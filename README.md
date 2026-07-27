@@ -144,7 +144,7 @@ Individual pieces:
 pnpm db:up            # Postgres on :55432
 pnpm db:migrate
 pnpm seed
-pnpm test             # 61 tests, unit + integration (needs Postgres up)
+pnpm test             # 92 tests, unit + integration (needs Postgres up)
 pnpm test:schema      # append-only guarantees, run as coffre_app
 pnpm check:pins       # every dependency exactly pinned
 ```
