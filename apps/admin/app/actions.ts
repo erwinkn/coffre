@@ -58,3 +58,27 @@ export async function verifyAuditChain(): Promise<
   }
   return { ok: true, rows: result.data.rows, head: result.data.head };
 }
+
+/**
+ * Retire or restore a secret.
+ *
+ * Not a delete: audit_log references secrets with ON DELETE RESTRICT, so a
+ * secret that has ever been read or written cannot be removed. Archiving stops
+ * it being served and drops it from bulk fetch, so a rotated-out credential
+ * stops being injected into processes -- while its history stays intact.
+ */
+export async function setSecretArchived(
+  project: string,
+  environment: string,
+  key: string,
+  archived: boolean,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const result = await coffreFetch(
+    `/v1/projects/${project}/environments/${environment}/secrets/${key}/archive`,
+    { method: 'POST', body: JSON.stringify({ archived }) },
+  );
+  if (!result.ok) return { ok: false, error: result.error };
+
+  revalidatePath(`/${project}/${environment}`);
+  return { ok: true };
+}

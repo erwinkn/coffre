@@ -177,8 +177,9 @@ All five phases are implemented and working locally.
 - **M4.** Admin UI: browse projects and environments, reveal (audited), create
   and edit secrets, read the audit log, and verify chain integrity.
 
-- **Management.** Projects, environments and grants are created, renamed and
-  archived through the UI and the API. Every structural change is audited.
+- **Management.** Projects, environments, secrets and grants are created,
+  renamed and archived through the UI and the API. Every structural change is
+  audited.
 
 ### There is no delete, and that is deliberate
 
@@ -191,28 +192,65 @@ ERROR: update or delete on table "secrets" violates foreign key constraint
 ```
 
 Letting a delete cascade would destroy the evidence this service exists to keep.
-So "delete" is **archive**: hidden from listings, reads and writes refused,
-every row still present and the audit trail still valid. Archiving is
-reversible and the secrets survive it intact.
+So "delete" is **archive** — for projects, environments and individual secrets
+alike: hidden from listings, reads refused, every row still present and the
+audit trail still valid. Archiving is reversible and the values survive intact.
+
+Archiving a secret matters operationally, not just tidily: a rotated-out
+credential stops being injected by `coffre run`.
 
 Actually destroying data belongs to a retention policy under Art 12(2)(a) —
 a decision to be written down and applied deliberately, not a button in an
 admin UI.
 
-### Authorisation
+### Authorisation: roles and permissions
 
-| Scope | Confers |
+Permissions are a **fixed catalogue**, not a policy language. Roles are named
+bundles of them.
+
+| Permission | Scope |
 |---|---|
-| `COFFRE_ROOT_ADMINS` (config) | everything, including creating projects and reading the audit log |
-| Grant on a **project** | that capability on every environment in it; `admin` also manages environments and grants |
-| Grant on an **environment** | that capability on that environment only |
+| `secret.read` | project or environment |
+| `secret.write` | project or environment |
+| `secret.archive` | project or environment |
+| `audit.read` | project or environment |
+| `environment.manage` | project only |
+| `grant.manage` | project only |
+| `project.manage` | project only |
 
-Where both a project and an environment grant exist, the stronger wins. A grant
-targets exactly one scope — the schema enforces `(project_id IS NULL) <>
-(environment_id IS NULL)`.
+Built-in roles:
 
-`admin` on a single environment deliberately does **not** authorise changing the
-project's structure. That is what project-scoped grants are for.
+| Role | Permissions | Can read secrets? |
+|---|---|---|
+| `viewer` | `secret.read` | yes |
+| `developer` | `secret.read`, `secret.write` | yes |
+| `maintainer` | + `secret.archive`, `environment.manage` | yes |
+| `access-manager` | `grant.manage` | **no** |
+| `auditor` | `audit.read` | **no** |
+| `owner` | everything | yes |
+
+The last two are why roles exist at all. Under the previous `read < write <
+admin` ladder, seeing the audit log required `admin`, which also meant reading
+every secret — so appointing someone to answer "who read which secret" meant
+handing them the whole vault. `auditor` and `access-manager` both deliberately
+omit `secret.read`.
+
+**Scope.** A grant targets a project or exactly one environment; the schema
+enforces `(project_id IS NULL) <> (environment_id IS NULL)`. A project grant
+applies to every environment in it, and effective permissions are the *union*
+of project- and environment-scoped grants.
+
+Environment permissions are inherently project-specific: `environments.project_id`
+is `NOT NULL`, so an environment belongs to exactly one project, and grants are
+always resolved by `(project_id, slug)`.
+
+A role carrying project-only permissions **cannot** be scoped to one
+environment — `environment.manage` on a single environment would authorise
+creating its own siblings. The API rejects it with 409 rather than silently
+granting less than asked.
+
+Grants may carry an `expires_at`. Expiry is enforced in permission resolution,
+which is the single place every check goes through.
 
 Principals are `user` (matched on the Access `email` claim) or `service`
 (matched on `common_name`, because service-token JWTs carry no email at all).

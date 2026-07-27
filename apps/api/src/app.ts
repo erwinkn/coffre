@@ -136,6 +136,28 @@ export function buildApp(options: BuildOptions): FastifyInstance {
     );
   });
 
+  /**
+   * Retire or restore a secret. Not a delete -- audit_log references secrets
+   * with ON DELETE RESTRICT, so nothing ever read or written can be removed.
+   */
+  app.post(
+    '/v1/projects/:project/environments/:environment/secrets/:key/archive',
+    async (request) => {
+      const params = z
+        .object({ project: slug, environment: slug, key: secretKey })
+        .parse(request.params);
+      const body = z.object({ archived: z.boolean().default(true) }).parse(request.body ?? {});
+
+      return secrets.setSecretArchived(
+        contextOf(request),
+        params.project,
+        params.environment,
+        params.key,
+        body.archived,
+      );
+    },
+  );
+
   // --- metadata (no secret values) -----------------------------------------
 
   app.get('/v1/projects', async (request) => {
@@ -143,7 +165,7 @@ export function buildApp(options: BuildOptions): FastifyInstance {
     const byProject = new Map<string, { slug: string; environments: unknown[] }>();
     for (const entry of accessible) {
       const project = byProject.get(entry.project) ?? { slug: entry.project, environments: [] };
-      project.environments.push({ slug: entry.environment, capability: entry.capability });
+      project.environments.push({ slug: entry.environment, permissions: entry.permissions });
       byProject.set(entry.project, project);
     }
     return { projects: [...byProject.values()] };
@@ -167,7 +189,7 @@ export function buildApp(options: BuildOptions): FastifyInstance {
     if (!match) throw new AccessDenied();
 
     const result = await options.pool.query(
-      `SELECT s.key, v.version, v.created_at, v.created_by
+      `SELECT s.key, s.archived_at, v.version, v.created_at, v.created_by
          FROM secrets s
          JOIN projects p ON p.id = s.project_id
          JOIN environments e ON e.id = s.environment_id
@@ -178,9 +200,10 @@ export function buildApp(options: BuildOptions): FastifyInstance {
     );
 
     return {
-      capability: match.capability,
+      permissions: match.permissions,
       keys: result.rows.map((row) => ({
         key: row.key,
+        archived: row.archived_at !== null,
         version: row.version === null ? null : Number(row.version),
         updatedAt: row.created_at,
         updatedBy: row.created_by,
@@ -250,7 +273,9 @@ export function buildApp(options: BuildOptions): FastifyInstance {
     );
   });
 
-  // --- grants ---------------------------------------------------------------
+  // --- roles and grants -----------------------------------------------------
+
+  app.get('/v1/admin/roles', async () => ({ roles: await admin.listRoles() }));
 
   app.get('/v1/admin/projects/:project/grants', async (request) => {
     const params = z.object({ project: slug }).parse(request.params);
@@ -263,9 +288,11 @@ export function buildApp(options: BuildOptions): FastifyInstance {
       .object({
         principalType: z.enum(['user', 'service']),
         principalId: z.string().min(1).max(320),
-        capability: z.enum(['read', 'write', 'admin']),
+        role: slug,
         // Omit or null to scope the grant to the whole project.
         environmentSlug: slug.nullish(),
+        // Omit or null for a grant that does not expire.
+        expiresAt: z.string().datetime().nullish(),
       })
       .parse(request.body);
 
@@ -292,12 +319,32 @@ export function buildApp(options: BuildOptions): FastifyInstance {
       })
       .parse(request.query);
 
-    if (!options.rootAdmins.includes((request.principal as { id: string }).id)) {
-      throw new AccessDenied('only root admins may read the audit log');
+    // Audit visibility no longer requires root admin.
+    //
+    // Under the old capability ladder, seeing the audit log meant holding
+    // 'admin', which also meant being able to read every secret. For a service
+    // whose purpose is audit, that was backwards: you could not appoint someone
+    // to answer "who read which secret" without handing them the whole vault.
+    //
+    // The 'auditor' role carries audit.read and nothing else. A caller sees the
+    // entries for the projects they hold it on; root admins see everything.
+    const auditableProjects = await projectsWithAuditRead(
+      options.pool,
+      contextOf(request),
+      options.rootAdmins,
+    );
+    if (auditableProjects !== 'all' && auditableProjects.length === 0) {
+      throw new AccessDenied('you do not hold audit.read on any project');
     }
 
     const filters: string[] = [];
     const values: unknown[] = [];
+    if (auditableProjects !== 'all') {
+      values.push(auditableProjects);
+      // Rows with no project (for example a denied read of an unknown project)
+      // are only visible to root admins, since they cannot be attributed.
+      filters.push(`project_id = ANY($${values.length}::uuid[])`);
+    }
     if (query.actorId) {
       values.push(query.actorId);
       filters.push(`actor_id = $${values.length}`);
@@ -334,8 +381,13 @@ export function buildApp(options: BuildOptions): FastifyInstance {
 
   /** Verify the whole chain. This is the "prove the log was not edited" button. */
   app.get('/v1/audit/verify', async (request) => {
-    if (!options.rootAdmins.includes((request.principal as { id: string }).id)) {
-      throw new AccessDenied('only root admins may verify the audit log');
+    const auditable = await projectsWithAuditRead(
+      options.pool,
+      contextOf(request),
+      options.rootAdmins,
+    );
+    if (auditable !== 'all' && auditable.length === 0) {
+      throw new AccessDenied('you do not hold audit.read on any project');
     }
 
     const client = await options.pool.connect();
@@ -352,4 +404,33 @@ export function buildApp(options: BuildOptions): FastifyInstance {
 
   void NotFound;
   return app;
+}
+
+/**
+ * Which projects the caller may read audit entries for.
+ *
+ * Returns 'all' for root admins. Otherwise the ids of every project where the
+ * caller holds audit.read, whether granted on the project or on one of its
+ * environments.
+ */
+async function projectsWithAuditRead(
+  pool: pg.Pool,
+  ctx: RequestContext,
+  rootAdmins: readonly string[],
+): Promise<'all' | string[]> {
+  if (rootAdmins.includes(ctx.principal.id)) return 'all';
+
+  const result = await pool.query<{ project_id: string }>(
+    `SELECT DISTINCT COALESCE(g.project_id, e.project_id) AS project_id
+       FROM grants g
+       JOIN role_permissions rp ON rp.role_id = g.role_id
+       LEFT JOIN environments e ON e.id = g.environment_id
+      WHERE g.principal_type = $1
+        AND g.principal_id = $2
+        AND rp.permission = 'audit.read'
+        AND (g.expires_at IS NULL OR g.expires_at > now())`,
+    [ctx.principal.type, ctx.principal.id],
+  );
+
+  return result.rows.map((row) => row.project_id);
 }

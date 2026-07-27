@@ -100,7 +100,7 @@ async function seedProject(): Promise<void> {
     method: 'POST',
     url: '/v1/admin/projects/market/grants',
     ...req(rootToken),
-    payload: { principalType: 'user', principalId: 'lead@equisafe.io', capability: 'admin' },
+    payload: { principalType: 'user', principalId: 'lead@equisafe.io', role: 'owner' },
   });
 }
 
@@ -189,10 +189,32 @@ test('a project admin can create an environment', async () => {
   assert.equal(response.statusCode, 201);
 });
 
+test('a role containing project-only permissions cannot be scoped to one environment', async () => {
+  await seedProject();
+
+  // 'owner' includes environment.manage and grant.manage. Granting it on a
+  // single environment would be incoherent -- environment.manage on one
+  // environment would authorise creating its own siblings.
+  const response = await app.inject({
+    method: 'POST',
+    url: '/v1/admin/projects/market/grants',
+    ...req(rootToken),
+    payload: {
+      principalType: 'user',
+      principalId: 'reader@equisafe.io',
+      role: 'owner',
+      environmentSlug: 'prod',
+    },
+  });
+
+  assert.equal(response.statusCode, 409);
+  assert.match(response.json().message, /cannot be scoped to one environment/);
+  assert.equal((await auditActions()).at(-1)?.decision, 'deny');
+});
+
 test('an environment-scoped grant does NOT authorise creating environments', async () => {
   await seedProject();
 
-  // reader gets admin, but only on the prod environment -- not on the project.
   await app.inject({
     method: 'POST',
     url: '/v1/admin/projects/market/grants',
@@ -200,7 +222,7 @@ test('an environment-scoped grant does NOT authorise creating environments', asy
     payload: {
       principalType: 'user',
       principalId: 'reader@equisafe.io',
-      capability: 'admin',
+      role: 'developer',
       environmentSlug: 'prod',
     },
   });
@@ -212,13 +234,10 @@ test('an environment-scoped grant does NOT authorise creating environments', asy
     payload: { slug: 'staging', name: 'Staging' },
   });
 
-  // This is the whole point of project-scoped grants: admin on one environment
+  // The whole point of project-scoped grants: authority over one environment
   // must not confer authority over the project's structure.
   assert.equal(response.statusCode, 403);
-  assert.equal(
-    (await auditActions()).at(-1)?.action,
-    'environment.create',
-  );
+  assert.equal((await auditActions()).at(-1)?.action, 'environment.create');
 });
 
 // --- archiving --------------------------------------------------------------
@@ -315,7 +334,7 @@ test('a project grant confers its capability on every environment in the project
     payload: {
       principalType: 'user',
       principalId: 'reader@equisafe.io',
-      capability: 'read',
+      role: 'viewer',
     },
   });
 
@@ -333,7 +352,7 @@ test('the strongest of an environment grant and a project grant wins', async () 
     method: 'POST',
     url: '/v1/admin/projects/market/grants',
     ...req(rootToken),
-    payload: { principalType: 'user', principalId: 'reader@equisafe.io', capability: 'read' },
+    payload: { principalType: 'user', principalId: 'reader@equisafe.io', role: 'viewer' },
   });
   await app.inject({
     method: 'POST',
@@ -342,7 +361,7 @@ test('the strongest of an environment grant and a project grant wins', async () 
     payload: {
       principalType: 'user',
       principalId: 'reader@equisafe.io',
-      capability: 'write',
+      role: 'developer',
       environmentSlug: 'prod',
     },
   });
@@ -363,7 +382,7 @@ test('revoking a grant removes access, and is audited', async () => {
     method: 'POST',
     url: '/v1/admin/projects/market/grants',
     ...req(rootToken),
-    payload: { principalType: 'user', principalId: 'reader@equisafe.io', capability: 'read' },
+    payload: { principalType: 'user', principalId: 'reader@equisafe.io', role: 'viewer' },
   });
   const grantId = created.json().id;
 
@@ -391,7 +410,7 @@ test('a service principal can be granted access by common_name', async () => {
     method: 'POST',
     url: '/v1/admin/projects/market/grants',
     ...req(rootToken),
-    payload: { principalType: 'service', principalId: 'ci.access', capability: 'read' },
+    payload: { principalType: 'service', principalId: 'ci.access', role: 'viewer' },
   });
 
   const me = await app.inject({ method: 'GET', url: '/v1/me', ...req(ciToken) });
@@ -410,7 +429,7 @@ test('a non-admin cannot list or create grants', async () => {
     method: 'POST',
     url: '/v1/admin/projects/market/grants',
     ...req(outsiderToken),
-    payload: { principalType: 'user', principalId: 'outsider@equisafe.io', capability: 'admin' },
+    payload: { principalType: 'user', principalId: 'outsider@equisafe.io', role: 'owner' },
   });
 
   assert.equal(list.statusCode, 403);
@@ -429,7 +448,7 @@ test('a project admin cannot revoke a grant belonging to another project', async
     method: 'POST',
     url: '/v1/admin/projects/other/grants',
     ...req(rootToken),
-    payload: { principalType: 'user', principalId: 'someone@equisafe.io', capability: 'read' },
+    payload: { principalType: 'user', principalId: 'someone@equisafe.io', role: 'viewer' },
   });
 
   // `lead` administers market, not other.
@@ -473,7 +492,7 @@ test('the audit chain still verifies after a full round of structural changes', 
     method: 'POST',
     url: '/v1/admin/projects/market/grants',
     ...req(outsiderToken),
-    payload: { principalType: 'user', principalId: 'x@equisafe.io', capability: 'admin' },
+    payload: { principalType: 'user', principalId: 'x@equisafe.io', role: 'owner' },
   });
 
   const verify = await app.inject({

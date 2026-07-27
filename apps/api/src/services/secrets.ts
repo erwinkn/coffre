@@ -6,11 +6,15 @@ import type { SecretContext } from '../../../../packages/core/src/context.ts';
 import type { KekRegistry } from '../../../../packages/core/src/kek/registry.ts';
 import type { Principal } from '../../../../packages/core/src/identity/types.ts';
 import { appendAudit, type AuditEntry } from '../../../../packages/db/src/audit.ts';
+import {
+  has,
+  permissionsForEnvironment,
+  PERMISSIONS as ALL_PERMISSIONS,
+  type Permission,
+  type PermissionSet,
+} from './permissions.ts';
 
 export type Capability = 'read' | 'write' | 'admin';
-
-/** Ranked so that a stronger capability satisfies a weaker requirement. */
-const CAPABILITY_RANK: Record<Capability, number> = { read: 1, write: 2, admin: 3 };
 
 export class AccessDenied extends Error {
   readonly statusCode = 403;
@@ -137,29 +141,12 @@ export class SecretsService {
    * "admin on this project" mean something -- there is otherwise nothing that
    * could authorise creating an environment inside it.
    */
-  async #capabilityFor(
+  #permissionsFor(
     tx: PoolClient,
     principal: Principal,
     environmentId: string,
-  ): Promise<Capability | null> {
-    if (this.#isRootAdmin(principal)) return 'admin';
-
-    const result = await tx.query<{ capability: Capability }>(
-      `SELECT g.capability
-         FROM grants g
-        WHERE g.principal_type = $1
-          AND g.principal_id = $2
-          AND (
-                g.environment_id = $3
-             OR g.project_id = (SELECT project_id FROM environments WHERE id = $3)
-              )`,
-      [principal.type, principal.id, environmentId],
-    );
-    if (result.rowCount === 0) return null;
-
-    return result.rows
-      .map((row) => row.capability)
-      .reduce((best, next) => (CAPABILITY_RANK[next] > CAPABILITY_RANK[best] ? next : best));
+  ): Promise<PermissionSet> {
+    return permissionsForEnvironment(tx, principal, environmentId, this.#deps.rootAdmins);
   }
 
   #baseEntry(ctx: RequestContext, action: string): Omit<AuditEntry, 'decision'> {
@@ -197,14 +184,14 @@ export class SecretsService {
         });
       }
 
-      const capability = await this.#capabilityFor(tx, ctx.principal, env.environmentId);
-      if (capability === null) {
+      const permissions = await this.#permissionsFor(tx, ctx.principal, env.environmentId);
+      if (!has(permissions, 'secret.read')) {
         throw new AuditedFailure(new AccessDenied(), {
           ...base,
           decision: 'deny',
           projectId: env.projectId,
           environmentId: env.environmentId,
-          metadata: { key, reason: 'no_grant' },
+          metadata: { key, reason: 'missing_secret_read' },
         });
       }
 
@@ -269,15 +256,15 @@ export class SecretsService {
         });
       }
 
-      const capability = await this.#capabilityFor(tx, ctx.principal, env.environmentId);
-      if (capability === null) {
+      const permissions = await this.#permissionsFor(tx, ctx.principal, env.environmentId);
+      if (!has(permissions, 'secret.read')) {
         throw new AuditedFailure(new AccessDenied(), {
           ...base,
           decision: 'deny',
           bundleId,
           projectId: env.projectId,
           environmentId: env.environmentId,
-          metadata: { reason: 'no_grant' },
+          metadata: { reason: 'missing_secret_read' },
         });
       }
 
@@ -346,14 +333,14 @@ export class SecretsService {
         });
       }
 
-      const capability = await this.#capabilityFor(tx, ctx.principal, env.environmentId);
-      if (capability === null || CAPABILITY_RANK[capability] < CAPABILITY_RANK.write) {
+      const permissions = await this.#permissionsFor(tx, ctx.principal, env.environmentId);
+      if (!has(permissions, 'secret.write')) {
         throw new AuditedFailure(new AccessDenied(), {
           ...base,
           decision: 'deny',
           projectId: env.projectId,
           environmentId: env.environmentId,
-          metadata: { key, reason: 'insufficient_capability' },
+          metadata: { key, reason: 'missing_secret_write' },
         });
       }
 
@@ -413,10 +400,16 @@ export class SecretsService {
     });
   }
 
-  /** List the environments a caller may see, with their capability. */
+  /**
+   * Environments the caller can reach, with the permissions they hold on each.
+   *
+   * Returns the union of permissions across every applicable grant, rather than
+   * a single "capability" -- an auditor and a viewer are no longer points on
+   * one ladder, so there is no single label that describes what someone can do.
+   */
   async listAccessible(
     ctx: RequestContext,
-  ): Promise<{ project: string; environment: string; capability: Capability }[]> {
+  ): Promise<{ project: string; environment: string; permissions: Permission[] }[]> {
     const client = await this.#deps.pool.connect();
     try {
       if (this.#isRootAdmin(ctx.principal)) {
@@ -426,39 +419,117 @@ export class SecretsService {
             WHERE p.archived_at IS NULL AND e.archived_at IS NULL
             ORDER BY p.slug, e.slug`,
         );
-        return all.rows.map((row) => ({ ...row, capability: 'admin' as const }));
+        return all.rows.map((row) => ({
+          ...row,
+          permissions: [...ALL_PERMISSIONS],
+        }));
       }
 
-      // An environment is visible if the caller holds a grant on it directly or
-      // on its project. Where both exist, the strongest capability wins.
       const result = await client.query<{
         project: string;
         environment: string;
-        capability: Capability;
+        permission: Permission;
       }>(
-        `SELECT p.slug AS project, e.slug AS environment, g.capability
+        `SELECT DISTINCT p.slug AS project, e.slug AS environment, rp.permission
            FROM grants g
+           JOIN role_permissions rp ON rp.role_id = g.role_id
            JOIN environments e
              ON e.id = g.environment_id OR e.project_id = g.project_id
            JOIN projects p ON p.id = e.project_id
           WHERE g.principal_type = $1 AND g.principal_id = $2
+            AND (g.expires_at IS NULL OR g.expires_at > now())
             AND p.archived_at IS NULL AND e.archived_at IS NULL
           ORDER BY p.slug, e.slug`,
         [ctx.principal.type, ctx.principal.id],
       );
 
-      const strongest = new Map<string, { project: string; environment: string; capability: Capability }>();
+      const byEnvironment = new Map<
+        string,
+        { project: string; environment: string; permissions: Permission[] }
+      >();
       for (const row of result.rows) {
         const key = `${row.project}/${row.environment}`;
-        const existing = strongest.get(key);
-        if (!existing || CAPABILITY_RANK[row.capability] > CAPABILITY_RANK[existing.capability]) {
-          strongest.set(key, row);
-        }
+        const entry =
+          byEnvironment.get(key) ??
+          { project: row.project, environment: row.environment, permissions: [] };
+        entry.permissions.push(row.permission);
+        byEnvironment.set(key, entry);
       }
-      return [...strongest.values()];
+      return [...byEnvironment.values()];
     } finally {
       client.release();
     }
+  }
+
+  /**
+   * Retire or restore a secret.
+   *
+   * Not a delete: audit_log references secrets with ON DELETE RESTRICT, so a
+   * secret that has ever been read or written cannot be removed. Archiving
+   * stops it being served and drops it from bulk fetch -- so a rotated-out
+   * credential stops being injected into processes -- while its versions and
+   * its history stay exactly where they are.
+   */
+  async setSecretArchived(
+    ctx: RequestContext,
+    projectSlug: string,
+    environmentSlug: string,
+    key: string,
+    archived: boolean,
+  ): Promise<{ key: string; archived: boolean }> {
+    return this.#audited(async (tx) => {
+      const base = this.#baseEntry(ctx, archived ? 'secret.archive' : 'secret.restore');
+      const env = await this.#resolveEnvironment(tx, projectSlug, environmentSlug);
+
+      if (env === null) {
+        throw new AuditedFailure(new NotFound('unknown project or environment'), {
+          ...base,
+          decision: 'deny',
+          metadata: { projectSlug, environmentSlug, key, reason: 'unknown_environment' },
+        });
+      }
+
+      const permissions = await this.#permissionsFor(tx, ctx.principal, env.environmentId);
+      if (!has(permissions, 'secret.archive')) {
+        throw new AuditedFailure(new AccessDenied(), {
+          ...base,
+          decision: 'deny',
+          projectId: env.projectId,
+          environmentId: env.environmentId,
+          metadata: { key, reason: 'missing_secret_archive' },
+        });
+      }
+
+      const updated = await tx.query<{ id: string }>(
+        `UPDATE secrets SET archived_at = $4
+          WHERE project_id = $1 AND environment_id = $2 AND key = $3
+        RETURNING id`,
+        [env.projectId, env.environmentId, key, archived ? new Date().toISOString() : null],
+      );
+      if (updated.rowCount === 0) {
+        throw new AuditedFailure(new NotFound('unknown secret'), {
+          ...base,
+          decision: 'deny',
+          projectId: env.projectId,
+          environmentId: env.environmentId,
+          metadata: { key, reason: 'unknown_secret' },
+        });
+      }
+
+      return {
+        result: { key, archived },
+        entries: [
+          {
+            ...base,
+            decision: 'allow',
+            projectId: env.projectId,
+            environmentId: env.environmentId,
+            secretId: updated.rows[0].id,
+            metadata: { key },
+          },
+        ],
+      };
+    });
   }
 }
 
@@ -489,7 +560,8 @@ async function loadCurrentVersion(
             v.auth_tag, v.wrapped_dek, v.kek_provider, v.kek_id, v.kek_version
        FROM secrets s
        JOIN secret_versions v ON v.id = s.current_version_id
-      WHERE s.project_id = $1 AND s.environment_id = $2 AND s.key = $3`,
+      WHERE s.project_id = $1 AND s.environment_id = $2 AND s.key = $3
+        AND s.archived_at IS NULL`,
     [env.projectId, env.environmentId, key],
   );
   if (result.rowCount === 0) return null;
@@ -506,6 +578,7 @@ async function loadAllCurrentVersions(
        FROM secrets s
        JOIN secret_versions v ON v.id = s.current_version_id
       WHERE s.project_id = $1 AND s.environment_id = $2
+        AND s.archived_at IS NULL
       ORDER BY s.key`,
     [env.projectId, env.environmentId],
   );
@@ -539,11 +612,20 @@ async function upsertSecret(
   key: string,
   createdBy: string,
 ): Promise<string> {
+  // Deliberately not filtered on archived_at. Writing a value to an archived
+  // key restores it: the unique constraint means the row cannot be recreated,
+  // and silently failing on a name that is not visibly in use would be worse
+  // than the alternative. The restore is audited by the caller's write entry.
   const existing = await tx.query<{ id: string }>(
     'SELECT id FROM secrets WHERE project_id = $1 AND environment_id = $2 AND key = $3',
     [env.projectId, env.environmentId, key],
   );
-  if (existing.rowCount === 1) return existing.rows[0].id;
+  if (existing.rowCount === 1) {
+    await tx.query('UPDATE secrets SET archived_at = NULL WHERE id = $1', [
+      existing.rows[0].id,
+    ]);
+    return existing.rows[0].id;
+  }
 
   const created = await tx.query<{ id: string }>(
     `INSERT INTO secrets (project_id, environment_id, key) VALUES ($1, $2, $3) RETURNING id`,

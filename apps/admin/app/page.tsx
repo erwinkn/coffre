@@ -80,9 +80,7 @@ function ProjectRow({ project }: { project: ProjectSummary }) {
           {environment.slug}
         </a>
       ))}
-      <span className={`pill ${project.capability === 'admin' ? 'admin' : ''}`}>
-        {project.capability}
-      </span>
+      {project.permissions.includes('grant.manage') && <span className="pill admin">manage</span>}
     </div>
   );
 }

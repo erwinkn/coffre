@@ -2,15 +2,14 @@ import type { Pool, PoolClient } from 'pg';
 
 import type { Principal } from '../../../../packages/core/src/identity/types.ts';
 import { appendAudit, type AuditEntry } from '../../../../packages/db/src/audit.ts';
+import { AccessDenied, AuditedFailure, NotFound, type RequestContext } from './secrets.ts';
 import {
-  AccessDenied,
-  AuditedFailure,
-  NotFound,
-  type Capability,
-  type RequestContext,
-} from './secrets.ts';
-
-const CAPABILITY_RANK: Record<Capability, number> = { read: 1, write: 2, admin: 3 };
+  has,
+  permissionsForProject,
+  PROJECT_ONLY_PERMISSIONS,
+  type Permission,
+  type PermissionSet,
+} from './permissions.ts';
 
 export type AdminServiceDeps = {
   pool: Pool;
@@ -22,7 +21,8 @@ export type ProjectSummary = {
   slug: string;
   name: string;
   archivedAt: string | null;
-  capability: Capability;
+  /** What the caller may do at project scope. */
+  permissions: Permission[];
   environments: { slug: string; name: string; archivedAt: string | null; secretCount: number }[];
 };
 
@@ -30,9 +30,21 @@ export type GrantRow = {
   id: string;
   principalType: 'user' | 'service';
   principalId: string;
-  capability: Capability;
+  role: string;
+  roleName: string;
+  permissions: Permission[];
   scope: 'project' | 'environment';
   environmentSlug: string | null;
+  expiresAt: string | null;
+};
+
+export type RoleRow = {
+  slug: string;
+  name: string;
+  description: string;
+  permissions: Permission[];
+  /** False when the role contains a project-only permission. */
+  assignableToEnvironment: boolean;
 };
 
 /**
@@ -101,30 +113,21 @@ export class AdminService {
     };
   }
 
-  /** The caller's capability on a project: a project grant, or root admin. */
-  async #projectCapability(
+  /** What the caller may do at project scope. Environment grants do not count. */
+  #projectPermissions(
     tx: PoolClient,
     principal: Principal,
     projectId: string,
-  ): Promise<Capability | null> {
-    if (this.#isRootAdmin(principal)) return 'admin';
-
-    const result = await tx.query<{ capability: Capability }>(
-      `SELECT capability FROM grants
-        WHERE principal_type = $1 AND principal_id = $2 AND project_id = $3`,
-      [principal.type, principal.id, projectId],
-    );
-    if (result.rowCount === 0) return null;
-
-    return result.rows
-      .map((row) => row.capability)
-      .reduce((best, next) => (CAPABILITY_RANK[next] > CAPABILITY_RANK[best] ? next : best));
+  ): Promise<PermissionSet> {
+    return permissionsForProject(tx, principal, projectId, this.#deps.rootAdmins);
   }
 
-  async #requireProjectAdmin(
+  /** Resolve the project and assert the caller holds `permission` on it. */
+  async #requireProjectPermission(
     tx: PoolClient,
     ctx: RequestContext,
     projectSlug: string,
+    permission: Permission,
     base: Omit<AuditEntry, 'decision'>,
     metadata: Record<string, unknown>,
   ): Promise<{ projectId: string }> {
@@ -141,14 +144,14 @@ export class AdminService {
     }
 
     const projectId = project.rows[0].id;
-    const capability = await this.#projectCapability(tx, ctx.principal, projectId);
+    const permissions = await this.#projectPermissions(tx, ctx.principal, projectId);
 
-    if (capability !== 'admin') {
+    if (!has(permissions, permission)) {
       throw new AuditedFailure(new AccessDenied(), {
         ...base,
         decision: 'deny',
         projectId,
-        metadata: { ...metadata, reason: 'requires_project_admin' },
+        metadata: { ...metadata, reason: `missing_${permission}` },
       });
     }
     return { projectId };
@@ -222,7 +225,7 @@ export class AdminService {
   ): Promise<{ slug: string; name: string }> {
     return this.#audited(async (tx) => {
       const base = this.#base(ctx, 'project.update');
-      const { projectId } = await this.#requireProjectAdmin(tx, ctx, projectSlug, base, changes);
+      const { projectId } = await this.#requireProjectPermission(tx, ctx, projectSlug, 'project.manage', base, changes);
 
       const updated = await tx.query<{ slug: string; name: string }>(
         `UPDATE projects
@@ -254,7 +257,7 @@ export class AdminService {
   ): Promise<{ slug: string; archived: boolean }> {
     return this.#audited(async (tx) => {
       const base = this.#base(ctx, archived ? 'project.archive' : 'project.restore');
-      const { projectId } = await this.#requireProjectAdmin(tx, ctx, projectSlug, base, {});
+      const { projectId } = await this.#requireProjectPermission(tx, ctx, projectSlug, 'project.manage', base, {});
 
       await tx.query('UPDATE projects SET archived_at = $2 WHERE id = $1', [
         projectId,
@@ -278,7 +281,7 @@ export class AdminService {
   ): Promise<{ slug: string; name: string }> {
     return this.#audited(async (tx) => {
       const base = this.#base(ctx, 'environment.create');
-      const { projectId } = await this.#requireProjectAdmin(tx, ctx, projectSlug, base, { slug });
+      const { projectId } = await this.#requireProjectPermission(tx, ctx, projectSlug, 'environment.manage', base, { slug });
 
       const existing = await tx.query(
         'SELECT 1 FROM environments WHERE project_id = $1 AND slug = $2',
@@ -321,7 +324,7 @@ export class AdminService {
   ): Promise<{ slug: string; name: string }> {
     return this.#audited(async (tx) => {
       const base = this.#base(ctx, 'environment.update');
-      const { projectId } = await this.#requireProjectAdmin(tx, ctx, projectSlug, base, changes);
+      const { projectId } = await this.#requireProjectPermission(tx, ctx, projectSlug, 'environment.manage', base, changes);
 
       const updated = await tx.query<{ id: string; slug: string; name: string }>(
         `UPDATE environments
@@ -362,7 +365,7 @@ export class AdminService {
   ): Promise<{ slug: string; archived: boolean }> {
     return this.#audited(async (tx) => {
       const base = this.#base(ctx, archived ? 'environment.archive' : 'environment.restore');
-      const { projectId } = await this.#requireProjectAdmin(tx, ctx, projectSlug, base, {
+      const { projectId } = await this.#requireProjectPermission(tx, ctx, projectSlug, 'environment.manage', base, {
         environmentSlug,
       });
 
@@ -406,13 +409,19 @@ export class AdminService {
       );
       if (project.rowCount === 0) throw new NotFound('unknown project');
 
-      const capability = await this.#projectCapability(client, ctx.principal, project.rows[0].id);
-      if (capability !== 'admin') throw new AccessDenied('requires project admin');
+      const permissions = await this.#projectPermissions(client, ctx.principal, project.rows[0].id);
+      if (!has(permissions, 'grant.manage')) {
+        throw new AccessDenied('requires grant.manage on this project');
+      }
 
       const result = await client.query(
-        `SELECT g.id, g.principal_type, g.principal_id, g.capability,
-                e.slug AS environment_slug
+        `SELECT g.id, g.principal_type, g.principal_id, g.expires_at,
+                r.slug AS role, r.name AS role_name,
+                e.slug AS environment_slug,
+                (SELECT array_agg(rp.permission ORDER BY rp.permission)
+                   FROM role_permissions rp WHERE rp.role_id = r.id) AS permissions
            FROM grants g
+           JOIN roles r ON r.id = g.role_id
            LEFT JOIN environments e ON e.id = g.environment_id
           WHERE g.project_id = $1 OR e.project_id = $1
           ORDER BY g.principal_id, e.slug NULLS FIRST`,
@@ -423,9 +432,41 @@ export class AdminService {
         id: row.id,
         principalType: row.principal_type,
         principalId: row.principal_id,
-        capability: row.capability,
+        role: row.role,
+        roleName: row.role_name,
+        permissions: row.permissions ?? [],
         scope: row.environment_slug === null ? ('project' as const) : ('environment' as const),
         environmentSlug: row.environment_slug,
+        expiresAt: row.expires_at,
+      }));
+    } finally {
+      client.release();
+    }
+  }
+
+  /** Every role, with its permissions and where it may be assigned. */
+  async listRoles(): Promise<RoleRow[]> {
+    const client = await this.#deps.pool.connect();
+    try {
+      const result = await client.query(
+        `SELECT r.slug, r.name, r.description,
+                COALESCE(
+                  (SELECT array_agg(rp.permission ORDER BY rp.permission)
+                     FROM role_permissions rp WHERE rp.role_id = r.id),
+                  ARRAY[]::text[]
+                ) AS permissions
+           FROM roles r
+          ORDER BY r.slug`,
+      );
+
+      return result.rows.map((row) => ({
+        slug: row.slug,
+        name: row.name,
+        description: row.description,
+        permissions: row.permissions,
+        assignableToEnvironment: !row.permissions.some((permission: Permission) =>
+          PROJECT_ONLY_PERMISSIONS.includes(permission),
+        ),
       }));
     } finally {
       client.release();
@@ -433,7 +474,11 @@ export class AdminService {
   }
 
   /**
-   * Grant a capability, scoped to a project or to one environment within it.
+   * Grant a role, scoped to a project or to one environment within it.
+   *
+   * An environment-scoped grant is inherently project-specific: the environment
+   * is resolved by (project_id, slug), and `environments.project_id` is NOT
+   * NULL, so an environment belongs to exactly one project.
    *
    * `principalType` matters: a Cloudflare Access service token has no email
    * claim, so machine callers are matched on their common_name instead. A
@@ -445,18 +490,60 @@ export class AdminService {
     input: {
       principalType: 'user' | 'service';
       principalId: string;
-      capability: Capability;
+      role: string;
       environmentSlug?: string | null;
+      expiresAt?: string | null;
     },
   ): Promise<{ id: string }> {
     return this.#audited(async (tx) => {
       const base = this.#base(ctx, 'grant.create');
-      const { projectId } = await this.#requireProjectAdmin(tx, ctx, projectSlug, base, {
+      const { projectId } = await this.#requireProjectPermission(tx, ctx, projectSlug, 'grant.manage', base, {
         principalId: input.principalId,
       });
 
+      const role = await tx.query<{ id: string; permissions: Permission[] }>(
+        `SELECT r.id,
+                COALESCE(
+                  (SELECT array_agg(rp.permission) FROM role_permissions rp WHERE rp.role_id = r.id),
+                  ARRAY[]::text[]
+                ) AS permissions
+           FROM roles r WHERE r.slug = $1`,
+        [input.role],
+      );
+      if (role.rowCount === 0) {
+        throw new AuditedFailure(new NotFound('unknown role'), {
+          ...base,
+          decision: 'deny',
+          projectId,
+          metadata: { ...input, reason: 'unknown_role' },
+        });
+      }
+
       let environmentId: string | null = null;
       if (input.environmentSlug) {
+        // Some permissions are meaningless on a single environment --
+        // environment.manage on one environment would authorise creating its
+        // own siblings. Reject rather than silently granting less than asked.
+        const projectOnly = role.rows[0].permissions.filter((permission) =>
+          PROJECT_ONLY_PERMISSIONS.includes(permission),
+        );
+        if (projectOnly.length > 0) {
+          throw new AuditedFailure(
+            Object.assign(
+              new Error(
+                `role "${input.role}" cannot be scoped to one environment: it includes ${projectOnly.join(', ')}`,
+              ),
+              { statusCode: 409 },
+            ),
+            {
+              ...base,
+              decision: 'deny',
+              projectId,
+              metadata: { ...input, reason: 'role_is_project_scoped' },
+            },
+          );
+        }
+
         const environment = await tx.query<{ id: string }>(
           'SELECT id FROM environments WHERE project_id = $1 AND slug = $2',
           [projectId, input.environmentSlug],
@@ -473,17 +560,18 @@ export class AdminService {
       }
 
       const created = await tx.query<{ id: string }>(
-        `INSERT INTO grants (principal_type, principal_id, capability,
-                             project_id, environment_id, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6)
+        `INSERT INTO grants (principal_type, principal_id, role_id,
+                             project_id, environment_id, expires_at, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
          ON CONFLICT DO NOTHING
          RETURNING id`,
         [
           input.principalType,
           input.principalId,
-          input.capability,
+          role.rows[0].id,
           environmentId === null ? projectId : null,
           environmentId,
+          input.expiresAt ?? null,
           ctx.principal.id,
         ],
       );
@@ -506,9 +594,10 @@ export class AdminService {
             metadata: {
               principalType: input.principalType,
               principalId: input.principalId,
-              capability: input.capability,
+              role: input.role,
               scope: environmentId === null ? 'project' : 'environment',
               environmentSlug: input.environmentSlug ?? null,
+              expiresAt: input.expiresAt ?? null,
             },
           },
         ],
@@ -523,21 +612,21 @@ export class AdminService {
   ): Promise<{ revoked: true }> {
     return this.#audited(async (tx) => {
       const base = this.#base(ctx, 'grant.revoke');
-      const { projectId } = await this.#requireProjectAdmin(tx, ctx, projectSlug, base, { grantId });
+      const { projectId } = await this.#requireProjectPermission(tx, ctx, projectSlug, 'grant.manage', base, { grantId });
 
       // Scope the delete to this project so a project admin cannot revoke a
       // grant belonging to a project they do not administer.
       const deleted = await tx.query<{
         principal_type: string;
         principal_id: string;
-        capability: string;
+        role_id: string;
       }>(
         `DELETE FROM grants g
           USING (SELECT $1::uuid AS pid) scope
           WHERE g.id = $2
             AND (g.project_id = scope.pid
                  OR g.environment_id IN (SELECT id FROM environments WHERE project_id = scope.pid))
-        RETURNING g.principal_type, g.principal_id, g.capability`,
+        RETURNING g.principal_type, g.principal_id, g.role_id`,
         [projectId, grantId],
       );
 
@@ -560,7 +649,6 @@ export class AdminService {
             metadata: {
               grantId,
               principalId: deleted.rows[0].principal_id,
-              capability: deleted.rows[0].capability,
             },
           },
         ],
@@ -576,28 +664,30 @@ export class AdminService {
     try {
       const isRoot = this.#isRootAdmin(ctx.principal);
 
+      // Visibility: any grant anywhere inside the project, including one on a
+      // single environment. The permissions reported are the PROJECT-scope ones
+      // though -- an environment grant makes a project visible without
+      // conferring authority over its structure.
       const projects = await client.query(
-        `SELECT p.id, p.slug, p.name, p.archived_at,
-                COALESCE(MAX(CASE
-                  WHEN $3::boolean THEN 'admin'
-                  ELSE g.capability
-                END), NULL) AS capability
+        `SELECT DISTINCT p.id, p.slug, p.name, p.archived_at
            FROM projects p
            LEFT JOIN environments e ON e.project_id = p.id
            LEFT JOIN grants g
              ON (g.project_id = p.id OR g.environment_id = e.id)
             AND g.principal_type = $1 AND g.principal_id = $2
+            AND (g.expires_at IS NULL OR g.expires_at > now())
           WHERE $3::boolean OR g.id IS NOT NULL
-          GROUP BY p.id, p.slug, p.name, p.archived_at
           ORDER BY p.slug`,
         [ctx.principal.type, ctx.principal.id, isRoot],
       );
 
       const summaries: ProjectSummary[] = [];
       for (const project of projects.rows) {
+        const permissions = await this.#projectPermissions(client, ctx.principal, project.id);
         const environments = await client.query(
           `SELECT e.slug, e.name, e.archived_at,
-                  (SELECT count(*) FROM secrets s WHERE s.environment_id = e.id)::int AS secret_count
+                  (SELECT count(*) FROM secrets s
+                    WHERE s.environment_id = e.id AND s.archived_at IS NULL)::int AS secret_count
              FROM environments e
             WHERE e.project_id = $1
             ORDER BY e.slug`,
@@ -608,7 +698,7 @@ export class AdminService {
           slug: project.slug,
           name: project.name,
           archivedAt: project.archived_at,
-          capability: (project.capability ?? 'read') as Capability,
+          permissions: [...permissions],
           environments: environments.rows.map((row) => ({
             slug: row.slug,
             name: row.name,

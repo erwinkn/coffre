@@ -1,38 +1,68 @@
 'use client';
 
 import { useState, useTransition } from 'react';
-import { revealSecret, saveSecret } from '../../actions';
-import type { SecretKey } from '../../../lib/api';
+import { revealSecret, saveSecret, setSecretArchived } from '../../actions';
+import type { Permission, SecretKey } from '../../../lib/api';
 
 type Props = {
   project: string;
   environment: string;
-  capability: string;
+  permissions: Permission[];
   keys: SecretKey[];
 };
 
-export function SecretsClient({ project, environment, capability, keys }: Props) {
-  const canWrite = capability === 'write' || capability === 'admin';
+export function SecretsClient({ project, environment, permissions, keys }: Props) {
+  const canWrite = permissions.includes('secret.write');
+  const canArchive = permissions.includes('secret.archive');
+  const canReveal = permissions.includes('secret.read');
+
+  const active = keys.filter((entry) => !entry.archived);
+  const archived = keys.filter((entry) => entry.archived);
 
   return (
     <>
       <div className="card">
-        {keys.length === 0 ? (
+        {active.length === 0 ? (
           <div className="empty">No secrets in this environment yet.</div>
         ) : (
-          keys.map((entry) => (
+          active.map((entry) => (
             <SecretRow
               key={entry.key}
               project={project}
               environment={environment}
               entry={entry}
               canWrite={canWrite}
+              canArchive={canArchive}
+              canReveal={canReveal}
             />
           ))
         )}
       </div>
 
       {canWrite && <NewSecret project={project} environment={environment} />}
+
+      {archived.length > 0 && (
+        <>
+          <h2>Archived</h2>
+          <p className="sub">
+            Retired, so no longer served or injected by <code>coffre run</code>. History and
+            audit references are intact, and restoring is one click.
+          </p>
+          <div className="card">
+            {archived.map((entry) => (
+              <SecretRow
+                key={entry.key}
+                project={project}
+                environment={environment}
+                entry={entry}
+                canWrite={canWrite}
+                canArchive={canArchive}
+                canReveal={canReveal}
+              />
+            ))}
+          </div>
+        </>
+      )}
     </>
   );
 }
@@ -42,11 +72,15 @@ function SecretRow({
   environment,
   entry,
   canWrite,
+  canArchive,
+  canReveal,
 }: {
   project: string;
   environment: string;
   entry: SecretKey;
   canWrite: boolean;
+  canArchive: boolean;
+  canReveal: boolean;
 }) {
   const [value, setValue] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -91,10 +125,30 @@ function SecretRow({
         <span className="meta">
           v{entry.version} · {entry.updatedBy}
         </span>
-        <button onClick={onReveal} disabled={pending}>
-          {value !== null ? 'Hide' : pending ? '...' : 'Reveal'}
-        </button>
-        {canWrite && (
+        {canReveal && (
+          <button onClick={onReveal} disabled={pending}>
+            {value !== null ? 'Hide' : pending ? '...' : 'Reveal'}
+          </button>
+        )}
+        {canArchive && (
+          <button
+            disabled={pending}
+            onClick={() =>
+              startTransition(async () => {
+                const result = await setSecretArchived(
+                  project,
+                  environment,
+                  entry.key,
+                  !entry.archived,
+                );
+                if (!result.ok) setError(result.error);
+              })
+            }
+          >
+            {entry.archived ? 'Restore' : 'Archive'}
+          </button>
+        )}
+        {canWrite && !entry.archived && (
           <button
             onClick={() => {
               setEditing(!editing);

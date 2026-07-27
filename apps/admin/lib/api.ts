@@ -74,21 +74,32 @@ export async function coffreFetch<T>(
 
 export type Me = {
   principal: { type: 'user' | 'service'; id: string };
-  environments: { project: string; environment: string; capability: string }[];
+  environments: { project: string; environment: string; permissions: Permission[] }[];
 };
 
 export type SecretKey = {
   key: string;
+  archived: boolean;
   version: number | null;
   updatedAt: string | null;
   updatedBy: string | null;
 };
 
+export type Permission =
+  | 'secret.read'
+  | 'secret.write'
+  | 'secret.archive'
+  | 'audit.read'
+  | 'environment.manage'
+  | 'grant.manage'
+  | 'project.manage';
+
 export type ProjectSummary = {
   slug: string;
   name: string;
   archivedAt: string | null;
-  capability: 'read' | 'write' | 'admin';
+  /** What the caller may do at PROJECT scope. */
+  permissions: Permission[];
   environments: {
     slug: string;
     name: string;
@@ -101,9 +112,20 @@ export type GrantRow = {
   id: string;
   principalType: 'user' | 'service';
   principalId: string;
-  capability: 'read' | 'write' | 'admin';
+  role: string;
+  roleName: string;
+  permissions: Permission[];
   scope: 'project' | 'environment';
   environmentSlug: string | null;
+  expiresAt: string | null;
+};
+
+export type RoleRow = {
+  slug: string;
+  name: string;
+  description: string;
+  permissions: Permission[];
+  assignableToEnvironment: boolean;
 };
 
 export type AuditEntry = {

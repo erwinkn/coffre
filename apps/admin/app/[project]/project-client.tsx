@@ -10,26 +10,34 @@ import {
   updateEnvironment,
   updateProject,
 } from '../admin-actions';
-import type { GrantRow, ProjectSummary } from '../../lib/api';
+import type { GrantRow, ProjectSummary, RoleRow } from '../../lib/api';
 
 type Env = ProjectSummary['environments'][number];
 
 export function ProjectClient({
   project,
   grants,
+  roles,
   grantsError,
 }: {
   project: ProjectSummary;
   grants: GrantRow[];
+  roles: RoleRow[];
   grantsError: string | null;
 }) {
-  const isAdmin = project.capability === 'admin';
+  // Each section is gated on its own permission, not on one blanket "admin".
+  // That is what lets an access manager administer grants without being able
+  // to rename the project, and vice versa.
+  const canManageProject = project.permissions.includes('project.manage');
+  const canManageEnvironments = project.permissions.includes('environment.manage');
+  const canManageGrants = project.permissions.includes('grant.manage');
+
   const active = project.environments.filter((e) => e.archivedAt === null);
   const archived = project.environments.filter((e) => e.archivedAt !== null);
 
   return (
     <>
-      {isAdmin && <ProjectSettings project={project} />}
+      {canManageProject && <ProjectSettings project={project} />}
 
       <h2>Environments</h2>
       <div className="card">
@@ -41,13 +49,13 @@ export function ProjectClient({
               key={environment.slug}
               project={project.slug}
               environment={environment}
-              isAdmin={isAdmin}
+              isAdmin={canManageEnvironments}
             />
           ))
         )}
       </div>
 
-      {isAdmin && <NewEnvironment project={project.slug} />}
+      {canManageEnvironments && <NewEnvironment project={project.slug} />}
 
       {archived.length > 0 && (
         <>
@@ -58,18 +66,19 @@ export function ProjectClient({
                 key={environment.slug}
                 project={project.slug}
                 environment={environment}
-                isAdmin={isAdmin}
+                isAdmin={canManageEnvironments}
               />
             ))}
           </div>
         </>
       )}
 
-      {isAdmin && (
+      {canManageGrants && (
         <Grants
           project={project.slug}
           environments={project.environments}
           grants={grants}
+          roles={roles}
           error={grantsError}
         />
       )}
@@ -297,26 +306,37 @@ function Grants({
   project,
   environments,
   grants,
+  roles,
   error: loadError,
 }: {
   project: string;
   environments: Env[];
   grants: GrantRow[];
+  roles: RoleRow[];
   error: string | null;
 }) {
   const [principalType, setPrincipalType] = useState<'user' | 'service'>('user');
   const [principalId, setPrincipalId] = useState('');
-  const [capability, setCapability] = useState<'read' | 'write' | 'admin'>('read');
+  const [role, setRole] = useState('viewer');
   const [scope, setScope] = useState('');
+  const [expiresAt, setExpiresAt] = useState('');
   const { error, pending, run } = useAction();
+
+  const selected = roles.find((entry) => entry.slug === role);
+  const scopedToEnvironment = scope !== '';
+
+  // Some roles carry project-only permissions and cannot be narrowed to one
+  // environment. Rather than let the API reject it, narrow the options.
+  const assignableRoles = scopedToEnvironment
+    ? roles.filter((entry) => entry.assignableToEnvironment)
+    : roles;
 
   return (
     <>
       <h2>Access</h2>
       <p className="sub">
-        A project-scoped grant applies to every environment in it. Where both exist, the
-        stronger capability wins. Machine callers are matched on their Access service-token
-        common name, not an email.
+        A project-scoped grant applies to every environment in it. Machine callers are
+        matched on their Access service-token common name, not an email.
       </p>
 
       {loadError !== null ? (
@@ -332,7 +352,9 @@ function Grants({
                   <th>Principal</th>
                   <th>Type</th>
                   <th>Scope</th>
-                  <th>Capability</th>
+                  <th>Role</th>
+                  <th>Permissions</th>
+                  <th>Expires</th>
                   <th />
                 </tr>
               </thead>
@@ -363,7 +385,17 @@ function Grants({
             value={principalId}
             onChange={(event) => setPrincipalId(event.target.value)}
           />
-          <select value={scope} onChange={(event) => setScope(event.target.value)}>
+          <select
+            value={scope}
+            onChange={(event) => {
+              setScope(event.target.value);
+              // Narrowing the scope may invalidate the chosen role.
+              const stillValid = roles.find(
+                (entry) => entry.slug === role && entry.assignableToEnvironment,
+              );
+              if (event.target.value !== '' && !stillValid) setRole('viewer');
+            }}
+          >
             <option value="">whole project</option>
             {environments
               .filter((environment) => environment.archivedAt === null)
@@ -373,16 +405,20 @@ function Grants({
                 </option>
               ))}
           </select>
-          <select
-            value={capability}
-            onChange={(event) =>
-              setCapability(event.target.value as 'read' | 'write' | 'admin')
-            }
-          >
-            <option value="read">read</option>
-            <option value="write">write</option>
-            <option value="admin">admin</option>
+          <select value={role} onChange={(event) => setRole(event.target.value)}>
+            {assignableRoles.map((entry) => (
+              <option key={entry.slug} value={entry.slug}>
+                {entry.name}
+              </option>
+            ))}
           </select>
+          <input
+            type="date"
+            style={{ maxWidth: 160 }}
+            title="Optional expiry"
+            value={expiresAt}
+            onChange={(event) => setExpiresAt(event.target.value)}
+          />
           <button
             className="primary"
             disabled={pending || principalId === ''}
@@ -392,16 +428,33 @@ function Grants({
                   createGrant(project, {
                     principalType,
                     principalId,
-                    capability,
+                    role,
                     environmentSlug: scope === '' ? null : scope,
+                    expiresAt:
+                      expiresAt === '' ? null : new Date(`${expiresAt}T23:59:59Z`).toISOString(),
                   }),
-                () => setPrincipalId(''),
+                () => {
+                  setPrincipalId('');
+                  setExpiresAt('');
+                },
               )
             }
           >
             Grant
           </button>
         </div>
+
+        {selected && (
+          <div className="meta" style={{ padding: '0 14px 12px' }}>
+            {selected.description}{' '}
+            {selected.permissions.length === 0
+              ? 'No permissions.'
+              : selected.permissions.join(', ')}
+            {!selected.permissions.includes('secret.read') && (
+              <strong style={{ color: 'var(--allow)' }}> — cannot read secret values.</strong>
+            )}
+          </div>
+        )}
         <ErrorLine error={error} />
       </div>
     </>
@@ -419,10 +472,17 @@ function GrantRowView({ project, grant }: { project: string; grant: GrantRow }) 
       </td>
       <td>{grant.scope === 'project' ? 'whole project' : grant.environmentSlug}</td>
       <td>
-        <span className={`pill ${grant.capability === 'admin' ? 'admin' : ''}`}>
-          {grant.capability}
+        <span
+          className={`pill ${grant.permissions.includes('secret.read') ? 'admin' : ''}`}
+          title={grant.permissions.join(', ')}
+        >
+          {grant.role}
         </span>
       </td>
+      <td className="wrap" style={{ fontSize: 11, color: 'var(--muted)' }}>
+        {grant.permissions.join(', ')}
+      </td>
+      <td>{grant.expiresAt === null ? '-' : grant.expiresAt.slice(0, 10)}</td>
       <td>
         <button disabled={pending} onClick={() => run(() => revokeGrant(project, grant.id))}>
           Revoke

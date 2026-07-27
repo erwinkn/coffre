@@ -80,24 +80,27 @@ console.log('==> created project market with environments dev, prod');
 //   auditor  -- read across the whole project
 //   ci       -- a machine principal, matched on its service-token common name
 for (const grant of [
-    { principalType: 'user', principalId: 'lead@equisafe.io', capability: 'admin' },
+    { principalType: 'user', principalId: 'lead@equisafe.io', role: 'owner' },
     {
         principalType: 'user',
         principalId: 'dev@equisafe.io',
-        capability: 'write',
+        role: 'developer',
         environmentSlug: 'dev',
     },
-    { principalType: 'user', principalId: 'auditor@equisafe.io', capability: 'read' },
+    // The two roles that motivated having roles at all: both deliberately
+    // exclude secret.read, so neither can see a single secret value.
+    { principalType: 'user', principalId: 'auditor@equisafe.io', role: 'auditor' },
+    { principalType: 'user', principalId: 'accessmgr@equisafe.io', role: 'access-manager' },
     {
         principalType: 'service',
         principalId: 'ci-deploy.access',
-        capability: 'read',
+        role: 'viewer',
         environmentSlug: 'prod',
     },
 ]) {
     await post(adminToken, '/v1/admin/projects/market/grants', grant);
 }
-console.log('==> granted access to lead, dev, auditor and ci-deploy.access');
+console.log('==> granted access to lead, dev, auditor, accessmgr and ci-deploy.access');
 
 const values = {
     dev: {

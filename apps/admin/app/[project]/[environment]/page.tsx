@@ -1,4 +1,4 @@
-import { coffreFetch, type SecretKey } from '../../../lib/api';
+import { coffreFetch, type Permission, type SecretKey } from '../../../lib/api';
 import { SecretsClient } from './secrets-client';
 
 export const dynamic = 'force-dynamic';
@@ -8,7 +8,7 @@ type Params = Promise<{ project: string; environment: string }>;
 export default async function EnvironmentPage({ params }: { params: Params }) {
   const { project, environment } = await params;
 
-  const result = await coffreFetch<{ capability: string; keys: SecretKey[] }>(
+  const result = await coffreFetch<{ permissions: Permission[]; keys: SecretKey[] }>(
     `/v1/projects/${project}/environments/${environment}/keys`,
   );
 
@@ -32,12 +32,17 @@ export default async function EnvironmentPage({ params }: { params: Params }) {
             {project} / {environment}
           </h1>
           <p className="sub">
-            {result.data.keys.length} secret{result.data.keys.length === 1 ? '' : 's'}
+            {result.data.keys.filter((entry) => !entry.archived).length} secret
+            {result.data.keys.filter((entry) => !entry.archived).length === 1 ? '' : 's'}
           </p>
         </div>
-        <span className={`pill ${result.data.capability === 'admin' ? 'admin' : ''}`}>
-          {result.data.capability}
-        </span>
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          {result.data.permissions.map((permission) => (
+            <span className="pill" key={permission}>
+              {permission}
+            </span>
+          ))}
+        </div>
       </div>
 
       <div className="notice">
@@ -47,7 +52,7 @@ export default async function EnvironmentPage({ params }: { params: Params }) {
       <SecretsClient
         project={project}
         environment={environment}
-        capability={result.data.capability}
+        permissions={result.data.permissions}
         keys={result.data.keys}
       />
     </>

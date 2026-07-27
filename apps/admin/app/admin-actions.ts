@@ -131,8 +131,9 @@ export async function createGrant(
   input: {
     principalType: 'user' | 'service';
     principalId: string;
-    capability: 'read' | 'write' | 'admin';
+    role: string;
     environmentSlug: string | null;
+    expiresAt: string | null;
   },
 ): Promise<Result<object>> {
   if (input.principalId.trim() === '') return { ok: false, error: 'principal is required' };

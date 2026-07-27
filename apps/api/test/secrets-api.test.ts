@@ -85,11 +85,12 @@ beforeEach(async () => {
   );
 
   // reader may read dev only. ci may read prod only.
+  const viewer = await pool.query("SELECT id FROM roles WHERE slug = 'viewer'");
   await pool.query(
-    `INSERT INTO grants (principal_type, principal_id, environment_id, capability, created_by)
-     VALUES ('user', 'reader@equisafe.io', $1, 'read', 'test'),
-            ('service', 'ci-deploy.access', $2, 'read', 'test')`,
-    [dev.rows[0].id, prod.rows[0].id],
+    `INSERT INTO grants (principal_type, principal_id, environment_id, role_id, created_by)
+     VALUES ('user', 'reader@equisafe.io', $1, $3, 'test'),
+            ('service', 'ci-deploy.access', $2, $3, 'test')`,
+    [dev.rows[0].id, prod.rows[0].id, viewer.rows[0].id],
   );
 });
 
@@ -165,7 +166,7 @@ test('a reader cannot write', async () => {
   const rows = await auditRows();
   assert.equal(rows.length, 1);
   assert.equal(rows[0].decision, 'deny');
-  assert.equal(rows[0].metadata.reason, 'insufficient_capability');
+  assert.equal(rows[0].metadata.reason, 'missing_secret_write');
 });
 
 // --- reads ------------------------------------------------------------------
@@ -208,7 +209,7 @@ test('a denied read is audited', async () => {
   assert.equal(rows.length, 1);
   assert.equal(rows[0].decision, 'deny');
   assert.equal(rows[0].actorId, 'reader@equisafe.io');
-  assert.equal(rows[0].metadata.reason, 'no_grant');
+  assert.equal(rows[0].metadata.reason, 'missing_secret_read');
 });
 
 test('a caller with no grants at all is denied and audited', async () => {
@@ -435,6 +436,6 @@ test('/v1/me reports the principal and only the environments they hold', async (
 
   assert.equal(response.statusCode, 200);
   assert.deepEqual(response.json().environments, [
-    { project: 'market', environment: 'dev', capability: 'read' },
+    { project: 'market', environment: 'dev', permissions: ['secret.read'] },
   ]);
 });
