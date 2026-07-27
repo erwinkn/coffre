@@ -298,3 +298,17 @@ td.wrap {
   margin-bottom: 14px;
   font-size: 12px;
 }
+
+select {
+  background: #0b0d11;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 8px 10px;
+  font-family: var(--mono);
+  font-size: 13px;
+}
+select:focus {
+  outline: none;
+  border-color: var(--accent);
+}

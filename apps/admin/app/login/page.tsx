@@ -35,8 +35,9 @@ export default function LoginPage() {
       <div className="card">
         {[
           ['erwin@equisafe.io', 'root admin — everything, plus the audit log'],
-          ['dev@equisafe.io', 'write on market/dev'],
-          ['auditor@equisafe.io', 'read on market/dev'],
+          ['lead@equisafe.io', 'project admin on market — environments and access'],
+          ['dev@equisafe.io', 'write, on market/dev only'],
+          ['auditor@equisafe.io', 'read across the whole market project'],
           ['outsider@equisafe.io', 'no grants — useful for seeing a denial'],
         ].map(([email, description]) => (
           <div className="row" key={email}>

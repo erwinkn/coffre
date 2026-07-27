@@ -103,6 +103,12 @@ export class SecretsService {
     return this.#deps.rootAdmins.includes(principal.id);
   }
 
+  /**
+   * Resolve slugs to ids.
+   *
+   * Archived projects and environments resolve to null, so every caller treats
+   * them exactly as it treats one that never existed: denied, and audited.
+   */
   async #resolveEnvironment(
     tx: PoolClient,
     projectSlug: string,
@@ -112,7 +118,8 @@ export class SecretsService {
       `SELECT p.id AS project_id, e.id AS environment_id
          FROM projects p
          JOIN environments e ON e.project_id = p.id
-        WHERE p.slug = $1 AND e.slug = $2`,
+        WHERE p.slug = $1 AND e.slug = $2
+          AND p.archived_at IS NULL AND e.archived_at IS NULL`,
       [projectSlug, environmentSlug],
     );
     if (result.rowCount === 0) return null;
@@ -122,6 +129,14 @@ export class SecretsService {
     };
   }
 
+  /**
+   * The caller's effective capability on one environment.
+   *
+   * Two sources, and the strongest wins: a grant on the environment itself, or
+   * a grant on the project that contains it. Project grants are what make
+   * "admin on this project" mean something -- there is otherwise nothing that
+   * could authorise creating an environment inside it.
+   */
   async #capabilityFor(
     tx: PoolClient,
     principal: Principal,
@@ -130,8 +145,14 @@ export class SecretsService {
     if (this.#isRootAdmin(principal)) return 'admin';
 
     const result = await tx.query<{ capability: Capability }>(
-      `SELECT capability FROM grants
-        WHERE principal_type = $1 AND principal_id = $2 AND environment_id = $3`,
+      `SELECT g.capability
+         FROM grants g
+        WHERE g.principal_type = $1
+          AND g.principal_id = $2
+          AND (
+                g.environment_id = $3
+             OR g.project_id = (SELECT project_id FROM environments WHERE id = $3)
+              )`,
       [principal.type, principal.id, environmentId],
     );
     if (result.rowCount === 0) return null;
@@ -402,11 +423,14 @@ export class SecretsService {
         const all = await client.query<{ project: string; environment: string }>(
           `SELECT p.slug AS project, e.slug AS environment
              FROM environments e JOIN projects p ON p.id = e.project_id
+            WHERE p.archived_at IS NULL AND e.archived_at IS NULL
             ORDER BY p.slug, e.slug`,
         );
         return all.rows.map((row) => ({ ...row, capability: 'admin' as const }));
       }
 
+      // An environment is visible if the caller holds a grant on it directly or
+      // on its project. Where both exist, the strongest capability wins.
       const result = await client.query<{
         project: string;
         environment: string;
@@ -414,13 +438,24 @@ export class SecretsService {
       }>(
         `SELECT p.slug AS project, e.slug AS environment, g.capability
            FROM grants g
-           JOIN environments e ON e.id = g.environment_id
+           JOIN environments e
+             ON e.id = g.environment_id OR e.project_id = g.project_id
            JOIN projects p ON p.id = e.project_id
           WHERE g.principal_type = $1 AND g.principal_id = $2
+            AND p.archived_at IS NULL AND e.archived_at IS NULL
           ORDER BY p.slug, e.slug`,
         [ctx.principal.type, ctx.principal.id],
       );
-      return result.rows;
+
+      const strongest = new Map<string, { project: string; environment: string; capability: Capability }>();
+      for (const row of result.rows) {
+        const key = `${row.project}/${row.environment}`;
+        const existing = strongest.get(key);
+        if (!existing || CAPABILITY_RANK[row.capability] > CAPABILITY_RANK[existing.capability]) {
+          strongest.set(key, row);
+        }
+      }
+      return [...strongest.values()];
     } finally {
       client.release();
     }

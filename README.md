@@ -177,16 +177,63 @@ All five phases are implemented and working locally.
 - **M4.** Admin UI: browse projects and environments, reveal (audited), create
   and edit secrets, read the audit log, and verify chain integrity.
 
+- **Management.** Projects, environments and grants are created, renamed and
+  archived through the UI and the API. Every structural change is audited.
+
+### There is no delete, and that is deliberate
+
+`audit_log` holds `ON DELETE RESTRICT` references to projects, environments and
+secrets, so anything that has ever been read or written cannot be removed:
+
+```
+ERROR: update or delete on table "secrets" violates foreign key constraint
+       "audit_log_secret_id_fkey" on table "audit_log"
+```
+
+Letting a delete cascade would destroy the evidence this service exists to keep.
+So "delete" is **archive**: hidden from listings, reads and writes refused,
+every row still present and the audit trail still valid. Archiving is
+reversible and the secrets survive it intact.
+
+Actually destroying data belongs to a retention policy under Art 12(2)(a) —
+a decision to be written down and applied deliberately, not a button in an
+admin UI.
+
+### Authorisation
+
+| Scope | Confers |
+|---|---|
+| `COFFRE_ROOT_ADMINS` (config) | everything, including creating projects and reading the audit log |
+| Grant on a **project** | that capability on every environment in it; `admin` also manages environments and grants |
+| Grant on an **environment** | that capability on that environment only |
+
+Where both a project and an environment grant exist, the stronger wins. A grant
+targets exactly one scope — the schema enforces `(project_id IS NULL) <>
+(environment_id IS NULL)`.
+
+`admin` on a single environment deliberately does **not** authorise changing the
+project's structure. That is what project-scoped grants are for.
+
+Principals are `user` (matched on the Access `email` claim) or `service`
+(matched on `common_name`, because service-token JWTs carry no email at all).
+
 ### Things that are stubbed, not finished
 
 - `SyncTarget` (push to Scaleway Secret Manager) is designed but not
   implemented — it is a non-goal for this phase.
 - The `scaleway` `KekProvider` does not exist yet; only `local` does.
-- Grants are seeded directly into Postgres. There is no grants admin UI.
 - Rollback is free in the data model (versions are append-only with a current
   pointer) but no endpoint exposes it yet.
 - Audit checkpoints have a table but nothing exports them off-box, so tail
   truncation is currently detectable only in principle.
+- The UI has no automated tests. The API logic behind every screen is covered,
+  but the React layer is verified by hand.
+
+### Why `--test-concurrency=1`
+
+The integration tests share one Postgres database and reset it in `beforeEach`.
+Run in parallel they clobber each other. Serialising is the pragmatic fix for a
+prototype; the real fix is a schema (or database) per test file.
 
 ## Deliberately out of scope
 

@@ -26,56 +26,78 @@ async function mint(params) {
     return (await response.json()).token;
 }
 
-async function put(token, path, body) {
+async function call(token, method, path, body) {
     const response = await fetch(`${API}${path}`, {
-        method: 'PUT',
+        method,
         headers: { 'cf-access-jwt-assertion': token, 'content-type': 'application/json' },
-        body: JSON.stringify(body),
+        body: body === undefined ? undefined : JSON.stringify(body),
     });
-    if (!response.ok) throw new Error(`PUT ${path} -> ${response.status}`);
+    if (!response.ok) throw new Error(`${method} ${path} -> ${response.status}`);
     return response.json();
 }
 
-// Projects, environments and grants are structural, so they go in directly.
-// Secret values do not: those go through the API so they are enveloped and
-// audited properly.
+const put = (token, path, body) => call(token, 'PUT', path, body);
+const post = (token, path, body) => call(token, 'POST', path, body);
+
+// Everything goes through the API, including the structural setup. That way the
+// seed exercises the same authorisation and audit paths the UI and CLI use, and
+// the resulting audit log is a realistic one rather than a log with no history
+// of how any of this came to exist.
+// Reset order matters. audit_log holds ON DELETE RESTRICT references to
+// secrets, environments and projects, so it has to go FIRST -- otherwise every
+// re-seed on top of an already-audited database fails on the environments
+// delete. This only ever appeared to work because the log happened to be empty.
+//
+// This wholesale delete is possible only because the seed connects as the
+// owner. The application role cannot do any of it: coffre_app has no DELETE on
+// audit_log at all.
 console.log('==> resetting local data');
+await pool.query('DELETE FROM audit_log');
 await pool.query('UPDATE secrets SET current_version_id = NULL');
 await pool.query('DELETE FROM secret_versions');
 await pool.query('DELETE FROM secrets');
 await pool.query('DELETE FROM grants');
 await pool.query('DELETE FROM environments');
 await pool.query('DELETE FROM projects');
-await pool.query('DELETE FROM audit_log');
 await pool.query(
     "UPDATE audit_chain_head SET next_seq = 0, head_hash = decode(repeat('00', 32), 'hex')",
 );
 
-const project = await pool.query(
-    "INSERT INTO projects (slug, name) VALUES ('market', 'Equisafe Market') RETURNING id",
-);
-const environments = {};
+const adminToken = await mint({ email: ADMIN });
+
+await post(adminToken, '/v1/admin/projects', { slug: 'market', name: 'Equisafe Market' });
 for (const [slug, name] of [
     ['dev', 'Development'],
     ['prod', 'Production'],
 ]) {
-    const row = await pool.query(
-        'INSERT INTO environments (project_id, slug, name) VALUES ($1, $2, $3) RETURNING id',
-        [project.rows[0].id, slug, name],
-    );
-    environments[slug] = row.rows[0].id;
+    await post(adminToken, '/v1/admin/projects/market/environments', { slug, name });
 }
-
-await pool.query(
-    `INSERT INTO grants (principal_type, principal_id, environment_id, capability, created_by)
-     VALUES ('user',    'dev@equisafe.io',    $1, 'write', 'seed'),
-            ('user',    'auditor@equisafe.io',$1, 'read',  'seed'),
-            ('service', 'ci-deploy.access',   $2, 'read',  'seed')`,
-    [environments.dev, environments.prod],
-);
 console.log('==> created project market with environments dev, prod');
 
-const adminToken = await mint({ email: ADMIN });
+// A mix of scopes, so the UI shows both kinds of grant:
+//   lead     -- project admin: can add environments and manage access
+//   dev      -- write, but only on dev
+//   auditor  -- read across the whole project
+//   ci       -- a machine principal, matched on its service-token common name
+for (const grant of [
+    { principalType: 'user', principalId: 'lead@equisafe.io', capability: 'admin' },
+    {
+        principalType: 'user',
+        principalId: 'dev@equisafe.io',
+        capability: 'write',
+        environmentSlug: 'dev',
+    },
+    { principalType: 'user', principalId: 'auditor@equisafe.io', capability: 'read' },
+    {
+        principalType: 'service',
+        principalId: 'ci-deploy.access',
+        capability: 'read',
+        environmentSlug: 'prod',
+    },
+]) {
+    await post(adminToken, '/v1/admin/projects/market/grants', grant);
+}
+console.log('==> granted access to lead, dev, auditor and ci-deploy.access');
 
 const values = {
     dev: {

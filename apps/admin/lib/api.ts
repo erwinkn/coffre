@@ -84,6 +84,28 @@ export type SecretKey = {
   updatedBy: string | null;
 };
 
+export type ProjectSummary = {
+  slug: string;
+  name: string;
+  archivedAt: string | null;
+  capability: 'read' | 'write' | 'admin';
+  environments: {
+    slug: string;
+    name: string;
+    archivedAt: string | null;
+    secretCount: number;
+  }[];
+};
+
+export type GrantRow = {
+  id: string;
+  principalType: 'user' | 'service';
+  principalId: string;
+  capability: 'read' | 'write' | 'admin';
+  scope: 'project' | 'environment';
+  environmentSlug: string | null;
+};
+
 export type AuditEntry = {
   seq: number;
   occurredAt: string;

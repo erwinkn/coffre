@@ -16,6 +16,7 @@ import {
   NotFound,
   type RequestContext,
 } from './services/secrets.ts';
+import { AdminService } from './services/admin.ts';
 
 const slug = z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/);
 const secretKey = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/);
@@ -42,6 +43,12 @@ export function buildApp(options: BuildOptions): FastifyInstance {
     rootAdmins: options.rootAdmins,
   });
 
+  const admin = new AdminService({
+    pool: options.pool,
+    auditChainKey: options.auditChainKey,
+    rootAdmins: options.rootAdmins,
+  });
+
   registerAuth(app, { verifier: options.verifier, publicPaths: ['/healthz'] });
 
   function contextOf(request: { id: string; ip: string; principal: unknown }): RequestContext {
@@ -56,6 +63,7 @@ export function buildApp(options: BuildOptions): FastifyInstance {
     const status = (error as { statusCode?: number }).statusCode;
     if (status === 403) return reply.code(403).send({ error: 'forbidden' });
     if (status === 404) return reply.code(404).send({ error: 'not_found' });
+    if (status === 409) return reply.code(409).send({ error: 'conflict', message: error.message });
     if ((error as { validation?: unknown }).validation || status === 400) {
       return reply.code(400).send({ error: 'bad_request' });
     }
@@ -178,6 +186,99 @@ export function buildApp(options: BuildOptions): FastifyInstance {
         updatedBy: row.created_by,
       })),
     };
+  });
+
+  // --- project and environment management -----------------------------------
+  //
+  // Note the absence of DELETE. The audit log holds ON DELETE RESTRICT
+  // references to projects, environments and secrets, so anything that has ever
+  // been used cannot be removed without destroying the trail. Archiving is the
+  // operation that actually exists.
+
+  app.get('/v1/admin/projects', async (request) => ({
+    projects: await admin.listProjects(contextOf(request)),
+  }));
+
+  app.post('/v1/admin/projects', async (request, reply) => {
+    const body = z.object({ slug, name: z.string().min(1).max(120) }).parse(request.body);
+    reply.code(201);
+    return admin.createProject(contextOf(request), body.slug, body.name);
+  });
+
+  app.patch('/v1/admin/projects/:project', async (request) => {
+    const params = z.object({ project: slug }).parse(request.params);
+    const body = z
+      .object({ slug: slug.optional(), name: z.string().min(1).max(120).optional() })
+      .parse(request.body);
+
+    return admin.updateProject(contextOf(request), params.project, body);
+  });
+
+  app.post('/v1/admin/projects/:project/archive', async (request) => {
+    const params = z.object({ project: slug }).parse(request.params);
+    const body = z.object({ archived: z.boolean().default(true) }).parse(request.body ?? {});
+
+    return admin.setProjectArchived(contextOf(request), params.project, body.archived);
+  });
+
+  app.post('/v1/admin/projects/:project/environments', async (request, reply) => {
+    const params = z.object({ project: slug }).parse(request.params);
+    const body = z.object({ slug, name: z.string().min(1).max(120) }).parse(request.body);
+
+    reply.code(201);
+    return admin.createEnvironment(contextOf(request), params.project, body.slug, body.name);
+  });
+
+  app.patch('/v1/admin/projects/:project/environments/:environment', async (request) => {
+    const params = z.object({ project: slug, environment: slug }).parse(request.params);
+    const body = z
+      .object({ slug: slug.optional(), name: z.string().min(1).max(120).optional() })
+      .parse(request.body);
+
+    return admin.updateEnvironment(contextOf(request), params.project, params.environment, body);
+  });
+
+  app.post('/v1/admin/projects/:project/environments/:environment/archive', async (request) => {
+    const params = z.object({ project: slug, environment: slug }).parse(request.params);
+    const body = z.object({ archived: z.boolean().default(true) }).parse(request.body ?? {});
+
+    return admin.setEnvironmentArchived(
+      contextOf(request),
+      params.project,
+      params.environment,
+      body.archived,
+    );
+  });
+
+  // --- grants ---------------------------------------------------------------
+
+  app.get('/v1/admin/projects/:project/grants', async (request) => {
+    const params = z.object({ project: slug }).parse(request.params);
+    return { grants: await admin.listGrants(contextOf(request), params.project) };
+  });
+
+  app.post('/v1/admin/projects/:project/grants', async (request, reply) => {
+    const params = z.object({ project: slug }).parse(request.params);
+    const body = z
+      .object({
+        principalType: z.enum(['user', 'service']),
+        principalId: z.string().min(1).max(320),
+        capability: z.enum(['read', 'write', 'admin']),
+        // Omit or null to scope the grant to the whole project.
+        environmentSlug: slug.nullish(),
+      })
+      .parse(request.body);
+
+    reply.code(201);
+    return admin.createGrant(contextOf(request), params.project, body);
+  });
+
+  app.delete('/v1/admin/projects/:project/grants/:grantId', async (request) => {
+    const params = z
+      .object({ project: slug, grantId: z.string().uuid() })
+      .parse(request.params);
+
+    return admin.revokeGrant(contextOf(request), params.project, params.grantId);
   });
 
   // --- audit ----------------------------------------------------------------
