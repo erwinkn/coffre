@@ -97,6 +97,13 @@ an authorization bypass in exactly that position via `x-middleware-subrequest`.
 The admin UI calls this API and never reads the database — a UI querying
 Postgres directly would read secrets without writing an audit row.
 
+**The `.env` parser refuses ambiguity rather than guessing.** It is the one
+place where free text becomes credential material. Unrecognised escapes are
+preserved verbatim, trailing text after a closing quote is an error, NUL bytes
+are rejected (`execve` truncates at them), and all three line-ending
+conventions are split. Writing tests for it found four ways it silently
+corrupted values — see `apps/api/test/dotenv.test.ts`.
+
 **Append-only by grant, not convention.** `coffre_app` has no `UPDATE`, no
 `DELETE`, no `TRUNCATE` on `audit_log`. Proven in
 `packages/db/test/schema-guarantees.sql`, which runs as that role and asserts
@@ -144,7 +151,7 @@ Individual pieces:
 pnpm db:up            # Postgres on :55432
 pnpm db:migrate
 pnpm seed
-pnpm test             # 109 tests, unit + integration (needs Postgres up)
+pnpm test             # 139 tests, unit + integration (needs Postgres up)
 pnpm test:schema      # append-only guarantees, run as coffre_app
 pnpm check:pins       # every dependency exactly pinned
 ```
@@ -288,8 +295,9 @@ Principals are `user` (matched on the Access `email` claim) or `service`
 - The `scaleway` `KekProvider` does not exist yet; only `local` does.
 - Audit checkpoints have a table but nothing exports them off-box, so tail
   truncation is currently detectable only in principle.
-- `.env` import does not support multi-line values or variable interpolation.
-  Both are reported as parse problems rather than guessed at.
+- `.env` import does not support literal multi-line values (use `\n` inside
+  double quotes) or variable interpolation. Both are reported as parse problems
+  rather than guessed at.
 - The project-only-permission rule (a role containing `grant.manage` cannot be
   scoped to one environment) is enforced in the service layer with tests, not by
   a database constraint — unlike the append-only guarantee, which is.

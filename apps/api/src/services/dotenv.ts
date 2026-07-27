@@ -26,7 +26,10 @@ export function parseDotenv(input: string): ParseResult {
   const problems: ParseProblem[] = [];
   const seen = new Set<string>();
 
-  const lines = input.split(/\r?\n/);
+  // Split on all three line-ending conventions. Splitting on /\r?\n/ alone
+  // leaves a lone \r inside the value, which silently swallows the following
+  // key into the preceding secret -- corruption with no error.
+  const lines = input.split(/\r\n|\n|\r/);
 
   for (let index = 0; index < lines.length; index++) {
     const lineNumber = index + 1;
@@ -69,6 +72,17 @@ export function parseDotenv(input: string): ParseResult {
         continue;
       }
       value = unescapeDoubleQuoted(rest.slice(1, closing));
+      // Anything other than whitespace or a comment after the closing quote
+      // means the line is not what its author thought it was. Rejecting beats
+      // silently discarding part of a credential.
+      if (trailingIsSignificant(rest.slice(closing + 1))) {
+        problems.push({
+          line: lineNumber,
+          text: key,
+          reason: 'unexpected text after the closing quote',
+        });
+        continue;
+      }
     } else if (rest.startsWith("'")) {
       const closing = rest.indexOf("'", 1);
       if (closing === -1) {
@@ -79,13 +93,34 @@ export function parseDotenv(input: string): ParseResult {
         });
         continue;
       }
-      // Single quotes are literal, as in a shell.
+      // Single quotes are literal, as in a shell: no escapes inside them.
       value = rest.slice(1, closing);
+      if (trailingIsSignificant(rest.slice(closing + 1))) {
+        problems.push({
+          line: lineNumber,
+          text: key,
+          reason: 'unexpected text after the closing quote',
+        });
+        continue;
+      }
     } else {
       // Unquoted: strip a trailing comment, then trailing whitespace.
       const comment = rest.indexOf(' #');
       if (comment !== -1) rest = rest.slice(0, comment);
       value = rest.trim();
+    }
+
+    // A NUL byte cannot survive being put in a process environment: execve
+    // truncates at the first one, so `coffre run` would inject a silently
+    // shortened secret. Refuse it here rather than store something that will
+    // be wrong only at the point of use.
+    if (value.includes('\u0000')) {
+      problems.push({
+        line: lineNumber,
+        text: key,
+        reason: 'value contains a NUL byte, which cannot be passed in an environment',
+      });
+      continue;
     }
 
     if (seen.has(key)) {
@@ -100,6 +135,12 @@ export function parseDotenv(input: string): ParseResult {
   return { entries, problems };
 }
 
+/** True when what follows a closing quote is neither whitespace nor a comment. */
+function trailingIsSignificant(rest: string): boolean {
+  const trimmed = rest.trim();
+  return trimmed !== '' && !trimmed.startsWith('#');
+}
+
 function findClosingQuote(text: string, quote: string): number {
   for (let index = 1; index < text.length; index++) {
     if (text[index] === '\\') {
@@ -111,17 +152,35 @@ function findClosingQuote(text: string, quote: string): number {
   return -1;
 }
 
+/**
+ * Expand escapes inside a double-quoted value.
+ *
+ * Deliberately minimal: only the escapes that are necessary. `\n` and `\r`
+ * because multi-line values (PEM keys) cannot otherwise be expressed on one
+ * line, and `\\` `\"` `\'` because quoting needs them.
+ *
+ * EVERYTHING ELSE IS PRESERVED VERBATIM, backslash included. The obvious
+ * implementation -- returning the character and dropping the backslash for
+ * unknown escapes -- silently mangles credentials: `"C:\path\to\file"` came
+ * out as `C:path<TAB>ofile`, and `"\d+\w"` as `d+w`. A secrets store that
+ * quietly rewrites what you gave it is worse than one that refuses.
+ *
+ * A value that should contain no interpretation at all belongs in single
+ * quotes, which are literal.
+ */
 function unescapeDoubleQuoted(text: string): string {
-  return text.replace(/\\(.)/g, (_match, character: string) => {
+  return text.replace(/\\(.)/g, (match, character: string) => {
     switch (character) {
       case 'n':
         return '\n';
       case 'r':
         return '\r';
-      case 't':
-        return '\t';
-      default:
+      case '\\':
+      case '"':
+      case "'":
         return character;
+      default:
+        return match;
     }
   });
 }
