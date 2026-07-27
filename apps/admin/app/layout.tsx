@@ -22,6 +22,7 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
             </div>
             <nav className="top-nav">
               <a href="/">Projects</a>
+              <a href="/access">Access</a>
               <a href="/audit">Audit log</a>
               {me.ok ? (
                 <span className="whoami">

@@ -484,9 +484,15 @@ function GrantRowView({ project, grant }: { project: string; grant: GrantRow }) 
       </td>
       <td>{grant.expiresAt === null ? '-' : grant.expiresAt.slice(0, 10)}</td>
       <td>
-        <button disabled={pending} onClick={() => run(() => revokeGrant(project, grant.id))}>
-          Revoke
-        </button>
+        {grant.id.startsWith('root:') ? (
+          // Root admins come from COFFRE_ROOT_ADMINS, not from this table.
+          // Shown so the access list is honest; not revocable from here.
+          <span className="meta">config</span>
+        ) : (
+          <button disabled={pending} onClick={() => run(() => revokeGrant(project, grant.id))}>
+            Revoke
+          </button>
+        )}
         {error !== null && <span style={{ color: 'var(--deny)' }}> {error}</span>}
       </td>
     </tr>

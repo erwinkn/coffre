@@ -312,3 +312,9 @@ select:focus {
   outline: none;
   border-color: var(--accent);
 }
+
+textarea {
+  min-height: 120px;
+  resize: vertical;
+  line-height: 1.45;
+}

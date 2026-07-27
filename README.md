@@ -144,7 +144,7 @@ Individual pieces:
 pnpm db:up            # Postgres on :55432
 pnpm db:migrate
 pnpm seed
-pnpm test             # 92 tests, unit + integration (needs Postgres up)
+pnpm test             # 109 tests, unit + integration (needs Postgres up)
 pnpm test:schema      # append-only guarantees, run as coffre_app
 pnpm check:pins       # every dependency exactly pinned
 ```
@@ -152,12 +152,28 @@ pnpm check:pins       # every dependency exactly pinned
 CLI:
 
 ```sh
-node apps/cli/src/main.ts login --email erwin@equisafe.io
-node apps/cli/src/main.ts list market/dev
-node apps/cli/src/main.ts run  market/dev -- printenv
-node apps/cli/src/main.ts audit --denied
-node apps/cli/src/main.ts verify
+coffre login --email erwin@equisafe.io
+
+# secrets
+coffre list     market/dev
+coffre get      market/dev/DATABASE_URL
+coffre run      market/dev -- printenv
+coffre history  market/dev/DATABASE_URL
+coffre rollback market/dev/DATABASE_URL 2
+coffre import   market/dev --file .env          # previews; --apply to write
+
+# access
+coffre projects
+coffre roles
+coffre access                                   # who holds what, everywhere
+coffre grant market alice@equisafe.io --role developer --env dev
+
+# audit
+coffre audit --denied
+coffre verify
 ```
+
+(`coffre` here is `node apps/cli/src/main.ts`.)
 
 ## Progress
 
@@ -180,6 +196,16 @@ All five phases are implemented and working locally.
 - **Management.** Projects, environments, secrets and grants are created,
   renamed and archived through the UI and the API. Every structural change is
   audited.
+- **Version history and rollback.** Every version records who wrote it and
+  when. Rollback repoints the current pointer -- nothing is copied or deleted,
+  and a later write continues the numbering forward.
+- **Bulk `.env` import.** Previews as a diff (create / update / unchanged)
+  before writing. Parsing happens server-side so the CLI and UI cannot disagree
+  about what a `.env` file means; malformed lines are reported, never silently
+  mangled.
+- **Access overview.** Every principal and what they can reach, across all
+  projects you administer -- the query you want when someone leaves. Root
+  admins appear too, flagged as coming from configuration.
 
 ### There is no delete, and that is deliberate
 
@@ -260,10 +286,13 @@ Principals are `user` (matched on the Access `email` claim) or `service`
 - `SyncTarget` (push to Scaleway Secret Manager) is designed but not
   implemented — it is a non-goal for this phase.
 - The `scaleway` `KekProvider` does not exist yet; only `local` does.
-- Rollback is free in the data model (versions are append-only with a current
-  pointer) but no endpoint exposes it yet.
 - Audit checkpoints have a table but nothing exports them off-box, so tail
   truncation is currently detectable only in principle.
+- `.env` import does not support multi-line values or variable interpolation.
+  Both are reported as parse problems rather than guessed at.
+- The project-only-permission rule (a role containing `grant.manage` cannot be
+  scoped to one environment) is enforced in the service layer with tests, not by
+  a database constraint — unlike the append-only guarantee, which is.
 - The UI has no automated tests. The API logic behind every screen is covered,
   but the React layer is verified by hand.
 

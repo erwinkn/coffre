@@ -5,6 +5,7 @@ import { appendAudit, type AuditEntry } from '../../../../packages/db/src/audit.
 import { AccessDenied, AuditedFailure, NotFound, type RequestContext } from './secrets.ts';
 import {
   has,
+  PERMISSIONS,
   permissionsForProject,
   PROJECT_ONLY_PERMISSIONS,
   type Permission,
@@ -428,7 +429,7 @@ export class AdminService {
         [project.rows[0].id],
       );
 
-      return result.rows.map((row) => ({
+      const granted: GrantRow[] = result.rows.map((row) => ({
         id: row.id,
         principalType: row.principal_type,
         principalId: row.principal_id,
@@ -439,6 +440,24 @@ export class AdminService {
         environmentSlug: row.environment_slug,
         expiresAt: row.expires_at,
       }));
+
+      // Root admins hold everything from configuration, not from this table.
+      // An access list that omitted the most privileged principals in the
+      // system would be quietly misleading, so they are shown -- flagged as
+      // coming from config, and not revocable here.
+      const roots: GrantRow[] = this.#deps.rootAdmins.map((id) => ({
+        id: `root:${id}`,
+        principalType: 'user' as const,
+        principalId: id,
+        role: 'root-admin',
+        roleName: 'Root admin (from configuration)',
+        permissions: [...PERMISSIONS],
+        scope: 'project' as const,
+        environmentSlug: null,
+        expiresAt: null,
+      }));
+
+      return [...roots, ...granted];
     } finally {
       client.release();
     }
@@ -654,6 +673,91 @@ export class AdminService {
         ],
       };
     });
+  }
+
+  /**
+   * Every principal and what they can reach, across the projects the caller
+   * administers.
+   *
+   * The inverse of the per-project access table, and the query you actually
+   * want when offboarding someone: "what does this person still hold?"
+   */
+  async listPrincipals(ctx: RequestContext): Promise<
+    {
+      principalType: 'user' | 'service';
+      principalId: string;
+      isRootAdmin: boolean;
+      grants: { project: string; scope: string; role: string; expiresAt: string | null }[];
+    }[]
+  > {
+    const client = await this.#deps.pool.connect();
+    try {
+      const isRoot = this.#isRootAdmin(ctx.principal);
+
+      const result = await client.query(
+        `SELECT g.principal_type, g.principal_id, g.expires_at,
+                r.slug AS role,
+                p.slug AS project,
+                e.slug AS environment_slug
+           FROM grants g
+           JOIN roles r ON r.id = g.role_id
+           LEFT JOIN environments e ON e.id = g.environment_id
+           JOIN projects p ON p.id = COALESCE(g.project_id, e.project_id)
+          WHERE $1::boolean OR p.id IN (
+                  SELECT COALESCE(mg.project_id, me.project_id)
+                    FROM grants mg
+                    JOIN role_permissions mrp ON mrp.role_id = mg.role_id
+                    LEFT JOIN environments me ON me.id = mg.environment_id
+                   WHERE mg.principal_type = $2 AND mg.principal_id = $3
+                     AND mrp.permission = 'grant.manage'
+                     AND (mg.expires_at IS NULL OR mg.expires_at > now())
+                )
+          ORDER BY g.principal_id, p.slug`,
+        [isRoot, ctx.principal.type, ctx.principal.id],
+      );
+
+      const byPrincipal = new Map<string, {
+        principalType: 'user' | 'service';
+        principalId: string;
+        isRootAdmin: boolean;
+        grants: { project: string; scope: string; role: string; expiresAt: string | null }[];
+      }>();
+
+      // Root admins first, so offboarding cannot miss them.
+      if (isRoot) {
+        for (const id of this.#deps.rootAdmins) {
+          byPrincipal.set(`user:${id}`, {
+            principalType: 'user',
+            principalId: id,
+            isRootAdmin: true,
+            grants: [],
+          });
+        }
+      }
+
+      for (const row of result.rows) {
+        const key = `${row.principal_type}:${row.principal_id}`;
+        const entry =
+          byPrincipal.get(key) ??
+          {
+            principalType: row.principal_type,
+            principalId: row.principal_id,
+            isRootAdmin: this.#deps.rootAdmins.includes(row.principal_id),
+            grants: [],
+          };
+        entry.grants.push({
+          project: row.project,
+          scope: row.environment_slug === null ? 'whole project' : row.environment_slug,
+          role: row.role,
+          expiresAt: row.expires_at,
+        });
+        byPrincipal.set(key, entry);
+      }
+
+      return [...byPrincipal.values()];
+    } finally {
+      client.release();
+    }
   }
 
   // --- listing --------------------------------------------------------------

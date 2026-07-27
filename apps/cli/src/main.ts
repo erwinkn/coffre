@@ -110,7 +110,7 @@ async function login(args: string[]): Promise<void> {
 
   const me = (await api('/v1/me', token)) as {
     principal: { type: string; id: string };
-    environments: { project: string; environment: string; capability: string }[];
+    environments: { project: string; environment: string; permissions: string[] }[];
   };
 
   process.stdout.write(`logged in as ${me.principal.id} (${me.principal.type})\n`);
@@ -118,7 +118,9 @@ async function login(args: string[]): Promise<void> {
     process.stdout.write('  no environments granted\n');
   }
   for (const entry of me.environments) {
-    process.stdout.write(`  ${entry.project}/${entry.environment}  ${entry.capability}\n`);
+    process.stdout.write(
+      `  ${`${entry.project}/${entry.environment}`.padEnd(24)} ${entry.permissions.join(', ')}\n`,
+    );
   }
 }
 
@@ -146,11 +148,15 @@ async function list(args: string[]): Promise<void> {
   const result = (await api(
     `/v1/projects/${project}/environments/${environment}/keys`,
     loadToken(),
-  )) as { capability: string; keys: { key: string; version: number; updatedBy: string }[] };
+  )) as {
+    permissions: string[];
+    keys: { key: string; archived: boolean; version: number; updatedBy: string }[];
+  };
 
   // Listing keys is not a read of any value, and is not logged as one.
   for (const entry of result.keys) {
-    process.stdout.write(`${entry.key}\tv${entry.version}\t${entry.updatedBy}\n`);
+    const archived = entry.archived ? '  (archived)' : '';
+    process.stdout.write(`${entry.key}\tv${entry.version}\t${entry.updatedBy}${archived}\n`);
   }
 }
 
@@ -209,6 +215,178 @@ async function run(args: string[]): Promise<void> {
   });
 }
 
+async function history(args: string[]): Promise<void> {
+  const target = args[0];
+  if (!target) fail('usage: coffre history <project>/<environment>/<KEY>');
+
+  const { project, environment, key } = parsePath(target);
+  if (!key) fail('usage: coffre history <project>/<environment>/<KEY>');
+
+  const result = (await api(
+    `/v1/projects/${project}/environments/${environment}/secrets/${key}/versions`,
+    loadToken(),
+  )) as {
+    versions: { version: number; createdAt: string; createdBy: string; current: boolean }[];
+  };
+
+  for (const version of result.versions) {
+    process.stdout.write(
+      `v${String(version.version).padEnd(4)} ${version.createdAt.slice(0, 19).replace('T', ' ')}  ${version.createdBy.padEnd(24)}${version.current ? ' (current)' : ''}\n`,
+    );
+  }
+}
+
+async function rollback(args: string[]): Promise<void> {
+  const [target, version] = args;
+  if (!target || !version) {
+    fail('usage: coffre rollback <project>/<environment>/<KEY> <version>');
+  }
+
+  const { project, environment, key } = parsePath(target);
+  if (!key) fail('usage: coffre rollback <project>/<environment>/<KEY> <version>');
+
+  await api(
+    `/v1/projects/${project}/environments/${environment}/secrets/${key}/rollback`,
+    loadToken(),
+    { method: 'POST', body: JSON.stringify({ version: Number(version) }) },
+  );
+
+  process.stdout.write(`${key} rolled back to version ${version}\n`);
+}
+
+/**
+ * Import a .env file. Previews by default; --apply writes.
+ *
+ * The file is sent verbatim and parsed by the API, so the CLI and the UI
+ * cannot disagree about what a .env file means.
+ */
+async function importEnv(args: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({
+    args,
+    options: { file: { type: 'string' }, apply: { type: 'boolean', default: false } },
+    allowPositionals: true,
+  });
+
+  const target = positionals[0];
+  if (!target) fail('usage: coffre import <project>/<environment> [--file .env] [--apply]');
+
+  const { project, environment } = parsePath(target);
+  const content = values.file ? readFileSync(values.file, 'utf8') : readFileSync(0, 'utf8');
+
+  const result = (await api(
+    `/v1/projects/${project}/environments/${environment}/import`,
+    loadToken(),
+    { method: 'POST', body: JSON.stringify({ content, dryRun: !values.apply }) },
+  )) as {
+    plan: { key: string; action: string; version: number | null }[];
+    problems: { line: number; reason: string; text: string }[];
+  };
+
+  for (const problem of result.problems ?? []) {
+    process.stderr.write(`  line ${problem.line}: ${problem.reason} (${problem.text})\n`);
+  }
+  for (const entry of result.plan) {
+    process.stdout.write(`${entry.action.padEnd(10)} ${entry.key}\n`);
+  }
+
+  if (!values.apply) {
+    const changes = result.plan.filter((entry) => entry.action !== 'unchanged').length;
+    process.stdout.write(
+      `\n${changes} change${changes === 1 ? '' : 's'} pending. Re-run with --apply to write.\n`,
+    );
+  }
+}
+
+async function projects(): Promise<void> {
+  const result = (await api('/v1/admin/projects', loadToken())) as {
+    projects: {
+      slug: string;
+      name: string;
+      archivedAt: string | null;
+      permissions: string[];
+      environments: { slug: string; archivedAt: string | null; secretCount: number }[];
+    }[];
+  };
+
+  for (const project of result.projects) {
+    const archived = project.archivedAt === null ? '' : ' (archived)';
+    process.stdout.write(`${project.slug}${archived}  ${project.name}\n`);
+    for (const environment of project.environments.filter((e) => e.archivedAt === null)) {
+      process.stdout.write(
+        `  ${environment.slug.padEnd(16)} ${environment.secretCount} secrets\n`,
+      );
+    }
+  }
+}
+
+async function whoHasAccess(): Promise<void> {
+  const result = (await api('/v1/admin/principals', loadToken())) as {
+    principals: {
+      principalId: string;
+      principalType: string;
+      isRootAdmin: boolean;
+      grants: { project: string; scope: string; role: string; expiresAt: string | null }[];
+    }[];
+  };
+
+  for (const principal of result.principals) {
+    const root = principal.isRootAdmin ? '  [root admin]' : '';
+    process.stdout.write(`${principal.principalId} (${principal.principalType})${root}\n`);
+    for (const g of principal.grants) {
+      const until = g.expiresAt === null ? '' : ` until ${g.expiresAt.slice(0, 10)}`;
+      process.stdout.write(`  ${g.project}/${g.scope.padEnd(16)} ${g.role}${until}\n`);
+    }
+  }
+}
+
+async function grantAccess(args: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({
+    args,
+    options: {
+      role: { type: 'string' },
+      env: { type: 'string' },
+      service: { type: 'boolean', default: false },
+      expires: { type: 'string' },
+    },
+    allowPositionals: true,
+  });
+
+  const [project, principalId] = positionals;
+  if (!project || !principalId || !values.role) {
+    fail('usage: coffre grant <project> <principal> --role <role> [--env <env>] [--service] [--expires YYYY-MM-DD]');
+  }
+
+  await api(`/v1/admin/projects/${project}/grants`, loadToken(), {
+    method: 'POST',
+    body: JSON.stringify({
+      principalType: values.service ? 'service' : 'user',
+      principalId,
+      role: values.role,
+      environmentSlug: values.env ?? null,
+      expiresAt: values.expires ? new Date(`${values.expires}T23:59:59Z`).toISOString() : null,
+    }),
+  });
+
+  const scope = values.env ? `${project}/${values.env}` : project;
+  process.stdout.write(`granted ${values.role} on ${scope} to ${principalId}\n`);
+}
+
+async function roles(): Promise<void> {
+  const result = (await api('/v1/admin/roles', loadToken())) as {
+    roles: {
+      slug: string;
+      description: string;
+      permissions: string[];
+      assignableToEnvironment: boolean;
+    }[];
+  };
+
+  for (const role of result.roles) {
+    const scope = role.assignableToEnvironment ? 'project or env' : 'project only';
+    process.stdout.write(`${role.slug.padEnd(16)} [${scope}]  ${role.permissions.join(', ')}\n`);
+  }
+}
+
 async function audit(args: string[]): Promise<void> {
   const { values } = parseArgs({
     args,
@@ -259,13 +437,28 @@ async function verify(): Promise<void> {
 
 const USAGE = `coffre - secrets, with an audit log
 
-  coffre login [--email <addr>] [--service-token <name>]
-  coffre list  <project>/<environment>
-  coffre get   <project>/<environment>/<KEY>
-  coffre set   <project>/<environment>/<KEY> [value]     (reads stdin if omitted)
-  coffre run   <project>/<environment> -- <command>
-  coffre audit [--limit N] [--actor <id>] [--denied]
-  coffre verify
+  Secrets
+    coffre list     <project>/<environment>
+    coffre get      <project>/<environment>/<KEY>
+    coffre set      <project>/<environment>/<KEY> [value]   (reads stdin if omitted)
+    coffre run      <project>/<environment> -- <command>
+    coffre history  <project>/<environment>/<KEY>
+    coffre rollback <project>/<environment>/<KEY> <version>
+    coffre import   <project>/<environment> [--file .env] [--apply]
+
+  Access
+    coffre projects
+    coffre roles
+    coffre access
+    coffre grant <project> <principal> --role <role> [--env <env>] [--service]
+                 [--expires YYYY-MM-DD]
+
+  Audit
+    coffre audit [--limit N] [--actor <id>] [--denied]
+    coffre verify
+
+  Session
+    coffre login [--email <addr>] [--service-token <name>]
 `;
 
 const [command, ...rest] = process.argv.slice(2);
@@ -285,6 +478,27 @@ switch (command) {
     break;
   case 'run':
     await run(rest);
+    break;
+  case 'history':
+    await history(rest);
+    break;
+  case 'rollback':
+    await rollback(rest);
+    break;
+  case 'import':
+    await importEnv(rest);
+    break;
+  case 'projects':
+    await projects();
+    break;
+  case 'roles':
+    await roles();
+    break;
+  case 'access':
+    await whoHasAccess();
+    break;
+  case 'grant':
+    await grantAccess(rest);
     break;
   case 'audit':
     await audit(rest);

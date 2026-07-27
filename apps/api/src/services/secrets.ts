@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 
 import { seal, open, type Envelope } from '../../../../packages/core/src/envelope.ts';
@@ -459,6 +459,320 @@ export class SecretsService {
     } finally {
       client.release();
     }
+  }
+
+
+  /**
+   * A secret's version history: who wrote each version and when, never values.
+   *
+   * Requires secret.read even though no value is returned -- the shape of a
+   * change history is itself information about the secret.
+   */
+  async listVersions(
+    ctx: RequestContext,
+    projectSlug: string,
+    environmentSlug: string,
+    key: string,
+  ): Promise<{
+    key: string;
+    archived: boolean;
+    versions: {
+      version: number;
+      createdAt: string;
+      createdBy: string;
+      current: boolean;
+      kek: string;
+    }[];
+  }> {
+    const client = await this.#deps.pool.connect();
+    try {
+      const env = await this.#resolveEnvironment(client, projectSlug, environmentSlug);
+      if (env === null) throw new NotFound('unknown project or environment');
+
+      const permissions = await this.#permissionsFor(client, ctx.principal, env.environmentId);
+      if (!has(permissions, 'secret.read')) throw new AccessDenied();
+
+      const secret = await client.query<{ id: string; archived_at: string | null; current_version_id: string | null }>(
+        `SELECT id, archived_at, current_version_id FROM secrets
+          WHERE project_id = $1 AND environment_id = $2 AND key = $3`,
+        [env.projectId, env.environmentId, key],
+      );
+      if (secret.rowCount === 0) throw new NotFound('unknown secret');
+
+      const versions = await client.query(
+        `SELECT id, version, created_at, created_by, kek_provider, kek_id
+           FROM secret_versions WHERE secret_id = $1 ORDER BY version DESC`,
+        [secret.rows[0].id],
+      );
+
+      return {
+        key,
+        archived: secret.rows[0].archived_at !== null,
+        versions: versions.rows.map((row) => ({
+          version: Number(row.version),
+          createdAt: row.created_at,
+          createdBy: row.created_by,
+          current: row.id === secret.rows[0].current_version_id,
+          kek: `${row.kek_provider}:${row.kek_id}`,
+        })),
+      };
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Roll back to an earlier version.
+   *
+   * This repoints `current_version_id`; it does not copy or rewrite anything.
+   * Versions are append-only, so every value that was ever current is still
+   * there and rollback costs nothing -- which is exactly why the data model was
+   * shaped this way.
+   *
+   * The old version stays where it is in the numbering. A subsequent write
+   * takes MAX(version) + 1, so history reads forward even after a rollback.
+   */
+  async rollback(
+    ctx: RequestContext,
+    projectSlug: string,
+    environmentSlug: string,
+    key: string,
+    toVersion: number,
+  ): Promise<{ key: string; version: number }> {
+    return this.#audited(async (tx) => {
+      const base = this.#baseEntry(ctx, 'secret.rollback');
+      const env = await this.#resolveEnvironment(tx, projectSlug, environmentSlug);
+
+      if (env === null) {
+        throw new AuditedFailure(new NotFound('unknown project or environment'), {
+          ...base,
+          decision: 'deny',
+          metadata: { projectSlug, environmentSlug, key, reason: 'unknown_environment' },
+        });
+      }
+
+      const permissions = await this.#permissionsFor(tx, ctx.principal, env.environmentId);
+      if (!has(permissions, 'secret.write')) {
+        throw new AuditedFailure(new AccessDenied(), {
+          ...base,
+          decision: 'deny',
+          projectId: env.projectId,
+          environmentId: env.environmentId,
+          metadata: { key, toVersion, reason: 'missing_secret_write' },
+        });
+      }
+
+      const secret = await tx.query<{ id: string; current_version_id: string | null }>(
+        `SELECT id, current_version_id FROM secrets
+          WHERE project_id = $1 AND environment_id = $2 AND key = $3 AND archived_at IS NULL`,
+        [env.projectId, env.environmentId, key],
+      );
+      if (secret.rowCount === 0) {
+        throw new AuditedFailure(new NotFound('unknown secret'), {
+          ...base,
+          decision: 'deny',
+          projectId: env.projectId,
+          environmentId: env.environmentId,
+          metadata: { key, toVersion, reason: 'unknown_secret' },
+        });
+      }
+
+      const target = await tx.query<{ id: string; version: number }>(
+        'SELECT id, version FROM secret_versions WHERE secret_id = $1 AND version = $2',
+        [secret.rows[0].id, toVersion],
+      );
+      if (target.rowCount === 0) {
+        throw new AuditedFailure(new NotFound('unknown version'), {
+          ...base,
+          decision: 'deny',
+          projectId: env.projectId,
+          environmentId: env.environmentId,
+          secretId: secret.rows[0].id,
+          metadata: { key, toVersion, reason: 'unknown_version' },
+        });
+      }
+
+      const previous = await tx.query<{ version: number }>(
+        'SELECT version FROM secret_versions WHERE id = $1',
+        [secret.rows[0].current_version_id],
+      );
+
+      await tx.query(
+        'UPDATE secrets SET current_version_id = $1, updated_at = now() WHERE id = $2',
+        [target.rows[0].id, secret.rows[0].id],
+      );
+
+      return {
+        result: { key, version: toVersion },
+        entries: [
+          {
+            ...base,
+            decision: 'allow',
+            projectId: env.projectId,
+            environmentId: env.environmentId,
+            secretId: secret.rows[0].id,
+            metadata: {
+              key,
+              fromVersion: previous.rows[0] ? Number(previous.rows[0].version) : null,
+              toVersion,
+            },
+          },
+        ],
+      };
+    });
+  }
+
+
+  /**
+   * Bulk import from a .env file.
+   *
+   * `dryRun` returns the plan without writing anything, so the UI can show a
+   * diff before committing. The plan reports "unchanged" by comparing against
+   * the current decrypted value, which means a dry run IS a read of every
+   * existing secret -- so it is authorised as one and audited as one. Anything
+   * else would make import a way to read values without a read being logged.
+   */
+  async importSecrets(
+    ctx: RequestContext,
+    projectSlug: string,
+    environmentSlug: string,
+    entries: readonly { key: string; value: string }[],
+    dryRun: boolean,
+  ): Promise<{
+    bundleId: string;
+    plan: { key: string; action: 'create' | 'update' | 'unchanged'; version: number | null }[];
+  }> {
+    return this.#audited(async (tx) => {
+      const action = dryRun ? 'secret.import.preview' : 'secret.import';
+      const base = this.#baseEntry(ctx, action);
+      const bundleId = randomUUID();
+      const env = await this.#resolveEnvironment(tx, projectSlug, environmentSlug);
+
+      if (env === null) {
+        throw new AuditedFailure(new NotFound('unknown project or environment'), {
+          ...base,
+          decision: 'deny',
+          bundleId,
+          metadata: { projectSlug, environmentSlug, reason: 'unknown_environment' },
+        });
+      }
+
+      const permissions = await this.#permissionsFor(tx, ctx.principal, env.environmentId);
+      // Both paths need secret.write: a preview compares against existing
+      // values, and secret.read alone must not unlock that.
+      const required: Permission[] = ['secret.write', 'secret.read'];
+      const missing = required.find((permission) => !has(permissions, permission));
+      if (missing) {
+        throw new AuditedFailure(new AccessDenied(), {
+          ...base,
+          decision: 'deny',
+          bundleId,
+          projectId: env.projectId,
+          environmentId: env.environmentId,
+          metadata: { reason: `missing_${missing}`, keys: entries.length },
+        });
+      }
+
+      const plan: { key: string; action: 'create' | 'update' | 'unchanged'; version: number | null }[] = [];
+      const auditEntries: AuditEntry[] = [];
+
+      for (const entry of entries) {
+        const existing = await loadCurrentVersion(tx, env, entry.key);
+
+        let outcome: 'create' | 'update' | 'unchanged';
+        if (existing === null) {
+          outcome = 'create';
+        } else {
+          const current = await open(
+            existing.envelope,
+            { projectId: env.projectId, environmentId: env.environmentId, secretId: existing.secretId },
+            this.#deps.keks,
+          );
+          const incoming = Buffer.from(entry.value, 'utf8');
+          outcome =
+            current.length === incoming.length && timingSafeEqual(current, incoming)
+              ? 'unchanged'
+              : 'update';
+          current.fill(0);
+        }
+
+        if (dryRun || outcome === 'unchanged') {
+          plan.push({
+            key: entry.key,
+            action: outcome,
+            version: existing?.version ?? null,
+          });
+          continue;
+        }
+
+        const secretId = await upsertSecret(tx, env, entry.key, ctx.principal.id);
+        const next = await tx.query<{ next: string }>(
+          'SELECT COALESCE(MAX(version), 0) + 1 AS next FROM secret_versions WHERE secret_id = $1',
+          [secretId],
+        );
+        const version = Number(next.rows[0].next);
+
+        const envelope = await seal(
+          Buffer.from(entry.value, 'utf8'),
+          { projectId: env.projectId, environmentId: env.environmentId, secretId },
+          this.#deps.keks,
+        );
+
+        const inserted = await tx.query<{ id: string }>(
+          `INSERT INTO secret_versions (
+               secret_id, version, envelope_version, ciphertext, iv, auth_tag,
+               wrapped_dek, kek_provider, kek_id, kek_version, created_by
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
+          [
+            secretId,
+            version,
+            envelope.envelopeVersion,
+            envelope.ciphertext,
+            envelope.iv,
+            envelope.authTag,
+            envelope.wrappedDek,
+            envelope.kekProvider,
+            envelope.kekId,
+            envelope.kekVersion,
+            ctx.principal.id,
+          ],
+        );
+        await tx.query(
+          'UPDATE secrets SET current_version_id = $1, updated_at = now() WHERE id = $2',
+          [inserted.rows[0].id, secretId],
+        );
+
+        plan.push({ key: entry.key, action: outcome, version });
+        auditEntries.push({
+          ...base,
+          decision: 'allow',
+          bundleId,
+          projectId: env.projectId,
+          environmentId: env.environmentId,
+          secretId,
+          metadata: { key: entry.key, version, action: outcome },
+        });
+      }
+
+      // Always at least one row, so an import that changed nothing still leaves
+      // a trace of having been run.
+      if (auditEntries.length === 0) {
+        auditEntries.push({
+          ...base,
+          decision: 'allow',
+          bundleId,
+          projectId: env.projectId,
+          environmentId: env.environmentId,
+          metadata: {
+            keys: entries.length,
+            changed: 0,
+            dryRun,
+          },
+        });
+      }
+
+      return { result: { bundleId, plan }, entries: auditEntries };
+    });
   }
 
   /**

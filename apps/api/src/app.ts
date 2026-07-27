@@ -9,6 +9,7 @@ import type { KekRegistry } from '../../../packages/core/src/kek/registry.ts';
 import { verifyChain, GENESIS_HASH } from '../../../packages/core/src/audit/chain.ts';
 import { readAuditRows, OCCURRED_AT_SQL } from '../../../packages/db/src/audit.ts';
 import { registerAuth } from './auth.ts';
+import { parseDotenv } from './services/dotenv.ts';
 import { heartbeatAgeSeconds } from './heartbeat.ts';
 import {
   SecretsService,
@@ -158,6 +159,73 @@ export function buildApp(options: BuildOptions): FastifyInstance {
     },
   );
 
+  /** Version history: who wrote each version and when. Never values. */
+  app.get(
+    '/v1/projects/:project/environments/:environment/secrets/:key/versions',
+    async (request) => {
+      const params = z
+        .object({ project: slug, environment: slug, key: secretKey })
+        .parse(request.params);
+
+      return secrets.listVersions(
+        contextOf(request),
+        params.project,
+        params.environment,
+        params.key,
+      );
+    },
+  );
+
+  /** Repoint a secret at an earlier version. Versions are append-only, so this costs nothing. */
+  app.post(
+    '/v1/projects/:project/environments/:environment/secrets/:key/rollback',
+    async (request) => {
+      const params = z
+        .object({ project: slug, environment: slug, key: secretKey })
+        .parse(request.params);
+      const body = z.object({ version: z.number().int().positive() }).parse(request.body);
+
+      return secrets.rollback(
+        contextOf(request),
+        params.project,
+        params.environment,
+        params.key,
+        body.version,
+      );
+    },
+  );
+
+  /**
+   * Bulk import from a .env file. `dryRun` returns the plan without writing.
+   *
+   * Parsing happens here rather than in the client so the CLI and the UI cannot
+   * disagree about what a .env file means.
+   */
+  app.post('/v1/projects/:project/environments/:environment/import', async (request) => {
+    const params = z.object({ project: slug, environment: slug }).parse(request.params);
+    const body = z
+      .object({
+        content: z.string().max(1024 * 1024),
+        dryRun: z.boolean().default(false),
+      })
+      .parse(request.body);
+
+    const parsed = parseDotenv(body.content);
+    if (parsed.entries.length === 0 && parsed.problems.length > 0) {
+      return { bundleId: null, plan: [], problems: parsed.problems };
+    }
+
+    const result = await secrets.importSecrets(
+      contextOf(request),
+      params.project,
+      params.environment,
+      parsed.entries,
+      body.dryRun,
+    );
+
+    return { ...result, problems: parsed.problems };
+  });
+
   // --- metadata (no secret values) -----------------------------------------
 
   app.get('/v1/projects', async (request) => {
@@ -276,6 +344,11 @@ export function buildApp(options: BuildOptions): FastifyInstance {
   // --- roles and grants -----------------------------------------------------
 
   app.get('/v1/admin/roles', async () => ({ roles: await admin.listRoles() }));
+
+  /** Who holds what, across every project the caller administers. */
+  app.get('/v1/admin/principals', async (request) => ({
+    principals: await admin.listPrincipals(contextOf(request)),
+  }));
 
   app.get('/v1/admin/projects/:project/grants', async (request) => {
     const params = z.object({ project: slug }).parse(request.params);

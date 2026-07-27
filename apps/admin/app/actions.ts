@@ -82,3 +82,79 @@ export async function setSecretArchived(
   revalidatePath(`/${project}/${environment}`);
   return { ok: true };
 }
+
+export type SecretVersion = {
+  version: number;
+  createdAt: string;
+  createdBy: string;
+  current: boolean;
+  kek: string;
+};
+
+/** Version history. Metadata only -- no values are returned or logged as read. */
+export async function listVersions(
+  project: string,
+  environment: string,
+  key: string,
+): Promise<{ ok: true; versions: SecretVersion[] } | { ok: false; error: string }> {
+  const result = await coffreFetch<{ versions: SecretVersion[] }>(
+    `/v1/projects/${project}/environments/${environment}/secrets/${key}/versions`,
+  );
+  return result.ok
+    ? { ok: true, versions: result.data.versions }
+    : { ok: false, error: result.error };
+}
+
+/**
+ * Roll back to an earlier version.
+ *
+ * Repoints the current pointer; nothing is copied or rewritten, because
+ * versions are append-only. Audited with both the old and new version.
+ */
+export async function rollbackSecret(
+  project: string,
+  environment: string,
+  key: string,
+  version: number,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const result = await coffreFetch(
+    `/v1/projects/${project}/environments/${environment}/secrets/${key}/rollback`,
+    { method: 'POST', body: JSON.stringify({ version }) },
+  );
+  if (!result.ok) return { ok: false, error: result.error };
+
+  revalidatePath(`/${project}/${environment}`);
+  return { ok: true };
+}
+
+export type ImportPlanEntry = {
+  key: string;
+  action: 'create' | 'update' | 'unchanged';
+  version: number | null;
+};
+export type ImportProblem = { line: number; text: string; reason: string };
+
+/**
+ * Bulk import a .env file. `dryRun` returns the plan without writing.
+ *
+ * Parsing happens server-side so the UI and CLI cannot disagree about what a
+ * .env file means.
+ */
+export async function importEnv(
+  project: string,
+  environment: string,
+  content: string,
+  dryRun: boolean,
+): Promise<
+  | { ok: true; plan: ImportPlanEntry[]; problems: ImportProblem[] }
+  | { ok: false; error: string }
+> {
+  const result = await coffreFetch<{ plan: ImportPlanEntry[]; problems: ImportProblem[] }>(
+    `/v1/projects/${project}/environments/${environment}/import`,
+    { method: 'POST', body: JSON.stringify({ content, dryRun }) },
+  );
+  if (!result.ok) return { ok: false, error: result.error };
+
+  if (!dryRun) revalidatePath(`/${project}/${environment}`);
+  return { ok: true, plan: result.data.plan, problems: result.data.problems ?? [] };
+}
