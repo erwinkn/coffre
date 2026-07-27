@@ -1,3 +1,32 @@
 packages:
   - packages/*
   - apps/*
+
+# Supply-chain settings.
+#
+# These MUST live here, not in .npmrc. As of pnpm 10.16/11, only auth and
+# registry settings are read from .npmrc -- everything else is silently
+# ignored there. We found this the honest way: `pnpm add jose` wrote a caret
+# range while .npmrc said save-exact=true.
+#
+# Keys are camelCase in this file even though the CLI flags are kebab-case.
+
+# The npm supply chain is the largest untrusted input to a service that holds
+# every credential we own.
+ignoreScripts: true
+
+# Exact pins, no caret ranges.
+#
+# NOTE: pnpm 11 reads this key but does NOT apply it on `pnpm add` -- verified
+# by observation, it still wrote "^6.2.3". Use `pnpm add --save-exact` (wired
+# up as `pnpm run add:dep`), and rely on `scripts/check-pins.mjs` to enforce
+# the invariant rather than trusting a setting that silently does nothing.
+savePrefix: ''
+
+strictPeerDependencies: true
+autoInstallPeers: false
+
+# Do not install a version published in the last 7 days. Most malicious package
+# releases are yanked within hours, and nothing here is urgent enough to need a
+# same-week release.
+minimumReleaseAge: 10080

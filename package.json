@@ -8,6 +8,16 @@
     "node": ">=24"
   },
   "scripts": {
-    "test": "pnpm -r test"
+    "test": "node --test \"packages/**/test/*.test.ts\" \"apps/**/test/*.test.ts\"",
+    "test:schema": "docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U coffre_owner -d coffre < packages/db/test/schema-guarantees.sql",
+    "check:pins": "node scripts/check-pins.mjs",
+    "db:up": "docker compose up -d postgres",
+    "db:migrate": "./scripts/migrate.sh",
+    "add:dep": "pnpm add --save-exact"
+  },
+  "dependencies": {
+    "fastify": "5.6.1",
+    "jose": "6.2.3",
+    "pg": "8.16.3"
   }
 }
