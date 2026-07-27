@@ -7,17 +7,25 @@
 \set QUIET on
 
 -- Seed a minimal object graph as the owner.
+--
+-- Reset fully rather than upserting: this file pins fixed UUIDs, and an
+-- ON CONFLICT DO NOTHING would silently skip the insert when a project of the
+-- same slug already exists, leaving the fixed UUID dangling.
 DELETE FROM audit_log;
 UPDATE audit_chain_head SET next_seq = 0, head_hash = decode(repeat('00', 32), 'hex');
+UPDATE secrets SET current_version_id = NULL;
+DELETE FROM secret_versions;
+DELETE FROM secrets;
+DELETE FROM grants;
+DELETE FROM environments;
+DELETE FROM projects;
 
 INSERT INTO projects (id, slug, name)
-VALUES ('11111111-1111-1111-1111-111111111111', 'market', 'Equisafe Market')
-ON CONFLICT (slug) DO NOTHING;
+VALUES ('11111111-1111-1111-1111-111111111111', 'market', 'Equisafe Market');
 
 INSERT INTO environments (id, project_id, slug, name)
 VALUES ('22222222-2222-2222-2222-222222222222',
-        '11111111-1111-1111-1111-111111111111', 'prod', 'Production')
-ON CONFLICT (project_id, slug) DO NOTHING;
+        '11111111-1111-1111-1111-111111111111', 'prod', 'Production');
 
 INSERT INTO audit_log (seq, actor_type, actor_id, action, decision, prev_hash, hash)
 VALUES (0, 'user', 'erwin@equisafe.io', 'secret.read', 'allow',
