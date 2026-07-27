@@ -123,34 +123,70 @@ published six days before we tried to install it.
 ```
 packages/core   envelope encryption, KEK providers, audit hash chain, identity
 packages/db     migrations, fail-closed audit writer, schema guarantee tests
-apps/api        Fastify: the authentication boundary
+apps/api        Fastify: the authentication boundary and the read/write API
 apps/dev-idp    local stand-in for Cloudflare Access (serves JWKS, mints tokens)
+apps/cli        login / list / get / set / run / audit / verify
+apps/admin      Next.js admin UI (calls the API; never touches Postgres)
 ```
 
 ## Running it
 
 ```sh
 pnpm install
+pnpm dev              # Postgres + dev IdP + API + UI + seed data, all local
+```
+
+Then open http://127.0.0.1:3000 and sign in as `erwin@equisafe.io`.
+
+Individual pieces:
+
+```sh
 pnpm db:up            # Postgres on :55432
 pnpm db:migrate
-pnpm test             # unit + integration (needs Postgres up)
+pnpm seed
+pnpm test             # 61 tests, unit + integration (needs Postgres up)
 pnpm test:schema      # append-only guarantees, run as coffre_app
 pnpm check:pins       # every dependency exactly pinned
 ```
 
+CLI:
+
+```sh
+node apps/cli/src/main.ts login --email erwin@equisafe.io
+node apps/cli/src/main.ts list market/dev
+node apps/cli/src/main.ts run  market/dev -- printenv
+node apps/cli/src/main.ts audit --denied
+node apps/cli/src/main.ts verify
+```
+
 ## Progress
 
-- **M0 — done.** Schema and migrations, envelope, local `KekProvider`, KEK
-  registry with rotation, audit hash chain. Includes the cross-environment AAD
-  test.
-- **M1 — done.** JWKS verification and the auth boundary, adversarial tests
-  written first: forged signature, wrong `aud`, expired, not-yet-valid, wrong
-  issuer, `alg=none`, RS256→HS256 confusion, missing header, proxy bypass,
+All five phases are implemented and working locally.
+
+- **M0.** Schema and migrations, envelope, local `KekProvider`, KEK registry
+  with rotation, audit hash chain. Includes the cross-environment AAD test.
+- **M1.** JWKS verification and the auth boundary, adversarial tests written
+  first: forged signature, wrong `aud`, expired, not-yet-valid, wrong issuer,
+  `alg=none`, RS256→HS256 confusion, missing header, proxy bypass,
   identity-less token. Plus the fail-closed chained audit writer.
-- **M2 — not started.** Read API including bulk fetch, audit row on every read
-  and every denial.
-- **M3 — not started.** CLI: `login`, `get`, `run -- <cmd>`.
-- **M4 — not started.** Admin UI: browse, create, edit, view the audit log.
+- **M2.** Read/write API, bulk fetch, one audit row per secret on every read
+  and an audit row on every denial. End-to-end test that a ciphertext relocated
+  across environments in the database fails to decrypt.
+- **M3.** CLI: `login`, `list`, `get`, `set`, `run -- <cmd>`, `audit`, `verify`.
+  Zero dependencies.
+- **M4.** Admin UI: browse projects and environments, reveal (audited), create
+  and edit secrets, read the audit log, and verify chain integrity.
+
+### Things that are stubbed, not finished
+
+- `SyncTarget` (push to Scaleway Secret Manager) is designed but not
+  implemented — it is a non-goal for this phase.
+- The `scaleway` `KekProvider` does not exist yet; only `local` does.
+- Grants are seeded directly into Postgres. There is no grants admin UI.
+- Rollback is free in the data model (versions are append-only with a current
+  pointer) but no endpoint exposes it yet.
+- Audit checkpoints have a table but nothing exports them off-box, so tail
+  truncation is currently detectable only in principle.
 
 ## Deliberately out of scope
 

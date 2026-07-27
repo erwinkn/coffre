@@ -18,6 +18,12 @@ export class DevIdp {
   publicJwk!: JWK;
   readonly kid = 'dev-idp-key-1';
 
+  /** Used by the /dev/mint convenience endpoint when no aud is supplied. */
+  defaultAudience = 'coffre-local-dev-aud';
+
+  /** Fixed port for the standalone dev server; 0 (ephemeral) in tests. */
+  listenPort = 0;
+
   get origin(): string {
     if (this.#port === 0) throw new Error('DevIdp is not started');
     return `http://127.0.0.1:${this.#port}`;
@@ -39,6 +45,25 @@ export class DevIdp {
     this.publicJwk = { ...(await exportJWK(publicKey)), kid: this.kid, alg: 'RS256', use: 'sig' };
 
     this.#server = createServer((req, res) => {
+      // Dev-only: stands in for `cloudflared access login`. Cloudflare Access
+      // has no equivalent endpoint -- in production the browser SSO flow issues
+      // the token and the CLI reads it via cloudflared.
+      if (req.url?.startsWith('/dev/mint')) {
+        const url = new URL(req.url, this.origin);
+        const audience = url.searchParams.get('aud') ?? this.defaultAudience;
+        const email = url.searchParams.get('email');
+        const commonName = url.searchParams.get('common_name');
+
+        const minted = commonName
+          ? this.mintServiceToken({ audience, commonName })
+          : this.mintUserToken({ audience, email: email ?? 'erwin@equisafe.io' });
+
+        minted.then((token) => {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ token }));
+        });
+        return;
+      }
       if (req.url === '/cdn-cgi/access/certs') {
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ keys: [this.publicJwk] }));
@@ -53,7 +78,7 @@ export class DevIdp {
     });
 
     await new Promise<void>((resolve) => {
-      this.#server!.listen(0, '127.0.0.1', () => {
+      this.#server!.listen(this.listenPort, '127.0.0.1', () => {
         const address = this.#server!.address();
         if (address === null || typeof address === 'string') throw new Error('no port');
         this.#port = address.port;
