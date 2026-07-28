@@ -12,6 +12,7 @@
     "test": "node --test --test-concurrency=1 \"packages/**/test/*.test.ts\" \"apps/**/test/*.test.ts\"",
     "test:schema": "docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U coffre_owner -d coffre < packages/db/test/schema-guarantees.sql",
     "check:pins": "node scripts/check-pins.mjs",
+    "check:contrast": "node scripts/check-contrast.mjs",
     "db:up": "docker compose up -d postgres",
     "db:migrate": "./scripts/migrate.sh",
     "seed": "node scripts/seed.mjs",

@@ -92,10 +92,13 @@ true and useless.
 `claims.email` gets `undefined` for every machine caller. Machine callers
 (external-secrets, CI) are most of the real traffic.
 
-**The auth boundary is in Fastify, not Next.js middleware.** CVE-2025-29927 was
-an authorization bypass in exactly that position via `x-middleware-subrequest`.
-The admin UI calls this API and never reads the database — a UI querying
-Postgres directly would read secrets without writing an audit row.
+**The auth boundary is in Fastify, not in the UI framework.** It was originally
+written against Next.js, where CVE-2025-29927 was an authorization bypass in
+exactly that position via `x-middleware-subrequest`. The point survives the move
+to TanStack Start and is the reason the move was cheap: the admin UI calls this
+API and never reads the database, so no framework has ever been load-bearing for
+authorization. A UI querying Postgres directly would read secrets without
+writing an audit row.
 
 **The `.env` parser refuses ambiguity rather than guessing.** It is the one
 place where free text becomes credential material. Unrecognised escapes are
@@ -133,7 +136,7 @@ packages/db     migrations, fail-closed audit writer, schema guarantee tests
 apps/api        Fastify: the authentication boundary and the read/write API
 apps/dev-idp    local stand-in for Cloudflare Access (serves JWKS, mints tokens)
 apps/cli        login / list / get / set / run / audit / verify
-apps/admin      Next.js admin UI (calls the API; never touches Postgres)
+apps/admin      TanStack Start admin UI (calls the API; never touches Postgres)
 ```
 
 ## Running it
@@ -154,6 +157,7 @@ pnpm seed
 pnpm test             # 139 tests, unit + integration (needs Postgres up)
 pnpm test:schema      # append-only guarantees, run as coffre_app
 pnpm check:pins       # every dependency exactly pinned
+pnpm check:contrast   # every admin-UI colour pair meets WCAG AA
 ```
 
 CLI:
@@ -213,6 +217,61 @@ All five phases are implemented and working locally.
 - **Access overview.** Every principal and what they can reach, across all
   projects you administer -- the query you want when someone leaves. Root
   admins appear too, flagged as coming from configuration.
+
+### The admin UI
+
+Two audiences use it and they want opposite things. An engineer glances at an
+environment with a terminal open beside the browser; an auditor reads two
+hundred log rows while writing a finding. So it ships both colour schemes,
+following `prefers-color-scheme` with a manual override, and stays dense enough
+for the first without being unreadable for the second.
+
+Things worth knowing about it:
+
+- **Colours are authored in OKLCH and verified, not eyeballed.**
+  `scripts/check-contrast.mjs` converts every token back to sRGB and fails on
+  any text pair under WCAG AA, or any accent whose chroma clips the gamut. It
+  caught four real failures on the first run, including a muted grey that had
+  been sitting at 4.2:1.
+- **Both themes are one declaration each**, via CSS `light-dark()`. The obvious
+  alternative writes every light value twice and the copies drift.
+- **No decision is carried by colour alone.** `allow` / `deny` in the audit log
+  is exactly the red/green pair deuteranopia collapses, so each row carries a
+  glyph and the word as well as the hue.
+- **A revealed value hides itself after 45 seconds**, with a countdown so the
+  disappearance is expected. The read is already logged; re-revealing writes a
+  second, honest row.
+- **Archiving gets an undo toast, not a confirmation dialog.** Dialogs are
+  reserved for changes that reach other people -- archiving a project or
+  environment, revoking a grant -- and each one says what will actually break.
+- **Permissions shape the page.** Sections are gated individually, so an access
+  manager administers grants without seeing a rename control, and never meets an
+  affordance that refuses them.
+
+`⌘K` jumps to any project or environment.
+
+#### Built on TanStack Start
+
+Vite 8 plus TanStack Router, replacing Next.js. Notes for anyone reading the
+code expecting the old shape:
+
+- **Every read is a server function**, not a server component. `src/lib/api.ts`
+  is imported only by handlers in `src/lib/server.ts`, so the Access token and
+  the API base URL never reach the client bundle. The property that matters is
+  unchanged: the browser holds no credential and never calls the coffre API
+  directly.
+- **`router.invalidate()` replaces `revalidatePath`.** The old version had to
+  name the routes a mutation affected, and renaming a project meant remembering
+  to revalidate both `/` and `/:project`. Invalidating refetches every mounted
+  loader, so the sidebar's project tree cannot silently go stale.
+- **The audit table's rows are projected server-side.** An audit row's
+  `metadata` is arbitrary JSON and the table renders one derived string from it,
+  so the projection happens in the server function and the rest never crosses to
+  the browser.
+- **The Vite 8 toolchain runs no install scripts.** It uses Rolldown and
+  lightningcss, both shipped as prebuilt platform packages, so `ignoreScripts:
+  true` costs nothing here. That was worth checking before committing to it.
+- `src/routeTree.gen.ts` is generated and gitignored; `vite build` writes it.
 
 ### There is no delete, and that is deliberate
 
@@ -302,7 +361,17 @@ Principals are `user` (matched on the Access `email` claim) or `service`
   scoped to one environment) is enforced in the service layer with tests, not by
   a database constraint — unlike the append-only guarantee, which is.
 - The UI has no automated tests. The API logic behind every screen is covered,
-  but the React layer is verified by hand.
+  and `check:contrast` mechanically verifies the palette, but the React layer
+  itself is verified by hand.
+- The admin UI has three UI runtime dependencies (`radix-ui`, `cmdk`, `sonner`)
+  where it previously had none beyond React. They buy correct focus management,
+  the command palette and toasts; they also mean ~75 more packages in a service
+  that holds every credential we own. Pinned exactly and subject to the same
+  7-day minimum release age as everything else.
+- TanStack Start is on the 1.168 line, which moves fast. `createServerFn`'s
+  validator was renamed `inputValidator` recently enough that most examples
+  online still show the old name; pin bumps here deserve a read of the
+  changelog rather than a version bump on trust.
 
 ### Why `--test-concurrency=1`
 

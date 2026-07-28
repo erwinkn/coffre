@@ -1,11 +1,17 @@
 node_modules/
 dist/
-.next/
 *.tsbuildinfo
 .env
 .env.local
 *.log
-.next/
-next-env.d.ts
-*.tsbuildinfo
 .logs/
+
+# TanStack Start / Vite build output.
+.output/
+.nitro/
+.tanstack/
+.vite/
+
+# Generated from src/routes by the TanStack Start plugin. Committing it means
+# resolving conflicts in a file nobody edits.
+routeTree.gen.ts

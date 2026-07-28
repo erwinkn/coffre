@@ -54,9 +54,17 @@ export class DevIdp {
         const email = url.searchParams.get('email');
         const commonName = url.searchParams.get('common_name');
 
+        // Callers choose their own lifetime. The admin UI asks for a working
+        // day, because a token minted for the default 15 minutes turned every
+        // local session into a sign-in every quarter of an hour. Left
+        // unspecified so the default still applies to everything else.
+        const requested = Number(url.searchParams.get('expires_in'));
+        const expiresIn =
+          Number.isInteger(requested) && requested > 0 ? requested : undefined;
+
         const minted = commonName
-          ? this.mintServiceToken({ audience, commonName })
-          : this.mintUserToken({ audience, email: email ?? 'erwin@equisafe.io' });
+          ? this.mintServiceToken({ audience, commonName, expiresIn })
+          : this.mintUserToken({ audience, email: email ?? 'erwin@equisafe.io', expiresIn });
 
         minted.then((token) => {
           res.writeHead(200, { 'content-type': 'application/json' });

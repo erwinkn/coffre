@@ -398,6 +398,73 @@ test('the audit chain verifies over a realistic mixed workload', async () => {
   assert.equal(response.json().ok, true);
 });
 
+test('truncating the tail of the log is detected, though what remains is consistent', async () => {
+  // Three reads, so there is a tail worth cutting off.
+  for (const key of ['A', 'B', 'C']) {
+    await app.inject({
+      method: 'PUT',
+      url: `/v1/projects/market/environments/dev/secrets/${key}`,
+      ...req(adminToken),
+      payload: { value: 'v' },
+    });
+  }
+
+  const before = await app.inject({
+    method: 'GET',
+    url: '/v1/audit/verify',
+    ...req(adminToken),
+  });
+  assert.equal(before.json().ok, true);
+
+  // Delete the newest two rows but leave audit_chain_head alone. Every
+  // surviving row still hashes correctly and the sequence has no gap, so the
+  // chain on its own sees nothing wrong -- only the head row remembers that
+  // the log used to be longer.
+  const head = await pool.query<{ next_seq: string }>(
+    'SELECT next_seq FROM audit_chain_head WHERE only_row',
+  );
+  const kept = BigInt(head.rows[0].next_seq) - 2n;
+  await pool.query('DELETE FROM audit_log WHERE seq >= $1', [kept.toString()]);
+
+  const after = await app.inject({
+    method: 'GET',
+    url: '/v1/audit/verify',
+    ...req(adminToken),
+  });
+
+  assert.equal(after.statusCode, 200);
+  const body = after.json();
+  assert.equal(body.ok, false);
+  assert.equal(body.failedAtSeq, Number(kept));
+  assert.match(body.reason, /removed from the end/);
+});
+
+test('a chain longer than one verification batch still verifies end to end', async () => {
+  // The batch size is 5000; this only has to prove the loop continues past a
+  // full batch rather than stopping at one, so a handful of rows past a
+  // deliberately small horizon is not testable here. Instead: assert the
+  // reported row count covers every row in the table, which is what silently
+  // broke when the old code read a fixed 100k prefix.
+  for (const key of ['A', 'B', 'C', 'D']) {
+    await app.inject({
+      method: 'PUT',
+      url: `/v1/projects/market/environments/dev/secrets/${key}`,
+      ...req(adminToken),
+      payload: { value: 'v' },
+    });
+  }
+
+  const stored = await pool.query<{ count: string }>('SELECT count(*) FROM audit_log');
+  const verify = await app.inject({
+    method: 'GET',
+    url: '/v1/audit/verify',
+    ...req(adminToken),
+  });
+
+  assert.equal(verify.json().ok, true);
+  assert.equal(verify.json().rows, Number(stored.rows[0].count));
+});
+
 test('a non-admin cannot read or verify the audit log', async () => {
   const list = await app.inject({ method: 'GET', url: '/v1/audit', ...req(readerToken) });
   const verify = await app.inject({

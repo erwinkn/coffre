@@ -56,7 +56,7 @@ log 'seeding'
 node scripts/seed.mjs
 
 log 'starting admin UI on :3000'
-(cd apps/admin && ./node_modules/.bin/next dev -p 3000) > .logs/admin.log 2>&1 &
+(cd apps/admin && ./node_modules/.bin/vite dev) > .logs/admin.log 2>&1 &
 until curl -sf http://127.0.0.1:3000/login >/dev/null 2>&1; do sleep 1; done
 
 cat <<'BANNER'

@@ -19,6 +19,14 @@ import {
 } from './services/secrets.ts';
 import { AdminService } from './services/admin.ts';
 
+/**
+ * Rows per batch when verifying the chain.
+ *
+ * Bounded so that verifying a long log does not materialise it in one array.
+ * The whole log is still covered: batches continue until the reader runs dry.
+ */
+const VERIFY_BATCH = 5_000;
+
 const slug = z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/);
 const secretKey = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/);
 
@@ -452,7 +460,20 @@ export function buildApp(options: BuildOptions): FastifyInstance {
     };
   });
 
-  /** Verify the whole chain. This is the "prove the log was not edited" button. */
+  /**
+   * Verify the whole chain, from genesis to the head row.
+   *
+   * Two things are checked, and the second is not optional. Recomputing the
+   * links catches mutation, reordering and holes punched in the middle. It
+   * cannot catch the tail being cut off, because what remains is a perfectly
+   * consistent shorter chain -- so the recomputed head and length are compared
+   * against `audit_chain_head`, which is the only thing in the database that
+   * remembers how long the log is supposed to be.
+   *
+   * An attacker holding the chain key defeats both. That is the point of
+   * publishing checkpoints somewhere coffre cannot write; see
+   * `audit_checkpoints`.
+   */
   app.get('/v1/audit/verify', async (request) => {
     const auditable = await projectsWithAuditRead(
       options.pool,
@@ -465,12 +486,73 @@ export function buildApp(options: BuildOptions): FastifyInstance {
 
     const client = await options.pool.connect();
     try {
-      const rows = await readAuditRows(client, 0n, 100_000);
-      const result = verifyChain(options.auditChainKey, rows, GENESIS_HASH);
-      return result.ok
-        ? { ok: true, rows: result.rows, head: result.head.toString('hex') }
-        : { ok: false, failedAtSeq: Number(result.failedAtSeq), reason: result.reason };
+      // One snapshot for the head row and every batch under it. Without it a
+      // concurrent append lands between two batches and the recomputed head
+      // fails to match a head row read a moment earlier -- a false alarm on
+      // the one check that must never cry wolf.
+      await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY');
+
+      const head = await client.query<{ next_seq: string; head_hash: Buffer }>(
+        'SELECT next_seq, head_hash FROM audit_chain_head WHERE only_row LIMIT 1',
+      );
+      if (head.rowCount !== 1) {
+        return {
+          ok: false,
+          failedAtSeq: 0,
+          reason: 'audit_chain_head is missing, so the length of the log cannot be established',
+        };
+      }
+
+      // Batched rather than one 100k-row read: the previous cap silently
+      // verified a prefix and reported success over it once the log outgrew
+      // the limit, which is the failure mode this endpoint exists to catch.
+      let prevHash = GENESIS_HASH;
+      let nextSeq = 0n;
+      let rows = 0;
+
+      for (;;) {
+        const batch = await readAuditRows(client, nextSeq, VERIFY_BATCH);
+        if (batch.length === 0) break;
+
+        const result = verifyChain(options.auditChainKey, batch, prevHash);
+        if (!result.ok) {
+          return {
+            ok: false,
+            failedAtSeq: Number(result.failedAtSeq),
+            reason: result.reason,
+          };
+        }
+
+        rows += result.rows;
+        prevHash = result.head;
+        nextSeq = batch[batch.length - 1].seq + 1n;
+        if (batch.length < VERIFY_BATCH) break;
+      }
+
+      const expectedSeq = BigInt(head.rows[0].next_seq);
+      if (nextSeq !== expectedSeq) {
+        const missing = expectedSeq - nextSeq;
+        return {
+          ok: false,
+          failedAtSeq: Number(nextSeq),
+          reason:
+            missing > 0n
+              ? `the log ends at seq ${nextSeq} but the chain head expects ${expectedSeq}: ${missing} ${missing === 1n ? 'entry has' : 'entries have'} been removed from the end`
+              : `the log runs to seq ${nextSeq} but the chain head only expects ${expectedSeq}`,
+        };
+      }
+      if (!prevHash.equals(head.rows[0].head_hash)) {
+        return {
+          ok: false,
+          failedAtSeq: Number(nextSeq),
+          reason: 'the recomputed head does not match the stored chain head',
+        };
+      }
+
+      return { ok: true, rows, head: prevHash.toString('hex') };
     } finally {
+      // Read-only throughout; ending the snapshot is all this has to do.
+      await client.query('ROLLBACK').catch(() => {});
       client.release();
     }
   });
