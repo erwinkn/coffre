@@ -654,6 +654,7 @@ h2,
 /* Rows inside a card. The divider is on the top edge of every row but the
    first, so a card never ends on a stray rule. */
 .row {
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--space-4);
@@ -692,14 +693,67 @@ h2,
    rows are different in kind from the ones above them -- typed, not stored --
    so they read as pending rather than as saved rows being edited. */
 .row-draft {
-  background: var(--accent-wash);
-  box-shadow: inset 3px 0 0 var(--accent);
+  background: var(--allow-wash);
+  box-shadow: inset 3px 0 0 var(--allow);
 }
 
 @media (hover: hover) and (pointer: fine) {
   .row-draft.row-interactive:hover {
-    background: var(--accent-wash);
+    background: var(--allow-wash);
   }
+}
+
+/* The editor is intentionally a list of fields, not a card containing a
+   second form. Colour reinforces the textual status pill and inset edge. */
+.secret-editor {
+  border-block: 1px solid var(--border-subtle);
+}
+
+.secret-edit-row {
+  padding-block: var(--space-3);
+}
+
+.secret-key-input {
+  flex: 0 1 18rem;
+}
+
+.secret-input-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.secret-input-wrap > .spinner {
+  position: absolute;
+  right: var(--space-3);
+}
+
+.secret-version {
+  flex: none;
+}
+
+.row-change-update > .row {
+  background: var(--secret-wash);
+  box-shadow: inset 3px 0 0 var(--secret);
+}
+
+.row-change-delete > .row {
+  background: var(--deny-wash);
+  box-shadow: inset 3px 0 0 var(--deny);
+}
+
+.row-change-delete .input {
+  color: var(--deny);
+  text-decoration: line-through;
+}
+
+.secret-savebar {
+  position: sticky;
+  bottom: var(--space-3);
+  z-index: var(--z-sticky);
+  background: color-mix(in oklab, var(--surface) 94%, transparent);
+  backdrop-filter: blur(10px);
+  box-shadow: var(--shadow-card);
 }
 
 .row-key {
@@ -711,6 +765,8 @@ h2,
 }
 
 .row-actions {
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: center;
   gap: var(--space-2);
@@ -868,6 +924,28 @@ h2,
   width: 1.625rem;
 }
 
+/* Page-head actions carry high-value context and need a larger target than
+   dense row controls. */
+.btn-head-action {
+  height: 2rem;
+  min-width: 2rem;
+  padding: 0 var(--space-3);
+}
+
+.btn-icon.btn-head-action {
+  width: 2rem;
+  padding: 0;
+}
+
+/* The link's hit area covers its row; action controls sit above it via the
+   row-actions stacking context. This keeps one semantic link without nesting
+   buttons inside it. */
+.row-stretch-link::after {
+  position: absolute;
+  inset: 0;
+  content: "";
+}
+
 /* -- Fields ---------------------------------------------------------------- */
 
 .field {
@@ -987,6 +1065,12 @@ h2,
   background: var(--deny-wash);
   color: var(--deny);
   border-color: var(--deny-line);
+}
+
+.pill-secret {
+  background: var(--secret-wash);
+  color: var(--secret);
+  border-color: var(--secret-line);
 }
 
 .pill-muted {
@@ -1244,6 +1328,25 @@ tbody tr:first-child td {
 td.wrap {
   white-space: normal;
   word-break: break-word;
+}
+
+.nowrap {
+  white-space: nowrap;
+}
+
+.principal-group + .principal-group > tr:first-child > td {
+  border-top: 1px solid var(--border);
+}
+
+.principal-name-cell {
+  vertical-align: top;
+}
+
+.access-role-select {
+  width: auto;
+  min-width: 9.5rem;
+  height: 1.625rem;
+  font-size: var(--text-xs);
 }
 
 td.num,

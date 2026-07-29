@@ -44,12 +44,11 @@ export function PermissionSummary({ permissions }: { permissions: Permission[] }
       <Tip label={label}>
         <Popover.Trigger asChild>
           <button
-            className="btn btn-sm"
+            className="btn btn-head-action"
             aria-label={`${label}. ${permissions.length} permissions here.`}
-            style={{ padding: '0 var(--space-2)' }}
           >
-            {canRead ? <Eye size={13} /> : <ShieldCheck size={13} />}
-            <ChevronDown size={12} />
+            {canRead ? <Eye size={15} /> : <ShieldCheck size={15} />}
+            <ChevronDown size={13} />
           </button>
         </Popover.Trigger>
       </Tip>

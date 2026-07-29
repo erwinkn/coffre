@@ -115,6 +115,16 @@ test('a root admin can create a project, and it is audited', async () => {
   });
 
   assert.equal(response.statusCode, 201);
+  const owner = await pool.query(
+    `SELECT g.principal_type, g.principal_id, r.slug AS role
+       FROM grants g
+       JOIN roles r ON r.id = g.role_id
+       JOIN projects p ON p.id = g.project_id
+      WHERE p.slug = 'market'`,
+  );
+  assert.deepEqual(owner.rows, [
+    { principal_type: 'user', principal_id: ROOT, role: 'owner' },
+  ]);
   assert.deepEqual(await auditActions(), [{ action: 'project.create', decision: 'allow' }]);
 });
 
@@ -400,6 +410,62 @@ test('revoking a grant removes access, and is audited', async () => {
   assert.deepEqual(after.json().environments, []);
 
   assert.ok((await auditActions()).some((row) => row.action === 'grant.revoke'));
+});
+
+test('a grant role can be changed in place, and the change is audited', async () => {
+  await seedProject();
+  const created = await app.inject({
+    method: 'POST',
+    url: '/v1/admin/projects/market/grants',
+    ...req(rootToken),
+    payload: { principalType: 'user', principalId: 'reader@equisafe.io', role: 'viewer' },
+  });
+
+  const updated = await app.inject({
+    method: 'PATCH',
+    url: `/v1/admin/projects/market/grants/${created.json().id}`,
+    ...req(rootToken),
+    payload: { role: 'owner' },
+  });
+
+  assert.equal(updated.statusCode, 200);
+  const stored = await pool.query<{ role: string }>(
+    `SELECT r.slug AS role FROM grants g JOIN roles r ON r.id = g.role_id
+      WHERE g.id = $1`,
+    [created.json().id],
+  );
+  assert.equal(stored.rows[0].role, 'owner');
+  assert.ok((await auditActions()).some((row) => row.action === 'grant.update'));
+});
+
+test('removing a principal revokes all of their grants', async () => {
+  await seedProject();
+  await app.inject({
+    method: 'POST',
+    url: '/v1/admin/projects/market/grants',
+    ...req(rootToken),
+    payload: { principalType: 'user', principalId: 'reader@equisafe.io', role: 'viewer' },
+  });
+  await app.inject({
+    method: 'POST',
+    url: '/v1/admin/projects/market/grants',
+    ...req(rootToken),
+    payload: { principalType: 'user', principalId: 'reader@equisafe.io', role: 'auditor' },
+  });
+
+  const removed = await app.inject({
+    method: 'DELETE',
+    url: '/v1/admin/principals/user/reader%40equisafe.io',
+    ...req(rootToken),
+  });
+
+  assert.equal(removed.statusCode, 200);
+  assert.deepEqual(removed.json(), { revoked: 2 });
+  const remaining = await pool.query(
+    "SELECT 1 FROM grants WHERE principal_id = 'reader@equisafe.io'",
+  );
+  assert.equal(remaining.rowCount, 0);
+  assert.ok((await auditActions()).some((row) => row.action === 'principal.remove'));
 });
 
 test('a service principal can be granted access by common_name', async () => {

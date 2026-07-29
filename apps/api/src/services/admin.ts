@@ -5,7 +5,6 @@ import { appendAudit, type AuditEntry } from '../../../../packages/db/src/audit.
 import { AccessDenied, AuditedFailure, NotFound, type RequestContext } from './secrets.ts';
 import {
   has,
-  PERMISSIONS,
   permissionsForProject,
   PROJECT_ONLY_PERMISSIONS,
   type Permission,
@@ -196,6 +195,19 @@ export class AdminService {
       const created = await tx.query<{ id: string }>(
         'INSERT INTO projects (slug, name) VALUES ($1, $2) RETURNING id',
         [slug, name],
+      );
+
+      // Creating a project also establishes its first real project-level
+      // owner. Root admin is deployment-wide bootstrap authority; it must not
+      // masquerade as a project grant in the access table.
+      await tx.query(
+        `INSERT INTO grants (
+           principal_type, principal_id, role_id, project_id, created_by
+         )
+         SELECT $1, $2, r.id, $3, $2
+           FROM roles r
+          WHERE r.slug = 'owner'`,
+        [ctx.principal.type, ctx.principal.id, created.rows[0].id],
       );
 
       return {
@@ -429,7 +441,7 @@ export class AdminService {
         [project.rows[0].id],
       );
 
-      const granted: GrantRow[] = result.rows.map((row) => ({
+      return result.rows.map((row) => ({
         id: row.id,
         principalType: row.principal_type,
         principalId: row.principal_id,
@@ -440,24 +452,6 @@ export class AdminService {
         environmentSlug: row.environment_slug,
         expiresAt: row.expires_at,
       }));
-
-      // Root admins hold everything from configuration, not from this table.
-      // An access list that omitted the most privileged principals in the
-      // system would be quietly misleading, so they are shown -- flagged as
-      // coming from config, and not revocable here.
-      const roots: GrantRow[] = this.#deps.rootAdmins.map((id) => ({
-        id: `root:${id}`,
-        principalType: 'user' as const,
-        principalId: id,
-        role: 'root-admin',
-        roleName: 'Root admin (from configuration)',
-        permissions: [...PERMISSIONS],
-        scope: 'project' as const,
-        environmentSlug: null,
-        expiresAt: null,
-      }));
-
-      return [...roots, ...granted];
     } finally {
       client.release();
     }
@@ -675,6 +669,214 @@ export class AdminService {
     });
   }
 
+  async updateGrant(
+    ctx: RequestContext,
+    projectSlug: string,
+    grantId: string,
+    roleSlug: string,
+  ): Promise<{ updated: true }> {
+    return this.#audited(async (tx) => {
+      const base = this.#base(ctx, 'grant.update');
+      const { projectId } = await this.#requireProjectPermission(
+        tx,
+        ctx,
+        projectSlug,
+        'grant.manage',
+        base,
+        { grantId, role: roleSlug },
+      );
+
+      const grant = await tx.query<{
+        id: string;
+        principal_type: string;
+        principal_id: string;
+        role_id: string;
+        environment_id: string | null;
+      }>(
+        `SELECT g.id, g.principal_type, g.principal_id, g.role_id, g.environment_id
+           FROM grants g
+           LEFT JOIN environments e ON e.id = g.environment_id
+          WHERE g.id = $1 AND (g.project_id = $2 OR e.project_id = $2)`,
+        [grantId, projectId],
+      );
+      if (grant.rowCount === 0) {
+        throw new AuditedFailure(new NotFound('unknown grant'), {
+          ...base,
+          decision: 'deny',
+          projectId,
+          metadata: { grantId, role: roleSlug, reason: 'unknown_grant' },
+        });
+      }
+
+      const role = await tx.query<{ id: string; permissions: Permission[] }>(
+        `SELECT r.id,
+                COALESCE(
+                  (SELECT array_agg(rp.permission)
+                     FROM role_permissions rp WHERE rp.role_id = r.id),
+                  ARRAY[]::text[]
+                ) AS permissions
+           FROM roles r WHERE r.slug = $1`,
+        [roleSlug],
+      );
+      if (role.rowCount === 0) {
+        throw new AuditedFailure(new NotFound('unknown role'), {
+          ...base,
+          decision: 'deny',
+          projectId,
+          metadata: { grantId, role: roleSlug, reason: 'unknown_role' },
+        });
+      }
+
+      if (
+        grant.rows[0].environment_id !== null &&
+        role.rows[0].permissions.some((permission) =>
+          PROJECT_ONLY_PERMISSIONS.includes(permission),
+        )
+      ) {
+        throw new AuditedFailure(
+          Object.assign(
+            new Error(`role "${roleSlug}" cannot be scoped to one environment`),
+            { statusCode: 409 },
+          ),
+          {
+            ...base,
+            decision: 'deny',
+            projectId,
+            environmentId: grant.rows[0].environment_id,
+            metadata: { grantId, role: roleSlug, reason: 'role_is_project_scoped' },
+          },
+        );
+      }
+
+      const duplicate = await tx.query(
+        `SELECT 1 FROM grants
+          WHERE id <> $1
+            AND principal_type = $2 AND principal_id = $3
+            AND role_id = $4
+            AND project_id IS NOT DISTINCT FROM $5
+            AND environment_id IS NOT DISTINCT FROM $6`,
+        [
+          grantId,
+          grant.rows[0].principal_type,
+          grant.rows[0].principal_id,
+          role.rows[0].id,
+          grant.rows[0].environment_id === null ? projectId : null,
+          grant.rows[0].environment_id,
+        ],
+      );
+      if (duplicate.rowCount !== 0) {
+        throw new AuditedFailure(
+          Object.assign(new Error('that grant already exists'), { statusCode: 409 }),
+          {
+            ...base,
+            decision: 'deny',
+            projectId,
+            metadata: { grantId, role: roleSlug, reason: 'duplicate' },
+          },
+        );
+      }
+
+      await tx.query('UPDATE grants SET role_id = $1 WHERE id = $2', [
+        role.rows[0].id,
+        grantId,
+      ]);
+
+      return {
+        result: { updated: true as const },
+        entries: [
+          {
+            ...base,
+            decision: 'allow',
+            projectId,
+            environmentId: grant.rows[0].environment_id,
+            metadata: {
+              grantId,
+              principalType: grant.rows[0].principal_type,
+              principalId: grant.rows[0].principal_id,
+              role: roleSlug,
+            },
+          },
+        ],
+      };
+    });
+  }
+
+  /**
+   * Revoke every grant for one principal that the caller is allowed to manage.
+   * Root admins remove the principal everywhere; delegated access managers
+   * remove it from the projects visible in their access overview.
+   */
+  async removePrincipal(
+    ctx: RequestContext,
+    principalType: 'user' | 'service',
+    principalId: string,
+  ): Promise<{ revoked: number }> {
+    return this.#audited(async (tx) => {
+      const base = this.#base(ctx, 'principal.remove');
+      const isRoot = this.#isRootAdmin(ctx.principal);
+
+      if (principalType === 'user' && this.#deps.rootAdmins.includes(principalId)) {
+        throw new AuditedFailure(
+          Object.assign(
+            new Error('root admins are managed by COFFRE_ROOT_ADMINS'),
+            { statusCode: 409 },
+          ),
+          {
+            ...base,
+            decision: 'deny',
+            metadata: { principalType, principalId, reason: 'configured_root_admin' },
+          },
+        );
+      }
+
+      const deleted = await tx.query<{ id: string }>(
+        `DELETE FROM grants g
+          WHERE g.principal_type = $1 AND g.principal_id = $2
+            AND (
+              $3::boolean
+              OR COALESCE(
+                   g.project_id,
+                   (SELECT e.project_id FROM environments e WHERE e.id = g.environment_id)
+                 ) IN (
+                   SELECT COALESCE(mg.project_id, me.project_id)
+                     FROM grants mg
+                     JOIN role_permissions mrp ON mrp.role_id = mg.role_id
+                     LEFT JOIN environments me ON me.id = mg.environment_id
+                    WHERE mg.principal_type = $4 AND mg.principal_id = $5
+                      AND mrp.permission = 'grant.manage'
+                      AND (mg.expires_at IS NULL OR mg.expires_at > now())
+                 )
+            )
+        RETURNING g.id`,
+        [
+          principalType,
+          principalId,
+          isRoot,
+          ctx.principal.type,
+          ctx.principal.id,
+        ],
+      );
+      if (deleted.rowCount === 0) {
+        throw new AuditedFailure(new NotFound('unknown principal'), {
+          ...base,
+          decision: 'deny',
+          metadata: { principalType, principalId, reason: 'no_manageable_grants' },
+        });
+      }
+
+      return {
+        result: { revoked: deleted.rowCount ?? 0 },
+        entries: [
+          {
+            ...base,
+            decision: 'allow',
+            metadata: { principalType, principalId, revoked: deleted.rowCount ?? 0 },
+          },
+        ],
+      };
+    });
+  }
+
   /**
    * Every principal and what they can reach, across the projects the caller
    * administers.
@@ -687,7 +889,14 @@ export class AdminService {
       principalType: 'user' | 'service';
       principalId: string;
       isRootAdmin: boolean;
-      grants: { project: string; scope: string; role: string; expiresAt: string | null }[];
+      grants: {
+        id: string;
+        project: string;
+        scope: string;
+        environmentSlug: string | null;
+        role: string;
+        expiresAt: string | null;
+      }[];
     }[]
   > {
     const client = await this.#deps.pool.connect();
@@ -695,7 +904,7 @@ export class AdminService {
       const isRoot = this.#isRootAdmin(ctx.principal);
 
       const result = await client.query(
-        `SELECT g.principal_type, g.principal_id, g.expires_at,
+        `SELECT g.id, g.principal_type, g.principal_id, g.expires_at,
                 r.slug AS role,
                 p.slug AS project,
                 e.slug AS environment_slug
@@ -720,7 +929,14 @@ export class AdminService {
         principalType: 'user' | 'service';
         principalId: string;
         isRootAdmin: boolean;
-        grants: { project: string; scope: string; role: string; expiresAt: string | null }[];
+        grants: {
+          id: string;
+          project: string;
+          scope: string;
+          environmentSlug: string | null;
+          role: string;
+          expiresAt: string | null;
+        }[];
       }>();
 
       // Root admins first, so offboarding cannot miss them.
@@ -746,8 +962,10 @@ export class AdminService {
             grants: [],
           };
         entry.grants.push({
+          id: row.id,
           project: row.project,
           scope: row.environment_slug === null ? 'whole project' : row.environment_slug,
+          environmentSlug: row.environment_slug,
           role: row.role,
           expiresAt: row.expires_at,
         });

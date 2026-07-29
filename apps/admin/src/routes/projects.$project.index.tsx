@@ -13,7 +13,7 @@ import {
   updateProject,
 } from '../lib/server';
 import { useAction } from '../lib/use-action';
-import type { GrantRow, ProjectSummary, RoleRow } from '../lib/api';
+import type { GrantRow, ProjectSummary } from '../lib/api';
 import {
   ConfirmButton,
   ConfirmDialog,
@@ -22,9 +22,13 @@ import {
   Modal,
   Notice,
   Spinner,
-  Tip,
 } from '../components/ui';
 import { PermissionSummary } from '../components/permissions';
+import {
+  parseProjectAccess,
+  projectAccessLabel,
+  projectAccessOptions,
+} from '../lib/project-access';
 import {
   Archive,
   Layers,
@@ -32,7 +36,6 @@ import {
   Pencil,
   Plus,
   Settings,
-  ShieldCheck,
   Users,
   X,
 } from '../components/icons';
@@ -65,7 +68,7 @@ function ProjectPage() {
     );
   }
 
-  const { project, grants, roles, grantsError } = result;
+  const { project, grants, grantsError } = result;
 
   // Each section is gated on its own permission, not on one blanket "admin".
   // That is what lets an access manager administer grants without being able
@@ -146,7 +149,6 @@ function ProjectPage() {
           project={project.slug}
           environments={project.environments}
           grants={grants}
-          roles={roles}
           error={grantsError}
         />
       )}
@@ -183,11 +185,11 @@ function ProjectSettings({ project }: { project: ProjectSummary }) {
       <DropdownMenu.Root>
         <DropdownMenu.Trigger asChild>
           <button
-            className="btn btn-sm btn-icon"
+            className="btn btn-icon btn-head-action"
             aria-label={`Settings for ${project.slug}`}
             disabled={pending}
           >
-            <Settings size={14} />
+            <Settings size={16} />
           </button>
         </DropdownMenu.Trigger>
         <DropdownMenu.Portal>
@@ -346,7 +348,7 @@ function EnvironmentRow({
             <span className="row-key">{environment.slug}</span>
           ) : (
             <Link
-              className="row-key"
+              className="row-key row-stretch-link"
               to="/projects/$project/$environment"
               params={{ project, environment: environment.slug }}
             >
@@ -576,20 +578,18 @@ function Grants({
   project,
   environments,
   grants,
-  roles,
   error: loadError,
 }: {
   project: string;
   environments: Env[];
   grants: GrantRow[];
-  roles: RoleRow[];
   error: string | null;
 }) {
   return (
     <section className="section">
       <div className="section-head">
         <h2>Access</h2>
-        <NewGrant project={project} environments={environments} roles={roles} />
+        <NewGrant project={project} environments={environments} />
       </div>
 
       {loadError !== null ? (
@@ -607,9 +607,6 @@ function Grants({
                 <thead>
                   <tr>
                     <th>Principal</th>
-                    <th className="shrink">Type</th>
-                    <th className="shrink">Scope</th>
-                    <th className="shrink">Role</th>
                     <th>Permissions</th>
                     <th className="shrink">Expires</th>
                     <th className="shrink" />
@@ -632,26 +629,16 @@ function Grants({
 function NewGrant({
   project,
   environments,
-  roles,
 }: {
   project: string;
   environments: Env[];
-  roles: RoleRow[];
 }) {
   const [open, setOpen] = useState(false);
-  const [principalType, setPrincipalType] = useState<'user' | 'service'>('user');
   const [principalId, setPrincipalId] = useState('');
-  const [role, setRole] = useState('viewer');
-  const [scope, setScope] = useState('');
+  const [permission, setPermission] = useState('viewer:');
   const [expiresAt, setExpiresAt] = useState('');
   const { pending, error, setError, run } = useAction();
-
-  const selected = roles.find((entry) => entry.slug === role);
-
-  // Some roles carry project-only permissions and cannot be narrowed to one
-  // environment. Rather than let the API reject it, narrow the options.
-  const assignableRoles =
-    scope !== '' ? roles.filter((entry) => entry.assignableToEnvironment) : roles;
+  const permissionOptions = projectAccessOptions(environments);
 
   function close() {
     setOpen(false);
@@ -672,10 +659,9 @@ function NewGrant({
         wide
         description={
           <>
-            A project-scoped grant applies to every environment in it, and effective
-            permissions are the union of both scopes. Machine callers are matched on their
-            Access service-token common name, because service-token JWTs carry no email at
-            all.
+            Owners can manage the whole project and its access. Read and write access can
+            cover every environment or one specific environment. Service accounts are
+            managed from the Users page.
           </>
         }
       >
@@ -683,15 +669,16 @@ function NewGrant({
           className="dialog-form stack"
           onSubmit={(event) => {
             event.preventDefault();
+            const access = parseProjectAccess(permission);
             run(
               () =>
                 createGrant({
                   data: {
                     project,
-                    principalType,
+                    principalType: 'user',
                     principalId,
-                    role,
-                    environmentSlug: scope === '' ? null : scope,
+                    role: access.role,
+                    environmentSlug: access.environmentSlug,
                     expiresAt:
                       expiresAt === ''
                         ? null
@@ -699,81 +686,40 @@ function NewGrant({
                   },
                 }),
               () => {
-                toast.success(`${principalId} granted ${role}`);
+                const label =
+                  permissionOptions.find((option) => option.value === permission)?.label ??
+                  'access';
+                toast.success(`${principalId} granted ${label.toLowerCase()}`);
                 setPrincipalId('');
                 setExpiresAt('');
+                setPermission('viewer:');
                 close();
               },
             );
           }}
         >
-          <div className="form-grid">
-            <label className="field" style={{ maxWidth: '7.5rem' }}>
-              <span className="label">Kind</span>
-              <select
-                className="select"
-                value={principalType}
-                onChange={(event) =>
-                  setPrincipalType(event.target.value as 'user' | 'service')
-                }
-              >
-                <option value="user">user</option>
-                <option value="service">service</option>
-              </select>
-            </label>
-
-            <label className="field grow" style={{ minWidth: '14rem' }}>
-              <span className="label">
-                {principalType === 'user' ? 'Email' : 'Service token common name'}
-              </span>
-              <input
-                className="input"
-                autoFocus
-                placeholder={
-                  principalType === 'user' ? 'someone@equisafe.io' : 'ci-deploy.access'
-                }
-                value={principalId}
-                onChange={(event) => setPrincipalId(event.target.value)}
-              />
-            </label>
-          </div>
+          <label className="field">
+            <span className="label">Email</span>
+            <input
+              className="input"
+              autoFocus
+              placeholder="someone@equisafe.io"
+              value={principalId}
+              onChange={(event) => setPrincipalId(event.target.value)}
+            />
+          </label>
 
           <div className="form-grid">
             <label className="field grow">
-              <span className="label">Scope</span>
+              <span className="label">Permissions</span>
               <select
                 className="select"
-                value={scope}
-                onChange={(event) => {
-                  setScope(event.target.value);
-                  // Narrowing the scope may invalidate the chosen role.
-                  const stillValid = roles.find(
-                    (entry) => entry.slug === role && entry.assignableToEnvironment,
-                  );
-                  if (event.target.value !== '' && !stillValid) setRole('viewer');
-                }}
+                value={permission}
+                onChange={(event) => setPermission(event.target.value)}
               >
-                <option value="">whole project</option>
-                {environments
-                  .filter((environment) => environment.archivedAt === null)
-                  .map((environment) => (
-                    <option key={environment.slug} value={environment.slug}>
-                      {environment.slug}
-                    </option>
-                  ))}
-              </select>
-            </label>
-
-            <label className="field grow">
-              <span className="label">Role</span>
-              <select
-                className="select"
-                value={role}
-                onChange={(event) => setRole(event.target.value)}
-              >
-                {assignableRoles.map((entry) => (
-                  <option key={entry.slug} value={entry.slug}>
-                    {entry.name}
+                {permissionOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
                   </option>
                 ))}
               </select>
@@ -789,30 +735,6 @@ function NewGrant({
               />
             </label>
           </div>
-
-          {selected && (
-            <div>
-              <p className="meta" style={{ lineHeight: 'var(--leading-relaxed)' }}>
-                {selected.description}{' '}
-                {selected.permissions.length === 0
-                  ? 'No permissions.'
-                  : selected.permissions.join(', ')}
-              </p>
-              {!selected.permissions.includes('secret.read') && (
-                <p
-                  className="cluster"
-                  style={{
-                    marginTop: 'var(--space-2)',
-                    color: 'var(--allow)',
-                    fontSize: 'var(--text-xs)',
-                  }}
-                >
-                  <ShieldCheck size={14} />
-                  Cannot read secret values.
-                </p>
-              )}
-            </div>
-          )}
 
           <ErrorLine error={error} />
 
@@ -837,67 +759,40 @@ function NewGrant({
 
 function GrantRowView({ project, grant }: { project: string; grant: GrantRow }) {
   const { pending, error, run } = useAction();
-  const canReadSecrets = grant.permissions.includes('secret.read');
-  const isRootAdmin = grant.id.startsWith('root:');
 
   return (
     <tr>
-      <td className="wrap mono">{grant.principalId}</td>
+      <td className="mono nowrap">{grant.principalId}</td>
       <td>
-        <span className="pill">{grant.principalType}</span>
+        <span className={`pill ${grant.role === 'owner' ? 'pill-accent' : ''}`}>
+          {projectAccessLabel(grant)}
+        </span>
       </td>
-      <td className="mono">
-        {grant.scope === 'project' ? 'whole project' : grant.environmentSlug}
-      </td>
-      <td>
-        <Tip label={grant.permissions.join(', ') || 'no permissions'}>
-          <span className={`pill ${canReadSecrets ? 'pill-accent' : 'pill-allow'}`}>
-            {grant.role}
-          </span>
-        </Tip>
-      </td>
-      <td className="wrap meta">{grant.permissions.join(', ')}</td>
       <td className="num">{grant.expiresAt === null ? '--' : grant.expiresAt.slice(0, 10)}</td>
       <td className="shrink">
-        {isRootAdmin ? (
-          // Root admins come from COFFRE_ROOT_ADMINS, not from this table.
-          // Shown so the access list is honest; not revocable from here. The
-          // cell says what you cannot do rather than naming its cause, which
-          // as a bare "config" pill meant nothing to anyone who had not read
-          // the deployment configuration.
-          <Tip label="This access comes from the COFFRE_ROOT_ADMINS environment variable rather than from a grant. Remove them there to revoke it.">
-            <span className="meta" style={{ whiteSpace: 'nowrap', cursor: 'help' }}>
-              Not revocable here
-            </span>
-          </Tip>
-        ) : (
-          <ConfirmButton
-            trigger={
-              <button className="btn btn-sm btn-danger" disabled={pending}>
-                <X size={13} />
-                Revoke
-              </button>
-            }
-            title={`Revoke ${grant.role} from ${grant.principalId}?`}
-            body={
-              <>
-                They lose {grant.permissions.join(', ') || 'these permissions'} on{' '}
-                <span className="mono">
-                  {grant.scope === 'project' ? project : `${project}/${grant.environmentSlug}`}
-                </span>{' '}
-                immediately. Any other grant they hold still applies, since effective
-                permissions are the union of all of them.
-              </>
-            }
-            confirmLabel="Revoke grant"
-            onConfirm={() =>
-              run(
-                () => revokeGrant({ data: { project, grantId: grant.id } }),
-                () => toast.success(`Revoked ${grant.role} from ${grant.principalId}`),
-              )
-            }
-          />
-        )}
+        <ConfirmButton
+          trigger={
+            <button className="btn btn-sm btn-danger" disabled={pending}>
+              <X size={13} />
+              Revoke
+            </button>
+          }
+          title={`Revoke ${projectAccessLabel(grant)} from ${grant.principalId}?`}
+          body={
+            <>
+              They lose <strong>{projectAccessLabel(grant)}</strong> on{' '}
+              <span className="mono">{project}</span> immediately. Any other access they
+              hold still applies.
+            </>
+          }
+          confirmLabel="Revoke access"
+          onConfirm={() =>
+            run(
+              () => revokeGrant({ data: { project, grantId: grant.id } }),
+              () => toast.success(`Revoked access from ${grant.principalId}`),
+            )
+          }
+        />
         {error !== null && (
           <span className="meta" style={{ color: 'var(--deny)' }}>
             {' '}

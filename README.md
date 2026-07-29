@@ -347,6 +347,12 @@ which is the single place every check goes through.
 Principals are `user` (matched on the Access `email` claim) or `service`
 (matched on `common_name`, because service-token JWTs carry no email at all).
 
+`root-admin` is not a project role. It is deployment-wide bootstrap authority
+from `COFFRE_ROOT_ADMINS`, and is shown only in the cross-project Users view.
+Creating a project writes a real `owner` grant for the creator. In the project
+UI, the underlying role and scope are presented as one permissions value:
+`Owner`, `Read: all`, `Write: all`, or read/write for one named environment.
+
 ### Things that are stubbed, not finished
 
 - `SyncTarget` (push to Scaleway Secret Manager) is designed but not

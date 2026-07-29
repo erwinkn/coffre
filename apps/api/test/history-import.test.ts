@@ -456,17 +456,18 @@ test('the audit chain verifies across history, rollback and import', async () =>
 
 // --- principal view and root admin visibility -------------------------------
 
-test('the access table shows root admins, flagged as coming from config', async () => {
+test('project access shows the creator as owner, not as a projected root admin', async () => {
   const response = await app.inject({
     method: 'GET',
     url: '/v1/admin/projects/market/grants',
     ...req(ROOT),
   });
 
-  const root = response.json().grants.find((g: { role: string }) => g.role === 'root-admin');
-  assert.ok(root, 'root admins must appear in the access list');
-  assert.equal(root.principalId, ROOT);
-  assert.ok(root.id.startsWith('root:'), 'flagged as not revocable here');
+  const grants = response.json().grants;
+  assert.equal(grants.some((grant: { role: string }) => grant.role === 'root-admin'), false);
+  const owner = grants.find((grant: { role: string }) => grant.role === 'owner');
+  assert.equal(owner.principalId, ROOT);
+  assert.equal(owner.scope, 'project');
 });
 
 test('the principal view answers "what does this person still hold"', async () => {

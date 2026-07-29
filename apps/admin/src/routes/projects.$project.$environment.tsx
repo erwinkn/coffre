@@ -6,6 +6,7 @@ import {
   importEnv,
   listKeys,
   listVersions,
+  renameSecret,
   revealSecret,
   rollbackSecret,
   saveSecret,
@@ -62,6 +63,7 @@ export const Route = createFileRoute('/projects/$project/$environment')({
 
 /** A row you are filling in, not yet written to anything. */
 type Draft = { id: number; key: string; value: string };
+type SecretChange = { key: string; value: string | null; archived: boolean };
 
 function EnvironmentPage() {
   const result = Route.useLoaderData();
@@ -69,6 +71,7 @@ function EnvironmentPage() {
   const router = useRouter();
 
   const [drafts, setDrafts] = useState<Draft[]>([]);
+  const [changes, setChanges] = useState<Record<string, SecretChange>>({});
   const [saving, setSaving] = useState(false);
   const [draftError, setDraftError] = useState<string | null>(null);
   const nextDraftId = useRef(0);
@@ -78,6 +81,7 @@ function EnvironmentPage() {
   // next environment and be written there.
   useEffect(() => {
     setDrafts([]);
+    setChanges({});
     setDraftError(null);
   }, [project, environment]);
 
@@ -93,27 +97,69 @@ function EnvironmentPage() {
    * There is no batch endpoint and inventing one client-side would only hide
    * that this is several audited writes.
    */
-  async function saveDrafts() {
+  async function saveChanges() {
     setSaving(true);
     setDraftError(null);
-    const written: number[] = [];
+    let applied = 0;
+    let failed = false;
     try {
+      for (const entry of active) {
+        const change = changes[entry.key];
+        if (change === undefined) continue;
+
+        if (change.archived) {
+          const archived = await setSecretArchived({
+            data: { project, environment, key: entry.key, archived: true },
+          });
+          if (!archived.ok) throw new Error(`${entry.key}: ${archived.error}`);
+          applied += 1;
+          continue;
+        }
+
+        let currentKey = entry.key;
+        if (change.key !== entry.key) {
+          const renamed = await renameSecret({
+            data: { project, environment, key: entry.key, nextKey: change.key.trim() },
+          });
+          if (!renamed.ok) throw new Error(`${entry.key}: ${renamed.error}`);
+          currentKey = change.key.trim();
+          applied += 1;
+        }
+
+        if (change.value !== null) {
+          const saved = await saveSecret({
+            data: { project, environment, key: currentKey, value: change.value },
+          });
+          if (!saved.ok) throw new Error(`${currentKey}: ${saved.error}`);
+          applied += 1;
+        }
+      }
+
       for (const draft of drafts) {
         const saved = await saveSecret({
           data: { project, environment, key: draft.key.trim(), value: draft.value },
         });
-        if (!saved.ok) {
-          setDraftError(`${draft.key.trim()}: ${saved.error}`);
-          return;
-        }
-        written.push(draft.id);
+        if (!saved.ok) throw new Error(`${draft.key.trim()}: ${saved.error}`);
+        applied += 1;
       }
-      toast.success(`Saved ${written.length} secret${written.length === 1 ? '' : 's'}`);
-    } catch {
-      setDraftError('The request could not be sent.');
+
+      toast.success(`Saved ${applied} change${applied === 1 ? '' : 's'}`);
+    } catch (error) {
+      failed = true;
+      setDraftError(
+        error instanceof Error ? error.message : 'The request could not be sent.',
+      );
     } finally {
-      setDrafts((rows) => rows.filter((row) => !written.includes(row.id)));
-      if (written.length > 0) await router.invalidate();
+      if (!failed || applied > 0) {
+        await router.invalidate();
+        setDrafts([]);
+        setChanges({});
+        if (failed) {
+          setDraftError(
+            `Some earlier changes were saved before the failure. The list has been refreshed.`,
+          );
+        }
+      }
       setSaving(false);
     }
   }
@@ -144,8 +190,22 @@ function EnvironmentPage() {
   const rowProps = { project, environment, canWrite, canArchive, canReveal };
 
   const existing = new Set(keys.map((entry) => entry.key));
+  const changedEntries = active.filter((entry) => changes[entry.key] !== undefined);
+  const targetKeys = [
+    ...active
+      .filter((entry) => !changes[entry.key]?.archived)
+      .map((entry) => changes[entry.key]?.key.trim() ?? entry.key),
+    ...drafts.map((row) => row.key.trim()),
+  ];
+  const hasDuplicate = new Set(targetKeys).size !== targetKeys.length;
   const ready =
-    drafts.length > 0 && drafts.every((row) => row.key.trim() !== '' && row.value !== '');
+    (drafts.length > 0 || changedEntries.length > 0) &&
+    drafts.every((row) => row.key.trim() !== '' && row.value !== '') &&
+    changedEntries.every((entry) => {
+      const change = changes[entry.key];
+      return change.archived || (change.key.trim() !== '' && change.value !== '');
+    }) &&
+    !hasDuplicate;
 
   return (
     <>
@@ -173,7 +233,7 @@ function EnvironmentPage() {
         </div>
       </div>
 
-      <div className="card">
+      <div className="secret-editor">
         {active.length === 0 && drafts.length === 0 ? (
           <EmptyState icon={<Key size={26} />} title="No secrets here yet">
             {canWrite
@@ -181,7 +241,37 @@ function EnvironmentPage() {
               : 'Nothing has been written to this environment. You would need secret.write to add the first one.'}
           </EmptyState>
         ) : (
-          active.map((entry) => <SecretRow key={entry.key} entry={entry} {...rowProps} />)
+          active.map((entry) => (
+            <EditableSecretRow
+              key={entry.key}
+              entry={entry}
+              change={
+                changes[entry.key] ?? {
+                  key: entry.key,
+                  value: null,
+                  archived: false,
+                }
+              }
+              onChange={(patch) =>
+                setChanges((current) => {
+                  const next = {
+                    ...(current[entry.key] ?? {
+                      key: entry.key,
+                      value: null,
+                      archived: false,
+                    }),
+                    ...patch,
+                  };
+                  const dirty =
+                    next.key !== entry.key || next.value !== null || next.archived;
+                  if (dirty) return { ...current, [entry.key]: next };
+                  const { [entry.key]: _, ...rest } = current;
+                  return rest;
+                })
+              }
+              {...rowProps}
+            />
+          ))
         )}
 
         {drafts.map((draft) => (
@@ -199,8 +289,8 @@ function EnvironmentPage() {
           />
         ))}
 
-        {drafts.length > 0 && (
-          <div className="row">
+        {(drafts.length > 0 || changedEntries.length > 0) && (
+          <div className="row secret-savebar">
             <button className="btn btn-sm btn-quiet" onClick={addDraft} disabled={saving}>
               <Plus size={13} />
               Add another
@@ -210,6 +300,7 @@ function EnvironmentPage() {
                 className="btn btn-sm"
                 onClick={() => {
                   setDrafts([]);
+                  setChanges({});
                   setDraftError(null);
                 }}
                 disabled={saving}
@@ -218,11 +309,11 @@ function EnvironmentPage() {
               </button>
               <button
                 className="btn btn-sm btn-primary"
-                onClick={saveDrafts}
+                onClick={saveChanges}
                 disabled={saving || !ready}
               >
                 {saving && <Spinner size={13} />}
-                Save {drafts.length} secret{drafts.length === 1 ? '' : 's'}
+                Save changes
               </button>
             </div>
           </div>
@@ -231,6 +322,11 @@ function EnvironmentPage() {
         {draftError !== null && (
           <div className="row">
             <ErrorLine error={draftError} />
+          </div>
+        )}
+        {hasDuplicate && (
+          <div className="row">
+            <ErrorLine error="Secret names must be unique in this environment." />
           </div>
         )}
       </div>
@@ -254,6 +350,255 @@ function EnvironmentPage() {
         </section>
       )}
     </>
+  );
+}
+
+function EditableSecretRow({
+  project,
+  environment,
+  entry,
+  change,
+  canWrite,
+  canArchive,
+  canReveal,
+  onChange,
+}: {
+  project: string;
+  environment: string;
+  entry: SecretKey;
+  change: SecretChange;
+  canWrite: boolean;
+  canArchive: boolean;
+  canReveal: boolean;
+  onChange: (patch: Partial<SecretChange>) => void;
+}) {
+  const [revealed, setRevealed] = useState<string | null>(null);
+  const [visible, setVisible] = useState(false);
+  const [versions, setVersions] = useState<SecretVersion[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const valueFocused = useRef(false);
+  const { pending, error, setError, run } = useAction();
+
+  const dirty =
+    change.key !== entry.key || change.value !== null || change.archived;
+  const rowTone = change.archived
+    ? ' row-change-delete'
+    : dirty
+      ? ' row-change-update'
+      : '';
+  const displayedValue = change.value ?? revealed ?? '';
+
+  async function revealForEditing() {
+    valueFocused.current = true;
+    if (change.value !== null) {
+      setVisible(true);
+      return;
+    }
+    if (!canReveal || revealed !== null) {
+      setVisible(revealed !== null);
+      return;
+    }
+
+    setBusy(true);
+    try {
+      const result = await revealSecret({ data: { project, environment, key: entry.key } });
+      if (result.ok) {
+        setRevealed(result.value);
+        setError(null);
+        if (valueFocused.current) setVisible(true);
+      } else {
+        setError(result.error);
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function toggleHistory() {
+    if (versions !== null) {
+      setVersions(null);
+      return;
+    }
+    setBusy(true);
+    try {
+      const result = await listVersions({ data: { project, environment, key: entry.key } });
+      if (result.ok) {
+        setVersions(result.versions);
+        setError(null);
+      } else {
+        setError(result.error);
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className={`row-group${rowTone}`}>
+      <div className="row secret-edit-row">
+        <input
+          className="input secret-key-input"
+          aria-label={`Name for ${entry.key}`}
+          spellCheck={false}
+          value={change.key}
+          disabled={!canWrite || change.archived}
+          onChange={(event) => onChange({ key: event.target.value })}
+        />
+
+        <div className="secret-input-wrap grow">
+          <input
+            className="input"
+            aria-label={`Value for ${entry.key}`}
+            type={visible ? 'text' : 'password'}
+            placeholder={canReveal ? 'Click to reveal current value' : 'Enter a new value'}
+            spellCheck={false}
+            autoComplete="off"
+            value={displayedValue}
+            disabled={!canWrite || change.archived || busy}
+            onFocus={() => void revealForEditing()}
+            onBlur={() => {
+              valueFocused.current = false;
+              setVisible(false);
+              if (change.value === null) setRevealed(null);
+            }}
+            onChange={(event) => onChange({ value: event.target.value })}
+          />
+          {busy && <Spinner size={13} />}
+        </div>
+
+        <span className="meta numeric secret-version">v{entry.version ?? 0}</span>
+
+        {dirty && (
+          <span
+            className={`pill ${
+              change.archived ? 'pill-deny' : 'pill-secret'
+            }`}
+          >
+            {change.archived
+              ? 'will archive'
+              : change.key !== entry.key && change.value !== null
+                ? 'name + value'
+                : change.key !== entry.key
+                  ? 'renamed'
+                  : 'new value'}
+          </span>
+        )}
+
+        <div className="row-actions">
+          {canReveal && (
+            <button
+              className="btn btn-sm btn-icon btn-quiet"
+              aria-label={versions === null ? `Show history for ${entry.key}` : 'Hide history'}
+              onClick={() => void toggleHistory()}
+              disabled={busy || pending}
+            >
+              <History size={14} />
+            </button>
+          )}
+          {canArchive && (
+            <button
+              className={`btn btn-sm btn-icon ${
+                change.archived ? 'btn-quiet' : 'btn-danger'
+              }`}
+              aria-label={
+                change.archived
+                  ? `Keep ${entry.key}`
+                  : `Mark ${entry.key} for archiving`
+              }
+              onClick={() => onChange({ archived: !change.archived })}
+              disabled={pending}
+            >
+              {change.archived ? <RotateBack size={14} /> : <Archive size={14} />}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {versions !== null && (
+        <div className="row-detail">
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th className="shrink">Version</th>
+                  <th>Written</th>
+                  <th>By</th>
+                  <th>KEK</th>
+                  <th className="shrink" />
+                </tr>
+              </thead>
+              <tbody>
+                {versions.map((version) => (
+                  <tr key={version.version}>
+                    <td className="num">
+                      v{version.version}
+                      {version.current && (
+                        <span className="pill pill-accent" style={{ marginLeft: 8 }}>
+                          current
+                        </span>
+                      )}
+                    </td>
+                    <td className="num">
+                      <Timestamp iso={version.createdAt} />
+                    </td>
+                    <td className="nowrap">{version.createdBy}</td>
+                    <td className="mono">{version.kek}</td>
+                    <td className="shrink">
+                      {canWrite && !version.current && (
+                        <ConfirmButton
+                          trigger={
+                            <button className="btn btn-sm" disabled={pending}>
+                              <RotateBack size={13} />
+                              Roll back
+                            </button>
+                          }
+                          title={`Roll ${entry.key} back to v${version.version}?`}
+                          body={
+                            <>
+                              The current pointer moves to v{version.version}. Nothing is
+                              copied or deleted, and the next write continues the numbering
+                              forward.
+                            </>
+                          }
+                          confirmLabel={`Roll back to v${version.version}`}
+                          destructive={false}
+                          onConfirm={() =>
+                            run(
+                              () =>
+                                rollbackSecret({
+                                  data: {
+                                    project,
+                                    environment,
+                                    key: entry.key,
+                                    version: version.version,
+                                  },
+                                }),
+                              () => {
+                                toast.success(
+                                  `${entry.key} rolled back to v${version.version}`,
+                                );
+                                setVersions(null);
+                                setRevealed(null);
+                              },
+                            )
+                          }
+                        />
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {error !== null && (
+        <div className="row-detail">
+          <ErrorLine error={error} />
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -620,6 +965,7 @@ function DraftRow({
       <input
         className="input grow"
         aria-label="Value"
+        type="password"
         placeholder="postgres://..."
         spellCheck={false}
         value={draft.value}

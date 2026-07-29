@@ -401,6 +401,101 @@ export class SecretsService {
   }
 
   /**
+   * Rename a secret without touching its versions or ciphertext.
+   *
+   * The envelope is bound to immutable ids, not the display key, so this is a
+   * metadata update. Keeping it here (rather than copying the value to a new
+   * secret) preserves the version history and its audit references.
+   */
+  async renameSecret(
+    ctx: RequestContext,
+    projectSlug: string,
+    environmentSlug: string,
+    key: string,
+    nextKey: string,
+  ): Promise<{ key: string }> {
+    return this.#audited(async (tx) => {
+      const base = this.#baseEntry(ctx, 'secret.rename');
+      const env = await this.#resolveEnvironment(tx, projectSlug, environmentSlug);
+
+      if (env === null) {
+        throw new AuditedFailure(new NotFound('unknown project or environment'), {
+          ...base,
+          decision: 'deny',
+          metadata: { projectSlug, environmentSlug, key, nextKey, reason: 'unknown_environment' },
+        });
+      }
+
+      const permissions = await this.#permissionsFor(tx, ctx.principal, env.environmentId);
+      if (!has(permissions, 'secret.write')) {
+        throw new AuditedFailure(new AccessDenied(), {
+          ...base,
+          decision: 'deny',
+          projectId: env.projectId,
+          environmentId: env.environmentId,
+          metadata: { key, nextKey, reason: 'missing_secret_write' },
+        });
+      }
+
+      const secret = await tx.query<{ id: string }>(
+        `SELECT id FROM secrets
+          WHERE project_id = $1 AND environment_id = $2 AND key = $3
+            AND archived_at IS NULL`,
+        [env.projectId, env.environmentId, key],
+      );
+      if (secret.rowCount === 0) {
+        throw new AuditedFailure(new NotFound('unknown secret'), {
+          ...base,
+          decision: 'deny',
+          projectId: env.projectId,
+          environmentId: env.environmentId,
+          metadata: { key, nextKey, reason: 'unknown_secret' },
+        });
+      }
+
+      const collision = await tx.query(
+        `SELECT 1 FROM secrets
+          WHERE project_id = $1 AND environment_id = $2 AND key = $3 AND id <> $4`,
+        [env.projectId, env.environmentId, nextKey, secret.rows[0].id],
+      );
+      if (collision.rowCount !== 0) {
+        throw new AuditedFailure(
+          Object.assign(new Error(`a secret named "${nextKey}" already exists`), {
+            statusCode: 409,
+          }),
+          {
+            ...base,
+            decision: 'deny',
+            projectId: env.projectId,
+            environmentId: env.environmentId,
+            secretId: secret.rows[0].id,
+            metadata: { key, nextKey, reason: 'duplicate_key' },
+          },
+        );
+      }
+
+      await tx.query('UPDATE secrets SET key = $1, updated_at = now() WHERE id = $2', [
+        nextKey,
+        secret.rows[0].id,
+      ]);
+
+      return {
+        result: { key: nextKey },
+        entries: [
+          {
+            ...base,
+            decision: 'allow',
+            projectId: env.projectId,
+            environmentId: env.environmentId,
+            secretId: secret.rows[0].id,
+            metadata: { key, nextKey },
+          },
+        ],
+      };
+    });
+  }
+
+  /**
    * Environments the caller can reach, with the permissions they hold on each.
    *
    * Returns the union of permissions across every applicable grant, rather than

@@ -145,6 +145,21 @@ export function buildApp(options: BuildOptions): FastifyInstance {
     );
   });
 
+  app.patch('/v1/projects/:project/environments/:environment/secrets/:key', async (request) => {
+    const params = z
+      .object({ project: slug, environment: slug, key: secretKey })
+      .parse(request.params);
+    const body = z.object({ key: secretKey }).parse(request.body);
+
+    return secrets.renameSecret(
+      contextOf(request),
+      params.project,
+      params.environment,
+      params.key,
+      body.key,
+    );
+  });
+
   /**
    * Retire or restore a secret. Not a delete -- audit_log references secrets
    * with ON DELETE RESTRICT, so nothing ever read or written can be removed.
@@ -387,6 +402,30 @@ export function buildApp(options: BuildOptions): FastifyInstance {
       .parse(request.params);
 
     return admin.revokeGrant(contextOf(request), params.project, params.grantId);
+  });
+
+  app.patch('/v1/admin/projects/:project/grants/:grantId', async (request) => {
+    const params = z
+      .object({ project: slug, grantId: z.string().uuid() })
+      .parse(request.params);
+    const body = z.object({ role: slug }).parse(request.body);
+
+    return admin.updateGrant(contextOf(request), params.project, params.grantId, body.role);
+  });
+
+  app.delete('/v1/admin/principals/:principalType/:principalId', async (request) => {
+    const params = z
+      .object({
+        principalType: z.enum(['user', 'service']),
+        principalId: z.string().min(1).max(320),
+      })
+      .parse(request.params);
+
+    return admin.removePrincipal(
+      contextOf(request),
+      params.principalType,
+      params.principalId,
+    );
   });
 
   // --- audit ----------------------------------------------------------------

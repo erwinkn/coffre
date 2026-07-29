@@ -178,7 +178,14 @@ export type Principal = {
   principalType: 'user' | 'service';
   principalId: string;
   isRootAdmin: boolean;
-  grants: { project: string; scope: string; role: string; expiresAt: string | null }[];
+  grants: {
+    id: string;
+    project: string;
+    scope: string;
+    environmentSlug: string | null;
+    role: string;
+    expiresAt: string | null;
+  }[];
 };
 
 export type SecretVersion = {

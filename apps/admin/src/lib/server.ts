@@ -66,7 +66,7 @@ export const listProjects = createServerFn({ method: 'GET' }).handler(async () =
     : { ok: false as const, error: result.error };
 });
 
-/** One project, plus its grants and the role catalogue if you may see them. */
+/** One project, plus its real project grants if the caller may manage access. */
 export const getProject = createServerFn({ method: 'GET' })
   .inputValidator((data: { project: string }) => data)
   .handler(async ({ data }) => {
@@ -79,18 +79,16 @@ export const getProject = createServerFn({ method: 'GET' })
     // Only grant.manage holders may see the access list, so everyone else gets
     // the page without it rather than an error page.
     const canManageGrants = project.permissions.includes('grant.manage');
-    const [grants, roles] = await Promise.all([
-      canManageGrants
-        ? coffreFetch<{ grants: GrantRow[] }>(`/v1/admin/projects/${data.project}/grants`)
-        : null,
-      canManageGrants ? coffreFetch<{ roles: RoleRow[] }>('/v1/admin/roles') : null,
-    ]);
+    const grants = canManageGrants
+      ? await coffreFetch<{ grants: GrantRow[] }>(
+          `/v1/admin/projects/${data.project}/grants`,
+        )
+      : null;
 
     return {
       ok: true as const,
       project,
       grants: grants?.ok ? grants.data.grants : [],
-      roles: roles?.ok ? roles.data.roles : [],
       grantsError: grants && !grants.ok ? grants.error : null,
     };
   });
@@ -135,10 +133,24 @@ export const listAudit = createServerFn({ method: 'GET' })
   });
 
 export const listPrincipals = createServerFn({ method: 'GET' }).handler(async () => {
-  const result = await coffreFetch<{ principals: Principal[] }>('/v1/admin/principals');
-  return result.ok
-    ? { ok: true as const, principals: result.data.principals }
-    : { ok: false as const, error: result.error };
+  const [principals, projects, roles] = await Promise.all([
+    coffreFetch<{ principals: Principal[] }>('/v1/admin/principals'),
+    coffreFetch<{ projects: ProjectSummary[] }>('/v1/admin/projects'),
+    coffreFetch<{ roles: RoleRow[] }>('/v1/admin/roles'),
+  ]);
+
+  if (!principals.ok) return { ok: false as const, error: principals.error };
+  if (!projects.ok) return { ok: false as const, error: projects.error };
+  if (!roles.ok) return { ok: false as const, error: roles.error };
+
+  return {
+    ok: true as const,
+    principals: principals.data.principals,
+    projects: projects.data.projects.filter((project) =>
+      project.permissions.includes('grant.manage'),
+    ),
+    roles: roles.data.roles,
+  };
 });
 
 /* -------------------------------------------------------------------------- */
@@ -183,6 +195,22 @@ export const saveSecret = createServerFn({ method: 'POST' })
     return result.ok
       ? { ok: true as const, version: result.data.version }
       : { ok: false as const, error: result.error };
+  });
+
+export const renameSecret = createServerFn({ method: 'POST' })
+  .inputValidator(
+    (data: { project: string; environment: string; key: string; nextKey: string }) => data,
+  )
+  .handler(async ({ data }) => {
+    if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(data.nextKey)) {
+      return { ok: false as const, error: 'Key must look like AN_ENV_VAR.' };
+    }
+
+    const result = await coffreFetch(
+      `/v1/projects/${data.project}/environments/${data.environment}/secrets/${data.key}`,
+      { method: 'PATCH', body: JSON.stringify({ key: data.nextKey }) },
+    );
+    return result.ok ? { ok: true as const } : { ok: false as const, error: result.error };
   });
 
 /**
@@ -407,6 +435,28 @@ export const revokeGrant = createServerFn({ method: 'POST' })
   .handler(async ({ data }) => {
     const result = await coffreFetch(
       `/v1/admin/projects/${data.project}/grants/${data.grantId}`,
+      { method: 'DELETE' },
+    );
+    return result.ok ? { ok: true as const } : { ok: false as const, error: result.error };
+  });
+
+export const updateGrant = createServerFn({ method: 'POST' })
+  .inputValidator((data: { project: string; grantId: string; role: string }) => data)
+  .handler(async ({ data }) => {
+    const result = await coffreFetch(
+      `/v1/admin/projects/${data.project}/grants/${data.grantId}`,
+      { method: 'PATCH', body: JSON.stringify({ role: data.role }) },
+    );
+    return result.ok ? { ok: true as const } : { ok: false as const, error: result.error };
+  });
+
+export const removePrincipal = createServerFn({ method: 'POST' })
+  .inputValidator(
+    (data: { principalType: 'user' | 'service'; principalId: string }) => data,
+  )
+  .handler(async ({ data }) => {
+    const result = await coffreFetch(
+      `/v1/admin/principals/${data.principalType}/${encodeURIComponent(data.principalId)}`,
       { method: 'DELETE' },
     );
     return result.ok ? { ok: true as const } : { ok: false as const, error: result.error };

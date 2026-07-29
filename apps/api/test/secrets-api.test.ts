@@ -153,6 +153,45 @@ test('writing twice creates a new version rather than mutating one', async () =>
   assert.equal(read.json().value, 'v2');
 });
 
+test('renaming a secret preserves its value, versions, and immutable identity', async () => {
+  const originalUrl = '/v1/projects/market/environments/dev/secrets/OLD_KEY';
+  await app.inject({
+    method: 'PUT',
+    url: originalUrl,
+    ...req(adminToken),
+    payload: { value: 'still-secret' },
+  });
+  const before = await pool.query<{ id: string }>(
+    "SELECT id FROM secrets WHERE key = 'OLD_KEY'",
+  );
+
+  const renamed = await app.inject({
+    method: 'PATCH',
+    url: originalUrl,
+    ...req(adminToken),
+    payload: { key: 'NEW_KEY' },
+  });
+
+  assert.equal(renamed.statusCode, 200);
+  assert.deepEqual(renamed.json(), { key: 'NEW_KEY' });
+
+  const read = await app.inject({
+    method: 'GET',
+    url: '/v1/projects/market/environments/dev/secrets/NEW_KEY',
+    ...req(adminToken),
+  });
+  assert.equal(read.json().value, 'still-secret');
+
+  const after = await pool.query<{ id: string; versions: number }>(
+    `SELECT s.id, count(v.id)::int AS versions
+       FROM secrets s JOIN secret_versions v ON v.secret_id = s.id
+      WHERE s.key = 'NEW_KEY' GROUP BY s.id`,
+  );
+  assert.equal(after.rows[0].id, before.rows[0].id);
+  assert.equal(after.rows[0].versions, 1);
+  assert.ok((await auditRows()).some((row) => row.action === 'secret.rename'));
+});
+
 test('a reader cannot write', async () => {
   const response = await app.inject({
     method: 'PUT',
