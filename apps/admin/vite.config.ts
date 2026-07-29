@@ -1,6 +1,7 @@
 import { defineConfig } from 'vite';
 import viteReact from '@vitejs/plugin-react';
 import { tanstackStart } from '@tanstack/react-start/plugin/vite';
+import { nitro } from 'nitro/vite';
 
 export default defineConfig({
   server: {
@@ -14,6 +15,8 @@ export default defineConfig({
     // Generates src/routeTree.gen.ts from src/routes, and wires the SSR
     // server. Must come before the React plugin.
     tanstackStart(),
+    // Turns Start's fetch handler into a standalone production Node server.
+    nitro(),
     viteReact(),
   ],
 });

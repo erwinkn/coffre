@@ -164,6 +164,8 @@ pnpm test             # unit + integration tests (needs Postgres up)
 pnpm test:schema      # append-only guarantees, run as coffre_app
 pnpm check:pins       # every dependency exactly pinned
 pnpm check:contrast   # every admin-UI colour pair meets WCAG AA
+pnpm --dir apps/admin build
+pnpm --dir apps/admin smoke:production
 ```
 
 CLI:
@@ -285,6 +287,11 @@ code expecting the old shape:
 - **The Vite 8 toolchain runs no install scripts.** It uses Rolldown and
   lightningcss, both shipped as prebuilt platform packages, so `ignoreScripts:
   true` costs nothing here. That was worth checking before committing to it.
+- **The production build is a standalone Nitro Node server.** Start it with
+  `pnpm --dir apps/admin start`; it listens on `PORT` (and `HOST`, when set).
+  The launcher also turns a failed asynchronous bind into a non-zero exit.
+  `smoke:production` boots the built output on an isolated test port, requests
+  `/login`, proves a second bind fails, and stops it again.
 - `src/routeTree.gen.ts` is generated and gitignored; `vite build` writes it.
 
 ### There is no delete, and that is deliberate
