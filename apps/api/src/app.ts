@@ -107,11 +107,23 @@ export function buildApp(options: BuildOptions): FastifyInstance {
 
   app.get('/v1/me', async (request) => {
     const ctx = contextOf(request);
-    const [environments, instanceRole] = await Promise.all([
+    const [environments, instanceRole, auditableProjects] = await Promise.all([
       secrets.listAccessible(ctx),
       admin.instanceRole(ctx.principal),
+      projectsWithAuditRead(options.pool, ctx, options.rootAdmins),
     ]);
-    return { principal: request.principal, instanceRole, environments };
+
+    return {
+      principal: request.principal,
+      instanceRole,
+      isRootAdmin: isRootAdmin(request.principal, options.rootAdmins),
+      // This deliberately comes from the same projection as /v1/audit rather
+      // than from the active environment list. Audit grants remain meaningful
+      // after a project or environment is archived.
+      canReadAudit:
+        auditableProjects === 'all' || auditableProjects.length > 0,
+      environments,
+    };
   });
 
   // --- secrets --------------------------------------------------------------

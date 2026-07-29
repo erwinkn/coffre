@@ -6,6 +6,10 @@ import { useAction } from '../lib/use-action';
 import type { ProjectSummary } from '../lib/api';
 import { EmptyState, ErrorLine, Modal, Notice, Spinner } from '../components/ui';
 import { Folder, Inbox, Layers, Plus } from '../components/icons';
+import {
+  ProjectEmptyStateCopy,
+  RootAdminOnly,
+} from '../components/affordances';
 
 export const Route = createFileRoute('/projects/')({
   loader: () => listProjects(),
@@ -40,16 +44,19 @@ function ProjectsPage() {
       <div className="card">
         {active.length === 0 ? (
           <EmptyState icon={<Inbox size={26} />} title="Nothing granted yet">
-            No project is visible to you. Someone holding{' '}
-            <span className="mono">grant.manage</span> can add you, or create a project below
-            if you administer this instance.
+            <ProjectEmptyStateCopy
+              capabilities={result.capabilities}
+              hasArchivedProjects={archived.length > 0}
+            />
           </EmptyState>
         ) : (
           active.map((project) => <ProjectRow key={project.slug} project={project} />)
         )}
       </div>
 
-      <NewProject />
+      <RootAdminOnly capabilities={result.capabilities}>
+        <NewProject />
+      </RootAdminOnly>
 
       {archived.length > 0 && (
         <section className="section">

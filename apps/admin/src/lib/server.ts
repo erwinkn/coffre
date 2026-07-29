@@ -17,6 +17,7 @@ import {
   type SecretKey,
   type SecretVersion,
 } from './api';
+import { deriveUiCapabilities } from './capabilities';
 
 /*
  * Every function in this file is a thin wrapper over the coffre API. None of
@@ -58,6 +59,10 @@ export const getShell = createServerFn({ method: 'GET' }).handler(async () => {
     instanceRole: me.ok ? me.data.instanceRole : null,
     signInError: me.ok ? null : me.error,
     projects: projects.ok ? projects.data.projects : [],
+    capabilities: deriveUiCapabilities(
+      me.ok ? me.data : null,
+      projects.ok ? projects.data.projects : [],
+    ),
   };
 });
 
@@ -74,9 +79,16 @@ export const getLoginAuthState = createServerFn({ method: 'GET' }).handler(async
 }));
 
 export const listProjects = createServerFn({ method: 'GET' }).handler(async () => {
-  const result = await coffreFetch<{ projects: ProjectSummary[] }>('/v1/admin/projects');
+  const [me, result] = await Promise.all([
+    coffreFetch<Me>('/v1/me'),
+    coffreFetch<{ projects: ProjectSummary[] }>('/v1/admin/projects'),
+  ]);
   return result.ok
-    ? { ok: true as const, projects: result.data.projects }
+    ? {
+        ok: true as const,
+        projects: result.data.projects,
+        capabilities: deriveUiCapabilities(me.ok ? me.data : null, result.data.projects),
+      }
     : { ok: false as const, error: result.error };
 });
 

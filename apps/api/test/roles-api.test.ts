@@ -256,6 +256,37 @@ test('an auditor sees only the projects they hold audit.read on', async () => {
   assert.equal(keys.includes('OTHER_KEY'), false, 'must not see another project');
 });
 
+test('an archived environment audit grant remains visible in the shell', async () => {
+  await grant({
+    principalType: 'user',
+    principalId: 'auditor@equisafe.io',
+    role: 'auditor',
+    environmentSlug: 'prod',
+  });
+  await app.inject({
+    method: 'POST',
+    url: '/v1/admin/projects/market/environments/prod/archive',
+    ...req(ROOT),
+    payload: { archived: true },
+  });
+
+  const me = await app.inject({
+    method: 'GET',
+    url: '/v1/me',
+    ...req('auditor@equisafe.io'),
+  });
+  const audit = await app.inject({
+    method: 'GET',
+    url: '/v1/audit',
+    ...req('auditor@equisafe.io'),
+  });
+
+  assert.equal(me.statusCode, 200);
+  assert.deepEqual(me.json().environments, []);
+  assert.equal(me.json().canReadAudit, true);
+  assert.equal(audit.statusCode, 200);
+});
+
 // --- roles ------------------------------------------------------------------
 
 test('the role catalogue reports which roles may be scoped to an environment', async () => {

@@ -102,6 +102,10 @@ export async function coffreFetch<T>(
 export type Me = {
   principal: { type: 'user' | 'service'; id: string };
   instanceRole: 'user' | 'owner' | 'root-admin';
+  /** Configuration-owned bootstrap authority, not a database grant. */
+  isRootAdmin: boolean;
+  /** Whether audit.read is effective on at least one project, archived or active. */
+  canReadAudit: boolean;
   environments: { project: string; environment: string; permissions: Permission[] }[];
 };
 

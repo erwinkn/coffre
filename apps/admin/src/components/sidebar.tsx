@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { Link, useRouterState } from '@tanstack/react-router';
 import type { ProjectSummary } from '../lib/api';
+import type { UiCapabilities } from '../lib/capabilities';
+import { AdministrationNav } from './affordances';
 import { ThemeToggle } from './theme';
 import { ChevronRight, Folder, Ledger, Users, Vault } from './icons';
 
@@ -8,6 +10,7 @@ type Props = {
   projects: ProjectSummary[];
   principal: { type: 'user' | 'service'; id: string } | null;
   instanceRole: 'user' | 'owner' | 'root-admin' | null;
+  capabilities: UiCapabilities;
 };
 
 /** Marks the current route without each link having to compare paths itself. */
@@ -20,7 +23,7 @@ const CURRENT = { 'aria-current': 'page' } as const;
  * because "jump from market/dev to market/prod" is the single most common
  * movement in the app and it used to cost two page loads.
  */
-export function Sidebar({ projects, principal, instanceRole }: Props) {
+export function Sidebar({ projects, principal, instanceRole, capabilities }: Props) {
   const active = projects.filter((project) => project.archivedAt === null);
 
   // Which project you are inside, read off the path the way Breadcrumbs does
@@ -117,19 +120,21 @@ export function Sidebar({ projects, principal, instanceRole }: Props) {
         )}
       </nav>
 
-      <nav className="nav-group" aria-label="Administration">
-        <span className="nav-label">Admin</span>
-        {(instanceRole === 'owner' || instanceRole === 'root-admin') && (
+      <AdministrationNav
+        capabilities={capabilities}
+        users={
           <Link className="nav-item" to="/access" activeProps={CURRENT}>
             <Users size={15} />
             Users
           </Link>
-        )}
-        <Link className="nav-item" to="/audit" activeProps={CURRENT}>
-          <Ledger size={15} />
-          Audit log
-        </Link>
-      </nav>
+        }
+        audit={
+          <Link className="nav-item" to="/audit" activeProps={CURRENT}>
+            <Ledger size={15} />
+            Audit log
+          </Link>
+        }
+      />
 
       <div className="sidebar-foot">
         <div className="identity">

@@ -145,6 +145,20 @@ test('a non-root user cannot create a project, and the denial is audited', async
   assert.equal(projects.rows[0].n, 0);
 });
 
+test('/v1/me identifies only configured bootstrap principals as root admins', async () => {
+  const [root, outsider] = await Promise.all([
+    app.inject({ method: 'GET', url: '/v1/me', ...req(rootToken) }),
+    app.inject({ method: 'GET', url: '/v1/me', ...req(outsiderToken) }),
+  ]);
+
+  assert.equal(root.statusCode, 200);
+  assert.equal(root.json().isRootAdmin, true);
+  assert.equal(root.json().canReadAudit, true);
+  assert.equal(outsider.statusCode, 200);
+  assert.equal(outsider.json().isRootAdmin, false);
+  assert.equal(outsider.json().canReadAudit, false);
+});
+
 test('a duplicate project slug is rejected', async () => {
   await seedProject();
   const response = await app.inject({

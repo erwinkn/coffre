@@ -20,6 +20,7 @@ import type {
   SecretKey,
   SecretVersion,
 } from '../lib/api';
+import { canRevealSecrets } from '../lib/capabilities';
 import {
   ConfirmButton,
   CopyButton,
@@ -32,6 +33,7 @@ import {
   Tip,
 } from '../components/ui';
 import { PermissionSummary } from '../components/permissions';
+import { SecretReadOnly } from '../components/affordances';
 import {
   Archive,
   Eye,
@@ -183,7 +185,7 @@ function EnvironmentPage() {
   const { permissions, keys } = result;
   const canWrite = permissions.includes('secret.write');
   const canArchive = permissions.includes('secret.archive');
-  const canReveal = permissions.includes('secret.read');
+  const canReveal = canRevealSecrets(permissions);
 
   const active = keys.filter((entry) => !entry.archived);
   const archived = keys.filter((entry) => entry.archived);
@@ -485,7 +487,7 @@ function EditableSecretRow({
         )}
 
         <div className="row-actions">
-          {canReveal && (
+          <SecretReadOnly canReveal={canReveal}>
             <button
               className="btn btn-sm btn-icon btn-quiet"
               aria-label={versions === null ? `Show history for ${entry.key}` : 'Hide history'}
@@ -494,7 +496,7 @@ function EditableSecretRow({
             >
               <History size={14} />
             </button>
-          )}
+          </SecretReadOnly>
           {canArchive && (
             <button
               className={`btn btn-sm btn-icon ${
@@ -703,7 +705,7 @@ function SecretRow({
         )}
 
         <div className="row-actions">
-          {canReveal && !entry.archived && (
+          <SecretReadOnly canReveal={canReveal && !entry.archived}>
             <button className="btn btn-sm" onClick={onReveal} disabled={working}>
               {working && value === null ? (
                 <Spinner size={13} />
@@ -714,7 +716,7 @@ function SecretRow({
               )}
               {value !== null ? 'Hide' : 'Reveal'}
             </button>
-          )}
+          </SecretReadOnly>
 
           {hasSecondaryActions && (
             <DropdownMenu.Root>
@@ -740,12 +742,12 @@ function SecretRow({
                       {editing ? 'Cancel edit' : 'Set new value'}
                     </DropdownMenu.Item>
                   )}
-                  {canReveal && (
+                  <SecretReadOnly canReveal={canReveal}>
                     <DropdownMenu.Item className="menu-item" onSelect={onHistory}>
                       <History size={14} />
                       {versions === null ? 'Version history' : 'Hide history'}
                     </DropdownMenu.Item>
-                  )}
+                  </SecretReadOnly>
                   {canArchive && (
                     <>
                       <DropdownMenu.Separator className="menu-sep" />

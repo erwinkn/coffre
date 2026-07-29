@@ -550,6 +550,8 @@ test('/v1/me reports the principal and only the environments they hold', async (
   const response = await app.inject({ method: 'GET', url: '/v1/me', ...req(readerToken) });
 
   assert.equal(response.statusCode, 200);
+  assert.equal(response.json().isRootAdmin, false);
+  assert.equal(response.json().canReadAudit, false);
   assert.deepEqual(response.json().environments, [
     { project: 'market', environment: 'dev', permissions: ['secret.read'] },
   ]);

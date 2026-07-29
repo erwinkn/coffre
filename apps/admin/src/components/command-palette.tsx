@@ -2,6 +2,11 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from '@tanstack/react-router';
 import { Command } from 'cmdk';
 import type { ProjectSummary } from '../lib/api';
+import type { UiCapabilities } from '../lib/capabilities';
+import {
+  AdministrationItems,
+  hasAdministrationItems,
+} from './affordances';
 import { setTheme } from './theme';
 import {
   Folder,
@@ -30,10 +35,10 @@ import {
  */
 export function CommandPalette({
   projects,
-  canManageDirectory,
+  capabilities,
 }: {
   projects: ProjectSummary[];
-  canManageDirectory: boolean;
+  capabilities: UiCapabilities;
 }) {
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
@@ -124,40 +129,49 @@ export function CommandPalette({
             </Command.Group>
           )}
 
-          <Command.Group heading="Admin">
-            {canManageDirectory && (
-              <Command.Item
-                value="users service accounts identity directory"
-                onSelect={() => {
-                  setOpen(false);
-                  navigate({ to: '/access' });
-                }}
-              >
-                <Users size={15} />
-                Users
-              </Command.Item>
-            )}
-            <Command.Item
-              value="audit log history reads"
-              onSelect={() => {
-                setOpen(false);
-                navigate({ to: '/audit', search: {} });
-              }}
-            >
-              <Ledger size={15} />
-              Audit log
-            </Command.Item>
-            <Command.Item
-              value="denials denied refused audit"
-              onSelect={() => {
-                setOpen(false);
-                navigate({ to: '/audit', search: { decision: 'deny' } });
-              }}
-            >
-              <SlashCircle size={15} />
-              Denials only
-            </Command.Item>
-          </Command.Group>
+          {hasAdministrationItems(capabilities) && (
+            <Command.Group heading="Admin">
+              <AdministrationItems
+                capabilities={capabilities}
+                users={
+                  <Command.Item
+                    value="users access principals grants who holds what"
+                    onSelect={() => {
+                      setOpen(false);
+                      navigate({ to: '/access' });
+                    }}
+                  >
+                    <Users size={15} />
+                    Users
+                  </Command.Item>
+                }
+                audit={
+                  <>
+                    <Command.Item
+                      value="audit log history reads"
+                      onSelect={() => {
+                        setOpen(false);
+                        navigate({ to: '/audit', search: {} });
+                      }}
+                    >
+                      <Ledger size={15} />
+                      Audit log
+                    </Command.Item>
+                    <Command.Item
+                      value="denials denied refused audit"
+                      onSelect={() => {
+                        setOpen(false);
+                        navigate({ to: '/audit', search: { decision: 'deny' } });
+                      }}
+                    >
+                      <SlashCircle size={15} />
+                      Denials only
+                    </Command.Item>
+                  </>
+                }
+              />
+            </Command.Group>
+          )}
 
           <Command.Group heading="Appearance">
             <Command.Item

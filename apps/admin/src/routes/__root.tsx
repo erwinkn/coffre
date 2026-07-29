@@ -72,7 +72,7 @@ function RootDocument({ children }: { children: ReactNode }) {
 }
 
 function RootComponent() {
-  const { principal, instanceRole, projects } = Route.useLoaderData();
+  const { principal, instanceRole, projects, capabilities } = Route.useLoaderData();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
 
   // Sign-in gets no shell. Every destination in the sidebar, the breadcrumbs
@@ -115,18 +115,14 @@ function RootComponent() {
           projects={projects}
           principal={principal}
           instanceRole={instanceRole}
+          capabilities={capabilities}
         />
 
         <div className="main">
           <header className="topbar">
             <Breadcrumbs />
             <div style={{ marginLeft: 'auto' }}>
-              <CommandPalette
-                projects={projects}
-                canManageDirectory={
-                  instanceRole === 'owner' || instanceRole === 'root-admin'
-                }
-              />
+              <CommandPalette projects={projects} capabilities={capabilities} />
             </div>
           </header>
 
