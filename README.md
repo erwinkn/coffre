@@ -214,9 +214,12 @@ All five phases are implemented and working locally.
   before writing. Parsing happens server-side so the CLI and UI cannot disagree
   about what a `.env` file means; malformed lines are reported, never silently
   mangled.
-- **Access overview.** Every principal and what they can reach, across all
-  projects you administer -- the query you want when someone leaves. Root
-  admins appear too, flagged as coming from configuration.
+- **Identity directory.** Users and service accounts are managed separately
+  from project permissions. Owners can manage the directory and read the full
+  audit log; root admins remain deployment configuration.
+- **Access overview.** `coffre access` still reports every principal and grant
+  across the projects the caller administers, including scope and expiry. It
+  remains available to project access managers for operational offboarding.
 
 ### The admin UI
 
@@ -320,6 +323,12 @@ Built-in roles:
 | `access-manager` | `grant.manage` | **no** |
 | `auditor` | `audit.read` | **no** |
 | `owner` | everything | yes |
+
+The project role `owner` is distinct from the instance role with the same
+label. An instance owner manages users and service accounts and can read the
+complete audit log. Project access is still granted only from the relevant
+project, where `owner`, `viewer`, and the other project roles describe what the
+identity can do there.
 
 The last two are why roles exist at all. Under the previous `read < write <
 admin` ladder, seeing the audit log required `admin`, which also meant reading

@@ -702,7 +702,7 @@ function NewGrant({
     <>
       <button className="btn btn-sm" onClick={() => setOpen(true)}>
         <Plus size={13} />
-        Add {principalType === 'user' ? 'user' : 'service account'}
+        Add
       </button>
 
       <Modal

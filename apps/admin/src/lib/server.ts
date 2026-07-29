@@ -10,7 +10,7 @@ import {
   type ImportProblem,
   type Me,
   type Permission,
-  type Principal,
+  type DirectoryPrincipal,
   type ProjectSummary,
   type RoleRow,
   type SecretKey,
@@ -54,6 +54,7 @@ export const getShell = createServerFn({ method: 'GET' }).handler(async () => {
 
   return {
     principal: me.ok ? me.data.principal : null,
+    instanceRole: me.ok ? me.data.instanceRole : null,
     signInError: me.ok ? null : me.error,
     projects: projects.ok ? projects.data.projects : [],
   };
@@ -132,25 +133,19 @@ export const listAudit = createServerFn({ method: 'GET' })
     return { ok: true as const, entries };
   });
 
-export const listPrincipals = createServerFn({ method: 'GET' }).handler(async () => {
-  const [principals, projects, roles] = await Promise.all([
-    coffreFetch<{ principals: Principal[] }>('/v1/admin/principals'),
-    coffreFetch<{ projects: ProjectSummary[] }>('/v1/admin/projects'),
-    coffreFetch<{ roles: RoleRow[] }>('/v1/admin/roles'),
-  ]);
-
-  if (!principals.ok) return { ok: false as const, error: principals.error };
-  if (!projects.ok) return { ok: false as const, error: projects.error };
-  if (!roles.ok) return { ok: false as const, error: roles.error };
-
-  return {
-    ok: true as const,
-    principals: principals.data.principals,
-    projects: projects.data.projects.filter((project) =>
-      project.permissions.includes('grant.manage'),
-    ),
-    roles: roles.data.roles,
-  };
+export const listDirectoryPrincipals = createServerFn({ method: 'GET' }).handler(async () => {
+  const result = await coffreFetch<{ principals: DirectoryPrincipal[] }>(
+    '/v1/admin/directory',
+  );
+  if (!result.ok && result.status === 403) {
+    return {
+      ok: false as const,
+      error: 'Only owners can manage users and service accounts.',
+    };
+  }
+  return result.ok
+    ? { ok: true as const, principals: result.data.principals }
+    : { ok: false as const, error: result.error };
 });
 
 /* -------------------------------------------------------------------------- */
@@ -450,13 +445,47 @@ export const updateGrant = createServerFn({ method: 'POST' })
     return result.ok ? { ok: true as const } : { ok: false as const, error: result.error };
   });
 
-export const removePrincipal = createServerFn({ method: 'POST' })
+export const createDirectoryPrincipal = createServerFn({ method: 'POST' })
+  .inputValidator(
+    (data: {
+      principalType: 'user' | 'service';
+      principalId: string;
+      instanceRole: 'user' | 'owner';
+    }) => data,
+  )
+  .handler(async ({ data }) => {
+    if (data.principalId.trim() === '') {
+      return { ok: false as const, error: 'Identity is required.' };
+    }
+    const result = await coffreFetch('/v1/admin/directory', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+    return result.ok ? { ok: true as const } : { ok: false as const, error: result.error };
+  });
+
+export const updateDirectoryPrincipalRole = createServerFn({ method: 'POST' })
+  .inputValidator(
+    (data: { principalId: string; instanceRole: 'user' | 'owner' }) => data,
+  )
+  .handler(async ({ data }) => {
+    const result = await coffreFetch(
+      `/v1/admin/directory/user/${encodeURIComponent(data.principalId)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ instanceRole: data.instanceRole }),
+      },
+    );
+    return result.ok ? { ok: true as const } : { ok: false as const, error: result.error };
+  });
+
+export const removeDirectoryPrincipal = createServerFn({ method: 'POST' })
   .inputValidator(
     (data: { principalType: 'user' | 'service'; principalId: string }) => data,
   )
   .handler(async ({ data }) => {
     const result = await coffreFetch(
-      `/v1/admin/principals/${data.principalType}/${encodeURIComponent(data.principalId)}`,
+      `/v1/admin/directory/${data.principalType}/${encodeURIComponent(data.principalId)}`,
       { method: 'DELETE' },
     );
     return result.ok ? { ok: true as const } : { ok: false as const, error: result.error };

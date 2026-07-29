@@ -63,6 +63,7 @@ beforeEach(async () => {
   await pool.query('DELETE FROM secret_versions');
   await pool.query('DELETE FROM secrets');
   await pool.query('DELETE FROM grants');
+  await pool.query('DELETE FROM principals');
   await pool.query('DELETE FROM environments');
   await pool.query('DELETE FROM projects');
 
@@ -513,4 +514,39 @@ test('the principal view answers "what does this person still hold"', async () =
     .json()
     .principals.find((p: { principalId: string }) => p.principalId === ROOT);
   assert.equal(root.isRootAdmin, true);
+});
+
+test('the principal directory is separate from project permissions', async () => {
+  await app.inject({
+    method: 'POST',
+    url: '/v1/admin/directory',
+    ...req(ROOT),
+    payload: {
+      principalType: 'user',
+      principalId: 'grantless@equisafe.io',
+      instanceRole: 'user',
+    },
+  });
+
+  const response = await app.inject({
+    method: 'GET',
+    url: '/v1/admin/directory',
+    ...req(ROOT),
+  });
+
+  assert.equal(response.statusCode, 200);
+  const grantless = response
+    .json()
+    .principals.find(
+      (p: { principalId: string }) => p.principalId === 'grantless@equisafe.io',
+    );
+
+  assert.equal(grantless.instanceRole, 'user');
+  assert.equal('grants' in grantless, false);
+
+  const root = response
+    .json()
+    .principals.find((p: { principalId: string }) => p.principalId === ROOT);
+  assert.equal(root.isRootAdmin, true);
+  assert.equal(root.instanceRole, 'root-admin');
 });

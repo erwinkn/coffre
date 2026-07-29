@@ -47,6 +47,13 @@ export type RoleRow = {
   assignableToEnvironment: boolean;
 };
 
+export type InstancePrincipalRow = {
+  principalType: 'user' | 'service';
+  principalId: string;
+  instanceRole: 'user' | 'owner' | 'root-admin';
+  isRootAdmin: boolean;
+};
+
 /**
  * Structural management: projects, environments and grants.
  *
@@ -101,6 +108,79 @@ export class AdminService {
 
   #isRootAdmin(principal: Principal): boolean {
     return this.#deps.rootAdmins.includes(principal.id);
+  }
+
+  async #lockPrincipals(
+    tx: PoolClient,
+    principals: readonly Principal[],
+  ): Promise<void> {
+    const keys = [
+      ...new Set(
+        principals.map(
+          (principal) =>
+            `coffre:principal:${principal.type}:${principal.id}`,
+        ),
+      ),
+    ].sort();
+    for (const key of keys) {
+      await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
+        key,
+      ]);
+    }
+  }
+
+  async #lockPrincipal(
+    tx: PoolClient,
+    principalType: 'user' | 'service',
+    principalId: string,
+  ): Promise<void> {
+    await this.#lockPrincipals(tx, [{ type: principalType, id: principalId }]);
+  }
+
+  async #isInstanceOwner(tx: PoolClient, principal: Principal): Promise<boolean> {
+    if (this.#isRootAdmin(principal)) return true;
+    if (principal.type !== 'user') return false;
+
+    const result = await tx.query(
+      `SELECT 1 FROM principals
+        WHERE principal_type = 'user'
+          AND principal_id = $1
+          AND active
+          AND instance_role = 'owner'`,
+      [principal.id],
+    );
+    return result.rowCount !== 0;
+  }
+
+  async #requireInstanceOwner(
+    tx: PoolClient,
+    ctx: RequestContext,
+    base: Omit<AuditEntry, 'decision'>,
+    metadata: Record<string, unknown> = {},
+  ): Promise<void> {
+    if (await this.#isInstanceOwner(tx, ctx.principal)) return;
+    throw new AuditedFailure(new AccessDenied('only owners may manage users'), {
+      ...base,
+      decision: 'deny',
+      metadata: { ...metadata, reason: 'requires_instance_owner' },
+    });
+  }
+
+  async instanceRole(
+    principal: Principal,
+  ): Promise<'user' | 'owner' | 'root-admin'> {
+    if (this.#isRootAdmin(principal)) return 'root-admin';
+    if (principal.type !== 'user') return 'user';
+
+    const result = await this.#deps.pool.query<{ instance_role: 'user' | 'owner' }>(
+      `SELECT instance_role
+         FROM principals
+        WHERE principal_type = 'user'
+          AND principal_id = $1
+          AND active`,
+      [principal.id],
+    );
+    return result.rows[0]?.instance_role ?? 'user';
   }
 
   #base(ctx: RequestContext, action: string): Omit<AuditEntry, 'decision'> {
@@ -200,6 +280,16 @@ export class AdminService {
       // Creating a project also establishes its first real project-level
       // owner. Root admin is deployment-wide bootstrap authority; it must not
       // masquerade as a project grant in the access table.
+      await this.#lockPrincipal(tx, ctx.principal.type, ctx.principal.id);
+      await tx.query(
+        `INSERT INTO principals (
+           principal_type, principal_id, instance_role, created_by, active
+         )
+         VALUES ($1, $2, 'user', $2, true)
+         ON CONFLICT (principal_type, principal_id) DO UPDATE
+           SET active = true`,
+        [ctx.principal.type, ctx.principal.id],
+      );
       await tx.query(
         `INSERT INTO grants (
            principal_type, principal_id, role_id, project_id, created_by
@@ -572,6 +662,38 @@ export class AdminService {
         environmentId = environment.rows[0].id;
       }
 
+      await this.#lockPrincipal(tx, input.principalType, input.principalId);
+      await tx.query(
+        `INSERT INTO principals (
+           principal_type, principal_id, instance_role, created_by, active
+         )
+         VALUES ($1, $2, 'user', $3, true)
+         ON CONFLICT DO NOTHING`,
+        [input.principalType, input.principalId, ctx.principal.id],
+      );
+      const registered = await tx.query<{ active: boolean }>(
+        `SELECT active
+           FROM principals
+          WHERE principal_type = $1 AND principal_id = $2`,
+        [input.principalType, input.principalId],
+      );
+      if (!registered.rows[0]?.active) {
+        throw new AuditedFailure(
+          Object.assign(
+            new Error(
+              'that principal was removed; add it to the directory before granting access',
+            ),
+            { statusCode: 409 },
+          ),
+          {
+            ...base,
+            decision: 'deny',
+            projectId,
+            metadata: { ...input, reason: 'principal_inactive' },
+          },
+        );
+      }
+
       const created = await tx.query<{ id: string }>(
         `INSERT INTO grants (principal_type, principal_id, role_id,
                              project_id, environment_id, expires_at, created_by)
@@ -805,6 +927,10 @@ export class AdminService {
    * Revoke every grant for one principal that the caller is allowed to manage.
    * Root admins remove the principal everywhere; delegated access managers
    * remove it from the projects visible in their access overview.
+   *
+   * This is intentionally separate from deleting an identity from the
+   * instance directory. Project access managers may revoke grants, but only
+   * instance owners may remove identities from Coffre.
    */
   async removePrincipal(
     ctx: RequestContext,
@@ -881,8 +1007,8 @@ export class AdminService {
    * Every principal and what they can reach, across the projects the caller
    * administers.
    *
-   * The inverse of the per-project access table, and the query you actually
-   * want when offboarding someone: "what does this person still hold?"
+   * This remains the grant-aware operational/offboarding view. The instance
+   * directory is exposed separately because a user may exist without grants.
    */
   async listPrincipals(ctx: RequestContext): Promise<
     {
@@ -925,19 +1051,22 @@ export class AdminService {
         [isRoot, ctx.principal.type, ctx.principal.id],
       );
 
-      const byPrincipal = new Map<string, {
-        principalType: 'user' | 'service';
-        principalId: string;
-        isRootAdmin: boolean;
-        grants: {
-          id: string;
-          project: string;
-          scope: string;
-          environmentSlug: string | null;
-          role: string;
-          expiresAt: string | null;
-        }[];
-      }>();
+      const byPrincipal = new Map<
+        string,
+        {
+          principalType: 'user' | 'service';
+          principalId: string;
+          isRootAdmin: boolean;
+          grants: {
+            id: string;
+            project: string;
+            scope: string;
+            environmentSlug: string | null;
+            role: string;
+            expiresAt: string | null;
+          }[];
+        }
+      >();
 
       // Root admins first, so offboarding cannot miss them.
       if (isRoot) {
@@ -953,14 +1082,12 @@ export class AdminService {
 
       for (const row of result.rows) {
         const key = `${row.principal_type}:${row.principal_id}`;
-        const entry =
-          byPrincipal.get(key) ??
-          {
-            principalType: row.principal_type,
-            principalId: row.principal_id,
-            isRootAdmin: this.#deps.rootAdmins.includes(row.principal_id),
-            grants: [],
-          };
+        const entry = byPrincipal.get(key) ?? {
+          principalType: row.principal_type,
+          principalId: row.principal_id,
+          isRootAdmin: this.#deps.rootAdmins.includes(row.principal_id),
+          grants: [],
+        };
         entry.grants.push({
           id: row.id,
           project: row.project,
@@ -973,6 +1100,287 @@ export class AdminService {
       }
 
       return [...byPrincipal.values()];
+    } finally {
+      client.release();
+    }
+  }
+
+  async addDirectoryPrincipal(
+    ctx: RequestContext,
+    input: {
+      principalType: 'user' | 'service';
+      principalId: string;
+      instanceRole: 'user' | 'owner';
+    },
+  ): Promise<{ created: true }> {
+    return this.#audited(async (tx) => {
+      const base = this.#base(ctx, 'directory.create');
+      await this.#lockPrincipals(tx, [
+        ctx.principal,
+        { type: input.principalType, id: input.principalId },
+      ]);
+      await this.#requireInstanceOwner(tx, ctx, base, input);
+
+      if (input.principalType === 'service' && input.instanceRole !== 'user') {
+        throw new AuditedFailure(
+          Object.assign(new Error('service accounts cannot be instance owners'), {
+            statusCode: 409,
+          }),
+          {
+            ...base,
+            decision: 'deny',
+            metadata: { ...input, reason: 'service_cannot_be_owner' },
+          },
+        );
+      }
+      if (
+        input.principalType === 'user' &&
+        this.#deps.rootAdmins.includes(input.principalId)
+      ) {
+        throw new AuditedFailure(
+          Object.assign(new Error('that root admin is already configured'), {
+            statusCode: 409,
+          }),
+          {
+            ...base,
+            decision: 'deny',
+            metadata: { ...input, reason: 'configured_root_admin' },
+          },
+        );
+      }
+
+      const created = await tx.query(
+        `INSERT INTO principals (
+           principal_type, principal_id, instance_role, created_by, active
+         )
+         VALUES ($1, $2, $3, $4, true)
+         ON CONFLICT (principal_type, principal_id) DO UPDATE
+           SET instance_role = EXCLUDED.instance_role,
+               active = true,
+               created_at = now(),
+               created_by = EXCLUDED.created_by
+         WHERE NOT principals.active
+         RETURNING 1`,
+        [
+          input.principalType,
+          input.principalId,
+          input.instanceRole,
+          ctx.principal.id,
+        ],
+      );
+      if (created.rowCount === 0) {
+        throw new AuditedFailure(
+          Object.assign(new Error('that principal already exists'), { statusCode: 409 }),
+          {
+            ...base,
+            decision: 'deny',
+            metadata: { ...input, reason: 'duplicate' },
+          },
+        );
+      }
+
+      return {
+        result: { created: true as const },
+        entries: [{ ...base, decision: 'allow', metadata: input }],
+      };
+    });
+  }
+
+  async updateDirectoryPrincipalRole(
+    ctx: RequestContext,
+    principalId: string,
+    instanceRole: 'user' | 'owner',
+  ): Promise<{ updated: true }> {
+    return this.#audited(async (tx) => {
+      const base = this.#base(ctx, 'directory.update');
+      await this.#lockPrincipals(tx, [
+        ctx.principal,
+        { type: 'user', id: principalId },
+      ]);
+      await this.#requireInstanceOwner(tx, ctx, base, { principalId, instanceRole });
+
+      if (this.#deps.rootAdmins.includes(principalId)) {
+        throw new AuditedFailure(
+          Object.assign(new Error('root admins are managed by COFFRE_ROOT_ADMINS'), {
+            statusCode: 409,
+          }),
+          {
+            ...base,
+            decision: 'deny',
+            metadata: { principalId, instanceRole, reason: 'configured_root_admin' },
+          },
+        );
+      }
+
+      const updated = await tx.query(
+        `UPDATE principals
+            SET instance_role = $2
+          WHERE principal_type = 'user'
+            AND principal_id = $1
+            AND active`,
+        [principalId, instanceRole],
+      );
+      if (updated.rowCount === 0) {
+        throw new AuditedFailure(new NotFound('unknown user'), {
+          ...base,
+          decision: 'deny',
+          metadata: { principalId, instanceRole, reason: 'unknown_principal' },
+        });
+      }
+
+      return {
+        result: { updated: true as const },
+        entries: [
+          {
+            ...base,
+            decision: 'allow',
+            metadata: { principalType: 'user', principalId, instanceRole },
+          },
+        ],
+      };
+    });
+  }
+
+  async removeDirectoryPrincipal(
+    ctx: RequestContext,
+    principalType: 'user' | 'service',
+    principalId: string,
+  ): Promise<{ revoked: number }> {
+    return this.#audited(async (tx) => {
+      const base = this.#base(ctx, 'directory.remove');
+      await this.#lockPrincipals(tx, [
+        ctx.principal,
+        { type: principalType, id: principalId },
+      ]);
+      await this.#requireInstanceOwner(tx, ctx, base, {
+        principalType,
+        principalId,
+      });
+
+      if (principalType === 'user' && this.#deps.rootAdmins.includes(principalId)) {
+        throw new AuditedFailure(
+          Object.assign(
+            new Error('root admins are managed by COFFRE_ROOT_ADMINS'),
+            { statusCode: 409 },
+          ),
+          {
+            ...base,
+            decision: 'deny',
+            metadata: { principalType, principalId, reason: 'configured_root_admin' },
+          },
+        );
+      }
+
+      const principal = await tx.query(
+        `SELECT 1 FROM principals
+          WHERE principal_type = $1
+            AND principal_id = $2
+            AND active`,
+        [principalType, principalId],
+      );
+      if (principal.rowCount === 0) {
+        throw new AuditedFailure(new NotFound('unknown principal'), {
+          ...base,
+          decision: 'deny',
+          metadata: { principalType, principalId, reason: 'unknown_principal' },
+        });
+      }
+
+      const affectedProjects = await tx.query<{
+        project_id: string;
+        revoked: number;
+      }>(
+        `WITH deleted AS (
+           DELETE FROM grants
+            WHERE principal_type = $1 AND principal_id = $2
+           RETURNING project_id, environment_id
+         )
+         SELECT COALESCE(d.project_id, e.project_id) AS project_id,
+                count(*)::int AS revoked
+           FROM deleted d
+           LEFT JOIN environments e ON e.id = d.environment_id
+          GROUP BY COALESCE(d.project_id, e.project_id)
+          ORDER BY COALESCE(d.project_id, e.project_id)`,
+        [principalType, principalId],
+      );
+      await tx.query(
+        `UPDATE principals
+            SET active = false
+          WHERE principal_type = $1 AND principal_id = $2`,
+        [principalType, principalId],
+      );
+
+      const revoked = affectedProjects.rows.reduce(
+        (total, project) => total + project.revoked,
+        0,
+      );
+
+      return {
+        result: { revoked },
+        entries: [
+          {
+            ...base,
+            decision: 'allow',
+            metadata: { principalType, principalId, revoked },
+          },
+          ...affectedProjects.rows.map((project) => ({
+            ...base,
+            decision: 'allow' as const,
+            projectId: project.project_id,
+            metadata: {
+              principalType,
+              principalId,
+              revoked: project.revoked,
+            },
+          })),
+        ],
+      };
+    });
+  }
+
+  /** Every identity registered with this Coffre instance. */
+  async listDirectory(ctx: RequestContext): Promise<InstancePrincipalRow[]> {
+    const client = await this.#deps.pool.connect();
+    try {
+      if (!(await this.#isInstanceOwner(client, ctx.principal))) {
+        throw new AccessDenied('only owners may manage users');
+      }
+
+      const result = await client.query<{
+        principal_type: 'user' | 'service';
+        principal_id: string;
+        instance_role: 'user' | 'owner';
+      }>(
+        `SELECT principal_type, principal_id, instance_role
+           FROM principals
+          WHERE active
+          ORDER BY principal_type DESC, principal_id`,
+      );
+
+      const byPrincipal = new Map<string, InstancePrincipalRow>();
+      for (const row of result.rows) {
+        byPrincipal.set(`${row.principal_type}:${row.principal_id}`, {
+          principalType: row.principal_type,
+          principalId: row.principal_id,
+          instanceRole: row.instance_role,
+          isRootAdmin: false,
+        });
+      }
+
+      for (const id of this.#deps.rootAdmins) {
+        byPrincipal.set(`user:${id}`, {
+          principalType: 'user',
+          principalId: id,
+          instanceRole: 'root-admin',
+          isRootAdmin: true,
+        });
+      }
+
+      return [...byPrincipal.values()].sort(
+        (a, b) =>
+          a.principalType.localeCompare(b.principalType) ||
+          a.principalId.localeCompare(b.principalId),
+      );
     } finally {
       client.release();
     }

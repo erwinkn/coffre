@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { createFileRoute, useRouter } from '@tanstack/react-router';
 import { devSignIn } from '../lib/server';
-import { ErrorLine, Notice, Spinner } from '../components/ui';
+import { ErrorLine, Spinner } from '../components/ui';
 import { Vault } from '../components/icons';
 
 export const Route = createFileRoute('/login')({
@@ -145,14 +145,6 @@ function LoginPage() {
           ))}
         </div>
       </section>
-
-      <div style={{ marginTop: 'var(--space-7)' }}>
-        <Notice tone="info">
-          The dev IdP on <span className="mono">:8081</span> mints a real Access-shaped JWT
-          and the API verifies it against the same JWKS path it will use in production. The
-          shortcut is who gets a token, not how it is checked.
-        </Notice>
-      </div>
     </>
   );
 }

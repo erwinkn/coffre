@@ -28,7 +28,13 @@ import {
  * of the navigation and the router holds the old screen until it resolves,
  * which is both correct and considerably faster.
  */
-export function CommandPalette({ projects }: { projects: ProjectSummary[] }) {
+export function CommandPalette({
+  projects,
+  canManageDirectory,
+}: {
+  projects: ProjectSummary[];
+  canManageDirectory: boolean;
+}) {
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
 
@@ -119,16 +125,18 @@ export function CommandPalette({ projects }: { projects: ProjectSummary[] }) {
           )}
 
           <Command.Group heading="Admin">
-            <Command.Item
-              value="users access principals grants who holds what"
-              onSelect={() => {
-                setOpen(false);
-                navigate({ to: '/access' });
-              }}
-            >
-              <Users size={15} />
-              Users
-            </Command.Item>
+            {canManageDirectory && (
+              <Command.Item
+                value="users service accounts identity directory"
+                onSelect={() => {
+                  setOpen(false);
+                  navigate({ to: '/access' });
+                }}
+              >
+                <Users size={15} />
+                Users
+              </Command.Item>
+            )}
             <Command.Item
               value="audit log history reads"
               onSelect={() => {

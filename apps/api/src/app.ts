@@ -98,10 +98,14 @@ export function buildApp(options: BuildOptions): FastifyInstance {
 
   // --- identity -------------------------------------------------------------
 
-  app.get('/v1/me', async (request) => ({
-    principal: request.principal,
-    environments: await secrets.listAccessible(contextOf(request)),
-  }));
+  app.get('/v1/me', async (request) => {
+    const ctx = contextOf(request);
+    const [environments, instanceRole] = await Promise.all([
+      secrets.listAccessible(ctx),
+      admin.instanceRole(ctx.principal),
+    ]);
+    return { principal: request.principal, instanceRole, environments };
+  });
 
   // --- secrets --------------------------------------------------------------
 
@@ -368,10 +372,41 @@ export function buildApp(options: BuildOptions): FastifyInstance {
 
   app.get('/v1/admin/roles', async () => ({ roles: await admin.listRoles() }));
 
-  /** Who holds what, across every project the caller administers. */
+  /** Grant-aware access overview, retained for the CLI and access managers. */
   app.get('/v1/admin/principals', async (request) => ({
     principals: await admin.listPrincipals(contextOf(request)),
   }));
+
+  /** Identities registered with this Coffre instance, including grantless users. */
+  app.get('/v1/admin/directory', async (request) => ({
+    principals: await admin.listDirectory(contextOf(request)),
+  }));
+
+  app.post('/v1/admin/directory', async (request, reply) => {
+    const body = z
+      .object({
+        principalType: z.enum(['user', 'service']),
+        principalId: z.string().min(1).max(320),
+        instanceRole: z.enum(['user', 'owner']).default('user'),
+      })
+      .parse(request.body);
+
+    reply.code(201);
+    return admin.addDirectoryPrincipal(contextOf(request), body);
+  });
+
+  app.patch('/v1/admin/directory/user/:principalId', async (request) => {
+    const params = z
+      .object({ principalId: z.string().min(1).max(320) })
+      .parse(request.params);
+    const body = z.object({ instanceRole: z.enum(['user', 'owner']) }).parse(request.body);
+
+    return admin.updateDirectoryPrincipalRole(
+      contextOf(request),
+      params.principalId,
+      body.instanceRole,
+    );
+  });
 
   app.get('/v1/admin/projects/:project/grants', async (request) => {
     const params = z.object({ project: slug }).parse(request.params);
@@ -422,6 +457,21 @@ export function buildApp(options: BuildOptions): FastifyInstance {
       .parse(request.params);
 
     return admin.removePrincipal(
+      contextOf(request),
+      params.principalType,
+      params.principalId,
+    );
+  });
+
+  app.delete('/v1/admin/directory/:principalType/:principalId', async (request) => {
+    const params = z
+      .object({
+        principalType: z.enum(['user', 'service']),
+        principalId: z.string().min(1).max(320),
+      })
+      .parse(request.params);
+
+    return admin.removeDirectoryPrincipal(
       contextOf(request),
       params.principalType,
       params.principalId,
@@ -613,6 +663,17 @@ async function projectsWithAuditRead(
   rootAdmins: readonly string[],
 ): Promise<'all' | string[]> {
   if (rootAdmins.includes(ctx.principal.id)) return 'all';
+  if (ctx.principal.type === 'user') {
+    const owner = await pool.query(
+      `SELECT 1 FROM principals
+        WHERE principal_type = 'user'
+          AND principal_id = $1
+          AND active
+          AND instance_role = 'owner'`,
+      [ctx.principal.id],
+    );
+    if (owner.rowCount !== 0) return 'all';
+  }
 
   const result = await pool.query<{ project_id: string }>(
     `SELECT DISTINCT COALESCE(g.project_id, e.project_id) AS project_id

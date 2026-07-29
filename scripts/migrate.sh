@@ -35,7 +35,9 @@ schema_exists="$(psql_run -tAc \
 
 if [ "$ledger_count" = "0" ] && [ "$schema_exists" = "t" ]; then
     echo "==> existing schema found with an empty ledger; recording a baseline"
-    for file in packages/db/migrations/*.sql; do
+    # The ledger was introduced after 0005. Only those known legacy migrations
+    # may be baselined: newer files must still execute on an adopted database.
+    for file in packages/db/migrations/000[1-5]_*.sql; do
         psql_run -q -c "INSERT INTO schema_migrations (name, checksum) VALUES ('$(basename "$file")', '$(shasum -a 256 "$file" | cut -d' ' -f1)')"
     done
 fi

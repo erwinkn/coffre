@@ -67,6 +67,7 @@ beforeEach(async () => {
   await pool.query('DELETE FROM secret_versions');
   await pool.query('DELETE FROM secrets');
   await pool.query('DELETE FROM grants');
+  await pool.query('DELETE FROM principals');
   await pool.query('DELETE FROM environments');
   await pool.query('DELETE FROM projects');
 });
@@ -465,7 +466,260 @@ test('removing a principal revokes all of their grants', async () => {
     "SELECT 1 FROM grants WHERE principal_id = 'reader@equisafe.io'",
   );
   assert.equal(remaining.rowCount, 0);
+  const directoryEntry = await pool.query(
+    "SELECT 1 FROM principals WHERE principal_id = 'reader@equisafe.io'",
+  );
+  assert.equal(directoryEntry.rowCount, 1);
   assert.ok((await auditActions()).some((row) => row.action === 'principal.remove'));
+});
+
+test('directory deletion is visible in every affected project audit log', async () => {
+  await seedProject();
+  await app.inject({
+    method: 'POST',
+    url: '/v1/admin/projects/market/grants',
+    ...req(rootToken),
+    payload: { principalType: 'user', principalId: 'reader@equisafe.io', role: 'viewer' },
+  });
+
+  const removed = await app.inject({
+    method: 'DELETE',
+    url: '/v1/admin/directory/user/reader%40equisafe.io',
+    ...req(rootToken),
+  });
+  assert.equal(removed.statusCode, 200);
+  assert.deepEqual(removed.json(), { revoked: 1 });
+
+  const audit = await app.inject({
+    method: 'GET',
+    url: '/v1/audit',
+    ...req(projectAdminToken),
+  });
+  assert.equal(audit.statusCode, 200);
+  const removal = audit
+    .json()
+    .entries.find(
+      (entry: { action: string; metadata: { principalId?: string } }) =>
+        entry.action === 'directory.remove' &&
+        entry.metadata.principalId === 'reader@equisafe.io',
+    );
+  assert.ok(removal, 'the project auditor should see the access revocation');
+});
+
+test('an instance owner manages identities without granting project access', async () => {
+  const ownerToken = await idp.mintUserToken({
+    audience: AUD,
+    email: 'instance-owner@equisafe.io',
+  });
+
+  const addedOwner = await app.inject({
+    method: 'POST',
+    url: '/v1/admin/directory',
+    ...req(rootToken),
+    payload: {
+      principalType: 'user',
+      principalId: 'instance-owner@equisafe.io',
+      instanceRole: 'owner',
+    },
+  });
+  assert.equal(addedOwner.statusCode, 201);
+
+  const me = await app.inject({
+    method: 'GET',
+    url: '/v1/me',
+    ...req(ownerToken),
+  });
+  assert.equal(me.statusCode, 200);
+  assert.equal(me.json().instanceRole, 'owner');
+
+  const addedService = await app.inject({
+    method: 'POST',
+    url: '/v1/admin/directory',
+    ...req(ownerToken),
+    payload: {
+      principalType: 'service',
+      principalId: 'reporting.access',
+      instanceRole: 'user',
+    },
+  });
+  assert.equal(addedService.statusCode, 201);
+
+  const listed = await app.inject({
+    method: 'GET',
+    url: '/v1/admin/directory',
+    ...req(ownerToken),
+  });
+  assert.equal(listed.statusCode, 200);
+  const service = listed
+    .json()
+    .principals.find(
+      (principal: { principalId: string }) =>
+        principal.principalId === 'reporting.access',
+    );
+  assert.equal(service.instanceRole, 'user');
+
+  const grants = await pool.query(
+    "SELECT 1 FROM grants WHERE principal_id = 'reporting.access'",
+  );
+  assert.equal(grants.rowCount, 0);
+
+  const audit = await app.inject({
+    method: 'GET',
+    url: '/v1/audit',
+    ...req(ownerToken),
+  });
+  assert.equal(audit.statusCode, 200);
+
+  const removed = await app.inject({
+    method: 'DELETE',
+    url: '/v1/admin/directory/service/reporting.access',
+    ...req(ownerToken),
+  });
+  assert.equal(removed.statusCode, 200);
+  assert.deepEqual(removed.json(), { revoked: 0 });
+  const directoryEntry = await pool.query(
+    "SELECT 1 FROM principals WHERE principal_id = 'reporting.access' AND active",
+  );
+  assert.equal(directoryEntry.rowCount, 0);
+
+  const removedOwner = await app.inject({
+    method: 'DELETE',
+    url: '/v1/admin/directory/user/instance-owner%40equisafe.io',
+    ...req(rootToken),
+  });
+  assert.equal(removedOwner.statusCode, 200);
+
+  const auditAfterOffboarding = await app.inject({
+    method: 'GET',
+    url: '/v1/audit',
+    ...req(ownerToken),
+  });
+  assert.equal(auditAfterOffboarding.statusCode, 403);
+
+  const selfReactivation = await app.inject({
+    method: 'POST',
+    url: '/v1/admin/directory',
+    ...req(ownerToken),
+    payload: {
+      principalType: 'user',
+      principalId: 'instance-owner@equisafe.io',
+      instanceRole: 'owner',
+    },
+  });
+  assert.equal(selfReactivation.statusCode, 403);
+});
+
+test('an offboarded principal must be re-added before receiving access again', async () => {
+  await seedProject();
+  const grant = {
+    principalType: 'user',
+    principalId: 'reader@equisafe.io',
+    role: 'viewer',
+  };
+
+  const initiallyGranted = await app.inject({
+    method: 'POST',
+    url: '/v1/admin/projects/market/grants',
+    ...req(rootToken),
+    payload: grant,
+  });
+  assert.equal(initiallyGranted.statusCode, 201);
+
+  const removed = await app.inject({
+    method: 'DELETE',
+    url: '/v1/admin/directory/user/reader%40equisafe.io',
+    ...req(rootToken),
+  });
+  assert.equal(removed.statusCode, 200);
+
+  const silentlyRegranted = await app.inject({
+    method: 'POST',
+    url: '/v1/admin/projects/market/grants',
+    ...req(rootToken),
+    payload: grant,
+  });
+  assert.equal(silentlyRegranted.statusCode, 409);
+  assert.match(silentlyRegranted.json().message, /add it to the directory/i);
+
+  const readded = await app.inject({
+    method: 'POST',
+    url: '/v1/admin/directory',
+    ...req(rootToken),
+    payload: {
+      principalType: 'user',
+      principalId: 'reader@equisafe.io',
+      instanceRole: 'user',
+    },
+  });
+  assert.equal(readded.statusCode, 201);
+
+  const explicitlyRegranted = await app.inject({
+    method: 'POST',
+    url: '/v1/admin/projects/market/grants',
+    ...req(rootToken),
+    payload: grant,
+  });
+  assert.equal(explicitlyRegranted.statusCode, 201);
+});
+
+test('ordinary users cannot manage the instance directory', async () => {
+  await seedProject();
+
+  const listed = await app.inject({
+    method: 'GET',
+    url: '/v1/admin/directory',
+    ...req(projectAdminToken),
+  });
+  assert.equal(listed.statusCode, 403);
+
+  const me = await app.inject({
+    method: 'GET',
+    url: '/v1/me',
+    ...req(projectAdminToken),
+  });
+  assert.equal(me.statusCode, 200);
+  assert.equal(me.json().instanceRole, 'user');
+
+  const added = await app.inject({
+    method: 'POST',
+    url: '/v1/admin/directory',
+    ...req(projectAdminToken),
+    payload: {
+      principalType: 'user',
+      principalId: 'someone@equisafe.io',
+      instanceRole: 'user',
+    },
+  });
+  assert.equal(added.statusCode, 403);
+});
+
+test('service accounts cannot be owners and configured root admins cannot be edited', async () => {
+  const serviceOwner = await app.inject({
+    method: 'POST',
+    url: '/v1/admin/directory',
+    ...req(rootToken),
+    payload: {
+      principalType: 'service',
+      principalId: 'ci.access',
+      instanceRole: 'owner',
+    },
+  });
+  assert.equal(serviceOwner.statusCode, 409);
+
+  const editedRoot = await app.inject({
+    method: 'PATCH',
+    url: `/v1/admin/directory/user/${encodeURIComponent(ROOT)}`,
+    ...req(rootToken),
+    payload: { instanceRole: 'user' },
+  });
+  assert.equal(editedRoot.statusCode, 409);
+
+  const removedRoot = await app.inject({
+    method: 'DELETE',
+    url: `/v1/admin/directory/user/${encodeURIComponent(ROOT)}`,
+    ...req(rootToken),
+  });
+  assert.equal(removedRoot.statusCode, 409);
 });
 
 test('a service principal can be granted access by common_name', async () => {

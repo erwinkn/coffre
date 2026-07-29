@@ -63,6 +63,7 @@ beforeEach(async () => {
   await pool.query('DELETE FROM secret_versions');
   await pool.query('DELETE FROM secrets');
   await pool.query('DELETE FROM grants');
+  await pool.query('DELETE FROM principals');
   await pool.query('DELETE FROM environments');
   await pool.query('DELETE FROM projects');
 
@@ -170,6 +171,22 @@ test('an access manager grants access WITHOUT being able to read secrets', async
     },
   });
   assert.equal(created.statusCode, 201);
+
+  // The grant-aware operational overview remains available to project access
+  // managers even though the instance directory is owner-only.
+  const overview = await app.inject({
+    method: 'GET',
+    url: '/v1/admin/principals',
+    ...req('accessmgr@equisafe.io'),
+  });
+  assert.equal(overview.statusCode, 200);
+  const developer = overview
+    .json()
+    .principals.find(
+      (principal: { principalId: string }) =>
+        principal.principalId === 'dev@equisafe.io',
+    );
+  assert.equal(developer.grants[0].project, 'market');
 
   // ...but cannot read the secrets they are handing out access to.
   const read = await app.inject({

@@ -4,7 +4,7 @@ import { toast } from 'sonner';
 import { createProject, listProjects } from '../lib/server';
 import { useAction } from '../lib/use-action';
 import type { ProjectSummary } from '../lib/api';
-import { EmptyState, ErrorLine, Notice, Spinner } from '../components/ui';
+import { EmptyState, ErrorLine, Modal, Notice, Spinner } from '../components/ui';
 import { Folder, Inbox, Layers, Plus } from '../components/icons';
 
 export const Route = createFileRoute('/projects/')({
@@ -114,26 +114,23 @@ function NewProject() {
   const [open, setOpen] = useState(false);
   const { pending, error, run } = useAction();
 
-  if (!open) {
-    return (
+  return (
+    <>
       <div style={{ marginTop: 'var(--space-5)' }}>
         <button className="btn" onClick={() => setOpen(true)}>
           <Plus size={14} />
           New project
         </button>
       </div>
-    );
-  }
 
-  return (
-    <section className="section">
-      <div className="section-head">
-        <h2>New project</h2>
-      </div>
-
-      <div className="card card-pad">
+      <Modal
+        open={open}
+        onOpenChange={setOpen}
+        title="New project"
+        description="Create a project, then add its environments and access."
+      >
         <form
-          className="form-grid"
+          className="dialog-form stack"
           onSubmit={(event) => {
             event.preventDefault();
             run(
@@ -147,7 +144,7 @@ function NewProject() {
             );
           }}
         >
-          <label className="field" style={{ maxWidth: '15rem' }}>
+          <label className="field">
             <span className="label">Slug</span>
             <input
               className="input"
@@ -158,7 +155,7 @@ function NewProject() {
             />
           </label>
 
-          <label className="field grow">
+          <label className="field">
             <span className="label">Display name</span>
             <input
               className="input"
@@ -168,25 +165,23 @@ function NewProject() {
             />
           </label>
 
-          <button
-            className="btn btn-primary"
-            type="submit"
-            disabled={pending || slug === '' || name === ''}
-          >
-            {pending && <Spinner />}
-            Create project
-          </button>
-          <button className="btn" type="button" onClick={() => setOpen(false)}>
-            Cancel
-          </button>
-        </form>
+          <ErrorLine error={error} />
 
-        {error !== null && (
-          <div style={{ marginTop: 'var(--space-4)' }}>
-            <ErrorLine error={error} />
+          <div className="dialog-actions">
+            <button className="btn" type="button" onClick={() => setOpen(false)}>
+              Cancel
+            </button>
+            <button
+              className="btn btn-primary"
+              type="submit"
+              disabled={pending || slug === '' || name === ''}
+            >
+              {pending && <Spinner />}
+              Create project
+            </button>
           </div>
-        )}
-      </div>
-    </section>
+        </form>
+      </Modal>
+    </>
   );
 }

@@ -1,33 +1,27 @@
-import { useState } from 'react';
-import { createFileRoute, Link } from '@tanstack/react-router';
+import { useEffect, useState } from 'react';
+import { createFileRoute } from '@tanstack/react-router';
+import { DropdownMenu } from 'radix-ui';
 import { toast } from 'sonner';
 import {
-  createGrant,
-  listPrincipals,
-  removePrincipal,
-  updateGrant,
+  createDirectoryPrincipal,
+  listDirectoryPrincipals,
+  removeDirectoryPrincipal,
+  updateDirectoryPrincipalRole,
 } from '../lib/server';
 import { useAction } from '../lib/use-action';
-import type { Principal, ProjectSummary, RoleRow } from '../lib/api';
+import type { DirectoryPrincipal } from '../lib/api';
 import {
-  parseProjectAccess,
-  projectAccessLabel,
-  projectAccessOptions,
-  projectAccessRoles,
-} from '../lib/project-access';
-import {
-  ConfirmButton,
+  ConfirmDialog,
   EmptyState,
   ErrorLine,
   Modal,
   Notice,
   Spinner,
-  Tip,
 } from '../components/ui';
-import { Key, Plus, Users, X } from '../components/icons';
+import { Key, MoreHorizontal, Pencil, Plus, Users, X } from '../components/icons';
 
 export const Route = createFileRoute('/access')({
-  loader: () => listPrincipals(),
+  loader: () => listDirectoryPrincipals(),
   component: AccessPage,
 });
 
@@ -38,10 +32,9 @@ function AccessPage() {
     <>
       <div className="page-head">
         <div>
-          <h1>Users</h1>
+          <h1>Access</h1>
           <p className="sub">
-            Human and machine access are managed separately. Permissions apply to a
-            project or one environment; root admins remain global configuration.
+            Manage who can use Coffre. Project permissions are managed from each project.
           </p>
         </div>
       </div>
@@ -52,13 +45,11 @@ function AccessPage() {
         <>
           <PrincipalSection
             title="Users"
-            description="People authenticated by Cloudflare Access email."
+            description="People authenticated by their Cloudflare Access email."
             principalType="user"
             principals={result.principals.filter(
               (principal) => principal.principalType === 'user',
             )}
-            projects={result.projects}
-            roles={result.roles}
           />
           <PrincipalSection
             title="Service accounts"
@@ -67,8 +58,6 @@ function AccessPage() {
             principals={result.principals.filter(
               (principal) => principal.principalType === 'service',
             )}
-            projects={result.projects}
-            roles={result.roles}
           />
         </>
       )}
@@ -81,15 +70,11 @@ function PrincipalSection({
   description,
   principalType,
   principals,
-  projects,
-  roles,
 }: {
   title: string;
   description: string;
   principalType: 'user' | 'service';
-  principals: Principal[];
-  projects: ProjectSummary[];
-  roles: RoleRow[];
+  principals: DirectoryPrincipal[];
 }) {
   return (
     <section className="section">
@@ -98,20 +83,16 @@ function PrincipalSection({
           <h2>{title}</h2>
           <p className="sub">{description}</p>
         </div>
-        <AddAccess
-          principalType={principalType}
-          projects={projects}
-        />
+        <AddPrincipal principalType={principalType} />
       </div>
 
       <div className="card">
         {principals.length === 0 ? (
           <EmptyState
             icon={principalType === 'user' ? <Users size={26} /> : <Key size={26} />}
-            title={`No ${title.toLowerCase()} visible`}
+            title={`No ${title.toLowerCase()}`}
           >
-            Add the first one with project permissions. A principal with no access does
-            not appear here.
+            Add the first {principalType === 'user' ? 'user' : 'service account'}.
           </EmptyState>
         ) : (
           <div className="table-wrap">
@@ -119,20 +100,15 @@ function PrincipalSection({
               <thead>
                 <tr>
                   <th>{principalType === 'user' ? 'Email' : 'Common name'}</th>
-                  <th>Project</th>
-                  <th>Permissions</th>
-                  <th className="shrink">Expires</th>
+                  {principalType === 'user' && <th>Role</th>}
                   <th className="shrink" />
                 </tr>
               </thead>
-              {principals.map((principal) => (
-                <PrincipalRows
-                  key={principal.principalId}
-                  principal={principal}
-                  projects={projects}
-                  roles={roles}
-                />
-              ))}
+              <tbody>
+                {principals.map((principal) => (
+                  <PrincipalRow key={principal.principalId} principal={principal} />
+                ))}
+              </tbody>
             </table>
           </div>
         )}
@@ -141,222 +117,202 @@ function PrincipalSection({
   );
 }
 
-function PrincipalRows({
-  principal,
-  projects,
-  roles,
-}: {
-  principal: Principal;
-  projects: ProjectSummary[];
-  roles: RoleRow[];
-}) {
-  const { pending, error, run } = useAction();
+function PrincipalRow({ principal }: { principal: DirectoryPrincipal }) {
+  const [editing, setEditing] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [instanceRole, setInstanceRole] = useState<'user' | 'owner'>(
+    principal.instanceRole === 'owner' ? 'owner' : 'user',
+  );
+  const { pending, error, setError, run } = useAction();
 
-  if (principal.isRootAdmin && principal.grants.length === 0) {
-    return (
-      <tbody>
-        <tr>
-          <td className="mono nowrap">
-            {principal.principalId}{' '}
-            <Tip label="Granted by COFFRE_ROOT_ADMINS, not by a database grant.">
-              <span className="pill pill-accent">root admin</span>
-            </Tip>
-          </td>
-          <td className="meta">Everything, from configuration.</td>
-          <td>
-            <span className="pill pill-accent">Root admin</span>
-          </td>
-          <td className="num">--</td>
-          <td className="shrink">
-            <Tip label="Remove this principal from COFFRE_ROOT_ADMINS to revoke it.">
-              <span className="meta nowrap">Not editable here</span>
-            </Tip>
-          </td>
-        </tr>
-      </tbody>
-    );
-  }
+  useEffect(() => {
+    if (error !== null && !editing) toast.error(error);
+  }, [editing, error]);
+
+  const roleLabel =
+    principal.instanceRole === 'root-admin'
+      ? 'Root admin'
+      : principal.instanceRole === 'owner'
+        ? 'Owner'
+        : 'User';
 
   return (
-    <tbody className="principal-group">
-      {principal.grants.map((grant, index) => {
-        const assignableRoles = projectAccessRoles(
-          roles,
-          grant.environmentSlug,
-          grant.role,
-        );
+    <tr>
+      <td className="mono">{principal.principalId}</td>
+      {principal.principalType === 'user' && (
+        <td>
+          <span
+            className={`pill${principal.instanceRole === 'user' ? '' : ' pill-accent'}`}
+          >
+            {roleLabel}
+          </span>
+        </td>
+      )}
+      <td className="shrink">
+        <DropdownMenu.Root>
+          <DropdownMenu.Trigger asChild>
+            <button
+              className="btn btn-sm btn-quiet btn-icon"
+              aria-label={`Actions for ${principal.principalId}`}
+              disabled={pending}
+            >
+              <MoreHorizontal size={16} />
+            </button>
+          </DropdownMenu.Trigger>
+          <DropdownMenu.Portal>
+            <DropdownMenu.Content className="menu" sideOffset={6} align="end">
+              {principal.isRootAdmin ? (
+                <DropdownMenu.Item className="menu-item" disabled>
+                  Managed in configuration
+                </DropdownMenu.Item>
+              ) : (
+                <>
+                  {principal.principalType === 'user' && (
+                    <>
+                      <DropdownMenu.Item
+                        className="menu-item"
+                        onSelect={() => {
+                          setInstanceRole(
+                            principal.instanceRole === 'owner' ? 'owner' : 'user',
+                          );
+                          setEditing(true);
+                        }}
+                      >
+                        <Pencil size={14} />
+                        Edit role
+                      </DropdownMenu.Item>
+                      <DropdownMenu.Separator className="menu-sep" />
+                    </>
+                  )}
+                  <DropdownMenu.Item
+                    className="menu-item menu-item-danger"
+                    onSelect={() => setConfirming(true)}
+                  >
+                    <X size={14} />
+                    Delete
+                  </DropdownMenu.Item>
+                </>
+              )}
+            </DropdownMenu.Content>
+          </DropdownMenu.Portal>
+        </DropdownMenu.Root>
 
-        return (
-          <tr key={grant.id}>
-            {index === 0 && (
-              <td className="mono nowrap principal-name-cell" rowSpan={principal.grants.length}>
-                <div className="stack">
-                  <span>
-                    {principal.principalId}{' '}
-                    {principal.isRootAdmin && (
-                      <Tip label="Global access from COFFRE_ROOT_ADMINS.">
-                        <span className="pill pill-accent">root admin</span>
-                      </Tip>
-                    )}
-                  </span>
-                  <div className="cluster">
-                    <AddAccess
-                      compact
-                      principalType={principal.principalType}
-                      principalId={principal.principalId}
-                      projects={projects}
-                    />
-                    {principal.isRootAdmin ? (
-                      <Tip label="Remove this principal from COFFRE_ROOT_ADMINS to revoke global access.">
-                        <span className="meta nowrap">Configured globally</span>
-                      </Tip>
-                    ) : (
-                      <ConfirmButton
-                        trigger={
-                          <button className="btn btn-sm btn-danger" disabled={pending}>
-                            <X size={13} />
-                            Remove
-                          </button>
-                        }
-                        title={`Remove ${principal.principalId}?`}
-                        body="Every project and environment permission shown here is revoked immediately."
-                        confirmLabel={`Remove ${principal.principalType}`}
-                        onConfirm={() =>
-                          run(
-                            () =>
-                              removePrincipal({
-                                data: {
-                                  principalType: principal.principalType,
-                                  principalId: principal.principalId,
-                                },
-                              }),
-                            () => toast.success(`${principal.principalId} removed`),
-                          )
-                        }
-                      />
-                    )}
-                  </div>
-                  <ErrorLine error={error} />
-                </div>
-              </td>
-            )}
-            <td>
-              <Link
-                className="mono"
-                to="/projects/$project"
-                params={{ project: grant.project }}
-              >
-                {grant.project}
-              </Link>
-            </td>
-            <td>
-              <select
-                className="select access-role-select"
-                aria-label={`Permissions for ${principal.principalId} on ${grant.project}`}
-                value={grant.role}
-                disabled={pending}
-                onChange={(event) => {
-                  const role = event.target.value;
-                  void run(
-                    () =>
-                      updateGrant({
-                        data: { project: grant.project, grantId: grant.id, role },
-                      }),
-                    () => toast.success(`${principal.principalId} is now ${role}`),
-                  );
-                }}
-              >
-                {assignableRoles.map((role) => (
-                  <option key={role.slug} value={role.slug}>
-                    {projectAccessLabel({
-                      role: role.slug,
-                      roleName: role.name,
-                      environmentSlug: grant.environmentSlug,
-                    })}
-                  </option>
-                ))}
-              </select>
-            </td>
-            <td className="num">
-              {grant.expiresAt === null ? '--' : grant.expiresAt.slice(0, 10)}
-            </td>
-            <td className="shrink" />
-          </tr>
-        );
-      })}
-    </tbody>
+        {principal.principalType === 'user' && !principal.isRootAdmin && (
+          <Modal
+            open={editing}
+            onOpenChange={(open) => {
+              setEditing(open);
+              if (!open) setError(null);
+            }}
+            title={`Edit ${principal.principalId}`}
+            description="Owners can manage users and service accounts and access the full audit log."
+          >
+            <form
+              className="dialog-form stack"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void run(
+                  () =>
+                    updateDirectoryPrincipalRole({
+                      data: { principalId: principal.principalId, instanceRole },
+                    }),
+                  () => {
+                    toast.success(`${principal.principalId} is now ${instanceRole}`);
+                    setEditing(false);
+                  },
+                );
+              }}
+            >
+              <RoleField value={instanceRole} onChange={setInstanceRole} />
+              <ErrorLine error={error} />
+              <div className="dialog-actions">
+                <button className="btn" type="button" onClick={() => setEditing(false)}>
+                  Cancel
+                </button>
+                <button className="btn btn-primary" type="submit" disabled={pending}>
+                  {pending && <Spinner />}
+                  Save
+                </button>
+              </div>
+            </form>
+          </Modal>
+        )}
+
+        {!principal.isRootAdmin && (
+          <ConfirmDialog
+            open={confirming}
+            onOpenChange={setConfirming}
+            title={`Delete ${principal.principalId}?`}
+            body="This removes the identity and immediately revokes all of its project permissions."
+            confirmLabel={`Delete ${
+              principal.principalType === 'user' ? 'user' : 'service account'
+            }`}
+            onConfirm={() =>
+              void run(
+                () =>
+                  removeDirectoryPrincipal({
+                    data: {
+                      principalType: principal.principalType,
+                      principalId: principal.principalId,
+                    },
+                  }),
+                () => toast.success(`${principal.principalId} deleted`),
+              )
+            }
+          />
+        )}
+      </td>
+    </tr>
   );
 }
 
-function AddAccess({
-  principalType,
-  principalId: fixedPrincipalId,
-  projects,
-  compact = false,
-}: {
-  principalType: 'user' | 'service';
-  principalId?: string;
-  projects: ProjectSummary[];
-  compact?: boolean;
-}) {
+function AddPrincipal({ principalType }: { principalType: 'user' | 'service' }) {
   const [open, setOpen] = useState(false);
-  const [principalId, setPrincipalId] = useState(fixedPrincipalId ?? '');
-  const [project, setProject] = useState(projects[0]?.slug ?? '');
-  const [permission, setPermission] = useState('viewer:');
+  const [principalId, setPrincipalId] = useState('');
+  const [instanceRole, setInstanceRole] = useState<'user' | 'owner'>('user');
   const { pending, error, setError, run } = useAction();
-
-  const selectedProject = projects.find((entry) => entry.slug === project);
-  const permissionOptions = projectAccessOptions(selectedProject?.environments ?? []);
 
   function close() {
     setOpen(false);
+    setPrincipalId('');
+    setInstanceRole('user');
     setError(null);
-    if (fixedPrincipalId === undefined) setPrincipalId('');
-    setPermission('viewer:');
   }
+
+  const kind = principalType === 'user' ? 'user' : 'service account';
 
   return (
     <>
-      <button
-        className={compact ? 'btn btn-sm btn-quiet' : 'btn btn-sm'}
-        onClick={() => setOpen(true)}
-        disabled={projects.length === 0}
-      >
+      <button className="btn btn-sm" onClick={() => setOpen(true)}>
         <Plus size={13} />
-        {compact
-          ? 'Add access'
-          : `Add ${principalType === 'user' ? 'user' : 'service account'}`}
+        Add
       </button>
 
       <Modal
         open={open}
         onOpenChange={(next) => (next ? setOpen(true) : close())}
-        title={`Add ${principalType === 'user' ? 'user' : 'service-account'} access`}
-        wide
-        description="Owner manages the whole project and its access. Read and write can cover every environment or one specific environment. Root admin remains global deployment configuration."
+        title={`Add ${kind}`}
+        description={
+          principalType === 'user'
+            ? 'Add a user to Coffre. Project permissions are assigned from each project.'
+            : 'Add a service account to Coffre. Project permissions are assigned from each project.'
+        }
       >
         <form
           className="dialog-form stack"
           onSubmit={(event) => {
             event.preventDefault();
-            const access = parseProjectAccess(permission);
             void run(
               () =>
-                createGrant({
+                createDirectoryPrincipal({
                   data: {
-                    project,
                     principalType,
-                    principalId,
-                    role: access.role,
-                    environmentSlug: access.environmentSlug,
-                    expiresAt: null,
+                    principalId: principalId.trim(),
+                    instanceRole: principalType === 'user' ? instanceRole : 'user',
                   },
                 }),
               () => {
-                const label =
-                  permissionOptions.find((option) => option.value === permission)?.label ??
-                  'access';
-                toast.success(`${principalId} granted ${label.toLowerCase()} on ${project}`);
+                toast.success(`${principalId.trim()} added`);
                 close();
               },
             );
@@ -370,7 +326,6 @@ function AddAccess({
               className="input"
               autoFocus
               value={principalId}
-              disabled={fixedPrincipalId !== undefined}
               placeholder={
                 principalType === 'user' ? 'someone@equisafe.io' : 'ci-deploy.access'
               }
@@ -378,46 +333,11 @@ function AddAccess({
             />
           </label>
 
-          <div className="form-grid">
-            <label className="field grow">
-              <span className="label">Project</span>
-              <select
-                className="select"
-                value={project}
-                onChange={(event) => {
-                  setProject(event.target.value);
-                  setPermission('viewer:');
-                }}
-              >
-                {projects.map((entry) => (
-                  <option key={entry.slug} value={entry.slug}>
-                    {entry.name}
-                  </option>
-                ))}
-              </select>
-            </label>
+          {principalType === 'user' && (
+            <RoleField value={instanceRole} onChange={setInstanceRole} />
+          )}
 
-            <label className="field grow">
-              <span className="label">Permissions</span>
-              <select
-                className="select"
-                value={permission}
-                onChange={(event) => setPermission(event.target.value)}
-              >
-                {permissionOptions.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-
-          <p className="meta">
-            Owner includes project settings and access management. Write includes read.
-          </p>
           <ErrorLine error={error} />
-
           <div className="dialog-actions">
             <button className="btn" type="button" onClick={close}>
               Cancel
@@ -425,14 +345,39 @@ function AddAccess({
             <button
               className="btn btn-primary"
               type="submit"
-              disabled={pending || principalId.trim() === '' || project === ''}
+              disabled={pending || principalId.trim() === ''}
             >
               {pending && <Spinner />}
-              Add access
+              Add
             </button>
           </div>
         </form>
       </Modal>
     </>
+  );
+}
+
+function RoleField({
+  value,
+  onChange,
+}: {
+  value: 'user' | 'owner';
+  onChange: (value: 'user' | 'owner') => void;
+}) {
+  return (
+    <label className="field">
+      <span className="label">Role</span>
+      <select
+        className="select"
+        value={value}
+        onChange={(event) => onChange(event.target.value as 'user' | 'owner')}
+      >
+        <option value="user">User</option>
+        <option value="owner">Owner</option>
+      </select>
+      <span className="meta">
+        Owners can manage users and service accounts and access the full audit log.
+      </span>
+    </label>
   );
 }

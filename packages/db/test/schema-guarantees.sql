@@ -17,6 +17,7 @@ UPDATE secrets SET current_version_id = NULL;
 DELETE FROM secret_versions;
 DELETE FROM secrets;
 DELETE FROM grants;
+DELETE FROM principals;
 DELETE FROM environments;
 DELETE FROM projects;
 

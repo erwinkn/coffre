@@ -69,6 +69,7 @@ beforeEach(async () => {
   await pool.query('DELETE FROM secret_versions');
   await pool.query('DELETE FROM secrets');
   await pool.query('DELETE FROM grants');
+  await pool.query('DELETE FROM principals');
   await pool.query('DELETE FROM environments');
   await pool.query('DELETE FROM projects');
 
@@ -85,6 +86,13 @@ beforeEach(async () => {
   );
 
   // reader may read dev only. ci may read prod only.
+  await pool.query(
+    `INSERT INTO principals (
+       principal_type, principal_id, instance_role, created_by
+     )
+     VALUES ('user', 'reader@equisafe.io', 'user', 'test'),
+            ('service', 'ci-deploy.access', 'user', 'test')`,
+  );
   const viewer = await pool.query("SELECT id FROM roles WHERE slug = 'viewer'");
   await pool.query(
     `INSERT INTO grants (principal_type, principal_id, environment_id, role_id, created_by)

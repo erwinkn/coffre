@@ -55,7 +55,10 @@ export async function coffreFetch<T>(
       ...init,
       headers: {
         'cf-access-jwt-assertion': token,
-        'content-type': 'application/json',
+        // Fastify rejects an empty request carrying application/json before it
+        // reaches the route. Bodyless DELETEs therefore must not claim to have
+        // JSON; calls with a body in this app always serialise JSON.
+        ...(init.body === undefined ? {} : { 'content-type': 'application/json' }),
         ...(init.headers ?? {}),
       },
       cache: 'no-store',
@@ -87,6 +90,7 @@ export async function coffreFetch<T>(
 
 export type Me = {
   principal: { type: 'user' | 'service'; id: string };
+  instanceRole: 'user' | 'owner' | 'root-admin';
   environments: { project: string; environment: string; permissions: Permission[] }[];
 };
 
@@ -173,19 +177,12 @@ export type AuditRow = {
   subject: string;
 };
 
-/** A principal in the cross-project access overview. */
-export type Principal = {
+/** An identity registered with this Coffre instance. */
+export type DirectoryPrincipal = {
   principalType: 'user' | 'service';
   principalId: string;
+  instanceRole: 'user' | 'owner' | 'root-admin';
   isRootAdmin: boolean;
-  grants: {
-    id: string;
-    project: string;
-    scope: string;
-    environmentSlug: string | null;
-    role: string;
-    expiresAt: string | null;
-  }[];
 };
 
 export type SecretVersion = {

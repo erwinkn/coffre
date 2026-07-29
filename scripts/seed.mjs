@@ -57,6 +57,7 @@ await pool.query('UPDATE secrets SET current_version_id = NULL');
 await pool.query('DELETE FROM secret_versions');
 await pool.query('DELETE FROM secrets');
 await pool.query('DELETE FROM grants');
+await pool.query('DELETE FROM principals');
 await pool.query('DELETE FROM environments');
 await pool.query('DELETE FROM projects');
 await pool.query(
