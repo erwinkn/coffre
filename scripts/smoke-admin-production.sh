@@ -23,6 +23,11 @@ trap cleanup EXIT INT TERM
 
 PORT="$smoke_port" HOST="$smoke_host" \
     NITRO_PORT="$smoke_port" NITRO_HOST="$smoke_host" TEST='' \
+    COFFRE_AUTH_MODE=cloudflare \
+    COFFRE_ACCESS_ISSUER=https://coffre-smoke.cloudflareaccess.com \
+    COFFRE_ACCESS_JWKS_URL=https://coffre-smoke.cloudflareaccess.com/cdn-cgi/access/certs \
+    COFFRE_ACCESS_AUD=coffre-smoke-aud COFFRE_DEV_IDP_URL='' \
+    COFFRE_API_URL=https://api-smoke.example.test \
     node ../../scripts/start-admin-production.mjs \
     >"$smoke_tmp/server.log" 2>&1 &
 server_pid=$!
@@ -47,7 +52,7 @@ for _ in {1..100}; do
     if [[ -n "$smoke_url" ]] &&
         curl --fail --silent --show-error "$smoke_url" \
         --output "$smoke_tmp/login.html" 2>/dev/null; then
-        if grep -Fq '<h1>Sign in</h1>' "$smoke_tmp/login.html"; then
+        if grep -Fq '<h1>Cloudflare Access required</h1>' "$smoke_tmp/login.html"; then
             ready=true
             break
         fi
@@ -65,6 +70,11 @@ fi
 assigned_port="$(node -e 'console.log(new URL(process.argv[1]).port)' "$smoke_url")"
 if PORT="$assigned_port" HOST="$smoke_host" \
     NITRO_PORT="$assigned_port" NITRO_HOST="$smoke_host" TEST='' \
+    COFFRE_AUTH_MODE=cloudflare \
+    COFFRE_ACCESS_ISSUER=https://coffre-smoke.cloudflareaccess.com \
+    COFFRE_ACCESS_JWKS_URL=https://coffre-smoke.cloudflareaccess.com/cdn-cgi/access/certs \
+    COFFRE_ACCESS_AUD=coffre-smoke-aud COFFRE_DEV_IDP_URL='' \
+    COFFRE_API_URL=https://api-smoke.example.test \
     node ../../scripts/start-admin-production.mjs \
     >"$smoke_tmp/collision.log" 2>&1; then
     echo 'A second production server reported success on the occupied smoke port:' >&2
