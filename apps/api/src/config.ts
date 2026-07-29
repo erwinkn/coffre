@@ -88,6 +88,12 @@ export function parseRootAdmins(mode: AuthMode, raw: string | undefined): string
 }
 
 export function loadConfig(): Config {
+  if (process.env.COFFRE_OWNER_DATABASE_URL !== undefined) {
+    throw new Error(
+      'COFFRE_OWNER_DATABASE_URL is for migration and provisioning commands, not the API',
+    );
+  }
+
   const auth = loadAuthConfig(process.env);
   const rootAdmins = parseRootAdmins(auth.mode, process.env.COFFRE_ROOT_ADMINS);
 

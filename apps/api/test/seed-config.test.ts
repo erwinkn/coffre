@@ -5,7 +5,7 @@ import { loadLocalSeedConfig } from '../../../scripts/seed-config.mjs';
 
 const local = {
   COFFRE_AUTH_MODE: 'dev',
-  COFFRE_DATABASE_URL:
+  COFFRE_OWNER_DATABASE_URL:
     'postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/coffre',
   COFFRE_API_URL: 'http://127.0.0.1:8080',
   COFFRE_DEV_IDP_URL: 'http://127.0.0.1:8081',
@@ -15,7 +15,7 @@ const local = {
 
 test('seed accepts only the checked-in local development targets', () => {
   assert.deepEqual(loadLocalSeedConfig(local), {
-    databaseUrl:
+    ownerDatabaseUrl:
       'postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/coffre',
     apiUrl: 'http://127.0.0.1:8080',
     idpUrl: 'http://127.0.0.1:8081',
@@ -29,9 +29,9 @@ test('seed rejects a production database exported over the dev env file', () => 
     () =>
       loadLocalSeedConfig({
         ...local,
-        COFFRE_DATABASE_URL: 'postgresql://coffre@db.internal.example/coffre',
+        COFFRE_OWNER_DATABASE_URL: 'postgresql://coffre@db.internal.example/coffre',
       }),
-    /refuses non-local databaseUrl/,
+    /refuses non-local ownerDatabaseUrl/,
   );
 });
 

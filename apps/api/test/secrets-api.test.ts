@@ -8,19 +8,20 @@ import { DevIdp } from '../../dev-idp/src/idp.ts';
 import { AccessIdentityVerifier } from '../../../packages/core/src/identity/verifier.ts';
 import { LocalKekProvider } from '../../../packages/core/src/kek/local.ts';
 import { KekRegistry } from '../../../packages/core/src/kek/registry.ts';
+import {
+  TEST_OWNER_DATABASE_URL,
+  TEST_RUNTIME_DATABASE_URL,
+} from '../../../packages/db/test/connections.ts';
 import { buildApp } from '../src/app.ts';
 
 const AUD = 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90';
 const HEADER = 'cf-access-jwt-assertion';
-const CONNECTION =
-  process.env.COFFRE_DATABASE_URL ??
-  'postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/coffre';
-
 const CHAIN_KEY = randomBytes(32);
 const ROOT_ADMIN = 'erwin@equisafe.io';
 
 let idp: DevIdp;
 let pool: pg.Pool;
+let runtimePool: pg.Pool;
 let app: FastifyInstance;
 
 let adminToken: string;
@@ -32,10 +33,11 @@ before(async () => {
   idp = new DevIdp();
   await idp.start();
 
-  pool = new pg.Pool({ connectionString: CONNECTION });
+  pool = new pg.Pool({ connectionString: TEST_OWNER_DATABASE_URL });
+  runtimePool = new pg.Pool({ connectionString: TEST_RUNTIME_DATABASE_URL });
 
   app = buildApp({
-    pool,
+    pool: runtimePool,
     authMode: 'dev',
     verifier: new AccessIdentityVerifier({
       issuer: idp.issuer,
@@ -56,6 +58,7 @@ before(async () => {
 
 after(async () => {
   await app.close();
+  await runtimePool.end();
   await pool.end();
   await idp.stop();
 });
@@ -122,6 +125,21 @@ async function auditRows(): Promise<
 }
 
 // --- writes -----------------------------------------------------------------
+
+test('the API pool uses the restricted runtime login', async () => {
+  const identity = await runtimePool.query<{ current_user: string }>(
+    'SELECT current_user',
+  );
+  assert.equal(identity.rows[0].current_user, 'coffre_test_app');
+
+  const response = await app.inject({
+    method: 'PUT',
+    url: '/v1/projects/market/environments/dev/secrets/RUNTIME_PROOF',
+    ...req(adminToken),
+    payload: { value: 'works' },
+  });
+  assert.equal(response.statusCode, 200);
+});
 
 test('an admin can write a secret and it is audited without the value', async () => {
   const response = await app.inject({

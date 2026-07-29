@@ -695,22 +695,41 @@ export class AdminService {
         );
       }
 
-      const created = await tx.query<{ id: string }>(
-        `INSERT INTO grants (principal_type, principal_id, role_id,
-                             project_id, environment_id, expires_at, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         ON CONFLICT DO NOTHING
-         RETURNING id`,
-        [
-          input.principalType,
-          input.principalId,
-          role.rows[0].id,
-          environmentId === null ? projectId : null,
-          environmentId,
-          input.expiresAt ?? null,
-          ctx.principal.id,
-        ],
+      const grantValues = [
+        input.principalType,
+        input.principalId,
+        role.rows[0].id,
+        environmentId === null ? projectId : null,
+        environmentId,
+        input.expiresAt ?? null,
+        ctx.principal.id,
+      ];
+      const restored = await tx.query<{ id: string }>(
+        `UPDATE grants
+            SET expires_at = $6,
+                created_by = $7
+          WHERE principal_type = $1
+            AND principal_id = $2
+            AND role_id = $3
+            AND project_id IS NOT DISTINCT FROM $4
+            AND environment_id IS NOT DISTINCT FROM $5
+            AND expires_at <= now()
+        RETURNING id`,
+        grantValues,
       );
+      const created =
+        restored.rowCount !== 0
+          ? restored
+          : await tx.query<{ id: string }>(
+              `INSERT INTO grants (
+                 principal_type, principal_id, role_id,
+                 project_id, environment_id, expires_at, created_by
+               )
+               VALUES ($1, $2, $3, $4, $5, $6, $7)
+               ON CONFLICT DO NOTHING
+               RETURNING id`,
+              grantValues,
+            );
 
       if (created.rowCount === 0) {
         throw new AuditedFailure(
@@ -750,23 +769,27 @@ export class AdminService {
       const base = this.#base(ctx, 'grant.revoke');
       const { projectId } = await this.#requireProjectPermission(tx, ctx, projectSlug, 'grant.manage', base, { grantId });
 
-      // Scope the delete to this project so a project admin cannot revoke a
+      // Scope the revocation to this project so a project admin cannot revoke a
       // grant belonging to a project they do not administer.
-      const deleted = await tx.query<{
+      const revoked = await tx.query<{
         principal_type: string;
         principal_id: string;
         role_id: string;
       }>(
-        `DELETE FROM grants g
-          USING (SELECT $1::uuid AS pid) scope
+        `UPDATE grants g
+            SET expires_at = now()
+           FROM (SELECT $1::uuid AS pid) scope
           WHERE g.id = $2
+            AND (g.expires_at IS NULL OR g.expires_at > now())
             AND (g.project_id = scope.pid
-                 OR g.environment_id IN (SELECT id FROM environments WHERE project_id = scope.pid))
+                 OR g.environment_id IN (
+                      SELECT id FROM environments WHERE project_id = scope.pid
+                    ))
         RETURNING g.principal_type, g.principal_id, g.role_id`,
         [projectId, grantId],
       );
 
-      if (deleted.rowCount === 0) {
+      if (revoked.rowCount === 0) {
         throw new AuditedFailure(new NotFound('unknown grant'), {
           ...base,
           decision: 'deny',
@@ -784,7 +807,7 @@ export class AdminService {
             projectId,
             metadata: {
               grantId,
-              principalId: deleted.rows[0].principal_id,
+              principalId: revoked.rows[0].principal_id,
             },
           },
         ],
@@ -956,9 +979,11 @@ export class AdminService {
         );
       }
 
-      const deleted = await tx.query<{ id: string }>(
-        `DELETE FROM grants g
+      const revoked = await tx.query<{ id: string }>(
+        `UPDATE grants g
+            SET expires_at = now()
           WHERE g.principal_type = $1 AND g.principal_id = $2
+            AND (g.expires_at IS NULL OR g.expires_at > now())
             AND (
               $3::boolean
               OR COALESCE(
@@ -983,7 +1008,7 @@ export class AdminService {
           ctx.principal.id,
         ],
       );
-      if (deleted.rowCount === 0) {
+      if (revoked.rowCount === 0) {
         throw new AuditedFailure(new NotFound('unknown principal'), {
           ...base,
           decision: 'deny',
@@ -992,12 +1017,12 @@ export class AdminService {
       }
 
       return {
-        result: { revoked: deleted.rowCount ?? 0 },
+        result: { revoked: revoked.rowCount ?? 0 },
         entries: [
           {
             ...base,
             decision: 'allow',
-            metadata: { principalType, principalId, revoked: deleted.rowCount ?? 0 },
+            metadata: { principalType, principalId, revoked: revoked.rowCount ?? 0 },
           },
         ],
       };
@@ -1295,14 +1320,17 @@ export class AdminService {
         project_id: string;
         revoked: number;
       }>(
-        `WITH deleted AS (
-           DELETE FROM grants
-            WHERE principal_type = $1 AND principal_id = $2
+        `WITH revoked_grants AS (
+           UPDATE grants
+              SET expires_at = now()
+            WHERE principal_type = $1
+              AND principal_id = $2
+              AND (expires_at IS NULL OR expires_at > now())
            RETURNING project_id, environment_id
          )
          SELECT COALESCE(d.project_id, e.project_id) AS project_id,
                 count(*)::int AS revoked
-           FROM deleted d
+           FROM revoked_grants d
            LEFT JOIN environments e ON e.id = d.environment_id
           GROUP BY COALESCE(d.project_id, e.project_id)
           ORDER BY COALESCE(d.project_id, e.project_id)`,

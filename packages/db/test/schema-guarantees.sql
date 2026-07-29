@@ -1,4 +1,4 @@
--- Adversarial checks against the schema itself, run as the application role.
+-- Adversarial checks through the same login used by the API tests.
 --
 -- Every block below asserts that something the application must NOT be able to
 -- do actually fails. A passing run prints only 'PASS' lines.
@@ -6,35 +6,7 @@
 \set ON_ERROR_STOP on
 \set QUIET on
 
--- Seed a minimal object graph as the owner.
---
--- Reset fully rather than upserting: this file pins fixed UUIDs, and an
--- ON CONFLICT DO NOTHING would silently skip the insert when a project of the
--- same slug already exists, leaving the fixed UUID dangling.
-DELETE FROM audit_log;
-UPDATE audit_chain_head SET next_seq = 0, head_hash = decode(repeat('00', 32), 'hex');
-UPDATE secrets SET current_version_id = NULL;
-DELETE FROM secret_versions;
-DELETE FROM secrets;
-DELETE FROM grants;
-DELETE FROM principals;
-DELETE FROM environments;
-DELETE FROM projects;
-
-INSERT INTO projects (id, slug, name)
-VALUES ('11111111-1111-1111-1111-111111111111', 'market', 'Equisafe Market');
-
-INSERT INTO environments (id, project_id, slug, name)
-VALUES ('22222222-2222-2222-2222-222222222222',
-        '11111111-1111-1111-1111-111111111111', 'prod', 'Production');
-
-INSERT INTO audit_log (seq, actor_type, actor_id, action, decision, prev_hash, hash)
-VALUES (0, 'user', 'erwin@equisafe.io', 'secret.read', 'allow',
-        decode(repeat('00', 32), 'hex'), decode(repeat('aa', 32), 'hex'));
-
-SET ROLE coffre_app;
-
-\echo '--- running as coffre_app ---'
+\echo '--- running through restricted runtime login ---'
 
 -- 1. The application may append to the audit log.
 INSERT INTO audit_log (seq, actor_type, actor_id, action, decision, prev_hash, hash)
@@ -56,22 +28,22 @@ $$;
 -- 3. The application may NOT delete an audit row.
 DO $$
 BEGIN
-    DELETE FROM audit_log WHERE seq = 0;
-    RAISE EXCEPTION 'FAIL: coffre_app was able to DELETE from audit_log';
+    DELETE FROM projects WHERE id = '11111111-1111-1111-1111-111111111111';
+    RAISE EXCEPTION 'FAIL: runtime login was able to DELETE';
 EXCEPTION
     WHEN insufficient_privilege THEN
-        RAISE NOTICE 'PASS: coffre_app cannot DELETE from audit_log';
+        RAISE NOTICE 'PASS: runtime login cannot DELETE';
 END
 $$;
 
 -- 4. The application may NOT truncate the audit log.
 DO $$
 BEGIN
-    TRUNCATE audit_log;
-    RAISE EXCEPTION 'FAIL: coffre_app was able to TRUNCATE audit_log';
+    TRUNCATE projects;
+    RAISE EXCEPTION 'FAIL: runtime login was able to TRUNCATE';
 EXCEPTION
     WHEN insufficient_privilege THEN
-        RAISE NOTICE 'PASS: coffre_app cannot TRUNCATE audit_log';
+        RAISE NOTICE 'PASS: runtime login cannot TRUNCATE';
 END
 $$;
 
@@ -96,7 +68,28 @@ EXCEPTION
 END
 $$;
 
--- 6. A secret cannot claim an environment that belongs to another project.
+-- 6. The runtime login cannot create database objects.
+DO $$
+BEGIN
+    CREATE TABLE runtime_must_not_create_objects (id integer);
+    RAISE EXCEPTION 'FAIL: runtime login was able to run DDL';
+EXCEPTION
+    WHEN insufficient_privilege THEN
+        RAISE NOTICE 'PASS: runtime login cannot run DDL';
+END
+$$;
+
+DO $$
+BEGIN
+    CREATE TEMP TABLE runtime_must_not_create_temp_objects (id integer);
+    RAISE EXCEPTION 'FAIL: runtime login was able to create a temporary table';
+EXCEPTION
+    WHEN insufficient_privilege THEN
+        RAISE NOTICE 'PASS: runtime login cannot create temporary tables';
+END
+$$;
+
+-- 7. A secret cannot claim an environment that belongs to another project.
 DO $$
 DECLARE
     other_project uuid;
@@ -113,7 +106,7 @@ EXCEPTION
 END
 $$;
 
--- 7. Duplicate seq values are rejected, so a forked chain cannot be stored.
+-- 8. Duplicate seq values are rejected, so a forked chain cannot be stored.
 DO $$
 BEGIN
     INSERT INTO audit_log (seq, actor_type, actor_id, action, decision, prev_hash, hash)
@@ -126,7 +119,7 @@ EXCEPTION
 END
 $$;
 
--- 8. A malformed hash length is rejected.
+-- 9. A malformed hash length is rejected.
 DO $$
 BEGIN
     INSERT INTO audit_log (seq, actor_type, actor_id, action, decision, prev_hash, hash)
@@ -139,7 +132,7 @@ EXCEPTION
 END
 $$;
 
--- 9. An unknown actor_type is rejected.
+-- 10. An unknown actor_type is rejected.
 DO $$
 BEGIN
     INSERT INTO audit_log (seq, actor_type, actor_id, action, decision, prev_hash, hash)
@@ -152,5 +145,4 @@ EXCEPTION
 END
 $$;
 
-RESET ROLE;
 \echo '--- all schema guarantees held ---'

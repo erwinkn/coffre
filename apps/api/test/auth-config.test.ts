@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { parseRootAdmins } from '../src/config.ts';
+import { loadConfig, parseRootAdmins } from '../src/config.ts';
 import { isRootAdmin } from '../src/services/permissions.ts';
 
 test('cloudflare mode requires valid human email bootstrap identities', () => {
@@ -59,4 +59,22 @@ test('only a user principal can match a configured root-admin email', () => {
     ),
     false,
   );
+});
+
+test('normal API wiring rejects an owner database URL', () => {
+  const previous = process.env.COFFRE_OWNER_DATABASE_URL;
+  process.env.COFFRE_OWNER_DATABASE_URL =
+    'postgresql://coffre_owner:owner-secret@database.example/coffre';
+  try {
+    assert.throws(
+      () => loadConfig(),
+      /for migration and provisioning commands, not the API/,
+    );
+  } finally {
+    if (previous === undefined) {
+      delete process.env.COFFRE_OWNER_DATABASE_URL;
+    } else {
+      process.env.COFFRE_OWNER_DATABASE_URL = previous;
+    }
+  }
 });

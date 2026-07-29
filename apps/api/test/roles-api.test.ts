@@ -8,19 +8,20 @@ import { DevIdp } from '../../dev-idp/src/idp.ts';
 import { AccessIdentityVerifier } from '../../../packages/core/src/identity/verifier.ts';
 import { LocalKekProvider } from '../../../packages/core/src/kek/local.ts';
 import { KekRegistry } from '../../../packages/core/src/kek/registry.ts';
+import {
+  TEST_OWNER_DATABASE_URL,
+  TEST_RUNTIME_DATABASE_URL,
+} from '../../../packages/db/test/connections.ts';
 import { buildApp } from '../src/app.ts';
 
 const AUD = 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90';
 const HEADER = 'cf-access-jwt-assertion';
-const CONNECTION =
-  process.env.COFFRE_DATABASE_URL ??
-  'postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/coffre';
-
 const CHAIN_KEY = randomBytes(32);
 const ROOT = 'erwin@equisafe.io';
 
 let idp: DevIdp;
 let pool: pg.Pool;
+let runtimePool: pg.Pool;
 let app: FastifyInstance;
 
 const tokens: Record<string, string> = {};
@@ -28,10 +29,11 @@ const tokens: Record<string, string> = {};
 before(async () => {
   idp = new DevIdp();
   await idp.start();
-  pool = new pg.Pool({ connectionString: CONNECTION });
+  pool = new pg.Pool({ connectionString: TEST_OWNER_DATABASE_URL });
+  runtimePool = new pg.Pool({ connectionString: TEST_RUNTIME_DATABASE_URL });
 
   app = buildApp({
-    pool,
+    pool: runtimePool,
     authMode: 'dev',
     verifier: new AccessIdentityVerifier({
       issuer: idp.issuer,
@@ -51,6 +53,7 @@ before(async () => {
 
 after(async () => {
   await app.close();
+  await runtimePool.end();
   await pool.end();
   await idp.stop();
 });

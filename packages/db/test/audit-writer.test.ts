@@ -5,25 +5,28 @@ import pg from 'pg';
 
 import { appendAudit, readAuditRows } from '../src/audit.ts';
 import { verifyChain, GENESIS_HASH } from '../../core/src/audit/chain.ts';
-
-const CONNECTION =
-  process.env.COFFRE_DATABASE_URL ??
-  'postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/coffre';
+import {
+  TEST_OWNER_DATABASE_URL,
+  TEST_RUNTIME_DATABASE_URL,
+} from './connections.ts';
 
 const CHAIN_KEY = randomBytes(32);
 
-let pool: pg.Pool;
+let ownerPool: pg.Pool;
+let runtimePool: pg.Pool;
 
 before(async () => {
-  pool = new pg.Pool({ connectionString: CONNECTION });
+  ownerPool = new pg.Pool({ connectionString: TEST_OWNER_DATABASE_URL });
+  runtimePool = new pg.Pool({ connectionString: TEST_RUNTIME_DATABASE_URL });
 });
 
 after(async () => {
-  await pool.end();
+  await runtimePool.end();
+  await ownerPool.end();
 });
 
 beforeEach(async () => {
-  const client = await pool.connect();
+  const client = await ownerPool.connect();
   try {
     await client.query('DELETE FROM audit_log');
     await client.query(
@@ -35,7 +38,7 @@ beforeEach(async () => {
 });
 
 async function inTransaction<T>(fn: (tx: pg.PoolClient) => Promise<T>): Promise<T> {
-  const client = await pool.connect();
+  const client = await runtimePool.connect();
   try {
     await client.query('BEGIN');
     const result = await fn(client);
@@ -165,9 +168,7 @@ test('tampering with a stored row is detected on read', async () => {
   // As the owner role -- coffre_app cannot do this at all, which is checked in
   // schema-guarantees.sql. This simulates someone with higher privilege
   // rewriting history directly in the database.
-  await inTransaction((tx) =>
-    tx.query("UPDATE audit_log SET decision = 'allow' WHERE seq = 1"),
-  );
+  await ownerPool.query("UPDATE audit_log SET decision = 'allow' WHERE seq = 1");
 
   const rows = await inTransaction((tx) => readAuditRows(tx));
   const result = verifyChain(CHAIN_KEY, rows, GENESIS_HASH);

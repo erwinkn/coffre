@@ -15,7 +15,7 @@ const ADMIN = local.rootAdmin;
 
 const pg = (await import('pg')).default;
 const pool = new pg.Pool({
-    connectionString: local.databaseUrl,
+    connectionString: local.ownerDatabaseUrl,
 });
 
 async function mint(params) {

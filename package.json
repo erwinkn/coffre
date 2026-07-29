@@ -9,12 +9,13 @@
   },
   "scripts": {
     "dev": "./scripts/dev.sh",
-    "test": "node --test --test-concurrency=1 \"packages/**/test/*.test.ts\" \"apps/**/test/*.test.ts\"",
-    "test:schema": "docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U coffre_owner -d coffre < packages/db/test/schema-guarantees.sql",
+    "test": "./scripts/setup-test-database.sh && node --test --test-concurrency=1 \"packages/**/test/*.test.ts\" \"apps/**/test/*.test.ts\"",
+    "test:schema": "./scripts/test-schema.sh",
     "check:pins": "node scripts/check-pins.mjs",
     "check:contrast": "node scripts/check-contrast.mjs",
     "db:up": "docker compose up -d postgres",
     "db:migrate": "./scripts/migrate.sh",
+    "db:provision-runtime": "./scripts/provision-runtime-role.sh",
     "seed": "node --env-file=.env.dev scripts/seed.mjs",
     "add:dep": "pnpm add --save-exact"
   },

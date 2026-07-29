@@ -108,9 +108,25 @@ conventions are split. Writing tests for it found four ways it silently
 corrupted values — see `apps/api/test/dotenv.test.ts`.
 
 **Append-only by grant, not convention.** `coffre_app` has no `UPDATE`, no
-`DELETE`, no `TRUNCATE` on `audit_log`. Proven in
-`packages/db/test/schema-guarantees.sql`, which runs as that role and asserts
-each of those fails.
+`DELETE`, or `TRUNCATE` on history, and no `DELETE` or `TRUNCATE` anywhere.
+Grant revocation and removal use the existing expiry/archive columns.
+
+**Owner and runtime are separate.** Migrations and runtime-role provisioning
+receive `COFFRE_OWNER_DATABASE_URL`; the API receives only
+`COFFRE_DATABASE_URL`. Provision a deployment-selected login after migrating:
+
+```sh
+COFFRE_OWNER_DATABASE_URL='postgresql://owner:...@db/coffre' pnpm db:migrate
+COFFRE_OWNER_DATABASE_URL='postgresql://owner:...@db/coffre' \
+COFFRE_RUNTIME_ROLE=coffre_runtime \
+COFFRE_RUNTIME_PASSWORD='from-the-secret-store' \
+  pnpm db:provision-runtime
+```
+
+The API URL names that runtime login. Database routing, TLS, and credential
+delivery remain deployment infrastructure concerns; no production credential
+is stored here. Local `pnpm dev` provisions its disposable runtime login
+automatically.
 
 ## Supply chain
 
@@ -159,9 +175,10 @@ Individual pieces:
 ```sh
 pnpm db:up            # Postgres on :55432
 pnpm db:migrate
+pnpm db:provision-runtime
 pnpm seed             # loads the checked-in local-only .env.dev
 pnpm test             # unit + integration tests (needs Postgres up)
-pnpm test:schema      # append-only guarantees, run as coffre_app
+pnpm test:schema      # runtime-role guarantees in an isolated test database
 pnpm check:pins       # every dependency exactly pinned
 pnpm check:contrast   # every admin-UI colour pair meets WCAG AA
 pnpm --dir apps/admin build

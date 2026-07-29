@@ -8,9 +8,15 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+database_name="${COFFRE_DATABASE_NAME:-coffre}"
+
 psql_run() {
-    docker compose exec -T postgres \
-        psql -v ON_ERROR_STOP=1 -U coffre_owner -d coffre "$@"
+    if [ -n "${COFFRE_OWNER_DATABASE_URL:-}" ]; then
+        psql "$COFFRE_OWNER_DATABASE_URL" -v ON_ERROR_STOP=1 "$@"
+    else
+        docker compose exec -T postgres \
+            psql -v ON_ERROR_STOP=1 -U coffre_owner -d "$database_name" "$@"
+    fi
 }
 
 # Ledger of what has already been applied. Without this, re-running the script

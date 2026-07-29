@@ -5,6 +5,7 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-coffre}"
 set -a && . ./.env.dev && set +a
 
 log() { printf '\n==> %s\n' "$1"; }
@@ -40,6 +41,9 @@ done
 log 'applying migrations'
 ./scripts/migrate.sh >/dev/null
 
+log 'provisioning runtime database role'
+./scripts/provision-runtime-role.sh >/dev/null
+
 # Service logs go to files rather than stdout. The API logs every request, so
 # streaming it here drowns the seed output and the banner in JSON.
 mkdir -p .logs
@@ -53,7 +57,8 @@ node apps/api/src/server.ts > .logs/api.log 2>&1 &
 until curl -sf http://127.0.0.1:8080/healthz >/dev/null 2>&1; do sleep 1; done
 
 log 'seeding'
-node scripts/seed.mjs
+COFFRE_OWNER_DATABASE_URL='postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/coffre' \
+    node scripts/seed.mjs
 
 log 'starting admin UI on :3000'
 (cd apps/admin && ./node_modules/.bin/vite dev) > .logs/admin.log 2>&1 &
