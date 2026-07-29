@@ -15,7 +15,7 @@
     "check:contrast": "node scripts/check-contrast.mjs",
     "db:up": "docker compose up -d postgres",
     "db:migrate": "./scripts/migrate.sh",
-    "seed": "node scripts/seed.mjs",
+    "seed": "node --env-file=.env.dev scripts/seed.mjs",
     "add:dep": "pnpm add --save-exact"
   },
   "dependencies": {

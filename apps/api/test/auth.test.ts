@@ -18,6 +18,7 @@ before(async () => {
 
   app = Fastify({ logger: false });
   registerAuth(app, {
+    authMode: 'cloudflare',
     verifier: new AccessIdentityVerifier({
       issuer: idp.issuer,
       jwksUrl: idp.jwksUrl,
@@ -43,7 +44,7 @@ test('a request that bypasses the proxy is rejected', async () => {
   const response = await app.inject({ method: 'GET', url: '/whoami' });
 
   assert.equal(response.statusCode, 401);
-  assert.deepEqual(response.json(), { error: 'unauthenticated' });
+  assert.deepEqual(response.json(), { error: 'cloudflare_access_required' });
 });
 
 test('an authenticated user request succeeds and is attributed', async () => {

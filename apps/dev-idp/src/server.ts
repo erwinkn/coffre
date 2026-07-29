@@ -8,6 +8,10 @@
  */
 import { DevIdp } from './idp.ts';
 
+if (process.env.COFFRE_AUTH_MODE !== 'dev') {
+  throw new Error('dev-idp refuses to start unless COFFRE_AUTH_MODE=dev');
+}
+
 const idp = new DevIdp();
 idp.listenPort = Number(process.env.COFFRE_DEV_IDP_PORT ?? 8081);
 idp.defaultAudience = process.env.COFFRE_ACCESS_AUD ?? 'coffre-local-dev-aud';

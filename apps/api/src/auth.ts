@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import type { IdentityVerifier, Principal } from '../../../packages/core/src/identity/types.ts';
 import { ACCESS_JWT_HEADER } from '../../../packages/core/src/identity/types.ts';
+import type { AuthMode } from '../../../packages/core/src/identity/auth-mode.ts';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -10,6 +11,7 @@ declare module 'fastify' {
 
 export type AuthOptions = {
   verifier: IdentityVerifier;
+  authMode: AuthMode;
   /**
    * Paths served without authentication. Kept to an explicit allowlist so the
    * default for any new route is "protected"; forgetting to add a route here
@@ -50,14 +52,21 @@ export function registerAuth(app: FastifyInstance, options: AuthOptions): void {
     const token = request.headers[ACCESS_JWT_HEADER];
 
     if (typeof token !== 'string' || token.length === 0) {
-      // No Access assertion means the request did not come through the
-      // Cloudflare Access proxy. Reaching the origin directly must not be a
-      // way to skip authentication.
+      // In Cloudflare mode, no Access assertion means the request did not come
+      // through the Access proxy. In dev mode the same header transports the
+      // local Access-shaped token. Missing it is unauthenticated either way.
       request.log.warn(
-        { path: request.url, ip: request.ip },
-        'request without an Access assertion; possible direct-to-origin access',
+        { path: request.url, ip: request.ip, authMode: options.authMode },
+        options.authMode === 'cloudflare'
+          ? 'request without an Access assertion; possible direct-to-origin access'
+          : 'request without a local development assertion',
       );
-      return reply.code(401).send({ error: 'unauthenticated' });
+      return reply.code(401).send({
+        error:
+          options.authMode === 'cloudflare'
+            ? 'cloudflare_access_required'
+            : 'unauthenticated',
+      });
     }
 
     try {

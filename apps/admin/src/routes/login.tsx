@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { createFileRoute, useRouter } from '@tanstack/react-router';
-import { devSignIn } from '../lib/server';
-import { ErrorLine, Spinner } from '../components/ui';
+import { devSignIn, getLoginAuthState } from '../lib/server';
+import { ErrorLine, Notice, Spinner } from '../components/ui';
 import { Vault } from '../components/icons';
 
 export const Route = createFileRoute('/login')({
@@ -13,6 +13,7 @@ export const Route = createFileRoute('/login')({
     if (!next.startsWith('/') || next.startsWith('//')) return {};
     return { next };
   },
+  loader: () => getLoginAuthState(),
   component: LoginPage,
 });
 
@@ -33,6 +34,62 @@ const SEEDED: [email: string, role: string, note: string][] = [
  * app. This page exists so the same UI runs locally against the dev IdP.
  */
 function LoginPage() {
+  const { mode, hasForwardedAccessJwt } = Route.useLoaderData();
+  if (mode === 'cloudflare') {
+    return hasForwardedAccessJwt ? (
+      <CloudflareAuthenticationFailed />
+    ) : (
+      <CloudflareAccessRequired />
+    );
+  }
+  return <DevLoginPage />;
+}
+
+function CloudflareAccessRequired() {
+  return (
+    <>
+      <div className="page-head">
+        <div>
+          <h1>Cloudflare Access required</h1>
+          <p className="sub">
+            This production instance has no local sign-in. Open coffre through its
+            Access-protected hostname so Cloudflare can authenticate you before the request
+            reaches the application.
+          </p>
+        </div>
+      </div>
+
+      <Notice tone="bad">
+        No forwarded Access assertion was present. This is the expected closed door for a
+        direct-origin request; no development persona or cookie can bypass it.
+      </Notice>
+    </>
+  );
+}
+
+function CloudflareAuthenticationFailed() {
+  return (
+    <>
+      <div className="page-head">
+        <div>
+          <h1>Authentication unavailable</h1>
+          <p className="sub">
+            Cloudflare Access forwarded an identity assertion, but coffre could not
+            authenticate it with the API.
+          </p>
+        </div>
+      </div>
+
+      <Notice tone="bad">
+        The Access session may have expired, or the API or its identity verifier may be
+        unavailable. Reopen the Access-protected hostname; if this continues, contact the
+        coffre operator.
+      </Notice>
+    </>
+  );
+}
+
+function DevLoginPage() {
   const router = useRouter();
   const { next } = Route.useSearch();
   const [email, setEmail] = useState('erwin@equisafe.io');

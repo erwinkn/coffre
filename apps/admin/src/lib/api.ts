@@ -1,4 +1,10 @@
 import { getCookie, getRequestHeader } from '@tanstack/react-start/server';
+import { authConfig } from './auth-runtime';
+import {
+  missingIdentityMessage,
+  rejectedIdentityMessage,
+  selectAdminToken,
+} from './auth-mode';
 
 const API_URL = process.env.COFFRE_API_URL ?? 'http://127.0.0.1:8080';
 
@@ -19,10 +25,15 @@ export const DEV_TOKEN_COOKIE = 'coffre_dev_token';
  * that passes through Access and so arrives with the header too.
  */
 function currentToken(): string | null {
-  const forwarded = getRequestHeader('cf-access-jwt-assertion');
-  if (forwarded) return forwarded;
+  if (authConfig.mode === 'cloudflare') {
+    return selectAdminToken(authConfig, {
+      forwardedAccessJwt: getRequestHeader('cf-access-jwt-assertion'),
+    });
+  }
 
-  return getCookie(DEV_TOKEN_COOKIE) ?? null;
+  return selectAdminToken(authConfig, {
+    devCookie: getCookie(DEV_TOKEN_COOKIE),
+  });
 }
 
 export type ApiResult<T> =
@@ -46,7 +57,7 @@ export async function coffreFetch<T>(
 ): Promise<ApiResult<T>> {
   const token = currentToken();
   if (token === null) {
-    return { ok: false, status: 401, error: 'You are not signed in.' };
+    return { ok: false, status: 401, error: missingIdentityMessage(authConfig) };
   }
 
   let response: Response;
@@ -76,7 +87,7 @@ export async function coffreFetch<T>(
     // nothing, and a bare "forbidden" tells them nothing they can act on.
     const message =
       response.status === 401
-        ? 'Your session has expired. Sign in again to continue.'
+        ? rejectedIdentityMessage(authConfig)
         : response.status === 403
           ? 'You hold no grant that covers this. Someone with grant.manage on the project can add one.'
           : response.status === 404

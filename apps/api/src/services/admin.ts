@@ -5,6 +5,7 @@ import { appendAudit, type AuditEntry } from '../../../../packages/db/src/audit.
 import { AccessDenied, AuditedFailure, NotFound, type RequestContext } from './secrets.ts';
 import {
   has,
+  isRootAdmin as isConfiguredRootAdmin,
   permissionsForProject,
   PROJECT_ONLY_PERMISSIONS,
   type Permission,
@@ -107,7 +108,7 @@ export class AdminService {
   }
 
   #isRootAdmin(principal: Principal): boolean {
-    return this.#deps.rootAdmins.includes(principal.id);
+    return isConfiguredRootAdmin(principal, this.#deps.rootAdmins);
   }
 
   async #lockPrincipals(
@@ -1082,12 +1083,16 @@ export class AdminService {
 
       for (const row of result.rows) {
         const key = `${row.principal_type}:${row.principal_id}`;
-        const entry = byPrincipal.get(key) ?? {
-          principalType: row.principal_type,
-          principalId: row.principal_id,
-          isRootAdmin: this.#deps.rootAdmins.includes(row.principal_id),
-          grants: [],
-        };
+        const entry =
+          byPrincipal.get(key) ??
+          {
+            principalType: row.principal_type,
+            principalId: row.principal_id,
+            isRootAdmin:
+              row.principal_type === 'user' &&
+              this.#deps.rootAdmins.includes(row.principal_id),
+            grants: [],
+          };
         entry.grants.push({
           id: row.id,
           project: row.project,

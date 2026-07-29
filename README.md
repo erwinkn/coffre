@@ -148,13 +148,19 @@ pnpm dev              # Postgres + dev IdP + API + UI + seed data, all local
 
 Then open http://127.0.0.1:3000 and sign in as `erwin@equisafe.io`.
 
+Production uses an explicit `COFFRE_AUTH_MODE=cloudflare` contract; local
+persona minting exists only under `COFFRE_AUTH_MODE=dev`. The exact team-domain
+issuer, cert URL, application AUD, closed-origin behavior, and root-admin
+bootstrap requirements are in
+[docs/deployment-auth.md](docs/deployment-auth.md).
+
 Individual pieces:
 
 ```sh
 pnpm db:up            # Postgres on :55432
 pnpm db:migrate
-pnpm seed
-pnpm test             # 139 tests, unit + integration (needs Postgres up)
+pnpm seed             # loads the checked-in local-only .env.dev
+pnpm test             # unit + integration tests (needs Postgres up)
 pnpm test:schema      # append-only guarantees, run as coffre_app
 pnpm check:pins       # every dependency exactly pinned
 pnpm check:contrast   # every admin-UI colour pair meets WCAG AA
@@ -163,6 +169,8 @@ pnpm check:contrast   # every admin-UI colour pair meets WCAG AA
 CLI:
 
 ```sh
+coffre() { node --env-file=.env.dev apps/cli/src/main.ts "$@"; }
+
 coffre login --email erwin@equisafe.io
 
 # secrets
@@ -184,7 +192,10 @@ coffre audit --denied
 coffre verify
 ```
 
-(`coffre` here is `node apps/cli/src/main.ts`.)
+The local helper deliberately loads `.env.dev`, including the explicit dev
+authentication mode. In production, run the CLI directly with
+`COFFRE_AUTH_MODE=cloudflare` and the settings in
+[docs/deployment-auth.md](docs/deployment-auth.md).
 
 ## Progress
 

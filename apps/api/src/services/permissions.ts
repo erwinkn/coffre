@@ -37,7 +37,7 @@ export type PermissionSet = ReadonlySet<Permission>;
 const ALL: PermissionSet = new Set(PERMISSIONS);
 
 export function isRootAdmin(principal: Principal, rootAdmins: readonly string[]): boolean {
-  return rootAdmins.includes(principal.id);
+  return principal.type === 'user' && rootAdmins.includes(principal.id);
 }
 
 /**

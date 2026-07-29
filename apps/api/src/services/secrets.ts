@@ -8,6 +8,7 @@ import type { Principal } from '../../../../packages/core/src/identity/types.ts'
 import { appendAudit, type AuditEntry } from '../../../../packages/db/src/audit.ts';
 import {
   has,
+  isRootAdmin as isConfiguredRootAdmin,
   permissionsForEnvironment,
   PERMISSIONS as ALL_PERMISSIONS,
   type Permission,
@@ -104,7 +105,7 @@ export class SecretsService {
   }
 
   #isRootAdmin(principal: Principal): boolean {
-    return this.#deps.rootAdmins.includes(principal.id);
+    return isConfiguredRootAdmin(principal, this.#deps.rootAdmins);
   }
 
   /**

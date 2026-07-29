@@ -68,9 +68,9 @@ cat <<'BANNER'
     dev IdP     http://127.0.0.1:8081
 
   CLI:
-    node apps/cli/src/main.ts login --email erwin@equisafe.io
-    node apps/cli/src/main.ts run market/dev -- printenv
-    node apps/cli/src/main.ts verify
+    node --env-file=.env.dev apps/cli/src/main.ts login --email erwin@equisafe.io
+    node --env-file=.env.dev apps/cli/src/main.ts run market/dev -- printenv
+    node --env-file=.env.dev apps/cli/src/main.ts verify
 
   Logs:
     tail -f .logs/api.log .logs/admin.log .logs/dev-idp.log

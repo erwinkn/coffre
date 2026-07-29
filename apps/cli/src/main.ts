@@ -11,9 +11,16 @@ import { spawn } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
+import {
+  cliAuthHeader,
+  cloudflareApiUrl,
+  isCloudflareAccessRedirect,
+  isJsonContentType,
+} from './auth-mode.ts';
 
 const CREDENTIALS_PATH = join(homedir(), '.coffre', 'credentials.json');
 const API_URL = process.env.COFFRE_API_URL ?? 'http://127.0.0.1:8080';
+const AUTH_MODE = process.env.COFFRE_AUTH_MODE ?? '';
 const DEV_IDP_URL = process.env.COFFRE_DEV_IDP_URL ?? '';
 
 type Credentials = { token: string; obtainedAt: string };
@@ -42,21 +49,42 @@ function fail(message: string): never {
 }
 
 async function api(path: string, token: string, init: RequestInit = {}): Promise<unknown> {
-  const response = await fetch(`${API_URL}${path}`, {
+  if (AUTH_MODE !== 'dev' && AUTH_MODE !== 'cloudflare') {
+    fail('COFFRE_AUTH_MODE must be exactly "dev" or "cloudflare"');
+  }
+
+  let apiUrl = API_URL;
+  if (AUTH_MODE === 'cloudflare') {
+    try {
+      apiUrl = cloudflareApiUrl(process.env.COFFRE_API_URL);
+    } catch (error) {
+      fail(error instanceof Error ? error.message : 'invalid COFFRE_API_URL');
+    }
+  }
+
+  const response = await fetch(`${apiUrl}${path}`, {
     ...init,
+    // Cloudflare Access redirects rejected non-browser clients to its login
+    // page. Following that redirect would turn an auth failure into HTML that
+    // later explodes in JSON parsing.
+    redirect: 'manual',
     headers: {
-      // The same header Cloudflare Access sets on requests it forwards to the
-      // origin. Locally the dev IdP mints the token; in production Access does.
-      'cf-access-jwt-assertion': token,
+      ...cliAuthHeader(AUTH_MODE, token),
       'content-type': 'application/json',
       ...(init.headers ?? {}),
     },
   });
 
+  if (isCloudflareAccessRedirect(AUTH_MODE, response.status)) {
+    fail('unauthenticated: your token is missing, expired or invalid');
+  }
   if (response.status === 401) fail('unauthenticated: your token is missing, expired or invalid');
   if (response.status === 403) fail('forbidden: you do not have a grant for that environment');
   if (response.status === 404) fail('not found');
   if (!response.ok) fail(`request failed with status ${response.status}`);
+  if (!isJsonContentType(response.headers.get('content-type'))) {
+    fail('request returned a non-JSON response');
+  }
 
   return response.json();
 }
@@ -82,15 +110,16 @@ async function login(args: string[]): Promise<void> {
     allowPositionals: false,
   });
 
-  if (DEV_IDP_URL === '') {
+  if (AUTH_MODE !== 'dev') {
     // In production Cloudflare Access issues the token through its browser SSO
     // flow; the CLI does not implement an auth protocol of its own.
     fail(
-      'COFFRE_DEV_IDP_URL is not set.\n' +
+      'persona login is available only when COFFRE_AUTH_MODE=dev.\n' +
         '  In production: run `cloudflared access login <coffre-url>` and export\n' +
         '  COFFRE_TOKEN=$(cloudflared access token -app=<coffre-url>)',
     );
   }
+  if (DEV_IDP_URL === '') fail('COFFRE_DEV_IDP_URL is required when COFFRE_AUTH_MODE=dev');
 
   const url = new URL('/dev/mint', DEV_IDP_URL);
   if (values['service-token']) {

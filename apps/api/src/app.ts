@@ -5,6 +5,7 @@ import { z } from 'zod';
 
 import { AccessIdentityVerifier } from '../../../packages/core/src/identity/verifier.ts';
 import type { IdentityVerifier } from '../../../packages/core/src/identity/types.ts';
+import type { AuthMode } from '../../../packages/core/src/identity/auth-mode.ts';
 import type { KekRegistry } from '../../../packages/core/src/kek/registry.ts';
 import { verifyChain, GENESIS_HASH } from '../../../packages/core/src/audit/chain.ts';
 import { readAuditRows, OCCURRED_AT_SQL } from '../../../packages/db/src/audit.ts';
@@ -18,6 +19,7 @@ import {
   type RequestContext,
 } from './services/secrets.ts';
 import { AdminService } from './services/admin.ts';
+import { isRootAdmin } from './services/permissions.ts';
 
 /**
  * Rows per batch when verifying the chain.
@@ -33,6 +35,7 @@ const secretKey = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/);
 export type BuildOptions = {
   pool: pg.Pool;
   verifier: IdentityVerifier;
+  authMode: AuthMode;
   keks: KekRegistry;
   auditChainKey: Buffer;
   rootAdmins: readonly string[];
@@ -58,7 +61,11 @@ export function buildApp(options: BuildOptions): FastifyInstance {
     rootAdmins: options.rootAdmins,
   });
 
-  registerAuth(app, { verifier: options.verifier, publicPaths: ['/healthz'] });
+  registerAuth(app, {
+    verifier: options.verifier,
+    authMode: options.authMode,
+    publicPaths: ['/healthz'],
+  });
 
   function contextOf(request: { id: string; ip: string; principal: unknown }): RequestContext {
     return {
@@ -662,7 +669,7 @@ async function projectsWithAuditRead(
   ctx: RequestContext,
   rootAdmins: readonly string[],
 ): Promise<'all' | string[]> {
-  if (rootAdmins.includes(ctx.principal.id)) return 'all';
+  if (isRootAdmin(ctx.principal, rootAdmins)) return 'all';
   if (ctx.principal.type === 'user') {
     const owner = await pool.query(
       `SELECT 1 FROM principals

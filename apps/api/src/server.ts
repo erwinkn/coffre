@@ -9,7 +9,8 @@ const pool = new pg.Pool({ connectionString: config.databaseUrl });
 
 const app = buildApp({
   pool,
-  verifier: new AccessIdentityVerifier(config.access),
+  verifier: new AccessIdentityVerifier(config.auth.access),
+  authMode: config.auth.mode,
   keks: config.keks,
   auditChainKey: config.auditChainKey,
   rootAdmins: config.rootAdmins,

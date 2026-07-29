@@ -5,16 +5,17 @@
 // audited like anything else -- and so the seed exercises the same envelope
 // and audit code path the CLI and UI use.
 
-const API = process.env.COFFRE_API_URL ?? 'http://127.0.0.1:8080';
-const IDP = process.env.COFFRE_DEV_IDP_URL ?? 'http://127.0.0.1:8081';
-const AUD = process.env.COFFRE_ACCESS_AUD ?? 'coffre-local-dev-aud';
-const ADMIN = process.env.COFFRE_ROOT_ADMINS?.split(',')[0] ?? 'erwin@equisafe.io';
+import { loadLocalSeedConfig } from './seed-config.mjs';
+
+const local = loadLocalSeedConfig(process.env);
+const API = local.apiUrl;
+const IDP = local.idpUrl;
+const AUD = local.audience;
+const ADMIN = local.rootAdmin;
 
 const pg = (await import('pg')).default;
 const pool = new pg.Pool({
-    connectionString:
-        process.env.COFFRE_DATABASE_URL ??
-        'postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/coffre',
+    connectionString: local.databaseUrl,
 });
 
 async function mint(params) {
@@ -130,7 +131,6 @@ for (const [environment, secrets] of Object.entries(values)) {
 await pool.end();
 
 console.log('\nSeeded. Try:');
-console.log('  export COFFRE_DEV_IDP_URL=http://127.0.0.1:8081');
-console.log('  node apps/cli/src/main.ts login --email erwin@equisafe.io');
-console.log('  node apps/cli/src/main.ts list market/dev');
-console.log('  node apps/cli/src/main.ts run market/dev -- printenv');
+console.log('  node --env-file=.env.dev apps/cli/src/main.ts login --email erwin@equisafe.io');
+console.log('  node --env-file=.env.dev apps/cli/src/main.ts list market/dev');
+console.log('  node --env-file=.env.dev apps/cli/src/main.ts run market/dev -- printenv');

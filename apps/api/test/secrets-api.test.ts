@@ -36,6 +36,7 @@ before(async () => {
 
   app = buildApp({
     pool,
+    authMode: 'dev',
     verifier: new AccessIdentityVerifier({
       issuer: idp.issuer,
       jwksUrl: idp.jwksUrl,

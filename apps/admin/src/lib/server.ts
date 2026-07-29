@@ -1,5 +1,6 @@
 import { createServerFn } from '@tanstack/react-start';
-import { setCookie } from '@tanstack/react-start/server';
+import { getRequestHeader, setCookie } from '@tanstack/react-start/server';
+import { authConfig } from './auth-runtime';
 import {
   coffreFetch,
   DEV_TOKEN_COOKIE,
@@ -59,6 +60,18 @@ export const getShell = createServerFn({ method: 'GET' }).handler(async () => {
     projects: projects.ok ? projects.data.projects : [],
   };
 });
+
+/**
+ * Public information needed to render the login boundary accurately.
+ *
+ * The assertion itself never crosses back to the browser.
+ */
+export const getLoginAuthState = createServerFn({ method: 'GET' }).handler(async () => ({
+  mode: authConfig.mode,
+  hasForwardedAccessJwt:
+    authConfig.mode === 'cloudflare' &&
+    Boolean(getRequestHeader('cf-access-jwt-assertion')),
+}));
 
 export const listProjects = createServerFn({ method: 'GET' }).handler(async () => {
   const result = await coffreFetch<{ projects: ProjectSummary[] }>('/v1/admin/projects');
@@ -500,19 +513,21 @@ export const removeDirectoryPrincipal = createServerFn({ method: 'POST' })
  *
  * In production this does not exist in any meaningful sense: Cloudflare Access
  * authenticates the user before the request reaches this app and forwards
- * `Cf-Access-Jwt-Assertion`, which lib/api.ts prefers over any cookie. This
- * exists so the same UI can run locally against the dev IdP, and it refuses to
- * do anything unless COFFRE_DEV_IDP_URL is set.
+ * `Cf-Access-Jwt-Assertion`, and lib/api.ts reads only that header in
+ * Cloudflare mode. This exists so the same UI can run locally against the dev
+ * IdP, and it refuses to do anything unless the validated mode is explicitly
+ * `dev`.
  */
 export const devSignIn = createServerFn({ method: 'POST' })
   .inputValidator((data: { email: string }) => data)
   .handler(async ({ data }) => {
-    const idp = process.env.COFFRE_DEV_IDP_URL ?? '';
-    if (idp === '') return { ok: false as const, error: 'Dev sign-in is disabled.' };
+    if (authConfig.mode !== 'dev') {
+      return { ok: false as const, error: 'Dev sign-in is disabled.' };
+    }
 
-    const url = new URL('/dev/mint', idp);
+    const url = new URL('/dev/mint', authConfig.devIdpUrl);
     url.searchParams.set('email', data.email);
-    url.searchParams.set('aud', process.env.COFFRE_ACCESS_AUD ?? 'coffre-local-dev-aud');
+    url.searchParams.set('aud', authConfig.access.audience);
     url.searchParams.set('expires_in', String(DEV_SESSION_SECONDS));
 
     let minted: Response;

@@ -41,6 +41,13 @@ export const Route = createRootRoute({
       throw redirect({ to: '/login', search: { next: location.href } });
     }
 
+    // `/login` is only an error boundary in Cloudflare mode and a persona
+    // picker in dev mode. Once the API has authenticated the caller, neither
+    // belongs on screen.
+    if (shell.principal !== null && location.pathname === '/login') {
+      throw redirect({ to: '/projects' });
+    }
+
     return shell;
   },
 
