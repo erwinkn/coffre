@@ -31,6 +31,7 @@ import {
 } from '../lib/project-access';
 import {
   Archive,
+  Key,
   Layers,
   MoreHorizontal,
   Pencil,
@@ -585,51 +586,103 @@ function Grants({
   grants: GrantRow[];
   error: string | null;
 }) {
+  const userGrants = grants.filter((grant) => grant.principalType === 'user');
+  const serviceGrants = grants.filter((grant) => grant.principalType === 'service');
+
   return (
     <section className="section">
       <div className="section-head">
         <h2>Access</h2>
-        <NewGrant project={project} environments={environments} />
       </div>
 
       {loadError !== null ? (
         <Notice tone="bad">{loadError}</Notice>
       ) : (
-        <div className="card">
-          {grants.length === 0 ? (
-            <EmptyState icon={<Users size={26} />} title="No grants on this project">
-              Nobody but a root admin can reach it. Add the first grant above; scope it to one
-              environment when someone only needs <span className="mono">dev</span>.
-            </EmptyState>
-          ) : (
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Principal</th>
-                    <th>Permissions</th>
-                    <th className="shrink">Expires</th>
-                    <th className="shrink" />
-                  </tr>
-                </thead>
-                <tbody>
-                  {grants.map((grant) => (
-                    <GrantRowView key={grant.id} project={project} grant={grant} />
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+        <div className="stack" style={{ gap: 'var(--space-6)' }}>
+          <ProjectAccessTable
+            title="Users"
+            principalType="user"
+            project={project}
+            environments={environments}
+            grants={userGrants}
+          />
+          <ProjectAccessTable
+            title="Service accounts"
+            principalType="service"
+            project={project}
+            environments={environments}
+            grants={serviceGrants}
+          />
         </div>
       )}
     </section>
   );
 }
 
+function ProjectAccessTable({
+  title,
+  principalType,
+  project,
+  environments,
+  grants,
+}: {
+  title: string;
+  principalType: 'user' | 'service';
+  project: string;
+  environments: Env[];
+  grants: GrantRow[];
+}) {
+  return (
+    <div>
+      <div className="section-head">
+        <h3>{title}</h3>
+        <NewGrant
+          principalType={principalType}
+          project={project}
+          environments={environments}
+        />
+      </div>
+      <div className="card">
+        {grants.length === 0 ? (
+          <EmptyState
+            icon={
+              principalType === 'user' ? <Users size={26} /> : <Key size={26} />
+            }
+            title={`No ${title.toLowerCase()} have access`}
+          >
+            Add {principalType === 'user' ? 'a user' : 'a service account'} with
+            permissions for the whole project or one environment.
+          </EmptyState>
+        ) : (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>{principalType === 'user' ? 'Email' : 'Common name'}</th>
+                  <th>Permissions</th>
+                  <th className="shrink">Expires</th>
+                  <th className="shrink" />
+                </tr>
+              </thead>
+              <tbody>
+                {grants.map((grant) => (
+                  <GrantRowView key={grant.id} project={project} grant={grant} />
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function NewGrant({
+  principalType,
   project,
   environments,
 }: {
+  principalType: 'user' | 'service';
   project: string;
   environments: Env[];
 }) {
@@ -649,19 +702,18 @@ function NewGrant({
     <>
       <button className="btn btn-sm" onClick={() => setOpen(true)}>
         <Plus size={13} />
-        Grant access
+        Add {principalType === 'user' ? 'user' : 'service account'}
       </button>
 
       <Modal
         open={open}
         onOpenChange={(next) => (next ? setOpen(true) : close())}
-        title="Grant access"
+        title={`Add ${principalType === 'user' ? 'user' : 'service-account'} access`}
         wide
         description={
           <>
             Owners can manage the whole project and its access. Read and write access can
-            cover every environment or one specific environment. Service accounts are
-            managed from the Users page.
+            cover every environment or one specific environment.
           </>
         }
       >
@@ -675,7 +727,7 @@ function NewGrant({
                 createGrant({
                   data: {
                     project,
-                    principalType: 'user',
+                    principalType,
                     principalId,
                     role: access.role,
                     environmentSlug: access.environmentSlug,
@@ -699,11 +751,15 @@ function NewGrant({
           }}
         >
           <label className="field">
-            <span className="label">Email</span>
+            <span className="label">
+              {principalType === 'user' ? 'Email' : 'Service token common name'}
+            </span>
             <input
               className="input"
               autoFocus
-              placeholder="someone@equisafe.io"
+              placeholder={
+                principalType === 'user' ? 'someone@equisafe.io' : 'ci-deploy.access'
+              }
               value={principalId}
               onChange={(event) => setPrincipalId(event.target.value)}
             />

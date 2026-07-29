@@ -75,6 +75,12 @@ export function projectAccessLabel(
   if (grant.role === 'developer') {
     return grant.environmentSlug === null ? 'Write: all' : `Write: ${scope}`;
   }
+  if (
+    grant.role === 'root-admin' ||
+    grant.roleName.toLowerCase().startsWith('root admin')
+  ) {
+    return 'Root admin';
+  }
 
   // Older or deliberately specialised grants remain legible even though new
   // project access is intentionally limited to owner/read/write.
