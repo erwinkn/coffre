@@ -33,10 +33,8 @@ function asNonEmptyString(value: unknown): string | null {
 /**
  * Verifies Cloudflare Access JWTs.
  *
- * This is the entire authentication boundary. It lives in a small Fastify app
- * rather than in Next.js middleware: CVE-2025-29927 was an authorization
- * bypass in exactly that position, triggered by a crafted
- * `x-middleware-subrequest` header.
+ * Signature and claim verification for the TanStack request boundary. The
+ * boundary also rejects `x-middleware-subrequest` before calling this verifier.
  */
 export class AccessIdentityVerifier implements IdentityVerifier {
   readonly #config: AccessVerifierConfig;

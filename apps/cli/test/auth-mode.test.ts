@@ -38,7 +38,7 @@ test('production CLI rejects credentialed or path-bearing API URLs', () => {
     /explicit HTTPS origin/,
   );
   assert.throws(
-    () => cloudflareApiUrl('https://coffre-api.example.com/v1'),
+    () => cloudflareApiUrl('https://coffre-api.example.com/api'),
     /explicit HTTPS origin/,
   );
 });

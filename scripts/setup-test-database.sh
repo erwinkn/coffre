@@ -15,10 +15,19 @@ docker compose exec -T postgres \
     psql -v ON_ERROR_STOP=1 -U coffre_owner -d postgres <<'SQL' >/dev/null
 DROP DATABASE IF EXISTS coffre_test WITH (FORCE);
 CREATE DATABASE coffre_test;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'coffre_runtime') THEN
+        CREATE ROLE coffre_runtime;
+    END IF;
+END
+$$;
+
+ALTER ROLE coffre_runtime
+    LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS
+    PASSWORD 'test-runtime-only';
 SQL
 
-COFFRE_DATABASE_NAME=coffre_test ./scripts/migrate.sh >/dev/null
-COFFRE_DATABASE_NAME=coffre_test \
-COFFRE_RUNTIME_ROLE=coffre_test_app \
-COFFRE_RUNTIME_PASSWORD=test-runtime-only \
-    ./scripts/provision-runtime-role.sh >/dev/null
+DATABASE_URL='postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/coffre_test' \
+    pnpm --filter @coffre/db migrate >/dev/null

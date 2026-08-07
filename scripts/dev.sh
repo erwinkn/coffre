@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bring the whole local stack up: Postgres, dev IdP, API, admin UI, and seed data.
+# Bring the whole local stack up: Postgres, dev IdP, the web app, and seed data.
 #
 # Everything here is local. No Scaleway calls, no Cloudflare calls, no real KMS.
 set -euo pipefail
@@ -14,7 +14,7 @@ log() { printf '\n==> %s\n' "$1"; }
 # the first symptom is an EADDRINUSE stack trace from whichever service lost
 # the race, several steps after the real problem.
 busy=''
-for port in 8080 8081 3000; do
+for port in 8081 3000; do
     if lsof -iTCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1; then
         busy="${busy} ${port}"
     fi
@@ -22,7 +22,7 @@ done
 if [ -n "$busy" ]; then
     echo "ERROR: port(s) already in use:${busy}" >&2
     echo "  Another coffre stack is probably still running. Stop it with:" >&2
-    echo "    kill \$(lsof -iTCP:8080 -iTCP:8081 -iTCP:3000 -sTCP:LISTEN -t)" >&2
+    echo "    kill \$(lsof -iTCP:8081 -iTCP:3000 -sTCP:LISTEN -t)" >&2
     exit 1
 fi
 
@@ -39,37 +39,38 @@ until docker compose exec -T postgres pg_isready -U coffre_owner -d coffre >/dev
 done
 
 log 'applying migrations'
-./scripts/migrate.sh >/dev/null
+# Production creates this login in Terraform. Local development creates the
+# same narrowly-scoped login before Drizzle validates and grants membership.
+if ! docker compose exec -T postgres psql -U coffre_owner -d postgres -tAc \
+    "SELECT 1 FROM pg_roles WHERE rolname = 'coffre_runtime'" | grep -q 1; then
+    docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U coffre_owner -d postgres \
+        -c "CREATE ROLE coffre_runtime LOGIN PASSWORD 'local-runtime-only'" >/dev/null
+fi
+docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U coffre_owner -d postgres \
+    -c "ALTER ROLE coffre_runtime LOGIN PASSWORD 'local-runtime-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS" >/dev/null
+DATABASE_URL='postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/coffre' \
+    pnpm --dir packages/db migrate >/dev/null
 
-log 'provisioning runtime database role'
-./scripts/provision-runtime-role.sh >/dev/null
-
-# Service logs go to files rather than stdout. The API logs every request, so
-# streaming it here drowns the seed output and the banner in JSON.
+# Service logs go to files rather than stdout so the seed output stays legible.
 mkdir -p .logs
 
 log 'starting dev IdP on :8081'
 node apps/dev-idp/src/server.ts > .logs/dev-idp.log 2>&1 &
 sleep 1
 
-log 'starting API on :8080'
-node apps/api/src/server.ts > .logs/api.log 2>&1 &
-until curl -sf http://127.0.0.1:8080/healthz >/dev/null 2>&1; do sleep 1; done
+log 'starting web app on :3000'
+(cd apps/web && ./node_modules/.bin/vite dev) > .logs/web.log 2>&1 &
+until curl -sf http://127.0.0.1:3000/livez >/dev/null 2>&1; do sleep 1; done
 
 log 'seeding'
-COFFRE_OWNER_DATABASE_URL='postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/coffre' \
+DATABASE_URL='postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/coffre' \
     node scripts/seed.mjs
-
-log 'starting admin UI on :3000'
-(cd apps/admin && ./node_modules/.bin/vite dev) > .logs/admin.log 2>&1 &
-until curl -sf http://127.0.0.1:3000/login >/dev/null 2>&1; do sleep 1; done
 
 cat <<'BANNER'
 
   coffre is up.
 
-    admin UI    http://127.0.0.1:3000   (sign in as erwin@equisafe.io)
-    API         http://127.0.0.1:8080
+    web + API   http://127.0.0.1:3000   (sign in as erwin@equisafe.io)
     dev IdP     http://127.0.0.1:8081
 
   CLI:
@@ -78,7 +79,7 @@ cat <<'BANNER'
     node --env-file=.env.dev apps/cli/src/main.ts verify
 
   Logs:
-    tail -f .logs/api.log .logs/admin.log .logs/dev-idp.log
+    tail -f .logs/web.log .logs/dev-idp.log
 
   Ctrl-C to stop.
 

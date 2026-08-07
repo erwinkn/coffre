@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:17.5-alpine
+    image: postgres:16.14-alpine
     environment:
       POSTGRES_USER: coffre_owner
       POSTGRES_PASSWORD: local-dev-only
@@ -15,8 +15,10 @@ services:
       timeout: 3s
       retries: 30
     volumes:
-      - coffre-pgdata:/var/lib/postgresql/data
+      - coffre-pgdata-v16:/var/lib/postgresql/data
       - ./packages/db/migrations:/migrations:ro
 
 volumes:
-  coffre-pgdata:
+  # Versioned so adopting the PostgreSQL 16 production baseline never mounts
+  # (or destroys) an incompatible PostgreSQL 17 development volume.
+  coffre-pgdata-v16:

@@ -9,20 +9,25 @@
   },
   "scripts": {
     "dev": "./scripts/dev.sh",
-    "test": "./scripts/setup-test-database.sh && node --test --test-concurrency=1 \"packages/**/test/*.test.ts\" \"apps/**/test/*.test.ts\"",
+    "test": "pnpm lint && ./scripts/setup-test-database.sh && node --test --test-concurrency=1 \"packages/**/test/*.test.ts\" \"apps/**/test/*.test.ts\"",
     "test:schema": "./scripts/test-schema.sh",
+    "lint": "eslint \"apps/web/src/**/*.{ts,tsx}\"",
     "check:pins": "node scripts/check-pins.mjs",
     "check:contrast": "node scripts/check-contrast.mjs",
     "db:up": "docker compose up -d postgres",
-    "db:migrate": "./scripts/migrate.sh",
-    "db:provision-runtime": "./scripts/provision-runtime-role.sh",
-    "seed": "node --env-file=.env.dev scripts/seed.mjs",
+    "db:migrate": "pnpm --dir packages/db migrate",
+    "db:generate": "pnpm --dir packages/db generate",
+    "db:check": "pnpm --dir packages/db check",
+    "seed": "DATABASE_URL=postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/coffre node --env-file=.env.dev scripts/seed.mjs",
     "add:dep": "pnpm add --save-exact"
   },
   "dependencies": {
-    "fastify": "5.6.1",
     "jose": "6.2.3",
     "pg": "8.16.3",
     "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@typescript-eslint/parser": "8.65.0",
+    "eslint": "10.8.0"
   }
 }

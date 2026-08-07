@@ -6,7 +6,7 @@ identity provider, a password flow, or a persona picker in production.
 ## Cloudflare Access inputs
 
 Configure one Cloudflare Access application for the production hostname, then
-set the following variables on both the API and admin processes:
+set the following variables on the single web process:
 
 ```dotenv
 COFFRE_AUTH_MODE=cloudflare
@@ -22,14 +22,13 @@ COFFRE_ACCESS_AUD=<the Application Audience (AUD) Tag>
   controls > Applications > Configure > Additional settings** for this
   specific application. It is not the application ID or hostname.
 - `COFFRE_DEV_IDP_URL` must be absent. Its presence contradicts Cloudflare mode
-  and makes configuration loading fail before either application accepts an
+  and makes configuration loading fail before the application accepts an
   authenticated request.
 
 Cloudflare documents that the origin receives the application token in
 `Cf-Access-Jwt-Assertion`, and recommends validating that header rather than
-the browser cookie. Coffre's admin server forwards only that assertion to the
-API in Cloudflare mode. The API verifies its signature against the team certs
-and checks both issuer and audience.
+the browser cookie. Coffre's global request middleware verifies its signature,
+issuer, and audience before either a UI server function or `/api` handler runs.
 
 Official references:
 
@@ -40,7 +39,7 @@ Official references:
 ### CLI user tokens
 
 For interactive CLI use, point `COFFRE_API_URL` at the explicit HTTPS origin
-of the Access-protected API, set `COFFRE_AUTH_MODE=cloudflare`, and obtain a
+of the Access-protected web service, set `COFFRE_AUTH_MODE=cloudflare`, and obtain a
 user application token:
 
 ```sh
@@ -58,10 +57,9 @@ reported as unauthenticated instead of loading the browser login page.
 ## Closed-door behavior
 
 The production hostname must be protected by an Access Allow policy. Coffre
-still fails closed at the origin boundary: a request reaching the admin server
-without the forwarded assertion sees an Access-required page with no local
-login controls, and a request reaching the API without the assertion receives
-`401 cloudflare_access_required`.
+still fails closed at the origin boundary: every path except exact `/livez`
+and `/readyz` returns `401 cloudflare_access_required` without the forwarded
+assertion. There is no production persona picker or local login route.
 
 Do not treat this application check as a substitute for protecting the origin
 network. The production deployment must expose only the intended
@@ -69,7 +67,7 @@ Access-protected path to users.
 
 ## Root-admin bootstrap
 
-Set `COFFRE_ROOT_ADMINS` on the API to at least one comma-separated human email
+Set `COFFRE_ROOT_ADMINS` on the web service to at least one comma-separated human email
 identity:
 
 ```dotenv
@@ -81,7 +79,13 @@ emits. Service-token `common_name` values cannot be root admins. That person
 must also be allowed by the Access application policy. Root admins are the
 configuration-owned bootstrap principals that can create the first project and
 grant; an empty or malformed list makes a new instance unadministrable, so the
-API refuses to start with one in Cloudflare mode.
+web service refuses to initialize with one in Cloudflare mode.
+
+Every non-root identity must also have an active row in Coffre's principal
+directory. Passing the Cloudflare Access policy authenticates the person; it
+does not register them in this Coffre instance. An authenticated but
+unregistered browser is confined to `/unregistered`, while `/api` and all
+product server functions return `403 registration_required`.
 
 Changes to `COFFRE_ROOT_ADMINS` are deployment configuration changes. Keep at
 least one controlled bootstrap identity until the operational recovery path is

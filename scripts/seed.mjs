@@ -15,7 +15,7 @@ const ADMIN = local.rootAdmin;
 
 const pg = (await import('pg')).default;
 const pool = new pg.Pool({
-    connectionString: local.ownerDatabaseUrl,
+    connectionString: local.databaseUrl,
 });
 
 async function mint(params) {
@@ -67,12 +67,12 @@ await pool.query(
 
 const adminToken = await mint({ email: ADMIN });
 
-await post(adminToken, '/v1/admin/projects', { slug: 'market', name: 'Equisafe Market' });
+await post(adminToken, '/api/admin/projects', { slug: 'market', name: 'Equisafe Market' });
 for (const [slug, name] of [
     ['dev', 'Development'],
     ['prod', 'Production'],
 ]) {
-    await post(adminToken, '/v1/admin/projects/market/environments', { slug, name });
+    await post(adminToken, '/api/admin/projects/market/environments', { slug, name });
 }
 console.log('==> created project market with environments dev, prod');
 
@@ -100,19 +100,19 @@ for (const grant of [
         environmentSlug: 'prod',
     },
 ]) {
-    await post(adminToken, '/v1/admin/projects/market/grants', grant);
+    await post(adminToken, '/api/admin/projects/market/grants', grant);
 }
 console.log('==> granted access to lead, dev, auditor, accessmgr and ci-deploy.access');
 
 const values = {
     dev: {
-        DATABASE_URL: 'postgres://market:devpw@127.0.0.1:5432/market_dev',
+        DATABASE_URL: 'postgres://127.0.0.1:5432/market_dev',
         REDIS_URL: 'redis://127.0.0.1:6379/0',
         STRIPE_SECRET_KEY: 'sk_test_51LocalDevOnlyNotARealKey',
         JWT_SIGNING_SECRET: 'dev-signing-secret-not-for-prod',
     },
     prod: {
-        DATABASE_URL: 'postgres://market:prodpw@10.0.0.5:5432/market_prod',
+        DATABASE_URL: 'postgres://10.0.0.5:5432/market_prod',
         REDIS_URL: 'redis://10.0.0.6:6379/0',
         STRIPE_SECRET_KEY: 'sk_live_51LocalDevOnlyNotARealKey',
         JWT_SIGNING_SECRET: 'prod-signing-secret-not-for-prod',
@@ -121,7 +121,7 @@ const values = {
 
 for (const [environment, secrets] of Object.entries(values)) {
     for (const [key, value] of Object.entries(secrets)) {
-        await put(adminToken, `/v1/projects/market/environments/${environment}/secrets/${key}`, {
+        await put(adminToken, `/api/projects/market/environments/${environment}/secrets/${key}`, {
             value,
         });
     }

@@ -1,8 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 
 import {
@@ -10,61 +7,39 @@ import {
   TEST_RUNTIME_DATABASE_URL,
 } from './connections.ts';
 
-const execFileAsync = promisify(execFile);
-const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
-const PROVISION = fileURLToPath(
-  new URL('../../../scripts/provision-runtime-role.sh', import.meta.url),
-);
+const EXPECTED_UPDATE_COLUMNS = [
+  'audit_chain_head.head_hash',
+  'audit_chain_head.next_seq',
+  'audit_chain_head.updated_at',
+  'audit_heartbeat.last_beat_at',
+  'audit_heartbeat.last_seq',
+  'environments.archived_at',
+  'environments.name',
+  'environments.slug',
+  'grants.created_by',
+  'grants.expires_at',
+  'grants.role_id',
+  'principals.active',
+  'principals.created_at',
+  'principals.created_by',
+  'principals.instance_role',
+  'projects.archived_at',
+  'projects.name',
+  'projects.slug',
+  'secrets.archived_at',
+  'secrets.current_version_id',
+  'secrets.key',
+  'secrets.updated_at',
+];
 
-test('external provisioning requires an explicit runtime password', async () => {
-  await assert.rejects(
-    execFileAsync(PROVISION, {
-      cwd: ROOT,
-      env: {
-        ...process.env,
-        COFFRE_OWNER_DATABASE_URL:
-          'postgresql://owner:secret@database.example/coffre',
-        COFFRE_RUNTIME_PASSWORD: '',
-      },
-    }),
-    (error: unknown) =>
-      error instanceof Error &&
-      'stderr' in error &&
-      /COFFRE_RUNTIME_PASSWORD is required/.test(String(error.stderr)),
-  );
-});
-
-test('owner migrations and provisioning create the restricted runtime login', async () => {
-  await execFileAsync(PROVISION, {
-    cwd: ROOT,
-    env: {
-      ...process.env,
-      COMPOSE_PROJECT_NAME: 'coffre',
-      COFFRE_DATABASE_NAME: 'coffre_test',
-      COFFRE_RUNTIME_ROLE: 'coffre_test_app',
-      COFFRE_RUNTIME_PASSWORD: 'test-runtime-only',
-    },
-  });
-
+test('Drizzle migrations preserve the restricted runtime database identity', async () => {
   const owner = new pg.Pool({ connectionString: TEST_OWNER_DATABASE_URL });
   const runtime = new pg.Pool({ connectionString: TEST_RUNTIME_DATABASE_URL });
   try {
-    const migrations = await owner.query<{ name: string }>(
-      'SELECT name FROM schema_migrations ORDER BY name',
+    const migrations = await owner.query<{ count: number }>(
+      'SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations',
     );
-    assert.deepEqual(
-      migrations.rows.map((row) => row.name),
-      [
-        '0001_init.sql',
-        '0002_audit_log.sql',
-        '0003_roles.sql',
-        '0004_project_grants_and_archiving.sql',
-        '0005_roles_and_secret_archiving.sql',
-        '0006_principal_directory.sql',
-        '0007_principal_lifecycle.sql',
-        '0008_runtime_role.sql',
-      ],
-    );
+    assert.equal(migrations.rows[0].count, 2);
 
     const identity = await runtime.query<{
       current_user: string;
@@ -102,13 +77,36 @@ test('owner migrations and provisioning create the restricted runtime login', as
     );
 
     assert.deepEqual(identity.rows, [{
-      current_user: 'coffre_test_app',
-      session_user: 'coffre_test_app',
+      current_user: 'coffre_runtime',
+      session_user: 'coffre_runtime',
       inherits_app: true,
       unsafe_attributes: false,
       memberships: ['coffre_app'],
       safe_membership: true,
     }]);
+
+    const ownership = await owner.query<{ object_count: number }>(
+      `SELECT count(*)::int AS object_count
+         FROM pg_shdepend dependency
+         JOIN pg_roles role ON role.oid = dependency.refobjid
+        WHERE dependency.refclassid = 'pg_authid'::regclass
+          AND dependency.deptype = 'o'
+          AND role.rolname = 'coffre_runtime'`,
+    );
+    assert.equal(ownership.rows[0].object_count, 0);
+
+    const updateColumns = await owner.query<{ column_name: string; table_name: string }>(
+      `SELECT table_name, column_name
+         FROM information_schema.column_privileges
+        WHERE grantee = 'coffre_app'
+          AND table_schema = 'public'
+          AND privilege_type = 'UPDATE'
+        ORDER BY table_name, column_name`,
+    );
+    assert.deepEqual(
+      updateColumns.rows.map((row) => `${row.table_name}.${row.column_name}`),
+      EXPECTED_UPDATE_COLUMNS,
+    );
   } finally {
     await runtime.end();
     await owner.end();

@@ -4,6 +4,18 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "check": "drizzle-kit check --config drizzle.config.ts",
+    "generate": "drizzle-kit generate --config drizzle.config.ts",
+    "migrate": "node src/migrate.ts",
     "test": "node --test"
+  },
+  "dependencies": {
+    "drizzle-orm": "0.45.2",
+    "pg": "8.16.3"
+  },
+  "devDependencies": {
+    "@types/node": "26.1.1",
+    "@types/pg": "8.20.0",
+    "drizzle-kit": "0.31.10"
   }
 }

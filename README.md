@@ -3,7 +3,8 @@
 A deliberately small in-house secrets manager. Cloudflare Access is the identity
 provider, Postgres is the backend of record, and the audit log is the point.
 
-**Status: local prototype. Nothing is deployed. No Scaleway or Cloudflare calls.**
+**Status: demo software. Do not store real secrets.** Application deployment is
+handled separately; this repository makes no Scaleway or Cloudflare calls.
 
 ## Why this exists
 
@@ -92,38 +93,36 @@ true and useless.
 `claims.email` gets `undefined` for every machine caller. Machine callers
 (external-secrets, CI) are most of the real traffic.
 
-**The auth boundary is in Fastify, not in the UI framework.** It was originally
-written against Next.js, where CVE-2025-29927 was an authorization bypass in
-exactly that position via `x-middleware-subrequest`. The point survives the move
-to TanStack Start and is the reason the move was cheap: the admin UI calls this
-API and never reads the database, so no framework has ever been load-bearing for
-authorization. A UI querying Postgres directly would read secrets without
-writing an audit row.
+**One TanStack request boundary protects both transports.** Global request
+middleware authenticates direct `/api` calls and UI server functions, rejects
+`x-middleware-subrequest`, and requires an active principal row. Configured root
+admins are the sole empty-database bootstrap exception. Native API routes and UI
+server functions invoke the same in-process services directly, so there is no
+loopback request, custom router, or second server that could drift around
+authorization and audit behavior.
 
 **The `.env` parser refuses ambiguity rather than guessing.** It is the one
 place where free text becomes credential material. Unrecognised escapes are
 preserved verbatim, trailing text after a closing quote is an error, NUL bytes
 are rejected (`execve` truncates at them), and all three line-ending
 conventions are split. Writing tests for it found four ways it silently
-corrupted values — see `apps/api/test/dotenv.test.ts`.
+corrupted values — see `apps/web/test/dotenv.test.ts`.
 
 **Append-only by grant, not convention.** `coffre_app` has no `UPDATE`, no
 `DELETE`, or `TRUNCATE` on history, and no `DELETE` or `TRUNCATE` anywhere.
 Grant revocation and removal use the existing expiry/archive columns.
 
-**Owner and runtime are separate.** Migrations and runtime-role provisioning
-receive `COFFRE_OWNER_DATABASE_URL`; the API receives only
-`COFFRE_DATABASE_URL`. Provision a deployment-selected login after migrating:
+**Owner and runtime are separate process identities.** Both processes read the
+standard `DATABASE_URL`, but the migration Job receives the owner URL while the
+web Deployment receives only the restricted runtime URL. Terraform creates and
+password-manages the stable `coffre_runtime` login; the Drizzle bootstrap
+validates it and grants membership in the append-only `coffre_app` role:
 
 ```sh
-COFFRE_OWNER_DATABASE_URL='postgresql://owner:...@db/coffre' pnpm db:migrate
-COFFRE_OWNER_DATABASE_URL='postgresql://owner:...@db/coffre' \
-COFFRE_RUNTIME_ROLE=coffre_runtime \
-COFFRE_RUNTIME_PASSWORD='from-the-secret-store' \
-  pnpm db:provision-runtime
+DATABASE_URL='<owner-database-url>' pnpm db:migrate
 ```
 
-The API URL names that runtime login. Database routing, TLS, and credential
+The web `DATABASE_URL` names that runtime login. Database routing, TLS, and credential
 delivery remain deployment infrastructure concerns; no production credential
 is stored here. Local `pnpm dev` provisions its disposable runtime login
 automatically.
@@ -148,18 +147,17 @@ published six days before we tried to install it.
 
 ```
 packages/core   envelope encryption, KEK providers, audit hash chain, identity
-packages/db     migrations, fail-closed audit writer, schema guarantee tests
-apps/api        Fastify: the authentication boundary and the read/write API
+packages/db     Drizzle schema/migrations, audit writer, privilege tests
 apps/dev-idp    local stand-in for Cloudflare Access (serves JWKS, mints tokens)
 apps/cli        login / list / get / set / run / audit / verify
-apps/admin      TanStack Start admin UI (calls the API; never touches Postgres)
+apps/web        TanStack Start UI, auth boundary, services, and native /api routes
 ```
 
 ## Running it
 
 ```sh
 pnpm install
-pnpm dev              # Postgres + dev IdP + API + UI + seed data, all local
+pnpm dev              # Postgres + dev IdP + one web/API service + seed data
 ```
 
 Then open http://127.0.0.1:3000 and sign in as `erwin@equisafe.io`.
@@ -175,14 +173,17 @@ Individual pieces:
 ```sh
 pnpm db:up            # Postgres on :55432
 pnpm db:migrate
-pnpm db:provision-runtime
+pnpm db:generate       # generate SQL from packages/db/src/schema.ts
+pnpm db:check          # validate the Drizzle journal
 pnpm seed             # loads the checked-in local-only .env.dev
-pnpm test             # unit + integration tests (needs Postgres up)
+pnpm test             # lint + unit + integration tests (needs Postgres up)
 pnpm test:schema      # runtime-role guarantees in an isolated test database
+pnpm lint             # server-function authorization import boundaries
 pnpm check:pins       # every dependency exactly pinned
 pnpm check:contrast   # every admin-UI colour pair meets WCAG AA
-pnpm --dir apps/admin build
-pnpm --dir apps/admin smoke:production
+pnpm --dir apps/web typecheck
+pnpm --dir apps/web build
+pnpm --dir apps/web smoke:production
 ```
 
 CLI:
@@ -251,7 +252,7 @@ All five phases are implemented and working locally.
   across the projects the caller administers, including scope and expiry. It
   remains available to project access managers for operational offboarding.
 
-### The admin UI
+### The web UI
 
 Two audiences use it and they want opposite things. An engineer glances at an
 environment with a terminal open beside the browser; an auditor reads two
@@ -288,11 +289,10 @@ Things worth knowing about it:
 Vite 8 plus TanStack Router, replacing Next.js. Notes for anyone reading the
 code expecting the old shape:
 
-- **Every read is a server function**, not a server component. `src/lib/api.ts`
-  is imported only by handlers in `src/lib/server.ts`, so the Access token and
-  the API base URL never reach the client bundle. The property that matters is
-  unchanged: the browser holds no credential and never calls the coffre API
-  directly.
+- **Every UI read is a server function**, not a server component. Server
+  functions and native `/api` routes call the same internal services directly;
+  there is no API base URL in the web runtime, self-fetch, or application
+  façade above those services.
 - **`router.invalidate()` replaces `revalidatePath`.** The old version had to
   name the routes a mutation affected, and renaming a project meant remembering
   to revalidate both `/` and `/:project`. Invalidating refetches every mounted
@@ -305,10 +305,11 @@ code expecting the old shape:
   lightningcss, both shipped as prebuilt platform packages, so `ignoreScripts:
   true` costs nothing here. That was worth checking before committing to it.
 - **The production build is a standalone Nitro Node server.** Start it with
-  `pnpm --dir apps/admin start`; it listens on `PORT` (and `HOST`, when set).
+  `pnpm --dir apps/web start`; it listens on `PORT` (and `HOST`, when set).
   The launcher also turns a failed asynchronous bind into a non-zero exit.
   `smoke:production` boots the built output on an isolated test port, requests
-  `/login`, proves a second bind fails, and stops it again.
+  `/livez` and `/readyz`, proves `/api` fails closed without Access, proves a
+  second bind fails, and verifies graceful SIGTERM shutdown.
 - `src/routeTree.gen.ts` is generated and gitignored; `vite build` writes it.
 
 ### There is no delete, and that is deliberate
@@ -331,7 +332,7 @@ credential stops being injected by `coffre run`.
 
 Actually destroying data belongs to a retention policy under Art 12(2)(a) —
 a decision to be written down and applied deliberately, not a button in an
-admin UI.
+web UI.
 
 ### Authorisation: roles and permissions
 
@@ -410,18 +411,17 @@ UI, the underlying role and scope are presented as one permissions value:
 - The project-only-permission rule (a role containing `grant.manage` cannot be
   scoped to one environment) is enforced in the service layer with tests, not by
   a database constraint — unlike the append-only guarantee, which is.
-- The UI has no automated tests. The API logic behind every screen is covered,
-  and `check:contrast` mechanically verifies the palette, but the React layer
-  itself is verified by hand.
-- The admin UI has three UI runtime dependencies (`radix-ui`, `cmdk`, `sonner`)
+- The domain/API logic behind every screen and the TanStack auth/health boundary
+  are automated. `check:contrast` mechanically verifies the palette; the React
+  interaction layer is still verified by hand.
+- The web UI has three UI runtime dependencies (`radix-ui`, `cmdk`, `sonner`)
   where it previously had none beyond React. They buy correct focus management,
   the command palette and toasts; they also mean ~75 more packages in a service
   that holds every credential we own. Pinned exactly and subject to the same
   7-day minimum release age as everything else.
-- TanStack Start is on the 1.168 line, which moves fast. `createServerFn`'s
-  validator was renamed `inputValidator` recently enough that most examples
-  online still show the old name; pin bumps here deserve a read of the
-  changelog rather than a version bump on trust.
+- TanStack Start is on the 1.168 line, which moves fast. Server functions use
+  the current `.validator()` API; pin bumps deserve a changelog and boundary
+  test review rather than a version bump on trust.
 
 ### Why `--test-concurrency=1`
 

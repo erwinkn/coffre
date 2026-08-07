@@ -1,0 +1,216 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+import type { AuthConfig } from '../../../packages/core/src/identity/auth-mode.ts';
+import type { Principal } from '../../../packages/core/src/identity/types.ts';
+import {
+  accessTokenForRequest,
+  accessTokenForBoundary,
+  authenticateRequest,
+  DEV_TOKEN_COOKIE,
+  isApiPath,
+  isPublicHealthPath,
+} from '../src/server/auth.ts';
+import { startInstance } from '../src/start.ts';
+
+const cloudflare: AuthConfig = {
+  mode: 'cloudflare',
+  access: {
+    issuer: 'https://equisafe.cloudflareaccess.com',
+    jwksUrl: 'https://equisafe.cloudflareaccess.com/cdn-cgi/access/certs',
+    audience: 'coffre-aud',
+  },
+};
+
+const dev: AuthConfig = {
+  mode: 'dev',
+  access: {
+    issuer: 'http://127.0.0.1:8081',
+    jwksUrl: 'http://127.0.0.1:8081/cdn-cgi/access/certs',
+    audience: 'coffre-dev-aud',
+  },
+  devIdpUrl: 'http://127.0.0.1:8081',
+};
+
+const root: Principal = {
+  type: 'user',
+  id: 'erwin@equisafe.io',
+  email: 'erwin@equisafe.io',
+  subject: 'root-subject',
+};
+
+test('only the two health endpoints are public in production', () => {
+  assert.equal(isPublicHealthPath('/livez'), true);
+  assert.equal(isPublicHealthPath('/readyz'), true);
+  assert.equal(isPublicHealthPath('/livez/'), false);
+  assert.equal(isPublicHealthPath('/api/me'), false);
+});
+
+test('the API boundary matches only the native API namespace', () => {
+  assert.equal(isApiPath('/api'), true);
+  assert.equal(isApiPath('/api/me'), true);
+  assert.equal(isApiPath('/apiary'), false);
+  assert.equal(isApiPath('/v1/me'), false);
+});
+
+test('the Start instance keeps explicit CSRF and request identity layers', async () => {
+  const options = await startInstance.getOptions();
+  assert.equal(options.requestMiddleware?.length, 2);
+  assert.equal(options.functionMiddleware?.length ?? 0, 0);
+});
+
+test('the specific user-directory route owns both role updates and deletion', () => {
+  const route = readFileSync(
+    fileURLToPath(
+      new URL(
+        '../src/routes/api.admin.directory.user.$principalId.ts',
+        import.meta.url,
+      ),
+    ),
+    'utf8',
+  );
+  assert.match(route, /DELETE:\s*\(/);
+  assert.match(route, /PATCH:\s*\(/);
+  assert.match(route, /methodNotAllowed\(\['DELETE', 'PATCH'\]\)/);
+});
+
+test('Cloudflare mode ignores the dev cookie and dev mode ignores the Access header', () => {
+  const request = new Request('https://coffre.example.test', {
+    headers: {
+      'cf-access-jwt-assertion': 'access-token',
+      cookie: 'coffre_dev_token=dev-token',
+    },
+  });
+  assert.equal(accessTokenForRequest(request, cloudflare), 'access-token');
+  assert.equal(accessTokenForRequest(request, dev), 'dev-token');
+});
+
+test('dev direct API calls accept only the local Access-shaped assertion', () => {
+  const request = new Request('http://127.0.0.1:3000/api/me', {
+    headers: {
+      cookie: `${DEV_TOKEN_COOKIE}=browser-token`,
+      'cf-access-jwt-assertion': 'cli-token',
+    },
+  });
+  assert.equal(accessTokenForBoundary(request, dev, '/api/me'), 'cli-token');
+  assert.equal(accessTokenForBoundary(request, dev, '/projects'), 'browser-token');
+});
+
+test('a configured root admin authenticates without a principals row lookup', async () => {
+  let queried = false;
+  const result = await authenticateRequest(
+    new Request('https://coffre.example.test/api/me', {
+      headers: {
+        'cf-access-jwt-assertion': 'valid',
+        'cf-connecting-ip': '203.0.113.10',
+      },
+    }),
+    {
+      auth: cloudflare,
+      verifier: { verify: async () => root },
+      pool: {
+        query: async () => {
+          queried = true;
+          return { rows: [] };
+        },
+      },
+      rootAdmins: [root.id],
+    } as never,
+    'request-id',
+  );
+
+  assert.equal(result instanceof Response, false);
+  assert.equal(queried, false);
+  if (!(result instanceof Response)) {
+    assert.equal(result.requestId, 'request-id');
+    assert.equal(result.registered, true);
+    assert.equal(result.sourceIp, '203.0.113.10');
+    assert.deepEqual(result.principal, root);
+  }
+});
+
+test('an unregistered non-root identity is marked for the closed-door boundary', async () => {
+  const principal: Principal = {
+    type: 'user',
+    id: 'new@equisafe.io',
+    email: 'new@equisafe.io',
+    subject: 'new-subject',
+  };
+  const result = await authenticateRequest(
+    new Request('https://coffre.example.test/api/me', {
+      headers: { 'cf-access-jwt-assertion': 'valid' },
+    }),
+    {
+      auth: cloudflare,
+      verifier: { verify: async () => principal },
+      pool: { query: async () => ({ rows: [] }) },
+      rootAdmins: [root.id],
+    } as never,
+    'unregistered-request',
+  );
+
+  assert.equal(result instanceof Response, false);
+  assert.deepEqual(result, {
+    principal,
+    registered: false,
+    requestId: 'unregistered-request',
+    sourceIp: null,
+  });
+});
+
+test('production fails closed when the Access assertion is missing', async () => {
+  let verified = false;
+  const result = await authenticateRequest(
+    new Request('https://coffre.example.test/projects'),
+    {
+      auth: cloudflare,
+      verifier: {
+        verify: async () => {
+          verified = true;
+          return root;
+        },
+      },
+      pool: { query: async () => ({ rows: [] }) },
+      rootAdmins: [root.id],
+    } as never,
+  );
+
+  assert.equal(verified, false);
+  assert.equal(result instanceof Response, true);
+  assert.equal((result as Response).status, 401);
+  assert.deepEqual(await (result as Response).json(), {
+    error: 'cloudflare_access_required',
+  });
+});
+
+test('an active registered identity receives an auditable request context', async () => {
+  const principal: Principal = {
+    type: 'service',
+    id: 'reporting.access',
+    commonName: 'reporting.access',
+  };
+  const result = await authenticateRequest(
+    new Request('http://127.0.0.1:3000/api/me', {
+      headers: { cookie: 'coffre_dev_token=valid' },
+    }),
+    {
+      auth: dev,
+      verifier: { verify: async () => principal },
+      pool: { query: async () => ({ rows: [{ active: true }] }) },
+      rootAdmins: [],
+    } as never,
+    'registered-request',
+  );
+
+  assert.equal(result instanceof Response, false);
+  if (!(result instanceof Response)) {
+    assert.deepEqual(result, {
+      principal,
+      registered: true,
+      requestId: 'registered-request',
+      sourceIp: null,
+    });
+  }
+});

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Verify every text/background pair in the admin UI palette against WCAG 2.1.
+// Verify every text/background pair in the web UI palette against WCAG 2.1.
 //
 // The palette is authored in OKLCH, which is perceptually uniform and therefore
 // pleasant to build ramps in -- but perceptual lightness is NOT relative
@@ -61,7 +61,7 @@ function outOfGamut(oklch) {
 }
 
 // --- The palette ------------------------------------------------------------
-// Keep in lockstep with apps/admin/app/globals.css. Hue 264 is the existing
+// Keep in lockstep with apps/web/src/styles/globals.css. Hue 264 is the existing
 // coffre accent (#6ea8fe); neutrals carry a trace of it rather than being dead
 // grey, and nothing is tinted "warm by default".
 

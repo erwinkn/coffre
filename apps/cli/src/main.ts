@@ -19,7 +19,7 @@ import {
 } from './auth-mode.ts';
 
 const CREDENTIALS_PATH = join(homedir(), '.coffre', 'credentials.json');
-const API_URL = process.env.COFFRE_API_URL ?? 'http://127.0.0.1:8080';
+const API_URL = process.env.COFFRE_API_URL ?? 'http://127.0.0.1:3000';
 const AUTH_MODE = process.env.COFFRE_AUTH_MODE ?? '';
 const DEV_IDP_URL = process.env.COFFRE_DEV_IDP_URL ?? '';
 
@@ -137,7 +137,7 @@ async function login(args: string[]): Promise<void> {
 
   saveToken(token);
 
-  const me = (await api('/v1/me', token)) as {
+  const me = (await api('/api/me', token)) as {
     principal: { type: string; id: string };
     environments: { project: string; environment: string; permissions: string[] }[];
   };
@@ -161,7 +161,7 @@ async function get(args: string[]): Promise<void> {
   if (!key) fail('usage: coffre get <project>/<environment>/<KEY>');
 
   const result = (await api(
-    `/v1/projects/${project}/environments/${environment}/secrets/${key}`,
+    `/api/projects/${project}/environments/${environment}/secrets/${key}`,
     loadToken(),
   )) as { value: string };
 
@@ -175,7 +175,7 @@ async function list(args: string[]): Promise<void> {
 
   const { project, environment } = parsePath(target);
   const result = (await api(
-    `/v1/projects/${project}/environments/${environment}/keys`,
+    `/api/projects/${project}/environments/${environment}/keys`,
     loadToken(),
   )) as {
     permissions: string[];
@@ -200,7 +200,7 @@ async function set(args: string[]): Promise<void> {
   const resolved = value ?? readFileSync(0, 'utf8').replace(/\n$/, '');
 
   const result = (await api(
-    `/v1/projects/${project}/environments/${environment}/secrets/${key}`,
+    `/api/projects/${project}/environments/${environment}/secrets/${key}`,
     loadToken(),
     { method: 'PUT', body: JSON.stringify({ value: resolved }) },
   )) as { version: number };
@@ -225,7 +225,7 @@ async function run(args: string[]): Promise<void> {
   const command = args.slice(separator + 1);
 
   const result = (await api(
-    `/v1/projects/${project}/environments/${environment}/secrets`,
+    `/api/projects/${project}/environments/${environment}/secrets`,
     loadToken(),
   )) as { secrets: Record<string, string> };
 
@@ -252,7 +252,7 @@ async function history(args: string[]): Promise<void> {
   if (!key) fail('usage: coffre history <project>/<environment>/<KEY>');
 
   const result = (await api(
-    `/v1/projects/${project}/environments/${environment}/secrets/${key}/versions`,
+    `/api/projects/${project}/environments/${environment}/secrets/${key}/versions`,
     loadToken(),
   )) as {
     versions: { version: number; createdAt: string; createdBy: string; current: boolean }[];
@@ -275,7 +275,7 @@ async function rollback(args: string[]): Promise<void> {
   if (!key) fail('usage: coffre rollback <project>/<environment>/<KEY> <version>');
 
   await api(
-    `/v1/projects/${project}/environments/${environment}/secrets/${key}/rollback`,
+    `/api/projects/${project}/environments/${environment}/secrets/${key}/rollback`,
     loadToken(),
     { method: 'POST', body: JSON.stringify({ version: Number(version) }) },
   );
@@ -303,7 +303,7 @@ async function importEnv(args: string[]): Promise<void> {
   const content = values.file ? readFileSync(values.file, 'utf8') : readFileSync(0, 'utf8');
 
   const result = (await api(
-    `/v1/projects/${project}/environments/${environment}/import`,
+    `/api/projects/${project}/environments/${environment}/import`,
     loadToken(),
     { method: 'POST', body: JSON.stringify({ content, dryRun: !values.apply }) },
   )) as {
@@ -327,7 +327,7 @@ async function importEnv(args: string[]): Promise<void> {
 }
 
 async function projects(): Promise<void> {
-  const result = (await api('/v1/admin/projects', loadToken())) as {
+  const result = (await api('/api/admin/projects', loadToken())) as {
     projects: {
       slug: string;
       name: string;
@@ -349,7 +349,7 @@ async function projects(): Promise<void> {
 }
 
 async function whoHasAccess(): Promise<void> {
-  const result = (await api('/v1/admin/principals', loadToken())) as {
+  const result = (await api('/api/admin/principals', loadToken())) as {
     principals: {
       principalId: string;
       principalType: string;
@@ -385,7 +385,7 @@ async function grantAccess(args: string[]): Promise<void> {
     fail('usage: coffre grant <project> <principal> --role <role> [--env <env>] [--service] [--expires YYYY-MM-DD]');
   }
 
-  await api(`/v1/admin/projects/${project}/grants`, loadToken(), {
+  await api(`/api/admin/projects/${project}/grants`, loadToken(), {
     method: 'POST',
     body: JSON.stringify({
       principalType: values.service ? 'service' : 'user',
@@ -401,7 +401,7 @@ async function grantAccess(args: string[]): Promise<void> {
 }
 
 async function roles(): Promise<void> {
-  const result = (await api('/v1/admin/roles', loadToken())) as {
+  const result = (await api('/api/admin/roles', loadToken())) as {
     roles: {
       slug: string;
       description: string;
@@ -431,7 +431,7 @@ async function audit(args: string[]): Promise<void> {
   if (values.actor) query.set('actorId', values.actor);
   if (values.denied) query.set('decision', 'deny');
 
-  const result = (await api(`/v1/audit?${query}`, loadToken())) as {
+  const result = (await api(`/api/audit?${query}`, loadToken())) as {
     entries: {
       occurredAt: string;
       actorId: string;
@@ -450,7 +450,7 @@ async function audit(args: string[]): Promise<void> {
 }
 
 async function verify(): Promise<void> {
-  const result = (await api('/v1/audit/verify', loadToken())) as
+  const result = (await api('/api/audit/verify', loadToken())) as
     | { ok: true; rows: number; head: string }
     | { ok: false; failedAtSeq: number; reason: string };
 

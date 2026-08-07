@@ -1,6 +1,6 @@
 const LOCAL_SEED_CONFIG = Object.freeze({
-    ownerDatabaseUrl: 'postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/coffre',
-    apiUrl: 'http://127.0.0.1:8080',
+    databaseUrl: 'postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/coffre',
+    apiUrl: 'http://127.0.0.1:3000',
     idpUrl: 'http://127.0.0.1:8081',
     audience: 'coffre-local-dev-aud',
     rootAdmin: 'erwin@equisafe.io',
@@ -19,8 +19,7 @@ export function loadLocalSeedConfig(env) {
     }
 
     const resolved = {
-        ownerDatabaseUrl:
-            env.COFFRE_OWNER_DATABASE_URL ?? LOCAL_SEED_CONFIG.ownerDatabaseUrl,
+        databaseUrl: env.DATABASE_URL ?? LOCAL_SEED_CONFIG.databaseUrl,
         apiUrl: env.COFFRE_API_URL ?? LOCAL_SEED_CONFIG.apiUrl,
         idpUrl: env.COFFRE_DEV_IDP_URL ?? LOCAL_SEED_CONFIG.idpUrl,
         audience: env.COFFRE_ACCESS_AUD ?? LOCAL_SEED_CONFIG.audience,

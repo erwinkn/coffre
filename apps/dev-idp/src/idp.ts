@@ -54,7 +54,7 @@ export class DevIdp {
         const email = url.searchParams.get('email');
         const commonName = url.searchParams.get('common_name');
 
-        // Callers choose their own lifetime. The admin UI asks for a working
+        // Callers choose their own lifetime. The web UI asks for a working
         // day, because a token minted for the default 15 minutes turned every
         // local session into a sign-in every quarter of an hour. Left
         // unspecified so the default still applies to everything else.

@@ -25,7 +25,31 @@ EXCEPTION
 END
 $$;
 
--- 3. The application may NOT delete an audit row.
+-- 3. The application may not delete or truncate any application table.
+DO $$
+DECLARE
+    unsafe_table text;
+BEGIN
+    SELECT c.relname INTO unsafe_table
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = 'public'
+       AND c.relkind = 'r'
+       AND (
+           has_table_privilege(current_user, c.oid, 'DELETE')
+           OR has_table_privilege(current_user, c.oid, 'TRUNCATE')
+       )
+     LIMIT 1;
+
+    IF unsafe_table IS NOT NULL THEN
+        RAISE EXCEPTION 'FAIL: runtime login can delete or truncate %', unsafe_table;
+    END IF;
+
+    RAISE NOTICE 'PASS: runtime login cannot DELETE or TRUNCATE application tables';
+END
+$$;
+
+-- 4. Direct attempts fail as well as the privilege introspection above.
 DO $$
 BEGIN
     DELETE FROM projects WHERE id = '11111111-1111-1111-1111-111111111111';
@@ -33,17 +57,6 @@ BEGIN
 EXCEPTION
     WHEN insufficient_privilege THEN
         RAISE NOTICE 'PASS: runtime login cannot DELETE';
-END
-$$;
-
--- 4. The application may NOT truncate the audit log.
-DO $$
-BEGIN
-    TRUNCATE projects;
-    RAISE EXCEPTION 'FAIL: runtime login was able to TRUNCATE';
-EXCEPTION
-    WHEN insufficient_privilege THEN
-        RAISE NOTICE 'PASS: runtime login cannot TRUNCATE';
 END
 $$;
 
