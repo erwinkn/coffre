@@ -1,0 +1,67 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "equisafe-coffre",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-08-06",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "routes": [
+    {
+      "pattern": "coffre.equisafe.dev",
+      "custom_domain": true
+    }
+  ],
+  "placement": {
+    "mode": "smart"
+  },
+  "observability": {
+    "enabled": true
+  },
+  "vars": {
+    "COFFRE_AUTH_MODE": "cloudflare"
+  },
+  "secrets": {
+    "required": [
+      "COFFRE_ACCESS_ISSUER",
+      "COFFRE_ACCESS_JWKS_URL",
+      "COFFRE_ACCESS_AUD",
+      "COFFRE_ROOT_ADMINS",
+      "COFFRE_KEK_LOCAL",
+      "COFFRE_KEK_ID",
+      "COFFRE_AUDIT_CHAIN_KEY"
+    ]
+  },
+  "hyperdrive": [
+    {
+      "binding": "HYPERDRIVE",
+      "id": "__COFFRE_HYPERDRIVE_ID__"
+    }
+  ],
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
+  "env": {
+    "development": {
+      "vars": {
+        "COFFRE_AUTH_MODE": "dev"
+      },
+      "secrets": {
+        "required": [
+          "COFFRE_ACCESS_ISSUER",
+          "COFFRE_ACCESS_JWKS_URL",
+          "COFFRE_ACCESS_AUD",
+          "COFFRE_DEV_IDP_URL",
+          "COFFRE_ROOT_ADMINS",
+          "COFFRE_KEK_LOCAL",
+          "COFFRE_AUDIT_CHAIN_KEY"
+        ]
+      },
+      "hyperdrive": [
+        {
+          "binding": "HYPERDRIVE",
+          "id": "__COFFRE_HYPERDRIVE_ID__"
+        }
+      ]
+    }
+  }
+}

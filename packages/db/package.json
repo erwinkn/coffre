@@ -7,6 +7,7 @@
     "check": "drizzle-kit check --config drizzle.config.ts",
     "generate": "drizzle-kit generate --config drizzle.config.ts",
     "migrate": "node src/migrate.ts",
+    "verify:runtime": "node src/verify-runtime.ts",
     "test": "node --test"
   },
   "dependencies": {

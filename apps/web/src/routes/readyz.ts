@@ -8,7 +8,7 @@ export const Route = createFileRoute('/readyz')({
     handlers: {
       GET: async () => {
         const runtime = getRuntime();
-        const readiness = await auditReadiness(runtime.pool, runtime.heartbeat);
+        const readiness = await auditReadiness(runtime.pool);
         return jsonResponse(readiness, readiness.ok ? 200 : 503);
       },
     },

@@ -30,4 +30,4 @@ ALTER ROLE coffre_runtime
 SQL
 
 DATABASE_URL='postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/coffre_test' \
-    pnpm --filter @coffre/db migrate >/dev/null
+    pnpm --filter @coffre/db run migrate >/dev/null

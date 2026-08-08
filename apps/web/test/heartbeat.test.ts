@@ -1,22 +1,34 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { auditReadiness } from '../src/server/heartbeat.ts';
+import { auditReadiness, writeAuditHeartbeat } from '../src/server/heartbeat.ts';
 
-test('readiness fails closed when the audit writer has not completed its first beat', async () => {
-  let queried = false;
-  const readiness = await auditReadiness(
+test('the scheduled heartbeat updates the database-owned signal', async () => {
+  let statement = '';
+  const written = await writeAuditHeartbeat(
     {
-      query: async () => {
-        queried = true;
-        return { rowCount: 1, rows: [{ age: '0' }] };
+      query: async (sql: string) => {
+        statement = sql;
+        return { rowCount: 1, rows: [] };
       },
     } as never,
-    { firstBeat: Promise.resolve(false) },
+    { warn: () => assert.fail('successful heartbeat must not warn') },
   );
 
-  assert.deepEqual(readiness, { ok: false, auditHeartbeatAgeSeconds: null });
-  assert.equal(queried, false);
+  assert.equal(written, true);
+  assert.match(statement, /UPDATE audit_heartbeat/);
+  assert.match(statement, /audit_chain_head/);
+});
+
+test('the scheduled heartbeat rejects a missing singleton row', async () => {
+  let warning = '';
+  const written = await writeAuditHeartbeat(
+    { query: async () => ({ rowCount: 0, rows: [] }) } as never,
+    { warn: (_value, message) => { warning = message; } },
+  );
+
+  assert.equal(written, false);
+  assert.equal(warning, 'audit heartbeat singleton is missing');
 });
 
 test('readiness accepts a recent audit heartbeat and rejects a stale one', async () => {
@@ -27,7 +39,6 @@ test('readiness accepts a recent audit heartbeat and rejects a stale one', async
           ? { rowCount: 1, rows: [{ ready: true }] }
           : { rowCount: 1, rows: [{ age: '12.5' }] },
     } as never,
-    { firstBeat: Promise.resolve(true) },
   );
   assert.deepEqual(recent, { ok: true, auditHeartbeatAgeSeconds: 12.5 });
 
@@ -38,7 +49,6 @@ test('readiness accepts a recent audit heartbeat and rejects a stale one', async
           ? { rowCount: 1, rows: [{ ready: true }] }
           : { rowCount: 1, rows: [{ age: '301' }] },
     } as never,
-    { firstBeat: Promise.resolve(true) },
   );
   assert.deepEqual(stale, { ok: false, auditHeartbeatAgeSeconds: 301 });
 });
@@ -46,7 +56,6 @@ test('readiness accepts a recent audit heartbeat and rejects a stale one', async
 test('readiness rejects a database without the expected Drizzle schema prefix', async () => {
   const readiness = await auditReadiness(
     { query: async () => ({ rowCount: 1, rows: [{ ready: false }] }) } as never,
-    { firstBeat: Promise.resolve(true) },
   );
   assert.deepEqual(readiness, { ok: false, auditHeartbeatAgeSeconds: null });
 });

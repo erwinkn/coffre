@@ -15,7 +15,7 @@
     "check:pins": "node scripts/check-pins.mjs",
     "check:contrast": "node scripts/check-contrast.mjs",
     "db:up": "docker compose up -d postgres",
-    "db:migrate": "pnpm --dir packages/db migrate",
+    "db:migrate": "pnpm --dir packages/db run migrate",
     "db:generate": "pnpm --dir packages/db generate",
     "db:check": "pnpm --dir packages/db check",
     "seed": "DATABASE_URL=postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/coffre node --env-file=.env.dev scripts/seed.mjs",

@@ -17,6 +17,6 @@
       "@/*": ["./src/*"]
     }
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "vite.config.ts"],
+  "include": ["src/**/*.ts", "src/**/*.tsx", "vite.config.ts", "worker-configuration.d.ts"],
   "exclude": ["node_modules", ".output", ".nitro", ".tanstack"]
 }

@@ -1,42 +1,45 @@
 import '@tanstack/react-start/server-only';
 
-import pg from 'pg';
+import { AsyncLocalStorage } from 'node:async_hooks';
 
 import type { IdentityVerifier } from '../../../../packages/core/src/identity/types.ts';
 import { AccessIdentityVerifier } from '../../../../packages/core/src/identity/verifier.ts';
 import { loadConfig, type Config } from './config.ts';
-import { startHeartbeat, type Heartbeat } from './heartbeat.ts';
+import { HyperdriveDatabase, type Database } from './database.ts';
 import { AdminService } from './services/admin.ts';
 import { AuditService } from './services/audit.ts';
 import { SecretsService } from './services/secrets.ts';
 
 export type CoffreRuntime = {
-  pool: pg.Pool;
+  pool: Database;
   admin: AdminService;
   audit: AuditService;
   secrets: SecretsService;
   auth: Config['auth'];
   verifier: IdentityVerifier;
   rootAdmins: readonly string[];
-  heartbeat: Heartbeat;
 };
 
-let singleton: CoffreRuntime | undefined;
+export type WorkerBindings = {
+  HYPERDRIVE: { connectionString: string };
+  COFFRE_AUTH_MODE?: string;
+  COFFRE_ACCESS_ISSUER?: string;
+  COFFRE_ACCESS_JWKS_URL?: string;
+  COFFRE_ACCESS_AUD?: string;
+  COFFRE_DEV_IDP_URL?: string;
+  COFFRE_ROOT_ADMINS?: string;
+  COFFRE_KEK_LOCAL?: string;
+  COFFRE_KEK_ID?: string;
+  COFFRE_KEK_LOCAL_PREVIOUS?: string;
+  COFFRE_AUDIT_CHAIN_KEY?: string;
+};
 
-function runtimeLogger() {
-  return {
-    warn(value: unknown, message: string) {
-      console.warn(message, value);
-    },
-  };
-}
+const requestRuntime = new AsyncLocalStorage<CoffreRuntime>();
 
 /**
- * Construct the process-owned runtime without opening a database connection.
- * pg connects on the first query; the heartbeat is the deliberate first use.
+ * Construct the application services around an invocation-owned database.
  */
-export function createRuntime(config: Config = loadConfig()): CoffreRuntime {
-  const pool = new pg.Pool({ connectionString: config.databaseUrl });
+export function createRuntime(config: Config, pool: Database): CoffreRuntime {
   const verifier = new AccessIdentityVerifier(config.auth.access);
   const secrets = new SecretsService({
     pool,
@@ -54,8 +57,6 @@ export function createRuntime(config: Config = loadConfig()): CoffreRuntime {
     chainKey: config.auditChainKey,
     rootAdmins: config.rootAdmins,
   });
-  const heartbeat = startHeartbeat(pool, runtimeLogger());
-
   return {
     pool,
     admin,
@@ -64,22 +65,34 @@ export function createRuntime(config: Config = loadConfig()): CoffreRuntime {
     auth: config.auth,
     verifier,
     rootAdmins: config.rootAdmins,
-    heartbeat,
   };
 }
 
-/** Lazily initialized so imports, route generation, and builds never touch DB. */
+/** Resolve the runtime attached to the current Worker invocation. */
 export function getRuntime(): CoffreRuntime {
-  singleton ??= createRuntime();
-  return singleton;
+  const runtime = requestRuntime.getStore();
+  if (runtime === undefined) {
+    throw new Error('Coffre runtime is unavailable outside a Worker invocation');
+  }
+  return runtime;
 }
 
-/** Called by the production server's graceful-shutdown hook. */
-export async function disposeRuntime(): Promise<void> {
-  const current = singleton;
-  singleton = undefined;
-  if (current === undefined) return;
-
-  current.heartbeat.stop();
-  await current.pool.end();
+/**
+ * Attach Cloudflare bindings and a Hyperdrive client factory to one invocation.
+ * No database I/O object escapes this async context.
+ */
+export function runWithWorkerRuntime<T>(
+  bindings: WorkerBindings,
+  operation: () => T,
+): T {
+  const { HYPERDRIVE, ...environment } = bindings;
+  const config = loadConfig({
+    ...environment,
+    DATABASE_URL: HYPERDRIVE.connectionString,
+  });
+  const runtime = createRuntime(
+    config,
+    new HyperdriveDatabase(HYPERDRIVE.connectionString),
+  );
+  return requestRuntime.run(runtime, operation);
 }

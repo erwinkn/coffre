@@ -90,8 +90,8 @@ export function parseRootAdmins(mode: AuthMode, raw: string | undefined): string
 /**
  * Load and validate web-runtime configuration.
  *
- * This function is intentionally side-effect free. It is called lazily by
- * getRuntime(), never while Vite is discovering or building routes.
+ * This function is intentionally side-effect free. The Worker entrypoint calls
+ * it inside each invocation, never while Vite is discovering or building routes.
  */
 export function loadConfig(env: Environment = process.env): Config {
   if (env.COFFRE_OWNER_DATABASE_URL !== undefined) {

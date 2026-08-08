@@ -3,8 +3,9 @@
 A deliberately small in-house secrets manager. Cloudflare Access is the identity
 provider, Postgres is the backend of record, and the audit log is the point.
 
-**Status: demo software. Do not store real secrets.** Application deployment is
-handled separately; this repository makes no Scaleway or Cloudflare calls.
+**Status: demo software. Do not store real secrets.** The application deploys
+as a Cloudflare Worker; Terraform in the infrastructure repository owns the
+private Scaleway database, Workers VPC Service, connector, and Hyperdrive.
 
 ## Why this exists
 
@@ -112,9 +113,9 @@ corrupted values — see `apps/web/test/dotenv.test.ts`.
 `DELETE`, or `TRUNCATE` on history, and no `DELETE` or `TRUNCATE` anywhere.
 Grant revocation and removal use the existing expiry/archive columns.
 
-**Owner and runtime are separate process identities.** Both processes read the
-standard `DATABASE_URL`, but the migration Job receives the owner URL while the
-web Deployment receives only the restricted runtime URL. Terraform creates and
+**Owner and runtime are separate identities.** The one-shot migration process
+receives the owner `DATABASE_URL`; the Worker receives only the `HYPERDRIVE`
+binding backed by the restricted runtime login. Terraform creates and
 password-manages the stable `coffre_runtime` login; the Drizzle bootstrap
 validates it and grants membership in the append-only `coffre_app` role:
 
@@ -122,10 +123,10 @@ validates it and grants membership in the append-only `coffre_app` role:
 DATABASE_URL='<owner-database-url>' pnpm db:migrate
 ```
 
-The web `DATABASE_URL` names that runtime login. Database routing, TLS, and credential
-delivery remain deployment infrastructure concerns; no production credential
-is stored here. Local `pnpm dev` provisions its disposable runtime login
-automatically.
+Hyperdrive contains the runtime credential, so no database password is exposed
+as a Worker variable or secret. Database routing and TLS remain infrastructure
+concerns. Local `pnpm dev` provisions its disposable runtime login automatically
+and emulates the Hyperdrive binding against loopback PostgreSQL.
 
 ## Supply chain
 
@@ -304,12 +305,13 @@ code expecting the old shape:
 - **The Vite 8 toolchain runs no install scripts.** It uses Rolldown and
   lightningcss, both shipped as prebuilt platform packages, so `ignoreScripts:
   true` costs nothing here. That was worth checking before committing to it.
-- **The production build is a standalone Nitro Node server.** Start it with
-  `pnpm --dir apps/web start`; it listens on `PORT` (and `HOST`, when set).
-  The launcher also turns a failed asynchronous bind into a non-zero exit.
-  `smoke:production` boots the built output on an isolated test port, requests
-  `/livez` and `/readyz`, proves `/api` fails closed without Access, proves a
-  second bind fails, and verifies graceful SIGTERM shutdown.
+- **The production build is a Cloudflare Worker.** The custom entrypoint wraps
+  TanStack's fetch handler in one invocation-scoped runtime and exposes a
+  five-minute scheduled audit heartbeat. Hyperdrive maintains the origin pool;
+  Coffre never keeps a `pg` client across Worker requests. `smoke:production`
+  runs the built bundle in workerd, points the local Hyperdrive binding at the
+  test database, proves stale readiness, invokes Cron, and proves the protected
+  `/api` boundary still fails closed without Access.
 - `src/routeTree.gen.ts` is generated and gitignored; `vite build` writes it.
 
 ### There is no delete, and that is deliberate

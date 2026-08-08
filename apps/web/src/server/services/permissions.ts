@@ -1,4 +1,4 @@
-import type { PoolClient } from 'pg';
+import type { DatabaseClient } from '../database.ts';
 
 export type PrincipalRef = { type: 'user' | 'service'; id: string };
 
@@ -49,7 +49,7 @@ export function isRootAdmin(principal: PrincipalRef, rootAdmins: readonly string
  * enforced -- every check goes through this function.
  */
 export async function permissionsForEnvironment(
-  tx: PoolClient,
+  tx: DatabaseClient,
   principal: PrincipalRef,
   environmentId: string,
   rootAdmins: readonly string[],
@@ -81,7 +81,7 @@ export async function permissionsForEnvironment(
  * reason project-scoped grants exist.
  */
 export async function permissionsForProject(
-  tx: PoolClient,
+  tx: DatabaseClient,
   principal: PrincipalRef,
   projectId: string,
   rootAdmins: readonly string[],
@@ -108,7 +108,7 @@ export async function permissionsForProject(
  * see this project at all"), never for authorising a mutation.
  */
 export async function permissionsAnywhereInProject(
-  tx: PoolClient,
+  tx: DatabaseClient,
   principal: PrincipalRef,
   projectId: string,
   rootAdmins: readonly string[],

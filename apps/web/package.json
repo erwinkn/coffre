@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite dev",
     "build": "vite build",
-    "start": "node ../../scripts/start-web-production.mjs",
+    "preview": "vite preview",
+    "deploy": "pnpm build && node ../../scripts/deploy-worker.mjs",
+    "cf-typegen": "wrangler types",
     "smoke:production": "../../scripts/smoke-web-production.sh",
     "typecheck": "tsc --noEmit"
   },
@@ -20,13 +22,14 @@
     "sonner": "2.0.7"
   },
   "devDependencies": {
+    "@cloudflare/vite-plugin": "1.50.0",
     "@types/node": "26.1.1",
     "@types/pg": "8.20.0",
     "@types/react": "19.2.17",
     "@vitejs/plugin-react": "6.0.3",
     "agentation": "3.0.2",
-    "nitro": "3.0.260610-beta",
     "typescript": "5.9.3",
-    "vite": "8.1.5"
+    "vite": "8.1.5",
+    "wrangler": "4.118.0"
   }
 }

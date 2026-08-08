@@ -1,6 +1,8 @@
 import type { PoolClient } from 'pg';
 import { chainHash, type ChainedAuditRow } from '../../core/src/audit/chain.ts';
 
+type AuditDatabaseClient = Pick<PoolClient, 'query'>;
+
 /**
  * Canonical rendering of occurred_at.
  *
@@ -40,7 +42,7 @@ export type AuditEntry = {
  * secrets-manager volumes the resulting throughput ceiling does not matter.
  */
 export async function appendAudit(
-  tx: PoolClient,
+  tx: AuditDatabaseClient,
   chainKey: Buffer,
   entries: readonly AuditEntry[],
 ): Promise<{ seqStart: bigint; headHash: Buffer }> {
@@ -125,7 +127,7 @@ export async function appendAudit(
 
 /** Read rows back in chain order, rendering fields exactly as they were hashed. */
 export async function readAuditRows(
-  tx: PoolClient,
+  tx: AuditDatabaseClient,
   fromSeq = 0n,
   limit = 1000,
 ): Promise<(ChainedAuditRow & { prevHash: Buffer; hash: Buffer })[]> {

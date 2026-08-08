@@ -1,4 +1,4 @@
-import type { Pool, PoolClient } from 'pg';
+import type { Database, DatabaseClient } from '../database.ts';
 
 import { appendAudit, type AuditEntry } from '../../../../../packages/db/src/audit.ts';
 import { AccessDenied, AuditedFailure, NotFound, type RequestContext } from './secrets.ts';
@@ -13,7 +13,7 @@ import {
 } from './permissions.ts';
 
 export type AdminServiceDeps = {
-  pool: Pool;
+  pool: Database;
   auditChainKey: Buffer;
   rootAdmins: readonly string[];
 };
@@ -76,7 +76,7 @@ export class AdminService {
   }
 
   async #audited<T>(
-    fn: (tx: PoolClient) => Promise<{ result: T; entries: AuditEntry[] }>,
+    fn: (tx: DatabaseClient) => Promise<{ result: T; entries: AuditEntry[] }>,
   ): Promise<T> {
     const client = await this.#deps.pool.connect();
     try {
@@ -112,7 +112,7 @@ export class AdminService {
   }
 
   async #lockPrincipals(
-    tx: PoolClient,
+    tx: DatabaseClient,
     principals: readonly PrincipalRef[],
   ): Promise<void> {
     const keys = [
@@ -131,14 +131,14 @@ export class AdminService {
   }
 
   async #lockPrincipal(
-    tx: PoolClient,
+    tx: DatabaseClient,
     principalType: 'user' | 'service',
     principalId: string,
   ): Promise<void> {
     await this.#lockPrincipals(tx, [{ type: principalType, id: principalId }]);
   }
 
-  async #isInstanceOwner(tx: PoolClient, principal: PrincipalRef): Promise<boolean> {
+  async #isInstanceOwner(tx: DatabaseClient, principal: PrincipalRef): Promise<boolean> {
     if (this.#isRootAdmin(principal)) return true;
     if (principal.type !== 'user') return false;
 
@@ -154,7 +154,7 @@ export class AdminService {
   }
 
   async #requireInstanceOwner(
-    tx: PoolClient,
+    tx: DatabaseClient,
     ctx: RequestContext,
     base: Omit<AuditEntry, 'decision'>,
     metadata: Record<string, unknown> = {},
@@ -196,7 +196,7 @@ export class AdminService {
 
   /** What the caller may do at project scope. Environment grants do not count. */
   #projectPermissions(
-    tx: PoolClient,
+    tx: DatabaseClient,
     principal: PrincipalRef,
     projectId: string,
   ): Promise<PermissionSet> {
@@ -205,7 +205,7 @@ export class AdminService {
 
   /** Resolve the project and assert the caller holds `permission` on it. */
   async #requireProjectPermission(
-    tx: PoolClient,
+    tx: DatabaseClient,
     ctx: RequestContext,
     projectSlug: string,
     permission: Permission,

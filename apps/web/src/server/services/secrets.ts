@@ -1,5 +1,5 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto';
-import type { Pool, PoolClient } from 'pg';
+import type { Database, DatabaseClient } from '../database.ts';
 
 import { seal, open, type Envelope } from '../../../../../packages/core/src/envelope.ts';
 import type { SecretContext } from '../../../../../packages/core/src/context.ts';
@@ -38,7 +38,7 @@ export type RequestContext = {
 };
 
 export type SecretsServiceDeps = {
-  pool: Pool;
+  pool: Database;
   keks: KekRegistry;
   auditChainKey: Buffer;
   rootAdmins: readonly string[];
@@ -71,7 +71,7 @@ export class SecretsService {
    * gets an error and no secret.
    */
   async #audited<T>(
-    fn: (tx: PoolClient) => Promise<{ result: T; entries: AuditEntry[] }>,
+    fn: (tx: DatabaseClient) => Promise<{ result: T; entries: AuditEntry[] }>,
   ): Promise<T> {
     const client = await this.#deps.pool.connect();
     try {
@@ -123,7 +123,7 @@ export class SecretsService {
    * them exactly as it treats one that never existed: denied, and audited.
    */
   async #resolveEnvironment(
-    tx: PoolClient,
+    tx: DatabaseClient,
     projectSlug: string,
     environmentSlug: string,
   ): Promise<EnvironmentRow | null> {
@@ -151,7 +151,7 @@ export class SecretsService {
    * could authorise creating an environment inside it.
    */
   #permissionsFor(
-    tx: PoolClient,
+    tx: DatabaseClient,
     principal: PrincipalRef,
     environmentId: string,
   ): Promise<PermissionSet> {
@@ -1016,7 +1016,7 @@ export class AuditedFailure extends Error {
 }
 
 async function loadCurrentVersion(
-  tx: PoolClient,
+  tx: DatabaseClient,
   env: EnvironmentRow,
   key: string,
 ): Promise<{ secretId: string; version: number; envelope: Envelope } | null> {
@@ -1034,7 +1034,7 @@ async function loadCurrentVersion(
 }
 
 async function loadAllCurrentVersions(
-  tx: PoolClient,
+  tx: DatabaseClient,
   env: EnvironmentRow,
 ): Promise<{ secretId: string; key: string; version: number; envelope: Envelope }[]> {
   const result = await tx.query(
@@ -1072,7 +1072,7 @@ function toEnvelopeRow(row: Record<string, unknown>): {
 }
 
 async function upsertSecret(
-  tx: PoolClient,
+  tx: DatabaseClient,
   env: EnvironmentRow,
   key: string,
   createdBy: string,

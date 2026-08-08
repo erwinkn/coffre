@@ -1,4 +1,4 @@
-import type { Pool } from 'pg';
+import type { Database } from '../database.ts';
 
 import { GENESIS_HASH, verifyChain } from '../../../../../packages/core/src/audit/chain.ts';
 import {
@@ -26,12 +26,12 @@ export type AuditVerification =
   | { ok: false; failedAtSeq: number; reason: string };
 
 export class AuditService {
-  readonly #pool: Pool;
+  readonly #pool: Database;
   readonly #chainKey: Buffer;
   readonly #rootAdmins: readonly string[];
 
   constructor(options: {
-    pool: Pool;
+    pool: Database;
     chainKey: Buffer;
     rootAdmins: readonly string[];
   }) {

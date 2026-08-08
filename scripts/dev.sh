@@ -6,7 +6,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-coffre}"
-set -a && . ./.env.dev && set +a
+set -a
+# Local developer configuration is intentionally untracked.
+# shellcheck disable=SC1091
+. ./.env.dev
+set +a
 
 log() { printf '\n==> %s\n' "$1"; }
 
@@ -28,7 +32,13 @@ fi
 
 cleanup() {
     log 'stopping'
-    kill $(jobs -p) 2>/dev/null || true
+    job_pids=()
+    while IFS= read -r job_pid; do
+        job_pids+=("$job_pid")
+    done < <(jobs -p)
+    if ((${#job_pids[@]} > 0)); then
+        kill "${job_pids[@]}" 2>/dev/null || true
+    fi
 }
 trap cleanup EXIT INT TERM
 
@@ -49,7 +59,7 @@ fi
 docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U coffre_owner -d postgres \
     -c "ALTER ROLE coffre_runtime LOGIN PASSWORD 'local-runtime-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS" >/dev/null
 DATABASE_URL='postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/coffre' \
-    pnpm --dir packages/db migrate >/dev/null
+    pnpm --dir packages/db run migrate >/dev/null
 
 # Service logs go to files rather than stdout so the seed output stays legible.
 mkdir -p .logs
@@ -59,6 +69,8 @@ node apps/dev-idp/src/server.ts > .logs/dev-idp.log 2>&1 &
 sleep 1
 
 log 'starting web app on :3000'
+export CLOUDFLARE_ENV=development
+export CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE="$DATABASE_URL"
 (cd apps/web && ./node_modules/.bin/vite dev) > .logs/web.log 2>&1 &
 until curl -sf http://127.0.0.1:3000/livez >/dev/null 2>&1; do sleep 1; done
 

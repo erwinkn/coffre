@@ -6,7 +6,7 @@ identity provider, a password flow, or a persona picker in production.
 ## Cloudflare Access inputs
 
 Configure one Cloudflare Access application for the production hostname, then
-set the following variables on the single web process:
+set the following bindings on the Worker:
 
 ```dotenv
 COFFRE_AUTH_MODE=cloudflare
@@ -61,9 +61,9 @@ still fails closed at the origin boundary: every path except exact `/livez`
 and `/readyz` returns `401 cloudflare_access_required` without the forwarded
 assertion. There is no production persona picker or local login route.
 
-Do not treat this application check as a substitute for protecting the origin
-network. The production deployment must expose only the intended
-Access-protected path to users.
+Do not treat this application check as a substitute for protecting the data
+plane. The Worker receives PostgreSQL access only through its Hyperdrive
+binding; the Scaleway database has no public endpoint.
 
 ## Root-admin bootstrap
 

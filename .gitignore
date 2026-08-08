@@ -11,6 +11,7 @@ dist/
 .nitro/
 .tanstack/
 .vite/
+.wrangler/
 
 # Generated from src/routes by the TanStack Start plugin. Committing it means
 # resolving conflicts in a file nobody edits.

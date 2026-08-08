@@ -1,7 +1,7 @@
 import { defineConfig } from 'vite';
 import viteReact from '@vitejs/plugin-react';
 import { tanstackStart } from '@tanstack/react-start/plugin/vite';
-import { nitro } from 'nitro/vite';
+import { cloudflare } from '@cloudflare/vite-plugin';
 
 export default defineConfig({
   server: {
@@ -12,13 +12,10 @@ export default defineConfig({
   },
 
   plugins: [
+    cloudflare({ viteEnvironment: { name: 'ssr' } }),
     // Generates src/routeTree.gen.ts from src/routes, and wires the SSR
     // server. Must come before the React plugin.
     tanstackStart(),
-    // Turns Start's fetch handler into a standalone production Node server.
-    nitro({
-      plugins: ['./src/server/nitro-runtime.ts'],
-    }),
     viteReact(),
   ],
 });
