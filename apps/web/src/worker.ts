@@ -1,6 +1,5 @@
 import handler from '@tanstack/react-start/server-entry';
 
-import { writeAuditHeartbeat } from './server/heartbeat.ts';
 import {
   getRuntime,
   runWithWorkerRuntime,
@@ -24,7 +23,7 @@ export default {
   async scheduled(_controller, bindings, context) {
     context.waitUntil(
       runWithWorkerRuntime(bindings, async () => {
-        const written = await writeAuditHeartbeat(getRuntime().pool, runtimeLogger());
+        const written = await getRuntime().audit.writeHeartbeat(runtimeLogger());
         if (!written) {
           throw new Error('scheduled audit heartbeat failed');
         }

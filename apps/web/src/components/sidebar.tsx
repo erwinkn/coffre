@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link, useRouterState } from '@tanstack/react-router';
 import type { ProjectSummary } from '../shared/models';
 import type { UiCapabilities } from '../lib/capabilities';
+import { isActiveAccessibleEnvironment } from '../lib/project-environments';
 import { AdministrationNav } from './affordances';
 import { ThemeToggle } from './theme';
 import { ChevronRight, Folder, Ledger, Users, Vault } from './icons';
@@ -21,7 +22,7 @@ const CURRENT = { 'aria-current': 'page' } as const;
  *
  * The project/environment tree lives here rather than only on the index,
  * because "jump from market/dev to market/prod" is the single most common
- * movement in the app and it used to cost two page loads.
+ * movement in the app, so it belongs in the persistent navigation.
  */
 export function Sidebar({ projects, principal, instanceRole, capabilities }: Props) {
   const active = projects.filter((project) => project.archivedAt === null);
@@ -57,7 +58,7 @@ export function Sidebar({ projects, principal, instanceRole, capabilities }: Pro
           </span>
         ) : (
           active.map((project) => {
-            const environments = project.environments.filter((e) => e.archivedAt === null);
+            const environments = project.environments.filter(isActiveAccessibleEnvironment);
             const expanded = toggled[project.slug] ?? project.slug === current;
             const treeId = `nav-tree-${project.slug}`;
 

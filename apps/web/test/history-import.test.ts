@@ -49,6 +49,13 @@ beforeEach(async () => {
   await pool.query('DELETE FROM principals');
   await pool.query('DELETE FROM environments');
   await pool.query('DELETE FROM projects');
+  await pool.query(
+    `INSERT INTO principals (principal_type, principal_id, instance_role, created_by, active)
+     VALUES
+       ('user', $1, 'user', $3, true),
+       ('user', $2, 'user', $3, true)`,
+    [viewer.principal.id, 'leaver@equisafe.io', ROOT],
+  );
   await services.admin.createProject(root, 'market', 'Market');
   await services.admin.createEnvironment(root, 'market', 'dev', 'Dev');
 });
@@ -114,6 +121,8 @@ test('version history reports authors and current version without values', async
   assert.equal(history.versions[0].current, true);
   assert.equal(history.versions[1].current, false);
   assert.equal(history.versions[0].createdBy, ROOT);
+  assert.equal(typeof history.versions[0].createdAt, 'string');
+  assert.match(history.versions[0].createdAt, /^\d{4}-\d{2}-\d{2}T/);
   assert.equal(JSON.stringify(history).includes('v3'), false);
 });
 
@@ -190,6 +199,29 @@ test('a dry run reports the plan and writes nothing', async () => {
   assert.equal((await pool.query('SELECT count(*)::int AS n FROM secrets')).rows[0].n, 0);
 });
 
+test('a preview audits every existing secret that it compares', async () => {
+  await services.secrets.writeSecret(root, 'market', 'dev', 'A', 'one');
+  await services.secrets.writeSecret(root, 'market', 'dev', 'B', 'two');
+  await pool.query('DELETE FROM audit_log');
+  await importText('A=one\nB=changed\nC=new', true);
+
+  const reads = await pool.query(
+    "SELECT metadata FROM audit_log WHERE action = 'secret.read' ORDER BY metadata",
+  );
+  assert.deepEqual(
+    reads.rows.map((row) => JSON.parse(row.metadata).key).sort(),
+    ['A', 'B'],
+  );
+  assert.equal(
+    (
+      await pool.query(
+        "SELECT count(*)::int AS n FROM audit_log WHERE action = 'secret.import.preview'",
+      )
+    ).rows[0].n,
+    1,
+  );
+});
+
 test('import creates every secret and audits one row per key', async () => {
   await importText('A=one\nB=two\nC=three', false);
   assert.deepEqual(
@@ -253,10 +285,9 @@ test('the audit chain verifies across history, rollback, and import', async () =
   assert.equal((await services.audit.verify(root)).ok, true);
 });
 
-test('project access shows the creator as owner, not as a projected root admin', async () => {
+test('structural project creation does not create an implicit secret grant', async () => {
   const grants = await services.admin.listGrants(root, 'market');
-  const creator = grants.find((grant) => grant.principalId === ROOT);
-  assert.equal(creator?.role, 'owner');
+  assert.equal(grants.some((grant) => grant.principalId === ROOT), false);
 });
 
 test('the principal view answers what a person still holds', async () => {

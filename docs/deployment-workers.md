@@ -28,18 +28,29 @@ The `coffre-production` GitHub environment must provide:
   `COFFRE_OWNER_DATABASE_URL`, and `COFFRE_RUNTIME_PASSWORD`
 - optional rotation secret: `COFFRE_KEK_LOCAL_PREVIOUS`
 
+Set `COFFRE_RUNTIME_ROLE` to the fixed role name `coffre_runtime`. The database
+schema grants privileges to this exact role and the migration runner rejects a
+different value.
+
 Copy the application values only from Terraform's sensitive
 `worker_runtime_environment` output. Copy the Hyperdrive ID from
 `cloudflare_hyperdrive_id`. Never copy `migration_environment`, the database
 owner URL, database CA, or runtime password into the Worker environment.
 
 Deployments are manually dispatched. The workflow first runs the complete
-local contract suite. It then creates a temporary `DEV1-S` instance, attaches
+local contract suite. It rejects all release refs except `main`. Configure the
+`coffre-production` GitHub environment to allow only the selected branch
+`main`, and disable administrator bypass if the repository plan supports it.
+This environment rule is the authoritative secret boundary because workflow
+code on another branch is not trusted. The workflow then creates a temporary
+`DEV1-S` instance, attaches
 it to Coffre's Scaleway Private Network, permits SSH only from that GitHub
 runner's IPv4 address, and runs the owner migration image. A second container
 connects as the runtime role and verifies its identity, membership, lack of
 owner/DDL/audit-mutation privileges, and ability to write the heartbeat. The
-workflow deletes the instance, root volume, public IP, security group, CA, and
+runner generates the instance SSH host key and pins its public key before the
+first connection. Thus, credentials are never sent to an unauthenticated host.
+The workflow deletes the instance, root volume, public IP, security group, CA, and
 owner environment whether the migration succeeds or fails. The Worker deploy
 job cannot start unless this migration job succeeds.
 

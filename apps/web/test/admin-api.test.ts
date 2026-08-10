@@ -50,6 +50,14 @@ beforeEach(async () => {
   await pool.query('DELETE FROM principals');
   await pool.query('DELETE FROM environments');
   await pool.query('DELETE FROM projects');
+  await pool.query(
+    `INSERT INTO principals (principal_type, principal_id, instance_role, created_by, active)
+     VALUES
+       ('user', $1, 'user', $3, true),
+       ('user', $2, 'user', $3, true),
+       ('service', 'ci-deploy.access', 'user', $3, true)`,
+    [lead.principal.id, reader.principal.id, ROOT],
+  );
 });
 
 async function seedProject(): Promise<void> {
@@ -71,22 +79,43 @@ function isConflict(error: unknown): boolean {
   return (error as { statusCode?: number }).statusCode === 409;
 }
 
-test('only a configured root creates projects, and both outcomes are audited', async () => {
+test('root admins and instance owners create projects without implicit secret grants', async () => {
+  const owner = requestContext('instance-owner@equisafe.io');
+  await services.admin.addDirectoryPrincipal(root, {
+    principalType: 'user',
+    principalId: owner.principal.id,
+    instanceRole: 'owner',
+  });
   assert.deepEqual(await services.admin.createProject(root, 'market', 'Market'), {
     slug: 'market',
     name: 'Market',
+  });
+  assert.deepEqual(await services.admin.createProject(owner, 'operations', 'Operations'), {
+    slug: 'operations',
+    name: 'Operations',
   });
   await assert.rejects(
     services.admin.createProject(outsider, 'sneaky', 'Sneaky'),
     AccessDenied,
   );
   assert.deepEqual(await auditActions(), [
+    { action: 'directory.create', decision: 'allow' },
+    { action: 'project.create', decision: 'allow' },
     { action: 'project.create', decision: 'allow' },
     { action: 'project.create', decision: 'deny' },
   ]);
   assert.equal(
     (await pool.query('SELECT count(*)::int AS n FROM projects')).rows[0].n,
-    1,
+    2,
+  );
+  assert.equal(
+    (
+      await pool.query(
+        'SELECT count(*)::int AS n FROM grants WHERE principal_id = $1',
+        [owner.principal.id],
+      )
+    ).rows[0].n,
+    0,
   );
 });
 
@@ -112,6 +141,35 @@ test('renaming a project slug preserves its encrypted secrets', async () => {
   assert.equal(
     (await services.secrets.readSecret(root, 'marketplace', 'prod', 'DATABASE_URL')).value,
     'postgres://x',
+  );
+});
+
+test('renaming projects and environments to existing slugs is a conflict and is audited', async () => {
+  await seedProject();
+  await services.admin.createProject(root, 'other', 'Other');
+  await services.admin.createEnvironment(root, 'market', 'dev', 'Development');
+
+  await assert.rejects(
+    services.admin.updateProject(root, 'market', { slug: 'other' }),
+    isConflict,
+  );
+  await assert.rejects(
+    services.admin.updateEnvironment(root, 'market', 'prod', { slug: 'dev' }),
+    isConflict,
+  );
+
+  const denials = await pool.query(
+    `SELECT action, metadata
+       FROM audit_log
+      WHERE decision = 'deny' AND action IN ('project.update', 'environment.update')
+      ORDER BY seq`,
+  );
+  assert.deepEqual(
+    denials.rows.map((row) => [row.action, JSON.parse(row.metadata).reason]),
+    [
+      ['project.update', 'slug_taken'],
+      ['environment.update', 'slug_taken'],
+    ],
   );
 });
 
@@ -172,6 +230,20 @@ test('project archiving hides every environment', async () => {
   assert.deepEqual(await services.secrets.listAccessible(root), []);
 });
 
+test('archived projects stay visible only to project and instance administrators', async () => {
+  await seedProject();
+  await services.admin.createGrant(root, 'market', {
+    principalType: 'user',
+    principalId: reader.principal.id,
+    role: 'viewer',
+  });
+  await services.admin.setProjectArchived(root, 'market', true);
+
+  assert.deepEqual(await services.admin.listProjects(reader), []);
+  assert.equal((await services.admin.listProjects(lead))[0].archivedAt === null, false);
+  assert.equal((await services.admin.listProjects(root))[0].archivedAt === null, false);
+});
+
 test('project grants cover every environment and combine with environment grants', async () => {
   await seedProject();
   await services.admin.createEnvironment(root, 'market', 'dev', 'Development');
@@ -208,6 +280,10 @@ test('revoking and updating grants changes access in place and is audited', asyn
   );
   await services.admin.revokeGrant(root, 'market', created.id);
   assert.deepEqual(await services.secrets.listAccessible(reader), []);
+  assert.equal(
+    (await services.admin.listGrants(root, 'market')).some((grant) => grant.id === created.id),
+    false,
+  );
   const actions = await auditActions();
   assert.ok(actions.some(({ action }) => action === 'grant.update'));
   assert.ok(actions.some(({ action }) => action === 'grant.revoke'));
@@ -234,7 +310,7 @@ test('removing a principal revokes every grant and is audited', async () => {
   assert.ok((await auditActions()).some(({ action }) => action === 'principal.remove'));
 });
 
-test('instance owners manage the directory without receiving project access', async () => {
+test('instance owners manage every project without receiving secret access', async () => {
   await seedProject();
   const owner = requestContext('instance-owner@equisafe.io');
   await services.admin.addDirectoryPrincipal(root, {
@@ -247,13 +323,59 @@ test('instance owners manage the directory without receiving project access', as
     principalId: 'reporting.access',
     instanceRole: 'user',
   });
+  await services.admin.createEnvironment(owner, 'market', 'staging', 'Staging');
+  await services.admin.updateProject(owner, 'market', { name: 'Market platform' });
   assert.equal(await services.admin.instanceRole(owner.principal), 'owner');
   assert.deepEqual(await services.secrets.listAccessible(owner), []);
+  const project = (await services.admin.listProjects(owner))[0];
+  assert.equal(project.name, 'Market platform');
+  assert.deepEqual(project.permissions.sort(), [
+    'environment.manage',
+    'grant.manage',
+    'project.manage',
+  ]);
+  assert.ok(
+    project.environments.every(
+      (environment) =>
+        !environment.accessible
+        && environment.details !== null
+        && environment.details.secretCount === null,
+    ),
+  );
   assert.ok(
     (await services.admin.listDirectory(owner)).some(
       (entry) => entry.principalId === 'reporting.access',
     ),
   );
+});
+
+test('environment grants expose only the listed names of inaccessible siblings', async () => {
+  await seedProject();
+  await services.admin.createEnvironment(root, 'market', 'dev', 'Development');
+  await services.secrets.writeSecret(root, 'market', 'prod', 'PROD_ONLY', 'one');
+  await services.secrets.writeSecret(root, 'market', 'dev', 'DEV_ONLY', 'two');
+  await services.admin.createGrant(root, 'market', {
+    principalType: 'user',
+    principalId: reader.principal.id,
+    role: 'viewer',
+    environmentSlug: 'dev',
+  });
+
+  const project = (await services.admin.listProjects(reader))[0];
+  const dev = project.environments.find((environment) => environment.slug === 'dev');
+  const prod = project.environments.find((environment) => environment.slug === 'prod');
+  assert.deepEqual(dev, {
+    slug: 'dev',
+    name: 'Development',
+    accessible: true,
+    details: { archivedAt: null, secretCount: 1 },
+  });
+  assert.deepEqual(prod, {
+    slug: 'prod',
+    name: 'Production',
+    accessible: false,
+    details: null,
+  });
 });
 
 test('offboarded principals must be explicitly re-added before regranting access', async () => {

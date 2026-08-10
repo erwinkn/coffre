@@ -37,7 +37,7 @@ export function projectAccessOptions(
   }
 
   for (const environment of environments) {
-    if (environment.archivedAt !== null) continue;
+    if (environment.details === null || environment.details.archivedAt !== null) continue;
     for (const role of ['viewer', 'developer'] as const) {
       options.push({
         value: `${role}:${environment.slug}`,
@@ -75,15 +75,8 @@ export function projectAccessLabel(
   if (grant.role === 'developer') {
     return grant.environmentSlug === null ? 'Write: all' : `Write: ${scope}`;
   }
-  if (
-    grant.role === 'root-admin' ||
-    grant.roleName.toLowerCase().startsWith('root admin')
-  ) {
-    return 'Root admin';
-  }
-
-  // Older or deliberately specialised grants remain legible even though new
-  // project access is intentionally limited to owner/read/write.
+  // Specialised grants remain legible even though the common access controls
+  // use owner/read/write.
   return `${grant.roleName}: ${scope}`;
 }
 

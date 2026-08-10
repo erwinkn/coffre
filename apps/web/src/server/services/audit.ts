@@ -7,6 +7,10 @@ import {
 } from '../../../../../packages/db/src/audit.ts';
 import { AccessDenied, type RequestContext } from './secrets.ts';
 import { isRootAdmin } from './permissions.ts';
+import {
+  writeAuditHeartbeat,
+  type HeartbeatLogger,
+} from '../heartbeat.ts';
 
 const VERIFY_BATCH = 5_000;
 
@@ -17,6 +21,8 @@ export type AuditEntry = {
   actorId: string;
   action: string;
   decision: 'allow' | 'deny';
+  project: string | null;
+  environment: string | null;
   bundleId: string | null;
   metadata: Record<string, unknown>;
 };
@@ -24,6 +30,10 @@ export type AuditEntry = {
 export type AuditVerification =
   | { ok: true; rows: number; head: string }
   | { ok: false; failedAtSeq: number; reason: string };
+
+type AuditScope =
+  | 'all'
+  | { projectIds: string[]; environmentIds: string[] };
 
 export class AuditService {
   readonly #pool: Database;
@@ -40,9 +50,15 @@ export class AuditService {
     this.#rootAdmins = options.rootAdmins;
   }
 
+  writeHeartbeat(log: HeartbeatLogger): Promise<boolean> {
+    return writeAuditHeartbeat(this.#pool, this.#chainKey, log);
+  }
+
   async canRead(ctx: RequestContext): Promise<boolean> {
-    const projects = await this.#auditableProjects(ctx);
-    return projects === 'all' || projects.length > 0;
+    const scope = await this.#auditScope(ctx);
+    return (
+      scope === 'all' || scope.projectIds.length > 0 || scope.environmentIds.length > 0
+    );
   }
 
   async list(
@@ -53,33 +69,46 @@ export class AuditService {
       decision?: 'allow' | 'deny';
     },
   ): Promise<AuditEntry[]> {
-    const auditableProjects = await this.#auditableProjects(ctx);
-    if (auditableProjects !== 'all' && auditableProjects.length === 0) {
+    const scope = await this.#auditScope(ctx);
+    if (scope !== 'all' && scope.projectIds.length === 0 && scope.environmentIds.length === 0) {
       throw new AccessDenied('you do not hold audit.read on any project');
     }
 
     const filters: string[] = [];
     const values: unknown[] = [];
-    if (auditableProjects !== 'all') {
-      values.push(auditableProjects);
-      filters.push(`project_id = ANY($${values.length}::uuid[])`);
+    if (scope !== 'all') {
+      const scopeFilters: string[] = [];
+      if (scope.projectIds.length > 0) {
+        values.push(scope.projectIds);
+        scopeFilters.push(`audit_log.project_id = ANY($${values.length}::uuid[])`);
+      }
+      if (scope.environmentIds.length > 0) {
+        values.push(scope.environmentIds);
+        scopeFilters.push(`audit_log.environment_id = ANY($${values.length}::uuid[])`);
+      }
+      filters.push(`(${scopeFilters.join(' OR ')})`);
     }
     if (options.actorId) {
       values.push(options.actorId);
-      filters.push(`actor_id = $${values.length}`);
+      filters.push(`audit_log.actor_id = $${values.length}`);
     }
     if (options.decision) {
       values.push(options.decision);
-      filters.push(`decision = $${values.length}`);
+      filters.push(`audit_log.decision = $${values.length}`);
     }
     values.push(options.limit);
 
     const result = await this.#pool.query(
-      `SELECT seq, ${OCCURRED_AT_SQL} AS occurred_at, actor_type, actor_id, action,
-              decision, bundle_id, metadata
+      `SELECT audit_log.seq, ${OCCURRED_AT_SQL} AS occurred_at,
+              audit_log.actor_type, audit_log.actor_id, audit_log.action,
+              audit_log.decision, audit_log.bundle_id, audit_log.metadata,
+              projects.slug AS project_slug,
+              environments.slug AS environment_slug
          FROM audit_log
+         LEFT JOIN projects ON projects.id = audit_log.project_id
+         LEFT JOIN environments ON environments.id = audit_log.environment_id
         ${filters.length > 0 ? `WHERE ${filters.join(' AND ')}` : ''}
-        ORDER BY seq DESC
+        ORDER BY audit_log.seq DESC
         LIMIT $${values.length}`,
       values,
     );
@@ -91,6 +120,8 @@ export class AuditService {
       actorId: row.actor_id,
       action: row.action,
       decision: row.decision,
+      project: row.project_slug,
+      environment: row.environment_slug,
       bundleId: row.bundle_id,
       metadata: JSON.parse(row.metadata),
     }));
@@ -98,9 +129,11 @@ export class AuditService {
 
   /** Verify every audit row and compare the recomputed result with the stored head. */
   async verify(ctx: RequestContext): Promise<AuditVerification> {
-    const auditable = await this.#auditableProjects(ctx);
-    if (auditable !== 'all' && auditable.length === 0) {
-      throw new AccessDenied('you do not hold audit.read on any project');
+    const scope = await this.#auditScope(ctx);
+    if (scope !== 'all') {
+      throw new AccessDenied(
+        'only a root admin or instance owner may verify the complete audit chain',
+      );
     }
 
     const client = await this.#pool.connect();
@@ -164,11 +197,11 @@ export class AuditService {
       return { ok: true, rows, head: previousHash.toString('hex') };
     } finally {
       await client.query('ROLLBACK').catch(() => {});
-      client.release();
+      await client.release();
     }
   }
 
-  async #auditableProjects(ctx: RequestContext): Promise<'all' | string[]> {
+  async #auditScope(ctx: RequestContext): Promise<AuditScope> {
     if (isRootAdmin(ctx.principal, this.#rootAdmins)) return 'all';
     if (ctx.principal.type === 'user') {
       const owner = await this.#pool.query(
@@ -182,11 +215,13 @@ export class AuditService {
       if (owner.rowCount !== 0) return 'all';
     }
 
-    const result = await this.#pool.query<{ project_id: string }>(
-      `SELECT DISTINCT COALESCE(g.project_id, e.project_id) AS project_id
+    const result = await this.#pool.query<{
+      project_id: string | null;
+      environment_id: string | null;
+    }>(
+      `SELECT DISTINCT g.project_id, g.environment_id
          FROM grants g
          JOIN role_permissions rp ON rp.role_id = g.role_id
-         LEFT JOIN environments e ON e.id = g.environment_id
         WHERE g.principal_type = $1
           AND g.principal_id = $2
           AND rp.permission = 'audit.read'
@@ -194,6 +229,11 @@ export class AuditService {
       [ctx.principal.type, ctx.principal.id],
     );
 
-    return result.rows.map((row) => row.project_id);
+    return {
+      projectIds: result.rows.flatMap((row) => row.project_id === null ? [] : [row.project_id]),
+      environmentIds: result.rows.flatMap((row) =>
+        row.environment_id === null ? [] : [row.environment_id],
+      ),
+    };
   }
 }

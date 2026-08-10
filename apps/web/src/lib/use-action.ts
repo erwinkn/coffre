@@ -26,20 +26,29 @@ export function useAction() {
     onSuccess?: (result: Extract<T, { ok: true }>) => unknown,
   ): Promise<void> {
     setPending(true);
+    let result: T;
     try {
-      const result = await fn();
-      if (!result.ok) {
-        setError(result.error);
-        return;
-      }
-      setError(null);
+      result = await fn();
+    } catch {
+      setError('The request could not be sent. Nothing was changed.');
+      setPending(false);
+      return;
+    }
+
+    if (!result.ok) {
+      setError(result.error);
+      setPending(false);
+      return;
+    }
+
+    setError(null);
+    try {
       await router.invalidate();
       await onSuccess?.(result as Extract<T, { ok: true }>);
     } catch {
-      setError('The request could not be sent. Nothing was changed.');
-    } finally {
-      setPending(false);
+      setError('The change was saved, but the page could not refresh. Reload before you retry.');
     }
+    setPending(false);
   }
 
   return { pending, error, setError, run };

@@ -4,6 +4,10 @@ import { toast } from 'sonner';
 import { createProject, listProjects } from '../server-functions/projects';
 import { useAction } from '../lib/use-action';
 import type { ProjectSummary } from '../shared/models';
+import {
+  hasEnvironmentDetails,
+  isActiveAccessibleEnvironment,
+} from '../lib/project-environments';
 import { EmptyState, ErrorLine, Modal, Notice, Spinner } from '../components/ui';
 import { Folder, Inbox, Layers, Plus } from '../components/icons';
 import {
@@ -81,8 +85,21 @@ function ProjectsPage() {
 }
 
 function ProjectRow({ project }: { project: ProjectSummary }) {
-  const environments = project.environments.filter((e) => e.archivedAt === null);
-  const total = environments.reduce((sum, e) => sum + e.secretCount, 0);
+  const listedEnvironments = project.environments.filter(
+    (environment) =>
+      environment.details === null || environment.details.archivedAt === null,
+  );
+  const countedEnvironments = project.environments
+    .filter(hasEnvironmentDetails)
+    .filter(
+      (environment) =>
+        environment.details.archivedAt === null
+        && environment.details.secretCount !== null,
+    );
+  const total = countedEnvironments.reduce(
+    (sum, environment) => sum + (environment.details.secretCount ?? 0),
+    0,
+  );
 
   return (
     <div className="row row-interactive">
@@ -94,22 +111,30 @@ function ProjectRow({ project }: { project: ProjectSummary }) {
         <span className="meta">{project.name}</span>
       </div>
 
-      <span className="meta numeric" style={{ flex: 'none' }}>
-        {total} secret{total === 1 ? '' : 's'}
-      </span>
+      {countedEnvironments.length > 0 && (
+        <span className="meta numeric" style={{ flex: 'none' }}>
+          {total} secret{total === 1 ? '' : 's'}
+        </span>
+      )}
 
       <div className="row-actions">
-        {environments.map((environment) => (
-          <Link
-            key={environment.slug}
-            className="btn btn-sm"
-            to="/projects/$project/$environment"
-            params={{ project: project.slug, environment: environment.slug }}
-          >
-            <Layers size={13} />
-            {environment.slug}
-          </Link>
-        ))}
+        {listedEnvironments.map((environment) =>
+          isActiveAccessibleEnvironment(environment) ? (
+            <Link
+              key={environment.slug}
+              className="btn btn-sm"
+              to="/projects/$project/$environment"
+              params={{ project: project.slug, environment: environment.slug }}
+            >
+              <Layers size={13} />
+              {environment.slug}
+            </Link>
+          ) : (
+            <span key={environment.slug} className="meta mono">
+              {environment.slug}
+            </span>
+          ),
+        )}
       </div>
     </div>
   );

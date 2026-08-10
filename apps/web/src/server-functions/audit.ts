@@ -4,7 +4,7 @@ import { getRuntime } from '../server/runtime.ts';
 import { registeredServerFn } from '../server/server-fn.ts';
 import type { AuditRow } from '../shared/models.ts';
 import { currentRequestContext } from './session.ts';
-import { uiResult } from './result.ts';
+import { uiFailure, uiResult } from './result.ts';
 
 export const listAudit = registeredServerFn({ method: 'GET' })
   .validator(z.object({ decision: z.literal('deny').optional(), actorId: z.string().optional() }))
@@ -24,6 +24,8 @@ export const listAudit = registeredServerFn({ method: 'GET' })
         actorId: entry.actorId,
         action: entry.action,
         decision: entry.decision,
+        project: entry.project,
+        environment: entry.environment,
         subject:
           (typeof entry.metadata.key === 'string' ? entry.metadata.key : null) ??
           (typeof entry.metadata.reason === 'string' ? entry.metadata.reason : null) ??
@@ -36,14 +38,23 @@ export const listAudit = registeredServerFn({ method: 'GET' })
 export const verifyAuditChain = registeredServerFn({ method: 'GET' }).handler(async () => {
   const runtime = getRuntime();
   const ctx = currentRequestContext();
-  return uiResult(async () => {
+  try {
     const result = await runtime.audit.verify(ctx);
     if (!result.ok) {
-      throw Object.assign(
-        new Error(`Chain broken at seq ${result.failedAtSeq}: ${result.reason}`),
-        { statusCode: 409 },
-      );
+      return {
+        ok: true as const,
+        integrity: 'broken' as const,
+        failedAtSeq: result.failedAtSeq,
+        reason: result.reason,
+      };
     }
-    return { rows: result.rows, head: result.head };
-  });
+    return {
+      ok: true as const,
+      integrity: 'intact' as const,
+      rows: result.rows,
+      head: result.head,
+    };
+  } catch (error) {
+    return uiFailure(error);
+  }
 });

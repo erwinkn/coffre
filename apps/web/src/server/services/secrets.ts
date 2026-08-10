@@ -14,6 +14,13 @@ import {
   type PermissionSet,
   type PrincipalRef,
 } from './permissions.ts';
+import { toNullableIsoTimestamp, toIsoTimestamp } from '../database.ts';
+
+const SECRET_METADATA_PERMISSIONS: ReadonlySet<Permission> = new Set([
+  'secret.read',
+  'secret.write',
+  'secret.archive',
+]);
 
 export type Capability = 'read' | 'write' | 'admin';
 
@@ -108,7 +115,7 @@ export class SecretsService {
       await client.query('ROLLBACK').catch(() => {});
       throw error;
     } finally {
-      client.release();
+      await client.release();
     }
   }
 
@@ -205,7 +212,7 @@ export class SecretsService {
       }
 
       const secret = await loadCurrentVersion(tx, env, key);
-      if (secret === null) {
+      if (secret === null || secret.archived) {
         throw new AuditedFailure(new NotFound('unknown secret'), {
           ...base,
           decision: 'deny',
@@ -292,7 +299,12 @@ export class SecretsService {
           },
           this.#deps.keks,
         );
-        secrets[row.key] = value.toString('utf8');
+        Object.defineProperty(secrets, row.key, {
+          value: value.toString('utf8'),
+          enumerable: true,
+          configurable: true,
+          writable: true,
+        });
 
         entries.push({
           ...base,
@@ -353,7 +365,38 @@ export class SecretsService {
         });
       }
 
-      const secretId = await upsertSecret(tx, env, key, ctx.principal.id);
+      if (value.includes('\u0000')) {
+        throw new AuditedFailure(
+          Object.assign(new Error('secret values cannot contain a NUL byte'), {
+            statusCode: 409,
+          }),
+          {
+            ...base,
+            decision: 'deny',
+            projectId: env.projectId,
+            environmentId: env.environmentId,
+            metadata: { key, reason: 'invalid_secret_value' },
+          },
+        );
+      }
+
+      const secret = await upsertSecret(tx, env, key);
+      if (secret.archived) {
+        throw new AuditedFailure(
+          Object.assign(new Error('restore that secret before you write a new version'), {
+            statusCode: 409,
+          }),
+          {
+            ...base,
+            decision: 'deny',
+            projectId: env.projectId,
+            environmentId: env.environmentId,
+            secretId: secret.id,
+            metadata: { key, reason: 'secret_archived' },
+          },
+        );
+      }
+      const secretId = secret.id;
 
       const nextVersion = await tx.query<{ next: string }>(
         'SELECT COALESCE(MAX(version), 0) + 1 AS next FROM secret_versions WHERE secret_id = $1',
@@ -561,7 +604,7 @@ export class SecretsService {
       }
       return [...byEnvironment.values()];
     } finally {
-      client.release();
+      await client.release();
     }
   }
 
@@ -576,7 +619,12 @@ export class SecretsService {
       (entry) =>
         entry.project === projectSlug && entry.environment === environmentSlug,
     );
-    if (!match) throw new AccessDenied();
+    if (
+      !match
+      || !match.permissions.some((permission) => SECRET_METADATA_PERMISSIONS.has(permission))
+    ) {
+      throw new AccessDenied();
+    }
 
     const client = await this.#deps.pool.connect();
     try {
@@ -603,12 +651,12 @@ export class SecretsService {
           key: row.key,
           archived: row.archived_at !== null,
           version: row.version === null ? null : Number(row.version),
-          updatedAt: row.created_at,
+          updatedAt: toNullableIsoTimestamp(row.created_at),
           updatedBy: row.created_by,
         })),
       };
     } finally {
-      client.release();
+      await client.release();
     }
   }
 
@@ -661,14 +709,14 @@ export class SecretsService {
         archived: secret.rows[0].archived_at !== null,
         versions: versions.rows.map((row) => ({
           version: Number(row.version),
-          createdAt: row.created_at,
+          createdAt: toIsoTimestamp(row.created_at),
           createdBy: row.created_by,
           current: row.id === secret.rows[0].current_version_id,
           kek: `${row.kek_provider}:${row.kek_id}`,
         })),
       };
     } finally {
-      client.release();
+      await client.release();
     }
   }
 
@@ -715,7 +763,8 @@ export class SecretsService {
 
       const secret = await tx.query<{ id: string; current_version_id: string | null }>(
         `SELECT id, current_version_id FROM secrets
-          WHERE project_id = $1 AND environment_id = $2 AND key = $3 AND archived_at IS NULL`,
+          WHERE project_id = $1 AND environment_id = $2 AND key = $3 AND archived_at IS NULL
+          FOR UPDATE`,
         [env.projectId, env.environmentId, key],
       );
       if (secret.rowCount === 0) {
@@ -826,9 +875,26 @@ export class SecretsService {
 
       const plan: { key: string; action: 'create' | 'update' | 'unchanged'; version: number | null }[] = [];
       const auditEntries: AuditEntry[] = [];
+      let changed = 0;
 
       for (const entry of entries) {
         const existing = await loadCurrentVersion(tx, env, entry.key);
+        if (existing?.archived) {
+          throw new AuditedFailure(
+            Object.assign(new Error(`restore "${entry.key}" before you import a new version`), {
+              statusCode: 409,
+            }),
+            {
+              ...base,
+              decision: 'deny',
+              bundleId,
+              projectId: env.projectId,
+              environmentId: env.environmentId,
+              secretId: existing.secretId,
+              metadata: { key: entry.key, reason: 'secret_archived' },
+            },
+          );
+        }
 
         let outcome: 'create' | 'update' | 'unchanged';
         if (existing === null) {
@@ -845,6 +911,20 @@ export class SecretsService {
               ? 'unchanged'
               : 'update';
           current.fill(0);
+          auditEntries.push({
+            ...base,
+            action: 'secret.read',
+            decision: 'allow',
+            bundleId,
+            projectId: env.projectId,
+            environmentId: env.environmentId,
+            secretId: existing.secretId,
+            metadata: {
+              key: entry.key,
+              version: existing.version,
+              via: action,
+            },
+          });
         }
 
         if (dryRun || outcome === 'unchanged') {
@@ -856,7 +936,24 @@ export class SecretsService {
           continue;
         }
 
-        const secretId = await upsertSecret(tx, env, entry.key, ctx.principal.id);
+        const secret = await upsertSecret(tx, env, entry.key);
+        if (secret.archived) {
+          throw new AuditedFailure(
+            Object.assign(new Error(`restore "${entry.key}" before you import a new version`), {
+              statusCode: 409,
+            }),
+            {
+              ...base,
+              decision: 'deny',
+              bundleId,
+              projectId: env.projectId,
+              environmentId: env.environmentId,
+              secretId: secret.id,
+              metadata: { key: entry.key, reason: 'secret_archived' },
+            },
+          );
+        }
+        const secretId = secret.id;
         const next = await tx.query<{ next: string }>(
           'SELECT COALESCE(MAX(version), 0) + 1 AS next FROM secret_versions WHERE secret_id = $1',
           [secretId],
@@ -894,6 +991,7 @@ export class SecretsService {
         );
 
         plan.push({ key: entry.key, action: outcome, version });
+        changed += 1;
         auditEntries.push({
           ...base,
           decision: 'allow',
@@ -905,9 +1003,9 @@ export class SecretsService {
         });
       }
 
-      // Always at least one row, so an import that changed nothing still leaves
-      // a trace of having been run.
-      if (auditEntries.length === 0) {
+      // A preview or no-op import still gets its own operation row in addition
+      // to one secret.read row for every existing value it compared.
+      if (changed === 0) {
         auditEntries.push({
           ...base,
           decision: 'allow',
@@ -1019,18 +1117,26 @@ async function loadCurrentVersion(
   tx: DatabaseClient,
   env: EnvironmentRow,
   key: string,
-): Promise<{ secretId: string; version: number; envelope: Envelope } | null> {
+): Promise<{
+  secretId: string;
+  version: number;
+  envelope: Envelope;
+  archived: boolean;
+} | null> {
   const result = await tx.query(
     `SELECT s.id AS secret_id, v.version, v.envelope_version, v.ciphertext, v.iv,
-            v.auth_tag, v.wrapped_dek, v.kek_provider, v.kek_id, v.kek_version
+            v.auth_tag, v.wrapped_dek, v.kek_provider, v.kek_id, v.kek_version,
+            s.archived_at
        FROM secrets s
        JOIN secret_versions v ON v.id = s.current_version_id
-      WHERE s.project_id = $1 AND s.environment_id = $2 AND s.key = $3
-        AND s.archived_at IS NULL`,
+      WHERE s.project_id = $1 AND s.environment_id = $2 AND s.key = $3`,
     [env.projectId, env.environmentId, key],
   );
   if (result.rowCount === 0) return null;
-  return toEnvelopeRow(result.rows[0]);
+  return {
+    ...toEnvelopeRow(result.rows[0]),
+    archived: result.rows[0].archived_at !== null,
+  };
 }
 
 async function loadAllCurrentVersions(
@@ -1075,27 +1181,20 @@ async function upsertSecret(
   tx: DatabaseClient,
   env: EnvironmentRow,
   key: string,
-  createdBy: string,
-): Promise<string> {
-  // Deliberately not filtered on archived_at. Writing a value to an archived
-  // key restores it: the unique constraint means the row cannot be recreated,
-  // and silently failing on a name that is not visibly in use would be worse
-  // than the alternative. The restore is audited by the caller's write entry.
-  const existing = await tx.query<{ id: string }>(
-    'SELECT id FROM secrets WHERE project_id = $1 AND environment_id = $2 AND key = $3',
+): Promise<{ id: string; archived: boolean }> {
+  // A write can append a version, but it cannot also restore an archived key.
+  // The no-op conflict update locks the row so an archive racing this write is
+  // resolved before the caller checks the returned state.
+  // The conflict update takes a row lock until commit. Concurrent writes to
+  // the same key therefore allocate versions only after the prior writer has
+  // committed, including when both requests create the key at the same time.
+  const secret = await tx.query<{ id: string; archived: boolean }>(
+    `INSERT INTO secrets (project_id, environment_id, key)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (project_id, environment_id, key) DO UPDATE
+       SET key = EXCLUDED.key
+     RETURNING id, archived_at IS NOT NULL AS archived`,
     [env.projectId, env.environmentId, key],
   );
-  if (existing.rowCount === 1) {
-    await tx.query('UPDATE secrets SET archived_at = NULL WHERE id = $1', [
-      existing.rows[0].id,
-    ]);
-    return existing.rows[0].id;
-  }
-
-  const created = await tx.query<{ id: string }>(
-    `INSERT INTO secrets (project_id, environment_id, key) VALUES ($1, $2, $3) RETURNING id`,
-    [env.projectId, env.environmentId, key],
-  );
-  void createdBy;
-  return created.rows[0].id;
+  return secret.rows[0];
 }

@@ -22,6 +22,13 @@ import type {
 } from '../shared/models';
 import { canRevealSecrets } from '../lib/capabilities';
 import {
+  applySecretEditBatch,
+  hasSecretEditConflict,
+  secretChangeFor,
+  type SecretChange,
+  type SecretDraft,
+} from '../lib/secret-edit-batch';
+import {
   ConfirmButton,
   CopyButton,
   EmptyState,
@@ -63,16 +70,12 @@ export const Route = createFileRoute('/projects/$project/$environment')({
   component: EnvironmentPage,
 });
 
-/** A row you are filling in, not yet written to anything. */
-type Draft = { id: number; key: string; value: string };
-type SecretChange = { key: string; value: string | null; archived: boolean };
-
 function EnvironmentPage() {
   const result = Route.useLoaderData();
   const { project, environment } = Route.useParams();
   const router = useRouter();
 
-  const [drafts, setDrafts] = useState<Draft[]>([]);
+  const [drafts, setDrafts] = useState<SecretDraft[]>([]);
   const [changes, setChanges] = useState<Record<string, SecretChange>>({});
   const [saving, setSaving] = useState(false);
   const [draftError, setDraftError] = useState<string | null>(null);
@@ -102,68 +105,61 @@ function EnvironmentPage() {
   async function saveChanges() {
     setSaving(true);
     setDraftError(null);
-    let applied = 0;
-    let failed = false;
-    try {
-      for (const entry of active) {
-        const change = changes[entry.key];
-        if (change === undefined) continue;
-
-        if (change.archived) {
-          const archived = await setSecretArchived({
-            data: { project, environment, key: entry.key, archived: true },
+    const outcome = await applySecretEditBatch({
+      active,
+      drafts,
+      changes,
+      operations: {
+        archive: async (key) => {
+          const result = await setSecretArchived({
+            data: { project, environment, key, archived: true },
           });
-          if (!archived.ok) throw new Error(`${entry.key}: ${archived.error}`);
-          applied += 1;
-          continue;
-        }
-
-        let currentKey = entry.key;
-        if (change.key !== entry.key) {
-          const renamed = await renameSecret({
-            data: { project, environment, key: entry.key, nextKey: change.key.trim() },
+          if (!result.ok) throw new Error(`${key}: ${result.error}`);
+        },
+        rename: async (key, nextKey) => {
+          const result = await renameSecret({
+            data: { project, environment, key, nextKey },
           });
-          if (!renamed.ok) throw new Error(`${entry.key}: ${renamed.error}`);
-          currentKey = change.key.trim();
-          applied += 1;
-        }
-
-        if (change.value !== null) {
-          const saved = await saveSecret({
-            data: { project, environment, key: currentKey, value: change.value },
+          if (!result.ok) throw new Error(`${key}: ${result.error}`);
+        },
+        save: async (key, value) => {
+          const result = await saveSecret({
+            data: { project, environment, key, value },
           });
-          if (!saved.ok) throw new Error(`${currentKey}: ${saved.error}`);
-          applied += 1;
-        }
-      }
+          if (!result.ok) throw new Error(`${key}: ${result.error}`);
+        },
+      },
+    });
 
-      for (const draft of drafts) {
-        const saved = await saveSecret({
-          data: { project, environment, key: draft.key.trim(), value: draft.value },
-        });
-        if (!saved.ok) throw new Error(`${draft.key.trim()}: ${saved.error}`);
-        applied += 1;
-      }
+    setDrafts(outcome.drafts);
+    setChanges(outcome.changes);
 
-      toast.success(`Saved ${applied} change${applied === 1 ? '' : 's'}`);
-    } catch (error) {
-      failed = true;
-      setDraftError(
-        error instanceof Error ? error.message : 'The request could not be sent.',
-      );
-    } finally {
-      if (!failed || applied > 0) {
+    if (outcome.applied > 0) {
+      try {
         await router.invalidate();
-        setDrafts([]);
-        setChanges({});
-        if (failed) {
-          setDraftError(
-            `Some earlier changes were saved before the failure. The list has been refreshed.`,
-          );
-        }
+      } catch {
+        setDraftError('Saved changes could not be refreshed. Reload before you retry.');
+        setSaving(false);
+        return;
       }
-      setSaving(false);
     }
+
+    if (outcome.error === null) {
+      toast.success(
+        `Saved ${outcome.applied} change${outcome.applied === 1 ? '' : 's'}`,
+      );
+    } else {
+      const message =
+        outcome.error instanceof Error
+          ? outcome.error.message
+          : 'The request could not be sent.';
+      setDraftError(
+        outcome.applied === 0
+          ? message
+          : `${message} Earlier changes were saved. Failed and untried changes are ready to retry.`,
+      );
+    }
+    setSaving(false);
   }
 
   if (!result.ok) {
@@ -192,22 +188,19 @@ function EnvironmentPage() {
   const rowProps = { project, environment, canWrite, canArchive, canReveal };
 
   const existing = new Set(keys.map((entry) => entry.key));
-  const changedEntries = active.filter((entry) => changes[entry.key] !== undefined);
-  const targetKeys = [
-    ...active
-      .filter((entry) => !changes[entry.key]?.archived)
-      .map((entry) => changes[entry.key]?.key.trim() ?? entry.key),
-    ...drafts.map((row) => row.key.trim()),
-  ];
-  const hasDuplicate = new Set(targetKeys).size !== targetKeys.length;
+  const changedEntries = active.filter(
+    (entry) => secretChangeFor(changes, entry.key) !== undefined,
+  );
+  const hasConflict = hasSecretEditConflict(active, drafts, changes);
   const ready =
     (drafts.length > 0 || changedEntries.length > 0) &&
-    drafts.every((row) => row.key.trim() !== '' && row.value !== '') &&
+    drafts.every((row) => row.key.trim() !== '') &&
     changedEntries.every((entry) => {
-      const change = changes[entry.key];
-      return change.archived || (change.key.trim() !== '' && change.value !== '');
+      const change = secretChangeFor(changes, entry.key);
+      if (change === undefined) return true;
+      return change.archived || change.key.trim() !== '';
     }) &&
-    !hasDuplicate;
+    !hasConflict;
 
   return (
     <>
@@ -245,10 +238,10 @@ function EnvironmentPage() {
         ) : (
           active.map((entry) => (
             <EditableSecretRow
-              key={entry.key}
+              key={`${project}:${environment}:${entry.key}`}
               entry={entry}
               change={
-                changes[entry.key] ?? {
+                secretChangeFor(changes, entry.key) ?? {
                   key: entry.key,
                   value: null,
                   archived: false,
@@ -257,7 +250,7 @@ function EnvironmentPage() {
               onChange={(patch) =>
                 setChanges((current) => {
                   const next = {
-                    ...(current[entry.key] ?? {
+                    ...(secretChangeFor(current, entry.key) ?? {
                       key: entry.key,
                       value: null,
                       archived: false,
@@ -326,7 +319,7 @@ function EnvironmentPage() {
             <ErrorLine error={draftError} />
           </div>
         )}
-        {hasDuplicate && (
+        {hasConflict && (
           <div className="row">
             <ErrorLine error="Secret names must be unique in this environment." />
           </div>
@@ -389,6 +382,15 @@ function EditableSecretRow({
       ? ' row-change-update'
       : '';
   const displayedValue = change.value ?? revealed ?? '';
+
+  useEffect(() => {
+    if (revealed === null) return;
+    const timer = setTimeout(() => {
+      setRevealed(null);
+      setVisible(false);
+    }, REVEAL_TTL_SECONDS * 1000);
+    return () => clearTimeout(timer);
+  }, [revealed]);
 
   async function revealForEditing() {
     valueFocused.current = true;
@@ -456,7 +458,8 @@ function EditableSecretRow({
             spellCheck={false}
             autoComplete="off"
             value={displayedValue}
-            disabled={!canWrite || change.archived || busy}
+            disabled={change.archived || busy || (!canWrite && !canReveal)}
+            readOnly={!canWrite}
             onFocus={() => void revealForEditing()}
             onBlur={() => {
               valueFocused.current = false;
@@ -942,10 +945,10 @@ function DraftRow({
   onChange,
   onRemove,
 }: {
-  draft: Draft;
+  draft: SecretDraft;
   newVersion: boolean;
   disabled: boolean;
-  onChange: (patch: Partial<Draft>) => void;
+  onChange: (patch: Partial<SecretDraft>) => void;
   onRemove: () => void;
 }) {
   return (

@@ -3,6 +3,7 @@ import { useNavigate } from '@tanstack/react-router';
 import { Command } from 'cmdk';
 import type { ProjectSummary } from '../shared/models';
 import type { UiCapabilities } from '../lib/capabilities';
+import { isActiveAccessibleEnvironment } from '../lib/project-environments';
 import {
   AdministrationItems,
   hasAdministrationItems,
@@ -26,12 +27,8 @@ import {
  * The fast path, never the only path: everything reachable here is also
  * reachable by clicking.
  *
- * Selecting an item navigates through the router rather than assigning to
- * `location.href`. Under Next.js that shortcut was load-bearing -- every page
- * was `force-dynamic`, so a client transition would have shown the previous
- * screen's data while it refetched. Here the destination's loader runs as part
- * of the navigation and the router holds the old screen until it resolves,
- * which is both correct and considerably faster.
+ * Selecting an item uses router navigation so the destination loader finishes
+ * before the new screen replaces the current one.
  */
 export function CommandPalette({
   projects,
@@ -83,7 +80,7 @@ export function CommandPalette({
             <Command.Group heading="Environments">
               {active.flatMap((project) =>
                 project.environments
-                  .filter((environment) => environment.archivedAt === null)
+                  .filter(isActiveAccessibleEnvironment)
                   .map((environment) => (
                     <Command.Item
                       key={`${project.slug}/${environment.slug}`}
@@ -101,8 +98,8 @@ export function CommandPalette({
                         {project.slug}/{environment.slug}
                       </span>
                       <span className="palette-hint">
-                        {environment.secretCount} secret
-                        {environment.secretCount === 1 ? '' : 's'}
+                        {environment.details.secretCount} secret
+                        {environment.details.secretCount === 1 ? '' : 's'}
                       </span>
                     </Command.Item>
                   )),

@@ -11,8 +11,18 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  release-ref:
+    name: Require protected release branch
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Accept only main
+        env:
+          RELEASE_REF: ${{ github.ref }}
+        run: test "$RELEASE_REF" = 'refs/heads/main'
+
   validate:
     name: Validate release
+    needs: release-ref
     runs-on: ubuntu-24.04
     timeout-minutes: 20
 

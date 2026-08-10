@@ -17,6 +17,10 @@ import {
 import { useAction } from '../lib/use-action';
 import type { GrantRow, ProjectSummary } from '../shared/models';
 import {
+  hasEnvironmentDetails,
+  type DetailedProjectEnvironment,
+} from '../lib/project-environments';
+import {
   ConfirmButton,
   ConfirmDialog,
   EmptyState,
@@ -42,8 +46,6 @@ import {
   Users,
   X,
 } from '../components/icons';
-
-type Env = ProjectSummary['environments'][number];
 
 export const Route = createFileRoute('/projects/$project/')({
   loader: ({ params }) => getProject({ data: { project: params.project } }),
@@ -80,8 +82,10 @@ function ProjectPage() {
   const canManageEnvironments = project.permissions.includes('environment.manage');
   const canManageGrants = project.permissions.includes('grant.manage');
 
-  const active = project.environments.filter((e) => e.archivedAt === null);
-  const archived = project.environments.filter((e) => e.archivedAt !== null);
+  const detailed = project.environments.filter(hasEnvironmentDetails);
+  const active = detailed.filter((environment) => environment.details.archivedAt === null);
+  const archived = detailed.filter((environment) => environment.details.archivedAt !== null);
+  const listedOnly = project.environments.filter((environment) => environment.details === null);
 
   return (
     <>
@@ -112,14 +116,16 @@ function ProjectPage() {
         <div className="card">
           {active.length === 0 ? (
             <EmptyState icon={<Layers size={26} />} title="No environments yet">
-              {canManageEnvironments
+              {listedOnly.length > 0
+                ? 'You can see the other environment names below, but you do not have access to their metadata.'
+                : canManageEnvironments
                 ? 'Add the first one above. Secrets live in environments, not in the project itself, and a grant can be scoped to exactly one of them.'
                 : 'Nothing to show. Creating environments needs environment.manage on this project.'}
             </EmptyState>
           ) : (
             active.map((environment) => (
               <EnvironmentRow
-                key={environment.slug}
+                key={`${project.slug}:${environment.slug}`}
                 project={project.slug}
                 environment={environment}
                 isAdmin={canManageEnvironments}
@@ -128,6 +134,25 @@ function ProjectPage() {
           )}
         </div>
       </section>
+
+      {listedOnly.length > 0 && (
+        <section className="section">
+          <div className="section-head">
+            <h2>Other environments</h2>
+          </div>
+          <div className="card">
+            {listedOnly.map((environment) => (
+              <div className="row" key={environment.slug}>
+                <div className="row-title">
+                  <Layers size={15} style={{ color: 'var(--ink-3)', flex: 'none' }} />
+                  <span className="row-key">{environment.slug}</span>
+                  <span className="meta">{environment.name}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       {archived.length > 0 && (
         <section className="section">
@@ -162,10 +187,7 @@ function ProjectPage() {
 /**
  * Rename and archive, behind the gear in the page head.
  *
- * These used to be a permanent "Project settings" card above the content --
- * two buttons and a heading occupying the top of the page to say what the page
- * already said. Settings that are read once and changed rarely do not earn
- * standing space.
+ * These settings change rarely, so they stay behind the page-head action.
  */
 function ProjectSettings({ project }: { project: ProjectSummary }) {
   const router = useRouter();
@@ -332,7 +354,7 @@ function EnvironmentRow({
   isAdmin,
 }: {
   project: string;
-  environment: Env;
+  environment: DetailedProjectEnvironment;
   isAdmin: boolean;
 }) {
   const [editing, setEditing] = useState(false);
@@ -340,14 +362,15 @@ function EnvironmentRow({
   const [slug, setSlug] = useState(environment.slug);
   const [name, setName] = useState(environment.name);
   const { pending, error, run } = useAction();
-  const isArchived = environment.archivedAt !== null;
+  const isArchived = environment.details.archivedAt !== null;
+  const secretCount = environment.details.secretCount;
 
   return (
     <div className="row-group">
       <div className="row row-interactive">
         <div className="row-title">
           <Layers size={15} style={{ color: 'var(--ink-3)', flex: 'none' }} />
-          {isArchived ? (
+          {isArchived || !environment.accessible ? (
             <span className="row-key">{environment.slug}</span>
           ) : (
             <Link
@@ -361,9 +384,11 @@ function EnvironmentRow({
           <span className="meta">{environment.name}</span>
         </div>
 
-        <span className="meta numeric" style={{ flex: 'none' }}>
-          {environment.secretCount} secret{environment.secretCount === 1 ? '' : 's'}
-        </span>
+        {secretCount !== null && (
+          <span className="meta numeric" style={{ flex: 'none' }}>
+            {secretCount} secret{secretCount === 1 ? '' : 's'}
+          </span>
+        )}
 
         {isAdmin && (
           <div className="row-actions">
@@ -407,16 +432,21 @@ function EnvironmentRow({
                   : `Archive ${project}/${environment.slug}?`
               }
               body={
-                isArchived ? (
+                secretCount === null ? (
                   <>
-                    The environment starts serving its {environment.secretCount} secret
-                    {environment.secretCount === 1 ? '' : 's'} again, to everyone who holds a
+                    This changes whether the environment serves secrets to principals who have
+                    access. Values and history remain stored.
+                  </>
+                ) : isArchived ? (
+                  <>
+                    The environment starts serving its {secretCount} secret
+                    {secretCount === 1 ? '' : 's'} again, to everyone who holds a
                     grant on it.
                   </>
                 ) : (
                   <>
-                    Its {environment.secretCount} secret
-                    {environment.secretCount === 1 ? '' : 's'} stop being served, so anything
+                    Its {secretCount} secret
+                    {secretCount === 1 ? '' : 's'} stop being served, so anything
                     running <code>coffre run</code> against{' '}
                     <span className="mono">
                       {project}/{environment.slug}
@@ -584,7 +614,7 @@ function Grants({
   error: loadError,
 }: {
   project: string;
-  environments: Env[];
+  environments: ProjectSummary['environments'];
   grants: GrantRow[];
   error: string | null;
 }) {
@@ -631,7 +661,7 @@ function ProjectAccessTable({
   title: string;
   principalType: 'user' | 'service';
   project: string;
-  environments: Env[];
+  environments: ProjectSummary['environments'];
   grants: GrantRow[];
 }) {
   return (
@@ -686,7 +716,7 @@ function NewGrant({
 }: {
   principalType: 'user' | 'service';
   project: string;
-  environments: Env[];
+  environments: ProjectSummary['environments'];
 }) {
   const [open, setOpen] = useState(false);
   const [principalId, setPrincipalId] = useState('');

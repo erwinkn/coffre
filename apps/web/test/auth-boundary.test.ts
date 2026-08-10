@@ -9,11 +9,12 @@ import {
   accessTokenForRequest,
   accessTokenForBoundary,
   authenticateRequest,
+  allowsAnonymousTransport,
   DEV_TOKEN_COOKIE,
   isApiPath,
   isPublicHealthPath,
 } from '../src/server/auth.ts';
-import { startInstance } from '../src/start.ts';
+import { shouldValidateCsrf, startInstance } from '../src/start.ts';
 
 const cloudflare: AuthConfig = {
   mode: 'cloudflare',
@@ -55,10 +56,82 @@ test('the API boundary matches only the native API namespace', () => {
   assert.equal(isApiPath('/v1/me'), false);
 });
 
+test('anonymous page and session transport reaches its route-specific boundary', () => {
+  assert.equal(
+    allowsAnonymousTransport(
+      new Request('https://coffre.test/login'),
+      'router',
+      '/login',
+    ),
+    true,
+  );
+  assert.equal(
+    allowsAnonymousTransport(
+      new Request('https://coffre.test/api/me'),
+      'router',
+      '/api/me',
+    ),
+    false,
+  );
+  assert.equal(
+    allowsAnonymousTransport(
+      new Request('https://coffre.test/login', { method: 'POST' }),
+      'router',
+      '/login',
+    ),
+    false,
+  );
+  assert.equal(
+    allowsAnonymousTransport(
+      new Request('https://coffre.test/_serverFn/session'),
+      'serverFn',
+      '/_serverFn/session',
+    ),
+    true,
+  );
+});
+
 test('the Start instance keeps explicit CSRF and request identity layers', async () => {
   const options = await startInstance.getOptions();
   assert.equal(options.requestMiddleware?.length, 2);
   assert.equal(options.functionMiddleware?.length ?? 0, 0);
+});
+
+test('native API mutations require origin checks unless the request is non-simple JSON', () => {
+  assert.equal(
+    shouldValidateCsrf('router', new Request('https://coffre.test/api/projects')),
+    false,
+  );
+  assert.equal(
+    shouldValidateCsrf(
+      'router',
+      new Request('https://coffre.test/api/projects', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+      }),
+    ),
+    false,
+  );
+  assert.equal(
+    shouldValidateCsrf(
+      'router',
+      new Request('https://coffre.test/api/projects/market/archive', {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      }),
+    ),
+    true,
+  );
+  assert.equal(
+    shouldValidateCsrf(
+      'serverFn',
+      new Request('https://coffre.test/_serverFn/update', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+      }),
+    ),
+    true,
+  );
 });
 
 test('the specific user-directory route owns both role updates and deletion', () => {

@@ -3,32 +3,57 @@ import assert from 'node:assert/strict';
 
 import { auditReadiness, writeAuditHeartbeat } from '../src/server/heartbeat.ts';
 
+function heartbeatDatabase(options: { heartbeatRows?: number } = {}) {
+  const statements: string[] = [];
+  const client = {
+    async query(sql: string) {
+      statements.push(sql);
+      if (sql.includes('SELECT next_seq, head_hash')) {
+        return { rowCount: 1, rows: [{ next_seq: '0', head_hash: Buffer.alloc(32) }] };
+      }
+      if (sql.includes(`to_char(now()`)) {
+        return { rowCount: 1, rows: [{ ts: '2026-01-01T00:00:00.000000Z' }] };
+      }
+      if (sql.includes('UPDATE audit_heartbeat')) {
+        return { rowCount: options.heartbeatRows ?? 1, rows: [] };
+      }
+      return { rowCount: 1, rows: [] };
+    },
+    async release() {},
+  };
+  return {
+    database: { connect: async () => client } as never,
+    statements,
+  };
+}
+
 test('the scheduled heartbeat updates the database-owned signal', async () => {
-  let statement = '';
+  const { database, statements } = heartbeatDatabase();
   const written = await writeAuditHeartbeat(
-    {
-      query: async (sql: string) => {
-        statement = sql;
-        return { rowCount: 1, rows: [] };
-      },
-    } as never,
+    database,
+    Buffer.alloc(32, 1),
     { warn: () => assert.fail('successful heartbeat must not warn') },
   );
 
   assert.equal(written, true);
-  assert.match(statement, /UPDATE audit_heartbeat/);
-  assert.match(statement, /audit_chain_head/);
+  assert.ok(statements.some((statement) => statement.includes('INSERT INTO audit_log')));
+  assert.ok(statements.some((statement) => statement.includes('UPDATE audit_chain_head')));
+  assert.ok(statements.some((statement) => statement.includes('UPDATE audit_heartbeat')));
+  assert.equal(statements.at(-1), 'COMMIT');
 });
 
 test('the scheduled heartbeat rejects a missing singleton row', async () => {
   let warning = '';
+  const { database, statements } = heartbeatDatabase({ heartbeatRows: 0 });
   const written = await writeAuditHeartbeat(
-    { query: async () => ({ rowCount: 0, rows: [] }) } as never,
+    database,
+    Buffer.alloc(32, 1),
     { warn: (_value, message) => { warning = message; } },
   );
 
   assert.equal(written, false);
   assert.equal(warning, 'audit heartbeat singleton is missing');
+  assert.equal(statements.at(-1), 'ROLLBACK');
 });
 
 test('readiness accepts a recent audit heartbeat and rejects a stale one', async () => {

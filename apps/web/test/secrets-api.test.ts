@@ -116,6 +116,20 @@ test('writing a secret is audited without its value', async () => {
   assert.equal(JSON.stringify(rows).includes('db-demo://'), false);
 });
 
+test('direct writes reject NUL bytes and audit the denial', async () => {
+  await assert.rejects(
+    services.secrets.writeSecret(root, 'market', 'dev', 'BAD', 'before\u0000after'),
+    (error) => (error as { statusCode?: number }).statusCode === 409,
+  );
+  const rows = await auditRows();
+  assert.deepEqual(rows.at(-1), {
+    actorId: ROOT,
+    action: 'secret.write',
+    decision: 'deny',
+    metadata: { key: 'BAD', reason: 'invalid_secret_value' },
+  });
+});
+
 test('writing twice appends a version rather than mutating one', async () => {
   await services.secrets.writeSecret(root, 'market', 'dev', 'API_KEY', 'v1');
   assert.equal(
@@ -130,6 +144,26 @@ test('writing twice appends a version rather than mutating one', async () => {
     (await services.secrets.readSecret(root, 'market', 'dev', 'API_KEY')).value,
     'v2',
   );
+});
+
+test('concurrent writes allocate one ordered version sequence', async () => {
+  const writes = await Promise.all(
+    Array.from({ length: 8 }, (_, index) =>
+      services.secrets.writeSecret(root, 'market', 'dev', 'RACING_KEY', `value-${index}`),
+    ),
+  );
+  assert.deepEqual(
+    writes.map((write) => write.version).sort((left, right) => left - right),
+    [1, 2, 3, 4, 5, 6, 7, 8],
+  );
+  const versions = await pool.query<{ version: number }>(
+    `SELECT v.version
+       FROM secret_versions v
+       JOIN secrets s ON s.id = v.secret_id
+      WHERE s.key = 'RACING_KEY'
+      ORDER BY v.version`,
+  );
+  assert.deepEqual(versions.rows.map((row) => row.version), [1, 2, 3, 4, 5, 6, 7, 8]);
 });
 
 test('renaming preserves value, versions, and immutable identity', async () => {
@@ -229,6 +263,23 @@ test('bulk fetch returns every secret and writes one audit row per secret', asyn
     (await pool.query('SELECT DISTINCT bundle_id FROM audit_log')).rowCount,
     1,
   );
+});
+
+test('bulk fetch preserves keys that are also Object prototype property names', async () => {
+  for (const [key, value] of [
+    ['constructor', 'one'],
+    ['toString', 'two'],
+    ['__proto__', 'three'],
+  ]) {
+    await services.secrets.writeSecret(root, 'market', 'dev', key, value);
+  }
+
+  const result = await services.secrets.readEnvironment(reader, 'market', 'dev');
+  assert.deepEqual(Object.entries(result.secrets).sort(), [
+    ['__proto__', 'three'],
+    ['constructor', 'one'],
+    ['toString', 'two'],
+  ]);
 });
 
 test('the same key in two environments holds independent values', async () => {

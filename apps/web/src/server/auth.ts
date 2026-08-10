@@ -160,7 +160,7 @@ function remember(request: Request, context: RequestIdentityContext): void {
   requestContexts.set(request, context);
 }
 
-function allowsAnonymousDevTransport(
+export function allowsAnonymousTransport(
   request: Request,
   handlerType: 'serverFn' | 'router',
   pathname: string,
@@ -188,8 +188,7 @@ export const requestIdentityMiddleware = createMiddleware().server(
     const token = accessTokenForBoundary(request, runtime.auth, pathname);
     if (
       token === null &&
-      runtime.auth.mode === 'dev' &&
-      allowsAnonymousDevTransport(request, handlerType, pathname)
+      allowsAnonymousTransport(request, handlerType, pathname)
     ) {
       const context: RequestIdentityContext = anonymousContext();
       remember(request, context);

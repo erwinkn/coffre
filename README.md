@@ -69,8 +69,7 @@ Consequences:
 
 **AAD binds to UUIDs, never names.** A ciphertext is bound to
 `project_id/environment_id/secret_id`. Binding to `project/environment/key`
-names — as originally sketched — would make renaming an environment orphan
-every ciphertext in it.
+names would make renaming an environment orphan every ciphertext in it.
 
 **Two independent AAD layers.** The envelope binds context, and the KEK wrap
 binds context *and* KEK identity. Either alone stops a cross-environment

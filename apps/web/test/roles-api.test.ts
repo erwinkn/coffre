@@ -51,6 +51,14 @@ beforeEach(async () => {
   await pool.query('DELETE FROM principals');
   await pool.query('DELETE FROM environments');
   await pool.query('DELETE FROM projects');
+  await pool.query(
+    `INSERT INTO principals (principal_type, principal_id, instance_role, created_by, active)
+     VALUES
+       ('user', $1, 'user', $4, true),
+       ('user', $2, 'user', $4, true),
+       ('user', $3, 'user', $4, true)`,
+    [auditor.principal.id, accessManager.principal.id, developer.principal.id, ROOT],
+  );
 
   await services.admin.createProject(root, 'market', 'Market');
   await services.admin.createEnvironment(root, 'market', 'prod', 'Production');
@@ -83,9 +91,10 @@ test('an auditor reads audit data without being able to read secrets', async () 
   );
 });
 
-test('an auditor can verify chain integrity', async () => {
+test('only instance-wide administrators can verify the complete chain', async () => {
   await grant(auditor.principal.id, 'auditor');
-  assert.equal((await services.audit.verify(auditor)).ok, true);
+  await assert.rejects(services.audit.verify(auditor), AccessDenied);
+  assert.equal((await services.audit.verify(root)).ok, true);
 });
 
 test('an access manager grants access without being able to read secrets', async () => {
@@ -104,6 +113,31 @@ test('an access manager grants access without being able to read secrets', async
   await assert.rejects(
     services.secrets.readSecret(accessManager, 'market', 'prod', 'API_KEY'),
     AccessDenied,
+  );
+  await assert.rejects(
+    services.secrets.listKeys(accessManager, 'market', 'prod'),
+    AccessDenied,
+  );
+});
+
+test('a project access manager cannot add an unknown principal to the directory', async () => {
+  await grant(accessManager.principal.id, 'access-manager');
+  await assert.rejects(
+    services.admin.createGrant(accessManager, 'market', {
+      principalType: 'user',
+      principalId: 'unknown@equisafe.io',
+      role: 'developer',
+    }),
+    (error) => (error as { statusCode?: number }).statusCode === 409,
+  );
+  assert.equal(
+    (
+      await pool.query(
+        'SELECT 1 FROM principals WHERE principal_id = $1',
+        ['unknown@equisafe.io'],
+      )
+    ).rowCount,
+    0,
   );
 });
 
@@ -125,11 +159,16 @@ test('an auditor sees only projects on which they hold audit.read', async () => 
 });
 
 test('an archived-environment audit grant remains meaningful', async () => {
+  await services.admin.createEnvironment(root, 'market', 'dev', 'Development');
+  await services.secrets.writeSecret(root, 'market', 'dev', 'DEV_KEY', 'not-visible');
   await grant(auditor.principal.id, 'auditor', { environmentSlug: 'prod' });
   await services.admin.setEnvironmentArchived(root, 'market', 'prod', true);
   assert.deepEqual(await services.secrets.listAccessible(auditor), []);
   assert.equal(await services.audit.canRead(auditor), true);
-  assert.ok((await services.audit.list(auditor, { limit: 100 })).length > 0);
+  const entries = await services.audit.list(auditor, { limit: 100 });
+  assert.ok(entries.length > 0);
+  assert.ok(entries.every((entry) => entry.environment === 'prod'));
+  assert.equal(entries.some((entry) => entry.metadata.key === 'DEV_KEY'), false);
 });
 
 test('the role catalogue identifies environment-scopable roles', async () => {
@@ -158,6 +197,12 @@ test('an expired grant confers nothing while a live grant works', async () => {
   await assert.rejects(
     services.secrets.readSecret(developer, 'market', 'prod', 'API_KEY'),
     AccessDenied,
+  );
+  assert.equal(
+    (await services.admin.listPrincipals(root)).some(
+      (principal) => principal.principalId === developer.principal.id,
+    ),
+    false,
   );
 
   await pool.query('DELETE FROM grants WHERE principal_id = $1', [developer.principal.id]);
@@ -209,8 +254,13 @@ test('a developer cannot archive a secret and the denial is audited', async () =
   assert.equal(JSON.parse(row.rows[0].metadata).reason, 'missing_secret_archive');
 });
 
-test('writing to an archived key restores it with a new version', async () => {
+test('writing to an archived key requires an explicit restore', async () => {
   await services.secrets.setSecretArchived(root, 'market', 'prod', 'API_KEY', true);
+  await assert.rejects(
+    services.secrets.writeSecret(root, 'market', 'prod', 'API_KEY', 'rotated'),
+    (error) => (error as { statusCode?: number }).statusCode === 409,
+  );
+  await services.secrets.setSecretArchived(root, 'market', 'prod', 'API_KEY', false);
   assert.equal(
     (await services.secrets.writeSecret(root, 'market', 'prod', 'API_KEY', 'rotated')).version,
     2,

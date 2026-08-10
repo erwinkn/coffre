@@ -1,5 +1,10 @@
 import { REQUIRED_MIGRATION_COUNT } from '../../../../packages/db/src/schema-version.ts';
-import type { Database } from './database.ts';
+import { appendAudit } from '../../../../packages/db/src/audit.ts';
+import type { Database, DatabaseClient } from './database.ts';
+
+export type HeartbeatLogger = {
+  warn: (obj: unknown, msg: string) => void;
+};
 
 /**
  * Logging-failure detection.
@@ -16,10 +21,23 @@ import type { Database } from './database.ts';
  */
 export async function writeAuditHeartbeat(
   pool: Database,
-  log: { warn: (obj: unknown, msg: string) => void },
+  chainKey: Buffer,
+  log: HeartbeatLogger,
 ): Promise<boolean> {
+  let client: DatabaseClient | undefined;
   try {
-    const result = await pool.query(
+    client = await pool.connect();
+    await client.query('BEGIN');
+    await appendAudit(client, chainKey, [
+      {
+        actorType: 'system',
+        actorId: 'coffre-scheduler',
+        action: 'audit.heartbeat',
+        decision: 'allow',
+        metadata: { source: 'scheduled' },
+      },
+    ]);
+    const result = await client.query(
       `UPDATE audit_heartbeat
           SET last_beat_at = now(),
               last_seq = (SELECT next_seq FROM audit_chain_head WHERE only_row)
@@ -30,13 +48,18 @@ export async function writeAuditHeartbeat(
         { rowCount: result.rowCount },
         'audit heartbeat singleton is missing',
       );
+      await client.query('ROLLBACK');
       return false;
     }
+    await client.query('COMMIT');
     return true;
   } catch (error) {
+    await client?.query('ROLLBACK').catch(() => {});
     // A heartbeat that cannot write is itself the signal.
     log.warn({ err: (error as Error).message }, 'audit heartbeat failed to write');
     return false;
+  } finally {
+    await client?.release();
   }
 }
 

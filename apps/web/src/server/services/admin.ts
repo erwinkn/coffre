@@ -1,4 +1,8 @@
-import type { Database, DatabaseClient } from '../database.ts';
+import {
+  toNullableIsoTimestamp,
+  type Database,
+  type DatabaseClient,
+} from '../database.ts';
 
 import { appendAudit, type AuditEntry } from '../../../../../packages/db/src/audit.ts';
 import { AccessDenied, AuditedFailure, NotFound, type RequestContext } from './secrets.ts';
@@ -18,14 +22,34 @@ export type AdminServiceDeps = {
   rootAdmins: readonly string[];
 };
 
+export type ProjectEnvironmentSummary = {
+  slug: string;
+  name: string;
+  /** True when the caller may open the environment's secret metadata page. */
+  accessible: boolean;
+  /** Omitted for environments that the caller may only know by name. */
+  details: { archivedAt: string | null; secretCount: number | null } | null;
+};
+
 export type ProjectSummary = {
   slug: string;
   name: string;
   archivedAt: string | null;
   /** What the caller may do at project scope. */
   permissions: Permission[];
-  environments: { slug: string; name: string; archivedAt: string | null; secretCount: number }[];
+  environments: ProjectEnvironmentSummary[];
 };
+
+const INSTANCE_OWNER_PROJECT_PERMISSIONS: PermissionSet = new Set(PROJECT_ONLY_PERMISSIONS);
+
+function isUniqueViolation(error: unknown): boolean {
+  return (
+    typeof error === 'object'
+    && error !== null
+    && 'code' in error
+    && error.code === '23505'
+  );
+}
 
 export type GrantRow = {
   id: string;
@@ -103,7 +127,7 @@ export class AdminService {
       await client.query('ROLLBACK').catch(() => {});
       throw error;
     } finally {
-      client.release();
+      await client.release();
     }
   }
 
@@ -160,7 +184,7 @@ export class AdminService {
     metadata: Record<string, unknown> = {},
   ): Promise<void> {
     if (await this.#isInstanceOwner(tx, ctx.principal)) return;
-    throw new AuditedFailure(new AccessDenied('only owners may manage users'), {
+    throw new AuditedFailure(new AccessDenied('only instance owners may perform this action'), {
       ...base,
       decision: 'deny',
       metadata: { ...metadata, reason: 'requires_instance_owner' },
@@ -195,11 +219,14 @@ export class AdminService {
   }
 
   /** What the caller may do at project scope. Environment grants do not count. */
-  #projectPermissions(
+  async #projectPermissions(
     tx: DatabaseClient,
     principal: PrincipalRef,
     projectId: string,
   ): Promise<PermissionSet> {
+    if (!this.#isRootAdmin(principal) && await this.#isInstanceOwner(tx, principal)) {
+      return INSTANCE_OWNER_PROJECT_PERMISSIONS;
+    }
     return permissionsForProject(tx, principal, projectId, this.#deps.rootAdmins);
   }
 
@@ -243,9 +270,8 @@ export class AdminService {
   /**
    * Create a project.
    *
-   * Root admins only: a project does not exist yet, so there is nothing to hold
-   * a grant on. This is the one operation that cannot be delegated through the
-   * grants table.
+   * Instance owners and configured root admins may create the first resource;
+   * there is no project yet on which a delegated grant could live.
    */
   async createProject(
     ctx: RequestContext,
@@ -255,13 +281,8 @@ export class AdminService {
     return this.#audited(async (tx) => {
       const base = this.#base(ctx, 'project.create');
 
-      if (!this.#isRootAdmin(ctx.principal)) {
-        throw new AuditedFailure(new AccessDenied('only root admins may create projects'), {
-          ...base,
-          decision: 'deny',
-          metadata: { slug, reason: 'requires_root_admin' },
-        });
-      }
+      await this.#lockPrincipal(tx, ctx.principal.type, ctx.principal.id);
+      await this.#requireInstanceOwner(tx, ctx, base, { slug });
 
       const existing = await tx.query('SELECT 1 FROM projects WHERE slug = $1', [slug]);
       if (existing.rowCount !== 0) {
@@ -276,29 +297,6 @@ export class AdminService {
       const created = await tx.query<{ id: string }>(
         'INSERT INTO projects (slug, name) VALUES ($1, $2) RETURNING id',
         [slug, name],
-      );
-
-      // Creating a project also establishes its first real project-level
-      // owner. Root admin is deployment-wide bootstrap authority; it must not
-      // masquerade as a project grant in the access table.
-      await this.#lockPrincipal(tx, ctx.principal.type, ctx.principal.id);
-      await tx.query(
-        `INSERT INTO principals (
-           principal_type, principal_id, instance_role, created_by, active
-         )
-         VALUES ($1, $2, 'user', $2, true)
-         ON CONFLICT (principal_type, principal_id) DO UPDATE
-           SET active = true`,
-        [ctx.principal.type, ctx.principal.id],
-      );
-      await tx.query(
-        `INSERT INTO grants (
-           principal_type, principal_id, role_id, project_id, created_by
-         )
-         SELECT $1, $2, r.id, $3, $2
-           FROM roles r
-          WHERE r.slug = 'owner'`,
-        [ctx.principal.type, ctx.principal.id, created.rows[0].id],
       );
 
       return {
@@ -319,8 +317,7 @@ export class AdminService {
    * Rename a project.
    *
    * The slug is renameable because ciphertext AAD binds to immutable UUIDs, not
-   * to names. Had we bound to `project/environment/key` as originally sketched,
-   * this would silently orphan every secret in the project.
+   * to names, so a rename cannot orphan encrypted values.
    */
   async updateProject(
     ctx: RequestContext,
@@ -331,13 +328,30 @@ export class AdminService {
       const base = this.#base(ctx, 'project.update');
       const { projectId } = await this.#requireProjectPermission(tx, ctx, projectSlug, 'project.manage', base, changes);
 
-      const updated = await tx.query<{ slug: string; name: string }>(
-        `UPDATE projects
-            SET slug = COALESCE($2, slug), name = COALESCE($3, name)
-          WHERE id = $1
-        RETURNING slug, name`,
-        [projectId, changes.slug ?? null, changes.name ?? null],
-      );
+      const updated = await (async () => {
+        try {
+          return await tx.query<{ slug: string; name: string }>(
+            `UPDATE projects
+                SET slug = COALESCE($2, slug), name = COALESCE($3, name)
+              WHERE id = $1
+            RETURNING slug, name`,
+            [projectId, changes.slug ?? null, changes.name ?? null],
+          );
+        } catch (error) {
+          if (!isUniqueViolation(error)) throw error;
+          throw new AuditedFailure(
+            Object.assign(new Error('a project with that slug already exists'), {
+              statusCode: 409,
+            }),
+            {
+              ...base,
+              decision: 'deny',
+              projectId,
+              metadata: { from: projectSlug, ...changes, reason: 'slug_taken' },
+            },
+          );
+        }
+      })();
 
       return {
         result: updated.rows[0],
@@ -430,13 +444,30 @@ export class AdminService {
       const base = this.#base(ctx, 'environment.update');
       const { projectId } = await this.#requireProjectPermission(tx, ctx, projectSlug, 'environment.manage', base, changes);
 
-      const updated = await tx.query<{ id: string; slug: string; name: string }>(
-        `UPDATE environments
-            SET slug = COALESCE($3, slug), name = COALESCE($4, name)
-          WHERE project_id = $1 AND slug = $2
-        RETURNING id, slug, name`,
-        [projectId, environmentSlug, changes.slug ?? null, changes.name ?? null],
-      );
+      const updated = await (async () => {
+        try {
+          return await tx.query<{ id: string; slug: string; name: string }>(
+            `UPDATE environments
+                SET slug = COALESCE($3, slug), name = COALESCE($4, name)
+              WHERE project_id = $1 AND slug = $2
+            RETURNING id, slug, name`,
+            [projectId, environmentSlug, changes.slug ?? null, changes.name ?? null],
+          );
+        } catch (error) {
+          if (!isUniqueViolation(error)) throw error;
+          throw new AuditedFailure(
+            Object.assign(new Error('an environment with that slug already exists'), {
+              statusCode: 409,
+            }),
+            {
+              ...base,
+              decision: 'deny',
+              projectId,
+              metadata: { from: environmentSlug, ...changes, reason: 'slug_taken' },
+            },
+          );
+        }
+      })();
       if (updated.rowCount === 0) {
         throw new AuditedFailure(new NotFound('unknown environment'), {
           ...base,
@@ -527,7 +558,8 @@ export class AdminService {
            FROM grants g
            JOIN roles r ON r.id = g.role_id
            LEFT JOIN environments e ON e.id = g.environment_id
-          WHERE g.project_id = $1 OR e.project_id = $1
+          WHERE (g.project_id = $1 OR e.project_id = $1)
+            AND (g.expires_at IS NULL OR g.expires_at > now())
           ORDER BY g.principal_id, e.slug NULLS FIRST`,
         [project.rows[0].id],
       );
@@ -541,10 +573,10 @@ export class AdminService {
         permissions: row.permissions ?? [],
         scope: row.environment_slug === null ? ('project' as const) : ('environment' as const),
         environmentSlug: row.environment_slug,
-        expiresAt: row.expires_at,
+        expiresAt: toNullableIsoTimestamp(row.expires_at),
       }));
     } finally {
-      client.release();
+      await client.release();
     }
   }
 
@@ -573,7 +605,7 @@ export class AdminService {
         ),
       }));
     } finally {
-      client.release();
+      await client.release();
     }
   }
 
@@ -664,20 +696,26 @@ export class AdminService {
       }
 
       await this.#lockPrincipal(tx, input.principalType, input.principalId);
-      await tx.query(
-        `INSERT INTO principals (
-           principal_type, principal_id, instance_role, created_by, active
-         )
-         VALUES ($1, $2, 'user', $3, true)
-         ON CONFLICT DO NOTHING`,
-        [input.principalType, input.principalId, ctx.principal.id],
-      );
       const registered = await tx.query<{ active: boolean }>(
         `SELECT active
            FROM principals
           WHERE principal_type = $1 AND principal_id = $2`,
         [input.principalType, input.principalId],
       );
+      if (registered.rowCount === 0) {
+        throw new AuditedFailure(
+          Object.assign(
+            new Error('add that principal to the instance directory before granting access'),
+            { statusCode: 409 },
+          ),
+          {
+            ...base,
+            decision: 'deny',
+            projectId,
+            metadata: { ...input, reason: 'principal_not_registered' },
+          },
+        );
+      }
       if (!registered.rows[0]?.active) {
         throw new AuditedFailure(
           Object.assign(
@@ -963,7 +1001,7 @@ export class AdminService {
   ): Promise<{ revoked: number }> {
     return this.#audited(async (tx) => {
       const base = this.#base(ctx, 'principal.remove');
-      const isRoot = this.#isRootAdmin(ctx.principal);
+      const canManageInstance = await this.#isInstanceOwner(tx, ctx.principal);
 
       if (principalType === 'user' && this.#deps.rootAdmins.includes(principalId)) {
         throw new AuditedFailure(
@@ -1003,7 +1041,7 @@ export class AdminService {
         [
           principalType,
           principalId,
-          isRoot,
+          canManageInstance,
           ctx.principal.type,
           ctx.principal.id,
         ],
@@ -1053,7 +1091,7 @@ export class AdminService {
   > {
     const client = await this.#deps.pool.connect();
     try {
-      const isRoot = this.#isRootAdmin(ctx.principal);
+      const canManageInstance = await this.#isInstanceOwner(client, ctx.principal);
 
       const result = await client.query(
         `SELECT g.id, g.principal_type, g.principal_id, g.expires_at,
@@ -1064,7 +1102,7 @@ export class AdminService {
            JOIN roles r ON r.id = g.role_id
            LEFT JOIN environments e ON e.id = g.environment_id
            JOIN projects p ON p.id = COALESCE(g.project_id, e.project_id)
-          WHERE $1::boolean OR p.id IN (
+          WHERE ($1::boolean OR p.id IN (
                   SELECT COALESCE(mg.project_id, me.project_id)
                     FROM grants mg
                     JOIN role_permissions mrp ON mrp.role_id = mg.role_id
@@ -1072,9 +1110,10 @@ export class AdminService {
                    WHERE mg.principal_type = $2 AND mg.principal_id = $3
                      AND mrp.permission = 'grant.manage'
                      AND (mg.expires_at IS NULL OR mg.expires_at > now())
-                )
+                ))
+            AND (g.expires_at IS NULL OR g.expires_at > now())
           ORDER BY g.principal_id, p.slug`,
-        [isRoot, ctx.principal.type, ctx.principal.id],
+        [canManageInstance, ctx.principal.type, ctx.principal.id],
       );
 
       const byPrincipal = new Map<
@@ -1094,8 +1133,8 @@ export class AdminService {
         }
       >();
 
-      // Root admins first, so offboarding cannot miss them.
-      if (isRoot) {
+      // Instance managers see configured root admins even though they have no grant row.
+      if (canManageInstance) {
         for (const id of this.#deps.rootAdmins) {
           byPrincipal.set(`user:${id}`, {
             principalType: 'user',
@@ -1131,14 +1170,14 @@ export class AdminService {
           scope: row.environment_slug === null ? 'whole project' : row.environment_slug,
           environmentSlug: row.environment_slug,
           role: row.role,
-          expiresAt: row.expires_at,
+          expiresAt: toNullableIsoTimestamp(row.expires_at),
         });
         byPrincipal.set(key, entry);
       }
 
       return [...byPrincipal.values()];
     } finally {
-      client.release();
+      await client.release();
     }
   }
 
@@ -1422,7 +1461,7 @@ export class AdminService {
           a.principalId.localeCompare(b.principalId),
       );
     } finally {
-      client.release();
+      await client.release();
     }
   }
 
@@ -1432,6 +1471,7 @@ export class AdminService {
   async listProjects(ctx: RequestContext): Promise<ProjectSummary[]> {
     const client = await this.#deps.pool.connect();
     try {
+      const canManageInstance = await this.#isInstanceOwner(client, ctx.principal);
       const isRoot = this.#isRootAdmin(ctx.principal);
 
       // Visibility: any grant anywhere inside the project, including one on a
@@ -1448,38 +1488,93 @@ export class AdminService {
             AND (g.expires_at IS NULL OR g.expires_at > now())
           WHERE $3::boolean OR g.id IS NOT NULL
           ORDER BY p.slug`,
-        [ctx.principal.type, ctx.principal.id, isRoot],
+        [ctx.principal.type, ctx.principal.id, canManageInstance],
       );
 
       const summaries: ProjectSummary[] = [];
       for (const project of projects.rows) {
         const permissions = await this.#projectPermissions(client, ctx.principal, project.id);
-        const environments = await client.query(
-          `SELECT e.slug, e.name, e.archived_at,
-                  (SELECT count(*) FROM secrets s
-                    WHERE s.environment_id = e.id AND s.archived_at IS NULL)::int AS secret_count
+        if (
+          project.archived_at !== null
+          && !canManageInstance
+          && !has(permissions, 'project.manage')
+        ) {
+          continue;
+        }
+        const showManagementMetadata =
+          has(permissions, 'environment.manage') || has(permissions, 'grant.manage');
+        const environments = await client.query<{
+          slug: string;
+          name: string;
+          accessible: boolean;
+          details_visible: boolean;
+          archived_at: string | null;
+          secret_count: number | null;
+        }>(
+          `SELECT e.slug, e.name,
+                  ($4::boolean OR COALESCE(access.secret_access, false)) AS accessible,
+                  ($5::boolean OR $4::boolean OR COALESCE(access.secret_access, false))
+                    AS details_visible,
+                  CASE
+                    WHEN $5::boolean OR $4::boolean OR COALESCE(access.secret_access, false)
+                    THEN e.archived_at
+                    ELSE NULL
+                  END AS archived_at,
+                  CASE
+                    WHEN $4::boolean OR COALESCE(access.secret_access, false)
+                    THEN (SELECT count(*) FROM secrets s
+                           WHERE s.environment_id = e.id AND s.archived_at IS NULL)::int
+                    ELSE NULL
+                  END AS secret_count
              FROM environments e
+             LEFT JOIN LATERAL (
+               SELECT bool_or(rp.permission IN (
+                 'secret.read', 'secret.write', 'secret.archive'
+               )) AS secret_access
+                 FROM grants g
+                 JOIN role_permissions rp ON rp.role_id = g.role_id
+                WHERE g.principal_type = $2 AND g.principal_id = $3
+                  AND (g.expires_at IS NULL OR g.expires_at > now())
+                  AND (g.project_id = e.project_id OR g.environment_id = e.id)
+             ) access ON true
             WHERE e.project_id = $1
             ORDER BY e.slug`,
-          [project.id],
+          [
+            project.id,
+            ctx.principal.type,
+            ctx.principal.id,
+            isRoot,
+            showManagementMetadata,
+          ],
         );
 
         summaries.push({
           slug: project.slug,
           name: project.name,
-          archivedAt: project.archived_at,
+          archivedAt: toNullableIsoTimestamp(project.archived_at),
           permissions: [...permissions],
-          environments: environments.rows.map((row) => ({
-            slug: row.slug,
-            name: row.name,
-            archivedAt: row.archived_at,
-            secretCount: row.secret_count,
-          })),
+          environments: environments.rows.map((row): ProjectEnvironmentSummary =>
+            row.details_visible
+              ? {
+                  slug: row.slug,
+                  name: row.name,
+                  accessible: row.accessible,
+                  details: {
+                    archivedAt: toNullableIsoTimestamp(row.archived_at),
+                    secretCount: row.secret_count,
+                  },
+                }
+              : {
+                  slug: row.slug,
+                  name: row.name,
+                  accessible: false,
+                  details: null,
+                }),
         });
       }
       return summaries;
     } finally {
-      client.release();
+      await client.release();
     }
   }
 }

@@ -22,9 +22,7 @@
     "add:dep": "pnpm add --save-exact"
   },
   "dependencies": {
-    "jose": "6.2.3",
-    "pg": "8.16.3",
-    "zod": "4.4.3"
+    "pg": "8.16.3"
   },
   "devDependencies": {
     "@typescript-eslint/parser": "8.65.0",

@@ -19,6 +19,11 @@ for name in "${required[@]}"; do
   fi
 done
 
+if [[ "$COFFRE_RUNTIME_ROLE" != 'coffre_runtime' ]]; then
+  printf 'COFFRE_RUNTIME_ROLE must be coffre_runtime; the database grants name this fixed role\n' >&2
+  exit 1
+fi
+
 for command in curl docker gzip jq node scp scw ssh ssh-keygen; do
   command -v "$command" >/dev/null || {
     printf 'required command is unavailable: %s\n' "$command" >&2
@@ -75,8 +80,15 @@ trap 'exit 143' TERM
 
 ssh-keygen -q -t ed25519 -N '' -f "$work_directory/id_ed25519"
 public_key="$(<"$work_directory/id_ed25519.pub")"
+ssh-keygen -q -t ed25519 -N '' -f "$work_directory/ssh_host_ed25519_key"
+host_public_key="$(cut -d ' ' -f 1-2 "$work_directory/ssh_host_ed25519_key.pub")"
+host_private_key="$(sed 's/^/    /' "$work_directory/ssh_host_ed25519_key")"
 cat >"$work_directory/cloud-init.yaml" <<EOF
 #cloud-config
+ssh_keys:
+  ed25519_private: |
+${host_private_key}
+  ed25519_public: ${host_public_key}
 users:
   - default
   - name: coffre-migrate
@@ -108,7 +120,7 @@ NODE
 printf 'DATABASE_URL=%s\n' "$COFFRE_OWNER_DATABASE_URL" >"$work_directory/owner.env"
 chmod 600 "$work_directory/owner.env" "$work_directory/runtime.env"
 
-docker build --file deploy/migration.Dockerfile --tag "$migration_tag" .
+docker build --platform linux/amd64 --file deploy/migration.Dockerfile --tag "$migration_tag" .
 docker save "$migration_tag" | gzip -1 >"$work_directory/migration-image.tar.gz"
 
 runner_ip="$(curl --fail --silent --show-error --proto '=https' --tlsv1.2 https://api.ipify.org)"
@@ -167,17 +179,19 @@ scw instance server start "$server_id" --wait >/dev/null
 
 server_json="$(scw instance server get "$server_id" -o json)"
 server_ip="$(jq -er '.public_ip.address // .public_ips[0].address' <<<"$server_json")"
+printf '%s %s\n' "$server_ip" "$host_public_key" >"$work_directory/known_hosts"
+chmod 600 "$work_directory/known_hosts"
 ssh_options=(
   -i "$work_directory/id_ed25519"
   -o BatchMode=yes
   -o ConnectTimeout=10
-  -o StrictHostKeyChecking=accept-new
+  -o StrictHostKeyChecking=yes
   -o UserKnownHostsFile="$work_directory/known_hosts"
 )
 
 for attempt in {1..60}; do
   if ssh "${ssh_options[@]}" "coffre-migrate@$server_ip" \
-    'cloud-init status --wait >/dev/null && docker version >/dev/null' 2>/dev/null; then
+    'cloud-init status --wait >/dev/null && sudo docker version >/dev/null' 2>/dev/null; then
     break
   fi
   if [[ "$attempt" == 60 ]]; then

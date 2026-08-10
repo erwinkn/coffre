@@ -33,6 +33,8 @@ export type AuditRow = {
   actorId: string;
   action: string;
   decision: 'allow' | 'deny';
+  project: string | null;
+  environment: string | null;
   subject: string;
 };
 

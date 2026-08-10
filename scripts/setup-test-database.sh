@@ -19,14 +19,16 @@ CREATE DATABASE coffre_test;
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'coffre_runtime') THEN
-        CREATE ROLE coffre_runtime;
+        CREATE ROLE coffre_runtime
+            LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS
+            PASSWORD 'local-runtime-only';
+    ELSE
+        ALTER ROLE coffre_runtime
+            LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS
+            PASSWORD 'local-runtime-only';
     END IF;
 END
 $$;
-
-ALTER ROLE coffre_runtime
-    LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS
-    PASSWORD 'test-runtime-only';
 SQL
 
 DATABASE_URL='postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/coffre_test' \

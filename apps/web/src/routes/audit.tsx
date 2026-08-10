@@ -44,10 +44,15 @@ function AuditPage() {
       </div>
 
       {!chain.ok && (
+        <Notice>
+          <strong>Chain verification is not available.</strong> {chain.error}
+        </Notice>
+      )}
+
+      {chain.ok && chain.integrity === 'broken' && (
         <Notice tone="bad">
-          {/* The reason comes back unpunctuated, so it is terminated here
-              rather than running into the sentence after it. */}
-          <strong>The audit log does not verify.</strong> {chain.error}. Treat this as an
+          <strong>The audit log does not verify.</strong> Chain broken at seq{' '}
+          {chain.failedAtSeq}: {chain.reason}. Treat this as an
           incident: entries have been altered or removed by something holding direct database
           access, and nothing below can be relied on until it is explained.
         </Notice>
@@ -151,7 +156,7 @@ function AuditTableRow({ entry, deniedOnly }: { entry: AuditRow; deniedOnly: boo
         <span className="pill pill-muted">{entry.actorType}</span>
       </td>
       <td className="mono">{entry.action}</td>
-      <td className="wrap mono">{entry.subject}</td>
+      <td className="wrap mono">{scopedSubject(entry)}</td>
       <td>
         {/* Glyph first, then the word. The colour is the third signal, never
             the only one -- allow/deny is exactly the pair deuteranopia loses. */}
@@ -180,6 +185,15 @@ function AuditTableRow({ entry, deniedOnly }: { entry: AuditRow; deniedOnly: boo
 function ChainStatus({ chain }: { chain: ChainResult }) {
   if (!chain.ok) {
     return (
+      <span className="chain-status">
+        <AlertTriangle size={14} />
+        Verification unavailable
+      </span>
+    );
+  }
+
+  if (chain.integrity === 'broken') {
+    return (
       <span className="chain-status chain-status-bad">
         <AlertTriangle size={14} />
         Chain broken
@@ -200,4 +214,12 @@ function ChainStatus({ chain }: { chain: ChainResult }) {
       <CopyButton value={chain.head} label="Copy chain head" />
     </span>
   );
+}
+
+function scopedSubject(entry: AuditRow): string {
+  const scope = [entry.project, entry.environment].filter(
+    (part): part is string => part !== null,
+  );
+  if (entry.subject !== '--') scope.push(entry.subject);
+  return scope.length > 0 ? scope.join('/') : '--';
 }

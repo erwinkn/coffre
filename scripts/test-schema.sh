@@ -11,7 +11,7 @@ docker compose exec -T postgres \
     < packages/db/test/schema-fixture.sql
 
 docker compose exec -T \
-    -e PGPASSWORD=test-runtime-only \
+    -e PGPASSWORD=local-runtime-only \
     postgres \
     psql -v ON_ERROR_STOP=1 -h 127.0.0.1 \
         -U coffre_runtime -d coffre_test \

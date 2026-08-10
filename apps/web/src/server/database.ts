@@ -1,10 +1,23 @@
 import pg from 'pg';
 
-export type DatabaseClient = Pick<pg.PoolClient, 'query' | 'release'>;
+export type DatabaseClient = Pick<pg.PoolClient, 'query'> & {
+  release: () => void | Promise<void>;
+};
 
 export type Database = Pick<pg.Pool, 'query'> & {
   connect: () => Promise<DatabaseClient>;
 };
+
+/** Convert node-postgres timestamp values at the service boundary. */
+export function toIsoTimestamp(value: string | Date): string {
+  const timestamp = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(timestamp.getTime())) throw new Error('database returned an invalid timestamp');
+  return timestamp.toISOString();
+}
+
+export function toNullableIsoTimestamp(value: string | Date | null): string | null {
+  return value === null ? null : toIsoTimestamp(value);
+}
 
 /**
  * Request-scoped node-postgres adapter for Hyperdrive.
@@ -16,8 +29,6 @@ export type Database = Pick<pg.Pool, 'query'> & {
  */
 export class HyperdriveDatabase implements Database {
   readonly #connectionString: string;
-  #queryClient: pg.Client | undefined;
-  #queryClientReady: Promise<pg.Client> | undefined;
 
   constructor(connectionString: string) {
     if (connectionString.trim().length === 0) {
@@ -27,27 +38,31 @@ export class HyperdriveDatabase implements Database {
   }
 
   readonly query: Database['query'] = (async (...args: unknown[]) => {
-    const client = await this.#defaultClient();
-    return (client.query as (...queryArgs: unknown[]) => Promise<unknown>)(...args);
+    const client = await this.#connectClient();
+    try {
+      return await (client.query as (...queryArgs: unknown[]) => Promise<unknown>)(...args);
+    } finally {
+      await client.end();
+    }
   }) as Database['query'];
 
   async connect(): Promise<DatabaseClient> {
-    const client = new pg.Client({ connectionString: this.#connectionString });
-    await client.connect();
+    const client = await this.#connectClient();
+    let released = false;
 
     return {
       query: client.query.bind(client),
-      // Hyperdrive releases the edge client when the invocation finishes and
-      // retains the origin connection in its own pool. Service code still
-      // calls release() to delimit transaction ownership.
-      release: () => {},
+      release: async () => {
+        if (released) return;
+        released = true;
+        await client.end();
+      },
     };
   }
 
-  async #defaultClient(): Promise<pg.Client> {
-    this.#queryClient ??= new pg.Client({ connectionString: this.#connectionString });
-    this.#queryClientReady ??= this.#queryClient.connect();
-    await this.#queryClientReady;
-    return this.#queryClient;
+  async #connectClient(): Promise<pg.Client> {
+    const client = new pg.Client({ connectionString: this.#connectionString });
+    await client.connect();
+    return client;
   }
 }

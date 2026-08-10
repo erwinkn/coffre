@@ -35,7 +35,7 @@ docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U coffre_owner -d coffr
     >/dev/null
 
 cd apps/web
-CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE='postgresql://coffre_runtime:test-runtime-only@127.0.0.1:55432/coffre_test' \
+CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE='postgresql://coffre_runtime:local-runtime-only@127.0.0.1:55432/coffre_test' \
     COFFRE_ACCESS_ISSUER=https://coffre-smoke.cloudflareaccess.com \
     COFFRE_ACCESS_JWKS_URL=https://coffre-smoke.cloudflareaccess.com/cdn-cgi/access/certs \
     COFFRE_ACCESS_AUD=coffre-smoke-aud \
