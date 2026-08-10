@@ -9,7 +9,7 @@
   },
   "scripts": {
     "dev": "./scripts/dev.sh",
-    "test": "pnpm lint && ./scripts/setup-test-database.sh && node --test --test-concurrency=1 \"packages/**/test/*.test.ts\" \"apps/**/test/*.test.ts\"",
+    "test": "pnpm lint && ./scripts/setup-test-database.sh && node --test --test-concurrency=1 \"scripts/*.test.mjs\" \"packages/**/test/*.test.ts\" \"apps/**/test/*.test.ts\"",
     "test:schema": "./scripts/test-schema.sh",
     "lint": "eslint \"apps/web/src/**/*.{ts,tsx}\"",
     "check:pins": "node scripts/check-pins.mjs",
