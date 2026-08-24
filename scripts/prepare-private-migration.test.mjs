@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { migrationUrls } from './prepare-warp-migration.mjs';
+import { migrationUrls } from './prepare-private-migration.mjs';
 
 const owner = new URL('postgresql://10.84.0.12:5432/coffre?sslmode=require');
 owner.username = 'coffre_owner';
