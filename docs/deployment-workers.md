@@ -18,25 +18,22 @@ It never writes production values into the tracked Wrangler configuration.
 
 The `coffre-production` GitHub environment must provide:
 
-- variables: `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_HYPERDRIVE_ID`,
-  `CLOUDFLARE_WARP_DEVICE_PROFILE_ID`, `CLOUDFLARE_WARP_ORGANIZATION`,
-  `COFFRE_DATABASE_IP`, `COFFRE_DATABASE_PORT`, and `COFFRE_RUNTIME_ROLE`
+- variables: `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_HYPERDRIVE_ID`
 - secrets: `CLOUDFLARE_API_TOKEN`, `COFFRE_ACCESS_ISSUER`,
   `COFFRE_ACCESS_JWKS_URL`, `COFFRE_ACCESS_AUD`, `COFFRE_ROOT_ADMINS`,
-  `COFFRE_KEK_LOCAL`, `COFFRE_KEK_ID`, `COFFRE_AUDIT_CHAIN_KEY`,
-  `CLOUDFLARE_WARP_CLIENT_ID`, `CLOUDFLARE_WARP_CLIENT_SECRET`,
-  `COFFRE_DATABASE_CA_CERTIFICATE`, `COFFRE_OWNER_DATABASE_URL`, and
-  `COFFRE_RUNTIME_PASSWORD`
+  `COFFRE_KEK_LOCAL`, `COFFRE_KEK_ID`, and `COFFRE_AUDIT_CHAIN_KEY`
 - optional rotation secret: `COFFRE_KEK_LOCAL_PREVIOUS`
 
-The separate `coffre-maintenance` GitHub environment must allow only `main`
-without reviewer approval so its scheduled cleanup can run unattended. It
-contains variables `CLOUDFLARE_ACCOUNT_ID`,
-`CLOUDFLARE_WARP_DEVICE_PROFILE_ID`, and `CLOUDFLARE_WARP_ORGANIZATION`, plus
-only the `CLOUDFLARE_ZERO_TRUST_API_TOKEN` secret. That token requires the
-Cloudflare `Zero Trust Write` permission because Cloudflare does not expose a
-narrower registration-deletion permission. Do not reuse the Worker deployment
-token or copy database credentials into this environment.
+The separate `coffre-migrations` GitHub environment must provide:
+
+- variables: `COFFRE_DATABASE_IP`, `COFFRE_DATABASE_PORT`, and
+  `COFFRE_RUNTIME_ROLE`
+- secrets: `COFFRE_DATABASE_CA_CERTIFICATE`, `COFFRE_OWNER_DATABASE_URL`, and
+  `COFFRE_RUNTIME_PASSWORD`
+
+Both environments must allow only `main`. Keep migration-owner secrets out of
+`coffre-production`, and keep Worker deployment secrets out of
+`coffre-migrations`.
 
 Set `COFFRE_RUNTIME_ROLE` to the fixed role name `coffre_runtime`. The database
 schema grants privileges to this exact role and the migration runner rejects a
@@ -49,30 +46,27 @@ owner URL, database CA, or runtime password into the Worker environment.
 
 Deployments are manually dispatched. The workflow first runs the complete
 local contract suite. It rejects all release refs except `main`. Configure the
-`coffre-production` GitHub environment to allow only the selected branch
-`main`, and disable administrator bypass if the repository plan supports it.
-This environment rule is the authoritative secret boundary because workflow
-code on another branch is not trusted. The workflow verifies Cloudflare's
-package-signing key and installs a version-pinned Cloudflare One Client on its
-ephemeral Ubuntu runner. A dedicated
-service token enrols that runner into a device profile that routes only the
-database private `/32` address. Gateway permits this non-identity profile to
-reach only the PostgreSQL port. There is no public hostname or database
-endpoint.
+`coffre-production` and `coffre-migrations` GitHub environments to allow only
+the selected branch `main`, and disable administrator bypass if the repository
+plan supports it. These environment rules are the authoritative secret
+boundary because workflow code on another branch is not trusted. The migration
+job targets only the repository-scoped `coffre-migrations` self-hosted runner.
+That runner shares the stateless Scaleway connector VM and reaches the database
+through its Private Network attachment. The VM accepts no inbound traffic, and
+its security group allows PostgreSQL only to the RDB private `/32` endpoint.
 
-Before it starts the database migration, the job checks that
-`warp-cli settings` reports the Terraform-managed profile ID and that the
-private database IP and port are reachable through WARP.
+The runner registers with a one-hour GitHub token delivered through a temporary
+Scaleway user-data key. The key is deleted after GitHub reports the runner
+online. No GitHub administration credential is stored in Terraform, GitHub
+Actions, or the VM.
 
 The migration runs directly from CI, takes the PostgreSQL advisory lock, and
 then connects as the runtime role to verify its identity, membership, lack of
 owner/DDL/audit-mutation privileges, and ability to write the heartbeat. The
-runner removes the MDM file and its WARP registration on every normal, failed,
-or interrupted exit. The separate `cleanup-warp-registrations.yml` workflow
-uses a `Zero Trust Write` API token to delete registrations from the exact
-Coffre device profile when their last activity is more than six hours old.
-This covers jobs that are terminated before local cleanup can run. The Worker
-deploy job cannot start unless the migration and local deregistration succeed.
+script removes its mode-`0600` database CA and derived URLs on every normal,
+failed, or interrupted exit. A runner-level completion hook then clears the
+checked-out repository. The Worker deploy job cannot start unless the
+migration and runtime privilege verification succeed.
 
 ## Local Worker runtime
 
@@ -95,7 +89,7 @@ history hashes, apply Drizzle migrations, and verify the restricted runtime
 grants. Never put the owner URL in Worker secrets, add a migration handler to
 the Worker, or keep a migration process running.
 
-`scripts/migrate-over-warp.sh` verifies Cloudflare's package-signing key,
-installs an exact WARP package version, writes the database CA and derived URLs
-only to a mode-`0700` temporary directory, and removes those files on every
-exit. The owner URL remains outside Worker and Hyperdrive configuration.
+`scripts/migrate-private-database.sh` first verifies that the configured private
+database IP and port are reachable. It writes the database CA and derived URLs
+only to a mode-`0700` temporary directory and removes those files on every exit.
+The owner URL remains outside Worker and Hyperdrive configuration.

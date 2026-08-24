@@ -53,10 +53,10 @@ jobs:
           pnpm --dir apps/web smoke:production
 
   migrate:
-    name: Migrate through Cloudflare WARP
+    name: Migrate private database
     needs: validate
-    runs-on: ubuntu-24.04
-    environment: coffre-production
+    runs-on: coffre-migrations
+    environment: coffre-migrations
     timeout-minutes: 30
 
     steps:
@@ -78,17 +78,13 @@ jobs:
 
       - name: Run owner migration and verify runtime restrictions
         env:
-          CLOUDFLARE_WARP_CLIENT_ID: ${{ secrets.CLOUDFLARE_WARP_CLIENT_ID }}
-          CLOUDFLARE_WARP_CLIENT_SECRET: ${{ secrets.CLOUDFLARE_WARP_CLIENT_SECRET }}
-          CLOUDFLARE_WARP_DEVICE_PROFILE_ID: ${{ vars.CLOUDFLARE_WARP_DEVICE_PROFILE_ID }}
-          CLOUDFLARE_WARP_ORGANIZATION: ${{ vars.CLOUDFLARE_WARP_ORGANIZATION }}
           COFFRE_DATABASE_CA_CERTIFICATE: ${{ secrets.COFFRE_DATABASE_CA_CERTIFICATE }}
           COFFRE_DATABASE_IP: ${{ vars.COFFRE_DATABASE_IP }}
           COFFRE_DATABASE_PORT: ${{ vars.COFFRE_DATABASE_PORT }}
           COFFRE_OWNER_DATABASE_URL: ${{ secrets.COFFRE_OWNER_DATABASE_URL }}
           COFFRE_RUNTIME_PASSWORD: ${{ secrets.COFFRE_RUNTIME_PASSWORD }}
           COFFRE_RUNTIME_ROLE: ${{ vars.COFFRE_RUNTIME_ROLE }}
-        run: ./scripts/migrate-over-warp.sh
+        run: ./scripts/migrate-private-database.sh
 
   deploy:
     name: Deploy Worker
