@@ -6,5 +6,9 @@
   },
   "install": ". \"$HOME/.nvm/nvm.sh\"\nnvm use 24\ncorepack pnpm install",
   "start": "bash scripts/cloud-start.sh",
-  "ports": [3000, 8081, 55432]
+  "ports": [
+    { "name": "web", "port": 3000 },
+    { "name": "dev-idp", "port": 8081 },
+    { "name": "postgres", "port": 55432 }
+  ]
 }
