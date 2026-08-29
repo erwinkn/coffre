@@ -1,0 +1,10 @@
+{
+  "name": "coffre",
+  "user": "ubuntu",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "install": ". \"$HOME/.nvm/nvm.sh\"\nnvm use 24\ncorepack pnpm install",
+  "start": "bash scripts/cloud-start.sh",
+  "ports": [3000, 8081, 55432]
+}
