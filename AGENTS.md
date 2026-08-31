@@ -47,9 +47,15 @@ The Cloud Agent environment is defined in-repo by `.cursor/environment.json` and
 `.cursor/Dockerfile` (Node 24 via nvm, pnpm 11.8.0 via corepack, and a Docker engine set
 up for the nested VM). Two things worth knowing:
 
-- **Docker** is started automatically each boot by the `start` command
-  (`scripts/cloud-start.sh`); the VM has no systemd. All DB-backed work needs it, so if
-  `docker info` ever fails, re-run that script.
+- **Docker and Postgres** come up each boot via `.cursor/start.sh`
+  (`sudo service docker start`, then compose Postgres). PID 1 is tini, not
+  systemd; the SysV script is what actually starts dockerd. Snapshot compose
+  containers are dead until recreated. `/var/run` is not a symlink to `/run`
+  here; snapshots and `service docker start` can leave it `0700`, so the
+  script `chmod 755`s it *after* the daemon is up or `ubuntu` cannot see
+  `docker.sock`. If `docker info` fails or `:55432` is down, re-run that
+  script. Web and the dev IdP are still started by hand (or `pnpm dev`
+  once seed is fixed).
 - **Node on PATH.** The Cloud runtime injects its own Node 22 ahead on `PATH`, so the
   image prepends the nvm-managed Node 24 in `~/.bashrc` (above the stock interactive-guard
   early return, since the runtime sources it for non-interactive shells too) and in

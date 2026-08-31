@@ -43,8 +43,9 @@ RUN mkdir -p /etc/docker \
 RUN update-alternatives --set iptables /usr/sbin/iptables-legacy \
     && update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy
 
-# The agent runs as the stock `ubuntu` user (uid 1000). Give it Docker access
-# and passwordless sudo (the start hook launches dockerd with sudo).
+# The agent runs as the stock `ubuntu` user (uid 1000). Docker group +
+# passwordless sudo so `.cursor/start.sh` can run `sudo service docker start`
+# (SysV /etc/init.d/docker — PID 1 is tini, not systemd).
 RUN usermod -aG docker ubuntu \
     && echo 'ubuntu ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/90-ubuntu \
     && chmod 0440 /etc/sudoers.d/90-ubuntu

@@ -5,7 +5,7 @@
     "dockerfile": "Dockerfile"
   },
   "install": ". \"$HOME/.nvm/nvm.sh\"\nnvm use 24\ncorepack pnpm install",
-  "start": "bash scripts/cloud-start.sh",
+  "start": "bash .cursor/start.sh",
   "ports": [
     { "name": "web", "port": 3000 },
     { "name": "dev-idp", "port": 8081 },
