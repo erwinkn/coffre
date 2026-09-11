@@ -1,27 +1,57 @@
 {
   "name": "coffre",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@11.8.0",
   "engines": {
-    "node": ">=24"
-  },
-  "scripts": {
-    "dev": "./scripts/dev.sh",
-    "test": "node --test --test-concurrency=1 \"packages/**/test/*.test.ts\" \"apps/**/test/*.test.ts\"",
-    "test:schema": "docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U coffre_owner -d coffre < packages/db/test/schema-guarantees.sql",
-    "check:pins": "node scripts/check-pins.mjs",
-    "check:contrast": "node scripts/check-contrast.mjs",
-    "db:up": "docker compose up -d postgres",
-    "db:migrate": "./scripts/migrate.sh",
-    "seed": "node scripts/seed.mjs",
-    "add:dep": "pnpm add --save-exact"
+    "node": ">=22.16.0"
   },
   "dependencies": {
-    "fastify": "5.6.1",
-    "jose": "6.2.3",
-    "pg": "8.16.3",
-    "zod": "4.4.3"
+    "@tanstack/react-start": "1.168.49",
+    "@tanstack/react-router": "1.170.32",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "@base-ui/react": "1.7.0",
+    "class-variance-authority": "0.7.1",
+    "clsx": "2.1.1",
+    "tailwind-merge": "3.6.0",
+    "lucide-react": "1.39.0",
+    "jose": "6.2.10",
+    "drizzle-orm": "0.45.2",
+    "pg": "8.23.0",
+    "mysql2": "3.24.3",
+    "aws4fetch": "1.0.20",
+    "zod": "4.5.4"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "1.54.3",
+    "@cloudflare/workers-types": "5.20260902.1",
+    "@vitejs/plugin-react": "6.1.1",
+    "@tailwindcss/vite": "4.3.3",
+    "tailwindcss": "4.3.3",
+    "vite": "8.2.2",
+    "wrangler": "4.128.0",
+    "miniflare": "4.20260730.0",
+    "typescript": "5.9.3",
+    "@types/node": "22.20.1",
+    "@types/pg": "8.23.1",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.5",
+    "@playwright/test": "1.62.1",
+    "prettier": "3.9.6",
+    "esbuild": "0.28.1"
+  },
+  "license": "MIT",
+  "scripts": {
+    "dev": "node scripts/local-setup.mjs && vite --config vite.config.ts",
+    "build": "vite build --config vite.config.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node scripts/test.mjs",
+    "test:unit": "node scripts/test.mjs unit",
+    "test:integration": "node scripts/test.mjs integration",
+    "test:browser": "playwright test",
+    "check": "npm run build && npm run typecheck && npm test",
+    "cli:build": "node scripts/build-cli.mjs",
+    "deploy:check": "node scripts/deploy-check.mjs"
   }
 }

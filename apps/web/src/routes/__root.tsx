@@ -1,0 +1,4 @@
+import { createRootRoute, HeadContent, Outlet, Scripts } from '@tanstack/react-router';
+import stylesheet from '../styles.css?url';
+export const Route = createRootRoute({ head: () => ({ meta: [{ charSet: 'utf-8' }, { name: 'viewport', content: 'width=device-width,initial-scale=1' }, { title: 'Coffre' }, { name: 'referrer', content: 'no-referrer' }], links: [{ rel: 'stylesheet', href: stylesheet }] }), component: Root, notFoundComponent: () => <main className="error-page"><h1>Page not found</h1><a href="/">Return to Coffre</a></main>, errorComponent: () => <main className="error-page"><h1>Unable to load Coffre</h1><p>No secret values have been displayed.</p><a href="/">Reload</a></main> });
+function Root() { return <html lang="en"><head><HeadContent /></head><body><Outlet /><Scripts /></body></html>; }

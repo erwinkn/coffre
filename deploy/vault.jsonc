@@ -1,0 +1,47 @@
+{
+  "compatibility_date": "2026-07-01",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "workers_dev": false,
+  "preview_urls": false,
+  "observability": {
+    "enabled": true
+  },
+  "name": "coffre-vault",
+  "main": "../apps/vault/src/index.ts",
+  "vars": {
+    "STAGE": "production",
+    "INSTANCE_ID": "00000000-0000-4000-8000-000000000000",
+    "STORAGE": "d1",
+    "KEY_PROVIDER": "local",
+    "ACCESS_ISSUER": "https://replace-me.cloudflareaccess.com",
+    "ACCESS_AUDIENCE": "REPLACE_ME",
+    "REQUIRE_APPEND_ONLY": "false"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "coffre",
+      "database_id": "00000000-0000-4000-8000-000000000000"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "AUDIT_ARCHIVE",
+      "bucket_name": "coffre-audit"
+    }
+  ],
+  "services": [
+    {
+      "binding": "KMS",
+      "service": "coffre-kms",
+      "entrypoint": "KmsWorker"
+    }
+  ],
+  "triggers": {
+    "crons": [
+      "*/5 * * * *"
+    ]
+  }
+}

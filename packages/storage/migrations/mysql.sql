@@ -1,0 +1,14 @@
+-- Migration 001. Apply once with a migration role. Initialization is separate.
+CREATE TABLE coffre_meta (singleton INTEGER PRIMARY KEY CHECK(singleton=1), instance_id VARCHAR(36) NOT NULL, revision BIGINT NOT NULL DEFAULT 0, audit_seq BIGINT NOT NULL DEFAULT 0, audit_hash VARCHAR(256) NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+CREATE TABLE coffre_guard (id VARCHAR(36) PRIMARY KEY, ok INTEGER NOT NULL CONSTRAINT coffre_cas CHECK(ok=1)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+CREATE TABLE coffre_projects (id VARCHAR(36) PRIMARY KEY, name VARCHAR(120) NOT NULL UNIQUE, record LONGTEXT NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+CREATE TABLE coffre_environments (id VARCHAR(36) PRIMARY KEY, project_id VARCHAR(36) NOT NULL, name VARCHAR(120) NOT NULL, record LONGTEXT NOT NULL, UNIQUE(project_id,name), FOREIGN KEY (project_id) REFERENCES coffre_projects(id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+CREATE TABLE coffre_secrets (id VARCHAR(36) PRIMARY KEY, env_id VARCHAR(36) NOT NULL, secret_key VARCHAR(120) NOT NULL, record LONGTEXT NOT NULL, UNIQUE(env_id,secret_key), FOREIGN KEY (env_id) REFERENCES coffre_environments(id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+CREATE TABLE coffre_versions (secret_id VARCHAR(36) NOT NULL, version INTEGER NOT NULL CHECK(version>0), record LONGTEXT NOT NULL, PRIMARY KEY(secret_id,version), FOREIGN KEY (secret_id) REFERENCES coffre_secrets(id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+CREATE TABLE coffre_principals (id VARCHAR(36) PRIMARY KEY, subject VARCHAR(256) NOT NULL, kind VARCHAR(120) NOT NULL, record LONGTEXT NOT NULL, UNIQUE(subject,kind)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+CREATE TABLE coffre_grants (id VARCHAR(36) PRIMARY KEY, principal_id VARCHAR(36) NOT NULL, scope_type VARCHAR(120) NOT NULL, scope_id VARCHAR(36) NOT NULL, record LONGTEXT NOT NULL, FOREIGN KEY (principal_id) REFERENCES coffre_principals(id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+CREATE TABLE coffre_audit (seq BIGINT PRIMARY KEY, id VARCHAR(36) NOT NULL UNIQUE, actor_id VARCHAR(36), project_id VARCHAR(36), env_id VARCHAR(36), record LONGTEXT NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+CREATE TABLE coffre_outbox (seq BIGINT PRIMARY KEY, event_hash VARCHAR(256) NOT NULL, record LONGTEXT NOT NULL, FOREIGN KEY (seq) REFERENCES coffre_audit(seq)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+CREATE TABLE coffre_receipts (request_id VARCHAR(36) PRIMARY KEY, record LONGTEXT NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+CREATE INDEX coffre_audit_environment ON coffre_audit(env_id,seq);
+CREATE INDEX coffre_grants_principal ON coffre_grants(principal_id);

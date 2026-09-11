@@ -1,17 +1,13 @@
 node_modules/
+.local/
+.wrangler/
+.dev.vars*
+.env*
+!.env.example
 dist/
-*.tsbuildinfo
-.env
-.env.local
+.test-build/
+apps/web/src/routeTree.gen.ts
+playwright-report/
+test-results/
 *.log
-.logs/
-
-# TanStack Start / Vite build output.
-.output/
-.nitro/
-.tanstack/
-.vite/
-
-# Generated from src/routes by the TanStack Start plugin. Committing it means
-# resolving conflicts in a file nobody edits.
-routeTree.gen.ts
+.DS_Store
