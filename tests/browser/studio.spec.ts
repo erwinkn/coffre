@@ -29,8 +29,8 @@ test('Studio: metadata-only listing, exact cell editing, drawer metadata, audit,
   const drawer = page.getByRole('dialog'); await expect(drawer).toBeVisible();
   await expect(drawer).not.toContainText(replacement);
   await drawer.getByRole('button', { name: 'Edit details', exact: true }).click();
-  await drawer.getByLabel('Tag', { exact: true }).fill('Database');
-  await drawer.getByLabel('Description', { exact: true }).fill('Updated through the metadata drawer');
+  await drawer.getByRole('textbox', { name: 'Tag', exact: true }).fill('Database');
+  await drawer.getByRole('textbox', { name: 'Description', exact: true }).fill('Updated through the metadata drawer');
   await drawer.getByRole('button', { name: 'Save details', exact: true }).click();
   await expect(drawer).toContainText('Updated through the metadata drawer');
   await drawer.getByRole('button', { name: 'Version history', exact: true }).click();
