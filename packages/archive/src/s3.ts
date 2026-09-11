@@ -11,10 +11,10 @@ export class S3AuditArchive implements AuditArchive {
   }
   async putIfAbsent(key: string, data: string) {
     const url = `${this.origin}/${this.bucket}/${key.split('/').map(encodeURIComponent).join('/')}`;
-    const response = await this.client.fetch(url, { method: 'PUT', headers: { 'Content-Type': 'application/json', 'If-None-Match': '*' }, body: data, redirect: 'error', signal: AbortSignal.timeout(15000) });
+    const response = await this.client.fetch(url, { method: 'PUT', headers: { 'Content-Type': 'application/json', 'If-None-Match': '*' }, body: data, redirect: 'manual', signal: AbortSignal.timeout(15000) });
     if (response.ok) return;
     if (response.status === 412) {
-      const existing = await this.client.fetch(url, { redirect: 'error', signal: AbortSignal.timeout(15000) });
+      const existing = await this.client.fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(15000) });
       if (existing.ok && Number(existing.headers.get('Content-Length') ?? 0) < 1048576 && await existing.text() === data) return;
     }
     throw new Error('S3 audit write failed or conflicted');

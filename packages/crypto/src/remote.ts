@@ -8,7 +8,7 @@ export class HttpKmsBinding implements KmsBinding {
     this.origin = u.origin;
   }
   private async call(operation: string, request: object): Promise<unknown> {
-    const response = await this.fetcher(`${this.origin}/v1/${operation}`, { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(10000), headers: { 'Content-Type': 'application/json', 'CF-Access-Client-Id': this.clientId, 'CF-Access-Client-Secret': this.clientSecret }, body: JSON.stringify(request) });
+    const response = await this.fetcher(`${this.origin}/v1/${operation}`, { method: 'POST', redirect: 'manual', signal: AbortSignal.timeout(10000), headers: { 'Content-Type': 'application/json', 'CF-Access-Client-Id': this.clientId, 'CF-Access-Client-Secret': this.clientSecret }, body: JSON.stringify(request) });
     if (!response.ok) throw new Error('Key service operation failed');
     return response.json();
   }

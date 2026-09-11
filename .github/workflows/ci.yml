@@ -10,43 +10,7 @@ concurrency:
   group: coffre-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  prepare:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
-    outputs:
-      revision: ${{ steps.revision.outputs.sha }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22.16.0'
-      - name: Bootstrap lockfile on the rebuild branch only
-        if: hashFiles('package-lock.json') == ''
-        env:
-          BRANCH: ${{ github.ref }}
-          EVENT: ${{ github.event_name }}
-        run: |
-          test "$BRANCH" = 'refs/heads/feat/cloudflare-rebuild'
-          test "$EVENT" = 'push'
-          npm install --package-lock-only --ignore-scripts
-          python3 - <<'PYFIX'
-          from pathlib import Path
-          p = Path('apps/web/src/styles.css')
-          p.write_text(p.read_text().replace('max-width:min(440px,calc(100vw - 32px)))}', 'max-width:min(440px,calc(100vw - 32px))}'))
-          p = Path('apps/web/src/components/console.tsx')
-          p.write_text(p.read_text().replace('${Math.min(effectivePage * 8, filtered.length)}`', '${Math.min(effectivePage * 8, filtered.length)} of ${filtered.length}`'))
-          PYFIX
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add package-lock.json apps/web/src/styles.css apps/web/src/components/console.tsx
-          git commit -m 'build: lock rebuilt dependencies and normalize transferred UI source'
-          git push origin HEAD:feat/cloudflare-rebuild
-      - id: revision
-        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
   contracts:
-    needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 20
     services:
@@ -75,10 +39,10 @@ jobs:
       TEST_MYSQL_URL: mysql://root:synthetic-test-password@127.0.0.1:3306/coffre
       WRANGLER_SEND_METRICS: 'false'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ needs.prepare.outputs.revision }}
-      - uses: actions/setup-node@v4
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '22.16.0'
           cache: npm
@@ -90,16 +54,15 @@ jobs:
       - name: Verify PostgreSQL runtime audit privileges
         run: node scripts/check-postgres-role.mjs
   browser:
-    needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
       WRANGLER_SEND_METRICS: 'false'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ needs.prepare.outputs.revision }}
-      - uses: actions/setup-node@v4
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '22.16.0'
           cache: npm
@@ -113,4 +76,17 @@ jobs:
           path: |
             test-results/
             playwright-report/
+          retention-days: 7
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - run: git archive --format=zip --output=coffre-source.zip HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coffre-source
+          path: coffre-source.zip
           retention-days: 7

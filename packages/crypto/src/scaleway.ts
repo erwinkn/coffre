@@ -17,7 +17,7 @@ export class ScalewayKeyProvider implements KeyProvider {
     const response = await this.fetcher(`https://api.scaleway.com/key-manager/v1alpha1/regions/${region}/keys/${id}/${action}`, {
       method: 'POST', headers: { 'X-Auth-Token': this.secret, 'Content-Type': 'application/json' },
       body: JSON.stringify({ [action === 'encrypt' ? 'plaintext' : 'ciphertext']: data, associated_data: standard64(aad(context, 'wrap', keyRef)) }),
-      redirect: 'error', signal: AbortSignal.timeout(10000),
+      redirect: 'manual', signal: AbortSignal.timeout(10000),
     });
     if (!response.ok) throw new Error('Key service operation failed');
     const body = z.object({ key_id: z.literal(id!), ciphertext: z.unknown().optional(), plaintext: z.string().optional() }).parse(await response.json());

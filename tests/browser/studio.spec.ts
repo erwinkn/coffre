@@ -4,6 +4,7 @@ test('Studio: metadata-only listing, exact cell editing, drawer metadata, audit,
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'Projects', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Open Core API', exact: true }).click();
+  await page.getByRole('button', { name: 'Development', exact: true }).click();
   await expect(page.locator('[data-secret-row]')).toHaveCount(8);
   expect(await page.locator('body').textContent()).not.toContain('synthetic-jwt-secret');
   const row = page.locator('[data-secret-row]').filter({ has: page.locator('.secret-name code', { hasText: /^DATABASE_URL$/ }) });

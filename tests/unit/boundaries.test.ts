@@ -27,7 +27,7 @@ test('key provider selection has no implicit downgrade or missing-binding fallba
 });
 test('Scaleway adapter uses encrypt/decrypt with base64 AAD strings and allowed key references', async () => {
   const id = crypto.randomUUID(), ref = `scaleway:fr-par:${id}`, dek = random(32), calls: unknown[] = [];
-  const fetcher: typeof fetch = async (input, init) => { const body = JSON.parse(String(init?.body)); calls.push(body); assert.equal(typeof body.associated_data, 'string'); assert.equal(init?.redirect, 'error'); assert.equal((init?.headers as Record<string, string>)['X-Auth-Token'], 'synthetic-only'); return Response.json({ key_id: id, [String(input).endsWith('/encrypt') ? 'ciphertext' : 'plaintext']: btoa(String.fromCharCode(...dek)) }); };
+  const fetcher: typeof fetch = async (input, init) => { const body = JSON.parse(String(init?.body)); calls.push(body); assert.equal(typeof body.associated_data, 'string'); assert.equal(init?.redirect, 'manual'); assert.equal((init?.headers as Record<string, string>)['X-Auth-Token'], 'synthetic-only'); return Response.json({ key_id: id, [String(input).endsWith('/encrypt') ? 'ciphertext' : 'plaintext']: btoa(String.fromCharCode(...dek)) }); };
   const provider = new ScalewayKeyProvider(ref, [ref], 'synthetic-only', fetcher);
   const wrapped = await provider.wrap(dek, context); assert.deepEqual(await provider.unwrap(wrapped, context), dek); assert.equal(calls.length, 2);
   await assert.rejects(provider.unwrap({ ...wrapped, keyRef: `scaleway:fr-par:${crypto.randomUUID()}` }, context));
@@ -50,4 +50,18 @@ test('unexpected database/provider exceptions never echo secrets in RPC errors',
 test('Unicode value size is bounded in bytes, and large binary conversion does not overflow the stack', () => {
   assert.equal(commandSchema.safeParse({ type: 'secret.write', id: crypto.randomUUID(), expectedVersion: 1, value: '🌍'.repeat(20000) }).success, false);
   const data = new Uint8Array(300000).fill(150); assert.deepEqual(unb64(b64(data)), data);
+});
+test('KMS redirects fail closed without forwarding credentials to the Location target', async () => {
+  const calls: string[] = [];
+  const redirecting: typeof fetch = async (url, init) => {
+    calls.push(String(url));
+    assert.equal(init?.redirect, 'manual');
+    return new Response(null, { status: 302, headers: { Location: 'https://untrusted.invalid/' } });
+  };
+  const remote = new HttpKmsBinding('https://keys.example.invalid', 'synthetic-id', 'synthetic-secret', redirecting);
+  await assert.rejects(remote.wrap({ data: b64(random(32)), context, requestId: crypto.randomUUID() }));
+  const ref = `scaleway:fr-par:${crypto.randomUUID()}`;
+  await assert.rejects(new ScalewayKeyProvider(ref, [ref], 'synthetic-secret', redirecting).wrap(random(32), context));
+  assert.equal(calls.length, 2);
+  assert.ok(calls.every(url => !url.includes('untrusted.invalid')));
 });

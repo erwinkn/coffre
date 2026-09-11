@@ -141,7 +141,16 @@ export function mysqlStorage(config: SqlConnection): Storage {
   let connection: Connection | undefined;
   const options = connectionOptions(config);
   const dialect = new MySqlDialect();
-  const execute = async (q: SQL) => { connection ??= await createConnection({ ...options, connectTimeout: 10000, multipleStatements: false }); const compiled = dialect.sqlToQuery(q); return (await connection.execute(compiled.sql, compiled.params as (string | number | boolean | null)[]))[0]; };
+  const execute = async (q: SQL) => {
+    connection ??= await createConnection({ ...options, connectTimeout: 10000, multipleStatements: false });
+    const compiled = dialect.sqlToQuery(q);
+    // MySQL does not support every transaction-control command in its prepared
+    // statement protocol. Parameter-free SQL here is authored by the adapter;
+    // user values always remain bound parameters in execute(), never interpolated.
+    return compiled.params.length === 0
+      ? (await connection.query(compiled.sql))[0]
+      : (await connection.execute(compiled.sql, compiled.params as (string | number | boolean | null)[]))[0];
+  };
   const query = async (q: SQL): Promise<Row[]> => { const result = await execute(q); return Array.isArray(result) ? result as Row[] : []; };
   return new SqlStorage({
     engine: 'mysql', query,
