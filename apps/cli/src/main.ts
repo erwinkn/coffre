@@ -81,7 +81,19 @@ async function api(path: string, token: string, init: RequestInit = {}): Promise
   if (response.status === 401) fail('unauthenticated: your token is missing, expired or invalid');
   if (response.status === 403) fail('forbidden: you do not have a grant for that environment');
   if (response.status === 404) fail('not found');
-  if (!response.ok) fail(`request failed with status ${response.status}`);
+  if (!response.ok) {
+    let detail = `request failed with status ${response.status}`;
+    if (isJsonContentType(response.headers.get('content-type'))) {
+      const body = (await response.json()) as { error?: unknown; message?: unknown };
+      if (typeof body.message === 'string' && body.message.length > 0) {
+        fail(`${detail}: ${body.message}`);
+      }
+      if (typeof body.error === 'string' && body.error.length > 0) {
+        fail(`${detail}: ${body.error}`);
+      }
+    }
+    fail(detail);
+  }
   if (!isJsonContentType(response.headers.get('content-type'))) {
     fail('request returned a non-JSON response');
   }

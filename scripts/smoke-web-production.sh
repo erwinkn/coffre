@@ -3,7 +3,31 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-coffre}"
+
 ./scripts/setup-test-database.sh >/dev/null
+
+# vite preview serves the last Worker build. Docs and CI treat this script as
+# self-contained, so produce that build when it is missing.
+if [[ ! -f apps/web/.wrangler/deploy/config.json ]]; then
+    echo '==> building Worker (vite preview needs apps/web/.wrangler/deploy/config.json)'
+    pnpm --dir apps/web build
+fi
+
+# vite preview prefers dist/server/.dev.vars over the process environment.
+# A shell that sourced .env.dev (or a prior `vite build`) bakes the HTTP
+# local issuer into that file; production auth then 500s /livez.
+# Write the smoke contract there so preview cannot inherit the dev IdP.
+mkdir -p apps/web/dist/server
+cat >apps/web/dist/server/.dev.vars <<'EOF'
+COFFRE_ACCESS_ISSUER=https://coffre-smoke.cloudflareaccess.com
+COFFRE_ACCESS_JWKS_URL=https://coffre-smoke.cloudflareaccess.com/cdn-cgi/access/certs
+COFFRE_ACCESS_AUD=coffre-smoke-aud
+COFFRE_ROOT_ADMINS=smoke.admin@example.com
+COFFRE_KEK_LOCAL=Y29mZnJlLWxvY2FsLWRldi1rZWstMzItYnl0ZXMhISE=
+COFFRE_KEK_ID=coffre-smoke-1
+COFFRE_AUDIT_CHAIN_KEY=Y29mZnJlLWxvY2FsLWF1ZGl0LWNoYWluLWtleS0zMmI=
+EOF
 
 smoke_port="${SMOKE_PORT:-4173}"
 smoke_host="${SMOKE_HOST:-127.0.0.1}"
@@ -35,7 +59,10 @@ docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U coffre_owner -d coffr
     >/dev/null
 
 cd apps/web
-CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE='postgresql://coffre_runtime:local-runtime-only@127.0.0.1:55432/coffre_test' \
+# Drop inherited local-dev auth: cloudflare mode rejects COFFRE_DEV_IDP_URL,
+# and wrangler.jsonc already sets COFFRE_AUTH_MODE=cloudflare.
+env -u COFFRE_DEV_IDP_URL -u COFFRE_AUTH_MODE \
+    CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE='postgresql://coffre_runtime:local-runtime-only@127.0.0.1:55432/coffre_test' \
     COFFRE_ACCESS_ISSUER=https://coffre-smoke.cloudflareaccess.com \
     COFFRE_ACCESS_JWKS_URL=https://coffre-smoke.cloudflareaccess.com/cdn-cgi/access/certs \
     COFFRE_ACCESS_AUD=coffre-smoke-aud \
@@ -62,7 +89,11 @@ for _ in {1..100}; do
 done
 
 if [[ "$started" != true ]]; then
-    echo "Worker preview did not start at $smoke_base:" >&2
+    echo "Worker preview did not become ready at $smoke_base/livez:" >&2
+    curl --silent --show-error --output "$smoke_tmp/livez.body" \
+        --write-out 'livez HTTP %{http_code}\n' "$smoke_base/livez" >&2 || true
+    cat "$smoke_tmp/livez.body" >&2 || true
+    echo >&2
     cat "$smoke_tmp/server.log" >&2
     exit 1
 fi

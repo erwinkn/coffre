@@ -7,6 +7,45 @@ const LOCAL_SEED_CONFIG = Object.freeze({
 });
 
 /**
+ * Identities the login page lists as seeded personas.
+ *
+ * Root admin is deployment config (`COFFRE_ROOT_ADMINS`), not a directory row.
+ * Everyone else must be registered here before `createGrant` will accept them.
+ * `outsider@` is registered with no grants so the closed-door view is a denial,
+ * not `/unregistered`.
+ */
+export const LOCAL_SEED_DIRECTORY = Object.freeze([
+    Object.freeze({ principalType: 'user', principalId: 'lead@equisafe.io' }),
+    Object.freeze({ principalType: 'user', principalId: 'dev@equisafe.io' }),
+    Object.freeze({ principalType: 'user', principalId: 'auditor@equisafe.io' }),
+    Object.freeze({ principalType: 'user', principalId: 'accessmgr@equisafe.io' }),
+    Object.freeze({ principalType: 'user', principalId: 'outsider@equisafe.io' }),
+    Object.freeze({ principalType: 'service', principalId: 'ci-deploy.access' }),
+]);
+
+export const LOCAL_SEED_GRANTS = Object.freeze([
+    Object.freeze({ principalType: 'user', principalId: 'lead@equisafe.io', role: 'owner' }),
+    Object.freeze({
+        principalType: 'user',
+        principalId: 'dev@equisafe.io',
+        role: 'developer',
+        environmentSlug: 'dev',
+    }),
+    Object.freeze({ principalType: 'user', principalId: 'auditor@equisafe.io', role: 'auditor' }),
+    Object.freeze({
+        principalType: 'user',
+        principalId: 'accessmgr@equisafe.io',
+        role: 'access-manager',
+    }),
+    Object.freeze({
+        principalType: 'service',
+        principalId: 'ci-deploy.access',
+        role: 'viewer',
+        environmentSlug: 'prod',
+    }),
+]);
+
+/**
  * Resolve the destructive seed targets, refusing mixed environments.
  *
  * `node --env-file` deliberately gives already-exported variables precedence.

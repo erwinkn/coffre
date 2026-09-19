@@ -1,7 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { loadLocalSeedConfig } from '../../../scripts/seed-config.mjs';
+import {
+  loadLocalSeedConfig,
+  LOCAL_SEED_DIRECTORY,
+  LOCAL_SEED_GRANTS,
+} from '../../../scripts/seed-config.mjs';
 
 const local = {
   COFFRE_AUTH_MODE: 'dev',
@@ -46,6 +50,31 @@ test('seed rejects a foreign root admin before resetting local data', () => {
   assert.throws(
     () => loadLocalSeedConfig({ ...local, COFFRE_ROOT_ADMINS: '' }),
     /refuses non-local rootAdmin/,
+  );
+});
+
+test('every seeded grant principal is registered in the directory first', () => {
+  for (const grant of LOCAL_SEED_GRANTS) {
+    assert.ok(
+      LOCAL_SEED_DIRECTORY.some(
+        (entry) =>
+          entry.principalType === grant.principalType &&
+          entry.principalId === grant.principalId,
+      ),
+      `${grant.principalType}:${grant.principalId} is granted without a directory row`,
+    );
+  }
+});
+
+test('the closed-door persona is in the directory with no grant', () => {
+  assert.ok(
+    LOCAL_SEED_DIRECTORY.some(
+      (entry) => entry.principalType === 'user' && entry.principalId === 'outsider@equisafe.io',
+    ),
+  );
+  assert.equal(
+    LOCAL_SEED_GRANTS.some((grant) => grant.principalId === 'outsider@equisafe.io'),
+    false,
   );
 });
 

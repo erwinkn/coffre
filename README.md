@@ -175,7 +175,7 @@ pnpm db:up            # Postgres on :55432
 pnpm db:migrate
 pnpm db:generate       # generate SQL from packages/db/src/schema.ts
 pnpm db:check          # validate the Drizzle journal
-pnpm seed             # loads the checked-in local-only .env.dev
+pnpm seed             # directory + market/dev|prod + grants; loads .env.dev
 pnpm test             # lint + unit + integration tests (needs Postgres up)
 pnpm test:schema      # runtime-role guarantees in an isolated test database
 pnpm lint             # server-function authorization import boundaries

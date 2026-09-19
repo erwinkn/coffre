@@ -5,7 +5,11 @@
 // audited like anything else -- and so the seed exercises the same envelope
 // and audit code path the CLI and UI use.
 
-import { loadLocalSeedConfig } from './seed-config.mjs';
+import {
+    loadLocalSeedConfig,
+    LOCAL_SEED_DIRECTORY,
+    LOCAL_SEED_GRANTS,
+} from './seed-config.mjs';
 
 const local = loadLocalSeedConfig(process.env);
 const API = local.apiUrl;
@@ -33,7 +37,10 @@ async function call(token, method, path, body) {
         headers: { 'cf-access-jwt-assertion': token, 'content-type': 'application/json' },
         body: body === undefined ? undefined : JSON.stringify(body),
     });
-    if (!response.ok) throw new Error(`${method} ${path} -> ${response.status}`);
+    if (!response.ok) {
+        const detail = await response.text();
+        throw new Error(`${method} ${path} -> ${response.status} ${detail}`);
+    }
     return response.json();
 }
 
@@ -76,30 +83,20 @@ for (const [slug, name] of [
 }
 console.log('==> created project market with environments dev, prod');
 
+// Directory first. createGrant refuses unknown principals (HTTP 409): the
+// instance directory is a separate write from project access.
+for (const principal of LOCAL_SEED_DIRECTORY) {
+    await post(adminToken, '/api/admin/directory', principal);
+}
+console.log('==> registered directory principals (lead, dev, auditor, accessmgr, outsider, ci-deploy.access)');
+
 // A mix of scopes, so the UI shows both kinds of grant:
 //   lead     -- project admin: can add environments and manage access
 //   dev      -- write, but only on dev
 //   auditor  -- read across the whole project
 //   ci       -- a machine principal, matched on its service-token common name
-for (const grant of [
-    { principalType: 'user', principalId: 'lead@equisafe.io', role: 'owner' },
-    {
-        principalType: 'user',
-        principalId: 'dev@equisafe.io',
-        role: 'developer',
-        environmentSlug: 'dev',
-    },
-    // The two roles that motivated having roles at all: both deliberately
-    // exclude secret.read, so neither can see a single secret value.
-    { principalType: 'user', principalId: 'auditor@equisafe.io', role: 'auditor' },
-    { principalType: 'user', principalId: 'accessmgr@equisafe.io', role: 'access-manager' },
-    {
-        principalType: 'service',
-        principalId: 'ci-deploy.access',
-        role: 'viewer',
-        environmentSlug: 'prod',
-    },
-]) {
+// outsider is in the directory with no grants — the login page's closed door.
+for (const grant of LOCAL_SEED_GRANTS) {
     await post(adminToken, '/api/admin/projects/market/grants', grant);
 }
 console.log('==> granted access to lead, dev, auditor, accessmgr and ci-deploy.access');

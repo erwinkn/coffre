@@ -19,17 +19,19 @@ itself is version-agnostic.
 DB-backed tests need it up. Export `COMPOSE_PROJECT_NAME=coffre` whenever you invoke
 `docker compose` directly.
 
-**Run the stack.** `pnpm dev` is meant to bring up Postgres + dev IdP (:8081) + web/API
-(:3000) + seed data, but its seed step is currently broken (see Issues), so start the
-pieces manually until that is fixed. Sign in at `http://127.0.0.1:3000/login` as
-`erwin@equisafe.io` (root admin). CLI: `node --env-file=.env.dev apps/cli/src/main.ts <cmd>`.
+**Run the stack.** `pnpm dev` brings up Postgres + dev IdP (:8081) + web/API
+(:3000) + seed data. Sign in at `http://127.0.0.1:3000/login` as
+`erwin@equisafe.io` (root admin) or any of the seeded personas. CLI:
+`node --env-file=.env.dev apps/cli/src/main.ts <cmd>`.
 
 **Tests / checks.**
 - `pnpm test` = lint + recreate `coffre_test` + `node --test --test-concurrency=1`
   (serial: the integration suite shares one DB and resets it per test). Needs Postgres.
 - `pnpm test:schema` verifies the restricted runtime role's privileges. Needs Postgres.
-- `pnpm --dir apps/web smoke:production` needs a prior `pnpm --dir apps/web build` and
-  `COMPOSE_PROJECT_NAME=coffre` (see Issues).
+- `pnpm --dir apps/web smoke:production` sets `COMPOSE_PROJECT_NAME=coffre`,
+  builds the Worker if `apps/web/.wrangler/deploy/config.json` is missing, and
+  writes production smoke secrets to `dist/server/.dev.vars` so a sourced
+  `.env.dev` cannot 500 `/livez`. Needs Postgres.
 - `pnpm lint`, `pnpm check:pins`, `pnpm check:contrast` do not need Postgres.
 - `pnpm --dir apps/web typecheck` does not need Postgres, but on a fresh checkout it fails
   until `apps/web/src/routeTree.gen.ts` exists — run `pnpm --dir apps/web build` (or start
@@ -54,31 +56,8 @@ up for the nested VM). Two things worth knowing:
   here; snapshots and `service docker start` can leave it `0700`, so the
   script `chmod 755`s it *after* the daemon is up or `ubuntu` cannot see
   `docker.sock`. If `docker info` fails or `:55432` is down, re-run that
-  script. Web and the dev IdP are still started by hand (or `pnpm dev`
-  once seed is fixed).
+  script. Web and the dev IdP are started by `pnpm dev`, or by hand.
 - **Node on PATH.** The Cloud runtime injects its own Node 22 ahead on `PATH`, so the
   image prepends the nvm-managed Node 24 in `~/.bashrc` (above the stock interactive-guard
   early return, since the runtime sources it for non-interactive shells too) and in
   `/etc/profile.d`. If `node -v` ever shows 22, that prepend did not run.
-
-## Issues
-
-Pre-existing repo problems (not environment setup):
-
-- **`pnpm dev` seeding is broken and takes the whole stack down.** `scripts/seed.mjs`
-  grants roles to `lead@/dev@/…` without first registering them in the principal
-  directory, so `createGrant` (`apps/web/src/server/services/admin.ts`) rejects the first
-  grant with HTTP 409 ("add that principal to the instance directory before granting
-  access"). The directory requirement came from the "separate principal directory"
-  change and the seed was never updated. `scripts/dev.sh` traps `EXIT` and kills every
-  child when the seed fails, so `pnpm dev` exits leaving nothing running. Workaround:
-  bring up Postgres, the dev IdP, and `apps/web` manually (mirror `dev.sh`, skip the
-  seed). The seed is not needed to exercise the app — root admin `erwin@equisafe.io`
-  writes and reads secrets with no grant, and the `market` project plus `dev`/`prod`
-  environments survive from the partial seed run.
-- **`smoke:production` has undeclared prerequisites.** It runs `vite preview`, which
-  needs a prior `pnpm --dir apps/web build` (for `apps/web/.wrangler/deploy/config.json`),
-  and it calls `docker compose exec postgres` without setting `COMPOSE_PROJECT_NAME`, so
-  it only finds the container when `COMPOSE_PROJECT_NAME=coffre` is already exported.
-  `setup-test-database.sh` sets that internally, but the smoke script's own compose calls
-  do not.
