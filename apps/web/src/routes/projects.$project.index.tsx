@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { createFileRoute, Link, useRouter } from '@tanstack/react-router';
 import { DropdownMenu } from 'radix-ui';
 import { toast } from 'sonner';
@@ -30,7 +30,7 @@ import {
   Notice,
   Spinner,
 } from '../components/ui';
-import { ClosedDoor, PageHeader, Section } from '../components/page';
+import { Card, ClosedDoor, PageHeader } from '../components/page';
 import { PermissionSummary } from '../components/permissions';
 import {
   parseProjectAccess,
@@ -39,12 +39,17 @@ import {
 } from '../lib/project-access';
 import {
   Archive,
-  ArrowRight,
-  ChevronDown,
+  Clock,
+  Folder,
+  Hash,
+  Key,
+  Layers,
   MoreHorizontal,
   Pencil,
   Plus,
   RotateBack,
+  ShieldCheck,
+  User,
 } from '../components/icons';
 
 export const Route = createFileRoute('/projects/$project/')({
@@ -59,8 +64,9 @@ function ProjectPage() {
   if (!result.ok) {
     return (
       <ClosedDoor
-        eyebrow="Project"
-        title={projectSlug}
+        icon={<Folder size={18} />}
+        label={<span className="mono">{projectSlug}</span>}
+        title="No project here for you"
         actions={
           <Link className="btn" to="/projects">
             All projects
@@ -91,17 +97,12 @@ function ProjectPage() {
   return (
     <>
       <PageHeader
-        eyebrow={
-          <>
-            Project
-            {isArchived && <span className="tag tag-red">archived</span>}
-          </>
-        }
+        tile={project.slug}
         title={project.slug}
         aside={project.name}
-        actions={canManageProject && <ProjectSettings project={project} />}
         meta={
           <>
+            {isArchived && <span className="tag tag-red">archived</span>}
             <span>
               <strong>{active.length + listedOnly.length}</strong> environment
               {active.length + listedOnly.length === 1 ? '' : 's'}
@@ -113,7 +114,7 @@ function ProjectPage() {
       />
 
       {isArchived && (
-        <div style={{ marginTop: '1.25rem' }}>
+        <div style={{ marginBottom: '1.25rem' }}>
           <Notice tone="bad">
             <strong>This project is archived.</strong> Its environments serve no reads, to
             people or to machines, until it is restored.
@@ -121,22 +122,24 @@ function ProjectPage() {
         </div>
       )}
 
-      <Section
+      <Card
         labelledBy="environments"
         title="Environments"
+        description="Secrets live in environments, and a grant can be scoped to exactly one of them."
         actions={canManageEnvironments && <NewEnvironment project={project.slug} />}
       >
         {active.length === 0 && listedOnly.length === 0 ? (
           <EmptyState title="No environments yet">
             {canManageEnvironments
-              ? 'Secrets live in environments, not in the project itself, and a grant can be scoped to exactly one of them. Add the first with Add environment.'
+              ? 'Add the first with Add environment.'
               : 'Creating environments needs environment.manage on this project.'}
           </EmptyState>
         ) : (
-          <ul className="index">
-            {active.map((environment) => (
+          <EnvironmentTable>
+            {active.map((environment, index) => (
               <EnvironmentRow
                 key={`${project.slug}:${environment.slug}`}
+                number={index + 1}
                 project={project.slug}
                 environment={environment}
                 isAdmin={canManageEnvironments}
@@ -144,229 +147,115 @@ function ProjectPage() {
             ))}
             {/* Environments you may know by name only: no grant you hold covers
                 their contents, so they are listed, muted, and do not open. */}
-            {listedOnly.map((environment) => (
-              <li className="index-row is-muted" key={environment.slug}>
-                <div className="index-main">
-                  <span className="index-title">{environment.slug}</span>
-                  <span className="index-sub">{environment.name}</span>
-                </div>
-                <div className="index-side">
+            {listedOnly.map((environment, index) => (
+              <tr key={environment.slug}>
+                <td className="n">{active.length + index + 1}</td>
+                <td className="cell-mono cell-muted" data-label="Environment">
+                  {environment.slug}
+                </td>
+                <td className="cell-muted" data-label="Name">
+                  {environment.name}
+                </td>
+                <td data-label="Secrets">
                   <span className="tag tag-outline">no secret access</span>
-                </div>
-              </li>
+                </td>
+                <td className="col-actions" />
+              </tr>
             ))}
-          </ul>
+          </EnvironmentTable>
         )}
-      </Section>
+      </Card>
 
       {archived.length > 0 && (
-        <Section
+        <Card
           labelledBy="archived-environments"
           title="Archived environments"
-          note="Not served to anyone. Values, versions and their audit trail are intact."
+          description="Not served to anyone. Values, versions and their audit trail are intact."
         >
-          <ul className="index">
-            {archived.map((environment) => (
+          <EnvironmentTable>
+            {archived.map((environment, index) => (
               <EnvironmentRow
                 key={environment.slug}
+                number={index + 1}
                 project={project.slug}
                 environment={environment}
                 isAdmin={canManageEnvironments}
               />
             ))}
-          </ul>
-        </Section>
+          </EnvironmentTable>
+        </Card>
       )}
 
-      {canManageGrants && (
-        <Grants
-          project={project.slug}
-          environments={project.environments}
-          grants={grants}
-          error={grantsError}
-        />
+      {canManageGrants &&
+        (grantsError !== null ? (
+          <div style={{ marginTop: '1.25rem' }}>
+            <Notice tone="bad">{grantsError}</Notice>
+          </div>
+        ) : (
+          <>
+            <ProjectAccessTable
+              principalType="user"
+              project={project.slug}
+              environments={project.environments}
+              grants={grants.filter((grant) => grant.principalType === 'user')}
+            />
+            <ProjectAccessTable
+              principalType="service"
+              project={project.slug}
+              environments={project.environments}
+              grants={grants.filter((grant) => grant.principalType === 'service')}
+            />
+          </>
+        ))}
+
+      {canManageProject && (
+        <>
+          <GeneralSettings project={project} />
+          <DangerZone project={project} />
+        </>
       )}
     </>
   );
 }
 
-/**
- * Rename and archive, behind one Settings menu in the page head.
- *
- * These change rarely and reach everyone on the project, so they are one
- * deliberate step away rather than laid out on the page.
- */
-function ProjectSettings({ project }: { project: ProjectSummary }) {
-  const router = useRouter();
-  const [renaming, setRenaming] = useState(false);
-  const [confirming, setConfirming] = useState(false);
-  const [slug, setSlug] = useState(project.slug);
-  const [name, setName] = useState(project.name);
-  const { pending, error, setError, run } = useAction();
-  const isArchived = project.archivedAt !== null;
-  const slugError = slug === '' ? null : slugProblem(slug);
-
-  // Renaming prints its error inside the modal. Archiving has no surface of
-  // its own, so it says so in a toast -- otherwise a failed archive would look
-  // like nothing happening at all.
-  useEffect(() => {
-    if (error !== null && !renaming) toast.error(error);
-  }, [error, renaming]);
-
+function EnvironmentTable({ children }: { children: ReactNode }) {
   return (
-    <>
-      <DropdownMenu.Root>
-        <DropdownMenu.Trigger asChild>
-          <button className="btn" disabled={pending}>
-            Settings
-            <ChevronDown size={13} />
-          </button>
-        </DropdownMenu.Trigger>
-        <DropdownMenu.Portal>
-          <DropdownMenu.Content className="menu" sideOffset={6} align="end">
-            <DropdownMenu.Item
-              className="menu-item"
-              onSelect={() => {
-                setSlug(project.slug);
-                setName(project.name);
-                setRenaming(true);
-              }}
-            >
-              <Pencil size={14} />
-              Rename project
-            </DropdownMenu.Item>
-            <DropdownMenu.Separator className="menu-sep" />
-            <DropdownMenu.Item
-              className={`menu-item${isArchived ? '' : ' menu-item-danger'}`}
-              onSelect={() => setConfirming(true)}
-            >
-              {isArchived ? <RotateBack size={14} /> : <Archive size={14} />}
-              {isArchived ? 'Restore project' : 'Archive project…'}
-            </DropdownMenu.Item>
-          </DropdownMenu.Content>
-        </DropdownMenu.Portal>
-      </DropdownMenu.Root>
-
-      <Modal
-        open={renaming}
-        // Clearing on close keeps a failed rename from re-surfacing as a toast
-        // the moment the modal that already showed it goes away.
-        onOpenChange={(open) => {
-          setRenaming(open);
-          if (!open) setError(null);
-        }}
-        title={
-          <>
-            Rename <span className="mono">{project.slug}</span>
-          </>
-        }
-      >
-        <form
-          className="form"
-          onSubmit={(event) => {
-            event.preventDefault();
-            run(
-              () => updateProject({ data: { project: project.slug, slug, name } }),
-              async () => {
-                setRenaming(false);
-                toast.success('Project renamed');
-                // The slug is part of the URL, so a rename has to navigate.
-                if (slug !== project.slug) {
-                  await router.navigate({ to: '/projects/$project', params: { project: slug } });
-                }
-              },
-            );
-          }}
-        >
-          <label className="field">
-            <span className="caps">Slug</span>
-            <input
-              className="input input-mono"
-              autoFocus
-              spellCheck={false}
-              value={slug}
-              aria-invalid={slugError !== null}
-              onChange={(event) => setSlug(event.target.value)}
-            />
-            <span className={`hint${slugError !== null ? ' edit-note-error' : ''}`}>
-              {slugError ??
-                'Safe to change: ciphertext is bound to ids, never names, so nothing is re-encrypted and no history is orphaned. Scripts that name the old slug will need the new one.'}
-            </span>
-          </label>
-          <label className="field">
-            <span className="caps">Display name</span>
-            <input
-              className="input"
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-            />
-          </label>
-
-          <ErrorLine error={error} />
-
-          <div className="dialog-actions">
-            <button className="btn" type="button" onClick={() => setRenaming(false)}>
-              Cancel
-            </button>
-            <button
-              className="btn btn-primary"
-              type="submit"
-              disabled={pending || slug === '' || slugError !== null || name.trim() === ''}
-            >
-              {pending && <Spinner />}
-              Save
-            </button>
-          </div>
-        </form>
-      </Modal>
-
-      <ConfirmDialog
-        open={confirming}
-        onOpenChange={setConfirming}
-        title={
-          <>
-            {isArchived ? 'Restore' : 'Archive'} <span className="mono">{project.slug}</span>?
-          </>
-        }
-        body={
-          isArchived ? (
-            <>
-              The project reappears in listings and its environments start serving reads
-              again, for everyone who holds a grant on it.
-            </>
-          ) : (
-            <>
-              Every environment in <span className="mono">{project.slug}</span> stops serving
-              reads, including to machine callers already running. Nothing is deleted: values,
-              versions and the audit trail over them stay intact, and you can restore it here
-              at any time.
-            </>
-          )
-        }
-        confirmLabel={isArchived ? 'Restore project' : 'Archive project'}
-        destructive={!isArchived}
-        onConfirm={() =>
-          run(
-            () =>
-              setProjectArchived({
-                data: { project: project.slug, archived: !isArchived },
-              }),
-            () =>
-              toast.success(
-                isArchived ? `${project.slug} restored` : `${project.slug} archived`,
-              ),
-          )
-        }
-      />
-    </>
+    <div className="dt-wrap">
+      <table className="dt stacks">
+        <thead>
+          <tr>
+            <th className="n">#</th>
+            <th>
+              <span className="th">
+                <Layers size={14} />
+                Environment
+              </span>
+            </th>
+            <th>Name</th>
+            <th className="col-shrink">
+              <span className="th">
+                <Hash size={14} />
+                Secrets
+              </span>
+            </th>
+            <th className="col-actions">
+              <span className="visually-hidden">Actions</span>
+            </th>
+          </tr>
+        </thead>
+        <tbody>{children}</tbody>
+      </table>
+    </div>
   );
 }
 
 function EnvironmentRow({
+  number,
   project,
   environment,
   isAdmin,
 }: {
+  number: number;
   project: string;
   environment: DetailedProjectEnvironment;
   isAdmin: boolean;
@@ -386,38 +275,39 @@ function EnvironmentRow({
   }, [error, renaming]);
 
   return (
-    <li className={`index-row${isArchived ? ' is-muted' : ''}`}>
-      <div className="index-main">
+    <tr>
+      <td className="n">{number}</td>
+      <td className="cell-mono" data-label="Environment">
         {opens ? (
           <Link
-            className="index-title index-stretch"
+            className="cell-link"
             to="/projects/$project/$environment"
             params={{ project, environment: environment.slug }}
           >
             {environment.slug}
           </Link>
         ) : (
-          <span className="index-title">{environment.slug}</span>
+          <span className={isArchived ? 'cell-muted' : undefined}>{environment.slug}</span>
         )}
-        <span className="index-sub">{environment.name}</span>
-      </div>
-
-      <div className="index-side">
-        {secretCount !== null && (
-          <span className="num nowrap">
-            {secretCount} secret{secretCount === 1 ? '' : 's'}
-          </span>
-        )}
-        {isArchived && <span className="tag tag-red">archived</span>}
-        {!isArchived && !environment.accessible && (
+      </td>
+      <td className={isArchived ? 'cell-muted' : undefined} data-label="Name">
+        {environment.name}
+      </td>
+      <td className="num nowrap" data-label="Secrets">
+        {isArchived ? (
+          <span className="tag tag-red">archived</span>
+        ) : !environment.accessible ? (
           <span className="tag tag-outline">no secret access</span>
+        ) : (
+          (secretCount ?? '—')
         )}
-
+      </td>
+      <td className="col-actions">
         {isAdmin && (
           <DropdownMenu.Root>
             <DropdownMenu.Trigger asChild>
               <button
-                className="btn btn-quiet btn-sm btn-icon"
+                className="act act-quiet"
                 aria-label={`Actions for ${environment.slug}`}
                 disabled={pending}
               >
@@ -450,134 +340,135 @@ function EnvironmentRow({
           </DropdownMenu.Root>
         )}
 
-        {opens && <ArrowRight size={16} className="index-arrow" />}
-      </div>
-
-      {isAdmin && (
-        <>
-          <Modal
-            open={renaming}
-            onOpenChange={(open) => {
-              setRenaming(open);
-              if (!open) setError(null);
-            }}
-            title={
-              <>
-                Rename <span className="mono">{project}/{environment.slug}</span>
-              </>
-            }
-          >
-            <form
-              className="form"
-              onSubmit={(event) => {
-                event.preventDefault();
-                run(
-                  () =>
-                    updateEnvironment({
-                      data: { project, environment: environment.slug, slug, name },
-                    }),
-                  () => {
-                    setRenaming(false);
-                    toast.success('Environment renamed');
-                  },
-                );
+        {isAdmin && (
+          <>
+            <Modal
+              open={renaming}
+              onOpenChange={(open) => {
+                setRenaming(open);
+                if (!open) setError(null);
               }}
-            >
-              <label className="field">
-                <span className="caps">Slug</span>
-                <input
-                  className="input input-mono"
-                  autoFocus
-                  spellCheck={false}
-                  value={slug}
-                  aria-invalid={slugError !== null}
-                  onChange={(event) => setSlug(event.target.value)}
-                />
-                <span className={`hint${slugError !== null ? ' edit-note-error' : ''}`}>
-                  {slugError ??
-                    `Anything running coffre run ${project}/${environment.slug} will need the new path.`}
-                </span>
-              </label>
-              <label className="field">
-                <span className="caps">Display name</span>
-                <input
-                  className="input"
-                  value={name}
-                  onChange={(event) => setName(event.target.value)}
-                />
-              </label>
-
-              <ErrorLine error={error} />
-
-              <div className="dialog-actions">
-                <button className="btn" type="button" onClick={() => setRenaming(false)}>
-                  Cancel
-                </button>
-                <button
-                  className="btn btn-primary"
-                  type="submit"
-                  disabled={pending || slug === '' || slugError !== null || name.trim() === ''}
-                >
-                  {pending && <Spinner />}
-                  Save
-                </button>
-              </div>
-            </form>
-          </Modal>
-
-          <ConfirmDialog
-            open={confirming}
-            onOpenChange={setConfirming}
-            title={
-              <>
-                {isArchived ? 'Restore' : 'Archive'}{' '}
-                <span className="mono">
-                  {project}/{environment.slug}
-                </span>
-                ?
-              </>
-            }
-            body={
-              secretCount === null ? (
+              title={
                 <>
-                  This changes whether the environment serves secrets to principals who have
-                  access. Values and history remain stored.
-                </>
-              ) : isArchived ? (
-                <>
-                  The environment starts serving its {secretCount} secret
-                  {secretCount === 1 ? '' : 's'} again, to everyone who holds a grant on it.
-                </>
-              ) : (
-                <>
-                  Its {secretCount} secret{secretCount === 1 ? '' : 's'} stop being served, so
-                  anything running <code>coffre run</code> against{' '}
+                  Rename{' '}
                   <span className="mono">
                     {project}/{environment.slug}
-                  </span>{' '}
-                  loses them at its next start. Values and history survive, and restoring is
-                  one click.
+                  </span>
                 </>
-              )
-            }
-            confirmLabel={isArchived ? 'Restore environment' : 'Archive environment'}
-            destructive={!isArchived}
-            onConfirm={() =>
-              run(
-                () =>
-                  setEnvironmentArchived({
-                    data: { project, environment: environment.slug, archived: !isArchived },
-                  }),
-                () =>
-                  toast.success(
-                    isArchived ? `${environment.slug} restored` : `${environment.slug} archived`,
-                  ),
-              )
-            }
-          />
-        </>
-      )}
-    </li>
+              }
+            >
+              <form
+                className="form"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  run(
+                    () =>
+                      updateEnvironment({
+                        data: { project, environment: environment.slug, slug, name },
+                      }),
+                    () => {
+                      setRenaming(false);
+                      toast.success('Environment renamed');
+                    },
+                  );
+                }}
+              >
+                <label className="field">
+                  <span className="label">Slug</span>
+                  <input
+                    className="input input-mono"
+                    autoFocus
+                    spellCheck={false}
+                    value={slug}
+                    aria-invalid={slugError !== null}
+                    onChange={(event) => setSlug(event.target.value)}
+                  />
+                  <span className={`hint${slugError !== null ? ' edit-note-error' : ''}`}>
+                    {slugError ??
+                      `Anything running coffre run ${project}/${environment.slug} will need the new path.`}
+                  </span>
+                </label>
+                <label className="field">
+                  <span className="label">Display name</span>
+                  <input
+                    className="input"
+                    value={name}
+                    onChange={(event) => setName(event.target.value)}
+                  />
+                </label>
+
+                <ErrorLine error={error} />
+
+                <div className="dialog-actions">
+                  <button className="btn" type="button" onClick={() => setRenaming(false)}>
+                    Cancel
+                  </button>
+                  <button
+                    className="btn btn-primary"
+                    type="submit"
+                    disabled={pending || slug === '' || slugError !== null || name.trim() === ''}
+                  >
+                    {pending && <Spinner />}
+                    Save
+                  </button>
+                </div>
+              </form>
+            </Modal>
+
+            <ConfirmDialog
+              open={confirming}
+              onOpenChange={setConfirming}
+              title={
+                <>
+                  {isArchived ? 'Restore' : 'Archive'}{' '}
+                  <span className="mono">
+                    {project}/{environment.slug}
+                  </span>
+                  ?
+                </>
+              }
+              body={
+                secretCount === null ? (
+                  <>
+                    This changes whether the environment serves secrets to principals who have
+                    access. Values and history remain stored.
+                  </>
+                ) : isArchived ? (
+                  <>
+                    The environment starts serving its {secretCount} secret
+                    {secretCount === 1 ? '' : 's'} again, to everyone who holds a grant on it.
+                  </>
+                ) : (
+                  <>
+                    Its {secretCount} secret{secretCount === 1 ? '' : 's'} stop being served, so
+                    anything running <code>coffre run</code> against{' '}
+                    <span className="mono">
+                      {project}/{environment.slug}
+                    </span>{' '}
+                    loses them at its next start. Values and history survive, and restoring is
+                    one click.
+                  </>
+                )
+              }
+              confirmLabel={isArchived ? 'Restore environment' : 'Archive environment'}
+              destructive={!isArchived}
+              onConfirm={() =>
+                run(
+                  () =>
+                    setEnvironmentArchived({
+                      data: { project, environment: environment.slug, archived: !isArchived },
+                    }),
+                  () =>
+                    toast.success(
+                      isArchived ? `${environment.slug} restored` : `${environment.slug} archived`,
+                    ),
+                )
+              }
+            />
+          </>
+        )}
+      </td>
+    </tr>
   );
 }
 
@@ -596,7 +487,7 @@ function NewEnvironment({ project }: { project: string }) {
   return (
     <>
       <button className="btn btn-sm" onClick={() => setOpen(true)}>
-        <Plus size={13} />
+        <Plus size={14} />
         Add environment
       </button>
 
@@ -625,7 +516,7 @@ function NewEnvironment({ project }: { project: string }) {
           }}
         >
           <label className="field">
-            <span className="caps">Slug</span>
+            <span className="label">Slug</span>
             <input
               className="input input-mono"
               autoFocus
@@ -649,7 +540,7 @@ function NewEnvironment({ project }: { project: string }) {
             </span>
           </label>
           <label className="field">
-            <span className="caps">Display name</span>
+            <span className="label">Display name</span>
             <input
               className="input"
               placeholder="Staging"
@@ -679,102 +570,74 @@ function NewEnvironment({ project }: { project: string }) {
   );
 }
 
-function Grants({
-  project,
-  environments,
-  grants,
-  error: loadError,
-}: {
-  project: string;
-  environments: ProjectSummary['environments'];
-  grants: GrantRow[];
-  error: string | null;
-}) {
-  const userGrants = grants.filter((grant) => grant.principalType === 'user');
-  const serviceGrants = grants.filter((grant) => grant.principalType === 'service');
-
-  return (
-    <Section
-      labelledBy="access"
-      title="Access"
-      note="Who can do what in this project. A grant covers the whole project or exactly one environment, and takes effect immediately."
-    >
-      {loadError !== null ? (
-        <div style={{ marginTop: '1rem' }}>
-          <Notice tone="bad">{loadError}</Notice>
-        </div>
-      ) : (
-        <>
-          <ProjectAccessTable
-            title="People"
-            principalType="user"
-            project={project}
-            environments={environments}
-            grants={userGrants}
-          />
-          <ProjectAccessTable
-            title="Service accounts"
-            principalType="service"
-            project={project}
-            environments={environments}
-            grants={serviceGrants}
-          />
-        </>
-      )}
-    </Section>
-  );
-}
-
 function ProjectAccessTable({
-  title,
   principalType,
   project,
   environments,
   grants,
 }: {
-  title: string;
   principalType: 'user' | 'service';
   project: string;
   environments: ProjectSummary['environments'];
   grants: GrantRow[];
 }) {
+  const people = principalType === 'user';
   return (
-    <div className="subsection">
-      <div className="subsection-head">
-        <h3 className="subsection-title">{title}</h3>
+    <Card
+      labelledBy={`access-${principalType}`}
+      title={people ? 'People with access' : 'Service accounts with access'}
+      description={
+        people
+          ? 'A grant covers the whole project or exactly one environment, and takes effect immediately.'
+          : 'Machine callers such as CI, matched on their Access service-token common name.'
+      }
+      actions={
         <NewGrant principalType={principalType} project={project} environments={environments} />
-      </div>
+      }
+    >
       {grants.length === 0 ? (
-        <EmptyState
-          title={principalType === 'user' ? 'Nobody has access' : 'No service account has access'}
-        >
-          Add {principalType === 'user' ? 'a person' : 'a service account'} with permissions
-          on the whole project or on one environment.
+        <EmptyState title={people ? 'Nobody has access' : 'No service account has access'}>
+          Add {people ? 'a person' : 'a service account'} with permissions on the whole project
+          or on one environment.
         </EmptyState>
       ) : (
-        <div className="ledger-wrap">
-          <table className="ledger grants stacks">
+        <div className="dt-wrap">
+          <table className="dt grants stacks">
             <thead>
               <tr>
-                <th className="caps col-principal">
-                  {principalType === 'user' ? 'Email' : 'Common name'}
+                <th className="n">#</th>
+                <th className="col-principal">
+                  <span className="th">
+                    {people ? <User size={14} /> : <Key size={14} />}
+                    {people ? 'Email' : 'Common name'}
+                  </span>
                 </th>
-                <th className="caps">Permissions</th>
-                <th className="caps col-expires">Expires</th>
+                <th>
+                  <span className="th">
+                    <ShieldCheck size={14} />
+                    Permissions
+                  </span>
+                </th>
+                <th className="col-expires">
+                  <span className="th">
+                    <Clock size={14} />
+                    Expires
+                  </span>
+                </th>
                 <th className="col-actions">
                   <span className="visually-hidden">Actions</span>
                 </th>
               </tr>
             </thead>
             <tbody>
-              {grants.map((grant) => (
-                <GrantRowView key={grant.id} project={project} grant={grant} />
+              {grants.map((grant, index) => (
+                <GrantRowView key={grant.id} number={index + 1} project={project} grant={grant} />
               ))}
             </tbody>
           </table>
         </div>
       )}
-    </div>
+    </Card>
   );
 }
 
@@ -803,7 +666,7 @@ function NewGrant({
   return (
     <>
       <button className="btn btn-sm" onClick={() => setOpen(true)}>
-        <Plus size={13} />
+        <Plus size={14} />
         Add {kind}
       </button>
 
@@ -857,7 +720,7 @@ function NewGrant({
           }}
         >
           <label className="field">
-            <span className="caps">
+            <span className="label">
               {principalType === 'user' ? 'Email' : 'Service token common name'}
             </span>
             <input
@@ -875,7 +738,7 @@ function NewGrant({
 
           <div className="form-row">
             <label className="field" style={{ flexGrow: 2 }}>
-              <span className="caps">Permissions</span>
+              <span className="label">Permissions</span>
               <select
                 className="select"
                 value={permission}
@@ -890,7 +753,9 @@ function NewGrant({
             </label>
 
             <label className="field">
-              <span className="caps">Expires (optional)</span>
+              <span className="label">
+                Expires <span className="hint">(optional)</span>
+              </span>
               <input
                 className="input"
                 type="date"
@@ -921,7 +786,15 @@ function NewGrant({
   );
 }
 
-function GrantRowView({ project, grant }: { project: string; grant: GrantRow }) {
+function GrantRowView({
+  number,
+  project,
+  grant,
+}: {
+  number: number;
+  project: string;
+  grant: GrantRow;
+}) {
   const { pending, error, run } = useAction();
   const label = projectAccessLabel(grant);
   const expired = grant.expiresAt !== null && new Date(grant.expiresAt).getTime() < Date.now();
@@ -929,11 +802,15 @@ function GrantRowView({ project, grant }: { project: string; grant: GrantRow }) 
   return (
     <>
       <tr>
-        <td className="cell-mono" data-label={grant.principalType === 'user' ? 'Email' : 'Common name'}>
+        <td className="n">{number}</td>
+        <td
+          className="cell-mono"
+          data-label={grant.principalType === 'user' ? 'Email' : 'Common name'}
+        >
           {grant.principalId}
         </td>
         <td data-label="Permissions">
-          <span className={`tag ${grant.role === 'owner' ? 'tag-accent' : ''}`}>{label}</span>
+          <span className={`tag${grant.role === 'owner' ? ' tag-violet' : ''}`}>{label}</span>
         </td>
         <td className="col-expires cell-mono cell-muted" data-label="Expires">
           {grant.expiresAt === null ? (
@@ -982,11 +859,183 @@ function GrantRowView({ project, grant }: { project: string; grant: GrantRow }) 
       </tr>
       {error !== null && (
         <tr className="row-error">
-          <td colSpan={4}>
+          <td colSpan={5}>
             <ErrorLine error={error} />
           </td>
         </tr>
       )}
     </>
+  );
+}
+
+/**
+ * The project's name and slug, as a form on the page.
+ *
+ * Renaming changes paths other people and scripts use, so it is laid out in
+ * plain sight with what it does and does not affect, rather than tucked
+ * behind a menu.
+ */
+function GeneralSettings({ project }: { project: ProjectSummary }) {
+  const router = useRouter();
+  const [slug, setSlug] = useState(project.slug);
+  const [name, setName] = useState(project.name);
+  const { pending, error, run } = useAction();
+  const slugError = slug === '' ? null : slugProblem(slug);
+  const dirty = slug !== project.slug || name.trim() !== project.name;
+
+  // Follow a rename made elsewhere (another tab, another person) rather than
+  // keep offering the old values back.
+  useEffect(() => {
+    setSlug(project.slug);
+    setName(project.name);
+  }, [project.slug, project.name]);
+
+  return (
+    <section className="card" aria-labelledby="general-settings">
+      <div className="card-head">
+        <div>
+          <h2 className="card-title" id="general-settings">
+            General
+          </h2>
+          <p className="card-desc">
+            Safe to rename: ciphertext is bound to ids, never names, so nothing is re-encrypted
+            and no history is orphaned.
+          </p>
+        </div>
+      </div>
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          run(
+            () => updateProject({ data: { project: project.slug, slug, name } }),
+            async () => {
+              toast.success('Project renamed');
+              // The slug is part of the URL, so a rename has to navigate.
+              if (slug !== project.slug) {
+                await router.navigate({ to: '/projects/$project', params: { project: slug } });
+              }
+            },
+          );
+        }}
+      >
+        <div className="card-body form-row">
+          <label className="field">
+            <span className="label">Slug</span>
+            <input
+              className="input input-mono"
+              spellCheck={false}
+              value={slug}
+              aria-invalid={slugError !== null}
+              onChange={(event) => setSlug(event.target.value)}
+            />
+            <span className={`hint${slugError !== null ? ' edit-note-error' : ''}`}>
+              {slugError ?? 'Scripts that name the old slug will need the new one.'}
+            </span>
+          </label>
+          <label className="field">
+            <span className="label">Display name</span>
+            <input
+              className="input"
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+            />
+          </label>
+        </div>
+        <div className="card-foot">
+          {error !== null && (
+            <span className="hint">
+              <ErrorLine error={error} />
+            </span>
+          )}
+          <button
+            className="btn btn-primary"
+            type="submit"
+            disabled={!dirty || pending || slug === '' || slugError !== null || name.trim() === ''}
+          >
+            {pending && <Spinner />}
+            Save
+          </button>
+        </div>
+      </form>
+    </section>
+  );
+}
+
+function DangerZone({ project }: { project: ProjectSummary }) {
+  const [confirming, setConfirming] = useState(false);
+  const { pending, error, run } = useAction();
+  const isArchived = project.archivedAt !== null;
+
+  return (
+    <Card labelledBy="danger-zone" title="Danger zone" tone="danger">
+      <div className="card-row">
+        <div>
+          <p className="card-row-title">{isArchived ? 'Restore project' : 'Archive project'}</p>
+          <p className="card-row-desc">
+            {isArchived
+              ? 'The project reappears in listings and its environments serve reads again, for everyone who holds a grant on it.'
+              : 'Every environment stops serving reads, including to machine callers already running. Nothing is deleted, and you can restore it here at any time.'}
+          </p>
+          {error !== null && (
+            <div style={{ marginTop: '0.5rem' }}>
+              <ErrorLine error={error} />
+            </div>
+          )}
+        </div>
+        <button
+          className={`btn ${isArchived ? '' : 'btn-danger-outline'}`}
+          onClick={() => setConfirming(true)}
+          disabled={pending}
+        >
+          {pending ? (
+            <Spinner />
+          ) : isArchived ? (
+            <RotateBack size={14} />
+          ) : (
+            <Archive size={14} />
+          )}
+          {isArchived ? 'Restore project' : 'Archive project…'}
+        </button>
+      </div>
+
+      <ConfirmDialog
+        open={confirming}
+        onOpenChange={setConfirming}
+        title={
+          <>
+            {isArchived ? 'Restore' : 'Archive'} <span className="mono">{project.slug}</span>?
+          </>
+        }
+        body={
+          isArchived ? (
+            <>
+              The project reappears in listings and its environments start serving reads
+              again, for everyone who holds a grant on it.
+            </>
+          ) : (
+            <>
+              Every environment in <span className="mono">{project.slug}</span> stops serving
+              reads, including to machine callers already running. Nothing is deleted: values,
+              versions and the audit trail over them stay intact, and you can restore it here
+              at any time.
+            </>
+          )
+        }
+        confirmLabel={isArchived ? 'Restore project' : 'Archive project'}
+        destructive={!isArchived}
+        onConfirm={() =>
+          run(
+            () =>
+              setProjectArchived({
+                data: { project: project.slug, archived: !isArchived },
+              }),
+            () =>
+              toast.success(
+                isArchived ? `${project.slug} restored` : `${project.slug} archived`,
+              ),
+          )
+        }
+      />
+    </Card>
   );
 }

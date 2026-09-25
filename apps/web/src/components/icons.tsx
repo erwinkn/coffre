@@ -44,21 +44,20 @@ function Svg({
 }
 
 /**
- * The mark: an escutcheon, the plate a keyhole is cut into. It sits beside an
- * italic wordmark, so it stays one quiet outline with one solid shape.
- * `MARK_SVG` below is the same drawing, for the favicon.
+ * The mark: a keyhole, drawn solid so it holds up white-on-ink inside the
+ * brand tile at 16px. `MARK_SVG` below is the tile and keyhole together, for
+ * the favicon.
  */
 export function Mark(props: IconProps) {
   return (
     <Svg {...props}>
-      <rect x="5.25" y="2.75" width="13.5" height="18.5" rx="6.75" />
-      <circle cx="12" cy="10.25" r="2.2" fill="currentColor" stroke="none" />
-      <path d="M10.95 11.6h2.1l.7 4.5h-3.5Z" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="9.5" r="3.4" fill="currentColor" stroke="none" />
+      <path d="M10.35 11.2h3.3l1.15 7.3h-5.6Z" fill="currentColor" stroke="none" />
     </Svg>
   );
 }
 
-export const MARK_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><style>*{stroke:#1d1b17;fill:#1d1b17}@media (prefers-color-scheme:dark){*{stroke:#efe9dc;fill:#efe9dc}}</style><rect x="5.25" y="2.75" width="13.5" height="18.5" rx="6.75" fill="none" stroke-width="1.8"/><circle cx="12" cy="10.25" r="2.3" stroke="none"/><path d="M10.9 11.6h2.2l.7 4.6h-3.6Z" stroke="none"/></svg>`;
+export const MARK_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="#171717"/><circle cx="16" cy="13" r="4.3" fill="#fafafa"/><path d="M13.9 15.2h4.2l1.45 9.2h-7.1Z" fill="#fafafa"/></svg>`;
 
 export function Settings(props: IconProps) {
   return (
@@ -376,6 +375,65 @@ export function ArrowRight(props: IconProps) {
   return (
     <Svg {...props}>
       <path d="M4.5 12h15M14 6.5l5.5 5.5-5.5 5.5" />
+    </Svg>
+  );
+}
+
+export function ChevronsUpDown(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="m7.5 9.5 4.5-4.5 4.5 4.5M7.5 14.5l4.5 4.5 4.5-4.5" />
+    </Svg>
+  );
+}
+
+export function Hash(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M9.5 3.5 7.5 20.5M16.5 3.5l-2 17M4.5 8.5h16M3.5 15.5h16" />
+    </Svg>
+  );
+}
+
+export function Clock(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 7.5V12l3 2" />
+    </Svg>
+  );
+}
+
+export function User(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <circle cx="12" cy="8" r="3.5" />
+      <path d="M5 20a7 7 0 0 1 14 0" />
+    </Svg>
+  );
+}
+
+export function Lock(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <rect x="4.5" y="10.5" width="15" height="10" rx="2" />
+      <path d="M8 10.5V7.5a4 4 0 0 1 8 0v3" />
+    </Svg>
+  );
+}
+
+export function Terminal(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="m5 7.5 4.5 4.5L5 16.5M12 17h7" />
+    </Svg>
+  );
+}
+
+export function Activity(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M3.5 12h4l2.5-6.5 4 13 2.5-6.5h4" />
     </Svg>
   );
 }

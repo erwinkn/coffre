@@ -141,7 +141,9 @@ export function CopyButton({
     return (
       <button type="button" className="act" aria-label={label} onClick={copy}>
         {copied ? <Check size={13} /> : <Copy size={13} />}
-        <span aria-live="polite">{copied ? 'Copied' : 'Copy'}</span>
+        <span className="act-label" aria-live="polite">
+          {copied ? 'Copied' : 'Copy'}
+        </span>
       </button>
     );
   }
@@ -296,11 +298,11 @@ const RELATIVE_STEPS: [limit: number, divisor: number, unit: Intl.RelativeTimeFo
   [Infinity, 31536000, 'year'],
 ];
 
-function relative(iso: string, now: number): string {
+function relative(iso: string, now: number, style: 'long' | 'narrow' = 'long'): string {
   const delta = (new Date(iso).getTime() - now) / 1000;
   const magnitude = Math.abs(delta);
   const [, divisor, unit] = RELATIVE_STEPS.find(([limit]) => magnitude < limit)!;
-  const formatter = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
+  const formatter = new Intl.RelativeTimeFormat('en', { numeric: 'auto', style });
   return formatter.format(Math.round(delta / divisor), unit);
 }
 
@@ -313,7 +315,8 @@ function absolute(iso: string, precise: boolean): string {
  *
  * Absolute is the default on purpose: in the audit log this is evidence, and
  * someone reading it is often transcribing it into a finding. `relative` flips
- * the two for glanceable metadata like "last written". The relative form can
+ * the two, in the short form ("5h ago"), for glanceable metadata like "last
+ * written". The relative form can
  * differ between server and client by a rounding step, so that one text node
  * opts out of the hydration check rather than render a placeholder first.
  */
@@ -333,7 +336,7 @@ export function Timestamp({
     return (
       <Tip label={`${absolute(iso, precise)} UTC`}>
         <time dateTime={iso} suppressHydrationWarning>
-          {relative(iso, now ?? Date.now())}
+          {relative(iso, now ?? Date.now(), 'narrow')}
         </time>
       </Tip>
     );

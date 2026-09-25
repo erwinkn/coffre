@@ -26,7 +26,7 @@ export function AdministrationItems({
   );
 }
 
-/** The sidebar administration section, omitted entirely when it would be empty. */
+/** The top bar's administration links, omitted entirely when there would be none. */
 export function AdministrationNav({
   capabilities,
   users,
@@ -36,8 +36,7 @@ export function AdministrationNav({
 
   return createElement(
     'nav',
-    { className: 'nav-section', 'aria-label': 'Oversight' },
-    createElement('span', { className: 'caps', 'aria-hidden': true }, 'Oversight'),
+    { className: 'topnav', 'aria-label': 'Oversight' },
     createElement(AdministrationItems, { capabilities, users, audit }),
   );
 }

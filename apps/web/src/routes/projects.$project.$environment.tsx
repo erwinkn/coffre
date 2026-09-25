@@ -40,18 +40,25 @@ import {
   Spinner,
   Timestamp,
 } from '../components/ui';
-import { ClosedDoor, PageHeader, Section } from '../components/page';
+import { Card, ClosedDoor, PageHeader } from '../components/page';
 import { PermissionSummary } from '../components/permissions';
 import { SecretReadOnly } from '../components/affordances';
 import {
   AlertCircle,
   Archive,
+  Clock,
   Eye,
   EyeOff,
+  Hash,
   History,
+  Key,
+  Lock,
   MoreHorizontal,
+  Pencil,
   Plus,
   RotateBack,
+  Search,
+  Terminal,
   Upload,
 } from '../components/icons';
 
@@ -80,12 +87,13 @@ function EnvironmentPage() {
   if (!result.ok) {
     return (
       <ClosedDoor
-        eyebrow={
-          <Link to="/projects/$project" params={{ project }}>
-            {project}
-          </Link>
+        icon={<Lock size={18} />}
+        label={
+          <span className="mono">
+            {project}/{environment}
+          </span>
         }
-        title={environment}
+        title="This environment is closed to you"
         actions={
           <Link className="btn" to="/projects/$project" params={{ project }}>
             Back to {project}
@@ -132,6 +140,7 @@ function EnvironmentLedger({
   const [editing, setEditing] = useState<ReadonlySet<string>>(() => new Set());
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [query, setQuery] = useState('');
   const nextDraftId = useRef(0);
 
   const canWrite = permissions.includes('secret.write');
@@ -310,7 +319,12 @@ function EnvironmentLedger({
         ? 'Names are letters, digits and underscores, and cannot start with a digit.'
         : null;
 
-  const columns = 5;
+  // Filtering narrows what is listed, never what is saved: a pending edit on
+  // a row the filter hides still counts, and still shows in the save bar.
+  const needle = query.trim().toLowerCase();
+  const listed =
+    needle === '' ? active : active.filter((entry) => entry.key.toLowerCase().includes(needle));
+  const columns = 6;
 
   return (
     <>
@@ -319,13 +333,18 @@ function EnvironmentLedger({
       </p>
 
       <PageHeader
-        eyebrow={
-          <Link to="/projects/$project" params={{ project }}>
-            {project}
-          </Link>
-        }
+        tile={project}
         title={environment}
         aside={<EnvironmentName project={project} environment={environment} />}
+        meta={
+          <>
+            <span>
+              <strong>{active.length}</strong> secret{active.length === 1 ? '' : 's'}
+              {archived.length > 0 && `, ${archived.length} archived`}
+            </span>
+            <PermissionSummary permissions={permissions} />
+          </>
+        }
         actions={
           <>
             {canWrite && canReveal && <ImportEnv project={project} environment={environment} />}
@@ -337,142 +356,208 @@ function EnvironmentLedger({
             )}
           </>
         }
-        meta={
-          <>
-            <span>
-              <strong>{active.length}</strong> secret{active.length === 1 ? '' : 's'}
-              {archived.length > 0 && `, ${archived.length} archived`}
-            </span>
-            <PermissionSummary permissions={permissions} />
-            {canReveal && <span>Every reveal is recorded under your name</span>}
-            <span className="mono" title="Inject these into a process with the CLI">
-              coffre run {project}/{environment} -- …
-            </span>
-          </>
-        }
       />
 
-      {active.length === 0 && drafts.length === 0 ? (
-        <EmptyState
-          title="No secrets here yet"
-          actions={
-            canWrite ? (
-              <>
-                <button className="btn btn-primary" onClick={addDraft}>
-                  <Plus size={14} />
-                  New secret
-                </button>
-                {canReveal && <ImportEnv project={project} environment={environment} />}
-              </>
-            ) : undefined
-          }
-        >
-          {canWrite
-            ? 'Add them one by one, or paste an existing .env file to import several at once. Nothing is written until you save, or until you have seen the import plan.'
-            : 'Nothing has been written to this environment, and adding the first secret needs secret.write.'}
-        </EmptyState>
-      ) : (
-        <div className="ledger-wrap">
-          <table className="ledger secrets stacks">
-            <thead>
-              <tr>
-                <th className="caps col-key">Key</th>
-                <th className="caps">
-                  Value
-                  {!canReveal && <span className="col-head-note">· hidden from you</span>}
-                </th>
-                <th className="caps col-version">Ver.</th>
-                <th className="caps col-written col-hide-narrow">Last written</th>
-                <th className="col-actions">
-                  <span className="visually-hidden">Actions</span>
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {drafts.map((draft) => (
-                <DraftRow
-                  key={draft.id}
-                  draft={draft}
-                  existingVersion={
-                    keys.find((entry) => entry.key === draft.key.trim())?.version ?? null
-                  }
-                  disabled={saving}
-                  onChange={(patch) =>
-                    setDrafts((rows) =>
-                      rows.map((row) => (row.id === draft.id ? { ...row, ...patch } : row)),
-                    )
-                  }
-                  onRemove={() => setDrafts((rows) => rows.filter((row) => row.id !== draft.id))}
-                />
-              ))}
-
-              {active.map((entry) => {
-                const change = secretChangeFor(changes, entry.key);
-                return (
-                  <SecretRow
-                    key={entry.key}
-                    project={project}
-                    environment={environment}
-                    entry={entry}
-                    change={change ?? { key: entry.key, value: null, archived: false }}
-                    editing={
-                      change?.archived !== true &&
-                      (editing.has(entry.key) || change !== undefined)
-                    }
-                    canWrite={canWrite}
-                    canArchive={canArchive}
-                    canReveal={canReveal}
-                    disabled={saving}
-                    columns={columns}
-                    onEdit={() => setEditing((current) => new Set(current).add(entry.key))}
-                    onPatch={(patch) => patchChange(entry, patch)}
-                    onUndo={() => dropChange(entry.key)}
-                    onMarkArchive={() => {
-                      setEditing((current) => {
-                        const next = new Set(current);
-                        next.delete(entry.key);
-                        return next;
-                      });
-                      setChanges((current) => ({
-                        ...current,
-                        [entry.key]: { key: entry.key, value: null, archived: true },
-                      }));
-                    }}
-                  />
-                );
-              })}
-            </tbody>
-          </table>
+      {(active.length > 0 || drafts.length > 0) && (
+        <div className="toolbar">
+          <label className="filter input-group">
+            <span className="visually-hidden">Filter secrets by name</span>
+            <Search size={14} className="input-icon" />
+            <input
+              className="input"
+              type="search"
+              placeholder="Filter by name…"
+              spellCheck={false}
+              autoComplete="off"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+          </label>
+          <div className="toolbar-meta">
+            {canReveal && (
+              <span className="th">
+                <Eye size={14} />
+                Every reveal is recorded under your name
+              </span>
+            )}
+            <span className="th" title="Run a process with these secrets in its environment">
+              <Terminal size={14} />
+              <code>
+                coffre run {project}/{environment} -- …
+              </code>
+            </span>
+          </div>
         </div>
       )}
 
-      {archived.length > 0 && (
-        <Section
-          labelledBy="archived-secrets"
-          title="Archived"
-          note={
-            <>
-              Retired, so no longer served or injected by <code>coffre run</code>. Their
-              history and audit trail are intact, and restoring is immediate.
-            </>
-          }
-        >
-          <div className="ledger-wrap">
-            <table className="ledger secrets secrets-archived stacks">
+      <section className="card" aria-label="Secrets">
+        {active.length === 0 && drafts.length === 0 ? (
+          <EmptyState
+            title="No secrets yet"
+            actions={
+              canWrite ? (
+                <>
+                  <button className="btn btn-primary" onClick={addDraft}>
+                    <Plus size={14} />
+                    New secret
+                  </button>
+                  {canReveal && <ImportEnv project={project} environment={environment} />}
+                </>
+              ) : undefined
+            }
+          >
+            {canWrite
+              ? 'Add them one by one, or import an existing .env file. Nothing is written until you save, or until you have seen the import plan.'
+              : 'Nothing has been written to this environment, and adding the first secret needs secret.write.'}
+          </EmptyState>
+        ) : (
+          <div className="dt-wrap">
+            <table className="dt secrets stacks">
               <thead>
                 <tr>
-                  <th className="caps col-key">Key</th>
-                  <th className="caps col-version">Ver.</th>
-                  <th className="caps col-written col-hide-narrow">Last written</th>
+                  <th className="n">#</th>
+                  <th className="col-key">
+                    <span className="th">
+                      <Key size={14} />
+                      Key
+                    </span>
+                  </th>
+                  <th>
+                    <span className="th">
+                      <Lock size={14} />
+                      Value
+                      {!canReveal && <span className="th-note">hidden from you</span>}
+                    </span>
+                  </th>
+                  <th className="col-version">
+                    <span className="th">
+                      <Hash size={14} />
+                      Version
+                    </span>
+                  </th>
+                  <th className="col-written col-hide-narrow">
+                    <span className="th">
+                      <Clock size={14} />
+                      Last written
+                    </span>
+                  </th>
                   <th className="col-actions">
                     <span className="visually-hidden">Actions</span>
                   </th>
                 </tr>
               </thead>
               <tbody>
-                {archived.map((entry) => (
+                {drafts.map((draft) => (
+                  <DraftRow
+                    key={draft.id}
+                    draft={draft}
+                    existingVersion={
+                      keys.find((entry) => entry.key === draft.key.trim())?.version ?? null
+                    }
+                    disabled={saving}
+                    onChange={(patch) =>
+                      setDrafts((rows) =>
+                        rows.map((row) => (row.id === draft.id ? { ...row, ...patch } : row)),
+                      )
+                    }
+                    onRemove={() => setDrafts((rows) => rows.filter((row) => row.id !== draft.id))}
+                  />
+                ))}
+
+                {listed.map((entry) => {
+                  const change = secretChangeFor(changes, entry.key);
+                  return (
+                    <SecretRow
+                      key={entry.key}
+                      number={active.indexOf(entry) + 1}
+                      project={project}
+                      environment={environment}
+                      entry={entry}
+                      change={change ?? { key: entry.key, value: null, archived: false }}
+                      editing={
+                        change?.archived !== true &&
+                        (editing.has(entry.key) || change !== undefined)
+                      }
+                      canWrite={canWrite}
+                      canArchive={canArchive}
+                      canReveal={canReveal}
+                      disabled={saving}
+                      columns={columns}
+                      onEdit={() => setEditing((current) => new Set(current).add(entry.key))}
+                      onPatch={(patch) => patchChange(entry, patch)}
+                      onUndo={() => dropChange(entry.key)}
+                      onMarkArchive={() => {
+                        setEditing((current) => {
+                          const next = new Set(current);
+                          next.delete(entry.key);
+                          return next;
+                        });
+                        setChanges((current) => ({
+                          ...current,
+                          [entry.key]: { key: entry.key, value: null, archived: true },
+                        }));
+                      }}
+                    />
+                  );
+                })}
+
+                {listed.length === 0 && active.length > 0 && (
+                  <tr>
+                    <td colSpan={columns} className="cell-muted" style={{ padding: '1rem' }}>
+                      No secret name contains “{query.trim()}”.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      {archived.length > 0 && (
+        <Card
+          labelledBy="archived-secrets"
+          title="Archived"
+          description={
+            <>
+              Retired, so no longer served or injected by <code>coffre run</code>. Their history
+              and audit trail are intact, and restoring is immediate.
+            </>
+          }
+        >
+          <div className="dt-wrap">
+            <table className="dt secrets secrets-archived stacks">
+              <thead>
+                <tr>
+                  <th className="n">#</th>
+                  <th className="col-key">
+                    <span className="th">
+                      <Key size={14} />
+                      Key
+                    </span>
+                  </th>
+                  <th className="col-version">
+                    <span className="th">
+                      <Hash size={14} />
+                      Version
+                    </span>
+                  </th>
+                  <th className="col-written col-hide-narrow">
+                    <span className="th">
+                      <Clock size={14} />
+                      Last written
+                    </span>
+                  </th>
+                  <th className="col-actions">
+                    <span className="visually-hidden">Actions</span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {archived.map((entry, index) => (
                   <ArchivedRow
                     key={entry.key}
+                    number={index + 1}
                     project={project}
                     environment={environment}
                     entry={entry}
@@ -483,14 +568,15 @@ function EnvironmentLedger({
               </tbody>
             </table>
           </div>
-        </Section>
+        </Card>
       )}
 
       {pendingCount > 0 && (
         <div className="savebar" role="region" aria-label="Unsaved changes">
           <div className="savebar-inner">
             <span className="savebar-count">
-              {pendingCount} change{pendingCount === 1 ? '' : 's'}
+              <span className="dot" aria-hidden />
+              {pendingCount} unsaved change{pendingCount === 1 ? '' : 's'}
             </span>
             <span className="savebar-summary">
               {pending.slice(0, 3).map((item, index) => (
@@ -502,11 +588,11 @@ function EnvironmentLedger({
               {pending.length > 3 && ` · and ${pending.length - 3} more`}
             </span>
             <div className="savebar-actions">
-              <button className="btn" onClick={discardAll} disabled={saving}>
+              <button className="btn btn-sm" onClick={discardAll} disabled={saving}>
                 Discard
               </button>
               <button
-                className="btn btn-primary"
+                className="btn btn-sm btn-primary"
                 onClick={() => void saveChanges()}
                 disabled={saving || !ready}
                 title="Save (⌘ Enter or Ctrl Enter)"
@@ -632,6 +718,7 @@ function useSecondsLeft(reveal: Reveal | null): number {
 }
 
 function SecretRow({
+  number,
   project,
   environment,
   entry,
@@ -647,6 +734,7 @@ function SecretRow({
   onUndo,
   onMarkArchive,
 }: {
+  number: number;
   project: string;
   environment: string;
   entry: SecretKey;
@@ -734,6 +822,7 @@ function SecretRow({
   return (
     <>
       <tr className={`secret-row${state}`}>
+        <td className="n">{number}</td>
         <td className="cell-key" data-label="Key">
           {editing && canWrite ? (
             <div className="edit-stack">
@@ -816,7 +905,7 @@ function SecretRow({
             >
               <span className="revealed-value">{shown.value === '' ? '(empty)' : shown.value}</span>
               <span className="revealed-note">
-                Read recorded under your name at {clock(shown.at)} · hides in {secondsLeft}s
+                Read logged at {clock(shown.at)} · hides in {secondsLeft}s
               </span>
               <span className="revealed-meter" aria-hidden />
             </div>
@@ -856,7 +945,7 @@ function SecretRow({
               <>
                 <SecretReadOnly canReveal={canReveal}>
                   <button
-                    className="act"
+                    className="act act-accent"
                     onClick={toggleReveal}
                     disabled={revealing}
                     aria-describedby={shown === null ? REVEAL_COST_ID : undefined}
@@ -869,7 +958,7 @@ function SecretRow({
                     ) : (
                       <EyeOff size={14} />
                     )}
-                    {shown === null ? 'Reveal' : 'Hide'}
+                    <span className="act-label">{shown === null ? 'Reveal' : 'Hide'}</span>
                   </button>
                 </SecretReadOnly>
                 {shown !== null && <CopyButton variant="text" value={shown.value} label={`Copy ${entry.key}`} />}
@@ -887,7 +976,8 @@ function SecretRow({
                     disabled={disabled}
                     aria-label={`Edit ${entry.key}`}
                   >
-                    Edit
+                    <Pencil size={13} />
+                    <span className="act-label">Edit</span>
                   </button>
                 )}
                 {(canReveal || canArchive) && (
@@ -965,19 +1055,32 @@ function SecretRow({
   );
 }
 
+/**
+ * Who wrote the current version and how long ago, on one line: the local part
+ * of the email is enough to recognise a colleague, and the full address and
+ * the exact time are a hover away.
+ */
 function Written({ entry }: { entry: SecretKey }) {
   if (entry.updatedBy === null && entry.updatedAt === null) {
     return <span className="cell-muted">—</span>;
   }
+  const by = entry.updatedBy ?? 'unknown';
   return (
-    <div className="cell-stack">
-      <span title={entry.updatedBy ?? undefined}>{entry.updatedBy ?? 'unknown'}</span>
+    <span className="written">
+      <span className="written-by" title={by}>
+        {by.split('@')[0]}
+      </span>
       {entry.updatedAt !== null && (
-        <small>
-          <Timestamp iso={entry.updatedAt} display="relative" />
-        </small>
+        <>
+          <span className="cell-muted" aria-hidden>
+            ·
+          </span>
+          <span className="cell-muted">
+            <Timestamp iso={entry.updatedAt} display="relative" />
+          </span>
+        </>
       )}
-    </div>
+    </span>
   );
 }
 
@@ -986,7 +1089,7 @@ function clock(at: number): string {
 }
 
 /**
- * A secret being typed, sitting in the ledger where it will end up.
+ * A secret being typed, sitting in the table where it will end up.
  *
  * This replaced a separate "Add a secret" form. The form made you look away
  * from the list to add to it, and only ever accepted one key at a time; a row
@@ -1012,6 +1115,9 @@ function DraftRow({
 
   return (
     <tr className="secret-row is-draft">
+      <td className="n" aria-label="New">
+        +
+      </td>
       <td className="cell-key" data-label="New secret">
         <div className="edit-stack">
           <input
@@ -1076,12 +1182,14 @@ function DraftRow({
 }
 
 function ArchivedRow({
+  number,
   project,
   environment,
   entry,
   canArchive,
   canReveal,
 }: {
+  number: number;
   project: string;
   environment: string;
   entry: SecretKey;
@@ -1106,6 +1214,7 @@ function ArchivedRow({
   return (
     <>
       <tr className="secret-row is-archived">
+        <td className="n">{number}</td>
         <td className="cell-key" data-label="Key">
           {entry.key}
         </td>
@@ -1134,7 +1243,7 @@ function ArchivedRow({
       </tr>
       {historyOpen && (
         <tr className="detail-row">
-          <td colSpan={4}>
+          <td colSpan={5}>
             <VersionHistory
               project={project}
               environment={environment}
@@ -1149,7 +1258,7 @@ function ArchivedRow({
       )}
       {error !== null && (
         <tr className="row-error">
-          <td colSpan={4}>
+          <td colSpan={5}>
             <ErrorLine error={error} />
           </td>
         </tr>
@@ -1208,29 +1317,32 @@ function VersionHistory({
   return (
     <div className="history">
       <div className="history-head">
-        <span className="history-title">
-          History of <span className="mono">{secretKey}</span>
+        <span className="history-title th">
+          <History size={14} />
+          Versions of <span className="mono">{secretKey}</span>
         </span>
-        <button className="act act-quiet" onClick={onClose}>
+        <button className="act" onClick={onClose}>
           Close
         </button>
       </div>
 
       {loadError !== null ? (
-        <ErrorLine error={loadError} />
+        <div className="history-body">
+          <ErrorLine error={loadError} />
+        </div>
       ) : versions === null ? (
-        <p className="hint" style={{ padding: '0.75rem 0' }}>
+        <p className="hint history-body">
           <Spinner size={13} /> Loading versions…
         </p>
       ) : (
-        <div className="ledger-wrap">
-          <table className="ledger">
+        <div className="dt-wrap">
+          <table className="dt">
             <thead>
               <tr>
-                <th className="caps col-shrink">Version</th>
-                <th className="caps col-shrink">Written (UTC)</th>
-                <th className="caps">By</th>
-                <th className="caps col-shrink">Key id</th>
+                <th className="col-shrink">Version</th>
+                <th className="col-shrink">Written (UTC)</th>
+                <th>By</th>
+                <th className="col-shrink">Key id</th>
                 <th className="col-actions">
                   <span className="visually-hidden">Actions</span>
                 </th>
@@ -1241,7 +1353,7 @@ function VersionHistory({
                 <tr key={version.version}>
                   <td className="cell-mono nowrap">
                     v{version.version}{' '}
-                    {version.current && <span className="tag tag-accent">current</span>}
+                    {version.current && <span className="tag tag-blue">current</span>}
                   </td>
                   <td className="nowrap">
                     <Timestamp iso={version.createdAt} />
@@ -1303,7 +1415,11 @@ function VersionHistory({
         </div>
       )}
 
-      <ErrorLine error={error} />
+      {error !== null && (
+        <div className="history-body">
+          <ErrorLine error={error} />
+        </div>
+      )}
       <p className="history-note">
         Metadata only. Listing versions decrypts nothing and is not recorded as a read.
       </p>
@@ -1317,8 +1433,8 @@ function VersionHistory({
 
 const PLAN_TAG: Record<ImportPlanEntry['action'], string> = {
   create: 'tag tag-green',
-  update: 'tag tag-accent',
-  unchanged: 'tag tag-outline',
+  update: 'tag tag-blue',
+  unchanged: 'tag',
 };
 
 /**
@@ -1396,7 +1512,7 @@ function ImportEnv({ project, environment }: { project: string; environment: str
       >
         <div className="form" style={{ marginTop: '1.25rem' }}>
           <label className="field">
-            <span className="caps">File contents</span>
+            <span className="label">File contents</span>
             <textarea
               className="textarea"
               autoFocus
@@ -1412,13 +1528,13 @@ function ImportEnv({ project, environment }: { project: string; environment: str
           </label>
 
           {plan !== null && plan.length > 0 && (
-            <div className="ledger-wrap">
-              <table className="ledger">
+            <div className="card dt-wrap">
+              <table className="dt">
                 <thead>
                   <tr>
-                    <th className="caps">Key</th>
-                    <th className="caps col-shrink">Plan</th>
-                    <th className="caps col-shrink">Current</th>
+                    <th>Key</th>
+                    <th className="col-shrink">Plan</th>
+                    <th className="col-shrink">Current</th>
                   </tr>
                 </thead>
                 <tbody>

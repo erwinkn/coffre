@@ -10,8 +10,9 @@ import {
 } from '../lib/project-environments';
 import { slugProblem } from '../lib/validation';
 import { EmptyState, ErrorLine, Modal, Spinner } from '../components/ui';
-import { ClosedDoor, PageHeader, Section } from '../components/page';
-import { ArrowRight, Plus } from '../components/icons';
+import { Card, ClosedDoor, PageHeader } from '../components/page';
+import { Tile } from '../components/tile';
+import { AlertTriangle, Plus } from '../components/icons';
 import {
   ProjectEmptyStateCopy,
   RootAdminOnly,
@@ -28,7 +29,7 @@ function ProjectsPage() {
   if (!result.ok) {
     return (
       <ClosedDoor
-        eyebrow="Projects"
+        icon={<AlertTriangle size={18} />}
         title="Projects could not be listed"
         actions={
           <Link className="btn" to="/login">
@@ -48,13 +49,7 @@ function ProjectsPage() {
   return (
     <>
       <PageHeader
-        eyebrow="Index"
         title="Projects"
-        actions={
-          <RootAdminOnly capabilities={result.capabilities}>
-            <NewProject />
-          </RootAdminOnly>
-        }
         meta={
           <>
             <span>
@@ -63,41 +58,52 @@ function ProjectsPage() {
             </span>
             {secretTotal > 0 && (
               <span>
-                <strong>{secretTotal}</strong> secret{secretTotal === 1 ? '' : 's'} across the
+                <strong>{secretTotal}</strong> secret{secretTotal === 1 ? '' : 's'} in the
                 environments you can open
               </span>
             )}
           </>
         }
+        actions={
+          <RootAdminOnly capabilities={result.capabilities}>
+            <NewProject />
+          </RootAdminOnly>
+        }
       />
 
       {active.length === 0 ? (
-        <EmptyState title="Nothing here for you yet">
-          <ProjectEmptyStateCopy
-            capabilities={result.capabilities}
-            hasArchivedProjects={archived.length > 0}
-          />
-        </EmptyState>
+        <div className="card">
+          <EmptyState title="Nothing here for you yet">
+            <ProjectEmptyStateCopy
+              capabilities={result.capabilities}
+              hasArchivedProjects={archived.length > 0}
+            />
+          </EmptyState>
+        </div>
       ) : (
-        <ul className="index">
+        <ul className="project-grid" style={{ listStyle: 'none', margin: 0, padding: 0 }}>
           {active.map((project) => (
-            <ProjectRow key={project.slug} project={project} />
+            <ProjectCard key={project.slug} project={project} />
           ))}
         </ul>
       )}
 
       {archived.length > 0 && (
-        <Section
-          labelledBy="archived-projects"
-          title="Archived"
-          note="Hidden from listings and refused on read. Every row is still present, and the audit trail over them still verifies."
-        >
-          <ul className="index">
-            {archived.map((project) => (
-              <ProjectRow key={project.slug} project={project} />
-            ))}
-          </ul>
-        </Section>
+        <div style={{ marginTop: '2rem' }}>
+          <Card
+            labelledBy="archived-projects"
+            title="Archived"
+            description="Hidden from listings and refused on read. Every row is still present, and the audit trail over them still verifies."
+          >
+            <div className="card-body">
+              <ul className="project-grid" style={{ listStyle: 'none', margin: 0, padding: 0 }}>
+                {archived.map((project) => (
+                  <ProjectCard key={project.slug} project={project} />
+                ))}
+              </ul>
+            </div>
+          </Card>
+        </div>
       )}
     </>
   );
@@ -110,7 +116,7 @@ function countSecrets(project: ProjectSummary): number {
     .reduce((sum, environment) => sum + (environment.details.secretCount ?? 0), 0);
 }
 
-function ProjectRow({ project }: { project: ProjectSummary }) {
+function ProjectCard({ project }: { project: ProjectSummary }) {
   const listedEnvironments = project.environments.filter(
     (environment) =>
       environment.details === null || environment.details.archivedAt === null,
@@ -125,50 +131,54 @@ function ProjectRow({ project }: { project: ProjectSummary }) {
   const isArchived = project.archivedAt !== null;
 
   return (
-    <li className={`index-row${isArchived ? ' is-muted' : ''}`}>
-      <div className="index-main">
-        <Link
-          className="index-title index-stretch"
-          to="/projects/$project"
-          params={{ project: project.slug }}
-        >
-          {project.slug}
-        </Link>
-        <span className="index-sub">{project.name}</span>
+    <li className={`project-card${isArchived ? ' is-archived' : ''}`}>
+      <div className="project-card-head">
+        <Tile name={project.slug} size="lg" />
+        <div className="project-card-name">
+          <Link className="stretch" to="/projects/$project" params={{ project: project.slug }}>
+            {project.slug}
+          </Link>
+          <small>{project.name}</small>
+        </div>
       </div>
 
-      <div className="index-side">
-        {!isArchived && listedEnvironments.length > 0 && (
-          <div className="env-links" aria-label={`Environments in ${project.slug}`}>
-            {listedEnvironments.map((environment) =>
-              isActiveAccessibleEnvironment(environment) ? (
-                <Link
-                  key={environment.slug}
-                  className="env-link"
-                  to="/projects/$project/$environment"
-                  params={{ project: project.slug, environment: environment.slug }}
-                >
-                  {environment.slug}
-                </Link>
-              ) : (
-                <span
-                  key={environment.slug}
-                  className="env-link"
-                  title="You can see this environment exists, but not open it"
-                >
-                  {environment.slug}
-                </span>
-              ),
-            )}
-          </div>
-        )}
+      {!isArchived && listedEnvironments.length > 0 && (
+        <div className="env-links" aria-label={`Environments in ${project.slug}`}>
+          {listedEnvironments.map((environment) =>
+            isActiveAccessibleEnvironment(environment) ? (
+              <Link
+                key={environment.slug}
+                className="env-link"
+                to="/projects/$project/$environment"
+                params={{ project: project.slug, environment: environment.slug }}
+              >
+                {environment.slug}
+                <span className="count">{environment.details.secretCount}</span>
+              </Link>
+            ) : (
+              <span
+                key={environment.slug}
+                className="env-link"
+                title="You can see this environment exists, but not open it"
+              >
+                {environment.slug}
+              </span>
+            ),
+          )}
+        </div>
+      )}
+
+      <div className="project-card-foot">
+        <span>
+          {listedEnvironments.length} environment{listedEnvironments.length === 1 ? '' : 's'}
+          {counted && !isArchived && (
+            <>
+              {' · '}
+              {total} secret{total === 1 ? '' : 's'}
+            </>
+          )}
+        </span>
         {isArchived && <span className="tag tag-red">archived</span>}
-        {counted && !isArchived && (
-          <span className="num nowrap">
-            {total} secret{total === 1 ? '' : 's'}
-          </span>
-        )}
-        <ArrowRight size={16} className="index-arrow" />
       </div>
     </li>
   );
@@ -215,7 +225,7 @@ function NewProject() {
           }}
         >
           <label className="field">
-            <span className="caps">Slug</span>
+            <span className="label">Slug</span>
             <input
               className="input input-mono"
               autoFocus
@@ -233,7 +243,7 @@ function NewProject() {
           </label>
 
           <label className="field">
-            <span className="caps">Display name</span>
+            <span className="label">Display name</span>
             <input
               className="input"
               placeholder="Market data platform"

@@ -2,8 +2,8 @@ import { useState } from 'react';
 import { createFileRoute, useRouter } from '@tanstack/react-router';
 import { devSignIn, getLoginAuthState } from '../server-functions/auth';
 import { ErrorLine, Spinner } from '../components/ui';
-import { ClosedDoor, PageHeader, Section } from '../components/page';
-import { ArrowRight } from '../components/icons';
+import { ClosedDoor } from '../components/page';
+import { ArrowRight, Lock, ShieldCheck } from '../components/icons';
 
 export const Route = createFileRoute('/login')({
   // Where to resume after signing in. Same-origin paths only: an absolute URL
@@ -48,13 +48,13 @@ function LoginPage() {
 
 function CloudflareAccessRequired() {
   return (
-    <ClosedDoor eyebrow="Cloudflare Access" title="Open coffre through Access">
+    <ClosedDoor icon={<Lock size={18} />} label="Cloudflare Access" title="Open coffre through Access">
       <p>
         This instance has no sign-in of its own. Cloudflare Access authenticates you before
         a request ever reaches coffre, and this request arrived without an Access
         assertion.
       </p>
-      <p style={{ marginTop: '0.875rem' }}>
+      <p>
         Use the Access-protected hostname. A request straight to the origin is refused by
         design, and no development persona or cookie can get around that.
       </p>
@@ -64,12 +64,16 @@ function CloudflareAccessRequired() {
 
 function CloudflareAuthenticationFailed() {
   return (
-    <ClosedDoor eyebrow="Cloudflare Access" title="Your identity could not be confirmed">
+    <ClosedDoor
+      icon={<ShieldCheck size={18} />}
+      label="Cloudflare Access"
+      title="Your identity could not be confirmed"
+    >
       <p>
         Cloudflare Access forwarded an identity assertion, but coffre could not verify it.
         The Access session may have expired, or the identity verifier may be unavailable.
       </p>
-      <p style={{ marginTop: '0.875rem' }}>
+      <p>
         Reopen coffre through its Access-protected hostname. If this keeps happening, tell
         whoever operates coffre.
       </p>
@@ -112,55 +116,58 @@ function DevLoginPage() {
 
   return (
     <>
-      <PageHeader
-        eyebrow="Local development"
-        title="Sign in"
-        lede="In production, Cloudflare Access authenticates you before any request reaches coffre, and there is no sign-in page at all. Locally, choose who to be."
-      />
-
-      <form
-        className="signin-form"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void signIn(email);
-        }}
-      >
-        <label className="field">
-          <span className="caps">Email</span>
-          <input
-            className="input input-mono"
-            name="email"
-            type="email"
-            autoComplete="off"
-            spellCheck={false}
-            value={email}
-            onChange={(event) => setEmail(event.target.value)}
-            placeholder="you@equisafe.io"
-          />
-        </label>
-        <button
-          className="btn btn-primary"
-          type="submit"
-          style={{ height: '2.375rem' }}
-          disabled={pending !== null || email === ''}
-        >
-          {pending === email && <Spinner />}
-          Sign in
-        </button>
-      </form>
-
-      {error !== null && (
-        <div style={{ marginTop: '0.875rem' }}>
-          <ErrorLine error={error} />
+      <section className="card signin" aria-labelledby="signin-title">
+        <div className="signin-head">
+          <h1 className="signin-title" id="signin-title">
+            Sign in to coffre
+          </h1>
+          <p className="signin-lede">
+            Local development only. In production Cloudflare Access authenticates you before
+            any request reaches coffre, and there is no sign-in page at all.
+          </p>
         </div>
-      )}
 
-      <Section
-        labelledBy="seeded-identities"
-        title="Seeded identities"
-        note="Each sees a different coffre. The auditor and the access manager exist to prove that reading the log and granting access need no power to read a secret."
-      >
-        <ul className="personas">
+        <form
+          className="signin-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void signIn(email);
+          }}
+        >
+          <label className="field">
+            <span className="label">Email</span>
+            <input
+              className="input"
+              name="email"
+              type="email"
+              autoComplete="off"
+              spellCheck={false}
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              placeholder="you@equisafe.io"
+            />
+          </label>
+          <button
+            className="btn btn-primary"
+            type="submit"
+            style={{ height: '2.125rem' }}
+            disabled={pending !== null || email === ''}
+          >
+            {pending === email && <Spinner />}
+            Continue
+          </button>
+        </form>
+
+        {error !== null && (
+          <div className="signin-error">
+            <ErrorLine error={error} />
+          </div>
+        )}
+
+        <p className="personas-head" id="seeded-identities">
+          Or pick a seeded identity. Each sees a different coffre.
+        </p>
+        <ul className="personas" aria-labelledby="seeded-identities">
           {SEEDED.map(([seededEmail, role, note]) => (
             <li key={seededEmail}>
               <button
@@ -174,9 +181,12 @@ function DevLoginPage() {
                   void signIn(seededEmail);
                 }}
               >
+                <span className="avatar" aria-hidden>
+                  {seededEmail.slice(0, 1)}
+                </span>
                 <span className="persona-who">
                   <span className="persona-email">{seededEmail}</span>
-                  <span className="tag tag-outline">{role}</span>
+                  <span className="tag">{role}</span>
                 </span>
                 <span className="persona-note" id={`persona-${seededEmail}`}>
                   {note}
@@ -188,7 +198,12 @@ function DevLoginPage() {
             </li>
           ))}
         </ul>
-      </Section>
+      </section>
+
+      <p className="demo-note">
+        <span className="dot" aria-hidden />
+        Demo instance. Do not store real secrets here.
+      </p>
     </>
   );
 }

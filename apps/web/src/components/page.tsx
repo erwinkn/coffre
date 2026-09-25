@@ -1,67 +1,77 @@
 import type { ReactNode } from 'react';
+import { Tile } from './tile';
 
 /**
- * The head of every page: a small-caps line of context, a serif title, and the
- * page's own actions, closed off by a heavy rule the way a register opens.
+ * The head of every page: an optional project tile, the title with a muted
+ * aside, one line of description or facts, and the page's own actions.
  *
- * `meta` is the line of facts under the rule (counts, your access). Keeping it
- * out of the title block is what lets the title stay one word.
+ * Where you are is already in the top bar's path, so the head does not repeat
+ * it; it says what this page is.
  */
 export function PageHeader({
-  eyebrow,
+  tile,
   title,
   aside,
-  actions,
-  lede,
+  description,
   meta,
+  actions,
 }: {
-  eyebrow?: ReactNode;
+  tile?: string;
   title: ReactNode;
   aside?: ReactNode;
-  actions?: ReactNode;
-  lede?: ReactNode;
+  description?: ReactNode;
   meta?: ReactNode;
+  actions?: ReactNode;
 }) {
   return (
-    <>
-      <header className="page-head">
-        <div className="page-head-text">
-          {eyebrow !== undefined && <div className="eyebrow caps">{eyebrow}</div>}
+    <header className="page-head">
+      <div className="page-head-text">
+        {tile !== undefined && <Tile name={tile} size="lg" />}
+        <div style={{ minWidth: 0 }}>
           <h1 className="page-title">
             <span>{title}</span>
-            {aside !== undefined && <span className="page-title-aside">{aside}</span>}
+            {aside !== undefined && aside !== null && (
+              <span className="page-title-aside">{aside}</span>
+            )}
           </h1>
-          {lede !== undefined && <p className="page-lede">{lede}</p>}
+          {description !== undefined && <p className="page-desc">{description}</p>}
+          {meta !== undefined && <div className="page-meta">{meta}</div>}
         </div>
-        {actions !== undefined && <div className="page-actions">{actions}</div>}
-      </header>
-      {meta !== undefined && <div className="page-meta">{meta}</div>}
-    </>
+      </div>
+      {actions !== undefined && actions !== false && (
+        <div className="page-actions">{actions}</div>
+      )}
+    </header>
   );
 }
 
-/** A section of a page: a serif heading on a thin rule, with its own actions. */
-export function Section({
+/** A bordered panel with a titled head; tables inside it run edge to edge. */
+export function Card({
   title,
-  note,
+  description,
   actions,
   children,
   labelledBy,
+  tone,
 }: {
   title: ReactNode;
-  note?: ReactNode;
+  description?: ReactNode;
   actions?: ReactNode;
   children: ReactNode;
   labelledBy: string;
+  tone?: 'danger';
 }) {
   return (
-    <section className="section" aria-labelledby={labelledBy}>
-      <div className="section-head">
+    <section
+      className={`card${tone === 'danger' ? ' card-danger' : ''}`}
+      aria-labelledby={labelledBy}
+    >
+      <div className="card-head">
         <div>
-          <h2 className="section-title" id={labelledBy}>
+          <h2 className="card-title" id={labelledBy}>
             {title}
           </h2>
-          {note !== undefined && <p className="section-note">{note}</p>}
+          {description !== undefined && <p className="card-desc">{description}</p>}
         </div>
         {actions}
       </div>
@@ -73,27 +83,32 @@ export function Section({
 /**
  * A page that cannot be shown: no access, no such thing, or no session.
  *
- * It keeps the page head so the reader still knows where they tried to go,
- * then says why in a sentence and offers the one useful way out.
+ * It says which page, why in a sentence, and offers the one useful way out.
  */
 export function ClosedDoor({
-  eyebrow,
+  icon,
+  label,
   title,
   children,
   actions,
 }: {
-  eyebrow?: ReactNode;
+  icon?: ReactNode;
+  label?: ReactNode;
   title: ReactNode;
   children: ReactNode;
   actions?: ReactNode;
 }) {
   return (
-    <>
-      <PageHeader eyebrow={eyebrow} title={title} />
-      <div className="closed">
-        <div className="closed-body">{children}</div>
-        {actions !== undefined && <div className="closed-actions">{actions}</div>}
-      </div>
-    </>
+    <div className="closed" role="status">
+      {icon !== undefined && (
+        <div className="closed-icon" aria-hidden>
+          {icon}
+        </div>
+      )}
+      {label !== undefined && <p className="closed-label">{label}</p>}
+      <h1 className="closed-title">{title}</h1>
+      <div className="closed-body">{children}</div>
+      {actions !== undefined && <div className="closed-actions">{actions}</div>}
+    </div>
   );
 }

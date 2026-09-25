@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { Monitor, Moon, Sun } from './icons';
+import { DropdownMenu } from 'radix-ui';
+import { Check, Monitor, Moon, Sun } from './icons';
 
 export type Theme = 'system' | 'light' | 'dark';
 
@@ -47,13 +48,13 @@ const OPTIONS: { value: Theme; label: string; Icon: typeof Sun }[] = [
 ];
 
 /**
- * Three glyphs, one of them pressed. A menu for a three-way choice costs a
- * click to find out what the current value is.
+ * The stored choice, kept in step with changes made elsewhere (the command
+ * palette, another tab).
+ *
+ * Server-rendered markup cannot know the stored preference, so it starts on
+ * "system" and corrects itself on mount. Any other approach hydration-mismatches.
  */
-export function ThemeToggle() {
-  // Server-rendered markup cannot know the stored preference, so it starts on
-  // "system" and corrects itself on mount. Any other approach
-  // hydration-mismatches.
+function useTheme(): Theme {
   const [theme, setThemeState] = useState<Theme>('system');
 
   useEffect(() => {
@@ -66,6 +67,34 @@ export function ThemeToggle() {
       window.removeEventListener('storage', sync);
     };
   }, []);
+
+  return theme;
+}
+
+/** The theme as a radio group inside a dropdown menu (the account menu). */
+export function ThemeMenuItems() {
+  const theme = useTheme();
+  return (
+    <DropdownMenu.RadioGroup value={theme} onValueChange={(value: string) => apply(value as Theme)}>
+      {OPTIONS.map(({ value, label, Icon }) => (
+        <DropdownMenu.RadioItem key={value} value={value} className="menu-item">
+          <Icon size={15} />
+          {label}
+          <DropdownMenu.ItemIndicator className="menu-check">
+            <Check size={14} />
+          </DropdownMenu.ItemIndicator>
+        </DropdownMenu.RadioItem>
+      ))}
+    </DropdownMenu.RadioGroup>
+  );
+}
+
+/**
+ * Three glyphs, one of them pressed, for pages without the account menu.
+ * A menu for a three-way choice costs a click to find out the current value.
+ */
+export function ThemeToggle() {
+  const theme = useTheme();
 
   return (
     <div className="theme-choice" role="group" aria-label="Colour scheme">

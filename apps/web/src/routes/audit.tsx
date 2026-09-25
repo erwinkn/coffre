@@ -3,7 +3,18 @@ import { listAudit, verifyAuditChain } from '../server-functions/audit';
 import type { AuditRow } from '../shared/models';
 import { CopyButton, EmptyState, Notice, Timestamp, Tip } from '../components/ui';
 import { ClosedDoor, PageHeader } from '../components/page';
-import { AlertTriangle, CheckCircle, ShieldCheck, SlashCircle, X } from '../components/icons';
+import {
+  Activity,
+  AlertTriangle,
+  CheckCircle,
+  Clock,
+  Layers,
+  Ledger,
+  ShieldCheck,
+  SlashCircle,
+  User,
+  X,
+} from '../components/icons';
 
 type AuditSearch = { decision?: 'deny'; actorId?: string };
 type ChainResult = Awaited<ReturnType<typeof verifyAuditChain>>;
@@ -33,7 +44,7 @@ function AuditPage() {
 
   if (!result.ok) {
     return (
-      <ClosedDoor eyebrow="Oversight" title="Audit log">
+      <ClosedDoor icon={<Ledger size={18} />} label="Audit log" title="The log is closed to you">
         {result.error}
       </ClosedDoor>
     );
@@ -44,32 +55,24 @@ function AuditPage() {
   return (
     <>
       <PageHeader
-        eyebrow="Oversight"
         title="Audit log"
-        lede="Who read which secret, and when. Append-only by database grant, not by convention: the application's role holds no UPDATE, DELETE or TRUNCATE on this table."
-        actions={<ChainStatus chain={chain} />}
+        description="Who read which secret, and when. Append-only by database grant, not by convention: the application's role holds no UPDATE, DELETE or TRUNCATE on this table."
       />
 
-      {!chain.ok && (
-        <div style={{ marginTop: '1.25rem' }}>
-          <Notice>
-            <strong>The chain could not be verified.</strong> {chain.error}
-          </Notice>
-        </div>
-      )}
+      <ChainStatus chain={chain} />
 
       {chain.ok && chain.integrity === 'broken' && (
-        <div style={{ marginTop: '1.25rem' }}>
+        <div style={{ marginBottom: '1.25rem' }}>
           <Notice tone="bad">
-            <strong>The audit log does not verify.</strong> The chain breaks at entry{' '}
-            <span className="mono">{chain.failedAtSeq}</span>: {chain.reason}. Treat this as an
-            incident. Entries have been altered or removed by something with direct database
-            access, and nothing below can be relied on until that is explained.
+            <strong>Treat this as an incident.</strong> The chain breaks at entry{' '}
+            <span className="mono">{chain.failedAtSeq}</span>: {chain.reason}. Entries have been
+            altered or removed by something with direct database access, and nothing below can
+            be relied on until that is explained.
           </Notice>
         </div>
       )}
 
-      <div className="filters">
+      <div className="toolbar">
         <nav className="segmented" aria-label="Filter by decision">
           {/* `exact` compares the whole search, not a subset of it: otherwise
               "All events" for one actor also counts as active while that
@@ -103,39 +106,75 @@ function AuditPage() {
           </Link>
         )}
 
-        <span className="filters-count">
-          {result.entries.length} most recent
-          {!deniedOnly && denials > 0 && `, ${denials} refused`}
+        <span className="toolbar-meta">
+          <span>
+            <strong>{result.entries.length}</strong> most recent
+            {!deniedOnly && denials > 0 && (
+              <>
+                {', '}
+                <strong>{denials}</strong> refused
+              </>
+            )}
+          </span>
         </span>
       </div>
 
-      {result.entries.length === 0 ? (
-        <EmptyState title={deniedOnly ? 'No denials recorded' : 'Nothing recorded yet'}>
-          {deniedOnly
-            ? 'Every authorisation decision reaches this log, refusals included. An empty page means nobody has been turned away.'
-            : 'The log fills as secrets are read and written. Listing keys does not appear here; revealing a value does.'}
-        </EmptyState>
-      ) : (
-        <div className="ledger-wrap">
-          <table className="ledger audit stacks">
-            <thead>
-              <tr>
-                <th className="caps col-seq">No.</th>
-                <th className="caps col-shrink">When (UTC)</th>
-                <th className="caps">Actor</th>
-                <th className="caps col-shrink">Action</th>
-                <th className="caps">Subject</th>
-                <th className="caps col-shrink">Decision</th>
-              </tr>
-            </thead>
-            <tbody>
-              {result.entries.map((entry) => (
-                <AuditTableRow key={entry.seq} entry={entry} deniedOnly={deniedOnly} />
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+      <section className="card" aria-label="Audit entries">
+        {result.entries.length === 0 ? (
+          <EmptyState title={deniedOnly ? 'No denials recorded' : 'Nothing recorded yet'}>
+            {deniedOnly
+              ? 'Every authorisation decision reaches this log, refusals included. An empty page means nobody has been turned away.'
+              : 'The log fills as secrets are read and written. Listing keys does not appear here; revealing a value does.'}
+          </EmptyState>
+        ) : (
+          <div className="dt-wrap">
+            <table className="dt audit stacks">
+              <thead>
+                <tr>
+                  <th className="n" title="Sequence number in the hash chain">
+                    #
+                  </th>
+                  <th className="col-shrink">
+                    <span className="th">
+                      <Clock size={14} />
+                      When (UTC)
+                    </span>
+                  </th>
+                  <th>
+                    <span className="th">
+                      <User size={14} />
+                      Actor
+                    </span>
+                  </th>
+                  <th className="col-shrink">
+                    <span className="th">
+                      <Activity size={14} />
+                      Action
+                    </span>
+                  </th>
+                  <th>
+                    <span className="th">
+                      <Layers size={14} />
+                      Subject
+                    </span>
+                  </th>
+                  <th className="col-shrink">
+                    <span className="th">
+                      <ShieldCheck size={14} />
+                      Decision
+                    </span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {result.entries.map((entry) => (
+                  <AuditTableRow key={entry.seq} entry={entry} deniedOnly={deniedOnly} />
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
     </>
   );
 }
@@ -145,10 +184,10 @@ function AuditTableRow({ entry, deniedOnly }: { entry: AuditRow; deniedOnly: boo
 
   return (
     <tr className={denied ? 'is-denied' : undefined}>
-      <td className="col-seq" data-label="No.">
+      <td className="n" data-label="Sequence">
         {entry.seq}
       </td>
-      <td className="nowrap" data-label="When (UTC)">
+      <td className="nowrap cell-mono" data-label="When (UTC)">
         <Timestamp iso={entry.occurredAt} precise />
       </td>
       <td data-label="Actor">
@@ -156,7 +195,6 @@ function AuditTableRow({ entry, deniedOnly }: { entry: AuditRow; deniedOnly: boo
             "what happened", so the actor cell is the control. */}
         <span className="actor">
           <Link
-            className="mono"
             to="/audit"
             search={{
               ...(deniedOnly ? { decision: 'deny' as const } : {}),
@@ -165,7 +203,7 @@ function AuditTableRow({ entry, deniedOnly }: { entry: AuditRow; deniedOnly: boo
           >
             {entry.actorId}
           </Link>
-          {entry.actorType === 'service' && <span className="tag tag-outline">service</span>}
+          {entry.actorType === 'service' && <span className="tag">service</span>}
         </span>
       </td>
       <td className="cell-mono nowrap" data-label="Action">
@@ -178,7 +216,7 @@ function AuditTableRow({ entry, deniedOnly }: { entry: AuditRow; deniedOnly: boo
         {/* Glyph first, then the word. The colour is the third signal, never
             the only one -- allow/deny is exactly the pair deuteranopia loses. */}
         <span className={`decision ${denied ? 'decision-deny' : 'decision-allow'}`}>
-          {denied ? <SlashCircle size={14} /> : <CheckCircle size={14} />}
+          {denied ? <SlashCircle size={13} /> : <CheckCircle size={13} />}
           {entry.decision}
         </span>
       </td>
@@ -192,8 +230,7 @@ function AuditTableRow({ entry, deniedOnly }: { entry: AuditRow; deniedOnly: boo
  * This replaced a card with a "Verify chain" button on it. A green result you
  * have to ask for is reassurance rather than evidence: it is checked when
  * someone is already feeling confident, and not on the morning it would have
- * mattered. Recomputing on load makes the claim continuous, which also means
- * the status must stay small enough to sit beside the title.
+ * mattered. Recomputing on load makes the claim continuous.
  *
  * The head hash is the part worth carrying away. Recomputation only proves the
  * log is consistent with itself; comparing this value against one recorded
@@ -207,8 +244,8 @@ function ChainStatus({ chain }: { chain: ChainResult }) {
           <AlertTriangle size={16} />
         </span>
         <span className="chain-text">
-          <span className="chain-title">Verification unavailable</span>
-          <span className="chain-sub">The chain was not recomputed</span>
+          <span className="chain-title">Chain not verified</span>
+          <span className="chain-sub">{chain.error}</span>
         </span>
       </div>
     );
@@ -223,7 +260,7 @@ function ChainStatus({ chain }: { chain: ChainResult }) {
         <span className="chain-text">
           <span className="chain-title">Chain broken</span>
           <span className="chain-sub">
-            at entry <span className="mono">{chain.failedAtSeq}</span>
+            Recomputation fails at entry <span className="mono">{chain.failedAtSeq}</span>.
           </span>
         </span>
       </div>
@@ -233,20 +270,22 @@ function ChainStatus({ chain }: { chain: ChainResult }) {
   return (
     <div className="chain">
       <span className="chain-seal">
-        <ShieldCheck size={17} />
+        <ShieldCheck size={16} />
       </span>
       <span className="chain-text">
         <span className="chain-title">Chain intact</span>
         <span className="chain-sub">
-          {chain.rows} {chain.rows === 1 ? 'entry' : 'entries'}, recomputed on load · head
-          <Tip label="The chain head: every entry folded into one HMAC. Record it somewhere coffre cannot reach, and a later mismatch proves the log was altered.">
-            <code className="chain-head" tabIndex={0}>
-              {chain.head.slice(0, 12)}
-            </code>
-          </Tip>
+          All {chain.rows} {chain.rows === 1 ? 'entry' : 'entries'} recomputed on load. Record the
+          head somewhere coffre cannot write; a later mismatch proves the log was altered.
         </span>
       </span>
-      <CopyButton value={chain.head} label="Copy the full chain head" />
+      <span className="chain-head">
+        <span className="chain-head-label">head</span>
+        <Tip label={chain.head}>
+          <code tabIndex={0}>{chain.head.slice(0, 16)}…</code>
+        </Tip>
+        <CopyButton value={chain.head} label="Copy the full chain head" />
+      </span>
     </div>
   );
 }

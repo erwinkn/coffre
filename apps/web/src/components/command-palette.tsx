@@ -55,10 +55,16 @@ export function CommandPalette({
 
   return (
     <>
-      <button type="button" className="jump" onClick={() => setOpen(true)}>
+      <button
+        type="button"
+        className="search-trigger"
+        onClick={() => setOpen(true)}
+        aria-label="Search projects and environments"
+        aria-keyshortcuts="Meta+K Control+K"
+      >
         <Search size={14} />
-        <span className="jump-label">Jump to…</span>
-        <kbd aria-label="Command K">⌘K</kbd>
+        <span className="search-label">Search…</span>
+        <kbd aria-hidden>⌘K</kbd>
       </button>
 
       <Command.Dialog
@@ -69,7 +75,7 @@ export function CommandPalette({
         contentClassName="palette"
         loop
       >
-        <Command.Input placeholder="Jump to a project, environment or page…" />
+        <Command.Input placeholder="Search projects, environments and pages…" />
 
         <Command.List>
           <Command.Empty>Nothing by that name.</Command.Empty>

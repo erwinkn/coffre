@@ -1,12 +1,14 @@
 import { Link, useRouter, type ErrorComponentProps } from '@tanstack/react-router';
 import { ClosedDoor } from './page';
+import { AlertTriangle, Search } from './icons';
 
 /** A path that matches no page. */
 export function NotFound() {
   return (
     <ClosedDoor
-      eyebrow="Not found"
-      title="Nothing filed here"
+      icon={<Search size={18} />}
+      label="404"
+      title="Nothing at this address"
       actions={
         <Link className="btn" to="/projects">
           All projects
@@ -29,7 +31,8 @@ export function RouteError({ reset }: ErrorComponentProps) {
   const router = useRouter();
   return (
     <ClosedDoor
-      eyebrow="Something went wrong"
+      icon={<AlertTriangle size={18} />}
+      label="Something went wrong"
       title="This page could not be shown"
       actions={
         <>

@@ -1,6 +1,6 @@
 import { Popover } from 'radix-ui';
 import type { Permission } from '../shared/models';
-import { ChevronDown } from './icons';
+import { Check, ChevronDown } from './icons';
 
 /**
  * What each permission actually lets you do, in the second person.
@@ -66,12 +66,12 @@ export function PermissionSummary({ permissions }: { permissions: Permission[] }
 
       <Popover.Portal>
         <Popover.Content className="popover" sideOffset={8} align="start" collisionPadding={12}>
-          <p className="caps">Your effective permissions</p>
+          <p className="popover-title">Your effective permissions</p>
 
           <ul className="perm-list">
             {ORDER.filter((permission) => permissions.includes(permission)).map((permission) => (
               <li key={permission}>
-                <span className="perm-mark" aria-hidden />
+                <Check size={13} />
                 <span>
                   <span className="mono">{permission}</span>
                   <span className="hint">{EXPLAINED[permission]}</span>

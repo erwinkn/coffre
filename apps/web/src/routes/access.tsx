@@ -17,8 +17,8 @@ import {
   Modal,
   Spinner,
 } from '../components/ui';
-import { ClosedDoor, PageHeader, Section } from '../components/page';
-import { MoreHorizontal, Pencil, Plus, X } from '../components/icons';
+import { Card, ClosedDoor, PageHeader } from '../components/page';
+import { Key, MoreHorizontal, Pencil, Plus, ShieldCheck, User, Users, X } from '../components/icons';
 
 export const Route = createFileRoute('/access')({
   loader: () => listDirectoryPrincipals(),
@@ -30,7 +30,7 @@ function DirectoryPage() {
 
   if (!result.ok) {
     return (
-      <ClosedDoor eyebrow="Oversight" title="Directory">
+      <ClosedDoor icon={<Users size={18} />} label="Directory" title="The directory is closed to you">
         {result.error}
       </ClosedDoor>
     );
@@ -44,9 +44,8 @@ function DirectoryPage() {
   return (
     <>
       <PageHeader
-        eyebrow="Oversight"
         title="Directory"
-        lede="Who may use coffre at all. Being listed here grants nothing by itself: what each identity can do is granted per project, from that project's page."
+        description="Who may use coffre at all. Being listed here grants nothing by itself: what each identity can do is granted per project, from that project's page."
         meta={
           <>
             <span>
@@ -93,47 +92,65 @@ function PrincipalSection({
   principalType: 'user' | 'service';
   principals: DirectoryPrincipal[];
 }) {
+  const people = principalType === 'user';
   return (
-    <Section
+    <Card
       labelledBy={`directory-${principalType}`}
       title={title}
-      note={description}
+      description={description}
       actions={<AddPrincipal principalType={principalType} />}
     >
       {principals.length === 0 ? (
-        <EmptyState
-          title={principalType === 'user' ? 'Nobody is registered' : 'No service accounts'}
-        >
-          Add the first {principalType === 'user' ? 'person' : 'service account'} to let it
-          through the door. Project access is a separate step.
+        <EmptyState title={people ? 'Nobody is registered' : 'No service accounts'}>
+          Add the first {people ? 'person' : 'service account'} to let it through the door.
+          Project access is a separate step.
         </EmptyState>
       ) : (
-        <div className="ledger-wrap">
-          <table className="ledger grants stacks">
+        <div className="dt-wrap">
+          <table className="dt grants stacks">
             <thead>
               <tr>
-                <th className="caps col-principal">
-                  {principalType === 'user' ? 'Email' : 'Common name'}
+                <th className="n">#</th>
+                <th className="col-principal">
+                  <span className="th">
+                    {people ? <User size={14} /> : <Key size={14} />}
+                    {people ? 'Email' : 'Common name'}
+                  </span>
                 </th>
-                {principalType === 'user' && <th className="caps">Instance role</th>}
+                <th>
+                  <span className="th">
+                    <ShieldCheck size={14} />
+                    {people ? 'Instance role' : 'Kind'}
+                  </span>
+                </th>
                 <th className="col-actions">
                   <span className="visually-hidden">Actions</span>
                 </th>
               </tr>
             </thead>
             <tbody>
-              {principals.map((principal) => (
-                <PrincipalRow key={principal.principalId} principal={principal} />
+              {principals.map((principal, index) => (
+                <PrincipalRow
+                  key={principal.principalId}
+                  number={index + 1}
+                  principal={principal}
+                />
               ))}
             </tbody>
           </table>
         </div>
       )}
-    </Section>
+    </Card>
   );
 }
 
-function PrincipalRow({ principal }: { principal: DirectoryPrincipal }) {
+function PrincipalRow({
+  number,
+  principal,
+}: {
+  number: number;
+  principal: DirectoryPrincipal;
+}) {
   const [editing, setEditing] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [instanceRole, setInstanceRole] = useState<'user' | 'owner'>(
@@ -148,15 +165,23 @@ function PrincipalRow({ principal }: { principal: DirectoryPrincipal }) {
 
   return (
     <tr>
-      <td className="cell-mono" data-label={principal.principalType === 'user' ? 'Email' : 'Common name'}>
+      <td className="n">{number}</td>
+      <td
+        className="cell-mono"
+        data-label={principal.principalType === 'user' ? 'Email' : 'Common name'}
+      >
         {principal.principalId}
       </td>
-      {principal.principalType === 'user' && (
+      {principal.principalType === 'user' ? (
         <td data-label="Instance role">
-          <span className={`tag${principal.instanceRole === 'user' ? '' : ' tag-accent'}`}>
+          <span className={`tag${principal.instanceRole === 'user' ? '' : ' tag-violet'}`}>
             {ROLE_LABEL[principal.instanceRole]}
           </span>
           {principal.isRootAdmin && <span className="hint"> · set in deployment config</span>}
+        </td>
+      ) : (
+        <td className="cell-muted" data-label="Kind">
+          Service token
         </td>
       )}
       <td className="col-actions">
@@ -335,7 +360,7 @@ function AddPrincipal({ principalType }: { principalType: 'user' | 'service' }) 
           }}
         >
           <label className="field">
-            <span className="caps">
+            <span className="label">
               {principalType === 'user' ? 'Cloudflare Access email' : 'Service token common name'}
             </span>
             <input
@@ -384,7 +409,7 @@ function RoleField({
 }) {
   return (
     <label className="field">
-      <span className="caps">Instance role</span>
+      <span className="label">Instance role</span>
       <select
         className="select"
         value={value}
