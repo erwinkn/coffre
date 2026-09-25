@@ -1547,6 +1547,12 @@ kbd {
   }
 }
 
+/* In development the Agentation feedback button floats bottom right; keep
+   the save actions out from under it. Production never renders it. */
+body:has(> [data-agentation-root]) .savebar-inner {
+  padding-right: max(var(--gutter), 5.5rem);
+}
+
 /* ========================================================================== */
 /* Index lists (projects, environments)                                       */
 /* ========================================================================== */

@@ -49,8 +49,9 @@ export function RouteError({ reset }: ErrorComponentProps) {
         </>
       }
     >
-      coffre could not load what this page needs. Nothing was read or written. If it keeps
-      happening, the service or its database may be unavailable.
+      coffre could not load what this page needs, and nothing was read or written. If you
+      typed this address, check it; if it keeps happening, the service or its database may
+      be unavailable.
     </ClosedDoor>
   );
 }
