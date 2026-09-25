@@ -8,8 +8,8 @@ export const Route = createFileRoute('/unregistered')({
 });
 
 /**
- * Cloudflare Access has authenticated this person, but Coffre's own directory
- * has not admitted them. Keep this deliberately actionless: registration is
+ * Cloudflare Access has authenticated this person, but Coffre has not
+ * registered them as a member. Keep this deliberately actionless: registration is
  * an owner decision, not a self-service privilege escalation path.
  */
 function UnregisteredPage() {
@@ -19,7 +19,7 @@ function UnregisteredPage() {
     <ClosedDoor
       icon={<User size={18} />}
       label="Registration required"
-      title="You are not in the directory yet"
+      title="You are not a member yet"
     >
       <p>
         Cloudflare Access knows who you are
@@ -33,7 +33,7 @@ function UnregisteredPage() {
         projects, secrets, audit entries or API operations are available to you.
       </p>
       <p>
-        Ask a coffre owner or root admin to add your Access email to the directory.
+        Ask a coffre owner or root admin to add your Access email under Members.
       </p>
     </ClosedDoor>
   );

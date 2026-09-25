@@ -437,3 +437,12 @@ export function Activity(props: IconProps) {
     </Svg>
   );
 }
+
+export function PanelLeft(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <rect x="3.5" y="4.5" width="17" height="15" rx="2" />
+      <path d="M9.5 4.5v15" />
+    </Svg>
+  );
+}

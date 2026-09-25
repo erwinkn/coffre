@@ -44,7 +44,7 @@ function AuditPage() {
 
   if (!result.ok) {
     return (
-      <ClosedDoor icon={<Ledger size={18} />} label="Audit log" title="The log is closed to you">
+      <ClosedDoor icon={<Ledger size={18} />} label="Audit" title="The audit log is closed to you">
         {result.error}
       </ClosedDoor>
     );
@@ -55,7 +55,7 @@ function AuditPage() {
   return (
     <>
       <PageHeader
-        title="Audit log"
+        title="Audit"
         description="Who read which secret, and when. Append-only by database grant, not by convention: the application's role holds no UPDATE, DELETE or TRUNCATE on this table."
       />
 
@@ -203,7 +203,7 @@ function AuditTableRow({ entry, deniedOnly }: { entry: AuditRow; deniedOnly: boo
           >
             {entry.actorId}
           </Link>
-          {entry.actorType === 'service' && <span className="tag">service</span>}
+          {entry.actorType === 'service' && <span className="tag">token</span>}
         </span>
       </td>
       <td className="cell-mono nowrap" data-label="Action">

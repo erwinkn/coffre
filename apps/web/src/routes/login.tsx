@@ -19,7 +19,7 @@ export const Route = createFileRoute('/login')({
 });
 
 const SEEDED: [email: string, role: string, note: string][] = [
-  ['erwin@equisafe.io', 'root admin', 'Everything, including the audit log and the directory.'],
+  ['erwin@equisafe.io', 'root admin', 'Everything, including audit, members and tokens.'],
   ['lead@equisafe.io', 'owner of market', 'Environments, access and secrets on one project.'],
   ['dev@equisafe.io', 'developer', 'Reads and writes secrets on market/dev only.'],
   ['auditor@equisafe.io', 'auditor', 'Reads the audit log. Cannot read a single secret value.'],

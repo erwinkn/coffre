@@ -11,11 +11,13 @@ import {
 import { setTheme } from './theme';
 import {
   Folder,
+  Key,
   Layers,
   Ledger,
   Monitor,
   Moon,
   Search,
+  Settings,
   SlashCircle,
   Sun,
   Users,
@@ -130,23 +132,20 @@ export function CommandPalette({
             </Command.Group>
           )}
 
-          {hasAdministrationItems(capabilities) && (
-            <Command.Group heading="Oversight">
+          <Command.Group heading="Pages">
+            <Command.Item
+              value="projects all"
+              onSelect={() => {
+                setOpen(false);
+                navigate({ to: '/projects' });
+              }}
+            >
+              <Folder size={15} />
+              Projects
+            </Command.Item>
+            {hasAdministrationItems(capabilities) && (
               <AdministrationItems
                 capabilities={capabilities}
-                users={
-                  <Command.Item
-                    value="directory users service accounts people principals"
-                    onSelect={() => {
-                      setOpen(false);
-                      navigate({ to: '/access' });
-                    }}
-                  >
-                    <Users size={15} />
-                    Directory
-                    <span className="palette-hint">People and service accounts</span>
-                  </Command.Item>
-                }
                 audit={
                   <>
                     <Command.Item
@@ -157,23 +156,57 @@ export function CommandPalette({
                       }}
                     >
                       <Ledger size={15} />
-                      Audit log
+                      Audit
                     </Command.Item>
                     <Command.Item
-                      value="denials denied refused audit"
+                      value="audit denials denied refused"
                       onSelect={() => {
                         setOpen(false);
                         navigate({ to: '/audit', search: { decision: 'deny' } });
                       }}
                     >
                       <SlashCircle size={15} />
-                      Audit log, denials only
+                      Audit, denials only
+                    </Command.Item>
+                  </>
+                }
+                users={
+                  <>
+                    <Command.Item
+                      value="members people users directory"
+                      onSelect={() => {
+                        setOpen(false);
+                        navigate({ to: '/members' });
+                      }}
+                    >
+                      <Users size={15} />
+                      Members
+                    </Command.Item>
+                    <Command.Item
+                      value="tokens service accounts machines ci directory"
+                      onSelect={() => {
+                        setOpen(false);
+                        navigate({ to: '/tokens' });
+                      }}
+                    >
+                      <Key size={15} />
+                      Tokens
                     </Command.Item>
                   </>
                 }
               />
-            </Command.Group>
-          )}
+            )}
+            <Command.Item
+              value="settings preferences instance"
+              onSelect={() => {
+                setOpen(false);
+                navigate({ to: '/settings' });
+              }}
+            >
+              <Settings size={15} />
+              Settings
+            </Command.Item>
+          </Command.Group>
 
           <Command.Group heading="Appearance">
             <Command.Item

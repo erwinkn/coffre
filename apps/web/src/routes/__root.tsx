@@ -10,7 +10,7 @@ import {
 import { Toaster } from 'sonner';
 import globalsCss from '../styles/globals.css?url';
 import { getShell } from '../server-functions/shell';
-import { Brand, TopBar } from '../components/topbar';
+import { Brand, Shell } from '../components/shell';
 import { TooltipProvider } from '../components/ui';
 import { ThemeToggle, themeBootScript } from '../components/theme';
 import { Agentation } from '../components/agentation';
@@ -111,7 +111,7 @@ function RootComponent() {
   const { principal, instanceRole, projects, capabilities } = Route.useLoaderData();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
 
-  // Sign-in gets no navigation. Every destination in the top bar and the
+  // Sign-in gets no navigation. Every destination in the rail and the
   // command palette bounces straight back here while you are signed out, so
   // offering them is a loop dressed up as navigation. The brand stays, as a
   // mark rather than a link, so the page is still recognisably this app.
@@ -139,16 +139,14 @@ function RootComponent() {
         Skip to content
       </a>
 
-      <TopBar
+      <Shell
         projects={projects}
         principal={principal}
         instanceRole={instanceRole}
         capabilities={capabilities}
-      />
-
-      <main className="content" id="content">
+      >
         <Outlet />
-      </main>
+      </Shell>
 
       <Toasts />
       <Agentation />

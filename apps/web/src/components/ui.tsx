@@ -17,12 +17,20 @@ export function TooltipProvider({ children }: { children: ReactNode }) {
   );
 }
 
-export function Tip({ label, children }: { label: ReactNode; children: ReactNode }) {
+export function Tip({
+  label,
+  side,
+  children,
+}: {
+  label: ReactNode;
+  side?: 'top' | 'right' | 'bottom' | 'left';
+  children: ReactNode;
+}) {
   return (
     <Tooltip.Root>
       <Tooltip.Trigger asChild>{children}</Tooltip.Trigger>
       <Tooltip.Portal>
-        <Tooltip.Content className="tooltip" sideOffset={6} collisionPadding={8}>
+        <Tooltip.Content className="tooltip" side={side} sideOffset={6} collisionPadding={8}>
           {label}
         </Tooltip.Content>
       </Tooltip.Portal>

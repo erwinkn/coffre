@@ -265,8 +265,10 @@ Things worth knowing about it:
 - **It is drawn as a plain developer tool.** Neutral surfaces, bordered
   cards, and tables as grids with a row-number gutter; Inter for the interface
   and JetBrains Mono for anything a machine reads back (keys, slugs, values,
-  sequence numbers). The top bar's path is itself the switcher: one click on
-  `prod` lists its sibling environments. Hue is kept for meaning: blue for
+  sequence numbers). A rail holds the sections (Projects, Audit, Members,
+  Tokens, Settings), Projects has a sidebar with the project and environment
+  tree, and the header's path is itself a switcher: one click on `prod` lists
+  its sibling environments. Hue is kept for meaning: blue for
   edits not yet saved, amber for a value on screen, red for what leaves or is
   refused, green for what was allowed. The fonts are self-hosted from exactly
   pinned packages.

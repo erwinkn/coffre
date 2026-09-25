@@ -21,12 +21,12 @@ export function AdministrationItems({
   return createElement(
     Fragment,
     null,
-    capabilities.canManageGrants ? users : null,
     capabilities.canReadAudit ? audit : null,
+    capabilities.canManageGrants ? users : null,
   );
 }
 
-/** The top bar's administration links, omitted entirely when there would be none. */
+/** The rail's administration group, omitted entirely when it would be empty. */
 export function AdministrationNav({
   capabilities,
   users,
@@ -35,8 +35,8 @@ export function AdministrationNav({
   if (!capabilities.canManageGrants && !capabilities.canReadAudit) return null;
 
   return createElement(
-    'nav',
-    { className: 'topnav', 'aria-label': 'Oversight' },
+    'div',
+    { className: 'rail-group', role: 'group', 'aria-label': 'Administration' },
     createElement(AdministrationItems, { capabilities, users, audit }),
   );
 }

@@ -118,3 +118,24 @@ export function ThemeToggle() {
 export function setTheme(theme: Theme) {
   apply(theme);
 }
+
+/** The theme as three large choices, for the Settings page. */
+export function ThemeCards() {
+  const theme = useTheme();
+  return (
+    <div className="choice-grid" role="group" aria-label="Colour scheme">
+      {OPTIONS.map(({ value, label, Icon }) => (
+        <button
+          key={value}
+          type="button"
+          className="choice"
+          aria-pressed={theme === value}
+          onClick={() => apply(value)}
+        >
+          <Icon size={16} />
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
