@@ -1,13 +1,19 @@
 import { Fragment } from 'react';
 import { Link, useRouterState } from '@tanstack/react-router';
-import { ChevronRight } from './icons';
 
 const NAMED: Record<string, string> = {
   '/projects': 'Projects',
-  '/access': 'Users',
+  '/access': 'Directory',
   '/audit': 'Audit log',
-  '/login': 'Sign in',
 };
+
+function Sep() {
+  return (
+    <span className="crumb-sep" aria-hidden>
+      /
+    </span>
+  );
+}
 
 /**
  * Where you are, and one click back to everything above it.
@@ -23,15 +29,19 @@ export function Breadcrumbs() {
   if (named !== undefined) {
     return (
       <nav className="crumbs" aria-label="Breadcrumb">
-        <span className="crumb-current">{named}</span>
+        <span className="crumb-current" aria-current="page">
+          {named}
+        </span>
       </nav>
     );
   }
 
   // Everything else is /projects/$project or /projects/$project/$environment.
   const segments = pathname.split('/').filter((segment) => segment !== '');
-  const [, project, environment] =
-    segments[0] === 'projects' ? segments.map(decodeURIComponent) : [];
+  if (segments[0] !== 'projects') {
+    return <nav className="crumbs" aria-label="Breadcrumb" />;
+  }
+  const [, project, environment] = segments.map(decodeURIComponent);
 
   return (
     <nav className="crumbs" aria-label="Breadcrumb">
@@ -39,7 +49,7 @@ export function Breadcrumbs() {
 
       {project !== undefined && (
         <Fragment key="project">
-          <ChevronRight size={13} className="crumb-sep" />
+          <Sep />
           {environment === undefined ? (
             <span className="crumb-current mono" aria-current="page">
               {project}
@@ -54,7 +64,7 @@ export function Breadcrumbs() {
 
       {environment !== undefined && (
         <Fragment key="environment">
-          <ChevronRight size={13} className="crumb-sep" />
+          <Sep />
           <span className="crumb-current mono" aria-current="page">
             {environment}
           </span>

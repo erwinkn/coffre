@@ -8,7 +8,7 @@ import { AlertCircle, AlertTriangle, Check, Copy, Info, Loader, X } from './icon
 
 export function TooltipProvider({ children }: { children: ReactNode }) {
   // 400ms before the first tip; afterwards adjacent tips open instantly, which
-  // makes a row of icon buttons feel immediate without the delay losing its
+  // makes a row of controls feel immediate without the delay losing its
   // purpose (preventing accidental activation on a passing cursor).
   return (
     <Tooltip.Provider delayDuration={400} skipDelayDuration={300}>
@@ -74,20 +74,26 @@ export function Notice({
   );
 }
 
+/**
+ * Nothing here yet, said in a sentence.
+ *
+ * No illustration and no centred icon: an empty ledger page is a blank line
+ * with a note in the margin, and a note is what this is.
+ */
 export function EmptyState({
-  icon,
   title,
   children,
+  actions,
 }: {
-  icon?: ReactNode;
   title: string;
   children?: ReactNode;
+  actions?: ReactNode;
 }) {
   return (
     <div className="empty">
-      {icon}
       <p className="empty-title">{title}</p>
       {children !== undefined && <p className="empty-body">{children}</p>}
+      {actions !== undefined && <div className="empty-actions">{actions}</div>}
     </div>
   );
 }
@@ -99,18 +105,19 @@ export function EmptyState({
 /**
  * Copy to clipboard with a settled confirmation.
  *
- * The icon swap is the whole feedback mechanism, so it holds for 1.4s -- long
+ * The label swap is the whole feedback mechanism, so it holds for 1.4s -- long
  * enough to be noticed after the eye has moved on, short enough not to look
- * stuck.
+ * stuck. `text` renders as a row action ("Copy" / "Copied"); `icon` as a
+ * glyph with a tooltip, for tight spots.
  */
 export function CopyButton({
   value,
   label = 'Copy',
-  className = 'btn btn-quiet btn-sm btn-icon',
+  variant = 'icon',
 }: {
   value: string;
   label?: string;
-  className?: string;
+  variant?: 'icon' | 'text';
 }) {
   const [copied, setCopied] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -119,23 +126,29 @@ export function CopyButton({
     if (timer.current !== null) clearTimeout(timer.current);
   }, []);
 
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(value);
+    } catch {
+      return; // Clipboard denied; say nothing rather than claim success.
+    }
+    setCopied(true);
+    if (timer.current !== null) clearTimeout(timer.current);
+    timer.current = setTimeout(() => setCopied(false), 1400);
+  }
+
+  if (variant === 'text') {
+    return (
+      <button type="button" className="act" aria-label={label} onClick={copy}>
+        {copied ? <Check size={13} /> : <Copy size={13} />}
+        <span aria-live="polite">{copied ? 'Copied' : 'Copy'}</span>
+      </button>
+    );
+  }
+
   return (
     <Tip label={copied ? 'Copied' : label}>
-      <button
-        type="button"
-        className={className}
-        aria-label={label}
-        onClick={async () => {
-          try {
-            await navigator.clipboard.writeText(value);
-          } catch {
-            return; // Clipboard denied; say nothing rather than claim success.
-          }
-          setCopied(true);
-          if (timer.current !== null) clearTimeout(timer.current);
-          timer.current = setTimeout(() => setCopied(false), 1400);
-        }}
-      >
+      <button type="button" className="btn btn-quiet btn-sm btn-icon" aria-label={label} onClick={copy}>
         {copied ? <Check size={14} /> : <Copy size={14} />}
       </button>
     </Tip>
@@ -150,11 +163,11 @@ export function CopyButton({
  * Confirmation for actions with reach.
  *
  * Reserved for changes that affect other people or other screens (archiving a
- * project, revoking a grant). Archiving one secret is reversible and gets an
+ * project, revoking a grant). Restoring one secret is reversible and gets an
  * undo toast instead -- a dialog on every action trains people to dismiss them.
  */
 type ConfirmProps = {
-  title: string;
+  title: ReactNode;
   body: ReactNode;
   confirmLabel: string;
   destructive?: boolean;
@@ -165,7 +178,7 @@ function ConfirmContent({ title, body, confirmLabel, destructive, onConfirm }: C
   return (
     <AlertDialog.Portal>
       <AlertDialog.Overlay className="overlay" />
-      <AlertDialog.Content className="dialog">
+      <AlertDialog.Content className="dialog dialog-confirm">
         <AlertDialog.Title className="dialog-title">{title}</AlertDialog.Title>
         <AlertDialog.Description className="dialog-body">{body}</AlertDialog.Description>
         <div className="dialog-actions">
@@ -174,7 +187,7 @@ function ConfirmContent({ title, body, confirmLabel, destructive, onConfirm }: C
           </AlertDialog.Cancel>
           <AlertDialog.Action asChild>
             <button
-              className={`btn ${destructive === false ? 'btn-primary' : 'btn-danger-solid'}`}
+              className={`btn ${destructive === false ? 'btn-primary' : 'btn-danger'}`}
               onClick={onConfirm}
             >
               {confirmLabel}
@@ -221,10 +234,10 @@ export function ConfirmDialog({
 }
 
 /**
- * A plain modal, for forms that were previously always-open cards.
+ * A plain modal, for a task you chose to begin.
  *
  * Distinct from ConfirmButton: that one interrupts to ask about something you
- * already started, this one holds a task you chose to begin.
+ * already started, this one holds a form.
  */
 export function Modal({
   open,
@@ -236,7 +249,7 @@ export function Modal({
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  title: string;
+  title: ReactNode;
   description?: ReactNode;
   wide?: boolean;
   children: ReactNode;
@@ -256,7 +269,7 @@ export function Modal({
             <Dialog.Title className="dialog-title">{title}</Dialog.Title>
             <Dialog.Close asChild>
               <button className="btn btn-quiet btn-sm btn-icon" aria-label="Close">
-                <X size={14} />
+                <X size={15} />
               </button>
             </Dialog.Close>
           </div>
@@ -287,25 +300,50 @@ function relative(iso: string, now: number): string {
   const delta = (new Date(iso).getTime() - now) / 1000;
   const magnitude = Math.abs(delta);
   const [, divisor, unit] = RELATIVE_STEPS.find(([limit]) => magnitude < limit)!;
-  const formatter = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
+  const formatter = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
   return formatter.format(Math.round(delta / divisor), unit);
 }
 
+function absolute(iso: string, precise: boolean): string {
+  return iso.replace('T', ' ').replace('Z', '').slice(0, precise ? 23 : 19);
+}
+
 /**
- * An absolute UTC timestamp, with "3 hours ago" on hover.
+ * A timestamp. Absolute UTC by default, "3 hours ago" on hover.
  *
- * Absolute is primary on purpose: this is evidence, and someone reading it is
- * often transcribing it into a finding. Relative time is the convenience, and
- * it only appears after mount because "now" differs between server and client
- * and would otherwise hydration-mismatch on every row.
+ * Absolute is the default on purpose: in the audit log this is evidence, and
+ * someone reading it is often transcribing it into a finding. `relative` flips
+ * the two for glanceable metadata like "last written". The relative form can
+ * differ between server and client by a rounding step, so that one text node
+ * opts out of the hydration check rather than render a placeholder first.
  */
-export function Timestamp({ iso, precise = false }: { iso: string; precise?: boolean }) {
+export function Timestamp({
+  iso,
+  precise = false,
+  display = 'absolute',
+}: {
+  iso: string;
+  precise?: boolean;
+  display?: 'absolute' | 'relative';
+}) {
   const [now, setNow] = useState<number | null>(null);
   useEffect(() => setNow(Date.now()), [iso]);
 
-  const absolute = iso.replace('T', ' ').replace('Z', '').slice(0, precise ? 23 : 19);
-  const body = <time dateTime={iso}>{absolute}</time>;
+  if (display === 'relative') {
+    return (
+      <Tip label={`${absolute(iso, precise)} UTC`}>
+        <time dateTime={iso} suppressHydrationWarning>
+          {relative(iso, now ?? Date.now())}
+        </time>
+      </Tip>
+    );
+  }
 
+  const body = (
+    <time className="mono" dateTime={iso}>
+      {absolute(iso, precise)}
+    </time>
+  );
   if (now === null) return body;
   return <Tip label={relative(iso, now)}>{body}</Tip>;
 }

@@ -180,10 +180,10 @@ test('root project empty states distinguish empty from archived-only instances',
     }),
   );
 
-  assert.equal(empty, 'No projects exist yet. Create the first one below.');
+  assert.equal(empty, 'No projects exist yet. Start the first one with New project.');
   assert.equal(
     archivedOnly,
-    'No active projects. Create another below or restore one from Archived.',
+    'No active projects. Start a new one, or restore one from the archive below.',
   );
 });
 

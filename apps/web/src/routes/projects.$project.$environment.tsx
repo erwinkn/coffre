@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
-import { createFileRoute, Link, useRouter } from '@tanstack/react-router';
+import { useEffect, useRef, useState, type InputHTMLAttributes } from 'react';
+import { createFileRoute, Link, useLoaderData, useRouter } from '@tanstack/react-router';
 import { DropdownMenu } from 'radix-ui';
 import { toast } from 'sonner';
 import {
@@ -28,6 +28,8 @@ import {
   type SecretChange,
   type SecretDraft,
 } from '../lib/secret-edit-batch';
+import { revealIsCurrent, type Reveal } from '../lib/reveal';
+import { secretKeyProblem } from '../lib/validation';
 import {
   ConfirmButton,
   CopyButton,
@@ -37,22 +39,20 @@ import {
   Notice,
   Spinner,
   Timestamp,
-  Tip,
 } from '../components/ui';
+import { ClosedDoor, PageHeader, Section } from '../components/page';
 import { PermissionSummary } from '../components/permissions';
 import { SecretReadOnly } from '../components/affordances';
 import {
+  AlertCircle,
   Archive,
   Eye,
   EyeOff,
   History,
-  Key,
   MoreHorizontal,
-  Pencil,
   Plus,
   RotateBack,
   Upload,
-  X,
 } from '../components/icons';
 
 /**
@@ -64,6 +64,9 @@ import {
  */
 const REVEAL_TTL_SECONDS = 45;
 
+/** Referenced by every Reveal control, so the cost is announced before the click. */
+const REVEAL_COST_ID = 'reveal-cost';
+
 export const Route = createFileRoute('/projects/$project/$environment')({
   loader: ({ params }) =>
     listKeys({ data: { project: params.project, environment: params.environment } }),
@@ -73,38 +76,139 @@ export const Route = createFileRoute('/projects/$project/$environment')({
 function EnvironmentPage() {
   const result = Route.useLoaderData();
   const { project, environment } = Route.useParams();
-  const router = useRouter();
 
+  if (!result.ok) {
+    return (
+      <ClosedDoor
+        eyebrow={
+          <Link to="/projects/$project" params={{ project }}>
+            {project}
+          </Link>
+        }
+        title={environment}
+        actions={
+          <Link className="btn" to="/projects/$project" params={{ project }}>
+            Back to {project}
+          </Link>
+        }
+      >
+        {result.error}
+      </ClosedDoor>
+    );
+  }
+
+  // Keyed by location: pending edits belong to the environment they were
+  // started in. The route component is reused across params, so without the
+  // key they would follow you into the next environment and be written there.
+  return (
+    <EnvironmentLedger
+      key={`${project}/${environment}`}
+      project={project}
+      environment={environment}
+      permissions={result.permissions}
+      keys={result.keys}
+    />
+  );
+}
+
+type Pending = { key: string; what: string };
+
+function EnvironmentLedger({
+  project,
+  environment,
+  permissions,
+  keys,
+}: {
+  project: string;
+  environment: string;
+  permissions: Permission[];
+  keys: SecretKey[];
+}) {
+  const router = useRouter();
   const [drafts, setDrafts] = useState<SecretDraft[]>([]);
   const [changes, setChanges] = useState<Record<string, SecretChange>>({});
+  // Rows opened for editing that may not have changed yet. A row with a
+  // pending change is in edit mode whether or not it is listed here.
+  const [editing, setEditing] = useState<ReadonlySet<string>>(() => new Set());
   const [saving, setSaving] = useState(false);
-  const [draftError, setDraftError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const nextDraftId = useRef(0);
 
-  // Drafts belong to the environment they were started in. The route component
-  // is reused across params, so without this they would follow you into the
-  // next environment and be written there.
-  useEffect(() => {
-    setDrafts([]);
-    setChanges({});
-    setDraftError(null);
-  }, [project, environment]);
+  const canWrite = permissions.includes('secret.write');
+  const canArchive = permissions.includes('secret.archive');
+  const canReveal = canRevealSecrets(permissions);
+
+  const active = keys.filter((entry) => !entry.archived);
+  const archived = keys.filter((entry) => entry.archived);
+  const existing = new Set(keys.map((entry) => entry.key));
+
+  const changedEntries = active.filter(
+    (entry) => secretChangeFor(changes, entry.key) !== undefined,
+  );
+  const hasConflict = hasSecretEditConflict(active, drafts, changes);
+  const invalid =
+    drafts.some((row) => secretKeyProblem(row.key.trim()) !== null) ||
+    changedEntries.some((entry) => {
+      const change = secretChangeFor(changes, entry.key);
+      return change !== undefined && !change.archived && secretKeyProblem(change.key.trim()) !== null;
+    });
+  const pendingCount = drafts.length + changedEntries.length;
+  const ready = pendingCount > 0 && !invalid && !hasConflict;
+
+  function patchChange(entry: SecretKey, patch: Partial<SecretChange>) {
+    setChanges((current) => {
+      const next = {
+        ...(secretChangeFor(current, entry.key) ?? {
+          key: entry.key,
+          value: null,
+          archived: false,
+        }),
+        ...patch,
+      };
+      const dirty = next.key !== entry.key || next.value !== null || next.archived;
+      if (dirty) return { ...current, [entry.key]: next };
+      const { [entry.key]: _, ...rest } = current;
+      return rest;
+    });
+  }
+
+  function dropChange(key: string) {
+    setChanges((current) => {
+      const { [key]: _, ...rest } = current;
+      return rest;
+    });
+    setEditing((current) => {
+      const next = new Set(current);
+      next.delete(key);
+      return next;
+    });
+  }
 
   function addDraft() {
-    setDrafts((rows) => [...rows, { id: nextDraftId.current++, key: '', value: '' }]);
+    // New rows go to the top, where the button that made them is, rather than
+    // below a list that may be longer than the screen.
+    setDrafts((rows) => [{ id: nextDraftId.current++, key: '', value: '' }, ...rows]);
+  }
+
+  function discardAll() {
+    setDrafts([]);
+    setChanges({});
+    setEditing(new Set());
+    setSaveError(null);
   }
 
   /**
-   * Write every draft row, stopping at the first refusal.
+   * Write every pending edit, stopping at the first refusal.
    *
-   * Rows already written are dropped and the rest are kept, so pressing save
+   * Edits already written are dropped and the rest are kept, so pressing save
    * again retries exactly what did not land rather than duplicating what did.
    * There is no batch endpoint and inventing one client-side would only hide
    * that this is several audited writes.
    */
   async function saveChanges() {
+    if (!ready || saving) return;
     setSaving(true);
-    setDraftError(null);
+    setSaveError(null);
     const outcome = await applySecretEditBatch({
       active,
       drafts,
@@ -133,553 +237,837 @@ function EnvironmentPage() {
 
     setDrafts(outcome.drafts);
     setChanges(outcome.changes);
+    setEditing(new Set());
 
     if (outcome.applied > 0) {
       try {
         await router.invalidate();
       } catch {
-        setDraftError('Saved changes could not be refreshed. Reload before you retry.');
+        setSaveError('Saved, but the page could not refresh. Reload before you retry.');
         setSaving(false);
         return;
       }
     }
 
     if (outcome.error === null) {
-      toast.success(
-        `Saved ${outcome.applied} change${outcome.applied === 1 ? '' : 's'}`,
-      );
+      toast.success(`Saved ${outcome.applied} change${outcome.applied === 1 ? '' : 's'}`);
     } else {
       const message =
-        outcome.error instanceof Error
-          ? outcome.error.message
-          : 'The request could not be sent.';
-      setDraftError(
+        outcome.error instanceof Error ? outcome.error.message : 'The request could not be sent.';
+      setSaveError(
         outcome.applied === 0
           ? message
-          : `${message} Earlier changes were saved. Failed and untried changes are ready to retry.`,
+          : `${message} Earlier changes were saved; the failed one and any after it are ready to retry.`,
       );
     }
     setSaving(false);
   }
 
-  if (!result.ok) {
-    return (
-      <>
-        <div className="page-head">
-          <h1 className="mono">
-            {project}/{environment}
-          </h1>
-        </div>
-        <Notice tone="bad">{result.error}</Notice>
-        <p style={{ marginTop: 'var(--space-5)' }}>
-          <Link to="/projects">Back to projects</Link>
-        </p>
-      </>
-    );
-  }
+  // Cmd/Ctrl+Enter saves from anywhere on the page, as the save bar says.
+  const saveRef = useRef(saveChanges);
+  saveRef.current = saveChanges;
+  useEffect(() => {
+    if (pendingCount === 0) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+        event.preventDefault();
+        void saveRef.current();
+      }
+    }
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [pendingCount]);
 
-  const { permissions, keys } = result;
-  const canWrite = permissions.includes('secret.write');
-  const canArchive = permissions.includes('secret.archive');
-  const canReveal = canRevealSecrets(permissions);
+  const pending: Pending[] = [
+    ...drafts.map((draft) => ({
+      key: draft.key.trim() || 'unnamed',
+      what: existing.has(draft.key.trim()) ? 'new version' : 'added',
+    })),
+    ...changedEntries.map((entry) => {
+      const change = secretChangeFor(changes, entry.key)!;
+      if (change.archived) return { key: entry.key, what: 'archived' };
+      const renamed = change.key.trim() !== entry.key;
+      if (renamed && change.value !== null) {
+        return { key: entry.key, what: `renamed ${change.key.trim()}, new value` };
+      }
+      if (renamed) return { key: entry.key, what: `renamed ${change.key.trim()}` };
+      return { key: entry.key, what: 'new value' };
+    }),
+  ];
 
-  const active = keys.filter((entry) => !entry.archived);
-  const archived = keys.filter((entry) => entry.archived);
-  const rowProps = { project, environment, canWrite, canArchive, canReveal };
+  const problem = hasConflict
+    ? 'Two pending edits would end up with the same name. Secret names are unique in an environment.'
+    : invalid
+      ? 'Every name needs letters, digits or underscores, and cannot start with a digit.'
+      : null;
 
-  const existing = new Set(keys.map((entry) => entry.key));
-  const changedEntries = active.filter(
-    (entry) => secretChangeFor(changes, entry.key) !== undefined,
-  );
-  const hasConflict = hasSecretEditConflict(active, drafts, changes);
-  const ready =
-    (drafts.length > 0 || changedEntries.length > 0) &&
-    drafts.every((row) => row.key.trim() !== '') &&
-    changedEntries.every((entry) => {
-      const change = secretChangeFor(changes, entry.key);
-      if (change === undefined) return true;
-      return change.archived || change.key.trim() !== '';
-    }) &&
-    !hasConflict;
+  const columns = 5;
 
   return (
     <>
-      <div className="page-head">
-        <div>
-          <h1 className="mono">
-            {project}/{environment}
-          </h1>
-          <p className="sub">
-            {active.length} secret{active.length === 1 ? '' : 's'} in this environment
-            {archived.length > 0 && `, ${archived.length} archived`}.
-          </p>
+      <p id={REVEAL_COST_ID} className="visually-hidden">
+        Revealing decrypts the value and records a read under your name in the audit log.
+      </p>
+
+      <PageHeader
+        eyebrow={
+          <Link to="/projects/$project" params={{ project }}>
+            {project}
+          </Link>
+        }
+        title={environment}
+        aside={<EnvironmentName project={project} environment={environment} />}
+        actions={
+          <>
+            {canWrite && canReveal && <ImportEnv project={project} environment={environment} />}
+            {canWrite && (
+              <button className="btn btn-primary" onClick={addDraft} disabled={saving}>
+                <Plus size={14} />
+                New secret
+              </button>
+            )}
+          </>
+        }
+        meta={
+          <>
+            <span>
+              <strong>{active.length}</strong> secret{active.length === 1 ? '' : 's'}
+              {archived.length > 0 && `, ${archived.length} archived`}
+            </span>
+            <PermissionSummary permissions={permissions} />
+            {canReveal && <span>Every reveal is recorded under your name</span>}
+            <span className="mono" title="Inject these into a process with the CLI">
+              coffre run {project}/{environment} -- …
+            </span>
+          </>
+        }
+      />
+
+      {active.length === 0 && drafts.length === 0 ? (
+        <EmptyState
+          title="No secrets here yet"
+          actions={
+            canWrite && (
+              <>
+                <button className="btn btn-primary" onClick={addDraft}>
+                  <Plus size={14} />
+                  New secret
+                </button>
+                {canReveal && <ImportEnv project={project} environment={environment} />}
+              </>
+            )
+          }
+        >
+          {canWrite
+            ? 'Add them one by one, or paste an existing .env file to import several at once. Nothing is written until you save, or until you have seen the import plan.'
+            : 'Nothing has been written to this environment, and adding the first secret needs secret.write.'}
+        </EmptyState>
+      ) : (
+        <div className="ledger-wrap">
+          <table className="ledger secrets stacks">
+            <thead>
+              <tr>
+                <th className="caps col-key">Key</th>
+                <th className="caps">
+                  Value
+                  {!canReveal && <span className="col-head-note">· hidden from you</span>}
+                </th>
+                <th className="caps col-version">Ver.</th>
+                <th className="caps col-written col-hide-narrow">Last written</th>
+                <th className="col-actions">
+                  <span className="visually-hidden">Actions</span>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {drafts.map((draft) => (
+                <DraftRow
+                  key={draft.id}
+                  draft={draft}
+                  existingVersion={
+                    keys.find((entry) => entry.key === draft.key.trim())?.version ?? null
+                  }
+                  disabled={saving}
+                  onChange={(patch) =>
+                    setDrafts((rows) =>
+                      rows.map((row) => (row.id === draft.id ? { ...row, ...patch } : row)),
+                    )
+                  }
+                  onRemove={() => setDrafts((rows) => rows.filter((row) => row.id !== draft.id))}
+                />
+              ))}
+
+              {active.map((entry) => {
+                const change = secretChangeFor(changes, entry.key);
+                return (
+                  <SecretRow
+                    key={entry.key}
+                    project={project}
+                    environment={environment}
+                    entry={entry}
+                    change={change ?? { key: entry.key, value: null, archived: false }}
+                    editing={
+                      change?.archived !== true &&
+                      (editing.has(entry.key) || change !== undefined)
+                    }
+                    canWrite={canWrite}
+                    canArchive={canArchive}
+                    canReveal={canReveal}
+                    disabled={saving}
+                    columns={columns}
+                    onEdit={() => setEditing((current) => new Set(current).add(entry.key))}
+                    onPatch={(patch) => patchChange(entry, patch)}
+                    onUndo={() => dropChange(entry.key)}
+                    onMarkArchive={() => {
+                      setEditing((current) => {
+                        const next = new Set(current);
+                        next.delete(entry.key);
+                        return next;
+                      });
+                      setChanges((current) => ({
+                        ...current,
+                        [entry.key]: { key: entry.key, value: null, archived: true },
+                      }));
+                    }}
+                  />
+                );
+              })}
+            </tbody>
+          </table>
         </div>
-        <div className="cluster">
-          <PermissionSummary permissions={permissions} />
-          {canWrite && (
-            <button className="btn btn-sm" onClick={addDraft} disabled={saving}>
-              <Plus size={13} />
-              Add secret
-            </button>
-          )}
-          {canWrite && canReveal && (
-            <ImportEnv project={project} environment={environment} />
-          )}
-        </div>
-      </div>
+      )}
 
-      <div className="secret-editor">
-        {active.length === 0 && drafts.length === 0 ? (
-          <EmptyState icon={<Key size={26} />} title="No secrets here yet">
-            {canWrite
-              ? 'Add one with the button above, or paste an existing .env file to import several at once. Nothing is written until you have seen the plan.'
-              : 'Nothing has been written to this environment. You would need secret.write to add the first one.'}
-          </EmptyState>
-        ) : (
-          active.map((entry) => (
-            <EditableSecretRow
-              key={`${project}:${environment}:${entry.key}`}
-              entry={entry}
-              change={
-                secretChangeFor(changes, entry.key) ?? {
-                  key: entry.key,
-                  value: null,
-                  archived: false,
-                }
-              }
-              onChange={(patch) =>
-                setChanges((current) => {
-                  const next = {
-                    ...(secretChangeFor(current, entry.key) ?? {
-                      key: entry.key,
-                      value: null,
-                      archived: false,
-                    }),
-                    ...patch,
-                  };
-                  const dirty =
-                    next.key !== entry.key || next.value !== null || next.archived;
-                  if (dirty) return { ...current, [entry.key]: next };
-                  const { [entry.key]: _, ...rest } = current;
-                  return rest;
-                })
-              }
-              {...rowProps}
-            />
-          ))
-        )}
+      {archived.length > 0 && (
+        <Section
+          labelledBy="archived-secrets"
+          title="Archived"
+          note={
+            <>
+              Retired, so no longer served or injected by <code>coffre run</code>. Their
+              history and audit trail are intact, and restoring is immediate.
+            </>
+          }
+        >
+          <div className="ledger-wrap">
+            <table className="ledger secrets secrets-archived stacks">
+              <thead>
+                <tr>
+                  <th className="caps col-key">Key</th>
+                  <th className="caps col-version">Ver.</th>
+                  <th className="caps col-written col-hide-narrow">Last written</th>
+                  <th className="col-actions">
+                    <span className="visually-hidden">Actions</span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {archived.map((entry) => (
+                  <ArchivedRow
+                    key={entry.key}
+                    project={project}
+                    environment={environment}
+                    entry={entry}
+                    canArchive={canArchive}
+                    canReveal={canReveal}
+                  />
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Section>
+      )}
 
-        {drafts.map((draft) => (
-          <DraftRow
-            key={draft.id}
-            draft={draft}
-            newVersion={draft.key.trim() !== '' && existing.has(draft.key.trim())}
-            disabled={saving}
-            onChange={(patch) =>
-              setDrafts((rows) =>
-                rows.map((row) => (row.id === draft.id ? { ...row, ...patch } : row)),
-              )
-            }
-            onRemove={() => setDrafts((rows) => rows.filter((row) => row.id !== draft.id))}
-          />
-        ))}
-
-        {(drafts.length > 0 || changedEntries.length > 0) && (
-          <div className="row secret-savebar">
-            <button className="btn btn-sm btn-quiet" onClick={addDraft} disabled={saving}>
-              <Plus size={13} />
-              Add another
-            </button>
-            <div className="row-actions">
-              <button
-                className="btn btn-sm"
-                onClick={() => {
-                  setDrafts([]);
-                  setChanges({});
-                  setDraftError(null);
-                }}
-                disabled={saving}
-              >
+      {pendingCount > 0 && (
+        <div className="savebar" role="region" aria-label="Unsaved changes">
+          <div className="savebar-inner">
+            <span className="savebar-count">
+              {pendingCount} change{pendingCount === 1 ? '' : 's'}
+            </span>
+            <span className="savebar-summary">
+              {pending.slice(0, 3).map((item, index) => (
+                <span key={`${item.key}:${index}`}>
+                  {index > 0 && ' · '}
+                  <span className="mono">{item.key}</span> {item.what}
+                </span>
+              ))}
+              {pending.length > 3 && ` · and ${pending.length - 3} more`}
+            </span>
+            <div className="savebar-actions">
+              <button className="btn" onClick={discardAll} disabled={saving}>
                 Discard
               </button>
               <button
-                className="btn btn-sm btn-primary"
-                onClick={saveChanges}
+                className="btn btn-primary"
+                onClick={() => void saveChanges()}
                 disabled={saving || !ready}
+                title="Save (⌘ Enter or Ctrl Enter)"
+                aria-keyshortcuts="Meta+Enter Control+Enter"
               >
                 {saving && <Spinner size={13} />}
-                Save changes
+                Save {pendingCount === 1 ? 'change' : `${pendingCount} changes`}
               </button>
             </div>
-          </div>
-        )}
-
-        {draftError !== null && (
-          <div className="row">
-            <ErrorLine error={draftError} />
-          </div>
-        )}
-        {hasConflict && (
-          <div className="row">
-            <ErrorLine error="Secret names must be unique in this environment." />
-          </div>
-        )}
-      </div>
-
-      {archived.length > 0 && (
-        <section className="section">
-          <div className="section-head">
-            <div>
-              <h2>Archived</h2>
-              <p className="sub">
-                Retired, so no longer served or injected by <code>coffre run</code>. History
-                and audit references are intact, and restoring is one click.
+            {(saveError ?? problem) !== null && (
+              <p className="savebar-error" role="alert">
+                <AlertCircle size={14} />
+                <span>{saveError ?? problem}</span>
               </p>
-            </div>
+            )}
           </div>
-          <div className="card">
-            {archived.map((entry) => (
-              <SecretRow key={entry.key} entry={entry} {...rowProps} />
-            ))}
-          </div>
-        </section>
+        </div>
       )}
     </>
   );
 }
 
-function EditableSecretRow({
-  project,
-  environment,
-  entry,
-  change,
-  canWrite,
-  canArchive,
-  canReveal,
-  onChange,
-}: {
-  project: string;
-  environment: string;
-  entry: SecretKey;
-  change: SecretChange;
-  canWrite: boolean;
-  canArchive: boolean;
-  canReveal: boolean;
-  onChange: (patch: Partial<SecretChange>) => void;
-}) {
-  const [revealed, setRevealed] = useState<string | null>(null);
-  const [visible, setVisible] = useState(false);
-  const [versions, setVersions] = useState<SecretVersion[] | null>(null);
-  const [busy, setBusy] = useState(false);
-  const valueFocused = useRef(false);
-  const { pending, error, setError, run } = useAction();
+/** The display name sits beside the slug; it comes from the shell's project tree. */
+function EnvironmentName({ project, environment }: { project: string; environment: string }) {
+  const { projects } = useLoaderData({ from: '__root__' });
+  const name = projects
+    .find((entry) => entry.slug === project)
+    ?.environments.find((entry) => entry.slug === environment)?.name;
+  return name === undefined ? null : <>{name}</>;
+}
 
-  const dirty =
-    change.key !== entry.key || change.value !== null || change.archived;
-  const rowTone = change.archived
-    ? ' row-change-delete'
-    : dirty
-      ? ' row-change-update'
-      : '';
-  const displayedValue = change.value ?? revealed ?? '';
+/* -------------------------------------------------------------------------- */
+/* Rows                                                                        */
+/* -------------------------------------------------------------------------- */
 
+/**
+ * A text field whose contents are masked until asked, for secret values.
+ *
+ * Where the browser supports it, the mask is CSS on a text input rather than
+ * `type="password"`: password fields invite password managers to offer to
+ * save or fill them, and a secret being typed into coffre is neither.
+ */
+function MaskedInput({
+  masked,
+  className = '',
+  ...props
+}: Omit<InputHTMLAttributes<HTMLInputElement>, 'type'> & { masked: boolean }) {
+  const [cssMask, setCssMask] = useState(false);
   useEffect(() => {
-    if (revealed === null) return;
-    const timer = setTimeout(() => {
-      setRevealed(null);
-      setVisible(false);
-    }, REVEAL_TTL_SECONDS * 1000);
-    return () => clearTimeout(timer);
-  }, [revealed]);
-
-  async function revealForEditing() {
-    valueFocused.current = true;
-    if (change.value !== null) {
-      setVisible(true);
-      return;
-    }
-    if (!canReveal || revealed !== null) {
-      setVisible(revealed !== null);
-      return;
-    }
-
-    setBusy(true);
-    try {
-      const result = await revealSecret({ data: { project, environment, key: entry.key } });
-      if (result.ok) {
-        setRevealed(result.value);
-        setError(null);
-        if (valueFocused.current) setVisible(true);
-      } else {
-        setError(result.error);
-      }
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function toggleHistory() {
-    if (versions !== null) {
-      setVersions(null);
-      return;
-    }
-    setBusy(true);
-    try {
-      const result = await listVersions({ data: { project, environment, key: entry.key } });
-      if (result.ok) {
-        setVersions(result.versions);
-        setError(null);
-      } else {
-        setError(result.error);
-      }
-    } finally {
-      setBusy(false);
-    }
-  }
+    setCssMask(typeof CSS !== 'undefined' && CSS.supports('-webkit-text-security', 'disc'));
+  }, []);
 
   return (
-    <div className={`row-group${rowTone}`}>
-      <div className="row secret-edit-row">
-        <input
-          className="input secret-key-input"
-          aria-label={`Name for ${entry.key}`}
-          spellCheck={false}
-          value={change.key}
-          disabled={!canWrite || change.archived}
-          onChange={(event) => onChange({ key: event.target.value })}
-        />
+    <input
+      {...props}
+      type={masked && !cssMask ? 'password' : 'text'}
+      className={`${className}${masked && cssMask ? ' is-masked' : ''}`}
+      autoComplete="off"
+      spellCheck={false}
+      data-1p-ignore
+      data-lpignore="true"
+      data-bwignore
+    />
+  );
+}
 
-        <div className="secret-input-wrap grow">
-          <input
-            className="input"
-            aria-label={`Value for ${entry.key}`}
-            type={visible ? 'text' : 'password'}
-            placeholder={canReveal ? 'Click to reveal current value' : 'Enter a new value'}
-            spellCheck={false}
-            autoComplete="off"
-            value={displayedValue}
-            disabled={change.archived || busy || (!canWrite && !canReveal)}
-            readOnly={!canWrite}
-            onFocus={() => void revealForEditing()}
-            onBlur={() => {
-              valueFocused.current = false;
-              setVisible(false);
-              if (change.value === null) setRevealed(null);
-            }}
-            onChange={(event) => onChange({ value: event.target.value })}
-          />
-          {busy && <Spinner size={13} />}
-        </div>
-
-        <span className="meta numeric secret-version">v{entry.version ?? 0}</span>
-
-        {dirty && (
-          <span
-            className={`pill ${
-              change.archived ? 'pill-deny' : 'pill-secret'
-            }`}
-          >
-            {change.archived
-              ? 'will archive'
-              : change.key !== entry.key && change.value !== null
-                ? 'name + value'
-                : change.key !== entry.key
-                  ? 'renamed'
-                  : 'new value'}
-          </span>
-        )}
-
-        <div className="row-actions">
-          <SecretReadOnly canReveal={canReveal}>
-            <button
-              className="btn btn-sm btn-icon btn-quiet"
-              aria-label={versions === null ? `Show history for ${entry.key}` : 'Hide history'}
-              onClick={() => void toggleHistory()}
-              disabled={busy || pending}
-            >
-              <History size={14} />
-            </button>
-          </SecretReadOnly>
-          {canArchive && (
-            <button
-              className={`btn btn-sm btn-icon ${
-                change.archived ? 'btn-quiet' : 'btn-danger'
-              }`}
-              aria-label={
-                change.archived
-                  ? `Keep ${entry.key}`
-                  : `Mark ${entry.key} for archiving`
-              }
-              onClick={() => onChange({ archived: !change.archived })}
-              disabled={pending}
-            >
-              {change.archived ? <RotateBack size={14} /> : <Archive size={14} />}
-            </button>
-          )}
-        </div>
-      </div>
-
-      {versions !== null && (
-        <div className="row-detail">
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th className="shrink">Version</th>
-                  <th>Written</th>
-                  <th>By</th>
-                  <th>KEK</th>
-                  <th className="shrink" />
-                </tr>
-              </thead>
-              <tbody>
-                {versions.map((version) => (
-                  <tr key={version.version}>
-                    <td className="num">
-                      v{version.version}
-                      {version.current && (
-                        <span className="pill pill-accent" style={{ marginLeft: 8 }}>
-                          current
-                        </span>
-                      )}
-                    </td>
-                    <td className="num">
-                      <Timestamp iso={version.createdAt} />
-                    </td>
-                    <td className="nowrap">{version.createdBy}</td>
-                    <td className="mono">{version.kek}</td>
-                    <td className="shrink">
-                      {canWrite && !version.current && (
-                        <ConfirmButton
-                          trigger={
-                            <button className="btn btn-sm" disabled={pending}>
-                              <RotateBack size={13} />
-                              Roll back
-                            </button>
-                          }
-                          title={`Roll ${entry.key} back to v${version.version}?`}
-                          body={
-                            <>
-                              The current pointer moves to v{version.version}. Nothing is
-                              copied or deleted, and the next write continues the numbering
-                              forward.
-                            </>
-                          }
-                          confirmLabel={`Roll back to v${version.version}`}
-                          destructive={false}
-                          onConfirm={() =>
-                            run(
-                              () =>
-                                rollbackSecret({
-                                  data: {
-                                    project,
-                                    environment,
-                                    key: entry.key,
-                                    version: version.version,
-                                  },
-                                }),
-                              () => {
-                                toast.success(
-                                  `${entry.key} rolled back to v${version.version}`,
-                                );
-                                setVersions(null);
-                                setRevealed(null);
-                              },
-                            )
-                          }
-                        />
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {error !== null && (
-        <div className="row-detail">
-          <ErrorLine error={error} />
-        </div>
-      )}
+function ValueField({
+  label,
+  value,
+  onChange,
+  placeholder,
+  disabled,
+  autoFocus,
+  onEscape,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+  disabled: boolean;
+  autoFocus?: boolean;
+  onEscape?: () => void;
+}) {
+  const [shown, setShown] = useState(false);
+  return (
+    <div className="input-group">
+      <MaskedInput
+        className="input input-mono"
+        masked={!shown}
+        aria-label={label}
+        placeholder={placeholder}
+        value={value}
+        disabled={disabled}
+        autoFocus={autoFocus}
+        onChange={(event) => onChange(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'Escape' && onEscape !== undefined) onEscape();
+        }}
+      />
+      <button
+        type="button"
+        className="btn btn-quiet btn-sm btn-icon input-addon"
+        aria-label={shown ? 'Mask what you typed' : 'Show what you typed'}
+        aria-pressed={shown}
+        onClick={() => setShown((current) => !current)}
+      >
+        {shown ? <EyeOff size={14} /> : <Eye size={14} />}
+      </button>
     </div>
   );
+}
+
+function useSecondsLeft(reveal: Reveal | null): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (reveal === null) return;
+    setNow(Date.now());
+    const tick = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(tick);
+  }, [reveal]);
+  if (reveal === null) return 0;
+  return Math.max(0, Math.ceil(REVEAL_TTL_SECONDS - (now - reveal.at) / 1000));
 }
 
 function SecretRow({
   project,
   environment,
   entry,
+  change,
+  editing,
   canWrite,
+  canArchive,
+  canReveal,
+  disabled,
+  columns,
+  onEdit,
+  onPatch,
+  onUndo,
+  onMarkArchive,
+}: {
+  project: string;
+  environment: string;
+  entry: SecretKey;
+  change: SecretChange;
+  editing: boolean;
+  canWrite: boolean;
+  canArchive: boolean;
+  canReveal: boolean;
+  disabled: boolean;
+  columns: number;
+  onEdit: () => void;
+  onPatch: (patch: Partial<SecretChange>) => void;
+  onUndo: () => void;
+  onMarkArchive: () => void;
+}) {
+  const [reveal, setReveal] = useState<Reveal | null>(null);
+  const [revealing, setRevealing] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // A reveal belongs to the version it decrypted. The moment the row shows a
+  // different version -- saved here, rolled back, or written by someone else
+  // and picked up on refresh -- the old plaintext is not the value any more,
+  // and must not stay on screen pretending to be.
+  const shown = revealIsCurrent(reveal, entry.version) ? reveal : null;
+  useEffect(() => {
+    if (reveal !== null && !revealIsCurrent(reveal, entry.version)) setReveal(null);
+  }, [reveal, entry.version]);
+
+  useEffect(() => {
+    if (reveal === null) return;
+    const timer = setTimeout(() => setReveal(null), REVEAL_TTL_SECONDS * 1000);
+    return () => clearTimeout(timer);
+  }, [reveal]);
+
+  const secondsLeft = useSecondsLeft(shown);
+
+  async function readValue(): Promise<string | null> {
+    if (shown !== null) return shown.value;
+    setRevealing(true);
+    try {
+      const result = await revealSecret({ data: { project, environment, key: entry.key } });
+      if (!result.ok) {
+        setError(result.error);
+        return null;
+      }
+      setError(null);
+      setReveal({ value: result.value, version: entry.version, at: Date.now() });
+      return result.value;
+    } catch {
+      setError('The request could not be sent. Nothing was read.');
+      return null;
+    } finally {
+      setRevealing(false);
+    }
+  }
+
+  function toggleReveal() {
+    if (shown !== null) setReveal(null);
+    else void readValue();
+  }
+
+  const leaving = change.archived;
+  const renamed = change.key !== entry.key;
+  const valueChanged = change.value !== null;
+  const keyProblem = editing ? secretKeyProblem(change.key.trim()) : null;
+  const state = leaving
+    ? ' is-leaving'
+    : editing && (renamed || valueChanged)
+      ? ' is-changed'
+      : shown !== null
+        ? ' is-revealed'
+        : '';
+  const version = entry.version ?? 0;
+
+  return (
+    <>
+      <tr className={`secret-row${state}`}>
+        <td className="cell-key" data-label="Key">
+          {editing && canWrite ? (
+            <div className="edit-stack">
+              <input
+                className="input input-mono"
+                aria-label={`Name for ${entry.key}`}
+                aria-invalid={keyProblem !== null}
+                spellCheck={false}
+                autoComplete="off"
+                value={change.key}
+                disabled={disabled}
+                onChange={(event) => onPatch({ key: event.target.value })}
+                onKeyDown={(event) => {
+                  if (event.key === 'Escape') onUndo();
+                }}
+              />
+              {(keyProblem !== null || renamed) && (
+                <span className={`edit-note${keyProblem !== null ? ' edit-note-error' : ''}`}>
+                  {keyProblem ?? (
+                    <>
+                      Renamed from <span className="mono">{entry.key}</span>
+                    </>
+                  )}
+                </span>
+              )}
+            </div>
+          ) : (
+            <div className="key-cell">
+              <span>{entry.key}</span>
+              {leaving && <span className="tag tag-red">will be archived</span>}
+            </div>
+          )}
+        </td>
+
+        <td data-label="Value">
+          {editing && canWrite ? (
+            <div className="edit-stack">
+              <ValueField
+                label={`New value for ${entry.key}`}
+                value={change.value ?? ''}
+                placeholder={`Unchanged. Type to replace v${version}.`}
+                disabled={disabled}
+                autoFocus
+                onChange={(value) => onPatch({ value: value === '' ? null : value })}
+                onEscape={onUndo}
+              />
+              <span className="edit-note">
+                <span>
+                  {valueChanged
+                    ? `Saving appends v${version + 1}; v${version} stays restorable.`
+                    : 'Nothing is decrypted to edit. Leave it empty to keep the current value.'}
+                </span>
+                {canReveal && !valueChanged && (
+                  <button
+                    type="button"
+                    className="act"
+                    aria-describedby={REVEAL_COST_ID}
+                    disabled={revealing}
+                    onClick={async () => {
+                      const value = await readValue();
+                      if (value !== null) onPatch({ value });
+                    }}
+                  >
+                    {revealing && <Spinner size={12} />}
+                    Start from current value (logged)
+                  </button>
+                )}
+              </span>
+            </div>
+          ) : shown !== null && !leaving ? (
+            <div
+              className="revealed"
+              style={{ ['--reveal-ttl' as string]: `${REVEAL_TTL_SECONDS}s` }}
+            >
+              <span className="revealed-value">{shown.value === '' ? '(empty)' : shown.value}</span>
+              <span className="revealed-note">
+                Read recorded under your name at {clock(shown.at)} · hides in {secondsLeft}s
+              </span>
+              <span className="revealed-meter" aria-hidden />
+            </div>
+          ) : (
+            <span className="mask" aria-label="Hidden">
+              ••••••••••••
+            </span>
+          )}
+        </td>
+
+        <td className="col-version" data-label="Version">
+          {editing && valueChanged ? (
+            <span className="version-shift">
+              v{version} → <b>v{version + 1}</b>
+            </span>
+          ) : (
+            <span className="version-shift">{entry.version === null ? '—' : `v${entry.version}`}</span>
+          )}
+        </td>
+
+        <td className="col-written col-hide-narrow" data-label="Last written">
+          <Written entry={entry} />
+        </td>
+
+        <td className="col-actions">
+          <div className="acts">
+            {leaving ? (
+              <button className="act act-quiet" onClick={onUndo} disabled={disabled}>
+                <RotateBack size={13} />
+                Keep
+              </button>
+            ) : editing ? (
+              <button className="act act-quiet" onClick={onUndo} disabled={disabled}>
+                {renamed || valueChanged ? 'Undo' : 'Cancel'}
+              </button>
+            ) : (
+              <>
+                <SecretReadOnly canReveal={canReveal}>
+                  <button
+                    className="act"
+                    onClick={toggleReveal}
+                    disabled={revealing}
+                    aria-describedby={shown === null ? REVEAL_COST_ID : undefined}
+                    aria-label={`${shown === null ? 'Reveal' : 'Hide'} ${entry.key}`}
+                  >
+                    {revealing ? (
+                      <Spinner size={13} />
+                    ) : shown === null ? (
+                      <Eye size={14} />
+                    ) : (
+                      <EyeOff size={14} />
+                    )}
+                    {shown === null ? 'Reveal' : 'Hide'}
+                  </button>
+                </SecretReadOnly>
+                {shown !== null && <CopyButton variant="text" value={shown.value} label={`Copy ${entry.key}`} />}
+                {canWrite && (
+                  <button
+                    className="act"
+                    onClick={() => {
+                      setReveal(null);
+                      onEdit();
+                    }}
+                    disabled={disabled}
+                    aria-label={`Edit ${entry.key}`}
+                  >
+                    Edit
+                  </button>
+                )}
+                {(canReveal || canArchive) && (
+                  <DropdownMenu.Root>
+                    <DropdownMenu.Trigger asChild>
+                      <button
+                        className="act act-quiet"
+                        aria-label={`More for ${entry.key}`}
+                        disabled={disabled}
+                      >
+                        <MoreHorizontal size={16} />
+                      </button>
+                    </DropdownMenu.Trigger>
+                    <DropdownMenu.Portal>
+                      <DropdownMenu.Content className="menu" sideOffset={6} align="end">
+                        <SecretReadOnly canReveal={canReveal}>
+                          <DropdownMenu.Item
+                            className="menu-item"
+                            onSelect={() => setHistoryOpen((open) => !open)}
+                          >
+                            <History size={14} />
+                            {historyOpen ? 'Hide history' : 'Version history'}
+                          </DropdownMenu.Item>
+                        </SecretReadOnly>
+                        {canArchive && (
+                          <>
+                            {canReveal && <DropdownMenu.Separator className="menu-sep" />}
+                            <DropdownMenu.Item
+                              className="menu-item menu-item-danger"
+                              onSelect={() => {
+                                setReveal(null);
+                                onMarkArchive();
+                              }}
+                            >
+                              <Archive size={14} />
+                              Archive
+                              <span className="menu-hint">on save</span>
+                            </DropdownMenu.Item>
+                          </>
+                        )}
+                      </DropdownMenu.Content>
+                    </DropdownMenu.Portal>
+                  </DropdownMenu.Root>
+                )}
+              </>
+            )}
+          </div>
+        </td>
+      </tr>
+
+      {historyOpen && canReveal && (
+        <tr className="detail-row">
+          <td colSpan={columns}>
+            <VersionHistory
+              project={project}
+              environment={environment}
+              secretKey={entry.key}
+              currentVersion={entry.version}
+              canWrite={canWrite}
+              onClose={() => setHistoryOpen(false)}
+              onRolledBack={() => setReveal(null)}
+            />
+          </td>
+        </tr>
+      )}
+
+      {error !== null && (
+        <tr className="row-error">
+          <td colSpan={columns}>
+            <ErrorLine error={error} />
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+function Written({ entry }: { entry: SecretKey }) {
+  if (entry.updatedBy === null && entry.updatedAt === null) {
+    return <span className="cell-muted">—</span>;
+  }
+  return (
+    <div className="cell-stack">
+      <span title={entry.updatedBy ?? undefined}>{entry.updatedBy ?? 'unknown'}</span>
+      {entry.updatedAt !== null && (
+        <small>
+          <Timestamp iso={entry.updatedAt} display="relative" />
+        </small>
+      )}
+    </div>
+  );
+}
+
+function clock(at: number): string {
+  return `${new Date(at).toISOString().slice(11, 19)} UTC`;
+}
+
+/**
+ * A secret being typed, sitting in the ledger where it will end up.
+ *
+ * This replaced a separate "Add a secret" form. The form made you look away
+ * from the list to add to it, and only ever accepted one key at a time; a row
+ * in place accepts as many as you want to queue.
+ */
+function DraftRow({
+  draft,
+  existingVersion,
+  disabled,
+  onChange,
+  onRemove,
+}: {
+  draft: SecretDraft;
+  existingVersion: number | null;
+  disabled: boolean;
+  onChange: (patch: Partial<SecretDraft>) => void;
+  onRemove: () => void;
+}) {
+  const [touched, setTouched] = useState(false);
+  const trimmed = draft.key.trim();
+  const keyProblem = trimmed === '' ? (touched ? 'Give it a name.' : null) : secretKeyProblem(trimmed);
+  const isNewVersion = trimmed !== '' && existingVersion !== null;
+
+  return (
+    <tr className="secret-row is-draft">
+      <td className="cell-key" data-label="New secret">
+        <div className="edit-stack">
+          <input
+            className="input input-mono"
+            // Only the row that just mounted takes focus, which is the one the
+            // New secret button created.
+            autoFocus
+            aria-label="Name of the new secret"
+            aria-invalid={keyProblem !== null}
+            placeholder="NAME_OF_SECRET"
+            spellCheck={false}
+            autoComplete="off"
+            value={draft.key}
+            disabled={disabled}
+            onBlur={() => setTouched(true)}
+            onChange={(event) => onChange({ key: event.target.value })}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') onRemove();
+            }}
+          />
+          {(keyProblem !== null || isNewVersion) && (
+            <span className={`edit-note${keyProblem !== null ? ' edit-note-error' : ''}`}>
+              {keyProblem ??
+                'This name already exists here. Saving appends a new version to it rather than creating a second secret.'}
+            </span>
+          )}
+        </div>
+      </td>
+      <td data-label="Value">
+        <div className="edit-stack">
+          <ValueField
+            label={`Value for ${trimmed === '' ? 'the new secret' : trimmed}`}
+            value={draft.value}
+            placeholder="Value"
+            disabled={disabled}
+            onChange={(value) => onChange({ value })}
+            onEscape={onRemove}
+          />
+        </div>
+      </td>
+      <td className="col-version" data-label="Version">
+        <span className="version-shift">
+          {isNewVersion ? (
+            <>
+              v{existingVersion} → <b>v{existingVersion + 1}</b>
+            </>
+          ) : (
+            <b>new</b>
+          )}
+        </span>
+      </td>
+      <td className="col-written col-hide-narrow">
+        <span className="cell-muted">—</span>
+      </td>
+      <td className="col-actions">
+        <button className="act act-quiet" onClick={onRemove} disabled={disabled}>
+          Remove
+        </button>
+      </td>
+    </tr>
+  );
+}
+
+function ArchivedRow({
+  project,
+  environment,
+  entry,
   canArchive,
   canReveal,
 }: {
   project: string;
   environment: string;
   entry: SecretKey;
-  canWrite: boolean;
   canArchive: boolean;
   canReveal: boolean;
 }) {
-  const [value, setValue] = useState<string | null>(null);
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState('');
-  const [versions, setVersions] = useState<SecretVersion[] | null>(null);
-  const [busy, setBusy] = useState(false);
-  const { pending, error, setError, run } = useAction();
-
-  // Hide the value again on a timer. Paired with the countdown bar in
-  // `.secret-value`, so the disappearance is expected rather than startling.
-  useEffect(() => {
-    if (value === null) return;
-    const timer = setTimeout(() => setValue(null), REVEAL_TTL_SECONDS * 1000);
-    return () => clearTimeout(timer);
-  }, [value]);
-
-  async function onReveal() {
-    if (value !== null) {
-      setValue(null);
-      return;
-    }
-    setBusy(true);
-    try {
-      const result = await revealSecret({ data: { project, environment, key: entry.key } });
-      if (result.ok) {
-        setValue(result.value);
-        setError(null);
-      } else {
-        setError(result.error);
-      }
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function onHistory() {
-    if (versions !== null) {
-      setVersions(null);
-      return;
-    }
-    setBusy(true);
-    try {
-      const result = await listVersions({ data: { project, environment, key: entry.key } });
-      if (result.ok) {
-        setVersions(result.versions);
-        setError(null);
-      } else {
-        setError(result.error);
-      }
-    } finally {
-      setBusy(false);
-    }
-  }
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const { pending, error, run } = useAction();
 
   function setArchived(archived: boolean) {
     run(
       () => setSecretArchived({ data: { project, environment, key: entry.key, archived } }),
       () =>
-        // Archiving is fully reversible, so it gets an undo rather than a
+        // Restoring is fully reversible, so it gets an undo rather than a
         // confirmation dialog in front of it.
         toast.success(archived ? `${entry.key} archived` : `${entry.key} restored`, {
           action: { label: 'Undo', onClick: () => setArchived(!archived) },
@@ -687,318 +1075,223 @@ function SecretRow({
     );
   }
 
-  const working = busy || pending;
-  const hasSecondaryActions = canWrite || canArchive || canReveal;
-
   return (
-    <div className="row-group">
-      <div className="row row-interactive">
-        <div className="row-title">
-          <span className="row-key">{entry.key}</span>
-          {entry.archived && <span className="pill pill-muted">archived</span>}
-        </div>
-
-        <span className="meta numeric" style={{ flex: 'none' }}>
-          v{entry.version ?? 0}
-        </span>
-        {entry.updatedBy !== null && (
-          <span className="meta" style={{ flex: 'none' }}>
-            {entry.updatedBy}
-          </span>
-        )}
-
-        <div className="row-actions">
-          <SecretReadOnly canReveal={canReveal && !entry.archived}>
-            <button className="btn btn-sm" onClick={onReveal} disabled={working}>
-              {working && value === null ? (
-                <Spinner size={13} />
-              ) : value !== null ? (
-                <EyeOff size={13} />
-              ) : (
-                <Eye size={13} />
-              )}
-              {value !== null ? 'Hide' : 'Reveal'}
-            </button>
-          </SecretReadOnly>
-
-          {hasSecondaryActions && (
-            <DropdownMenu.Root>
-              <DropdownMenu.Trigger asChild>
-                <button
-                  className="btn btn-sm btn-icon"
-                  aria-label={`Actions for ${entry.key}`}
-                >
-                  <MoreHorizontal size={14} />
-                </button>
-              </DropdownMenu.Trigger>
-              <DropdownMenu.Portal>
-                <DropdownMenu.Content className="menu" sideOffset={6} align="end">
-                  {canWrite && !entry.archived && (
-                    <DropdownMenu.Item
-                      className="menu-item"
-                      onSelect={() => {
-                        setEditing((open) => !open);
-                        setDraft('');
-                      }}
-                    >
-                      <Pencil size={14} />
-                      {editing ? 'Cancel edit' : 'Set new value'}
-                    </DropdownMenu.Item>
-                  )}
-                  <SecretReadOnly canReveal={canReveal}>
-                    <DropdownMenu.Item className="menu-item" onSelect={onHistory}>
-                      <History size={14} />
-                      {versions === null ? 'Version history' : 'Hide history'}
-                    </DropdownMenu.Item>
-                  </SecretReadOnly>
-                  {canArchive && (
-                    <>
-                      <DropdownMenu.Separator className="menu-sep" />
-                      <DropdownMenu.Item
-                        className={`menu-item${entry.archived ? '' : ' menu-item-danger'}`}
-                        onSelect={() => setArchived(!entry.archived)}
-                      >
-                        <Archive size={14} />
-                        {entry.archived ? 'Restore' : 'Archive'}
-                      </DropdownMenu.Item>
-                    </>
-                  )}
-                </DropdownMenu.Content>
-              </DropdownMenu.Portal>
-            </DropdownMenu.Root>
-          )}
-        </div>
-      </div>
-
-      {value !== null && (
-        <div className="row-detail">
-          <div
-            className="secret-value"
-            style={{ ['--secret-ttl' as string]: `${REVEAL_TTL_SECONDS}s` }}
-          >
-            <span className="secret-text">{value}</span>
-            <CopyButton value={value} label={`Copy ${entry.key}`} />
-            <div className="secret-meter" />
+    <>
+      <tr className="secret-row is-archived">
+        <td className="cell-key" data-label="Key">
+          {entry.key}
+        </td>
+        <td className="col-version" data-label="Version">
+          <span className="version-shift">{entry.version === null ? '—' : `v${entry.version}`}</span>
+        </td>
+        <td className="col-written col-hide-narrow" data-label="Last written">
+          <Written entry={entry} />
+        </td>
+        <td className="col-actions">
+          <div className="acts">
+            <SecretReadOnly canReveal={canReveal}>
+              <button className="act act-quiet" onClick={() => setHistoryOpen((open) => !open)}>
+                <History size={14} />
+                {historyOpen ? 'Hide history' : 'History'}
+              </button>
+            </SecretReadOnly>
+            {canArchive && (
+              <button className="act" onClick={() => setArchived(false)} disabled={pending}>
+                {pending ? <Spinner size={13} /> : <RotateBack size={13} />}
+                Restore
+              </button>
+            )}
           </div>
-          <p className="meta" style={{ marginTop: 'var(--space-2)' }}>
-            Logged as a read by you. Hides itself in {REVEAL_TTL_SECONDS} seconds.
-          </p>
-        </div>
+        </td>
+      </tr>
+      {historyOpen && (
+        <tr className="detail-row">
+          <td colSpan={4}>
+            <VersionHistory
+              project={project}
+              environment={environment}
+              secretKey={entry.key}
+              currentVersion={entry.version}
+              canWrite={false}
+              onClose={() => setHistoryOpen(false)}
+              onRolledBack={() => undefined}
+            />
+          </td>
+        </tr>
       )}
-
-      {editing && (
-        <div className="row-detail">
-          <form
-            className="form-grid"
-            onSubmit={(event) => {
-              event.preventDefault();
-              run(
-                () =>
-                  saveSecret({
-                    data: { project, environment, key: entry.key, value: draft },
-                  }),
-                (result) => {
-                  toast.success(`${entry.key} saved as v${result.version}`);
-                  setEditing(false);
-                  setValue(null);
-                  setVersions(null);
-                  setDraft('');
-                },
-              );
-            }}
-          >
-            <label className="field grow">
-              <span className="label">New value for {entry.key}</span>
-              <input
-                className="input"
-                autoFocus
-                value={draft}
-                onChange={(event) => setDraft(event.target.value)}
-              />
-            </label>
-            <button
-              className="btn btn-primary"
-              type="submit"
-              disabled={working || draft === ''}
-            >
-              {working && <Spinner />}
-              Save as v{(entry.version ?? 0) + 1}
-            </button>
-            <button className="btn" type="button" onClick={() => setEditing(false)}>
-              Cancel
-            </button>
-          </form>
-          <p className="meta" style={{ marginTop: 'var(--space-3)' }}>
-            The current value is not replaced. A new version is appended and the pointer
-            moves, so v{entry.version ?? 0} stays readable and restorable.
-          </p>
-        </div>
-      )}
-
-      {versions !== null && (
-        <div className="row-detail">
-          {/* No card wrapper: this table already sits inside one, and a card
-              inside a card reads as a rendering accident. */}
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th className="shrink">Version</th>
-                  <th>Written</th>
-                  <th>By</th>
-                  <th>KEK</th>
-                  <th className="shrink" />
-                </tr>
-              </thead>
-              <tbody>
-                {versions.map((version) => (
-                  <tr key={version.version}>
-                    <td className="num">
-                      v{version.version}
-                      {version.current && (
-                        <span className="pill pill-accent" style={{ marginLeft: 8 }}>
-                          current
-                        </span>
-                      )}
-                    </td>
-                    <td className="num">
-                      <Timestamp iso={version.createdAt} />
-                    </td>
-                    <td className="wrap">{version.createdBy}</td>
-                    <td className="mono">{version.kek}</td>
-                    <td className="shrink">
-                      {canWrite && !version.current && (
-                        <ConfirmButton
-                          trigger={
-                            <button className="btn btn-sm" disabled={working}>
-                              <RotateBack size={13} />
-                              Roll back
-                            </button>
-                          }
-                          title={`Roll ${entry.key} back to v${version.version}?`}
-                          body={
-                            <>
-                              The current pointer moves to v{version.version}. Nothing is
-                              copied or deleted, every version stays readable, and the next
-                              write continues the numbering forward. Anything reading this
-                              environment picks up the change immediately.
-                            </>
-                          }
-                          confirmLabel={`Roll back to v${version.version}`}
-                          destructive={false}
-                          onConfirm={() =>
-                            run(
-                              () =>
-                                rollbackSecret({
-                                  data: {
-                                    project,
-                                    environment,
-                                    key: entry.key,
-                                    version: version.version,
-                                  },
-                                }),
-                              () => {
-                                toast.success(
-                                  `${entry.key} rolled back to v${version.version}`,
-                                );
-                                setVersions(null);
-                                setValue(null);
-                              },
-                            )
-                          }
-                        />
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <p className="meta" style={{ marginTop: 'var(--space-3)' }}>
-            Metadata only. Listing versions does not decrypt anything and is not recorded as
-            a read.
-          </p>
-        </div>
-      )}
-
       {error !== null && (
-        <div className="row-detail">
-          <ErrorLine error={error} />
-        </div>
+        <tr className="row-error">
+          <td colSpan={4}>
+            <ErrorLine error={error} />
+          </td>
+        </tr>
       )}
-    </div>
+    </>
   );
 }
 
-/**
- * A secret being typed, sitting in the list where it will end up.
- *
- * This replaced a separate "Add a secret" form below the table. The form made
- * you look away from the list to add to it, and only ever accepted one key at
- * a time; a row in place accepts as many as you want to queue and shows them
- * in the order they will be written.
- */
-function DraftRow({
-  draft,
-  newVersion,
-  disabled,
-  onChange,
-  onRemove,
+/* -------------------------------------------------------------------------- */
+/* History                                                                     */
+/* -------------------------------------------------------------------------- */
+
+function VersionHistory({
+  project,
+  environment,
+  secretKey,
+  currentVersion,
+  canWrite,
+  onClose,
+  onRolledBack,
 }: {
-  draft: SecretDraft;
-  newVersion: boolean;
-  disabled: boolean;
-  onChange: (patch: Partial<SecretDraft>) => void;
-  onRemove: () => void;
+  project: string;
+  environment: string;
+  secretKey: string;
+  currentVersion: number | null;
+  canWrite: boolean;
+  onClose: () => void;
+  onRolledBack: () => void;
 }) {
+  const [versions, setVersions] = useState<SecretVersion[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const { pending, error, run } = useAction();
+
+  // Refetch whenever the current version moves, so a rollback -- here or by
+  // anyone else -- is reflected in which row says "current".
+  useEffect(() => {
+    let cancelled = false;
+    listVersions({ data: { project, environment, key: secretKey } })
+      .then((result) => {
+        if (cancelled) return;
+        if (result.ok) {
+          setVersions(result.versions);
+          setLoadError(null);
+        } else {
+          setLoadError(result.error);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setLoadError('The version history could not be loaded.');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [project, environment, secretKey, currentVersion]);
+
   return (
-    <div className="row row-draft">
-      <input
-        className="input"
-        style={{ flex: '0 1 17rem' }}
-        // Only the row that just mounted takes focus, which is the one the
-        // "Add" button created.
-        autoFocus
-        aria-label="Key"
-        placeholder="DATABASE_URL"
-        spellCheck={false}
-        value={draft.key}
-        disabled={disabled}
-        onChange={(event) => onChange({ key: event.target.value })}
-      />
-
-      <input
-        className="input grow"
-        aria-label="Value"
-        type="password"
-        placeholder="postgres://..."
-        spellCheck={false}
-        value={draft.value}
-        disabled={disabled}
-        onChange={(event) => onChange({ value: event.target.value })}
-      />
-
-      {newVersion && (
-        <Tip label="This key already exists here. Saving appends a new version to it rather than creating a second secret.">
-          <span className="pill pill-muted" style={{ flex: 'none', cursor: 'help' }}>
-            new version
-          </span>
-        </Tip>
-      )}
-
-      <div className="row-actions">
-        <button
-          className="btn btn-quiet btn-sm btn-icon"
-          aria-label="Discard this row"
-          onClick={onRemove}
-          disabled={disabled}
-        >
-          <X size={14} />
+    <div className="history">
+      <div className="history-head">
+        <span className="history-title">
+          History of <span className="mono">{secretKey}</span>
+        </span>
+        <button className="act act-quiet" onClick={onClose}>
+          Close
         </button>
       </div>
+
+      {loadError !== null ? (
+        <ErrorLine error={loadError} />
+      ) : versions === null ? (
+        <p className="hint" style={{ padding: '0.75rem 0' }}>
+          <Spinner size={13} /> Loading versions…
+        </p>
+      ) : (
+        <div className="ledger-wrap">
+          <table className="ledger">
+            <thead>
+              <tr>
+                <th className="caps col-shrink">Version</th>
+                <th className="caps col-shrink">Written (UTC)</th>
+                <th className="caps">By</th>
+                <th className="caps col-shrink">Key id</th>
+                <th className="col-actions">
+                  <span className="visually-hidden">Actions</span>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {versions.map((version) => (
+                <tr key={version.version}>
+                  <td className="cell-mono nowrap">
+                    v{version.version}{' '}
+                    {version.current && <span className="tag tag-accent">current</span>}
+                  </td>
+                  <td className="nowrap">
+                    <Timestamp iso={version.createdAt} />
+                  </td>
+                  <td>{version.createdBy}</td>
+                  <td className="cell-mono cell-muted nowrap">{version.kek}</td>
+                  <td className="col-actions">
+                    {canWrite && !version.current && (
+                      <ConfirmButton
+                        trigger={
+                          <button className="act" disabled={pending}>
+                            <RotateBack size={13} />
+                            Roll back
+                          </button>
+                        }
+                        title={
+                          <>
+                            Roll <span className="mono">{secretKey}</span> back to v
+                            {version.version}?
+                          </>
+                        }
+                        body={
+                          <>
+                            The current pointer moves to v{version.version}. Nothing is copied
+                            or deleted, every version stays readable, and the next write
+                            continues the numbering forward. Anything reading{' '}
+                            <span className="mono">
+                              {project}/{environment}
+                            </span>{' '}
+                            picks up the change immediately.
+                          </>
+                        }
+                        confirmLabel={`Roll back to v${version.version}`}
+                        destructive={false}
+                        onConfirm={() =>
+                          run(
+                            () =>
+                              rollbackSecret({
+                                data: {
+                                  project,
+                                  environment,
+                                  key: secretKey,
+                                  version: version.version,
+                                },
+                              }),
+                            () => {
+                              onRolledBack();
+                              toast.success(`${secretKey} rolled back to v${version.version}`);
+                            },
+                          )
+                        }
+                      />
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <ErrorLine error={error} />
+      <p className="history-note">
+        Metadata only. Listing versions decrypts nothing and is not recorded as a read.
+      </p>
     </div>
   );
 }
+
+/* -------------------------------------------------------------------------- */
+/* Import                                                                      */
+/* -------------------------------------------------------------------------- */
+
+const PLAN_TAG: Record<ImportPlanEntry['action'], string> = {
+  create: 'tag tag-green',
+  update: 'tag tag-accent',
+  unchanged: 'tag tag-outline',
+};
 
 /**
  * Bulk import from a .env file.
@@ -1047,64 +1340,68 @@ function ImportEnv({ project, environment }: { project: string; environment: str
 
   return (
     <>
-      <button className="btn btn-sm" onClick={() => setOpen(true)}>
-        <Upload size={13} />
+      <button className="btn" onClick={() => setOpen(true)}>
+        <Upload size={14} />
         Import .env
       </button>
 
       <Modal
         open={open}
         onOpenChange={(next) => (next ? setOpen(true) : close())}
-        title="Import .env"
+        title={
+          <>
+            Import into{' '}
+            <span className="mono">
+              {project}/{environment}
+            </span>
+          </>
+        }
         wide
         description={
           <>
-            Parsed on the server, so the CLI and this page cannot disagree about what a file
-            means. Malformed lines are reported, never guessed at.
+            Paste a .env file. It is parsed on the server, so this page and the CLI cannot
+            disagree about what it means, and malformed lines are reported rather than
+            guessed at. The preview compares against current values, so both the preview and
+            the import are recorded in the audit log.
           </>
         }
       >
-        <div className="dialog-form stack">
+        <div className="form" style={{ marginTop: '1.25rem' }}>
           <label className="field">
-            <span className="label">Paste file contents</span>
+            <span className="caps">File contents</span>
             <textarea
               className="textarea"
               autoFocus
               spellCheck={false}
-              placeholder={'DATABASE_URL=postgres://...\nSTRIPE_KEY="sk_live_..."'}
+              placeholder={'DATABASE_URL=postgres://…\nSTRIPE_KEY="sk_live_…"'}
               value={content}
               onChange={(event) => {
                 setContent(event.target.value);
                 setPlan(null);
+                setProblems([]);
               }}
             />
           </label>
 
-          {plan !== null && (
-            <div className="table-wrap">
-              <table>
+          {plan !== null && plan.length > 0 && (
+            <div className="ledger-wrap">
+              <table className="ledger">
                 <thead>
                   <tr>
-                    <th>Key</th>
-                    <th className="shrink">Action</th>
-                    <th className="shrink">Current</th>
+                    <th className="caps">Key</th>
+                    <th className="caps col-shrink">Plan</th>
+                    <th className="caps col-shrink">Current</th>
                   </tr>
                 </thead>
                 <tbody>
                   {plan.map((entry) => (
                     <tr key={entry.key}>
-                      <td className="mono">{entry.key}</td>
-                      <td>
-                        <span
-                          className={`pill ${
-                            entry.action === 'unchanged' ? 'pill-muted' : 'pill-allow'
-                          }`}
-                        >
-                          {entry.action}
-                        </span>
+                      <td className="cell-key">{entry.key}</td>
+                      <td className="col-shrink">
+                        <span className={PLAN_TAG[entry.action]}>{entry.action}</span>
                       </td>
-                      <td className="num">
-                        {entry.version === null ? '--' : `v${entry.version}`}
+                      <td className="col-shrink cell-mono cell-muted">
+                        {entry.version === null ? '—' : `v${entry.version}`}
                       </td>
                     </tr>
                   ))}
@@ -1113,12 +1410,16 @@ function ImportEnv({ project, environment }: { project: string; environment: str
             </div>
           )}
 
+          {plan !== null && plan.length > 0 && changes.length === 0 && (
+            <Notice tone="good">Every key already has this value. There is nothing to write.</Notice>
+          )}
+
           {problems.length > 0 && (
             <Notice tone="bad">
               <strong>
                 {problems.length} line{problems.length === 1 ? '' : 's'} could not be parsed
               </strong>
-              <ul style={{ margin: 'var(--space-2) 0 0', paddingLeft: '1.1rem' }}>
+              <ul style={{ margin: '0.375rem 0 0', paddingLeft: '1.1rem' }}>
                 {problems.map((problem) => (
                   <li key={problem.line}>
                     Line {problem.line}: {problem.reason}{' '}
@@ -1135,22 +1436,29 @@ function ImportEnv({ project, environment }: { project: string; environment: str
             <button className="btn" onClick={close}>
               Cancel
             </button>
-            <button className="btn" disabled={pending || content === ''} onClick={preview}>
-              {pending && <Spinner />}
-              Preview changes
-            </button>
-            <button
-              className="btn btn-primary"
-              disabled={pending || plan === null || changes.length === 0}
-              onClick={apply}
-            >
-              {plan === null
-                ? 'Preview first'
-                : `Apply ${changes.length} change${changes.length === 1 ? '' : 's'}`}
-            </button>
+            {plan === null ? (
+              <button
+                className="btn btn-primary"
+                disabled={pending || content.trim() === ''}
+                onClick={preview}
+              >
+                {pending && <Spinner />}
+                Preview changes
+              </button>
+            ) : (
+              <button
+                className="btn btn-primary"
+                disabled={pending || changes.length === 0}
+                onClick={apply}
+              >
+                {pending && <Spinner />}
+                Write {changes.length} change{changes.length === 1 ? '' : 's'}
+              </button>
+            )}
           </div>
         </div>
       </Modal>
     </>
   );
 }
+

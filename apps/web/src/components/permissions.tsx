@@ -1,7 +1,6 @@
 import { Popover } from 'radix-ui';
 import type { Permission } from '../shared/models';
-import { Tip } from './ui';
-import { ChevronDown, Eye, Key, ShieldCheck } from './icons';
+import { ChevronDown } from './icons';
 
 /**
  * What each permission actually lets you do, in the second person.
@@ -11,78 +10,80 @@ import { ChevronDown, Eye, Key, ShieldCheck } from './icons';
  * dotted strings and left to the reader.
  */
 const EXPLAINED: Record<Permission, string> = {
-  'secret.read': 'Reveal secret values. Every reveal is audited.',
-  'secret.write': 'Write new versions of a secret.',
+  'secret.read': 'Reveal secret values. Every reveal is written to the audit log.',
+  'secret.write': 'Write new versions of a secret, rename it, import a .env file.',
   'secret.archive': 'Retire and restore secrets.',
   'audit.read': 'Read the audit log.',
   'environment.manage': 'Create, rename and archive environments.',
-  'grant.manage': 'Grant and revoke access for other principals.',
+  'grant.manage': 'Grant and revoke access for other people and services.',
   'project.manage': 'Rename and archive the project itself.',
 };
 
+const SHORT: Record<Permission, string> = {
+  'secret.read': 'read',
+  'secret.write': 'write',
+  'secret.archive': 'archive',
+  'audit.read': 'audit',
+  'environment.manage': 'environments',
+  'grant.manage': 'access',
+  'project.manage': 'settings',
+};
+
+const ORDER = Object.keys(EXPLAINED) as Permission[];
+
+/** "Read, write, archive" -- the permissions as a phrase, in catalogue order. */
+export function permissionPhrase(permissions: readonly Permission[]): string {
+  if (permissions.length === ORDER.length) return 'Everything';
+  const words = ORDER.filter((permission) => permissions.includes(permission)).map(
+    (permission) => SHORT[permission],
+  );
+  const phrase = words.join(', ');
+  return phrase.charAt(0).toUpperCase() + phrase.slice(1);
+}
+
 /**
- * A compact stand-in for the list of permissions.
+ * Your access here, as a short phrase that opens into the full list.
  *
  * Rendering all seven as pills next to the page title made the title compete
- * with reference information nobody reads twice. Even spelled out in a word or
- * two it competed, so the trigger is down to the one glyph that carries the
- * distinction -- eye or shield, can read values or cannot -- and the detail
- * waits inside.
+ * with reference information nobody reads twice, so the summary is one line in
+ * the meta strip under the title, and the explanation waits behind it.
  */
 export function PermissionSummary({ permissions }: { permissions: Permission[] }) {
   if (permissions.length === 0) {
-    return <span className="pill pill-muted">no permissions here</span>;
+    return <span>No permissions here</span>;
   }
 
   const canRead = permissions.includes('secret.read');
-  const label = canRead ? 'Can read values' : 'Cannot read values';
 
   return (
     <Popover.Root>
-      {/* Tooltip outside, popover inside: Popover.Trigger forwards a ref, so
-          Tooltip.Trigger can wrap it, but not the other way around. */}
-      <Tip label={label}>
-        <Popover.Trigger asChild>
-          <button
-            className="btn btn-head-action"
-            aria-label={`${label}. ${permissions.length} permissions here.`}
-          >
-            {canRead ? <Eye size={15} /> : <ShieldCheck size={15} />}
-            <ChevronDown size={13} />
-          </button>
-        </Popover.Trigger>
-      </Tip>
+      <Popover.Trigger asChild>
+        <button type="button" className="perm-trigger">
+          Your access: <strong>{permissionPhrase(permissions)}</strong>
+          <ChevronDown size={12} />
+        </button>
+      </Popover.Trigger>
 
       <Popover.Portal>
-        <Popover.Content
-          className="menu"
-          sideOffset={6}
-          align="end"
-          collisionPadding={12}
-          style={{ minWidth: '20rem', padding: 'var(--space-4)' }}
-        >
-          <p className="label" style={{ marginBottom: 'var(--space-3)' }}>
-            Your effective permissions
-          </p>
+        <Popover.Content className="popover" sideOffset={8} align="start" collisionPadding={12}>
+          <p className="caps">Your effective permissions</p>
 
-          <div className="stack" style={{ gap: 'var(--space-3)' }}>
-            {permissions.map((permission) => (
-              <div key={permission} className="cluster" style={{ gap: 'var(--space-3)' }}>
-                <Key size={13} style={{ color: 'var(--ink-3)', flex: 'none' }} />
-                <span style={{ minWidth: 0 }}>
-                  <span className="mono" style={{ fontSize: 'var(--text-xs)' }}>
-                    {permission}
-                  </span>
-                  <span className="meta" style={{ display: 'block' }}>
-                    {EXPLAINED[permission]}
-                  </span>
+          <ul className="perm-list">
+            {ORDER.filter((permission) => permissions.includes(permission)).map((permission) => (
+              <li key={permission}>
+                <span className="perm-mark" aria-hidden />
+                <span>
+                  <span className="mono">{permission}</span>
+                  <span className="hint">{EXPLAINED[permission]}</span>
                 </span>
-              </div>
+              </li>
             ))}
-          </div>
+          </ul>
 
-          <p className="meta" style={{ marginTop: 'var(--space-4)' }}>
-            The union of every grant you hold at project and environment scope.
+          <p className="perm-foot">
+            {canRead
+              ? 'The union of every grant you hold here, at project and environment scope.'
+              : 'You cannot read secret values here. The union of every grant you hold, at project and environment scope.'}
           </p>
         </Popover.Content>
       </Popover.Portal>

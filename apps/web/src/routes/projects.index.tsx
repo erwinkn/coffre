@@ -8,8 +8,10 @@ import {
   hasEnvironmentDetails,
   isActiveAccessibleEnvironment,
 } from '../lib/project-environments';
-import { EmptyState, ErrorLine, Modal, Notice, Spinner } from '../components/ui';
-import { Folder, Inbox, Layers, Plus } from '../components/icons';
+import { slugProblem } from '../lib/validation';
+import { EmptyState, ErrorLine, Modal, Spinner } from '../components/ui';
+import { ClosedDoor, PageHeader, Section } from '../components/page';
+import { ArrowRight, Plus } from '../components/icons';
 import {
   ProjectEmptyStateCopy,
   RootAdminOnly,
@@ -25,63 +27,87 @@ function ProjectsPage() {
 
   if (!result.ok) {
     return (
-      <>
-        <div className="page-head">
-          <h1>Projects</h1>
-        </div>
-        <Notice tone="bad">
-          {result.error} <Link to="/login">Sign in</Link> to continue.
-        </Notice>
-      </>
+      <ClosedDoor
+        eyebrow="Projects"
+        title="Projects could not be listed"
+        actions={
+          <Link className="btn" to="/login">
+            Sign in again
+          </Link>
+        }
+      >
+        {result.error}
+      </ClosedDoor>
     );
   }
 
   const active = result.projects.filter((project) => project.archivedAt === null);
   const archived = result.projects.filter((project) => project.archivedAt !== null);
+  const secretTotal = active.reduce((sum, project) => sum + countSecrets(project), 0);
 
   return (
     <>
-      <div className="page-head">
-        <h1>Projects</h1>
-      </div>
+      <PageHeader
+        eyebrow="Index"
+        title="Projects"
+        actions={
+          <RootAdminOnly capabilities={result.capabilities}>
+            <NewProject />
+          </RootAdminOnly>
+        }
+        meta={
+          <>
+            <span>
+              <strong>{active.length}</strong> project{active.length === 1 ? '' : 's'} visible
+              to you
+            </span>
+            {secretTotal > 0 && (
+              <span>
+                <strong>{secretTotal}</strong> secret{secretTotal === 1 ? '' : 's'} across the
+                environments you can open
+              </span>
+            )}
+          </>
+        }
+      />
 
-      <div className="card">
-        {active.length === 0 ? (
-          <EmptyState icon={<Inbox size={26} />} title="Nothing granted yet">
-            <ProjectEmptyStateCopy
-              capabilities={result.capabilities}
-              hasArchivedProjects={archived.length > 0}
-            />
-          </EmptyState>
-        ) : (
-          active.map((project) => <ProjectRow key={project.slug} project={project} />)
-        )}
-      </div>
-
-      <RootAdminOnly capabilities={result.capabilities}>
-        <NewProject />
-      </RootAdminOnly>
+      {active.length === 0 ? (
+        <EmptyState title="Nothing here for you yet">
+          <ProjectEmptyStateCopy
+            capabilities={result.capabilities}
+            hasArchivedProjects={archived.length > 0}
+          />
+        </EmptyState>
+      ) : (
+        <ul className="index">
+          {active.map((project) => (
+            <ProjectRow key={project.slug} project={project} />
+          ))}
+        </ul>
+      )}
 
       {archived.length > 0 && (
-        <section className="section">
-          <div className="section-head">
-            <div>
-              <h2>Archived</h2>
-              <p className="sub">
-                Hidden from listings and refused on read. Every row is still present and the
-                audit trail over them is still valid.
-              </p>
-            </div>
-          </div>
-          <div className="card">
+        <Section
+          labelledBy="archived-projects"
+          title="Archived"
+          note="Hidden from listings and refused on read. Every row is still present, and the audit trail over them still verifies."
+        >
+          <ul className="index">
             {archived.map((project) => (
               <ProjectRow key={project.slug} project={project} />
             ))}
-          </div>
-        </section>
+          </ul>
+        </Section>
       )}
     </>
   );
+}
+
+function countSecrets(project: ProjectSummary): number {
+  return project.environments
+    .filter(hasEnvironmentDetails)
+    .filter((environment) => environment.details.archivedAt === null)
+    .reduce((sum, environment) => sum + (environment.details.secretCount ?? 0), 0);
 }
 
 function ProjectRow({ project }: { project: ProjectSummary }) {
@@ -89,54 +115,62 @@ function ProjectRow({ project }: { project: ProjectSummary }) {
     (environment) =>
       environment.details === null || environment.details.archivedAt === null,
   );
-  const countedEnvironments = project.environments
+  const counted = project.environments
     .filter(hasEnvironmentDetails)
-    .filter(
+    .some(
       (environment) =>
-        environment.details.archivedAt === null
-        && environment.details.secretCount !== null,
+        environment.details.archivedAt === null && environment.details.secretCount !== null,
     );
-  const total = countedEnvironments.reduce(
-    (sum, environment) => sum + (environment.details.secretCount ?? 0),
-    0,
-  );
+  const total = countSecrets(project);
+  const isArchived = project.archivedAt !== null;
 
   return (
-    <div className="row row-interactive">
-      <div className="row-title">
-        <Folder size={15} style={{ color: 'var(--ink-3)', flex: 'none' }} />
-        <Link className="row-key" to="/projects/$project" params={{ project: project.slug }}>
+    <li className={`index-row${isArchived ? ' is-muted' : ''}`}>
+      <div className="index-main">
+        <Link
+          className="index-title index-stretch"
+          to="/projects/$project"
+          params={{ project: project.slug }}
+        >
           {project.slug}
         </Link>
-        <span className="meta">{project.name}</span>
+        <span className="index-sub">{project.name}</span>
       </div>
 
-      {countedEnvironments.length > 0 && (
-        <span className="meta numeric" style={{ flex: 'none' }}>
-          {total} secret{total === 1 ? '' : 's'}
-        </span>
-      )}
-
-      <div className="row-actions">
-        {listedEnvironments.map((environment) =>
-          isActiveAccessibleEnvironment(environment) ? (
-            <Link
-              key={environment.slug}
-              className="btn btn-sm"
-              to="/projects/$project/$environment"
-              params={{ project: project.slug, environment: environment.slug }}
-            >
-              <Layers size={13} />
-              {environment.slug}
-            </Link>
-          ) : (
-            <span key={environment.slug} className="meta mono">
-              {environment.slug}
-            </span>
-          ),
+      <div className="index-side">
+        {!isArchived && listedEnvironments.length > 0 && (
+          <div className="env-links" aria-label={`Environments in ${project.slug}`}>
+            {listedEnvironments.map((environment) =>
+              isActiveAccessibleEnvironment(environment) ? (
+                <Link
+                  key={environment.slug}
+                  className="env-link"
+                  to="/projects/$project/$environment"
+                  params={{ project: project.slug, environment: environment.slug }}
+                >
+                  {environment.slug}
+                </Link>
+              ) : (
+                <span
+                  key={environment.slug}
+                  className="env-link"
+                  title="You can see this environment exists, but not open it"
+                >
+                  {environment.slug}
+                </span>
+              ),
+            )}
+          </div>
         )}
+        {isArchived && <span className="tag tag-red">archived</span>}
+        {counted && !isArchived && (
+          <span className="num nowrap">
+            {total} secret{total === 1 ? '' : 's'}
+          </span>
+        )}
+        <ArrowRight size={16} className="index-arrow" />
       </div>
-    </div>
+    </li>
   );
 }
 
@@ -144,25 +178,29 @@ function NewProject() {
   const [slug, setSlug] = useState('');
   const [name, setName] = useState('');
   const [open, setOpen] = useState(false);
-  const { pending, error, run } = useAction();
+  const { pending, error, setError, run } = useAction();
+  const slugError = slug === '' ? null : slugProblem(slug);
+
+  function close() {
+    setOpen(false);
+    setError(null);
+  }
 
   return (
     <>
-      <div style={{ marginTop: 'var(--space-5)' }}>
-        <button className="btn" onClick={() => setOpen(true)}>
-          <Plus size={14} />
-          New project
-        </button>
-      </div>
+      <button className="btn btn-primary" onClick={() => setOpen(true)}>
+        <Plus size={14} />
+        New project
+      </button>
 
       <Modal
         open={open}
-        onOpenChange={setOpen}
+        onOpenChange={(next) => (next ? setOpen(true) : close())}
         title="New project"
-        description="Create a project, then add its environments and access."
+        description="A project holds environments, and access is granted on it or on one of its environments. You become its owner."
       >
         <form
-          className="dialog-form stack"
+          className="form"
           onSubmit={(event) => {
             event.preventDefault();
             run(
@@ -177,18 +215,25 @@ function NewProject() {
           }}
         >
           <label className="field">
-            <span className="label">Slug</span>
+            <span className="caps">Slug</span>
             <input
-              className="input"
+              className="input input-mono"
               autoFocus
+              spellCheck={false}
+              autoComplete="off"
               placeholder="market"
               value={slug}
+              aria-invalid={slugError !== null}
+              aria-describedby="new-project-slug-hint"
               onChange={(event) => setSlug(event.target.value)}
             />
+            <span className={`hint${slugError !== null ? ' edit-note-error' : ''}`} id="new-project-slug-hint">
+              {slugError ?? 'Used in paths, as in market/prod. Renaming it later is safe.'}
+            </span>
           </label>
 
           <label className="field">
-            <span className="label">Display name</span>
+            <span className="caps">Display name</span>
             <input
               className="input"
               placeholder="Market data platform"
@@ -200,13 +245,13 @@ function NewProject() {
           <ErrorLine error={error} />
 
           <div className="dialog-actions">
-            <button className="btn" type="button" onClick={() => setOpen(false)}>
+            <button className="btn" type="button" onClick={close}>
               Cancel
             </button>
             <button
               className="btn btn-primary"
               type="submit"
-              disabled={pending || slug === '' || name === ''}
+              disabled={pending || slug === '' || slugError !== null || name.trim() === ''}
             >
               {pending && <Spinner />}
               Create project

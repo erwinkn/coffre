@@ -5,7 +5,7 @@ import type { UiCapabilities } from '../lib/capabilities';
 import { isActiveAccessibleEnvironment } from '../lib/project-environments';
 import { AdministrationNav } from './affordances';
 import { ThemeToggle } from './theme';
-import { ChevronRight, Folder, Ledger, Users, Vault } from './icons';
+import { ChevronRight, Mark } from './icons';
 
 type Props = {
   projects: ProjectSummary[];
@@ -16,6 +16,32 @@ type Props = {
 
 /** Marks the current route without each link having to compare paths itself. */
 const CURRENT = { 'aria-current': 'page' } as const;
+
+export function Wordmark({ asLink = true }: { asLink?: boolean }) {
+  const body = (
+    <>
+      <Mark size={20} className="wordmark-mark" />
+      coffre
+    </>
+  );
+  return asLink ? (
+    <Link className="wordmark" to="/projects" aria-label="coffre, all projects">
+      {body}
+    </Link>
+  ) : (
+    <span className="wordmark">{body}</span>
+  );
+}
+
+export function roleLabel(
+  principal: Props['principal'],
+  instanceRole: Props['instanceRole'],
+): string {
+  if (principal?.type === 'service') return 'Service account';
+  if (instanceRole === 'root-admin') return 'Root admin';
+  if (instanceRole === 'owner') return 'Owner';
+  return 'User';
+}
 
 /**
  * Primary navigation.
@@ -41,21 +67,15 @@ export function Sidebar({ projects, principal, instanceRole, capabilities }: Pro
 
   return (
     <aside className="sidebar">
-      <div>
-        <Link className="brand" to="/projects">
-          <Vault size={20} className="brand-mark" />
-          coffre
-        </Link>
-        <span className="brand-tag">Secrets, with an audit log</span>
-      </div>
+      <Wordmark />
 
-      <nav className="nav-group" aria-label="Sections">
-        <span className="nav-label">Projects</span>
+      <nav className="nav-section" aria-label="Projects">
+        <span className="caps" aria-hidden>
+          Projects
+        </span>
 
         {active.length === 0 ? (
-          <span className="nav-sub" style={{ opacity: 0.7 }}>
-            none visible
-          </span>
+          <span className="nav-empty">None visible to you</span>
         ) : (
           active.map((project) => {
             const environments = project.environments.filter(isActiveAccessibleEnvironment);
@@ -64,28 +84,9 @@ export function Sidebar({ projects, principal, instanceRole, capabilities }: Pro
 
             return (
               <div key={project.slug}>
-                <div className="nav-row">
-                  {environments.length === 0 ? (
-                    // Keeps the labels of childless projects on the same
-                    // vertical line as everything else.
-                    <span className="nav-toggle-space" aria-hidden />
-                  ) : (
-                    <button
-                      type="button"
-                      className="nav-toggle"
-                      aria-expanded={expanded}
-                      aria-controls={treeId}
-                      aria-label={`${expanded ? 'Collapse' : 'Expand'} ${project.slug}`}
-                      onClick={() =>
-                        setToggled((state) => ({ ...state, [project.slug]: !expanded }))
-                      }
-                    >
-                      <ChevronRight size={13} />
-                    </button>
-                  )}
-
+                <div className="nav-project">
                   <Link
-                    className="nav-item grow"
+                    className="nav-link"
                     to="/projects/$project"
                     params={{ project: project.slug }}
                     // Without `exact`, the project stays marked as current while
@@ -94,10 +95,23 @@ export function Sidebar({ projects, principal, instanceRole, capabilities }: Pro
                     activeOptions={{ exact: true }}
                     activeProps={CURRENT}
                   >
-                    <Folder size={15} />
                     {project.slug}
-                    <span className="nav-count">{environments.length}</span>
                   </Link>
+
+                  {environments.length > 0 && (
+                    <button
+                      type="button"
+                      className="nav-toggle"
+                      aria-expanded={expanded}
+                      aria-controls={treeId}
+                      aria-label={`${expanded ? 'Hide' : 'Show'} environments of ${project.slug}`}
+                      onClick={() =>
+                        setToggled((state) => ({ ...state, [project.slug]: !expanded }))
+                      }
+                    >
+                      <ChevronRight size={12} />
+                    </button>
+                  )}
                 </div>
 
                 {environments.length > 0 && expanded && (
@@ -105,12 +119,13 @@ export function Sidebar({ projects, principal, instanceRole, capabilities }: Pro
                     {environments.map((environment) => (
                       <Link
                         key={environment.slug}
-                        className="nav-sub"
+                        className="nav-link"
                         to="/projects/$project/$environment"
                         params={{ project: project.slug, environment: environment.slug }}
                         activeProps={CURRENT}
                       >
                         {environment.slug}
+                        <span className="count">{environment.details.secretCount}</span>
                       </Link>
                     ))}
                   </div>
@@ -124,50 +139,30 @@ export function Sidebar({ projects, principal, instanceRole, capabilities }: Pro
       <AdministrationNav
         capabilities={capabilities}
         users={
-          <Link className="nav-item" to="/access" activeProps={CURRENT}>
-            <Users size={15} />
-            Users
+          <Link className="nav-link" to="/access" activeProps={CURRENT}>
+            Directory
           </Link>
         }
         audit={
-          <Link className="nav-item" to="/audit" activeProps={CURRENT}>
-            <Ledger size={15} />
+          <Link className="nav-link" to="/audit" activeProps={CURRENT}>
             Audit log
           </Link>
         }
       />
 
       <div className="sidebar-foot">
-        <div className="identity">
-          {principal === null ? (
-            <Link className="nav-item" to="/login" style={{ padding: 0 }}>
-              Sign in
-            </Link>
-          ) : (
-            <>
-              <span className="identity-avatar" aria-hidden>
-                {principal.id.slice(0, 1)}
-              </span>
-              <span className="identity-text">
-                <span className="identity-name" title={principal.id}>
-                  {principal.id}
-                </span>
-                <span className="identity-role">
-                  {principal.type === 'service'
-                    ? 'Service account'
-                    : instanceRole === 'root-admin'
-                      ? 'Root admin'
-                      : instanceRole === 'owner'
-                        ? 'Owner'
-                        : 'User'}
-                </span>
-              </span>
-            </>
-          )}
-          <span style={{ marginLeft: 'auto' }}>
-            <ThemeToggle />
-          </span>
+        {principal !== null && (
+          <div className="identity">
+            <span className="identity-name" title={principal.id}>
+              {principal.id}
+            </span>
+            <span className="identity-role">{roleLabel(principal, instanceRole)}</span>
+          </div>
+        )}
+        <div className="sidebar-row">
+          <ThemeToggle />
         </div>
+        <p className="demo-note">Demo instance. Do not store real secrets here.</p>
       </div>
     </aside>
   );

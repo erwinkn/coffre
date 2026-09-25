@@ -2,7 +2,8 @@ import { createFileRoute, Link } from '@tanstack/react-router';
 import { listAudit, verifyAuditChain } from '../server-functions/audit';
 import type { AuditRow } from '../shared/models';
 import { CopyButton, EmptyState, Notice, Timestamp, Tip } from '../components/ui';
-import { AlertTriangle, CheckCircle, Ledger, ShieldCheck, SlashCircle, X } from '../components/icons';
+import { ClosedDoor, PageHeader } from '../components/page';
+import { AlertTriangle, CheckCircle, ShieldCheck, SlashCircle, X } from '../components/icons';
 
 type AuditSearch = { decision?: 'deny'; actorId?: string };
 type ChainResult = Awaited<ReturnType<typeof verifyAuditChain>>;
@@ -30,102 +31,107 @@ function AuditPage() {
   const { decision, actorId } = Route.useSearch();
   const deniedOnly = decision === 'deny';
 
+  if (!result.ok) {
+    return (
+      <ClosedDoor eyebrow="Oversight" title="Audit log">
+        {result.error}
+      </ClosedDoor>
+    );
+  }
+
+  const denials = result.entries.filter((entry) => entry.decision === 'deny').length;
+
   return (
     <>
-      <div className="page-head">
-        <div>
-          <h1>Audit log</h1>
-          <p className="sub">
-            Who read which secret, when. Append-only by database grant, not by convention:
-            the application role holds no UPDATE, DELETE or TRUNCATE on this table.
-          </p>
-        </div>
-        <ChainStatus chain={chain} />
-      </div>
+      <PageHeader
+        eyebrow="Oversight"
+        title="Audit log"
+        lede="Who read which secret, and when. Append-only by database grant, not by convention: the application's role holds no UPDATE, DELETE or TRUNCATE on this table."
+        actions={<ChainStatus chain={chain} />}
+      />
 
       {!chain.ok && (
-        <Notice>
-          <strong>Chain verification is not available.</strong> {chain.error}
-        </Notice>
+        <div style={{ marginTop: '1.25rem' }}>
+          <Notice>
+            <strong>The chain could not be verified.</strong> {chain.error}
+          </Notice>
+        </div>
       )}
 
       {chain.ok && chain.integrity === 'broken' && (
-        <Notice tone="bad">
-          <strong>The audit log does not verify.</strong> Chain broken at seq{' '}
-          {chain.failedAtSeq}: {chain.reason}. Treat this as an
-          incident: entries have been altered or removed by something holding direct database
-          access, and nothing below can be relied on until it is explained.
-        </Notice>
+        <div style={{ marginTop: '1.25rem' }}>
+          <Notice tone="bad">
+            <strong>The audit log does not verify.</strong> The chain breaks at entry{' '}
+            <span className="mono">{chain.failedAtSeq}</span>: {chain.reason}. Treat this as an
+            incident. Entries have been altered or removed by something with direct database
+            access, and nothing below can be relied on until that is explained.
+          </Notice>
+        </div>
       )}
 
-      {!result.ok ? (
-        <Notice tone="bad">{result.error}</Notice>
-      ) : (
-        <>
-          <div className="cluster" style={{ margin: 'var(--space-6) 0 var(--space-4)' }}>
-            <Link
-              className={`btn btn-sm${deniedOnly || actorId ? '' : ' btn-primary'}`}
-              to="/audit"
-              search={{}}
-            >
-              All events
-            </Link>
-            <Link
-              className={`btn btn-sm${deniedOnly ? ' btn-primary' : ''}`}
-              to="/audit"
-              search={{ decision: 'deny' }}
-            >
-              <SlashCircle size={13} />
-              Denials only
-            </Link>
-            {actorId && (
-              <Link
-                className="btn btn-sm"
-                to="/audit"
-                search={deniedOnly ? { decision: 'deny' } : {}}
-              >
-                <X size={13} />
-                <span className="mono">{actorId}</span>
-              </Link>
-            )}
-            <span className="meta" style={{ marginLeft: 'auto' }}>
-              {result.entries.length} most recent
-            </span>
-          </div>
+      <div className="filters">
+        <nav className="segmented" aria-label="Filter by decision">
+          <Link
+            to="/audit"
+            search={actorId === undefined ? {} : { actorId }}
+            aria-current={deniedOnly ? undefined : 'page'}
+          >
+            All events
+          </Link>
+          <Link
+            to="/audit"
+            search={{ decision: 'deny', ...(actorId === undefined ? {} : { actorId }) }}
+            aria-current={deniedOnly ? 'page' : undefined}
+          >
+            <SlashCircle size={13} />
+            Denials only
+          </Link>
+        </nav>
 
-          <div className="card">
-            {result.entries.length === 0 ? (
-              <EmptyState
-                icon={<Ledger size={26} />}
-                title={deniedOnly ? 'No denials recorded' : 'Nothing recorded yet'}
-              >
-                {deniedOnly
-                  ? 'Every authorisation decision reaches this table, including refusals. An empty result means nobody has been turned away.'
-                  : 'The log fills as secrets are read and written. Listing keys does not appear here; revealing a value does.'}
-              </EmptyState>
-            ) : (
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th className="shrink num">Seq</th>
-                      <th className="shrink">When (UTC)</th>
-                      <th>Actor</th>
-                      <th className="shrink">Action</th>
-                      <th>Subject</th>
-                      <th className="shrink">Decision</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {result.entries.map((entry) => (
-                      <AuditTableRow key={entry.seq} entry={entry} deniedOnly={deniedOnly} />
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-        </>
+        {actorId !== undefined && (
+          <Link
+            className="filter-chip"
+            to="/audit"
+            search={deniedOnly ? { decision: 'deny' } : {}}
+            aria-label={`Stop filtering by ${actorId}`}
+          >
+            Actor <span className="mono">{actorId}</span>
+            <X size={13} />
+          </Link>
+        )}
+
+        <span className="filters-count">
+          {result.entries.length} most recent
+          {!deniedOnly && denials > 0 && `, ${denials} refused`}
+        </span>
+      </div>
+
+      {result.entries.length === 0 ? (
+        <EmptyState title={deniedOnly ? 'No denials recorded' : 'Nothing recorded yet'}>
+          {deniedOnly
+            ? 'Every authorisation decision reaches this log, refusals included. An empty page means nobody has been turned away.'
+            : 'The log fills as secrets are read and written. Listing keys does not appear here; revealing a value does.'}
+        </EmptyState>
+      ) : (
+        <div className="ledger-wrap">
+          <table className="ledger audit stacks">
+            <thead>
+              <tr>
+                <th className="caps col-seq">No.</th>
+                <th className="caps col-shrink">When (UTC)</th>
+                <th className="caps">Actor</th>
+                <th className="caps col-shrink">Action</th>
+                <th className="caps">Subject</th>
+                <th className="caps col-shrink">Decision</th>
+              </tr>
+            </thead>
+            <tbody>
+              {result.entries.map((entry) => (
+                <AuditTableRow key={entry.seq} entry={entry} deniedOnly={deniedOnly} />
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </>
   );
@@ -135,29 +141,37 @@ function AuditTableRow({ entry, deniedOnly }: { entry: AuditRow; deniedOnly: boo
   const denied = entry.decision === 'deny';
 
   return (
-    <tr style={denied ? { background: 'var(--deny-wash)' } : undefined}>
-      <td className="num meta">{entry.seq}</td>
-      <td className="num">
+    <tr className={denied ? 'is-denied' : undefined}>
+      <td className="col-seq" data-label="No.">
+        {entry.seq}
+      </td>
+      <td className="nowrap" data-label="When (UTC)">
         <Timestamp iso={entry.occurredAt} precise />
       </td>
-      <td className="wrap">
+      <td data-label="Actor">
         {/* Filtering to one actor is the second question anyone asks after
             "what happened", so the actor cell is the control. */}
-        <Link
-          className="mono"
-          to="/audit"
-          search={{
-            ...(deniedOnly ? { decision: 'deny' as const } : {}),
-            actorId: entry.actorId,
-          }}
-        >
-          {entry.actorId}
-        </Link>{' '}
-        <span className="pill pill-muted">{entry.actorType}</span>
+        <span className="actor">
+          <Link
+            className="mono"
+            to="/audit"
+            search={{
+              ...(deniedOnly ? { decision: 'deny' as const } : {}),
+              actorId: entry.actorId,
+            }}
+          >
+            {entry.actorId}
+          </Link>
+          {entry.actorType === 'service' && <span className="tag tag-outline">service</span>}
+        </span>
       </td>
-      <td className="mono">{entry.action}</td>
-      <td className="wrap mono">{scopedSubject(entry)}</td>
-      <td>
+      <td className="cell-mono nowrap" data-label="Action">
+        {entry.action}
+      </td>
+      <td className="cell-mono" style={{ overflowWrap: 'anywhere' }} data-label="Subject">
+        {scopedSubject(entry)}
+      </td>
+      <td className="nowrap" data-label="Decision">
         {/* Glyph first, then the word. The colour is the third signal, never
             the only one -- allow/deny is exactly the pair deuteranopia loses. */}
         <span className={`decision ${denied ? 'decision-deny' : 'decision-allow'}`}>
@@ -185,34 +199,52 @@ function AuditTableRow({ entry, deniedOnly }: { entry: AuditRow; deniedOnly: boo
 function ChainStatus({ chain }: { chain: ChainResult }) {
   if (!chain.ok) {
     return (
-      <span className="chain-status">
-        <AlertTriangle size={14} />
-        Verification unavailable
-      </span>
+      <div className="chain chain-unknown">
+        <span className="chain-seal">
+          <AlertTriangle size={16} />
+        </span>
+        <span className="chain-text">
+          <span className="chain-title">Verification unavailable</span>
+          <span className="chain-sub">The chain was not recomputed</span>
+        </span>
+      </div>
     );
   }
 
   if (chain.integrity === 'broken') {
     return (
-      <span className="chain-status chain-status-bad">
-        <AlertTriangle size={14} />
-        Chain broken
-      </span>
+      <div className="chain chain-bad" role="status">
+        <span className="chain-seal">
+          <AlertTriangle size={16} />
+        </span>
+        <span className="chain-text">
+          <span className="chain-title">Chain broken</span>
+          <span className="chain-sub">
+            at entry <span className="mono">{chain.failedAtSeq}</span>
+          </span>
+        </span>
+      </div>
     );
   }
 
   return (
-    <span className="chain-status">
-      <ShieldCheck size={14} />
-      Chain intact
-      <span className="meta">
-        {chain.rows} {chain.rows === 1 ? 'entry' : 'entries'}, recomputed just now
+    <div className="chain">
+      <span className="chain-seal">
+        <ShieldCheck size={17} />
       </span>
-      <Tip label="The chain head: every entry folded into one HMAC. Record it somewhere coffre cannot reach, and a later mismatch proves the log was altered.">
-        <code className="mono chain-head">{chain.head.slice(0, 12)}</code>
-      </Tip>
-      <CopyButton value={chain.head} label="Copy chain head" />
-    </span>
+      <span className="chain-text">
+        <span className="chain-title">Chain intact</span>
+        <span className="chain-sub">
+          {chain.rows} {chain.rows === 1 ? 'entry' : 'entries'}, recomputed on load · head
+          <Tip label="The chain head: every entry folded into one HMAC. Record it somewhere coffre cannot reach, and a later mismatch proves the log was altered.">
+            <code className="chain-head" tabIndex={0}>
+              {chain.head.slice(0, 12)}
+            </code>
+          </Tip>
+        </span>
+      </span>
+      <CopyButton value={chain.head} label="Copy the full chain head" />
+    </div>
   );
 }
 
@@ -221,5 +253,5 @@ function scopedSubject(entry: AuditRow): string {
     (part): part is string => part !== null,
   );
   if (entry.subject !== '--') scope.push(entry.subject);
-  return scope.length > 0 ? scope.join('/') : '--';
+  return scope.length > 0 ? scope.join('/') : '—';
 }

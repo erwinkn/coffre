@@ -1,7 +1,7 @@
 /**
  * One icon vocabulary for the whole app.
  *
- * Every glyph is a 24-unit viewBox, 1.75 stroke, round caps and joins, drawn in
+ * Every glyph is a 24-unit viewBox, 1.6 stroke, round caps and joins, drawn in
  * `currentColor`. Mixing icon families is the fastest way to make a product UI
  * feel assembled rather than designed, so there is exactly one source here and
  * no icon dependency.
@@ -29,7 +29,7 @@ function Svg({
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
-      strokeWidth={1.75}
+      strokeWidth={1.6}
       strokeLinecap="round"
       strokeLinejoin="round"
       className={className}
@@ -43,13 +43,16 @@ function Svg({
   );
 }
 
-/** The mark: a vault door. Literal, and the product is called "coffre". */
-export function Vault(props: IconProps) {
+/**
+ * The mark: an escutcheon, the plate around a keyhole. It sits beside an
+ * italic wordmark, so it stays a single quiet outline with one solid shape.
+ */
+export function Mark(props: IconProps) {
   return (
     <Svg {...props}>
-      <rect x="3" y="4" width="18" height="16" rx="2.5" />
-      <circle cx="11" cy="12" r="3.5" />
-      <path d="M11 8.5V6M11 18v-2.5M14.5 12H17M5 12h2.5" />
+      <circle cx="12" cy="12" r="9.25" />
+      <circle cx="12" cy="10" r="2.35" fill="currentColor" stroke="none" />
+      <path d="M10.9 11.4h2.2l.75 5.1h-3.7Z" fill="currentColor" stroke="none" />
     </Svg>
   );
 }
@@ -354,6 +357,22 @@ export function Inbox(props: IconProps) {
     <Svg {...props}>
       <path d="M3.5 13.5h4l1.5 2.5h6l1.5-2.5h4" />
       <path d="M5.6 5.2 3.5 13.5v4A1.5 1.5 0 0 0 5 19h14a1.5 1.5 0 0 0 1.5-1.5v-4l-2.1-8.3A1.5 1.5 0 0 0 16.9 4H7.1a1.5 1.5 0 0 0-1.5 1.2Z" />
+    </Svg>
+  );
+}
+
+export function Menu(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M4 7h16M4 12h16M4 17h10" />
+    </Svg>
+  );
+}
+
+export function ArrowRight(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M4.5 12h15M14 6.5l5.5 5.5-5.5 5.5" />
     </Svg>
   );
 }

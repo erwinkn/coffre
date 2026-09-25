@@ -55,26 +55,24 @@ export function CommandPalette({
 
   return (
     <>
-      <button className="kbd-trigger" onClick={() => setOpen(true)}>
+      <button type="button" className="jump" onClick={() => setOpen(true)}>
         <Search size={14} />
-        <span>Search</span>
-        <span className="palette-hint">
-          <kbd>⌘</kbd> <kbd>K</kbd>
-        </span>
+        <span className="jump-label">Jump to…</span>
+        <kbd aria-label="Command K">⌘K</kbd>
       </button>
 
       <Command.Dialog
         open={open}
         onOpenChange={setOpen}
-        label="Command palette"
+        label="Jump to a project, environment or page"
         overlayClassName="overlay"
         contentClassName="palette"
         loop
       >
-        <Command.Input placeholder="Jump to a project, environment or view..." />
+        <Command.Input placeholder="Jump to a project, environment or page…" />
 
         <Command.List>
-          <Command.Empty>Nothing matches that.</Command.Empty>
+          <Command.Empty>Nothing by that name.</Command.Empty>
 
           {active.length > 0 && (
             <Command.Group heading="Environments">
@@ -127,19 +125,20 @@ export function CommandPalette({
           )}
 
           {hasAdministrationItems(capabilities) && (
-            <Command.Group heading="Admin">
+            <Command.Group heading="Oversight">
               <AdministrationItems
                 capabilities={capabilities}
                 users={
                   <Command.Item
-                    value="users access principals grants who holds what"
+                    value="directory users service accounts people principals"
                     onSelect={() => {
                       setOpen(false);
                       navigate({ to: '/access' });
                     }}
                   >
                     <Users size={15} />
-                    Users
+                    Directory
+                    <span className="palette-hint">People and service accounts</span>
                   </Command.Item>
                 }
                 audit={
@@ -162,7 +161,7 @@ export function CommandPalette({
                       }}
                     >
                       <SlashCircle size={15} />
-                      Denials only
+                      Audit log, denials only
                     </Command.Item>
                   </>
                 }
@@ -179,30 +178,43 @@ export function CommandPalette({
               }}
             >
               <Monitor size={15} />
-              Match system theme
+              Match system colours
             </Command.Item>
             <Command.Item
-              value="theme light"
+              value="theme light paper"
               onSelect={() => {
                 setTheme('light');
                 setOpen(false);
               }}
             >
               <Sun size={15} />
-              Light theme
+              Light
             </Command.Item>
             <Command.Item
-              value="theme dark"
+              value="theme dark night"
               onSelect={() => {
                 setTheme('dark');
                 setOpen(false);
               }}
             >
               <Moon size={15} />
-              Dark theme
+              Dark
             </Command.Item>
           </Command.Group>
         </Command.List>
+
+        <div className="palette-foot" aria-hidden>
+          <span>
+            <kbd>↑</kbd>
+            <kbd>↓</kbd> move
+          </span>
+          <span>
+            <kbd>↵</kbd> open
+          </span>
+          <span>
+            <kbd>esc</kbd> close
+          </span>
+        </div>
       </Command.Dialog>
     </>
   );

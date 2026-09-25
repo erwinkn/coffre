@@ -15,55 +15,72 @@ import {
   EmptyState,
   ErrorLine,
   Modal,
-  Notice,
   Spinner,
 } from '../components/ui';
-import { Key, MoreHorizontal, Pencil, Plus, Users, X } from '../components/icons';
+import { ClosedDoor, PageHeader, Section } from '../components/page';
+import { MoreHorizontal, Pencil, Plus, X } from '../components/icons';
 
 export const Route = createFileRoute('/access')({
   loader: () => listDirectoryPrincipals(),
-  component: AccessPage,
+  component: DirectoryPage,
 });
 
-function AccessPage() {
+function DirectoryPage() {
   const result = Route.useLoaderData();
+
+  if (!result.ok) {
+    return (
+      <ClosedDoor eyebrow="Oversight" title="Directory">
+        {result.error}
+      </ClosedDoor>
+    );
+  }
+
+  const people = result.principals.filter((principal) => principal.principalType === 'user');
+  const services = result.principals.filter(
+    (principal) => principal.principalType === 'service',
+  );
 
   return (
     <>
-      <div className="page-head">
-        <div>
-          <h1>Access</h1>
-          <p className="sub">
-            Manage who can use Coffre. Project permissions are managed from each project.
-          </p>
-        </div>
-      </div>
+      <PageHeader
+        eyebrow="Oversight"
+        title="Directory"
+        lede="Who may use coffre at all. Being listed here grants nothing by itself: what each identity can do is granted per project, from that project's page."
+        meta={
+          <>
+            <span>
+              <strong>{people.length}</strong> {people.length === 1 ? 'person' : 'people'}
+            </span>
+            <span>
+              <strong>{services.length}</strong> service account
+              {services.length === 1 ? '' : 's'}
+            </span>
+          </>
+        }
+      />
 
-      {!result.ok ? (
-        <Notice tone="bad">{result.error}</Notice>
-      ) : (
-        <>
-          <PrincipalSection
-            title="Users"
-            description="People authenticated by their Cloudflare Access email."
-            principalType="user"
-            principals={result.principals.filter(
-              (principal) => principal.principalType === 'user',
-            )}
-          />
-          <PrincipalSection
-            title="Service accounts"
-            description="Machine callers matched on their Access service-token common name."
-            principalType="service"
-            principals={result.principals.filter(
-              (principal) => principal.principalType === 'service',
-            )}
-          />
-        </>
-      )}
+      <PrincipalSection
+        title="People"
+        description="Matched on the email Cloudflare Access authenticates."
+        principalType="user"
+        principals={people}
+      />
+      <PrincipalSection
+        title="Service accounts"
+        description="Machine callers, matched on their Access service-token common name, because those tokens carry no email at all."
+        principalType="service"
+        principals={services}
+      />
     </>
   );
 }
+
+const ROLE_LABEL: Record<DirectoryPrincipal['instanceRole'], string> = {
+  'root-admin': 'Root admin',
+  owner: 'Owner',
+  user: 'User',
+};
 
 function PrincipalSection({
   title,
@@ -77,43 +94,40 @@ function PrincipalSection({
   principals: DirectoryPrincipal[];
 }) {
   return (
-    <section className="section">
-      <div className="section-head">
-        <div>
-          <h2>{title}</h2>
-          <p className="sub">{description}</p>
+    <Section
+      labelledBy={`directory-${principalType}`}
+      title={title}
+      note={description}
+      actions={<AddPrincipal principalType={principalType} />}
+    >
+      {principals.length === 0 ? (
+        <EmptyState
+          title={principalType === 'user' ? 'Nobody is registered' : 'No service accounts'}
+        >
+          Add the first {principalType === 'user' ? 'person' : 'service account'} to let it
+          through the door. Project access is a separate step.
+        </EmptyState>
+      ) : (
+        <div className="ledger-wrap">
+          <table className="ledger stacks">
+            <thead>
+              <tr>
+                <th className="caps">{principalType === 'user' ? 'Email' : 'Common name'}</th>
+                {principalType === 'user' && <th className="caps">Instance role</th>}
+                <th className="col-actions">
+                  <span className="visually-hidden">Actions</span>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {principals.map((principal) => (
+                <PrincipalRow key={principal.principalId} principal={principal} />
+              ))}
+            </tbody>
+          </table>
         </div>
-        <AddPrincipal principalType={principalType} />
-      </div>
-
-      <div className="card">
-        {principals.length === 0 ? (
-          <EmptyState
-            icon={principalType === 'user' ? <Users size={26} /> : <Key size={26} />}
-            title={`No ${title.toLowerCase()}`}
-          >
-            Add the first {principalType === 'user' ? 'user' : 'service account'}.
-          </EmptyState>
-        ) : (
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>{principalType === 'user' ? 'Email' : 'Common name'}</th>
-                  {principalType === 'user' && <th>Role</th>}
-                  <th className="shrink" />
-                </tr>
-              </thead>
-              <tbody>
-                {principals.map((principal) => (
-                  <PrincipalRow key={principal.principalId} principal={principal} />
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-    </section>
+      )}
+    </Section>
   );
 }
 
@@ -124,78 +138,69 @@ function PrincipalRow({ principal }: { principal: DirectoryPrincipal }) {
     principal.instanceRole === 'owner' ? 'owner' : 'user',
   );
   const { pending, error, setError, run } = useAction();
+  const kind = principal.principalType === 'user' ? 'person' : 'service account';
 
   useEffect(() => {
     if (error !== null && !editing) toast.error(error);
   }, [editing, error]);
 
-  const roleLabel =
-    principal.instanceRole === 'root-admin'
-      ? 'Root admin'
-      : principal.instanceRole === 'owner'
-        ? 'Owner'
-        : 'User';
-
   return (
     <tr>
-      <td className="mono">{principal.principalId}</td>
+      <td className="cell-mono" data-label={principal.principalType === 'user' ? 'Email' : 'Common name'}>
+        {principal.principalId}
+      </td>
       {principal.principalType === 'user' && (
-        <td>
-          <span
-            className={`pill${principal.instanceRole === 'user' ? '' : ' pill-accent'}`}
-          >
-            {roleLabel}
+        <td data-label="Instance role">
+          <span className={`tag${principal.instanceRole === 'user' ? '' : ' tag-accent'}`}>
+            {ROLE_LABEL[principal.instanceRole]}
           </span>
+          {principal.isRootAdmin && <span className="hint"> · set in deployment config</span>}
         </td>
       )}
-      <td className="shrink">
-        <DropdownMenu.Root>
-          <DropdownMenu.Trigger asChild>
-            <button
-              className="btn btn-sm btn-quiet btn-icon"
-              aria-label={`Actions for ${principal.principalId}`}
-              disabled={pending}
-            >
-              <MoreHorizontal size={16} />
-            </button>
-          </DropdownMenu.Trigger>
-          <DropdownMenu.Portal>
-            <DropdownMenu.Content className="menu" sideOffset={6} align="end">
-              {principal.isRootAdmin ? (
-                <DropdownMenu.Item className="menu-item" disabled>
-                  Managed in configuration
+      <td className="col-actions">
+        {principal.isRootAdmin ? (
+          <span className="cell-muted" style={{ fontSize: '0.8125rem' }}>
+            —
+          </span>
+        ) : (
+          <DropdownMenu.Root>
+            <DropdownMenu.Trigger asChild>
+              <button
+                className="act act-quiet"
+                aria-label={`Actions for ${principal.principalId}`}
+                disabled={pending}
+              >
+                {pending ? <Spinner size={13} /> : <MoreHorizontal size={16} />}
+              </button>
+            </DropdownMenu.Trigger>
+            <DropdownMenu.Portal>
+              <DropdownMenu.Content className="menu" sideOffset={6} align="end">
+                {principal.principalType === 'user' && (
+                  <>
+                    <DropdownMenu.Item
+                      className="menu-item"
+                      onSelect={() => {
+                        setInstanceRole(principal.instanceRole === 'owner' ? 'owner' : 'user');
+                        setEditing(true);
+                      }}
+                    >
+                      <Pencil size={14} />
+                      Change role
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Separator className="menu-sep" />
+                  </>
+                )}
+                <DropdownMenu.Item
+                  className="menu-item menu-item-danger"
+                  onSelect={() => setConfirming(true)}
+                >
+                  <X size={14} />
+                  Remove from directory…
                 </DropdownMenu.Item>
-              ) : (
-                <>
-                  {principal.principalType === 'user' && (
-                    <>
-                      <DropdownMenu.Item
-                        className="menu-item"
-                        onSelect={() => {
-                          setInstanceRole(
-                            principal.instanceRole === 'owner' ? 'owner' : 'user',
-                          );
-                          setEditing(true);
-                        }}
-                      >
-                        <Pencil size={14} />
-                        Edit role
-                      </DropdownMenu.Item>
-                      <DropdownMenu.Separator className="menu-sep" />
-                    </>
-                  )}
-                  <DropdownMenu.Item
-                    className="menu-item menu-item-danger"
-                    onSelect={() => setConfirming(true)}
-                  >
-                    <X size={14} />
-                    Delete
-                  </DropdownMenu.Item>
-                </>
-              )}
-            </DropdownMenu.Content>
-          </DropdownMenu.Portal>
-        </DropdownMenu.Root>
+              </DropdownMenu.Content>
+            </DropdownMenu.Portal>
+          </DropdownMenu.Root>
+        )}
 
         {principal.principalType === 'user' && !principal.isRootAdmin && (
           <Modal
@@ -204,11 +209,14 @@ function PrincipalRow({ principal }: { principal: DirectoryPrincipal }) {
               setEditing(open);
               if (!open) setError(null);
             }}
-            title={`Edit ${principal.principalId}`}
-            description="Owners can manage users and service accounts and access the full audit log."
+            title={
+              <>
+                Role of <span className="mono">{principal.principalId}</span>
+              </>
+            }
           >
             <form
-              className="dialog-form stack"
+              className="form"
               onSubmit={(event) => {
                 event.preventDefault();
                 void run(
@@ -217,7 +225,9 @@ function PrincipalRow({ principal }: { principal: DirectoryPrincipal }) {
                       data: { principalId: principal.principalId, instanceRole },
                     }),
                   () => {
-                    toast.success(`${principal.principalId} is now ${instanceRole}`);
+                    toast.success(
+                      `${principal.principalId} is now ${ROLE_LABEL[instanceRole].toLowerCase()}`,
+                    );
                     setEditing(false);
                   },
                 );
@@ -242,11 +252,19 @@ function PrincipalRow({ principal }: { principal: DirectoryPrincipal }) {
           <ConfirmDialog
             open={confirming}
             onOpenChange={setConfirming}
-            title={`Delete ${principal.principalId}?`}
-            body="This removes the identity and immediately revokes all of its project permissions."
-            confirmLabel={`Delete ${
-              principal.principalType === 'user' ? 'user' : 'service account'
-            }`}
+            title={
+              <>
+                Remove <span className="mono">{principal.principalId}</span>?
+              </>
+            }
+            body={
+              <>
+                The {kind} can no longer use coffre, and every project permission it holds is
+                revoked at once, including for anything running with it right now. Its past
+                actions stay in the audit log.
+              </>
+            }
+            confirmLabel={`Remove ${kind}`}
             onConfirm={() =>
               void run(
                 () =>
@@ -256,7 +274,7 @@ function PrincipalRow({ principal }: { principal: DirectoryPrincipal }) {
                       principalId: principal.principalId,
                     },
                   }),
-                () => toast.success(`${principal.principalId} deleted`),
+                () => toast.success(`${principal.principalId} removed`),
               )
             }
           />
@@ -279,27 +297,23 @@ function AddPrincipal({ principalType }: { principalType: 'user' | 'service' }) 
     setError(null);
   }
 
-  const kind = principalType === 'user' ? 'user' : 'service account';
+  const kind = principalType === 'user' ? 'person' : 'service account';
 
   return (
     <>
       <button className="btn btn-sm" onClick={() => setOpen(true)}>
         <Plus size={13} />
-        Add
+        Add {kind}
       </button>
 
       <Modal
         open={open}
         onOpenChange={(next) => (next ? setOpen(true) : close())}
-        title={`Add ${kind}`}
-        description={
-          principalType === 'user'
-            ? 'Add a user to Coffre. Project permissions are assigned from each project.'
-            : 'Add a service account to Coffre. Project permissions are assigned from each project.'
-        }
+        title={`Add a ${kind}`}
+        description={`This lets the ${kind} through the door and nothing more. Grant project access from each project's page.`}
       >
         <form
-          className="dialog-form stack"
+          className="form"
           onSubmit={(event) => {
             event.preventDefault();
             void run(
@@ -319,12 +333,14 @@ function AddPrincipal({ principalType }: { principalType: 'user' | 'service' }) 
           }}
         >
           <label className="field">
-            <span className="label">
-              {principalType === 'user' ? 'Email' : 'Service token common name'}
+            <span className="caps">
+              {principalType === 'user' ? 'Cloudflare Access email' : 'Service token common name'}
             </span>
             <input
-              className="input"
+              className="input input-mono"
               autoFocus
+              spellCheck={false}
+              autoComplete="off"
               value={principalId}
               placeholder={
                 principalType === 'user' ? 'someone@equisafe.io' : 'ci-deploy.access'
@@ -348,7 +364,7 @@ function AddPrincipal({ principalType }: { principalType: 'user' | 'service' }) 
               disabled={pending || principalId.trim() === ''}
             >
               {pending && <Spinner />}
-              Add
+              Add {kind}
             </button>
           </div>
         </form>
@@ -366,7 +382,7 @@ function RoleField({
 }) {
   return (
     <label className="field">
-      <span className="label">Role</span>
+      <span className="caps">Instance role</span>
       <select
         className="select"
         value={value}
@@ -375,8 +391,9 @@ function RoleField({
         <option value="user">User</option>
         <option value="owner">Owner</option>
       </select>
-      <span className="meta">
-        Owners can manage users and service accounts and access the full audit log.
+      <span className="hint">
+        Owners manage this directory, can create projects, and read the whole audit log.
+        Neither role reads a secret without a project grant.
       </span>
     </label>
   );

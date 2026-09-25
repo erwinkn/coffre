@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import {
   createRootRoute,
   HeadContent,
@@ -7,16 +7,17 @@ import {
   Scripts,
   useRouterState,
 } from '@tanstack/react-router';
+import { Dialog } from 'radix-ui';
 import { Toaster } from 'sonner';
 import globalsCss from '../styles/globals.css?url';
 import { getShell } from '../server-functions/shell';
-import { Sidebar } from '../components/sidebar';
+import { Sidebar, Wordmark } from '../components/sidebar';
 import { Breadcrumbs } from '../components/breadcrumbs';
 import { CommandPalette } from '../components/command-palette';
 import { TooltipProvider } from '../components/ui';
-import { themeBootScript } from '../components/theme';
+import { ThemeToggle, themeBootScript } from '../components/theme';
 import { Agentation } from '../components/agentation';
-import { Vault } from '../components/icons';
+import { Menu, X } from '../components/icons';
 
 export const Route = createRootRoute({
   head: () => ({
@@ -25,6 +26,8 @@ export const Route = createRootRoute({
       { name: 'viewport', content: 'width=device-width, initial-scale=1' },
       { title: 'coffre' },
       { name: 'description', content: 'Secrets, with an audit log' },
+      { name: 'theme-color', content: '#f6f3ec', media: '(prefers-color-scheme: light)' },
+      { name: 'theme-color', content: '#15130f', media: '(prefers-color-scheme: dark)' },
     ],
     links: [{ rel: 'stylesheet', href: globalsCss }],
   }),
@@ -82,38 +85,68 @@ function RootDocument({ children }: { children: ReactNode }) {
   );
 }
 
+function Toasts() {
+  return (
+    <Toaster
+      position="bottom-right"
+      gap={10}
+      offset={20}
+      toastOptions={{
+        duration: 4200,
+        unstyled: true,
+        classNames: {
+          toast: 'toast',
+          title: 'toast-title',
+          description: 'toast-description',
+          actionButton: 'toast-action',
+          success: 'toast-success',
+          error: 'toast-error',
+        },
+      }}
+    />
+  );
+}
+
 function RootComponent() {
   const { principal, instanceRole, projects, capabilities } = Route.useLoaderData();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const [drawerOpen, setDrawerOpen] = useState(false);
+
+  // Following a link in the drawer should land on the page, not leave the
+  // navigation covering it.
+  useEffect(() => setDrawerOpen(false), [pathname]);
 
   // Sign-in gets no shell. Every destination in the sidebar, the breadcrumbs
   // and the command palette bounces straight back here while you are signed
-  // out, so offering them is a loop dressed up as navigation. The brand stays,
-  // as a mark rather than a link, so the page is still recognisably this app.
+  // out, so offering them is a loop dressed up as navigation. The wordmark
+  // stays, as a mark rather than a link, so the page is still recognisably
+  // this app.
   if (pathname === '/login' || pathname === '/unregistered') {
     return (
       <TooltipProvider>
         <div className="solo">
-          <p className="brand solo-brand">
-            <Vault size={20} className="brand-mark" />
-            coffre
-          </p>
-          <main className="content" id="content">
+          <div className="solo-top">
+            <Wordmark asLink={false} />
+            <ThemeToggle />
+          </div>
+          <main className="solo-main" id="content">
             <Outlet />
           </main>
         </div>
-
-        <Toaster
-          position="bottom-right"
-          gap={10}
-          offset={16}
-          toastOptions={{ duration: 4200 }}
-        />
-
+        <Toasts />
         <Agentation />
       </TooltipProvider>
     );
   }
+
+  const sidebar = (
+    <Sidebar
+      projects={projects}
+      principal={principal}
+      instanceRole={instanceRole}
+      capabilities={capabilities}
+    />
+  );
 
   return (
     <TooltipProvider>
@@ -121,23 +154,42 @@ function RootComponent() {
         Skip to content
       </a>
 
-      <div className="app">
-        <Sidebar
-          projects={projects}
-          principal={principal}
-          instanceRole={instanceRole}
-          capabilities={capabilities}
-        />
+      <div className="shell">
+        {sidebar}
 
         <div className="main">
-          <header className="topbar">
+          <header className="masthead">
+            <Dialog.Root open={drawerOpen} onOpenChange={setDrawerOpen}>
+              <Dialog.Trigger asChild>
+                <button
+                  type="button"
+                  className="btn btn-quiet btn-icon menu-button"
+                  aria-label="Open navigation"
+                >
+                  <Menu size={18} />
+                </button>
+              </Dialog.Trigger>
+              <Dialog.Portal>
+                <Dialog.Overlay className="overlay" />
+                <Dialog.Content className="drawer" aria-describedby={undefined}>
+                  <Dialog.Title className="visually-hidden">Navigation</Dialog.Title>
+                  {sidebar}
+                  <Dialog.Close asChild>
+                    <button
+                      type="button"
+                      className="btn btn-quiet btn-sm btn-icon drawer-close"
+                      aria-label="Close navigation"
+                    >
+                      <X size={16} />
+                    </button>
+                  </Dialog.Close>
+                </Dialog.Content>
+              </Dialog.Portal>
+            </Dialog.Root>
+
+            <Wordmark />
             <Breadcrumbs />
-            <span className="pill pill-secret" style={{ marginLeft: 'auto' }}>
-              Demo · do not store real secrets
-            </span>
-            <div>
-              <CommandPalette projects={projects} capabilities={capabilities} />
-            </div>
+            <CommandPalette projects={projects} capabilities={capabilities} />
           </header>
 
           <main className="content" id="content">
@@ -146,13 +198,7 @@ function RootComponent() {
         </div>
       </div>
 
-      <Toaster
-        position="bottom-right"
-        gap={10}
-        offset={16}
-        toastOptions={{ duration: 4200 }}
-      />
-
+      <Toasts />
       <Agentation />
     </TooltipProvider>
   );
