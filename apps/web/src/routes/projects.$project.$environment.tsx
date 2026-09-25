@@ -146,14 +146,19 @@ function EnvironmentLedger({
     (entry) => secretChangeFor(changes, entry.key) !== undefined,
   );
   const hasConflict = hasSecretEditConflict(active, drafts, changes);
-  const invalid =
-    drafts.some((row) => secretKeyProblem(row.key.trim()) !== null) ||
-    changedEntries.some((entry) => {
+  // Every name that will be written. Blank ones only hold the save back -- a
+  // row you just added is not an error yet -- while malformed ones say why.
+  const pendingNames = [
+    ...drafts.map((row) => row.key.trim()),
+    ...changedEntries.flatMap((entry) => {
       const change = secretChangeFor(changes, entry.key);
-      return change !== undefined && !change.archived && secretKeyProblem(change.key.trim()) !== null;
-    });
+      return change === undefined || change.archived ? [] : [change.key.trim()];
+    }),
+  ];
+  const unnamed = pendingNames.some((name) => name === '');
+  const invalid = pendingNames.some((name) => name !== '' && secretKeyProblem(name) !== null);
   const pendingCount = drafts.length + changedEntries.length;
-  const ready = pendingCount > 0 && !invalid && !hasConflict;
+  const ready = pendingCount > 0 && !unnamed && !invalid && !hasConflict;
 
   function patchChange(entry: SecretKey, patch: Partial<SecretChange>) {
     setChanges((current) => {
@@ -263,7 +268,7 @@ function EnvironmentLedger({
     setSaving(false);
   }
 
-  // Cmd/Ctrl+Enter saves from anywhere on the page, as the save bar says.
+  // Cmd/Ctrl+Enter saves from anywhere on the page while edits are pending.
   const saveRef = useRef(saveChanges);
   saveRef.current = saveChanges;
   useEffect(() => {
@@ -288,9 +293,9 @@ function EnvironmentLedger({
       if (change.archived) return { key: entry.key, what: 'archived' };
       const renamed = change.key.trim() !== entry.key;
       if (renamed && change.value !== null) {
-        return { key: entry.key, what: `renamed ${change.key.trim()}, new value` };
+        return { key: entry.key, what: `→ ${change.key.trim()}, new value` };
       }
-      if (renamed) return { key: entry.key, what: `renamed ${change.key.trim()}` };
+      if (renamed) return { key: entry.key, what: `→ ${change.key.trim()}` };
       return { key: entry.key, what: 'new value' };
     }),
   ];
@@ -298,7 +303,7 @@ function EnvironmentLedger({
   const problem = hasConflict
     ? 'Two pending edits would end up with the same name. Secret names are unique in an environment.'
     : invalid
-      ? 'Every name needs letters, digits or underscores, and cannot start with a digit.'
+      ? 'Names are letters, digits and underscores, and cannot start with a digit.'
       : null;
 
   const columns = 5;
@@ -347,7 +352,7 @@ function EnvironmentLedger({
         <EmptyState
           title="No secrets here yet"
           actions={
-            canWrite && (
+            canWrite ? (
               <>
                 <button className="btn btn-primary" onClick={addDraft}>
                   <Plus size={14} />
@@ -355,7 +360,7 @@ function EnvironmentLedger({
                 </button>
                 {canReveal && <ImportEnv project={project} environment={environment} />}
               </>
-            )
+            ) : undefined
           }
         >
           {canWrite
@@ -600,7 +605,7 @@ function ValueField({
       <button
         type="button"
         className="btn btn-quiet btn-sm btn-icon input-addon"
-        aria-label={shown ? 'Mask what you typed' : 'Show what you typed'}
+        aria-label={shown ? 'Mask the value' : 'Show the value'}
         aria-pressed={shown}
         onClick={() => setShown((current) => !current)}
       >
@@ -657,6 +662,10 @@ function SecretRow({
   const [revealing, setRevealing] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The current value, loaded on request as the starting point for an edit.
+  // It is not a change until it is edited: saving it untouched would append a
+  // version identical to the one it came from.
+  const [base, setBase] = useState<Reveal | null>(null);
 
   // A reveal belongs to the version it decrypted. The moment the row shows a
   // different version -- saved here, rolled back, or written by someone else
@@ -674,6 +683,11 @@ function SecretRow({
   }, [reveal]);
 
   const secondsLeft = useSecondsLeft(shown);
+
+  const editBase = editing && revealIsCurrent(base, entry.version) ? base : null;
+  useEffect(() => {
+    if (!editing) setBase(null);
+  }, [editing]);
 
   async function readValue(): Promise<string | null> {
     if (shown !== null) return shown.value;
@@ -755,20 +769,24 @@ function SecretRow({
             <div className="edit-stack">
               <ValueField
                 label={`New value for ${entry.key}`}
-                value={change.value ?? ''}
-                placeholder={`Unchanged. Type to replace v${version}.`}
+                value={change.value ?? editBase?.value ?? ''}
+                placeholder="New value"
                 disabled={disabled}
                 autoFocus
-                onChange={(value) => onPatch({ value: value === '' ? null : value })}
+                onChange={(value) =>
+                  onPatch({ value: value === (editBase?.value ?? '') ? null : value })
+                }
                 onEscape={onUndo}
               />
               <span className="edit-note">
                 <span>
                   {valueChanged
                     ? `Saving appends v${version + 1}; v${version} stays restorable.`
-                    : 'Nothing is decrypted to edit. Leave it empty to keep the current value.'}
+                    : editBase !== null
+                      ? `This is v${version}. Change it to append v${version + 1}.`
+                      : `Nothing is decrypted to edit. Left empty, v${version} stays current.`}
                 </span>
-                {canReveal && !valueChanged && (
+                {canReveal && !valueChanged && editBase === null && (
                   <button
                     type="button"
                     className="act"
@@ -776,7 +794,9 @@ function SecretRow({
                     disabled={revealing}
                     onClick={async () => {
                       const value = await readValue();
-                      if (value !== null) onPatch({ value });
+                      if (value !== null) {
+                        setBase({ value, version: entry.version, at: Date.now() });
+                      }
                     }}
                   >
                     {revealing && <Spinner size={12} />}
@@ -853,6 +873,10 @@ function SecretRow({
                   <button
                     className="act"
                     onClick={() => {
+                      // A value already revealed is already on the record, so
+                      // it becomes the starting point instead of being thrown
+                      // away and read again.
+                      if (shown !== null) setBase(shown);
                       setReveal(null);
                       onEdit();
                     }}

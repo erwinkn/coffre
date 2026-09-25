@@ -20,7 +20,7 @@ const CURRENT = { 'aria-current': 'page' } as const;
 export function Wordmark({ asLink = true }: { asLink?: boolean }) {
   const body = (
     <>
-      <Mark size={20} className="wordmark-mark" />
+      <Mark size={22} className="wordmark-mark" />
       coffre
     </>
   );

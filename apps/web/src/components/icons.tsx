@@ -44,18 +44,21 @@ function Svg({
 }
 
 /**
- * The mark: an escutcheon, the plate around a keyhole. It sits beside an
- * italic wordmark, so it stays a single quiet outline with one solid shape.
+ * The mark: an escutcheon, the plate a keyhole is cut into. It sits beside an
+ * italic wordmark, so it stays one quiet outline with one solid shape.
+ * `MARK_SVG` below is the same drawing, for the favicon.
  */
 export function Mark(props: IconProps) {
   return (
     <Svg {...props}>
-      <circle cx="12" cy="12" r="9.25" />
-      <circle cx="12" cy="10" r="2.35" fill="currentColor" stroke="none" />
-      <path d="M10.9 11.4h2.2l.75 5.1h-3.7Z" fill="currentColor" stroke="none" />
+      <rect x="5.25" y="2.75" width="13.5" height="18.5" rx="6.75" />
+      <circle cx="12" cy="10.25" r="2.2" fill="currentColor" stroke="none" />
+      <path d="M10.95 11.6h2.1l.7 4.5h-3.5Z" fill="currentColor" stroke="none" />
     </Svg>
   );
 }
+
+export const MARK_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><style>*{stroke:#1d1b17;fill:#1d1b17}@media (prefers-color-scheme:dark){*{stroke:#efe9dc;fill:#efe9dc}}</style><rect x="5.25" y="2.75" width="13.5" height="18.5" rx="6.75" fill="none" stroke-width="1.8"/><circle cx="12" cy="10.25" r="2.3" stroke="none"/><path d="M10.9 11.6h2.2l.7 4.6h-3.6Z" stroke="none"/></svg>`;
 
 export function Settings(props: IconProps) {
   return (

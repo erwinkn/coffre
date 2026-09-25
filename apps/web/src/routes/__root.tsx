@@ -17,7 +17,7 @@ import { CommandPalette } from '../components/command-palette';
 import { TooltipProvider } from '../components/ui';
 import { ThemeToggle, themeBootScript } from '../components/theme';
 import { Agentation } from '../components/agentation';
-import { Menu, X } from '../components/icons';
+import { MARK_SVG, Menu, X } from '../components/icons';
 
 export const Route = createRootRoute({
   head: () => ({
@@ -29,7 +29,12 @@ export const Route = createRootRoute({
       { name: 'theme-color', content: '#f6f3ec', media: '(prefers-color-scheme: light)' },
       { name: 'theme-color', content: '#15130f', media: '(prefers-color-scheme: dark)' },
     ],
-    links: [{ rel: 'stylesheet', href: globalsCss }],
+    links: [
+      { rel: 'stylesheet', href: globalsCss },
+      // Inline, so the icon needs no route of its own: in Cloudflare mode
+      // every path but the health checks is behind Access.
+      { rel: 'icon', type: 'image/svg+xml', href: `data:image/svg+xml,${encodeURIComponent(MARK_SVG)}` },
+    ],
   }),
 
   // Identity and the project tree, which the shell needs on every screen.

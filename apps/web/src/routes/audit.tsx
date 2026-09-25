@@ -71,17 +71,20 @@ function AuditPage() {
 
       <div className="filters">
         <nav className="segmented" aria-label="Filter by decision">
+          {/* `exact` compares the whole search, not a subset of it: otherwise
+              "All events" for one actor also counts as active while that
+              actor's denials are showing, and both halves light up. */}
           <Link
             to="/audit"
             search={actorId === undefined ? {} : { actorId }}
-            aria-current={deniedOnly ? undefined : 'page'}
+            activeOptions={{ exact: true }}
           >
             All events
           </Link>
           <Link
             to="/audit"
             search={{ decision: 'deny', ...(actorId === undefined ? {} : { actorId }) }}
-            aria-current={deniedOnly ? 'page' : undefined}
+            activeOptions={{ exact: true }}
           >
             <SlashCircle size={13} />
             Denials only
