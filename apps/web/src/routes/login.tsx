@@ -166,6 +166,8 @@ function DevLoginPage() {
               <button
                 type="button"
                 className="persona"
+                aria-label={`Sign in as ${seededEmail}, ${role}`}
+                aria-describedby={`persona-${seededEmail}`}
                 disabled={pending !== null}
                 onClick={() => {
                   setEmail(seededEmail);
@@ -176,7 +178,9 @@ function DevLoginPage() {
                   <span className="persona-email">{seededEmail}</span>
                   <span className="tag tag-outline">{role}</span>
                 </span>
-                <span className="persona-note">{note}</span>
+                <span className="persona-note" id={`persona-${seededEmail}`}>
+                  {note}
+                </span>
                 <span className="persona-go" aria-hidden>
                   {pending === seededEmail ? <Spinner size={13} /> : <ArrowRight size={14} />}
                 </span>

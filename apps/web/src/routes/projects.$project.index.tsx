@@ -103,7 +103,8 @@ function ProjectPage() {
         meta={
           <>
             <span>
-              <strong>{active.length}</strong> environment{active.length === 1 ? '' : 's'}
+              <strong>{active.length + listedOnly.length}</strong> environment
+              {active.length + listedOnly.length === 1 ? '' : 's'}
               {archived.length > 0 && `, ${archived.length} archived`}
             </span>
             <PermissionSummary permissions={project.permissions} />
@@ -125,13 +126,11 @@ function ProjectPage() {
         title="Environments"
         actions={canManageEnvironments && <NewEnvironment project={project.slug} />}
       >
-        {active.length === 0 ? (
+        {active.length === 0 && listedOnly.length === 0 ? (
           <EmptyState title="No environments yet">
-            {listedOnly.length > 0
-              ? 'You can see the names of other environments below, but not open them.'
-              : canManageEnvironments
-                ? 'Secrets live in environments, not in the project itself, and a grant can be scoped to exactly one of them. Add the first with Add environment.'
-                : 'Creating environments needs environment.manage on this project.'}
+            {canManageEnvironments
+              ? 'Secrets live in environments, not in the project itself, and a grant can be scoped to exactly one of them. Add the first with Add environment.'
+              : 'Creating environments needs environment.manage on this project.'}
           </EmptyState>
         ) : (
           <ul className="index">
@@ -143,17 +142,8 @@ function ProjectPage() {
                 isAdmin={canManageEnvironments}
               />
             ))}
-          </ul>
-        )}
-      </Section>
-
-      {listedOnly.length > 0 && (
-        <Section
-          labelledBy="other-environments"
-          title="Other environments"
-          note="They exist, and that is all you can see: no grant you hold covers their contents."
-        >
-          <ul className="index">
+            {/* Environments you may know by name only: no grant you hold covers
+                their contents, so they are listed, muted, and do not open. */}
             {listedOnly.map((environment) => (
               <li className="index-row is-muted" key={environment.slug}>
                 <div className="index-main">
@@ -161,13 +151,13 @@ function ProjectPage() {
                   <span className="index-sub">{environment.name}</span>
                 </div>
                 <div className="index-side">
-                  <span className="tag tag-outline">no access</span>
+                  <span className="tag tag-outline">no secret access</span>
                 </div>
               </li>
             ))}
           </ul>
-        </Section>
-      )}
+        )}
+      </Section>
 
       {archived.length > 0 && (
         <Section
@@ -419,6 +409,9 @@ function EnvironmentRow({
           </span>
         )}
         {isArchived && <span className="tag tag-red">archived</span>}
+        {!isArchived && !environment.accessible && (
+          <span className="tag tag-outline">no secret access</span>
+        )}
 
         {isAdmin && (
           <DropdownMenu.Root>
@@ -760,12 +753,14 @@ function ProjectAccessTable({
         </EmptyState>
       ) : (
         <div className="ledger-wrap">
-          <table className="ledger stacks">
+          <table className="ledger grants stacks">
             <thead>
               <tr>
-                <th className="caps">{principalType === 'user' ? 'Email' : 'Common name'}</th>
+                <th className="caps col-principal">
+                  {principalType === 'user' ? 'Email' : 'Common name'}
+                </th>
                 <th className="caps">Permissions</th>
-                <th className="caps col-shrink">Expires</th>
+                <th className="caps col-expires">Expires</th>
                 <th className="col-actions">
                   <span className="visually-hidden">Actions</span>
                 </th>
@@ -940,7 +935,7 @@ function GrantRowView({ project, grant }: { project: string; grant: GrantRow }) 
         <td data-label="Permissions">
           <span className={`tag ${grant.role === 'owner' ? 'tag-accent' : ''}`}>{label}</span>
         </td>
-        <td className="col-shrink cell-mono cell-muted" data-label="Expires">
+        <td className="col-expires cell-mono cell-muted" data-label="Expires">
           {grant.expiresAt === null ? (
             'never'
           ) : (

@@ -43,6 +43,8 @@
   --ink: light-dark(oklch(0.223 0.008 85), oklch(0.935 0.018 86));
   --ink-2: light-dark(oklch(0.392 0.016 82), oklch(0.797 0.025 86));
   --ink-3: light-dark(oklch(0.496 0.021 81), oklch(0.682 0.025 85));
+  /* Secondary text on an ink ground: the save bar and toasts. */
+  --on-ink-2: light-dark(oklch(0.83 0.014 85), oklch(0.42 0.016 83));
 
   /* Blue-black ink: links, focus, and edits waiting to be saved. */
   --accent: light-dark(oklch(0.393 0.106 263), oklch(0.793 0.072 266));
@@ -580,6 +582,7 @@ kbd {
 }
 
 .page-head-text {
+  flex: 1 1 26rem;
   min-width: 0;
 }
 
@@ -1391,6 +1394,28 @@ kbd {
   font-weight: 500;
 }
 
+/* Grants: the same columns in both tables, so People and Service accounts
+   line up as one register. */
+.grants {
+  table-layout: fixed;
+}
+
+.grants .col-principal {
+  width: 44%;
+}
+
+.grants .col-expires {
+  width: 9rem;
+}
+
+.grants .col-actions {
+  width: 6.5rem;
+}
+
+.grants td {
+  overflow-wrap: anywhere;
+}
+
 /* Version history, unfolded beneath its secret. */
 .detail-row > td {
   padding: 0 0 1.25rem 1.5rem;
@@ -1469,7 +1494,7 @@ kbd {
 .savebar-summary {
   flex: 1 1 16rem;
   min-width: 0;
-  color: color-mix(in oklab, var(--paper) 78%, var(--ink));
+  color: var(--on-ink-2);
   font-size: 0.8125rem;
 }
 
@@ -1741,8 +1766,8 @@ span.env-link {
 
 .filter-chip:hover {
   text-decoration: none;
-  background: color-mix(in oklab, var(--accent-wash) 70%, var(--accent));
-  color: var(--accent);
+  background: var(--accent);
+  color: var(--paper);
 }
 
 .filters-count {
@@ -1783,8 +1808,8 @@ span.env-link {
 .actor {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 0.25rem 0.5rem;
+  gap: 0.5rem;
+  white-space: nowrap;
 }
 
 .decision {
@@ -2280,7 +2305,7 @@ span.env-link {
 }
 
 .toast-description {
-  color: color-mix(in oklab, var(--paper) 78%, var(--ink));
+  color: var(--on-ink-2);
 }
 
 .toast-action {
@@ -2474,8 +2499,13 @@ span.env-link {
     border-bottom: 1px solid var(--rule-soft);
   }
 
+  .ledger.stacks {
+    table-layout: auto;
+  }
+
   .ledger.stacks td {
     display: block;
+    width: auto;
     height: auto;
     padding: 0;
     border: 0;
@@ -2519,6 +2549,91 @@ span.env-link {
   .ledger.stacks .secret-row.is-leaving {
     box-shadow: inset 3px 0 var(--red);
     padding-left: 0.875rem;
+  }
+
+  /* Secrets: key, version and actions on one line, the value beneath. The
+     labels would only repeat what the monospace already says. */
+  .ledger.secrets.stacks tr.secret-row {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-areas:
+      'key version actions'
+      'value value value';
+    align-items: center;
+  }
+
+  .ledger.secrets.stacks td[data-label]::before {
+    display: none;
+  }
+
+  .ledger.secrets.stacks td.cell-key {
+    grid-area: key;
+  }
+
+  .ledger.secrets.stacks td.col-version {
+    grid-area: version;
+  }
+
+  .ledger.secrets.stacks td.col-actions {
+    grid-area: actions;
+    grid-column: auto;
+    grid-row: auto;
+  }
+
+  .ledger.secrets.stacks td[data-label='Value'] {
+    grid-area: value;
+  }
+
+  .ledger.secrets.stacks .secret-row.is-archived {
+    grid-template-areas: 'key version actions';
+  }
+
+  .ledger.secrets.stacks .secret-row.is-draft,
+  .ledger.secrets.stacks .secret-row.is-changed {
+    grid-template-areas:
+      'key key actions'
+      'value value version';
+  }
+
+  /* Audit: the sequence number in the margin, the entry as three lines. */
+  .ledger.audit.stacks tr {
+    grid-template-columns: 2.5rem minmax(0, 1fr) auto;
+    grid-template-areas:
+      'seq when decision'
+      'seq actor actor'
+      'seq action action'
+      'seq subject subject';
+    gap: 0.125rem 0.75rem;
+    padding: 0.625rem 0.25rem;
+  }
+
+  .ledger.audit.stacks td[data-label]::before {
+    display: none;
+  }
+
+  .ledger.audit.stacks td:nth-child(1) {
+    grid-area: seq;
+    text-align: left;
+  }
+
+  .ledger.audit.stacks td:nth-child(2) {
+    grid-area: when;
+  }
+
+  .ledger.audit.stacks td:nth-child(3) {
+    grid-area: actor;
+  }
+
+  .ledger.audit.stacks td:nth-child(4) {
+    grid-area: action;
+    color: var(--ink-3);
+  }
+
+  .ledger.audit.stacks td:nth-child(5) {
+    grid-area: subject;
+  }
+
+  .ledger.audit.stacks td:nth-child(6) {
+    grid-area: decision;
   }
 
   .ledger.stacks .detail-row {

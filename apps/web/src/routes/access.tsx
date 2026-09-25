@@ -109,10 +109,12 @@ function PrincipalSection({
         </EmptyState>
       ) : (
         <div className="ledger-wrap">
-          <table className="ledger stacks">
+          <table className="ledger grants stacks">
             <thead>
               <tr>
-                <th className="caps">{principalType === 'user' ? 'Email' : 'Common name'}</th>
+                <th className="caps col-principal">
+                  {principalType === 'user' ? 'Email' : 'Common name'}
+                </th>
                 {principalType === 'user' && <th className="caps">Instance role</th>}
                 <th className="col-actions">
                   <span className="visually-hidden">Actions</span>
