@@ -262,12 +262,14 @@ for the first without being unreadable for the second.
 
 Things worth knowing about it:
 
-- **It is set like a ledger, because the log is the point.** Warm paper and
-  ink, hairline rules, Newsreader for titles, IBM Plex Sans for the interface,
-  and IBM Plex Mono for anything a machine reads back: keys, slugs, values,
-  sequence numbers. Colour is kept for meaning: blue ink for edits not yet
-  saved, ochre for a value on screen, red for what leaves or is refused, green
-  for what was allowed. The fonts are self-hosted from exactly pinned packages.
+- **It is drawn as a plain developer tool.** Neutral surfaces, bordered
+  cards, and tables as grids with a row-number gutter; Inter for the interface
+  and JetBrains Mono for anything a machine reads back (keys, slugs, values,
+  sequence numbers). The top bar's path is itself the switcher: one click on
+  `prod` lists its sibling environments. Hue is kept for meaning: blue for
+  edits not yet saved, amber for a value on screen, red for what leaves or is
+  refused, green for what was allowed. The fonts are self-hosted from exactly
+  pinned packages.
 - **Colours are authored in OKLCH and verified, not eyeballed.**
   `scripts/check-contrast.mjs` converts every token back to sRGB and fails on
   any text pair under WCAG AA, or any accent whose chroma clips the gamut. It
@@ -432,7 +434,7 @@ UI, the underlying role and scope are presented as one permissions value:
   where it previously had none beyond React. They buy correct focus management,
   the command palette and toasts; they also mean ~75 more packages in a service
   that holds every credential we own. Pinned exactly and subject to the same
-  7-day minimum release age as everything else. The three `@fontsource`
+  7-day minimum release age as everything else. The two `@fontsource`
   packages are font files and CSS only, with no dependencies of their own.
 - TanStack Start is on the 1.168 line, which moves fast. Server functions use
   the current `.validator()` API; pin bumps deserve a changelog and boundary

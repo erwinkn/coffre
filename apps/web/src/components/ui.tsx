@@ -77,8 +77,8 @@ export function Notice({
 /**
  * Nothing here yet, said in a sentence.
  *
- * No illustration and no centred icon: an empty ledger page is a blank line
- * with a note in the margin, and a note is what this is.
+ * It sits where the table would have been, left-aligned like the rows it
+ * stands in for, rather than as a centred illustration.
  */
 export function EmptyState({
   title,
