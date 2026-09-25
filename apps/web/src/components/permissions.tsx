@@ -23,10 +23,10 @@ const SHORT: Record<Permission, string> = {
   'secret.read': 'read',
   'secret.write': 'write',
   'secret.archive': 'archive',
-  'audit.read': 'audit',
+  'audit.read': 'audit log',
   'environment.manage': 'environments',
-  'grant.manage': 'access',
-  'project.manage': 'settings',
+  'grant.manage': 'grants',
+  'project.manage': 'project settings',
 };
 
 const ORDER = Object.keys(EXPLAINED) as Permission[];

@@ -262,6 +262,12 @@ for the first without being unreadable for the second.
 
 Things worth knowing about it:
 
+- **It is set like a ledger, because the log is the point.** Warm paper and
+  ink, hairline rules, Newsreader for titles, IBM Plex Sans for the interface,
+  and IBM Plex Mono for anything a machine reads back: keys, slugs, values,
+  sequence numbers. Colour is kept for meaning: blue ink for edits not yet
+  saved, ochre for a value on screen, red for what leaves or is refused, green
+  for what was allowed. The fonts are self-hosted from exactly pinned packages.
 - **Colours are authored in OKLCH and verified, not eyeballed.**
   `scripts/check-contrast.mjs` converts every token back to sRGB and fails on
   any text pair under WCAG AA, or any accent whose chroma clips the gamut. It
@@ -272,10 +278,17 @@ Things worth knowing about it:
 - **No decision is carried by colour alone.** `allow` / `deny` in the audit log
   is exactly the red/green pair deuteranopia collapses, so each row carries a
   glyph and the word as well as the hue.
-- **A revealed value hides itself after 45 seconds**, with a countdown so the
-  disappearance is expected. The read is already logged; re-revealing writes a
-  second, honest row.
-- **Archiving gets an undo toast, not a confirmation dialog.** Dialogs are
+- **Revealing is always a deliberate click.** Focusing or tabbing through a
+  field never decrypts anything, and editing a value does not need to read it.
+  A revealed value hides itself after 45 seconds, with a countdown so the
+  disappearance is expected; re-revealing writes a second, honest row. It also
+  belongs to the version it decrypted, so a save, a rollback or someone else's
+  write clears it rather than leaving an old value on screen.
+- **Edits are staged, then saved together.** Renames, new values, new secrets
+  and archiving collect in a save bar and are written as the individual audited
+  operations they are, stopping at the first refusal so a retry picks up
+  exactly what did not land.
+- **Restoring gets an undo toast, not a confirmation dialog.** Dialogs are
   reserved for changes that reach other people -- archiving a project or
   environment, revoking a grant -- and each one says what will actually break.
 - **Permissions shape the page.** Sections are gated individually, so an access
@@ -419,7 +432,8 @@ UI, the underlying role and scope are presented as one permissions value:
   where it previously had none beyond React. They buy correct focus management,
   the command palette and toasts; they also mean ~75 more packages in a service
   that holds every credential we own. Pinned exactly and subject to the same
-  7-day minimum release age as everything else.
+  7-day minimum release age as everything else. The three `@fontsource`
+  packages are font files and CSS only, with no dependencies of their own.
 - TanStack Start is on the 1.168 line, which moves fast. Server functions use
   the current `.validator()` API; pin bumps deserve a changelog and boundary
   test review rather than a version bump on trust.

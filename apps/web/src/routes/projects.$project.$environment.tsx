@@ -300,11 +300,15 @@ function EnvironmentLedger({
     }),
   ];
 
-  const problem = hasConflict
-    ? 'Two pending edits would end up with the same name. Secret names are unique in an environment.'
-    : invalid
-      ? 'Names are letters, digits and underscores, and cannot start with a digit.'
-      : null;
+  // Two rows that are both still blank "conflict" too, so say nothing until
+  // every name is filled in; the blank row speaks for itself.
+  const problem = unnamed
+    ? null
+    : hasConflict
+      ? 'Two pending edits would end up with the same name. Secret names are unique in an environment.'
+      : invalid
+        ? 'Names are letters, digits and underscores, and cannot start with a digit.'
+        : null;
 
   const columns = 5;
 
