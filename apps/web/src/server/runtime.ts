@@ -11,9 +11,10 @@ import { loadConfig, type Config } from './config.ts';
 import { HyperdriveDatabase, type Database } from './database.ts';
 import { AdminService } from './services/admin.ts';
 import { AuditService } from './services/audit.ts';
-import { SecretsService } from './services/secrets.ts';
+import { SecretsService, type RequestContext } from './services/secrets.ts';
 import { SigninService } from './services/signin.ts';
 import { SyncService } from './services/sync.ts';
+import type { PrincipalReport } from '../shared/models.ts';
 
 export type CoffreRuntime = {
   pool: Database;
@@ -100,6 +101,23 @@ export function createRuntime(
     rootAdmins: config.rootAdmins,
     waitUntil,
   };
+}
+
+/**
+ * What leaving would take for one person or service: what still lets them
+ * in, what they saw, and what they set up that outlives them. Owners only.
+ */
+export async function principalReport(
+  runtime: CoffreRuntime,
+  ctx: RequestContext,
+  principalType: 'user' | 'service',
+  principalId: string,
+): Promise<PrincipalReport> {
+  const [report, syncs] = await Promise.all([
+    runtime.admin.offboardingReport(ctx, principalType, principalId),
+    runtime.syncs.listCreatedBy(ctx, principalId),
+  ]);
+  return { ...report, syncs };
 }
 
 const accessVerifiers = new Map<string, AccessIdentityVerifier>();

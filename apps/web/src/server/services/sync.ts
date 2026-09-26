@@ -13,7 +13,7 @@ import {
   type SyncProvider,
 } from '../../../../../packages/sync/src/index.ts';
 import { runAudited } from './audited.ts';
-import { has, permissionsForEnvironment, type Permission } from './permissions.ts';
+import { has, isInstanceOwner, permissionsForEnvironment, type Permission } from './permissions.ts';
 import {
   AccessDenied,
   AuditedFailure,
@@ -80,6 +80,9 @@ export type SyncView = {
   /** Keys the destination cannot hold, and why. */
   skipped: { key: string; reason: string }[];
 };
+
+/** A sync somewhere on the instance, with where it lives. */
+export type PlacedSyncView = SyncView & { project: string; environment: string };
 
 export type RunOutcome =
   | { status: 'busy' }
@@ -265,6 +268,37 @@ export class SyncService {
         syncs: await this.#views(client, rows.rows),
         canManage: has(permissions, 'environment.manage') && has(permissions, 'secret.read'),
       };
+    } finally {
+      await client.release();
+    }
+  }
+
+  /**
+   * Every live sync one person set up, for their offboarding report. Owners
+   * only. A sync keeps pushing after its creator leaves, to a destination
+   * they chose, so each one is worth a look.
+   */
+  async listCreatedBy(ctx: RequestContext, principalId: string): Promise<PlacedSyncView[]> {
+    const client = await this.#deps.pool.connect();
+    try {
+      if (!(await isInstanceOwner(client, ctx.principal, this.#deps.rootAdmins))) {
+        throw new AccessDenied('only owners may see what someone has access to');
+      }
+      const rows = await client.query<SyncRow & { project_slug: string; environment_slug: string }>(
+        `SELECT ${SYNC_COLUMNS}, p.slug AS project_slug, e.slug AS environment_slug
+           FROM syncs s ${SYNC_JOINS}
+           JOIN environments e ON e.id = s.environment_id AND e.archived_at IS NULL
+           JOIN projects p ON p.id = s.project_id AND p.archived_at IS NULL
+          WHERE s.created_by = $1 AND s.archived_at IS NULL
+          ORDER BY p.slug, e.slug, s.created_at`,
+        [principalId],
+      );
+      const views = await this.#views(client, rows.rows);
+      return views.map((view, index) => ({
+        ...view,
+        project: rows.rows[index].project_slug,
+        environment: rows.rows[index].environment_slug,
+      }));
     } finally {
       await client.release();
     }

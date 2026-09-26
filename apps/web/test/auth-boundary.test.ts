@@ -134,7 +134,7 @@ test('native API mutations require origin checks unless the request is non-simpl
   );
 });
 
-test('the specific user-directory route owns both role updates and deletion', () => {
+test('the specific user-directory route owns the report, role updates and deletion', () => {
   const route = readFileSync(
     fileURLToPath(
       new URL(
@@ -144,9 +144,10 @@ test('the specific user-directory route owns both role updates and deletion', ()
     ),
     'utf8',
   );
+  assert.match(route, /GET:\s*\(/);
   assert.match(route, /DELETE:\s*\(/);
   assert.match(route, /PATCH:\s*\(/);
-  assert.match(route, /methodNotAllowed\(\['DELETE', 'PATCH'\]\)/);
+  assert.match(route, /methodNotAllowed\(\['GET', 'DELETE', 'PATCH'\]\)/);
 });
 
 test('Cloudflare mode ignores the dev cookie and dev mode ignores the Access header', () => {

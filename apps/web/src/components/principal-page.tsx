@@ -1,7 +1,7 @@
 import { useState } from 'react';
-import { Link, useLoaderData, useNavigate, useRouter } from '@tanstack/react-router';
+import { Link, useLoaderData, useRouter } from '@tanstack/react-router';
 import { toast } from 'sonner';
-import { listDirectoryPrincipals, revokeGrant } from '../server-functions/access';
+import { getPrincipalReport, revokeGrant } from '../server-functions/access';
 import { getProject } from '../server-functions/projects';
 import { useAction } from '../lib/use-action';
 import type { UiCapabilities } from '../lib/capabilities';
@@ -22,6 +22,7 @@ import { ClosedDoor, PageHeader } from './page';
 import { EmptyState, ErrorLine, Modal, Notice, Spinner } from './ui';
 import { ensureGrant, GrantRowView, GrantsTable } from './grants';
 import { InstanceRole, KIND, PrincipalActions } from './directory';
+import { PrincipalReportCards, RemovedNotice } from './offboarding';
 import { PrincipalAvatar } from './principal';
 import { Tile } from './tile';
 import { Clock, Folder, Key, Pencil, Users, X } from './icons';
@@ -31,13 +32,14 @@ type PrincipalType = DirectoryPrincipal['principalType'];
 type ProjectAccess = { project: ProjectSummary; grants: GrantRow[]; grantsError: string | null };
 
 /**
- * Everything one user's or token's page shows: its directory entry, and its
- * grants on every project where you manage access.
+ * Everything one user's or token's page shows: who it is to the instance and
+ * what it has seen (owners only), and its grants on every project where you
+ * manage access.
  *
  * There is no "grants of this principal" call, so this asks each project you
  * manage for its grants and keeps this principal's. Projects where you do not
  * hold grant.manage are skipped rather than asked: the refusal would land in
- * the audit log as a denial in your name. The directory is only asked for
+ * the audit log as a denial in your name. The report is only asked for
  * instance owners, for the same reason.
  */
 export async function loadPrincipalPage(
@@ -48,8 +50,10 @@ export async function loadPrincipalPage(
   const managed = (root?.projects ?? []).filter((project) =>
     project.permissions.includes('grant.manage'),
   );
-  const [directory, details] = await Promise.all([
-    root?.capabilities.canManageGrants ? listDirectoryPrincipals() : Promise.resolve(null),
+  const [report, details] = await Promise.all([
+    root?.capabilities.canManageGrants
+      ? getPrincipalReport({ data: { principalType, principalId } })
+      : Promise.resolve(null),
     Promise.all(managed.map((project) => getProject({ data: { project: project.slug } }))),
   ]);
 
@@ -68,7 +72,7 @@ export async function loadPrincipalPage(
       : [],
   );
 
-  return { directory, access };
+  return { report, access };
 }
 
 export function PrincipalPage({
@@ -80,24 +84,29 @@ export function PrincipalPage({
   principalId: string;
   data: Awaited<ReturnType<typeof loadPrincipalPage>>;
 }) {
-  const navigate = useNavigate();
+  const router = useRouter();
   const { instanceRole } = useLoaderData({ from: '__root__' });
-  const { directory, access } = data;
+  const { report, access } = data;
   const kind = KIND[principalType];
   const people = principalType === 'user';
   const list = people ? '/users' : '/tokens';
+  const found = report?.ok === true ? report.report : null;
+  const removed = found?.status === 'removed';
   const entry =
-    directory?.ok === true
-      ? directory.principals.find(
-          (principal) =>
-            principal.principalType === principalType && principal.principalId === principalId,
-        )
+    found !== null && !removed
+      ? {
+          principalType,
+          principalId,
+          instanceRole: found.instanceRole,
+          isRootAdmin: found.isRootAdmin,
+        }
       : undefined;
 
-  // Owners see the whole directory, so a miss there means there is no such
-  // user. Everyone else only reaches this page through projects they manage.
-  const unknown = directory?.ok === true && entry === undefined;
-  if (unknown || (directory === null && access.length === 0)) {
+  // Owners get a report about anyone ever registered, removed or not, so a
+  // miss there means there is no such user. Everyone else only reaches this
+  // page through projects they manage.
+  const unknown = report?.ok === true && found === null;
+  if (unknown || (report === null && access.length === 0)) {
     return (
       <ClosedDoor
         icon={people ? <Users size={18} /> : <Key size={18} />}
@@ -109,9 +118,9 @@ export function PrincipalPage({
           </Link>
         }
       >
-        {directory === null
+        {report === null
           ? `A ${kind}'s page lists its access to the projects where you manage access, and you manage none.`
-          : `No ${kind} by that name is registered. It may have been removed.`}
+          : `No ${kind} by that name has ever been registered here.`}
       </ClosedDoor>
     );
   }
@@ -120,16 +129,25 @@ export function PrincipalPage({
     grants.map((grant) => ({ project, grant })),
   );
   const errors = access.filter((entry) => entry.grantsError !== null);
-  const editable = access.filter(
-    ({ project, grantsError }) => project.archivedAt === null && grantsError === null,
-  );
+  // Grants to someone removed are refused until they are added back.
+  const editable = removed
+    ? []
+    : access.filter(
+        ({ project, grantsError }) => project.archivedAt === null && grantsError === null,
+      );
 
   return (
     <>
       <PageHeader
         lead={<PrincipalAvatar type={principalType} id={principalId} size="lg" />}
         title={principalId}
-        meta={entry?.principalType === 'user' && <InstanceRole principal={entry} />}
+        meta={
+          removed ? (
+            <span className="tag tag-red">Removed</span>
+          ) : (
+            entry?.principalType === 'user' && <InstanceRole principal={entry} />
+          )
+        }
         actions={
           (editable.length > 0 || entry !== undefined) && (
             <>
@@ -144,7 +162,7 @@ export function PrincipalPage({
                 <PrincipalActions
                   principal={entry}
                   trigger="btn btn-icon"
-                  onRemoved={() => navigate({ to: list })}
+                  onRemoved={() => router.invalidate()}
                 />
               )}
             </>
@@ -152,65 +170,79 @@ export function PrincipalPage({
         }
       />
 
-      <h2 className="section-title">Project access</h2>
-
-      {errors.map(({ project, grantsError }) => (
-        <div key={project.slug} style={{ marginBottom: '0.75rem' }}>
-          <Notice tone="bad">
-            <span className="mono">{project.slug}</span>: {grantsError}
-          </Notice>
+      {report?.ok === false && (
+        <div className="report-notice">
+          <Notice tone="bad">{report.error}</Notice>
         </div>
-      ))}
+      )}
+      {removed && found !== null && <RemovedNotice report={found} />}
 
-      <section className="card" aria-label="Project access">
-        {rows.length === 0 ? (
-          <EmptyState title="No project access yet">
-            {editable.length > 0
-              ? `Edit access gives this ${kind} access to several projects at once.`
-              : `None of the projects where you manage access has a grant for this ${kind}.`}
-          </EmptyState>
-        ) : (
-          <GrantsTable
-            lead={
-              <span className="th">
-                <Folder size={14} />
-                Project
-              </span>
-            }
-          >
-            {rows.map(({ project, grant }, index) => (
-              <GrantRowView
-                key={grant.id}
-                number={index + 1}
-                project={project.slug}
-                grant={grant}
-                leadLabel="Project"
+      {/* Removal ends every grant, so there is no access left to show. */}
+      {!removed && (
+        <>
+          <h2 className="section-title">Project access</h2>
+
+          {errors.map(({ project, grantsError }) => (
+            <div key={project.slug} style={{ marginBottom: '0.75rem' }}>
+              <Notice tone="bad">
+                <span className="mono">{project.slug}</span>: {grantsError}
+              </Notice>
+            </div>
+          ))}
+
+          <section className="card" aria-label="Project access">
+            {rows.length === 0 ? (
+              <EmptyState title="No project access yet">
+                {editable.length > 0
+                  ? `Edit access gives this ${kind} access to several projects at once.`
+                  : `None of the projects where you manage access has a grant for this ${kind}.`}
+              </EmptyState>
+            ) : (
+              <GrantsTable
                 lead={
-                  <span className="cell-project">
-                    <Tile name={project.slug} />
-                    <Link
-                      className="cell-link"
-                      to="/projects/$project"
-                      params={{ project: project.slug }}
-                      search={{ tab: people ? 'users' : 'tokens' }}
-                    >
-                      {project.name}
-                    </Link>
-                    {project.archivedAt !== null && <span className="tag tag-red">archived</span>}
+                  <span className="th">
+                    <Folder size={14} />
+                    Project
                   </span>
                 }
-              />
-            ))}
-          </GrantsTable>
-        )}
-      </section>
+              >
+                {rows.map(({ project, grant }, index) => (
+                  <GrantRowView
+                    key={grant.id}
+                    number={index + 1}
+                    project={project.slug}
+                    grant={grant}
+                    leadLabel="Project"
+                    lead={
+                      <span className="cell-project">
+                        <Tile name={project.slug} />
+                        <Link
+                          className="cell-link"
+                          to="/projects/$project"
+                          params={{ project: project.slug }}
+                          search={{ tab: people ? 'users' : 'tokens' }}
+                        >
+                          {project.name}
+                        </Link>
+                        {project.archivedAt !== null && <span className="tag tag-red">archived</span>}
+                      </span>
+                    }
+                  />
+                ))}
+              </GrantsTable>
+            )}
+          </section>
 
-      {/* A root admin manages every project, so nothing is out of view. */}
-      {instanceRole !== 'root-admin' && (
-        <p className="hint section-foot">
-          Only projects where you manage access are listed.
-        </p>
+          {/* A root admin manages every project, so nothing is out of view. */}
+          {instanceRole !== 'root-admin' && (
+            <p className="hint section-foot">
+              Only projects where you manage access are listed.
+            </p>
+          )}
+        </>
       )}
+
+      {found !== null && <PrincipalReportCards report={found} />}
     </>
   );
 }

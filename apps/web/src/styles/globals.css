@@ -3913,3 +3913,27 @@ a.env-card-name:hover {
   align-items: flex-start;
   gap: 0.25rem;
 }
+
+/* ========================================================================== */
+/* Offboarding report                                                         */
+/* ========================================================================== */
+
+.report-notice {
+  margin-bottom: 1.25rem;
+}
+
+/* The report's cards follow the access table, whose hint may close it. */
+.section-foot + .card {
+  margin-top: 1.25rem;
+}
+
+.card-aside {
+  color: var(--ink-3);
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Where a value lives recedes; its name is what someone goes looking for. */
+.report-path {
+  color: var(--ink-3);
+}

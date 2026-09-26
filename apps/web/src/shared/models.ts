@@ -1,6 +1,8 @@
 import type {
   GrantRow as ServiceGrantRow,
   InstancePrincipalRow,
+  OffboardingReport,
+  RemovedPrincipal,
   ProjectSummary as ServiceProjectSummary,
   RoleRow as ServiceRoleRow,
 } from '../server/services/admin.ts';
@@ -10,6 +12,7 @@ import type {
   SecretsService,
 } from '../server/services/secrets.ts';
 import type {
+  PlacedSyncView,
   RunOutcome as ServiceRunOutcome,
   SyncView as ServiceSyncView,
 } from '../server/services/sync.ts';
@@ -51,6 +54,10 @@ export type SecretVersion = Awaited<
 export type ImportPlanEntry = Awaited<
   ReturnType<SecretsService['importSecrets']>
 >['plan'][number];
+
+/** What someone can still reach and what they have seen, with the syncs they set up. */
+export type PrincipalReport = OffboardingReport & { syncs: PlacedSyncView[] };
+export type { RemovedPrincipal };
 
 export type SyncView = ServiceSyncView;
 export type RunOutcome = ServiceRunOutcome;

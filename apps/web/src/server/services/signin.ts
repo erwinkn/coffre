@@ -415,6 +415,15 @@ export class SigninService {
     principal: PrincipalRef,
     options: { identityId: string | null; label: string | null; createdBy: string; expiresAt: Date },
   ): Promise<IssuedCredential> {
+    // Removing someone takes this lock to revoke everything they hold, so a
+    // credential is either minted first and revoked with the rest, or refused.
+    await advisoryLock(tx, `coffre:principal:${principal.type}:${principal.id}`);
+    const active = await tx.query(
+      `SELECT 1 FROM principals WHERE principal_type = $1 AND principal_id = $2 AND active`,
+      [principal.type, principal.id],
+    );
+    if (active.rowCount === 0) throw new SigninRefused('deactivated');
+
     const token = generateToken(kind);
     const inserted = await tx.query<{ id: string; expires_at: Date | string }>(
       `INSERT INTO credentials (
@@ -956,10 +965,11 @@ export class SigninService {
         principal_id: string | null;
         client_label: string | null;
         client_ip: string | null;
+        decided_at: Date | string | null;
         expired: boolean;
         consumed: boolean;
       }>(
-        `SELECT id, decision, principal_id, client_label, client_ip,
+        `SELECT id, decision, principal_id, client_label, client_ip, decided_at,
                 expires_at <= now() AS expired,
                 consumed_at IS NOT NULL AS consumed
            FROM device_authorizations
@@ -978,9 +988,12 @@ export class SigninService {
 
       const principalId = row.principal_id as string;
       await tx.query(`UPDATE device_authorizations SET consumed_at = now() WHERE id = $1`, [row.id]);
+      // An approval given before the person was last added is void: someone
+      // removed and re-added in between starts with nothing from before.
       const active = await tx.query(
-        `SELECT 1 FROM principals WHERE principal_type = 'user' AND principal_id = $1 AND active`,
-        [principalId],
+        `SELECT 1 FROM principals
+          WHERE principal_type = 'user' AND principal_id = $1 AND active AND created_at <= $2`,
+        [principalId, row.decided_at],
       );
       if (active.rowCount === 0) return none({ status: 'denied' });
 

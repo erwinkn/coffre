@@ -259,11 +259,19 @@ export function PrincipalActions({
           </>
         }
         body={
-          <>
-            The {kind} can no longer use coffre, and every project permission it holds is
-            revoked at once, including for anything running with it right now. Its past actions
-            stay in the audit log.
-          </>
+          principal.principalType === 'user' ? (
+            <>
+              They are signed out everywhere, and their CLI logins, linked sign-in accounts and
+              project permissions are revoked at once. Their past actions stay in the audit log,
+              and their page then lists the values they saw, to rotate.
+            </>
+          ) : (
+            <>
+              Every token issued to it stops working and its project permissions are revoked at
+              once, including for anything running with it right now. Its past actions stay in
+              the audit log, and its page then lists the values it read, to rotate.
+            </>
+          )
         }
         confirmLabel={`Remove ${kind}`}
         onConfirm={() =>

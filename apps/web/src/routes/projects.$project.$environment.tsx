@@ -85,6 +85,10 @@ const REVEAL_TTL_SECONDS = 45;
 const REVEAL_COST_ID = 'reveal-cost';
 
 export const Route = createFileRoute('/projects/$project/$environment')({
+  // `?filter=KEY` opens the ledger narrowed to matching keys, for links to one secret.
+  validateSearch: (search: Record<string, unknown>): { filter?: string } => ({
+    filter: typeof search.filter === 'string' && search.filter !== '' ? search.filter : undefined,
+  }),
   loader: async ({ params }) => {
     const data = { project: params.project, environment: params.environment };
     const [keys, syncs] = await Promise.all([listKeys({ data }), listSyncs({ data })]);
@@ -156,7 +160,7 @@ function EnvironmentLedger({
   const [editing, setEditing] = useState<ReadonlySet<string>>(() => new Set());
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
-  const [query, setQuery] = useState('');
+  const [query, setQuery] = useState(Route.useSearch().filter ?? '');
   const nextDraftId = useRef(0);
 
   const canWrite = permissions.includes('secret.write');

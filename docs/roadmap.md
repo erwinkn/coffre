@@ -291,10 +291,13 @@ identity: signIn({
   an OIDC issuer, so the suite covers both modes without an account anywhere.
   Each preset gets a setup guide and a check against a real tenant before a
   release.
-- **Later, offboarding.** In either mode, someone removed from the identity
-  provider cannot sign in again, but keeps an open session until it expires
-  and stays in coffre's directory. Entra and Okta can push removals over SCIM;
-  Google Workspace would need its directory polled.
+- **Offboarding: built, by hand.** Removing someone from coffre's directory
+  ends their sessions, CLI logins, tokens and linked accounts at once, and
+  lists the values they saw that still need rotating (see
+  [offboarding.md](offboarding.md)). Still open: noticing removals at the
+  identity provider by itself. Until then, someone removed there cannot sign
+  in again, but keeps an open session until it expires. Entra and Okta can
+  push removals over SCIM; Google Workspace would need its directory polled.
 
 ## Open decisions
 

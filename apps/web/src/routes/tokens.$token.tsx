@@ -22,15 +22,12 @@ export const Route = createFileRoute('/tokens/$token')({
 function TokenPage() {
   const { token } = Route.useParams();
   const { page, credentials } = Route.useLoaderData();
-  const known =
-    page.directory?.ok === true &&
-    page.directory.principals.some(
-      (principal) => principal.principalType === 'service' && principal.principalId === token,
-    );
+  // A removed service can be issued nothing; its page shows what it left behind.
+  const active = page.report?.ok === true && page.report.report?.status === 'active';
   return (
     <>
       <PrincipalPage principalType="service" principalId={token} data={page} />
-      {known && credentials?.ok === true && credentials.mode === 'signin' && (
+      {active && credentials?.ok === true && credentials.mode === 'signin' && (
         <ServiceTokens serviceId={token} tokens={credentials.tokens} />
       )}
     </>

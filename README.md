@@ -208,6 +208,7 @@ coffre projects
 coffre roles
 coffre access                                   # who holds what, everywhere
 coffre grant market alice@equisafe.io --role developer --env dev
+coffre offboard alice@equisafe.io               # previews; --apply to remove (docs/offboarding.md)
 
 # syncs (docs/syncs.md)
 coffre sync add  market/prod github-actions owner=equisafe repo=market \
@@ -278,6 +279,11 @@ All five phases are implemented and working locally.
   or Cloudflare Workers and kept current there: on every change, and hourly
   to repair drift. Only keys coffre pushed are ever removed, and every value
   that leaves is audited first. See [docs/syncs.md](docs/syncs.md).
+- **Offboarding.** Removing someone revokes their grants, sessions, CLI
+  logins and linked sign-in accounts in one step. Their page then lists the
+  values they read or wrote that are still current, the syncs they set up and
+  the tokens they issued, until each is dealt with. See
+  [docs/offboarding.md](docs/offboarding.md).
 - **Access overview.** `coffre access` still reports every principal and grant
   across the projects the caller administers, including scope and expiry. It
   remains available to project access managers for operational offboarding.

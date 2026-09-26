@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-import { getRuntime } from '../server/runtime.ts';
+import { getRuntime, principalReport } from '../server/runtime.ts';
 import { registeredServerFn } from '../server/server-fn.ts';
 import {
   grantId,
@@ -17,7 +17,11 @@ export const listDirectoryPrincipals = registeredServerFn({ method: 'GET' }).han
   const runtime = getRuntime();
   const ctx = currentRequestContext();
   try {
-    return { ok: true as const, principals: await runtime.admin.listDirectory(ctx) };
+    const [principals, removed] = await Promise.all([
+      runtime.admin.listDirectory(ctx),
+      runtime.admin.listRemoved(ctx),
+    ]);
+    return { ok: true as const, principals, removed };
   } catch (error) {
     const status =
       typeof error === 'object' && error !== null && 'statusCode' in error
@@ -29,6 +33,25 @@ export const listDirectoryPrincipals = registeredServerFn({ method: 'GET' }).han
     return uiFailure(error);
   }
 });
+
+/** One principal's report for their page. `report` is null when there is no such principal. */
+export const getPrincipalReport = registeredServerFn({ method: 'GET' })
+  .validator(z.object({ principalType, principalId }))
+  .handler(async ({ data }) => {
+    try {
+      const report = await principalReport(
+        getRuntime(), currentRequestContext(), data.principalType, data.principalId,
+      );
+      return { ok: true as const, report };
+    } catch (error) {
+      const status =
+        typeof error === 'object' && error !== null && 'statusCode' in error
+          ? (error as { statusCode?: number }).statusCode
+          : undefined;
+      if (status === 404) return { ok: true as const, report: null };
+      return uiFailure(error);
+    }
+  });
 
 export const createGrant = registeredServerFn({ method: 'POST' })
   .validator(z.object({

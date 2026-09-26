@@ -716,6 +716,122 @@ async function grantAccess(args: string[]): Promise<void> {
   process.stdout.write(`granted ${values.role} on ${scope} to ${principalId}\n`);
 }
 
+type PrincipalReport = {
+  principalType: 'user' | 'service';
+  status: 'active' | 'removed';
+  removedAt: string | null;
+  removedBy: string | null;
+  live: { grants: number; sessions: number; tokens: number; identities: number };
+  exposed: {
+    project: string;
+    environment: string;
+    key: string;
+    version: number;
+    how: 'read' | 'wrote';
+    at: string;
+  }[];
+  rotated: number;
+  issuedTokens: { service: string; label: string | null; hint: string; expiresAt: string }[];
+  syncs: (SyncView & { project: string; environment: string })[];
+};
+
+function plural(count: number, word: string): string {
+  return `${count} ${word}${count === 1 ? '' : 's'}`;
+}
+
+/** "2 grants, 1 session, 0 linked accounts": what a removal ends. */
+function waysIn(
+  principalType: 'user' | 'service',
+  counts: { grants: number; sessions: number; tokens: number; identities: number },
+): string {
+  return principalType === 'user'
+    ? [plural(counts.grants, 'grant'), plural(counts.sessions, 'session'), plural(counts.identities, 'linked account')].join(', ')
+    : [plural(counts.grants, 'grant'), plural(counts.tokens, 'token')].join(', ');
+}
+
+/**
+ * Offboard someone. Previews by default, like import: what removing them
+ * would revoke, and what they leave behind. --apply removes them.
+ *
+ * Removal takes every way in away at once. What it cannot take back is what
+ * they saw, so the report after it is the list of values to rotate.
+ */
+async function offboard(args: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({
+    args,
+    options: {
+      service: { type: 'boolean', default: false },
+      apply: { type: 'boolean', default: false },
+    },
+    allowPositionals: true,
+  });
+
+  const principalId = positionals[0];
+  if (!principalId) fail('usage: coffre offboard <principal> [--service] [--apply]');
+  const path = `/api/admin/directory/${values.service ? 'service' : 'user'}/${encodeURIComponent(principalId)}`;
+
+  let report = (await api(path)) as PrincipalReport;
+  const they = report.principalType === 'user' ? 'they' : 'it';
+
+  if (report.status === 'active' && values.apply) {
+    const removed = (await api(path, { method: 'DELETE' })) as {
+      revoked: number;
+      sessions: number;
+      tokens: number;
+      identities: number;
+    };
+    process.stdout.write(
+      `removed ${principalId}: revoked ${waysIn(report.principalType, { ...removed, grants: removed.revoked })}\n`,
+    );
+    report = (await api(path)) as PrincipalReport;
+  } else if (report.status === 'active') {
+    process.stdout.write(
+      `${principalId} is active; removing would revoke ${waysIn(report.principalType, report.live)}\n`,
+    );
+  } else {
+    const by = report.removedBy === null ? '' : ` by ${report.removedBy}`;
+    const at = report.removedAt === null ? '' : ` on ${report.removedAt.slice(0, 16).replace('T', ' ')}`;
+    process.stdout.write(`${principalId} was removed${by}${at}\n`);
+  }
+
+  const rotated = report.rotated > 0 ? `, ${report.rotated} already rotated` : '';
+  const when = report.status === 'active' ? ` once ${they} ${they === 'they' ? 'leave' : 'is retired'}` : '';
+  process.stdout.write(
+    `\nValues ${they} saw that nobody has changed since, to rotate${when} (${report.exposed.length}${rotated})\n`,
+  );
+  if (report.exposed.length === 0) process.stdout.write('  none\n');
+  const names = report.exposed.map((entry) => `${entry.project}/${entry.environment}/${entry.key}`);
+  const width = Math.max(0, ...names.map((name) => name.length));
+  report.exposed.forEach((entry, index) => {
+    process.stdout.write(
+      `  ${names[index]!.padEnd(width)}  v${String(entry.version).padEnd(4)} ${entry.how} ${entry.at.slice(0, 10)}\n`,
+    );
+  });
+
+  if (report.syncs.length > 0) {
+    process.stdout.write(`\nSyncs ${they} set up, which keep pushing\n`);
+    for (const entry of report.syncs) {
+      const paused = entry.paused ? ' (paused)' : '';
+      process.stdout.write(
+        `  ${entry.project}/${entry.environment} -> ${entry.providerLabel} ${entry.destination}${paused}\n`,
+      );
+    }
+  }
+  if (report.issuedTokens.length > 0) {
+    process.stdout.write(`\nService tokens ${they} issued, which still work\n`);
+    for (const token of report.issuedTokens) {
+      const label = token.label === null ? '' : ` "${token.label}"`;
+      process.stdout.write(
+        `  ${token.service}${label} ${token.hint}, expires ${token.expiresAt.slice(0, 10)}\n`,
+      );
+    }
+  }
+
+  if (report.status === 'active' && !values.apply) {
+    process.stdout.write(`\nNothing changed. Re-run with --apply to remove ${principalId}.\n`);
+  }
+}
+
 async function roles(): Promise<void> {
   const result = (await api('/api/admin/roles')) as {
     roles: {
@@ -978,6 +1094,8 @@ const USAGE = `coffre - secrets, with an audit log
     coffre access
     coffre grant <project> <principal> --role <role> [--env <env>] [--service]
                  [--expires YYYY-MM-DD]
+    coffre offboard <principal> [--service] [--apply]
+                                            what removing them revokes, and what to rotate
 
   Syncs (coffre sync --help for destinations)
     coffre sync list   <project>/<environment>
@@ -1047,6 +1165,9 @@ switch (command) {
     break;
   case 'grant':
     await grantAccess(rest);
+    break;
+  case 'offboard':
+    await offboard(rest);
     break;
   case 'sync':
     await sync(rest);
