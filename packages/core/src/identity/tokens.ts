@@ -34,7 +34,12 @@ export function hashToken(token: string): Buffer {
   return createHash('sha256').update(token, 'utf8').digest();
 }
 
-/** Enough of a token to recognize it in a list, never enough to use it. */
+/**
+ * Enough of a token to recognize it in a list, never enough to use it: the
+ * kind prefix and the last four characters. The prefix is matched rather than
+ * cut at the last underscore, because base64url uses `_` too.
+ */
 export function tokenHint(token: string): string {
-  return `${token.slice(0, token.lastIndexOf('_') + 1)}…${token.slice(-4)}`;
+  const prefix = Object.values(PREFIX).find((candidate) => token.startsWith(candidate)) ?? '';
+  return `${prefix}…${token.slice(-4)}`;
 }

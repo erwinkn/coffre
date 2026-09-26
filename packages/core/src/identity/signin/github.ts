@@ -153,9 +153,12 @@ export class GitHubSigninProvider implements SigninProvider {
     return (await readJson(response)) as T | null;
   }
 
+  // A redirect is never followed: callers treat any answer other than a 2xx,
+  // a 3xx included, as one coffre cannot trust. Workers only offer 'follow'
+  // and 'manual'; 'error' throws there before any request is made.
   async #send(url: string, init: RequestInit): Promise<Response> {
     try {
-      return await this.#fetch(url, { ...init, redirect: 'error', signal: AbortSignal.timeout(10_000) });
+      return await this.#fetch(url, { ...init, redirect: 'manual', signal: AbortSignal.timeout(10_000) });
     } catch (cause) {
       const error = new SigninError('provider_unavailable', `${this.#config.label} could not be reached`);
       (error as Error & { cause?: unknown }).cause = cause;

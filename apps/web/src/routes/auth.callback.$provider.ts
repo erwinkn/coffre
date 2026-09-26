@@ -53,7 +53,14 @@ export const Route = createFileRoute('/auth/callback/$provider')({
             pending,
           );
         } catch (error) {
-          if (error instanceof SigninError) return fail(error.code);
+          // The person sees a sentence; the operator needs the reason. Provider
+          // messages name the step that failed and never carry tokens or codes.
+          if (error instanceof SigninError) {
+            if (error.code === 'provider_unavailable' || error.code === 'invalid_response') {
+              console.warn(`sign-in with ${config.id} failed: ${error.message}`, error.cause ?? '');
+            }
+            return fail(error.code);
+          }
           console.error('sign-in callback failed', error);
           return fail('provider_unavailable');
         }
