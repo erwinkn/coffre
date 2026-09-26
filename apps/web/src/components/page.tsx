@@ -84,6 +84,16 @@ export function Card({
   );
 }
 
+/** One labelled fact in a card's `dl.facts`. */
+export function Fact({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="fact">
+      <dt>{label}</dt>
+      <dd>{children}</dd>
+    </div>
+  );
+}
+
 /**
  * A page that cannot be shown: no access, no such thing, or no session.
  *

@@ -265,8 +265,9 @@ Things worth knowing about it:
 - **It is drawn as a plain developer tool.** Neutral surfaces, bordered
   cards, and tables as grids with a row-number gutter; Inter for the interface
   and JetBrains Mono for anything a machine reads back (keys, slugs, values,
-  sequence numbers). A sidebar holds your account and the sections (Projects,
-  Users, Tokens, Audit, Settings); the bar above the page holds search and a
+  sequence numbers). A sidebar holds the sections (Projects, Users, Tokens,
+  Audit, and the workspace's Settings) and, at its foot, your account with
+  your own settings (theme, identity); the bar above the page holds search and a
   link to this repository, and inside a project, the path to where you are.
   That path is itself a switcher: one click on `prod` lists its sibling
   environments. Hue is kept for meaning: blue for
@@ -297,8 +298,9 @@ Things worth knowing about it:
   reserved for changes that reach other people -- archiving a project or
   environment, revoking a grant -- and each one says what will actually break.
 - **Access is managed from either side.** A project's page has tabs for its
-  environments, the users and tokens that hold grants on it, and its settings.
-  Each user and token has a page too, listing its grants across the projects
+  environments, the users and tokens that hold grants on it, and its settings;
+  adding one picks from those registered, each shown with what it already
+  holds there (only instance owners may list them; anyone else types a name). Each user and token has a page too, listing its grants across the projects
   you manage. Its "Edit access" dialog opens on what it holds -- a level per
   project (owner, read or write everywhere, or per environment), each grant
   with its own expiry -- and saving sends only the difference. Granting what

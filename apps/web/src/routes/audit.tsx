@@ -50,14 +50,9 @@ function AuditPage() {
     );
   }
 
-  const denials = result.entries.filter((entry) => entry.decision === 'deny').length;
-
   return (
     <>
-      <PageHeader
-        title="Audit"
-        description="Who read which secret, and when. Append-only by database grant, not by convention: the application's role holds no UPDATE, DELETE or TRUNCATE on this table."
-      />
+      <PageHeader title="Audit" />
 
       <ChainStatus chain={chain} />
 
@@ -105,18 +100,6 @@ function AuditPage() {
             <X size={13} />
           </Link>
         )}
-
-        <span className="toolbar-meta">
-          <span>
-            <strong>{result.entries.length}</strong> most recent
-            {!deniedOnly && denials > 0 && (
-              <>
-                {', '}
-                <strong>{denials}</strong> refused
-              </>
-            )}
-          </span>
-        </span>
       </div>
 
       <section className="card" aria-label="Audit entries">
@@ -274,10 +257,6 @@ function ChainStatus({ chain }: { chain: ChainResult }) {
       </span>
       <span className="chain-text">
         <span className="chain-title">Chain intact</span>
-        <span className="chain-sub">
-          All {chain.rows} {chain.rows === 1 ? 'entry' : 'entries'} recomputed on load. Record the
-          head somewhere coffre cannot write; a later mismatch proves the log was altered.
-        </span>
       </span>
       <span className="chain-head">
         <span className="chain-head-label">head</span>

@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { createFileRoute, Link, useRouter } from '@tanstack/react-router';
+import { createFileRoute, Link, useLoaderData, useRouter } from '@tanstack/react-router';
 import { DropdownMenu } from 'radix-ui';
 import { toast } from 'sonner';
 import {
@@ -28,6 +28,7 @@ import {
 import { Card, ClosedDoor, PageHeader } from '../components/page';
 import { ensureGrant, GrantRowView, GrantsTable } from '../components/grants';
 import { PrincipalLink } from '../components/principal';
+import { PrincipalPicker } from '../components/principal-picker';
 import {
   parseProjectAccess,
   projectAccessOptions,
@@ -125,6 +126,7 @@ function ProjectPage() {
                   principalType={principalType}
                   project={project.slug}
                   environments={project.environments}
+                  grants={grants}
                 />
               )
         }
@@ -617,11 +619,14 @@ function NewGrant({
   principalType,
   project,
   environments,
+  grants,
 }: {
   principalType: 'user' | 'service';
   project: string;
   environments: ProjectSummary['environments'];
+  grants: GrantRow[];
 }) {
+  const { capabilities } = useLoaderData({ from: '__root__' });
   const [open, setOpen] = useState(false);
   const [principalId, setPrincipalId] = useState('');
   const [permission, setPermission] = useState('viewer:');
@@ -651,13 +656,7 @@ function NewGrant({
           </>
         }
         wide
-        description={
-          <>
-            Owners manage the whole project and its access. Read and write can cover every
-            environment, or one. The {kind} must already be registered under
-            {principalType === 'user' ? ' Users' : ' Tokens'}.
-          </>
-        }
+        description="Owners manage the whole project and its access. Read and write can cover every environment, or one."
       >
         <form
           className="form"
@@ -669,7 +668,7 @@ function NewGrant({
                 ensureGrant({
                   project,
                   principalType,
-                  principalId,
+                  principalId: principalId.trim(),
                   role: access.role,
                   environmentSlug: access.environmentSlug,
                   expiresAt:
@@ -692,22 +691,13 @@ function NewGrant({
             );
           }}
         >
-          <label className="field">
-            <span className="label">
-              {principalType === 'user' ? 'Email' : 'Service token common name'}
-            </span>
-            <input
-              className="input input-mono"
-              autoFocus
-              spellCheck={false}
-              autoComplete="off"
-              placeholder={
-                principalType === 'user' ? 'someone@equisafe.io' : 'ci-deploy.access'
-              }
-              value={principalId}
-              onChange={(event) => setPrincipalId(event.target.value)}
-            />
-          </label>
+          <PrincipalPicker
+            principalType={principalType}
+            canList={capabilities.canManageGrants}
+            grants={grants}
+            value={principalId}
+            onChange={setPrincipalId}
+          />
 
           <div className="form-row">
             <label className="field" style={{ flexGrow: 2 }}>
@@ -788,10 +778,6 @@ function GeneralSettings({ project }: { project: ProjectSummary }) {
           <h2 className="card-title" id="general-settings">
             General
           </h2>
-          <p className="card-desc">
-            Safe to rename: ciphertext is bound to ids, never names, so nothing is re-encrypted
-            and no history is orphaned.
-          </p>
         </div>
       </div>
       <form

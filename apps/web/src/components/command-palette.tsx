@@ -20,6 +20,7 @@ import {
   Settings,
   SlashCircle,
   Sun,
+  User,
   Users,
 } from './icons';
 
@@ -197,7 +198,7 @@ export function CommandPalette({
               />
             )}
             <Command.Item
-              value="settings preferences instance"
+              value="settings workspace instance sign-in"
               onSelect={() => {
                 setOpen(false);
                 navigate({ to: '/settings' });
@@ -205,6 +206,16 @@ export function CommandPalette({
             >
               <Settings size={15} />
               Settings
+            </Command.Item>
+            <Command.Item
+              value="account preferences appearance identity profile me"
+              onSelect={() => {
+                setOpen(false);
+                navigate({ to: '/account' });
+              }}
+            >
+              <User size={15} />
+              Account
             </Command.Item>
           </Command.Group>
 

@@ -39,7 +39,7 @@ const REPOSITORY = 'https://github.com/equisafe/coffre';
 /** Marks the current route without each link having to compare paths itself. */
 const CURRENT = { 'aria-current': 'page' } as const;
 
-export function roleLabel(principal: Principal, instanceRole: InstanceRole): string {
+function roleLabel(principal: Principal, instanceRole: InstanceRole): string {
   if (principal?.type === 'service') return 'Token';
   if (instanceRole === 'root-admin') return 'Root admin';
   if (instanceRole === 'owner') return 'Owner';
@@ -65,8 +65,9 @@ export function Brand({ asLink = true }: { asLink?: boolean }) {
 }
 
 /**
- * The application frame: a sidebar of sections with your account at its top,
- * and a bar across the content with search on the right.
+ * The application frame: a sidebar of sections, headed by the workspace and
+ * footed by your account, and a bar across the content with search on the
+ * right.
  *
  * Inside a project, the left of that bar is the path to where you are, and
  * each step of it switches: that is the only place project and environment
@@ -168,7 +169,7 @@ function Sidebar({
   return (
     <>
       <div className="sidebar-head">
-        <AccountMenu principal={principal} instanceRole={instanceRole} />
+        <Brand />
         {close}
       </div>
 
@@ -187,9 +188,22 @@ function Sidebar({
         <NavLink to="/settings" label="Settings" icon={<Settings size={16} />} />
       </nav>
 
-      <div className="sidebar-foot">
-        <Brand />
-      </div>
+      {/* Settings above is the workspace's; yours are here, with you. */}
+      {principal !== null && (
+        <div className="sidebar-foot">
+          <AccountMenu principal={principal} instanceRole={instanceRole} />
+          <Tip label="Account settings">
+            <Link
+              className="btn btn-quiet btn-icon sidebar-foot-settings"
+              to="/account"
+              aria-label="Account settings"
+              activeProps={CURRENT}
+            >
+              <Settings size={16} />
+            </Link>
+          </Tip>
+        </div>
+      )}
     </>
   );
 }
@@ -217,11 +231,9 @@ function AccountMenu({
   principal,
   instanceRole,
 }: {
-  principal: Principal;
+  principal: NonNullable<Principal>;
   instanceRole: InstanceRole;
 }) {
-  const navigate = useNavigate();
-  if (principal === null) return null;
 
   return (
     <DropdownMenu.Root>
@@ -234,21 +246,15 @@ function AccountMenu({
             <span className="account-name">{principal.id}</span>
             <span className="account-role">{roleLabel(principal, instanceRole)}</span>
           </span>
-          <ChevronsUpDown size={14} className="account-chevron" />
         </button>
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
         <DropdownMenu.Content
           className="menu menu-account"
+          side="top"
           align="start"
           sideOffset={6}
         >
-          <DropdownMenu.Item className="menu-item" onSelect={() => navigate({ to: '/settings' })}>
-            <Settings size={15} />
-            Settings
-          </DropdownMenu.Item>
-
-          <DropdownMenu.Separator className="menu-sep" />
           <DropdownMenu.Label className="menu-label">Theme</DropdownMenu.Label>
           <ThemeMenuItems />
 

@@ -1,15 +1,13 @@
-import type { ReactNode } from 'react';
-import { createFileRoute, Link, useLoaderData } from '@tanstack/react-router';
+import { createFileRoute, Link } from '@tanstack/react-router';
 import { getLoginAuthState } from '../server-functions/auth';
 import { listDirectoryPrincipals } from '../server-functions/access';
-import { Card, PageHeader } from '../components/page';
-import { ThemeCards } from '../components/theme';
-import { roleLabel } from '../components/shell';
+import { Card, Fact, PageHeader } from '../components/page';
 
+/** The workspace's settings. Your own are under Account, at the sidebar's foot. */
 export const Route = createFileRoute('/settings')({
   // Instance facts come from the directory, which only owners may list.
   // Asking on everyone's behalf would write a refusal to the audit log for
-  // every user who opens their own settings, so it is only asked for them.
+  // every user who opens the page, so it is only asked for them.
   loader: async ({ parentMatchPromise }) => {
     const root = await parentMatchPromise;
     const canManage = root.loaderData?.capabilities.canManageGrants ?? false;
@@ -24,7 +22,6 @@ export const Route = createFileRoute('/settings')({
 
 function SettingsPage() {
   const { auth, directory } = Route.useLoaderData();
-  const { principal, instanceRole } = useLoaderData({ from: '__root__' });
 
   const principals = directory?.ok === true ? directory.principals : null;
   const rootAdmins = principals?.filter((entry) => entry.isRootAdmin) ?? [];
@@ -33,36 +30,7 @@ function SettingsPage() {
 
   return (
     <>
-      <PageHeader
-        title="Settings"
-        description="Your preferences on this device, and how this coffre instance is set up."
-      />
-
-      <Card
-        labelledBy="appearance"
-        title="Appearance"
-        description="Kept in this browser. Match system follows your operating system's light or dark setting."
-      >
-        <div className="card-body">
-          <ThemeCards />
-        </div>
-      </Card>
-
-      {principal !== null && (
-        <Card
-          labelledBy="identity"
-          title="Your identity"
-          description="As coffre sees you. Every read and write you make is recorded against it."
-        >
-          <dl className="facts">
-            <Fact label="Identity">
-              <span className="mono">{principal.id}</span>
-            </Fact>
-            <Fact label="Kind">{principal.type === 'user' ? 'User' : 'Token'}</Fact>
-            <Fact label="Instance role">{roleLabel(principal, instanceRole)}</Fact>
-          </dl>
-        </Card>
-      )}
+      <PageHeader title="Settings" />
 
       <Card
         labelledBy="instance"
@@ -90,10 +58,6 @@ function SettingsPage() {
                     </span>
                   ))}
                 </span>
-                <span className="hint">
-                  From <code>COFFRE_ROOT_ADMINS</code>. They bootstrap an empty instance and
-                  cannot be removed from the interface.
-                </span>
               </Fact>
               <Fact label="Directory">
                 <span>
@@ -111,14 +75,5 @@ function SettingsPage() {
         </dl>
       </Card>
     </>
-  );
-}
-
-function Fact({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div className="fact">
-      <dt>{label}</dt>
-      <dd>{children}</dd>
-    </div>
   );
 }

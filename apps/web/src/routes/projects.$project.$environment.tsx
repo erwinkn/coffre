@@ -39,9 +39,9 @@ import {
   Notice,
   Spinner,
   Timestamp,
+  Tip,
 } from '../components/ui';
 import { Card, ClosedDoor, PageHeader } from '../components/page';
-import { PermissionSummary } from '../components/permissions';
 import { SecretReadOnly } from '../components/affordances';
 import {
   AlertCircle,
@@ -60,6 +60,7 @@ import {
   Search,
   Terminal,
   Upload,
+  X,
 } from '../components/icons';
 
 /**
@@ -336,15 +337,6 @@ function EnvironmentLedger({
         tile={project}
         title={environment}
         aside={<EnvironmentName project={project} environment={environment} />}
-        meta={
-          <>
-            <span>
-              <strong>{active.length}</strong> secret{active.length === 1 ? '' : 's'}
-              {archived.length > 0 && `, ${archived.length} archived`}
-            </span>
-            <PermissionSummary permissions={permissions} />
-          </>
-        }
         actions={
           <>
             {canWrite && canReveal && <ImportEnv project={project} environment={environment} />}
@@ -374,17 +366,15 @@ function EnvironmentLedger({
             />
           </label>
           <div className="toolbar-meta">
-            {canReveal && (
-              <span className="th">
-                <Eye size={14} />
-                Every reveal is recorded under your name
-              </span>
-            )}
             <span className="th" title="Run a process with these secrets in its environment">
               <Terminal size={14} />
               <code>
                 coffre run {project}/{environment} -- …
               </code>
+              <CopyButton
+                value={`coffre run ${project}/${environment} -- `}
+                label="Copy command"
+              />
             </span>
           </div>
         </div>
@@ -933,58 +923,76 @@ function SecretRow({
         <td className="col-actions">
           <div className="acts">
             {leaving ? (
-              <button className="act act-quiet" onClick={onUndo} disabled={disabled}>
-                <RotateBack size={13} />
-                Keep
-              </button>
+              <Tip label="Keep">
+                <button
+                  className="act act-icon act-quiet"
+                  onClick={onUndo}
+                  disabled={disabled}
+                  aria-label={`Keep ${entry.key}`}
+                >
+                  <RotateBack size={14} />
+                </button>
+              </Tip>
             ) : editing ? (
-              <button className="act act-quiet" onClick={onUndo} disabled={disabled}>
-                {renamed || valueChanged ? 'Undo' : 'Cancel'}
-              </button>
+              <Tip label={renamed || valueChanged ? 'Undo changes' : 'Cancel'}>
+                <button
+                  className="act act-icon act-quiet"
+                  onClick={onUndo}
+                  disabled={disabled}
+                  aria-label={`${renamed || valueChanged ? 'Undo changes to' : 'Stop editing'} ${entry.key}`}
+                >
+                  {renamed || valueChanged ? <RotateBack size={14} /> : <X size={15} />}
+                </button>
+              </Tip>
             ) : (
               <>
+                {/* Copy comes in to the left, so Hide stays where Reveal was clicked. */}
+                {shown !== null && (
+                  <CopyButton variant="act" value={shown.value} label={`Copy ${entry.key}`} />
+                )}
                 <SecretReadOnly canReveal={canReveal}>
-                  <button
-                    className="act act-accent"
-                    onClick={toggleReveal}
-                    disabled={revealing}
-                    aria-describedby={shown === null ? REVEAL_COST_ID : undefined}
-                    aria-label={`${shown === null ? 'Reveal' : 'Hide'} ${entry.key}`}
-                  >
-                    {revealing ? (
-                      <Spinner size={13} />
-                    ) : shown === null ? (
-                      <Eye size={14} />
-                    ) : (
-                      <EyeOff size={14} />
-                    )}
-                    <span className="act-label">{shown === null ? 'Reveal' : 'Hide'}</span>
-                  </button>
+                  <Tip label={shown === null ? 'Reveal (logged under your name)' : 'Hide'}>
+                    <button
+                      className="act act-icon act-accent"
+                      onClick={toggleReveal}
+                      disabled={revealing}
+                      aria-describedby={shown === null ? REVEAL_COST_ID : undefined}
+                      aria-label={`${shown === null ? 'Reveal' : 'Hide'} ${entry.key}`}
+                    >
+                      {revealing ? (
+                        <Spinner size={13} />
+                      ) : shown === null ? (
+                        <Eye size={15} />
+                      ) : (
+                        <EyeOff size={15} />
+                      )}
+                    </button>
+                  </Tip>
                 </SecretReadOnly>
-                {shown !== null && <CopyButton variant="text" value={shown.value} label={`Copy ${entry.key}`} />}
                 {canWrite && (
-                  <button
-                    className="act"
-                    onClick={() => {
-                      // A value already revealed is already on the record, so
-                      // it becomes the starting point instead of being thrown
-                      // away and read again.
-                      if (shown !== null) setBase(shown);
-                      setReveal(null);
-                      onEdit();
-                    }}
-                    disabled={disabled}
-                    aria-label={`Edit ${entry.key}`}
-                  >
-                    <Pencil size={13} />
-                    <span className="act-label">Edit</span>
-                  </button>
+                  <Tip label="Edit">
+                    <button
+                      className="act act-icon"
+                      onClick={() => {
+                        // A value already revealed is already on the record, so
+                        // it becomes the starting point instead of being thrown
+                        // away and read again.
+                        if (shown !== null) setBase(shown);
+                        setReveal(null);
+                        onEdit();
+                      }}
+                      disabled={disabled}
+                      aria-label={`Edit ${entry.key}`}
+                    >
+                      <Pencil size={14} />
+                    </button>
+                  </Tip>
                 )}
                 {(canReveal || canArchive) && (
                   <DropdownMenu.Root>
                     <DropdownMenu.Trigger asChild>
                       <button
-                        className="act act-quiet"
+                        className="act act-icon act-quiet"
                         aria-label={`More for ${entry.key}`}
                         disabled={disabled}
                       >
@@ -1173,9 +1181,18 @@ function DraftRow({
         <span className="cell-muted">—</span>
       </td>
       <td className="col-actions">
-        <button className="act act-quiet" onClick={onRemove} disabled={disabled}>
-          Remove
-        </button>
+        <div className="acts">
+          <Tip label="Remove">
+            <button
+              className="act act-icon act-quiet"
+              onClick={onRemove}
+              disabled={disabled}
+              aria-label={trimmed === '' ? 'Remove this new secret' : `Remove new secret ${trimmed}`}
+            >
+              <X size={15} />
+            </button>
+          </Tip>
+        </div>
       </td>
     </tr>
   );
@@ -1227,16 +1244,28 @@ function ArchivedRow({
         <td className="col-actions">
           <div className="acts">
             <SecretReadOnly canReveal={canReveal}>
-              <button className="act act-quiet" onClick={() => setHistoryOpen((open) => !open)}>
-                <History size={14} />
-                {historyOpen ? 'Hide history' : 'History'}
-              </button>
+              <Tip label={historyOpen ? 'Hide history' : 'Version history'}>
+                <button
+                  className="act act-icon act-quiet"
+                  onClick={() => setHistoryOpen((open) => !open)}
+                  aria-label={`${historyOpen ? 'Hide history of' : 'Version history of'} ${entry.key}`}
+                  aria-expanded={historyOpen}
+                >
+                  <History size={15} />
+                </button>
+              </Tip>
             </SecretReadOnly>
             {canArchive && (
-              <button className="act" onClick={() => setArchived(false)} disabled={pending}>
-                {pending ? <Spinner size={13} /> : <RotateBack size={13} />}
-                Restore
-              </button>
+              <Tip label="Restore">
+                <button
+                  className="act act-icon"
+                  onClick={() => setArchived(false)}
+                  disabled={pending}
+                  aria-label={`Restore ${entry.key}`}
+                >
+                  {pending ? <Spinner size={13} /> : <RotateBack size={14} />}
+                </button>
+              </Tip>
             )}
           </div>
         </td>

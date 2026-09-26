@@ -174,10 +174,9 @@ export function EmptyState({
 /**
  * Copy to clipboard with a settled confirmation.
  *
- * The label swap is the whole feedback mechanism, so it holds for 1.4s -- long
- * enough to be noticed after the eye has moved on, short enough not to look
- * stuck. `text` renders as a row action ("Copy" / "Copied"); `icon` as a
- * glyph with a tooltip, for tight spots.
+ * The glyph turns into a check, and screen readers hear "Copied", for 1.4s --
+ * long enough to be noticed after the eye has moved on, short enough not to
+ * look stuck.
  */
 export function CopyButton({
   value,
@@ -186,7 +185,8 @@ export function CopyButton({
 }: {
   value: string;
   label?: string;
-  variant?: 'icon' | 'text';
+  /** `act` sits among a table row's actions; `icon` anywhere else. */
+  variant?: 'icon' | 'act';
 }) {
   const [copied, setCopied] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -206,21 +206,18 @@ export function CopyButton({
     timer.current = setTimeout(() => setCopied(false), 1400);
   }
 
-  if (variant === 'text') {
-    return (
-      <button type="button" className="act" aria-label={label} onClick={copy}>
-        {copied ? <Check size={13} /> : <Copy size={13} />}
-        <span className="act-label" aria-live="polite">
-          {copied ? 'Copied' : 'Copy'}
-        </span>
-      </button>
-    );
-  }
-
   return (
     <Tip label={copied ? 'Copied' : label}>
-      <button type="button" className="btn btn-quiet btn-sm btn-icon" aria-label={label} onClick={copy}>
-        {copied ? <Check size={14} /> : <Copy size={14} />}
+      <button
+        type="button"
+        className={variant === 'act' ? 'act act-icon' : 'btn btn-quiet btn-sm btn-icon'}
+        aria-label={label}
+        onClick={copy}
+      >
+        {copied ? <Check size={14} className="copied" /> : <Copy size={14} />}
+        <span className="visually-hidden" aria-live="polite">
+          {copied ? 'Copied' : ''}
+        </span>
       </button>
     </Tip>
   );
