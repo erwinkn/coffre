@@ -9,7 +9,7 @@ import {
   TEST_OWNER_DATABASE_URL,
   TEST_RUNTIME_DATABASE_URL,
 } from '../../../packages/db/test/connections.ts';
-import { parseDotenv } from '../src/server/services/dotenv.ts';
+import { parseDotenv } from '../../../packages/core/src/dotenv.ts';
 import { AccessDenied, NotFound } from '../src/server/services/secrets.ts';
 import { requestContext, serviceFixture } from './service-fixture.ts';
 

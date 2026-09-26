@@ -191,12 +191,13 @@ CLI:
 ```sh
 coffre() { node --env-file=.env.dev apps/cli/src/main.ts "$@"; }
 
-coffre login --email erwin@equisafe.io
+coffre login --email erwin@equisafe.io          # local only: a dev IdP persona
 
 # secrets
 coffre list     market/dev
 coffre get      market/dev/DATABASE_URL
 coffre run      market/dev -- printenv
+coffre export   market/dev --format dotenv      # or json, shell
 coffre history  market/dev/DATABASE_URL
 coffre rollback market/dev/DATABASE_URL 2
 coffre import   market/dev --file .env          # previews; --apply to write
@@ -213,9 +214,27 @@ coffre verify
 ```
 
 The local helper deliberately loads `.env.dev`, including the explicit dev
-authentication mode. In production, run the CLI directly with
-`COFFRE_AUTH_MODE=cloudflare` and the settings in
-[docs/deployment-auth.md](docs/deployment-auth.md).
+authentication mode. Against a deployed instance, no settings are needed:
+
+```sh
+coffre login https://coffre.example.com   # shows a code to approve in the browser
+coffre whoami
+coffre use                                # every instance you are signed in to
+coffre logout
+```
+
+`coffre login` works out how the instance signs people in. With coffre's own
+sign-in it runs a device login: the CLI prints a link and a code, you approve
+it in a browser where you are signed in, and the CLI gets a session token of
+its own (30 days by default), listed and revocable on the account page. Behind Cloudflare
+Access it hands over to `cloudflared` (see
+[docs/deployment-auth.md](docs/deployment-auth.md)). Sessions are kept per
+instance in `~/.coffre/credentials.json` (mode 0600), so a company instance
+and a personal one coexist.
+
+CI sets environment variables instead and stores nothing:
+`COFFRE_API_URL` plus `COFFRE_TOKEN` (a service token from the Tokens page),
+or `COFFRE_ACCESS_CLIENT_ID`/`COFFRE_ACCESS_CLIENT_SECRET` behind Access.
 
 ## Progress
 

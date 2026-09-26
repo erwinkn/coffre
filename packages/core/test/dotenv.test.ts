@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { parseDotenv } from '../src/server/services/dotenv.ts';
+import { formatDotenv, formatShellExports, parseDotenv } from '../src/dotenv.ts';
 
 /**
  * The parser is the one place where attacker-influenceable text becomes
@@ -293,4 +293,66 @@ test('every accepted value round-trips exactly through a quoted encoding', () =>
       `round-trip failed for ${JSON.stringify(original)} via ${encoded}`,
     );
   }
+});
+
+// --- writing ----------------------------------------------------------------
+
+const AWKWARD = [
+  'plain',
+  '',
+  'db-demo://u:p@h:5432/db?ssl=require',
+  'with space',
+  '   padded   ',
+  'with#hash',
+  'with #comment-lookalike',
+  'with$dollar and ${BRACES}',
+  "with'single",
+  'with"double',
+  `both ' and "`,
+  'with\\backslash',
+  'C:\\path\\to\\file',
+  '\\n is not a newline',
+  'with\nnewline',
+  'with\r\nCRLF',
+  '-----BEGIN KEY-----\nabc\n-----END KEY-----\n',
+  'tab\there',
+  'unicode: café ☕',
+];
+
+test('formatDotenv output parses back to exactly the values written', () => {
+  const entries = AWKWARD.map((value, index) => [`K${index}`, value] as const);
+  const parsed = values(formatDotenv(entries));
+  for (const [key, value] of entries) {
+    assert.equal(parsed[key], value, `round trip changed ${JSON.stringify(value)}`);
+  }
+});
+
+test('formatDotenv quotes only as much as each value needs', () => {
+  assert.equal(
+    formatDotenv([
+      ['URL', 'https://example.com/a?b=c'],
+      ['SPACED', 'two words'],
+      ['QUOTE', "it's"],
+      ['PEM', 'a\nb'],
+    ]),
+    [`URL=https://example.com/a?b=c`, `SPACED='two words'`, `QUOTE="it's"`, `PEM="a\\nb"`, ''].join(
+      '\n',
+    ),
+  );
+});
+
+test('formatDotenv refuses what no .env file can carry', () => {
+  assert.throws(() => formatDotenv([['1BAD', 'x']]), /not a valid variable name/);
+  assert.throws(() => formatDotenv([['K', 'a\u0000b']]), /NUL/);
+});
+
+test('formatShellExports single-quotes everything, including single quotes', () => {
+  assert.equal(
+    formatShellExports([
+      ['A', 'plain'],
+      ['B', "it's $HOME `x`"],
+    ]),
+    `export A='plain'\nexport B='it'\\''s $HOME \`x\`'\n`,
+  );
+  assert.throws(() => formatShellExports([['NOT-A-NAME', 'x']]), /not a valid variable name/);
 });

@@ -1,9 +1,10 @@
 /**
- * A small .env parser, for bulk import.
+ * A small .env parser, for bulk import, and its inverse, for export.
  *
  * Deliberately hand-written rather than pulled from npm: this runs inside the
  * service that holds every credential we own, and the whole grammar is about
- * thirty lines.
+ * thirty lines. The server parses and the CLI formats with this one module,
+ * so `coffre export` output always imports back unchanged.
  *
  * Supported: `KEY=value`, `export KEY=value`, single and double quoting,
  * escapes inside double quotes, `#` comments, blank lines, and surrounding
@@ -183,4 +184,59 @@ function unescapeDoubleQuoted(text: string): string {
         return match;
     }
   });
+}
+
+/** Values that read the same unquoted: no spaces, quotes, `#`, `$` or backslashes. */
+const PLAIN_VALUE = /^[A-Za-z0-9_./:@+,=%?-]*$/;
+
+/**
+ * Write entries as a .env file that `parseDotenv` reads back exactly.
+ *
+ * Plain values stay bare; anything else is single-quoted, which is literal;
+ * values holding a quote or a line break are double-quoted with the four
+ * escapes the parser knows (`\\`, `\"`, `\n`, `\r`).
+ */
+export function formatDotenv(entries: Iterable<readonly [key: string, value: string]>): string {
+  let out = '';
+  for (const [key, value] of entries) {
+    assertWritable(key, value);
+    out += `${key}=${quoteDotenv(value)}\n`;
+  }
+  return out;
+}
+
+function assertWritable(key: string, value: string): void {
+  if (!KEY_RE.test(key)) throw new Error(`${JSON.stringify(key)} is not a valid variable name`);
+  if (value.includes('\u0000')) throw new Error(`${key} contains a NUL byte`);
+}
+
+function quoteDotenv(value: string): string {
+  if (PLAIN_VALUE.test(value)) return value;
+  if (!/['\n\r]/.test(value)) return `'${value}'`;
+  const escaped = value.replace(/[\\"\n\r]/g, (character) => {
+    switch (character) {
+      case '\n':
+        return '\\n';
+      case '\r':
+        return '\\r';
+      default:
+        return `\\${character}`;
+    }
+  });
+  return `"${escaped}"`;
+}
+
+/**
+ * Write entries as POSIX shell `export` statements, for
+ * `eval "$(coffre export … --format shell)"`. Single quotes are the only
+ * shell quoting with no expansion inside; a single quote itself is written
+ * as `'\''`.
+ */
+export function formatShellExports(entries: Iterable<readonly [key: string, value: string]>): string {
+  let out = '';
+  for (const [key, value] of entries) {
+    assertWritable(key, value);
+    out += `export ${key}='${value.replaceAll("'", "'\\''")}'\n`;
+  }
+  return out;
 }

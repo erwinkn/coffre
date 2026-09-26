@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { apiResponse, methodNotAllowed, parseJson, requestContext } from '../server/http.ts';
 import { getRuntime } from '../server/runtime.ts';
 import { slug } from '../shared/schemas.ts';
-import { parseDotenv } from '../server/services/dotenv.ts';
+import { parseDotenv } from '../../../../packages/core/src/dotenv.ts';
 
 const paramsSchema = z.object({ project: slug, environment: slug });
 
