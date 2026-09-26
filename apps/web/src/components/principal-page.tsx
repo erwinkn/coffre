@@ -1,19 +1,30 @@
 import { useState } from 'react';
 import { Link, useLoaderData, useNavigate, useRouter } from '@tanstack/react-router';
 import { toast } from 'sonner';
-import { createGrant, listDirectoryPrincipals } from '../server-functions/access';
+import { listDirectoryPrincipals, revokeGrant } from '../server-functions/access';
 import { getProject } from '../server-functions/projects';
 import { useAction } from '../lib/use-action';
 import type { UiCapabilities } from '../lib/capabilities';
-import { parseProjectAccess, projectAccessLabel } from '../lib/project-access';
+import { projectAccessLabel } from '../lib/project-access';
+import {
+  accessChanges,
+  dateFromExpiry,
+  environmentAccess,
+  expiryFromDate,
+  planFromGrants,
+  withEnvironment,
+  withLevel,
+  type AccessChange,
+  type AccessPlan,
+} from '../lib/access-plan';
 import type { DirectoryPrincipal, GrantRow, ProjectSummary } from '../shared/models';
 import { ClosedDoor, PageHeader } from './page';
 import { EmptyState, ErrorLine, Modal, Notice, Spinner } from './ui';
-import { GrantRowView, GrantsTable } from './grants';
+import { ensureGrant, GrantRowView, GrantsTable } from './grants';
 import { InstanceRole, KIND, PrincipalActions } from './directory';
 import { PrincipalAvatar } from './principal';
 import { Tile } from './tile';
-import { Folder, Key, Plus, Users } from './icons';
+import { Clock, Folder, Key, Pencil, Users, X } from './icons';
 
 type PrincipalType = DirectoryPrincipal['principalType'];
 
@@ -109,7 +120,7 @@ export function PrincipalPage({
     grants.map((grant) => ({ project, grant })),
   );
   const errors = access.filter((entry) => entry.grantsError !== null);
-  const addable = access.filter(
+  const editable = access.filter(
     ({ project, grantsError }) => project.archivedAt === null && grantsError === null,
   );
 
@@ -120,13 +131,13 @@ export function PrincipalPage({
         title={principalId}
         meta={entry !== undefined && <InstanceRole principal={entry} />}
         actions={
-          (addable.length > 0 || entry !== undefined) && (
+          (editable.length > 0 || entry !== undefined) && (
             <>
-              {addable.length > 0 && (
-                <AddToProjects
+              {editable.length > 0 && (
+                <EditAccess
                   principalType={principalType}
                   principalId={principalId}
-                  access={addable}
+                  access={editable}
                 />
               )}
               {entry !== undefined && (
@@ -154,8 +165,8 @@ export function PrincipalPage({
       <section className="card" aria-label="Project access">
         {rows.length === 0 ? (
           <EmptyState title="No project access yet">
-            {addable.length > 0
-              ? `Add to projects gives this ${kind} access to several projects at once.`
+            {editable.length > 0
+              ? `Edit access gives this ${kind} access to several projects at once.`
               : `None of the projects where you manage access has a grant for this ${kind}.`}
           </EmptyState>
         ) : (
@@ -204,26 +215,20 @@ export function PrincipalPage({
   );
 }
 
-/** What one project's row of the dialog is set to. */
-type Plan = {
-  level: '' | 'owner' | 'viewer' | 'developer' | 'env';
-  environments: Record<string, '' | 'viewer' | 'developer'>;
-};
-
-const NO_PLAN: Plan = { level: '', environments: {} };
-
-/** One grant the dialog will create. */
-type Planned = { project: string; environment: string | null; access: string };
-
 /**
- * Grants on several projects in one go, for onboarding someone.
+ * One principal's access to every project you manage, edited in one place.
  *
- * Each project takes one project-wide level, or "per environment" to read or
- * write only some of them. Every choice becomes one grant, created in order;
- * if one fails, the ones before it stand and drop out of the form, so trying
- * again does not create them twice.
+ * Each project opens set to what the principal holds: a project-wide level,
+ * or read or write per environment, each with its own expiry. Saving sends
+ * only the difference, so picking what is already held does nothing, and a
+ * retry after a partial failure sends exactly what did not land, since the
+ * difference is taken against the refreshed grants.
+ *
+ * The server has no call that moves an expiry, so a new expiry is a revoke
+ * and then a grant of the same access, which the server restores in place.
+ * The audit log shows the pair, and the access lapses for the moment between.
  */
-function AddToProjects({
+function EditAccess({
   principalType,
   principalId,
   access,
@@ -234,56 +239,33 @@ function AddToProjects({
 }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
-  const [plans, setPlans] = useState<Record<string, Plan>>({});
-  const [expiresAt, setExpiresAt] = useState('');
+  const [edits, setEdits] = useState<Record<string, AccessPlan>>({});
   const { pending, error, setError, run } = useAction();
   const kind = KIND[principalType];
 
-  const planned = access.flatMap(({ project }): Planned[] => {
-    const plan = plans[project.slug] ?? NO_PLAN;
-    if (plan.level === '') return [];
-    if (plan.level !== 'env') {
-      return [{ project: project.slug, environment: null, access: `${plan.level}:` }];
-    }
-    return Object.entries(plan.environments).flatMap(([environment, role]) =>
-      role === '' ? [] : [{ project: project.slug, environment, access: `${role}:${environment}` }],
-    );
+  const rows = access.map(({ project, grants }) => {
+    const environments = project.environments
+      .filter(
+        (environment) => environment.details !== null && environment.details.archivedAt === null,
+      )
+      .map((environment) => environment.slug);
+    const held = planFromGrants(grants, environments);
+    const plan = Object.hasOwn(edits, project.slug) ? edits[project.slug] : held;
+    return { project, grants, environments, held, plan, changes: accessChanges(grants, plan) };
   });
-
-  function setPlan(project: string, next: Partial<Plan>) {
-    setPlans((current) => ({
-      ...current,
-      [project]: { ...(current[project] ?? NO_PLAN), ...next },
-    }));
-  }
-
-  /** Drop grants that were created from the form, so a retry skips them. */
-  function forget(done: Planned[]) {
-    setPlans((current) => {
-      const next = { ...current };
-      for (const item of done) {
-        const plan = next[item.project] ?? NO_PLAN;
-        next[item.project] =
-          item.environment === null
-            ? NO_PLAN
-            : { ...plan, environments: { ...plan.environments, [item.environment]: '' } };
-      }
-      return next;
-    });
-  }
+  const changed = rows.filter((row) => row.changes.length > 0);
 
   function close() {
     setOpen(false);
-    setPlans({});
-    setExpiresAt('');
+    setEdits({});
     setError(null);
   }
 
   return (
     <>
       <button className="btn btn-primary" onClick={() => setOpen(true)}>
-        <Plus size={14} />
-        Add to projects
+        <Pencil size={14} />
+        Edit access
       </button>
 
       <Modal
@@ -291,46 +273,57 @@ function AddToProjects({
         onOpenChange={(next) => (next ? setOpen(true) : close())}
         title={
           <>
-            Add <span className="mono">{principalId}</span> to projects
+            Edit access for <span className="mono">{principalId}</span>
           </>
         }
-        description={`Pick a level on each project the ${kind} should reach. Per environment reads or writes only the environments you choose.`}
+        description={`Set what this ${kind} can reach on each project you manage, and until when. Saving applies only what you changed.`}
         wide
       >
         <form
           className="form"
           onSubmit={(event) => {
             event.preventDefault();
-            const expiry =
-              expiresAt === '' ? null : new Date(`${expiresAt}T23:59:59Z`).toISOString();
             run(
               async () => {
-                for (const [index, item] of planned.entries()) {
-                  const { role, environmentSlug } = parseProjectAccess(item.access);
-                  const result = await createGrant({
-                    data: {
-                      project: item.project,
-                      principalType,
-                      principalId,
-                      role,
-                      environmentSlug,
-                      expiresAt: expiry,
-                    },
-                  });
-                  if (!result.ok) {
-                    if (index > 0) {
-                      forget(planned.slice(0, index));
-                      await router.invalidate();
+                let landed = false;
+                for (const { project, changes } of changed) {
+                  for (const change of changes) {
+                    const grant = (role: string, environmentSlug: string | null) =>
+                      ensureGrant({
+                        project: project.slug,
+                        principalType,
+                        principalId,
+                        role,
+                        environmentSlug,
+                        expiresAt: change.kind === 'revoke' ? null : change.expiresAt,
+                      });
+                    const revoke = (grantId: string) =>
+                      revokeGrant({ data: { project: project.slug, grantId } });
+
+                    let result;
+                    if (change.kind === 'create') {
+                      result = await grant(change.role, change.environmentSlug);
+                    } else if (change.kind === 'revoke') {
+                      result = await revoke(change.grant.id);
+                    } else {
+                      result = await revoke(change.grant.id);
+                      if (result.ok) {
+                        landed = true;
+                        result = await grant(change.grant.role, change.grant.environmentSlug);
+                      }
                     }
-                    return { ok: false as const, error: `${item.project}: ${result.error}` };
+                    if (!result.ok) {
+                      if (landed) await router.invalidate();
+                      return { ok: false as const, error: `${project.slug}: ${result.error}` };
+                    }
+                    landed = true;
                   }
                 }
                 return { ok: true as const };
               },
               () => {
-                const projects = new Set(planned.map((item) => item.project)).size;
                 toast.success(
-                  `${principalId} added to ${projects} project${projects === 1 ? '' : 's'}`,
+                  `Updated ${principalId}’s access on ${changed.length} project${changed.length === 1 ? '' : 's'}`,
                 );
                 close();
               },
@@ -338,24 +331,29 @@ function AddToProjects({
           }}
         >
           <ul className="plan-list">
-            {access.map(({ project, grants }) => {
-              const plan = plans[project.slug] ?? NO_PLAN;
-              const environments = project.environments.filter(
-                (environment) =>
-                  environment.details !== null && environment.details.archivedAt === null,
-              );
+            <li className="plan-head" aria-hidden="true">
+              <span>Project</span>
+              <span>Access</span>
+              <span>Expires</span>
+            </li>
+            {rows.map(({ project, grants, environments, held, plan, changes }) => {
               const id = `plan-${project.slug}`;
+              const edit = (next: AccessPlan) =>
+                setEdits((current) => ({ ...current, [project.slug]: next }));
               return (
-                <li key={project.slug} className="plan-row">
+                <li
+                  key={project.slug}
+                  className={`plan-row${changes.length > 0 ? ' is-changed' : ''}`}
+                >
                   <label className="plan-project" htmlFor={id}>
                     <Tile name={project.slug} />
                     <span className="plan-project-text">
                       <span className="plan-project-name">{project.name}</span>
-                      <span className="plan-project-held">
-                        {grants.length === 0
-                          ? 'No access yet'
-                          : `Holds ${grants.map((grant) => projectAccessLabel(grant)).join(', ')}`}
-                      </span>
+                      {held.level === 'custom' && (
+                        <span className="plan-project-held">
+                          Holds {grants.map((grant) => projectAccessLabel(grant)).join(', ')}
+                        </span>
+                      )}
                     </span>
                   </label>
                   <select
@@ -363,42 +361,84 @@ function AddToProjects({
                     className="select select-sm"
                     value={plan.level}
                     onChange={(event) =>
-                      setPlan(project.slug, { level: event.target.value as Plan['level'] })
+                      edit(
+                        withLevel(plan, event.target.value as AccessPlan['level'], environments),
+                      )
                     }
                   >
-                    <option value="">Leave as is</option>
+                    {held.level === 'custom' && <option value="custom">Keep as is</option>}
+                    <option value="none">No access</option>
                     <option value="owner">Owner</option>
                     <option value="viewer">Read: all</option>
                     <option value="developer">Write: all</option>
                     {environments.length > 0 && <option value="env">Per environment…</option>}
                   </select>
+                  {(plan.level === 'owner' ||
+                    plan.level === 'viewer' ||
+                    plan.level === 'developer') && (
+                    <ExpiryField
+                      label={`${project.name} expires`}
+                      expiresAt={plan.expiresAt}
+                      onChange={(expiresAt) => edit({ ...plan, expiresAt })}
+                    />
+                  )}
 
                   {plan.level === 'env' && (
                     <ul className="plan-envs" aria-label={`Environments of ${project.name}`}>
-                      {environments.map((environment) => (
-                        <li key={environment.slug}>
-                          <label className="plan-env">
-                            <span className="mono">{environment.slug}</span>
+                      {environments.map((slug) => {
+                        const current = environmentAccess(plan, slug);
+                        return (
+                          <li key={slug} className="plan-env">
+                            <label className="mono" htmlFor={`${id}-${slug}`}>
+                              {slug}
+                            </label>
                             <select
+                              id={`${id}-${slug}`}
                               className="select select-sm"
-                              value={plan.environments[environment.slug] ?? ''}
-                              onChange={(event) =>
-                                setPlan(project.slug, {
-                                  environments: {
-                                    ...plan.environments,
-                                    [environment.slug]: event.target.value as
-                                      | ''
-                                      | 'viewer'
-                                      | 'developer',
-                                  },
-                                })
-                              }
+                              value={current?.role ?? ''}
+                              onChange={(event) => {
+                                const role = event.target.value;
+                                edit(
+                                  withEnvironment(
+                                    plan,
+                                    slug,
+                                    role === 'viewer' || role === 'developer'
+                                      ? { role, expiresAt: current?.expiresAt ?? null }
+                                      : null,
+                                  ),
+                                );
+                              }}
                             >
                               <option value="">No access</option>
                               <option value="viewer">Read</option>
                               <option value="developer">Write</option>
                             </select>
-                          </label>
+                            {current !== null && (
+                              <ExpiryField
+                                label={`${slug} of ${project.name} expires`}
+                                expiresAt={current.expiresAt}
+                                onChange={(expiresAt) =>
+                                  edit(withEnvironment(plan, slug, { ...current, expiresAt }))
+                                }
+                              />
+                            )}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+
+                  {changes.length > 0 && (
+                    <ul className="plan-changes" aria-label={`Changes to ${project.name}`}>
+                      {changes.map((change) => (
+                        <li
+                          key={
+                            change.kind === 'create'
+                              ? `+${change.role}@${change.environmentSlug ?? ''}`
+                              : change.grant.id
+                          }
+                        >
+                          <AccessChangeTag change={change} />
                         </li>
                       ))}
                     </ul>
@@ -407,18 +447,6 @@ function AddToProjects({
               );
             })}
           </ul>
-
-          <label className="field">
-            <span className="label">
-              Expires <span className="hint">(optional, for every grant above)</span>
-            </span>
-            <input
-              className="input"
-              type="date"
-              value={expiresAt}
-              onChange={(event) => setExpiresAt(event.target.value)}
-            />
-          </label>
 
           <ErrorLine error={error} />
 
@@ -429,15 +457,87 @@ function AddToProjects({
             <button
               className="btn btn-primary"
               type="submit"
-              disabled={pending || planned.length === 0}
+              disabled={pending || changed.length === 0}
             >
               {pending && <Spinner />}
-              {planned.length > 1 ? `Add ${planned.length} grants` : 'Add grant'}
+              Save changes
             </button>
           </div>
         </form>
       </Modal>
     </>
   );
+}
 
+/**
+ * When one grant ends, as a date: access lasts through that day, UTC. Blank
+ * reads "Never" where the browser lets the empty field be restyled.
+ */
+function ExpiryField({
+  label,
+  expiresAt,
+  onChange,
+}: {
+  label: string;
+  expiresAt: string | null;
+  onChange: (expiresAt: string | null) => void;
+}) {
+  const date = dateFromExpiry(expiresAt);
+  return (
+    <span className={`expiry${date === '' ? ' is-never' : ''}`}>
+      <input
+        className="input select-sm"
+        type="date"
+        aria-label={label}
+        min={new Date().toISOString().slice(0, 10)}
+        value={date}
+        onChange={(event) => onChange(expiryFromDate(event.target.value))}
+      />
+      <span className="expiry-never" aria-hidden="true">
+        Never
+      </span>
+      <button
+        className="btn btn-quiet btn-sm btn-icon"
+        type="button"
+        aria-label={`${label}: never`}
+        title="Never expires"
+        onClick={() => onChange(null)}
+      >
+        <X size={12} />
+      </button>
+    </span>
+  );
+}
+
+function AccessChangeTag({ change }: { change: AccessChange }) {
+  const until = (expiresAt: string | null) =>
+    expiresAt === null ? '' : ` until ${dateFromExpiry(expiresAt)}`;
+  switch (change.kind) {
+    case 'create':
+      return (
+        <span className="tag tag-green">
+          <span aria-hidden="true">+</span>
+          <span className="visually-hidden">Adds</span>
+          {projectAccessLabel({ ...change, roleName: change.role })}
+          {until(change.expiresAt)}
+        </span>
+      );
+    case 'expiry':
+      return (
+        <span className="tag tag-blue">
+          <Clock size={12} />
+          <span className="visually-hidden">Moves the expiry of</span>
+          {projectAccessLabel(change.grant)}
+          {change.expiresAt === null ? ', no expiry' : until(change.expiresAt)}
+        </span>
+      );
+    case 'revoke':
+      return (
+        <span className="tag tag-red">
+          <span aria-hidden="true">−</span>
+          <span className="visually-hidden">Removes</span>
+          {projectAccessLabel(change.grant)}
+        </span>
+      );
+  }
 }

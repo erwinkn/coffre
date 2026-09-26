@@ -2274,11 +2274,14 @@ a.env-card-name:hover {
   margin-top: -0.25rem;
 }
 
-/* Add to projects: one row per project, and per environment when asked. */
+/* Edit access: one row per project, and per environment when asked. Each
+   row reads name, access, expiry, in the columns the header names. */
 .plan-list {
+  --plan-columns: minmax(0, 1fr) 10.5rem 10.5rem;
+
   display: flex;
   flex-direction: column;
-  max-height: min(24rem, 50vh);
+  max-height: min(26rem, 55vh);
   margin: 0;
   padding: 0;
   overflow-y: auto;
@@ -2287,16 +2290,38 @@ a.env-card-name:hover {
   list-style: none;
 }
 
-.plan-row {
+.plan-head,
+.plan-row,
+.plan-env {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 11rem;
+  grid-template-columns: var(--plan-columns);
   align-items: center;
-  gap: 0.625rem 0.75rem;
+  column-gap: 0.75rem;
+}
+
+.plan-head {
+  position: sticky;
+  z-index: 1;
+  top: 0;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--subtle);
+  color: var(--ink-2);
+  font-size: 0.75rem;
+  font-weight: 550;
+}
+
+.plan-row {
+  row-gap: 0.625rem;
   padding: 0.625rem 0.75rem;
 }
 
 .plan-row + .plan-row {
   border-top: 1px solid var(--border);
+}
+
+.plan-row.is-changed {
+  box-shadow: inset 3px 0 var(--accent);
 }
 
 .plan-project {
@@ -2331,16 +2356,65 @@ a.env-card-name:hover {
   gap: 0.375rem;
   grid-column: 1 / -1;
   margin: 0;
-  padding: 0 0 0 2rem;
+  padding: 0;
   list-style: none;
 }
 
 .plan-env {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 11rem;
-  align-items: center;
-  gap: 0.75rem;
   font-size: 0.8125rem;
+}
+
+.plan-env > label {
+  padding-left: 2rem;
+}
+
+.plan-changes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 0 0 0 2rem;
+  list-style: none;
+}
+
+/* A date, or "Never" over the blank field, with a button back to never. */
+.expiry {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.expiry .input {
+  min-width: 0;
+  padding-right: 0.25rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.expiry-never {
+  display: none;
+}
+
+.expiry.is-never .btn {
+  visibility: hidden;
+}
+
+/* Only engines whose date field can be emptied of its dd/mm/yyyy mask get the
+   word; elsewhere the mask shows, and the header says what the column is. */
+@supports selector(::-webkit-datetime-edit) {
+  .expiry.is-never .input:not(:focus)::-webkit-datetime-edit {
+    color: transparent;
+  }
+
+  .expiry.is-never:not(:focus-within) .expiry-never {
+    position: absolute;
+    left: 0.625rem;
+    display: block;
+    color: var(--ink-3);
+    font-size: 0.8125rem;
+    pointer-events: none;
+  }
 }
 
 .select-sm {
@@ -3260,12 +3334,26 @@ a.env-card-name:hover {
     padding: 0 0.5rem;
   }
 
-  .plan-row,
-  .plan-env {
-    grid-template-columns: minmax(0, 1fr);
+  .plan-list {
+    --plan-columns: minmax(0, 1fr) 7.5rem;
   }
 
-  .plan-envs {
+  /* Phone date pickers bring their own Clear. */
+  .expiry .btn {
+    display: none;
+  }
+
+  .plan-head > :first-child {
+    display: none;
+  }
+
+  .plan-project,
+  .plan-env > label {
+    grid-column: 1 / -1;
+  }
+
+  .plan-env > label,
+  .plan-changes {
     padding-left: 0;
   }
 }

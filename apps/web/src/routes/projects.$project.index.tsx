@@ -10,7 +10,6 @@ import {
   updateEnvironment,
   updateProject,
 } from '../server-functions/projects';
-import { createGrant } from '../server-functions/access';
 import { useAction } from '../lib/use-action';
 import type { GrantRow, ProjectSummary } from '../shared/models';
 import {
@@ -27,7 +26,7 @@ import {
   Spinner,
 } from '../components/ui';
 import { Card, ClosedDoor, PageHeader } from '../components/page';
-import { GrantRowView, GrantsTable } from '../components/grants';
+import { ensureGrant, GrantRowView, GrantsTable } from '../components/grants';
 import { PrincipalLink } from '../components/principal';
 import {
   parseProjectAccess,
@@ -667,24 +666,24 @@ function NewGrant({
             const access = parseProjectAccess(permission);
             run(
               () =>
-                createGrant({
-                  data: {
-                    project,
-                    principalType,
-                    principalId,
-                    role: access.role,
-                    environmentSlug: access.environmentSlug,
-                    expiresAt:
-                      expiresAt === ''
-                        ? null
-                        : new Date(`${expiresAt}T23:59:59Z`).toISOString(),
-                  },
+                ensureGrant({
+                  project,
+                  principalType,
+                  principalId,
+                  role: access.role,
+                  environmentSlug: access.environmentSlug,
+                  expiresAt:
+                    expiresAt === '' ? null : new Date(`${expiresAt}T23:59:59Z`).toISOString(),
                 }),
-              () => {
+              ({ existed }) => {
                 const label =
                   permissionOptions.find((option) => option.value === permission)?.label ??
                   'access';
-                toast.success(`${principalId} granted ${label.toLowerCase()}`);
+                toast.success(
+                  existed
+                    ? `${principalId} already has ${label}`
+                    : `${principalId} granted ${label.toLowerCase()}`,
+                );
                 setPrincipalId('');
                 setExpiresAt('');
                 setPermission('viewer:');
