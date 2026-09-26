@@ -26,6 +26,11 @@ import {
   type Target,
 } from './instance.ts';
 import { formatDotenv, formatShellExports } from '../../../packages/core/src/dotenv.ts';
+import {
+  DESTINATIONS,
+  configFromArguments,
+  type DestinationField,
+} from '../../../packages/sync/src/destinations.ts';
 
 const CREDENTIALS_PATH = join(homedir(), '.coffre', 'credentials.json');
 
@@ -775,6 +780,180 @@ async function verify(): Promise<void> {
   process.exit(2);
 }
 
+type SyncView = {
+  id: string;
+  provider: string;
+  providerLabel: string;
+  destination: string;
+  credential: string;
+  paused: boolean;
+  running: boolean;
+  lastRunAt: string | null;
+  lastStatus: 'succeeded' | 'partial' | 'failed' | null;
+  lastError: string | null;
+  synced: number;
+  pending: number;
+  skipped: { key: string; reason: string }[];
+};
+
+type RunOutcome =
+  | { status: 'busy' }
+  | {
+      status: 'succeeded' | 'partial' | 'failed';
+      upserted: string[];
+      deleted: string[];
+      failed: { key: string; operation: 'upsert' | 'delete'; message: string }[];
+      error: string | null;
+    };
+
+const SYNC_USAGE = `usage:
+  coffre sync list   <project>/<environment>
+  coffre sync add    <project>/<environment> <destination> name=value… --credential <project>/<environment>/<KEY>
+  coffre sync run    <project>/<environment> <sync>
+  coffre sync pause  <project>/<environment> <sync>
+  coffre sync resume <project>/<environment> <sync>
+  coffre sync remove <project>/<environment> <sync>
+
+<sync> is the start of an id from \`coffre sync list\`, or the destination's name
+when the environment syncs to only one of that kind.
+
+Destinations, and what they take. What is in brackets can be left out, and a
+choice left out is its first option. Several targets go comma-separated.
+${DESTINATIONS.map((entry) => `  ${entry.kind.padEnd(19)} ${entry.fields.map(fieldUsage).join(' ')}`).join('\n')}
+`;
+
+function fieldUsage(field: DestinationField): string {
+  if (field.type === 'text') return field.optional ? `[${field.name}=…]` : `${field.name}=…`;
+  const options = field.options.map((option) => option.value).join('|');
+  return `[${field.name}=${options}]`;
+}
+
+/**
+ * Push an environment somewhere else and keep it current. The server does
+ * the work and checks every field; this names things and reports back.
+ */
+async function sync(args: string[]): Promise<void> {
+  const [verb, path, ...rest] = args;
+  if (verb === undefined || verb === '--help' || path === undefined) {
+    process.stdout.write(SYNC_USAGE);
+    process.exit(verb === undefined || verb === '--help' ? 0 : 1);
+  }
+  const { project, environment, key } = parsePath(path);
+  if (key !== undefined) fail(`syncs belong to an environment: use ${project}/${environment}`);
+  const base = `/api/projects/${project}/environments/${environment}/syncs`;
+
+  if (verb === 'list') {
+    const { syncs } = (await api(base)) as { syncs: SyncView[] };
+    if (syncs.length === 0) process.stdout.write(`${project}/${environment} is not synced anywhere\n`);
+    for (const entry of syncs) printSync(entry);
+    return;
+  }
+
+  if (verb === 'add') {
+    const { values, positionals } = parseArgs({
+      args: rest,
+      options: { credential: { type: 'string' } },
+      allowPositionals: true,
+    });
+    const [kind, ...assignments] = positionals;
+    const entry = DESTINATIONS.find((candidate) => candidate.kind === kind);
+    if (entry === undefined) fail(`name a destination: ${DESTINATIONS.map((candidate) => candidate.kind).join(', ')}`);
+    if (values.credential === undefined) {
+      fail(`--credential names the secret holding the ${entry.label} token, such as ${entry.credentialExample}`);
+    }
+    const config = attempt(() => configFromArguments(entry, assignments));
+    const created = (await api(base, {
+      method: 'POST',
+      body: JSON.stringify({ provider: entry.kind, config, credential: values.credential }),
+    })) as SyncView;
+    process.stdout.write(
+      `Syncing ${project}/${environment} to ${created.destination} (${created.providerLabel}), id ${created.id.slice(0, 8)}.\n` +
+        `The first push has started; \`coffre sync list ${project}/${environment}\` shows how it went.\n`,
+    );
+    return;
+  }
+
+  if (!['run', 'pause', 'resume', 'remove'].includes(verb)) fail(`unknown sync command "${verb}"; see \`coffre sync --help\``);
+  const reference = rest[0];
+  if (reference === undefined) fail(`usage: coffre sync ${verb} ${project}/${environment} <sync>`);
+  const { syncs } = (await api(base)) as { syncs: SyncView[] };
+  const chosen = attempt(() => pickSync(syncs, reference));
+
+  if (verb === 'run') {
+    // The server would only answer that it is busy.
+    if (chosen.paused) fail(`syncing to ${chosen.destination} is paused; resume it first`);
+    const { sync: after, outcome } = (await api(`/api/syncs/${chosen.id}/run`, { method: 'POST' })) as {
+      sync: SyncView;
+      outcome: RunOutcome;
+    };
+    if (outcome.status === 'busy') fail(`a run to ${chosen.destination} is already under way`);
+    for (const failure of outcome.failed) {
+      process.stderr.write(`  could not ${failure.operation === 'upsert' ? 'push' : 'remove'} ${failure.key}: ${failure.message}\n`);
+    }
+    if (outcome.status === 'failed') fail(`could not sync to ${after.destination}: ${outcome.error ?? 'the run failed'}`);
+    const changed = outcome.upserted.length + outcome.deleted.length;
+    process.stdout.write(
+      changed === 0 && outcome.failed.length === 0
+        ? `${after.destination} was already current\n`
+        : `Pushed ${outcome.upserted.length}, removed ${outcome.deleted.length} at ${after.destination}\n`,
+    );
+    if (outcome.status === 'partial') process.exit(1);
+    return;
+  }
+
+  if (verb === 'remove') {
+    await api(`/api/syncs/${chosen.id}`, { method: 'DELETE' });
+    process.stdout.write(
+      `No longer syncing to ${chosen.destination}. Keys coffre pushed there stay; remove them at ${chosen.providerLabel} if they should go too.\n`,
+    );
+    return;
+  }
+
+  const paused = verb === 'pause';
+  await api(`/api/syncs/${chosen.id}`, { method: 'PATCH', body: JSON.stringify({ paused }) });
+  process.stdout.write(
+    paused
+      ? `Paused syncing to ${chosen.destination}\n`
+      : `Resumed syncing to ${chosen.destination}; changes since the pause go out on the next run\n`,
+  );
+}
+
+/** By id prefix, or by destination when only one sync goes to that kind. */
+function pickSync(syncs: SyncView[], reference: string): SyncView {
+  const byKind = syncs.filter((entry) => entry.provider === reference);
+  if (byKind.length === 1) return byKind[0];
+  if (byKind.length > 1) throw new Error(`more than one ${reference} sync here; name it by id (coffre sync list)`);
+  if (reference.length < 4) throw new Error('give at least 4 characters of a sync id, or a destination name');
+  const byId = syncs.filter((entry) => entry.id.startsWith(reference.toLowerCase()));
+  if (byId.length === 1) return byId[0];
+  if (byId.length > 1) throw new Error(`"${reference}" starts more than one sync id; give more of it`);
+  throw new Error(`no sync "${reference}" here; \`coffre sync list\` shows them`);
+}
+
+function printSync(entry: SyncView): void {
+  const state = entry.running
+    ? 'pushing'
+    : entry.paused
+      ? 'paused'
+      : entry.lastStatus === 'failed'
+        ? 'failed'
+        : entry.lastStatus === 'partial'
+          ? 'partial'
+          : entry.lastRunAt === null
+            ? 'not run yet'
+            : entry.pending > 0
+              ? 'behind'
+              : 'in sync';
+  const counts = [`${entry.synced} synced`, ...(entry.pending > 0 ? [`${entry.pending} pending`] : [])];
+  if (entry.lastRunAt !== null) counts.push(`last run ${entry.lastRunAt.slice(0, 16).replace('T', ' ')}`);
+  process.stdout.write(`${entry.id.slice(0, 8)}  ${entry.providerLabel.padEnd(18)} ${entry.destination}\n`);
+  process.stdout.write(`          ${state}: ${counts.join(', ')}; token from ${entry.credential}\n`);
+  if (entry.lastError !== null && !entry.running) process.stdout.write(`          ${entry.lastError}\n`);
+  for (const skipped of entry.skipped) {
+    process.stdout.write(`          skips ${skipped.key}: ${skipped.reason}\n`);
+  }
+}
+
 const USAGE = `coffre - secrets, with an audit log
 
   Session
@@ -799,6 +978,12 @@ const USAGE = `coffre - secrets, with an audit log
     coffre access
     coffre grant <project> <principal> --role <role> [--env <env>] [--service]
                  [--expires YYYY-MM-DD]
+
+  Syncs (coffre sync --help for destinations)
+    coffre sync list   <project>/<environment>
+    coffre sync add    <project>/<environment> <destination> name=value…
+                       --credential <project>/<environment>/<KEY>
+    coffre sync run|pause|resume|remove <project>/<environment> <sync>
 
   Audit
     coffre audit [--limit N] [--actor <id>] [--denied]
@@ -862,6 +1047,9 @@ switch (command) {
     break;
   case 'grant':
     await grantAccess(rest);
+    break;
+  case 'sync':
+    await sync(rest);
     break;
   case 'audit':
     await audit(rest);

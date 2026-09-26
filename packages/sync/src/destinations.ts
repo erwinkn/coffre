@@ -1,12 +1,15 @@
 /**
- * What the Add sync form asks for, per destination.
+ * What each destination asks for, shared by the web form and `coffre sync add`.
  *
- * The server validates every field (formats, lengths, combinations) and says
- * what is wrong in a sentence; this only lays out the form and turns it into
- * the JSON the destination's config parser expects.
+ * The provider's parseConfig validates every field (formats, lengths,
+ * combinations) and says what is wrong in a sentence; this only describes the
+ * fields and turns what someone typed into the JSON that parser expects. It
+ * imports no provider code, so the browser can load it.
  */
 
-export type DestinationKind = 'github-actions' | 'vercel' | 'railway' | 'cloudflare-workers';
+import type { SyncProviderKind } from './types.ts';
+
+export type DestinationKind = SyncProviderKind;
 
 export type FormValues = Record<string, string | string[]>;
 
@@ -184,6 +187,35 @@ export function destinationConfig(entry: Destination, values: FormValues): Recor
     } else {
       const text = typeof value === 'string' ? value.trim() : '';
       if (text !== '') config[field.name] = text;
+    }
+  }
+  return config;
+}
+
+/**
+ * The config from `name=value` arguments, as the CLI takes them. A field with
+ * several options takes them comma-separated, and one left out gets what the
+ * form preselects. Text goes as typed, for the server to check.
+ */
+export function configFromArguments(entry: Destination, assignments: readonly string[]): Record<string, unknown> {
+  const config: Record<string, unknown> = {};
+  for (const assignment of assignments) {
+    const equals = assignment.indexOf('=');
+    const name = equals === -1 ? assignment : assignment.slice(0, equals);
+    const field = entry.fields.find((candidate) => candidate.name === name);
+    if (equals === -1 || field === undefined) {
+      const names = entry.fields.map((candidate) => candidate.name).join(', ');
+      throw new Error(`${entry.label} takes ${names} as name=value; got ${JSON.stringify(assignment)}`);
+    }
+    if (Object.hasOwn(config, name)) throw new Error(`${name} is given twice`);
+    const value = assignment.slice(equals + 1);
+    if (field.type === 'text') config[name] = value;
+    else if (field.multiple) config[name] = value.split(',').map((item) => item.trim()).filter((item) => item !== '');
+    else config[name] = value;
+  }
+  for (const field of entry.fields) {
+    if (field.type === 'options' && !Object.hasOwn(config, field.name)) {
+      config[field.name] = field.multiple ? field.initial : field.initial[0];
     }
   }
   return config;

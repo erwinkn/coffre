@@ -1,14 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { getProvider } from '../../../packages/sync/src/index.ts';
+import { getProvider } from '../src/index.ts';
 import {
   DESTINATIONS,
+  configFromArguments,
   destination,
   destinationConfig,
   firstMissing,
   initialValues,
-} from '../src/lib/sync-destinations.ts';
+} from '../src/destinations.ts';
 
 // The form builds what each provider's own parser accepts; the parser is the
 // judge, so a field renamed on one side fails here rather than in a dialog.
@@ -48,4 +49,24 @@ test('Vercel asks for a branch only when previews are the only target', () => {
     gitBranch: 'staging',
   });
   assert.equal(firstMissing(vercel, { ...base, targets: [] }), 'Targets');
+});
+
+test('CLI arguments become the same config, with the form’s preselected options', () => {
+  const vercel = destination('vercel');
+  assert.deepEqual(configFromArguments(vercel, ['projectId=prj_abc123']), {
+    projectId: 'prj_abc123',
+    targets: ['production'],
+  });
+  const previews = configFromArguments(vercel, ['projectId=prj_abc123', 'targets=preview, development']);
+  assert.deepEqual(previews.targets, ['preview', 'development']);
+  assert.deepEqual(configFromArguments(destination('railway'), ['projectId=p', 'environmentId=e']), {
+    projectId: 'p',
+    environmentId: 'e',
+    tokenKind: 'project',
+  });
+  // Whatever parseConfig makes of it is the server's call; this only refuses
+  // what could never be a field.
+  assert.throws(() => configFromArguments(vercel, ['project=prj_abc123']), /takes projectId, teamId, targets, gitBranch/);
+  assert.throws(() => configFromArguments(vercel, ['prj_abc123']), /as name=value/);
+  assert.throws(() => configFromArguments(vercel, ['teamId=a', 'teamId=b']), /teamId is given twice/);
 });
