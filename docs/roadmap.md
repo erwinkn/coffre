@@ -182,38 +182,22 @@ Two spikes go first:
 
 ### Sync
 
-Start with a push driven by the CLI from a declarative file, before any
-server-side engine:
+Built, as a server-side engine rather than the CLI-driven push first planned:
+an environment is pushed to GitHub Actions, Vercel, Railway or Cloudflare
+Workers on every change, and checked hourly for drift. See
+[syncs.md](syncs.md).
 
-```toml
-# coffre.sync.toml, in the repository that owns the deployment
-[[sync]]
-from = "blog/prod"
-to   = "cloudflare-worker:blog-api"
-
-[[sync]]
-from = "infra/prod"
-to   = "railway:infra/production"
-keys = ["DATABASE_URL", "REDIS_URL"]
-```
-
-`coffre sync --plan` shows what would change, and `coffre sync` pushes it.
-
-- **Target credentials** stay with whoever runs the sync (your laptop, a CI
-  job) and never enter coffre.
-- **Audit already fits.** A sync is a read by the syncing principal: one row
-  per secret, sharing a bundle id, with the target in the metadata.
-- **Write-only targets.** Workers secrets and GitHub Actions secrets cannot be
-  read back, so the plan cannot diff their values. Instead, coffre records
-  which version it pushed where, so the plan can say `DATABASE_URL v3 → v4`.
-- **Targets, in order:**
-  1. Cloudflare Workers secrets.
-  2. Railway variables.
-  3. GitHub Actions secrets. These need libsodium sealed boxes: either a
-     dependency, or shelling out to `gh`.
-  4. Plain `.env` files.
-- **A server-side engine** (pushing on every write) would hold deploy tokens
-  for every service. It is only worth it if drift becomes the pain.
+- **Why the engine won.** A CLI push only happens when someone remembers to
+  run it, and the point, as with Doppler, is that nobody has to. The cost the
+  plan named is real: coffre now holds deploy tokens. They are ordinary
+  secrets, named by path (`ops/sync/GITHUB_TOKEN`), so they get the same
+  encryption, versioning, grants and audit as everything else, and adding a
+  sync requires being able to read the token already.
+- **Write-only targets** are handled as planned: coffre records which version
+  it pushed where, so a run compares ids and decrypts only what changed.
+- **Still open:** plain `.env` files as a target, and a declarative
+  `coffre.sync.toml` if keeping syncs in the repository that deploys turns
+  out to matter.
 
 ## Phase 4: Equisafe
 
@@ -321,4 +305,4 @@ identity: signIn({
    Apache-2.0.
 2. **Postgres for erwinkn.com:** whichever host already runs your stack, given
    the ciphertext argument above.
-3. **Sync model:** a CLI push first (recommended), or a server-side engine.
+3. ~~**Sync model.**~~ Decided: a server-side engine (see phase 3).

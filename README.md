@@ -148,8 +148,9 @@ published six days before we tried to install it.
 ```
 packages/core   envelope encryption, KEK providers, audit hash chain, identity
 packages/db     Drizzle schema/migrations, audit writer, privilege tests
+packages/sync   destinations syncs push to: GitHub Actions, Vercel, Railway, Cloudflare
 apps/dev-idp    local stand-in for Cloudflare Access (serves JWKS, mints tokens)
-apps/cli        login / list / get / set / run / audit / verify
+apps/cli        login, secrets, access, syncs, audit; no dependencies
 apps/web        TanStack Start UI, auth boundary, services, and native /api routes
 ```
 
@@ -207,6 +208,12 @@ coffre projects
 coffre roles
 coffre access                                   # who holds what, everywhere
 coffre grant market alice@equisafe.io --role developer --env dev
+
+# syncs (docs/syncs.md)
+coffre sync add  market/prod github-actions owner=equisafe repo=market \
+                 --credential ops/sync/GITHUB_TOKEN
+coffre sync list market/prod
+coffre sync run  market/prod github-actions
 
 # audit
 coffre audit --denied
@@ -267,6 +274,10 @@ All five phases are implemented and working locally.
 - **Identity directory.** Users and service accounts are managed separately
   from project permissions. Owners can manage the directory and read the full
   audit log; root admins remain deployment configuration.
+- **Syncs.** An environment can be pushed to GitHub Actions, Vercel, Railway
+  or Cloudflare Workers and kept current there: on every change, and hourly
+  to repair drift. Only keys coffre pushed are ever removed, and every value
+  that leaves is audited first. See [docs/syncs.md](docs/syncs.md).
 - **Access overview.** `coffre access` still reports every principal and grant
   across the projects the caller administers, including scope and expiry. It
   remains available to project access managers for operational offboarding.
@@ -457,8 +468,9 @@ UI, the underlying role and scope are presented as one permissions value:
 
 ### Things that are stubbed, not finished
 
-- `SyncTarget` (push to Scaleway Secret Manager) is designed but not
-  implemented — it is a non-goal for this phase.
+- Syncs cover four destinations. Scaleway Secret Manager, AWS and the rest
+  are not built in; `coffre run` or `coffre export` with a service token
+  covers them.
 - The `scaleway` `KekProvider` does not exist yet; only `local` does.
 - Audit checkpoints have a table but nothing exports them off-box, so tail
   truncation is currently detectable only in principle.
