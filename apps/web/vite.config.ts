@@ -2,6 +2,7 @@ import { defineConfig } from 'vite';
 import viteReact from '@vitejs/plugin-react';
 import { tanstackStart } from '@tanstack/react-start/plugin/vite';
 import { cloudflare } from '@cloudflare/vite-plugin';
+import { instanceConfig } from './instance.ts';
 
 export default defineConfig({
   server: {
@@ -22,7 +23,7 @@ export default defineConfig({
   },
 
   plugins: [
-    cloudflare({ viteEnvironment: { name: 'ssr' } }),
+    cloudflare({ viteEnvironment: { name: 'ssr' }, config: instanceConfig(process.env) }),
     // Generates src/routeTree.gen.ts from src/routes, and wires the SSR
     // server. Must come before the React plugin.
     tanstackStart(),

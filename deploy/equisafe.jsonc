@@ -1,0 +1,14 @@
+// Equisafe's coffre, deployed by .github/workflows/deploy-worker.yml.
+//
+// Behind Cloudflare Access, so it keeps coffre's default vars and secrets
+// (apps/web/wrangler.jsonc). The Hyperdrive ID, account and secret values
+// come from the coffre-production GitHub environment at deploy time.
+{
+  "name": "equisafe-coffre",
+  "routes": [
+    {
+      "pattern": "coffre.equisafe.dev",
+      "custom_domain": true
+    }
+  ]
+}

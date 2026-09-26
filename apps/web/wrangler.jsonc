@@ -1,16 +1,15 @@
+// coffre itself: its code, and the bindings and schedule the code relies on.
+// Where a copy runs (its Worker name, domain, sign-in, secrets) lives in an
+// instance file, such as ../../deploy/equisafe.jsonc, named by
+// COFFRE_INSTANCE when building (see instance.ts). The vars and secrets
+// below are the defaults an instance keeps unless it sets its own.
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "equisafe-coffre",
+  "name": "coffre",
   "main": "src/worker.ts",
   "compatibility_date": "2026-08-06",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": false,
-  "routes": [
-    {
-      "pattern": "coffre.equisafe.dev",
-      "custom_domain": true
-    }
-  ],
   "placement": {
     "mode": "smart"
   },

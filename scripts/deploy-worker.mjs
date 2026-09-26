@@ -27,16 +27,6 @@ const signalHandlers = new Map(
 );
 for (const [signal, handler] of signalHandlers) process.on(signal, handler);
 
-const requiredSecrets = [
-  'COFFRE_ACCESS_ISSUER',
-  'COFFRE_ACCESS_JWKS_URL',
-  'COFFRE_ACCESS_AUD',
-  'COFFRE_ROOT_ADMINS',
-  'COFFRE_KEK_LOCAL',
-  'COFFRE_KEK_ID',
-  'COFFRE_AUDIT_CHAIN_KEY',
-];
-
 function requiredEnvironment(name) {
   const value = process.env[name]?.trim();
   if (!value) throw new Error(`missing required deployment environment variable: ${name}`);
@@ -64,6 +54,21 @@ function run(command, args) {
   });
 }
 
+// The build applied the instance file (apps/web/instance.ts). Without one it
+// is coffre with no name of its own and no route, which has nowhere to go.
+requiredEnvironment('COFFRE_INSTANCE');
+const builtConfig = await readFile(builtConfigPath, 'utf8');
+if (!builtConfig.includes(sentinel)) {
+  throw new Error('built Wrangler configuration is missing the Hyperdrive sentinel');
+}
+const { name, routes = [], vars = {}, secrets: declared } = JSON.parse(builtConfig);
+// The instance decides which secrets exist: Access needs its issuer and
+// audience, sign-in its providers' client secrets.
+const requiredSecrets = declared?.required ?? [];
+if (requiredSecrets.length === 0) {
+  throw new Error('built Wrangler configuration declares no required secrets');
+}
+
 const hyperdriveId = requiredEnvironment('CLOUDFLARE_HYPERDRIVE_ID');
 if (!/^[0-9a-f-]{32,36}$/i.test(hyperdriveId)) {
   throw new Error('CLOUDFLARE_HYPERDRIVE_ID is not a valid Cloudflare resource ID');
@@ -80,19 +85,17 @@ const secrets = Object.fromEntries(
 // protected environment cannot leave an old decryption key active.
 secrets.COFFRE_KEK_LOCAL_PREVIOUS = process.env.COFFRE_KEK_LOCAL_PREVIOUS?.trim() ?? '';
 
+const destination = routes.map((route) => route.pattern ?? route).join(', ') || 'no route';
+console.log(`Deploying ${name} to ${destination}, in ${vars.COFFRE_AUTH_MODE} mode`);
+
 const temporaryDirectory = await mkdtemp(join(tmpdir(), 'coffre-worker-deploy-'));
-let builtConfig;
+let replaced = false;
 let deploymentError;
 let cleanupError;
 try {
   interrupted();
   const secretsPath = join(temporaryDirectory, 'secrets.json');
-  builtConfig = await readFile(builtConfigPath, 'utf8');
-  interrupted();
-  if (!builtConfig.includes(sentinel)) {
-    throw new Error('built Wrangler configuration is missing the Hyperdrive sentinel');
-  }
-
+  replaced = true;
   await writeFile(builtConfigPath, builtConfig.replaceAll(sentinel, hyperdriveId));
   interrupted();
   await writeFile(secretsPath, JSON.stringify(secrets), { mode: 0o600 });
@@ -112,9 +115,7 @@ try {
   deploymentError = error;
 } finally {
   try {
-    if (builtConfig !== undefined) {
-      await writeFile(builtConfigPath, builtConfig);
-    }
+    if (replaced) await writeFile(builtConfigPath, builtConfig);
   } catch (error) {
     cleanupError = error;
   }

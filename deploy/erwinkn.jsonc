@@ -1,0 +1,32 @@
+// Erwin's coffre, at coffre.erwinkn.com, signing in with GitHub.
+//
+// docs/deploy.md walks through deploying it. Secrets are only named here;
+// their values come from the environment of whoever deploys.
+{
+  "name": "coffre",
+  "routes": [
+    {
+      "pattern": "coffre.erwinkn.com",
+      "custom_domain": true
+    }
+  ],
+  "vars": {
+    "COFFRE_AUTH_MODE": "signin",
+    "COFFRE_PUBLIC_URL": "https://coffre.erwinkn.com",
+    // Who can sign in the first time, before anyone else is added: an email
+    // GitHub lists as verified on your account.
+    "COFFRE_ROOT_ADMINS": "",
+    "COFFRE_SIGNIN_PROVIDERS": "github",
+    // From a GitHub OAuth app whose callback URL is
+    // https://coffre.erwinkn.com/auth/callback/github
+    "COFFRE_SIGNIN_GITHUB_CLIENT_ID": ""
+  },
+  "secrets": {
+    "required": [
+      "COFFRE_SIGNIN_GITHUB_CLIENT_SECRET",
+      "COFFRE_KEK_LOCAL",
+      "COFFRE_KEK_ID",
+      "COFFRE_AUDIT_CHAIN_KEY"
+    ]
+  }
+}
