@@ -1,0 +1,48 @@
+name: Validate
+
+# The full local contract suite, on every pull request and again before every
+# deploy (deploy-worker.yml calls this file), so what a review saw pass is
+# what a release checks.
+on:
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out the selected revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install frozen dependencies
+        run: pnpm install --frozen-lockfile
+
+      # First, because it also generates src/routeTree.gen.ts, which the
+      # typecheck needs and a fresh checkout lacks. The smoke reuses the build.
+      - name: Build the Worker
+        run: pnpm --dir apps/web build
+
+      - name: Validate application and database contracts
+        run: |
+          pnpm test
+          pnpm test:schema
+          pnpm check:pins
+          pnpm check:contrast
+          pnpm --dir apps/web typecheck
+          pnpm --dir apps/web smoke:production

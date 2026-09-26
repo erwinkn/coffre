@@ -74,10 +74,10 @@ Each item says what is wrong today.
    should compare against it.
 6. **Backups.** Point-in-time recovery on whatever hosts Postgres, exercised by
    the drill in item 2.
-7. **Guard main.** `main` is unprotected and nothing runs on pull requests. A
-   deploy accepts anything that reached `main` and passes the tests, so nothing
-   reviews what gets there. Add a PR workflow that reuses the deploy's validate
-   job, and make both a PR and that workflow required.
+7. **Guard main.** `main` is unprotected, so nothing reviews what a deploy
+   ships. `.github/workflows/validate.yml` now runs the deploy's own checks on
+   every pull request, and the deploy calls the same file. What is left is a
+   setting: protect `main`, requiring a pull request and the `Validate` check.
 8. ~~**Machine callers in the CLI.**~~ Done: `COFFRE_TOKEN` for coffre's own
    service tokens, `COFFRE_ACCESS_CLIENT_ID` and `COFFRE_ACCESS_CLIENT_SECRET`
    behind Access.

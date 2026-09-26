@@ -60,8 +60,10 @@ Copy the application values only from Terraform's sensitive
 `cloudflare_hyperdrive_id`. Never copy `migration_environment`, the database
 owner URL, database CA, or runtime password into the Worker environment.
 
-Deployments are manually dispatched. The workflow first runs the complete
-local contract suite. It rejects all release refs except `main`. Configure the
+Deployments are manually dispatched. The workflow rejects all release refs
+except `main`, then runs the complete local contract suite from
+[`validate.yml`](../.github/workflows/validate.yml), the same checks every pull
+request runs. Configure the
 `coffre-production` and `coffre-migrations` GitHub environments to allow only
 the selected branch `main`, and disable administrator bypass if the repository
 plan supports it. These environment rules are the authoritative secret
