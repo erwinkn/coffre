@@ -54,13 +54,16 @@ import {
 export type SyncStatus = 'ok' | 'partial' | 'failed';
 export type SyncTrigger = 'create' | 'change' | 'manual' | 'scheduled';
 
+/** What survives JSON, as a stored destination config always has. */
+export type Json = string | number | boolean | null | Json[] | { [key: string]: Json };
+
 export type SyncView = {
   id: string;
   provider: string;
   providerLabel: string;
   /** One line naming the destination, e.g. "erwinkn/app · environment production". */
   destination: string;
-  config: unknown;
+  config: { [key: string]: Json };
   /** `project/environment/KEY` of the secret holding the destination's token. */
   credential: string;
   createdAt: string;
@@ -881,7 +884,8 @@ function toView(
     provider: row.provider,
     providerLabel: provider?.label ?? row.provider,
     destination,
-    config,
+    // Stored as JSON text from an object the create call checked.
+    config: config as SyncView['config'],
     credential: row.credential_path,
     createdAt: toIsoTimestamp(row.created_at),
     createdBy: row.created_by,

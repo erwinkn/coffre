@@ -9,6 +9,10 @@ import type {
   SecretKey as ServiceSecretKey,
   SecretsService,
 } from '../server/services/secrets.ts';
+import type {
+  RunOutcome as ServiceRunOutcome,
+  SyncView as ServiceSyncView,
+} from '../server/services/sync.ts';
 
 /** Browser-safe projections whose source types stay owned by the services. */
 export type Permission = ServicePermission;
@@ -47,5 +51,8 @@ export type SecretVersion = Awaited<
 export type ImportPlanEntry = Awaited<
   ReturnType<SecretsService['importSecrets']>
 >['plan'][number];
+
+export type SyncView = ServiceSyncView;
+export type RunOutcome = ServiceRunOutcome;
 
 export type ImportProblem = { line: number; text: string; reason: string };
