@@ -59,8 +59,16 @@ const post = (token, path, body) => call(token, 'POST', path, body);
 // This wholesale delete is possible only because the seed connects as the
 // owner. The application role cannot do any of it: coffre_app has no DELETE on
 // audit_log at all.
+//
+// Syncs hold references to secrets, versions and environments, and sign-in
+// sessions, device logins and linked accounts to principals, so they go next.
 console.log('==> resetting local data');
 await pool.query('DELETE FROM audit_log');
+await pool.query('DELETE FROM sync_keys');
+await pool.query('DELETE FROM syncs');
+await pool.query('DELETE FROM credentials');
+await pool.query('DELETE FROM device_authorizations');
+await pool.query('DELETE FROM identities');
 await pool.query('UPDATE secrets SET current_version_id = NULL');
 await pool.query('DELETE FROM secret_versions');
 await pool.query('DELETE FROM secrets');
