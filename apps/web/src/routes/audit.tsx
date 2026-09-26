@@ -1,7 +1,14 @@
 import { createFileRoute, Link } from '@tanstack/react-router';
 import { listAudit, verifyAuditChain } from '../server-functions/audit';
 import type { AuditRow } from '../shared/models';
-import { CopyButton, EmptyState, Notice, Timestamp, Tip } from '../components/ui';
+import {
+  breakAfterUnderscores,
+  CopyButton,
+  EmptyState,
+  Notice,
+  Timestamp,
+  Tip,
+} from '../components/ui';
 import { ClosedDoor, PageHeader } from '../components/page';
 import {
   Activity,
@@ -193,7 +200,7 @@ function AuditTableRow({ entry, deniedOnly }: { entry: AuditRow; deniedOnly: boo
         {entry.action}
       </td>
       <td className="cell-mono" style={{ overflowWrap: 'anywhere' }} data-label="Subject">
-        {scopedSubject(entry)}
+        {breakAfterUnderscores(scopedSubject(entry))}
       </td>
       <td className="nowrap" data-label="Decision">
         {/* Glyph first, then the word. The colour is the third signal, never

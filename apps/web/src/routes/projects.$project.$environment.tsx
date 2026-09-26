@@ -31,6 +31,7 @@ import {
 import { revealIsCurrent, type Reveal } from '../lib/reveal';
 import { secretKeyProblem } from '../lib/validation';
 import {
+  breakAfterUnderscores,
   ConfirmButton,
   CopyButton,
   EmptyState,
@@ -841,7 +842,7 @@ function SecretRow({
             </div>
           ) : (
             <div className="key-cell">
-              <span>{entry.key}</span>
+              <span>{breakAfterUnderscores(entry.key)}</span>
               {leaving && <span className="tag tag-red">will be archived</span>}
             </div>
           )}
@@ -1233,7 +1234,7 @@ function ArchivedRow({
       <tr className="secret-row is-archived">
         <td className="n">{number}</td>
         <td className="cell-key" data-label="Key">
-          {entry.key}
+          {breakAfterUnderscores(entry.key)}
         </td>
         <td className="col-version" data-label="Version">
           <span className="version-shift">{entry.version === null ? '—' : `v${entry.version}`}</span>
@@ -1569,7 +1570,7 @@ function ImportEnv({ project, environment }: { project: string; environment: str
                 <tbody>
                   {plan.map((entry) => (
                     <tr key={entry.key}>
-                      <td className="cell-key">{entry.key}</td>
+                      <td className="cell-key">{breakAfterUnderscores(entry.key)}</td>
                       <td className="col-shrink">
                         <span className={PLAN_TAG[entry.action]}>{entry.action}</span>
                       </td>

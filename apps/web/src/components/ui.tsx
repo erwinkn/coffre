@@ -168,6 +168,24 @@ export function EmptyState({
 }
 
 /* -------------------------------------------------------------------------- */
+/* Text                                                                        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * An identifier that wraps after its underscores rather than mid-word.
+ *
+ * To the line breaker `DOCUSIGN_INTEGRATION_KEY` is one word, so a narrow
+ * column cuts it wherever room runs out (`…_KE` / `Y`). A <wbr> after each
+ * underscore offers the natural places instead. Copied text is unchanged, and
+ * `overflow-wrap: anywhere` still catches a segment too long for any line.
+ */
+export function breakAfterUnderscores(text: string): ReactNode {
+  return text
+    .split('_')
+    .flatMap((part, index) => (index === 0 ? [part] : ['_', <wbr key={index} />, part]));
+}
+
+/* -------------------------------------------------------------------------- */
 /* Copy                                                                        */
 /* -------------------------------------------------------------------------- */
 
