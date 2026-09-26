@@ -33,7 +33,7 @@ function UnregisteredPage() {
         projects, secrets, audit entries or API operations are available to you.
       </p>
       <p>
-        Ask a coffre owner or root admin to add your Access email under Members.
+        Ask a coffre owner or root admin to add your Access email under Users.
       </p>
     </ClosedDoor>
   );

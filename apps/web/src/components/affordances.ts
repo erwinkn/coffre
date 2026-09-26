@@ -21,23 +21,8 @@ export function AdministrationItems({
   return createElement(
     Fragment,
     null,
-    capabilities.canReadAudit ? audit : null,
     capabilities.canManageGrants ? users : null,
-  );
-}
-
-/** The rail's administration group, omitted entirely when it would be empty. */
-export function AdministrationNav({
-  capabilities,
-  users,
-  audit,
-}: AdministrationItemsProps): ReactElement | null {
-  if (!capabilities.canManageGrants && !capabilities.canReadAudit) return null;
-
-  return createElement(
-    'div',
-    { className: 'rail-group', role: 'group', 'aria-label': 'Administration' },
-    createElement(AdministrationItems, { capabilities, users, audit }),
+    capabilities.canReadAudit ? audit : null,
   );
 }
 

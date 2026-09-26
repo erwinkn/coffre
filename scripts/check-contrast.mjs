@@ -89,6 +89,9 @@ const LIGHT = {
     float: [0.235, 0, 0],
     onFloat: [0.985, 0, 0],
     onFloat2: [0.8, 0, 0],
+    // Sidebar states: the canvas with 5% and 8% of ink mixed in (oklab).
+    navHover: [0.946, 0, 0],
+    navCurrent: [0.923, 0, 0],
 };
 
 const DARK = {
@@ -113,6 +116,8 @@ const DARK = {
     float: [0.3, 0, 0],
     onFloat: [0.97, 0, 0],
     onFloat2: [0.8, 0, 0],
+    navHover: [0.195, 0, 0],
+    navCurrent: [0.219, 0, 0],
 };
 
 // [foreground, background, minimum ratio, label]
@@ -149,6 +154,9 @@ const PAIRS = [
     ['ink', 'amberWash', 4.5, 'the revealed value itself'],
     ['ink', 'accentWash', 4.5, 'text on an edited row'],
     ['ink', 'redWash', 4.5, 'text on a denied row'],
+    ['ink', 'navHover', 4.5, 'a hovered sidebar link, the path'],
+    ['ink', 'navCurrent', 4.5, 'the current section in the sidebar'],
+    ['ink3', 'navHover', 4.5, 'your role under the hovered account'],
     ['edge', 'panel', 3.0, 'input and checkbox boundary'],
     ['edge', 'canvas', 3.0, 'input boundary on the page'],
     ['accent', 'panel', 3.0, 'focus ring'],

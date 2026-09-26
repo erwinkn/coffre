@@ -29,7 +29,7 @@ export function deriveUiCapabilities(
     me.instanceRole === 'owner' || me.instanceRole === 'root-admin';
 
   return {
-    // Members and Tokens manage the instance directory, not project grants.
+    // Users and Tokens manage the instance directory, not project grants.
     // Project access managers keep their grant controls on each project page.
     canManageGrants: canManageInstance,
     canReadAudit: me.canReadAudit,

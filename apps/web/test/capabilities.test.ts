@@ -9,7 +9,7 @@ import {
   deriveUiCapabilities,
 } from '../src/lib/capabilities.ts';
 import {
-  AdministrationNav,
+  AdministrationItems,
   ProjectEmptyStateCopy,
   RootAdminOnly,
   SecretReadOnly,
@@ -123,9 +123,9 @@ for (const [name, persona] of Object.entries(PERSONAS)) {
       createElement(
         Fragment,
         null,
-        createElement(AdministrationNav, {
+        createElement(AdministrationItems, {
           capabilities,
-          users: createElement('a', { href: '/access' }, 'Users'),
+          users: createElement('a', { href: '/users' }, 'Users'),
           audit: createElement('a', { href: '/audit' }, 'Audit log'),
         }),
         createElement(

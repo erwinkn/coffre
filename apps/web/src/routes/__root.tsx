@@ -111,7 +111,7 @@ function RootComponent() {
   const { principal, instanceRole, projects, capabilities } = Route.useLoaderData();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
 
-  // Sign-in gets no navigation. Every destination in the rail and the
+  // Sign-in gets no navigation. Every destination in the sidebar and the
   // command palette bounces straight back here while you are signed out, so
   // offering them is a loop dressed up as navigation. The brand stays, as a
   // mark rather than a link, so the page is still recognisably this app.

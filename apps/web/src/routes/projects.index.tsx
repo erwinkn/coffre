@@ -12,7 +12,7 @@ import { slugProblem } from '../lib/validation';
 import { EmptyState, ErrorLine, Modal, Spinner } from '../components/ui';
 import { Card, ClosedDoor, PageHeader } from '../components/page';
 import { Tile } from '../components/tile';
-import { AlertTriangle, Plus } from '../components/icons';
+import { AlertTriangle, Folder, Hash, Layers, Plus } from '../components/icons';
 import {
   ProjectEmptyStateCopy,
   RootAdminOnly,
@@ -81,11 +81,9 @@ function ProjectsPage() {
           </EmptyState>
         </div>
       ) : (
-        <ul className="project-grid" style={{ listStyle: 'none', margin: 0, padding: 0 }}>
-          {active.map((project) => (
-            <ProjectCard key={project.slug} project={project} />
-          ))}
-        </ul>
+        <section className="card" aria-label="Projects">
+          <ProjectTable projects={active} />
+        </section>
       )}
 
       {archived.length > 0 && (
@@ -95,13 +93,7 @@ function ProjectsPage() {
             title="Archived"
             description="Hidden from listings and refused on read. Every row is still present, and the audit trail over them still verifies."
           >
-            <div className="card-body">
-              <ul className="project-grid" style={{ listStyle: 'none', margin: 0, padding: 0 }}>
-                {archived.map((project) => (
-                  <ProjectCard key={project.slug} project={project} />
-                ))}
-              </ul>
-            </div>
+            <ProjectTable projects={archived} />
           </Card>
         </div>
       )}
@@ -116,7 +108,50 @@ function countSecrets(project: ProjectSummary): number {
     .reduce((sum, environment) => sum + (environment.details.secretCount ?? 0), 0);
 }
 
-function ProjectCard({ project }: { project: ProjectSummary }) {
+function ProjectTable({ projects }: { projects: ProjectSummary[] }) {
+  return (
+    <div className="dt-wrap">
+      <table className="dt projects stacks">
+        <thead>
+          <tr>
+            <th className="n">#</th>
+            <th className="col-project">
+              <span className="th">
+                <Folder size={14} />
+                Project
+              </span>
+            </th>
+            <th className="col-name">Name</th>
+            <th>
+              <span className="th">
+                <Layers size={14} />
+                Environments
+              </span>
+            </th>
+            <th className="col-shrink">
+              <span className="th">
+                <Hash size={14} />
+                Secrets
+              </span>
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {projects.map((project, index) => (
+            <ProjectRow key={project.slug} number={index + 1} project={project} />
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/**
+ * One project. The whole row opens it; the environment links inside it sit
+ * above that and go straight to the environment.
+ */
+function ProjectRow({ number, project }: { number: number; project: ProjectSummary }) {
+  const isArchived = project.archivedAt !== null;
   const listedEnvironments = project.environments.filter(
     (environment) =>
       environment.details === null || environment.details.archivedAt === null,
@@ -127,60 +162,60 @@ function ProjectCard({ project }: { project: ProjectSummary }) {
       (environment) =>
         environment.details.archivedAt === null && environment.details.secretCount !== null,
     );
-  const total = countSecrets(project);
-  const isArchived = project.archivedAt !== null;
 
   return (
-    <li className={`project-card${isArchived ? ' is-archived' : ''}`}>
-      <div className="project-card-head">
-        <Tile name={project.slug} size="lg" />
-        <div className="project-card-name">
-          <Link className="stretch" to="/projects/$project" params={{ project: project.slug }}>
+    <tr className="row-link">
+      <td className="n">{number}</td>
+      <td data-label="Project">
+        <span className="cell-project">
+          <Tile name={project.slug} />
+          <Link
+            className="cell-link stretch"
+            to="/projects/$project"
+            params={{ project: project.slug }}
+          >
             {project.slug}
           </Link>
-          <small>{project.name}</small>
-        </div>
-      </div>
-
-      {!isArchived && listedEnvironments.length > 0 && (
-        <div className="env-links" aria-label={`Environments in ${project.slug}`}>
-          {listedEnvironments.map((environment) =>
-            isActiveAccessibleEnvironment(environment) ? (
-              <Link
-                key={environment.slug}
-                className="env-link"
-                to="/projects/$project/$environment"
-                params={{ project: project.slug, environment: environment.slug }}
-              >
-                {environment.slug}
-                <span className="count">{environment.details.secretCount}</span>
-              </Link>
-            ) : (
-              <span
-                key={environment.slug}
-                className="env-link"
-                title="You can see this environment exists, but not open it"
-              >
-                {environment.slug}
-              </span>
-            ),
-          )}
-        </div>
-      )}
-
-      <div className="project-card-foot">
-        <span>
-          {listedEnvironments.length} environment{listedEnvironments.length === 1 ? '' : 's'}
-          {counted && !isArchived && (
-            <>
-              {' · '}
-              {total} secret{total === 1 ? '' : 's'}
-            </>
-          )}
         </span>
-        {isArchived && <span className="tag tag-red">archived</span>}
-      </div>
-    </li>
+      </td>
+      <td className="cell-muted" data-label="Name">
+        {project.name}
+      </td>
+      <td data-label="Environments">
+        {isArchived || listedEnvironments.length === 0 ? (
+          <span className="cell-muted">
+            {listedEnvironments.length === 0 ? 'None yet' : listedEnvironments.length}
+          </span>
+        ) : (
+          <span className="env-links" aria-label={`Environments in ${project.slug}`}>
+            {listedEnvironments.map((environment) =>
+              isActiveAccessibleEnvironment(environment) ? (
+                <Link
+                  key={environment.slug}
+                  className="env-link"
+                  to="/projects/$project/$environment"
+                  params={{ project: project.slug, environment: environment.slug }}
+                >
+                  {environment.slug}
+                  <span className="count">{environment.details.secretCount}</span>
+                </Link>
+              ) : (
+                <span
+                  key={environment.slug}
+                  className="env-link"
+                  title="You can see this environment exists, but not open it"
+                >
+                  {environment.slug}
+                </span>
+              ),
+            )}
+          </span>
+        )}
+      </td>
+      <td className="num nowrap" data-label="Secrets">
+        {counted && !isArchived ? countSecrets(project) : <span className="cell-muted">—</span>}
+      </td>
+    </tr>
   );
 }
 

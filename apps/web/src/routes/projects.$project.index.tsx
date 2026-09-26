@@ -585,7 +585,7 @@ function ProjectAccessTable({
   return (
     <Card
       labelledBy={`access-${principalType}`}
-      title={people ? 'Members with access' : 'Tokens with access'}
+      title={people ? 'Users with access' : 'Tokens with access'}
       description={
         people
           ? 'A grant covers the whole project or exactly one environment, and takes effect immediately.'
@@ -596,8 +596,8 @@ function ProjectAccessTable({
       }
     >
       {grants.length === 0 ? (
-        <EmptyState title={people ? 'No member has access' : 'No token has access'}>
-          Add {people ? 'a member' : 'a token'} with permissions on the whole project
+        <EmptyState title={people ? 'No user has access' : 'No token has access'}>
+          Add {people ? 'a user' : 'a token'} with permissions on the whole project
           or on one environment.
         </EmptyState>
       ) : (
@@ -656,7 +656,7 @@ function NewGrant({
   const [expiresAt, setExpiresAt] = useState('');
   const { pending, error, setError, run } = useAction();
   const permissionOptions = projectAccessOptions(environments);
-  const kind = principalType === 'user' ? 'member' : 'token';
+  const kind = principalType === 'user' ? 'user' : 'token';
 
   function close() {
     setOpen(false);
@@ -683,7 +683,7 @@ function NewGrant({
           <>
             Owners manage the whole project and its access. Read and write can cover every
             environment, or one. The {kind} must already be registered under
-            {principalType === 'user' ? ' Members' : ' Tokens'}.
+            {principalType === 'user' ? ' Users' : ' Tokens'}.
           </>
         }
       >

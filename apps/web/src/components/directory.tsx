@@ -12,7 +12,7 @@ import { ConfirmDialog, EmptyState, ErrorLine, Modal, Spinner } from './ui';
 import { Key, MoreHorizontal, Pencil, Plus, ShieldCheck, User, X } from './icons';
 
 /**
- * The instance directory, shared by the Members and Tokens pages.
+ * The instance directory, shared by the Users and Tokens pages.
  *
  * Both are rows in the same table on the server (principals, typed user or
  * service); the pages split them because people and machines are looked after
@@ -29,7 +29,7 @@ export const ROLE_LABEL: Record<DirectoryPrincipal['instanceRole'], string> = {
 
 /** What each kind of principal is called in the interface. */
 export const KIND: Record<PrincipalType, string> = {
-  user: 'member',
+  user: 'user',
   service: 'token',
 };
 
@@ -40,11 +40,11 @@ export function DirectoryTable({
   principalType: PrincipalType;
   principals: DirectoryPrincipal[];
 }) {
-  const members = principalType === 'user';
+  const users = principalType === 'user';
   return (
-    <section className="card" aria-label={members ? 'Members' : 'Tokens'}>
+    <section className="card" aria-label={users ? 'Users' : 'Tokens'}>
       {principals.length === 0 ? (
-        <EmptyState title={members ? 'Nobody is registered' : 'No tokens yet'}>
+        <EmptyState title={users ? 'Nobody is registered' : 'No tokens yet'}>
           Add the first {KIND[principalType]} to let it through the door. Project access is a
           separate step, granted from each project's page.
         </EmptyState>
@@ -56,14 +56,14 @@ export function DirectoryTable({
                 <th className="n">#</th>
                 <th className="col-principal">
                   <span className="th">
-                    {members ? <User size={14} /> : <Key size={14} />}
-                    {members ? 'Email' : 'Common name'}
+                    {users ? <User size={14} /> : <Key size={14} />}
+                    {users ? 'Email' : 'Common name'}
                   </span>
                 </th>
                 <th>
                   <span className="th">
                     <ShieldCheck size={14} />
-                    {members ? 'Instance role' : 'Kind'}
+                    {users ? 'Instance role' : 'Kind'}
                   </span>
                 </th>
                 <th className="col-actions">
@@ -361,7 +361,7 @@ function RoleField({
         <option value="owner">Owner</option>
       </select>
       <span className="hint">
-        Owners manage members and tokens, can create projects, and read the whole audit log.
+        Owners manage users and tokens, can create projects, and read the whole audit log.
         Neither role reads a secret without a project grant.
       </span>
     </label>

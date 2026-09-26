@@ -9,7 +9,7 @@ import { roleLabel } from '../components/shell';
 export const Route = createFileRoute('/settings')({
   // Instance facts come from the directory, which only owners may list.
   // Asking on everyone's behalf would write a refusal to the audit log for
-  // every member who opens their own settings, so it is only asked for them.
+  // every user who opens their own settings, so it is only asked for them.
   loader: async ({ parentMatchPromise }) => {
     const root = await parentMatchPromise;
     const canManage = root.loaderData?.capabilities.canManageGrants ?? false;
@@ -28,7 +28,7 @@ function SettingsPage() {
 
   const principals = directory?.ok === true ? directory.principals : null;
   const rootAdmins = principals?.filter((entry) => entry.isRootAdmin) ?? [];
-  const members = principals?.filter((entry) => entry.principalType === 'user').length ?? 0;
+  const users = principals?.filter((entry) => entry.principalType === 'user').length ?? 0;
   const tokens = principals?.filter((entry) => entry.principalType === 'service').length ?? 0;
 
   return (
@@ -58,7 +58,7 @@ function SettingsPage() {
             <Fact label="Identity">
               <span className="mono">{principal.id}</span>
             </Fact>
-            <Fact label="Kind">{principal.type === 'user' ? 'Member' : 'Token'}</Fact>
+            <Fact label="Kind">{principal.type === 'user' ? 'User' : 'Token'}</Fact>
             <Fact label="Instance role">{roleLabel(principal, instanceRole)}</Fact>
           </dl>
         </Card>
@@ -97,8 +97,8 @@ function SettingsPage() {
               </Fact>
               <Fact label="Directory">
                 <span>
-                  <Link to="/members">
-                    {members} member{members === 1 ? '' : 's'}
+                  <Link to="/users">
+                    {users} user{users === 1 ? '' : 's'}
                   </Link>
                   {' · '}
                   <Link to="/tokens">

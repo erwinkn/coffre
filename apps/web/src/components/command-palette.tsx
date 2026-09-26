@@ -173,14 +173,14 @@ export function CommandPalette({
                 users={
                   <>
                     <Command.Item
-                      value="members people users directory"
+                      value="users people members directory"
                       onSelect={() => {
                         setOpen(false);
-                        navigate({ to: '/members' });
+                        navigate({ to: '/users' });
                       }}
                     >
                       <Users size={15} />
-                      Members
+                      Users
                     </Command.Item>
                     <Command.Item
                       value="tokens service accounts machines ci directory"
