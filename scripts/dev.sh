@@ -1,8 +1,23 @@
 #!/usr/bin/env bash
 # Bring the whole local stack up: Postgres, dev IdP, the web app, and seed data.
 #
+#   pnpm dev          dev mode: the dev IdP's persona picker stands in for
+#                     Cloudflare Access
+#   pnpm dev:signin   coffre's own sign-in page, with the dev IdP standing in
+#                     for GitHub and for an OpenID Connect provider
+#
 # Everything here is local. No Scaleway calls, no Cloudflare calls, no real KMS.
 set -euo pipefail
+
+# The Wrangler environment in apps/web/wrangler.jsonc.
+mode="${1:-development}"
+case "$mode" in
+    development | signin) ;;
+    *)
+        echo "usage: $0 [signin]" >&2
+        exit 2
+        ;;
+esac
 
 cd "$(dirname "$0")/.."
 export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-coffre}"
@@ -68,17 +83,42 @@ log 'starting dev IdP on :8081'
 node apps/dev-idp/src/server.ts > .logs/dev-idp.log 2>&1 &
 sleep 1
 
-log 'starting web app on :3000'
-export CLOUDFLARE_ENV=development
+log "starting web app on :3000 ($mode)"
+export CLOUDFLARE_ENV="$mode"
 export CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE="$DATABASE_URL"
-(cd apps/web && ./node_modules/.bin/vite dev) > .logs/web.log 2>&1 &
+# The dev IdP and the seed refuse anything but dev mode, so only the web app
+# is told otherwise, and sign-in mode refuses a dev IdP URL.
+web_env=(env)
+if [ "$mode" = signin ]; then
+    web_env=(env -u COFFRE_DEV_IDP_URL COFFRE_AUTH_MODE=signin)
+fi
+(cd apps/web && "${web_env[@]}" ./node_modules/.bin/vite dev) > .logs/web.log 2>&1 &
 until curl -sf http://127.0.0.1:3000/livez >/dev/null 2>&1; do sleep 1; done
 
-log 'seeding'
-DATABASE_URL='postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/coffre' \
-    node scripts/seed.mjs
+# The seed writes through the API with dev IdP tokens, which only dev mode
+# accepts. Sign-in mode keeps whatever the last `pnpm dev` left, or starts
+# empty, as a new deployment does.
+if [ "$mode" = development ]; then
+    log 'seeding'
+    DATABASE_URL='postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/coffre' \
+        node scripts/seed.mjs
+fi
 
-cat <<'BANNER'
+if [ "$mode" = signin ]; then
+    cat <<'BANNER'
+
+  coffre is up, with its own sign-in page, and the data `pnpm dev` last
+  seeded (not seeded again here).
+
+    web + API   http://127.0.0.1:3000   (either button, then erwin@equisafe.io)
+    dev IdP     http://127.0.0.1:8081
+
+  CLI (a device login: approve it in the browser):
+    node apps/cli/src/main.ts login http://127.0.0.1:3000
+    node apps/cli/src/main.ts run market/dev -- printenv
+BANNER
+else
+    cat <<'BANNER'
 
   coffre is up.
 
@@ -89,6 +129,9 @@ cat <<'BANNER'
     node --env-file=.env.dev apps/cli/src/main.ts login --email erwin@equisafe.io
     node --env-file=.env.dev apps/cli/src/main.ts run market/dev -- printenv
     node --env-file=.env.dev apps/cli/src/main.ts verify
+BANNER
+fi
+cat <<'BANNER'
 
   Logs:
     tail -f .logs/web.log .logs/dev-idp.log
