@@ -1,11 +1,15 @@
 # coffre
 
-A deliberately small in-house secrets manager. Cloudflare Access is the identity
-provider, Postgres is the backend of record, and the audit log is the point.
+A deliberately small in-house secrets manager. People sign in with GitHub,
+Google, Microsoft or any OpenID Connect provider, or through Cloudflare Access;
+Postgres is the backend of record, and the audit log is the point.
 
-**Status: demo software. Do not store real secrets.** The application deploys
-as a Cloudflare Worker; Terraform in the infrastructure repository owns the
-private Scaleway database, Workers VPC Service, connector, and Hyperdrive.
+**Status: ready for a first deployment, still hardening.** coffre runs as a
+Cloudflare Worker in front of Postgres, and [docs/deploy.md](docs/deploy.md)
+deploys one. [Phase 1 of the roadmap](docs/roadmap.md#phase-1-harden) is still
+open, so until it is done, keep the keys escrowed and a copy of anything you
+move in. Equisafe's pipeline, with Terraform owning a private Scaleway
+database, is [docs/deployment-workers.md](docs/deployment-workers.md).
 
 ## Why this exists
 
@@ -33,7 +37,7 @@ Infisical's audit logging being paywalled is a fact about Infisical, not about
 the market. **OpenBao ships request/response audit logging in its open-source
 core**, unlicensed. The honest justification for building rather than adopting
 is that we want a secrets service small enough to read end to end, with
-Cloudflare Access as the only identity system. Not "nothing else does this."
+identity delegated to a provider we already trust. Not "nothing else does this."
 
 ## The finding that changed the design
 
@@ -149,7 +153,8 @@ published six days before we tried to install it.
 packages/core   envelope encryption, KEK providers, audit hash chain, identity
 packages/db     Drizzle schema/migrations, audit writer, privilege tests
 packages/sync   destinations syncs push to: GitHub Actions, Vercel, Railway, Cloudflare
-apps/dev-idp    local stand-in for Cloudflare Access (serves JWKS, mints tokens)
+apps/dev-idp    local stand-in for Cloudflare Access, an OIDC provider and GitHub
+deploy/         instance files: where each copy of coffre runs, and how people sign in
 apps/cli        login, secrets, access, syncs, audit; no dependencies
 apps/web        TanStack Start UI, auth boundary, services, and native /api routes
 ```
@@ -163,11 +168,11 @@ pnpm dev              # Postgres + dev IdP + one web/API service + seed data
 
 Then open http://127.0.0.1:3000 and sign in as `erwin@equisafe.io`.
 
-Production uses an explicit `COFFRE_AUTH_MODE=cloudflare` contract; local
-persona minting exists only under `COFFRE_AUTH_MODE=dev`. The exact team-domain
-issuer, cert URL, application AUD, closed-origin behavior, and root-admin
-bootstrap requirements are in
-[docs/deployment-auth.md](docs/deployment-auth.md).
+`pnpm dev` picks a persona, which exists only under `COFFRE_AUTH_MODE=dev`.
+`pnpm dev:signin` runs the real sign-in page instead, with the dev IdP playing
+GitHub and an OIDC provider, on the data `pnpm dev` seeded. A deployment runs
+in `signin` mode ([docs/deploy.md](docs/deploy.md)) or behind Cloudflare
+Access ([docs/deployment-auth.md](docs/deployment-auth.md)).
 
 Individual pieces:
 
@@ -275,6 +280,17 @@ All five phases are implemented and working locally.
 - **Identity directory.** Users and service accounts are managed separately
   from project permissions. Owners can manage the directory and read the full
   audit log; root admins remain deployment configuration.
+- **Sign-in.** coffre's own sign-in page, with providers as configuration:
+  GitHub (including an organisation check and Enterprise Server), Google
+  (optionally one Workspace domain), Microsoft Entra, and any OpenID Connect
+  issuer, which covers Okta, Auth0, Keycloak and the like. An account binds to
+  the provider's stable user id, never to an email. The CLI signs in with a
+  device code, and machines use service tokens coffre issues. See
+  [docs/deploy.md](docs/deploy.md#sign-in-providers).
+- **Instances.** `apps/web/wrangler.jsonc` describes coffre; a file in
+  `deploy/` says where one copy runs and how people sign in, and the deploy
+  reads the secrets it needs from there. `deploy/equisafe.jsonc` and
+  `deploy/erwinkn.jsonc` are the first two.
 - **Syncs.** An environment can be pushed to GitHub Actions, Vercel, Railway
   or Cloudflare Workers and kept current there: on every change, and hourly
   to repair drift. Only keys coffre pushed are ever removed, and every value
@@ -507,10 +523,10 @@ prototype; the real fix is a schema (or database) per test file.
 
 ## Deliberately out of scope
 
-No deployment, no Terraform, no real KMS. No rotation engine, no dynamic
-secrets, no PKI, no policy DSL (a grants table is enough), no HA. No Kubernetes
-operator — external-secrets has a generic `webhook` provider that can call this
-API later.
+No Terraform here (it lives in the infrastructure repository), and no real
+KMS yet. No rotation engine, no dynamic secrets, no PKI, no policy DSL (a
+grants table is enough), no HA. No Kubernetes operator — external-secrets has
+a generic `webhook` provider that can call this API later.
 
 ## Open question
 

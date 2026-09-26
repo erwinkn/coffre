@@ -5,16 +5,19 @@ product that runs first on erwinkn.com and then inside Equisafe.
 
 ## Where we are
 
-- The product works end to end locally: API, CLI, audit chain, and the web UI
-  (landed in #8). 228 tests pass.
-- The README still says *demo software, do not store real secrets*, and that
-  is still true: the gaps are listed under phase 1.
-- A production pipeline exists for Equisafe (`deploy-worker.yml`, a private
-  migration runner, the `coffre-production` and `coffre-migrations` GitHub
-  environments). It has never run.
-- Product and instance are one thing. `apps/web/wrangler.jsonc` names the
-  Worker `equisafe-coffre` and routes it to `coffre.equisafe.dev`, so a second
-  deployment today means forking the configuration.
+- The product works end to end: API, CLI, web UI, audit chain, and now
+  coffre's own sign-in (phase 5), syncs (phase 3) and offboarding.
+- Product and instance are apart. `apps/web/wrangler.jsonc` describes coffre,
+  and a file in `deploy/` says where one copy runs and how people sign in,
+  named by `COFFRE_INSTANCE` at build time. That is the "deployment is a
+  config file" half of phase 2, without the npm packages or the Node adapter.
+- erwinkn.com is ready to deploy: [deploy.md](deploy.md) walks through it, and
+  `deploy/erwinkn.jsonc` needs two values filled in.
+- Equisafe's pipeline (`deploy-worker.yml`, a private migration runner, the
+  `coffre-production` and `coffre-migrations` GitHub environments) has never
+  run.
+- Most of phase 1 is still open. The README says *ready for a first
+  deployment, still hardening* until it is done.
 
 ## Sequence
 
@@ -57,14 +60,10 @@ Each item says what is wrong today.
    re-wraps each DEK under the primary, leaves the ciphertext untouched, and
    writes one audit row per secret. The `coffre-maintenance` GitHub
    environment already exists and nothing uses it yet; this is its job.
-4. **A heartbeat someone hears.** There are two problems:
-   - The readiness threshold (`age > 300` in `server/heartbeat.ts`) equals the
-     Cron interval (`*/5`). So `/readyz` returns 503 for a few seconds whenever
-     Cron fires late, and a monitor would flap.
-   - Nothing monitors it.
-
-   Allow two missed beats (about 11 minutes) and attach an external check that
-   pages you.
+4. **A heartbeat someone hears.** Readiness now tolerates one late or missed
+   Cron run (11 minutes, where it used to fail at 5, the Cron interval itself,
+   and flapped). Nothing monitors it yet: attach an external check on
+   `/readyz` that pages you.
 5. **Checkpoints off the box.** `audit_checkpoints` exists but nothing exports
    it. Whoever holds the database owner role can delete the last N audit rows
    and rewind the head, and the chain still verifies. The scheduled handler
@@ -77,11 +76,11 @@ Each item says what is wrong today.
    deploy accepts anything that reached `main` and passes the tests, so nothing
    reviews what gets there. Add a PR workflow that reuses the deploy's validate
    job, and make both a PR and that workflow required.
-8. **Machine callers in the CLI.** The CLI can only send a human's
-   `cloudflared` token. CI jobs and sync need Access service tokens
-   (`CF-Access-Client-Id` and `CF-Access-Client-Secret`).
+8. ~~**Machine callers in the CLI.**~~ Done: `COFFRE_TOKEN` for coffre's own
+   service tokens, `COFFRE_ACCESS_CLIENT_ID` and `COFFRE_ACCESS_CLIENT_SECRET`
+   behind Access.
 
-Then flip the README's status line.
+Then drop "still hardening" from the README's status line.
 
 ## Phase 2: package
 
@@ -172,11 +171,11 @@ Two spikes go first:
   ciphertext and the audit log, while values need the KEK, which lives in
   Cloudflare. A database leak therefore exposes names and who read what, but
   not values. That makes a public endpoint acceptable for a personal instance.
-- **Access:** one application for `coffre.erwinkn.com` with GitHub as its
-  login method, and one service token per machine that reads from it.
+- **Sign-in:** coffre's own, with GitHub, rather than an Access application
+  (phase 5 landed first). Machines get coffre service tokens.
 - **Moving in:** `coffre import` from your existing `.env` files.
-- **CLI:** installed with `npm i -g @coffre/cli`. `coffre login` wraps
-  `cloudflared` instead of asking you to export a token by hand.
+- **CLI:** run from a checkout until it is published as `@coffre/cli`.
+  `coffre login` signs in with a device code.
 - **Exit:** a few weeks of daily use with no open bugs, plus a rotation drill
   and a restore drill on the live instance.
 
@@ -221,6 +220,12 @@ Workers on every change, and checked hourly for drift. See
   holds company credentials.
 
 ## Phase 5: sign-in
+
+Built, on Workers. Where the build departed from the plan below: Microsoft
+takes one tenant, by GUID, because the multi-tenant endpoints publish an
+issuer template that standard validation rejects; the CLI signs in with a
+device code rather than a local port, which also works over SSH; and the page
+takes a title and a note but no logo yet. The plan, as written:
 
 Behind Cloudflare Access, the login page is Access's own. GitHub, Google,
 Microsoft, one-time email codes and any OIDC or SAML provider are login

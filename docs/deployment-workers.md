@@ -6,7 +6,21 @@ Cron Trigger. The infrastructure repository owns PostgreSQL, its owner/runtime
 credentials, the private network, connector, Workers VPC Service, Hyperdrive
 configuration, and Cloudflare Access application.
 
+This page is Equisafe's pipeline. [deploy.md](deploy.md) deploys a coffre
+of your own by hand.
+
 ## Production boundary
+
+`apps/web/wrangler.jsonc` describes coffre itself. Where Equisafe's copy runs,
+its Worker name and custom domain, is
+[`deploy/equisafe.jsonc`](../deploy/equisafe.jsonc), which the workflow passes
+to the build as `COFFRE_INSTANCE`. It keeps coffre's default auth mode,
+Cloudflare Access, and so the default list of required secrets below.
+
+Hyperdrive's query cache must be off for coffre (`caching.disabled` in
+Terraform, `--caching-disabled` in Wrangler). With it on, a repeated `SELECT`
+can be answered from a copy up to a minute old, so a revoked grant, session
+or person keeps working for that minute.
 
 `apps/web/wrangler.jsonc` deliberately contains the sentinel
 `__COFFRE_HYPERDRIVE_ID__`. A normal Wrangler deployment must never create a
@@ -16,7 +30,9 @@ sentinel only in Vite's generated deployment configuration with Terraform's
 Wrangler's secrets file, deploys, and restores the generated file afterwards.
 It never writes production values into the tracked Wrangler configuration.
 
-The `coffre-production` GitHub environment must provide:
+The deploy reads the list of secrets from the built configuration and
+refuses to start if any is missing. The `coffre-production` GitHub environment
+must provide:
 
 - variables: `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_HYPERDRIVE_ID`
 - secrets: `CLOUDFLARE_API_TOKEN`, `COFFRE_ACCESS_ISSUER`,
