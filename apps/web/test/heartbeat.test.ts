@@ -1,7 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { auditReadiness, writeAuditHeartbeat } from '../src/server/heartbeat.ts';
+import {
+  auditReadiness,
+  HEARTBEAT_STALE_AFTER_SECONDS,
+  writeAuditHeartbeat,
+} from '../src/server/heartbeat.ts';
 
 function heartbeatDatabase(options: { heartbeatRows?: number } = {}) {
   const statements: string[] = [];
@@ -67,15 +71,26 @@ test('readiness accepts a recent audit heartbeat and rejects a stale one', async
   );
   assert.deepEqual(recent, { ok: true, auditHeartbeatAgeSeconds: 12.5 });
 
+  // A Cron run that fires a few seconds late is not a logging failure.
+  const late = await auditReadiness(
+    {
+      query: async (sql: string) =>
+        sql.includes('__drizzle_migrations')
+          ? { rowCount: 1, rows: [{ ready: true }] }
+          : { rowCount: 1, rows: [{ age: '307' }] },
+    } as never,
+  );
+  assert.equal(late.ok, true);
+
   const stale = await auditReadiness(
     {
       query: async (sql: string) =>
         sql.includes('__drizzle_migrations')
           ? { rowCount: 1, rows: [{ ready: true }] }
-          : { rowCount: 1, rows: [{ age: '301' }] },
+          : { rowCount: 1, rows: [{ age: String(HEARTBEAT_STALE_AFTER_SECONDS + 1) }] },
     } as never,
   );
-  assert.deepEqual(stale, { ok: false, auditHeartbeatAgeSeconds: 301 });
+  assert.deepEqual(stale, { ok: false, auditHeartbeatAgeSeconds: HEARTBEAT_STALE_AFTER_SECONDS + 1 });
 });
 
 test('readiness rejects a database without the expected Drizzle schema prefix', async () => {

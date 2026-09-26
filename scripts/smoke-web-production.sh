@@ -55,7 +55,7 @@ fi
 # Prove readiness depends on the Cron-driven database signal, not process
 # startup. The scheduled handler must turn this deliberately stale row fresh.
 docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U coffre_owner -d coffre_test \
-    -c "UPDATE audit_heartbeat SET last_beat_at = now() - interval '10 minutes' WHERE only_row" \
+    -c "UPDATE audit_heartbeat SET last_beat_at = now() - interval '1 hour' WHERE only_row" \
     >/dev/null
 
 cd apps/web

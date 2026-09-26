@@ -72,6 +72,13 @@ export async function heartbeatAgeSeconds(pool: Database): Promise<number | null
   return result.rowCount === 1 ? Number(result.rows[0].age) : null;
 }
 
+/**
+ * How old the last heartbeat may be before readiness fails. Cron beats every
+ * five minutes, so this allows one late or skipped run, plus a minute of
+ * scheduling slack, before a monitor sees a failure.
+ */
+export const HEARTBEAT_STALE_AFTER_SECONDS = 11 * 60;
+
 export type Readiness =
   | { ok: true; auditHeartbeatAgeSeconds: number }
   | { ok: false; auditHeartbeatAgeSeconds: number | null };
@@ -100,7 +107,7 @@ export async function auditReadiness(
       return { ok: false, auditHeartbeatAgeSeconds: null };
     }
     const age = await heartbeatAgeSeconds(pool);
-    if (age === null || !Number.isFinite(age) || age > 300) {
+    if (age === null || !Number.isFinite(age) || age > HEARTBEAT_STALE_AFTER_SECONDS) {
       return { ok: false, auditHeartbeatAgeSeconds: age };
     }
     return { ok: true, auditHeartbeatAgeSeconds: age };
