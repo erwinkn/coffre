@@ -42,6 +42,7 @@
   },
   "env": {
     "development": {
+      "routes": [],
       "vars": {
         "COFFRE_AUTH_MODE": "dev"
       },
@@ -53,6 +54,43 @@
           "COFFRE_DEV_IDP_URL",
           "COFFRE_ROOT_ADMINS",
           "COFFRE_KEK_LOCAL",
+          "COFFRE_AUDIT_CHAIN_KEY"
+        ]
+      },
+      "hyperdrive": [
+        {
+          "binding": "HYPERDRIVE",
+          "id": "__COFFRE_HYPERDRIVE_ID__"
+        }
+      ]
+    },
+    // coffre's own sign-in, locally: `pnpm dev:signin`. Both providers are the
+    // dev IdP, one through its fake GitHub and one as a plain OpenID Connect
+    // issuer, so the two provider kinds get exercised without a network.
+    // Every value is a local fixture, and Wrangler only hands the Worker the
+    // names declared here, so nothing else from the shell leaks in.
+    "signin": {
+      "routes": [],
+      "vars": {
+        "COFFRE_AUTH_MODE": "signin",
+        "COFFRE_PUBLIC_URL": "http://127.0.0.1:3000",
+        "COFFRE_SIGNIN_PROVIDERS": "github, local",
+        "COFFRE_SIGNIN_NOTE": "Local development. Both buttons lead to the dev IdP on :8081.",
+        "COFFRE_SIGNIN_GITHUB_CLIENT_ID": "coffre-local",
+        "COFFRE_SIGNIN_GITHUB_CLIENT_SECRET": "coffre-local-secret",
+        "COFFRE_SIGNIN_GITHUB_WEB_URL": "http://127.0.0.1:8081/github",
+        "COFFRE_SIGNIN_GITHUB_API_URL": "http://127.0.0.1:8081/github/api",
+        "COFFRE_SIGNIN_LOCAL_TYPE": "oidc",
+        "COFFRE_SIGNIN_LOCAL_LABEL": "Dev IdP",
+        "COFFRE_SIGNIN_LOCAL_ISSUER": "http://127.0.0.1:8081",
+        "COFFRE_SIGNIN_LOCAL_CLIENT_ID": "coffre-local",
+        "COFFRE_SIGNIN_LOCAL_CLIENT_SECRET": "coffre-local-secret"
+      },
+      "secrets": {
+        "required": [
+          "COFFRE_ROOT_ADMINS",
+          "COFFRE_KEK_LOCAL",
+          "COFFRE_KEK_ID",
           "COFFRE_AUDIT_CHAIN_KEY"
         ]
       },
