@@ -9,6 +9,16 @@ export default defineConfig({
     // scripts/dev.sh checks 127.0.0.1 and the seeded links point there, so bind
     // both loopback names rather than only localhost.
     host: '127.0.0.1',
+    // The Agentation feedback toolbar (dev only) talks to its annotation
+    // server through the app's own origin, so it also works when the dev
+    // server is reached through a tunnel, where the browser's localhost is
+    // not this machine's.
+    proxy: {
+      '/_agentation': {
+        target: 'http://127.0.0.1:4747',
+        rewrite: (path) => path.replace(/^\/_agentation/, ''),
+      },
+    },
   },
 
   plugins: [

@@ -262,6 +262,26 @@ for the first without being unreadable for the second.
 
 Things worth knowing about it:
 
+- **It is drawn as a plain developer tool.** Neutral surfaces, bordered
+  cards, and tables as grids with a row-number gutter; Inter for the interface
+  and JetBrains Mono for anything a machine reads back (keys, slugs, values,
+  sequence numbers). A table too wide for the window scrolls sideways rather
+  than squeeze a column to nothing, and on a phone its rows stack into cards.
+  A sidebar opens on the workspace switcher, holds the sections (Projects,
+  Users, Tokens, Audit, and the workspace's Settings) and, at its foot, your
+  account with your own settings (theme, identity). It folds down to its icons
+  (⌘B, or the button at the left of the bar) and stays folded across visits,
+  set before first paint so a reload does not flash it open. The switcher is
+  ahead of the server, which has no notion of workspaces yet: it shows the one
+  this deployment is and says so if you try to create another.
+  The bar above the page holds search and a
+  link to this repository, and inside a project, the path to where you are.
+  That path is itself a switcher: one click on `prod` lists its sibling
+  environments. Hue is kept for meaning: blue for
+  edits not yet saved, amber for a value on screen, red for what leaves or is
+  refused, green for what was allowed. The fonts are self-hosted from exactly
+  pinned packages, and every icon is Lucide at one stroke weight, drawn through
+  `components/icons.tsx` so a second family cannot creep in beside it.
 - **Colours are authored in OKLCH and verified, not eyeballed.**
   `scripts/check-contrast.mjs` converts every token back to sRGB and fails on
   any text pair under WCAG AA, or any accent whose chroma clips the gamut. It
@@ -272,15 +292,32 @@ Things worth knowing about it:
 - **No decision is carried by colour alone.** `allow` / `deny` in the audit log
   is exactly the red/green pair deuteranopia collapses, so each row carries a
   glyph and the word as well as the hue.
-- **A revealed value hides itself after 45 seconds**, with a countdown so the
-  disappearance is expected. The read is already logged; re-revealing writes a
-  second, honest row.
-- **Archiving gets an undo toast, not a confirmation dialog.** Dialogs are
+- **Revealing is always a deliberate click.** Focusing or tabbing through a
+  field never decrypts anything, and editing a value does not need to read it.
+  A revealed value hides itself after 45 seconds, with a countdown so the
+  disappearance is expected; re-revealing writes a second, honest row. It also
+  belongs to the version it decrypted, so a save, a rollback or someone else's
+  write clears it rather than leaving an old value on screen.
+- **Edits are staged, then saved together.** Renames, new values, new secrets
+  and archiving collect in a save bar and are written as the individual audited
+  operations they are, stopping at the first refusal so a retry picks up
+  exactly what did not land.
+- **Restoring gets an undo toast, not a confirmation dialog.** Dialogs are
   reserved for changes that reach other people -- archiving a project or
   environment, revoking a grant -- and each one says what will actually break.
+- **Access is managed from either side.** A project's page has tabs for its
+  environments, the users and tokens that hold grants on it, and its settings;
+  adding one picks from those registered, each shown with what it already
+  holds there (only instance owners may list them; anyone else types a name). Each user and token has a page too, listing its grants across the projects
+  you manage. Its "Edit access" dialog opens on what it holds -- a level per
+  project (owner, read or write everywhere, or per environment), each grant
+  with its own expiry -- and saving sends only the difference. Granting what
+  is already held is not an error, from either side. The server has no call
+  that moves an expiry, so a new expiry is a revoke and a re-grant, restored in
+  place; the audit log shows the pair.
 - **Permissions shape the page.** Sections are gated individually, so an access
   manager administers grants without seeing a rename control, and never meets an
-  affordance that refuses them.
+  affordance that refuses them. A tab you cannot use is not drawn.
 
 `⌘K` jumps to any project or environment.
 
@@ -296,7 +333,7 @@ code expecting the old shape:
 - **`router.invalidate()` replaces `revalidatePath`.** The old version had to
   name the routes a mutation affected, and renaming a project meant remembering
   to revalidate both `/` and `/:project`. Invalidating refetches every mounted
-  loader, so the sidebar's project tree cannot silently go stale.
+  loader, so the path's project and environment lists cannot silently go stale.
 - **The audit table's rows are projected server-side.** An audit row's
   `metadata` is arbitrary JSON and the table renders one derived string from it,
   so the projection happens in the server function and the rest never crosses to
@@ -419,7 +456,8 @@ UI, the underlying role and scope are presented as one permissions value:
   where it previously had none beyond React. They buy correct focus management,
   the command palette and toasts; they also mean ~75 more packages in a service
   that holds every credential we own. Pinned exactly and subject to the same
-  7-day minimum release age as everything else.
+  7-day minimum release age as everything else. The two `@fontsource`
+  packages are font files and CSS only, with no dependencies of their own.
 - TanStack Start is on the 1.168 line, which moves fast. Server functions use
   the current `.validator()` API; pin bumps deserve a changelog and boundary
   test review rather than a version bump on trust.

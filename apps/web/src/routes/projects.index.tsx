@@ -2,37 +2,79 @@ import { useState } from 'react';
 import { createFileRoute, Link } from '@tanstack/react-router';
 import { toast } from 'sonner';
 import { createProject, listProjects } from '../server-functions/projects';
+import { listKeys } from '../server-functions/secrets';
 import { useAction } from '../lib/use-action';
 import type { ProjectSummary } from '../shared/models';
-import {
-  hasEnvironmentDetails,
-  isActiveAccessibleEnvironment,
-} from '../lib/project-environments';
-import { EmptyState, ErrorLine, Modal, Notice, Spinner } from '../components/ui';
-import { Folder, Inbox, Layers, Plus } from '../components/icons';
+import { isActiveAccessibleEnvironment } from '../lib/project-environments';
+import { slugProblem } from '../lib/validation';
+import { EmptyState, ErrorLine, Modal, Spinner } from '../components/ui';
+import { ClosedDoor, PageHeader } from '../components/page';
+import { Tile } from '../components/tile';
+import { AlertTriangle, Folder, Hash, Layers, Plus } from '../components/icons';
 import {
   ProjectEmptyStateCopy,
   RootAdminOnly,
 } from '../components/affordances';
 
 export const Route = createFileRoute('/projects/')({
-  loader: () => listProjects(),
+  loader: async () => {
+    const result = await listProjects();
+    return { result, secrets: result.ok ? await countSecrets(result.projects) : {} };
+  },
   component: ProjectsPage,
 });
 
+/**
+ * Distinct secret names per project, across the environments you can open.
+ *
+ * The project summary only counts secrets per environment, and the same key
+ * in dev and prod is one secret, not two. So this lists the keys of every
+ * environment you can open and counts the names. Listing keys reads no value
+ * and writes no audit row. Environments you cannot open are not asked: the
+ * refusal would be audited.
+ *
+ * A project whose keys could not all be listed gets no count rather than a
+ * short one.
+ */
+async function countSecrets(projects: ProjectSummary[]): Promise<Record<string, number | null>> {
+  const counts = await Promise.all(
+    projects
+      .filter((project) => project.archivedAt === null)
+      .map(async (project) => {
+        const environments = project.environments.filter(isActiveAccessibleEnvironment);
+        if (environments.length === 0) return [project.slug, null] as const;
+        const lists = await Promise.all(
+          environments.map((environment) =>
+            listKeys({ data: { project: project.slug, environment: environment.slug } }),
+          ),
+        );
+        const names = new Set<string>();
+        for (const list of lists) {
+          if (!list.ok) return [project.slug, null] as const;
+          for (const key of list.keys) if (!key.archived) names.add(key.key);
+        }
+        return [project.slug, names.size] as const;
+      }),
+  );
+  return Object.fromEntries(counts);
+}
+
 function ProjectsPage() {
-  const result = Route.useLoaderData();
+  const { result, secrets } = Route.useLoaderData();
 
   if (!result.ok) {
     return (
-      <>
-        <div className="page-head">
-          <h1>Projects</h1>
-        </div>
-        <Notice tone="bad">
-          {result.error} <Link to="/login">Sign in</Link> to continue.
-        </Notice>
-      </>
+      <ClosedDoor
+        icon={<AlertTriangle size={18} />}
+        title="Projects could not be listed"
+        actions={
+          <Link className="btn" to="/login">
+            Sign in again
+          </Link>
+        }
+      >
+        {result.error}
+      </ClosedDoor>
     );
   }
 
@@ -41,42 +83,37 @@ function ProjectsPage() {
 
   return (
     <>
-      <div className="page-head">
-        <h1>Projects</h1>
-      </div>
+      <PageHeader
+        title="Projects"
+        actions={
+          <RootAdminOnly capabilities={result.capabilities}>
+            <NewProject />
+          </RootAdminOnly>
+        }
+      />
 
-      <div className="card">
-        {active.length === 0 ? (
-          <EmptyState icon={<Inbox size={26} />} title="Nothing granted yet">
+      {active.length === 0 ? (
+        <div className="card">
+          <EmptyState title="Nothing here for you yet">
             <ProjectEmptyStateCopy
               capabilities={result.capabilities}
               hasArchivedProjects={archived.length > 0}
             />
           </EmptyState>
-        ) : (
-          active.map((project) => <ProjectRow key={project.slug} project={project} />)
-        )}
-      </div>
-
-      <RootAdminOnly capabilities={result.capabilities}>
-        <NewProject />
-      </RootAdminOnly>
+        </div>
+      ) : (
+        <section className="card" aria-label="Projects">
+          <ProjectTable projects={active} secrets={secrets} />
+        </section>
+      )}
 
       {archived.length > 0 && (
-        <section className="section">
-          <div className="section-head">
-            <div>
-              <h2>Archived</h2>
-              <p className="sub">
-                Hidden from listings and refused on read. Every row is still present and the
-                audit trail over them is still valid.
-              </p>
-            </div>
-          </div>
+        <section aria-labelledby="archived-projects">
+          <h2 className="section-title" id="archived-projects">
+            Archived
+          </h2>
           <div className="card">
-            {archived.map((project) => (
-              <ProjectRow key={project.slug} project={project} />
-            ))}
+            <ProjectTable projects={archived} secrets={secrets} />
           </div>
         </section>
       )}
@@ -84,59 +121,135 @@ function ProjectsPage() {
   );
 }
 
-function ProjectRow({ project }: { project: ProjectSummary }) {
+function ProjectTable({
+  projects,
+  secrets,
+}: {
+  projects: ProjectSummary[];
+  secrets: Record<string, number | null>;
+}) {
+  return (
+    <div className="dt-wrap">
+      <table className="dt projects stacks">
+        <thead>
+          <tr>
+            <th className="n">#</th>
+            <th className="col-project">
+              <span className="th">
+                <Folder size={14} />
+                Project
+              </span>
+            </th>
+            <th>
+              <span className="th">
+                <Layers size={14} />
+                Environments
+              </span>
+            </th>
+            <th className="col-shrink col-secrets">
+              <span className="th">
+                <Hash size={14} />
+                Secrets
+              </span>
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {projects.map((project, index) => (
+            <ProjectRow
+              key={project.slug}
+              number={index + 1}
+              project={project}
+              secrets={secrets[project.slug] ?? null}
+            />
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/**
+ * One project. The whole row opens it; the environment links inside it sit
+ * above that and go straight to the environment.
+ */
+function ProjectRow({
+  number,
+  project,
+  secrets,
+}: {
+  number: number;
+  project: ProjectSummary;
+  secrets: number | null;
+}) {
+  const isArchived = project.archivedAt !== null;
   const listedEnvironments = project.environments.filter(
     (environment) =>
       environment.details === null || environment.details.archivedAt === null,
   );
-  const countedEnvironments = project.environments
-    .filter(hasEnvironmentDetails)
-    .filter(
-      (environment) =>
-        environment.details.archivedAt === null
-        && environment.details.secretCount !== null,
-    );
-  const total = countedEnvironments.reduce(
-    (sum, environment) => sum + (environment.details.secretCount ?? 0),
-    0,
-  );
 
   return (
-    <div className="row row-interactive">
-      <div className="row-title">
-        <Folder size={15} style={{ color: 'var(--ink-3)', flex: 'none' }} />
-        <Link className="row-key" to="/projects/$project" params={{ project: project.slug }}>
-          {project.slug}
-        </Link>
-        <span className="meta">{project.name}</span>
-      </div>
-
-      {countedEnvironments.length > 0 && (
-        <span className="meta numeric" style={{ flex: 'none' }}>
-          {total} secret{total === 1 ? '' : 's'}
-        </span>
-      )}
-
-      <div className="row-actions">
-        {listedEnvironments.map((environment) =>
-          isActiveAccessibleEnvironment(environment) ? (
+    <tr className="row-link">
+      <td className="n">{number}</td>
+      <td className="col-project">
+        <span className="cell-project">
+          <Tile name={project.slug} />
+          <span className="cell-stack">
             <Link
-              key={environment.slug}
-              className="btn btn-sm"
-              to="/projects/$project/$environment"
-              params={{ project: project.slug, environment: environment.slug }}
+              className="cell-link stretch"
+              to="/projects/$project"
+              params={{ project: project.slug }}
             >
-              <Layers size={13} />
-              {environment.slug}
+              {project.name}
             </Link>
-          ) : (
-            <span key={environment.slug} className="meta mono">
-              {environment.slug}
-            </span>
-          ),
+            <small className="mono">{project.slug}</small>
+          </span>
+        </span>
+      </td>
+      <td className="col-envs" data-label="Environments">
+        {isArchived || listedEnvironments.length === 0 ? (
+          <span className="cell-muted">
+            {listedEnvironments.length === 0
+              ? 'No environments yet'
+              : `${listedEnvironments.length} environment${listedEnvironments.length === 1 ? '' : 's'}`}
+          </span>
+        ) : (
+          <span className="env-links" aria-label={`Environments in ${project.slug}`}>
+            {listedEnvironments.map((environment) =>
+              isActiveAccessibleEnvironment(environment) ? (
+                <Link
+                  key={environment.slug}
+                  className="env-link"
+                  to="/projects/$project/$environment"
+                  params={{ project: project.slug, environment: environment.slug }}
+                >
+                  {environment.slug}
+                  <span className="count">{environment.details.secretCount}</span>
+                </Link>
+              ) : (
+                <span
+                  key={environment.slug}
+                  className="env-link"
+                  title="You can see this environment exists, but not open it"
+                >
+                  {environment.slug}
+                </span>
+              ),
+            )}
+          </span>
         )}
-      </div>
-    </div>
+      </td>
+      <td className="col-secrets num nowrap">
+        {secrets !== null && !isArchived ? (
+          <>
+            {secrets}
+            <span className="narrow-only"> secret{secrets === 1 ? '' : 's'}</span>
+          </>
+        ) : (
+          <span className="cell-muted wide-only">—</span>
+        )}
+      </td>
+    </tr>
   );
 }
 
@@ -144,25 +257,29 @@ function NewProject() {
   const [slug, setSlug] = useState('');
   const [name, setName] = useState('');
   const [open, setOpen] = useState(false);
-  const { pending, error, run } = useAction();
+  const { pending, error, setError, run } = useAction();
+  const slugError = slug === '' ? null : slugProblem(slug);
+
+  function close() {
+    setOpen(false);
+    setError(null);
+  }
 
   return (
     <>
-      <div style={{ marginTop: 'var(--space-5)' }}>
-        <button className="btn" onClick={() => setOpen(true)}>
-          <Plus size={14} />
-          New project
-        </button>
-      </div>
+      <button className="btn btn-primary" onClick={() => setOpen(true)}>
+        <Plus size={14} />
+        New project
+      </button>
 
       <Modal
         open={open}
-        onOpenChange={setOpen}
+        onOpenChange={(next) => (next ? setOpen(true) : close())}
         title="New project"
-        description="Create a project, then add its environments and access."
+        description="A project holds environments, and access is granted on it or on one of its environments. You become its owner."
       >
         <form
-          className="dialog-form stack"
+          className="form"
           onSubmit={(event) => {
             event.preventDefault();
             run(
@@ -179,12 +296,19 @@ function NewProject() {
           <label className="field">
             <span className="label">Slug</span>
             <input
-              className="input"
+              className="input input-mono"
               autoFocus
+              spellCheck={false}
+              autoComplete="off"
               placeholder="market"
               value={slug}
+              aria-invalid={slugError !== null}
+              aria-describedby="new-project-slug-hint"
               onChange={(event) => setSlug(event.target.value)}
             />
+            <span className={`hint${slugError !== null ? ' edit-note-error' : ''}`} id="new-project-slug-hint">
+              {slugError ?? 'Used in paths, as in market/prod. Renaming it later is safe.'}
+            </span>
           </label>
 
           <label className="field">
@@ -200,13 +324,13 @@ function NewProject() {
           <ErrorLine error={error} />
 
           <div className="dialog-actions">
-            <button className="btn" type="button" onClick={() => setOpen(false)}>
+            <button className="btn" type="button" onClick={close}>
               Cancel
             </button>
             <button
               className="btn btn-primary"
               type="submit"
-              disabled={pending || slug === '' || name === ''}
+              disabled={pending || slug === '' || slugError !== null || name.trim() === ''}
             >
               {pending && <Spinner />}
               Create project

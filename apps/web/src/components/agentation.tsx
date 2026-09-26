@@ -2,7 +2,10 @@ import { lazy, Suspense } from 'react';
 import { ClientOnly } from '@tanstack/react-router';
 
 // Point-and-click UI feedback overlay (agentation.com): you annotate the page,
-// the agent reads the annotations over MCP at localhost:4747. Dev-only.
+// the agent reads the annotations over MCP from the annotation server on
+// 127.0.0.1:4747. Dev-only. The toolbar reaches that server through the dev
+// server's `/_agentation` proxy (vite.config.ts) rather than at localhost
+// directly, so annotating through a tunnel lands on this machine too.
 //
 // The ternary is what keeps it out of production: import.meta.env.DEV is
 // replaced with a literal at build time, so the dynamic import is unreachable
@@ -19,8 +22,13 @@ export function Agentation() {
     // run during SSR or the hydration pass.
     <ClientOnly>
       <Suspense fallback={null}>
-        <Toolbar endpoint="http://localhost:4747" />
+        <SameOriginToolbar />
       </Suspense>
     </ClientOnly>
   );
+}
+
+/** Reads the page's origin, so it renders only inside ClientOnly, never on the server. */
+function SameOriginToolbar() {
+  return <Toolbar endpoint={`${window.location.origin}/_agentation`} />;
 }

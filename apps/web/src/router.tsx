@@ -1,5 +1,6 @@
 import { createRouter as createTanStackRouter } from '@tanstack/react-router';
 import { routeTree } from './routeTree.gen';
+import { NotFound, RouteError } from './components/route-states';
 
 /**
  * The router factory. TanStack Start calls this once per request on the server
@@ -17,6 +18,8 @@ export function getRouter() {
     defaultPreload: 'intent',
     defaultStaleTime: 0,
     scrollRestoration: true,
+    defaultNotFoundComponent: NotFound,
+    defaultErrorComponent: RouteError,
   });
 }
 

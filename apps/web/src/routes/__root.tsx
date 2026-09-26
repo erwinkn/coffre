@@ -10,13 +10,11 @@ import {
 import { Toaster } from 'sonner';
 import globalsCss from '../styles/globals.css?url';
 import { getShell } from '../server-functions/shell';
-import { Sidebar } from '../components/sidebar';
-import { Breadcrumbs } from '../components/breadcrumbs';
-import { CommandPalette } from '../components/command-palette';
+import { Brand, Shell, sidebarBootScript } from '../components/shell';
 import { TooltipProvider } from '../components/ui';
-import { themeBootScript } from '../components/theme';
+import { ThemeToggle, themeBootScript } from '../components/theme';
 import { Agentation } from '../components/agentation';
-import { Vault } from '../components/icons';
+import { MARK_SVG } from '../components/icons';
 
 export const Route = createRootRoute({
   head: () => ({
@@ -26,7 +24,12 @@ export const Route = createRootRoute({
       { title: 'coffre' },
       { name: 'description', content: 'Secrets, with an audit log' },
     ],
-    links: [{ rel: 'stylesheet', href: globalsCss }],
+    links: [
+      { rel: 'stylesheet', href: globalsCss },
+      // Inline, so the icon needs no route of its own: in Cloudflare mode
+      // every path but the health checks is behind Access.
+      { rel: 'icon', type: 'image/svg+xml', href: `data:image/svg+xml,${encodeURIComponent(MARK_SVG)}` },
+    ],
   }),
 
   // Identity and the project tree, which the shell needs on every screen.
@@ -71,8 +74,9 @@ function RootDocument({ children }: { children: ReactNode }) {
     <html lang="en" suppressHydrationWarning>
       <head>
         <HeadContent />
-        {/* Must run before first paint; see the comment on themeBootScript. */}
+        {/* Must run before first paint; see the comments on each script. */}
         <script dangerouslySetInnerHTML={{ __html: themeBootScript }} />
+        <script dangerouslySetInnerHTML={{ __html: sidebarBootScript }} />
       </head>
       <body>
         {children}
@@ -82,34 +86,49 @@ function RootDocument({ children }: { children: ReactNode }) {
   );
 }
 
+function Toasts() {
+  return (
+    <Toaster
+      position="bottom-right"
+      gap={10}
+      offset={20}
+      toastOptions={{
+        duration: 4200,
+        unstyled: true,
+        classNames: {
+          toast: 'toast',
+          title: 'toast-title',
+          description: 'toast-description',
+          actionButton: 'toast-action',
+          success: 'toast-success',
+          error: 'toast-error',
+        },
+      }}
+    />
+  );
+}
+
 function RootComponent() {
   const { principal, instanceRole, projects, capabilities } = Route.useLoaderData();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
 
-  // Sign-in gets no shell. Every destination in the sidebar, the breadcrumbs
-  // and the command palette bounces straight back here while you are signed
-  // out, so offering them is a loop dressed up as navigation. The brand stays,
-  // as a mark rather than a link, so the page is still recognisably this app.
+  // Sign-in gets no navigation. Every destination in the sidebar and the
+  // command palette bounces straight back here while you are signed out, so
+  // offering them is a loop dressed up as navigation. The brand stays, as a
+  // mark rather than a link, so the page is still recognisably this app.
   if (pathname === '/login' || pathname === '/unregistered') {
     return (
       <TooltipProvider>
         <div className="solo">
-          <p className="brand solo-brand">
-            <Vault size={20} className="brand-mark" />
-            coffre
-          </p>
-          <main className="content" id="content">
+          <div className="solo-top">
+            <Brand />
+            <ThemeToggle />
+          </div>
+          <main className="solo-main" id="content">
             <Outlet />
           </main>
         </div>
-
-        <Toaster
-          position="bottom-right"
-          gap={10}
-          offset={16}
-          toastOptions={{ duration: 4200 }}
-        />
-
+        <Toasts />
         <Agentation />
       </TooltipProvider>
     );
@@ -121,38 +140,16 @@ function RootComponent() {
         Skip to content
       </a>
 
-      <div className="app">
-        <Sidebar
-          projects={projects}
-          principal={principal}
-          instanceRole={instanceRole}
-          capabilities={capabilities}
-        />
+      <Shell
+        projects={projects}
+        principal={principal}
+        instanceRole={instanceRole}
+        capabilities={capabilities}
+      >
+        <Outlet />
+      </Shell>
 
-        <div className="main">
-          <header className="topbar">
-            <Breadcrumbs />
-            <span className="pill pill-secret" style={{ marginLeft: 'auto' }}>
-              Demo · do not store real secrets
-            </span>
-            <div>
-              <CommandPalette projects={projects} capabilities={capabilities} />
-            </div>
-          </header>
-
-          <main className="content" id="content">
-            <Outlet />
-          </main>
-        </div>
-      </div>
-
-      <Toaster
-        position="bottom-right"
-        gap={10}
-        offset={16}
-        toastOptions={{ duration: 4200 }}
-      />
-
+      <Toasts />
       <Agentation />
     </TooltipProvider>
   );

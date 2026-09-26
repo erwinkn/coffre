@@ -61,84 +61,114 @@ function outOfGamut(oklch) {
 }
 
 // --- The palette ------------------------------------------------------------
-// Keep in lockstep with apps/web/src/styles/globals.css. Hue 264 is the existing
-// coffre accent (#6ea8fe); neutrals carry a trace of it rather than being dead
-// grey, and nothing is tinted "warm by default".
-
-const DARK = {
-    bg: [0.168, 0.01, 264],
-    // Sidebar and top bar. One step *away* from the canvas so chrome recedes
-    // and cards rise; the second neutral layer product UI wants.
-    panel: [0.142, 0.011, 264],
-    surface: [0.212, 0.013, 264],
-    surface2: [0.257, 0.016, 264],
-    sunken: [0.139, 0.011, 264],
-    border: [0.322, 0.019, 264],
-    ink: [0.949, 0.005, 264],
-    ink2: [0.792, 0.013, 264],
-    ink3: [0.686, 0.017, 264],
-    // Chroma on every accent is held just under the sRGB gamut boundary for its
-    // own lightness -- see the GAMUT check below. Going higher does not produce
-    // a more saturated colour, only a clipped one that shifts hue.
-    accent: [0.744, 0.128, 264],
-    allow: [0.796, 0.155, 152],
-    deny: [0.735, 0.156, 25],
-    secret: [0.845, 0.145, 85],
-};
+// Keep in lockstep with apps/web/src/styles/globals.css, where each token is
+// one light-dark() declaration. Surfaces and text are true neutrals; hue is
+// kept for meaning: blue for links, focus and edits not yet saved, amber for a
+// revealed value, red for archive and denial, green for allow, violet for
+// owners.
 
 const LIGHT = {
-    bg: [0.977, 0.003, 264],
-    panel: [0.958, 0.005, 264],
-    surface: [1.0, 0.0, 264],
-    surface2: [0.963, 0.005, 264],
-    sunken: [0.974, 0.005, 264],
-    border: [0.886, 0.009, 264],
-    ink: [0.235, 0.016, 264],
-    ink2: [0.446, 0.019, 264],
-    ink3: [0.532, 0.019, 264],
-    accent: [0.523, 0.175, 264],
-    allow: [0.481, 0.122, 152],
-    deny: [0.523, 0.203, 25],
-    secret: [0.475, 0.098, 70],
+    canvas: [0.985, 0, 0],
+    panel: [1, 0, 0],
+    subtle: [0.97, 0, 0],
+    border: [0.922, 0, 0],
+    edge: [0.64, 0, 0],
+    ink: [0.205, 0, 0],
+    ink2: [0.44, 0, 0],
+    ink3: [0.52, 0, 0],
+    accent: [0.52, 0.19, 262],
+    accentWash: [0.955, 0.02, 258],
+    green: [0.5, 0.13, 152],
+    greenWash: [0.955, 0.03, 158],
+    red: [0.52, 0.19, 27],
+    redWash: [0.955, 0.02, 22],
+    amber: [0.5, 0.11, 62],
+    amberWash: [0.955, 0.045, 88],
+    violet: [0.5, 0.19, 296],
+    violetWash: [0.955, 0.022, 300],
+    float: [0.235, 0, 0],
+    onFloat: [0.985, 0, 0],
+    onFloat2: [0.8, 0, 0],
+    // Sidebar states: the canvas with 5% and 8% of ink mixed in (oklab).
+    navHover: [0.946, 0, 0],
+    navCurrent: [0.923, 0, 0],
+};
+
+const DARK = {
+    canvas: [0.155, 0, 0],
+    panel: [0.19, 0, 0],
+    subtle: [0.225, 0, 0],
+    border: [0.29, 0, 0],
+    edge: [0.52, 0, 0],
+    ink: [0.95, 0, 0],
+    ink2: [0.79, 0, 0],
+    ink3: [0.7, 0, 0],
+    accent: [0.74, 0.13, 255],
+    accentWash: [0.28, 0.06, 262],
+    green: [0.77, 0.14, 155],
+    greenWash: [0.27, 0.045, 158],
+    red: [0.74, 0.15, 24],
+    redWash: [0.28, 0.06, 24],
+    amber: [0.82, 0.12, 82],
+    amberWash: [0.29, 0.05, 78],
+    violet: [0.76, 0.12, 300],
+    violetWash: [0.28, 0.06, 300],
+    float: [0.3, 0, 0],
+    onFloat: [0.97, 0, 0],
+    onFloat2: [0.8, 0, 0],
+    navHover: [0.195, 0, 0],
+    navCurrent: [0.219, 0, 0],
 };
 
 // [foreground, background, minimum ratio, label]
-// 4.5 is the AA floor for body text; 3.0 covers large text and UI boundaries.
-const PAIRS = (p) => [
-    ['ink', 'bg', 4.5, 'body text on canvas'],
-    ['ink', 'surface', 4.5, 'body text on card'],
-    ['ink', 'surface2', 4.5, 'body text on hovered row'],
-    ['ink', 'sunken', 4.5, 'input text'],
-    ['ink2', 'bg', 4.5, 'secondary text on canvas'],
-    ['ink2', 'surface', 4.5, 'secondary text on card'],
-    ['ink2', 'surface2', 4.5, 'secondary text on hovered row'],
-    // ink3 is the muted/label tier and the historical failure point: the old
-    // --muted (#8b94a6) sat at 4.2:1 on the panel colour.
-    ['ink3', 'bg', 4.5, 'muted label on canvas'],
-    ['ink3', 'surface', 4.5, 'muted label on card'],
-    ['ink3', 'surface2', 4.5, 'muted label on hovered row'],
-    ['ink3', 'sunken', 4.5, 'placeholder text'],
-    ['ink', 'panel', 4.5, 'active nav item'],
-    ['ink2', 'panel', 4.5, 'nav item'],
-    ['ink3', 'panel', 4.5, 'nav section label'],
-    ['accent', 'panel', 4.5, 'link in sidebar'],
-    ['accent', 'bg', 4.5, 'link on canvas'],
-    ['accent', 'surface', 4.5, 'link on card'],
-    ['accent', 'sunken', 3.0, 'focus ring on input'],
-    ['allow', 'bg', 4.5, 'allow text on canvas'],
-    ['allow', 'surface', 4.5, 'allow text on card'],
-    ['deny', 'bg', 4.5, 'deny text on canvas'],
-    ['deny', 'surface', 4.5, 'deny text on card'],
-    ['secret', 'sunken', 4.5, 'revealed secret value'],
-    ['border', 'surface', 1.4, 'card border against card'],
+// 4.5 is the AA floor for body text; 3.0 covers UI boundaries and focus rings
+// (WCAG 1.4.11). Every pair here is one the stylesheet actually draws.
+const PAIRS = [
+    ['ink', 'canvas', 4.5, 'body text on the page'],
+    ['ink', 'panel', 4.5, 'text in cards, tables, inputs, menus'],
+    ['ink', 'subtle', 4.5, 'text in table heads and hovered rows'],
+    ['ink2', 'canvas', 4.5, 'secondary text on the page'],
+    ['ink2', 'panel', 4.5, 'secondary text in cards'],
+    ['ink2', 'subtle', 4.5, 'column heads'],
+    ['ink3', 'canvas', 4.5, 'descriptions and meta on the page'],
+    ['ink3', 'panel', 4.5, 'placeholders, hints, row numbers'],
+    ['ink3', 'subtle', 4.5, 'meta on a hovered row, neutral tag'],
+    ['ink3', 'amberWash', 4.5, 'meta on a revealed row'],
+    ['ink3', 'accentWash', 4.5, 'meta on an edited row'],
+    ['ink3', 'redWash', 4.5, 'meta on a denied or leaving row'],
+    ['panel', 'ink', 4.5, 'primary button, tooltip'],
+    ['panel', 'red', 4.5, 'destructive button'],
+    ['onFloat', 'float', 4.5, 'save bar and toasts'],
+    ['onFloat2', 'float', 4.5, 'save bar summary, toast description'],
+    ['accent', 'canvas', 4.5, 'links on the page'],
+    ['accent', 'panel', 4.5, 'links and row actions in cards'],
+    ['accent', 'subtle', 4.5, 'row action on a hovered row'],
+    ['accent', 'accentWash', 4.5, 'blue tag, edited row action'],
+    ['accent', 'amberWash', 4.5, 'row action on a revealed row'],
+    ['green', 'panel', 4.5, 'allow in the audit log'],
+    ['green', 'greenWash', 4.5, 'green tag'],
+    ['red', 'panel', 4.5, 'revoke, archive, deny'],
+    ['red', 'redWash', 4.5, 'red tag, deny on a denied row'],
+    ['amber', 'amberWash', 4.5, 'reveal countdown, amber tag'],
+    ['violet', 'violetWash', 4.5, 'owner tag'],
+    ['ink', 'amberWash', 4.5, 'the revealed value itself'],
+    ['ink', 'accentWash', 4.5, 'text on an edited row'],
+    ['ink', 'redWash', 4.5, 'text on a denied row'],
+    ['ink', 'navHover', 4.5, 'a hovered sidebar link, the path'],
+    ['ink', 'navCurrent', 4.5, 'the current section in the sidebar'],
+    ['ink3', 'navHover', 4.5, 'your role under the hovered account'],
+    ['edge', 'panel', 3.0, 'input and checkbox boundary'],
+    ['edge', 'canvas', 3.0, 'input boundary on the page'],
+    ['accent', 'panel', 3.0, 'focus ring'],
+    ['accent', 'canvas', 3.0, 'focus ring on the page'],
 ];
 
 let failures = 0;
 let checks = 0;
 
 for (const [themeName, theme] of [
-    ['dark', DARK],
     ['light', LIGHT],
+    ['dark', DARK],
 ]) {
     console.log(`\n${themeName}`);
 
@@ -149,7 +179,7 @@ for (const [themeName, theme] of [
         }
     }
 
-    for (const [fg, bg, min, label] of PAIRS(theme)) {
+    for (const [fg, bg, min, label] of PAIRS) {
         checks += 1;
         const ratio = contrast(theme[fg], theme[bg]);
         const ok = ratio >= min;

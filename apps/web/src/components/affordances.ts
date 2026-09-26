@@ -26,22 +26,6 @@ export function AdministrationItems({
   );
 }
 
-/** The sidebar administration section, omitted entirely when it would be empty. */
-export function AdministrationNav({
-  capabilities,
-  users,
-  audit,
-}: AdministrationItemsProps): ReactElement | null {
-  if (!capabilities.canManageGrants && !capabilities.canReadAudit) return null;
-
-  return createElement(
-    'nav',
-    { className: 'nav-group', 'aria-label': 'Administration' },
-    createElement('span', { className: 'nav-label' }, 'Admin'),
-    createElement(AdministrationItems, { capabilities, users, audit }),
-  );
-}
-
 export function hasAdministrationItems(capabilities: UiCapabilities): boolean {
   return capabilities.canManageGrants || capabilities.canReadAudit;
 }
@@ -67,12 +51,12 @@ export function ProjectEmptyStateCopy({
 }): ReactNode {
   if (hasArchivedProjects) {
     return capabilities.canCreateProject
-      ? 'No active projects. Create another below or restore one from Archived.'
+      ? 'No active projects. Start a new one, or restore one from the archive below.'
       : 'No active projects. Your archived projects appear below.';
   }
 
   if (capabilities.canCreateProject) {
-    return 'No projects exist yet. Create the first one below.';
+    return 'No projects exist yet. Start the first one with New project.';
   }
 
   return createElement(

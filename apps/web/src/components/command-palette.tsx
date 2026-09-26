@@ -11,13 +11,16 @@ import {
 import { setTheme } from './theme';
 import {
   Folder,
+  Key,
   Layers,
   Ledger,
   Monitor,
   Moon,
   Search,
+  Settings,
   SlashCircle,
   Sun,
+  UserCog,
   Users,
 } from './icons';
 
@@ -55,26 +58,30 @@ export function CommandPalette({
 
   return (
     <>
-      <button className="kbd-trigger" onClick={() => setOpen(true)}>
+      <button
+        type="button"
+        className="search-trigger"
+        onClick={() => setOpen(true)}
+        aria-label="Search projects and environments"
+        aria-keyshortcuts="Meta+K Control+K"
+      >
         <Search size={14} />
-        <span>Search</span>
-        <span className="palette-hint">
-          <kbd>⌘</kbd> <kbd>K</kbd>
-        </span>
+        <span className="search-label">Search…</span>
+        <kbd aria-hidden>⌘K</kbd>
       </button>
 
       <Command.Dialog
         open={open}
         onOpenChange={setOpen}
-        label="Command palette"
+        label="Jump to a project, environment or page"
         overlayClassName="overlay"
         contentClassName="palette"
         loop
       >
-        <Command.Input placeholder="Jump to a project, environment or view..." />
+        <Command.Input placeholder="Search projects, environments and pages…" />
 
         <Command.List>
-          <Command.Empty>Nothing matches that.</Command.Empty>
+          <Command.Empty>Nothing by that name.</Command.Empty>
 
           {active.length > 0 && (
             <Command.Group heading="Environments">
@@ -126,22 +133,20 @@ export function CommandPalette({
             </Command.Group>
           )}
 
-          {hasAdministrationItems(capabilities) && (
-            <Command.Group heading="Admin">
+          <Command.Group heading="Pages">
+            <Command.Item
+              value="projects all"
+              onSelect={() => {
+                setOpen(false);
+                navigate({ to: '/projects' });
+              }}
+            >
+              <Folder size={15} />
+              Projects
+            </Command.Item>
+            {hasAdministrationItems(capabilities) && (
               <AdministrationItems
                 capabilities={capabilities}
-                users={
-                  <Command.Item
-                    value="users access principals grants who holds what"
-                    onSelect={() => {
-                      setOpen(false);
-                      navigate({ to: '/access' });
-                    }}
-                  >
-                    <Users size={15} />
-                    Users
-                  </Command.Item>
-                }
                 audit={
                   <>
                     <Command.Item
@@ -152,23 +157,67 @@ export function CommandPalette({
                       }}
                     >
                       <Ledger size={15} />
-                      Audit log
+                      Audit
                     </Command.Item>
                     <Command.Item
-                      value="denials denied refused audit"
+                      value="audit denials denied refused"
                       onSelect={() => {
                         setOpen(false);
                         navigate({ to: '/audit', search: { decision: 'deny' } });
                       }}
                     >
                       <SlashCircle size={15} />
-                      Denials only
+                      Audit, denials only
+                    </Command.Item>
+                  </>
+                }
+                users={
+                  <>
+                    <Command.Item
+                      value="users people members directory"
+                      onSelect={() => {
+                        setOpen(false);
+                        navigate({ to: '/users' });
+                      }}
+                    >
+                      <Users size={15} />
+                      Users
+                    </Command.Item>
+                    <Command.Item
+                      value="tokens service accounts machines ci directory"
+                      onSelect={() => {
+                        setOpen(false);
+                        navigate({ to: '/tokens' });
+                      }}
+                    >
+                      <Key size={15} />
+                      Tokens
                     </Command.Item>
                   </>
                 }
               />
-            </Command.Group>
-          )}
+            )}
+            <Command.Item
+              value="settings workspace instance sign-in"
+              onSelect={() => {
+                setOpen(false);
+                navigate({ to: '/settings' });
+              }}
+            >
+              <Settings size={15} />
+              Settings
+            </Command.Item>
+            <Command.Item
+              value="account preferences appearance identity profile me"
+              onSelect={() => {
+                setOpen(false);
+                navigate({ to: '/account' });
+              }}
+            >
+              <UserCog size={15} />
+              Account
+            </Command.Item>
+          </Command.Group>
 
           <Command.Group heading="Appearance">
             <Command.Item
@@ -179,30 +228,43 @@ export function CommandPalette({
               }}
             >
               <Monitor size={15} />
-              Match system theme
+              Match system colours
             </Command.Item>
             <Command.Item
-              value="theme light"
+              value="theme light paper"
               onSelect={() => {
                 setTheme('light');
                 setOpen(false);
               }}
             >
               <Sun size={15} />
-              Light theme
+              Light
             </Command.Item>
             <Command.Item
-              value="theme dark"
+              value="theme dark night"
               onSelect={() => {
                 setTheme('dark');
                 setOpen(false);
               }}
             >
               <Moon size={15} />
-              Dark theme
+              Dark
             </Command.Item>
           </Command.Group>
         </Command.List>
+
+        <div className="palette-foot" aria-hidden>
+          <span>
+            <kbd>↑</kbd>
+            <kbd>↓</kbd> move
+          </span>
+          <span>
+            <kbd>↵</kbd> open
+          </span>
+          <span>
+            <kbd>esc</kbd> close
+          </span>
+        </div>
       </Command.Dialog>
     </>
   );
