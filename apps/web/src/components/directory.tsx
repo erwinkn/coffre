@@ -61,12 +61,14 @@ export function DirectoryTable({
                     {users ? 'Email' : 'Common name'}
                   </span>
                 </th>
-                <th className="col-role">
-                  <span className="th">
-                    <ShieldCheck size={14} />
-                    {users ? 'Instance role' : 'Kind'}
-                  </span>
-                </th>
+                {users && (
+                  <th className="col-role">
+                    <span className="th">
+                      <ShieldCheck size={14} />
+                      Instance role
+                    </span>
+                  </th>
+                )}
                 <th className="col-actions">
                   <span className="visually-hidden">Actions</span>
                 </th>
@@ -86,9 +88,11 @@ export function DirectoryTable({
                       stretch
                     />
                   </td>
-                  <td className="col-role" data-label={users ? 'Instance role' : 'Kind'}>
-                    <InstanceRole principal={principal} />
-                  </td>
+                  {users && (
+                    <td className="col-role" data-label="Instance role">
+                      <InstanceRole principal={principal} />
+                    </td>
+                  )}
                   <td className="col-actions">
                     <PrincipalActions principal={principal} />
                   </td>
@@ -103,14 +107,11 @@ export function DirectoryTable({
 }
 
 /**
- * A user's instance role, or what a token is. A root admin's role comes from
- * the deployment, so its tag says so on hover or tap instead of offering a
- * menu that could not work.
+ * A user's instance role. Tokens have none worth showing: every one is a
+ * plain member. A root admin's role comes from the deployment, so its tag says
+ * so on hover or tap instead of offering a menu that could not work.
  */
 export function InstanceRole({ principal }: { principal: DirectoryPrincipal }) {
-  if (principal.principalType === 'service') {
-    return <span className="cell-muted">Cloudflare Access service token</span>;
-  }
   if (principal.isRootAdmin) {
     return (
       <Toggletip

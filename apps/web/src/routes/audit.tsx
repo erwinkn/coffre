@@ -8,6 +8,7 @@ import {
   Notice,
   Timestamp,
   Tip,
+  Toggletip,
 } from '../components/ui';
 import { ClosedDoor, PageHeader } from '../components/page';
 import {
@@ -59,9 +60,7 @@ function AuditPage() {
 
   return (
     <>
-      <PageHeader title="Audit" />
-
-      <ChainStatus chain={chain} />
+      <PageHeader title="Audit" actions={<ChainStatus chain={chain} />} />
 
       {chain.ok && chain.integrity === 'broken' && (
         <div style={{ marginBottom: '1.25rem' }}>
@@ -226,45 +225,41 @@ function AuditTableRow({ entry, deniedOnly }: { entry: AuditRow; deniedOnly: boo
  * log is consistent with itself; comparing this value against one recorded
  * earlier, somewhere coffre cannot write, is what proves it is unchanged.
  */
+/**
+ * Whether the log still recomputes from its first entry, beside the title.
+ *
+ * Intact is the normal state, so it is a seal that names itself on hover or
+ * tap, next to the head a finding would cite. Anything else is spelled out:
+ * a problem that hides behind a hover is not being reported.
+ */
 function ChainStatus({ chain }: { chain: ChainResult }) {
   if (!chain.ok) {
     return (
-      <div className="chain chain-unknown">
-        <span className="chain-seal">
-          <AlertTriangle size={16} />
-        </span>
-        <span className="chain-text">
-          <span className="chain-title">Chain not verified</span>
-          <span className="chain-sub">{chain.error}</span>
-        </span>
-      </div>
+      <Toggletip label={chain.error}>
+        <button type="button" className="chain-flag">
+          <AlertTriangle size={14} />
+          Chain not verified
+        </button>
+      </Toggletip>
     );
   }
 
   if (chain.integrity === 'broken') {
     return (
-      <div className="chain chain-bad" role="status">
-        <span className="chain-seal">
-          <AlertTriangle size={16} />
-        </span>
-        <span className="chain-text">
-          <span className="chain-title">Chain broken</span>
-          <span className="chain-sub">
-            Recomputation fails at entry <span className="mono">{chain.failedAtSeq}</span>.
-          </span>
-        </span>
-      </div>
+      <span className="chain-flag chain-flag-bad" role="status">
+        <AlertTriangle size={14} />
+        Chain broken at <span className="mono">{chain.failedAtSeq}</span>
+      </span>
     );
   }
 
   return (
     <div className="chain">
-      <span className="chain-seal">
-        <ShieldCheck size={16} />
-      </span>
-      <span className="chain-text">
-        <span className="chain-title">Chain intact</span>
-      </span>
+      <Toggletip label="Chain intact">
+        <button type="button" className="chain-seal" aria-label="Chain intact">
+          <ShieldCheck size={16} />
+        </button>
+      </Toggletip>
       <span className="chain-head">
         <span className="chain-head-label">head</span>
         <Tip label={chain.head}>

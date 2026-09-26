@@ -129,7 +129,7 @@ export function PrincipalPage({
       <PageHeader
         lead={<PrincipalAvatar type={principalType} id={principalId} size="lg" />}
         title={principalId}
-        meta={entry !== undefined && <InstanceRole principal={entry} />}
+        meta={entry?.principalType === 'user' && <InstanceRole principal={entry} />}
         actions={
           (editable.length > 0 || entry !== undefined) && (
             <>

@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useRouterState } from '@tanstack/react-router';
 import { Dialog, DropdownMenu } from 'radix-ui';
+import { toast } from 'sonner';
 import type { ProjectSummary } from '../shared/models';
 import type { UiCapabilities } from '../lib/capabilities';
 import { isActiveAccessibleEnvironment } from '../lib/project-environments';
@@ -18,6 +19,7 @@ import {
   Ledger,
   Mark,
   Menu,
+  Plus,
   Settings,
   Users,
   X,
@@ -36,6 +38,12 @@ type ShellProps = {
 
 const REPOSITORY = 'https://github.com/equisafe/coffre';
 
+/**
+ * The workspace this deployment serves. The server has no such notion yet --
+ * one deployment is one workspace -- so the name lives here until it does.
+ */
+const WORKSPACE = 'Equisafe';
+
 /** Marks the current route without each link having to compare paths itself. */
 const CURRENT = { 'aria-current': 'page' } as const;
 
@@ -46,21 +54,15 @@ function roleLabel(principal: Principal, instanceRole: InstanceRole): string {
   return 'Member';
 }
 
-export function Brand({ asLink = true }: { asLink?: boolean }) {
-  const body = (
-    <>
+/** The product's mark and name, for the pages you see before signing in. */
+export function Brand() {
+  return (
+    <span className="brand">
       <span className="brand-mark" aria-hidden>
         <Mark size={16} />
       </span>
       <span className="brand-name">coffre</span>
-    </>
-  );
-  return asLink ? (
-    <Link className="brand" to="/projects" aria-label="coffre, all projects">
-      {body}
-    </Link>
-  ) : (
-    <span className="brand">{body}</span>
+    </span>
   );
 }
 
@@ -169,7 +171,7 @@ function Sidebar({
   return (
     <>
       <div className="sidebar-head">
-        <Brand />
+        <WorkspaceMenu />
         {close}
       </div>
 
@@ -227,6 +229,49 @@ function NavLink({
   );
 }
 
+/**
+ * The workspace you are in, and where the others would be.
+ *
+ * For now this lists the one there is, and creating another says why it
+ * cannot yet rather than opening a form that goes nowhere.
+ */
+function WorkspaceMenu() {
+  const navigate = useNavigate();
+  return (
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger asChild>
+        <button type="button" className="workspace">
+          <Tile name={WORKSPACE} />
+          <span className="workspace-name">{WORKSPACE}</span>
+          <ChevronsUpDown size={14} className="workspace-chevron" />
+        </button>
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content className="menu menu-workspace" align="start" sideOffset={6}>
+          <DropdownMenu.Label className="menu-label">Workspaces</DropdownMenu.Label>
+          <DropdownMenu.Item className="menu-item" onSelect={() => navigate({ to: '/projects' })}>
+            <Tile name={WORKSPACE} />
+            {WORKSPACE}
+            <Check size={14} className="menu-check" />
+          </DropdownMenu.Item>
+          <DropdownMenu.Separator className="menu-sep" />
+          <DropdownMenu.Item
+            className="menu-item"
+            onSelect={() =>
+              toast('One workspace per deployment, for now', {
+                description: `Creating another needs server support coffre does not have yet. This deployment is ${WORKSPACE}.`,
+              })
+            }
+          >
+            <Plus size={14} />
+            Create workspace
+          </DropdownMenu.Item>
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
+  );
+}
+
 function AccountMenu({
   principal,
   instanceRole,
@@ -234,7 +279,6 @@ function AccountMenu({
   principal: NonNullable<Principal>;
   instanceRole: InstanceRole;
 }) {
-
   return (
     <DropdownMenu.Root>
       <DropdownMenu.Trigger asChild>

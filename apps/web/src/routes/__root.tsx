@@ -120,7 +120,7 @@ function RootComponent() {
       <TooltipProvider>
         <div className="solo">
           <div className="solo-top">
-            <Brand asLink={false} />
+            <Brand />
             <ThemeToggle />
           </div>
           <main className="solo-main" id="content">

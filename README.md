@@ -265,15 +265,19 @@ Things worth knowing about it:
 - **It is drawn as a plain developer tool.** Neutral surfaces, bordered
   cards, and tables as grids with a row-number gutter; Inter for the interface
   and JetBrains Mono for anything a machine reads back (keys, slugs, values,
-  sequence numbers). A sidebar holds the sections (Projects, Users, Tokens,
-  Audit, and the workspace's Settings) and, at its foot, your account with
-  your own settings (theme, identity); the bar above the page holds search and a
+  sequence numbers). A sidebar opens on the workspace switcher, holds the
+  sections (Projects, Users, Tokens, Audit, and the workspace's Settings) and,
+  at its foot, your account with your own settings (theme, identity). The
+  switcher is ahead of the server, which has no notion of workspaces yet: it
+  shows the one this deployment is and says so if you try to create another.
+  The bar above the page holds search and a
   link to this repository, and inside a project, the path to where you are.
   That path is itself a switcher: one click on `prod` lists its sibling
   environments. Hue is kept for meaning: blue for
   edits not yet saved, amber for a value on screen, red for what leaves or is
   refused, green for what was allowed. The fonts are self-hosted from exactly
-  pinned packages.
+  pinned packages, and every icon is Lucide at one stroke weight, drawn through
+  `components/icons.tsx` so a second family cannot creep in beside it.
 - **Colours are authored in OKLCH and verified, not eyeballed.**
   `scripts/check-contrast.mjs` converts every token back to sRGB and fails on
   any text pair under WCAG AA, or any accent whose chroma clips the gamut. It

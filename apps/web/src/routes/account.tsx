@@ -19,24 +19,16 @@ function AccountPage() {
     <>
       <PageHeader title="Account" />
 
-      <Card
-        labelledBy="appearance"
-        title="Appearance"
-        description="Kept in this browser. Match system follows your operating system's light or dark setting."
-      >
+      <Card labelledBy="appearance" title="Appearance">
         <div className="card-body">
           <ThemeCards />
         </div>
       </Card>
 
       {principal !== null && (
-        <Card
-          labelledBy="identity"
-          title="Your identity"
-          description="As coffre sees you. Every read and write you make is recorded against it."
-        >
+        <Card labelledBy="identity" title="Identity">
           <dl className="facts">
-            <Fact label="Identity">
+            <Fact label={principal.type === 'user' ? 'Email' : 'Common name'}>
               <span className="mono">{principal.id}</span>
             </Fact>
             <Fact label="Kind">{principal.type === 'user' ? 'User' : 'Token'}</Fact>
