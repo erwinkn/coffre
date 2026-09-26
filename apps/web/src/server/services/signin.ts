@@ -971,7 +971,10 @@ export class SigninService {
       const none = (result: DevicePoll) => ({ result, entries: [] });
       if (row === undefined || row.consumed) return none({ status: 'expired' });
       if (row.decision === 'denied') return none({ status: 'denied' });
-      if (row.decision === null) return none(row.expired ? { status: 'expired' } : { status: 'pending' });
+      // An approval is only good within the code's lifetime: one the CLI
+      // never collected must not stay redeemable for a session indefinitely.
+      if (row.expired) return none({ status: 'expired' });
+      if (row.decision === null) return none({ status: 'pending' });
 
       const principalId = row.principal_id as string;
       await tx.query(`UPDATE device_authorizations SET consumed_at = now() WHERE id = $1`, [row.id]);
