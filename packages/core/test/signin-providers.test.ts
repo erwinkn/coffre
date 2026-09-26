@@ -326,7 +326,7 @@ test('GitHub: the name falls back to the login', async () => {
       fetch: async (input, init) => {
         const response = await fetch(input, init);
         if (!String(input).endsWith('/github/api/user')) return response;
-        const body = await response.json();
+        const body = (await response.json()) as Record<string, unknown>;
         return Response.json({ ...body, name: null });
       },
     },
