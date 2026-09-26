@@ -5,6 +5,7 @@ import {
   runWithWorkerRuntime,
   type WorkerBindings,
 } from './server/runtime.ts';
+import { cspNonce, withSecurityHeaders } from './server/security-headers.ts';
 
 function runtimeLogger() {
   return {
@@ -16,8 +17,16 @@ function runtimeLogger() {
 
 export default {
   fetch(request, bindings, context) {
-    return runWithWorkerRuntime(bindings, () =>
-      handler.fetch(request), context);
+    return runWithWorkerRuntime(bindings, async () => {
+      // The router puts it on every script it renders; see router.tsx.
+      const nonce = cspNonce();
+      const response = await handler.fetch(request, { context: { cspNonce: nonce } });
+      const auth = getRuntime().auth;
+      return withSecurityHeaders(request, response, {
+        nonce,
+        formOrigins: auth.mode === 'cloudflare' ? [auth.access.issuer] : [],
+      });
+    }, context);
   },
 
   async scheduled(_controller, bindings, context) {

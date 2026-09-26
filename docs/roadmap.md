@@ -16,8 +16,9 @@ product that runs first on erwinkn.com and then inside Equisafe.
 - Equisafe's pipeline (`deploy-worker.yml`, a private migration runner, the
   `coffre-production` and `coffre-migrations` GitHub environments) has never
   run.
-- Most of phase 1 is still open. The README says *ready for a first
-  deployment, still hardening* until it is done.
+- Most of phase 1 is still open; only the security headers are done. The
+  README says *ready for a first deployment, still hardening* until the rest
+  is.
 
 ## Sequence
 
@@ -41,13 +42,14 @@ release needs, so it moves ahead of phase 4 if publishing comes first.
 
 Each item says what is wrong today.
 
-1. **Security headers and a CSP.** No response sets any today. In a secrets
-   manager an XSS is a full read of whatever the victim can see, audited in
-   their name. Add a `Content-Security-Policy` (a nonce or hash for our two
-   boot scripts and for the scripts TanStack emits for hydration, and
-   `frame-ancestors 'none'`), `X-Content-Type-Options: nosniff`,
-   `Referrer-Policy: no-referrer`, and HSTS. Spike first: nonce support in
-   Start 1.168.
+1. ~~**Security headers and a CSP.**~~ Done, in
+   `apps/web/src/server/security-headers.ts`. The Worker mints a nonce per
+   response and TanStack puts it on every script it renders, so `script-src`
+   is `'self'` plus that nonce; styles stay `'unsafe-inline'` for React's
+   `style` props. It is enforced in development too, so a script without the
+   nonce breaks where it is written. `Referrer-Policy` is `same-origin`, not
+   `no-referrer`: under `no-referrer` a same-origin POST carries
+   `Origin: null`, which the CSRF check refuses.
 2. **Escrow the keys, then prove recovery.** `COFFRE_KEK_LOCAL` and
    `COFFRE_AUDIT_CHAIN_KEY` are Worker secrets and GitHub environment secrets,
    and both stores are write-only. If no other copy exists, losing the Worker

@@ -109,7 +109,8 @@ curl --fail --silent --show-error \
     "$smoke_base/cdn-cgi/local/scheduled?cron=*/5+*+*+*+*" >/dev/null
 curl --fail --silent --show-error "$smoke_base/readyz" >/dev/null
 
-status="$(curl --silent --output "$smoke_tmp/unauthenticated.json" --write-out '%{http_code}' "$smoke_base/api/me")"
+status="$(curl --silent --output "$smoke_tmp/unauthenticated.json" \
+    --dump-header "$smoke_tmp/unauthenticated.headers" --write-out '%{http_code}' "$smoke_base/api/me")"
 if [[ "$status" != 401 ]] ||
     ! grep -Fq '"error":"cloudflare_access_required"' "$smoke_tmp/unauthenticated.json"; then
     echo 'The production /api boundary did not fail closed without Access:' >&2
@@ -117,4 +118,13 @@ if [[ "$status" != 401 ]] ||
     exit 1
 fi
 
-echo "Worker production smoke passed: $smoke_base; Hyperdrive, Cron readiness, and auth behaved as expected"
+# Every response, a refusal included, carries the security headers.
+if ! grep -Eiq "^content-security-policy: .*script-src 'self' 'nonce-" "$smoke_tmp/unauthenticated.headers" ||
+    ! grep -Fiq "frame-ancestors 'none'" "$smoke_tmp/unauthenticated.headers" ||
+    ! grep -Fiq 'x-content-type-options: nosniff' "$smoke_tmp/unauthenticated.headers"; then
+    echo 'The production Worker did not send its security headers:' >&2
+    cat "$smoke_tmp/unauthenticated.headers" >&2
+    exit 1
+fi
+
+echo "Worker production smoke passed: $smoke_base; Hyperdrive, Cron readiness, auth and security headers behaved as expected"

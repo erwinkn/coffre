@@ -4,6 +4,7 @@ import {
   HeadContent,
   Outlet,
   redirect,
+  ScriptOnce,
   Scripts,
   useRouterState,
 } from '@tanstack/react-router';
@@ -74,9 +75,11 @@ function RootDocument({ children }: { children: ReactNode }) {
     <html lang="en" suppressHydrationWarning>
       <head>
         <HeadContent />
-        {/* Must run before first paint; see the comments on each script. */}
-        <script dangerouslySetInnerHTML={{ __html: themeBootScript }} />
-        <script dangerouslySetInnerHTML={{ __html: sidebarBootScript }} />
+        {/* Must run before first paint; see the comments on each script.
+            ScriptOnce gives them the page's CSP nonce, and removes them
+            once run so hydration finds nothing to reconcile. */}
+        <ScriptOnce>{themeBootScript}</ScriptOnce>
+        <ScriptOnce>{sidebarBootScript}</ScriptOnce>
       </head>
       <body>
         {children}
