@@ -10,6 +10,7 @@ import { Tile } from './tile';
  */
 export function PageHeader({
   tile,
+  lead,
   title,
   aside,
   description,
@@ -17,6 +18,8 @@ export function PageHeader({
   actions,
 }: {
   tile?: string;
+  /** Stands where the tile would, for pages that are not about a project. */
+  lead?: ReactNode;
   title: ReactNode;
   aside?: ReactNode;
   description?: ReactNode;
@@ -27,6 +30,7 @@ export function PageHeader({
     <header className="page-head">
       <div className="page-head-text">
         {tile !== undefined && <Tile name={tile} size="lg" />}
+        {lead}
         <div style={{ minWidth: 0 }}>
           <h1 className="page-title">
             <span>{title}</span>

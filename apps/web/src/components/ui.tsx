@@ -1,5 +1,12 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { AlertDialog, Dialog, Tooltip } from 'radix-ui';
+import {
+  useEffect,
+  useRef,
+  useState,
+  type MouseEvent,
+  type PointerEvent,
+  type ReactNode,
+} from 'react';
+import { AlertDialog, Dialog, Popover, Tooltip } from 'radix-ui';
 import { AlertCircle, AlertTriangle, Check, Copy, Info, Loader, X } from './icons';
 
 /* -------------------------------------------------------------------------- */
@@ -35,6 +42,60 @@ export function Tip({
         </Tooltip.Content>
       </Tooltip.Portal>
     </Tooltip.Root>
+  );
+}
+
+/**
+ * The same bubble as Tip, for a note a touch screen must reach too.
+ *
+ * A tooltip opens on hover and focus only, so on a phone it never opens. This
+ * one also opens on a tap, which means its trigger has to be a real button.
+ * With a mouse, hover alone drives it: a click would otherwise close the note
+ * the hover just opened.
+ */
+export function Toggletip({
+  label,
+  side,
+  children,
+}: {
+  label: ReactNode;
+  side?: 'top' | 'right' | 'bottom' | 'left';
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  const pointer = useRef<string | null>(null);
+  const hover = (next: boolean) => (event: { pointerType: string }) => {
+    if (event.pointerType === 'mouse') setOpen(next);
+  };
+
+  return (
+    <Popover.Root open={open} onOpenChange={setOpen}>
+      <Popover.Trigger
+        asChild
+        onPointerEnter={hover(true)}
+        onPointerLeave={hover(false)}
+        onPointerDown={(event: PointerEvent) => {
+          pointer.current = event.pointerType;
+        }}
+        onClick={(event: MouseEvent) => {
+          if (pointer.current === 'mouse') event.preventDefault();
+          pointer.current = null;
+        }}
+      >
+        {children}
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content
+          className="tooltip"
+          side={side}
+          sideOffset={6}
+          collisionPadding={8}
+          onOpenAutoFocus={(event: Event) => event.preventDefault()}
+        >
+          {label}
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
   );
 }
 

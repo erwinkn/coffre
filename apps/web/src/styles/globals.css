@@ -188,6 +188,11 @@ code {
   white-space: nowrap;
 }
 
+/* Words that only make sense once a table has stacked, and the reverse. */
+.narrow-only {
+  display: none;
+}
+
 .visually-hidden {
   position: absolute;
   width: 1px;
@@ -329,6 +334,18 @@ kbd {
   font-weight: 650;
   text-transform: uppercase;
   box-shadow: inset 0 0 0 1px color-mix(in oklab, currentColor 18%, transparent);
+}
+
+/* A machine: a key on grey, so tokens never pass for people at a glance. */
+.avatar-token {
+  background: var(--subtle);
+  color: var(--ink-2);
+}
+
+.avatar-lg {
+  width: 2.25rem;
+  height: 2.25rem;
+  font-size: 0.9375rem;
 }
 
 .sidebar-nav {
@@ -677,6 +694,14 @@ a.crumb-link:hover {
 .page-title-aside {
   color: var(--ink-3);
   font-weight: 450;
+}
+
+/* A project's slug beside its name: the address, set as code and quieter. */
+.page-title-slug {
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+  font-weight: 450;
+  letter-spacing: 0;
 }
 
 .page-desc {
@@ -1284,6 +1309,19 @@ a.crumb-link:hover {
   box-shadow: inset 0 0 0 1px var(--border);
 }
 
+/* A tag with a note behind it (hover, focus or tap). It sits above a row's
+   stretched link, or tapping it would open the row instead. */
+.tag-button {
+  position: relative;
+  z-index: 1;
+  border: 0;
+  cursor: help;
+}
+
+.tag-button svg {
+  opacity: 0.8;
+}
+
 .dot {
   display: inline-block;
   flex: none;
@@ -1490,12 +1528,14 @@ a.crumb-link:hover {
   color: var(--accent);
 }
 
-/* Grants and the directory: the same columns in every such table. */
-.grants {
+/* Grants: the same columns whether a row leads with a person or a project. */
+.grants,
+.directory {
   table-layout: fixed;
 }
 
-.grants .n {
+.grants .n,
+.directory .n {
   width: 2.75rem;
 }
 
@@ -1513,6 +1553,46 @@ a.crumb-link:hover {
 
 .grants td {
   overflow-wrap: anywhere;
+}
+
+/* The directory: who, their role, and a menu that needs no more than its
+   own width. */
+.directory .col-role {
+  width: 17rem;
+}
+
+.directory .col-actions {
+  width: 2.75rem;
+}
+
+/* A person or token: avatar and name, the name cut short rather than
+   wrapped so every row keeps one line. */
+.cell-principal {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.625rem;
+  min-width: 0;
+  max-width: 100%;
+  vertical-align: middle;
+}
+
+.cell-principal .avatar {
+  width: 1.375rem;
+  height: 1.375rem;
+  font-size: 0.6875rem;
+}
+
+.cell-principal .cell-link {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Row menus sit above the row's stretched link. */
+.row-link .col-actions > * {
+  position: relative;
+  z-index: 1;
 }
 
 /* A long role ("Access manager: all environments") wraps inside its tag
@@ -1994,9 +2074,16 @@ a.crumb-link:hover {
   gap: 0.625rem;
 }
 
-.dt.projects .col-project,
-.dt.projects .col-name {
-  width: 22%;
+.dt.projects .col-project {
+  width: 34%;
+}
+
+.dt.projects .cell-stack small {
+  font-size: 0.71875rem;
+}
+
+.dt.projects .col-secrets {
+  text-align: right;
 }
 
 .env-links {
@@ -2035,6 +2122,230 @@ span.env-link {
 
 .env-link .count {
   color: var(--ink-3);
+}
+
+/* ========================================================================== */
+/* Project page                                                               */
+/* ========================================================================== */
+
+/* Environments, Users, Tokens, Settings: one underlined tab per section. */
+.tabs {
+  display: flex;
+  gap: 0.25rem;
+  margin: -0.25rem 0 1.5rem;
+  /* A shadow rather than a border: the scroll box clips at its padding
+     edge, and the current tab's underline has to cover this line. */
+  box-shadow: inset 0 -1px var(--border);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.tabs a {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  height: 2.5rem;
+  padding: 0 0.75rem;
+  color: var(--ink-3);
+  font-size: 0.875rem;
+  font-weight: 550;
+  white-space: nowrap;
+}
+
+.tabs a:hover {
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.tabs a:focus-visible {
+  outline-offset: -2px;
+  border-radius: var(--radius);
+}
+
+.tabs a[aria-current='page'] {
+  color: var(--ink);
+}
+
+.tabs a[aria-current='page']::after {
+  content: '';
+  position: absolute;
+  right: 0.5rem;
+  bottom: 0;
+  left: 0.5rem;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: var(--ink);
+}
+
+/* A heading between groups on a page, without a card around it. */
+.section-title {
+  margin: 2rem 0 0.75rem;
+  color: var(--ink-2);
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+.page-head + .section-title {
+  margin-top: 0;
+}
+
+.section-foot {
+  margin-top: 0.75rem;
+}
+
+/* Environments as cards in a grid: each one a door into its secrets. */
+.env-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+  gap: 0.75rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.env-card {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  height: 100%;
+  padding: 0.875rem 0.625rem 0.875rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  box-shadow: var(--shadow-xs);
+  transition:
+    border-color 120ms,
+    box-shadow 120ms;
+}
+
+.env-card.is-link:hover {
+  border-color: var(--edge);
+  box-shadow: var(--shadow-md);
+}
+
+/* Known by name only: no grant you hold covers what is inside. */
+.env-card.is-muted {
+  border-style: dashed;
+  background: transparent;
+  box-shadow: none;
+}
+
+.env-card-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  min-width: 0;
+}
+
+.env-card-name {
+  color: var(--ink);
+  font-size: 0.9375rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+a.env-card-name:hover {
+  text-decoration: none;
+}
+
+.env-card-name.stretch::after {
+  border-radius: var(--radius-lg);
+}
+
+.env-card.is-muted .env-card-name {
+  color: var(--ink-2);
+}
+
+.env-card-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.75rem;
+  color: var(--ink-3);
+  font-size: 0.8125rem;
+}
+
+.env-card-menu {
+  position: relative;
+  z-index: 1;
+  margin-top: -0.25rem;
+}
+
+/* Add to projects: one row per project, and per environment when asked. */
+.plan-list {
+  display: flex;
+  flex-direction: column;
+  max-height: min(24rem, 50vh);
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  list-style: none;
+}
+
+.plan-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 11rem;
+  align-items: center;
+  gap: 0.625rem 0.75rem;
+  padding: 0.625rem 0.75rem;
+}
+
+.plan-row + .plan-row {
+  border-top: 1px solid var(--border);
+}
+
+.plan-project {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  min-width: 0;
+}
+
+.plan-project-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.plan-project-name {
+  font-size: 0.875rem;
+  font-weight: 550;
+}
+
+.plan-project-held {
+  overflow: hidden;
+  color: var(--ink-3);
+  font-size: 0.75rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plan-envs {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 0 0 0 2rem;
+  list-style: none;
+}
+
+.plan-env {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 11rem;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.8125rem;
+}
+
+.select-sm {
+  height: 1.875rem;
+  font-size: 0.8125rem;
 }
 
 /* ========================================================================== */
@@ -2590,6 +2901,12 @@ span.env-link {
   animation: fade-in 100ms ease-out;
 }
 
+.tooltip code {
+  padding: 0;
+  border: 0;
+  background: none;
+}
+
 /* Command palette */
 .palette {
   position: fixed;
@@ -2934,6 +3251,23 @@ span.env-link {
   .fact {
     grid-template-columns: minmax(0, 1fr);
   }
+
+  .tabs svg {
+    display: none;
+  }
+
+  .tabs a {
+    padding: 0 0.5rem;
+  }
+
+  .plan-row,
+  .plan-env {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .plan-envs {
+    padding-left: 0;
+  }
 }
 
 /* Below this the tables stop being tables: each row stacks into a block. */
@@ -2993,6 +3327,127 @@ span.env-link {
 
   .dt.stacks td.col-hide-narrow {
     display: none;
+  }
+
+  .narrow-only {
+    display: inline;
+  }
+
+  .wide-only {
+    display: none;
+  }
+
+  /* Projects: name and address with the secret count opposite, then the
+     environments as a line of chips. */
+  .dt.projects.stacks tr {
+    grid-template-areas:
+      'project secrets'
+      'envs envs';
+    align-items: center;
+    gap: 0.625rem 0.75rem;
+  }
+
+  .dt.projects.stacks td[data-label]::before {
+    display: none;
+  }
+
+  .dt.projects.stacks td.col-project {
+    grid-area: project;
+    width: auto;
+  }
+
+  .dt.projects.stacks td.col-secrets {
+    grid-area: secrets;
+    color: var(--ink-3);
+    font-size: 0.8125rem;
+  }
+
+  .dt.projects.stacks td.col-envs {
+    grid-area: envs;
+    padding-left: 2rem;
+  }
+
+  /* The directory: one line per user, the menu column kept even when a row
+     has no menu so the role tags stay in line. */
+  .dt.directory.stacks tr {
+    grid-template-columns: minmax(0, 1fr) auto 1.75rem;
+    grid-template-areas: 'lead role actions';
+    align-items: center;
+    gap: 0.25rem 0.5rem;
+    padding: 0.625rem 0.5rem 0.625rem 0.875rem;
+  }
+
+  .dt.directory.stacks td[data-label]::before {
+    display: none;
+  }
+
+  .dt.directory.stacks td.col-lead {
+    grid-area: lead;
+  }
+
+  .dt.directory.stacks td.col-role {
+    grid-area: role;
+  }
+
+  .dt.directory.stacks td.col-actions {
+    grid-area: actions;
+    min-height: 1.75rem;
+    padding: 0;
+  }
+
+  /* Tokens: what they are goes under the name, where a long phrase fits. */
+  .dt.directory-service.stacks tr {
+    grid-template-columns: minmax(0, 1fr) 1.75rem;
+    grid-template-areas:
+      'lead actions'
+      'role role';
+  }
+
+  .dt.directory-service.stacks td.col-role {
+    padding-left: 2rem;
+    font-size: 0.75rem;
+  }
+
+  /* Grants: who (or which project) and the revoke, then the access and when
+     it lapses, lined up under the name. */
+  .dt.grants.stacks tr {
+    grid-template-areas:
+      'lead actions'
+      'access expires';
+    align-items: center;
+    gap: 0.375rem 0.75rem;
+  }
+
+  .dt.grants.stacks td[data-label]::before {
+    display: none;
+  }
+
+  .dt.grants.stacks td.col-lead {
+    grid-area: lead;
+  }
+
+  .dt.grants.stacks td.col-access {
+    grid-area: access;
+    padding-left: 2rem;
+  }
+
+  .dt.grants.stacks td.col-expires {
+    grid-area: expires;
+    font-size: 0.75rem;
+    text-align: right;
+  }
+
+  .dt.grants.stacks td.col-expires.is-never {
+    display: none;
+  }
+
+  .dt.grants.stacks td.col-actions {
+    grid-area: actions;
+    padding: 0;
+  }
+
+  .dt.grants.stacks tr.row-error {
+    grid-template-areas: none;
   }
 
   /* Secrets: key, version and actions on one line, the value beneath. */

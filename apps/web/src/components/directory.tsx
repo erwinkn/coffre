@@ -8,8 +8,9 @@ import {
 } from '../server-functions/access';
 import { useAction } from '../lib/use-action';
 import type { DirectoryPrincipal } from '../shared/models';
-import { ConfirmDialog, EmptyState, ErrorLine, Modal, Spinner } from './ui';
-import { Key, MoreHorizontal, Pencil, Plus, ShieldCheck, User, X } from './icons';
+import { ConfirmDialog, EmptyState, ErrorLine, Modal, Spinner, Toggletip } from './ui';
+import { PrincipalLink } from './principal';
+import { Key, Lock, MoreHorizontal, Pencil, Plus, ShieldCheck, User, X } from './icons';
 
 /**
  * The instance directory, shared by the Users and Tokens pages.
@@ -50,7 +51,7 @@ export function DirectoryTable({
         </EmptyState>
       ) : (
         <div className="dt-wrap">
-          <table className="dt grants stacks">
+          <table className={`dt directory directory-${principalType} stacks`}>
             <thead>
               <tr>
                 <th className="n">#</th>
@@ -60,7 +61,7 @@ export function DirectoryTable({
                     {users ? 'Email' : 'Common name'}
                   </span>
                 </th>
-                <th>
+                <th className="col-role">
                   <span className="th">
                     <ShieldCheck size={14} />
                     {users ? 'Instance role' : 'Kind'}
@@ -73,11 +74,25 @@ export function DirectoryTable({
             </thead>
             <tbody>
               {principals.map((principal, index) => (
-                <PrincipalRow
-                  key={principal.principalId}
-                  number={index + 1}
-                  principal={principal}
-                />
+                <tr key={principal.principalId} className="row-link">
+                  <td className="n">{index + 1}</td>
+                  <td
+                    className="col-lead"
+                    data-label={principal.principalType === 'user' ? 'Email' : 'Common name'}
+                  >
+                    <PrincipalLink
+                      type={principal.principalType}
+                      id={principal.principalId}
+                      stretch
+                    />
+                  </td>
+                  <td className="col-role" data-label={users ? 'Instance role' : 'Kind'}>
+                    <InstanceRole principal={principal} />
+                  </td>
+                  <td className="col-actions">
+                    <PrincipalActions principal={principal} />
+                  </td>
+                </tr>
               ))}
             </tbody>
           </table>
@@ -87,12 +102,52 @@ export function DirectoryTable({
   );
 }
 
-function PrincipalRow({
-  number,
+/**
+ * A user's instance role, or what a token is. A root admin's role comes from
+ * the deployment, so its tag says so on hover or tap instead of offering a
+ * menu that could not work.
+ */
+export function InstanceRole({ principal }: { principal: DirectoryPrincipal }) {
+  if (principal.principalType === 'service') {
+    return <span className="cell-muted">Cloudflare Access service token</span>;
+  }
+  if (principal.isRootAdmin) {
+    return (
+      <Toggletip
+        label={
+          <>
+            Set by <code>COFFRE_ROOT_ADMINS</code> in the deployment's configuration, so it
+            cannot be changed or removed here.
+          </>
+        }
+      >
+        <button type="button" className="tag tag-violet tag-button">
+          <Lock size={11} />
+          Root admin
+        </button>
+      </Toggletip>
+    );
+  }
+  return (
+    <span className={`tag${principal.instanceRole === 'user' ? '' : ' tag-violet'}`}>
+      {ROLE_LABEL[principal.instanceRole]}
+    </span>
+  );
+}
+
+/**
+ * Change role and Remove, behind one menu. Root admins get none: the
+ * deployment's configuration owns them.
+ */
+export function PrincipalActions({
   principal,
+  trigger = 'act act-quiet act-menu',
+  onRemoved,
 }: {
-  number: number;
   principal: DirectoryPrincipal;
+  /** The menu button's classes: a row action in tables, a button in a page head. */
+  trigger?: string;
+  onRemoved?: () => unknown;
 }) {
   const [editing, setEditing] = useState(false);
   const [confirming, setConfirming] = useState(false);
@@ -106,151 +161,127 @@ function PrincipalRow({
     if (error !== null && !editing) toast.error(error);
   }, [editing, error]);
 
+  if (principal.isRootAdmin) return null;
+
   return (
-    <tr>
-      <td className="n">{number}</td>
-      <td
-        className="cell-mono"
-        data-label={principal.principalType === 'user' ? 'Email' : 'Common name'}
-      >
-        {principal.principalId}
-      </td>
-      {principal.principalType === 'user' ? (
-        <td data-label="Instance role">
-          <span className={`tag${principal.instanceRole === 'user' ? '' : ' tag-violet'}`}>
-            {ROLE_LABEL[principal.instanceRole]}
-          </span>
-          {principal.isRootAdmin && <span className="hint"> · set in deployment config</span>}
-        </td>
-      ) : (
-        <td className="cell-muted" data-label="Kind">
-          Cloudflare Access service token
-        </td>
-      )}
-      <td className="col-actions">
-        {principal.isRootAdmin ? (
-          <span className="cell-muted" style={{ fontSize: '0.8125rem' }}>
-            —
-          </span>
-        ) : (
-          <DropdownMenu.Root>
-            <DropdownMenu.Trigger asChild>
-              <button
-                className="act act-quiet"
-                aria-label={`Actions for ${principal.principalId}`}
-                disabled={pending}
-              >
-                {pending ? <Spinner size={13} /> : <MoreHorizontal size={16} />}
-              </button>
-            </DropdownMenu.Trigger>
-            <DropdownMenu.Portal>
-              <DropdownMenu.Content className="menu" sideOffset={6} align="end">
-                {principal.principalType === 'user' && (
-                  <>
-                    <DropdownMenu.Item
-                      className="menu-item"
-                      onSelect={() => {
-                        setInstanceRole(principal.instanceRole === 'owner' ? 'owner' : 'user');
-                        setEditing(true);
-                      }}
-                    >
-                      <Pencil size={14} />
-                      Change role
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Separator className="menu-sep" />
-                  </>
-                )}
-                <DropdownMenu.Item
-                  className="menu-item menu-item-danger"
-                  onSelect={() => setConfirming(true)}
-                >
-                  <X size={14} />
-                  Remove {kind}…
-                </DropdownMenu.Item>
-              </DropdownMenu.Content>
-            </DropdownMenu.Portal>
-          </DropdownMenu.Root>
-        )}
-
-        {principal.principalType === 'user' && !principal.isRootAdmin && (
-          <Modal
-            open={editing}
-            onOpenChange={(open) => {
-              setEditing(open);
-              if (!open) setError(null);
-            }}
-            title={
-              <>
-                Role of <span className="mono">{principal.principalId}</span>
-              </>
-            }
+    <>
+      <DropdownMenu.Root>
+        <DropdownMenu.Trigger asChild>
+          <button
+            className={trigger}
+            aria-label={`Actions for ${principal.principalId}`}
+            disabled={pending}
           >
-            <form
-              className="form"
-              onSubmit={(event) => {
-                event.preventDefault();
-                void run(
-                  () =>
-                    updateDirectoryPrincipalRole({
-                      data: { principalId: principal.principalId, instanceRole },
-                    }),
-                  () => {
-                    toast.success(
-                      `${principal.principalId} is now ${ROLE_LABEL[instanceRole].toLowerCase()}`,
-                    );
-                    setEditing(false);
-                  },
-                );
-              }}
+            {pending ? <Spinner size={13} /> : <MoreHorizontal size={16} />}
+          </button>
+        </DropdownMenu.Trigger>
+        <DropdownMenu.Portal>
+          <DropdownMenu.Content className="menu" sideOffset={6} align="end">
+            {principal.principalType === 'user' && (
+              <>
+                <DropdownMenu.Item
+                  className="menu-item"
+                  onSelect={() => {
+                    setInstanceRole(principal.instanceRole === 'owner' ? 'owner' : 'user');
+                    setEditing(true);
+                  }}
+                >
+                  <Pencil size={14} />
+                  Change role
+                </DropdownMenu.Item>
+                <DropdownMenu.Separator className="menu-sep" />
+              </>
+            )}
+            <DropdownMenu.Item
+              className="menu-item menu-item-danger"
+              onSelect={() => setConfirming(true)}
             >
-              <RoleField value={instanceRole} onChange={setInstanceRole} />
-              <ErrorLine error={error} />
-              <div className="dialog-actions">
-                <button className="btn" type="button" onClick={() => setEditing(false)}>
-                  Cancel
-                </button>
-                <button className="btn btn-primary" type="submit" disabled={pending}>
-                  {pending && <Spinner />}
-                  Save
-                </button>
-              </div>
-            </form>
-          </Modal>
-        )}
+              <X size={14} />
+              Remove {kind}…
+            </DropdownMenu.Item>
+          </DropdownMenu.Content>
+        </DropdownMenu.Portal>
+      </DropdownMenu.Root>
 
-        {!principal.isRootAdmin && (
-          <ConfirmDialog
-            open={confirming}
-            onOpenChange={setConfirming}
-            title={
-              <>
-                Remove <span className="mono">{principal.principalId}</span>?
-              </>
-            }
-            body={
-              <>
-                The {kind} can no longer use coffre, and every project permission it holds is
-                revoked at once, including for anything running with it right now. Its past
-                actions stay in the audit log.
-              </>
-            }
-            confirmLabel={`Remove ${kind}`}
-            onConfirm={() =>
+      {principal.principalType === 'user' && (
+        <Modal
+          open={editing}
+          onOpenChange={(open) => {
+            setEditing(open);
+            if (!open) setError(null);
+          }}
+          title={
+            <>
+              Role of <span className="mono">{principal.principalId}</span>
+            </>
+          }
+        >
+          <form
+            className="form"
+            onSubmit={(event) => {
+              event.preventDefault();
               void run(
                 () =>
-                  removeDirectoryPrincipal({
-                    data: {
-                      principalType: principal.principalType,
-                      principalId: principal.principalId,
-                    },
+                  updateDirectoryPrincipalRole({
+                    data: { principalId: principal.principalId, instanceRole },
                   }),
-                () => toast.success(`${principal.principalId} removed`),
-              )
-            }
-          />
-        )}
-      </td>
-    </tr>
+                () => {
+                  toast.success(
+                    `${principal.principalId} is now ${ROLE_LABEL[instanceRole].toLowerCase()}`,
+                  );
+                  setEditing(false);
+                },
+              );
+            }}
+          >
+            <RoleField value={instanceRole} onChange={setInstanceRole} />
+            <ErrorLine error={error} />
+            <div className="dialog-actions">
+              <button className="btn" type="button" onClick={() => setEditing(false)}>
+                Cancel
+              </button>
+              <button className="btn btn-primary" type="submit" disabled={pending}>
+                {pending && <Spinner />}
+                Save
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+
+      <ConfirmDialog
+        open={confirming}
+        onOpenChange={setConfirming}
+        title={
+          <>
+            Remove <span className="mono">{principal.principalId}</span>?
+          </>
+        }
+        body={
+          <>
+            The {kind} can no longer use coffre, and every project permission it holds is
+            revoked at once, including for anything running with it right now. Its past actions
+            stay in the audit log.
+          </>
+        }
+        confirmLabel={`Remove ${kind}`}
+        onConfirm={() =>
+          void run(
+            () =>
+              removeDirectoryPrincipal({
+                data: {
+                  principalType: principal.principalType,
+                  principalId: principal.principalId,
+                },
+              }),
+            async () => {
+              toast.success(`${principal.principalId} removed`);
+              await onRemoved?.();
+            },
+          )
+        }
+      />
+    </>
   );
 }
 
@@ -279,7 +310,7 @@ export function AddPrincipal({ principalType }: { principalType: PrincipalType }
         open={open}
         onOpenChange={(next) => (next ? setOpen(true) : close())}
         title={`Add a ${kind}`}
-        description={`This lets the ${kind} through the door and nothing more. Grant project access from each project's page.`}
+        description={`This lets the ${kind} through the door and nothing more. Grant project access from its page or from each project's.`}
       >
         <form
           className="form"

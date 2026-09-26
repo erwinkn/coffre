@@ -10,19 +10,15 @@ import {
   updateEnvironment,
   updateProject,
 } from '../server-functions/projects';
-import {
-  createGrant,
-  revokeGrant,
-} from '../server-functions/access';
+import { createGrant } from '../server-functions/access';
 import { useAction } from '../lib/use-action';
 import type { GrantRow, ProjectSummary } from '../shared/models';
 import {
   hasEnvironmentDetails,
-  type DetailedProjectEnvironment,
+  type ProjectEnvironment,
 } from '../lib/project-environments';
 import { slugProblem } from '../lib/validation';
 import {
-  ConfirmButton,
   ConfirmDialog,
   EmptyState,
   ErrorLine,
@@ -31,35 +27,52 @@ import {
   Spinner,
 } from '../components/ui';
 import { Card, ClosedDoor, PageHeader } from '../components/page';
-import { PermissionSummary } from '../components/permissions';
+import { GrantRowView, GrantsTable } from '../components/grants';
+import { PrincipalLink } from '../components/principal';
 import {
   parseProjectAccess,
-  projectAccessLabel,
   projectAccessOptions,
 } from '../lib/project-access';
 import {
   Archive,
-  Clock,
   Folder,
-  Hash,
   Key,
   Layers,
   MoreHorizontal,
   Pencil,
   Plus,
   RotateBack,
-  ShieldCheck,
+  Settings,
   User,
+  Users,
 } from '../components/icons';
 
+type ProjectTab = 'environments' | 'users' | 'tokens' | 'settings';
+
 export const Route = createFileRoute('/projects/$project/')({
+  // The tab lives in the URL so a link can land on a project's access list.
+  // Environments is the default and so has no parameter.
+  validateSearch: (search: Record<string, unknown>): { tab?: Exclude<ProjectTab, 'environments'> } => ({
+    tab:
+      search.tab === 'users' || search.tab === 'tokens' || search.tab === 'settings'
+        ? search.tab
+        : undefined,
+  }),
   loader: ({ params }) => getProject({ data: { project: params.project } }),
   component: ProjectPage,
 });
 
+const TABS: { key: ProjectTab; label: string; icon: ReactNode }[] = [
+  { key: 'environments', label: 'Environments', icon: <Layers size={15} /> },
+  { key: 'users', label: 'Users', icon: <Users size={15} /> },
+  { key: 'tokens', label: 'Tokens', icon: <Key size={15} /> },
+  { key: 'settings', label: 'Settings', icon: <Settings size={15} /> },
+];
+
 function ProjectPage() {
   const result = Route.useLoaderData();
   const { project: projectSlug } = Route.useParams();
+  const search = Route.useSearch();
 
   if (!result.ok) {
     return (
@@ -81,39 +94,44 @@ function ProjectPage() {
 
   const { project, grants, grantsError } = result;
 
-  // Each section is gated on its own permission, not on one blanket "admin".
+  // Each tab is gated on its own permission, not on one blanket "admin".
   // That is what lets an access manager administer grants without being able
   // to rename the project, and vice versa.
   const canManageProject = project.permissions.includes('project.manage');
   const canManageEnvironments = project.permissions.includes('environment.manage');
   const canManageGrants = project.permissions.includes('grant.manage');
-
-  const detailed = project.environments.filter(hasEnvironmentDetails);
-  const active = detailed.filter((environment) => environment.details.archivedAt === null);
-  const archived = detailed.filter((environment) => environment.details.archivedAt !== null);
-  const listedOnly = project.environments.filter((environment) => environment.details === null);
-  const isArchived = project.archivedAt !== null;
+  const allowed = TABS.filter(
+    ({ key }) =>
+      key === 'environments' ||
+      ((key === 'users' || key === 'tokens') && canManageGrants) ||
+      (key === 'settings' && canManageProject),
+  );
+  // A tab you may not open falls back to the default rather than to an error:
+  // a link someone shared still lands somewhere useful.
+  const tab = allowed.find(({ key }) => key === search.tab)?.key ?? 'environments';
+  const principalType = tab === 'users' ? 'user' : 'service';
 
   return (
     <>
       <PageHeader
         tile={project.slug}
-        title={project.slug}
-        aside={project.name}
-        meta={
-          <>
-            {isArchived && <span className="tag tag-red">archived</span>}
-            <span>
-              <strong>{active.length + listedOnly.length}</strong> environment
-              {active.length + listedOnly.length === 1 ? '' : 's'}
-              {archived.length > 0 && `, ${archived.length} archived`}
-            </span>
-            <PermissionSummary permissions={project.permissions} />
-          </>
+        title={project.name}
+        aside={<span className="page-title-slug">{project.slug}</span>}
+        actions={
+          tab === 'environments'
+            ? canManageEnvironments && <NewEnvironment project={project.slug} />
+            : (tab === 'users' || tab === 'tokens') &&
+              grantsError === null && (
+                <NewGrant
+                  principalType={principalType}
+                  project={project.slug}
+                  environments={project.environments}
+                />
+              )
         }
       />
 
-      {isArchived && (
+      {project.archivedAt !== null && (
         <div style={{ marginBottom: '1.25rem' }}>
           <Notice tone="bad">
             <strong>This project is archived.</strong> Its environments serve no reads, to
@@ -122,93 +140,43 @@ function ProjectPage() {
         </div>
       )}
 
-      <Card
-        labelledBy="environments"
-        title="Environments"
-        description="Secrets live in environments, and a grant can be scoped to exactly one of them."
-        actions={canManageEnvironments && <NewEnvironment project={project.slug} />}
-      >
-        {active.length === 0 && listedOnly.length === 0 ? (
-          <EmptyState title="No environments yet">
-            {canManageEnvironments
-              ? 'Add the first with Add environment.'
-              : 'Creating environments needs environment.manage on this project.'}
-          </EmptyState>
-        ) : (
-          <EnvironmentTable>
-            {active.map((environment, index) => (
-              <EnvironmentRow
-                key={`${project.slug}:${environment.slug}`}
-                number={index + 1}
-                project={project.slug}
-                environment={environment}
-                isAdmin={canManageEnvironments}
-              />
-            ))}
-            {/* Environments you may know by name only: no grant you hold covers
-                their contents, so they are listed, muted, and do not open. */}
-            {listedOnly.map((environment, index) => (
-              <tr key={environment.slug}>
-                <td className="n">{active.length + index + 1}</td>
-                <td className="cell-mono cell-muted" data-label="Environment">
-                  {environment.slug}
-                </td>
-                <td className="cell-muted" data-label="Name">
-                  {environment.name}
-                </td>
-                <td data-label="Secrets">
-                  <span className="tag tag-outline">no secret access</span>
-                </td>
-                <td className="col-actions" />
-              </tr>
-            ))}
-          </EnvironmentTable>
-        )}
-      </Card>
-
-      {archived.length > 0 && (
-        <Card
-          labelledBy="archived-environments"
-          title="Archived environments"
-          description="Not served to anyone. Values, versions and their audit trail are intact."
-        >
-          <EnvironmentTable>
-            {archived.map((environment, index) => (
-              <EnvironmentRow
-                key={environment.slug}
-                number={index + 1}
-                project={project.slug}
-                environment={environment}
-                isAdmin={canManageEnvironments}
-              />
-            ))}
-          </EnvironmentTable>
-        </Card>
+      {/* One tab is no choice at all, so a reader-only project shows none. */}
+      {allowed.length > 1 && (
+        <nav className="tabs" aria-label="Project sections">
+          {allowed.map(({ key, label, icon }) => (
+            <Link
+              key={key}
+              to="/projects/$project"
+              params={{ project: project.slug }}
+              search={{ tab: key === 'environments' ? undefined : key }}
+              // Without these, Environments (no parameter) counts as a
+              // prefix of every other tab and stays highlighted on all of them.
+              activeOptions={{ exact: true, explicitUndefined: true }}
+              aria-current={key === tab ? 'page' : undefined}
+            >
+              {icon}
+              {label}
+            </Link>
+          ))}
+        </nav>
       )}
 
-      {canManageGrants &&
+      {tab === 'environments' && (
+        <EnvironmentsPanel project={project} canManage={canManageEnvironments} />
+      )}
+
+      {(tab === 'users' || tab === 'tokens') &&
         (grantsError !== null ? (
-          <div style={{ marginTop: '1.25rem' }}>
-            <Notice tone="bad">{grantsError}</Notice>
-          </div>
+          <Notice tone="bad">{grantsError}</Notice>
         ) : (
-          <>
-            <ProjectAccessTable
-              principalType="user"
-              project={project.slug}
-              environments={project.environments}
-              grants={grants.filter((grant) => grant.principalType === 'user')}
-            />
-            <ProjectAccessTable
-              principalType="service"
-              project={project.slug}
-              environments={project.environments}
-              grants={grants.filter((grant) => grant.principalType === 'service')}
-            />
-          </>
+          <AccessPanel
+            principalType={principalType}
+            project={project.slug}
+            grants={grants.filter((grant) => grant.principalType === principalType)}
+          />
         ))}
 
-      {canManageProject && (
+      {tab === 'settings' && (
         <>
           <GeneralSettings project={project} />
           <DangerZone project={project} />
@@ -218,46 +186,78 @@ function ProjectPage() {
   );
 }
 
-function EnvironmentTable({ children }: { children: ReactNode }) {
+function EnvironmentsPanel({
+  project,
+  canManage,
+}: {
+  project: ProjectSummary;
+  canManage: boolean;
+}) {
+  const detailed = project.environments.filter(hasEnvironmentDetails);
+  const archived = detailed.filter((environment) => environment.details.archivedAt !== null);
+  // Environments you may know by name only sit with the active ones: no grant
+  // you hold covers their contents, so they are muted and do not open.
+  const current = project.environments.filter(
+    (environment) => environment.details === null || environment.details.archivedAt === null,
+  );
+
   return (
-    <div className="dt-wrap">
-      <table className="dt stacks">
-        <thead>
-          <tr>
-            <th className="n">#</th>
-            <th>
-              <span className="th">
-                <Layers size={14} />
-                Environment
-              </span>
-            </th>
-            <th>Name</th>
-            <th className="col-shrink">
-              <span className="th">
-                <Hash size={14} />
-                Secrets
-              </span>
-            </th>
-            <th className="col-actions">
-              <span className="visually-hidden">Actions</span>
-            </th>
-          </tr>
-        </thead>
-        <tbody>{children}</tbody>
-      </table>
-    </div>
+    <>
+      {current.length === 0 ? (
+        <div className="card">
+          <EmptyState title="No environments yet">
+            {canManage
+              ? 'Add the first with Add environment.'
+              : 'Creating environments needs environment.manage on this project.'}
+          </EmptyState>
+        </div>
+      ) : (
+        <ul className="env-grid" aria-label="Environments">
+          {current.map((environment) => (
+            <li key={`${project.slug}:${environment.slug}`}>
+              <EnvironmentCard
+                project={project.slug}
+                environment={environment}
+                isAdmin={canManage}
+              />
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {archived.length > 0 && (
+        <section aria-labelledby="archived-environments">
+          <h2 className="section-title" id="archived-environments">
+            Archived
+          </h2>
+          <ul className="env-grid">
+            {archived.map((environment) => (
+              <li key={environment.slug}>
+                <EnvironmentCard
+                  project={project.slug}
+                  environment={environment}
+                  isAdmin={canManage}
+                />
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+    </>
   );
 }
 
-function EnvironmentRow({
-  number,
+/**
+ * One environment. The whole card opens it when you can; its menu sits above
+ * that link.
+ */
+function EnvironmentCard({
   project,
   environment,
   isAdmin,
 }: {
-  number: number;
   project: string;
-  environment: DetailedProjectEnvironment;
+  environment: ProjectEnvironment;
   isAdmin: boolean;
 }) {
   const [renaming, setRenaming] = useState(false);
@@ -265,9 +265,11 @@ function EnvironmentRow({
   const [slug, setSlug] = useState(environment.slug);
   const [name, setName] = useState(environment.name);
   const { pending, error, setError, run } = useAction();
-  const isArchived = environment.details.archivedAt !== null;
-  const secretCount = environment.details.secretCount;
-  const opens = !isArchived && environment.accessible;
+  const details = environment.details;
+  const isArchived = details !== null && details.archivedAt !== null;
+  const secretCount = details?.secretCount ?? null;
+  const opens = details !== null && !isArchived && environment.accessible;
+  const manageable = isAdmin && details !== null;
   const slugError = slug === '' ? null : slugProblem(slug);
 
   useEffect(() => {
@@ -275,200 +277,200 @@ function EnvironmentRow({
   }, [error, renaming]);
 
   return (
-    <tr>
-      <td className="n">{number}</td>
-      <td className="cell-mono" data-label="Environment">
+    <div className={`env-card${opens ? ' is-link' : ' is-muted'}`}>
+      <div className="env-card-text">
         {opens ? (
           <Link
-            className="cell-link"
+            className="env-card-name stretch"
             to="/projects/$project/$environment"
             params={{ project, environment: environment.slug }}
           >
-            {environment.slug}
+            {environment.name}
           </Link>
         ) : (
-          <span className={isArchived ? 'cell-muted' : undefined}>{environment.slug}</span>
+          <span className="env-card-name">{environment.name}</span>
         )}
-      </td>
-      <td className={isArchived ? 'cell-muted' : undefined} data-label="Name">
-        {environment.name}
-      </td>
-      <td className="num nowrap" data-label="Secrets">
-        {isArchived ? (
-          <span className="tag tag-red">archived</span>
-        ) : !environment.accessible ? (
-          <span className="tag tag-outline">no secret access</span>
-        ) : (
-          (secretCount ?? '—')
-        )}
-      </td>
-      <td className="col-actions">
-        {isAdmin && (
-          <DropdownMenu.Root>
-            <DropdownMenu.Trigger asChild>
-              <button
-                className="act act-quiet"
-                aria-label={`Actions for ${environment.slug}`}
-                disabled={pending}
-              >
-                {pending ? <Spinner size={14} /> : <MoreHorizontal size={16} />}
-              </button>
-            </DropdownMenu.Trigger>
-            <DropdownMenu.Portal>
-              <DropdownMenu.Content className="menu" sideOffset={6} align="end">
-                <DropdownMenu.Item
-                  className="menu-item"
-                  onSelect={() => {
-                    setSlug(environment.slug);
-                    setName(environment.name);
-                    setRenaming(true);
-                  }}
-                >
-                  <Pencil size={14} />
-                  Rename
-                </DropdownMenu.Item>
-                <DropdownMenu.Separator className="menu-sep" />
-                <DropdownMenu.Item
-                  className={`menu-item${isArchived ? '' : ' menu-item-danger'}`}
-                  onSelect={() => setConfirming(true)}
-                >
-                  {isArchived ? <RotateBack size={14} /> : <Archive size={14} />}
-                  {isArchived ? 'Restore' : 'Archive…'}
-                </DropdownMenu.Item>
-              </DropdownMenu.Content>
-            </DropdownMenu.Portal>
-          </DropdownMenu.Root>
-        )}
+        <span className="env-card-meta">
+          <span className="mono">{environment.slug}</span>
+          {isArchived ? (
+            <span className="tag tag-red">archived</span>
+          ) : !environment.accessible ? (
+            <span className="tag tag-outline">no secret access</span>
+          ) : (
+            secretCount !== null && (
+              <span>
+                {secretCount} secret{secretCount === 1 ? '' : 's'}
+              </span>
+            )
+          )}
+        </span>
+      </div>
 
-        {isAdmin && (
-          <>
-            <Modal
-              open={renaming}
-              onOpenChange={(open) => {
-                setRenaming(open);
-                if (!open) setError(null);
-              }}
-              title={
-                <>
-                  Rename{' '}
-                  <span className="mono">
-                    {project}/{environment.slug}
-                  </span>
-                </>
-              }
+      {manageable && (
+        <DropdownMenu.Root>
+          <DropdownMenu.Trigger asChild>
+            <button
+              className="act act-quiet env-card-menu"
+              aria-label={`Actions for ${environment.slug}`}
+              disabled={pending}
             >
-              <form
-                className="form"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  run(
-                    () =>
-                      updateEnvironment({
-                        data: { project, environment: environment.slug, slug, name },
-                      }),
-                    () => {
-                      setRenaming(false);
-                      toast.success('Environment renamed');
-                    },
-                  );
+              {pending ? <Spinner size={14} /> : <MoreHorizontal size={16} />}
+            </button>
+          </DropdownMenu.Trigger>
+          <DropdownMenu.Portal>
+            <DropdownMenu.Content className="menu" sideOffset={6} align="end">
+              <DropdownMenu.Item
+                className="menu-item"
+                onSelect={() => {
+                  setSlug(environment.slug);
+                  setName(environment.name);
+                  setRenaming(true);
                 }}
               >
-                <label className="field">
-                  <span className="label">Slug</span>
-                  <input
-                    className="input input-mono"
-                    autoFocus
-                    spellCheck={false}
-                    value={slug}
-                    aria-invalid={slugError !== null}
-                    onChange={(event) => setSlug(event.target.value)}
-                  />
-                  <span className={`hint${slugError !== null ? ' edit-note-error' : ''}`}>
-                    {slugError ??
-                      `Anything running coffre run ${project}/${environment.slug} will need the new path.`}
-                  </span>
-                </label>
-                <label className="field">
-                  <span className="label">Display name</span>
-                  <input
-                    className="input"
-                    value={name}
-                    onChange={(event) => setName(event.target.value)}
-                  />
-                </label>
+                <Pencil size={14} />
+                Rename
+              </DropdownMenu.Item>
+              <DropdownMenu.Separator className="menu-sep" />
+              <DropdownMenu.Item
+                className={`menu-item${isArchived ? '' : ' menu-item-danger'}`}
+                onSelect={() => setConfirming(true)}
+              >
+                {isArchived ? <RotateBack size={14} /> : <Archive size={14} />}
+                {isArchived ? 'Restore' : 'Archive…'}
+              </DropdownMenu.Item>
+            </DropdownMenu.Content>
+          </DropdownMenu.Portal>
+        </DropdownMenu.Root>
+      )}
 
-                <ErrorLine error={error} />
-
-                <div className="dialog-actions">
-                  <button className="btn" type="button" onClick={() => setRenaming(false)}>
-                    Cancel
-                  </button>
-                  <button
-                    className="btn btn-primary"
-                    type="submit"
-                    disabled={pending || slug === '' || slugError !== null || name.trim() === ''}
-                  >
-                    {pending && <Spinner />}
-                    Save
-                  </button>
-                </div>
-              </form>
-            </Modal>
-
-            <ConfirmDialog
-              open={confirming}
-              onOpenChange={setConfirming}
-              title={
-                <>
-                  {isArchived ? 'Restore' : 'Archive'}{' '}
-                  <span className="mono">
-                    {project}/{environment.slug}
-                  </span>
-                  ?
-                </>
-              }
-              body={
-                secretCount === null ? (
-                  <>
-                    This changes whether the environment serves secrets to principals who have
-                    access. Values and history remain stored.
-                  </>
-                ) : isArchived ? (
-                  <>
-                    The environment starts serving its {secretCount} secret
-                    {secretCount === 1 ? '' : 's'} again, to everyone who holds a grant on it.
-                  </>
-                ) : (
-                  <>
-                    Its {secretCount} secret{secretCount === 1 ? '' : 's'} stop being served, so
-                    anything running <code>coffre run</code> against{' '}
-                    <span className="mono">
-                      {project}/{environment.slug}
-                    </span>{' '}
-                    loses them at its next start. Values and history survive, and restoring is
-                    one click.
-                  </>
-                )
-              }
-              confirmLabel={isArchived ? 'Restore environment' : 'Archive environment'}
-              destructive={!isArchived}
-              onConfirm={() =>
+      {manageable && (
+        <>
+          <Modal
+            open={renaming}
+            onOpenChange={(open) => {
+              setRenaming(open);
+              if (!open) setError(null);
+            }}
+            title={
+              <>
+                Rename{' '}
+                <span className="mono">
+                  {project}/{environment.slug}
+                </span>
+              </>
+            }
+          >
+            <form
+              className="form"
+              onSubmit={(event) => {
+                event.preventDefault();
                 run(
                   () =>
-                    setEnvironmentArchived({
-                      data: { project, environment: environment.slug, archived: !isArchived },
+                    updateEnvironment({
+                      data: { project, environment: environment.slug, slug, name },
                     }),
-                  () =>
-                    toast.success(
-                      isArchived ? `${environment.slug} restored` : `${environment.slug} archived`,
-                    ),
-                )
-              }
-            />
-          </>
-        )}
-      </td>
-    </tr>
+                  () => {
+                    setRenaming(false);
+                    toast.success('Environment renamed');
+                  },
+                );
+              }}
+            >
+              <label className="field">
+                <span className="label">Slug</span>
+                <input
+                  className="input input-mono"
+                  autoFocus
+                  spellCheck={false}
+                  value={slug}
+                  aria-invalid={slugError !== null}
+                  onChange={(event) => setSlug(event.target.value)}
+                />
+                <span className={`hint${slugError !== null ? ' edit-note-error' : ''}`}>
+                  {slugError ??
+                    `Anything running coffre run ${project}/${environment.slug} will need the new path.`}
+                </span>
+              </label>
+              <label className="field">
+                <span className="label">Display name</span>
+                <input
+                  className="input"
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                />
+              </label>
+
+              <ErrorLine error={error} />
+
+              <div className="dialog-actions">
+                <button className="btn" type="button" onClick={() => setRenaming(false)}>
+                  Cancel
+                </button>
+                <button
+                  className="btn btn-primary"
+                  type="submit"
+                  disabled={pending || slug === '' || slugError !== null || name.trim() === ''}
+                >
+                  {pending && <Spinner />}
+                  Save
+                </button>
+              </div>
+            </form>
+          </Modal>
+
+          <ConfirmDialog
+            open={confirming}
+            onOpenChange={setConfirming}
+            title={
+              <>
+                {isArchived ? 'Restore' : 'Archive'}{' '}
+                <span className="mono">
+                  {project}/{environment.slug}
+                </span>
+                ?
+              </>
+            }
+            body={
+              secretCount === null ? (
+                <>
+                  This changes whether the environment serves secrets to principals who have
+                  access. Values and history remain stored.
+                </>
+              ) : isArchived ? (
+                <>
+                  The environment starts serving its {secretCount} secret
+                  {secretCount === 1 ? '' : 's'} again, to everyone who holds a grant on it.
+                </>
+              ) : (
+                <>
+                  Its {secretCount} secret{secretCount === 1 ? '' : 's'} stop being served, so
+                  anything running <code>coffre run</code> against{' '}
+                  <span className="mono">
+                    {project}/{environment.slug}
+                  </span>{' '}
+                  loses them at its next start. Values and history survive, and restoring is
+                  one click.
+                </>
+              )
+            }
+            confirmLabel={isArchived ? 'Restore environment' : 'Archive environment'}
+            destructive={!isArchived}
+            onConfirm={() =>
+              run(
+                () =>
+                  setEnvironmentArchived({
+                    data: { project, environment: environment.slug, archived: !isArchived },
+                  }),
+                () =>
+                  toast.success(
+                    isArchived ? `${environment.slug} restored` : `${environment.slug} archived`,
+                  ),
+              )
+            }
+          />
+        </>
+      )}
+    </div>
   );
 }
 
@@ -486,7 +488,7 @@ function NewEnvironment({ project }: { project: string }) {
 
   return (
     <>
-      <button className="btn btn-sm" onClick={() => setOpen(true)}>
+      <button className="btn btn-primary" onClick={() => setOpen(true)}>
         <Plus size={14} />
         Add environment
       </button>
@@ -570,74 +572,45 @@ function NewEnvironment({ project }: { project: string }) {
   );
 }
 
-function ProjectAccessTable({
+function AccessPanel({
   principalType,
   project,
-  environments,
   grants,
 }: {
   principalType: 'user' | 'service';
   project: string;
-  environments: ProjectSummary['environments'];
   grants: GrantRow[];
 }) {
   const people = principalType === 'user';
   return (
-    <Card
-      labelledBy={`access-${principalType}`}
-      title={people ? 'Users with access' : 'Tokens with access'}
-      description={
-        people
-          ? 'A grant covers the whole project or exactly one environment, and takes effect immediately.'
-          : 'Machines such as CI and deploys, matched on their Access service-token common name.'
-      }
-      actions={
-        <NewGrant principalType={principalType} project={project} environments={environments} />
-      }
-    >
+    <section className="card" aria-label={people ? 'Users with access' : 'Tokens with access'}>
       {grants.length === 0 ? (
         <EmptyState title={people ? 'No user has access' : 'No token has access'}>
-          Add {people ? 'a user' : 'a token'} with permissions on the whole project
-          or on one environment.
+          Add {people ? 'a user' : 'a token'} with permissions on the whole project or on one
+          environment.
         </EmptyState>
       ) : (
-        <div className="dt-wrap">
-          <table className="dt grants stacks">
-            <thead>
-              <tr>
-                <th className="n">#</th>
-                <th className="col-principal">
-                  <span className="th">
-                    {people ? <User size={14} /> : <Key size={14} />}
-                    {people ? 'Email' : 'Common name'}
-                  </span>
-                </th>
-                <th>
-                  <span className="th">
-                    <ShieldCheck size={14} />
-                    Permissions
-                  </span>
-                </th>
-                <th className="col-expires">
-                  <span className="th">
-                    <Clock size={14} />
-                    Expires
-                  </span>
-                </th>
-                <th className="col-actions">
-                  <span className="visually-hidden">Actions</span>
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {grants.map((grant, index) => (
-                <GrantRowView key={grant.id} number={index + 1} project={project} grant={grant} />
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <GrantsTable
+          lead={
+            <span className="th">
+              {people ? <User size={14} /> : <Key size={14} />}
+              {people ? 'Email' : 'Common name'}
+            </span>
+          }
+        >
+          {grants.map((grant, index) => (
+            <GrantRowView
+              key={grant.id}
+              number={index + 1}
+              project={project}
+              grant={grant}
+              leadLabel={people ? 'Email' : 'Common name'}
+              lead={<PrincipalLink type={grant.principalType} id={grant.principalId} />}
+            />
+          ))}
+        </GrantsTable>
       )}
-    </Card>
+    </section>
   );
 }
 
@@ -665,7 +638,7 @@ function NewGrant({
 
   return (
     <>
-      <button className="btn btn-sm" onClick={() => setOpen(true)}>
+      <button className="btn btn-primary" onClick={() => setOpen(true)}>
         <Plus size={14} />
         Add {kind}
       </button>
@@ -787,88 +760,6 @@ function NewGrant({
   );
 }
 
-function GrantRowView({
-  number,
-  project,
-  grant,
-}: {
-  number: number;
-  project: string;
-  grant: GrantRow;
-}) {
-  const { pending, error, run } = useAction();
-  const label = projectAccessLabel(grant);
-  const expired = grant.expiresAt !== null && new Date(grant.expiresAt).getTime() < Date.now();
-
-  return (
-    <>
-      <tr>
-        <td className="n">{number}</td>
-        <td
-          className="cell-mono"
-          data-label={grant.principalType === 'user' ? 'Email' : 'Common name'}
-        >
-          {grant.principalId}
-        </td>
-        <td data-label="Permissions">
-          <span className={`tag${grant.role === 'owner' ? ' tag-violet' : ''}`}>{label}</span>
-        </td>
-        <td className="col-expires cell-mono cell-muted" data-label="Expires">
-          {grant.expiresAt === null ? (
-            'never'
-          ) : (
-            <>
-              {grant.expiresAt.slice(0, 10)}
-              {expired && (
-                <>
-                  {' '}
-                  <span className="tag tag-red">expired</span>
-                </>
-              )}
-            </>
-          )}
-        </td>
-        <td className="col-actions">
-          <ConfirmButton
-            trigger={
-              <button className="act act-danger" disabled={pending}>
-                {pending && <Spinner size={13} />}
-                Revoke
-              </button>
-            }
-            title={
-              <>
-                Revoke {label} from <span className="mono">{grant.principalId}</span>?
-              </>
-            }
-            body={
-              <>
-                They lose <strong>{label}</strong> on <span className="mono">{project}</span>{' '}
-                immediately, including any process using it right now. Other grants they hold
-                still apply.
-              </>
-            }
-            confirmLabel="Revoke access"
-            onConfirm={() =>
-              run(
-                () => revokeGrant({ data: { project, grantId: grant.id } }),
-                () => toast.success(`Revoked access from ${grant.principalId}`),
-              )
-            }
-          />
-        </td>
-      </tr>
-      {error !== null && (
-        <tr className="row-error">
-          <td colSpan={5}>
-            <ErrorLine error={error} />
-          </td>
-        </tr>
-      )}
-    </>
-  );
-}
-
 /**
  * The project's name and slug, as a form on the page.
  *
@@ -913,7 +804,11 @@ function GeneralSettings({ project }: { project: ProjectSummary }) {
               toast.success('Project renamed');
               // The slug is part of the URL, so a rename has to navigate.
               if (slug !== project.slug) {
-                await router.navigate({ to: '/projects/$project', params: { project: slug } });
+                await router.navigate({
+                  to: '/projects/$project',
+                  params: { project: slug },
+                  search: { tab: 'settings' },
+                });
               }
             },
           );

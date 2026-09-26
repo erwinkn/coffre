@@ -2,15 +2,13 @@ import { useState } from 'react';
 import { createFileRoute, Link } from '@tanstack/react-router';
 import { toast } from 'sonner';
 import { createProject, listProjects } from '../server-functions/projects';
+import { listKeys } from '../server-functions/secrets';
 import { useAction } from '../lib/use-action';
 import type { ProjectSummary } from '../shared/models';
-import {
-  hasEnvironmentDetails,
-  isActiveAccessibleEnvironment,
-} from '../lib/project-environments';
+import { isActiveAccessibleEnvironment } from '../lib/project-environments';
 import { slugProblem } from '../lib/validation';
 import { EmptyState, ErrorLine, Modal, Spinner } from '../components/ui';
-import { Card, ClosedDoor, PageHeader } from '../components/page';
+import { ClosedDoor, PageHeader } from '../components/page';
 import { Tile } from '../components/tile';
 import { AlertTriangle, Folder, Hash, Layers, Plus } from '../components/icons';
 import {
@@ -19,12 +17,50 @@ import {
 } from '../components/affordances';
 
 export const Route = createFileRoute('/projects/')({
-  loader: () => listProjects(),
+  loader: async () => {
+    const result = await listProjects();
+    return { result, secrets: result.ok ? await countSecrets(result.projects) : {} };
+  },
   component: ProjectsPage,
 });
 
+/**
+ * Distinct secret names per project, across the environments you can open.
+ *
+ * The project summary only counts secrets per environment, and the same key
+ * in dev and prod is one secret, not two. So this lists the keys of every
+ * environment you can open and counts the names. Listing keys reads no value
+ * and writes no audit row. Environments you cannot open are not asked: the
+ * refusal would be audited.
+ *
+ * A project whose keys could not all be listed gets no count rather than a
+ * short one.
+ */
+async function countSecrets(projects: ProjectSummary[]): Promise<Record<string, number | null>> {
+  const counts = await Promise.all(
+    projects
+      .filter((project) => project.archivedAt === null)
+      .map(async (project) => {
+        const environments = project.environments.filter(isActiveAccessibleEnvironment);
+        if (environments.length === 0) return [project.slug, null] as const;
+        const lists = await Promise.all(
+          environments.map((environment) =>
+            listKeys({ data: { project: project.slug, environment: environment.slug } }),
+          ),
+        );
+        const names = new Set<string>();
+        for (const list of lists) {
+          if (!list.ok) return [project.slug, null] as const;
+          for (const key of list.keys) if (!key.archived) names.add(key.key);
+        }
+        return [project.slug, names.size] as const;
+      }),
+  );
+  return Object.fromEntries(counts);
+}
+
 function ProjectsPage() {
-  const result = Route.useLoaderData();
+  const { result, secrets } = Route.useLoaderData();
 
   if (!result.ok) {
     return (
@@ -44,26 +80,11 @@ function ProjectsPage() {
 
   const active = result.projects.filter((project) => project.archivedAt === null);
   const archived = result.projects.filter((project) => project.archivedAt !== null);
-  const secretTotal = active.reduce((sum, project) => sum + countSecrets(project), 0);
 
   return (
     <>
       <PageHeader
         title="Projects"
-        meta={
-          <>
-            <span>
-              <strong>{active.length}</strong> project{active.length === 1 ? '' : 's'} visible
-              to you
-            </span>
-            {secretTotal > 0 && (
-              <span>
-                <strong>{secretTotal}</strong> secret{secretTotal === 1 ? '' : 's'} in the
-                environments you can open
-              </span>
-            )}
-          </>
-        }
         actions={
           <RootAdminOnly capabilities={result.capabilities}>
             <NewProject />
@@ -82,33 +103,31 @@ function ProjectsPage() {
         </div>
       ) : (
         <section className="card" aria-label="Projects">
-          <ProjectTable projects={active} />
+          <ProjectTable projects={active} secrets={secrets} />
         </section>
       )}
 
       {archived.length > 0 && (
-        <div style={{ marginTop: '2rem' }}>
-          <Card
-            labelledBy="archived-projects"
-            title="Archived"
-            description="Hidden from listings and refused on read. Every row is still present, and the audit trail over them still verifies."
-          >
-            <ProjectTable projects={archived} />
-          </Card>
-        </div>
+        <section aria-labelledby="archived-projects">
+          <h2 className="section-title" id="archived-projects">
+            Archived
+          </h2>
+          <div className="card">
+            <ProjectTable projects={archived} secrets={secrets} />
+          </div>
+        </section>
       )}
     </>
   );
 }
 
-function countSecrets(project: ProjectSummary): number {
-  return project.environments
-    .filter(hasEnvironmentDetails)
-    .filter((environment) => environment.details.archivedAt === null)
-    .reduce((sum, environment) => sum + (environment.details.secretCount ?? 0), 0);
-}
-
-function ProjectTable({ projects }: { projects: ProjectSummary[] }) {
+function ProjectTable({
+  projects,
+  secrets,
+}: {
+  projects: ProjectSummary[];
+  secrets: Record<string, number | null>;
+}) {
   return (
     <div className="dt-wrap">
       <table className="dt projects stacks">
@@ -121,14 +140,13 @@ function ProjectTable({ projects }: { projects: ProjectSummary[] }) {
                 Project
               </span>
             </th>
-            <th className="col-name">Name</th>
             <th>
               <span className="th">
                 <Layers size={14} />
                 Environments
               </span>
             </th>
-            <th className="col-shrink">
+            <th className="col-shrink col-secrets">
               <span className="th">
                 <Hash size={14} />
                 Secrets
@@ -138,7 +156,12 @@ function ProjectTable({ projects }: { projects: ProjectSummary[] }) {
         </thead>
         <tbody>
           {projects.map((project, index) => (
-            <ProjectRow key={project.slug} number={index + 1} project={project} />
+            <ProjectRow
+              key={project.slug}
+              number={index + 1}
+              project={project}
+              secrets={secrets[project.slug] ?? null}
+            />
           ))}
         </tbody>
       </table>
@@ -150,41 +173,45 @@ function ProjectTable({ projects }: { projects: ProjectSummary[] }) {
  * One project. The whole row opens it; the environment links inside it sit
  * above that and go straight to the environment.
  */
-function ProjectRow({ number, project }: { number: number; project: ProjectSummary }) {
+function ProjectRow({
+  number,
+  project,
+  secrets,
+}: {
+  number: number;
+  project: ProjectSummary;
+  secrets: number | null;
+}) {
   const isArchived = project.archivedAt !== null;
   const listedEnvironments = project.environments.filter(
     (environment) =>
       environment.details === null || environment.details.archivedAt === null,
   );
-  const counted = project.environments
-    .filter(hasEnvironmentDetails)
-    .some(
-      (environment) =>
-        environment.details.archivedAt === null && environment.details.secretCount !== null,
-    );
 
   return (
     <tr className="row-link">
       <td className="n">{number}</td>
-      <td data-label="Project">
+      <td className="col-project">
         <span className="cell-project">
           <Tile name={project.slug} />
-          <Link
-            className="cell-link stretch"
-            to="/projects/$project"
-            params={{ project: project.slug }}
-          >
-            {project.slug}
-          </Link>
+          <span className="cell-stack">
+            <Link
+              className="cell-link stretch"
+              to="/projects/$project"
+              params={{ project: project.slug }}
+            >
+              {project.name}
+            </Link>
+            <small className="mono">{project.slug}</small>
+          </span>
         </span>
       </td>
-      <td className="cell-muted" data-label="Name">
-        {project.name}
-      </td>
-      <td data-label="Environments">
+      <td className="col-envs" data-label="Environments">
         {isArchived || listedEnvironments.length === 0 ? (
           <span className="cell-muted">
-            {listedEnvironments.length === 0 ? 'None yet' : listedEnvironments.length}
+            {listedEnvironments.length === 0
+              ? 'No environments yet'
+              : `${listedEnvironments.length} environment${listedEnvironments.length === 1 ? '' : 's'}`}
           </span>
         ) : (
           <span className="env-links" aria-label={`Environments in ${project.slug}`}>
@@ -212,8 +239,15 @@ function ProjectRow({ number, project }: { number: number; project: ProjectSumma
           </span>
         )}
       </td>
-      <td className="num nowrap" data-label="Secrets">
-        {counted && !isArchived ? countSecrets(project) : <span className="cell-muted">—</span>}
+      <td className="col-secrets num nowrap">
+        {secrets !== null && !isArchived ? (
+          <>
+            {secrets}
+            <span className="narrow-only"> secret{secrets === 1 ? '' : 's'}</span>
+          </>
+        ) : (
+          <span className="cell-muted wide-only">—</span>
+        )}
       </td>
     </tr>
   );

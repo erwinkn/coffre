@@ -123,7 +123,11 @@ export function Shell({ projects, principal, instanceRole, capabilities, childre
             </Dialog.Portal>
           </Dialog.Root>
 
-          <Breadcrumbs pathname={pathname} projects={projects} />
+          <Breadcrumbs
+            pathname={pathname}
+            projects={projects}
+            canListPrincipals={capabilities.canManageGrants}
+          />
 
           <div className="header-end">
             <CommandPalette projects={projects} capabilities={capabilities} />
@@ -263,11 +267,45 @@ function AccountMenu({
  * The path to the project or environment you are in, where each step also
  * switches: one click on `prod` lists its siblings. Absent everywhere else.
  */
-function Breadcrumbs({ pathname, projects }: { pathname: string; projects: ProjectSummary[] }) {
+function Breadcrumbs({
+  pathname,
+  projects,
+  canListPrincipals,
+}: {
+  pathname: string;
+  projects: ProjectSummary[];
+  canListPrincipals: boolean;
+}) {
   const [section, projectSlug, environmentSlug] = pathname
     .split('/')
     .filter((segment) => segment !== '')
     .map(decodeURIComponent);
+
+  // A user's or token's own page sits under its list, like an environment
+  // under its project. Someone who manages one project's access reaches the
+  // page without being able to open the list, so the root is then just a label.
+  if ((section === 'users' || section === 'tokens') && projectSlug !== undefined) {
+    const label = <span>{section === 'users' ? 'Users' : 'Tokens'}</span>;
+    return (
+      <nav className="crumbs" aria-label="Breadcrumb">
+        {canListPrincipals ? (
+          <Link className="crumb-link crumb-root" to={section === 'users' ? '/users' : '/tokens'}>
+            {label}
+          </Link>
+        ) : (
+          <span className="crumb-link crumb-root">{label}</span>
+        )}
+        <span className="crumb-sep" aria-hidden>
+          /
+        </span>
+        <span className="crumb">
+          <span className="crumb-link" aria-current="page">
+            <span>{projectSlug}</span>
+          </span>
+        </span>
+      </nav>
+    );
+  }
 
   if (section !== 'projects' || projectSlug === undefined) return null;
 

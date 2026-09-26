@@ -296,9 +296,14 @@ Things worth knowing about it:
 - **Restoring gets an undo toast, not a confirmation dialog.** Dialogs are
   reserved for changes that reach other people -- archiving a project or
   environment, revoking a grant -- and each one says what will actually break.
+- **Access is managed from either side.** A project's page has tabs for its
+  environments, the users and tokens that hold grants on it, and its settings.
+  Each user and token has a page too, listing its grants across the projects
+  you manage, where "Add to projects" sets a level per project (owner, read or
+  write everywhere, or per environment) and writes them as separate grants.
 - **Permissions shape the page.** Sections are gated individually, so an access
   manager administers grants without seeing a rename control, and never meets an
-  affordance that refuses them.
+  affordance that refuses them. A tab you cannot use is not drawn.
 
 `⌘K` jumps to any project or environment.
 
