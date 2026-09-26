@@ -41,6 +41,26 @@ export function isRootAdmin(principal: PrincipalRef, rootAdmins: readonly string
   return principal.type === 'user' && rootAdmins.includes(principal.id);
 }
 
+/** Root admins and active users with the instance `owner` role. */
+export async function isInstanceOwner(
+  tx: DatabaseClient,
+  principal: PrincipalRef,
+  rootAdmins: readonly string[],
+): Promise<boolean> {
+  if (isRootAdmin(principal, rootAdmins)) return true;
+  if (principal.type !== 'user') return false;
+
+  const result = await tx.query(
+    `SELECT 1 FROM principals
+      WHERE principal_type = 'user'
+        AND principal_id = $1
+        AND active
+        AND instance_role = 'owner'`,
+    [principal.id],
+  );
+  return result.rowCount !== 0;
+}
+
 /**
  * Everything the caller may do in one environment.
  *

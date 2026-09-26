@@ -8,6 +8,7 @@ import { appendAudit, type AuditEntry } from '../../../../../packages/db/src/aud
 import { AccessDenied, AuditedFailure, NotFound, type RequestContext } from './secrets.ts';
 import {
   has,
+  isInstanceOwner,
   isRootAdmin as isConfiguredRootAdmin,
   permissionsForProject,
   PROJECT_ONLY_PERMISSIONS,
@@ -163,18 +164,7 @@ export class AdminService {
   }
 
   async #isInstanceOwner(tx: DatabaseClient, principal: PrincipalRef): Promise<boolean> {
-    if (this.#isRootAdmin(principal)) return true;
-    if (principal.type !== 'user') return false;
-
-    const result = await tx.query(
-      `SELECT 1 FROM principals
-        WHERE principal_type = 'user'
-          AND principal_id = $1
-          AND active
-          AND instance_role = 'owner'`,
-      [principal.id],
-    );
-    return result.rowCount !== 0;
+    return isInstanceOwner(tx, principal, this.#deps.rootAdmins);
   }
 
   async #requireInstanceOwner(

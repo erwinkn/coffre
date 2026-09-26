@@ -13,6 +13,7 @@
     "test": "node --test"
   },
   "dependencies": {
-    "jose": "6.2.3"
+    "jose": "6.2.3",
+    "oauth4webapi": "3.8.8"
   }
 }

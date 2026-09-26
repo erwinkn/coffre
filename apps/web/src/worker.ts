@@ -15,9 +15,9 @@ function runtimeLogger() {
 }
 
 export default {
-  fetch(request, bindings, _context) {
+  fetch(request, bindings, context) {
     return runWithWorkerRuntime(bindings, () =>
-      handler.fetch(request));
+      handler.fetch(request), context);
   },
 
   async scheduled(_controller, bindings, context) {

@@ -28,11 +28,11 @@ export type Principal =
 /**
  * Verifies a bearer token and returns the caller it identifies.
  *
- * Production points at the Cloudflare Access team domain; local development
- * points at the dev IdP. Same code, different configuration.
+ * Cloudflare mode verifies Access JWTs against the team domain, dev mode
+ * against the dev IdP; signin mode looks up coffre's own credentials.
  */
 export interface IdentityVerifier {
-  verify(token: string): Promise<Principal>;
+  verify(token: string, request?: { sourceIp: string | null }): Promise<Principal>;
 }
 
 /** Access delivers the JWT to the origin in this header. */
