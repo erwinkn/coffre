@@ -4,7 +4,7 @@ import { ClientOnly } from '@tanstack/react-router';
 // Point-and-click UI feedback overlay (agentation.com): you annotate the page,
 // the agent reads the annotations over MCP from the annotation server on
 // 127.0.0.1:4747. Dev-only. The toolbar reaches that server through the dev
-// server's `/__agentation` proxy (vite.config.ts) rather than at localhost
+// server's `/_agentation` proxy (vite.config.ts) rather than at localhost
 // directly, so annotating through a tunnel lands on this machine too.
 //
 // The ternary is what keeps it out of production: import.meta.env.DEV is
@@ -30,5 +30,5 @@ export function Agentation() {
 
 /** Reads the page's origin, so it renders only inside ClientOnly, never on the server. */
 function SameOriginToolbar() {
-  return <Toolbar endpoint={`${window.location.origin}/__agentation`} />;
+  return <Toolbar endpoint={`${window.location.origin}/_agentation`} />;
 }

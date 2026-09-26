@@ -14,9 +14,9 @@ export default defineConfig({
     // server is reached through a tunnel, where the browser's localhost is
     // not this machine's.
     proxy: {
-      '/__agentation': {
+      '/_agentation': {
         target: 'http://127.0.0.1:4747',
-        rewrite: (path) => path.replace(/^\/__agentation/, ''),
+        rewrite: (path) => path.replace(/^\/_agentation/, ''),
       },
     },
   },
