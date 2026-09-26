@@ -265,11 +265,15 @@ Things worth knowing about it:
 - **It is drawn as a plain developer tool.** Neutral surfaces, bordered
   cards, and tables as grids with a row-number gutter; Inter for the interface
   and JetBrains Mono for anything a machine reads back (keys, slugs, values,
-  sequence numbers). A sidebar opens on the workspace switcher, holds the
-  sections (Projects, Users, Tokens, Audit, and the workspace's Settings) and,
-  at its foot, your account with your own settings (theme, identity). The
-  switcher is ahead of the server, which has no notion of workspaces yet: it
-  shows the one this deployment is and says so if you try to create another.
+  sequence numbers). A table too wide for the window scrolls sideways rather
+  than squeeze a column to nothing, and on a phone its rows stack into cards.
+  A sidebar opens on the workspace switcher, holds the sections (Projects,
+  Users, Tokens, Audit, and the workspace's Settings) and, at its foot, your
+  account with your own settings (theme, identity). It folds down to its icons
+  (⌘B, or the button at the left of the bar) and stays folded across visits,
+  set before first paint so a reload does not flash it open. The switcher is
+  ahead of the server, which has no notion of workspaces yet: it shows the one
+  this deployment is and says so if you try to create another.
   The bar above the page holds search and a
   link to this repository, and inside a project, the path to where you are.
   That path is itself a switcher: one click on `prod` lists its sibling

@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useRouterState } from '@tanstack/react-router';
 import { Dialog, DropdownMenu } from 'radix-ui';
 import { toast } from 'sonner';
@@ -19,8 +19,10 @@ import {
   Ledger,
   Mark,
   Menu,
+  PanelLeft,
   Plus,
   Settings,
+  UserCog,
   Users,
   X,
 } from './icons';
@@ -43,6 +45,49 @@ const REPOSITORY = 'https://github.com/equisafe/coffre';
  * one deployment is one workspace -- so the name lives here until it does.
  */
 const WORKSPACE = 'Equisafe';
+
+const SIDEBAR_KEY = 'coffre-sidebar';
+
+/** Wide enough for the sidebar to sit beside the page; narrower, it is a drawer. */
+const WIDE = '(width > 60rem)';
+
+/**
+ * Collapses the sidebar before first paint, inlined in <head> like the
+ * theme's script: drawn wide and then snapped narrow, the whole page would
+ * lurch sideways on every load.
+ */
+export const sidebarBootScript = `(function(){try{if(localStorage.getItem(${JSON.stringify(
+  SIDEBAR_KEY,
+)})==="collapsed"){document.documentElement.setAttribute("data-sidebar","collapsed")}}catch(e){}})()`;
+
+/**
+ * Whether the sidebar is folded down to its icons, and the switch.
+ *
+ * The attribute on <html> is the truth and the stylesheet reads it, so the
+ * boot script has already drawn the right width. Server-rendered markup
+ * cannot know it, so this state starts expanded and catches up on mount.
+ */
+function useSidebarCollapsed(): [boolean, () => void] {
+  const [collapsed, setCollapsed] = useState(false);
+
+  useEffect(() => setCollapsed(document.documentElement.dataset.sidebar === 'collapsed'), []);
+
+  const toggle = useCallback(() => {
+    const root = document.documentElement;
+    const next = root.dataset.sidebar !== 'collapsed';
+    if (next) root.dataset.sidebar = 'collapsed';
+    else delete root.dataset.sidebar;
+    try {
+      if (next) localStorage.setItem(SIDEBAR_KEY, 'collapsed');
+      else localStorage.removeItem(SIDEBAR_KEY);
+    } catch {
+      // Storage refused (private mode); the choice still holds for this page.
+    }
+    setCollapsed(next);
+  }, []);
+
+  return [collapsed, toggle];
+}
 
 /** Marks the current route without each link having to compare paths itself. */
 const CURRENT = { 'aria-current': 'page' } as const;
@@ -69,7 +114,8 @@ export function Brand() {
 /**
  * The application frame: a sidebar of sections, headed by the workspace and
  * footed by your account, and a bar across the content with search on the
- * right.
+ * right. The sidebar folds down to its icons (⌘B, or the button at the left
+ * of the bar) and stays folded across visits.
  *
  * Inside a project, the left of that bar is the path to where you are, and
  * each step of it switches: that is the only place project and environment
@@ -79,19 +125,56 @@ export function Brand() {
 export function Shell({ projects, principal, instanceRole, capabilities, children }: ShellProps) {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [collapsed, toggleSidebar] = useSidebarCollapsed();
 
   // Following a link in the drawer should land on the page, not leave the
   // navigation covering it.
   useEffect(() => setDrawerOpen(false), [pathname]);
 
+  // ⌘B, as in most editors, and only where there is a sidebar to fold.
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === 'b' && (event.metaKey || event.ctrlKey) && matchMedia(WIDE).matches) {
+        event.preventDefault();
+        toggleSidebar();
+      }
+    }
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [toggleSidebar]);
+
   return (
     <div className="shell">
       <aside className="sidebar">
-        <Sidebar principal={principal} instanceRole={instanceRole} capabilities={capabilities} />
+        <Sidebar
+          principal={principal}
+          instanceRole={instanceRole}
+          capabilities={capabilities}
+          collapsed={collapsed}
+        />
       </aside>
 
       <div className="main">
         <header className="header">
+          <Tip
+            label={
+              <>
+                {collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+                <kbd>⌘B</kbd>
+              </>
+            }
+          >
+            <button
+              type="button"
+              className="btn btn-quiet btn-icon header-sidebar"
+              aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              aria-keyshortcuts="Meta+B Control+B"
+              onClick={toggleSidebar}
+            >
+              <PanelLeft size={16} />
+            </button>
+          </Tip>
+
           <Dialog.Root open={drawerOpen} onOpenChange={setDrawerOpen}>
             <Dialog.Trigger asChild>
               <button
@@ -161,47 +244,62 @@ function Sidebar({
   principal,
   instanceRole,
   capabilities,
+  collapsed = false,
   close,
 }: {
   principal: Principal;
   instanceRole: InstanceRole;
   capabilities: UiCapabilities;
+  /** Folded down to its icons: each then names itself on hover. */
+  collapsed?: boolean;
   close?: ReactNode;
 }) {
   return (
     <>
       <div className="sidebar-head">
-        <WorkspaceMenu />
+        <WorkspaceMenu collapsed={collapsed} />
         {close}
       </div>
 
       <nav className="sidebar-nav" aria-label="Sections">
-        <NavLink to="/projects" label="Projects" icon={<Folder size={16} />} />
+        <NavLink
+          to="/projects"
+          label="Projects"
+          icon={<Folder size={16} />}
+          collapsed={collapsed}
+        />
         <AdministrationItems
           capabilities={capabilities}
           users={
             <>
-              <NavLink to="/users" label="Users" icon={<Users size={16} />} />
-              <NavLink to="/tokens" label="Tokens" icon={<Key size={16} />} />
+              <NavLink to="/users" label="Users" icon={<Users size={16} />} collapsed={collapsed} />
+              <NavLink to="/tokens" label="Tokens" icon={<Key size={16} />} collapsed={collapsed} />
             </>
           }
-          audit={<NavLink to="/audit" label="Audit" icon={<Ledger size={16} />} />}
+          audit={
+            <NavLink to="/audit" label="Audit" icon={<Ledger size={16} />} collapsed={collapsed} />
+          }
         />
-        <NavLink to="/settings" label="Settings" icon={<Settings size={16} />} />
+        <NavLink
+          to="/settings"
+          label="Settings"
+          icon={<Settings size={16} />}
+          collapsed={collapsed}
+        />
       </nav>
 
       {/* Settings above is the workspace's; yours are here, with you. */}
       {principal !== null && (
         <div className="sidebar-foot">
-          <AccountMenu principal={principal} instanceRole={instanceRole} />
-          <Tip label="Account settings">
+          <AccountMenu principal={principal} instanceRole={instanceRole} collapsed={collapsed} />
+          <Tip label="Account settings" side={collapsed ? 'right' : undefined}>
             <Link
               className="btn btn-quiet btn-icon sidebar-foot-settings"
               to="/account"
               aria-label="Account settings"
               activeProps={CURRENT}
             >
-              <Settings size={16} />
+              <UserCog size={16} />
             </Link>
           </Tip>
         </div>
@@ -210,22 +308,45 @@ function Sidebar({
   );
 }
 
+/** A folded sidebar's stand-in for the labels it hides. */
+function CollapsedTip({
+  collapsed,
+  label,
+  children,
+}: {
+  collapsed: boolean;
+  label: string;
+  children: ReactNode;
+}) {
+  return collapsed ? (
+    <Tip label={label} side="right">
+      {children}
+    </Tip>
+  ) : (
+    children
+  );
+}
+
 function NavLink({
   to,
   label,
   icon,
+  collapsed,
 }: {
   to: '/projects' | '/users' | '/tokens' | '/audit' | '/settings';
   label: string;
   icon: ReactNode;
+  collapsed: boolean;
 }) {
   // Matching is by prefix, so Projects stays current inside a project and
   // Audit stays current whatever its filters.
   return (
-    <Link className="nav-link" to={to} activeProps={CURRENT}>
-      {icon}
-      {label}
-    </Link>
+    <CollapsedTip collapsed={collapsed} label={label}>
+      <Link className="nav-link" to={to} activeProps={CURRENT}>
+        {icon}
+        <span className="nav-label">{label}</span>
+      </Link>
+    </CollapsedTip>
   );
 }
 
@@ -235,17 +356,19 @@ function NavLink({
  * For now this lists the one there is, and creating another says why it
  * cannot yet rather than opening a form that goes nowhere.
  */
-function WorkspaceMenu() {
+function WorkspaceMenu({ collapsed }: { collapsed: boolean }) {
   const navigate = useNavigate();
   return (
     <DropdownMenu.Root>
-      <DropdownMenu.Trigger asChild>
-        <button type="button" className="workspace">
-          <Tile name={WORKSPACE} />
-          <span className="workspace-name">{WORKSPACE}</span>
-          <ChevronsUpDown size={14} className="workspace-chevron" />
-        </button>
-      </DropdownMenu.Trigger>
+      <CollapsedTip collapsed={collapsed} label={WORKSPACE}>
+        <DropdownMenu.Trigger asChild>
+          <button type="button" className="workspace">
+            <Tile name={WORKSPACE} />
+            <span className="workspace-name">{WORKSPACE}</span>
+            <ChevronsUpDown size={14} className="workspace-chevron" />
+          </button>
+        </DropdownMenu.Trigger>
+      </CollapsedTip>
       <DropdownMenu.Portal>
         <DropdownMenu.Content className="menu menu-workspace" align="start" sideOffset={6}>
           <DropdownMenu.Label className="menu-label">Workspaces</DropdownMenu.Label>
@@ -275,23 +398,31 @@ function WorkspaceMenu() {
 function AccountMenu({
   principal,
   instanceRole,
+  collapsed,
 }: {
   principal: NonNullable<Principal>;
   instanceRole: InstanceRole;
+  collapsed: boolean;
 }) {
   return (
     <DropdownMenu.Root>
-      <DropdownMenu.Trigger asChild>
-        <button type="button" className="account" title={principal.id}>
-          <span className="avatar" aria-hidden>
-            {principal.id.slice(0, 1)}
-          </span>
-          <span className="account-text">
-            <span className="account-name">{principal.id}</span>
-            <span className="account-role">{roleLabel(principal, instanceRole)}</span>
-          </span>
-        </button>
-      </DropdownMenu.Trigger>
+      <CollapsedTip collapsed={collapsed} label={principal.id}>
+        <DropdownMenu.Trigger asChild>
+          <button
+            type="button"
+            className="account"
+            title={collapsed ? undefined : principal.id}
+          >
+            <span className="avatar" aria-hidden>
+              {principal.id.slice(0, 1)}
+            </span>
+            <span className="account-text">
+              <span className="account-name">{principal.id}</span>
+              <span className="account-role">{roleLabel(principal, instanceRole)}</span>
+            </span>
+          </button>
+        </DropdownMenu.Trigger>
+      </CollapsedTip>
       <DropdownMenu.Portal>
         <DropdownMenu.Content
           className="menu menu-account"

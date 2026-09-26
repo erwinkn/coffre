@@ -20,7 +20,7 @@ import {
   Settings,
   SlashCircle,
   Sun,
-  User,
+  UserCog,
   Users,
 } from './icons';
 
@@ -214,7 +214,7 @@ export function CommandPalette({
                 navigate({ to: '/account' });
               }}
             >
-              <User size={15} />
+              <UserCog size={15} />
               Account
             </Command.Item>
           </Command.Group>

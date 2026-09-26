@@ -10,7 +10,7 @@ import {
 import { Toaster } from 'sonner';
 import globalsCss from '../styles/globals.css?url';
 import { getShell } from '../server-functions/shell';
-import { Brand, Shell } from '../components/shell';
+import { Brand, Shell, sidebarBootScript } from '../components/shell';
 import { TooltipProvider } from '../components/ui';
 import { ThemeToggle, themeBootScript } from '../components/theme';
 import { Agentation } from '../components/agentation';
@@ -74,8 +74,9 @@ function RootDocument({ children }: { children: ReactNode }) {
     <html lang="en" suppressHydrationWarning>
       <head>
         <HeadContent />
-        {/* Must run before first paint; see the comment on themeBootScript. */}
+        {/* Must run before first paint; see the comments on each script. */}
         <script dangerouslySetInnerHTML={{ __html: themeBootScript }} />
+        <script dangerouslySetInnerHTML={{ __html: sidebarBootScript }} />
       </head>
       <body>
         {children}

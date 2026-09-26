@@ -28,6 +28,7 @@ import {
   Menu as MenuGlyph,
   Monitor as MonitorGlyph,
   Moon as MoonGlyph,
+  PanelLeft as PanelLeftGlyph,
   Pencil as PencilGlyph,
   Plus as PlusGlyph,
   RotateCcw,
@@ -40,6 +41,7 @@ import {
   TriangleAlert,
   Upload as UploadGlyph,
   User as UserGlyph,
+  UserRoundCog,
   Users as UsersGlyph,
   X as XGlyph,
 } from 'lucide-react';
@@ -132,6 +134,8 @@ export const Folder = lucide(FolderGlyph);
 export const Layers = lucide(LayersGlyph);
 export const Users = lucide(UsersGlyph);
 export const User = lucide(UserGlyph);
+/** Your own settings, so they never share the workspace's gear. */
+export const UserCog = lucide(UserRoundCog);
 export const Key = lucide(KeyRound);
 export const Ledger = lucide(ScrollText);
 export const Settings = lucide(SettingsGlyph);
@@ -167,6 +171,7 @@ export const X = lucide(XGlyph);
 export const Plus = lucide(PlusGlyph);
 export const Search = lucide(SearchGlyph);
 export const Menu = lucide(MenuGlyph);
+export const PanelLeft = lucide(PanelLeftGlyph);
 export const MoreHorizontal = lucide(Ellipsis);
 export const ChevronRight = lucide(ChevronRightGlyph);
 export const ChevronDown = lucide(ChevronDownGlyph);

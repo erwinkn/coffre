@@ -198,7 +198,7 @@ function AuditTableRow({ entry, deniedOnly }: { entry: AuditRow; deniedOnly: boo
       <td className="cell-mono nowrap" data-label="Action">
         {entry.action}
       </td>
-      <td className="cell-mono" style={{ overflowWrap: 'anywhere' }} data-label="Subject">
+      <td className="cell-mono nowrap" data-label="Subject">
         {breakAfterUnderscores(scopedSubject(entry))}
       </td>
       <td className="nowrap" data-label="Decision">

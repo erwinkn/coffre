@@ -242,6 +242,7 @@ kbd {
   display: grid;
   grid-template-columns: 15rem minmax(0, 1fr);
   min-height: 100vh;
+  transition: grid-template-columns 200ms var(--ease-out);
 
   /* Sidebar states, as ink laid over the canvas, so both schemes follow. */
   --nav-hover: color-mix(in oklab, var(--ink) 5%, transparent);
@@ -256,6 +257,7 @@ kbd {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  overflow-x: hidden;
   overflow-y: auto;
   border-right: 1px solid var(--border);
   background: var(--canvas);
@@ -280,7 +282,7 @@ kbd {
   flex: 1;
   min-width: 0;
   height: 2.625rem;
-  padding: 0 0.5rem;
+  padding: 0 0.375rem;
   border: 0;
   border-radius: var(--radius);
   background: none;
@@ -289,9 +291,9 @@ kbd {
 }
 
 .workspace:hover,
-.workspace[data-state='open'],
+.workspace[aria-expanded='true'],
 .account:hover,
-.account[data-state='open'] {
+.account[aria-expanded='true'] {
   background: var(--nav-hover);
 }
 
@@ -387,10 +389,11 @@ kbd {
   align-items: center;
   gap: 0.625rem;
   height: 2rem;
-  padding: 0 0.625rem;
+  padding: 0 0.75rem;
   border-radius: var(--radius);
   color: var(--ink-2);
   font-weight: 500;
+  white-space: nowrap;
 }
 
 .nav-link svg {
@@ -489,6 +492,11 @@ kbd {
   margin-left: -0.5rem;
 }
 
+.header .header-sidebar {
+  margin-left: -0.5rem;
+  color: var(--ink-2);
+}
+
 .header-end {
   display: flex;
   align-items: center;
@@ -505,7 +513,6 @@ kbd {
   align-items: center;
   gap: 0.125rem;
   min-width: 0;
-  margin-left: -0.5rem;
 }
 
 .crumb-sep {
@@ -625,6 +632,36 @@ a.crumb-link:hover {
   from {
     opacity: 0;
     transform: translateX(-16px);
+  }
+}
+
+/* Folded, the sidebar keeps only its icons. The tile, the section icons and
+   the avatar share one centre line, the same folded or not, so folding moves
+   the page and nothing in the sidebar. */
+@media (width > 60rem) {
+  :root[data-sidebar='collapsed'] .shell {
+    grid-template-columns: 3.5rem minmax(0, 1fr);
+  }
+
+  :root[data-sidebar='collapsed']
+    .shell
+    > .sidebar
+    :is(.workspace-name, .workspace-chevron, .nav-label, .account-text) {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+
+  :root[data-sidebar='collapsed'] .shell > .sidebar .sidebar-foot {
+    flex-direction: column-reverse;
+  }
+
+  :root[data-sidebar='collapsed'] .shell > .sidebar .sidebar-foot-settings {
+    width: 100%;
+    height: 2rem;
   }
 }
 
@@ -1533,7 +1570,10 @@ a.crumb-link:hover {
 /* Data tables: a grid, with a row-number gutter                               */
 /* ========================================================================== */
 
+/* Positioned, so the visually hidden labels inside are clipped with the
+   table: otherwise they escape the scroll box and widen the whole page. */
 .dt-wrap {
+  position: relative;
   overflow-x: auto;
 }
 
@@ -1745,9 +1785,11 @@ a.crumb-link:hover {
 /* ========================================================================== */
 
 /* Fixed layout, so a row switching into edit mode does not reflow the
-   columns of every other row. */
+   columns of every other row. The value takes what the others leave, so
+   below a width it would have none: the table scrolls sideways instead. */
 .secrets {
   table-layout: fixed;
+  min-width: 55rem;
 }
 
 .secrets .col-key {
@@ -1772,6 +1814,14 @@ a.crumb-link:hover {
 
 .secret-row td {
   height: 2.625rem;
+}
+
+/* The dots stand for any value, so a narrow column shows fewer of them
+   rather than spilling them into the next. */
+.mask {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 .written {
@@ -3021,6 +3071,14 @@ a.env-card-name:hover {
   animation: fade-in 100ms ease-out;
 }
 
+/* A shortcut in a tooltip, in the bubble's own colours. */
+.tooltip kbd {
+  margin-left: 0.5rem;
+  border-color: color-mix(in oklab, currentColor 30%, transparent);
+  background: none;
+  color: inherit;
+}
+
 .tooltip code {
   padding: 0;
   border: 0;
@@ -3345,8 +3403,8 @@ a.env-card-name:hover {
     display: inline-flex;
   }
 
-  .crumbs {
-    margin-left: 0;
+  .header .header-sidebar {
+    display: none;
   }
 }
 
@@ -3407,6 +3465,7 @@ a.env-card-name:hover {
 /* Below this the tables stop being tables: each row stacks into a block. */
 @media (max-width: 44rem) {
   .dt.stacks {
+    min-width: 0;
     table-layout: auto;
   }
 
@@ -3668,8 +3727,12 @@ a.env-card-name:hover {
     color: var(--ink-3);
   }
 
+  /* One line when wide, scrolling sideways if it must; stacked, the subject
+     has the row to itself and breaks after its separators. */
   .dt.audit.stacks td:nth-child(5) {
     grid-area: subject;
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
 
   .dt.audit.stacks td:nth-child(6) {
