@@ -40,7 +40,14 @@ export function apiErrorResponse(error: unknown): Response {
     );
   }
   if (status === 400 || (error instanceof Error && error.name === 'ZodError')) {
-    return jsonResponse({ error: 'bad_request' }, 400);
+    // Errors marked `expose` carry a sentence written for the caller, such as
+    // which field of a sync's destination is wrong.
+    const expose =
+      error instanceof Error && (error as { expose?: unknown }).expose === true;
+    return jsonResponse(
+      expose ? { error: 'bad_request', message: error.message } : { error: 'bad_request' },
+      400,
+    );
   }
   console.error('unhandled API error', error);
   return jsonResponse({ error: 'internal_error' }, 500);

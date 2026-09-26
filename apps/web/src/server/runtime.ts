@@ -13,12 +13,14 @@ import { AdminService } from './services/admin.ts';
 import { AuditService } from './services/audit.ts';
 import { SecretsService } from './services/secrets.ts';
 import { SigninService } from './services/signin.ts';
+import { SyncService } from './services/sync.ts';
 
 export type CoffreRuntime = {
   pool: Database;
   admin: AdminService;
   audit: AuditService;
   secrets: SecretsService;
+  syncs: SyncService;
   /** Present in signin mode only. */
   signin: SigninService | null;
   auth: Config['auth'];
@@ -62,11 +64,19 @@ export function createRuntime(
   } else {
     verifier = accessVerifier(config.auth.access);
   }
+  const syncs = new SyncService({
+    pool,
+    keks: config.keks,
+    auditChainKey: config.auditChainKey,
+    rootAdmins: config.rootAdmins,
+    waitUntil,
+  });
   const secrets = new SecretsService({
     pool,
     keks: config.keks,
     auditChainKey: config.auditChainKey,
     rootAdmins: config.rootAdmins,
+    onChange: (environmentId) => waitUntil(syncs.runForEnvironment(environmentId)),
   });
   const admin = new AdminService({
     pool,
@@ -83,6 +93,7 @@ export function createRuntime(
     admin,
     audit,
     secrets,
+    syncs,
     signin,
     auth: config.auth,
     verifier,

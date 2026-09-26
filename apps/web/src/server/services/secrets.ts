@@ -49,7 +49,19 @@ export type SecretsServiceDeps = {
   keks: KekRegistry;
   auditChainKey: Buffer;
   rootAdmins: readonly string[];
+  /** Called after a commit that changed an environment's secrets, so its syncs can push. */
+  onChange?: (environmentId: string) => void;
 };
+
+/** Audit actions that change what an environment holds, and so what its syncs push. */
+const CHANGE_ACTIONS: ReadonlySet<string> = new Set([
+  'secret.write',
+  'secret.rename',
+  'secret.rollback',
+  'secret.import',
+  'secret.archive',
+  'secret.restore',
+]);
 
 export type SecretKey = {
   key: string;
@@ -108,6 +120,7 @@ export class SecretsService {
 
       await appendAudit(client, this.#deps.auditChainKey, outcome.entries);
       await client.query('COMMIT');
+      this.#notifyChanges(outcome.entries);
       return outcome.result;
     } catch (error) {
       // ROLLBACK on an already-finished transaction is a no-op warning, which
@@ -116,6 +129,29 @@ export class SecretsService {
       throw error;
     } finally {
       await client.release();
+    }
+  }
+
+  /**
+   * Tell syncs which environments just changed. The audit entries already say
+   * exactly that, so no write path has to remember to call this itself.
+   */
+  #notifyChanges(entries: readonly AuditEntry[]): void {
+    const onChange = this.#deps.onChange;
+    if (onChange === undefined) return;
+    const changed = new Set<string>();
+    for (const entry of entries) {
+      if (entry.decision === 'allow' && CHANGE_ACTIONS.has(entry.action) && entry.secretId && entry.environmentId) {
+        changed.add(entry.environmentId);
+      }
+    }
+    for (const environmentId of changed) {
+      try {
+        onChange(environmentId);
+      } catch (error) {
+        // The write has committed; a sync that cannot start now is picked up by the scheduler.
+        console.error('sync notification failed', error);
+      }
     }
   }
 
@@ -1156,7 +1192,7 @@ async function loadAllCurrentVersions(
   return result.rows.map((row) => ({ ...toEnvelopeRow(row), key: row.key }));
 }
 
-function toEnvelopeRow(row: Record<string, unknown>): {
+export function toEnvelopeRow(row: Record<string, unknown>): {
   secretId: string;
   version: number;
   envelope: Envelope;
