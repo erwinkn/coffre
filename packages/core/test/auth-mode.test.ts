@@ -27,7 +27,7 @@ test('auth mode is explicit rather than inferred from other variables', () => {
   );
   assert.throws(
     () => loadAuthConfig({ ...dev, COFFRE_AUTH_MODE: 'production' }),
-    /exactly "dev" or "cloudflare"/,
+    /exactly "signin", "cloudflare" or "dev"/,
   );
 });
 

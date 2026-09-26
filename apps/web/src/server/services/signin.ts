@@ -6,7 +6,8 @@ import { toIsoTimestamp, toNullableIsoTimestamp } from '../database.ts';
 import type { AuditEntry } from '../../../../../packages/db/src/audit.ts';
 import type { Principal } from '../../../../../packages/core/src/identity/types.ts';
 import type { SigninConfig } from '../../../../../packages/core/src/identity/signin/config.ts';
-import type { SigninProfile } from '../../../../../packages/core/src/identity/signin/types.ts';
+import type { PendingSignin, SigninProfile } from '../../../../../packages/core/src/identity/signin/types.ts';
+import { deriveKey, seal, unseal } from '../../../../../packages/core/src/identity/signin/sealed.ts';
 import {
   generateToken,
   hashToken,
@@ -48,6 +49,16 @@ class SigninRefused extends Error {
     this.reason = reason;
   }
 }
+
+/** What rides in the sealed cookie between leaving for the provider and coming back. */
+export type PendingState = PendingSignin & {
+  /** Where to land afterwards: a path on this origin. */
+  next: string;
+  /** Linking: the principal who asked to add this account. */
+  link: string | null;
+};
+
+const PENDING_TTL_SECONDS = 10 * 60;
 
 export type IssuedCredential = { id: string; token: string; expiresAt: string };
 
@@ -171,13 +182,26 @@ function tooMany(message: string): Error {
  */
 export class SigninService {
   readonly #deps: SigninServiceDeps;
+  readonly #stateKey: Buffer;
 
   constructor(deps: SigninServiceDeps) {
     this.#deps = deps;
+    // Derived rather than configured: one fewer secret to provision, and
+    // HKDF keeps it independent of the audit chain key it comes from.
+    this.#stateKey = deriveKey(deps.auditChainKey, 'signin-state/v1');
   }
 
   get config(): SigninConfig {
     return this.#deps.signin;
+  }
+
+  /** Seal a sign-in in progress for its round trip through the browser. */
+  sealPending(state: PendingState): { value: string; maxAge: number } {
+    return { value: seal(this.#stateKey, state, PENDING_TTL_SECONDS), maxAge: PENDING_TTL_SECONDS };
+  }
+
+  openPending(value: string | null): PendingState | null {
+    return unseal<PendingState>(this.#stateKey, value);
   }
 
   #run<T>(fn: (tx: DatabaseClient) => Promise<{ result: T; entries: AuditEntry[] }>): Promise<T> {

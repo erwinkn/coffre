@@ -27,7 +27,12 @@ export function missingIdentityMessage(auth: AuthConfig): string {
 }
 
 export function rejectedIdentityMessage(auth: AuthConfig): string {
-  return auth.mode === 'cloudflare'
-    ? 'Cloudflare Access authentication was not accepted. Reopen coffre through its Access-protected hostname.'
-    : 'Your local development session has expired. Sign in again to continue.';
+  switch (auth.mode) {
+    case 'cloudflare':
+      return 'Cloudflare Access authentication was not accepted. Reopen coffre through its Access-protected hostname.';
+    case 'signin':
+      return 'Your session has ended. Sign in again to continue.';
+    case 'dev':
+      return 'Your local development session has expired. Sign in again to continue.';
+  }
 }

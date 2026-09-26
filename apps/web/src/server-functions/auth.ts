@@ -4,16 +4,26 @@ import { z } from 'zod';
 import { DEV_TOKEN_COOKIE } from '../server/auth.ts';
 import { getRuntime } from '../server/runtime.ts';
 import { sessionServerFn } from '../server/server-fn.ts';
+import { publicProviders } from '../server/signin.ts';
 import { emailAddress } from '../shared/schemas.ts';
 
 const DEV_SESSION_SECONDS = 8 * 60 * 60;
 
 export const getLoginAuthState = sessionServerFn({ method: 'GET' }).handler(async () => {
-  const auth = getRuntime().auth;
+  const runtime = getRuntime();
+  const auth = runtime.auth;
   return {
     mode: auth.mode,
     hasForwardedAccessJwt:
       auth.mode === 'cloudflare' && Boolean(getRequestHeader('cf-access-jwt-assertion')),
+    signin:
+      runtime.signin === null
+        ? null
+        : {
+            title: runtime.signin.config.page.title,
+            note: runtime.signin.config.page.note,
+            providers: publicProviders(runtime.signin.config),
+          },
   };
 });
 

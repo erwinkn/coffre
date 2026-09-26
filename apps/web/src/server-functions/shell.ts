@@ -10,6 +10,7 @@ import { uiResult } from './result.ts';
 /** Identity and project tree used by the application shell. */
 export const getShell = sessionServerFn({ method: 'GET' }).handler(async () => {
   const identity = currentIdentity();
+  const authMode = getRuntime().auth.mode;
   if (identity?.principal !== null && identity?.principal !== undefined && !identity.registered) {
     return {
       principal: { type: identity.principal.type, id: identity.principal.id },
@@ -18,6 +19,7 @@ export const getShell = sessionServerFn({ method: 'GET' }).handler(async () => {
       projects: [] as ProjectSummary[],
       capabilities: deriveUiCapabilities(null, []),
       registrationRequired: true,
+      authMode,
     };
   }
 
@@ -29,6 +31,7 @@ export const getShell = sessionServerFn({ method: 'GET' }).handler(async () => {
       projects: [] as ProjectSummary[],
       capabilities: deriveUiCapabilities(null, []),
       registrationRequired: false,
+      authMode,
     };
   }
 
@@ -48,5 +51,6 @@ export const getShell = sessionServerFn({ method: 'GET' }).handler(async () => {
     projects,
     capabilities: deriveUiCapabilities(me, projects),
     registrationRequired: false,
+    authMode,
   };
 });

@@ -4,23 +4,11 @@ import { createHash } from 'node:crypto';
 
 import {
   createSigninProvider,
-  deriveKey,
-  type PendingSignin,
   type SigninConfig,
   type SigninProvider,
   type SigninProviderConfig,
 } from '../../../../packages/core/src/identity/signin/index.ts';
 import type { AuthConfig } from '../../../../packages/core/src/identity/auth-mode.ts';
-
-/** What rides in the sealed cookie between leaving for the provider and coming back. */
-export type PendingState = PendingSignin & {
-  /** Where to land afterwards: a path on this origin. */
-  next: string;
-  /** Linking: the principal who asked to add this account. */
-  link: string | null;
-};
-
-export const PENDING_TTL_SECONDS = 10 * 60;
 
 const providers = new Map<string, SigninProvider>();
 
@@ -40,11 +28,6 @@ export function signinProvider(config: SigninProviderConfig): SigninProvider {
 
 export function callbackUrl(config: SigninConfig, providerId: string): string {
   return `${config.publicUrl}/auth/callback/${providerId}`;
-}
-
-/** The pending-state cookie is sealed under a key derived from the audit chain key. */
-export function pendingStateKey(auditChainKey: Uint8Array): Buffer {
-  return deriveKey(auditChainKey, 'signin-state/v1');
 }
 
 function secure(auth: AuthConfig): boolean {
@@ -120,4 +103,9 @@ export function describeUserAgent(userAgent: string | null): string | null {
     : null;
   if (browser === null && system === null) return userAgent.slice(0, 60);
   return [browser ?? 'Browser', system].filter(Boolean).join(' on ');
+}
+
+/** Configured providers as the pages show them: no client ids, no secrets. */
+export function publicProviders(config: SigninConfig) {
+  return config.providers.map(({ id, label, brand }) => ({ id, label, brand }));
 }

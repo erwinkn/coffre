@@ -1,18 +1,22 @@
 import { useState } from 'react';
 import { createFileRoute, useRouter } from '@tanstack/react-router';
 import { devSignIn, getLoginAuthState } from '../server-functions/auth';
+import { signinErrorMessage } from '../lib/signin-errors';
 import { ErrorLine, Spinner } from '../components/ui';
 import { ClosedDoor } from '../components/page';
-import { ArrowRight, Lock, ShieldCheck } from '../components/icons';
+import { ArrowRight, Lock, ProviderMark, ShieldCheck } from '../components/icons';
 
 export const Route = createFileRoute('/login')({
   // Where to resume after signing in. Same-origin paths only: an absolute URL
   // accepted here would make the sign-in page an open redirect.
-  validateSearch: (search: Record<string, unknown>): { next?: string } => {
-    const next = search.next;
-    if (typeof next !== 'string') return {};
-    if (!next.startsWith('/') || next.startsWith('//')) return {};
-    return { next };
+  validateSearch: (search: Record<string, unknown>): { next?: string; error?: string } => {
+    const out: { next?: string; error?: string } = {};
+    const { next, error } = search;
+    if (typeof next === 'string' && next.startsWith('/') && !next.startsWith('//')) {
+      out.next = next;
+    }
+    if (typeof error === 'string' && /^[a-z_]{1,40}$/.test(error)) out.error = error;
+    return out;
   },
   loader: () => getLoginAuthState(),
   component: LoginPage,
@@ -28,14 +32,16 @@ const SEEDED: [email: string, role: string, note: string][] = [
 ];
 
 /**
- * Local sign-in only.
+ * The front door, which depends on who authenticates people.
  *
- * There is no login system here and there never will be. In production
- * Cloudflare Access authenticates the user before any request reaches this
- * app. This page exists so the same UI runs locally against the dev IdP.
+ * In signin mode it is coffre's own: one button per configured provider. In
+ * Cloudflare mode Access authenticates before any request arrives, so this
+ * page only explains why it is showing at all. In dev mode it is a persona
+ * picker backed by the dev IdP.
  */
 function LoginPage() {
-  const { mode, hasForwardedAccessJwt } = Route.useLoaderData();
+  const { mode, hasForwardedAccessJwt, signin } = Route.useLoaderData();
+  if (signin !== null) return <ProviderLoginPage {...signin} />;
   if (mode === 'cloudflare') {
     return hasForwardedAccessJwt ? (
       <CloudflareAuthenticationFailed />
@@ -78,6 +84,66 @@ function CloudflareAuthenticationFailed() {
         whoever operates coffre.
       </p>
     </ClosedDoor>
+  );
+}
+
+function ProviderLoginPage({
+  title,
+  note,
+  providers,
+}: {
+  title: string;
+  note: string | null;
+  providers: { id: string; label: string; brand: string }[];
+}) {
+  const { next, error } = Route.useSearch();
+  const message = signinErrorMessage(error);
+  const [leaving, setLeaving] = useState<string | null>(null);
+  const query = next === undefined ? '' : `?next=${encodeURIComponent(next)}`;
+
+  return (
+    <section className="card signin" aria-labelledby="signin-title">
+      <div className="signin-head">
+        <h1 className="signin-title" id="signin-title">
+          {title}
+        </h1>
+        <p className="signin-lede">
+          {note ?? 'Sign in with your organization’s account. Only people an owner has invited can get in.'}
+        </p>
+      </div>
+
+      {message !== null && (
+        <div className="signin-error">
+          <ErrorLine error={message} />
+        </div>
+      )}
+
+      {providers.length === 0 ? (
+        <p className="signin-empty">
+          No sign-in provider is configured. Whoever runs coffre sets them with{' '}
+          <span className="mono">COFFRE_SIGNIN_PROVIDERS</span>.
+        </p>
+      ) : (
+        <ul className="providers">
+          {providers.map((provider) => (
+            <li key={provider.id}>
+              {/* A plain link: the provider's page is a full navigation away. */}
+              <a
+                className="btn provider"
+                href={`/auth/signin/${encodeURIComponent(provider.id)}${query}`}
+                aria-busy={leaving === provider.id}
+                onClick={() => setLeaving(provider.id)}
+              >
+                <span className="provider-mark" aria-hidden>
+                  {leaving === provider.id ? <Spinner /> : <ProviderMark brand={provider.brand} />}
+                </span>
+                Continue with {provider.label}
+              </a>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 

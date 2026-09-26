@@ -116,7 +116,8 @@ function RootComponent() {
   // command palette bounces straight back here while you are signed out, so
   // offering them is a loop dressed up as navigation. The brand stays, as a
   // mark rather than a link, so the page is still recognisably this app.
-  if (pathname === '/login' || pathname === '/unregistered') {
+  // Approving a CLI sign-in is the same kind of single-purpose stop.
+  if (pathname === '/login' || pathname === '/unregistered' || pathname === '/auth/device') {
     return (
       <TooltipProvider>
         <div className="solo">
