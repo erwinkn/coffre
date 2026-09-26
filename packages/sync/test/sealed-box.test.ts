@@ -46,7 +46,7 @@ test('a sealed box does not open with another key, or once tampered with', () =>
   assert.equal(sealOpen(sealed, nacl.box.keyPair().secretKey), null);
 
   const tampered = sealed.slice();
-  tampered[tampered.length - 1] ^= 1;
+  tampered[tampered.length - 1]! ^= 1;
   assert.equal(sealOpen(tampered, recipient.secretKey), null);
 });
 
