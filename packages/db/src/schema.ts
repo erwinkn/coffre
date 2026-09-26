@@ -364,3 +364,214 @@ export const auditHeartbeat = pgTable(
   },
   (table) => [check('audit_heartbeat_only_row_check', sql`${table.onlyRow}`)],
 );
+
+/**
+ * An account at a sign-in provider, bound to one principal.
+ *
+ * Looked up by (provider, subject), never by email. An email address is
+ * recycled when someone leaves; the provider's subject is not, so binding to
+ * it is what stops a new holder of an old address from inheriting its access.
+ * The email is kept for display only.
+ */
+export const identities = pgTable(
+  'identities',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    provider: text().notNull(),
+    subject: text().notNull(),
+    principalType: text('principal_type').notNull(),
+    principalId: text('principal_id').notNull(),
+    email: text(),
+    createdAt: createdAt(),
+    createdBy: text('created_by').notNull(),
+    lastSignInAt: timestamp('last_sign_in_at', { withTimezone: true }),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    revokedBy: text('revoked_by'),
+  },
+  (table) => [
+    check('identities_principal_type_check', sql`${table.principalType} = 'user'`),
+    check('identities_provider_check', sql`${table.provider} ~ '^[a-z0-9][a-z0-9-]{0,31}$'`),
+    foreignKey({
+      name: 'identities_principal_fkey',
+      columns: [table.principalType, table.principalId],
+      foreignColumns: [principals.principalType, principals.principalId],
+    }).onDelete('restrict'),
+    uniqueIndex('identities_active_subject')
+      .on(table.provider, table.subject)
+      .where(sql`${table.revokedAt} IS NULL`),
+    index('identities_principal_idx').on(table.principalType, table.principalId),
+  ],
+);
+
+/**
+ * Bearer credentials coffre issues itself: browser sessions, CLI sessions and
+ * service tokens.
+ *
+ * One table, so that revoking everything a principal holds is one statement.
+ * Only a SHA-256 of each token is stored. Tokens carry 256 bits of entropy, so
+ * a fast hash is enough; a database leak yields nothing that authenticates.
+ */
+export const credentials = pgTable(
+  'credentials',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    kind: text().notNull(),
+    tokenHash: bytea('token_hash').notNull(),
+    tokenHint: text('token_hint').notNull(),
+    principalType: text('principal_type').notNull(),
+    principalId: text('principal_id').notNull(),
+    identityId: uuid('identity_id'),
+    label: text(),
+    createdAt: createdAt(),
+    createdBy: text('created_by').notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
+    lastUsedIp: text('last_used_ip'),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    revokedBy: text('revoked_by'),
+  },
+  (table) => [
+    unique('credentials_token_hash_key').on(table.tokenHash),
+    check('credentials_kind_check', sql`${table.kind} IN ('browser', 'cli', 'service')`),
+    check(
+      'credentials_kind_matches_principal',
+      sql`(${table.kind} = 'service') = (${table.principalType} = 'service')`,
+    ),
+    check('credentials_token_hash_check', sql`octet_length(${table.tokenHash}) = 32`),
+    foreignKey({
+      name: 'credentials_principal_fkey',
+      columns: [table.principalType, table.principalId],
+      foreignColumns: [principals.principalType, principals.principalId],
+    }).onDelete('restrict'),
+    foreignKey({
+      name: 'credentials_identity_id_fkey',
+      columns: [table.identityId],
+      foreignColumns: [identities.id],
+    }).onDelete('restrict'),
+    index('credentials_principal_idx')
+      .on(table.principalType, table.principalId)
+      .where(sql`${table.revokedAt} IS NULL`),
+  ],
+);
+
+/**
+ * A CLI asking to be signed in from a browser (RFC 8628, device flow).
+ *
+ * The CLI holds the device code and polls with it; a signed-in person approves
+ * the short user code in their browser. It works the same on a laptop and on
+ * a server reached over SSH, which a localhost redirect does not.
+ */
+export const deviceAuthorizations = pgTable(
+  'device_authorizations',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    deviceCodeHash: bytea('device_code_hash').notNull(),
+    userCode: text('user_code').notNull(),
+    clientLabel: text('client_label'),
+    clientIp: text('client_ip'),
+    createdAt: createdAt(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    decidedAt: timestamp('decided_at', { withTimezone: true }),
+    decision: text(),
+    principalType: text('principal_type'),
+    principalId: text('principal_id'),
+    consumedAt: timestamp('consumed_at', { withTimezone: true }),
+  },
+  (table) => [
+    unique('device_authorizations_device_code_hash_key').on(table.deviceCodeHash),
+    unique('device_authorizations_user_code_key').on(table.userCode),
+    check(
+      'device_authorizations_decision_check',
+      sql`${table.decision} IS NULL OR ${table.decision} IN ('approved', 'denied')`,
+    ),
+    check(
+      'device_authorizations_approval_names_principal',
+      sql`(${table.decision} = 'approved') = (${table.principalId} IS NOT NULL)`,
+    ),
+    foreignKey({
+      name: 'device_authorizations_principal_fkey',
+      columns: [table.principalType, table.principalId],
+      foreignColumns: [principals.principalType, principals.principalId],
+    }).onDelete('restrict'),
+  ],
+);
+
+/**
+ * An environment kept in step with a third-party service: GitHub Actions
+ * secrets, Vercel or Railway variables, Worker secrets.
+ *
+ * The destination's API token is itself a coffre secret, referenced by id, so
+ * it is encrypted, versioned and audited like everything else and never sits
+ * in this table.
+ */
+export const syncs = pgTable(
+  'syncs',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    projectId: uuid('project_id').notNull(),
+    environmentId: uuid('environment_id').notNull(),
+    provider: text().notNull(),
+    config: text().notNull(),
+    credentialSecretId: uuid('credential_secret_id').notNull(),
+    createdAt: createdAt(),
+    createdBy: text('created_by').notNull(),
+    pausedAt: timestamp('paused_at', { withTimezone: true }),
+    archivedAt: timestamp('archived_at', { withTimezone: true }),
+    leaseUntil: timestamp('lease_until', { withTimezone: true }),
+    lastRunAt: timestamp('last_run_at', { withTimezone: true }),
+    lastStatus: text('last_status'),
+    lastError: text('last_error'),
+  },
+  (table) => [
+    check('syncs_config_check', sql`${table.config}::jsonb IS NOT NULL`),
+    check(
+      'syncs_last_status_check',
+      sql`${table.lastStatus} IS NULL OR ${table.lastStatus} IN ('ok', 'partial', 'failed')`,
+    ),
+    foreignKey({
+      name: 'syncs_environment_in_project',
+      columns: [table.environmentId, table.projectId],
+      foreignColumns: [environments.id, environments.projectId],
+    }).onDelete('restrict'),
+    foreignKey({
+      name: 'syncs_credential_secret_id_fkey',
+      columns: [table.credentialSecretId],
+      foreignColumns: [secrets.id],
+    }).onDelete('restrict'),
+    index('syncs_environment_idx')
+      .on(table.environmentId)
+      .where(sql`${table.archivedAt} IS NULL`),
+  ],
+);
+
+/**
+ * What a sync last pushed, one row per key.
+ *
+ * Most destinations are write-only, so coffre cannot diff against them. It
+ * diffs against this instead: a key is stale when its secret has moved past
+ * the version recorded here. It is also the list of keys coffre may delete at
+ * the destination; a key it never pushed is never removed.
+ */
+export const syncKeys = pgTable(
+  'sync_keys',
+  {
+    syncId: uuid('sync_id').notNull(),
+    key: text().notNull(),
+    secretVersionId: uuid('secret_version_id'),
+    pushedAt: timestamp('pushed_at', { withTimezone: true }).notNull().defaultNow(),
+    removedAt: timestamp('removed_at', { withTimezone: true }),
+  },
+  (table) => [
+    primaryKey({ name: 'sync_keys_pkey', columns: [table.syncId, table.key] }),
+    foreignKey({
+      name: 'sync_keys_sync_id_fkey',
+      columns: [table.syncId],
+      foreignColumns: [syncs.id],
+    }).onDelete('restrict'),
+    foreignKey({
+      name: 'sync_keys_secret_version_id_fkey',
+      columns: [table.secretVersionId],
+      foreignColumns: [secretVersions.id],
+    }).onDelete('restrict'),
+  ],
+);
