@@ -2,9 +2,19 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { exportJWK, generateKeyPair, SignJWT, type JWK, type CryptoKey } from 'jose';
 
 import { AuthorizationServer } from './authorize.ts';
+import { FakeGitHub } from './github.ts';
 import type { Route } from './http.ts';
 import { OidcProvider } from './oidc.ts';
-import { defaultSubject, displayName, normalizeEmail } from './people.ts';
+import {
+  defaultGitHubAccount,
+  defaultSubject,
+  displayName,
+  gitHubEmails,
+  normalizeEmail,
+  PERSONAS,
+  type GitHubAccount,
+  type GitHubAccountPatch,
+} from './people.ts';
 
 export interface DevIdpClient {
   clientId: string;
@@ -36,7 +46,8 @@ export const DEFAULT_CLIENT = Object.freeze({
  *
  * For Cloudflare Access, it generates a keypair, serves a JWKS at the same
  * `cdn-cgi` path Access uses, and mints Access-shaped tokens. It is also an
- * OpenID Connect provider (under `/oauth`) signing with the same key. The
+ * OpenID Connect provider (under `/oauth`) signing with the same key, and an
+ * imitation of GitHub's OAuth apps and REST API (under `/github`). The
  * point is that the code under test runs its real remote code paths against
  * real HTTP endpoints -- local mode is a different implementation of the same
  * interface, never a branch that skips verification.
@@ -46,6 +57,7 @@ export class DevIdp {
   #port = 0;
   #clients = new Map<string, RegisteredClient>();
   #subjects = new Map<string, string>();
+  #gitHubAccounts = new Map<string, GitHubAccount>();
   #routes: Route[];
 
   privateKey!: CryptoKey;
@@ -71,7 +83,7 @@ export class DevIdp {
     for (const client of options.clients ?? []) this.registerClient(client);
 
     const authz = new AuthorizationServer(this);
-    this.#routes = [...new OidcProvider(this, authz).routes()];
+    this.#routes = [...new OidcProvider(this, authz).routes(), ...new FakeGitHub(this, authz).routes()];
   }
 
   get origin(): string {
@@ -172,6 +184,37 @@ export class DevIdp {
    */
   setSubject(email: string, subject: string): void {
     this.#subjects.set(normalizeEmail(email), subject);
+  }
+
+  /** The fake GitHub account that signs in with this email. */
+  gitHubUserFor(email: string): GitHubAccount {
+    const normalized = normalizeEmail(email);
+    return this.#gitHubAccounts.get(normalized) ?? defaultGitHubAccount(normalized);
+  }
+
+  /**
+   * From now on, whoever picks this email on the fake GitHub gets this account,
+   * patched over the current one. A new `id` simulates a recycled address;
+   * `emails` can add several, unverified ones included; `orgs` sets memberships.
+   */
+  setGitHubUser(email: string, patch: GitHubAccountPatch): void {
+    const current = this.gitHubUserFor(email);
+    this.#gitHubAccounts.set(normalizeEmail(email), {
+      id: patch.id ?? current.id,
+      login: patch.login ?? current.login,
+      name: patch.name ?? current.name,
+      emails: patch.emails ? gitHubEmails(patch.emails) : current.emails,
+      orgs: patch.orgs ? [...patch.orgs] : current.orgs,
+    });
+  }
+
+  /** The email that signs in as a GitHub login, for GitHub's `login` hint. */
+  emailForGitHubLogin(login: string): string | undefined {
+    const wanted = login.toLowerCase();
+    for (const [email, account] of this.#gitHubAccounts) {
+      if (account.login.toLowerCase() === wanted) return email;
+    }
+    return PERSONAS.find((p) => this.gitHubUserFor(p.email).login.toLowerCase() === wanted)?.email;
   }
 
   /** An OIDC ID token, as the token endpoint issues it. */

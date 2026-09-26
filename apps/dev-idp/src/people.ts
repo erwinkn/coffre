@@ -48,3 +48,58 @@ export function displayName(email: string): string {
   const local = email.split('@')[0]!;
   return local.charAt(0).toUpperCase() + local.slice(1);
 }
+
+export interface GitHubEmail {
+  email: string;
+  primary: boolean;
+  verified: boolean;
+  visibility: 'public' | 'private' | null;
+}
+
+export interface GitHubAccount {
+  id: number;
+  login: string;
+  name: string;
+  emails: GitHubEmail[];
+  /** Organizations the account is an active member of. */
+  orgs: string[];
+}
+
+export interface GitHubAccountPatch {
+  id?: number;
+  login?: string;
+  name?: string;
+  /** Replaces the list. The first is primary unless one says so; all verified unless they say not. */
+  emails?: ReadonlyArray<{ email: string } & Partial<Omit<GitHubEmail, 'email'>>>;
+  orgs?: readonly string[];
+}
+
+/**
+ * Outsider's GitHub account also lists lead's address, unverified: a client
+ * that trusts unverified emails signs Otto in as Lea.
+ */
+const UNVERIFIED_GITHUB_EMAILS: Readonly<Record<string, readonly string[]>> = {
+  'outsider@equisafe.io': ['lead@equisafe.io'],
+};
+
+export function gitHubEmails(list: NonNullable<GitHubAccountPatch['emails']>): GitHubEmail[] {
+  const primary = Math.max(0, list.findIndex((e) => e.primary));
+  return list.map((e, i) => ({
+    email: normalizeEmail(e.email),
+    primary: i === primary,
+    verified: e.verified ?? true,
+    visibility: e.visibility !== undefined ? e.visibility : i === primary ? 'public' : null,
+  }));
+}
+
+/** Stable per email, so a persona keeps its numeric id across runs. */
+export function defaultGitHubAccount(email: string): GitHubAccount {
+  const unverified = UNVERIFIED_GITHUB_EMAILS[email] ?? [];
+  return {
+    id: 1_000_000 + Number.parseInt(sha256Hex(`github:${email}`).slice(0, 7), 16),
+    login: email.split('@')[0]!.replace(/[^A-Za-z0-9-]/g, '-'),
+    name: displayName(email),
+    emails: gitHubEmails([{ email }, ...unverified.map((e) => ({ email: e, verified: false }))]),
+    orgs: ['equisafe'],
+  };
+}
