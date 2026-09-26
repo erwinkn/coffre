@@ -24,12 +24,15 @@ product that runs first on erwinkn.com and then inside Equisafe.
 | 2. Package | The product apart from its instances; Cloudflare and Node adapters | A deployment is a config file depending on `@coffre/cloudflare`; the smoke suite passes on both adapters |
 | 3. erwinkn.com | Dogfood | Your secrets live in it, the CLI and sync are in daily use, a few weeks pass with no open bugs |
 | 4. Equisafe | Internal rollout | KMS-backed KEK, two-person review, Infisical migrated |
+| 5. Sign-in | Deployable without a proxy in front | A Node deployment signs in with Google, GitHub and an arbitrary OIDC issuer, and the CLI logs in through it |
 
 Hardening comes first because it is mostly independent of the package layout,
 and it is what the README's status line is waiting on. Packaging comes before
 erwinkn.com so your instance is deployed the way every other one will be, and
 Equisafe's becomes the second consumer of the packages rather than a migration
-off a fork.
+off a fork. Sign-in comes last because both deployments sit behind Cloudflare
+Access, which already offers the login methods they want; it is what a public
+release needs, so it moves ahead of phase 4 if publishing comes first.
 
 ## Phase 1: harden
 
@@ -143,9 +146,8 @@ The adapters are then small:
 - **Identity becomes pluggable.** Cloudflare Access becomes one preset of a
   general trusted-proxy JWT verifier, configured by header, issuer, JWKS,
   audience, and which claims name users and machines. The same verifier covers
-  Pomerium, oauth2-proxy and Google IAP. That is what makes the Node adapter
-  useful without coffre growing a login of its own; I recommend none for v1.
-  Later, GitHub Actions OIDC could be a machine identity so CI needs no stored
+  Pomerium, oauth2-proxy and Google IAP, which makes the Node adapter usable
+  before coffre has a sign-in of its own (phase 5). Later, GitHub Actions OIDC could be a machine identity so CI needs no stored
   credential. Behind Cloudflare Access it would need an API hostname that
   bypasses Access, which weakens the outer wall, so it fits Node deployments
   better.
@@ -170,8 +172,8 @@ Two spikes go first:
   ciphertext and the audit log, while values need the KEK, which lives in
   Cloudflare. A database leak therefore exposes names and who read what, but
   not values. That makes a public endpoint acceptable for a personal instance.
-- **Access:** one application for `coffre.erwinkn.com`, and one service token
-  per machine that reads from it.
+- **Access:** one application for `coffre.erwinkn.com` with GitHub as its
+  login method, and one service token per machine that reads from it.
 - **Moving in:** `coffre import` from your existing `.env` files.
 - **CLI:** installed with `npm i -g @coffre/cli`. `coffre login` wraps
   `cloudflared` instead of asking you to export a token by hand.
@@ -219,6 +221,10 @@ keys = ["DATABASE_URL", "REDIS_URL"]
   the KEK from Terraform's `worker_runtime_environment` output, which makes the
   state bucket as sensitive as the vault. Implement the Scaleway KMS
   `KekProvider` the README anticipates, make it primary, and run `rewrap`.
+- **Google Workspace as the only login method**, required by the Access
+  policy. coffre recognises Access users by their email, so leaving GitHub
+  enabled as well would let a leaver back in through a personal GitHub account
+  that still lists their work address (the example in phase 5).
 - **Two-person rule:** required review on `main`, and required reviewers on
   the `coffre-production` environment.
 - **A written retention policy** (Art. 12(2)(a)), as the only sanctioned way
@@ -230,6 +236,82 @@ keys = ["DATABASE_URL", "REDIS_URL"]
 - **An external review** of the crypto and the auth boundary before coffre
   holds company credentials.
 
+## Phase 5: sign-in
+
+Behind Cloudflare Access, the login page is Access's own. GitHub, Google,
+Microsoft, one-time email codes and any OIDC or SAML provider are login
+methods toggled in the Cloudflare dashboard, and the page takes a logo,
+colours and text. That covers both deployments above. Anywhere else, "first
+put an identity-aware proxy in front" is where most people would give up on
+self-hosting coffre. So coffre gets a sign-in page of its own: a second
+identity mode beside the proxy one, producing the same principal.
+
+A deployment lists the buttons its page shows:
+
+```ts
+identity: signIn({
+  providers: [
+    google({ clientId, clientSecret, domain: 'equisafe.io' }),
+    github({ clientId, clientSecret }),
+    microsoft({ tenant: 'organizations', clientId, clientSecret }),
+    oidc({ label: 'Okta', issuer: 'https://equisafe.okta.com', clientId, clientSecret }),
+  ],
+  page: { title: 'Equisafe secrets', note: 'No access yet? Ask in #it.' },
+})
+```
+
+- **One provider implementation, not one per vendor.** `oidc({ issuer })`
+  reads everything else from the issuer's discovery document, so Okta, Entra,
+  GitLab, Auth0, Keycloak, Authentik, Clerk and WorkOS take configuration and
+  no code. It runs the authorization-code flow with PKCE on `oauth4webapi`,
+  which has no dependencies and comes from the author of `jose`. Not
+  better-auth: its security advisories cluster in exactly this flow, and it
+  updates and deletes rows in tables of its own, where coffre's runtime role
+  has no DELETE anywhere.
+- **A preset is defaults plus at most one quirk.** `google` checks the `hd`
+  claim when `domain` is set, so only that Workspace domain gets in.
+  `microsoft` handles the multi-tenant endpoints, whose discovery document
+  gives the issuer as a `{tenantid}` template rather than a URL.
+- **GitHub is the one exception.** It speaks OAuth 2 but not OIDC: there is no
+  ID token, and a private address is only visible through `GET /user/emails`.
+  It gets a small implementation of its own, which a developer tool can
+  justify.
+- **Anything else goes through a broker.** For SAML, LDAP or Bitbucket, run
+  Dex, Authentik or WorkOS, which speak those and present coffre with one OIDC
+  issuer.
+- **Accounts bind to a provider's user, never to an email.** The principal
+  directory stays the allowlist. A first sign-in binds a registered email to
+  the provider's stable user id (`sub`, or GitHub's numeric id), and only if
+  the provider says the address is verified. Every later sign-in must match
+  that binding, and a second provider can only be linked by its owner while
+  signed in through the first. Example: Bob leaves Equisafe and IT deletes his
+  Google account. His personal GitHub account still lists bob@equisafe.io as
+  verified, because GitHub checked it once, when he added it. Matching on
+  email would let him back in through the GitHub button.
+- **Sessions are coffre's.** They are kept on the server and short-lived, and
+  ending one sets `revoked_at` rather than deleting a row. Sign-in, refused
+  sign-in and sign-out each write an audit row. Owning sessions also lets
+  Reveal ask for a recent sign-in.
+- **The CLI and machines don't depend on which providers are on.**
+  `coffre login` opens the browser and receives the result on a local port.
+  CI jobs and sync get tokens coffre issues itself: prefixed, stored hashed,
+  expiring, one per service principal.
+- **The page is configured, not replaced.** Title, logo, a note, and the order
+  and labels of the buttons come from configuration, and the logo is inlined
+  so the CSP stays strict. Swapping in components of your own would mean
+  shipping source instead of a prebuilt bundle.
+- **Not in v1: passwords and email links.** Both need a mail sender and an
+  account-recovery path. Passkeys are a good later addition, as the recent
+  sign-in that Reveal asks for.
+- **Tests.** The dev IdP, today a stand-in for Cloudflare Access, also becomes
+  an OIDC issuer, so the suite covers both modes without an account anywhere.
+  Each preset gets a setup guide and a check against a real tenant before a
+  release.
+- **Later, offboarding.** In either mode, someone removed from the identity
+  provider cannot sign in again, but keeps an open session until it expires
+  and stays in coffre's directory. Entra and Okta can push removals over SCIM;
+  Google Workspace would need its directory polled.
+
 ## Open decisions
 
 1. **Where it is published, and under what license.** The repository is
@@ -239,6 +321,4 @@ keys = ["DATABASE_URL", "REDIS_URL"]
    Apache-2.0.
 2. **Postgres for erwinkn.com:** whichever host already runs your stack, given
    the ciphertext argument above.
-3. **Identity outside Cloudflare:** a trusted-proxy JWT (recommended) or a
-   built-in OIDC login.
-4. **Sync model:** a CLI push first (recommended), or a server-side engine.
+3. **Sync model:** a CLI push first (recommended), or a server-side engine.
