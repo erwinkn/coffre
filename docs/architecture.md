@@ -101,6 +101,53 @@ loader: ({ context }) => context.client.secrets.list('market/dev')
 and every read, the UI's included, goes through `/api` and its permission
 checks. The nonce-based Content-Security-Policy stays as it is.
 
+## The API
+
+The API is small and addressed by path: `market` is a project, `market/prod`
+an environment, `market/prod/DATABASE_URL` a secret, and `user:ada@acme.example`
+or `token:ci-deploy` a member. The URL names the thing and the HTTP method is
+the verb:
+
+| Call | HTTP |
+|---|---|
+| who I am, and everything I can reach | `GET /api/me` |
+| list, create, rename or archive a project | `GET /api/projects`, `PUT` / `PATCH /api/projects/market` |
+| the same for an environment | `PUT` / `PATCH /api/projects/market/prod` |
+| list an environment's secrets, never their values | `GET /api/secrets/market/prod` |
+| set, add or archive secrets, one or many, in one transaction | `PATCH /api/secrets/market/prod {"DATABASE_URL": "…", "OLD_KEY": null}` |
+| rename a secret | `PATCH /api/secrets/market/prod/DB_URL {"key": "DATABASE_URL"}` |
+| a secret's versions | `GET /api/secrets/market/prod/DATABASE_URL/versions` |
+| restore a version, as a new version | `POST /api/secrets/market/prod/DATABASE_URL/restore {"version": 3}` |
+| decrypt a secret or a whole environment | `POST /api/reveals {"path": "market/prod"}` |
+| list, add or offboard members | `GET /api/members`, `PUT` / `DELETE /api/members/user:ada@acme.example` |
+| issue a token | `POST /api/members/token:ci-deploy/tokens` |
+| change someone's access, in one transaction | `PATCH /api/access/user:ada@acme.example {"market": "developer", "market/prod": null}` |
+| syncs | `GET` / `POST /api/syncs/market/prod`, `PATCH` / `DELETE /api/syncs/by-id/:id`, `POST …/:id/runs` |
+| the audit log, and verifying it | `GET /api/audit?path=market/prod`, `GET /api/audit/verification` |
+
+Three conventions carry it:
+
+- **`PATCH` bodies are JSON merge patches** (RFC 7396): a field you send is
+  set, `null` removes it, a field you leave out stays. That is all
+  `secrets.set` and `access.set` mean.
+- **Decrypting is a `POST`.** A reveal writes an audit row in the caller's
+  name, so no `GET` may do it, and no prefetch, crawler or retrying proxy can.
+- **One role per member per place.** A grant maps `(member, place)` to one of
+  the built-in roles, which live in code, not in tables.
+
+Sign-in (OAuth callbacks, the device-code flow for `coffre login`) stays on
+its own routes; it is a protocol, not something done to the data.
+
+The server is one table keyed by method and route, each entry giving its input
+schema, the permission it needs and its handler. `@coffre/client` is generated
+from the same table (`coffre.secrets.set('market/prod', {…})`), so the two
+cannot drift, and the UI's server functions go away.
+
+Behind it, a request loads the caller and all their grants in one query, and
+every permission check after that is a plain function. With paths resolved in
+one join, the app needs about a dozen reads, down from about a hundred
+hand-written queries today.
+
 ## The vault
 
 The app decides **who** someone is. The vault decides **what** they may
