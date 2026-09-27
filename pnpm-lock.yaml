@@ -161,6 +161,24 @@ importers:
         specifier: 5.9.3
         version: 5.9.3
 
+  spikes/ssr-ui/consumer:
+    dependencies:
+      '@coffre/ui-spike':
+        specifier: workspace:*
+        version: link:../ui-package
+    devDependencies:
+      '@types/node':
+        specifier: 26.1.1
+        version: 26.1.1
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+      wrangler:
+        specifier: 4.118.0
+        version: 4.118.0
+
+  spikes/ssr-ui/ui-package: {}
+
 packages:
 
   '@babel/code-frame@7.27.1':

@@ -2,6 +2,7 @@ packages:
   - packages/*
   - apps/*
   - spikes/*
+  - spikes/ssr-ui/*
 
 # Supply-chain settings.
 #

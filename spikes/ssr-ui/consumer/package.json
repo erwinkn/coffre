@@ -1,0 +1,21 @@
+{
+  "name": "@coffre/ssr-ui-spike-consumer",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev:worker": "wrangler dev --port 3061",
+    "dev:node": "node src/node.ts",
+    "typecheck": "tsc --noEmit",
+    "verify:worker": "node verify.mjs http://127.0.0.1:3061 worker",
+    "verify:node": "node verify.mjs http://127.0.0.1:3062 node"
+  },
+  "dependencies": {
+    "@coffre/ui-spike": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "26.1.1",
+    "typescript": "5.9.3",
+    "wrangler": "4.118.0"
+  }
+}

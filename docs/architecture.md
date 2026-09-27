@@ -69,7 +69,24 @@ match the server's version exactly and the CLI's may differ:
 
 The UI stays a server-rendered TanStack Start app, published prebuilt as
 `@coffre/ui`. `@coffre/server` routes `/api`, `/auth/*`, `/livez` and
-`/readyz` itself and hands every other path to the UI.
+`/readyz` itself and hands every other path to the UI:
+
+```ts
+type Ui = {
+  fetch(request: Request, options: { context: { cspNonce: string; client: CoffreClient } }): Promise<Response>;
+};
+export function createUi(options?: UiOptions): Ui;
+```
+
+The server mints the nonce, builds the request's client and sets the security
+headers; the UI only renders. Its static files are served straight from
+`node_modules/@coffre/ui/dist/client`, under `/_coffre/assets/` so they cannot
+collide with a deployment's own paths. [A spike](../spikes/ssr-ui/REPORT.md)
+showed this works: a separate Worker imported today's built UI, served its
+files through pnpm's symlink, rendered on the server with one copy of React and
+hydrated with the nonce intact, and Node 24 ran the same build behind a small
+`node:http` adapter. Still unproven: uploading symlinked files to Cloudflare
+(check with `wrangler deploy --dry-run` in CI).
 
 Pages get their data through `@coffre/client`, the same client the CLI uses,
 never by reaching into the services. The client takes a transport: HTTP in the
@@ -149,30 +166,37 @@ sign-in.
 
 The app database can be Postgres, MySQL or SQLite. Every query goes through
 Drizzle; none is written by hand. The integration suite runs against all
-three.
+three. [A spike](../spikes/drizzle-dialects/REPORT.md) ran the same queries,
+joins, a transaction, an upsert and 24 concurrent audit appends on all three.
 
-What differs between them is kept to a small per-dialect module:
+Each query is written once, typed against the Postgres schema. Drizzle has no
+type shared by its dialects, so the MySQL and SQLite databases are cast to the
+Postgres one in a single small module; at run time each database always
+travels with its own dialect's tables. The cast is unsound by construction, so
+two things guard it: a parity test (the three schemas have the same tables,
+columns, nullability and keys, and the same row types) and the whole suite on
+every engine, on every Drizzle upgrade.
 
-- **Schemas.** Drizzle's table builders are per dialect (`pgTable`,
-  `mysqlTable`, `sqliteTable`), so each dialect has its schema and migrations;
-  a test checks the three describe the same tables and columns.
+What differs between them stays in the schemas and a small per-dialect module:
+
+- **Schemas and migrations.** Drizzle's table builders are per dialect
+  (`pgTable`, `mysqlTable`, `sqliteTable`), so there are three schemas and
+  three migration trees, changed together. Types differ on purpose: bytes are
+  `bytea`, `longblob` (`blob` is too small for a 64 KiB secret) and `blob`.
 - **Ids come from the application**, never from the database: MySQL has no
   `RETURNING`.
-- **Upserts and locks.** Postgres locks rows (`FOR UPDATE`) and takes advisory
-  locks for the audit chain and for offboarding racing a sign-in; MySQL locks
-  rows; SQLite has a single writer and needs neither.
+- **Upserts and locks** are named operations of the dialect module, never
+  branches in the services. The audit chain locks a permanent head row
+  (`FOR UPDATE` on Postgres and MySQL) instead of a Postgres advisory lock.
+  SQLite has a single writer but its driver does not queue for us (24
+  concurrent appends failed with `SQLITE_BUSY`), so the SQLite module queues
+  writes itself, once per database.
+- **Postgres-only SQL in today's services** (partial unique indexes, regex
+  checks, `array_agg`, lateral joins, `jsonb ->>` filters, `lower()` matching)
+  is remodelled rather than written three ways: a JSON field used in a filter
+  becomes a column, a case-insensitive identity is stored normalised.
 
-D1 is probably not a fit for the app database: as far as we know it has no
-interactive transactions, and the audit chain and offboarding read, then
-write, under a lock. A Durable Object's SQLite has them, for an all-Cloudflare
-deployment without Postgres.
-
-## Open questions, settled by spikes first
-
-1. **A prebuilt server-rendered UI.** Can a consumer's Worker import
-   TanStack Start's built server and serve its static files from
-   `node_modules`? If not, the fallback is a Vite plugin the template runs,
-   so the consumer's project builds the UI itself.
-2. **One set of Drizzle queries across three dialects.** Drizzle's types are
-   per dialect. The question is how to write each query once, keep it typed,
-   and confine the differences to the per-dialect module.
+D1 is not a fit for the app database: it has no interactive transactions, and
+the audit chain reads the previous hash, computes the next in JavaScript, then
+writes. Drizzle's D1 transactions send `BEGIN`, which D1 rejects. A Durable
+Object's SQLite has them, for an all-Cloudflare deployment without Postgres.

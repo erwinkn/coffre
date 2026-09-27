@@ -92,8 +92,10 @@ coffre becomes packages a deployment imports and configures in code:
 that holds the keys and decides who may decrypt. The design is in
 [architecture.md](architecture.md). In order:
 
-1. **Two spikes**: a prebuilt server-rendered UI imported by another Worker,
-   and one set of Drizzle queries across three dialects.
+1. ~~**Two spikes**~~: done, both positive. A prebuilt server-rendered UI
+   imported by another Worker ([report](../spikes/ssr-ui/REPORT.md)), and one
+   set of Drizzle queries across three dialects
+   ([report](../spikes/drizzle-dialects/REPORT.md)).
 2. **Every query through Drizzle**, on Postgres, with no change in behaviour;
    then MySQL and SQLite, with the integration suite on all three.
 3. **The UI on the API**: page loaders call `@coffre/client` instead of
