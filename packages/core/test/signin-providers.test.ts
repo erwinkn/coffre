@@ -112,7 +112,7 @@ function editIdToken(edit: (claims: Record<string, unknown>) => void): typeof fe
 
 test('OIDC: a round trip yields the subject and the verified email', async () => {
   const provider = createSigninProvider(oidcConfig());
-  const { url, pending } = await provider.start(REDIRECT_URI, { loginHint: 'Dev@Equisafe.io' });
+  const { url, pending } = await provider.start(REDIRECT_URI, { loginHint: 'Dev@Acme.example' });
 
   assert.equal(url.origin + url.pathname, `${idp.origin}/oauth/authorize`);
   assert.equal(url.searchParams.get('client_id'), 'coffre-local');
@@ -126,34 +126,34 @@ test('OIDC: a round trip yields the subject and the verified email', async () =>
   const profile = await provider.finish(await authorize(url), REDIRECT_URI, pending);
   assert.deepEqual(profile, {
     provider: 'dev',
-    subject: idp.subjectFor('dev@equisafe.io'),
-    emails: ['dev@equisafe.io'],
+    subject: idp.subjectFor('dev@acme.example'),
+    emails: ['dev@acme.example'],
     name: 'Devon Dev',
   });
 });
 
 test('OIDC: the subject follows the account, not the email', async () => {
   const provider = createSigninProvider(oidcConfig());
-  idp.setSubject('recycled@equisafe.io', 'someone-new');
-  const profile = await signIn(provider, 'recycled@equisafe.io');
+  idp.setSubject('recycled@acme.example', 'someone-new');
+  const profile = await signIn(provider, 'recycled@acme.example');
   assert.equal(profile.subject, 'someone-new');
-  assert.deepEqual(profile.emails, ['recycled@equisafe.io']);
+  assert.deepEqual(profile.emails, ['recycled@acme.example']);
 });
 
 test('OIDC: extra authorization parameters are sent', async () => {
   const provider = createSigninProvider(
-    oidcConfig({ authorizationParams: { prompt: 'select_account', hd: 'equisafe.io' } }),
+    oidcConfig({ authorizationParams: { prompt: 'select_account', hd: 'acme.example' } }),
   );
   const { url } = await provider.start(REDIRECT_URI);
   assert.equal(url.searchParams.get('prompt'), 'select_account');
-  assert.equal(url.searchParams.get('hd'), 'equisafe.io');
+  assert.equal(url.searchParams.get('hd'), 'acme.example');
   assert.equal(url.searchParams.get('login_hint'), null);
 });
 
 test('OIDC: a callback for another sign-in is a state mismatch', async () => {
   const provider = createSigninProvider(oidcConfig());
-  const first = await provider.start(REDIRECT_URI, { loginHint: 'dev@equisafe.io' });
-  const second = await provider.start(REDIRECT_URI, { loginHint: 'dev@equisafe.io' });
+  const first = await provider.start(REDIRECT_URI, { loginHint: 'dev@acme.example' });
+  const second = await provider.start(REDIRECT_URI, { loginHint: 'dev@acme.example' });
   const callback = await authorize(first.url);
   await refusal(provider.finish(callback, REDIRECT_URI, second.pending), 'state_mismatch');
 
@@ -177,25 +177,25 @@ test('OIDC: pressing Deny is a provider denial', async () => {
 test('OIDC: a code is redeemed once, and only with its redirect URI and verifier', async () => {
   const provider = createSigninProvider(oidcConfig());
 
-  const { url, pending } = await provider.start(REDIRECT_URI, { loginHint: 'dev@equisafe.io' });
+  const { url, pending } = await provider.start(REDIRECT_URI, { loginHint: 'dev@acme.example' });
   const callback = await authorize(url);
   await provider.finish(callback, REDIRECT_URI, pending);
   await refusal(provider.finish(callback, REDIRECT_URI, pending), 'provider_denied');
 
-  const other = await provider.start(REDIRECT_URI, { loginHint: 'dev@equisafe.io' });
+  const other = await provider.start(REDIRECT_URI, { loginHint: 'dev@acme.example' });
   await refusal(
     provider.finish(await authorize(other.url), 'http://127.0.0.1:3000/elsewhere', other.pending),
     'provider_denied',
   );
 
-  const third = await provider.start(REDIRECT_URI, { loginHint: 'dev@equisafe.io' });
+  const third = await provider.start(REDIRECT_URI, { loginHint: 'dev@acme.example' });
   const wrongVerifier: PendingSignin = { ...third.pending, codeVerifier: 'x'.repeat(43) };
   await refusal(provider.finish(await authorize(third.url), REDIRECT_URI, wrongVerifier), 'provider_denied');
 });
 
 test('OIDC: a nonce that does not match is not trusted', async () => {
   const provider = createSigninProvider(oidcConfig());
-  const { url, pending } = await provider.start(REDIRECT_URI, { loginHint: 'dev@equisafe.io' });
+  const { url, pending } = await provider.start(REDIRECT_URI, { loginHint: 'dev@acme.example' });
   await refusal(
     provider.finish(await authorize(url), REDIRECT_URI, { ...pending, nonce: 'another-nonce' }),
     'invalid_response',
@@ -208,9 +208,9 @@ test('OIDC: an email the provider marks unverified is dropped', async () => {
       claims.email_verified = false;
     }),
   });
-  const profile = await signIn(provider, 'dev@equisafe.io');
+  const profile = await signIn(provider, 'dev@acme.example');
   assert.deepEqual(profile.emails, []);
-  assert.equal(profile.subject, idp.subjectFor('dev@equisafe.io'));
+  assert.equal(profile.subject, idp.subjectFor('dev@acme.example'));
 });
 
 test('OIDC: a token without email yields no email; one without email_verified is trusted', async () => {
@@ -219,35 +219,35 @@ test('OIDC: a token without email yields no email; one without email_verified is
       delete claims.email;
     }),
   });
-  assert.deepEqual((await signIn(missing, 'dev@equisafe.io')).emails, []);
+  assert.deepEqual((await signIn(missing, 'dev@acme.example')).emails, []);
 
   // Entra sends no email_verified at all.
   const silent = createSigninProvider(oidcConfig(), {
     fetch: editIdToken((claims) => {
       delete claims.email_verified;
-      claims.email = '  Dev@Equisafe.IO ';
+      claims.email = '  Dev@Acme.EXAMPLE ';
     }),
   });
-  assert.deepEqual((await signIn(silent, 'dev@equisafe.io')).emails, ['dev@equisafe.io']);
+  assert.deepEqual((await signIn(silent, 'dev@acme.example')).emails, ['dev@acme.example']);
 });
 
 test('OIDC: a hosted domain is checked on the hd claim, not the request', async () => {
-  const config = oidcConfig({ hostedDomain: 'equisafe.io', authorizationParams: { hd: 'equisafe.io' } });
-  await refusal(signIn(createSigninProvider(config), 'dev@equisafe.io'), 'wrong_domain');
+  const config = oidcConfig({ hostedDomain: 'acme.example', authorizationParams: { hd: 'acme.example' } });
+  await refusal(signIn(createSigninProvider(config), 'dev@acme.example'), 'wrong_domain');
 
   const other = createSigninProvider(config, {
     fetch: editIdToken((claims) => {
       claims.hd = 'gmail.com';
     }),
   });
-  await refusal(signIn(other, 'dev@equisafe.io'), 'wrong_domain');
+  await refusal(signIn(other, 'dev@acme.example'), 'wrong_domain');
 
   const member = createSigninProvider(config, {
     fetch: editIdToken((claims) => {
-      claims.hd = 'equisafe.io';
+      claims.hd = 'acme.example';
     }),
   });
-  assert.deepEqual((await signIn(member, 'dev@equisafe.io')).emails, ['dev@equisafe.io']);
+  assert.deepEqual((await signIn(member, 'dev@acme.example')).emails, ['dev@acme.example']);
 });
 
 test('OIDC: an ID token for another client is not trusted', async () => {
@@ -256,7 +256,7 @@ test('OIDC: an ID token for another client is not trusted', async () => {
       claims.aud = 'someone-else';
     }),
   });
-  await refusal(signIn(provider, 'dev@equisafe.io'), 'invalid_response');
+  await refusal(signIn(provider, 'dev@acme.example'), 'invalid_response');
 });
 
 test('OIDC: an issuer that cannot be reached is provider_unavailable', async () => {
@@ -273,49 +273,49 @@ test('OIDC: an issuer that cannot be reached is provider_unavailable', async () 
 
 test('GitHub: a round trip yields the numeric id and verified emails, primary first', async () => {
   const provider = githubProvider();
-  const { url, pending } = await provider.start(REDIRECT_URI, { loginHint: 'lead@equisafe.io' });
+  const { url, pending } = await provider.start(REDIRECT_URI, { loginHint: 'lead@acme.example' });
   assert.equal(url.origin + url.pathname, `${idp.origin}/github/login/oauth/authorize`);
   assert.equal(url.searchParams.get('scope'), 'read:user user:email');
   assert.equal(url.searchParams.get('allow_signup'), 'false');
-  assert.equal(url.searchParams.get('login'), 'lead@equisafe.io');
+  assert.equal(url.searchParams.get('login'), 'lead@acme.example');
   assert.equal(pending.nonce, null);
 
   const profile = await provider.finish(await authorize(url), REDIRECT_URI, pending);
-  const account = idp.gitHubUserFor('lead@equisafe.io');
+  const account = idp.gitHubUserFor('lead@acme.example');
   assert.deepEqual(profile, {
     provider: 'dev-github',
     subject: String(account.id),
-    emails: ['lead@equisafe.io'],
+    emails: ['lead@acme.example'],
     name: 'Lea Lead',
   });
 
-  idp.setGitHubUser('multi@equisafe.io', {
+  idp.setGitHubUser('multi@acme.example', {
     emails: [
       { email: 'Personal@Example.com' },
-      { email: 'multi@equisafe.io', primary: true },
-      { email: 'old@equisafe.io', verified: false },
+      { email: 'multi@acme.example', primary: true },
+      { email: 'old@acme.example', verified: false },
     ],
   });
-  assert.deepEqual((await signIn(provider, 'multi@equisafe.io')).emails, [
-    'multi@equisafe.io',
+  assert.deepEqual((await signIn(provider, 'multi@acme.example')).emails, [
+    'multi@acme.example',
     'personal@example.com',
   ]);
 });
 
 test('GitHub: an unverified address on the account is never reported', async () => {
   // The fake outsider account lists lead's address, unverified.
-  assert.ok(idp.gitHubUserFor('outsider@equisafe.io').emails.some((e) => e.email === 'lead@equisafe.io'));
-  const profile = await signIn(githubProvider(), 'outsider@equisafe.io');
-  assert.deepEqual(profile.emails, ['outsider@equisafe.io']);
+  assert.ok(idp.gitHubUserFor('outsider@acme.example').emails.some((e) => e.email === 'lead@acme.example'));
+  const profile = await signIn(githubProvider(), 'outsider@acme.example');
+  assert.deepEqual(profile.emails, ['outsider@acme.example']);
 });
 
 test('GitHub: an account with no verified email yields none', async () => {
-  idp.setGitHubUser('unverified@equisafe.io', {
-    emails: [{ email: 'unverified@equisafe.io', verified: false }],
+  idp.setGitHubUser('unverified@acme.example', {
+    emails: [{ email: 'unverified@acme.example', verified: false }],
   });
-  const profile = await signIn(githubProvider(), 'unverified@equisafe.io');
+  const profile = await signIn(githubProvider(), 'unverified@acme.example');
   assert.deepEqual(profile.emails, []);
-  assert.equal(profile.subject, String(idp.gitHubUserFor('unverified@equisafe.io').id));
+  assert.equal(profile.subject, String(idp.gitHubUserFor('unverified@acme.example').id));
 });
 
 test('GitHub: the name falls back to the login', async () => {
@@ -331,24 +331,24 @@ test('GitHub: the name falls back to the login', async () => {
       },
     },
   );
-  assert.equal((await signIn(provider, 'noname@equisafe.io')).name, 'noname');
+  assert.equal((await signIn(provider, 'noname@acme.example')).name, 'noname');
 });
 
 test('GitHub: an organization admits its members only, and asks for read:org', async () => {
-  const provider = githubProvider({ organization: 'Equisafe' });
-  const { url } = await provider.start(REDIRECT_URI, { loginHint: 'dev@equisafe.io' });
+  const provider = githubProvider({ organization: 'Acme' });
+  const { url } = await provider.start(REDIRECT_URI, { loginHint: 'dev@acme.example' });
   assert.equal(url.searchParams.get('scope'), 'read:user user:email read:org');
 
-  assert.deepEqual((await signIn(provider, 'dev@equisafe.io')).emails, ['dev@equisafe.io']);
+  assert.deepEqual((await signIn(provider, 'dev@acme.example')).emails, ['dev@acme.example']);
 
-  idp.setGitHubUser('contractor@equisafe.io', { orgs: ['elsewhere'] });
-  await refusal(signIn(provider, 'contractor@equisafe.io'), 'not_in_organization');
+  idp.setGitHubUser('contractor@acme.example', { orgs: ['elsewhere'] });
+  await refusal(signIn(provider, 'contractor@acme.example'), 'not_in_organization');
 });
 
 test('GitHub: a callback for another sign-in is a state mismatch, even when it reports an error', async () => {
   const provider = githubProvider();
-  const first = await provider.start(REDIRECT_URI, { loginHint: 'dev@equisafe.io' });
-  const second = await provider.start(REDIRECT_URI, { loginHint: 'dev@equisafe.io' });
+  const first = await provider.start(REDIRECT_URI, { loginHint: 'dev@acme.example' });
+  const second = await provider.start(REDIRECT_URI, { loginHint: 'dev@acme.example' });
   const callback = await authorize(first.url);
   await refusal(provider.finish(callback, REDIRECT_URI, second.pending), 'state_mismatch');
 
@@ -374,19 +374,19 @@ test('GitHub: a callback without a code is not trusted', async () => {
 
 test('GitHub: a spent code, a wrong verifier or a wrong secret is refused by GitHub', async () => {
   const provider = githubProvider();
-  const { url, pending } = await provider.start(REDIRECT_URI, { loginHint: 'dev@equisafe.io' });
+  const { url, pending } = await provider.start(REDIRECT_URI, { loginHint: 'dev@acme.example' });
   const callback = await authorize(url);
   await provider.finish(callback, REDIRECT_URI, pending);
   await refusal(provider.finish(callback, REDIRECT_URI, pending), 'provider_denied');
 
-  const other = await provider.start(REDIRECT_URI, { loginHint: 'dev@equisafe.io' });
+  const other = await provider.start(REDIRECT_URI, { loginHint: 'dev@acme.example' });
   await refusal(
     provider.finish(await authorize(other.url), REDIRECT_URI, { ...other.pending, codeVerifier: 'x'.repeat(43) }),
     'provider_denied',
   );
 
   const wrongSecret = githubProvider({ clientSecret: 'not-the-secret' });
-  await refusal(signIn(wrongSecret, 'dev@equisafe.io'), 'provider_denied');
+  await refusal(signIn(wrongSecret, 'dev@acme.example'), 'provider_denied');
 });
 
 test('GitHub: an API that cannot be reached is provider_unavailable', async () => {

@@ -39,13 +39,13 @@ type ShellProps = {
   children: ReactNode;
 };
 
-const REPOSITORY = 'https://github.com/equisafe/coffre';
+const REPOSITORY = 'https://github.com/erwinkn/coffre';
 
 /**
  * The workspace this deployment serves. The server has no such notion yet --
  * one deployment is one workspace -- so the name lives here until it does.
  */
-const WORKSPACE = 'Equisafe';
+const WORKSPACE = 'Acme';
 
 const SIDEBAR_KEY = 'coffre-sidebar';
 

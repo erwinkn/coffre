@@ -17,7 +17,7 @@
  *   COFFRE_SIGNIN_GITHUB_CLIENT_ID=Iv23li...
  *   COFFRE_SIGNIN_GITHUB_CLIENT_SECRET=...        (a secret)
  *   COFFRE_SIGNIN_OKTA_TYPE=oidc
- *   COFFRE_SIGNIN_OKTA_ISSUER=https://equisafe.okta.com
+ *   COFFRE_SIGNIN_OKTA_ISSUER=https://acme.okta.com
  *   COFFRE_SIGNIN_OKTA_CLIENT_ID=...
  *   COFFRE_SIGNIN_OKTA_CLIENT_SECRET=...
  */
@@ -63,9 +63,9 @@ export type GitHubProviderConfig = ProviderBase & {
 export type SigninProviderConfig = OidcProviderConfig | GitHubProviderConfig;
 
 export type SigninPage = {
-  /** Heading on the sign-in page, e.g. "Equisafe secrets". */
+  /** Heading on the sign-in page, e.g. "Acme secrets". */
   title: string;
-  /** One line under it, e.g. "Use your equisafe.io Google account." */
+  /** One line under it, e.g. "Use your acme.example Google account." */
   note: string | null;
 };
 

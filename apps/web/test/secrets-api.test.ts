@@ -13,10 +13,10 @@ import { AccessDenied } from '../src/server/services/secrets.ts';
 import { requestContext, serviceFixture } from './service-fixture.ts';
 
 const CHAIN_KEY = randomBytes(32);
-const ROOT = 'erwin@equisafe.io';
+const ROOT = 'admin@acme.example';
 const root = requestContext(ROOT);
-const reader = requestContext('reader@equisafe.io');
-const outsider = requestContext('outsider@equisafe.io');
+const reader = requestContext('reader@acme.example');
+const outsider = requestContext('outsider@acme.example');
 const ci = requestContext('ci-deploy.access', 'service');
 
 let pool: pg.Pool;
@@ -65,13 +65,13 @@ beforeEach(async () => {
   );
   await pool.query(
     `INSERT INTO principals (principal_type, principal_id, instance_role, created_by)
-     VALUES ('user', 'reader@equisafe.io', 'user', 'test'),
+     VALUES ('user', 'reader@acme.example', 'user', 'test'),
             ('service', 'ci-deploy.access', 'user', 'test')`,
   );
   const viewer = await pool.query("SELECT id FROM roles WHERE slug = 'viewer'");
   await pool.query(
     `INSERT INTO grants (principal_type, principal_id, environment_id, role_id, created_by)
-     VALUES ('user', 'reader@equisafe.io', $1, $3, 'test'),
+     VALUES ('user', 'reader@acme.example', $1, $3, 'test'),
             ('service', 'ci-deploy.access', $2, $3, 'test')`,
     [dev.rows[0].id, prod.rows[0].id, viewer.rows[0].id],
   );

@@ -126,7 +126,7 @@ export class DevIdp {
 
         const minted = commonName
           ? this.mintServiceToken({ audience, commonName, expiresIn })
-          : this.mintUserToken({ audience, email: email ?? 'erwin@equisafe.io', expiresIn });
+          : this.mintUserToken({ audience, email: email ?? 'admin@acme.example', expiresIn });
 
         minted.then((token) => {
           res.writeHead(200, { 'content-type': 'application/json' });
@@ -251,7 +251,7 @@ export class DevIdp {
   }): Promise<string> {
     return this.#sign(
       {
-        email: opts.email ?? 'erwin@equisafe.io',
+        email: opts.email ?? 'admin@acme.example',
         sub: opts.sub ?? '0f9a1c2e-1111-2222-3333-444455556666',
         identity_nonce: 'devnonce',
       },

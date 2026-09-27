@@ -24,10 +24,10 @@ import {
 import { requestContext } from './service-fixture.ts';
 
 const CHAIN_KEY = randomBytes(32);
-const ROOT = 'erwin@equisafe.io';
-const LEAD = 'lead@equisafe.io';
-const DEV = 'dev@equisafe.io';
-const GONE = 'gone@equisafe.io';
+const ROOT = 'admin@acme.example';
+const LEAD = 'lead@acme.example';
+const DEV = 'dev@acme.example';
+const GONE = 'gone@acme.example';
 const SERVICE = 'ci-deploy';
 const RETIRED = 'retired-bot';
 const IP = '203.0.113.7';
@@ -37,7 +37,7 @@ const lead = requestContext(LEAD);
 const dev = requestContext(DEV);
 
 const CONFIG = defineSignin({
-  publicUrl: 'https://secrets.equisafe.io',
+  publicUrl: 'https://secrets.acme.example',
   providers: [
     github({ clientId: 'gh-id', clientSecret: 'gh-secret' }),
     google({ clientId: 'g-id', clientSecret: 'g-secret' }),
@@ -238,15 +238,15 @@ test('a first sign-in with an invited email binds the account and opens a browse
 test('any verified email on the account may match, and case does not matter', async () => {
   await pool.query(
     `INSERT INTO principals (principal_type, principal_id, instance_role, created_by, active)
-     VALUES ('user', 'Mixed.Case@Equisafe.io', 'user', $1, true)`,
+     VALUES ('user', 'Mixed.Case@Acme.example', 'user', $1, true)`,
     [ROOT],
   );
   const result = await signedIn(
-    profile('google', 'g-7', ['personal@example.com', 'mixed.case@equisafe.io']),
+    profile('google', 'g-7', ['personal@example.com', 'mixed.case@acme.example']),
   );
-  assert.deepEqual(result.principal, { type: 'user', id: 'Mixed.Case@Equisafe.io' });
+  assert.deepEqual(result.principal, { type: 'user', id: 'Mixed.Case@Acme.example' });
   const [bind] = await auditRows();
-  assert.equal(bind.metadata.matchedEmail, 'mixed.case@equisafe.io');
+  assert.equal(bind.metadata.matchedEmail, 'mixed.case@acme.example');
   const identity = (await pool.query('SELECT email FROM identities')).rows[0];
   assert.equal(identity.email, 'personal@example.com', 'the primary address is remembered');
 });
@@ -772,8 +772,8 @@ test('device flow: start, describe, approve, then one poll gets a CLI session', 
   const started = await signin.startDevice({ clientLabel: 'coffre CLI on laptop', sourceIp: IP });
   assert.match(started.userCode, /^[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}$/);
   assert.match(started.deviceCode, /^[A-Za-z0-9_-]{43}$/);
-  assert.equal(started.verificationUri, 'https://secrets.equisafe.io/auth/device');
-  assert.equal(started.verificationUriComplete, `https://secrets.equisafe.io/auth/device?code=${started.userCode}`);
+  assert.equal(started.verificationUri, 'https://secrets.acme.example/auth/device');
+  assert.equal(started.verificationUriComplete, `https://secrets.acme.example/auth/device?code=${started.userCode}`);
   assert.equal(started.expiresIn, 600);
   assert.equal(started.interval, 5);
 

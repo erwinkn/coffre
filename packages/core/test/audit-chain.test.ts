@@ -23,7 +23,7 @@ function buildLog(chainKey: Buffer, count: number): StoredRow[] {
       seq: BigInt(i),
       occurredAt: new Date(Date.UTC(2026, 6, 27, 12, 0, i)).toISOString(),
       actorType: 'user',
-      actorId: 'erwin@equisafe.io',
+      actorId: 'admin@acme.example',
       action: 'secret.read',
       decision: 'allow',
       projectId,
@@ -57,7 +57,7 @@ test('mutating a row breaks the chain at that row', () => {
   const rows = buildLog(chainKey, 5);
 
   // Someone edits an audit entry to hide who read the secret.
-  rows[2].actorId = 'someone-else@equisafe.io';
+  rows[2].actorId = 'someone-else@acme.example';
 
   const result = verifyChain(chainKey, rows);
   assert.equal(result.ok, false);

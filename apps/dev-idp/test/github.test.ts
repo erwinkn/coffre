@@ -33,7 +33,7 @@ async function authorize(opts: { email?: string; login?: string; scope?: string 
   url.searchParams.set('code_challenge_method', 'S256');
   url.searchParams.set('allow_signup', 'false');
   if (opts.login) url.searchParams.set('login', opts.login);
-  else url.searchParams.set('login_hint', opts.email ?? 'dev@equisafe.io');
+  else url.searchParams.set('login_hint', opts.email ?? 'dev@acme.example');
 
   const back = location(await get(url));
   return { back, code: back.searchParams.get('code')!, verifier };
@@ -121,7 +121,7 @@ test('the API requires a token, under Bearer or token', async () => {
   assert.equal((await apiGet('/user')).status, 401);
   assert.equal((await apiGet('/user', 'gho_nope')).status, 401);
 
-  const token = await signIn({ email: 'lead@equisafe.io' });
+  const token = await signIn({ email: 'lead@acme.example' });
   for (const scheme of ['Bearer', 'token']) {
     const response = await apiGet('/user', token, scheme);
     assert.equal(response.status, 200);
@@ -130,14 +130,14 @@ test('the API requires a token, under Bearer or token', async () => {
     assert.equal(typeof user.id, 'number');
     assert.equal(user.login, 'lead');
     assert.equal(user.name, 'Lea Lead');
-    assert.equal(user.email, 'lead@equisafe.io');
+    assert.equal(user.email, 'lead@acme.example');
   }
 });
 
 test('user ids are stable per persona', async () => {
-  const a = await (await apiGet('/user', await signIn({ email: 'auditor@equisafe.io' }))).json();
-  const b = await (await apiGet('/user', await signIn({ email: 'auditor@equisafe.io' }))).json();
-  const c = await (await apiGet('/user', await signIn({ email: 'dev@equisafe.io' }))).json();
+  const a = await (await apiGet('/user', await signIn({ email: 'auditor@acme.example' }))).json();
+  const b = await (await apiGet('/user', await signIn({ email: 'auditor@acme.example' }))).json();
+  const c = await (await apiGet('/user', await signIn({ email: 'dev@acme.example' }))).json();
   assert.equal(a.id, b.id);
   assert.notEqual(a.id, c.id);
 });
@@ -148,38 +148,38 @@ test('GitHub’s login hint names a user, not an email', async () => {
 });
 
 test('emails list unverified addresses too, and need user:email', async () => {
-  const token = await signIn({ email: 'outsider@equisafe.io' });
+  const token = await signIn({ email: 'outsider@acme.example' });
   const response = await apiGet('/user/emails', token);
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), [
-    { email: 'outsider@equisafe.io', primary: true, verified: true, visibility: 'public' },
-    { email: 'lead@equisafe.io', primary: false, verified: false, visibility: null },
+    { email: 'outsider@acme.example', primary: true, verified: true, visibility: 'public' },
+    { email: 'lead@acme.example', primary: false, verified: false, visibility: null },
   ]);
 
-  const narrow = await signIn({ email: 'outsider@equisafe.io', scope: 'read:user' });
+  const narrow = await signIn({ email: 'outsider@acme.example', scope: 'read:user' });
   assert.equal((await apiGet('/user/emails', narrow)).status, 404);
   assert.equal((await apiGet('/user/emails', await signIn({ scope: 'user' }))).status, 200);
 });
 
 test('org membership needs read:org, and is 404 for non-members', async () => {
-  const token = await signIn({ email: 'dev@equisafe.io' });
-  const member = await apiGet('/user/memberships/orgs/equisafe', token);
+  const token = await signIn({ email: 'dev@acme.example' });
+  const member = await apiGet('/user/memberships/orgs/acme', token);
   assert.equal(member.status, 200);
   const body = await member.json();
   assert.equal(body.state, 'active');
   assert.equal(body.role, 'member');
-  assert.equal(body.organization.login, 'equisafe');
+  assert.equal(body.organization.login, 'acme');
   assert.equal(body.user.login, 'dev');
 
-  assert.equal((await apiGet('/user/memberships/orgs/EquiSafe', token)).status, 200);
+  assert.equal((await apiGet('/user/memberships/orgs/Acme', token)).status, 200);
   assert.equal((await apiGet('/user/memberships/orgs/other-org', token)).status, 404);
 
-  const narrow = await signIn({ email: 'dev@equisafe.io', scope: 'read:user user:email' });
-  assert.equal((await apiGet('/user/memberships/orgs/equisafe', narrow)).status, 403);
+  const narrow = await signIn({ email: 'dev@acme.example', scope: 'read:user user:email' });
+  assert.equal((await apiGet('/user/memberships/orgs/acme', narrow)).status, 403);
 });
 
 test('setGitHubUser simulates a recycled email, several emails, and leaving the org', async () => {
-  const email = 'recycled@equisafe.io';
+  const email = 'recycled@acme.example';
   const before = await (await apiGet('/user', await signIn({ email }))).json();
 
   idp.setGitHubUser(email, {
@@ -188,7 +188,7 @@ test('setGitHubUser simulates a recycled email, several emails, and leaving the 
     emails: [
       { email: 'newcomer@personal.example', visibility: 'private' },
       { email, primary: true },
-      { email: 'old@equisafe.io', verified: false },
+      { email: 'old@acme.example', verified: false },
     ],
     orgs: [],
   });
@@ -205,15 +205,15 @@ test('setGitHubUser simulates a recycled email, several emails, and leaving the 
     [
       ['newcomer@personal.example', false, true],
       [email, true, true],
-      ['old@equisafe.io', false, false],
+      ['old@acme.example', false, false],
     ],
   );
-  assert.equal((await apiGet('/user/memberships/orgs/equisafe', token)).status, 404);
+  assert.equal((await apiGet('/user/memberships/orgs/acme', token)).status, 404);
 
   // A patch keeps what it does not mention.
-  idp.setGitHubUser(email, { orgs: ['equisafe'] });
+  idp.setGitHubUser(email, { orgs: ['acme'] });
   assert.equal(idp.gitHubUserFor(email).id, 424242);
-  assert.equal((await apiGet('/user/memberships/orgs/equisafe', await signIn({ email }))).status, 200);
+  assert.equal((await apiGet('/user/memberships/orgs/acme', await signIn({ email }))).status, 200);
 });
 
 test('GitHub codes and tokens do not cross into OIDC', async () => {

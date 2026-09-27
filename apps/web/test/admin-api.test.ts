@@ -13,11 +13,11 @@ import { AccessDenied, NotFound } from '../src/server/services/secrets.ts';
 import { requestContext, serviceFixture } from './service-fixture.ts';
 
 const CHAIN_KEY = randomBytes(32);
-const ROOT = 'erwin@equisafe.io';
+const ROOT = 'admin@acme.example';
 const root = requestContext(ROOT);
-const lead = requestContext('lead@equisafe.io');
-const reader = requestContext('reader@equisafe.io');
-const outsider = requestContext('outsider@equisafe.io');
+const lead = requestContext('lead@acme.example');
+const reader = requestContext('reader@acme.example');
+const outsider = requestContext('outsider@acme.example');
 let pool: pg.Pool;
 let runtimePool: pg.Pool;
 let services: ReturnType<typeof serviceFixture>;
@@ -61,7 +61,7 @@ beforeEach(async () => {
 });
 
 async function seedProject(): Promise<void> {
-  await services.admin.createProject(root, 'market', 'Equisafe Market');
+  await services.admin.createProject(root, 'market', 'Acme Market');
   await services.admin.createEnvironment(root, 'market', 'prod', 'Production');
   await services.admin.createGrant(root, 'market', {
     principalType: 'user',
@@ -80,7 +80,7 @@ function isConflict(error: unknown): boolean {
 }
 
 test('root admins and instance owners create projects without implicit secret grants', async () => {
-  const owner = requestContext('instance-owner@equisafe.io');
+  const owner = requestContext('instance-owner@acme.example');
   await services.admin.addDirectoryPrincipal(root, {
     principalType: 'user',
     principalId: owner.principal.id,
@@ -312,7 +312,7 @@ test('removing a principal revokes every grant and is audited', async () => {
 
 test('instance owners manage every project without receiving secret access', async () => {
   await seedProject();
-  const owner = requestContext('instance-owner@equisafe.io');
+  const owner = requestContext('instance-owner@acme.example');
   await services.admin.addDirectoryPrincipal(root, {
     principalType: 'user',
     principalId: owner.principal.id,
@@ -413,7 +413,7 @@ test('ordinary users cannot manage the instance directory', async () => {
   await assert.rejects(
     services.admin.addDirectoryPrincipal(lead, {
       principalType: 'user',
-      principalId: 'new@equisafe.io',
+      principalId: 'new@acme.example',
       instanceRole: 'user',
     }),
     AccessDenied,

@@ -7,7 +7,7 @@ per target, and all of them have the same shape (`src/types.ts`):
 import { getProvider } from '@coffre/sync';
 
 const github = getProvider('github-actions')!;
-const config = github.parseConfig({ owner: 'equisafe', repo: 'app' });
+const config = github.parseConfig({ owner: 'acme', repo: 'app' });
 const ctx = { token };
 const current = await github.listKeys(ctx, config);
 const result = await github.apply(ctx, config, {

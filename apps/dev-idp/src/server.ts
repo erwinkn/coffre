@@ -23,7 +23,7 @@ console.log(`dev-idp listening on   ${idp.origin}`);
 console.log(`  issuer               ${idp.issuer}`);
 console.log(`  jwks_uri             ${idp.jwksUrl}`);
 console.log(`  audience             ${idp.defaultAudience}`);
-console.log(`  mint a user token    ${idp.origin}/dev/mint?email=erwin@equisafe.io`);
+console.log(`  mint a user token    ${idp.origin}/dev/mint?email=admin@acme.example`);
 console.log(`  mint a service token ${idp.origin}/dev/mint?common_name=ci-deploy.access`);
 console.log(`OpenID Connect`);
 console.log(`  discovery            ${idp.origin}/.well-known/openid-configuration`);

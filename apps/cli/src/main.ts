@@ -346,7 +346,7 @@ async function devLogin(origin: string, email?: string, serviceToken?: string): 
   if (serviceToken) {
     url.searchParams.set('common_name', serviceToken);
   } else {
-    url.searchParams.set('email', email ?? 'erwin@equisafe.io');
+    url.searchParams.set('email', email ?? 'admin@acme.example');
   }
   if (process.env.COFFRE_ACCESS_AUD) {
     url.searchParams.set('aud', process.env.COFFRE_ACCESS_AUD);

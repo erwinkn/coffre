@@ -8,8 +8,7 @@ Postgres is the backend of record, and the audit log is the point.
 Cloudflare Worker in front of Postgres, and [docs/deploy.md](docs/deploy.md)
 deploys one. [Phase 1 of the roadmap](docs/roadmap.md#phase-1-harden) is still
 open, so until it is done, keep the keys escrowed and a copy of anything you
-move in. Equisafe's pipeline, with Terraform owning a private Scaleway
-database, is [docs/deployment-workers.md](docs/deployment-workers.md).
+move in.
 
 ## Why this exists
 
@@ -154,7 +153,6 @@ packages/core   envelope encryption, KEK providers, audit hash chain, identity
 packages/db     Drizzle schema/migrations, audit writer, privilege tests
 packages/sync   destinations syncs push to: GitHub Actions, Vercel, Railway, Cloudflare
 apps/dev-idp    local stand-in for Cloudflare Access, an OIDC provider and GitHub
-deploy/         instance files: where each copy of coffre runs, and how people sign in
 apps/cli        login, secrets, access, syncs, audit; no dependencies
 apps/web        TanStack Start UI, auth boundary, services, and native /api routes
 ```
@@ -166,7 +164,7 @@ pnpm install
 pnpm dev              # Postgres + dev IdP + one web/API service + seed data
 ```
 
-Then open http://127.0.0.1:3000 and sign in as `erwin@equisafe.io`.
+Then open http://127.0.0.1:3000 and sign in as `admin@acme.example`.
 
 `pnpm dev` picks a persona, which exists only under `COFFRE_AUTH_MODE=dev`.
 `pnpm dev:signin` runs the real sign-in page instead, with the dev IdP playing
@@ -197,7 +195,7 @@ CLI:
 ```sh
 coffre() { node --env-file=.env.dev apps/cli/src/main.ts "$@"; }
 
-coffre login --email erwin@equisafe.io          # local only: a dev IdP persona
+coffre login --email admin@acme.example          # local only: a dev IdP persona
 
 # secrets
 coffre list     market/dev
@@ -212,11 +210,11 @@ coffre import   market/dev --file .env          # previews; --apply to write
 coffre projects
 coffre roles
 coffre access                                   # who holds what, everywhere
-coffre grant market alice@equisafe.io --role developer --env dev
-coffre offboard alice@equisafe.io               # previews; --apply to remove (docs/offboarding.md)
+coffre grant market alice@acme.example --role developer --env dev
+coffre offboard alice@acme.example               # previews; --apply to remove (docs/offboarding.md)
 
 # syncs (docs/syncs.md)
-coffre sync add  market/prod github-actions owner=equisafe repo=market \
+coffre sync add  market/prod github-actions owner=acme repo=market \
                  --credential ops/sync/GITHUB_TOKEN
 coffre sync list market/prod
 coffre sync run  market/prod github-actions
@@ -251,7 +249,7 @@ or `COFFRE_ACCESS_CLIENT_ID`/`COFFRE_ACCESS_CLIENT_SECRET` behind Access.
 
 ## Progress
 
-All five phases are implemented and working locally.
+All five milestones are implemented and working locally.
 
 - **M0.** Schema and migrations, envelope, local `KekProvider`, KEK registry
   with rotation, audit hash chain. Includes the cross-environment AAD test.
@@ -286,11 +284,10 @@ All five phases are implemented and working locally.
   issuer, which covers Okta, Auth0, Keycloak and the like. An account binds to
   the provider's stable user id, never to an email. The CLI signs in with a
   device code, and machines use service tokens coffre issues. See
-  [docs/deploy.md](docs/deploy.md#sign-in-providers).
-- **Instances.** `apps/web/wrangler.jsonc` describes coffre; a file in
-  `deploy/` says where one copy runs and how people sign in, and the deploy
-  reads the secrets it needs from there. `deploy/equisafe.jsonc` and
-  `deploy/erwinkn.jsonc` are the first two.
+  [phase 4 of the roadmap](docs/roadmap.md#phase-4-sign-in).
+- **Deployment.** Until the packages described in the architecture land,
+  configure and deploy `apps/web` directly with Wrangler. See
+  [docs/deploy.md](docs/deploy.md).
 - **Syncs.** An environment can be pushed to GitHub Actions, Vercel, Railway
   or Cloudflare Workers and kept current there: on every change, and hourly
   to repair drift. Only keys coffre pushed are ever removed, and every value

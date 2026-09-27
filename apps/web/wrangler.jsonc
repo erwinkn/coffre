@@ -1,8 +1,6 @@
-// coffre itself: its code, and the bindings and schedule the code relies on.
-// Where a copy runs (its Worker name, domain, sign-in, secrets) lives in an
-// instance file, such as ../../deploy/equisafe.jsonc, named by
-// COFFRE_INSTANCE when building (see instance.ts). The vars and secrets
-// below are the defaults an instance keeps unless it sets its own.
+// The Worker entry point, deployment target, bindings, schedule and runtime
+// configuration. Set deployment-specific vars here and secret values through
+// Wrangler or the Cloudflare dashboard.
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "coffre",

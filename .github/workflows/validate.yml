@@ -1,11 +1,7 @@
 name: Validate
 
-# The full local contract suite, on every pull request and again before every
-# deploy (deploy-worker.yml calls this file), so what a review saw pass is
-# what a release checks.
 on:
   pull_request:
-  workflow_call:
 
 permissions:
   contents: read

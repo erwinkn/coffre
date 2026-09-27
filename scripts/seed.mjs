@@ -82,7 +82,7 @@ await pool.query(
 
 const adminToken = await mint({ email: ADMIN });
 
-await post(adminToken, '/api/admin/projects', { slug: 'market', name: 'Equisafe Market' });
+await post(adminToken, '/api/admin/projects', { slug: 'market', name: 'Acme Market' });
 for (const [slug, name] of [
     ['dev', 'Development'],
     ['prod', 'Production'],
@@ -136,6 +136,6 @@ for (const [environment, secrets] of Object.entries(values)) {
 await pool.end();
 
 console.log('\nSeeded. Try:');
-console.log('  node --env-file=.env.dev apps/cli/src/main.ts login --email erwin@equisafe.io');
+console.log('  node --env-file=.env.dev apps/cli/src/main.ts login --email admin@acme.example');
 console.log('  node --env-file=.env.dev apps/cli/src/main.ts list market/dev');
 console.log('  node --env-file=.env.dev apps/cli/src/main.ts run market/dev -- printenv');

@@ -4,7 +4,7 @@
  * Modelled as a tagged union rather than "a user with an optional email",
  * because Cloudflare Access issues two structurally different tokens:
  *
- *   identity token  -> sub = user uuid, email = "erwin@equisafe.io"
+ *   identity token  -> sub = user uuid, email = "admin@acme.example"
  *   service token   -> sub = ""       , common_name = "<client-id>.access", NO email
  *
  * Machine callers (external-secrets, CI) are most of the real traffic, so the

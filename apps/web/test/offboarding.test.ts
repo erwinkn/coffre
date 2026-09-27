@@ -17,9 +17,9 @@ import { SyncService } from '../src/server/services/sync.ts';
 import { requestContext } from './service-fixture.ts';
 
 const CHAIN_KEY = randomBytes(32);
-const ROOT = 'erwin@equisafe.io';
-const LEAD = 'lead@equisafe.io';
-const DEV = 'dev@equisafe.io';
+const ROOT = 'admin@acme.example';
+const LEAD = 'lead@acme.example';
+const DEV = 'dev@acme.example';
 const SERVICE = 'ci-deploy';
 const IP = '203.0.113.7';
 
@@ -64,7 +64,7 @@ before(() => {
   signin = new SigninService({
     ...deps,
     signin: defineSignin({
-      publicUrl: 'https://secrets.equisafe.io',
+      publicUrl: 'https://secrets.acme.example',
       providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })],
     }),
   });
@@ -294,10 +294,10 @@ test('the syncs someone set up are listed with where they push', async () => {
     [
       project_id,
       environment_id,
-      JSON.stringify({ owner: 'equisafe', repo: 'app' }),
+      JSON.stringify({ owner: 'acme', repo: 'app' }),
       id,
       DEV,
-      JSON.stringify({ owner: 'equisafe', repo: 'other' }),
+      JSON.stringify({ owner: 'acme', repo: 'other' }),
       ROOT,
     ],
   );
@@ -316,7 +316,7 @@ test('the syncs someone set up are listed with where they push', async () => {
         project: 'market',
         environment: 'prod',
         providerLabel: 'GitHub Actions',
-        destination: 'equisafe/app',
+        destination: 'acme/app',
         credential: 'market/prod/GITHUB_TOKEN_FOR_SYNC',
       },
     ],
@@ -326,7 +326,7 @@ test('the syncs someone set up are listed with where they push', async () => {
 test('only owners see reports, and only about someone who exists', async () => {
   await assert.rejects(admin.offboardingReport(dev, 'user', DEV), AccessDenied);
   await assert.rejects(syncs.listCreatedBy(dev, DEV), AccessDenied);
-  await assert.rejects(admin.offboardingReport(root, 'user', 'nobody@equisafe.io'), NotFound);
+  await assert.rejects(admin.offboardingReport(root, 'user', 'nobody@acme.example'), NotFound);
 
   const rootReport = await admin.offboardingReport(lead, 'user', ROOT);
   assert.equal(rootReport.status, 'active');

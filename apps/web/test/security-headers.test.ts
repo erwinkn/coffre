@@ -25,9 +25,9 @@ test('scripts need the nonce; nothing may frame the page', () => {
 
   const access = contentSecurityPolicy({
     nonce: 'abc',
-    formOrigins: ['https://equisafe.cloudflareaccess.com'],
+    formOrigins: ['https://acme.cloudflareaccess.com'],
   });
-  assert.match(access, /form-action 'self' https:\/\/equisafe\.cloudflareaccess\.com;/);
+  assert.match(access, /form-action 'self' https:\/\/acme\.cloudflareaccess\.com;/);
 });
 
 test('a response gets the headers, on a copy it can change', async () => {
