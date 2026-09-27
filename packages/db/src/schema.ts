@@ -234,7 +234,11 @@ export const auditLog = pgTable(
   {
     seq: bigint({ mode: 'bigint' }).primaryKey(),
     id: uuid().notNull().defaultRandom(),
-    occurredAt: timestamp('occurred_at', { withTimezone: true }).notNull().defaultNow(),
+    // A string, not a Date: the chain covers it to the microsecond, and a
+    // Date keeps milliseconds. See canonicalTimestamp in audit.ts.
+    occurredAt: timestamp('occurred_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
     actorType: text('actor_type').notNull(),
     actorId: text('actor_id').notNull(),
     action: text().notNull(),

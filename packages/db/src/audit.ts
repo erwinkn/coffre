@@ -1,18 +1,9 @@
-import type { PoolClient } from 'pg';
+import { asc, eq, gte } from 'drizzle-orm';
+
 import { chainHash, type ChainedAuditRow } from '../../core/src/audit/chain.ts';
-
-type AuditDatabaseClient = Pick<PoolClient, 'query'>;
-
-/**
- * Canonical rendering of occurred_at.
- *
- * The hash chain covers the timestamp as a string, so reading a row back has
- * to reproduce byte-identical text. Letting the driver turn timestamptz into a
- * Date and back would not survive that. Every read path must use this same
- * expression.
- */
-export const OCCURRED_AT_SQL =
-  `to_char(occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+import type { Queryable, Transaction } from './database.ts';
+import { lockAuditHead } from './dialect.ts';
+import { auditChainHead, auditLog } from './schema.ts';
 
 export type AuditEntry = {
   actorType: 'user' | 'service' | 'system';
@@ -28,6 +19,35 @@ export type AuditEntry = {
   metadata?: Record<string, unknown>;
 };
 
+const TIMESTAMP =
+  /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(Z|[+-]\d{2}(?::?\d{2})?)$/;
+
+/**
+ * The one rendering of occurred_at: UTC, microseconds, `Z`.
+ *
+ * The hash chain covers the timestamp as text, so reading a row back has to
+ * reproduce it byte for byte. Databases hand timestamps back in their own
+ * shapes (`2026-09-27 12:34:56.1+02` from Postgres), and a Date would drop
+ * the microseconds, so every value goes through here on the way in and out:
+ *
+ *   2026-09-27 12:34:56.1+02  ->  2026-09-27T10:34:56.100000Z
+ */
+export function canonicalTimestamp(raw: string): string {
+  const match = TIMESTAMP.exec(raw);
+  if (match === null) throw new Error(`unexpected timestamp from the database: ${raw}`);
+  const [, year, month, day, hour, minute, second, fraction = '', zone] = match;
+  let offsetMinutes = 0;
+  if (zone !== 'Z') {
+    const sign = zone.startsWith('-') ? -1 : 1;
+    const digits = zone.slice(1).replace(':', '');
+    offsetMinutes = sign * (Number(digits.slice(0, 2)) * 60 + Number(digits.slice(2) || '0'));
+  }
+  const utc = new Date(
+    Date.UTC(+year, +month - 1, +day, +hour, +minute, +second) - offsetMinutes * 60_000,
+  );
+  return `${utc.toISOString().slice(0, 19)}.${fraction.padEnd(6, '0')}Z`;
+}
+
 /**
  * Append entries to the audit log, inside the caller's transaction.
  *
@@ -42,32 +62,26 @@ export type AuditEntry = {
  * secrets-manager volumes the resulting throughput ceiling does not matter.
  */
 export async function appendAudit(
-  tx: AuditDatabaseClient,
+  tx: Transaction,
   chainKey: Buffer,
   entries: readonly AuditEntry[],
-): Promise<{ seqStart: bigint; headHash: Buffer }> {
+): Promise<{ seqStart: bigint; nextSeq: bigint; headHash: Buffer }> {
   if (entries.length === 0) {
     throw new Error('appendAudit called with no entries');
   }
 
   // Serialise. Every other appender blocks here until we commit or roll back.
-  const head = await tx.query<{ next_seq: string; head_hash: Buffer }>(
-    'SELECT next_seq, head_hash FROM audit_chain_head WHERE only_row LIMIT 1 FOR UPDATE',
-  );
-  if (head.rowCount !== 1) {
+  const head = await lockAuditHead(tx);
+  if (head === null) {
     throw new Error('audit_chain_head is missing; refusing to write an unchained audit row');
   }
 
-  // One timestamp for the whole append, taken from the database clock rather
-  // than from an application server. CDR 2024/1774 Art 12(2)(f).
-  const clock = await tx.query<{ ts: string }>(
-    `SELECT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS ts`,
-  );
-  const occurredAt = clock.rows[0].ts;
+  // One timestamp for the whole append.
+  const occurredAt = canonicalTimestamp(head.now);
 
-  let seq = BigInt(head.rows[0].next_seq);
+  let seq = head.nextSeq;
   const seqStart = seq;
-  let prevHash = head.rows[0].head_hash;
+  let prevHash = head.headHash;
 
   for (const entry of entries) {
     const row: ChainedAuditRow = {
@@ -87,78 +101,48 @@ export async function appendAudit(
     };
 
     const hash = chainHash(chainKey, prevHash, row);
-
-    await tx.query(
-      `INSERT INTO audit_log (
-           seq, occurred_at, actor_type, actor_id, action, decision,
-           project_id, environment_id, secret_id, bundle_id,
-           request_id, source_ip, metadata, prev_hash, hash
-       ) VALUES ($1, $2::timestamptz, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
-      [
-        row.seq.toString(),
-        occurredAt,
-        row.actorType,
-        row.actorId,
-        row.action,
-        row.decision,
-        row.projectId,
-        row.environmentId,
-        row.secretId,
-        row.bundleId,
-        row.requestId,
-        row.sourceIp,
-        row.metadata,
-        prevHash,
-        hash,
-      ],
-    );
+    await tx.insert(auditLog).values({ ...row, prevHash, hash });
 
     prevHash = hash;
     seq += 1n;
   }
 
-  await tx.query(
-    'UPDATE audit_chain_head SET next_seq = $1, head_hash = $2, updated_at = now() WHERE only_row',
-    [seq.toString(), prevHash],
-  );
+  await tx
+    .update(auditChainHead)
+    .set({ nextSeq: seq, headHash: prevHash, updatedAt: new Date(occurredAt) })
+    .where(eq(auditChainHead.onlyRow, true));
 
-  return { seqStart, headHash: prevHash };
+  return { seqStart, nextSeq: seq, headHash: prevHash };
 }
 
 /** Read rows back in chain order, rendering fields exactly as they were hashed. */
 export async function readAuditRows(
-  tx: AuditDatabaseClient,
+  db: Queryable,
   fromSeq = 0n,
   limit = 1000,
 ): Promise<(ChainedAuditRow & { prevHash: Buffer; hash: Buffer })[]> {
-  const result = await tx.query(
-    `SELECT seq,
-            ${OCCURRED_AT_SQL} AS occurred_at,
-            actor_type, actor_id, action, decision,
-            project_id, environment_id, secret_id, bundle_id,
-            request_id, source_ip, metadata, prev_hash, hash
-       FROM audit_log
-      WHERE seq >= $1
-      ORDER BY seq ASC
-      LIMIT $2`,
-    [fromSeq.toString(), limit],
-  );
+  const rows = await db
+    .select({
+      seq: auditLog.seq,
+      occurredAt: auditLog.occurredAt,
+      actorType: auditLog.actorType,
+      actorId: auditLog.actorId,
+      action: auditLog.action,
+      decision: auditLog.decision,
+      projectId: auditLog.projectId,
+      environmentId: auditLog.environmentId,
+      secretId: auditLog.secretId,
+      bundleId: auditLog.bundleId,
+      requestId: auditLog.requestId,
+      sourceIp: auditLog.sourceIp,
+      metadata: auditLog.metadata,
+      prevHash: auditLog.prevHash,
+      hash: auditLog.hash,
+    })
+    .from(auditLog)
+    .where(gte(auditLog.seq, fromSeq))
+    .orderBy(asc(auditLog.seq))
+    .limit(limit);
 
-  return result.rows.map((r) => ({
-    seq: BigInt(r.seq),
-    occurredAt: r.occurred_at,
-    actorType: r.actor_type,
-    actorId: r.actor_id,
-    action: r.action,
-    decision: r.decision,
-    projectId: r.project_id,
-    environmentId: r.environment_id,
-    secretId: r.secret_id,
-    bundleId: r.bundle_id,
-    requestId: r.request_id,
-    sourceIp: r.source_ip,
-    metadata: r.metadata,
-    prevHash: r.prev_hash,
-    hash: r.hash,
-  }));
+  return rows.map((row) => ({ ...row, occurredAt: canonicalTimestamp(row.occurredAt) }));
 }

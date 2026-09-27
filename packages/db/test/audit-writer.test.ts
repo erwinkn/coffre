@@ -1,9 +1,11 @@
 import test, { before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
+import { sql } from 'drizzle-orm';
 import pg from 'pg';
 
-import { appendAudit, readAuditRows } from '../src/audit.ts';
+import { appendAudit, canonicalTimestamp, readAuditRows } from '../src/audit.ts';
+import { createDatabase, type Database, type Transaction } from '../src/database.ts';
 import { verifyChain, GENESIS_HASH } from '../../core/src/audit/chain.ts';
 import {
   TEST_OWNER_DATABASE_URL,
@@ -14,10 +16,12 @@ const CHAIN_KEY = randomBytes(32);
 
 let ownerPool: pg.Pool;
 let runtimePool: pg.Pool;
+let db: Database;
 
 before(async () => {
   ownerPool = new pg.Pool({ connectionString: TEST_OWNER_DATABASE_URL });
   runtimePool = new pg.Pool({ connectionString: TEST_RUNTIME_DATABASE_URL });
+  db = createDatabase(runtimePool);
 });
 
 after(async () => {
@@ -37,19 +41,8 @@ beforeEach(async () => {
   }
 });
 
-async function inTransaction<T>(fn: (tx: pg.PoolClient) => Promise<T>): Promise<T> {
-  const client = await runtimePool.connect();
-  try {
-    await client.query('BEGIN');
-    const result = await fn(client);
-    await client.query('COMMIT');
-    return result;
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
-  }
+function inTransaction<T>(fn: (tx: Transaction) => Promise<T>): Promise<T> {
+  return db.transaction(fn);
 }
 
 test('appended rows verify as a chain when read back from the database', async () => {
@@ -182,4 +175,26 @@ test('appendAudit refuses to write nothing', async () => {
     () => inTransaction((tx) => appendAudit(tx, CHAIN_KEY, [])),
     /no entries/,
   );
+});
+
+test('timestamps render as UTC with microseconds, whatever shape the database returns', () => {
+  assert.equal(canonicalTimestamp('2026-09-27 12:34:56.123456+00'), '2026-09-27T12:34:56.123456Z');
+  assert.equal(canonicalTimestamp('2026-09-27 12:34:56.1+02'), '2026-09-27T10:34:56.100000Z');
+  assert.equal(canonicalTimestamp('2026-09-27 00:10:00-05:30'), '2026-09-27T05:40:00.000000Z');
+  assert.equal(canonicalTimestamp('2026-09-27T12:34:56.123456Z'), '2026-09-27T12:34:56.123456Z');
+  assert.throws(() => canonicalTimestamp('yesterday'), /unexpected timestamp/);
+});
+
+test('a session in another time zone reads back the same chain', async () => {
+  await inTransaction((tx) =>
+    appendAudit(tx, CHAIN_KEY, [
+      { actorType: 'user', actorId: 'a@acme.example', action: 'secret.read', decision: 'allow' },
+    ]),
+  );
+  const rows = await inTransaction(async (tx) => {
+    await tx.execute(sql`SET LOCAL TIME ZONE 'Asia/Kolkata'`);
+    return readAuditRows(tx);
+  });
+  assert.match(rows[0].occurredAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/);
+  assert.equal(verifyChain(CHAIN_KEY, rows, GENESIS_HASH).ok, true);
 });
