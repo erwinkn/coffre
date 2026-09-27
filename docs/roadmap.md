@@ -1,21 +1,17 @@
 # Roadmap
 
-From demo software that deploys to one Cloudflare account, to a packaged
-product that runs first on erwinkn.com and then inside Equisafe.
+From a source checkout that deploys one Cloudflare Worker to a packaged
+product that deployments import and configure in their own repositories.
 
 ## Where we are
 
 - The product works end to end: API, CLI, web UI, audit chain, and now
-  coffre's own sign-in (phase 5), syncs (phase 3) and offboarding.
-- Product and instance are apart. `apps/web/wrangler.jsonc` describes coffre,
-  and a file in `deploy/` says where one copy runs and how people sign in,
-  named by `COFFRE_INSTANCE` at build time. Phase 2 replaces this with
-  packages configured in code ([architecture.md](architecture.md)).
-- erwinkn.com is ready to deploy: [deploy.md](deploy.md) walks through it, and
-  `deploy/erwinkn.jsonc` needs two values filled in.
-- Equisafe's pipeline (`deploy-worker.yml`, a private migration runner, the
-  `coffre-production` and `coffre-migrations` GitHub environments) has never
-  run.
+  coffre's own sign-in (phase 4), syncs (phase 3) and offboarding.
+- The in-repository instance files and deployment pipeline are gone. Until
+  phase 2 packages coffre, a checkout can still deploy `apps/web` directly
+  with Wrangler; [deploy.md](deploy.md) describes that temporary path.
+- erwinkn.com will deploy from the erwinkn.com repository once phase 2, step 5
+  provides packages that a small deployment project can import.
 - Most of phase 1 is still open; only the security headers are done. The
   README says *ready for a first deployment, still hardening* until the rest
   is.
@@ -27,16 +23,13 @@ product that runs first on erwinkn.com and then inside Equisafe.
 | 1. Harden | Safe to hold real secrets | Every item below shipped; restore and rotation drills pass |
 | 2. Package | The product apart from its instances; Cloudflare and Node adapters; a vault; three databases | A deployment is a small project importing `@coffre/server` and `@coffre/vault`; the suite passes on Postgres, MySQL and SQLite, and the smoke suite on both adapters |
 | 3. erwinkn.com | Dogfood | Your secrets live in it, the CLI and sync are in daily use, a few weeks pass with no open bugs |
-| 4. Equisafe | Internal rollout | KMS-backed KEK, two-person review, Infisical migrated |
-| 5. Sign-in | Deployable without a proxy in front | A Node deployment signs in with Google, GitHub and an arbitrary OIDC issuer, and the CLI logs in through it |
+| 4. Sign-in | Deployable without a proxy in front | A Node deployment signs in with Google, GitHub and an arbitrary OIDC issuer, and the CLI logs in through it |
 
 Hardening comes first because it is mostly independent of the package layout,
 and it is what the README's status line is waiting on. Packaging comes before
-erwinkn.com so your instance is deployed the way every other one will be, and
-Equisafe's becomes the second consumer of the packages rather than a migration
-off a fork. Sign-in comes last because both deployments sit behind Cloudflare
-Access, which already offers the login methods they want; it is what a public
-release needs, so it moves ahead of phase 4 if publishing comes first.
+erwinkn.com so the first live instance uses the same package boundary as every
+other deployment. Sign-in was planned last but landed early because a public
+release must work without an identity-aware proxy.
 
 ## Phase 1: harden
 
@@ -51,8 +44,8 @@ Each item says what is wrong today.
    `no-referrer`: under `no-referrer` a same-origin POST carries
    `Origin: null`, which the CSRF check refuses.
 2. **Escrow the keys, then prove recovery.** `COFFRE_KEK_LOCAL` and
-   `COFFRE_AUDIT_CHAIN_KEY` are Worker secrets and GitHub environment secrets,
-   and both stores are write-only. If no other copy exists, losing the Worker
+   `COFFRE_AUDIT_CHAIN_KEY` are Worker secrets, and that store is write-only.
+   If no other copy exists, losing the Worker
    loses every secret. Keep an offline copy, then run a restore drill: a fresh
    database from backup plus the escrowed KEK, then `coffre verify` passes
    and a canary secret decrypts.
@@ -60,8 +53,7 @@ Each item says what is wrong today.
    wraps *new* versions. Every old version still needs the old KEK forever, so
    a leaked KEK cannot be retired. Add a `rewrap` maintenance command: it
    re-wraps each DEK under the primary, leaves the ciphertext untouched, and
-   writes one audit row per secret. The `coffre-maintenance` GitHub
-   environment already exists and nothing uses it yet; this is its job.
+   writes one audit row per secret.
 4. **A heartbeat someone hears.** Readiness now tolerates one late or missed
    Cron run (11 minutes, where it used to fail at 5, the Cron interval itself,
    and flapped). Nothing monitors it yet: attach an external check on
@@ -74,9 +66,8 @@ Each item says what is wrong today.
    should compare against it.
 6. **Backups.** Point-in-time recovery on whatever hosts Postgres, exercised by
    the drill in item 2.
-7. **Guard main.** `main` is unprotected, so nothing reviews what a deploy
-   ships. `.github/workflows/validate.yml` now runs the deploy's own checks on
-   every pull request, and the deploy calls the same file. What is left is a
+7. **Guard main.** `main` is unprotected. `.github/workflows/validate.yml`
+   runs the full contract suite on every pull request. What is left is a
    setting: protect `main`, requiring a pull request and the `Validate` check.
 8. ~~**Machine callers in the CLI.**~~ Done: `COFFRE_TOKEN` for coffre's own
    service tokens, `COFFRE_ACCESS_CLIENT_ID` and `COFFRE_ACCESS_CLIENT_SECRET`
@@ -104,17 +95,21 @@ that holds the keys and decides who may decrypt. The design is in
 5. **The packages**: configuration in code, compiled output, the Node
    adapter, `coffre init`, and example deployments the smoke suite runs.
 
-Instance files, `scripts/deploy-worker.mjs` and the environment variable
-parsing go away with step 5.
+The former instance files and in-repository deployment scripts are already
+gone. Step 5 replaces the remaining environment-variable configuration with
+typed configuration in each deployment project.
 
 ## Phase 3: erwinkn.com
+
+The deployment lives in the erwinkn.com repository and imports coffre's
+packages; this repository contains no instance-specific configuration.
 
 - **Postgres:** any TLS Postgres that Hyperdrive can reach. The database holds
   ciphertext and the audit log, while values need the KEK, which lives in
   Cloudflare. A database leak therefore exposes names and who read what, but
   not values. That makes a public endpoint acceptable for a personal instance.
 - **Sign-in:** coffre's own, with GitHub, rather than an Access application
-  (phase 5 landed first). Machines get coffre service tokens.
+  (phase 4 landed early). Machines get coffre service tokens.
 - **Moving in:** `coffre import` from your existing `.env` files.
 - **CLI:** run from a checkout until it is published as `@coffre/cli`.
   `coffre login` signs in with a device code.
@@ -140,28 +135,7 @@ Workers on every change, and checked hourly for drift. See
   `coffre.sync.toml` if keeping syncs in the repository that deploys turns
   out to matter.
 
-## Phase 4: Equisafe
-
-- **Take the KEK out of Terraform state.** `docs/deployment-workers.md` copies
-  the KEK from Terraform's `worker_runtime_environment` output, which makes the
-  state bucket as sensitive as the vault. Implement the Scaleway KMS
-  `KekProvider` the README anticipates, make it primary, and run `rewrap`.
-- **Google Workspace as the only login method**, required by the Access
-  policy. coffre recognises Access users by their email, so leaving GitHub
-  enabled as well would let a leaver back in through a personal GitHub account
-  that still lists their work address (the example in phase 5).
-- **Two-person rule:** required review on `main`, and required reviewers on
-  the `coffre-production` environment.
-- **A written retention policy** (Art. 12(2)(a)), as the only sanctioned way
-  data is ever destroyed.
-- **Infisical migration:** first settle the README's open question (nested
-  folders against flat `project/environment/key`), then write an importer.
-- **The external-secrets `webhook` provider,** if Equisafe's Kubernetes
-  workloads need it.
-- **An external review** of the crypto and the auth boundary before coffre
-  holds company credentials.
-
-## Phase 5: sign-in
+## Phase 4: sign-in
 
 Built, on Workers. Where the build departed from the plan below: Microsoft
 takes one tenant, by GUID, because the multi-tenant endpoints publish an
@@ -182,12 +156,12 @@ A deployment lists the buttons its page shows:
 ```ts
 identity: signIn({
   providers: [
-    google({ clientId, clientSecret, domain: 'equisafe.io' }),
+    google({ clientId, clientSecret, domain: 'acme.example' }),
     github({ clientId, clientSecret }),
     microsoft({ tenant: 'organizations', clientId, clientSecret }),
-    oidc({ label: 'Okta', issuer: 'https://equisafe.okta.com', clientId, clientSecret }),
+    oidc({ label: 'Okta', issuer: 'https://acme.okta.com', clientId, clientSecret }),
   ],
-  page: { title: 'Equisafe secrets', note: 'No access yet? Ask in #it.' },
+  page: { title: 'Acme secrets', note: 'No access yet? Ask in #it.' },
 })
 ```
 
@@ -215,8 +189,8 @@ identity: signIn({
   the provider's stable user id (`sub`, or GitHub's numeric id), and only if
   the provider says the address is verified. Every later sign-in must match
   that binding, and a second provider can only be linked by its owner while
-  signed in through the first. Example: Bob leaves Equisafe and IT deletes his
-  Google account. His personal GitHub account still lists bob@equisafe.io as
+  signed in through the first. Example: Bob leaves Acme and IT deletes his
+  Google account. His personal GitHub account still lists bob@acme.example as
   verified, because GitHub checked it once, when he added it. Matching on
   email would let him back in through the GitHub button.
 - **Sessions are coffre's.** They are kept on the server and short-lived, and
@@ -245,6 +219,18 @@ identity: signIn({
   identity provider by itself. Until then, someone removed there cannot sign
   in again, but keeps an open session until it expires. Entra and Okta can
   push removals over SCIM; Google Workspace would need its directory polled.
+
+## Later
+
+- Add a KMS-backed `KekProvider`, for example Scaleway or AWS KMS, make it the
+  primary provider, then rewrap existing DEKs under it.
+- Write a retention policy that defines the only sanctioned way to destroy
+  data.
+- Import from other secret managers such as Infisical, after settling how
+  nested folders map to coffre's flat `project/environment/key` model.
+- Add an external-secrets `webhook` provider for Kubernetes workloads.
+- Commission an external review of the cryptography and authentication
+  boundary.
 
 ## Open decisions
 

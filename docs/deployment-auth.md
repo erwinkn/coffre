@@ -1,13 +1,13 @@
 # Signing in behind Cloudflare Access
 
 A deployed coffre signs people in one of two ways, chosen by
-`COFFRE_AUTH_MODE` in its instance file:
+`COFFRE_AUTH_MODE` in its Worker configuration:
 
 - `signin`: coffre's own sign-in page, with GitHub, Google, Microsoft or any
   OpenID Connect provider. [deploy.md](deploy.md) sets one up.
 - `cloudflare`: Cloudflare Access in front of the Worker, and coffre verifies
-  the token Access forwards. This is coffre's default and Equisafe's choice,
-  and what this page describes.
+  the token Access forwards. This is coffre's default and what this page
+  describes.
 
 Neither runs a password flow or a persona picker.
 
