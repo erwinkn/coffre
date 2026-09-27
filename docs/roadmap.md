@@ -9,8 +9,8 @@ product that runs first on erwinkn.com and then inside Equisafe.
   coffre's own sign-in (phase 5), syncs (phase 3) and offboarding.
 - Product and instance are apart. `apps/web/wrangler.jsonc` describes coffre,
   and a file in `deploy/` says where one copy runs and how people sign in,
-  named by `COFFRE_INSTANCE` at build time. That is the "deployment is a
-  config file" half of phase 2, without the npm packages or the Node adapter.
+  named by `COFFRE_INSTANCE` at build time. Phase 2 replaces this with
+  packages configured in code ([architecture.md](architecture.md)).
 - erwinkn.com is ready to deploy: [deploy.md](deploy.md) walks through it, and
   `deploy/erwinkn.jsonc` needs two values filled in.
 - Equisafe's pipeline (`deploy-worker.yml`, a private migration runner, the
@@ -25,7 +25,7 @@ product that runs first on erwinkn.com and then inside Equisafe.
 | Phase | Goal | Done when |
 |---|---|---|
 | 1. Harden | Safe to hold real secrets | Every item below shipped; restore and rotation drills pass |
-| 2. Package | The product apart from its instances; Cloudflare and Node adapters | A deployment is a config file depending on `@coffre/cloudflare`; the smoke suite passes on both adapters |
+| 2. Package | The product apart from its instances; Cloudflare and Node adapters; a vault; three databases | A deployment is a small project importing `@coffre/server` and `@coffre/vault`; the suite passes on Postgres, MySQL and SQLite, and the smoke suite on both adapters |
 | 3. erwinkn.com | Dogfood | Your secrets live in it, the CLI and sync are in daily use, a few weeks pass with no open bugs |
 | 4. Equisafe | Internal rollout | KMS-backed KEK, two-person review, Infisical migrated |
 | 5. Sign-in | Deployable without a proxy in front | A Node deployment signs in with Google, GitHub and an arbitrary OIDC issuer, and the CLI logs in through it |
@@ -86,86 +86,24 @@ Then drop "still hardening" from the README's status line.
 
 ## Phase 2: package
 
-### Layout
+coffre becomes packages a deployment imports and configures in code:
+`@coffre/ui`, `@coffre/server`, `@coffre/vault`, `@coffre/client` and
+`@coffre/cli`, on Postgres, MySQL or SQLite through Drizzle, with a vault
+that holds the keys and decides who may decrypt. The design is in
+[architecture.md](architecture.md). In order:
 
-```
-packages/core        @coffre/core        envelope, KEK providers, audit chain, identity   (exists)
-packages/db          @coffre/db          schema, migrations, a coffre-migrate bin         (exists)
-packages/server      @coffre/server      services, auth boundary, /api, the built UI      (today's apps/web)
-packages/cloudflare  @coffre/cloudflare  Worker entry, Cron handler, wrangler template
-packages/node        @coffre/node        coffre-server bin, Dockerfile
-packages/cli         @coffre/cli         the coffre bin
-apps/dev-idp                              local tooling, never published
-```
+1. **Two spikes**: a prebuilt server-rendered UI imported by another Worker,
+   and one set of Drizzle queries across three dialects.
+2. **Every query through Drizzle**, on Postgres, with no change in behaviour;
+   then MySQL and SQLite, with the integration suite on all three.
+3. **The UI on the API**: page loaders call `@coffre/client` instead of
+   server functions.
+4. **The vault**: keys, grants, principal status and its log move behind it.
+5. **The packages**: configuration in code, compiled output, the Node
+   adapter, `coffre init`, and example deployments the smoke suite runs.
 
-### The seam
-
-Everything platform-specific already enters at one place, `createRuntime` in
-`apps/web/src/server/runtime.ts`. The work is to make that the public API:
-
-```ts
-const coffre = createCoffre({
-  database,       // pg-shaped: a Hyperdrive client per request on Workers, a pg.Pool on Node
-  identity,       // how a request proves who it is (see below)
-  keks,           // a KekRegistry: local keys today, a KMS later
-  auditChainKey,
-  rootAdmins,
-});
-
-coffre.fetch(request); // the whole app: UI, server functions, /api
-coffre.heartbeat();    // Cron calls it on Workers, a timer on Node
-```
-
-The adapters are then small:
-
-- **Cloudflare** maps bindings to options on each invocation, as it does today.
-- **Node** builds the options once from the environment, serves the static
-  assets, runs the heartbeat timer, and shuts down gracefully.
-
-### A deployment becomes a config file
-
-```jsonc
-// wrangler.jsonc in your infra repository, not this one
-{
-  "name": "coffre",
-  "main": "node_modules/@coffre/cloudflare/dist/worker.js",
-  "assets": { "directory": "node_modules/@coffre/cloudflare/dist/client" },
-  "routes": [{ "pattern": "coffre.erwinkn.com", "custom_domain": true }],
-  "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "…" }],
-  "triggers": { "crons": ["*/5 * * * *"] }
-}
-```
-
-### What changes on the way
-
-- **Imports go through package names.** Today `apps/web` reaches into
-  `../../../../packages/core/src/…`.
-- **Ship JavaScript, not TypeScript.** Everything runs `.ts` directly through
-  Node 24's type stripping, which Node refuses to do inside `node_modules`: a
-  published CLI would crash on its first import. Compile with `tsc`, emitting
-  declarations as well. The CLI also needs a `package.json`; it has none.
-- **Identity becomes pluggable.** Cloudflare Access becomes one preset of a
-  general trusted-proxy JWT verifier, configured by header, issuer, JWKS,
-  audience, and which claims name users and machines. The same verifier covers
-  Pomerium, oauth2-proxy and Google IAP, which makes the Node adapter usable
-  before coffre has a sign-in of its own (phase 5). Later, GitHub Actions OIDC could be a machine identity so CI needs no stored
-  credential. Behind Cloudflare Access it would need an API hostname that
-  bypasses Access, which weakens the outer wall, so it fits Node deployments
-  better.
-- **Dev mode is compiled out of published builds**, the way the Agentation
-  toolbar is today, so no configuration of a packaged coffre can switch on
-  persona minting.
-- **The Node adapter rate-limits.** On Cloudflare only Access-authenticated
-  callers reach the origin. On Node, the adapter is the edge.
-- **The smoke suite runs against both adapters.** A second adapter is what
-  proves the core does not quietly lean on Workers, which is why Node lands in
-  this phase rather than later.
-
-Two spikes go first:
-
-- Ship TanStack Start's Cloudflare build prebuilt, and deploy it with a
-  consumer's own wrangler config.
-- Try Start's Node server output.
+Instance files, `scripts/deploy-worker.mjs` and the environment variable
+parsing go away with step 5.
 
 ## Phase 3: erwinkn.com
 
@@ -308,11 +246,9 @@ identity: signIn({
 
 ## Open decisions
 
-1. **Where it is published, and under what license.** The repository is
-   private under the `equisafe` organisation, so publishing it publicly means
-   open-sourcing Equisafe's code. On npm, `coffre` is taken; the `@coffre`
-   scope looks free but that is unconfirmed. For the license I'd recommend
-   Apache-2.0.
+1. ~~**Where it is published, and under what license.**~~ Decided: publicly,
+   at [erwinkn/coffre](https://github.com/erwinkn/coffre), under MIT. On npm,
+   `coffre` is taken; the `@coffre` scope looks free but that is unconfirmed.
 2. **Postgres for erwinkn.com:** whichever host already runs your stack, given
    the ciphertext argument above.
 3. ~~**Sync model.**~~ Decided: a server-side engine (see phase 3).
