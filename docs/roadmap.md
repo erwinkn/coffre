@@ -96,16 +96,19 @@ that holds the keys and decides who may decrypt. The design is in
    imported by another Worker ([report](../spikes/ssr-ui/REPORT.md)), and one
    set of Drizzle queries across three dialects
    ([report](../spikes/drizzle-dialects/REPORT.md)).
-2. **Every query through Drizzle**, on Postgres, with no change in behaviour;
-   then MySQL and SQLite, with the integration suite on all three.
-3. **The UI on the API**: page loaders call `@coffre/client` instead of
-   server functions.
-4. **The vault**: keys, grants, principal status and its log move behind it.
-5. **The packages**: configuration in code, compiled output, the Node
+2. **The API** ([design](architecture.md#the-api)): the new routes and the
+   client generated from them, rewritten on Drizzle against Postgres, with
+   roles in code and one role per member per place. The CLI moves onto the
+   client.
+3. **The UI on the client**: page loaders call `@coffre/client`; the server
+   functions and the old routes go.
+4. **MySQL and SQLite**, with the integration suite on all three.
+5. **The vault**: keys, grants, principal status and its log move behind it.
+6. **The packages**: configuration in code, compiled output, the Node
    adapter, `coffre init`, and example deployments the smoke suite runs.
 
 Instance files, `scripts/deploy-worker.mjs` and the environment variable
-parsing go away with step 5.
+parsing go away with step 6.
 
 ## Phase 3: erwinkn.com
 
