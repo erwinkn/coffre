@@ -139,61 +139,6 @@ export const secretVersions = pgTable(
   ],
 );
 
-export const permissions = pgTable(
-  'permissions',
-  {
-    slug: text().primaryKey(),
-    description: text().notNull(),
-    minScope: text('min_scope').notNull(),
-  },
-  (table) => [
-    check(
-      'permissions_min_scope_check',
-      sql`${table.minScope} IN ('environment', 'project')`,
-    ),
-  ],
-);
-
-export const roles = pgTable(
-  'roles',
-  {
-    id: uuid().primaryKey().defaultRandom(),
-    slug: text().notNull(),
-    name: text().notNull(),
-    description: text().notNull().default(''),
-    isBuiltin: boolean('is_builtin').notNull().default(false),
-    createdAt: createdAt(),
-  },
-  (table) => [
-    unique('roles_slug_key').on(table.slug),
-    check('roles_slug_check', sql`${table.slug} ~ '^[a-z0-9][a-z0-9-]{0,62}$'`),
-  ],
-);
-
-export const rolePermissions = pgTable(
-  'role_permissions',
-  {
-    roleId: uuid('role_id').notNull(),
-    permission: text().notNull(),
-  },
-  (table) => [
-    primaryKey({
-      name: 'role_permissions_pkey',
-      columns: [table.roleId, table.permission],
-    }),
-    foreignKey({
-      name: 'role_permissions_role_id_fkey',
-      columns: [table.roleId],
-      foreignColumns: [roles.id],
-    }).onDelete('cascade'),
-    foreignKey({
-      name: 'role_permissions_permission_fkey',
-      columns: [table.permission],
-      foreignColumns: [permissions.slug],
-    }).onDelete('restrict'),
-  ],
-);
-
 export const principals = pgTable(
   'principals',
   {
@@ -218,6 +163,12 @@ export const principals = pgTable(
       'principals_service_role_check',
       sql`${table.principalType} = 'user' OR ${table.instanceRole} = 'user'`,
     ),
+    // A person is their email address, stored lowercased, so matching a
+    // provider's verified email is plain equality on every database.
+    check(
+      'principals_user_id_lowercase',
+      sql`${table.principalType} <> 'user' OR ${table.principalId} = lower(${table.principalId})`,
+    ),
   ],
 );
 
@@ -231,7 +182,8 @@ export const grants = pgTable(
     createdAt: createdAt(),
     createdBy: text('created_by').notNull(),
     projectId: uuid('project_id'),
-    roleId: uuid('role_id').notNull(),
+    /** One of the built-in roles in packages/core/src/access.ts. */
+    role: text().notNull(),
     expiresAt: timestamp('expires_at', { withTimezone: true }),
   },
   (table) => [
@@ -258,17 +210,18 @@ export const grants = pgTable(
       columns: [table.projectId],
       foreignColumns: [projects.id],
     }).onDelete('restrict'),
-    foreignKey({
-      name: 'grants_role_id_fkey',
-      columns: [table.roleId],
-      foreignColumns: [roles.id],
-    }).onDelete('restrict'),
+    check(
+      'grants_role_check',
+      sql`${table.role} IN ('viewer', 'developer', 'maintainer', 'access-manager', 'auditor', 'owner')`,
+    ),
     index('grants_lookup_idx').on(table.principalType, table.principalId, table.environmentId),
+    // One grant per member per place. Revoking expires the row rather than
+    // deleting it, and granting again reuses it.
     uniqueIndex('grants_environment_unique')
-      .on(table.principalType, table.principalId, table.environmentId, table.roleId)
+      .on(table.principalType, table.principalId, table.environmentId)
       .where(sql`${table.environmentId} IS NOT NULL`),
     uniqueIndex('grants_project_unique')
-      .on(table.principalType, table.principalId, table.projectId, table.roleId)
+      .on(table.principalType, table.principalId, table.projectId)
       .where(sql`${table.projectId} IS NOT NULL`),
     index('grants_project_lookup_idx')
       .on(table.principalType, table.principalId, table.projectId)

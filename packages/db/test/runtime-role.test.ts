@@ -27,7 +27,7 @@ const EXPECTED_UPDATE_COLUMNS = [
   'environments.slug',
   'grants.created_by',
   'grants.expires_at',
-  'grants.role_id',
+  'grants.role',
   'identities.email',
   'identities.last_sign_in_at',
   'identities.revoked_at',
@@ -63,7 +63,7 @@ test('Drizzle migrations preserve the restricted runtime database identity', asy
     const migrations = await owner.query<{ count: number }>(
       'SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations',
     );
-    assert.equal(migrations.rows[0].count, 3);
+    assert.equal(migrations.rows[0].count, 4);
 
     const identity = await runtime.query<{
       current_user: string;
