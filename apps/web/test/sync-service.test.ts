@@ -22,10 +22,10 @@ import { planSync, SyncService } from '../src/server/services/sync.ts';
 import { requestContext } from './service-fixture.ts';
 
 const CHAIN_KEY = randomBytes(32);
-const ROOT = 'erwin@equisafe.io';
+const ROOT = 'admin@acme.example';
 const root = requestContext(ROOT);
-const developer = requestContext('dev@equisafe.io');
-const maintainer = requestContext('lead@equisafe.io');
+const developer = requestContext('dev@acme.example');
+const maintainer = requestContext('lead@acme.example');
 const CREDENTIAL = 'ops/sync/DEST_TOKEN';
 
 // --- a destination that lives in memory ---------------------------------------
@@ -488,5 +488,5 @@ test('developers may run a sync but not pause or remove it', async () => {
 
 test('people with no access to the environment cannot see its syncs', async () => {
   await createSync();
-  await assert.rejects(syncs.list(requestContext('stranger@equisafe.io'), 'market', 'prod'), AccessDenied);
+  await assert.rejects(syncs.list(requestContext('stranger@acme.example'), 'market', 'prod'), AccessDenied);
 });

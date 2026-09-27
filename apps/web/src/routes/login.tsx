@@ -23,12 +23,12 @@ export const Route = createFileRoute('/login')({
 });
 
 const SEEDED: [email: string, role: string, note: string][] = [
-  ['erwin@equisafe.io', 'root admin', 'Everything, including audit, users and tokens.'],
-  ['lead@equisafe.io', 'owner of market', 'Environments, access and secrets on one project.'],
-  ['dev@equisafe.io', 'developer', 'Reads and writes secrets on market/dev only.'],
-  ['auditor@equisafe.io', 'auditor', 'Reads the audit log. Cannot read a single secret value.'],
-  ['accessmgr@equisafe.io', 'access manager', 'Grants and revokes access. Cannot read secret values.'],
-  ['outsider@equisafe.io', 'no grants', 'Registered, but holds nothing. What a denial looks like.'],
+  ['admin@acme.example', 'root admin', 'Everything, including audit, users and tokens.'],
+  ['lead@acme.example', 'owner of market', 'Environments, access and secrets on one project.'],
+  ['dev@acme.example', 'developer', 'Reads and writes secrets on market/dev only.'],
+  ['auditor@acme.example', 'auditor', 'Reads the audit log. Cannot read a single secret value.'],
+  ['accessmgr@acme.example', 'access manager', 'Grants and revokes access. Cannot read secret values.'],
+  ['outsider@acme.example', 'no grants', 'Registered, but holds nothing. What a denial looks like.'],
 ];
 
 /**
@@ -150,7 +150,7 @@ function ProviderLoginPage({
 function DevLoginPage() {
   const router = useRouter();
   const { next } = Route.useSearch();
-  const [email, setEmail] = useState('erwin@equisafe.io');
+  const [email, setEmail] = useState('admin@acme.example');
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<string | null>(null);
 
@@ -210,7 +210,7 @@ function DevLoginPage() {
               spellCheck={false}
               value={email}
               onChange={(event) => setEmail(event.target.value)}
-              placeholder="you@equisafe.io"
+              placeholder="you@acme.example"
             />
           </label>
           <button

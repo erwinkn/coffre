@@ -10,8 +10,8 @@ On the web, **Users → ⋯ → Remove user** (or **Tokens** for a service). Fro
 the CLI, `offboard` previews first, like `import`:
 
 ```
-$ coffre offboard alice@equisafe.io
-alice@equisafe.io is active; removing would revoke 3 grants, 2 sessions, 1 linked account
+$ coffre offboard alice@acme.example
+alice@acme.example is active; removing would revoke 3 grants, 2 sessions, 1 linked account
 
 Values they saw that nobody has changed since, to rotate once they leave (4)
   market/prod/DATABASE_URL       v4    read 2026-09-12
@@ -20,12 +20,12 @@ Values they saw that nobody has changed since, to rotate once they leave (4)
   market/dev/REDIS_URL           v3    read 2026-09-25
 
 Syncs they set up, which keep pushing
-  market/prod -> GitHub Actions equisafe/market
+  market/prod -> GitHub Actions acme/market
 
-Nothing changed. Re-run with --apply to remove alice@equisafe.io.
+Nothing changed. Re-run with --apply to remove alice@acme.example.
 
-$ coffre offboard alice@equisafe.io --apply
-removed alice@equisafe.io: revoked 3 grants, 2 sessions, 1 linked account
+$ coffre offboard alice@acme.example --apply
+removed alice@acme.example: revoked 3 grants, 2 sessions, 1 linked account
 …
 ```
 

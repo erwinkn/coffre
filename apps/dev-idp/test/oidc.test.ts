@@ -41,7 +41,7 @@ async function authorize(opts: { email?: string; nonce?: string; redirectUri?: s
     state: 'state-123',
     code_challenge: challenge,
     code_challenge_method: 'S256',
-    login_hint: opts.email ?? 'dev@equisafe.io',
+    login_hint: opts.email ?? 'dev@acme.example',
   };
   if (opts.nonce) params.nonce = opts.nonce;
   const back = location(await get(authorizeUrl(params)));
@@ -74,7 +74,7 @@ test('discovery advertises the code flow with PKCE', async () => {
 });
 
 test('the full code flow issues a verifiable ID token and a usable access token', async () => {
-  const { code, verifier, back } = await authorize({ email: 'lead@equisafe.io' });
+  const { code, verifier, back } = await authorize({ email: 'lead@acme.example' });
   assert.equal(back.origin + back.pathname, REDIRECT_URI);
   assert.equal(back.searchParams.get('state'), 'state-123');
   assert.equal(back.searchParams.get('iss'), idp.issuer);
@@ -95,10 +95,10 @@ test('the full code flow issues a verifiable ID token and a usable access token'
     audience: CLIENT_ID,
   });
   assert.equal(protectedHeader.kid, idp.kid);
-  assert.equal(payload.email, 'lead@equisafe.io');
+  assert.equal(payload.email, 'lead@acme.example');
   assert.equal(payload.email_verified, true);
   assert.equal(payload.name, 'Lea Lead');
-  assert.equal(payload.sub, defaultSubject('lead@equisafe.io'));
+  assert.equal(payload.sub, defaultSubject('lead@acme.example'));
   assert.match(payload.sub!, /^dev-[0-9a-f]{24}$/);
   assert.equal(typeof payload.auth_time, 'number');
   assert.equal(payload.nonce, undefined);
@@ -109,7 +109,7 @@ test('the full code flow issues a verifiable ID token and a usable access token'
   assert.equal(userinfo.status, 200);
   assert.deepEqual(await userinfo.json(), {
     sub: payload.sub,
-    email: 'lead@equisafe.io',
+    email: 'lead@acme.example',
     email_verified: true,
     name: 'Lea Lead',
   });
@@ -214,7 +214,7 @@ test('the built-in client accepts any loopback port, registered clients match ex
       state: 's',
       code_challenge: challenge,
       code_challenge_method: 'S256',
-      login_hint: 'dev@equisafe.io',
+      login_hint: 'dev@acme.example',
     }),
   );
   assert.equal(location(response).origin, 'https://app.example');
@@ -260,7 +260,7 @@ test('without auto-approve the persona page shows, escapes, and posts back', asy
       state: '"><script>alert(1)</script>',
       code_challenge: challenge,
       code_challenge_method: 'S256',
-      login_hint: 'dev@equisafe.io',
+      login_hint: 'dev@acme.example',
     };
     const url = new URL('/oauth/authorize', manual.origin);
     for (const [name, value] of Object.entries(params)) url.searchParams.set(name, value);
@@ -272,7 +272,7 @@ test('without auto-approve the persona page shows, escapes, and posts back', asy
     assert.ok(html.includes('&quot;&gt;&lt;script&gt;'));
     for (const persona of PERSONAS) assert.ok(html.includes(persona.email));
 
-    const approved = await fetch(`${manual.origin}/oauth/authorize`, form({ ...params, email: 'Auditor@Equisafe.io' }));
+    const approved = await fetch(`${manual.origin}/oauth/authorize`, form({ ...params, email: 'Auditor@Acme.example' }));
     const back = location(approved);
     assert.equal(back.searchParams.get('state'), params.state);
 
@@ -284,7 +284,7 @@ test('without auto-approve the persona page shows, escapes, and posts back', asy
       client_id: CLIENT_ID,
       client_secret: CLIENT_SECRET,
     }));
-    assert.equal(decodeJwt((await token.json()).id_token).email, 'auditor@equisafe.io');
+    assert.equal(decodeJwt((await token.json()).id_token).email, 'auditor@acme.example');
 
     const denied = location(await fetch(`${manual.origin}/oauth/authorize`, form({ ...params, deny: '1' })));
     assert.equal(denied.searchParams.get('error'), 'access_denied');
@@ -322,8 +322,8 @@ test('userinfo refuses missing and unknown tokens', async () => {
 });
 
 test('the Access endpoints still work', async () => {
-  const minted = await (await get(`${idp.origin}/dev/mint?email=dev@equisafe.io`)).json();
-  assert.equal(decodeJwt(minted.token).email, 'dev@equisafe.io');
+  const minted = await (await get(`${idp.origin}/dev/mint?email=dev@acme.example`)).json();
+  assert.equal(decodeJwt(minted.token).email, 'dev@acme.example');
   const jwks = await (await get(idp.jwksUrl)).json();
   assert.equal(jwks.keys[0].kid, idp.kid);
 });
@@ -332,6 +332,6 @@ test('the personas are the seeded users', () => {
   const seeded = LOCAL_SEED_DIRECTORY.filter((p) => p.principalType === 'user').map((p) => p.principalId);
   assert.deepEqual(
     PERSONAS.map((p) => p.email).sort(),
-    ['erwin@equisafe.io', ...seeded].sort(),
+    ['admin@acme.example', ...seeded].sort(),
   );
 });

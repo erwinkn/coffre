@@ -110,7 +110,7 @@ if [ "$mode" = signin ]; then
   coffre is up, with its own sign-in page, and the data `pnpm dev` last
   seeded (not seeded again here).
 
-    web + API   http://127.0.0.1:3000   (either button, then erwin@equisafe.io)
+    web + API   http://127.0.0.1:3000   (either button, then admin@acme.example)
     dev IdP     http://127.0.0.1:8081
 
   CLI (a device login: approve it in the browser):
@@ -122,11 +122,11 @@ else
 
   coffre is up.
 
-    web + API   http://127.0.0.1:3000   (sign in as erwin@equisafe.io)
+    web + API   http://127.0.0.1:3000   (sign in as admin@acme.example)
     dev IdP     http://127.0.0.1:8081
 
   CLI:
-    node --env-file=.env.dev apps/cli/src/main.ts login --email erwin@equisafe.io
+    node --env-file=.env.dev apps/cli/src/main.ts login --email admin@acme.example
     node --env-file=.env.dev apps/cli/src/main.ts run market/dev -- printenv
     node --env-file=.env.dev apps/cli/src/main.ts verify
 BANNER

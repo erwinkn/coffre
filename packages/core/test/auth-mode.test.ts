@@ -5,9 +5,9 @@ import { loadAuthConfig } from '../src/identity/auth-mode.ts';
 
 const cloudflare = {
   COFFRE_AUTH_MODE: 'cloudflare',
-  COFFRE_ACCESS_ISSUER: 'https://equisafe.cloudflareaccess.com',
+  COFFRE_ACCESS_ISSUER: 'https://acme.cloudflareaccess.com',
   COFFRE_ACCESS_JWKS_URL:
-    'https://equisafe.cloudflareaccess.com/cdn-cgi/access/certs',
+    'https://acme.cloudflareaccess.com/cdn-cgi/access/certs',
   COFFRE_ACCESS_AUD:
     'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90',
 } as const;

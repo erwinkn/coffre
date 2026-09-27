@@ -13,12 +13,12 @@ export interface Persona {
  * lands on a seeded account.
  */
 export const PERSONAS: readonly Persona[] = Object.freeze([
-  { email: 'erwin@equisafe.io', name: 'Erwin Kuhn', note: 'root admin' },
-  { email: 'lead@equisafe.io', name: 'Lea Lead', note: 'owner' },
-  { email: 'dev@equisafe.io', name: 'Devon Dev', note: 'developer on dev' },
-  { email: 'auditor@equisafe.io', name: 'Audrey Auditor', note: 'auditor' },
-  { email: 'accessmgr@equisafe.io', name: 'Max Access', note: 'access manager' },
-  { email: 'outsider@equisafe.io', name: 'Otto Outsider', note: 'registered, no grants' },
+  { email: 'admin@acme.example', name: 'Ada Admin', note: 'root admin' },
+  { email: 'lead@acme.example', name: 'Lea Lead', note: 'owner' },
+  { email: 'dev@acme.example', name: 'Devon Dev', note: 'developer on dev' },
+  { email: 'auditor@acme.example', name: 'Audrey Auditor', note: 'auditor' },
+  { email: 'accessmgr@acme.example', name: 'Max Access', note: 'access manager' },
+  { email: 'outsider@acme.example', name: 'Otto Outsider', note: 'registered, no grants' },
 ]);
 
 export function normalizeEmail(email: string): string {
@@ -79,7 +79,7 @@ export interface GitHubAccountPatch {
  * that trusts unverified emails signs Otto in as Lea.
  */
 const UNVERIFIED_GITHUB_EMAILS: Readonly<Record<string, readonly string[]>> = {
-  'outsider@equisafe.io': ['lead@equisafe.io'],
+  'outsider@acme.example': ['lead@acme.example'],
 };
 
 export function gitHubEmails(list: NonNullable<GitHubAccountPatch['emails']>): GitHubEmail[] {
@@ -100,6 +100,6 @@ export function defaultGitHubAccount(email: string): GitHubAccount {
     login: email.split('@')[0]!.replace(/[^A-Za-z0-9-]/g, '-'),
     name: displayName(email),
     emails: gitHubEmails([{ email }, ...unverified.map((e) => ({ email: e, verified: false }))]),
-    orgs: ['equisafe'],
+    orgs: ['acme'],
   };
 }

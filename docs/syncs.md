@@ -22,7 +22,7 @@ cannot also read a token that writes to your CI:
 
 ```sh
 coffre set ops/sync/GITHUB_TOKEN            # paste the token on stdin
-coffre sync add app/prod github-actions owner=equisafe repo=app environment=production \
+coffre sync add app/prod github-actions owner=acme repo=app environment=production \
   --credential ops/sync/GITHUB_TOKEN
 ```
 

@@ -2,7 +2,7 @@ import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
 import type { IdentityVerifier, Principal } from './types.ts';
 
 export type AccessVerifierConfig = {
-  /** Cloudflare Access team domain, e.g. https://equisafe.cloudflareaccess.com */
+  /** Cloudflare Access team domain, e.g. https://acme.cloudflareaccess.com */
   issuer: string;
   /** Usually `${issuer}/cdn-cgi/access/certs`. */
   jwksUrl: string;

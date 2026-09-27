@@ -55,9 +55,9 @@ async function inTransaction<T>(fn: (tx: pg.PoolClient) => Promise<T>): Promise<
 test('appended rows verify as a chain when read back from the database', async () => {
   await inTransaction((tx) =>
     appendAudit(tx, CHAIN_KEY, [
-      { actorType: 'user', actorId: 'erwin@equisafe.io', action: 'secret.read', decision: 'allow' },
+      { actorType: 'user', actorId: 'admin@acme.example', action: 'secret.read', decision: 'allow' },
       { actorType: 'service', actorId: 'ci.access', action: 'secret.read', decision: 'allow' },
-      { actorType: 'user', actorId: 'erwin@equisafe.io', action: 'secret.read', decision: 'deny' },
+      { actorType: 'user', actorId: 'admin@acme.example', action: 'secret.read', decision: 'deny' },
     ]),
   );
 
@@ -74,12 +74,12 @@ test('appended rows verify as a chain when read back from the database', async (
 test('the chain continues correctly across separate transactions', async () => {
   await inTransaction((tx) =>
     appendAudit(tx, CHAIN_KEY, [
-      { actorType: 'user', actorId: 'a@equisafe.io', action: 'secret.read', decision: 'allow' },
+      { actorType: 'user', actorId: 'a@acme.example', action: 'secret.read', decision: 'allow' },
     ]),
   );
   await inTransaction((tx) =>
     appendAudit(tx, CHAIN_KEY, [
-      { actorType: 'user', actorId: 'b@equisafe.io', action: 'secret.read', decision: 'allow' },
+      { actorType: 'user', actorId: 'b@acme.example', action: 'secret.read', decision: 'allow' },
     ]),
   );
 
@@ -91,7 +91,7 @@ test('the chain continues correctly across separate transactions', async () => {
 test('a rolled-back transaction leaves no gap in the sequence', async () => {
   await inTransaction((tx) =>
     appendAudit(tx, CHAIN_KEY, [
-      { actorType: 'user', actorId: 'a@equisafe.io', action: 'secret.read', decision: 'allow' },
+      { actorType: 'user', actorId: 'a@acme.example', action: 'secret.read', decision: 'allow' },
     ]),
   );
 
@@ -101,7 +101,7 @@ test('a rolled-back transaction leaves no gap in the sequence', async () => {
   await assert.rejects(
     inTransaction(async (tx) => {
       await appendAudit(tx, CHAIN_KEY, [
-        { actorType: 'user', actorId: 'b@equisafe.io', action: 'secret.read', decision: 'allow' },
+        { actorType: 'user', actorId: 'b@acme.example', action: 'secret.read', decision: 'allow' },
       ]);
       throw new Error('simulated failure after the audit write');
     }),
@@ -109,7 +109,7 @@ test('a rolled-back transaction leaves no gap in the sequence', async () => {
 
   await inTransaction((tx) =>
     appendAudit(tx, CHAIN_KEY, [
-      { actorType: 'user', actorId: 'c@equisafe.io', action: 'secret.read', decision: 'allow' },
+      { actorType: 'user', actorId: 'c@acme.example', action: 'secret.read', decision: 'allow' },
     ]),
   );
 
@@ -121,7 +121,7 @@ test('a rolled-back transaction leaves no gap in the sequence', async () => {
   );
   assert.deepEqual(
     rows.map((r) => r.actorId),
-    ['a@equisafe.io', 'c@equisafe.io'],
+    ['a@acme.example', 'c@acme.example'],
   );
   assert.equal(verifyChain(CHAIN_KEY, rows, GENESIS_HASH).ok, true);
 });
@@ -160,8 +160,8 @@ test('a bulk read writes one row per secret, sharing a bundle id', async () => {
 test('tampering with a stored row is detected on read', async () => {
   await inTransaction((tx) =>
     appendAudit(tx, CHAIN_KEY, [
-      { actorType: 'user', actorId: 'erwin@equisafe.io', action: 'secret.read', decision: 'allow' },
-      { actorType: 'user', actorId: 'erwin@equisafe.io', action: 'secret.read', decision: 'deny' },
+      { actorType: 'user', actorId: 'admin@acme.example', action: 'secret.read', decision: 'allow' },
+      { actorType: 'user', actorId: 'admin@acme.example', action: 'secret.read', decision: 'deny' },
     ]),
   );
 

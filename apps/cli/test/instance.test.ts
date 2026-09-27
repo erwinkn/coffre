@@ -13,7 +13,7 @@ import {
 } from '../src/instance.ts';
 
 const OURS = 'https://coffre.example.com';
-const THEIRS = 'https://coffre.equisafe.dev';
+const THEIRS = 'https://coffre.acme.example';
 const NOW = new Date('2026-09-26T12:00:00Z');
 
 function storeWith(): Store {
@@ -99,7 +99,7 @@ test('with no environment, the current instance and its session are used', () =>
 });
 
 test('COFFRE_API_URL picks another saved instance, with that instance’s mode', () => {
-  assert.deepEqual(resolveTarget({ COFFRE_API_URL: 'coffre.equisafe.dev' }, storeWith(), NOW), {
+  assert.deepEqual(resolveTarget({ COFFRE_API_URL: 'coffre.acme.example' }, storeWith(), NOW), {
     origin: THEIRS,
     mode: 'cloudflare',
     credential: { kind: 'cloudflared' },

@@ -15,7 +15,7 @@ const TENANT = '6f1c2a3b-4d5e-4f60-8a9b-0c1d2e3f4a5b';
 const CREDENTIALS = { clientId: 'id', clientSecret: 'secret' };
 
 const base = {
-  COFFRE_PUBLIC_URL: 'https://secrets.equisafe.io',
+  COFFRE_PUBLIC_URL: 'https://secrets.acme.example',
   COFFRE_SIGNIN_PROVIDERS: 'github',
   COFFRE_SIGNIN_GITHUB_CLIENT_ID: 'Iv23li-github',
   COFFRE_SIGNIN_GITHUB_CLIENT_SECRET: 'github-secret',
@@ -26,12 +26,12 @@ test('the documented GitHub + Okta example loads', () => {
     ...base,
     COFFRE_SIGNIN_PROVIDERS: 'github,okta',
     COFFRE_SIGNIN_OKTA_TYPE: 'oidc',
-    COFFRE_SIGNIN_OKTA_ISSUER: 'https://equisafe.okta.com',
+    COFFRE_SIGNIN_OKTA_ISSUER: 'https://acme.okta.com',
     COFFRE_SIGNIN_OKTA_CLIENT_ID: 'okta-id',
     COFFRE_SIGNIN_OKTA_CLIENT_SECRET: 'okta-secret',
   });
   assert.deepEqual(config, {
-    publicUrl: 'https://secrets.equisafe.io',
+    publicUrl: 'https://secrets.acme.example',
     providers: [
       {
         kind: 'github',
@@ -51,7 +51,7 @@ test('the documented GitHub + Okta example loads', () => {
         brand: 'oidc',
         clientId: 'okta-id',
         clientSecret: 'okta-secret',
-        issuer: 'https://equisafe.okta.com',
+        issuer: 'https://acme.okta.com',
         scopes: ['openid', 'email', 'profile'],
         authorizationParams: {},
         hostedDomain: null,
@@ -65,30 +65,30 @@ test('the documented GitHub + Okta example loads', () => {
 
 test('every optional variable is read, and values are trimmed', () => {
   const config = loadSigninConfig({
-    COFFRE_PUBLIC_URL: ' https://secrets.equisafe.io/ ',
+    COFFRE_PUBLIC_URL: ' https://secrets.acme.example/ ',
     COFFRE_SIGNIN_PROVIDERS: ' corp-github  google\tentra ',
     COFFRE_SIGNIN_CORP_GITHUB_TYPE: 'github',
     COFFRE_SIGNIN_CORP_GITHUB_CLIENT_ID: 'gh-id',
     COFFRE_SIGNIN_CORP_GITHUB_CLIENT_SECRET: 'gh-secret',
     COFFRE_SIGNIN_CORP_GITHUB_LABEL: 'GitHub Enterprise',
-    COFFRE_SIGNIN_CORP_GITHUB_ORGANIZATION: ' equisafe ',
-    COFFRE_SIGNIN_CORP_GITHUB_WEB_URL: 'https://git.equisafe.io/',
-    COFFRE_SIGNIN_CORP_GITHUB_API_URL: 'https://git.equisafe.io/api/v3/',
+    COFFRE_SIGNIN_CORP_GITHUB_ORGANIZATION: ' acme ',
+    COFFRE_SIGNIN_CORP_GITHUB_WEB_URL: 'https://git.acme.example/',
+    COFFRE_SIGNIN_CORP_GITHUB_API_URL: 'https://git.acme.example/api/v3/',
     COFFRE_SIGNIN_GOOGLE_CLIENT_ID: 'g-id',
     COFFRE_SIGNIN_GOOGLE_CLIENT_SECRET: 'g-secret',
-    COFFRE_SIGNIN_GOOGLE_DOMAIN: 'Equisafe.IO',
+    COFFRE_SIGNIN_GOOGLE_DOMAIN: 'Acme.EXAMPLE',
     COFFRE_SIGNIN_ENTRA_TYPE: 'microsoft',
     COFFRE_SIGNIN_ENTRA_CLIENT_ID: 'm-id',
     COFFRE_SIGNIN_ENTRA_CLIENT_SECRET: 'm-secret',
     COFFRE_SIGNIN_ENTRA_TENANT: TENANT.toUpperCase(),
-    COFFRE_SIGNIN_TITLE: 'Equisafe secrets',
-    COFFRE_SIGNIN_NOTE: 'Use your equisafe.io account.',
+    COFFRE_SIGNIN_TITLE: 'Acme secrets',
+    COFFRE_SIGNIN_NOTE: 'Use your acme.example account.',
     COFFRE_SESSION_HOURS: '8',
     COFFRE_CLI_SESSION_DAYS: '7.5',
   });
 
-  assert.equal(config.publicUrl, 'https://secrets.equisafe.io');
-  assert.deepEqual(config.page, { title: 'Equisafe secrets', note: 'Use your equisafe.io account.' });
+  assert.equal(config.publicUrl, 'https://secrets.acme.example');
+  assert.deepEqual(config.page, { title: 'Acme secrets', note: 'Use your acme.example account.' });
   assert.equal(config.browserSessionHours, 8);
   assert.equal(config.cliSessionDays, 7.5);
   assert.deepEqual(config.providers.map((p) => p.id), ['corp-github', 'google', 'entra']);
@@ -97,16 +97,16 @@ test('every optional variable is read, and values are trimmed', () => {
   assert.equal(gh.kind, 'github');
   if (gh.kind !== 'github') return;
   assert.equal(gh.label, 'GitHub Enterprise');
-  assert.equal(gh.organization, 'equisafe');
-  assert.equal(gh.webUrl, 'https://git.equisafe.io');
-  assert.equal(gh.apiUrl, 'https://git.equisafe.io/api/v3');
+  assert.equal(gh.organization, 'acme');
+  assert.equal(gh.webUrl, 'https://git.acme.example');
+  assert.equal(gh.apiUrl, 'https://git.acme.example/api/v3');
 
   assert.equal(goog.kind, 'oidc');
   if (goog.kind !== 'oidc') return;
   assert.equal(goog.brand, 'google');
   assert.equal(goog.issuer, 'https://accounts.google.com');
-  assert.equal(goog.hostedDomain, 'equisafe.io');
-  assert.deepEqual(goog.authorizationParams, { hd: 'equisafe.io', prompt: 'select_account' });
+  assert.equal(goog.hostedDomain, 'acme.example');
+  assert.deepEqual(goog.authorizationParams, { hd: 'acme.example', prompt: 'select_account' });
 
   assert.equal(entra.kind, 'oidc');
   if (entra.kind !== 'oidc') return;
@@ -121,7 +121,7 @@ test('custom OIDC scopes split on commas and whitespace', () => {
     COFFRE_SIGNIN_PROVIDERS: 'kc',
     COFFRE_SIGNIN_KC_TYPE: 'oidc',
     COFFRE_SIGNIN_KC_LABEL: 'Keycloak',
-    COFFRE_SIGNIN_KC_ISSUER: 'https://sso.equisafe.io/realms/staff/',
+    COFFRE_SIGNIN_KC_ISSUER: 'https://sso.acme.example/realms/staff/',
     COFFRE_SIGNIN_KC_CLIENT_ID: 'kc-id',
     COFFRE_SIGNIN_KC_CLIENT_SECRET: 'kc-secret',
     COFFRE_SIGNIN_KC_SCOPES: 'openid, email profile,groups',
@@ -131,7 +131,7 @@ test('custom OIDC scopes split on commas and whitespace', () => {
   if (kc.kind !== 'oidc') return;
   assert.equal(kc.label, 'Keycloak');
   assert.deepEqual(kc.scopes, ['openid', 'email', 'profile', 'groups']);
-  assert.equal(kc.issuer, 'https://sso.equisafe.io/realms/staff', 'one trailing slash dropped');
+  assert.equal(kc.issuer, 'https://sso.acme.example/realms/staff', 'one trailing slash dropped');
 });
 
 test('issuers keep their exact spelling apart from a trailing slash', () => {
@@ -173,7 +173,7 @@ test('a provider named twice is refused', () => {
   assert.throws(
     () =>
       defineSignin({
-        publicUrl: 'https://secrets.equisafe.io',
+        publicUrl: 'https://secrets.acme.example',
         providers: [github(CREDENTIALS), github({ ...CREDENTIALS, label: 'Again' })],
       }),
     /"github" is used twice/,
@@ -239,7 +239,7 @@ test('a bare `oidc` provider still needs its issuer, and Microsoft its tenant', 
 });
 
 test('the Microsoft tenant must be a GUID, not a domain or a multi-tenant alias', () => {
-  for (const tenant of ['common', 'organizations', 'equisafe.onmicrosoft.com', `${TENANT}x`]) {
+  for (const tenant of ['common', 'organizations', 'acme.onmicrosoft.com', `${TENANT}x`]) {
     assert.throws(() => microsoft({ ...CREDENTIALS, tenant }), /must be the directory \(tenant\) ID/, tenant);
   }
   assert.equal(
@@ -257,7 +257,7 @@ test('google() without a domain lets any account through the picker', () => {
 });
 
 test('provider URLs must be HTTPS, except on loopback', () => {
-  for (const issuer of ['http://sso.equisafe.io', 'ftp://sso.equisafe.io', 'http://10.0.0.1:8080']) {
+  for (const issuer of ['http://sso.acme.example', 'ftp://sso.acme.example', 'http://10.0.0.1:8080']) {
     assert.throws(
       () => oidc({ ...CREDENTIALS, id: 'sso', label: 'SSO', issuer }),
       /sign-in provider sso issuer must use HTTPS/,
@@ -268,24 +268,24 @@ test('provider URLs must be HTTPS, except on loopback', () => {
     assert.equal(oidc({ ...CREDENTIALS, id: 'dev', label: 'Dev', issuer }).issuer, issuer);
   }
   assert.throws(
-    () => github({ ...CREDENTIALS, webUrl: 'http://git.equisafe.io' }),
+    () => github({ ...CREDENTIALS, webUrl: 'http://git.acme.example' }),
     /sign-in provider github web URL must use HTTPS/,
   );
   assert.throws(
-    () => github({ ...CREDENTIALS, apiUrl: 'http://git.equisafe.io/api/v3' }),
+    () => github({ ...CREDENTIALS, apiUrl: 'http://git.acme.example/api/v3' }),
     /sign-in provider github API URL must use HTTPS/,
   );
   assert.throws(
-    () => oidc({ ...CREDENTIALS, id: 'sso', label: 'SSO', issuer: 'sso.equisafe.io' }),
+    () => oidc({ ...CREDENTIALS, id: 'sso', label: 'SSO', issuer: 'sso.acme.example' }),
     /issuer must be an absolute URL/,
   );
 });
 
 test('provider URLs carry no credentials, query or fragment', () => {
   for (const issuer of [
-    'https://user:pass@sso.equisafe.io',
-    'https://sso.equisafe.io/?tenant=1',
-    'https://sso.equisafe.io/#x',
+    'https://user:pass@sso.acme.example',
+    'https://sso.acme.example/?tenant=1',
+    'https://sso.acme.example/#x',
   ]) {
     assert.throws(
       () => oidc({ ...CREDENTIALS, id: 'sso', label: 'SSO', issuer }),
@@ -296,20 +296,20 @@ test('provider URLs carry no credentials, query or fragment', () => {
 });
 
 test('COFFRE_PUBLIC_URL must be an HTTPS origin, or loopback HTTP', () => {
-  assert.equal(publicOrigin('https://secrets.equisafe.io'), 'https://secrets.equisafe.io');
-  assert.equal(publicOrigin('https://secrets.equisafe.io:8443/'), 'https://secrets.equisafe.io:8443');
+  assert.equal(publicOrigin('https://secrets.acme.example'), 'https://secrets.acme.example');
+  assert.equal(publicOrigin('https://secrets.acme.example:8443/'), 'https://secrets.acme.example:8443');
   assert.equal(publicOrigin('http://127.0.0.1:3000'), 'http://127.0.0.1:3000');
-  assert.equal(publicOrigin('HTTPS://Secrets.Equisafe.IO'), 'https://secrets.equisafe.io');
-  assert.throws(() => publicOrigin('https://equisafe.io/secrets'), /must be an origin, with no path/);
-  assert.throws(() => publicOrigin('http://secrets.equisafe.io'), /COFFRE_PUBLIC_URL must use HTTPS/);
-  assert.throws(() => publicOrigin('https://secrets.equisafe.io/?a=1'), /must not carry/);
-  assert.throws(() => publicOrigin('secrets.equisafe.io'), /COFFRE_PUBLIC_URL must be an absolute URL/);
+  assert.equal(publicOrigin('HTTPS://Secrets.Acme.EXAMPLE'), 'https://secrets.acme.example');
+  assert.throws(() => publicOrigin('https://acme.example/secrets'), /must be an origin, with no path/);
+  assert.throws(() => publicOrigin('http://secrets.acme.example'), /COFFRE_PUBLIC_URL must use HTTPS/);
+  assert.throws(() => publicOrigin('https://secrets.acme.example/?a=1'), /must not carry/);
+  assert.throws(() => publicOrigin('secrets.acme.example'), /COFFRE_PUBLIC_URL must be an absolute URL/);
   assert.throws(
-    () => loadSigninConfig({ ...base, COFFRE_PUBLIC_URL: 'https://equisafe.io/coffre' }),
+    () => loadSigninConfig({ ...base, COFFRE_PUBLIC_URL: 'https://acme.example/coffre' }),
     /must be an origin/,
   );
   assert.throws(
-    () => defineSignin({ publicUrl: 'https://equisafe.io/coffre', providers: [github(CREDENTIALS)] }),
+    () => defineSignin({ publicUrl: 'https://acme.example/coffre', providers: [github(CREDENTIALS)] }),
     /must be an origin/,
   );
 });
@@ -332,13 +332,13 @@ test('session lifetimes are positive and bounded', () => {
 
 test('defineSignin needs a provider, and each needs a client id and secret', () => {
   assert.throws(
-    () => defineSignin({ publicUrl: 'https://secrets.equisafe.io', providers: [] }),
+    () => defineSignin({ publicUrl: 'https://secrets.acme.example', providers: [] }),
     /at least one provider/,
   );
   assert.throws(
     () =>
       defineSignin({
-        publicUrl: 'https://secrets.equisafe.io',
+        publicUrl: 'https://secrets.acme.example',
         providers: [github({ clientId: '', clientSecret: 'secret' })],
       }),
     /sign-in provider github needs a client id and a client secret/,
@@ -346,22 +346,22 @@ test('defineSignin needs a provider, and each needs a client id and secret', () 
   assert.throws(
     () =>
       defineSignin({
-        publicUrl: 'https://secrets.equisafe.io',
+        publicUrl: 'https://secrets.acme.example',
         providers: [google({ clientId: 'id', clientSecret: '' })],
       }),
     /sign-in provider google needs a client id and a client secret/,
   );
   assert.deepEqual(
     defineSignin({
-      publicUrl: 'https://secrets.equisafe.io/',
+      publicUrl: 'https://secrets.acme.example/',
       providers: [github(CREDENTIALS)],
-      page: { title: 'Equisafe secrets' },
+      page: { title: 'Acme secrets' },
       browserSessionHours: 4,
     }),
     {
-      publicUrl: 'https://secrets.equisafe.io',
+      publicUrl: 'https://secrets.acme.example',
       providers: [github(CREDENTIALS)],
-      page: { title: 'Equisafe secrets', note: null },
+      page: { title: 'Acme secrets', note: null },
       browserSessionHours: 4,
       cliSessionDays: 30,
     },

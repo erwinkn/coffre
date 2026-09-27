@@ -13,11 +13,11 @@ import { AccessDenied, NotFound } from '../src/server/services/secrets.ts';
 import { requestContext, serviceFixture } from './service-fixture.ts';
 
 const CHAIN_KEY = randomBytes(32);
-const ROOT = 'erwin@equisafe.io';
+const ROOT = 'admin@acme.example';
 const root = requestContext(ROOT);
-const auditor = requestContext('auditor@equisafe.io');
-const accessManager = requestContext('accessmgr@equisafe.io');
-const developer = requestContext('dev@equisafe.io');
+const auditor = requestContext('auditor@acme.example');
+const accessManager = requestContext('accessmgr@acme.example');
+const developer = requestContext('dev@acme.example');
 
 let pool: pg.Pool;
 let runtimePool: pg.Pool;
@@ -125,7 +125,7 @@ test('a project access manager cannot add an unknown principal to the directory'
   await assert.rejects(
     services.admin.createGrant(accessManager, 'market', {
       principalType: 'user',
-      principalId: 'unknown@equisafe.io',
+      principalId: 'unknown@acme.example',
       role: 'developer',
     }),
     (error) => (error as { statusCode?: number }).statusCode === 409,
@@ -134,7 +134,7 @@ test('a project access manager cannot add an unknown principal to the directory'
     (
       await pool.query(
         'SELECT 1 FROM principals WHERE principal_id = $1',
-        ['unknown@equisafe.io'],
+        ['unknown@acme.example'],
       )
     ).rowCount,
     0,

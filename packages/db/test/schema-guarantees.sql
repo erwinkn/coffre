@@ -10,14 +10,14 @@
 
 -- 1. The application may append to the audit log.
 INSERT INTO audit_log (seq, actor_type, actor_id, action, decision, prev_hash, hash)
-VALUES (1, 'user', 'erwin@equisafe.io', 'secret.read', 'allow',
+VALUES (1, 'user', 'admin@acme.example', 'secret.read', 'allow',
         decode(repeat('aa', 32), 'hex'), decode(repeat('bb', 32), 'hex'));
 \echo 'PASS: coffre_app can append to audit_log'
 
 -- 2. The application may NOT rewrite an audit row.
 DO $$
 BEGIN
-    UPDATE audit_log SET actor_id = 'someone.else@equisafe.io' WHERE seq = 0;
+    UPDATE audit_log SET actor_id = 'someone.else@acme.example' WHERE seq = 0;
     RAISE EXCEPTION 'FAIL: coffre_app was able to UPDATE audit_log';
 EXCEPTION
     WHEN insufficient_privilege THEN
@@ -123,7 +123,7 @@ $$;
 DO $$
 BEGIN
     INSERT INTO audit_log (seq, actor_type, actor_id, action, decision, prev_hash, hash)
-    VALUES (1, 'user', 'x@equisafe.io', 'secret.read', 'allow',
+    VALUES (1, 'user', 'x@acme.example', 'secret.read', 'allow',
             decode(repeat('aa', 32), 'hex'), decode(repeat('cc', 32), 'hex'));
     RAISE EXCEPTION 'FAIL: duplicate audit seq was accepted';
 EXCEPTION
@@ -136,7 +136,7 @@ $$;
 DO $$
 BEGIN
     INSERT INTO audit_log (seq, actor_type, actor_id, action, decision, prev_hash, hash)
-    VALUES (2, 'user', 'x@equisafe.io', 'secret.read', 'allow',
+    VALUES (2, 'user', 'x@acme.example', 'secret.read', 'allow',
             decode(repeat('aa', 32), 'hex'), decode('deadbeef', 'hex'));
     RAISE EXCEPTION 'FAIL: a short chain hash was accepted';
 EXCEPTION

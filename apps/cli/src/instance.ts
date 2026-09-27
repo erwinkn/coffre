@@ -13,7 +13,7 @@ import { cliAuthHeader } from './auth-mode.ts';
  *     "current": "https://coffre.example.com",
  *     "instances": {
  *       "https://coffre.example.com": { "mode": "signin", "token": "coffre_cli_…", … },
- *       "https://coffre.equisafe.dev": { "mode": "cloudflare", … }
+ *       "https://coffre.acme.example": { "mode": "cloudflare", … }
  *     }
  *   }
  *

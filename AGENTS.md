@@ -21,7 +21,7 @@ DB-backed tests need it up. Export `COMPOSE_PROJECT_NAME=coffre` whenever you in
 
 **Run the stack.** `pnpm dev` brings up Postgres + dev IdP (:8081) + web/API
 (:3000) + seed data. Sign in at `http://127.0.0.1:3000/login` as
-`erwin@equisafe.io` (root admin) or any of the seeded personas. CLI:
+`admin@acme.example` (root admin) or any of the seeded personas. CLI:
 `node --env-file=.env.dev apps/cli/src/main.ts <cmd>`.
 
 **Tests / checks.**

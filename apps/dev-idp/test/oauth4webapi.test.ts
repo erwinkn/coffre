@@ -43,7 +43,7 @@ for (const [name, auth] of [
     url.searchParams.set('nonce', nonce);
     url.searchParams.set('code_challenge', await oauth.calculatePKCECodeChallenge(verifier));
     url.searchParams.set('code_challenge_method', 'S256');
-    url.searchParams.set('login_hint', 'erwin@equisafe.io');
+    url.searchParams.set('login_hint', 'admin@acme.example');
 
     const callback = location(await get(url));
     const params = oauth.validateAuthResponse(as, client, callback, state);
@@ -58,9 +58,9 @@ for (const [name, auth] of [
     const claims = oauth.getValidatedIdTokenClaims(result)!;
     assert.equal(claims.iss, idp.issuer);
     assert.equal(claims.aud, 'coffre-local');
-    assert.equal(claims.email, 'erwin@equisafe.io');
+    assert.equal(claims.email, 'admin@acme.example');
     assert.equal(claims.nonce, nonce);
-    assert.equal(claims.sub, idp.subjectFor('erwin@equisafe.io'));
+    assert.equal(claims.sub, idp.subjectFor('admin@acme.example'));
 
     const userinfo = await oauth.processUserInfoResponse(
       as,
@@ -68,7 +68,7 @@ for (const [name, auth] of [
       claims.sub,
       await oauth.userInfoRequest(as, client, result.access_token, { [oauth.allowInsecureRequests]: true }),
     );
-    assert.equal(userinfo.email, 'erwin@equisafe.io');
+    assert.equal(userinfo.email, 'admin@acme.example');
   });
 }
 

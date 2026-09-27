@@ -19,8 +19,8 @@ import { shouldValidateCsrf, startInstance } from '../src/start.ts';
 const cloudflare: AuthConfig = {
   mode: 'cloudflare',
   access: {
-    issuer: 'https://equisafe.cloudflareaccess.com',
-    jwksUrl: 'https://equisafe.cloudflareaccess.com/cdn-cgi/access/certs',
+    issuer: 'https://acme.cloudflareaccess.com',
+    jwksUrl: 'https://acme.cloudflareaccess.com/cdn-cgi/access/certs',
     audience: 'coffre-aud',
   },
 };
@@ -37,8 +37,8 @@ const dev: AuthConfig = {
 
 const root: Principal = {
   type: 'user',
-  id: 'erwin@equisafe.io',
-  email: 'erwin@equisafe.io',
+  id: 'admin@acme.example',
+  email: 'admin@acme.example',
   subject: 'root-subject',
 };
 
@@ -208,8 +208,8 @@ test('a configured root admin authenticates without a principals row lookup', as
 test('an unregistered non-root identity is marked for the closed-door boundary', async () => {
   const principal: Principal = {
     type: 'user',
-    id: 'new@equisafe.io',
-    email: 'new@equisafe.io',
+    id: 'new@acme.example',
+    email: 'new@acme.example',
     subject: 'new-subject',
   };
   const result = await authenticateRequest(

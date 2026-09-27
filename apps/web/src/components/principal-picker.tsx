@@ -64,7 +64,7 @@ export function PrincipalPicker({
           autoFocus
           spellCheck={false}
           autoComplete="off"
-          placeholder={principalType === 'user' ? 'someone@equisafe.io' : 'ci-deploy.access'}
+          placeholder={principalType === 'user' ? 'someone@acme.example' : 'ci-deploy.access'}
           value={value}
           onChange={(event) => onChange(event.target.value)}
         />
