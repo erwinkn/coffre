@@ -1,0 +1,5 @@
+{
+  "extends": "../../apps/web/tsconfig.json",
+  "compilerOptions": { "types": [], "paths": {} },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}
