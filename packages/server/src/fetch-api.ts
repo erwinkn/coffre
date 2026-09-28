@@ -1,6 +1,6 @@
-import { createClient, type CoffreClient } from '../../../../packages/client/src/index.ts';
-import type { AuthConfig } from '../../../../packages/core/src/identity/auth-mode.ts';
-import { ACCESS_JWT_HEADER } from '../../../../packages/core/src/identity/types.ts';
+import { createClient, type CoffreClient } from '../../client/src/index.ts';
+import type { AuthConfig } from '../../core/src/identity/auth-mode.ts';
+import { ACCESS_JWT_HEADER } from '../../core/src/identity/types.ts';
 import { ApiError } from './api/errors.ts';
 import { serveApi } from './api/router.ts';
 import {
@@ -10,7 +10,6 @@ import {
   readCookie,
   registrationRequired,
   sessionCookieName,
-  trustedSourceIp,
   unauthenticated,
   type AuthenticatedIdentity,
 } from './auth.ts';
@@ -71,7 +70,7 @@ export function isSameOrigin(request: Request): boolean {
 export async function apiCaller(
   request: Request,
   runtime: CoffreRuntime,
-  sourceIp = trustedSourceIp(request, runtime.auth),
+  sourceIp: string | null,
 ): Promise<AuthenticatedIdentity | Response> {
   const credential = apiCredential(request, runtime.auth);
   if (credential === null) return unauthenticated(runtime.auth);
@@ -118,7 +117,7 @@ function authInfo(request: Request, runtime: CoffreRuntime): AuthInfo {
 export async function fetchApi(
   request: Request,
   runtime: CoffreRuntime,
-  options: { sourceIp?: string | null } = {},
+  options: { sourceIp: string | null },
 ): Promise<Response> {
   try {
     const { pathname } = new URL(request.url);
@@ -159,9 +158,8 @@ export function pageCredential(page: Request, auth: AuthConfig): Record<string, 
  * visitor's address rides alongside, not as a header, for the audit log and
  * the session's last-seen address.
  */
-export function pageClient(page: Request, runtime: CoffreRuntime): CoffreClient {
+export function pageClient(page: Request, runtime: CoffreRuntime, sourceIp: string | null): CoffreClient {
   const credential = pageCredential(page, runtime.auth);
-  const sourceIp = trustedSourceIp(page, runtime.auth);
   return createClient({
     url: new URL(page.url).origin,
     headers: () => credential,

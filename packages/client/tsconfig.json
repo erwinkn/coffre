@@ -1,5 +1,5 @@
 {
-  "extends": "../../apps/web/tsconfig.json",
-  "compilerOptions": { "types": [], "paths": {} },
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": { "types": [] },
   "include": ["src/**/*.ts", "test/**/*.ts"]
 }

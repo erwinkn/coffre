@@ -1,13 +1,13 @@
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { CoffreError } from '../../../packages/client/src/index.ts';
-import type { AuthConfig } from '../../../packages/core/src/identity/auth-mode.ts';
-import type { Principal } from '../../../packages/core/src/identity/types.ts';
-import { SyncRunner } from '../src/server/api/syncs.ts';
-import { DEV_TOKEN_COOKIE } from '../src/server/auth.ts';
-import { apiCredential, fetchApi, pageClient, pageCredential } from '../src/server/fetch-api.ts';
-import type { CoffreRuntime } from '../src/server/runtime.ts';
+import { CoffreError } from '../../client/src/index.ts';
+import type { AuthConfig } from '../../core/src/identity/auth-mode.ts';
+import type { Principal } from '../../core/src/identity/types.ts';
+import { SyncRunner } from '../src/api/syncs.ts';
+import { DEV_TOKEN_COOKIE } from '../src/auth.ts';
+import { apiCredential, fetchApi as serveApi, pageClient as clientForPage, pageCredential } from '../src/fetch-api.ts';
+import type { CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://coffre.test';
@@ -25,6 +25,10 @@ const cloudflare: AuthConfig = {
   access: { issuer: 'https://acme.cloudflareaccess.com', jwksUrl: 'https://acme.cloudflareaccess.com/certs', audience: 'aud' },
 };
 
+// Straight to the app, with no adapter in front to vouch for an address.
+const fetchApi = (request: Request, runtime: CoffreRuntime) => serveApi(request, runtime, { sourceIp: null });
+const pageClient = (page: Request, runtime: CoffreRuntime) => clientForPage(page, runtime, null);
+
 let db: Awaited<ReturnType<typeof openTestDatabase>>;
 let deps: FixtureDeps;
 
@@ -37,6 +41,7 @@ function runtimeFor(auth: AuthConfig): CoffreRuntime {
     syncs: new SyncRunner({ db: deps.db, vault: deps.vault, chainKey: deps.chainKey }),
     signin: null,
     auth,
+    publicUrl: ORIGIN,
     verifier: { verify: async (token: string): Promise<Principal> => ({ type: 'user', id: token, email: token, subject: token }) },
     waitUntil: () => {},
   };
@@ -73,7 +78,7 @@ test('a change made with a browser cookie from another site is refused and chang
   const runtime = runtimeFor(dev);
   const cookie = `${DEV_TOKEN_COOKIE}=${ROOT}`;
   for (const headers of [
-    { cookie, 'sec-fetch-site': 'cross-site' },
+    { cookie, 'sec-fetch-site': 'cross-site' } as Record<string, string>,
     // A sibling subdomain is the same site, and still not coffre.
     { cookie, 'sec-fetch-site': 'same-site' },
     { cookie, origin: 'https://evil.test' },

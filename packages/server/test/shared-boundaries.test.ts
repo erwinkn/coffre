@@ -1,9 +1,9 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { loadCaller } from '../src/server/api/caller.ts';
-import { me } from '../src/server/api/projects.ts';
-import { displayName, principalId } from '../src/shared/schemas.ts';
+import { loadCaller } from '../src/api/caller.ts';
+import { me } from '../src/api/projects.ts';
+import { displayName, principalId } from '../../core/src/schemas.ts';
 import { contextFor, openTestDatabase, resetDatabase, testDeps } from './api-fixture.ts';
 
 const db = await openTestDatabase();

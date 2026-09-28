@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Link, useLoaderData, useRouter } from '@tanstack/react-router';
 import { toast } from 'sonner';
-import type { CoffreClient } from '../../../../packages/client/src/index.ts';
+import type { CoffreClient } from '../../../client/src/index.ts';
 import { memberRef, statusOf, uiResult, useCoffre } from '../lib/coffre';
 import { useAction } from '../lib/use-action';
 import type { UiCapabilities } from '../lib/capabilities';

@@ -1,90 +1,75 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { loadAuthConfig } from '../src/identity/auth-mode.ts';
+import { cloudflareAccess, devIdp, signin } from '../src/identity/auth-mode.ts';
+import { github } from '../src/identity/signin/config.ts';
 
-const cloudflare = {
-  COFFRE_AUTH_MODE: 'cloudflare',
-  COFFRE_ACCESS_ISSUER: 'https://acme.cloudflareaccess.com',
-  COFFRE_ACCESS_JWKS_URL:
-    'https://acme.cloudflareaccess.com/cdn-cgi/access/certs',
-  COFFRE_ACCESS_AUD:
-    'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90',
-} as const;
+const AUD = 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90';
 
-const dev = {
-  COFFRE_AUTH_MODE: 'dev',
-  COFFRE_DEV_IDP_URL: 'http://127.0.0.1:8081',
-  COFFRE_ACCESS_ISSUER: 'http://127.0.0.1:8081',
-  COFFRE_ACCESS_JWKS_URL: 'http://127.0.0.1:8081/cdn-cgi/access/certs',
-  COFFRE_ACCESS_AUD: 'coffre-local-dev-aud',
-} as const;
-
-test('auth mode is explicit rather than inferred from other variables', () => {
-  assert.throws(
-    () => loadAuthConfig({ ...dev, COFFRE_AUTH_MODE: undefined }),
-    /COFFRE_AUTH_MODE/,
-  );
-  assert.throws(
-    () => loadAuthConfig({ ...dev, COFFRE_AUTH_MODE: 'production' }),
-    /exactly "signin", "cloudflare" or "dev"/,
-  );
-});
-
-test('cloudflare mode accepts the exact team issuer, cert URL, and AUD', () => {
-  assert.deepEqual(loadAuthConfig(cloudflare), {
+test('cloudflareAccess derives the issuer and cert URL from the team domain', () => {
+  const expected = {
     mode: 'cloudflare',
     access: {
-      issuer: cloudflare.COFFRE_ACCESS_ISSUER,
-      jwksUrl: cloudflare.COFFRE_ACCESS_JWKS_URL,
-      audience: cloudflare.COFFRE_ACCESS_AUD,
+      issuer: 'https://acme.cloudflareaccess.com',
+      jwksUrl: 'https://acme.cloudflareaccess.com/cdn-cgi/access/certs',
+      audience: AUD,
     },
+  };
+  for (const teamDomain of ['acme.cloudflareaccess.com', 'https://acme.cloudflareaccess.com', ' acme.cloudflareaccess.com/ ']) {
+    const auth = cloudflareAccess({ teamDomain, audience: AUD });
+    assert.equal(auth.mode, 'cloudflare');
+    assert.deepEqual(auth.resolve('https://secrets.acme.example'), expected, teamDomain);
+  }
+});
+
+test('cloudflareAccess takes only an Access team domain, with an AUD tag', () => {
+  for (const teamDomain of [
+    'login.example.com',
+    'cloudflareaccess.com',
+    'acme.cloudflareaccess.com:8443',
+    'http://acme.cloudflareaccess.com',
+    'https://acme.cloudflareaccess.com/cdn-cgi/access/certs',
+  ]) {
+    assert.throws(() => cloudflareAccess({ teamDomain, audience: AUD }), /team domain/, teamDomain);
+  }
+  for (const audience of ['', ' ', 'two words', 'a'.repeat(65)]) {
+    assert.throws(
+      () => cloudflareAccess({ teamDomain: 'acme.cloudflareaccess.com', audience }),
+      /Access audience/,
+      audience,
+    );
+  }
+});
+
+test('devIdp runs on loopback only, with the local audience by default', () => {
+  assert.deepEqual(devIdp({ url: 'http://127.0.0.1:8081' }).resolve('http://127.0.0.1:3000'), {
+    mode: 'dev',
+    access: {
+      issuer: 'http://127.0.0.1:8081',
+      jwksUrl: 'http://127.0.0.1:8081/cdn-cgi/access/certs',
+      audience: 'coffre-local-dev-aud',
+    },
+    devIdpUrl: 'http://127.0.0.1:8081',
   });
+  assert.equal(devIdp({ url: 'http://localhost:8081/', audience: 'other' }).resolve('').mode, 'dev');
+  for (const url of ['http://10.0.0.5:8081', 'https://127.0.0.1:8081', 'http://idp.acme.example', 'http://127.0.0.1:8081/idp']) {
+    assert.throws(() => devIdp({ url }), /dev IdP/, url);
+  }
 });
 
-test('cloudflare mode rejects every dev minting configuration', () => {
-  assert.throws(
-    () => loadAuthConfig({ ...cloudflare, COFFRE_DEV_IDP_URL: 'http://127.0.0.1:8081' }),
-    /must not be set/,
-  );
-});
+test('signin checks its options where they are written, and resolves against the public URL', () => {
+  const providers = [github({ clientId: 'id', clientSecret: 'secret' })];
+  const auth = signin({ providers, title: 'Acme secrets', browserSessionHours: 8 });
+  assert.equal(auth.mode, 'signin');
+  const resolved = auth.resolve('https://secrets.acme.example/');
+  assert.equal(resolved.mode, 'signin');
+  if (resolved.mode !== 'signin') return;
+  assert.equal(resolved.signin.publicUrl, 'https://secrets.acme.example');
+  assert.deepEqual(resolved.signin.page, { title: 'Acme secrets', note: null });
+  assert.equal(resolved.signin.browserSessionHours, 8);
+  assert.equal(resolved.signin.cliSessionDays, 30);
 
-test('cloudflare mode rejects a non-Access issuer or a derived JWKS mismatch', () => {
-  assert.throws(
-    () =>
-      loadAuthConfig({
-        ...cloudflare,
-        COFFRE_ACCESS_ISSUER: 'https://login.example.com',
-        COFFRE_ACCESS_JWKS_URL: 'https://login.example.com/cdn-cgi/access/certs',
-      }),
-    /Cloudflare Access team domain/,
-  );
-  assert.throws(
-    () =>
-      loadAuthConfig({
-        ...cloudflare,
-        COFFRE_ACCESS_JWKS_URL: 'https://other.cloudflareaccess.com/cdn-cgi/access/certs',
-      }),
-    /must be exactly/,
-  );
-});
-
-test('dev mode requires the local IdP to own both issuer and JWKS URL', () => {
-  assert.equal(loadAuthConfig(dev).mode, 'dev');
-  assert.throws(
-    () =>
-      loadAuthConfig({
-        ...dev,
-        COFFRE_ACCESS_ISSUER: 'http://127.0.0.1:9999',
-      }),
-    /must match COFFRE_DEV_IDP_URL/,
-  );
-  assert.throws(
-    () =>
-      loadAuthConfig({
-        ...dev,
-        COFFRE_ACCESS_JWKS_URL: 'http://127.0.0.1:8081/not-certs',
-      }),
-    /must be exactly/,
-  );
+  assert.throws(() => signin({ providers: [] }), /at least one provider/);
+  assert.throws(() => signin({ providers, cliSessionDays: 400 }), /cliSessionDays must be a number above 0 and at most 365/);
+  assert.throws(() => auth.resolve('http://secrets.acme.example'), /the public URL must use HTTPS/);
 });

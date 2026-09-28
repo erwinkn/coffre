@@ -5,7 +5,6 @@ import {
   defineSignin,
   github,
   google,
-  loadSigninConfig,
   microsoft,
   oidc,
   publicOrigin,
@@ -14,21 +13,13 @@ import {
 const TENANT = '6f1c2a3b-4d5e-4f60-8a9b-0c1d2e3f4a5b';
 const CREDENTIALS = { clientId: 'id', clientSecret: 'secret' };
 
-const base = {
-  COFFRE_PUBLIC_URL: 'https://secrets.acme.example',
-  COFFRE_SIGNIN_PROVIDERS: 'github',
-  COFFRE_SIGNIN_GITHUB_CLIENT_ID: 'Iv23li-github',
-  COFFRE_SIGNIN_GITHUB_CLIENT_SECRET: 'github-secret',
-} as const;
-
-test('the documented GitHub + Okta example loads', () => {
-  const config = loadSigninConfig({
-    ...base,
-    COFFRE_SIGNIN_PROVIDERS: 'github,okta',
-    COFFRE_SIGNIN_OKTA_TYPE: 'oidc',
-    COFFRE_SIGNIN_OKTA_ISSUER: 'https://acme.okta.com',
-    COFFRE_SIGNIN_OKTA_CLIENT_ID: 'okta-id',
-    COFFRE_SIGNIN_OKTA_CLIENT_SECRET: 'okta-secret',
+test('GitHub and Okta, as the docs write them', () => {
+  const config = defineSignin({
+    publicUrl: 'https://secrets.acme.example',
+    providers: [
+      github({ clientId: 'Iv23li-github', clientSecret: 'github-secret', organization: ' acme ' }),
+      oidc({ id: 'okta', label: 'Okta', issuer: 'https://acme.okta.com/', clientId: 'okta-id', clientSecret: 'okta-secret' }),
+    ],
   });
   assert.deepEqual(config, {
     publicUrl: 'https://secrets.acme.example',
@@ -42,12 +33,12 @@ test('the documented GitHub + Okta example loads', () => {
         clientSecret: 'github-secret',
         webUrl: 'https://github.com',
         apiUrl: 'https://api.github.com',
-        organization: null,
+        organization: 'acme',
       },
       {
         kind: 'oidc',
         id: 'okta',
-        label: 'okta',
+        label: 'Okta',
         brand: 'oidc',
         clientId: 'okta-id',
         clientSecret: 'okta-secret',
@@ -63,75 +54,21 @@ test('the documented GitHub + Okta example loads', () => {
   });
 });
 
-test('every optional variable is read, and values are trimmed', () => {
-  const config = loadSigninConfig({
-    COFFRE_PUBLIC_URL: ' https://secrets.acme.example/ ',
-    COFFRE_SIGNIN_PROVIDERS: ' corp-github  google\tentra ',
-    COFFRE_SIGNIN_CORP_GITHUB_TYPE: 'github',
-    COFFRE_SIGNIN_CORP_GITHUB_CLIENT_ID: 'gh-id',
-    COFFRE_SIGNIN_CORP_GITHUB_CLIENT_SECRET: 'gh-secret',
-    COFFRE_SIGNIN_CORP_GITHUB_LABEL: 'GitHub Enterprise',
-    COFFRE_SIGNIN_CORP_GITHUB_ORGANIZATION: ' acme ',
-    COFFRE_SIGNIN_CORP_GITHUB_WEB_URL: 'https://git.acme.example/',
-    COFFRE_SIGNIN_CORP_GITHUB_API_URL: 'https://git.acme.example/api/v3/',
-    COFFRE_SIGNIN_GOOGLE_CLIENT_ID: 'g-id',
-    COFFRE_SIGNIN_GOOGLE_CLIENT_SECRET: 'g-secret',
-    COFFRE_SIGNIN_GOOGLE_DOMAIN: 'Acme.EXAMPLE',
-    COFFRE_SIGNIN_ENTRA_TYPE: 'microsoft',
-    COFFRE_SIGNIN_ENTRA_CLIENT_ID: 'm-id',
-    COFFRE_SIGNIN_ENTRA_CLIENT_SECRET: 'm-secret',
-    COFFRE_SIGNIN_ENTRA_TENANT: TENANT.toUpperCase(),
-    COFFRE_SIGNIN_TITLE: 'Acme secrets',
-    COFFRE_SIGNIN_NOTE: 'Use your acme.example account.',
-    COFFRE_SESSION_HOURS: '8',
-    COFFRE_CLI_SESSION_DAYS: '7.5',
+test('GitHub Enterprise and a Google domain', () => {
+  const gh = github({
+    ...CREDENTIALS,
+    id: 'corp-github',
+    label: 'GitHub Enterprise',
+    webUrl: 'https://git.acme.example/',
+    apiUrl: 'https://git.acme.example/api/v3/',
   });
-
-  assert.equal(config.publicUrl, 'https://secrets.acme.example');
-  assert.deepEqual(config.page, { title: 'Acme secrets', note: 'Use your acme.example account.' });
-  assert.equal(config.browserSessionHours, 8);
-  assert.equal(config.cliSessionDays, 7.5);
-  assert.deepEqual(config.providers.map((p) => p.id), ['corp-github', 'google', 'entra']);
-
-  const [gh, goog, entra] = config.providers;
-  assert.equal(gh.kind, 'github');
-  if (gh.kind !== 'github') return;
-  assert.equal(gh.label, 'GitHub Enterprise');
-  assert.equal(gh.organization, 'acme');
   assert.equal(gh.webUrl, 'https://git.acme.example');
   assert.equal(gh.apiUrl, 'https://git.acme.example/api/v3');
-
-  assert.equal(goog.kind, 'oidc');
-  if (goog.kind !== 'oidc') return;
+  const goog = google({ ...CREDENTIALS, domain: 'Acme.EXAMPLE' });
   assert.equal(goog.brand, 'google');
   assert.equal(goog.issuer, 'https://accounts.google.com');
   assert.equal(goog.hostedDomain, 'acme.example');
   assert.deepEqual(goog.authorizationParams, { hd: 'acme.example', prompt: 'select_account' });
-
-  assert.equal(entra.kind, 'oidc');
-  if (entra.kind !== 'oidc') return;
-  assert.equal(entra.brand, 'microsoft');
-  assert.equal(entra.label, 'Microsoft');
-  assert.equal(entra.issuer, `https://login.microsoftonline.com/${TENANT}/v2.0`);
-});
-
-test('custom OIDC scopes split on commas and whitespace', () => {
-  const config = loadSigninConfig({
-    ...base,
-    COFFRE_SIGNIN_PROVIDERS: 'kc',
-    COFFRE_SIGNIN_KC_TYPE: 'oidc',
-    COFFRE_SIGNIN_KC_LABEL: 'Keycloak',
-    COFFRE_SIGNIN_KC_ISSUER: 'https://sso.acme.example/realms/staff/',
-    COFFRE_SIGNIN_KC_CLIENT_ID: 'kc-id',
-    COFFRE_SIGNIN_KC_CLIENT_SECRET: 'kc-secret',
-    COFFRE_SIGNIN_KC_SCOPES: 'openid, email profile,groups',
-  });
-  const [kc] = config.providers;
-  assert.equal(kc.kind, 'oidc');
-  if (kc.kind !== 'oidc') return;
-  assert.equal(kc.label, 'Keycloak');
-  assert.deepEqual(kc.scopes, ['openid', 'email', 'profile', 'groups']);
-  assert.equal(kc.issuer, 'https://sso.acme.example/realms/staff', 'one trailing slash dropped');
 });
 
 test('issuers keep their exact spelling apart from a trailing slash', () => {
@@ -142,34 +79,7 @@ test('issuers keep their exact spelling apart from a trailing slash', () => {
   );
 });
 
-test('the public URL, the providers list and each client id and secret are required', () => {
-  assert.throws(
-    () => loadSigninConfig({ ...base, COFFRE_PUBLIC_URL: undefined }),
-    /missing required environment variable: COFFRE_PUBLIC_URL/,
-  );
-  assert.throws(
-    () => loadSigninConfig({ ...base, COFFRE_SIGNIN_PROVIDERS: ' ' }),
-    /missing required environment variable: COFFRE_SIGNIN_PROVIDERS/,
-  );
-  assert.throws(
-    () => loadSigninConfig({ ...base, COFFRE_SIGNIN_PROVIDERS: ',' }),
-    /at least one provider/,
-  );
-  assert.throws(
-    () => loadSigninConfig({ ...base, COFFRE_SIGNIN_GITHUB_CLIENT_ID: '' }),
-    /missing required environment variable: COFFRE_SIGNIN_GITHUB_CLIENT_ID/,
-  );
-  assert.throws(
-    () => loadSigninConfig({ ...base, COFFRE_SIGNIN_GITHUB_CLIENT_SECRET: undefined }),
-    /missing required environment variable: COFFRE_SIGNIN_GITHUB_CLIENT_SECRET/,
-  );
-});
-
 test('a provider named twice is refused', () => {
-  assert.throws(
-    () => loadSigninConfig({ ...base, COFFRE_SIGNIN_PROVIDERS: 'github github' }),
-    /names a provider twice/,
-  );
   assert.throws(
     () =>
       defineSignin({
@@ -185,57 +95,6 @@ test('provider ids are short lowercase slugs', () => {
     assert.throws(() => github({ ...CREDENTIALS, id }), /1-32 lowercase letters, digits or dashes/, id);
   }
   assert.equal(github({ ...CREDENTIALS, id: 'a'.repeat(32) }).id, 'a'.repeat(32));
-  assert.throws(
-    () => loadSigninConfig({ ...base, COFFRE_SIGNIN_PROVIDERS: 'GitHub' }),
-    /"GitHub" must be 1-32/,
-  );
-});
-
-test('a provider that is not a preset name needs a TYPE, and TYPE must be known', () => {
-  assert.throws(
-    () =>
-      loadSigninConfig({
-        ...base,
-        COFFRE_SIGNIN_PROVIDERS: 'okta',
-        COFFRE_SIGNIN_OKTA_CLIENT_ID: 'id',
-        COFFRE_SIGNIN_OKTA_CLIENT_SECRET: 'secret',
-      }),
-    /COFFRE_SIGNIN_OKTA_TYPE is required: one of github, google, microsoft or oidc/,
-  );
-  assert.throws(
-    () => loadSigninConfig({ ...base, COFFRE_SIGNIN_GITHUB_TYPE: 'saml' }),
-    /COFFRE_SIGNIN_GITHUB_TYPE must be one of github, google, microsoft or oidc/,
-  );
-  // A preset name can still be given another type.
-  const config = loadSigninConfig({
-    ...base,
-    COFFRE_SIGNIN_GITHUB_TYPE: 'oidc',
-    COFFRE_SIGNIN_GITHUB_ISSUER: 'https://token.actions.githubusercontent.com',
-  });
-  assert.equal(config.providers[0].kind, 'oidc');
-});
-
-test('a bare `oidc` provider still needs its issuer, and Microsoft its tenant', () => {
-  assert.throws(
-    () =>
-      loadSigninConfig({
-        ...base,
-        COFFRE_SIGNIN_PROVIDERS: 'oidc',
-        COFFRE_SIGNIN_OIDC_CLIENT_ID: 'id',
-        COFFRE_SIGNIN_OIDC_CLIENT_SECRET: 'secret',
-      }),
-    /missing required environment variable: COFFRE_SIGNIN_OIDC_ISSUER/,
-  );
-  assert.throws(
-    () =>
-      loadSigninConfig({
-        ...base,
-        COFFRE_SIGNIN_PROVIDERS: 'microsoft',
-        COFFRE_SIGNIN_MICROSOFT_CLIENT_ID: 'id',
-        COFFRE_SIGNIN_MICROSOFT_CLIENT_SECRET: 'secret',
-      }),
-    /missing required environment variable: COFFRE_SIGNIN_MICROSOFT_TENANT/,
-  );
 });
 
 test('the Microsoft tenant must be a GUID, not a domain or a multi-tenant alias', () => {
@@ -295,19 +154,15 @@ test('provider URLs carry no credentials, query or fragment', () => {
   }
 });
 
-test('COFFRE_PUBLIC_URL must be an HTTPS origin, or loopback HTTP', () => {
+test('the public URL must be an HTTPS origin, or loopback HTTP', () => {
   assert.equal(publicOrigin('https://secrets.acme.example'), 'https://secrets.acme.example');
   assert.equal(publicOrigin('https://secrets.acme.example:8443/'), 'https://secrets.acme.example:8443');
   assert.equal(publicOrigin('http://127.0.0.1:3000'), 'http://127.0.0.1:3000');
   assert.equal(publicOrigin('HTTPS://Secrets.Acme.EXAMPLE'), 'https://secrets.acme.example');
   assert.throws(() => publicOrigin('https://acme.example/secrets'), /must be an origin, with no path/);
-  assert.throws(() => publicOrigin('http://secrets.acme.example'), /COFFRE_PUBLIC_URL must use HTTPS/);
+  assert.throws(() => publicOrigin('http://secrets.acme.example'), /the public URL must use HTTPS/);
   assert.throws(() => publicOrigin('https://secrets.acme.example/?a=1'), /must not carry/);
-  assert.throws(() => publicOrigin('secrets.acme.example'), /COFFRE_PUBLIC_URL must be an absolute URL/);
-  assert.throws(
-    () => loadSigninConfig({ ...base, COFFRE_PUBLIC_URL: 'https://acme.example/coffre' }),
-    /must be an origin/,
-  );
+  assert.throws(() => publicOrigin('secrets.acme.example'), /the public URL must be an absolute URL/);
   assert.throws(
     () => defineSignin({ publicUrl: 'https://acme.example/coffre', providers: [github(CREDENTIALS)] }),
     /must be an origin/,
@@ -315,19 +170,19 @@ test('COFFRE_PUBLIC_URL must be an HTTPS origin, or loopback HTTP', () => {
 });
 
 test('session lifetimes are positive and bounded', () => {
-  for (const value of ['0', '-1', 'NaN', 'Infinity', 'twelve', '169']) {
+  const define = (lifetimes: { browserSessionHours?: number; cliSessionDays?: number }) =>
+    defineSignin({ publicUrl: 'https://secrets.acme.example', providers: [github(CREDENTIALS)], ...lifetimes });
+  for (const value of [0, -1, NaN, Infinity, 169]) {
     assert.throws(
-      () => loadSigninConfig({ ...base, COFFRE_SESSION_HOURS: value }),
-      /COFFRE_SESSION_HOURS must be a number between 0 and 168/,
-      value,
+      () => define({ browserSessionHours: value }),
+      /browserSessionHours must be a number above 0 and at most 168/,
+      String(value),
     );
   }
-  assert.equal(loadSigninConfig({ ...base, COFFRE_SESSION_HOURS: '168' }).browserSessionHours, 168);
-  assert.throws(
-    () => loadSigninConfig({ ...base, COFFRE_CLI_SESSION_DAYS: '366' }),
-    /COFFRE_CLI_SESSION_DAYS must be a number between 0 and 365/,
-  );
-  assert.equal(loadSigninConfig({ ...base, COFFRE_CLI_SESSION_DAYS: '365' }).cliSessionDays, 365);
+  assert.equal(define({ browserSessionHours: 168 }).browserSessionHours, 168);
+  assert.equal(define({ cliSessionDays: 7.5 }).cliSessionDays, 7.5);
+  assert.throws(() => define({ cliSessionDays: 366 }), /cliSessionDays must be a number above 0 and at most 365/);
+  assert.equal(define({ cliSessionDays: 365 }).cliSessionDays, 365);
 });
 
 test('defineSignin needs a provider, and each needs a client id and secret', () => {

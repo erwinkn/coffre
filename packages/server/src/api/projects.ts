@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
 
-import type { Permission } from '../../../../../packages/core/src/access.ts';
-import { isUniqueViolation } from '../../../../../packages/db/src/dialect.ts';
-import { insert, places, update, type ResolvedPath } from '../../../../../packages/db/src/queries.ts';
-import { environments, projects } from '../../../../../packages/db/src/schema.ts';
+import type { Permission } from '../../../core/src/access.ts';
+import { isUniqueViolation } from '../../../db/src/dialect.ts';
+import { insert, places, update, type ResolvedPath } from '../../../db/src/queries.ts';
+import { environments, projects } from '../../../db/src/schema.ts';
 import { can, canAnywhere, permissionsAt, seesProject } from './caller.ts';
 import { allowed, audited, denied, Refusal, requireOwner, type ApiContext } from './context.ts';
 import { conflict, notFound } from './errors.ts';

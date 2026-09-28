@@ -1,6 +1,6 @@
 import { badRequest } from './errors.ts';
 
-export type { ResolvedPath } from '../../../../../packages/db/src/queries.ts';
+export type { ResolvedPath } from '../../../db/src/queries.ts';
 
 /** `market`, `market/prod` or `market/prod/DATABASE_URL`. */
 export type Path = { project: string; environment?: string; key?: string };

@@ -1,16 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import type { AuthConfig } from '../../../packages/core/src/identity/auth-mode.ts';
-import type { Principal } from '../../../packages/core/src/identity/types.ts';
-import type { Access } from '../../../packages/vault/src/types.ts';
-import { accessTokenForRequest, authenticateRequest } from '../src/server/auth.ts';
-import {
-  allowsAnonymousTransport,
-  isApiPath,
-  isPublicHealthPath,
-} from '../src/server/request-identity.ts';
-import { shouldValidateCsrf, startInstance } from '../src/start.ts';
+import type { AuthConfig } from '../../core/src/identity/auth-mode.ts';
+import type { Principal } from '../../core/src/identity/types.ts';
+import type { Access } from '../../vault/src/types.ts';
+import { handleRequest } from '../src/app.ts';
+import { accessTokenForRequest, authenticateRequest, cloudflareSourceIp } from '../src/auth.ts';
 
 const cloudflare: AuthConfig = {
   mode: 'cloudflare',
@@ -51,96 +46,109 @@ const root: Principal = {
   subject: 'root-subject',
 };
 
-test('only the two health endpoints are public in production', () => {
-  assert.equal(isPublicHealthPath('/livez'), true);
-  assert.equal(isPublicHealthPath('/readyz'), true);
-  assert.equal(isPublicHealthPath('/livez/'), false);
-  assert.equal(isPublicHealthPath('/api/me'), false);
+/** The app with nothing behind it: health and routing need no database. */
+function appRuntime(auth: AuthConfig) {
+  return {
+    auth,
+    publicUrl: 'https://coffre.test',
+    signin: null,
+    verifier: { verify: async () => root },
+    vault: vaultKnowing({}),
+    db: null,
+  } as never;
+}
+
+/** A stand-in for `@coffre/ui` that remembers what it was handed. */
+function fakeUi() {
+  const seen: { nonce: string; path: string }[] = [];
+  return {
+    seen,
+    fetch: async (request: Request, init: { context: { cspNonce: string } }) => {
+      seen.push({ nonce: init.context.cspNonce, path: new URL(request.url).pathname });
+      return new Response('<html></html>', { headers: { 'content-type': 'text/html' } });
+    },
+  };
+}
+
+test('health is public, and every response carries the security headers', async () => {
+  const response = await handleRequest(new Request('https://coffre.test/livez'), appRuntime(cloudflare), fakeUi(), null);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { ok: true });
+  assert.equal(response.headers.get('x-frame-options'), 'DENY');
+  assert.match(response.headers.get('strict-transport-security') ?? '', /max-age=/);
+  // Access's logout form posts to Access itself.
+  assert.match(response.headers.get('content-security-policy') ?? '', /form-action 'self' https:\/\/acme\.cloudflareaccess\.com/);
 });
 
-test('the API boundary matches only the native API namespace', () => {
-  assert.equal(isApiPath('/api'), true);
-  assert.equal(isApiPath('/api/me'), true);
-  assert.equal(isApiPath('/apiary'), false);
-  assert.equal(isApiPath('/v1/me'), false);
+test('pages get the response nonce; everything else stays away from the UI', async () => {
+  const ui = fakeUi();
+  const runtime = appRuntime(dev);
+  const page = await handleRequest(new Request('https://coffre.test/projects'), runtime, ui, null);
+  assert.equal(page.status, 200);
+  assert.equal(ui.seen.length, 1);
+  assert.equal(ui.seen[0].path, '/projects');
+  assert.ok(page.headers.get('content-security-policy')?.includes(`'nonce-${ui.seen[0].nonce}'`));
+
+  const api = await handleRequest(new Request('https://coffre.test/api/me'), runtime, ui, null);
+  assert.equal(api.status, 401);
+  const apiary = await handleRequest(new Request('https://coffre.test/apiary'), runtime, ui, null);
+  assert.equal(apiary.status, 200, '/apiary is a page, not the API');
+  const post = await handleRequest(new Request('https://coffre.test/projects', { method: 'POST' }), runtime, ui, null);
+  assert.equal(post.status, 405);
+  assert.equal(ui.seen.length, 2);
 });
 
-test('anonymous page and sign-in transport reaches its route-specific boundary', () => {
-  assert.equal(
-    allowsAnonymousTransport(
-      new Request('https://coffre.test/login'),
-      'router',
-      '/login',
-    ),
-    true,
+test('the Next.js middleware header is refused outright', async () => {
+  const response = await handleRequest(
+    new Request('https://coffre.test/livez', { headers: { 'x-middleware-subrequest': 'middleware' } }),
+    appRuntime(dev),
+    fakeUi(),
+    null,
   );
-  assert.equal(
-    allowsAnonymousTransport(
-      new Request('https://coffre.test/auth/signout', { method: 'POST' }),
-      'router',
-      '/auth/signout',
-    ),
-    true,
-  );
-  assert.equal(
-    allowsAnonymousTransport(
-      new Request('https://coffre.test/login', { method: 'POST' }),
-      'router',
-      '/login',
-    ),
-    false,
-  );
-  assert.equal(
-    allowsAnonymousTransport(
-      new Request('https://coffre.test/_serverFn/session', { method: 'POST' }),
-      'serverFn',
-      '/_serverFn/session',
-    ),
-    false,
-  );
+  assert.equal(response.status, 400);
 });
 
-test('the Start instance keeps explicit CSRF and request identity layers', async () => {
-  const options = await startInstance.getOptions();
-  assert.equal(options.requestMiddleware?.length, 2);
-  assert.equal(options.functionMiddleware?.length ?? 0, 0);
+test('sign-in routes take one method, and browser posts only from coffre itself', async () => {
+  const runtime = appRuntime(dev);
+  const signout = (headers: Record<string, string>, method = 'POST') =>
+    handleRequest(new Request('https://coffre.test/auth/signout', { method, headers }), runtime, fakeUi(), null);
+
+  assert.equal((await signout({}, 'GET')).status, 405);
+  const refusals: Record<string, string>[] = [{ 'sec-fetch-site': 'cross-site' }, { origin: 'https://evil.test' }, {}];
+  for (const headers of refusals) {
+    const refused = await signout(headers);
+    assert.equal(refused.status, 403, JSON.stringify(headers));
+    assert.equal(((await refused.json()) as { error: string }).error, 'cross_origin');
+  }
+  const signedOut = await signout({ 'sec-fetch-site': 'same-origin' });
+  assert.equal(signedOut.status, 303);
+  assert.equal(signedOut.headers.get('location'), '/login');
+  assert.match(signedOut.headers.get('set-cookie') ?? '', /coffre_dev_token=;/);
+
+  const dev_ = await handleRequest(
+    new Request('https://coffre.test/auth/dev', { method: 'POST', headers: { origin: 'https://evil.test' } }),
+    runtime,
+    fakeUi(),
+    null,
+  );
+  assert.equal(dev_.status, 403);
+  // Signin mode's own routes are not there in dev mode.
+  const device = await handleRequest(
+    new Request('https://coffre.test/api/auth/device', { method: 'POST' }),
+    runtime,
+    fakeUi(),
+    null,
+  );
+  assert.equal(device.status, 404);
 });
 
-test('Start checks the origin of page posts, and leaves /api to check its own', () => {
+test('on Workers the address is Cloudflare\'s header, and nobody\'s in dev mode', () => {
+  const request = new Request('https://coffre.test/api/me', { headers: { 'cf-connecting-ip': '203.0.113.10' } });
+  assert.equal(cloudflareSourceIp(request, cloudflare), '203.0.113.10');
+  assert.equal(cloudflareSourceIp(request, dev), null);
   assert.equal(
-    shouldValidateCsrf('router', new Request('https://coffre.test/api/projects')),
-    false,
-  );
-  // /api knows whether a cookie or a token signed the change; see fetch-api.test.ts.
-  assert.equal(
-    shouldValidateCsrf(
-      'router',
-      new Request('https://coffre.test/api/projects/market/archive', {
-        method: 'POST',
-        headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      }),
-    ),
-    false,
-  );
-  assert.equal(
-    shouldValidateCsrf(
-      'router',
-      new Request('https://coffre.test/auth/signout', {
-        method: 'POST',
-        headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      }),
-    ),
-    true,
-  );
-  assert.equal(
-    shouldValidateCsrf(
-      'router',
-      new Request('https://coffre.test/auth/dev', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-      }),
-    ),
-    true,
+    cloudflareSourceIp(new Request('https://coffre.test', { headers: { 'cf-connecting-ip': 'not an address' } }), cloudflare),
+    null,
   );
 });
 
@@ -173,6 +181,8 @@ test('a root admin is whoever the vault says, in one call', async () => {
       ),
     } as never,
     'request-id',
+    undefined,
+    '203.0.113.10',
   );
 
   assert.equal(result instanceof Response, false);

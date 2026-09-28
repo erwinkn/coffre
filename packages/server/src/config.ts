@@ -1,53 +1,64 @@
-import { loadAuthConfig, type AuthConfig } from '../../../../packages/core/src/identity/auth-mode.ts';
-
-type Environment = Readonly<Record<string, string | undefined>>;
-
-function required(env: Environment, name: string): string {
-  const value = env[name];
-  if (value === undefined || value === '') {
-    throw new Error(`missing required environment variable: ${name}`);
-  }
-  return value;
-}
-
-function requiredKey(env: Environment, name: string): Buffer {
-  const raw = Buffer.from(required(env, name), 'base64');
-  if (raw.length !== 32) {
-    throw new Error(`${name} must decode to exactly 32 bytes, got ${raw.length}`);
-  }
-  return raw;
-}
-
-export type Config = {
-  databaseUrl: string;
-  auth: AuthConfig;
-  auditChainKey: Buffer;
-};
-
-/** What the vault Worker holds now; the app refuses to start with any of it. */
-const VAULT_ONLY = ['COFFRE_KEK_LOCAL', 'COFFRE_KEK_ID', 'COFFRE_KEK_LOCAL_PREVIOUS', 'COFFRE_ROOT_ADMINS', 'COFFRE_VAULT_SIGNING_KEY'];
+import type { Auth, AuthConfig } from '../../core/src/identity/auth-mode.ts';
+import { publicOrigin } from '../../core/src/identity/signin/config.ts';
+import type { Vault } from '../../vault/src/types.ts';
+import type { SyncTiming } from './api/syncs.ts';
 
 /**
- * Load and validate web-runtime configuration.
- *
- * This function is intentionally side-effect free. The Worker entrypoint calls
- * it inside each invocation, never while Vite is discovering or building routes.
+ * What every deployment writes, on either runtime. The runtime adds where
+ * the database is: `postgres(env.HYPERDRIVE)` on Workers, a URL on Node.
  */
-export function loadConfig(env: Environment = process.env): Config {
-  if (env.COFFRE_OWNER_DATABASE_URL !== undefined) {
-    throw new Error(
-      'COFFRE_OWNER_DATABASE_URL is obsolete; migration and web processes each use DATABASE_URL',
-    );
-  }
+export type CoffreConfig = {
+  /** The origin people reach coffre at, e.g. `https://secrets.acme.example`. */
+  publicUrl: string;
+  /** Keys, grants and members: the vault Worker's binding, or a Node vault. */
+  vault: Vault;
+  /** `signin(…)`, `cloudflareAccess(…)`, or `devIdp(…)` locally. */
+  auth: Auth;
+  /**
+   * 32 random bytes, base64: the key of the audit log's hash chain. It lives
+   * outside the database, so whoever can write the database cannot rewrite
+   * the log and fix up the chain.
+   */
+  auditChainKey: string;
+  syncs?: SyncSettings;
+};
 
-  const misplaced = VAULT_ONLY.filter((name) => env[name] !== undefined);
-  if (misplaced.length > 0) {
-    throw new Error(`${misplaced.join(', ')} belong to the vault Worker; the app holds no key`);
-  }
+/** When the scheduler runs syncs by itself. A change is pushed at once either way. */
+export type SyncSettings = {
+  /** How often an idle, healthy destination is checked for keys that went missing there. 60 unless set. */
+  driftCheckMinutes?: number;
+  /** How long a sync whose last run failed waits before the next try. 15 unless set. */
+  retryAfterMinutes?: number;
+};
 
+export type ResolvedConfig = {
+  publicUrl: string;
+  auth: AuthConfig;
+  auditChainKey: Buffer;
+  syncs: SyncTiming;
+};
+
+function minutes(value: number | undefined, name: string, fallback: number): number {
+  if (value === undefined) return fallback * 60_000;
+  if (!Number.isFinite(value) || value < 1) throw new Error(`syncs.${name} must be at least 1`);
+  return value * 60_000;
+}
+
+/** Check a deployment's configuration, failing on the first problem. */
+export function resolveConfig(config: CoffreConfig): ResolvedConfig {
+  const publicUrl = publicOrigin(config.publicUrl);
+  const auditChainKey = Buffer.from(config.auditChainKey ?? '', 'base64');
+  if (auditChainKey.length !== 32) {
+    throw new Error(`auditChainKey must be 32 bytes, base64; got ${auditChainKey.length} bytes`);
+  }
+  if (config.vault === undefined || config.vault === null) throw new Error('vault is required');
   return {
-    databaseUrl: required(env, 'DATABASE_URL'),
-    auth: loadAuthConfig(env),
-    auditChainKey: requiredKey(env, 'COFFRE_AUDIT_CHAIN_KEY'),
+    publicUrl,
+    auth: config.auth.resolve(publicUrl),
+    auditChainKey,
+    syncs: {
+      driftCheckMs: minutes(config.syncs?.driftCheckMinutes, 'driftCheckMinutes', 60),
+      retryAfterMs: minutes(config.syncs?.retryAfterMinutes, 'retryAfterMinutes', 15),
+    },
   };
 }

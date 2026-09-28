@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 
 import { and, asc, eq } from 'drizzle-orm';
 
-import type { CoffreClient } from '../../../packages/client/src/index.ts';
-import { assignableToEnvironment, ROLES } from '../../../packages/core/src/access.ts';
-import { auditLog, principals } from '../../../packages/db/test/tables.ts';
+import type { CoffreClient } from '../../client/src/index.ts';
+import { assignableToEnvironment, ROLES } from '../../core/src/access.ts';
+import { auditLog, principals } from '../../db/test/tables.ts';
 import {
   clientFor,
   openTestDatabase,

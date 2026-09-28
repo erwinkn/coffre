@@ -4,9 +4,9 @@ import { randomUUID } from 'node:crypto';
 
 import { and, eq, isNull } from 'drizzle-orm';
 
-import { defineSignin, github } from '../../../packages/core/src/identity/signin/config.ts';
-import { auditLog, credentials, secrets, syncs } from '../../../packages/db/test/tables.ts';
-import { SigninService } from '../src/server/api/signin.ts';
+import { defineSignin, github } from '../../core/src/identity/signin/config.ts';
+import { auditLog, credentials, secrets, syncs } from '../../db/test/tables.ts';
+import { SigninService } from '../src/api/signin.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 const ROOT = 'admin@acme.example';

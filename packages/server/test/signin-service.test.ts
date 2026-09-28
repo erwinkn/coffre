@@ -9,24 +9,24 @@ import {
   defineSignin,
   github,
   google,
-} from '../../../packages/core/src/identity/signin/config.ts';
-import type { SigninProfile } from '../../../packages/core/src/identity/signin/types.ts';
-import { hashToken, isCoffreToken } from '../../../packages/core/src/identity/tokens.ts';
-import type { Database } from '../../../packages/db/src/database.ts';
+} from '../../core/src/identity/signin/config.ts';
+import type { SigninProfile } from '../../core/src/identity/signin/types.ts';
+import { hashToken, isCoffreToken } from '../../core/src/identity/tokens.ts';
+import type { Database } from '../../db/src/database.ts';
 import {
   auditLog,
   credentials,
   deviceAuthorizations,
   identities,
   principals,
-} from '../../../packages/db/test/tables.ts';
-import { verifyAudit } from '../src/server/api/audit.ts';
+} from '../../db/test/tables.ts';
+import { verifyAudit } from '../src/api/audit.ts';
 import {
   normalizeUserCode,
   SigninService,
   type Asker,
   type PendingState,
-} from '../src/server/api/signin.ts';
+} from '../src/api/signin.ts';
 import {
   clientFor,
   contextFor,

@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 
 import { and, asc, count, eq } from 'drizzle-orm';
 
-import { planImport, type CoffreClient } from '../../../packages/client/src/index.ts';
-import { parseDotenv } from '../../../packages/core/src/dotenv.ts';
-import { auditLog, secrets, secretVersions } from '../../../packages/db/test/tables.ts';
-import { serveApi } from '../src/server/api/router.ts';
+import { planImport, type CoffreClient } from '../../client/src/index.ts';
+import { parseDotenv } from '../../core/src/dotenv.ts';
+import { auditLog, secrets, secretVersions } from '../../db/test/tables.ts';
+import { serveApi } from '../src/api/router.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 const ROOT = 'admin@acme.example';

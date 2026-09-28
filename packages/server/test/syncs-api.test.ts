@@ -3,15 +3,15 @@ import assert from 'node:assert/strict';
 
 import { asc, eq } from 'drizzle-orm';
 
-import { auditLog, secrets, syncs } from '../../../packages/db/test/tables.ts';
+import { auditLog, secrets, syncs } from '../../db/test/tables.ts';
 import {
   SyncConfigError,
   SyncProviderError,
   type SyncPlan,
   type SyncProvider,
   type SyncProviderKind,
-} from '../../../packages/sync/src/index.ts';
-import { planSync, SyncRunner } from '../src/server/api/syncs.ts';
+} from '../../sync/src/index.ts';
+import { planSync, SyncRunner } from '../src/api/syncs.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 const ROOT = 'admin@acme.example';

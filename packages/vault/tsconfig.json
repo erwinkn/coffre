@@ -1,5 +1,6 @@
 {
-  "extends": "../../apps/web/tsconfig.json",
-  "compilerOptions": { "types": ["node"], "paths": {} },
-  "include": ["src/**/*.ts", "test/**/*.ts"]
+  "extends": "../../tsconfig.base.json",
+  "include": ["src/**/*.ts", "test/**/*.ts"],
+  // The Worker entry has Workers' globals, not Node's; tsconfig.cloudflare.json.
+  "exclude": ["src/cloudflare.ts"]
 }

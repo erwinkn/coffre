@@ -73,7 +73,7 @@ test('the closed-door persona is in the directory with no grant', () => {
     ),
   );
   assert.equal(
-    LOCAL_SEED_GRANTS.some((grant) => grant.principalId === 'outsider@acme.example'),
+    LOCAL_SEED_GRANTS.some((grant) => (grant.principalId as string) === 'outsider@acme.example'),
     false,
   );
 });

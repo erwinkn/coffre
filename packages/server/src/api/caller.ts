@@ -5,8 +5,8 @@ import {
   type Permission,
   type Place,
   type Role,
-} from '../../../../../packages/core/src/access.ts';
-import type { Access, Vault } from '../../../../../packages/vault/src/types.ts';
+} from '../../../core/src/access.ts';
+import type { Access, Vault } from '../../../vault/src/types.ts';
 import { formatMember } from './paths.ts';
 
 export type { Place };

@@ -1,5 +1,5 @@
-import { decrypt, encrypt, freshDek, type Envelope } from '../../../../../packages/core/src/envelope.ts';
-import type { Purpose, Refusal, SecretRef, Vault, WrappedKey } from '../../../../../packages/vault/src/types.ts';
+import { decrypt, encrypt, freshDek, type Envelope } from '../../../core/src/envelope.ts';
+import type { Purpose, Refusal, SecretRef, Vault, WrappedKey } from '../../../vault/src/types.ts';
 
 /**
  * The app's half of envelope encryption. It encrypts and decrypts values

@@ -8,7 +8,7 @@ import { Monitor, ProviderMark, SignOut, Terminal, X } from '../components/icons
 import { signinErrorMessage } from '../lib/signin-errors';
 import { uiResult, useCoffre } from '../lib/coffre';
 import { useAction } from '../lib/use-action';
-import type { IdentityRow, SessionRow } from '../server/api/signin';
+import type { IdentityRow, SessionRow } from '../../../server/src/api/signin';
 
 type Search = { linked?: string; error?: string };
 

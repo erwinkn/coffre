@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
-import { ROLE_NAMES, type Permission } from '../../../../../packages/core/src/access.ts';
-import { displayName, secretKey, slug } from '../../shared/schemas.ts';
+import { ROLE_NAMES, type Permission } from '../../../core/src/access.ts';
+import { displayName, secretKey, slug } from '../../../core/src/schemas.ts';
 import { setAccess } from './access.ts';
 import { listAudit, vaultLog, verifyAudit } from './audit.ts';
 import type { ApiContext } from './context.ts';

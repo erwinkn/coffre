@@ -6,7 +6,7 @@
   "scripts": {
     "check": "for engine in postgres mysql sqlite; do drizzle-kit check --config drizzle.$engine.config.ts || exit 1; done",
     "generate": "node src/baseline.ts",
-    "migrate": "node src/migrate.ts",
+    "migrate": "node src/migrate-main.ts",
     "verify:runtime": "node src/verify-runtime.ts",
     "test": "node --test"
   },

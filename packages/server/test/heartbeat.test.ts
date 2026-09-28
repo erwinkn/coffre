@@ -3,15 +3,15 @@ import assert from 'node:assert/strict';
 
 import { eq } from 'drizzle-orm';
 
-import { createDatabase } from '../../../packages/db/src/database.ts';
-import { heartbeat } from '../../../packages/db/src/queries.ts';
-import { auditChainHead, auditHeartbeat, auditLog } from '../../../packages/db/test/tables.ts';
+import { createDatabase } from '../../db/src/database.ts';
+import { heartbeat } from '../../db/src/queries.ts';
+import { auditChainHead, auditHeartbeat, auditLog } from '../../db/test/tables.ts';
 import {
   auditReadiness,
   checkpointAudit,
   HEARTBEAT_STALE_AFTER_SECONDS,
   writeAuditHeartbeat,
-} from '../src/server/heartbeat.ts';
+} from '../src/heartbeat.ts';
 import { openTestDatabase, resetDatabase, testVault } from './api-fixture.ts';
 
 const db = await openTestDatabase();

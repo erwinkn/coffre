@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
 
-import type { Permission } from '../../../../../packages/core/src/access.ts';
-import type { Envelope } from '../../../../../packages/core/src/envelope.ts';
-import type { Queryable, Transaction } from '../../../../../packages/db/src/database.ts';
-import { isUniqueViolation } from '../../../../../packages/db/src/dialect.ts';
+import type { Permission } from '../../../core/src/access.ts';
+import type { Envelope } from '../../../core/src/envelope.ts';
+import type { Queryable, Transaction } from '../../../db/src/database.ts';
+import { isUniqueViolation } from '../../../db/src/dialect.ts';
 import {
   environmentSecrets,
   insert,
@@ -13,9 +13,9 @@ import {
   secretHistory,
   update,
   type ResolvedPath,
-} from '../../../../../packages/db/src/queries.ts';
-import { secrets, secretVersions } from '../../../../../packages/db/src/schema.ts';
-import type { SecretRef } from '../../../../../packages/vault/src/types.ts';
+} from '../../../db/src/queries.ts';
+import { secrets, secretVersions } from '../../../db/src/schema.ts';
+import type { SecretRef } from '../../../vault/src/types.ts';
 import { permissionsAt } from './caller.ts';
 import { allowed, asking, audited, denied, need, Refusal, vaultRefusal, type ApiContext } from './context.ts';
 import { conflict, notFound } from './errors.ts';

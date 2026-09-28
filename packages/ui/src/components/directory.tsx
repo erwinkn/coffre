@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { DropdownMenu } from 'radix-ui';
 import { toast } from 'sonner';
-import type { CoffreClient } from '../../../../packages/client/src/index.ts';
+import type { CoffreClient } from '../../../client/src/index.ts';
 import { memberRef, Refusal, uiResult, useCoffre } from '../lib/coffre';
 import { useAction } from '../lib/use-action';
 import type { DirectoryPrincipal } from '../shared/models';

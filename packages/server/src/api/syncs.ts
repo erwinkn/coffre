@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
 
-import { mayManageAccess, type Permission } from '../../../../../packages/core/src/access.ts';
-import type { AuditEntry } from '../../../../../packages/db/src/audit.ts';
-import type { Database, Queryable, Transaction } from '../../../../../packages/db/src/database.ts';
+import { mayManageAccess, type Permission } from '../../../core/src/access.ts';
+import type { AuditEntry } from '../../../db/src/audit.ts';
+import type { Database, Queryable, Transaction } from '../../../db/src/database.ts';
 import {
   findSyncs,
   insert,
@@ -11,16 +11,16 @@ import {
   update,
   upsert,
   type SyncRow,
-} from '../../../../../packages/db/src/queries.ts';
-import { syncKeys, syncs } from '../../../../../packages/db/src/schema.ts';
+} from '../../../db/src/queries.ts';
+import { syncKeys, syncs } from '../../../db/src/schema.ts';
 import {
   getProvider,
   SyncConfigError,
   SyncProviderError,
   type SyncApplyResult,
   type SyncProvider,
-} from '../../../../../packages/sync/src/index.ts';
-import type { GrantChange, Vault } from '../../../../../packages/vault/src/types.ts';
+} from '../../../sync/src/index.ts';
+import type { GrantChange, Vault } from '../../../vault/src/types.ts';
 import { can } from './caller.ts';
 import { allowed, audited, denied, missing, Refusal, vaultRefusal, type ApiContext } from './context.ts';
 import { badRequest, conflict, forbidden, notFound } from './errors.ts';
@@ -114,6 +114,16 @@ export type SyncDeps = {
   resolveProvider?: (kind: string) => SyncProvider<unknown> | null;
   /** Injected by tests; defaults to the global fetch. */
   fetch?: typeof fetch;
+  /** The deployment's `syncs` settings; the defaults below unless set. */
+  timing?: SyncTiming;
+};
+
+/** When the scheduler runs a sync by itself. */
+export type SyncTiming = {
+  /** How often it checks an idle, healthy destination for missing keys. */
+  driftCheckMs: number;
+  /** How long it waits before retrying a sync whose last run failed. */
+  retryAfterMs: number;
 };
 
 const MINUTE = 60_000;
@@ -121,10 +131,7 @@ const MINUTE = 60_000;
 const LEASE_MS = 5 * MINUTE;
 /** The whole run's budget, inside the lease. */
 const RUN_TIMEOUT_MS = 4 * MINUTE;
-/** How often the scheduler checks an idle, healthy destination for missing keys. */
-const DRIFT_CHECK_MS = 60 * MINUTE;
-/** How long the scheduler waits before retrying a sync whose last run failed. */
-const RETRY_AFTER_MS = 15 * MINUTE;
+const DEFAULT_TIMING: SyncTiming = { driftCheckMs: 60 * MINUTE, retryAfterMs: 15 * MINUTE };
 /** A run that keeps finding new changes when it finishes stops after this many passes. */
 const MAX_PASSES = 3;
 const MAX_ERROR_LENGTH = 1000;
@@ -253,6 +260,7 @@ export class SyncRunner {
    */
   async reconcile(): Promise<{ ran: number }> {
     const now = Date.now();
+    const { driftCheckMs, retryAfterMs } = this.#deps.timing ?? DEFAULT_TIMING;
     const rows = (await findSyncs(this.#deps.db, {})).filter(
       (row) => serves(row) && row.pausedAt === null && (row.leaseUntil === null || row.leaseUntil.getTime() < now),
     );
@@ -260,11 +268,11 @@ export class SyncRunner {
     const toRun = rows
       .filter((row, index) => {
         const lastRun = row.lastRunAt?.getTime() ?? null;
-        const due = lastRun === null || lastRun < now - DRIFT_CHECK_MS;
+        const due = lastRun === null || lastRun < now - driftCheckMs;
         const backingOff =
           (row.lastStatus === 'failed' || row.lastStatus === 'partial') &&
           lastRun !== null &&
-          lastRun > now - RETRY_AFTER_MS;
+          lastRun > now - retryAfterMs;
         return !backingOff && (due || views[index].pending > 0);
       })
       .map((row) => row.id);

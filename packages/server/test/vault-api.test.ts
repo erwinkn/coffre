@@ -5,20 +5,20 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { and, asc, eq, is, Table } from 'drizzle-orm';
 
-import { createClient, type CoffreClient } from '../../../packages/client/src/index.ts';
-import { chainHash } from '../../../packages/core/src/audit/chain.ts';
-import type { AuthConfig } from '../../../packages/core/src/identity/auth-mode.ts';
-import type { Principal } from '../../../packages/core/src/identity/types.ts';
-import { tablesOf } from '../../../packages/db/src/database.ts';
-import { auditRange } from '../../../packages/db/src/queries.ts';
-import { auditChainHead, auditLog } from '../../../packages/db/test/tables.ts';
-import type { LogEntry } from '../../../packages/vault/src/types.ts';
-import { serveApi } from '../src/server/api/router.ts';
-import { SyncRunner } from '../src/server/api/syncs.ts';
-import { DEV_TOKEN_COOKIE } from '../src/server/auth.ts';
-import { fetchApi } from '../src/server/fetch-api.ts';
-import { checkpointAudit } from '../src/server/heartbeat.ts';
-import type { CoffreRuntime } from '../src/server/runtime.ts';
+import { createClient, type CoffreClient } from '../../client/src/index.ts';
+import { chainHash } from '../../core/src/audit/chain.ts';
+import type { AuthConfig } from '../../core/src/identity/auth-mode.ts';
+import type { Principal } from '../../core/src/identity/types.ts';
+import { tablesOf } from '../../db/src/database.ts';
+import { auditRange } from '../../db/src/queries.ts';
+import { auditChainHead, auditLog } from '../../db/test/tables.ts';
+import type { LogEntry } from '../../vault/src/types.ts';
+import { serveApi } from '../src/api/router.ts';
+import { SyncRunner } from '../src/api/syncs.ts';
+import { DEV_TOKEN_COOKIE } from '../src/auth.ts';
+import { fetchApi } from '../src/fetch-api.ts';
+import { checkpointAudit } from '../src/heartbeat.ts';
+import type { CoffreRuntime } from '../src/runtime.ts';
 import {
   clientFor,
   contextFor,
@@ -168,6 +168,7 @@ test('a removed member stays out despite a live session, until the vault admits 
       access: { issuer: 'http://127.0.0.1:8081', jwksUrl: 'http://127.0.0.1:8081/certs', audience: 'aud' },
       devIdpUrl: 'http://127.0.0.1:8081',
     } satisfies AuthConfig,
+    publicUrl: 'https://coffre.test',
     // Every token is simply the email of whoever holds it, and never expires.
     verifier: { verify: async (token: string): Promise<Principal> => ({ type: 'user', id: token, email: token, subject: token }) },
     waitUntil: () => {},
@@ -180,6 +181,7 @@ test('a removed member stays out despite a live session, until the vault admits 
         body: JSON.stringify({ path: 'market/dev/API_KEY' }),
       }),
       runtime,
+      { sourceIp: null },
     );
   assert.equal((await reveal()).status, 200);
 

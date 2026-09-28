@@ -1,6 +1,6 @@
 import { useRouter } from '@tanstack/react-router';
 
-import { CoffreError, type CoffreClient } from '../../../../packages/client/src/index.ts';
+import { CoffreError, type CoffreClient } from '../../../client/src/index.ts';
 
 /**
  * The API as whoever is looking at the page. In the browser this is plain

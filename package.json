@@ -15,7 +15,7 @@
     "test:mysql": "pnpm lint && COFFRE_TEST_ENGINE=mysql ./scripts/test-suite.sh",
     "test:all": "pnpm test && pnpm test:sqlite && pnpm test:mysql",
     "test:schema": "./scripts/test-schema.sh",
-    "lint": "eslint \"apps/web/src/**/*.{ts,tsx}\"",
+    "lint": "eslint \"packages/ui/src/**/*.{ts,tsx}\"",
     "check:pins": "node scripts/check-pins.mjs",
     "check:contrast": "node scripts/check-contrast.mjs",
     "db:up": "docker compose up -d postgres",

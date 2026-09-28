@@ -1,6 +1,6 @@
 import pg from 'pg';
 
-import type { PoolLike } from '../../../../packages/db/src/database.ts';
+import type { PoolLike } from '../../db/src/database.ts';
 
 /**
  * Request-scoped node-postgres adapter for Hyperdrive.

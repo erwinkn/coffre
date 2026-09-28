@@ -1,6 +1,6 @@
-import type { Principal } from '../../../../packages/core/src/identity/types.ts';
-import { ACCESS_JWT_HEADER } from '../../../../packages/core/src/identity/types.ts';
-import type { AuthConfig } from '../../../../packages/core/src/identity/auth-mode.ts';
+import type { Principal } from '../../core/src/identity/types.ts';
+import { ACCESS_JWT_HEADER } from '../../core/src/identity/types.ts';
+import type { AuthConfig } from '../../core/src/identity/auth-mode.ts';
 import { loadCaller, type Caller } from './api/caller.ts';
 import { ApiError } from './api/errors.ts';
 import { errorResponse } from './http.ts';
@@ -71,11 +71,12 @@ export function accessTokenForRequest(request: Request, auth: AuthConfig): strin
 }
 
 /**
- * The caller's address, from Cloudflare's own header. The edge overwrites
- * `cf-connecting-ip` on every request, so a client cannot choose it; in dev
- * mode nothing sits in front to vouch for it.
+ * The caller's address on Workers, from Cloudflare's own header. The edge
+ * overwrites `cf-connecting-ip` on every request, so a client cannot choose
+ * it; locally nothing sits in front to vouch for it. On Node the address is
+ * the socket's, and this header means nothing.
  */
-export function trustedSourceIp(request: Request, auth: AuthConfig): string | null {
+export function cloudflareSourceIp(request: Request, auth: AuthConfig): string | null {
   if (auth.mode === 'dev') return null;
   const value = request.headers.get('cf-connecting-ip');
   if (value === null || value.length > 45) return null;
@@ -100,9 +101,9 @@ export const registrationRequired = () =>
 export async function authenticateRequest(
   request: Request,
   runtime: AuthenticationRuntime,
-  requestId = crypto.randomUUID(),
+  requestId: string = crypto.randomUUID(),
   token = accessTokenForRequest(request, runtime.auth),
-  sourceIp = trustedSourceIp(request, runtime.auth),
+  sourceIp: string | null = null,
 ): Promise<AuthenticatedIdentity | Response> {
   if (token === null) return unauthenticated(runtime.auth);
 

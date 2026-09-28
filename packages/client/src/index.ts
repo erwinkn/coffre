@@ -13,9 +13,9 @@ import type {
   RouteInput,
   RouteKey,
   RouteOutput,
-} from '../../../apps/web/src/server/api/routes.ts';
-import type { DryRunOutcome, DryRunResult, SetResult } from '../../../apps/web/src/server/api/secrets.ts';
-import type { AuthInfo } from '../../../apps/web/src/server/fetch-api.ts';
+} from '../../server/src/api/routes.ts';
+import type { DryRunOutcome, DryRunResult, SetResult } from '../../server/src/api/secrets.ts';
+import type { AuthInfo } from '../../server/src/fetch-api.ts';
 
 export type { AuthInfo, DryRunOutcome, RouteInput, RouteKey, RouteOutput };
 

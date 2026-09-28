@@ -1,13 +1,13 @@
-import type { ImportAction } from '../../../../packages/client/src/index.ts';
-import type { Permission as CorePermission } from '../../../../packages/core/src/access.ts';
-import type { AuditEntryView } from '../server/api/audit.ts';
-import type { Member, OffboardingReport, RemovedMember } from '../server/api/members.ts';
-import type { Me as ApiMe, ProjectSummary as ApiProjectSummary } from '../server/api/projects.ts';
+import type { ImportAction } from '../../../client/src/index.ts';
+import type { Permission as CorePermission } from '../../../core/src/access.ts';
+import type { AuditEntryView } from '../../../server/src/api/audit.ts';
+import type { Member, OffboardingReport, RemovedMember } from '../../../server/src/api/members.ts';
+import type { Me as ApiMe, ProjectSummary as ApiProjectSummary } from '../../../server/src/api/projects.ts';
 import type {
   SecretKey as ApiSecretKey,
   SecretVersion as ApiSecretVersion,
-} from '../server/api/secrets.ts';
-import type { RunOutcome as ApiRunOutcome, SyncView as ApiSyncView } from '../server/api/syncs.ts';
+} from '../../../server/src/api/secrets.ts';
+import type { RunOutcome as ApiRunOutcome, SyncView as ApiSyncView } from '../../../server/src/api/syncs.ts';
 
 /** Browser-safe projections of what the API returns. */
 export type Permission = CorePermission;

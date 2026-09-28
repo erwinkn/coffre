@@ -13,20 +13,20 @@ async function lintImport(source: string, filePath: string) {
   return result.messages.filter((message) => message.severity === 2);
 }
 
-test('ESLint keeps server functions out of the web app', async () => {
+test('ESLint keeps server functions out of the pages', async () => {
   const source = "import { createServerFn } from '@tanstack/react-start';";
-  for (const filePath of ['apps/web/src/routes/example.tsx', 'apps/web/src/server/example.ts']) {
+  for (const filePath of ['packages/ui/src/routes/example.tsx', 'packages/ui/src/lib/example.ts']) {
     assert.equal((await lintImport(source, filePath))[0]?.ruleId, 'no-restricted-imports');
   }
   assert.deepEqual(
-    await lintImport("import { createMiddleware } from '@tanstack/react-start';", 'apps/web/src/start.ts'),
+    await lintImport("import { getGlobalStartContext } from '@tanstack/react-start';", 'packages/ui/src/router.tsx'),
     [],
   );
 });
 
 test('ESLint keeps drizzle queries in packages/db', async () => {
   assert.equal(
-    (await lintImport("import { eq } from 'drizzle-orm';", 'apps/web/src/server/example.ts'))[0]
+    (await lintImport("import { eq } from 'drizzle-orm';", 'packages/ui/src/lib/example.ts'))[0]
       ?.ruleId,
     'no-restricted-imports',
   );

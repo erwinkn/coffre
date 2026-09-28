@@ -5,7 +5,7 @@ import {
   contentSecurityPolicy,
   cspNonce,
   withSecurityHeaders,
-} from '../src/server/security-headers.ts';
+} from '../src/security-headers.ts';
 
 const page = new Request('https://coffre.example.com/projects');
 

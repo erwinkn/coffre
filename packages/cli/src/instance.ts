@@ -1,4 +1,4 @@
-import type { AuthMode } from '../../../packages/core/src/identity/auth-mode.ts';
+import type { AuthMode } from '../../core/src/identity/auth-mode.ts';
 import { cliAuthHeader } from './auth-mode.ts';
 
 /**

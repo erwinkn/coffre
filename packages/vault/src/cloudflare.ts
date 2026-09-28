@@ -1,6 +1,22 @@
+/**
+ * The vault as a Worker: one Durable Object, so one SQLite database and one
+ * thread for every decision, behind an entrypoint the app's `VAULT` service
+ * binding calls over RPC. It has no route and no HTTP surface.
+ *
+ *   import { vault } from '@coffre/vault/cloudflare';
+ *   export { VaultObject } from '@coffre/vault/cloudflare';
+ *
+ *   export default vault((env: Env) => ({
+ *     kek: { id: 'kek-1', key: env.KEK },
+ *     rootAdmins: ['admin@acme.example'],
+ *     signingKey: env.SIGNING_KEY,
+ *   }));
+ *
+ * The Worker's config binds the Durable Object as `VAULT_OBJECT`.
+ */
 import { DurableObject, WorkerEntrypoint } from 'cloudflare:workers';
 
-import { loadVaultConfig } from '../../../packages/vault/src/config.ts';
+import { resolveVaultConfig, type VaultConfig } from './config.ts';
 import type {
   AdmitInput,
   CheckpointInput,
@@ -11,26 +27,30 @@ import type {
   UnwrapInput,
   Vault,
   WrapInput,
-} from '../../../packages/vault/src/types.ts';
-import { openVault } from '../../../packages/vault/src/vault.ts';
+} from './types.ts';
+import { openVault } from './vault.ts';
 
-type Env = Readonly<Record<`COFFRE_${string}`, string | undefined>> & {
-  VAULT_OBJECT: DurableObjectNamespace<VaultObject>;
-};
+export type { Vault, VaultConfig };
+
+/** The bindings the vault needs of its Worker; the deployment's own come on top. */
+export type VaultBindings = { VAULT_OBJECT: DurableObjectNamespace<VaultObject> };
+
+/** Set when the Worker's module runs `vault(…)`, before any request reaches the object. */
+let configure: ((env: never) => VaultConfig) | null = null;
 
 /**
- * The vault itself: one Durable Object, so one SQLite database and one
- * thread for every decision. Its storage is the vault's store, migrated
- * before the first call is let in.
+ * The vault itself. Its storage is the vault's store, migrated before the
+ * first call is let in.
  */
-export class VaultObject extends DurableObject<Env> implements Vault {
+export class VaultObject extends DurableObject<VaultBindings> implements Vault {
   #vault!: Vault;
 
-  constructor(ctx: DurableObjectState, env: Env) {
+  constructor(ctx: DurableObjectState, env: VaultBindings) {
     super(ctx, env);
-    const { VAULT_OBJECT: _, ...vars } = env;
+    if (configure === null) throw new Error('the vault Worker must export default vault(…)');
+    const config = resolveVaultConfig(configure(env as never));
     void ctx.blockConcurrencyWhile(async () => {
-      this.#vault = await openVault(ctx.storage, loadVaultConfig(vars));
+      this.#vault = await openVault(ctx.storage, config);
     });
   }
 
@@ -48,28 +68,33 @@ export class VaultObject extends DurableObject<Env> implements Vault {
 }
 
 /**
- * What the app's `VAULT` service binding calls: the `Vault` interface over
- * RPC, each call passed to the one Durable Object as it is.
+ * The vault Worker's default export: what the app's `VAULT` service binding
+ * calls, each call passed to the one Durable Object as it is. `configure`
+ * reads the Worker's secrets into the vault's configuration.
  */
-export class VaultEntrypoint extends WorkerEntrypoint<Env> implements Vault {
-  get #object() {
-    return this.env.VAULT_OBJECT.get(this.env.VAULT_OBJECT.idFromName('vault'));
-  }
+export function vault<Env extends VaultBindings>(configure_: (env: Env) => VaultConfig) {
+  configure = configure_ as (env: never) => VaultConfig;
 
-  unwrap(input: UnwrapInput) { return this.#object.unwrap(input); }
-  wrap(input: WrapInput) { return this.#object.wrap(input); }
-  rewrap(input: RewrapInput) { return this.#object.rewrap(input); }
-  access(principal: string) { return this.#object.access(principal); }
-  members() { return this.#object.members(); }
-  setAccess(input: SetAccessInput) { return this.#object.setAccess(input); }
-  admit(input: AdmitInput) { return this.#object.admit(input); }
-  remove(input: RemoveInput) { return this.#object.remove(input); }
-  checkpoint(input: CheckpointInput) { return this.#object.checkpoint(input); }
-  latestCheckpoint() { return this.#object.latestCheckpoint(); }
-  log(input: LogInput) { return this.#object.log(input); }
+  return class VaultEntrypoint extends WorkerEntrypoint<Env> implements Vault {
+    get #object() {
+      return this.env.VAULT_OBJECT.get(this.env.VAULT_OBJECT.idFromName('vault'));
+    }
+
+    unwrap(input: UnwrapInput) { return this.#object.unwrap(input); }
+    wrap(input: WrapInput) { return this.#object.wrap(input); }
+    rewrap(input: RewrapInput) { return this.#object.rewrap(input); }
+    access(principal: string) { return this.#object.access(principal); }
+    members() { return this.#object.members(); }
+    setAccess(input: SetAccessInput) { return this.#object.setAccess(input); }
+    admit(input: AdmitInput) { return this.#object.admit(input); }
+    remove(input: RemoveInput) { return this.#object.remove(input); }
+    checkpoint(input: CheckpointInput) { return this.#object.checkpoint(input); }
+    latestCheckpoint() { return this.#object.latestCheckpoint(); }
+    log(input: LogInput) { return this.#object.log(input); }
+
+    /** No HTTP surface: only the app's service binding reaches the vault. */
+    fetch() {
+      return new Response('not found', { status: 404 });
+    }
+  };
 }
-
-/** No HTTP surface: only the app's service binding reaches the vault. */
-export default {
-  fetch: () => new Response('not found', { status: 404 }),
-} satisfies ExportedHandler<Env>;

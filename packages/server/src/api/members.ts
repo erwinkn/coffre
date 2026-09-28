@@ -1,5 +1,5 @@
-import { ROLES, type Permission, type Role } from '../../../../../packages/core/src/access.ts';
-import type { Queryable } from '../../../../../packages/db/src/database.ts';
+import { ROLES, type Permission, type Role } from '../../../core/src/access.ts';
+import type { Queryable } from '../../../db/src/database.ts';
 import {
   insertIfAbsent,
   lock,
@@ -7,9 +7,9 @@ import {
   members as loadMembers,
   places,
   update,
-} from '../../../../../packages/db/src/queries.ts';
-import { credentials, identities, principals } from '../../../../../packages/db/src/schema.ts';
-import type { Access, Grant } from '../../../../../packages/vault/src/types.ts';
+} from '../../../db/src/queries.ts';
+import { credentials, identities, principals } from '../../../db/src/schema.ts';
+import type { Access, Grant } from '../../../vault/src/types.ts';
 import { can } from './caller.ts';
 import { allowed, audited, denied, Refusal, requireOwner, vaultRefusal, type ApiContext } from './context.ts';
 import { conflict, forbidden, notFound } from './errors.ts';

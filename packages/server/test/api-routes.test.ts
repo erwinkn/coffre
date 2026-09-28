@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 
 import { eq } from 'drizzle-orm';
 
-import { auditLog } from '../../../packages/db/test/tables.ts';
-import { serveApi } from '../src/server/api/router.ts';
+import { auditLog } from '../../db/test/tables.ts';
+import { serveApi } from '../src/api/router.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps } from './api-fixture.ts';
 
 const ROOT = 'admin@acme.example';

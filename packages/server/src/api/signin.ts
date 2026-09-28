@@ -1,19 +1,19 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 
-import type { Principal } from '../../../../../packages/core/src/identity/types.ts';
-import type { SigninConfig } from '../../../../../packages/core/src/identity/signin/config.ts';
-import type { PendingSignin, SigninProfile } from '../../../../../packages/core/src/identity/signin/types.ts';
-import { deriveKey, seal, unseal } from '../../../../../packages/core/src/identity/signin/sealed.ts';
+import type { Principal } from '../../../core/src/identity/types.ts';
+import type { SigninConfig } from '../../../core/src/identity/signin/config.ts';
+import type { PendingSignin, SigninProfile } from '../../../core/src/identity/signin/types.ts';
+import { deriveKey, seal, unseal } from '../../../core/src/identity/signin/sealed.ts';
 import {
   generateToken,
   hashToken,
   isCoffreToken,
   tokenHint,
   type CredentialKind,
-} from '../../../../../packages/core/src/identity/tokens.ts';
-import type { AuditEntry } from '../../../../../packages/db/src/audit.ts';
-import type { Database, Transaction } from '../../../../../packages/db/src/database.ts';
-import { isUniqueViolation } from '../../../../../packages/db/src/dialect.ts';
+} from '../../../core/src/identity/tokens.ts';
+import type { AuditEntry } from '../../../db/src/audit.ts';
+import type { Database, Transaction } from '../../../db/src/database.ts';
+import { isUniqueViolation } from '../../../db/src/dialect.ts';
 import {
   findCredential,
   findDeviceAuthorizations,
@@ -23,9 +23,9 @@ import {
   lock,
   members,
   update,
-} from '../../../../../packages/db/src/queries.ts';
-import { credentials, deviceAuthorizations, identities, principals } from '../../../../../packages/db/src/schema.ts';
-import type { Access, Vault } from '../../../../../packages/vault/src/types.ts';
+} from '../../../db/src/queries.ts';
+import { credentials, deviceAuthorizations, identities, principals } from '../../../db/src/schema.ts';
+import type { Access, Vault } from '../../../vault/src/types.ts';
 import type { PrincipalRef } from './caller.ts';
 import { allowed, audited, denied, Refusal, type ApiContext } from './context.ts';
 import { ApiError, badRequest, forbidden, notFound } from './errors.ts';

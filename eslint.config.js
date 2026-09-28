@@ -20,9 +20,9 @@ const webBoundaries = {
 
 export default defineConfig([
   {
-    name: 'coffre/web-boundaries',
-    files: ['apps/web/src/**/*.{ts,tsx}'],
-    ignores: ['apps/web/src/routeTree.gen.ts'],
+    name: 'coffre/ui-boundaries',
+    files: ['packages/ui/src/**/*.{ts,tsx}'],
+    ignores: ['packages/ui/src/routeTree.gen.ts'],
     languageOptions: {
       parser: tsParser,
       parserOptions: {

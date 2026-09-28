@@ -1,6 +1,6 @@
 import { createRouter as createTanStackRouter } from '@tanstack/react-router';
 import { getGlobalStartContext } from '@tanstack/react-start';
-import { createClient, type CoffreClient } from '../../../packages/client/src/index.ts';
+import { createClient, type CoffreClient } from '../../client/src/index.ts';
 import { routeTree } from './routeTree.gen';
 import { NotFound, RouteError } from './components/route-states';
 

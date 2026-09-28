@@ -1,5 +1,3 @@
-import '@tanstack/react-start/server-only';
-
 import { createHash } from 'node:crypto';
 
 import {
@@ -7,8 +5,8 @@ import {
   type SigninConfig,
   type SigninProvider,
   type SigninProviderConfig,
-} from '../../../../packages/core/src/identity/signin/index.ts';
-import type { AuthConfig } from '../../../../packages/core/src/identity/auth-mode.ts';
+} from '../../core/src/identity/signin/index.ts';
+import type { AuthConfig } from '../../core/src/identity/auth-mode.ts';
 
 const providers = new Map<string, SigninProvider>();
 

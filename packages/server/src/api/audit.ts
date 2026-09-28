@@ -1,15 +1,15 @@
-import { roleGrants } from '../../../../../packages/core/src/access.ts';
-import { GENESIS_HASH, verifyChain } from '../../../../../packages/core/src/audit/chain.ts';
-import { SNAPSHOT } from '../../../../../packages/db/src/dialect.ts';
+import { roleGrants } from '../../../core/src/access.ts';
+import { GENESIS_HASH, verifyChain } from '../../../core/src/audit/chain.ts';
+import { SNAPSHOT } from '../../../db/src/dialect.ts';
 import {
   auditHead,
   auditPage,
   auditRange,
   resolvePath,
   type AuditFilter,
-} from '../../../../../packages/db/src/queries.ts';
-import { verifyCheckpoint } from '../../../../../packages/vault/src/checkpoint.ts';
-import type { LogPage } from '../../../../../packages/vault/src/types.ts';
+} from '../../../db/src/queries.ts';
+import { verifyCheckpoint } from '../../../vault/src/checkpoint.ts';
+import type { LogPage } from '../../../vault/src/types.ts';
 import type { ApiContext } from './context.ts';
 import { forbidden, notFound, vaultRefused } from './errors.ts';
 import { formatMember, parseMember, type Path } from './paths.ts';

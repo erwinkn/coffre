@@ -1,6 +1,6 @@
-import { assignableToEnvironment, ROLES, type Role } from '../../../../../packages/core/src/access.ts';
-import { places } from '../../../../../packages/db/src/queries.ts';
-import type { AccessChange } from '../../../../../packages/vault/src/types.ts';
+import { assignableToEnvironment, ROLES, type Role } from '../../../core/src/access.ts';
+import { places } from '../../../db/src/queries.ts';
+import type { AccessChange } from '../../../vault/src/types.ts';
 import { allowed, audited, denied, need, Refusal, vaultRefusal, type ApiContext } from './context.ts';
 import { badRequest, conflict, notFound } from './errors.ts';
 import { formatGrantee, formatMember, formatPath, parsePath, type GranteeRef } from './paths.ts';

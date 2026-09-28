@@ -3,18 +3,18 @@ import { rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { createClient, type CoffreClient } from '../../../packages/client/src/index.ts';
-import { LocalKekProvider } from '../../../packages/core/src/kek/local.ts';
-import { KekRegistry } from '../../../packages/core/src/kek/registry.ts';
-import { tablesOf, type Database } from '../../../packages/db/src/database.ts';
-import { DEFAULT_BULK_LIMIT, type VaultConfig } from '../../../packages/vault/src/config.ts';
-import { localVault, type LocalVault } from '../../../packages/vault/src/local.ts';
-import type { Vault } from '../../../packages/vault/src/types.ts';
-import { loadCaller } from '../src/server/api/caller.ts';
-import type { ApiContext } from '../src/server/api/context.ts';
-import { serveApi } from '../src/server/api/router.ts';
-import type { SigninService } from '../src/server/api/signin.ts';
-import { SyncRunner } from '../src/server/api/syncs.ts';
+import { createClient, type CoffreClient } from '../../client/src/index.ts';
+import { LocalKekProvider } from '../../core/src/kek/local.ts';
+import { KekRegistry } from '../../core/src/kek/registry.ts';
+import { tablesOf, type Database } from '../../db/src/database.ts';
+import { DEFAULT_BULK_LIMIT, type ResolvedVaultConfig } from '../../vault/src/config.ts';
+import { openLocalVault, type LocalVault } from '../../vault/src/local.ts';
+import type { Vault } from '../../vault/src/types.ts';
+import { loadCaller } from '../src/api/caller.ts';
+import type { ApiContext } from '../src/api/context.ts';
+import { serveApi } from '../src/api/router.ts';
+import type { SigninService } from '../src/api/signin.ts';
+import { SyncRunner } from '../src/api/syncs.ts';
 
 export type FixtureDeps = {
   db: Database;
@@ -31,7 +31,7 @@ export type FixtureDeps = {
  * do not share members, grants, checkpoints or bulk-limit counts.
  */
 export type TestVault = Vault & {
-  config: VaultConfig;
+  config: ResolvedVaultConfig;
   /** The raw primary KEK, which no database may hold. */
   kek: Buffer;
   /** The vault's file, while it is open. */
@@ -43,9 +43,9 @@ export type TestVault = Vault & {
 
 const vaults = new Set<TestVault>();
 
-export function testVault(rootAdmins: readonly string[], config: Partial<VaultConfig> = {}): TestVault {
+export function testVault(rootAdmins: readonly string[], config: Partial<ResolvedVaultConfig> = {}): TestVault {
   const kek = randomBytes(32);
-  const full: VaultConfig = {
+  const full: ResolvedVaultConfig = {
     keks: new KekRegistry(LocalKekProvider.fromBase64(kek.toString('base64'), 'test-kek-1')),
     rootAdmins,
     signingKey: randomBytes(32),
@@ -57,7 +57,7 @@ export function testVault(rootAdmins: readonly string[], config: Partial<VaultCo
   let current: Promise<LocalVault> | null = null;
   const open = () => {
     file = join(tmpdir(), `coffre-vault-${randomUUID()}.db`);
-    return localVault(file, full, { now: () => Date.now() + offset });
+    return openLocalVault(file, full, { now: () => Date.now() + offset });
   };
   const call = (name: keyof Vault) => async (...args: unknown[]) =>
     ((await (current ??= open()))[name] as (...args: unknown[]) => Promise<unknown>)(...args);
@@ -131,7 +131,7 @@ export function clientFor(
   });
 }
 
-export { openTestDatabase } from '../../../packages/db/test/engine.ts';
+export { openTestDatabase } from '../../db/test/engine.ts';
 
 /** Deps for a fresh instance with these root admins, over the restricted role. */
 export function testDeps(db: Database, rootAdmins: readonly string[], extra: Partial<FixtureDeps> = {}): FixtureDeps {

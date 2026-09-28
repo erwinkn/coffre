@@ -3,15 +3,15 @@ import assert from 'node:assert/strict';
 
 import { and, asc, count, eq, gte, sql } from 'drizzle-orm';
 
-import type { CoffreClient } from '../../../packages/client/src/index.ts';
+import type { CoffreClient } from '../../client/src/index.ts';
 import {
   auditChainHead,
   auditLog,
   environments,
   secrets,
   secretVersions,
-} from '../../../packages/db/test/tables.ts';
-import { postgresOnly } from '../../../packages/db/test/engine.ts';
+} from '../../db/test/tables.ts';
+import { postgresOnly } from '../../db/test/engine.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 const ROOT = 'admin@acme.example';
