@@ -7,11 +7,11 @@ product that deployments import and configure in their own repositories.
 
 - The product works end to end: API, CLI, web UI, audit chain, and now
   coffre's own sign-in (phase 4), syncs (phase 3) and offboarding.
-- The in-repository instance files and deployment pipeline are gone. Until
-  phase 2 packages coffre, a checkout can still deploy `apps/web` directly
-  with Wrangler; [deploy.md](deploy.md) describes that temporary path.
-- erwinkn.com will deploy from the erwinkn.com repository once phase 2, step 6
-  provides packages that a small deployment project can import.
+- Phase 2 is done: coffre is packages a deployment imports and configures in
+  code, and `coffre init --workers` or `--node` writes that deployment
+  ([deploy.md](deploy.md)). Nothing is on npm yet.
+- erwinkn.com is next (phase 3): a deployment project in its own
+  repository, made with `coffre init --workers`.
 - Most of phase 1 is still open; only the security headers are done. The
   README says *ready for a first deployment, still hardening* until the rest
   is.
@@ -21,7 +21,7 @@ product that deployments import and configure in their own repositories.
 | Phase | Goal | Done when |
 |---|---|---|
 | 1. Harden | Safe to hold real secrets | Every item below shipped; restore and rotation drills pass |
-| 2. Package | The product apart from its instances; Cloudflare and Node adapters; a vault; three databases | A deployment is a small project importing `@coffre/server` and `@coffre/vault`; the suite passes on Postgres, MySQL and SQLite, and the smoke suite on both adapters |
+| ~~2. Package~~ | The product apart from its instances; Cloudflare and Node adapters; a vault; three databases | A deployment is a small project importing `@coffre/server` and `@coffre/vault`; the suite passes on Postgres, MySQL and SQLite, and the smoke suite on both adapters |
 | 3. erwinkn.com | Dogfood | Your secrets live in it, the CLI and sync are in daily use, a few weeks pass with no open bugs |
 | 4. Sign-in | Deployable without a proxy in front | A Node deployment signs in with Google, GitHub and an arbitrary OIDC issuer, and the CLI logs in through it |
 
@@ -36,7 +36,7 @@ release must work without an identity-aware proxy.
 Each item says what is wrong today.
 
 1. ~~**Security headers and a CSP.**~~ Done, in
-   `apps/web/src/server/security-headers.ts`. The Worker mints a nonce per
+   `packages/server/src/security-headers.ts`. The Worker mints a nonce per
    response and TanStack puts it on every script it renders, so `script-src`
    is `'self'` plus that nonce; styles stay `'unsafe-inline'` for React's
    `style` props. It is enforced in development too, so a script without the
@@ -79,7 +79,7 @@ Then drop "still hardening" from the README's status line.
 
 ## Phase 2: package
 
-coffre becomes packages a deployment imports and configures in code:
+Done. coffre became packages a deployment imports and configures in code:
 `@coffre/ui`, `@coffre/server`, `@coffre/vault`, `@coffre/client` and
 `@coffre/cli`, on Postgres, MySQL or SQLite through Drizzle, with a vault
 that holds the keys and decides who may decrypt. The design is in
@@ -114,19 +114,27 @@ that holds the keys and decides who may decrypt. The design is in
    `packages/vault` holds the KEK, grants, principal status, root admins and
    a hash-chained log of its own, over SQLite; the app keeps ciphertext and
    wrapped keys, and asks the vault to wrap and unwrap, once per batch. It
-   runs as its own Worker, `apps/vault`, a Durable Object behind a service
+   runs as its own Worker, then `apps/vault`, a Durable Object behind a service
    binding, next to the app in dev and the smoke test, or in process over
    libSQL for the tests. Callers' grants come from the vault once per
    request; changing access and removing a member are vault calls, and a
    refusal is a 403 with the vault's code. Unwraps are capped per principal
    (`1000/15m` by default), syncs read as `sync:<id>`, and the vault signs
    checkpoints of the app's audit log, which verification checks.
-6. **The packages**: configuration in code, compiled output, the Node
-   adapter, `coffre init`, and example deployments the smoke suite runs.
-
-The instance files and deployment scripts are already gone. Step 6 replaces
-the remaining environment-variable configuration with typed configuration in
-each deployment project.
+6. ~~**The packages**~~ ([design](architecture.md#packages)): done.
+   `@coffre/server`, `@coffre/ui`, `@coffre/vault`, `@coffre/client` and
+   `@coffre/cli` build with tsdown into JavaScript and declarations, the
+   internal packages bundled in. Configuration is typed and passed in code:
+   `coffre(env => …)` and `vault(env => …)` on Workers, `serve({…})` and
+   `serveVault({…})` on Node, whose vault is a second process on a Unix
+   socket, or in process. No package reads an environment variable of its
+   own. `@coffre/ui` is the pages alone, a prebuilt handler the server calls,
+   with its static files served by Workers' assets or by `serve`.
+   `examples/workers` and `examples/node` are what `coffre init` writes, a
+   test diffs them, and `scripts/smoke.mjs` runs each through sign-in, a
+   reveal via the vault, the heartbeat and its checkpoint.
+   `pnpm test:consumer` does the same from packed tarballs installed outside
+   the workspace.
 
 ## Phase 3: erwinkn.com
 
@@ -166,11 +174,12 @@ Workers on every change, and checked hourly for drift. See
 
 ## Phase 4: sign-in
 
-Built, on Workers. Where the build departed from the plan below: Microsoft
-takes one tenant, by GUID, because the multi-tenant endpoints publish an
-issuer template that standard validation rejects; the CLI signs in with a
-device code rather than a local port, which also works over SSH; and the page
-takes a title and a note but no logo yet. The plan, as written:
+Built, on Workers, and on Node since phase 2 added its adapter. Where the
+build departed from the plan below: Microsoft takes one tenant, by GUID,
+because the multi-tenant endpoints publish an issuer template that standard
+validation rejects; the CLI signs in with a device code rather than a local
+port, which also works over SSH; and the page takes a title and a note but no
+logo yet. The plan, as written:
 
 Behind Cloudflare Access, the login page is Access's own. GitHub, Google,
 Microsoft, one-time email codes and any OIDC or SAML provider are login

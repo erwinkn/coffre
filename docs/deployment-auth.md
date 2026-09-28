@@ -1,37 +1,41 @@
 # Signing in behind Cloudflare Access
 
-A deployed coffre signs people in one of two ways, chosen by
-`COFFRE_AUTH_MODE` in its Worker configuration:
+A deployed coffre signs people in one of two ways, chosen by the `auth` it
+is configured with:
 
-- `signin`: coffre's own sign-in page, with GitHub, Google, Microsoft or any
-  OpenID Connect provider. [deploy.md](deploy.md) sets one up.
-- `cloudflare`: Cloudflare Access in front of the Worker, and coffre verifies
-  the token Access forwards. This is coffre's default and what this page
-  describes.
+- `signin({ providers })`: coffre's own sign-in page, with GitHub, Google,
+  Microsoft or any OpenID Connect provider. `coffre init` sets up GitHub;
+  [deploy.md](deploy.md) walks through it.
+- `cloudflareAccess({ teamDomain, audience })`: Cloudflare Access in front of
+  coffre, which verifies the token Access forwards. This page describes it.
 
 Neither runs a password flow or a persona picker.
 
 ## Cloudflare Access inputs
 
 Configure one Cloudflare Access application for the production hostname, then
-set the following bindings on the Worker:
+give the app Worker (`app/src/worker.ts`) that application instead of
+`signin(…)`:
 
-```dotenv
-COFFRE_AUTH_MODE=cloudflare
-COFFRE_ACCESS_ISSUER=https://<your-team-name>.cloudflareaccess.com
-COFFRE_ACCESS_JWKS_URL=https://<your-team-name>.cloudflareaccess.com/cdn-cgi/access/certs
-COFFRE_ACCESS_AUD=<the Application Audience (AUD) Tag>
+```ts
+import { cloudflareAccess, coffre, postgres } from '@coffre/server/cloudflare';
+
+export default coffre((env: Env) => ({
+  // …
+  auth: cloudflareAccess({ teamDomain: 'acme.cloudflareaccess.com', audience: env.ACCESS_AUD }),
+}));
 ```
 
-- `COFFRE_ACCESS_ISSUER` is the HTTPS team domain, with no trailing slash.
-- `COFFRE_ACCESS_JWKS_URL` is exactly that issuer plus
-  `/cdn-cgi/access/certs`.
-- `COFFRE_ACCESS_AUD` is the AUD tag copied from **Zero Trust > Access
-  controls > Applications > Configure > Additional settings** for this
-  specific application. It is not the application ID or hostname.
-- `COFFRE_DEV_IDP_URL` must be absent. Its presence contradicts Cloudflare mode
-  and makes configuration loading fail before the application accepts an
-  authenticated request.
+- `teamDomain` is `<your-team-name>.cloudflareaccess.com`. coffre takes the
+  issuer and its keys (`/cdn-cgi/access/certs`) from it, and refuses any
+  other domain.
+- `audience` is the AUD tag copied from **Zero Trust > Access controls >
+  Applications > Configure > Additional settings** for this specific
+  application. It is not the application ID or hostname. Put it in
+  `wrangler.jsonc` as a var; it is not a secret.
+
+The GitHub settings and `GITHUB_CLIENT_SECRET` are then unused: drop them
+from `wrangler.jsonc` and the worker's `Env`.
 
 Cloudflare documents that the origin receives the application token in
 `Cf-Access-Jwt-Assertion`, and recommends validating that header rather than
@@ -88,12 +92,14 @@ binding; the Scaleway database has no public endpoint.
 
 ## Root-admin bootstrap
 
-Set `COFFRE_ROOT_ADMINS` on the vault Worker (`coffre-vault`), not the web service, to at
-least one comma-separated human email identity:
+Root admins are the vault's configuration (`vault/src/worker.ts`), not the
+app's: at least one human email.
 
-```dotenv
-COFFRE_ROOT_ADMINS=first.admin@example.com
+```ts
+rootAdmins: ['first.admin@example.com'],
 ```
+
+`coffre init` reads them from the vault's `ROOT_ADMINS` var, comma-separated.
 
 Each value must be an email and match the `email` claim Cloudflare Access
 emits. Service-token `common_name` values cannot be root admins. That person
@@ -107,25 +113,20 @@ does not register them in this Coffre instance. An authenticated but
 unregistered browser is confined to `/unregistered`, while `/api` returns
 `403 registration_required` for everything but `GET /api/me`.
 
-Changes to `COFFRE_ROOT_ADMINS` are deployment configuration changes. Keep at
+Changes to `rootAdmins` are deployment configuration changes. Keep at
 least one controlled bootstrap identity until the operational recovery path is
 defined and tested.
 
 ## Local development is a separate mode
 
-Local development uses:
-
-```dotenv
-COFFRE_AUTH_MODE=dev
-COFFRE_DEV_IDP_URL=http://127.0.0.1:8081
-COFFRE_ACCESS_ISSUER=http://127.0.0.1:8081
-COFFRE_ACCESS_JWKS_URL=http://127.0.0.1:8081/cdn-cgi/access/certs
-COFFRE_ACCESS_AUD=coffre-local-dev-aud
-```
+Local development (`pnpm dev`, whose deployment is `packages/ui/dev/app.ts`)
+uses `devIdp({ url: 'http://127.0.0.1:8081' })`: the dev IdP stands in for
+Access, minting Access-shaped tokens for a persona picker. `devIdp` refuses
+any URL that is not on loopback, so no deployment can end up trusting it.
 
 `apps/dev-idp`, `scripts/seed.mjs`, the seeded persona page, and CLI
 email/service persona minting are local tooling. The dev IdP is not deployed.
-Both the dev IdP and seed script refuse to run unless
+Both the dev IdP and seed script refuse to run unless their shell has
 `COFFRE_AUTH_MODE=dev`. The seed additionally requires the exact checked-in
 loopback database, API, IdP, and local AUD values before performing its
 destructive reset.
