@@ -49,7 +49,7 @@ function cursor(names: string[], rows: unknown[][]): SqlCursor {
   const object = (row: unknown[]) => Object.fromEntries(names.map((name, i) => [name, row[i]]));
   return {
     toArray: () => rows.map(object),
-    raw: () => ({ toArray: () => rows }),
+    raw: () => rows.values(),
     next: () => (rows.length === 0 ? { done: true, value: undefined } : { done: false, value: object(rows[0]) }),
   };
 }

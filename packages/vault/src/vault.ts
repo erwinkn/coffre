@@ -527,11 +527,14 @@ class VaultService implements Vault {
         if (this.#isRootAdmin(principal)) throw refused('root_admin');
         const held = this.#grants(principal);
         const holder = this.#holdings(actor, at);
-        // Owners remove anyone; whoever may take away each of a sync's grants may remove the sync.
+        // Owners remove anyone. Removing a sync only takes access away, so
+        // whoever may take away one of its grants, or manage it at its
+        // source, may remove it, and anyone may remove one that holds nothing.
+        const places = input.source === undefined ? held : [...held, input.source];
         const may =
           holder.isOwner ||
           (isSyncPrincipal(principal) &&
-            held.every((grant) => mayManageAccess(holder, principal, { ...grant, role: null })));
+            (held.length === 0 || places.some((place) => mayManageAccess(holder, principal, { ...place, role: null }))));
         if (!may) throw refused('not_allowed', 'only owners may remove members');
         const status = this.#status(principal);
         if (status !== 'active') throw refused(status === 'removed' ? 'removed' : 'not_a_member');

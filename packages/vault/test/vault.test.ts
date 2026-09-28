@@ -291,6 +291,17 @@ test('a sync is a member from its first grant, and whoever manages environments 
   assert.equal((await grant('viewer')).ok, true);
   assert.equal((await w.vault.remove({ actor: MAINTAINER, principal: sync })).ok, true);
   assert.equal((await w.vault.access(sync)).status, 'removed');
+
+  // Its credential lives in a project the maintainer does not manage. Once
+  // its source grant is gone, naming the source is what lets them stop it.
+  const other = `sync:${randomUUID()}`;
+  const credential = { projectId: randomUUID(), environmentId: randomUUID(), role: 'viewer' as const, expiresAt: null };
+  assert.equal((await w.vault.setAccess({ actor: ROOT, principal: other, changes: [credential] })).ok, true);
+  const source = { projectId: w.project, environmentId: w.dev };
+  const refused = await w.vault.remove({ actor: MAINTAINER, principal: other });
+  assert.equal(!refused.ok && refused.refusal.code, 'not_allowed');
+  assert.equal((await w.vault.remove({ actor: BOB, principal: other, source })).ok, false);
+  assert.equal((await w.vault.remove({ actor: MAINTAINER, principal: other, source })).ok, true);
 });
 
 test('the log is hash-chained, append-only, and shows a rewritten entry', async (t) => {
@@ -368,4 +379,14 @@ test('configuration', () => {
   assert.throws(() => parseRootAdmins(''), /at least one/);
   assert.throws(() => parseRootAdmins('admin@example,com'), /human email/);
   assert.throws(() => parseRootAdmins('ci-deploy.access'), /human email/);
+  for (const malformed of [
+    'admin@.example.com',
+    'admin@example..com',
+    'admin@example.com.',
+    '.admin@example.com',
+    'admin..root@example.com',
+    'admin@-example.com',
+  ]) {
+    assert.throws(() => parseRootAdmins(malformed), /human email/, malformed);
+  }
 });

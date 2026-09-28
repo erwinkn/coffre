@@ -162,7 +162,16 @@ export type AdmitInput = Correlation & {
   owner?: boolean;
 };
 
-export type RemoveInput = Correlation & { actor: string; principal: string };
+export type RemoveInput = Correlation & {
+  actor: string;
+  principal: string;
+  /**
+   * For a sync: the environment it pushes from. Whoever may manage it there
+   * may stop the sync, also once its grant there is revoked and only the
+   * one on its credential is left.
+   */
+  source?: { projectId: string; environmentId: string };
+};
 
 export type CheckpointInput = {
   /** The app log's last sequence number, and that row's hash, hex. */

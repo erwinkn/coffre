@@ -17,8 +17,9 @@ export type SqlStorage = {
 
 export type SqlCursor = {
   toArray(): Record<string, unknown>[];
-  raw(): { toArray(): unknown[][] };
-  next(): IteratorResult<Record<string, unknown>>;
+  /** An iterator; Drizzle calls its `toArray()`, which iterators have. */
+  raw(): Iterable<unknown[]>;
+  next(): { done?: boolean; value?: Record<string, unknown> };
 };
 
 export type Store = DrizzleSqliteDODatabase<typeof schema>;

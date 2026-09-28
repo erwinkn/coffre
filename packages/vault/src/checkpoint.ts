@@ -2,8 +2,8 @@ import type { Checkpoint } from './types.ts';
 
 /** What a checkpoint's signature covers. */
 export function checkpointMessage(checkpoint: Omit<Checkpoint, 'signature' | 'keyId'>): Uint8Array<ArrayBuffer> {
-  return new TextEncoder().encode(
-    `coffre.checkpoint.v1|${checkpoint.seq}|${checkpoint.headHash}|${checkpoint.signedAt}`,
+  return new Uint8Array(
+    new TextEncoder().encode(`coffre.checkpoint.v1|${checkpoint.seq}|${checkpoint.headHash}|${checkpoint.signedAt}`),
   );
 }
 
@@ -22,7 +22,7 @@ export async function signer(seed: Uint8Array): Promise<Signer> {
   const pkcs8 = new Uint8Array([...PKCS8_ED25519, ...seed]);
   const privateKey = await crypto.subtle.importKey('pkcs8', pkcs8, { name: 'Ed25519' }, true, ['sign']);
   // A private JWK carries its public half, `x`; the raw private key does not export it.
-  const { x } = await crypto.subtle.exportKey('jwk', privateKey);
+  const { x } = (await crypto.subtle.exportKey('jwk', privateKey)) as JsonWebKey;
   const publicKey = Buffer.from(x!, 'base64url');
   const digest = Buffer.from(await crypto.subtle.digest('SHA-256', publicKey));
   return {

@@ -31,58 +31,33 @@ export type Envelope = {
   ciphertext: Buffer;
 };
 
-/**
- * Encrypt a secret value under a fresh DEK, and wrap that DEK under the
- * registry's primary KEK.
- *
- * A new DEK is generated per version. Versions are append-only, so a DEK is
- * never reused across two different plaintexts and the GCM IV-reuse hazard
- * cannot arise from normal operation.
- */
-export async function seal(
-  plaintext: Buffer,
-  ctx: SecretContext,
-  keks: KekRegistry,
-): Promise<Envelope> {
-  const aad = encodeAad(ctx);
-  const dek = randomBytes(DEK_BYTES);
+/** The part of an envelope the data key produces: everything but the wrapped key. */
+export type Sealed = Pick<Envelope, 'envelopeVersion' | 'iv' | 'authTag' | 'ciphertext'>;
 
-  try {
-    const iv = randomBytes(IV_BYTES);
-    const cipher = createCipheriv('aes-256-gcm', dek, iv);
-    cipher.setAAD(aad);
-
-    const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
-    const authTag = cipher.getAuthTag();
-    const wrapped = await keks.wrap(dek, ctx);
-
-    return {
-      envelopeVersion: ENVELOPE_VERSION,
-      kekProvider: wrapped.kekProvider,
-      kekId: wrapped.kekId,
-      kekVersion: wrapped.kekVersion,
-      wrappedDek: wrapped.bytes,
-      iv,
-      authTag,
-      ciphertext,
-    };
-  } finally {
-    dek.fill(0);
-  }
+/** A fresh data key. One per version, so no key ever encrypts two values. */
+export function freshDek(): Buffer {
+  return randomBytes(DEK_BYTES);
 }
 
 /**
- * Decrypt a sealed secret value.
- *
- * Throws if the envelope was sealed for a different project, environment or
- * secret than `ctx` describes, because the AAD will not match. This is the
- * property that makes relocating a ciphertext across environments fail closed.
+ * Encrypt a secret value under `dek`, bound to `ctx`. Whoever holds the key
+ * encryption key wraps `dek` separately: the vault, in coffre.
  */
-export async function open(
-  envelope: Envelope,
-  ctx: SecretContext,
-  keks: KekRegistry,
-): Promise<Buffer> {
+export function encrypt(plaintext: Buffer, ctx: SecretContext, dek: Buffer): Sealed {
+  const iv = randomBytes(IV_BYTES);
+  const cipher = createCipheriv('aes-256-gcm', dek, iv);
+  cipher.setAAD(encodeAad(ctx));
+  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  return { envelopeVersion: ENVELOPE_VERSION, iv, authTag: cipher.getAuthTag(), ciphertext };
+}
+
+/**
+ * Decrypt with an unwrapped `dek`. Throws if the envelope was sealed for a
+ * different project, environment or secret than `ctx` describes, because
+ * the AAD will not match. This is the property that makes relocating a
+ * ciphertext across environments fail closed.
+ */
+export function decrypt(envelope: Sealed, ctx: SecretContext, dek: Buffer): Buffer {
   if (envelope.envelopeVersion !== ENVELOPE_VERSION) {
     throw new Error(`unsupported envelope version: ${envelope.envelopeVersion}`);
   }
@@ -92,8 +67,47 @@ export async function open(
   if (envelope.authTag.length !== TAG_BYTES) {
     throw new Error('envelope auth tag has the wrong length');
   }
+  const decipher = createDecipheriv('aes-256-gcm', dek, envelope.iv);
+  decipher.setAAD(encodeAad(ctx));
+  decipher.setAuthTag(envelope.authTag);
+  return Buffer.concat([decipher.update(envelope.ciphertext), decipher.final()]);
+}
 
-  const aad = encodeAad(ctx);
+/**
+ * Encrypt a secret value under a fresh DEK, and wrap that DEK under the
+ * registry's primary KEK: `encrypt` and the wrap in one, where both halves
+ * are in one place.
+ */
+export async function seal(
+  plaintext: Buffer,
+  ctx: SecretContext,
+  keks: KekRegistry,
+): Promise<Envelope> {
+  const dek = freshDek();
+  try {
+    const sealed = encrypt(plaintext, ctx, dek);
+    const wrapped = await keks.wrap(dek, ctx);
+    return {
+      ...sealed,
+      kekProvider: wrapped.kekProvider,
+      kekId: wrapped.kekId,
+      kekVersion: wrapped.kekVersion,
+      wrappedDek: wrapped.bytes,
+    };
+  } finally {
+    dek.fill(0);
+  }
+}
+
+/** Unwrap the envelope's DEK under the registry and decrypt: `decrypt` and the unwrap in one. */
+export async function open(
+  envelope: Envelope,
+  ctx: SecretContext,
+  keks: KekRegistry,
+): Promise<Buffer> {
+  if (envelope.envelopeVersion !== ENVELOPE_VERSION) {
+    throw new Error(`unsupported envelope version: ${envelope.envelopeVersion}`);
+  }
   const dek = await keks.unwrap(
     {
       kekProvider: envelope.kekProvider,
@@ -103,12 +117,8 @@ export async function open(
     },
     ctx,
   );
-
   try {
-    const decipher = createDecipheriv('aes-256-gcm', dek, envelope.iv);
-    decipher.setAAD(aad);
-    decipher.setAuthTag(envelope.authTag);
-    return Buffer.concat([decipher.update(envelope.ciphertext), decipher.final()]);
+    return decrypt(envelope, ctx, dek);
   } finally {
     dek.fill(0);
   }
