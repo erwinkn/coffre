@@ -1,7 +1,6 @@
 import type { Auth, AuthConfig } from '../../core/src/identity/auth-mode.ts';
 import { publicOrigin } from '../../core/src/identity/signin/config.ts';
 import type { Vault } from '../../vault/src/types.ts';
-import type { SyncTiming } from './api/syncs.ts';
 
 /**
  * What every deployment writes, on either runtime. The runtime adds where
@@ -29,6 +28,14 @@ export type SyncSettings = {
   driftCheckMinutes?: number;
   /** How long a sync whose last run failed waits before the next try. 15 unless set. */
   retryAfterMinutes?: number;
+};
+
+/** When the scheduler runs a sync by itself. */
+export type SyncTiming = {
+  /** How often it checks an idle, healthy destination for missing keys. */
+  driftCheckMs: number;
+  /** How long it waits before retrying a sync whose last run failed. */
+  retryAfterMs: number;
 };
 
 export type ResolvedConfig = {

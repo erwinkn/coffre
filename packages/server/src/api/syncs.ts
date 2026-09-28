@@ -21,6 +21,7 @@ import {
   type SyncProvider,
 } from '../../../sync/src/index.ts';
 import type { GrantChange, Vault } from '../../../vault/src/types.ts';
+import type { SyncTiming } from '../config.ts';
 import { can } from './caller.ts';
 import { allowed, audited, denied, missing, Refusal, vaultRefusal, type ApiContext } from './context.ts';
 import { badRequest, conflict, forbidden, notFound } from './errors.ts';
@@ -116,14 +117,6 @@ export type SyncDeps = {
   fetch?: typeof fetch;
   /** The deployment's `syncs` settings; the defaults below unless set. */
   timing?: SyncTiming;
-};
-
-/** When the scheduler runs a sync by itself. */
-export type SyncTiming = {
-  /** How often it checks an idle, healthy destination for missing keys. */
-  driftCheckMs: number;
-  /** How long it waits before retrying a sync whose last run failed. */
-  retryAfterMs: number;
 };
 
 const MINUTE = 60_000;

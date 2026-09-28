@@ -68,33 +68,38 @@ export class VaultObject extends DurableObject<VaultBindings> implements Vault {
 }
 
 /**
- * The vault Worker's default export: what the app's `VAULT` service binding
- * calls, each call passed to the one Durable Object as it is. `configure`
- * reads the Worker's secrets into the vault's configuration.
+ * What the app's `VAULT` service binding calls: each call passed to the one
+ * Durable Object as it is.
  */
-export function vault<Env extends VaultBindings>(configure_: (env: Env) => VaultConfig) {
+export class VaultEntrypoint extends WorkerEntrypoint<VaultBindings> implements Vault {
+  get #object() {
+    return this.env.VAULT_OBJECT.get(this.env.VAULT_OBJECT.idFromName('vault'));
+  }
+
+  unwrap(input: UnwrapInput) { return this.#object.unwrap(input); }
+  wrap(input: WrapInput) { return this.#object.wrap(input); }
+  rewrap(input: RewrapInput) { return this.#object.rewrap(input); }
+  access(principal: string) { return this.#object.access(principal); }
+  members() { return this.#object.members(); }
+  setAccess(input: SetAccessInput) { return this.#object.setAccess(input); }
+  admit(input: AdmitInput) { return this.#object.admit(input); }
+  remove(input: RemoveInput) { return this.#object.remove(input); }
+  checkpoint(input: CheckpointInput) { return this.#object.checkpoint(input); }
+  latestCheckpoint() { return this.#object.latestCheckpoint(); }
+  log(input: LogInput) { return this.#object.log(input); }
+
+  /** No HTTP surface: only the app's service binding reaches the vault. */
+  fetch() {
+    return new Response('not found', { status: 404 });
+  }
+}
+
+/**
+ * The vault Worker's default export, `VaultEntrypoint`. `configure` reads
+ * the Worker's secrets into the vault's configuration when the Durable
+ * Object starts.
+ */
+export function vault<Env extends VaultBindings>(configure_: (env: Env) => VaultConfig): typeof VaultEntrypoint {
   configure = configure_ as (env: never) => VaultConfig;
-
-  return class VaultEntrypoint extends WorkerEntrypoint<Env> implements Vault {
-    get #object() {
-      return this.env.VAULT_OBJECT.get(this.env.VAULT_OBJECT.idFromName('vault'));
-    }
-
-    unwrap(input: UnwrapInput) { return this.#object.unwrap(input); }
-    wrap(input: WrapInput) { return this.#object.wrap(input); }
-    rewrap(input: RewrapInput) { return this.#object.rewrap(input); }
-    access(principal: string) { return this.#object.access(principal); }
-    members() { return this.#object.members(); }
-    setAccess(input: SetAccessInput) { return this.#object.setAccess(input); }
-    admit(input: AdmitInput) { return this.#object.admit(input); }
-    remove(input: RemoveInput) { return this.#object.remove(input); }
-    checkpoint(input: CheckpointInput) { return this.#object.checkpoint(input); }
-    latestCheckpoint() { return this.#object.latestCheckpoint(); }
-    log(input: LogInput) { return this.#object.log(input); }
-
-    /** No HTTP surface: only the app's service binding reaches the vault. */
-    fetch() {
-      return new Response('not found', { status: 404 });
-    }
-  };
+  return VaultEntrypoint;
 }

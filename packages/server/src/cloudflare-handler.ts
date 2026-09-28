@@ -1,9 +1,10 @@
 import { createDatabase } from '../../db/src/database.ts';
-import { handleRequest, runScheduled, type Ui } from './app.ts';
+import { handleRequest, runScheduled } from './app.ts';
 import { cloudflareSourceIp } from './auth.ts';
 import { resolveConfig, type CoffreConfig, type ResolvedConfig } from './config.ts';
 import { HyperdrivePool } from './database.ts';
 import { createRuntime } from './runtime.ts';
+import type { Ui } from './ui.ts';
 
 /** Postgres through a Hyperdrive binding: `postgres(env.HYPERDRIVE)`. */
 export type PostgresDatabase = { readonly engine: 'postgres'; readonly hyperdrive: { readonly connectionString: string } };

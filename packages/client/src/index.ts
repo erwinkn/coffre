@@ -1,5 +1,6 @@
 /**
- * The coffre API as function calls, typed from the server's route table.
+ * The coffre API as function calls, typed from the server's route table
+ * (`api.ts`, generated from it).
  *
  *   const coffre = createClient({ url: 'https://coffre.acme.example' });
  *   await coffre.secrets.set('market/prod', { DATABASE_URL: '…', OLD_KEY: null });
@@ -8,16 +9,24 @@
  * else: the web app hands requests straight to its router, and the CLI adds
  * its own handling of Cloudflare Access redirects.
  */
-import type {
-  Params,
-  RouteInput,
-  RouteKey,
-  RouteOutput,
-} from '../../server/src/api/routes.ts';
-import type { DryRunOutcome, DryRunResult, SetResult } from '../../server/src/api/secrets.ts';
-import type { AuthInfo } from '../../server/src/fetch-api.ts';
+import type { Api, AuthInfo, DryRunOutcome, DryRunResult, SetResult } from './api.ts';
 
-export type { AuthInfo, DryRunOutcome, RouteInput, RouteKey, RouteOutput };
+export type { Api, AuthInfo, DryRunOutcome, DryRunResult, Json, SetResult } from './api.ts';
+
+export type RouteKey = keyof Api;
+/** What a caller sends: the body, or the query string for a GET. */
+export type RouteInput<K extends RouteKey> = Api[K]['input'];
+/** What comes back, as JSON. */
+export type RouteOutput<K extends RouteKey> = Api[K]['output'];
+
+type ParamNames<Pattern> = Pattern extends `${string}:${infer Name}/${infer Rest}`
+  ? Name | ParamNames<`/${Rest}`>
+  : Pattern extends `${string}:${infer Name}`
+    ? Name
+    : never;
+
+/** `GET /members/:member` takes `{ member }`. */
+export type Params<Key> = { [Name in ParamNames<Key>]: string };
 
 export type Transport = (request: Request) => Promise<Response>;
 

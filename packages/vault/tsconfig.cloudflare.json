@@ -1,5 +1,6 @@
 {
   "extends": "../../tsconfig.base.json",
-  "compilerOptions": { "lib": ["ES2023"], "types": ["@cloudflare/workers-types"] },
+  // Workers' globals, and Node's that `nodejs_compat` adds: Buffer, node:crypto.
+  "compilerOptions": { "lib": ["ES2023"], "types": ["@cloudflare/workers-types", "node"] },
   "include": ["src/cloudflare.ts"]
 }

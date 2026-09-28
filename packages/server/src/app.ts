@@ -1,4 +1,3 @@
-import type { CoffreClient } from '../../client/src/index.ts';
 import { ApiError, badRequest } from './api/errors.ts';
 import {
   finishSignin,
@@ -14,15 +13,9 @@ import { auditReadiness, writeAuditHeartbeat } from './heartbeat.ts';
 import { errorResponse, jsonResponse, methodNotAllowed } from './http.ts';
 import type { CoffreRuntime } from './runtime.ts';
 import { cspNonce, withSecurityHeaders } from './security-headers.ts';
+import type { Ui } from './ui.ts';
 
-/**
- * The pages: `@coffre/ui`'s handler, or a stand-in in tests. It renders with
- * the nonce its scripts carry and a client that reaches the API in process,
- * as the visitor.
- */
-export type Ui = {
-  fetch(request: Request, init: { context: { cspNonce: string; client: CoffreClient } }): Promise<Response>;
-};
+export type { Ui };
 
 type Handler = (request: Request, runtime: CoffreRuntime, sourceIp: string | null) => Promise<Response>;
 

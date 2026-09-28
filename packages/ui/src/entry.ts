@@ -8,7 +8,7 @@ import type { Ui } from './types.ts';
  * the request's nonce and API client; see `router.tsx`.
  */
 export function createUi(): Ui {
-  return { fetch: (request, init) => handler.fetch(request, init) };
+  return { fetch: async (request, init) => handler.fetch(request, init) };
 }
 
 // The build's Worker entry must have a default `fetch`. Nothing deploys the

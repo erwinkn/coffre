@@ -136,7 +136,7 @@ class VaultService implements Vault {
       const keys = await Promise.all(
         input.items.map(({ secret, wrapped }) =>
           this.#config.keks.unwrap(unwrappable(wrapped), context(secret)).then(
-            (key) => key.toString('base64'),
+            (key) => base64(key),
             () => null,
           ),
         ),
@@ -672,5 +672,14 @@ function unwrappable(wrapped: WrappedKey) {
 }
 
 function serialisable(wrapped: { kekProvider: string; kekId: string; kekVersion: string; bytes: Buffer }): WrappedKey {
-  return { ...wrapped, bytes: wrapped.bytes.toString('base64') };
+  return { ...wrapped, bytes: base64(wrapped.bytes) };
+}
+
+/**
+ * Bytes as base64. Through `Buffer.from`, a view of the same memory, because
+ * Workers' types declare their own `Buffer` and a bare one loses its
+ * `toString(encoding)` to them.
+ */
+function base64(bytes: Uint8Array): string {
+  return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('base64');
 }

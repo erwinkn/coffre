@@ -1,5 +1,5 @@
 import { defineSignin, type SigninConfig, type SigninProviderConfig } from './signin/config.ts';
-import type { AccessVerifierConfig } from './verifier.ts';
+import type { AccessVerifierConfig } from './types.ts';
 
 /**
  * Who vouches for the person at the other end of a request.
