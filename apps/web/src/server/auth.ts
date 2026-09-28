@@ -167,9 +167,6 @@ export function requestIdentityContextFor(
   return requestContexts.get(request);
 }
 
-// Routes receive their Request directly. Server functions use getRequest().
-export const requestIdentityContext = requestIdentityContextFor;
-
 function remember(request: Request, context: RequestIdentityContext): void {
   requestContexts.set(request, context);
 }
@@ -183,8 +180,7 @@ export function allowsAnonymousTransport(
   handlerType: 'serverFn' | 'router',
   pathname: string,
 ): boolean {
-  if (handlerType === 'serverFn') return true;
-  if (pathname.startsWith('/auth/')) return true;
+  if (handlerType === 'router' && pathname.startsWith('/auth/')) return true;
   return request.method === 'GET' || request.method === 'HEAD';
 }
 
@@ -233,21 +229,3 @@ export const requestIdentityMiddleware = createMiddleware().server(
     });
   },
 );
-
-export const registeredIdentityMiddleware = createMiddleware({
-  type: 'function',
-}).server(async ({ next, context }) => {
-  const runtime = getRuntime();
-  const identity = (context as unknown as { coffreRequest?: RequestIdentityContext })
-    .coffreRequest;
-  if (
-    identity?.principal !== null &&
-    identity?.principal !== undefined &&
-    identity.registered
-  ) {
-    return next();
-  }
-  throw identity?.principal === null || identity?.principal === undefined
-    ? unauthenticated(runtime.auth)
-    : registrationRequired();
-});

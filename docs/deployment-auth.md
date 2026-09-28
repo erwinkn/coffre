@@ -35,8 +35,8 @@ COFFRE_ACCESS_AUD=<the Application Audience (AUD) Tag>
 
 Cloudflare documents that the origin receives the application token in
 `Cf-Access-Jwt-Assertion`, and recommends validating that header rather than
-the browser cookie. Coffre's global request middleware verifies its signature,
-issuer, and audience before either a UI server function or `/api` handler runs.
+the browser cookie. Coffre verifies its signature, issuer, and audience before
+any `/api` handler runs, and every page reads through `/api`.
 
 Official references:
 
@@ -105,8 +105,8 @@ web service refuses to initialize with one in Cloudflare mode.
 Every non-root identity must also have an active row in Coffre's principal
 directory. Passing the Cloudflare Access policy authenticates the person; it
 does not register them in this Coffre instance. An authenticated but
-unregistered browser is confined to `/unregistered`, while `/api` and all
-product server functions return `403 registration_required`.
+unregistered browser is confined to `/unregistered`, while `/api` returns
+`403 registration_required` for everything but `GET /api/me`.
 
 Changes to `COFFRE_ROOT_ADMINS` are deployment configuration changes. Keep at
 least one controlled bootstrap identity until the operational recovery path is

@@ -1,37 +1,26 @@
 import { defineConfig } from 'eslint/config';
 import tsParser from '@typescript-eslint/parser';
 
-const queriesLiveInDb = {
-  regex: '^drizzle-orm(/|$)',
-  message: 'Every query lives in packages/db/src/queries.ts; add or extend one there.',
-};
-
-const rawServerFunctionImport = {
+const webBoundaries = {
   paths: [
     {
       name: '@tanstack/react-start',
       importNames: ['createServerFn'],
-      message: 'Use registeredServerFn, or the reviewed sessionServerFn boundary.',
+      message:
+        'Pages read and write through the API client (context.client, useCoffre()); add a route to the API instead.',
     },
   ],
-  patterns: [queriesLiveInDb],
-};
-
-const protectedServerFunctionImports = {
-  ...rawServerFunctionImport,
   patterns: [
-    queriesLiveInDb,
     {
-      regex: '(^|/)server/server-fn(?:\\.ts)?$',
-      importNames: ['sessionServerFn'],
-      message: 'Session server functions are limited to the login and shell boundaries.',
+      regex: '^drizzle-orm(/|$)',
+      message: 'Every query lives in packages/db/src/queries.ts; add or extend one there.',
     },
   ],
 };
 
 export default defineConfig([
   {
-    name: 'coffre/server-function-boundaries',
+    name: 'coffre/web-boundaries',
     files: ['apps/web/src/**/*.{ts,tsx}'],
     ignores: ['apps/web/src/routeTree.gen.ts'],
     languageOptions: {
@@ -45,24 +34,7 @@ export default defineConfig([
       noInlineConfig: true,
     },
     rules: {
-      'no-restricted-imports': ['error', protectedServerFunctionImports],
-    },
-  },
-  {
-    name: 'coffre/reviewed-session-boundaries',
-    files: [
-      'apps/web/src/server-functions/auth.ts',
-      'apps/web/src/server-functions/shell.ts',
-    ],
-    rules: {
-      'no-restricted-imports': ['error', rawServerFunctionImport],
-    },
-  },
-  {
-    name: 'coffre/server-function-factory',
-    files: ['apps/web/src/server/server-fn.ts'],
-    rules: {
-      'no-restricted-imports': 'off',
+      'no-restricted-imports': ['error', webBoundaries],
     },
   },
 ]);

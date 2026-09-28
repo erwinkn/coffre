@@ -96,16 +96,19 @@ true and useless.
 `claims.email` gets `undefined` for every machine caller. Machine callers
 (external-secrets, CI) are most of the real traffic.
 
-**One TanStack request boundary protects both transports.** Global request
-middleware authenticates direct `/api` calls and UI server functions, rejects
-`x-middleware-subrequest`, and requires an active principal row. Configured root
-admins are the sole empty-database bootstrap exception.
+**`/api` is the one front door.** Every call, including a page's own server
+render, is authenticated there and must come from an active principal row;
+configured root admins are the sole empty-database bootstrap exception. A
+change made with a cookie must also be same-origin, which stops another site
+from making it in the visitor's name; the CLI and service tokens send a header
+and are unaffected. Page middleware only rejects `x-middleware-subrequest` and
+works out who is looking, for the sign-in routes.
 
 **One route table is the whole API.** `apps/web/src/server/api/routes.ts` maps
 each `METHOD /route` to its input schema, the permission it needs and its
 handler, and one catch-all route serves it under `/api`. The client in
-`packages/client` is typed from that table, and both the CLI and the UI's
-server functions call through it; the UI hands its requests to the router
+`packages/client` is typed from that table, and both the CLI and the UI call
+through it; during a server render the UI hands its requests to the API
 in-process, so there is no loopback request and no second path around
 validation, permission checks or the audit log. See
 [The API](#the-api) below.
@@ -290,8 +293,9 @@ await coffre.access.set('user:ada@acme.example', { market: 'developer', 'market/
 - Creating a project or an environment is a `PUT`: sending it twice is
   harmless, and the second answers `created: false`.
 - Every error is `{ "error": "<code>", "message": "<sentence>" }` with its
-  HTTP status: `bad_request` 400, `unauthenticated` 401, `forbidden` and
-  `registration_required` 403, `not_found` 404, `method_not_allowed` 405,
+  HTTP status: `bad_request` 400, `unauthenticated` 401, `forbidden`,
+  `registration_required` and `cross_origin` 403 (a change made with a
+  browser cookie from another site's page), `not_found` 404, `method_not_allowed` 405,
   `conflict` 409, `too_many_requests` 429, `internal_error` 500 (details in
   the server log only), `unavailable` 503. A refusal on a place that exists
   is logged; a place that does not exist is a 404 and is not.
@@ -431,18 +435,17 @@ Things worth knowing about it:
 Vite 8 plus TanStack Router, replacing Next.js. Notes for anyone reading the
 code expecting the old shape:
 
-- **Every UI read is a server function**, not a server component. Each one is
-  a thin shim that calls `@coffre/client` with a transport that hands the
-  request straight to the API router, in the same Worker invocation: no API
-  base URL, no self-fetch, and the same checks and audit as the CLI.
+- **Every UI read and write goes through `@coffre/client`**, with no server
+  functions or server components. Loaders read through `context.client`: in
+  the browser that is `fetch` to `/api`, and during the server render a
+  transport that hands the request straight to the API in the same Worker
+  invocation, carrying only the visitor's credential. No API base URL, no
+  self-fetch, and the same checks and audit as the CLI. Mutations call the
+  client from the browser, then invalidate the router.
 - **`router.invalidate()` replaces `revalidatePath`.** The old version had to
   name the routes a mutation affected, and renaming a project meant remembering
   to revalidate both `/` and `/:project`. Invalidating refetches every mounted
   loader, so the path's project and environment lists cannot silently go stale.
-- **The audit table's rows are projected server-side.** An audit row's
-  `metadata` is arbitrary JSON and the table renders one derived string from it,
-  so the projection happens in the server function and the rest never crosses to
-  the browser.
 - **The Vite 8 toolchain runs no install scripts.** It uses Rolldown and
   lightningcss, both shipped as prebuilt platform packages, so `ignoreScripts:
   true` costs nothing here. That was worth checking before committing to it.

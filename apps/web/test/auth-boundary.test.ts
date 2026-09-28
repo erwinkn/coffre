@@ -65,7 +65,7 @@ test('the API boundary matches only the native API namespace', () => {
   assert.equal(isApiPath('/v1/me'), false);
 });
 
-test('anonymous page and session transport reaches its route-specific boundary', () => {
+test('anonymous page and sign-in transport reaches its route-specific boundary', () => {
   assert.equal(
     allowsAnonymousTransport(
       new Request('https://coffre.test/login'),
@@ -92,11 +92,11 @@ test('anonymous page and session transport reaches its route-specific boundary',
   );
   assert.equal(
     allowsAnonymousTransport(
-      new Request('https://coffre.test/_serverFn/session'),
+      new Request('https://coffre.test/_serverFn/session', { method: 'POST' }),
       'serverFn',
       '/_serverFn/session',
     ),
-    true,
+    false,
   );
 });
 
