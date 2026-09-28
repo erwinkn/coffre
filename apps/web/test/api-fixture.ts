@@ -11,6 +11,7 @@ export type FixtureDeps = {
   chainKey: Buffer;
   rootAdmins: readonly string[];
   waitUntil?: ApiContext['waitUntil'];
+  onChange?: ApiContext['onChange'];
 };
 
 /** A handler context for one principal, loaded the way a request loads it. */
@@ -29,6 +30,7 @@ export async function contextFor(
       ((promise) => {
         promise.catch((error: unknown) => console.error('background task failed', error));
       }),
+    onChange: deps.onChange ?? (() => {}),
     caller: await loadCaller(deps.db, { type, id }, deps.rootAdmins),
     requestId: randomUUID(),
     sourceIp: null,

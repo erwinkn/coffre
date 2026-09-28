@@ -95,3 +95,21 @@ export async function resolvePath(db: Queryable, path: Path): Promise<ResolvedPa
           },
   };
 }
+
+/** A member as written in a URL: `user:ada@acme.example` or `token:ci-deploy`. */
+export type MemberRef = { type: 'user' | 'service'; id: string };
+
+export function parseMember(member: string): MemberRef {
+  const colon = member.indexOf(':');
+  const prefix = member.slice(0, colon);
+  const id = member.slice(colon + 1);
+  if (colon < 1 || id === '' || (prefix !== 'user' && prefix !== 'token')) {
+    throw badRequest('name a member as user:<email> or token:<name>');
+  }
+  // Emails are stored lowercase, so `user:Ada@…` and `user:ada@…` are one person.
+  return prefix === 'user' ? { type: 'user', id: id.toLowerCase() } : { type: 'service', id };
+}
+
+export function formatMember(member: MemberRef): string {
+  return `${member.type === 'user' ? 'user' : 'token'}:${member.id}`;
+}

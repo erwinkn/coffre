@@ -13,6 +13,8 @@ export type ApiContext = {
   rootAdmins: readonly string[];
   /** Background work that must outlive the response, such as syncs. */
   waitUntil: (promise: Promise<unknown>) => void;
+  /** Called after a commit that changed an environment's secrets, so its syncs can push. */
+  onChange: (environmentId: string) => void;
   caller: Caller;
   requestId: string;
   sourceIp: string | null;
@@ -94,8 +96,7 @@ export async function audited<T>(
     });
   } catch (error) {
     if (!(error instanceof Refusal)) throw error;
-    await ctx.db.transaction((tx) => appendAudit(tx, ctx.chainKey, [error.entry]));
-    throw error.error;
+    return refuse(ctx, error);
   }
 }
 
@@ -124,4 +125,19 @@ export function need(
       ...fields,
     }),
   );
+}
+
+/** Refuse, and log the refusal, unless the caller is an instance owner or a root admin. */
+export function requireOwner(ctx: ApiContext, action: string, fields: EntryFields = {}): void {
+  if (ctx.caller.isOwner) return;
+  throw new Refusal(
+    forbidden('only instance owners may do that'),
+    denied(ctx, action, 'requires_instance_owner', fields),
+  );
+}
+
+/** Log a refusal on its own and throw its error, for checks made outside any transaction. */
+export async function refuse(ctx: Pick<ApiContext, 'db' | 'chainKey'>, refusal: Refusal): Promise<never> {
+  await ctx.db.transaction((tx) => appendAudit(tx, ctx.chainKey, [refusal.entry]));
+  throw refusal.error;
 }
