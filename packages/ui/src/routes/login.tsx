@@ -118,8 +118,8 @@ function ProviderLoginPage({
 
       {providers.length === 0 ? (
         <p className="signin-empty">
-          No sign-in provider is configured. Whoever runs coffre sets them with{' '}
-          <span className="mono">COFFRE_SIGNIN_PROVIDERS</span>.
+          No sign-in provider is configured. Whoever runs coffre lists them in{' '}
+          <span className="mono">signin({'{'} providers {'}'})</span>.
         </p>
       ) : (
         <ul className="providers">

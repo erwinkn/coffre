@@ -130,7 +130,7 @@ export function InstanceRole({ principal }: { principal: DirectoryPrincipal }) {
       <Toggletip
         label={
           <>
-            Set by <code>COFFRE_ROOT_ADMINS</code> in the deployment's configuration, so it
+            Set by <code>rootAdmins</code> in the vault's configuration, so it
             cannot be changed or removed here.
           </>
         }

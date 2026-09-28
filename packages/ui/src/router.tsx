@@ -29,7 +29,7 @@ export function getRouter() {
 
 /**
  * The API as this visitor, which every loader reads through:
- * `context.client.secrets.list('market/dev')`. On the server the Worker
+ * `context.client.secrets.list('market/dev')`. On the server `@coffre/server`
  * builds it per request, calling the API in process with the visitor's
  * credential (`server/fetch-api.ts`); the UI only uses it. In the browser it
  * is plain `fetch` to `/api`, which sends the session cookie itself.
@@ -49,7 +49,7 @@ function requestClient(): CoffreClient {
 }
 
 /**
- * The nonce the Worker minted for this response's Content-Security-Policy,
+ * The nonce the server minted for this response's Content-Security-Policy,
  * which the router puts on every script it renders. The client has none to
  * give: hydration reads it back from the page. A router built only to
  * resolve a redirect runs outside the request's context and renders nothing.
@@ -62,7 +62,7 @@ function cspNonce(): string | undefined {
   }
 }
 
-/** What worker.ts hands every request. */
+/** What `@coffre/server` hands every request; see `types.ts`. */
 type RequestContext = { cspNonce: string; client: CoffreClient };
 
 /** What every loader and component can reach through the router. */

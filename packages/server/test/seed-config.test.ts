@@ -16,7 +16,7 @@ const local = {
   COFFRE_ROOT_ADMINS: 'admin@acme.example',
 };
 
-test('seed accepts only the checked-in local development targets', () => {
+test('seed accepts the checked-in local development targets', () => {
   assert.deepEqual(loadLocalSeedConfig(local), {
     databaseUrl:
       'postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/coffre',
@@ -27,12 +27,30 @@ test('seed accepts only the checked-in local development targets', () => {
   });
 });
 
+test('seed accepts a second local stack, on its own database and ports', () => {
+  const second = loadLocalSeedConfig({
+    ...local,
+    DATABASE_URL: 'postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/coffre_step6',
+    COFFRE_API_URL: 'http://127.0.0.1:3080',
+    COFFRE_DEV_IDP_URL: 'http://127.0.0.1:3081',
+  });
+  assert.equal(second.apiUrl, 'http://127.0.0.1:3080');
+});
+
 test('seed rejects a production database exported over the dev env file', () => {
   assert.throws(
     () =>
       loadLocalSeedConfig({
         ...local,
         DATABASE_URL: 'postgresql://coffre@db.internal.example/coffre',
+      }),
+    /refuses non-local databaseUrl/,
+  );
+  assert.throws(
+    () =>
+      loadLocalSeedConfig({
+        ...local,
+        DATABASE_URL: 'postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/postgres',
       }),
     /refuses non-local databaseUrl/,
   );

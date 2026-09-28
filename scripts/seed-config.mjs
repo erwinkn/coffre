@@ -46,10 +46,23 @@ export const LOCAL_SEED_GRANTS = Object.freeze([
 ]);
 
 /**
+ * What each target may be: this machine's Postgres as the local owner, any
+ * database on it named `coffre…`, and loopback for the API and the IdP, on
+ * any port, so a second dev stack can run beside the first.
+ */
+const LOCAL_TARGETS = Object.freeze({
+    databaseUrl: /^postgresql:\/\/coffre_owner:local-dev-only@127\.0\.0\.1:55432\/coffre[a-z0-9_]*$/,
+    apiUrl: /^http:\/\/127\.0\.0\.1:\d{2,5}$/,
+    idpUrl: /^http:\/\/127\.0\.0\.1:\d{2,5}$/,
+    audience: /^coffre-local-dev-aud$/,
+    rootAdmin: /^admin@acme\.example$/,
+});
+
+/**
  * Resolve the destructive seed targets, refusing mixed environments.
  *
  * `node --env-file` deliberately gives already-exported variables precedence.
- * Without exact target validation, a production database URL exported by the
+ * Without target validation, a production database URL exported by the
  * caller could be combined with COFFRE_AUTH_MODE=dev from `.env.dev`.
  */
 export function loadLocalSeedConfig(env) {
@@ -65,11 +78,9 @@ export function loadLocalSeedConfig(env) {
         rootAdmin: env.COFFRE_ROOT_ADMINS ?? LOCAL_SEED_CONFIG.rootAdmin,
     };
 
-    for (const key of Object.keys(LOCAL_SEED_CONFIG)) {
-        if (resolved[key] !== LOCAL_SEED_CONFIG[key]) {
-            throw new Error(
-                `seed refuses non-local ${key}: expected ${LOCAL_SEED_CONFIG[key]}`,
-            );
+    for (const [key, pattern] of Object.entries(LOCAL_TARGETS)) {
+        if (!pattern.test(resolved[key])) {
+            throw new Error(`seed refuses non-local ${key}: expected one like ${LOCAL_SEED_CONFIG[key]}`);
         }
     }
 
