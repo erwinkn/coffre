@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Exercise the built Worker, Hyperdrive's local binding, Cron heartbeat, and auth boundary.
+# Exercise the built Worker and its vault, Hyperdrive's local binding, the Cron
+# heartbeat and its signed checkpoint, and the auth boundary.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -18,15 +19,20 @@ fi
 # A shell that sourced .env.dev (or a prior `vite build`) bakes the HTTP
 # local issuer into that file; production auth then 500s /livez.
 # Write the smoke contract there so preview cannot inherit the dev IdP.
-mkdir -p apps/web/dist/server
+# The vault Worker reads its own file, beside its own build, and holds every
+# key: the app is handed none.
+mkdir -p apps/web/dist/server apps/web/dist/coffre_vault
 cat >apps/web/dist/server/.dev.vars <<'EOF'
 COFFRE_ACCESS_ISSUER=https://coffre-smoke.cloudflareaccess.com
 COFFRE_ACCESS_JWKS_URL=https://coffre-smoke.cloudflareaccess.com/cdn-cgi/access/certs
 COFFRE_ACCESS_AUD=coffre-smoke-aud
+COFFRE_AUDIT_CHAIN_KEY=Y29mZnJlLWxvY2FsLWF1ZGl0LWNoYWluLWtleS0zMmI=
+EOF
+cat >apps/web/dist/coffre_vault/.dev.vars <<'EOF'
 COFFRE_ROOT_ADMINS=smoke.admin@example.com
 COFFRE_KEK_LOCAL=Y29mZnJlLWxvY2FsLWRldi1rZWstMzItYnl0ZXMhISE=
 COFFRE_KEK_ID=coffre-smoke-1
-COFFRE_AUDIT_CHAIN_KEY=Y29mZnJlLWxvY2FsLWF1ZGl0LWNoYWluLWtleS0zMmI=
+COFFRE_VAULT_SIGNING_KEY=Y29mZnJlLXNtb2tlLXZhdWx0LXNpZ25pbmctc2VlZCE=
 EOF
 
 smoke_port="${SMOKE_PORT:-4173}"
@@ -60,15 +66,19 @@ docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U coffre_owner -d coffr
 
 cd apps/web
 # Drop inherited local-dev auth: cloudflare mode rejects COFFRE_DEV_IDP_URL,
-# and wrangler.jsonc already sets COFFRE_AUTH_MODE=cloudflare.
+# and wrangler.jsonc already sets COFFRE_AUTH_MODE=cloudflare. Drop the
+# vault's inherited keys too, so only its .dev.vars can supply them.
+#
+# COFFRE_STATE_DIR gives this run's vault an empty store: coffre_test was
+# just recreated, and a vault that checkpointed an older log would rightly
+# refuse to sign this one.
 env -u COFFRE_DEV_IDP_URL -u COFFRE_AUTH_MODE \
+    -u COFFRE_ROOT_ADMINS -u COFFRE_KEK_LOCAL -u COFFRE_KEK_ID -u COFFRE_VAULT_SIGNING_KEY \
+    COFFRE_STATE_DIR="$smoke_tmp/state" \
     CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE='postgresql://coffre_runtime:local-runtime-only@127.0.0.1:55432/coffre_test' \
     COFFRE_ACCESS_ISSUER=https://coffre-smoke.cloudflareaccess.com \
     COFFRE_ACCESS_JWKS_URL=https://coffre-smoke.cloudflareaccess.com/cdn-cgi/access/certs \
     COFFRE_ACCESS_AUD=coffre-smoke-aud \
-    COFFRE_ROOT_ADMINS=smoke.admin@example.com \
-    COFFRE_KEK_LOCAL=Y29mZnJlLWxvY2FsLWRldi1rZWstMzItYnl0ZXMhISE= \
-    COFFRE_KEK_ID=coffre-smoke-1 \
     COFFRE_AUDIT_CHAIN_KEY=Y29mZnJlLWxvY2FsLWF1ZGl0LWNoYWluLWtleS0zMmI= \
     ./node_modules/.bin/vite preview --host "$smoke_host" --port "$smoke_port" --strictPort \
     >"$smoke_tmp/server.log" 2>&1 &
@@ -109,6 +119,11 @@ curl --fail --silent --show-error \
     "$smoke_base/cdn-cgi/local/scheduled?cron=*/5+*+*+*+*" >/dev/null
 curl --fail --silent --show-error "$smoke_base/readyz" >/dev/null
 
+# Each beat also has the vault sign the log's head, and fails (a 500 here)
+# if it will not. The second checkpoint must extend the first.
+curl --fail --silent --show-error \
+    "$smoke_base/cdn-cgi/local/scheduled?cron=*/5+*+*+*+*" >/dev/null
+
 status="$(curl --silent --output "$smoke_tmp/unauthenticated.json" \
     --dump-header "$smoke_tmp/unauthenticated.headers" --write-out '%{http_code}' "$smoke_base/api/me")"
 if [[ "$status" != 401 ]] ||
@@ -127,4 +142,4 @@ if ! grep -Eiq "^content-security-policy: .*script-src 'self' 'nonce-" "$smoke_t
     exit 1
 fi
 
-echo "Worker production smoke passed: $smoke_base; Hyperdrive, Cron readiness, auth and security headers behaved as expected"
+echo "Worker production smoke passed: $smoke_base; Hyperdrive, Cron readiness, vault checkpoints, auth and security headers behaved as expected"

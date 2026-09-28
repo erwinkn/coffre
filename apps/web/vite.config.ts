@@ -33,6 +33,10 @@ export default defineConfig({
       // The vault runs next to the app, as the Worker its VAULT binding
       // names, in `vite dev`, `vite build` and `vite preview` alike.
       auxiliaryWorkers: [{ configPath: '../vault/wrangler.jsonc' }],
+      // Where local Durable Objects keep their SQLite, the vault's included.
+      // The vault's grants and checkpoints belong with one database, so the
+      // production smoke test, which recreates coffre_test, brings its own.
+      persistState: process.env.COFFRE_STATE_DIR ? { path: process.env.COFFRE_STATE_DIR } : true,
     }),
     // Generates src/routeTree.gen.ts from src/routes, and wires the SSR
     // server. Must come before the React plugin.
