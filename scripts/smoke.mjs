@@ -354,6 +354,13 @@ async function smoke() {
     check(verification.ok && verification.checkpoint !== null, 'the audit log is not verified and checkpointed', verification);
     check(verification.checkpoint.seq >= before.rows, 'the checkpoint does not cover the reveal', { before, verification });
     console.log(`  audit     ${verification.rows} rows verified, the vault's checkpoint at #${verification.checkpoint.seq}`);
+
+    // The vault's own log, its chain rehashed from the first entry in its
+    // store: a Durable Object's SQLite, or the Node vault's file.
+    const vaultLog = await api('GET', '/audit/vault');
+    const unwrap = vaultLog.entries.find((entry) => entry.action === 'unwrap' && entry.subject === 'smoke/dev/GREETING');
+    check(vaultLog.verification.ok && unwrap?.outcome === 'allow', 'the vault log does not verify, or lacks the reveal', vaultLog);
+    console.log(`  vault log ${vaultLog.verification.entries} entries verified, the reveal among them`);
 }
 
 try {

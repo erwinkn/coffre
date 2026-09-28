@@ -1,5 +1,3 @@
-import { and, count, desc, eq, gt, isNull } from 'drizzle-orm';
-
 import {
   allows,
   assignableToEnvironment,
@@ -13,9 +11,9 @@ import {
 import type { SecretContext } from '../../core/src/context.ts';
 import { checkpointMessage, signer, type Signer } from './checkpoint.ts';
 import type { BulkLimit, ResolvedVaultConfig } from './config.ts';
-import { append, page, verify, type Appended } from './log.ts';
-import * as schema from './schema.ts';
-import { openStore, type SqlStorage, type Store } from './store.ts';
+import { append, entry, verify, type Appended } from './log.ts';
+import type { Sqlite } from './sqlite.ts';
+import { openStore, type GrantRow, type Store } from './store.ts';
 import type {
   Access,
   AccessChange,
@@ -44,16 +42,10 @@ export type VaultOptions = {
   now?: () => number;
 };
 
-/** The vault over `storage`, migrated and ready. */
-export async function openVault(
-  storage: SqlStorage,
-  config: ResolvedVaultConfig,
-  options: VaultOptions = {},
-): Promise<Vault> {
-  return new VaultService(await openStore(storage), config, await signer(config.signingKey), options.now ?? Date.now);
+/** The vault over `db`, migrated and ready. */
+export async function openVault(db: Sqlite, config: ResolvedVaultConfig, options: VaultOptions = {}): Promise<Vault> {
+  return new VaultService(openStore(db), config, await signer(config.signingKey), options.now ?? Date.now);
 }
-
-type GrantRow = typeof schema.grants.$inferSelect;
 
 const PRINCIPAL = /^(user|token|sync):[^\s:][^\s]*$/;
 
@@ -93,14 +85,14 @@ const MESSAGES: Record<RefusalCode, string> = {
  * a Durable Object, so nothing interleaves between the two.
  */
 class VaultService implements Vault {
-  readonly #db: Store;
+  readonly #store: Store;
   readonly #config: ResolvedVaultConfig;
   readonly #signer: Signer;
   readonly #now: () => number;
   #queue: Promise<unknown> = Promise.resolve();
 
-  constructor(db: Store, config: ResolvedVaultConfig, signer: Signer, now: () => number) {
-    this.#db = db;
+  constructor(store: Store, config: ResolvedVaultConfig, signer: Signer, now: () => number) {
+    this.#store = store;
     this.#config = config;
     this.#signer = signer;
     this.#now = now;
@@ -115,15 +107,15 @@ class VaultService implements Vault {
   /** Decide and log in one transaction; a `Refused` rolls back all but its own entries. */
   #decide<T>(at: number, decision: (log: Appended[]) => T): Outcome<T> {
     try {
-      return this.#db.transaction(() => {
+      return this.#store.transaction(() => {
         const log: Appended[] = [];
         const result = decision(log);
-        append(this.#db, at, log);
+        append(this.#store, at, log);
         return { ok: true as const, ...result };
       });
     } catch (error) {
       if (!(error instanceof Refused)) throw error;
-      this.#db.transaction(() => append(this.#db, at, error.entries));
+      this.#store.transaction(() => append(this.#store, at, error.entries));
       return { ok: false, refusal: error.refusal };
     }
   }
@@ -270,19 +262,7 @@ class VaultService implements Vault {
   /** Whether `n` more unwraps would take `principal` past the limit. */
   #overBulkLimit(principal: string, n: number, at: number): boolean {
     const { count: limit, windowMs }: BulkLimit = this.#config.bulkLimit;
-    const [{ recent }] = this.#db
-      .select({ recent: count() })
-      .from(schema.log)
-      .where(
-        and(
-          eq(schema.log.actor, principal),
-          eq(schema.log.action, 'unwrap'),
-          eq(schema.log.outcome, 'allow'),
-          gt(schema.log.at, at - windowMs),
-        ),
-      )
-      .all();
-    return recent + n > limit;
+    return this.#store.unwrapsSince(principal, at - windowMs) + n > limit;
   }
 
   // --- who holds what -----------------------------------------------------
@@ -291,28 +271,20 @@ class VaultService implements Vault {
     return principal.startsWith('user:') && this.#config.rootAdmins.includes(principal.slice('user:'.length));
   }
 
-  #row(principal: string) {
-    return this.#db.select().from(schema.principals).where(eq(schema.principals.principal, principal)).get();
-  }
-
   #status(principal: string): Access['status'] {
     if (this.#isRootAdmin(principal)) return 'active';
-    return this.#row(principal)?.status ?? 'unknown';
-  }
-
-  #grants(principal: string): GrantRow[] {
-    return this.#db.select().from(schema.grants).where(eq(schema.grants.principal, principal)).all();
+    return this.#store.member(principal)?.status ?? 'unknown';
   }
 
   /** What `principal` holds at `at`, or with lapsed grants too when `at` is null. */
   #holdings(principal: string, at: number | null): Holdings {
     if (this.#isRootAdmin(principal)) return { isRootAdmin: true, isOwner: true, grants: [] };
-    const row = this.#row(principal);
+    const row = this.#store.member(principal);
     if (row?.status !== 'active') return { isRootAdmin: false, isOwner: false, grants: [] };
     return {
       isRootAdmin: false,
       isOwner: row.owner && principal.startsWith('user:'),
-      grants: this.#grants(principal)
+      grants: this.#store.grants(principal)
         .filter((grant) => at === null || live(grant, at))
         .map((grant) => ({ ...grant, role: grant.role as Role })),
     };
@@ -322,14 +294,14 @@ class VaultService implements Vault {
     if (this.#isRootAdmin(principal)) {
       return { principal, status: 'active', isRootAdmin: true, isOwner: true, grants: [], since: null, by: null };
     }
-    const row = this.#row(principal);
+    const row = this.#store.member(principal);
     const active = row?.status === 'active';
     return {
       principal,
       status: row?.status ?? 'unknown',
       isRootAdmin: false,
       isOwner: active && row.owner && principal.startsWith('user:'),
-      grants: active ? this.#grants(principal).filter((grant) => live(grant, at)).map(view) : [],
+      grants: active ? this.#store.grants(principal).filter((grant) => live(grant, at)).map(view) : [],
       since: row ? iso(row.since) : null,
       by: row?.by ?? null,
     };
@@ -342,11 +314,8 @@ class VaultService implements Vault {
   members(): Promise<Access[]> {
     return this.#serial(async () => {
       const at = this.#now();
-      const rows = this.#db.select({ principal: schema.principals.principal }).from(schema.principals).all();
-      const everyone = new Set([
-        ...this.#config.rootAdmins.map((email) => `user:${email}`),
-        ...rows.map((row) => row.principal),
-      ]);
+      const rootAdmins = this.#config.rootAdmins.map((email) => `user:${email}`);
+      const everyone = new Set([...rootAdmins, ...this.#store.memberNames()]);
       return [...everyone].sort().map((principal) => this.#access(principal, at));
     });
   }
@@ -395,7 +364,7 @@ class VaultService implements Vault {
           if (!isSyncPrincipal(principal) || input.changes.every((change) => change.role === null)) {
             throw refused('not_a_member');
           }
-          this.#db.insert(schema.principals).values({ principal, status: 'active', since: at, by: actor }).run();
+          this.#store.putMember({ principal, status: 'active', owner: false, since: at, by: actor });
           log.push({
             actor,
             action: 'principal.admit',
@@ -419,12 +388,7 @@ class VaultService implements Vault {
     log: Appended[],
     requestId: string | null | undefined,
   ): AccessChange {
-    const where = and(
-      eq(schema.grants.principal, principal),
-      eq(schema.grants.projectId, change.projectId),
-      change.environmentId === null ? isNull(schema.grants.environmentId) : eq(schema.grants.environmentId, change.environmentId),
-    );
-    const existing = this.#db.select().from(schema.grants).where(where).get();
+    const existing = this.#store.grant(principal, change);
     const current = existing !== undefined && live(existing, at) ? existing : undefined;
     const expiresAt = change.expiresAt === null ? null : Date.parse(change.expiresAt);
     const entry = (action: string, role: string | null) =>
@@ -444,21 +408,21 @@ class VaultService implements Vault {
       });
 
     if (change.role === null) {
-      if (existing !== undefined) this.#db.delete(schema.grants).where(where).run();
+      if (existing !== undefined) this.#store.deleteGrant(principal, change);
       if (current === undefined) return 'unchanged';
       entry('grant.revoke', null);
       return 'revoked';
     }
     if (current !== undefined && current.role === change.role && current.expiresAt === expiresAt) return 'unchanged';
-    const values = { role: change.role, expiresAt, grantedAt: at, grantedBy: actor };
-    if (existing === undefined) {
-      this.#db
-        .insert(schema.grants)
-        .values({ principal, projectId: change.projectId, environmentId: change.environmentId, ...values })
-        .run();
-    } else {
-      this.#db.update(schema.grants).set(values).where(where).run();
-    }
+    this.#store.putGrant({
+      principal,
+      projectId: change.projectId,
+      environmentId: change.environmentId,
+      role: change.role,
+      expiresAt,
+      grantedAt: at,
+      grantedBy: actor,
+    });
     entry(current === undefined ? 'grant.create' : 'grant.update', change.role);
     return current === undefined ? 'created' : 'updated';
   }
@@ -485,22 +449,20 @@ class VaultService implements Vault {
         if (input.owner === true && !principal.startsWith('user:')) {
           throw refused('invalid', 'service accounts cannot be owners');
         }
-        const row = this.#row(principal);
+        const row = this.#store.member(principal);
         const entry = (action: string, owner: boolean) =>
           log.push({ actor, action, outcome: 'allow', subject: principal, detail: { owner, requestId: input.requestId ?? null } });
 
         if (row === undefined || row.status === 'removed') {
           // Coming back is a fresh start: no owner role unless given again.
           const owner = input.owner ?? false;
-          const values = { status: 'active' as const, owner, since: at, by: actor };
-          if (row === undefined) this.#db.insert(schema.principals).values({ principal, ...values }).run();
-          else this.#db.update(schema.principals).set(values).where(eq(schema.principals.principal, principal)).run();
+          this.#store.putMember({ principal, status: 'active', owner, since: at, by: actor });
           entry(row === undefined ? 'principal.admit' : 'principal.restore', owner);
           return { created: true, owner };
         }
         const owner = input.owner ?? row.owner;
         if (owner !== row.owner) {
-          this.#db.update(schema.principals).set({ owner }).where(eq(schema.principals.principal, principal)).run();
+          this.#store.setOwner(principal, owner);
           entry('principal.owner', owner);
         }
         return { created: false, owner };
@@ -525,7 +487,7 @@ class VaultService implements Vault {
         ]);
       return this.#decide(at, (log) => {
         if (this.#isRootAdmin(principal)) throw refused('root_admin');
-        const held = this.#grants(principal);
+        const held = this.#store.grants(principal);
         const holder = this.#holdings(actor, at);
         // Owners remove anyone. Removing a sync only takes access away, so
         // whoever may take away one of its grants, or manage it at its
@@ -539,12 +501,8 @@ class VaultService implements Vault {
         const status = this.#status(principal);
         if (status !== 'active') throw refused(status === 'removed' ? 'removed' : 'not_a_member');
 
-        this.#db.delete(schema.grants).where(eq(schema.grants.principal, principal)).run();
-        this.#db
-          .update(schema.principals)
-          .set({ status: 'removed', owner: false, since: at, by: actor })
-          .where(eq(schema.principals.principal, principal))
-          .run();
+        this.#store.deleteGrants(principal);
+        this.#store.putMember({ principal, status: 'removed', owner: false, since: at, by: actor });
         const revoked = held.filter((grant) => live(grant, at));
         for (const grant of revoked) {
           log.push({
@@ -577,7 +535,7 @@ class VaultService implements Vault {
   // --- checkpoints and the log -------------------------------------------
 
   #latest(): Checkpoint | null {
-    const row = this.#db.select().from(schema.checkpoints).orderBy(desc(schema.checkpoints.seq)).limit(1).get();
+    const row = this.#store.latestCheckpoint();
     return row === undefined ? null : { ...row, signedAt: iso(row.signedAt) };
   }
 
@@ -614,7 +572,7 @@ class VaultService implements Vault {
           ]);
         }
         const checkpoint = { seq: input.seq, headHash: input.headHash, signedAt, keyId: this.#signer.keyId, signature };
-        this.#db.insert(schema.checkpoints).values({ ...checkpoint, signedAt: at }).run();
+        this.#store.addCheckpoint({ ...checkpoint, signedAt: at });
         return { checkpoint };
       });
     });
@@ -634,7 +592,7 @@ class VaultService implements Vault {
           ]);
         }
         const limit = Math.min(Math.max(Math.trunc(input.limit ?? 50), 1), 200);
-        return { entries: page(this.#db, input.before, limit), verification: verify(this.#db) };
+        return { entries: this.#store.logPage(input.before, limit).map(entry), verification: verify(this.#store) };
       });
     });
   }

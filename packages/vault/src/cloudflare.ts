@@ -17,6 +17,7 @@
 import { DurableObject, WorkerEntrypoint } from 'cloudflare:workers';
 
 import { resolveVaultConfig, type VaultConfig } from './config.ts';
+import { durableObjectSqlite } from './sqlite-durable-object.ts';
 import type {
   AdmitInput,
   CheckpointInput,
@@ -39,7 +40,7 @@ export type VaultBindings = { VAULT_OBJECT: DurableObjectNamespace<VaultObject> 
 let configure: ((env: never) => VaultConfig) | null = null;
 
 /**
- * The vault itself. Its storage is the vault's store, migrated before the
+ * The vault itself. Its SQLite is the vault's store, migrated before the
  * first call is let in.
  */
 export class VaultObject extends DurableObject<VaultBindings> implements Vault {
@@ -50,7 +51,7 @@ export class VaultObject extends DurableObject<VaultBindings> implements Vault {
     if (configure === null) throw new Error('the vault Worker must export default vault(…)');
     const config = resolveVaultConfig(configure(env as never));
     void ctx.blockConcurrencyWhile(async () => {
-      this.#vault = await openVault(ctx.storage, config);
+      this.#vault = await openVault(durableObjectSqlite(ctx.storage), config);
     });
   }
 

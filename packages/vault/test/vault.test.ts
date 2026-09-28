@@ -4,14 +4,12 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-
-import Database from 'libsql';
+import { DatabaseSync } from 'node:sqlite';
 
 import { LocalKekProvider } from '../../core/src/kek/local.ts';
 import { KekRegistry } from '../../core/src/kek/registry.ts';
 import { verifyCheckpoint } from '../src/checkpoint.ts';
 import { checkRootAdmins, resolveVaultConfig, type ResolvedVaultConfig } from '../src/config.ts';
-import { embeddedMigrations } from '../src/generate.ts';
 import { openLocalVault, type LocalVault } from '../src/local.ts';
 import type { SecretRef, WrappedKey } from '../src/types.ts';
 
@@ -84,13 +82,8 @@ async function wrapped(w: World, secret: SecretRef): Promise<WrappedKey> {
 }
 
 function raw(w: World) {
-  return new Database(w.path);
+  return new DatabaseSync(w.path);
 }
-
-test('src/migrations.ts is migrations/, embedded', async () => {
-  const embedded = readFileSync(new URL('../src/migrations.ts', import.meta.url), 'utf8');
-  assert.equal(embedded, await embeddedMigrations(), 'run `pnpm --dir packages/vault generate`');
-});
 
 test('a read needs a live grant on the environment, and unwraps the key it was wrapped with', async (t) => {
   const w = await world(t);
@@ -363,7 +356,9 @@ test('the store holds no key', async (t) => {
   const wrap = await w.vault.wrap({ principal: ADA, items: [{ secret, key: key.toString('base64') }] });
   assert.ok(wrap.ok);
   await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: [{ secret, wrapped: wrap.wrapped[0] }] });
-  const file = readFileSync(w.path);
+  // In WAL, the newest writes are in the -wal until a checkpoint moves them.
+  const file = Buffer.concat([w.path, `${w.path}-wal`].map((name) => readFileSync(name)));
+  assert.ok(file.includes(secret.path), 'the log entry is where this looks');
   for (const needle of [kek, key]) {
     assert.equal(file.includes(needle), false);
     assert.equal(file.includes(Buffer.from(needle.toString('base64'))), false);
