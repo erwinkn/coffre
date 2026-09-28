@@ -120,7 +120,8 @@ the verb:
 | restore a version, as a new version | `POST /api/secrets/market/prod/DATABASE_URL/restore {"version": 3}` |
 | decrypt a secret or a whole environment | `POST /api/reveals {"path": "market/prod"}` |
 | list, add or offboard members | `GET /api/members`, `PUT` / `DELETE /api/members/user:ada@acme.example` |
-| issue a token | `POST /api/members/token:ci-deploy/tokens` |
+| what a member holds and has seen, before offboarding | `GET /api/members/user:ada@acme.example` |
+| list, issue or revoke a token's credentials | `GET` / `POST /api/members/token:ci-deploy/tokens`, `DELETE …/tokens/:id` |
 | change someone's access, in one transaction | `PATCH /api/access/user:ada@acme.example {"market": "developer", "market/prod": null}` |
 | syncs | `GET` / `POST /api/syncs/market/prod`, `PATCH` / `DELETE /api/syncs/by-id/:id`, `POST …/:id/runs` |
 | the audit log, and verifying it | `GET /api/audit?path=market/prod`, `GET /api/audit/verification` |
@@ -139,9 +140,15 @@ Sign-in (OAuth callbacks, the device-code flow for `coffre login`) stays on
 its own routes; it is a protocol, not something done to the data.
 
 The server is one table keyed by method and route, each entry giving its input
-schema, the permission it needs and its handler. `@coffre/client` is generated
-from the same table (`coffre.secrets.set('market/prod', {…})`), so the two
-cannot drift, and the UI's server functions go away.
+schema, the permission it needs and its handler. `@coffre/client` is typed
+from the same table by inference (`coffre.secrets.set('market/prod', {…})`),
+so the two cannot drift, and the UI's server functions go away.
+
+Each segment names one level, so `/api/secrets/market/prod/versions` is a
+secret named `versions`, and its history is one level further down. Where a
+literal and a name could both fit a path, the literal wins among the routes
+that take the request's method: `DELETE /api/syncs/by-id/…` names a sync,
+while `GET /api/syncs/by-id/prod` is still a project named `by-id`.
 
 Behind it, a request loads the caller and all their grants in one query, and
 every permission check after that is a plain function. With paths resolved in

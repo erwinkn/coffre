@@ -87,12 +87,17 @@ that holds the keys and decides who may decrypt. The design is in
    imported by another Worker ([report](../spikes/ssr-ui/REPORT.md)), and one
    set of Drizzle queries across three dialects
    ([report](../spikes/drizzle-dialects/REPORT.md)).
-2. **The API** ([design](architecture.md#the-api)): the new routes and the
-   client generated from them, rewritten on Drizzle against Postgres, with
-   roles in code and one role per member per place. The CLI moves onto the
-   client.
+2. ~~**The API**~~ ([design](architecture.md#the-api)): done. One route
+   table under `/api`, on Drizzle against Postgres, with roles in code and
+   one role per member per place; `@coffre/client` typed from it; the CLI on
+   the client. The old routes and services are gone, and the UI's server
+   functions are thin shims that call the client in-process. Import has no
+   endpoint: the client plans it (a reveal and a list) and writes the changed
+   keys with one `PATCH`.
 3. **The UI on the client**: page loaders call `@coffre/client`; the server
-   functions and the old routes go.
+   functions go. Account sessions, linked sign-in accounts and the device
+   approval still call the sign-in service directly, outside the route
+   table.
 4. **MySQL and SQLite**, with the integration suite on all three.
 5. **The vault**: keys, grants, principal status and its log move behind it.
 6. **The packages**: configuration in code, compiled output, the Node

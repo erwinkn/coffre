@@ -81,8 +81,11 @@ pushed to a repository they administer, are outside what coffre can know.
 ## API
 
 ```
-GET    /api/admin/directory/{user|service}/{id}   the report
-DELETE /api/admin/directory/{user|service}/{id}   remove
+GET    /api/members/user:ada@acme.example   the report
+DELETE /api/members/user:ada@acme.example   remove; answers with the report
 ```
+
+Services are `token:<name>`. From the client, `coffre.members.get(member)` and
+`coffre.members.remove(member)`.
 
 Both need the instance owner role (root admins have it).
