@@ -1,4 +1,4 @@
-import { sql } from 'drizzle-orm';
+import { relations, sql } from 'drizzle-orm';
 import {
   bigint,
   boolean,
@@ -77,6 +77,9 @@ export const secrets = pgTable(
       (): AnyPgColumn => secretVersions.id,
       { onDelete: 'no action' },
     ),
+    // The number of the current version, 0 before the first. Versions only
+    // append, so it is also the highest: the next one is this plus one.
+    currentVersion: integer('current_version').notNull().default(0),
     archivedAt: timestamp('archived_at', { withTimezone: true }),
   },
   (table) => [
@@ -532,3 +535,55 @@ export const syncKeys = pgTable(
     }).onDelete('restrict'),
   ],
 );
+
+// --- relations ----------------------------------------------------------------
+//
+// For Drizzle's relational queries (`db.query.principals.findMany({ with })`),
+// which read a row and what hangs off it in one statement on every dialect.
+// They add no constraints; the foreign keys above do that.
+
+const holder = (table: typeof grants | typeof credentials | typeof identities) => ({
+  fields: [table.principalType, table.principalId],
+  references: [principals.principalType, principals.principalId],
+});
+
+export const principalsRelations = relations(principals, ({ many }) => ({
+  grants: many(grants),
+  credentials: many(credentials),
+  identities: many(identities),
+}));
+
+export const grantsRelations = relations(grants, ({ one }) => ({
+  principal: one(principals, holder(grants)),
+  project: one(projects, { fields: [grants.projectId], references: [projects.id] }),
+  environment: one(environments, { fields: [grants.environmentId], references: [environments.id] }),
+}));
+
+export const credentialsRelations = relations(credentials, ({ one }) => ({
+  principal: one(principals, holder(credentials)),
+  identity: one(identities, { fields: [credentials.identityId], references: [identities.id] }),
+}));
+
+export const identitiesRelations = relations(identities, ({ one }) => ({
+  principal: one(principals, holder(identities)),
+}));
+
+export const environmentsRelations = relations(environments, ({ one }) => ({
+  project: one(projects, { fields: [environments.projectId], references: [projects.id] }),
+}));
+
+export const secretsRelations = relations(secrets, ({ one }) => ({
+  project: one(projects, { fields: [secrets.projectId], references: [projects.id] }),
+  environment: one(environments, { fields: [secrets.environmentId], references: [environments.id] }),
+}));
+
+export const syncsRelations = relations(syncs, ({ one, many }) => ({
+  project: one(projects, { fields: [syncs.projectId], references: [projects.id] }),
+  environment: one(environments, { fields: [syncs.environmentId], references: [environments.id] }),
+  credential: one(secrets, { fields: [syncs.credentialSecretId], references: [secrets.id] }),
+  keys: many(syncKeys),
+}));
+
+export const syncKeysRelations = relations(syncKeys, ({ one }) => ({
+  sync: one(syncs, { fields: [syncKeys.syncId], references: [syncs.id] }),
+}));
