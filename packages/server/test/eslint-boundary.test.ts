@@ -33,10 +33,18 @@ test('ESLint keeps drizzle queries in the server\'s database layer', async () =>
     'packages/core/src/example.ts',
     'packages/client/src/example.ts',
     'packages/cli/src/example.ts',
+    'packages/vault/src/store.ts',
+    'packages/vault/src/sqlite-node.ts',
   ]) {
     assert.equal((await lintImport(source, filePath))[0]?.ruleId, 'no-restricted-imports', filePath);
   }
-  for (const filePath of ['packages/server/src/db/example.ts', 'packages/vault/src/example.ts']) {
-    assert.deepEqual(await lintImport(source, filePath), [], filePath);
+  assert.deepEqual(await lintImport(source, 'packages/server/src/db/example.ts'), []);
+});
+
+test('ESLint keeps node:sqlite in the vault\'s Node adapter, out of the Worker', async () => {
+  const source = "import { DatabaseSync } from 'node:sqlite';";
+  for (const filePath of ['packages/vault/src/store.ts', 'packages/vault/src/cloudflare.ts']) {
+    assert.equal((await lintImport(source, filePath))[0]?.ruleId, 'no-restricted-imports', filePath);
   }
+  assert.deepEqual(await lintImport(source, 'packages/vault/src/sqlite-node.ts'), []);
 });
