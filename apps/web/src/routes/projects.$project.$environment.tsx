@@ -1563,9 +1563,9 @@ function ImportEnv({ project, environment }: { project: string; environment: str
         wide
         description={
           <>
-            Paste a .env file. It is parsed on the server, so this page and the CLI cannot
-            disagree about what it means, and malformed lines are reported rather than
-            guessed at. The preview compares against current values, so both the preview and
+            Paste a .env file. It is read by the CLI’s own parser, so this page and the CLI
+            cannot disagree about what it means, and malformed lines are reported rather
+            than guessed at. The preview compares against current values, so both the preview and
             the import are recorded in the audit log.
           </>
         }
