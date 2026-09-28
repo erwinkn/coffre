@@ -73,9 +73,6 @@ import {
  */
 const REVEAL_TTL_SECONDS = 45;
 
-/** Referenced by every Reveal control, so the cost is announced before the click. */
-const REVEAL_COST_ID = 'reveal-cost';
-
 export const Route = createFileRoute('/projects/$project/$environment')({
   // `?filter=KEY` opens the ledger narrowed to matching keys, for links to one secret.
   validateSearch: (search: Record<string, unknown>): { filter?: string } => ({
@@ -341,10 +338,6 @@ function EnvironmentLedger({
 
   return (
     <>
-      <p id={REVEAL_COST_ID} className="visually-hidden">
-        Revealing decrypts the value and records a read under your name in the audit log.
-      </p>
-
       <PageHeader
         tile={project}
         title={environment}
@@ -894,7 +887,6 @@ function SecretRow({
                   <button
                     type="button"
                     className="act"
-                    aria-describedby={REVEAL_COST_ID}
                     disabled={revealing}
                     onClick={async () => {
                       const value = await readValue();
@@ -904,7 +896,7 @@ function SecretRow({
                     }}
                   >
                     {revealing && <Spinner size={12} />}
-                    Start from current value (logged)
+                    Start from current value
                   </button>
                 )}
               </span>
@@ -916,7 +908,7 @@ function SecretRow({
             >
               <span className="revealed-value">{shown.value === '' ? '(empty)' : shown.value}</span>
               <span className="revealed-note">
-                Read logged at {clock(shown.at)} · hides in {secondsLeft}s
+                Hides in {secondsLeft}s
               </span>
               <span className="revealed-meter" aria-hidden />
             </div>
@@ -972,12 +964,11 @@ function SecretRow({
                   <CopyButton variant="act" value={shown.value} label={`Copy ${entry.key}`} />
                 )}
                 <SecretReadOnly canReveal={canReveal}>
-                  <Tip label={shown === null ? 'Reveal (logged under your name)' : 'Hide'}>
+                  <Tip label={shown === null ? 'Reveal' : 'Hide'}>
                     <button
                       className="act act-icon act-accent"
                       onClick={toggleReveal}
                       disabled={revealing}
-                      aria-describedby={shown === null ? REVEAL_COST_ID : undefined}
                       aria-label={`${shown === null ? 'Reveal' : 'Hide'} ${entry.key}`}
                     >
                       {revealing ? (
@@ -1111,10 +1102,6 @@ function Written({ entry }: { entry: SecretKey }) {
       )}
     </span>
   );
-}
-
-function clock(at: number): string {
-  return `${new Date(at).toISOString().slice(11, 19)} UTC`;
 }
 
 /**
@@ -1471,7 +1458,7 @@ function VersionHistory({
         </div>
       )}
       <p className="history-note">
-        Metadata only. Listing versions decrypts nothing and is not recorded as a read.
+        Metadata only. Listing versions decrypts nothing.
       </p>
     </div>
   );
@@ -1570,7 +1557,7 @@ function ImportEnv({ project, environment }: { project: string; environment: str
             Paste a .env file. It is read by the CLI’s own parser, so this page and the CLI
             cannot disagree about what it means, and malformed lines are reported rather
             than guessed at. coffre compares it with the current values without sending any
-            to this page, and records both the comparison and the import in the audit log.
+            to this page.
           </>
         }
       >

@@ -439,7 +439,7 @@ function AddSync({ project, environment }: { project: string; environment: strin
             <span className="hint">
               The secret that holds it, as <code>project/environment/KEY</code>. An environment of
               its own, such as <code>ops/sync</code>, keeps it from everyone who reads these
-              secrets. You need read access to it, and every run logs opening it.
+              secrets. You need read access to it.
             </span>
           </label>
 
