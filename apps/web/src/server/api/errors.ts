@@ -11,6 +11,7 @@ import { z } from 'zod';
  *   404 not_found          no such project, environment, secret, member or sync
  *   405 method_not_allowed
  *   409 conflict           the request is valid but the current state refuses it
+ *   429 too_many_requests  too many sign-ins waiting; try again later
  *   500 internal_error     a bug; the details are in the server log only
  *
  * The message is written for a person and is safe to show them.
@@ -23,6 +24,7 @@ export const ERROR_STATUS = {
   not_found: 404,
   method_not_allowed: 405,
   conflict: 409,
+  too_many_requests: 429,
   unavailable: 503,
   internal_error: 500,
 } as const;

@@ -4,6 +4,7 @@ import type { KekRegistry } from '../../../packages/core/src/kek/registry.ts';
 import type { Database } from '../../../packages/db/src/database.ts';
 import { loadCaller } from '../src/server/api/caller.ts';
 import type { ApiContext } from '../src/server/api/context.ts';
+import { SyncRunner } from '../src/server/api/syncs.ts';
 
 export type FixtureDeps = {
   db: Database;
@@ -11,7 +12,7 @@ export type FixtureDeps = {
   chainKey: Buffer;
   rootAdmins: readonly string[];
   waitUntil?: ApiContext['waitUntil'];
-  onChange?: ApiContext['onChange'];
+  syncs?: SyncRunner;
 };
 
 /** A handler context for one principal, loaded the way a request loads it. */
@@ -30,7 +31,7 @@ export async function contextFor(
       ((promise) => {
         promise.catch((error: unknown) => console.error('background task failed', error));
       }),
-    onChange: deps.onChange ?? (() => {}),
+    syncs: deps.syncs ?? new SyncRunner({ db: deps.db, keks: deps.keks, chainKey: deps.chainKey }),
     caller: await loadCaller(deps.db, { type, id }, deps.rootAdmins),
     requestId: randomUUID(),
     sourceIp: null,

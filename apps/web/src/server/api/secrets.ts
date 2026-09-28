@@ -5,7 +5,7 @@ import { and, asc, desc, eq, inArray, isNull, max } from 'drizzle-orm';
 import type { Permission } from '../../../../../packages/core/src/access.ts';
 import { open, seal, type Envelope } from '../../../../../packages/core/src/envelope.ts';
 import type { Queryable, Transaction } from '../../../../../packages/db/src/database.ts';
-import { forUpdate, insertSecretIfAbsent } from '../../../../../packages/db/src/dialect.ts';
+import { forUpdate, insertIfAbsent } from '../../../../../packages/db/src/dialect.ts';
 import { secrets, secretVersions } from '../../../../../packages/db/src/schema.ts';
 import { permissionsAt } from './caller.ts';
 import { allowed, audited, denied, need, Refusal, type ApiContext } from './context.ts';
@@ -52,15 +52,11 @@ function requireLive(place: ResolvedPath): Environment {
 
 /** Tell the environment's syncs to push, once the change has committed. */
 function changed(ctx: ApiContext, environmentId: string): void {
-  try {
-    ctx.onChange(environmentId);
-  } catch (error) {
-    // The write has committed; a sync that cannot start now is picked up by the scheduler.
-    console.error('sync notification failed', error);
-  }
+  // Never throws: the write has committed, and the scheduler picks up any run missed here.
+  ctx.waitUntil(ctx.syncs.runForEnvironment(environmentId));
 }
 
-const envelopeColumns = {
+export const envelopeColumns = {
   envelopeVersion: secretVersions.envelopeVersion,
   kekProvider: secretVersions.kekProvider,
   kekId: secretVersions.kekId,
@@ -71,7 +67,7 @@ const envelopeColumns = {
   ciphertext: secretVersions.ciphertext,
 };
 
-function envelopeOf(row: Envelope): Envelope {
+export function envelopeOf(row: Envelope): Envelope {
   return {
     envelopeVersion: row.envelopeVersion,
     kekProvider: row.kekProvider,
@@ -198,7 +194,7 @@ export async function setSecrets(
 
   const result = await audited(ctx, async (tx, log) => {
     for (const [key] of writes) {
-      await insertSecretIfAbsent(tx, { id: randomUUID(), ...environment, key });
+      await insertIfAbsent(tx, secrets, { id: randomUUID(), ...environment, key });
     }
     // Lock every named row, so a racing archive or write waits for this one.
     const rows = await forUpdate(

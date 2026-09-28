@@ -4,6 +4,7 @@ import { appendAudit, type AuditEntry } from '../../../../../packages/db/src/aud
 import type { Database, Transaction } from '../../../../../packages/db/src/database.ts';
 import { can, type Caller, type Place } from './caller.ts';
 import { forbidden, type ApiError } from './errors.ts';
+import type { SyncRunner } from './syncs.ts';
 
 /** What every handler works with: the stores, and who is asking. */
 export type ApiContext = {
@@ -13,8 +14,8 @@ export type ApiContext = {
   rootAdmins: readonly string[];
   /** Background work that must outlive the response, such as syncs. */
   waitUntil: (promise: Promise<unknown>) => void;
-  /** Called after a commit that changed an environment's secrets, so its syncs can push. */
-  onChange: (environmentId: string) => void;
+  /** Runs syncs: after a commit that changed an environment's secrets, and on request. */
+  syncs: SyncRunner;
   caller: Caller;
   requestId: string;
   sourceIp: string | null;

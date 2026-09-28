@@ -1,7 +1,8 @@
 import { sql } from 'drizzle-orm';
+import { bigint, integer, pgSchema, text, type PgTable } from 'drizzle-orm/pg-core';
 
 import type { Transaction } from './database.ts';
-import { auditChainHead, secrets, syncKeys } from './schema.ts';
+import { auditChainHead, syncKeys } from './schema.ts';
 
 /**
  * Everything that is written differently on Postgres, MySQL and SQLite, and
@@ -15,6 +16,9 @@ import { auditChainHead, secrets, syncKeys } from './schema.ts';
  *   upsert            ON CONFLICT DO UPDATE   ON DUPLICATE KEY       ON CONFLICT DO UPDATE
  *   duplicate key     SQLSTATE 23505          errno 1062             SQLITE_CONSTRAINT_UNIQUE
  */
+
+/** A second name for a table, to join it twice. Each dialect's core exports its own. */
+export { alias } from 'drizzle-orm/pg-core';
 
 /** Lock the rows a select reads until the transaction ends. */
 export function forUpdate<Query extends { for: (strength: 'update') => unknown }>(
@@ -46,14 +50,16 @@ export async function lockAuditHead(
 }
 
 /**
- * Create a secret's row unless one with that key exists, so two writers
- * adding the same key both end up writing versions of one secret.
+ * Insert a row unless one with the same unique key exists. Two writers
+ * adding the same secret both end up writing versions of one secret; two
+ * first sign-ins of a root admin both find one principal.
  */
-export async function insertSecretIfAbsent(
+export async function insertIfAbsent<Table extends PgTable>(
   tx: Transaction,
-  row: typeof secrets.$inferInsert,
+  table: Table,
+  row: Table['$inferInsert'],
 ): Promise<void> {
-  await tx.insert(secrets).values(row).onConflictDoNothing();
+  await tx.insert(table).values(row).onConflictDoNothing();
 }
 
 /** Record that a sync pushed a key at a version, or pushed it again. */
@@ -78,3 +84,14 @@ export function isUniqueViolation(error: unknown): boolean {
   }
   return false;
 }
+
+/**
+ * The migrator's own ledger, read by readiness to tell a database that is
+ * up but not yet migrated from one that is ready. Drizzle keeps it in a
+ * `drizzle` schema on Postgres, and in a plain table elsewhere.
+ */
+export const migrations = pgSchema('drizzle').table('__drizzle_migrations', {
+  id: integer().primaryKey(),
+  hash: text().notNull(),
+  createdAt: bigint('created_at', { mode: 'number' }),
+});
