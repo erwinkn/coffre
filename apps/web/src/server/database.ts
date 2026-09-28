@@ -1,33 +1,17 @@
 import pg from 'pg';
 
-export type DatabaseClient = Pick<pg.PoolClient, 'query'> & {
-  release: () => void | Promise<void>;
-};
-
-export type Database = Pick<pg.Pool, 'query'> & {
-  connect: () => Promise<DatabaseClient>;
-};
-
-/** Convert node-postgres timestamp values at the service boundary. */
-export function toIsoTimestamp(value: string | Date): string {
-  const timestamp = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(timestamp.getTime())) throw new Error('database returned an invalid timestamp');
-  return timestamp.toISOString();
-}
-
-export function toNullableIsoTimestamp(value: string | Date | null): string | null {
-  return value === null ? null : toIsoTimestamp(value);
-}
+import type { PoolLike } from '../../../../packages/db/src/database.ts';
 
 /**
  * Request-scoped node-postgres adapter for Hyperdrive.
  *
  * Hyperdrive owns the durable origin pool. The Worker creates edge clients
  * only inside one invocation, which prevents I/O objects from leaking across
- * Worker request contexts while preserving the Pool-shaped contract used by
- * the service layer.
+ * Worker request contexts while keeping the Pool shape Drizzle expects. The
+ * class name must end in `Pool`: that is how Drizzle knows to check out a
+ * client for each transaction.
  */
-export class HyperdriveDatabase implements Database {
+export class HyperdrivePool implements Exclude<PoolLike, pg.Pool> {
   readonly #connectionString: string;
 
   constructor(connectionString: string) {
@@ -37,25 +21,24 @@ export class HyperdriveDatabase implements Database {
     this.#connectionString = connectionString;
   }
 
-  readonly query: Database['query'] = (async (...args: unknown[]) => {
+  readonly query: pg.Pool['query'] = (async (...args: unknown[]) => {
     const client = await this.#connectClient();
     try {
       return await (client.query as (...queryArgs: unknown[]) => Promise<unknown>)(...args);
     } finally {
       await client.end();
     }
-  }) as Database['query'];
+  }) as pg.Pool['query'];
 
-  async connect(): Promise<DatabaseClient> {
+  async connect(): Promise<Pick<pg.PoolClient, 'query'> & { release: () => void }> {
     const client = await this.#connectClient();
     let released = false;
-
     return {
-      query: client.query.bind(client),
-      release: async () => {
+      query: client.query.bind(client) as pg.PoolClient['query'],
+      release: () => {
         if (released) return;
         released = true;
-        await client.end();
+        client.end().catch(() => {});
       },
     };
   }

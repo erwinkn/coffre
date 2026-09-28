@@ -56,6 +56,11 @@ export async function loadCaller(
   rootAdmins: readonly string[],
   now = new Date(),
 ): Promise<Caller> {
+  const ref = { type: principal.type, id: principal.id };
+  // A root admin may do everything, so there is nothing to load.
+  if (isConfiguredRootAdmin(principal, rootAdmins)) {
+    return { principal: ref, registered: true, isRootAdmin: true, isOwner: true, instanceRole: 'root-admin', grants: [] };
+  }
   const rows = await db
     .select({
       active: principals.active,
@@ -79,9 +84,8 @@ export async function loadCaller(
     .leftJoin(environments, eq(environments.id, grants.environmentId))
     .where(and(eq(principals.principalType, principal.type), eq(principals.principalId, principal.id)));
 
-  const isRootAdmin = isConfiguredRootAdmin(principal, rootAdmins);
   const active = rows[0]?.active === true;
-  const isInstanceOwner = active && principal.type === 'user' && rows[0]?.instanceRole === 'owner';
+  const isOwner = active && principal.type === 'user' && rows[0]?.instanceRole === 'owner';
 
   const held: CallerGrant[] = [];
   if (active) {
@@ -99,11 +103,11 @@ export async function loadCaller(
   }
 
   return {
-    principal: { type: principal.type, id: principal.id },
-    registered: isRootAdmin || active,
-    isRootAdmin,
-    isOwner: isRootAdmin || isInstanceOwner,
-    instanceRole: isRootAdmin ? 'root-admin' : isInstanceOwner ? 'owner' : 'user',
+    principal: ref,
+    registered: active,
+    isRootAdmin: false,
+    isOwner,
+    instanceRole: isOwner ? 'owner' : 'user',
     grants: held,
   };
 }

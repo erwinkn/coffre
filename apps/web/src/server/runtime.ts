@@ -7,21 +7,20 @@ import {
   AccessIdentityVerifier,
   type AccessVerifierConfig,
 } from '../../../../packages/core/src/identity/verifier.ts';
+import type { KekRegistry } from '../../../../packages/core/src/kek/registry.ts';
+import { createDatabase, type Database } from '../../../../packages/db/src/database.ts';
+import type { ApiContext } from './api/context.ts';
+import { SigninService } from './api/signin.ts';
+import { SyncRunner } from './api/syncs.ts';
+import type { AuthenticatedIdentity } from './auth.ts';
 import { loadConfig, type Config } from './config.ts';
-import { HyperdriveDatabase, type Database } from './database.ts';
-import { AdminService } from './services/admin.ts';
-import { AuditService } from './services/audit.ts';
-import { SecretsService, type RequestContext } from './services/secrets.ts';
-import { SigninService } from './services/signin.ts';
-import { SyncService } from './services/sync.ts';
-import type { PrincipalReport } from '../shared/models.ts';
+import { HyperdrivePool } from './database.ts';
 
 export type CoffreRuntime = {
-  pool: Database;
-  admin: AdminService;
-  audit: AuditService;
-  secrets: SecretsService;
-  syncs: SyncService;
+  db: Database;
+  keks: KekRegistry;
+  chainKey: Buffer;
+  syncs: SyncRunner;
   /** Present in signin mode only. */
   signin: SigninService | null;
   auth: Config['auth'];
@@ -47,7 +46,7 @@ const requestRuntime = new AsyncLocalStorage<CoffreRuntime>();
  */
 export function createRuntime(
   config: Config,
-  pool: Database,
+  db: Database,
   waitUntil: CoffreRuntime['waitUntil'] = (promise) => {
     promise.catch((error: unknown) => console.error('background task failed', error));
   },
@@ -56,8 +55,8 @@ export function createRuntime(
   let verifier: IdentityVerifier;
   if (config.auth.mode === 'signin') {
     signin = new SigninService({
-      pool,
-      auditChainKey: config.auditChainKey,
+      db,
+      chainKey: config.auditChainKey,
       rootAdmins: config.rootAdmins,
       signin: config.auth.signin,
     });
@@ -65,36 +64,11 @@ export function createRuntime(
   } else {
     verifier = accessVerifier(config.auth.access);
   }
-  const syncs = new SyncService({
-    pool,
-    keks: config.keks,
-    auditChainKey: config.auditChainKey,
-    rootAdmins: config.rootAdmins,
-    waitUntil,
-  });
-  const secrets = new SecretsService({
-    pool,
-    keks: config.keks,
-    auditChainKey: config.auditChainKey,
-    rootAdmins: config.rootAdmins,
-    onChange: (environmentId) => waitUntil(syncs.runForEnvironment(environmentId)),
-  });
-  const admin = new AdminService({
-    pool,
-    auditChainKey: config.auditChainKey,
-    rootAdmins: config.rootAdmins,
-  });
-  const audit = new AuditService({
-    pool,
-    chainKey: config.auditChainKey,
-    rootAdmins: config.rootAdmins,
-  });
   return {
-    pool,
-    admin,
-    audit,
-    secrets,
-    syncs,
+    db,
+    keks: config.keks,
+    chainKey: config.auditChainKey,
+    syncs: new SyncRunner({ db, keks: config.keks, chainKey: config.auditChainKey }),
     signin,
     auth: config.auth,
     verifier,
@@ -103,21 +77,21 @@ export function createRuntime(
   };
 }
 
-/**
- * What leaving would take for one person or service: what still lets them
- * in, what they saw, and what they set up that outlives them. Owners only.
- */
-export async function principalReport(
-  runtime: CoffreRuntime,
-  ctx: RequestContext,
-  principalType: 'user' | 'service',
-  principalId: string,
-): Promise<PrincipalReport> {
-  const [report, syncs] = await Promise.all([
-    runtime.admin.offboardingReport(ctx, principalType, principalId),
-    runtime.syncs.listCreatedBy(ctx, principalId),
-  ]);
-  return { ...report, syncs };
+/** What a handler gets: the runtime's stores and the request's caller. */
+export function apiContext(runtime: CoffreRuntime, identity: AuthenticatedIdentity): ApiContext {
+  return {
+    db: runtime.db,
+    chainKey: runtime.chainKey,
+    keks: runtime.keks,
+    rootAdmins: runtime.rootAdmins,
+    waitUntil: runtime.waitUntil,
+    syncs: runtime.syncs,
+    signin: runtime.signin,
+    caller: identity.caller,
+    requestId: identity.requestId,
+    sourceIp: identity.sourceIp,
+    credentialId: identity.credentialId,
+  };
 }
 
 const accessVerifiers = new Map<string, AccessIdentityVerifier>();
@@ -163,7 +137,7 @@ export function runWithWorkerRuntime<T>(
   });
   const runtime = createRuntime(
     config,
-    new HyperdriveDatabase(HYPERDRIVE.connectionString),
+    createDatabase(new HyperdrivePool(HYPERDRIVE.connectionString)),
     context === undefined ? undefined : (promise) => context.waitUntil(promise),
   );
   return requestRuntime.run(runtime, operation);

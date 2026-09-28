@@ -2,7 +2,8 @@ import { createFileRoute } from '@tanstack/react-router';
 import { z } from 'zod';
 
 import { trustedSourceIp } from '../server/auth.ts';
-import { apiErrorResponse, jsonResponse, methodNotAllowed, parseJson } from '../server/http.ts';
+import { notFound } from '../server/api/errors.ts';
+import { errorResponse, jsonResponse, methodNotAllowed, readJson } from '../server/http.ts';
 import { getRuntime } from '../server/runtime.ts';
 
 const body = z.object({ device_code: z.string().min(1).max(128) });
@@ -16,9 +17,9 @@ export const Route = createFileRoute('/api/auth/device/token')({
     handlers: {
       POST: async ({ request }) => {
         const runtime = getRuntime();
-        if (runtime.signin === null) return jsonResponse({ error: 'not_found' }, 404);
+        if (runtime.signin === null) return errorResponse(notFound('device login needs signin mode'));
         try {
-          const { device_code } = await parseJson(request, (value) => body.parse(value));
+          const { device_code } = body.parse(await readJson(request));
           const polled = await runtime.signin.pollDevice(device_code, {
             requestId: crypto.randomUUID(),
             sourceIp: trustedSourceIp(request, runtime.auth),
@@ -39,7 +40,7 @@ export const Route = createFileRoute('/api/auth/device/token')({
               });
           }
         } catch (error) {
-          return apiErrorResponse(error);
+          return errorResponse(error);
         }
       },
       ANY: () => methodNotAllowed(['POST']),

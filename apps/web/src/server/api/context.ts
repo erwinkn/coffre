@@ -4,6 +4,7 @@ import { appendAudit, type AuditEntry } from '../../../../../packages/db/src/aud
 import type { Database, Transaction } from '../../../../../packages/db/src/database.ts';
 import { can, type Caller, type Place } from './caller.ts';
 import { forbidden, type ApiError } from './errors.ts';
+import type { SigninService } from './signin.ts';
 import type { SyncRunner } from './syncs.ts';
 
 /** What every handler works with: the stores, and who is asking. */
@@ -16,6 +17,8 @@ export type ApiContext = {
   waitUntil: (promise: Promise<unknown>) => void;
   /** Runs syncs: after a commit that changed an environment's secrets, and on request. */
   syncs: SyncRunner;
+  /** coffre's own sign-in and the tokens it issues; null behind Cloudflare Access. */
+  signin: SigninService | null;
   caller: Caller;
   requestId: string;
   sourceIp: string | null;
