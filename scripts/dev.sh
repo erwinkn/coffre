@@ -84,7 +84,7 @@ sleep 1
 # The seed starts the app's database over, so the vault starts over with it:
 # its grants and audit checkpoints describe that database and no other.
 if [ "$mode" = development ]; then
-    rm -rf apps/web/.wrangler/state/v3/do/coffre-vault-VaultObject
+    rm -rf apps/web/.wrangler/state/v3/do/coffre-vault-development-VaultObject
 fi
 
 log "starting web app and vault on :3000 ($mode)"

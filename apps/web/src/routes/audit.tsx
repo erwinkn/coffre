@@ -27,6 +27,7 @@ import {
 
 type AuditSearch = { decision?: 'deny'; actorId?: string };
 type ChainResult = Awaited<ReturnType<typeof verifyChain>>;
+type VaultResult = Awaited<ReturnType<typeof readVaultLog>>;
 
 export const Route = createFileRoute('/audit')({
   // Filters live in the URL so a finding can cite the exact view it came from.
@@ -39,9 +40,14 @@ export const Route = createFileRoute('/audit')({
   // The chain is recomputed on every visit rather than on demand. At this
   // volume it is one HMAC per row and costs less than the query that fetched
   // them, and a status that is always current beats a button nobody presses.
-  loader: async ({ context: { client }, deps }) => {
-    const [entries, chain] = await Promise.all([listEntries(client, deps), verifyChain(client)]);
-    return { entries, chain };
+  loader: async ({ context: { client }, deps, parentMatchPromise }) => {
+    const rootAdmin = (await parentMatchPromise).loaderData?.instanceRole === 'root-admin';
+    const [entries, chain, vault] = await Promise.all([
+      listEntries(client, deps),
+      verifyChain(client),
+      rootAdmin ? readVaultLog(client) : null,
+    ]);
+    return { entries, chain, vault };
   },
   component: AuditPage,
 });
@@ -71,13 +77,17 @@ function verifyChain(client: CoffreClient) {
   return uiResult(async () => {
     const result = await client.audit.verify();
     return result.ok
-      ? { integrity: 'intact' as const, rows: result.rows, head: result.head }
+      ? { integrity: 'intact' as const, rows: result.rows, head: result.head, checkpoint: result.checkpoint }
       : { integrity: 'broken' as const, failedAtSeq: result.failedAtSeq, reason: result.reason };
   });
 }
 
+function readVaultLog(client: CoffreClient) {
+  return uiResult(() => client.audit.vault({ limit: 20 }));
+}
+
 function AuditPage() {
-  const { entries: result, chain } = Route.useLoaderData();
+  const { entries: result, chain, vault } = Route.useLoaderData();
   const { decision, actorId } = Route.useSearch();
   const deniedOnly = decision === 'deny';
 
@@ -195,7 +205,93 @@ function AuditPage() {
           </div>
         )}
       </section>
+
+      {vault !== null && <VaultLog vault={vault} />}
     </>
+  );
+}
+
+/**
+ * The vault's own log, for root admins: the record the app cannot rewrite,
+ * of every key it unwrapped or refused and every change of access. Only the
+ * latest entries, and whether the whole chain holds; the API pages the rest.
+ */
+function VaultLog({ vault }: { vault: VaultResult }) {
+  return (
+    <section aria-labelledby="vault-log">
+      <div className="section-head">
+        <h2 className="section-title" id="vault-log">
+          Vault log
+        </h2>
+        {vault.ok &&
+          (vault.verification.ok ? (
+            <span className="vault-verdict">
+              <ShieldCheck size={13} />
+              {vault.verification.entries} entries, chain intact
+            </span>
+          ) : (
+            <span className="vault-verdict vault-verdict-bad" role="status">
+              <AlertTriangle size={13} />
+              Broken at <span className="mono">{vault.verification.failedAtSeq}</span>:{' '}
+              {vault.verification.reason}
+            </span>
+          ))}
+      </div>
+      <div className="card">
+        {!vault.ok ? (
+          <EmptyState title="The vault log could not be read">{vault.error}</EmptyState>
+        ) : vault.entries.length === 0 ? (
+          <EmptyState title="Nothing recorded yet">
+            The vault records every key it unwraps or refuses, and every change of access.
+          </EmptyState>
+        ) : (
+          <div className="dt-wrap">
+            <table className="dt audit stacks">
+              <thead>
+                <tr>
+                  <th className="n">#</th>
+                  <th className="col-shrink">When (UTC)</th>
+                  <th>Actor</th>
+                  <th className="col-shrink">Action</th>
+                  <th>Subject</th>
+                  <th className="col-shrink">Outcome</th>
+                </tr>
+              </thead>
+              <tbody>
+                {vault.entries.map((entry) => {
+                  const refused = entry.outcome === 'refuse';
+                  return (
+                    <tr key={entry.seq} className={refused ? 'is-denied' : undefined}>
+                      <td className="n" data-label="Sequence">
+                        {entry.seq}
+                      </td>
+                      <td className="nowrap cell-mono" data-label="When (UTC)">
+                        <Timestamp iso={entry.at} precise />
+                      </td>
+                      <td className="cell-mono" data-label="Actor">
+                        {entry.actor}
+                      </td>
+                      <td className="cell-mono nowrap" data-label="Action">
+                        {entry.action}
+                      </td>
+                      <td className="cell-mono" data-label="Subject">
+                        {entry.subject ?? '—'}
+                      </td>
+                      <td className="nowrap" data-label="Outcome">
+                        <span className={`decision ${refused ? 'decision-deny' : 'decision-allow'}`}>
+                          {refused ? <SlashCircle size={13} /> : <CheckCircle size={13} />}
+                          {refused ? breakAfterUnderscores(entry.code ?? 'refused') : 'allowed'}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -286,7 +382,13 @@ function ChainStatus({ chain }: { chain: ChainResult }) {
 
   return (
     <div className="chain">
-      <Toggletip label="Chain intact">
+      <Toggletip
+        label={
+          chain.checkpoint === null
+            ? 'Chain intact. The vault has not signed a checkpoint yet.'
+            : `Chain intact, and unchanged through entry ${chain.checkpoint.seq}, which the vault signed at ${chain.checkpoint.signedAt}.`
+        }
+      >
         <button type="button" className="chain-seal" aria-label="Chain intact">
           <ShieldCheck size={16} />
         </button>

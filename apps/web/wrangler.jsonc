@@ -32,7 +32,8 @@
     }
   ],
   // The vault Worker, apps/vault: keys, grants, members. Bindings are not
-  // inherited, so each environment below names it again.
+  // inherited, so each environment below names it again, as Wrangler names
+  // the vault there: `coffre-vault-<environment>`.
   "services": [
     {
       "binding": "VAULT",
@@ -67,7 +68,7 @@
       "services": [
         {
           "binding": "VAULT",
-          "service": "coffre-vault",
+          "service": "coffre-vault-development",
           "entrypoint": "VaultEntrypoint"
         }
       ]
@@ -108,7 +109,7 @@
       "services": [
         {
           "binding": "VAULT",
-          "service": "coffre-vault",
+          "service": "coffre-vault-signin",
           "entrypoint": "VaultEntrypoint"
         }
       ]
