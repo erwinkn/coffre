@@ -1,0 +1,22 @@
+{
+  "name": "@coffre/vault",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./local": "./src/local.ts"
+  },
+  "scripts": {
+    "generate": "drizzle-kit generate && node src/generate.ts",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "drizzle-orm": "0.45.2",
+    "libsql": "0.5.29"
+  },
+  "devDependencies": {
+    "@types/node": "26.1.1",
+    "drizzle-kit": "0.31.10"
+  }
+}
