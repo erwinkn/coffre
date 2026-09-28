@@ -19,7 +19,7 @@ import {
   deviceAuthorizations,
   identities,
   principals,
-} from '../../../packages/db/src/schema.ts';
+} from '../../../packages/db/test/tables.ts';
 import { verifyAudit } from '../src/server/api/audit.ts';
 import {
   normalizeUserCode,
@@ -61,8 +61,8 @@ let root: Asker;
 let lead: Asker;
 let dev: Asker;
 
-before(() => {
-  db = openTestDatabase();
+before(async () => {
+  db = await openTestDatabase();
 });
 
 after(async () => {

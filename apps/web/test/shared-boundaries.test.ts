@@ -6,7 +6,7 @@ import { me } from '../src/server/api/projects.ts';
 import { displayName, principalId } from '../src/shared/schemas.ts';
 import { contextFor, openTestDatabase, resetDatabase, testDeps } from './api-fixture.ts';
 
-const db = openTestDatabase();
+const db = await openTestDatabase();
 after(() => db.close());
 
 test('shared nonblank schemas reject whitespace and canonicalize valid input', () => {

@@ -25,7 +25,7 @@ const cloudflare: AuthConfig = {
   access: { issuer: 'https://acme.cloudflareaccess.com', jwksUrl: 'https://acme.cloudflareaccess.com/certs', audience: 'aud' },
 };
 
-let db: ReturnType<typeof openTestDatabase>;
+let db: Awaited<ReturnType<typeof openTestDatabase>>;
 let deps: FixtureDeps;
 
 /** The app's runtime, where every token is simply the email of whoever holds it. */
@@ -56,8 +56,8 @@ async function refusal(response: Response): Promise<{ status: number; error: str
   return { status: response.status, error: ((await response.json()) as { error: string }).error };
 }
 
-before(() => {
-  db = openTestDatabase();
+before(async () => {
+  db = await openTestDatabase();
   deps = testDeps(db.runtime, [ROOT]);
 });
 

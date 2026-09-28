@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { asc, count, eq } from 'drizzle-orm';
 
 import type { CoffreClient } from '../../../packages/client/src/index.ts';
-import { auditLog, grants, projects } from '../../../packages/db/src/schema.ts';
+import { auditLog, grants, projects } from '../../../packages/db/test/tables.ts';
 import {
   clientFor,
   openTestDatabase,
@@ -19,7 +19,7 @@ const READER = 'user:reader@acme.example';
 const OWNER = 'user:instance-owner@acme.example';
 const CI = 'token:ci-deploy';
 
-let db: ReturnType<typeof openTestDatabase>;
+let db: Awaited<ReturnType<typeof openTestDatabase>>;
 let deps: FixtureDeps;
 let root: CoffreClient;
 let lead: CoffreClient;
@@ -27,8 +27,8 @@ let reader: CoffreClient;
 let owner: CoffreClient;
 let outsider: CoffreClient;
 
-before(() => {
-  db = openTestDatabase();
+before(async () => {
+  db = await openTestDatabase();
   deps = testDeps(db.runtime, [ROOT]);
   root = clientFor(deps, ROOT);
   lead = clientFor(deps, 'lead@acme.example');

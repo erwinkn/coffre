@@ -5,7 +5,7 @@ import { and, asc, eq } from 'drizzle-orm';
 
 import type { CoffreClient } from '../../../packages/client/src/index.ts';
 import { assignableToEnvironment, ROLES } from '../../../packages/core/src/access.ts';
-import { auditLog, grants, principals } from '../../../packages/db/src/schema.ts';
+import { auditLog, grants, principals } from '../../../packages/db/test/tables.ts';
 import {
   clientFor,
   openTestDatabase,
@@ -19,15 +19,15 @@ const AUDITOR = 'user:auditor@acme.example';
 const ACCESS_MANAGER = 'user:accessmgr@acme.example';
 const DEVELOPER = 'user:dev@acme.example';
 
-let db: ReturnType<typeof openTestDatabase>;
+let db: Awaited<ReturnType<typeof openTestDatabase>>;
 let deps: FixtureDeps;
 let root: CoffreClient;
 let auditor: CoffreClient;
 let accessManager: CoffreClient;
 let developer: CoffreClient;
 
-before(() => {
-  db = openTestDatabase();
+before(async () => {
+  db = await openTestDatabase();
   deps = testDeps(db.runtime, [ROOT]);
   root = clientFor(deps, ROOT);
   auditor = clientFor(deps, 'auditor@acme.example');

@@ -1,46 +1,31 @@
 import test, { before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
-import { sql } from 'drizzle-orm';
-import pg from 'pg';
+import { eq, sql } from 'drizzle-orm';
 
 import { appendAudit } from '../src/audit.ts';
-import { createDatabase, type Database, type Transaction } from '../src/database.ts';
+import type { Database, Transaction } from '../src/database.ts';
 import { canonicalTimestamp } from '../src/dialect.ts';
 import { auditRange } from '../src/queries.ts';
 import { verifyChain, GENESIS_HASH } from '../../core/src/audit/chain.ts';
-import {
-  TEST_OWNER_DATABASE_URL,
-  TEST_RUNTIME_DATABASE_URL,
-} from './connections.ts';
+import { openTestDatabase, postgresOnly } from './engine.ts';
+import { auditChainHead, auditLog } from './tables.ts';
 
 const CHAIN_KEY = randomBytes(32);
 
-let ownerPool: pg.Pool;
-let runtimePool: pg.Pool;
+let owner: Database;
 let db: Database;
+let close: () => Promise<void>;
 
 before(async () => {
-  ownerPool = new pg.Pool({ connectionString: TEST_OWNER_DATABASE_URL });
-  runtimePool = new pg.Pool({ connectionString: TEST_RUNTIME_DATABASE_URL });
-  db = createDatabase(runtimePool);
+  ({ owner, runtime: db, close } = await openTestDatabase());
 });
 
-after(async () => {
-  await runtimePool.end();
-  await ownerPool.end();
-});
+after(() => close());
 
 beforeEach(async () => {
-  const client = await ownerPool.connect();
-  try {
-    await client.query('DELETE FROM audit_log');
-    await client.query(
-      "UPDATE audit_chain_head SET next_seq = 0, head_hash = decode(repeat('00', 32), 'hex')",
-    );
-  } finally {
-    client.release();
-  }
+  await owner.delete(auditLog);
+  await owner.update(auditChainHead).set({ nextSeq: 0n, headHash: Buffer.alloc(32) });
 });
 
 function inTransaction<T>(fn: (tx: Transaction) => Promise<T>): Promise<T> {
@@ -163,7 +148,7 @@ test('tampering with a stored row is detected on read', async () => {
   // As the owner role -- coffre_app cannot do this at all, which is checked in
   // schema-guarantees.sql. This simulates someone with higher privilege
   // rewriting history directly in the database.
-  await ownerPool.query("UPDATE audit_log SET decision = 'allow' WHERE seq = 1");
+  await owner.update(auditLog).set({ decision: 'allow' }).where(eq(auditLog.seq, 1n));
 
   const rows = await inTransaction((tx) => auditRange(tx));
   const result = verifyChain(CHAIN_KEY, rows, GENESIS_HASH);
@@ -187,16 +172,40 @@ test('timestamps render as UTC with microseconds, whatever shape the database re
   assert.throws(() => canonicalTimestamp('yesterday'), /unexpected timestamp/);
 });
 
-test('a session in another time zone reads back the same chain', async () => {
-  await inTransaction((tx) =>
-    appendAudit(tx, CHAIN_KEY, [
-      { actorType: 'user', actorId: 'a@acme.example', action: 'secret.read', decision: 'allow' },
-    ]),
+test(
+  'a session in another time zone reads back the same chain',
+  postgresOnly('the session time zone is Postgres rendering a timestamptz; MySQL and SQLite store no zone'),
+  async () => {
+    await inTransaction((tx) =>
+      appendAudit(tx, CHAIN_KEY, [
+        { actorType: 'user', actorId: 'a@acme.example', action: 'secret.read', decision: 'allow' },
+      ]),
+    );
+    const rows = await inTransaction(async (tx) => {
+      await tx.execute(sql`SET LOCAL TIME ZONE 'Asia/Kolkata'`);
+      return auditRange(tx);
+    });
+    assert.match(rows[0].occurredAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/);
+    assert.equal(verifyChain(CHAIN_KEY, rows, GENESIS_HASH).ok, true);
+  },
+);
+
+test('concurrent appends queue on the chain head and form one linear chain', async () => {
+  // Each append is its own transaction, as each request's is. They all want
+  // the head at once; the lock (a queue of one on SQLite) lets them through
+  // in turn, so every row links to the one before it.
+  await Promise.all(
+    Array.from({ length: 24 }, (_, index) =>
+      inTransaction((tx) =>
+        appendAudit(tx, CHAIN_KEY, [
+          { actorType: 'user', actorId: `user${index}@acme.example`, action: 'secret.read', decision: 'allow' },
+        ]),
+      ),
+    ),
   );
-  const rows = await inTransaction(async (tx) => {
-    await tx.execute(sql`SET LOCAL TIME ZONE 'Asia/Kolkata'`);
-    return auditRange(tx);
-  });
-  assert.match(rows[0].occurredAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/);
+
+  const rows = await inTransaction((tx) => auditRange(tx));
+  assert.deepEqual(rows.map((r) => r.seq), Array.from({ length: 24 }, (_, index) => BigInt(index)));
+  assert.equal(new Set(rows.map((r) => r.actorId)).size, 24);
   assert.equal(verifyChain(CHAIN_KEY, rows, GENESIS_HASH).ok, true);
 });
