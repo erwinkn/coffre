@@ -22,9 +22,6 @@
       "COFFRE_ACCESS_ISSUER",
       "COFFRE_ACCESS_JWKS_URL",
       "COFFRE_ACCESS_AUD",
-      "COFFRE_ROOT_ADMINS",
-      "COFFRE_KEK_LOCAL",
-      "COFFRE_KEK_ID",
       "COFFRE_AUDIT_CHAIN_KEY"
     ]
   },
@@ -32,6 +29,15 @@
     {
       "binding": "HYPERDRIVE",
       "id": "__COFFRE_HYPERDRIVE_ID__"
+    }
+  ],
+  // The vault Worker, apps/vault: keys, grants, members. Bindings are not
+  // inherited, so each environment below names it again.
+  "services": [
+    {
+      "binding": "VAULT",
+      "service": "coffre-vault",
+      "entrypoint": "VaultEntrypoint"
     }
   ],
   "triggers": {
@@ -49,8 +55,6 @@
           "COFFRE_ACCESS_JWKS_URL",
           "COFFRE_ACCESS_AUD",
           "COFFRE_DEV_IDP_URL",
-          "COFFRE_ROOT_ADMINS",
-          "COFFRE_KEK_LOCAL",
           "COFFRE_AUDIT_CHAIN_KEY"
         ]
       },
@@ -58,6 +62,13 @@
         {
           "binding": "HYPERDRIVE",
           "id": "__COFFRE_HYPERDRIVE_ID__"
+        }
+      ],
+      "services": [
+        {
+          "binding": "VAULT",
+          "service": "coffre-vault",
+          "entrypoint": "VaultEntrypoint"
         }
       ]
     },
@@ -85,9 +96,6 @@
       },
       "secrets": {
         "required": [
-          "COFFRE_ROOT_ADMINS",
-          "COFFRE_KEK_LOCAL",
-          "COFFRE_KEK_ID",
           "COFFRE_AUDIT_CHAIN_KEY"
         ]
       },
@@ -95,6 +103,13 @@
         {
           "binding": "HYPERDRIVE",
           "id": "__COFFRE_HYPERDRIVE_ID__"
+        }
+      ],
+      "services": [
+        {
+          "binding": "VAULT",
+          "service": "coffre-vault",
+          "entrypoint": "VaultEntrypoint"
         }
       ]
     }

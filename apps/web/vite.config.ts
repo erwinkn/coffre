@@ -28,7 +28,12 @@ export default defineConfig({
   },
 
   plugins: [
-    cloudflare({ viteEnvironment: { name: 'ssr' } }),
+    cloudflare({
+      viteEnvironment: { name: 'ssr' },
+      // The vault runs next to the app, as the Worker its VAULT binding
+      // names, in `vite dev`, `vite build` and `vite preview` alike.
+      auxiliaryWorkers: [{ configPath: '../vault/wrangler.jsonc' }],
+    }),
     // Generates src/routeTree.gen.ts from src/routes, and wires the SSR
     // server. Must come before the React plugin.
     tanstackStart(),
