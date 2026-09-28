@@ -3,7 +3,7 @@ import { and, asc, count, desc, eq, getTableColumns, gt, gte, inArray, isNull, l
 import type { Envelope } from '../../core/src/envelope.ts';
 import { own, tablesOf, type Queryable, type Transaction } from './database.ts';
 import * as dialect from './dialect.ts';
-import { canonicalTimestamp, changedRows, clock, forUpdate, migrationLedger, type Table } from './dialect.ts';
+import { canonicalTimestamp, changedRows, clock, forUpdate, migrationLedger, truth, type Table } from './dialect.ts';
 import type * as schema from './schema.ts';
 
 /**
@@ -382,7 +382,7 @@ export async function memberActivity(db: Queryable, actorIds: string[]) {
       occurredAt: auditLog.occurredAt,
       key: secrets.key,
       currentVersion: secrets.currentVersion,
-      archived: sql`${secrets.archivedAt} IS NOT NULL OR ${environments.archivedAt} IS NOT NULL OR ${projects.archivedAt} IS NOT NULL`.mapWith(Boolean),
+      archived: truth(sql`${secrets.archivedAt} IS NOT NULL OR ${environments.archivedAt} IS NOT NULL OR ${projects.archivedAt} IS NOT NULL`),
       project: projects.slug,
       environment: environments.slug,
     })

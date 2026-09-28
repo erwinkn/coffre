@@ -37,6 +37,15 @@ export async function openDatabase(url: string): Promise<OpenDatabase> {
         bigNumberStrings: true,
         timezone: 'Z',
       });
+      // Postgres's default isolation, which the server is written for.
+      // MySQL's own, REPEATABLE READ, also locks the gap where a missing row
+      // would go, so two transactions that lock the same absent member and
+      // then both add it deadlock rather than one of them waiting.
+      pool.pool.on('connection', (connection) => {
+        connection.query("SET SESSION transaction_isolation = 'READ-COMMITTED'", (error) => {
+          if (error) connection.destroy();
+        });
+      });
       const db = drizzle({ client: pool, schema, mode: 'default' });
       return { engine: 'mysql', db: asPostgresDatabase(db), close: () => pool.end() };
     }

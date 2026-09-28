@@ -9,12 +9,16 @@ import type { Queryable } from './database.ts';
  * reads the same on all three; the server never asks which database it has.
  *
  *                     Postgres                MySQL                    SQLite
+ *   isolation         READ COMMITTED          READ COMMITTED¹          one writer at a time
  *   lock a row        SELECT … FOR UPDATE     SELECT … FOR UPDATE      one writer at a time
  *   insert if absent  ON CONFLICT DO NOTHING  skip duplicate-key rows  ON CONFLICT DO NOTHING
  *   upsert            ON CONFLICT DO UPDATE   ON DUPLICATE KEY UPDATE  ON CONFLICT DO UPDATE
  *   rows changed      rowCount                affectedRows             rowsAffected
  *   duplicate key     SQLSTATE 23505          ER_DUP_ENTRY             SQLITE_CONSTRAINT_UNIQUE
  *   clock             CURRENT_TIMESTAMP       UTC_TIMESTAMP(6)         strftime(…, 'now')
+ *   a condition read  true / false            '1' / '0'                1 / 0
+ *
+ * ¹ Not MySQL's default; connect.ts sets it on every connection.
  *
  * Nothing here imports MySQL or SQLite code, so the Worker bundles none.
  */
@@ -97,6 +101,15 @@ export async function upsert<T extends Table>(
     target: target.map((name) => all[name as string]) as never,
     set: set as never,
   });
+}
+
+/**
+ * A condition read back as a boolean. Postgres answers true or false,
+ * SQLite 1 or 0, and MySQL '1' or '0' (a bigint, which connect.ts reads
+ * exactly, as a string, so Boolean('0') would be true).
+ */
+export function truth(condition: SQL): SQL<boolean> {
+  return condition.mapWith((value) => Number(value) === 1);
 }
 
 /** How many rows an insert, update or delete touched. */
