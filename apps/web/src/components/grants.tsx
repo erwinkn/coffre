@@ -1,29 +1,77 @@
 import type { ReactNode } from 'react';
 import { toast } from 'sonner';
-import { createGrant, revokeGrant } from '../server-functions/access';
+import type { CoffreClient } from '../../../../packages/client/src/index.ts';
+import type { Role } from '../../../../packages/core/src/access.ts';
+import { failureMessage, memberRef, uiFailure, useCoffre } from '../lib/coffre';
 import { useAction } from '../lib/use-action';
 import { projectAccessLabel } from '../lib/project-access';
-import type { GrantRow } from '../shared/models';
+import type { GrantRow, ProjectSummary } from '../shared/models';
 import { ConfirmButton, ErrorLine, Spinner } from './ui';
 import { Clock, ShieldCheck } from './icons';
 
 /**
- * Create a grant, where already holding it counts as done: asking twice for
- * the same access is not an error, whoever asked first. The server reports a
- * duplicate as a 409 with this message.
+ * One project and, when you manage its access, its grants. A project that is
+ * not there for you fails with no message: the page words that itself.
  */
-export async function ensureGrant(data: {
-  project: string;
-  principalType: GrantRow['principalType'];
-  principalId: string;
-  role: string;
-  environmentSlug: string | null;
-  expiresAt: string | null;
-}): Promise<{ ok: true; existed: boolean } | { ok: false; error: string }> {
-  const result = await createGrant({ data });
-  if (result.ok) return { ok: true, existed: false };
-  if (result.error === 'that grant already exists') return { ok: true, existed: true };
-  return result;
+export async function loadProject(client: CoffreClient, slug: string) {
+  let project: ProjectSummary | undefined;
+  try {
+    project = (await client.projects.list()).projects.find((entry) => entry.slug === slug);
+  } catch (error) {
+    return uiFailure(error);
+  }
+  if (project === undefined) return { ok: false as const, error: null };
+  if (!project.permissions.includes('grant.manage')) {
+    return { ok: true as const, project, grants: [] as GrantRow[], grantsError: null };
+  }
+
+  try {
+    const { members } = await client.members.list(slug);
+    const grants: GrantRow[] = members.flatMap((member) =>
+      member.grants.map((grant) => ({
+        id: grant.id,
+        principalType: member.principalType,
+        principalId: member.principalId,
+        role: grant.role,
+        roleName: grant.roleName,
+        permissions: grant.permissions,
+        scope: grant.environment === null ? ('project' as const) : ('environment' as const),
+        environmentSlug: grant.environment,
+        expiresAt: grant.expiresAt,
+      })),
+    );
+    return { ok: true as const, project, grants, grantsError: null };
+  } catch (error) {
+    return { ok: true as const, project, grants: [] as GrantRow[], grantsError: failureMessage(error) };
+  }
+}
+
+/** Where a grant applies, as the API names it: `market`, or `market/prod`. */
+export function grantPlace(project: string, environmentSlug: string | null): string {
+  return environmentSlug === null ? project : `${project}/${environmentSlug}`;
+}
+
+/**
+ * Give someone a role at one place. Access is declarative, so asking for what
+ * they already hold is not an error, whoever asked first: `existed` says so.
+ */
+export async function ensureGrant(
+  coffre: CoffreClient,
+  data: {
+    project: string;
+    principalType: GrantRow['principalType'];
+    principalId: string;
+    role: string;
+    environmentSlug: string | null;
+    expiresAt: string | null;
+  },
+): Promise<{ existed: boolean }> {
+  const place = grantPlace(data.project, data.environmentSlug);
+  const role = data.role as Role;
+  const { changes } = await coffre.access.set(memberRef(data.principalType, data.principalId), {
+    [place]: data.expiresAt === null ? role : { role, until: data.expiresAt },
+  });
+  return { existed: changes[place] === 'unchanged' };
 }
 
 /**
@@ -77,6 +125,7 @@ export function GrantRowView({
   lead: ReactNode;
   leadLabel: string;
 }) {
+  const coffre = useCoffre();
   const { pending, error, run } = useAction();
   const label = projectAccessLabel(grant);
   const expired = grant.expiresAt !== null && new Date(grant.expiresAt).getTime() < Date.now();
@@ -133,7 +182,10 @@ export function GrantRowView({
             confirmLabel="Revoke access"
             onConfirm={() =>
               run(
-                () => revokeGrant({ data: { project, grantId: grant.id } }),
+                () =>
+                  coffre.access.set(memberRef(grant.principalType, grant.principalId), {
+                    [grantPlace(project, grant.environmentSlug)]: null,
+                  }),
                 () => toast.success(`Revoked ${label} on ${project} from ${grant.principalId}`),
               )
             }

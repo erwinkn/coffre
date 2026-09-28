@@ -1,8 +1,9 @@
 import { useState } from 'react';
 import { createFileRoute, Link } from '@tanstack/react-router';
 import { toast } from 'sonner';
-import { createProject, listProjects } from '../server-functions/projects';
-import { listKeys } from '../server-functions/secrets';
+import type { CoffreClient } from '../../../../packages/client/src/index.ts';
+import { deriveUiCapabilities } from '../lib/capabilities';
+import { Refusal, uiResult, useCoffre } from '../lib/coffre';
 import { useAction } from '../lib/use-action';
 import type { ProjectSummary } from '../shared/models';
 import { isActiveAccessibleEnvironment } from '../lib/project-environments';
@@ -17,9 +18,12 @@ import {
 } from '../components/affordances';
 
 export const Route = createFileRoute('/projects/')({
-  loader: async () => {
-    const result = await listProjects();
-    return { result, secrets: result.ok ? await countSecrets(result.projects) : {} };
+  loader: async ({ context: { client } }) => {
+    const result = await uiResult(async () => {
+      const [me, { projects }] = await Promise.all([client.me(), client.projects.list()]);
+      return { projects, capabilities: deriveUiCapabilities(me, projects) };
+    });
+    return { result, secrets: result.ok ? await countSecrets(client, result.projects) : {} };
   },
   component: ProjectsPage,
 });
@@ -36,7 +40,10 @@ export const Route = createFileRoute('/projects/')({
  * A project whose keys could not all be listed gets no count rather than a
  * short one.
  */
-async function countSecrets(projects: ProjectSummary[]): Promise<Record<string, number | null>> {
+async function countSecrets(
+  client: CoffreClient,
+  projects: ProjectSummary[],
+): Promise<Record<string, number | null>> {
   const counts = await Promise.all(
     projects
       .filter((project) => project.archivedAt === null)
@@ -44,9 +51,7 @@ async function countSecrets(projects: ProjectSummary[]): Promise<Record<string, 
         const environments = project.environments.filter(isActiveAccessibleEnvironment);
         if (environments.length === 0) return [project.slug, null] as const;
         const lists = await Promise.all(
-          environments.map((environment) =>
-            listKeys({ data: { project: project.slug, environment: environment.slug } }),
-          ),
+          environments.map((environment) => uiResult(() => client.secrets.list(`${project.slug}/${environment.slug}`))),
         );
         const names = new Set<string>();
         for (const list of lists) {
@@ -257,6 +262,7 @@ function NewProject() {
   const [slug, setSlug] = useState('');
   const [name, setName] = useState('');
   const [open, setOpen] = useState(false);
+  const coffre = useCoffre();
   const { pending, error, setError, run } = useAction();
   const slugError = slug === '' ? null : slugProblem(slug);
 
@@ -283,7 +289,11 @@ function NewProject() {
           onSubmit={(event) => {
             event.preventDefault();
             run(
-              () => createProject({ data: { slug, name } }),
+              async () => {
+                // Creating is an idempotent PUT; the form reports a slug that is taken.
+                const { created } = await coffre.projects.create(slug, { name });
+                if (!created) throw new Refusal(`A project named "${slug}" already exists.`);
+              },
               () => {
                 toast.success(`Project ${slug} created`);
                 setSlug('');

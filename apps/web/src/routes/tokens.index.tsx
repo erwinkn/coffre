@@ -1,12 +1,12 @@
 import { createFileRoute } from '@tanstack/react-router';
-import { listDirectoryPrincipals } from '../server-functions/access';
-import { AddPrincipal, DirectoryTable } from '../components/directory';
+import { AddPrincipal, DirectoryTable, loadDirectory } from '../components/directory';
 import { ClosedDoor, PageHeader } from '../components/page';
 import { RemovedList } from '../components/offboarding';
 import { Key } from '../components/icons';
 
 export const Route = createFileRoute('/tokens/')({
-  loader: () => listDirectoryPrincipals(),
+  loader: async ({ context: { client }, parentMatchPromise }) =>
+    loadDirectory(client, (await parentMatchPromise).loaderData?.capabilities.canManageGrants ?? false),
   component: TokensPage,
 });
 

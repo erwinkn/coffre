@@ -1,13 +1,14 @@
 import { useState } from 'react';
 import { Link, useLoaderData, useRouter } from '@tanstack/react-router';
 import { toast } from 'sonner';
-import { getPrincipalReport, revokeGrant } from '../server-functions/access';
-import { getProject } from '../server-functions/projects';
+import type { CoffreClient } from '../../../../packages/client/src/index.ts';
+import { memberRef, statusOf, uiResult, useCoffre } from '../lib/coffre';
 import { useAction } from '../lib/use-action';
 import type { UiCapabilities } from '../lib/capabilities';
 import { projectAccessLabel } from '../lib/project-access';
 import {
   accessChanges,
+  accessPatch,
   dateFromExpiry,
   environmentAccess,
   expiryFromDate,
@@ -20,7 +21,7 @@ import {
 import type { DirectoryPrincipal, GrantRow, ProjectSummary } from '../shared/models';
 import { ClosedDoor, PageHeader } from './page';
 import { EmptyState, ErrorLine, Modal, Notice, Spinner } from './ui';
-import { ensureGrant, GrantRowView, GrantsTable } from './grants';
+import { GrantRowView, GrantsTable, loadProject } from './grants';
 import { InstanceRole, KIND, PrincipalActions } from './directory';
 import { PrincipalReportCards, RemovedNotice } from './offboarding';
 import { PrincipalAvatar } from './principal';
@@ -43,6 +44,7 @@ type ProjectAccess = { project: ProjectSummary; grants: GrantRow[]; grantsError:
  * instance owners, for the same reason.
  */
 export async function loadPrincipalPage(
+  client: CoffreClient,
   principalType: PrincipalType,
   principalId: string,
   root: { projects: ProjectSummary[]; capabilities: UiCapabilities } | undefined,
@@ -52,9 +54,17 @@ export async function loadPrincipalPage(
   );
   const [report, details] = await Promise.all([
     root?.capabilities.canManageGrants
-      ? getPrincipalReport({ data: { principalType, principalId } })
+      ? uiResult(async () => {
+          try {
+            return { report: await client.members.get(memberRef(principalType, principalId)) };
+          } catch (error) {
+            // No such principal is an answer, not a failure.
+            if (statusOf(error) === 404) return { report: null };
+            throw error;
+          }
+        })
       : Promise.resolve(null),
-    Promise.all(managed.map((project) => getProject({ data: { project: project.slug } }))),
+    Promise.all(managed.map((project) => loadProject(client, project.slug))),
   ]);
 
   const access: ProjectAccess[] = details.flatMap((result) =>
@@ -252,13 +262,8 @@ export function PrincipalPage({
  *
  * Each project opens set to what the principal holds: a project-wide level,
  * or read or write per environment, each with its own expiry. Saving sends
- * only the difference, so picking what is already held does nothing, and a
- * retry after a partial failure sends exactly what did not land, since the
- * difference is taken against the refreshed grants.
- *
- * The server has no call that moves an expiry, so a new expiry is a revoke
- * and then a grant of the same access, which the server restores in place.
- * The audit log shows the pair, and the access lapses for the moment between.
+ * only the difference, every project in one `access.set`: the server applies
+ * all of it in one transaction, or none of it.
  */
 function EditAccess({
   principalType,
@@ -269,7 +274,7 @@ function EditAccess({
   principalId: string;
   access: ProjectAccess[];
 }) {
-  const router = useRouter();
+  const coffre = useCoffre();
   const [open, setOpen] = useState(false);
   const [edits, setEdits] = useState<Record<string, AccessPlan>>({});
   const { pending, error, setError, run } = useAction();
@@ -316,43 +321,11 @@ function EditAccess({
           onSubmit={(event) => {
             event.preventDefault();
             run(
-              async () => {
-                let landed = false;
-                for (const { project, changes } of changed) {
-                  for (const change of changes) {
-                    const grant = (role: string, environmentSlug: string | null) =>
-                      ensureGrant({
-                        project: project.slug,
-                        principalType,
-                        principalId,
-                        role,
-                        environmentSlug,
-                        expiresAt: change.kind === 'revoke' ? null : change.expiresAt,
-                      });
-                    const revoke = (grantId: string) =>
-                      revokeGrant({ data: { project: project.slug, grantId } });
-
-                    let result;
-                    if (change.kind === 'create') {
-                      result = await grant(change.role, change.environmentSlug);
-                    } else if (change.kind === 'revoke') {
-                      result = await revoke(change.grant.id);
-                    } else {
-                      result = await revoke(change.grant.id);
-                      if (result.ok) {
-                        landed = true;
-                        result = await grant(change.grant.role, change.grant.environmentSlug);
-                      }
-                    }
-                    if (!result.ok) {
-                      if (landed) await router.invalidate();
-                      return { ok: false as const, error: `${project.slug}: ${result.error}` };
-                    }
-                    landed = true;
-                  }
-                }
-                return { ok: true as const };
-              },
+              () =>
+                coffre.access.set(
+                  memberRef(principalType, principalId),
+                  Object.assign({}, ...changed.map(({ project, changes }) => accessPatch(project.slug, changes))),
+                ),
               () => {
                 toast.success(
                   `Updated ${principalId}’s access on ${changed.length} project${changed.length === 1 ? '' : 's'}`,

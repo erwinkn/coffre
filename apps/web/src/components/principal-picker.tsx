@@ -1,15 +1,15 @@
 import { useEffect, useId, useState } from 'react';
 import { Link } from '@tanstack/react-router';
-import { listDirectoryPrincipals } from '../server-functions/access';
+import { useCoffre } from '../lib/coffre';
 import { projectAccessLabel } from '../lib/project-access';
 import type { DirectoryPrincipal, GrantRow } from '../shared/models';
-import { KIND } from './directory';
+import { KIND, loadDirectory } from './directory';
 import { PrincipalAvatar } from './principal';
 import { Spinner } from './ui';
 import { Check, Search } from './icons';
 
 type PrincipalType = DirectoryPrincipal['principalType'];
-type Directory = Awaited<ReturnType<typeof listDirectoryPrincipals>>;
+type Directory = Awaited<ReturnType<typeof loadDirectory>>;
 
 /**
  * Who a grant is for: picked from the registered users or tokens, each shown
@@ -36,6 +36,7 @@ export function PrincipalPicker({
   value: string;
   onChange: (principalId: string) => void;
 }) {
+  const coffre = useCoffre();
   const [directory, setDirectory] = useState<Directory | null>(null);
   const [query, setQuery] = useState('');
   const name = useId();
@@ -45,13 +46,13 @@ export function PrincipalPicker({
   useEffect(() => {
     if (!canList) return;
     let live = true;
-    void listDirectoryPrincipals().then((result) => {
+    void loadDirectory(coffre, true).then((result) => {
       if (live) setDirectory(result);
     });
     return () => {
       live = false;
     };
-  }, [canList]);
+  }, [canList, coffre]);
 
   if (!canList || directory?.ok === false) {
     return (

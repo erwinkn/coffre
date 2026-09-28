@@ -2,7 +2,7 @@ import { Fragment, useEffect, useState, type ReactNode } from 'react';
 import { useRouter } from '@tanstack/react-router';
 import { DropdownMenu } from 'radix-ui';
 import { toast } from 'sonner';
-import { archiveSync, createSync, runSync, setSyncPaused } from '../server-functions/syncs';
+import { useCoffre } from '../lib/coffre';
 import { useAction } from '../lib/use-action';
 import {
   DESTINATIONS,
@@ -97,6 +97,7 @@ export function Syncs({
 
 function SyncRow({ sync, canRun, canManage }: { sync: SyncView; canRun: boolean; canManage: boolean }) {
   const [removing, setRemoving] = useState(false);
+  const coffre = useCoffre();
   // Apart, so pausing does not spin the Run now button.
   const pushing = useAction();
   const managing = useAction();
@@ -105,14 +106,14 @@ function SyncRow({ sync, canRun, canManage }: { sync: SyncView; canRun: boolean;
 
   function runNow() {
     pushing.run(
-      () => runSync({ data: { id: sync.id } }),
+      () => coffre.syncs.run(sync.id),
       (result) => announce(sync, result.outcome),
     );
   }
 
   function setPaused(paused: boolean) {
     managing.run(
-      () => setSyncPaused({ data: { id: sync.id, paused } }),
+      () => coffre.syncs.update(sync.id, { paused }),
       () =>
         toast.success(paused ? `Paused ${sync.destination}` : `Resumed ${sync.destination}`, {
           action: { label: 'Undo', onClick: () => setPaused(!paused) },
@@ -191,7 +192,7 @@ function SyncRow({ sync, canRun, canManage }: { sync: SyncView; canRun: boolean;
             confirmLabel="Remove sync"
             onConfirm={() =>
               managing.run(
-                () => archiveSync({ data: { id: sync.id } }),
+                () => coffre.syncs.remove(sync.id),
                 () => toast.success(`No longer syncing to ${sync.destination}`),
               )
             }
@@ -297,6 +298,7 @@ function AddSync({ project, environment }: { project: string; environment: strin
   const [kind, setKind] = useState<DestinationKind>('github-actions');
   const [values, setValues] = useState<FormValues>(() => initialValues(destination(kind)));
   const [credential, setCredential] = useState('');
+  const coffre = useCoffre();
   const { pending, error, setError, run } = useAction();
 
   const entry = destination(kind);
@@ -342,17 +344,13 @@ function AddSync({ project, environment }: { project: string; environment: strin
             event.preventDefault();
             run(
               () =>
-                createSync({
-                  data: {
-                    project,
-                    environment,
-                    provider: kind,
-                    config: destinationConfig(entry, values),
-                    credential: credential.trim(),
-                  },
+                coffre.syncs.add(`${project}/${environment}`, {
+                  provider: kind,
+                  config: destinationConfig(entry, values),
+                  credential: credential.trim(),
                 }),
-              (result) => {
-                toast.success(`Syncing to ${result.sync.destination}`, {
+              (sync) => {
+                toast.success(`Syncing to ${sync.destination}`, {
                   description: 'The first push has started.',
                 });
                 close();

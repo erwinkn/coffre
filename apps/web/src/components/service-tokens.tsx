@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { toast } from 'sonner';
-import { issueServiceToken, revokeServiceToken } from '../server-functions/signin';
+import { memberRef, useCoffre } from '../lib/coffre';
 import { useAction } from '../lib/use-action';
 import type { ServiceTokenRow } from '../server/api/signin';
 import { Card } from './page';
@@ -14,6 +14,7 @@ const LIFETIMES = [30, 90, 180, 365] as const;
  * one place, this dialog, for as long as it stays open: coffre keeps a hash.
  */
 export function ServiceTokens({ serviceId, tokens }: { serviceId: string; tokens: ServiceTokenRow[] }) {
+  const coffre = useCoffre();
   const { pending, error, run } = useAction();
 
   return (
@@ -94,7 +95,7 @@ export function ServiceTokens({ serviceId, tokens }: { serviceId: string; tokens
                       confirmLabel="Revoke token"
                       onConfirm={() =>
                         run(
-                          () => revokeServiceToken({ data: { id: token.id } }),
+                          () => coffre.tokens.revoke(memberRef('service', serviceId), token.id),
                           () => toast.success('Token revoked'),
                         )
                       }
@@ -115,6 +116,7 @@ function IssueToken({ serviceId }: { serviceId: string }) {
   const [label, setLabel] = useState('');
   const [days, setDays] = useState<number>(90);
   const [issued, setIssued] = useState<{ token: string; expiresAt: string } | null>(null);
+  const coffre = useCoffre();
   const { pending, error, setError, run } = useAction();
 
   function close() {
@@ -142,10 +144,11 @@ function IssueToken({ serviceId }: { serviceId: string }) {
               event.preventDefault();
               run(
                 () =>
-                  issueServiceToken({
-                    data: { serviceId, label: label.trim() === '' ? null : label.trim(), expiresInDays: days },
+                  coffre.tokens.issue(memberRef('service', serviceId), {
+                    label: label.trim() === '' ? null : label.trim(),
+                    expiresInDays: days,
                   }),
-                (result) => setIssued(result.credential),
+                (credential) => setIssued(credential),
               );
             }}
           >

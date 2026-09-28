@@ -1,17 +1,17 @@
 import { createFileRoute } from '@tanstack/react-router';
 import { loadPrincipalPage, PrincipalPage } from '../components/principal-page';
 import { ServiceTokens } from '../components/service-tokens';
-import { listServiceTokens } from '../server-functions/signin';
+import { memberRef, uiResult } from '../lib/coffre';
 
 export const Route = createFileRoute('/tokens/$token')({
-  loader: async ({ params, parentMatchPromise }) => {
+  loader: async ({ context: { client }, params, parentMatchPromise }) => {
     const root = (await parentMatchPromise).loaderData;
     // Only owners issue and see credentials; asking as anyone else would
-    // only earn a refusal.
+    // only earn a refusal. Only coffre's own sign-in issues any.
     const [page, credentials] = await Promise.all([
-      loadPrincipalPage('service', params.token, root),
-      root?.capabilities.canManageGrants
-        ? listServiceTokens({ data: { serviceId: params.token } })
+      loadPrincipalPage(client, 'service', params.token, root),
+      root?.capabilities.canManageGrants && root.authMode === 'signin'
+        ? uiResult(() => client.tokens.list(memberRef('service', params.token)))
         : Promise.resolve(null),
     ]);
     return { page, credentials };
@@ -27,7 +27,7 @@ function TokenPage() {
   return (
     <>
       <PrincipalPage principalType="service" principalId={token} data={page} />
-      {active && credentials?.ok === true && credentials.mode === 'signin' && (
+      {active && credentials?.ok === true && (
         <ServiceTokens serviceId={token} tokens={credentials.tokens} />
       )}
     </>

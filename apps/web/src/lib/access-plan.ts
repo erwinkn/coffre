@@ -1,3 +1,5 @@
+import type { Role } from '../../../../packages/core/src/access.ts';
+import type { AccessValue } from '../server/api/access.ts';
 import type { GrantRow } from '../shared/models';
 
 /** Read or write on one environment, and when it ends: an ISO instant, or null for never. */
@@ -133,12 +135,8 @@ function sameExpiry(a: string | null, b: string | null): boolean {
 
 /**
  * The changes that take what is held to the plan: grants to create, grants
- * whose expiry moves, and grants to revoke, in that order.
- *
- * Creates come before revokes, so a change of level never passes through less
- * access than both ends. Asking for what is already held yields nothing, so
- * applying the same plan twice is a no-op, and after a partial failure the
- * changes against the refreshed grants are exactly what did not land.
+ * whose expiry moves, and grants to revoke, in that order. Asking for what is
+ * already held yields nothing, so applying the same plan twice is a no-op.
  */
 export function accessChanges(grants: readonly HeldGrant[], plan: AccessPlan): AccessChange[] {
   if (plan.level === 'custom') return [];
@@ -162,6 +160,33 @@ export function accessChanges(grants: readonly HeldGrant[], plan: AccessPlan): A
     if (!wanted.has(id)) changes.push({ kind: 'revoke', grant });
   }
   return changes;
+}
+
+/**
+ * The changes as the API's access patch for one project: each place it
+ * touches, and the role to hold there until when, or `null` for none.
+ *
+ *   { "market": null, "market/dev": { "role": "developer", "until": "2026-12-31T23:59:59.000Z" } }
+ *
+ * A place holds one role, so where a level changes, the revoke of the old
+ * role and the create of the new land on the same place, and the new role
+ * wins: the server replaces one with the other, never passing through none.
+ */
+export function accessPatch(project: string, changes: readonly AccessChange[]): Record<string, AccessValue> {
+  const place = (environmentSlug: string | null) =>
+    environmentSlug === null ? project : `${project}/${environmentSlug}`;
+  const holding = (role: string, expiresAt: string | null): AccessValue =>
+    expiresAt === null ? (role as Role) : { role: role as Role, until: expiresAt };
+
+  const patch: Record<string, AccessValue> = {};
+  for (const change of changes) {
+    if (change.kind === 'revoke') patch[place(change.grant.environmentSlug)] = null;
+  }
+  for (const change of changes) {
+    if (change.kind === 'expiry') patch[place(change.grant.environmentSlug)] = holding(change.grant.role, change.expiresAt);
+    if (change.kind === 'create') patch[place(change.environmentSlug)] = holding(change.role, change.expiresAt);
+  }
+  return patch;
 }
 
 /** A date field's value as the instant access ends: the close of that day, UTC. */
