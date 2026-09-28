@@ -1,11 +1,12 @@
 import { z } from 'zod';
 
+import { resolvePath, type ResolvedPath } from '../../../../../packages/db/src/queries.ts';
 import { secretKey, slug } from '../../shared/schemas.ts';
 import { errorResponse, jsonResponse, readJson } from '../http.ts';
 import { can } from './caller.ts';
 import { denied, missing, refuse, Refusal, type ApiContext } from './context.ts';
 import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
-import { formatPath, resolvePath, type ResolvedPath } from './paths.ts';
+import { formatPath } from './paths.ts';
 import { routes, type Check, type Route } from './routes.ts';
 
 type AnyRoute = Route<string, z.ZodType | undefined, unknown>;

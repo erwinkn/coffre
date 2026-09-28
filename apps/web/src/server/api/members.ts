@@ -1,20 +1,14 @@
-import { and, asc, count, desc, eq, gt, inArray, isNull, like, or } from 'drizzle-orm';
-
 import { ROLES, type Permission, type Role } from '../../../../../packages/core/src/access.ts';
 import type { Queryable } from '../../../../../packages/db/src/database.ts';
-import { canonicalTimestamp } from '../../../../../packages/db/src/audit.ts';
-import { forUpdate } from '../../../../../packages/db/src/dialect.ts';
 import {
-  auditLog,
-  credentials,
-  environments,
-  grants,
-  identities,
-  principals,
-  projects,
-  secrets,
-  secretVersions,
-} from '../../../../../packages/db/src/schema.ts';
+  insert,
+  lock,
+  memberActivity,
+  members as loadMembers,
+  update,
+  type MemberRow,
+} from '../../../../../packages/db/src/queries.ts';
+import { credentials, grants, identities, principals } from '../../../../../packages/db/src/schema.ts';
 import { can, isConfiguredRootAdmin } from './caller.ts';
 import { allowed, audited, denied, Refusal, requireOwner, type ApiContext } from './context.ts';
 import { conflict, forbidden, notFound } from './errors.ts';
@@ -98,11 +92,17 @@ export type RemovedMember = {
   toRotate: number;
 };
 
-const live = (now: Date) => or(isNull(grants.expiresAt), gt(grants.expiresAt, now));
+const isLive = (now: Date) => (grant: { expiresAt: Date | null }) =>
+  grant.expiresAt === null || grant.expiresAt > now;
 
-/** Rows of `table` that belong to `member`. */
-const heldBy = (table: typeof grants | typeof credentials | typeof identities, member: MemberRef) =>
-  and(eq(table.principalType, member.type), eq(table.principalId, member.id));
+/** By project, then environment, with the project-wide grant after its environments. */
+function byPlace(a: MemberRow['grants'][number], b: MemberRow['grants'][number]): number {
+  if (a.project !== b.project) return a.project < b.project ? -1 : 1;
+  if (a.environment === b.environment) return 0;
+  if (a.environment === null) return 1;
+  if (b.environment === null) return -1;
+  return a.environment < b.environment ? -1 : 1;
+}
 
 /**
  * Members and their live grants. Owners see everyone; anyone else sees the
@@ -114,42 +114,17 @@ export async function listMembers(
   query: { path?: Path },
 ): Promise<{ members: Member[]; removed: RemovedMember[] }> {
   const { caller } = ctx;
-  const now = new Date();
-  const rows = await ctx.db
-    .select({
-      principalType: principals.principalType,
-      principalId: principals.principalId,
-      instanceRole: principals.instanceRole,
-      grantId: grants.id,
-      role: grants.role,
-      expiresAt: grants.expiresAt,
-      projectId: projects.id,
-      project: projects.slug,
-      environment: environments.slug,
-    })
-    .from(principals)
-    .leftJoin(
-      grants,
-      and(
-        eq(grants.principalType, principals.principalType),
-        eq(grants.principalId, principals.principalId),
-        live(now),
-      ),
-    )
-    .leftJoin(environments, eq(environments.id, grants.environmentId))
-    .leftJoin(projects, or(eq(projects.id, grants.projectId), eq(projects.id, environments.projectId)))
-    .where(eq(principals.active, true))
-    .orderBy(asc(principals.principalType), asc(principals.principalId), asc(projects.slug), asc(environments.slug));
-
   const manages = (projectId: string) => can(caller, 'grant.manage', { projectId });
   if (!caller.isOwner && !caller.grants.some((grant) => manages(grant.projectId))) {
     throw forbidden('only owners, and members with grant.manage on a project, can list members');
   }
-  const inPath = (row: (typeof rows)[number]) =>
+  const everyone = query.path === undefined && caller.isOwner;
+  const inPath = (grant: MemberRow['grants'][number]) =>
     query.path === undefined ||
-    (row.project === query.path.project &&
-      (query.path.environment === undefined || row.environment === query.path.environment));
+    (grant.project === query.path.project &&
+      (query.path.environment === undefined || grant.environment === query.path.environment));
 
+  const all = await loadMembers(ctx.db, {}, new Date());
   const byMember = new Map<string, Member>();
   const entry = (type: 'user' | 'service', id: string, instanceRole: string): Member => {
     const ref = { type, id };
@@ -171,128 +146,106 @@ export async function listMembers(
   };
 
   // Owners see configured root admins even when they have no row.
-  if (caller.isOwner && query.path === undefined) {
+  if (everyone) {
     for (const id of ctx.rootAdmins) entry('user', id, 'user');
   }
-  for (const row of rows) {
-    const type = row.principalType as 'user' | 'service';
-    const hasGrant = row.grantId !== null && row.projectId !== null;
-    const visible = hasGrant && (caller.isOwner || manages(row.projectId!)) && inPath(row);
-    if (visible) {
-      const role = row.role as Role;
-      entry(type, row.principalId, row.instanceRole).grants.push({
-        id: row.grantId!,
-        project: row.project!,
-        environment: row.environment,
+  const now = new Date();
+  for (const row of all.filter((row) => row.active)) {
+    if (everyone) entry(row.type, row.id, row.instanceRole);
+    const visible = row.grants
+      .filter(isLive(now))
+      .filter((grant) => (caller.isOwner || manages(grant.projectId)) && inPath(grant))
+      .sort(byPlace);
+    for (const grant of visible) {
+      const role = grant.role as Role;
+      entry(row.type, row.id, row.instanceRole).grants.push({
+        id: grant.id,
+        project: grant.project,
+        environment: grant.environment,
         role,
         roleName: ROLES[role].name,
         permissions: [...ROLES[role].permissions],
-        expiresAt: row.expiresAt?.toISOString() ?? null,
+        expiresAt: grant.expiresAt?.toISOString() ?? null,
       });
-    } else if (caller.isOwner && query.path === undefined) {
-      entry(type, row.principalId, row.instanceRole);
     }
   }
 
   const members = [...byMember.values()].sort(
     (a, b) => a.principalType.localeCompare(b.principalType) || a.principalId.localeCompare(b.principalId),
   );
-  const removed = caller.isOwner && query.path === undefined ? await listRemoved(ctx) : [];
-  return { members, removed };
+  if (!everyone) return { members, removed: [] };
+
+  // Everyone removed, so their reports stay reachable: removal ends access,
+  // not the work of rotating what they saw.
+  const removed = all
+    .filter((row) => !row.active && !isConfiguredRootAdmin(row, ctx.rootAdmins))
+    .map((row) => ({ type: row.type, id: row.id }));
+  const exposed = exposure(removed, removed.length === 0 ? [] : await memberActivity(ctx.db, removed.map((m) => m.id)));
+  return {
+    members,
+    removed: removed.map((member) => ({
+      principalType: member.type,
+      principalId: member.id,
+      toRotate: exposed.get(formatMember(member))!.exposed.length,
+    })),
+  };
 }
 
-type Seen = { secretId: string; version: number; wrote: boolean; at: string };
+type Activity = Awaited<ReturnType<typeof memberActivity>>[number];
+type Seen = { version: number; wrote: boolean; at: string };
 
 /**
- * Everything these members read or wrote, and each live secret's current
- * version: a value they saw that is still current is one to rotate.
+ * What each of these members read or wrote that is still a live secret's
+ * current version: a value they saw that is still current is one to rotate.
  */
-async function exposure(
-  db: Queryable,
+function exposure(
   members: MemberRef[],
-): Promise<Map<string, { exposed: ExposedSecret[]; rotated: number }>> {
+  activity: Activity[],
+): Map<string, { exposed: ExposedSecret[]; rotated: number }> {
   const result = new Map(members.map((member) => [formatMember(member), { exposed: [] as ExposedSecret[], rotated: 0 }]));
-  if (members.length === 0) return result;
-
-  const rows = await db
-    .select({
-      actorType: auditLog.actorType,
-      actorId: auditLog.actorId,
-      action: auditLog.action,
-      secretId: auditLog.secretId,
-      metadata: auditLog.metadata,
-      occurredAt: auditLog.occurredAt,
-    })
-    .from(auditLog)
-    .where(
-      and(
-        inArray(auditLog.actorId, members.map((member) => member.id)),
-        eq(auditLog.decision, 'allow'),
-        inArray(auditLog.action, ['secret.read', 'secret.write', 'secret.import']),
-      ),
-    )
-    .orderBy(asc(auditLog.seq));
 
   // Per member, per secret, per version: whether they wrote it, and when they last saw it.
   const seen = new Map<string, Map<string, Map<number, Seen>>>();
-  for (const row of rows) {
+  // A restore is a new version holding an older one's value, so whoever saw
+  // that value has seen the restored version too.
+  const restoredFrom = new Map<string, number>();
+  const current = new Map<string, Activity>();
+  for (const row of activity) {
+    if (row.secretId === null) continue;
+    const metadata = JSON.parse(row.metadata) as { version?: unknown; toVersion?: unknown };
+    if (row.action === 'secret.rollback') {
+      if (typeof metadata.version === 'number' && typeof metadata.toVersion === 'number') {
+        restoredFrom.set(`${row.secretId}:${metadata.version}`, metadata.toVersion);
+      }
+      continue;
+    }
     const key = formatMember({ type: row.actorType as 'user' | 'service', id: row.actorId });
-    if (row.secretId === null || !result.has(key)) continue;
-    const version = (JSON.parse(row.metadata) as { version?: unknown }).version;
+    if (row.action === 'directory.remove' || !result.has(key)) continue;
+    const version = metadata.version;
     if (typeof version !== 'number') continue;
+    if (row.key !== null && !row.archived && row.currentVersion! > 0) current.set(row.secretId, row);
     const bySecret = seen.get(key) ?? new Map<string, Map<number, Seen>>();
     seen.set(key, bySecret);
     const byVersion = bySecret.get(row.secretId) ?? new Map<number, Seen>();
     bySecret.set(row.secretId, byVersion);
     const previous = byVersion.get(version);
     byVersion.set(version, {
-      secretId: row.secretId,
       version,
       wrote: (previous?.wrote ?? false) || row.action !== 'secret.read',
-      at: canonicalTimestamp(row.occurredAt),
+      at: row.occurredAt,
     });
   }
 
-  const touched = [...new Set([...seen.values()].flatMap((bySecret) => [...bySecret.keys()]))];
-  if (touched.length === 0) return result;
-  const current = await db
-    .select({
-      secretId: secrets.id,
-      key: secrets.key,
-      version: secretVersions.version,
-      project: projects.slug,
-      environment: environments.slug,
-    })
-    .from(secrets)
-    .innerJoin(environments, and(eq(environments.id, secrets.environmentId), isNull(environments.archivedAt)))
-    .innerJoin(projects, and(eq(projects.id, secrets.projectId), isNull(projects.archivedAt)))
-    .innerJoin(secretVersions, eq(secretVersions.id, secrets.currentVersionId))
-    .where(and(inArray(secrets.id, touched), isNull(secrets.archivedAt)))
-    .orderBy(asc(projects.slug), asc(environments.slug), asc(secrets.key));
-
-  // A restore is a new version holding an older one's value, so whoever saw
-  // that value has seen the restored version too.
-  const restores = await db
-    .select({ secretId: auditLog.secretId, metadata: auditLog.metadata })
-    .from(auditLog)
-    .where(
-      and(inArray(auditLog.secretId, touched), eq(auditLog.action, 'secret.rollback'), eq(auditLog.decision, 'allow')),
-    );
-  const restoredFrom = new Map<string, number>();
-  for (const row of restores) {
-    const { version, toVersion } = JSON.parse(row.metadata) as { version?: unknown; toVersion?: unknown };
-    if (typeof version === 'number' && typeof toVersion === 'number') {
-      restoredFrom.set(`${row.secretId}:${version}`, toVersion);
-    }
-  }
-
+  const secrets = [...current.values()].sort(
+    (a, b) => compare(a.project!, b.project!) || compare(a.environment!, b.environment!) || compare(a.key!, b.key!),
+  );
   for (const [key, bySecret] of seen) {
     const report = result.get(key)!;
-    for (const secret of current) {
-      const byVersion = bySecret.get(secret.secretId);
+    for (const secret of secrets) {
+      const byVersion = bySecret.get(secret.secretId!);
       if (byVersion === undefined) continue;
       // Restores only point back, so this walk ends.
-      let version: number | undefined = secret.version;
+      let version: number | undefined = secret.currentVersion!;
       let hit: Seen | undefined;
       while (version !== undefined && (hit = byVersion.get(version)) === undefined) {
         version = restoredFrom.get(`${secret.secretId}:${version}`);
@@ -302,10 +255,10 @@ async function exposure(
         continue;
       }
       report.exposed.push({
-        project: secret.project,
-        environment: secret.environment,
-        key: secret.key,
-        version: secret.version,
+        project: secret.project!,
+        environment: secret.environment!,
+        key: secret.key!,
+        version: secret.currentVersion!,
         how: hit.wrote ? 'wrote' : 'read',
         at: hit.at,
       });
@@ -314,26 +267,7 @@ async function exposure(
   return result;
 }
 
-/**
- * Everyone removed, so their reports stay reachable: removal ends access,
- * not the work of rotating what they saw.
- */
-async function listRemoved(ctx: ApiContext): Promise<RemovedMember[]> {
-  const rows = await ctx.db
-    .select({ principalType: principals.principalType, principalId: principals.principalId })
-    .from(principals)
-    .where(eq(principals.active, false))
-    .orderBy(asc(principals.principalType), asc(principals.principalId));
-  const removed = rows
-    .map((row) => ({ type: row.principalType as 'user' | 'service', id: row.principalId }))
-    .filter((member) => !isConfiguredRootAdmin(member, ctx.rootAdmins));
-  const exposed = await exposure(ctx.db, removed);
-  return removed.map((member) => ({
-    principalType: member.type,
-    principalId: member.id,
-    toRotate: exposed.get(formatMember(member))!.exposed.length,
-  }));
-}
+const compare = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
 /**
  * Who someone is to this instance and what to rotate if they leave. Owners
@@ -342,99 +276,53 @@ async function listRemoved(ctx: ApiContext): Promise<RemovedMember[]> {
 export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<OffboardingReport> {
   if (!ctx.caller.isOwner) throw forbidden('only owners may see what someone has access to');
   const isRootAdmin = isConfiguredRootAdmin(member, ctx.rootAdmins);
-  const where = and(eq(principals.principalType, member.type), eq(principals.principalId, member.id));
-  const [found] = await ctx.db
-    .select({ instanceRole: principals.instanceRole, active: principals.active })
-    .from(principals)
-    .where(where);
+  const now = new Date();
+  // Everyone, not just them: the service tokens they issued belong to others.
+  const all = await loadMembers(ctx.db, {}, now);
+  const found = all.find((row) => row.type === member.type && row.id === member.id);
   if (found === undefined && !isRootAdmin) throw notFound('no such member');
   const active = isRootAdmin || found?.active === true;
-  const now = new Date();
 
-  // The newest removal. Removals are rare, and the id narrows them further;
-  // the metadata is checked exactly below.
+  const activity = await memberActivity(ctx.db, [member.id]);
   const removal = active
     ? undefined
-    : (
-        await ctx.db
-          .select({ occurredAt: auditLog.occurredAt, actorId: auditLog.actorId, metadata: auditLog.metadata })
-          .from(auditLog)
-          .where(
-            and(
-              eq(auditLog.action, 'directory.remove'),
-              eq(auditLog.decision, 'allow'),
-              isNull(auditLog.projectId),
-              like(auditLog.metadata, `%${JSON.stringify(member.id).slice(1, -1)}%`),
-            ),
-          )
-          .orderBy(desc(auditLog.seq))
-      ).find((row) => {
-        const metadata = JSON.parse(row.metadata) as { principalType?: unknown; principalId?: unknown };
-        return metadata.principalType === member.type && metadata.principalId === member.id;
-      });
+    : activity
+        .filter((row) => {
+          if (row.action !== 'directory.remove') return false;
+          const metadata = JSON.parse(row.metadata) as { principalType?: unknown; principalId?: unknown };
+          return metadata.principalType === member.type && metadata.principalId === member.id;
+        })
+        .at(-1);
 
-  const [liveGrants] = await ctx.db
-    .select({ n: count() })
-    .from(grants)
-    .where(and(heldBy(grants, member), live(now)));
-  const liveCredentials = await ctx.db
-    .select({ kind: credentials.kind, n: count() })
-    .from(credentials)
-    .where(and(heldBy(credentials, member), isNull(credentials.revokedAt), gt(credentials.expiresAt, now)))
-    .groupBy(credentials.kind);
-  const [liveIdentities] = await ctx.db
-    .select({ n: count() })
-    .from(identities)
-    .where(and(heldBy(identities, member), isNull(identities.revokedAt)));
+  const held = found?.credentials ?? [];
+  const issued = all
+    .filter((row) => row.active)
+    .flatMap((row) => row.credentials.map((credential) => ({ service: row.id, ...credential })))
+    .filter((credential) => credential.kind === 'service' && credential.createdBy === member.id)
+    .sort((a, b) => compare(a.service, b.service) || a.createdAt.getTime() - b.createdAt.getTime());
 
-  const issued = await ctx.db
-    .select({
-      id: credentials.id,
-      service: credentials.principalId,
-      label: credentials.label,
-      hint: credentials.tokenHint,
-      expiresAt: credentials.expiresAt,
-      lastUsedAt: credentials.lastUsedAt,
-    })
-    .from(credentials)
-    .innerJoin(
-      principals,
-      and(
-        eq(principals.principalType, credentials.principalType),
-        eq(principals.principalId, credentials.principalId),
-        eq(principals.active, true),
-      ),
-    )
-    .where(
-      and(
-        eq(credentials.kind, 'service'),
-        eq(credentials.createdBy, member.id),
-        isNull(credentials.revokedAt),
-        gt(credentials.expiresAt, now),
-      ),
-    )
-    .orderBy(asc(credentials.principalId), asc(credentials.createdAt));
-
-  const { exposed, rotated } = (await exposure(ctx.db, [member])).get(formatMember(member))!;
-  const sessions = liveCredentials.filter((row) => row.kind !== 'service').reduce((sum, row) => sum + row.n, 0);
+  const { exposed, rotated } = exposure([member], activity).get(formatMember(member))!;
   return {
     principalType: member.type,
     principalId: member.id,
     status: active ? 'active' : 'removed',
     instanceRole: isRootAdmin ? 'root-admin' : ((found?.instanceRole ?? 'user') as 'user' | 'owner'),
     isRootAdmin,
-    removedAt: removal ? canonicalTimestamp(removal.occurredAt) : null,
+    removedAt: removal?.occurredAt ?? null,
     removedBy: removal?.actorId ?? null,
     live: {
-      grants: liveGrants.n,
-      sessions,
-      tokens: liveCredentials.find((row) => row.kind === 'service')?.n ?? 0,
-      identities: liveIdentities.n,
+      grants: (found?.grants ?? []).filter(isLive(now)).length,
+      sessions: held.filter((credential) => credential.kind !== 'service').length,
+      tokens: held.filter((credential) => credential.kind === 'service').length,
+      identities: found?.identities.length ?? 0,
     },
     exposed,
     rotated,
     issuedTokens: issued.map((token) => ({
-      ...token,
+      id: token.id,
+      service: token.service,
+      label: token.label,
+      hint: token.tokenHint,
       expiresAt: token.expiresAt.toISOString(),
       lastUsedAt: token.lastUsedAt?.toISOString() ?? null,
     })),
@@ -472,26 +360,19 @@ export async function putMember(
       );
     }
 
-    const where = and(eq(principals.principalType, member.type), eq(principals.principalId, member.id));
-    const [existing] = await forUpdate(
-      tx.select({ active: principals.active, instanceRole: principals.instanceRole }).from(principals).where(where),
-    );
+    const key = { principalType: member.type, principalId: member.id };
+    // Locked, so a removal racing this re-add or role change waits for it.
+    const [existing] = await lock(tx, principals, key);
     const createdBy = ctx.caller.principal.id;
     if (existing === undefined) {
-      await tx.insert(principals).values({
-        principalType: member.type,
-        principalId: member.id,
-        instanceRole,
-        createdBy,
-        active: true,
-      });
+      await insert(tx, principals, { ...key, instanceRole, createdBy, active: true });
     } else if (!existing.active) {
-      await tx.update(principals).set({ instanceRole, active: true, createdAt: new Date(), createdBy }).where(where);
+      await update(tx, principals, key, { instanceRole, active: true, createdAt: new Date(), createdBy });
     } else {
       // `owner` left out keeps the current role, as in any merge.
       const role = input.owner === undefined ? (existing.instanceRole as 'user' | 'owner') : instanceRole;
       if (role !== existing.instanceRole) {
-        await tx.update(principals).set({ instanceRole: role }).where(where);
+        await update(tx, principals, key, { instanceRole: role });
         log.push(allowed(ctx, 'directory.update', { metadata: { ...fields, instanceRole: role } }));
       }
       return { member: formatMember(member), instanceRole: role, created: false };
@@ -515,9 +396,9 @@ export async function removeMember(
     requireOwner(ctx, 'directory.remove', { metadata: fields });
     if (isConfiguredRootAdmin(member, ctx.rootAdmins)) throw rootAdminRefusal(ctx, 'directory.remove', member);
 
-    const where = and(eq(principals.principalType, member.type), eq(principals.principalId, member.id));
+    const key = { principalType: member.type, principalId: member.id };
     // Locking the row makes a sign-in or token issue that races this wait, then see them removed.
-    const [found] = await forUpdate(tx.select({ active: principals.active }).from(principals).where(where));
+    const [found] = await lock(tx, principals, key);
     if (found === undefined || !found.active) {
       throw new Refusal(
         notFound('no such member'),
@@ -526,36 +407,20 @@ export async function removeMember(
     }
 
     const now = new Date();
-    const liveGrants = await tx
-      .select({ id: grants.id, projectId: grants.projectId, environmentProjectId: environments.projectId })
-      .from(grants)
-      .leftJoin(environments, eq(environments.id, grants.environmentId))
-      .where(and(heldBy(grants, member), live(now)));
-    const liveCredentials = await tx
-      .select({ id: credentials.id, kind: credentials.kind })
-      .from(credentials)
-      .where(and(heldBy(credentials, member), isNull(credentials.revokedAt), gt(credentials.expiresAt, now)));
-    const liveIdentities = await tx
-      .select({ id: identities.id })
-      .from(identities)
-      .where(and(heldBy(identities, member), isNull(identities.revokedAt)));
+    const [held] = await loadMembers(tx, { member }, now);
+    const liveGrants = held.grants.filter(isLive(now));
+    const liveCredentials = held.credentials;
+    const liveIdentities = held.identities;
 
     const revokedBy = ctx.caller.principal.id;
-    if (liveGrants.length > 0) {
-      await tx.update(grants).set({ expiresAt: now }).where(inArray(grants.id, liveGrants.map((row) => row.id)));
-    }
-    await tx.update(principals).set({ active: false }).where(where);
+    const ids = (rows: { id: string }[]) => rows.map((row) => row.id);
+    if (liveGrants.length > 0) await update(tx, grants, { id: ids(liveGrants) }, { expiresAt: now });
+    await update(tx, principals, key, { active: false });
     if (liveCredentials.length > 0) {
-      await tx
-        .update(credentials)
-        .set({ revokedAt: now, revokedBy })
-        .where(inArray(credentials.id, liveCredentials.map((row) => row.id)));
+      await update(tx, credentials, { id: ids(liveCredentials) }, { revokedAt: now, revokedBy });
     }
     if (liveIdentities.length > 0) {
-      await tx
-        .update(identities)
-        .set({ revokedAt: now, revokedBy })
-        .where(inArray(identities.id, liveIdentities.map((row) => row.id)));
+      await update(tx, identities, { id: ids(liveIdentities) }, { revokedAt: now, revokedBy });
     }
 
     const counts = {
@@ -566,8 +431,7 @@ export async function removeMember(
     };
     const perProject = new Map<string, number>();
     for (const grant of liveGrants) {
-      const projectId = grant.projectId ?? grant.environmentProjectId!;
-      perProject.set(projectId, (perProject.get(projectId) ?? 0) + 1);
+      perProject.set(grant.projectId, (perProject.get(grant.projectId) ?? 0) + 1);
     }
     const { grants: revokedGrants, ...signedOut } = counts;
     log.push(allowed(ctx, 'directory.remove', { metadata: { ...fields, revoked: revokedGrants, ...signedOut } }));

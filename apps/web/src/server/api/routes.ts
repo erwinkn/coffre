@@ -88,7 +88,7 @@ export const routes = {
   ...route('PUT /projects/:project', {
     input: z.object({ name: displayName }),
     creates: true,
-    run: (ctx, { params, input }) => putProject(ctx, params.project, input),
+    run: (ctx, { params, place, input }) => putProject(ctx, place, params.project, input),
   }),
   ...route('PATCH /projects/:project', {
     input: placePatch,

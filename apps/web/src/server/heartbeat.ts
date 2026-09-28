@@ -1,14 +1,14 @@
-import { count, eq, sql } from 'drizzle-orm';
-
-import { appendAudit, canonicalTimestamp } from '../../../../packages/db/src/audit.ts';
+import { appendAudit } from '../../../../packages/db/src/audit.ts';
 import type { Database } from '../../../../packages/db/src/database.ts';
-import { migrations } from '../../../../packages/db/src/dialect.ts';
+import { appliedMigrations, heartbeat, update } from '../../../../packages/db/src/queries.ts';
 import { auditHeartbeat } from '../../../../packages/db/src/schema.ts';
 import { REQUIRED_MIGRATION_COUNT } from '../../../../packages/db/src/schema-version.ts';
 
 export type HeartbeatLogger = {
   warn: (obj: unknown, msg: string) => void;
 };
+
+class MissingSingleton extends Error {}
 
 /**
  * Logging-failure detection.
@@ -30,12 +30,7 @@ export async function writeAuditHeartbeat(
 ): Promise<boolean> {
   try {
     return await db.transaction(async (tx) => {
-      const [row] = await tx.select({ onlyRow: auditHeartbeat.onlyRow }).from(auditHeartbeat);
-      if (row === undefined) {
-        log.warn({}, 'audit heartbeat singleton is missing');
-        return false;
-      }
-      const { nextSeq } = await appendAudit(tx, chainKey, [
+      const { nextSeq, occurredAt } = await appendAudit(tx, chainKey, [
         {
           actorType: 'system',
           actorId: 'coffre-scheduler',
@@ -44,13 +39,17 @@ export async function writeAuditHeartbeat(
           metadata: { source: 'scheduled' },
         },
       ]);
-      await tx
-        .update(auditHeartbeat)
-        .set({ lastBeatAt: sql`CURRENT_TIMESTAMP`, lastSeq: nextSeq })
-        .where(eq(auditHeartbeat.onlyRow, true));
+      // The entry's own timestamp, which is the database clock.
+      const beat = { lastBeatAt: new Date(occurredAt), lastSeq: nextSeq };
+      if ((await update(tx, auditHeartbeat, { onlyRow: true }, beat)) === 0) throw new MissingSingleton();
       return true;
     });
   } catch (error) {
+    if (error instanceof MissingSingleton) {
+      // Rolled back, entry and all: a beat nobody can see is not a beat.
+      log.warn({}, 'audit heartbeat singleton is missing');
+      return false;
+    }
     // A heartbeat that cannot write is itself the signal.
     log.warn({ err: (error as Error).message }, 'audit heartbeat failed to write');
     return false;
@@ -62,11 +61,9 @@ export async function writeAuditHeartbeat(
  * database's clock, so a skewed application server cannot hide a stale beat.
  */
 export async function heartbeatAgeSeconds(db: Database): Promise<number | null> {
-  const [row] = await db
-    .select({ lastBeatAt: auditHeartbeat.lastBeatAt, now: sql<string>`CURRENT_TIMESTAMP` })
-    .from(auditHeartbeat);
-  if (row === undefined) return null;
-  return (Date.parse(canonicalTimestamp(row.now)) - row.lastBeatAt.getTime()) / 1000;
+  const row = await heartbeat(db);
+  if (row === null) return null;
+  return (Date.parse(row.now) - row.lastBeatAt.getTime()) / 1000;
 }
 
 /**
@@ -89,8 +86,7 @@ export async function auditReadiness(
   db: Database,
 ): Promise<Readiness> {
   try {
-    const [applied] = await db.select({ n: count() }).from(migrations);
-    if (applied === undefined || applied.n < REQUIRED_MIGRATION_COUNT) {
+    if ((await appliedMigrations(db)) < REQUIRED_MIGRATION_COUNT) {
       return { ok: false, auditHeartbeatAgeSeconds: null };
     }
     const age = await heartbeatAgeSeconds(db);

@@ -1,21 +1,20 @@
 import { randomUUID } from 'node:crypto';
 
-import { and, asc, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
-
 import type { Permission } from '../../../../../packages/core/src/access.ts';
 import { open } from '../../../../../packages/core/src/envelope.ts';
 import type { KekRegistry } from '../../../../../packages/core/src/kek/registry.ts';
 import type { AuditEntry } from '../../../../../packages/db/src/audit.ts';
 import type { Database, Queryable, Transaction } from '../../../../../packages/db/src/database.ts';
-import { alias, forUpdate, upsertSyncKey } from '../../../../../packages/db/src/dialect.ts';
 import {
-  environments,
-  projects,
-  secrets,
-  secretVersions,
-  syncKeys,
-  syncs,
-} from '../../../../../packages/db/src/schema.ts';
+  findSyncs,
+  insert,
+  lock,
+  resolvePath,
+  update,
+  upsert,
+  type SyncRow,
+} from '../../../../../packages/db/src/queries.ts';
+import { syncKeys, syncs } from '../../../../../packages/db/src/schema.ts';
 import {
   getProvider,
   SyncConfigError,
@@ -26,8 +25,8 @@ import {
 import { can } from './caller.ts';
 import { allowed, audited, denied, missing, Refusal, type ApiContext } from './context.ts';
 import { badRequest, conflict, forbidden, notFound } from './errors.ts';
-import { formatPath, parsePath, resolvePath } from './paths.ts';
-import { currentEnvelopes, envelopeColumns, envelopeOf } from './secrets.ts';
+import { formatPath, parsePath } from './paths.ts';
+import { currentEnvelopes } from './secrets.ts';
 
 /**
  * Syncs: coffre pushing one environment's secrets into a service that needs
@@ -180,86 +179,23 @@ export function planSync(input: {
 
 // --- reads --------------------------------------------------------------------
 
-const credentialProject = alias(projects, 'credential_project');
-const credentialEnvironment = alias(environments, 'credential_environment');
-
-/** Syncs with their place and their credential's path. Add a `where`. */
-function selectSyncs(db: Queryable) {
-  return db
-    .select({
-      id: syncs.id,
-      projectId: syncs.projectId,
-      environmentId: syncs.environmentId,
-      provider: syncs.provider,
-      config: syncs.config,
-      credentialSecretId: syncs.credentialSecretId,
-      createdAt: syncs.createdAt,
-      createdBy: syncs.createdBy,
-      pausedAt: syncs.pausedAt,
-      archivedAt: syncs.archivedAt,
-      leaseUntil: syncs.leaseUntil,
-      lastRunAt: syncs.lastRunAt,
-      lastStatus: syncs.lastStatus,
-      lastError: syncs.lastError,
-      project: projects.slug,
-      environment: environments.slug,
-      projectArchivedAt: projects.archivedAt,
-      environmentArchivedAt: environments.archivedAt,
-      credentialProject: credentialProject.slug,
-      credentialEnvironment: credentialEnvironment.slug,
-      credentialKey: secrets.key,
-    })
-    .from(syncs)
-    .innerJoin(environments, eq(environments.id, syncs.environmentId))
-    .innerJoin(projects, eq(projects.id, syncs.projectId))
-    .innerJoin(secrets, eq(secrets.id, syncs.credentialSecretId))
-    .innerJoin(credentialEnvironment, eq(credentialEnvironment.id, secrets.environmentId))
-    .innerJoin(credentialProject, eq(credentialProject.id, secrets.projectId));
-}
-
-type SyncRow = Awaited<ReturnType<typeof selectSyncs>>[number];
-
 /**
- * Lock one sync's row, and read it with its place. Only the sync's own row
- * is locked, not the secrets and environments it joins.
+ * Lock one sync's row, and read it with its place. Two runs racing for the
+ * lease, or a run and a pause, queue here. Only the sync's own row is locked,
+ * not the secrets and environments it joins.
  */
 async function lockSync(tx: Transaction, syncId: string): Promise<SyncRow | null> {
-  await forUpdate(tx.select({ id: syncs.id }).from(syncs).where(eq(syncs.id, syncId)));
-  const [row] = await selectSyncs(tx).where(eq(syncs.id, syncId));
+  await lock(tx, syncs, { id: syncId });
+  const [row] = await findSyncs(tx, { id: syncId });
   return row ?? null;
 }
 
 /** Syncs that serve: not archived, in a live project and environment. */
-const inLivePlace = and(isNull(syncs.archivedAt), isNull(environments.archivedAt), isNull(projects.archivedAt));
-
 function serves(row: SyncRow): boolean {
   return row.archivedAt === null && row.environmentArchivedAt === null && row.projectArchivedAt === null;
 }
 
-/** What the environment holds now: live secrets and their current version ids. */
-async function loadDesired(db: Queryable, environmentId: string): Promise<DesiredKey[]> {
-  return db
-    .select({ key: secrets.key, secretId: secrets.id, versionId: secrets.currentVersionId })
-    .from(secrets)
-    .where(and(eq(secrets.environmentId, environmentId), isNull(secrets.archivedAt), isNotNull(secrets.currentVersionId)))
-    .orderBy(asc(secrets.key)) as Promise<DesiredKey[]>;
-}
-
-/** What each sync last pushed and has not since removed. */
-async function loadRecorded(db: Queryable, syncIds: readonly string[]): Promise<Map<string, RecordedKey[]>> {
-  const bySync = new Map<string, RecordedKey[]>();
-  if (syncIds.length === 0) return bySync;
-  const rows = await db
-    .select({ syncId: syncKeys.syncId, key: syncKeys.key, versionId: syncKeys.secretVersionId })
-    .from(syncKeys)
-    .where(and(inArray(syncKeys.syncId, [...syncIds]), isNull(syncKeys.removedAt)));
-  for (const row of rows) {
-    const list = bySync.get(row.syncId) ?? [];
-    list.push({ key: row.key, versionId: row.versionId });
-    bySync.set(row.syncId, list);
-  }
-  return bySync;
-}
+const credentialPath = (row: SyncRow) => `${row.credential.project}/${row.credential.environment}/${row.credential.key}`;
 
 // --- runner -------------------------------------------------------------------
 
@@ -288,10 +224,9 @@ export class SyncRunner {
   /** After a secret changed: push it everywhere its environment syncs to. Never throws. */
   async runForEnvironment(environmentId: string): Promise<void> {
     try {
-      const rows = await this.#deps.db
-        .select({ id: syncs.id })
-        .from(syncs)
-        .where(and(eq(syncs.environmentId, environmentId), isNull(syncs.archivedAt), isNull(syncs.pausedAt)));
+      const rows = (await findSyncs(this.#deps.db, { environmentId })).filter(
+        (row) => row.archivedAt === null && row.pausedAt === null,
+      );
       const results = await Promise.allSettled(
         rows.map((row) => this.runSettled(row.id, 'change', systemActor(row.id))),
       );
@@ -309,8 +244,8 @@ export class SyncRunner {
    */
   async reconcile(): Promise<{ ran: number }> {
     const now = Date.now();
-    const rows = (await selectSyncs(this.#deps.db).where(and(inLivePlace, isNull(syncs.pausedAt)))).filter(
-      (row) => row.leaseUntil === null || row.leaseUntil.getTime() < now,
+    const rows = (await findSyncs(this.#deps.db, {})).filter(
+      (row) => serves(row) && row.pausedAt === null && (row.leaseUntil === null || row.leaseUntil.getTime() < now),
     );
     const views = await this.views(this.#deps.db, rows);
     const toRun = rows
@@ -333,7 +268,7 @@ export class SyncRunner {
   }
 
   async view(syncId: string): Promise<SyncView> {
-    const rows = await selectSyncs(this.#deps.db).where(eq(syncs.id, syncId));
+    const rows = await findSyncs(this.#deps.db, { id: syncId });
     if (rows.length === 0) throw notFound('unknown sync');
     const [view] = await this.views(this.#deps.db, rows);
     return view;
@@ -362,7 +297,7 @@ export class SyncRunner {
         destination,
         // Stored as JSON text from an object the create call checked.
         config: config as SyncView['config'],
-        credential: `${row.credentialProject}/${row.credentialEnvironment}/${row.credentialKey}`,
+        credential: credentialPath(row),
         createdAt: row.createdAt.toISOString(),
         createdBy: row.createdBy,
         paused: row.pausedAt !== null,
@@ -380,9 +315,8 @@ export class SyncRunner {
   /** What each sync would do if it ran now, going by the record alone. Decrypts nothing. */
   async #plans(
     db: Queryable,
-    rows: readonly Pick<SyncRow, 'id' | 'environmentId' | 'provider' | 'credentialSecretId'>[],
+    rows: readonly SyncRow[],
   ): Promise<Map<string, SyncPlanIds>> {
-    const recorded = await loadRecorded(db, rows.map((row) => row.id));
     const desiredByEnvironment = new Map<string, DesiredKey[]>();
     const plans = new Map<string, SyncPlanIds>();
     for (const row of rows) {
@@ -390,14 +324,18 @@ export class SyncRunner {
       if (provider === null) continue;
       let desired = desiredByEnvironment.get(row.environmentId);
       if (desired === undefined) {
-        desired = await loadDesired(db, row.environmentId);
+        desired = (await currentEnvelopes(db, row.environmentId)).map((entry) => ({
+          key: entry.key,
+          secretId: entry.secretId,
+          versionId: entry.secretVersionId,
+        }));
         desiredByEnvironment.set(row.environmentId, desired);
       }
       plans.set(
         row.id,
         planSync({
           desired: desired.filter((entry) => entry.secretId !== row.credentialSecretId),
-          recorded: recorded.get(row.id) ?? [],
+          recorded: row.recorded,
           checkKey: provider.checkKey,
         }),
       );
@@ -426,8 +364,8 @@ export class SyncRunner {
   }
 
   async #pendingKeys(syncId: string): Promise<string[]> {
-    const rows = await selectSyncs(this.#deps.db).where(
-      and(eq(syncs.id, syncId), isNull(syncs.archivedAt), isNull(syncs.pausedAt)),
+    const rows = (await findSyncs(this.#deps.db, { id: syncId })).filter(
+      (row) => row.archivedAt === null && row.pausedAt === null,
     );
     const plan = (await this.#plans(this.#deps.db, rows)).get(syncId);
     return plan ? [...plan.upsert.map((entry) => entry.key), ...plan.delete] : [];
@@ -440,7 +378,7 @@ export class SyncRunner {
       const now = Date.now();
       if (row === null || !serves(row) || row.pausedAt !== null) return null;
       if (row.leaseUntil !== null && row.leaseUntil.getTime() >= now) return null;
-      await tx.update(syncs).set({ leaseUntil: new Date(now + LEASE_MS) }).where(eq(syncs.id, syncId));
+      await update(tx, syncs, { id: syncId }, { leaseUntil: new Date(now + LEASE_MS) });
       return row;
     });
   }
@@ -475,25 +413,13 @@ export class SyncRunner {
       // Opening the credential is a use of a secret, so it is audited as the
       // run itself, in the same transaction as the read.
       const token = await audited({ db, chainKey }, async (tx, log) => {
-        const [credential] = await tx
-          .select({
-            secretId: secrets.id,
-            projectId: secrets.projectId,
-            environmentId: secrets.environmentId,
-            archivedAt: secrets.archivedAt,
-            version: secretVersions.version,
-            ...envelopeColumns,
-          })
-          .from(secrets)
-          .innerJoin(secretVersions, eq(secretVersions.id, secrets.currentVersionId))
-          .where(eq(secrets.id, sync.credentialSecretId));
-        if (credential === undefined || credential.archivedAt !== null) {
-          const path = `${sync.credentialProject}/${sync.credentialEnvironment}/${sync.credentialKey}`;
-          throw new SyncFailure(`${path} is archived; restore it or point this sync at another secret`);
+        const [credential] = await currentEnvelopes(tx, sync.credential.environmentId, sync.credentialSecretId);
+        if (credential === undefined) {
+          throw new SyncFailure(`${credentialPath(sync)} is archived; restore it or point this sync at another secret`);
         }
         const value = await open(
-          envelopeOf(credential),
-          { projectId: credential.projectId, environmentId: credential.environmentId, secretId: credential.secretId },
+          credential.envelope,
+          { projectId: sync.credential.projectId, environmentId: sync.credential.environmentId, secretId: credential.secretId },
           keks,
         );
         log.push({
@@ -501,8 +427,8 @@ export class SyncRunner {
           action: 'sync.run',
           decision: 'allow',
           // Filed under the credential, which is the secret this row reads.
-          projectId: credential.projectId,
-          environmentId: credential.environmentId,
+          projectId: sync.credential.projectId,
+          environmentId: sync.credential.environmentId,
           secretId: credential.secretId,
           bundleId: runId,
           metadata: { syncId, source: sourcePath, provider: provider.kind, destination, trigger, version: credential.version },
@@ -520,10 +446,10 @@ export class SyncRunner {
         const current = (await currentEnvelopes(tx, sync.environmentId)).filter(
           (entry) => entry.secretId !== sync.credentialSecretId,
         );
-        const recorded = (await loadRecorded(tx, [syncId])).get(syncId) ?? [];
+        // Read with the lease: only this run writes the record until it lets go.
         const ids = planSync({
           desired: current.map((entry) => ({ key: entry.key, secretId: entry.secretId, versionId: entry.secretVersionId })),
-          recorded,
+          recorded: sync.recorded,
           remote,
           checkKey: provider.checkKey,
         });
@@ -583,22 +509,25 @@ export class SyncRunner {
   ): Promise<void> {
     const now = new Date();
     await this.#deps.db.transaction(async (tx) => {
-      for (const key of outcome.upserted) {
+      const pushed = outcome.upserted.flatMap((key) => {
         const secretVersionId = pushedVersions.get(key);
-        if (secretVersionId === undefined) continue;
-        await upsertSyncKey(tx, { syncId, key, secretVersionId, pushedAt: now });
-      }
+        return secretVersionId === undefined ? [] : [{ syncId, key, secretVersionId, pushedAt: now, removedAt: null }];
+      });
+      // A key pushed again after being removed is the same row, brought back.
+      await upsert(tx, syncKeys, pushed, {
+        target: ['syncId', 'key'],
+        columns: ['secretVersionId', 'pushedAt', 'removedAt'],
+      });
       const removed = [...outcome.deleted, ...forget];
       if (removed.length > 0) {
-        await tx
-          .update(syncKeys)
-          .set({ removedAt: now })
-          .where(and(eq(syncKeys.syncId, syncId), inArray(syncKeys.key, removed), isNull(syncKeys.removedAt)));
+        await update(tx, syncKeys, { syncId, key: removed, removedAt: null }, { removedAt: now });
       }
-      await tx
-        .update(syncs)
-        .set({ lastRunAt: now, lastStatus: outcome.status, lastError: outcome.error, leaseUntil: null })
-        .where(eq(syncs.id, syncId));
+      await update(
+        tx,
+        syncs,
+        { id: syncId },
+        { lastRunAt: now, lastStatus: outcome.status, lastError: outcome.error, leaseUntil: null },
+      );
     });
   }
 }
@@ -610,9 +539,9 @@ export async function listSyncs(
   ctx: ApiContext,
   place: { projectId: string; environmentId: string },
 ): Promise<{ syncs: SyncView[]; canManage: boolean }> {
-  const rows = await selectSyncs(ctx.db)
-    .where(and(eq(syncs.environmentId, place.environmentId), isNull(syncs.archivedAt)))
-    .orderBy(asc(syncs.createdAt));
+  const rows = (await findSyncs(ctx.db, { environmentId: place.environmentId })).filter(
+    (row) => row.archivedAt === null,
+  );
   return {
     syncs: await ctx.syncs.views(ctx.db, rows),
     canManage: can(ctx.caller, 'environment.manage', place) && can(ctx.caller, 'secret.read', place),
@@ -626,9 +555,11 @@ export async function listSyncs(
  */
 export async function syncsCreatedBy(ctx: ApiContext, principalId: string): Promise<PlacedSyncView[]> {
   if (!ctx.caller.isOwner) throw forbidden('only owners may see what someone has access to');
-  const rows = await selectSyncs(ctx.db)
-    .where(and(eq(syncs.createdBy, principalId), inLivePlace))
-    .orderBy(asc(projects.slug), asc(environments.slug), asc(syncs.createdAt));
+  const byPlace = (row: SyncRow) => `${row.project}/${row.environment}`;
+  // Oldest first within each place: the sort is stable.
+  const rows = (await findSyncs(ctx.db, { createdBy: principalId }))
+    .filter(serves)
+    .sort((a, b) => (byPlace(a) < byPlace(b) ? -1 : byPlace(a) > byPlace(b) ? 1 : 0));
   const views = await ctx.syncs.views(ctx.db, rows);
   return views.map((view, index) => ({ ...view, project: rows[index].project, environment: rows[index].environment }));
 }
@@ -677,10 +608,10 @@ export async function createSync(
     // probe for secrets in environments the caller has no access to.
     if (
       credentialPlace === null ||
-      credential!.project.archived ||
-      credential!.environment!.archived ||
+      credential!.project.archivedAt !== null ||
+      credential!.environment!.archivedAt !== null ||
       credential!.secret === null ||
-      credential!.secret.archived ||
+      credential!.secret.archivedAt !== null ||
       credential!.secret.currentVersionId === null ||
       !can(ctx.caller, 'secret.read', credentialPlace)
     ) {
@@ -690,12 +621,7 @@ export async function createSync(
       );
     }
 
-    const others = await tx
-      .select({ config: syncs.config, project: projects.slug, environment: environments.slug })
-      .from(syncs)
-      .innerJoin(environments, eq(environments.id, syncs.environmentId))
-      .innerJoin(projects, eq(projects.id, syncs.projectId))
-      .where(and(eq(syncs.provider, provider.kind), isNull(syncs.archivedAt)));
+    const others = (await findSyncs(tx, { provider: provider.kind })).filter((row) => row.archivedAt === null);
     const wanted = canonicalJson(config);
     const duplicate = others.find((other) => canonicalJson(JSON.parse(other.config)) === wanted);
     if (duplicate !== undefined) {
@@ -706,7 +632,7 @@ export async function createSync(
     }
 
     const id = randomUUID();
-    await tx.insert(syncs).values({
+    await insert(tx, syncs, {
       id,
       ...place,
       provider: provider.kind,
@@ -743,7 +669,7 @@ async function manage(
       throw new Refusal(forbidden(), denied(ctx, action, missing(anyOf[0]), { ...scope, metadata: { syncId } }));
     }
     if (change === null) return;
-    await tx.update(syncs).set(change(row)).where(eq(syncs.id, syncId));
+    await update(tx, syncs, { id: syncId }, change(row));
     log.push(allowed(ctx, action, { ...scope, metadata: { syncId, provider: row.provider } }));
   });
 }

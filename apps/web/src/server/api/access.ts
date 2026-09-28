@@ -1,11 +1,9 @@
 import { randomUUID } from 'node:crypto';
 
-import { and, eq, inArray, isNull, or } from 'drizzle-orm';
-
 import { assignableToEnvironment, ROLES, type Role } from '../../../../../packages/core/src/access.ts';
 import type { AuditEntry } from '../../../../../packages/db/src/audit.ts';
-import { forUpdate } from '../../../../../packages/db/src/dialect.ts';
-import { environments, grants, principals, projects } from '../../../../../packages/db/src/schema.ts';
+import { insert, lock, members, places, update } from '../../../../../packages/db/src/queries.ts';
+import { grants, principals } from '../../../../../packages/db/src/schema.ts';
 import { allowed, audited, denied, need, Refusal, type ApiContext } from './context.ts';
 import { badRequest, conflict, notFound } from './errors.ts';
 import { formatPath, parsePath, type MemberRef } from './paths.ts';
@@ -65,21 +63,14 @@ export async function setAccess(
   if (wanted.length === 0) return { changes: {} };
 
   return audited(ctx, async (tx, log) => {
-    // Every named place, in one query.
-    const places = await tx
-      .select({ projectId: projects.id, project: projects.slug, environmentId: environments.id, environment: environments.slug })
-      .from(projects)
-      .leftJoin(environments, eq(environments.projectId, projects.id))
-      .where(inArray(projects.slug, [...new Set(wanted.map((want) => want.project))]));
+    const known = await places(tx);
     const located = wanted.map((want) => {
-      const project = places.find((place) => place.project === want.project);
+      const project = known.find((place) => place.slug === want.project);
       if (project === undefined) throw notFound(`no project "${want.project}"`);
-      if (want.environment === undefined) return { ...want, projectId: project.projectId, environmentId: null };
-      const environment = places.find(
-        (place) => place.project === want.project && place.environment === want.environment,
-      );
+      if (want.environment === undefined) return { ...want, projectId: project.id, environmentId: null };
+      const environment = project.environments.find((place) => place.slug === want.environment);
       if (environment === undefined) throw notFound(`no environment "${want.path}"`);
-      return { ...want, projectId: project.projectId, environmentId: environment.environmentId! };
+      return { ...want, projectId: project.id, environmentId: environment.id };
     });
 
     const subject = { principalType: member.type, principalId: member.id };
@@ -95,12 +86,7 @@ export async function setAccess(
     }
 
     // Lock the member, so a removal racing this cannot leave a grant behind.
-    const [principal] = await forUpdate(
-      tx
-        .select({ active: principals.active })
-        .from(principals)
-        .where(and(eq(principals.principalType, member.type), eq(principals.principalId, member.id))),
-    );
+    const [principal] = await lock(tx, principals, subject);
     const refuse = (want: (typeof located)[number], message: string, reason: string) =>
       new Refusal(
         conflict(message),
@@ -123,29 +109,8 @@ export async function setAccess(
       }
     }
 
-    const projectIds = located.filter((want) => want.environmentId === null).map((want) => want.projectId);
-    const environmentIds = located.flatMap((want) => want.environmentId ?? []);
-    const existing = await forUpdate(
-      tx
-        .select({
-          id: grants.id,
-          projectId: grants.projectId,
-          environmentId: grants.environmentId,
-          role: grants.role,
-          expiresAt: grants.expiresAt,
-        })
-        .from(grants)
-        .where(
-          and(
-            eq(grants.principalType, member.type),
-            eq(grants.principalId, member.id),
-            or(
-              ...(projectIds.length > 0 ? [and(inArray(grants.projectId, projectIds), isNull(grants.environmentId))] : []),
-              ...(environmentIds.length > 0 ? [inArray(grants.environmentId, environmentIds)] : []),
-            ),
-          ),
-        ),
-    );
+    // Expired grants too: granting a place again brings its row back.
+    const existing = principal === undefined ? [] : (await members(tx, { member }, now))[0].grants;
 
     const changes: Record<string, AccessChange> = {};
     const createdBy = ctx.caller.principal.id;
@@ -165,7 +130,7 @@ export async function setAccess(
           changes[want.path] = 'unchanged';
           continue;
         }
-        await tx.update(grants).set({ expiresAt: now }).where(eq(grants.id, row.id));
+        await update(tx, grants, { id: row.id }, { expiresAt: now });
         log.push(entry('grant.revoke', { grantId: row.id, role: row.role }));
         changes[want.path] = 'revoked';
         continue;
@@ -174,7 +139,7 @@ export async function setAccess(
       const grant = { role: want.role, roleName: ROLES[want.role].name, expiresAt };
       if (row === undefined) {
         const id = randomUUID();
-        await tx.insert(grants).values({
+        await insert(tx, grants, {
           id,
           principalType: member.type,
           principalId: member.id,
@@ -189,16 +154,13 @@ export async function setAccess(
       } else if (isLive && row.role === want.role && row.expiresAt?.getTime() === want.expiresAt?.getTime()) {
         changes[want.path] = 'unchanged';
       } else if (isLive) {
-        await tx.update(grants).set({ role: want.role, expiresAt: want.expiresAt }).where(eq(grants.id, row.id));
+        await update(tx, grants, { id: row.id }, { role: want.role, expiresAt: want.expiresAt });
         log.push(entry('grant.update', { grantId: row.id, from: row.role, ...grant }));
         changes[want.path] = 'updated';
       } else {
         // An expired grant is the same place's row: bring it back as a new grant.
         // The runtime role may not rewrite created_at; the log has when it came back.
-        await tx
-          .update(grants)
-          .set({ role: want.role, expiresAt: want.expiresAt, createdBy })
-          .where(eq(grants.id, row.id));
+        await update(tx, grants, { id: row.id }, { role: want.role, expiresAt: want.expiresAt, createdBy });
         log.push(entry('grant.create', { grantId: row.id, ...grant }));
         changes[want.path] = 'created';
       }

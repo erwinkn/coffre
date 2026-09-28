@@ -4,8 +4,10 @@ import { randomBytes } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import pg from 'pg';
 
-import { appendAudit, canonicalTimestamp, readAuditRows } from '../src/audit.ts';
+import { appendAudit } from '../src/audit.ts';
 import { createDatabase, type Database, type Transaction } from '../src/database.ts';
+import { canonicalTimestamp } from '../src/dialect.ts';
+import { auditRange } from '../src/queries.ts';
 import { verifyChain, GENESIS_HASH } from '../../core/src/audit/chain.ts';
 import {
   TEST_OWNER_DATABASE_URL,
@@ -54,7 +56,7 @@ test('appended rows verify as a chain when read back from the database', async (
     ]),
   );
 
-  const rows = await inTransaction((tx) => readAuditRows(tx));
+  const rows = await inTransaction((tx) => auditRange(tx));
   assert.equal(rows.length, 3);
 
   // The important property: the hash computed at write time still verifies
@@ -76,7 +78,7 @@ test('the chain continues correctly across separate transactions', async () => {
     ]),
   );
 
-  const rows = await inTransaction((tx) => readAuditRows(tx));
+  const rows = await inTransaction((tx) => auditRange(tx));
   assert.equal(rows.length, 2);
   assert.equal(verifyChain(CHAIN_KEY, rows, GENESIS_HASH).ok, true);
 });
@@ -106,7 +108,7 @@ test('a rolled-back transaction leaves no gap in the sequence', async () => {
     ]),
   );
 
-  const rows = await inTransaction((tx) => readAuditRows(tx));
+  const rows = await inTransaction((tx) => auditRange(tx));
   assert.deepEqual(
     rows.map((r) => r.seq),
     [0n, 1n],
@@ -137,7 +139,7 @@ test('a bulk read writes one row per secret, sharing a bundle id', async () => {
     ),
   );
 
-  const rows = await inTransaction((tx) => readAuditRows(tx));
+  const rows = await inTransaction((tx) => auditRange(tx));
 
   // "They read the whole environment" is a useless answer to "who read which
   // secret". One row per secret is what makes the log answer the question.
@@ -163,7 +165,7 @@ test('tampering with a stored row is detected on read', async () => {
   // rewriting history directly in the database.
   await ownerPool.query("UPDATE audit_log SET decision = 'allow' WHERE seq = 1");
 
-  const rows = await inTransaction((tx) => readAuditRows(tx));
+  const rows = await inTransaction((tx) => auditRange(tx));
   const result = verifyChain(CHAIN_KEY, rows, GENESIS_HASH);
 
   assert.equal(result.ok, false);
@@ -193,7 +195,7 @@ test('a session in another time zone reads back the same chain', async () => {
   );
   const rows = await inTransaction(async (tx) => {
     await tx.execute(sql`SET LOCAL TIME ZONE 'Asia/Kolkata'`);
-    return readAuditRows(tx);
+    return auditRange(tx);
   });
   assert.match(rows[0].occurredAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/);
   assert.equal(verifyChain(CHAIN_KEY, rows, GENESIS_HASH).ok, true);

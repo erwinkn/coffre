@@ -1,5 +1,3 @@
-import { and, eq, gt, isNull, or } from 'drizzle-orm';
-
 import {
   PERMISSIONS,
   PROJECT_ONLY_PERMISSIONS,
@@ -8,7 +6,7 @@ import {
   type Role,
 } from '../../../../../packages/core/src/access.ts';
 import type { Queryable } from '../../../../../packages/db/src/database.ts';
-import { environments, grants, principals } from '../../../../../packages/db/src/schema.ts';
+import { callerGrants } from '../../../../../packages/db/src/queries.ts';
 
 export type PrincipalRef = { type: 'user' | 'service'; id: string };
 
@@ -61,46 +59,10 @@ export async function loadCaller(
   if (isConfiguredRootAdmin(principal, rootAdmins)) {
     return { principal: ref, registered: true, isRootAdmin: true, isOwner: true, instanceRole: 'root-admin', grants: [] };
   }
-  const rows = await db
-    .select({
-      active: principals.active,
-      instanceRole: principals.instanceRole,
-      grantId: grants.id,
-      grantProjectId: grants.projectId,
-      environmentId: grants.environmentId,
-      environmentProjectId: environments.projectId,
-      role: grants.role,
-      expiresAt: grants.expiresAt,
-    })
-    .from(principals)
-    .leftJoin(
-      grants,
-      and(
-        eq(grants.principalType, principals.principalType),
-        eq(grants.principalId, principals.principalId),
-        or(isNull(grants.expiresAt), gt(grants.expiresAt, now)),
-      ),
-    )
-    .leftJoin(environments, eq(environments.id, grants.environmentId))
-    .where(and(eq(principals.principalType, principal.type), eq(principals.principalId, principal.id)));
-
-  const active = rows[0]?.active === true;
-  const isOwner = active && principal.type === 'user' && rows[0]?.instanceRole === 'owner';
-
-  const held: CallerGrant[] = [];
-  if (active) {
-    for (const row of rows) {
-      const projectId = row.grantProjectId ?? row.environmentProjectId;
-      if (row.grantId === null || projectId === null) continue;
-      held.push({
-        id: row.grantId,
-        projectId,
-        environmentId: row.environmentId,
-        role: row.role as Role,
-        expiresAt: row.expiresAt,
-      });
-    }
-  }
+  const row = await callerGrants(db, principal, now);
+  const active = row?.active === true;
+  const isOwner = active && principal.type === 'user' && row?.instanceRole === 'owner';
+  const held = active ? row!.grants.map((grant) => ({ ...grant, role: grant.role as Role })) : [];
 
   return {
     principal: ref,

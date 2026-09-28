@@ -1,7 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 
-import { and, count, desc, eq, gt, inArray, isNull, lte, ne, or } from 'drizzle-orm';
-
 import type { Principal } from '../../../../../packages/core/src/identity/types.ts';
 import type { SigninConfig } from '../../../../../packages/core/src/identity/signin/config.ts';
 import type { PendingSignin, SigninProfile } from '../../../../../packages/core/src/identity/signin/types.ts';
@@ -15,7 +13,17 @@ import {
 } from '../../../../../packages/core/src/identity/tokens.ts';
 import type { AuditEntry } from '../../../../../packages/db/src/audit.ts';
 import type { Database, Transaction } from '../../../../../packages/db/src/database.ts';
-import { forUpdate, insertIfAbsent, isUniqueViolation } from '../../../../../packages/db/src/dialect.ts';
+import { isUniqueViolation } from '../../../../../packages/db/src/dialect.ts';
+import {
+  findCredential,
+  findDeviceAuthorizations,
+  findIdentity,
+  insert,
+  lock,
+  members,
+  update,
+  upsert,
+} from '../../../../../packages/db/src/queries.ts';
 import { credentials, deviceAuthorizations, identities, principals } from '../../../../../packages/db/src/schema.ts';
 import { isConfiguredRootAdmin, type PrincipalRef } from './caller.ts';
 import { allowed, audited, denied, Refusal, type ApiContext } from './context.ts';
@@ -164,8 +172,6 @@ export function normalizeUserCode(input: string): string | null {
   return `${letters.slice(0, 4)}-${letters.slice(4)}`;
 }
 
-const isLiveCredential = (now: Date) => and(isNull(credentials.revokedAt), gt(credentials.expiresAt, now));
-
 /**
  * coffre's own sign-in: who may come in, and the credentials they hold.
  *
@@ -246,61 +252,42 @@ export class SigninService {
 
     return audited(this.#deps, async (tx, log) => {
       const now = new Date();
-      const [bound] = await tx
-        .select({ id: identities.id, principalId: identities.principalId, active: principals.active })
-        .from(identities)
-        .innerJoin(
-          principals,
-          and(
-            eq(principals.principalType, identities.principalType),
-            eq(principals.principalId, identities.principalId),
-          ),
-        )
-        .where(
-          and(eq(identities.provider, profile.provider), eq(identities.subject, profile.subject), isNull(identities.revokedAt)),
-        );
+      const bound = await findIdentity(tx, profile);
 
       let principalId: string;
       let identityId: string;
-      if (bound !== undefined) {
+      if (bound !== null) {
         principalId = bound.principalId;
         identityId = bound.id;
-        if (!bound.active && !this.#isRoot(principalId)) throw refuse('deactivated', principalId);
         await this.#ensureRootRow(tx, principalId);
-        await tx
-          .update(identities)
-          .set({ lastSignInAt: now, ...(profile.emails[0] === undefined ? {} : { email: profile.emails[0] }) })
-          .where(eq(identities.id, identityId));
+        const holder = await this.#lockHolder(tx, { type: 'user', id: principalId });
+        if (holder?.active !== true) throw refuse('deactivated', principalId);
+        await update(
+          tx,
+          identities,
+          { id: identityId },
+          { lastSignInAt: now, ...(profile.emails[0] === undefined ? {} : { email: profile.emails[0] }) },
+        );
       } else {
-        const match = await this.#principalForEmails(tx, profile.emails);
+        // Locked, so two accounts cannot both bind to one person at once.
+        const invited =
+          profile.emails.length === 0
+            ? []
+            : await lock(tx, principals, { principalType: 'user', principalId: [...profile.emails] });
+        const match = this.#principalForEmails(invited, profile.emails);
         if (match === null) throw refuse('not_registered');
         principalId = match.id;
         if (!match.active && !this.#isRoot(principalId)) throw refuse('deactivated', principalId);
-
         await this.#ensureRootRow(tx, principalId);
-        // Locked, so two accounts cannot both bind to one person at once.
-        await forUpdate(
-          tx
-            .select({ id: principals.principalId })
-            .from(principals)
-            .where(and(eq(principals.principalType, 'user'), eq(principals.principalId, principalId))),
+
+        const [person] = await members(tx, { member: { type: 'user', id: principalId } }, now);
+        const other = (person?.identities ?? []).some(
+          // This very account, bound a moment ago by a racing sign-in, is
+          // no mismatch: binding it again hits the unique index, and the
+          // retry finds it bound.
+          (identity) => identity.provider !== profile.provider || identity.subject !== profile.subject,
         );
-        const [existing] = await tx
-          .select({ id: identities.id })
-          .from(identities)
-          .where(
-            and(
-              eq(identities.principalType, 'user'),
-              eq(identities.principalId, principalId),
-              isNull(identities.revokedAt),
-              // This very account, bound a moment ago by a racing sign-in, is
-              // no mismatch: binding it again hits the unique index, and the
-              // retry finds it bound.
-              or(ne(identities.provider, profile.provider), ne(identities.subject, profile.subject)),
-            ),
-          )
-          .limit(1);
-        if (existing !== undefined) throw refuse('account_mismatch', principalId);
+        if (other) throw refuse('account_mismatch', principalId);
 
         identityId = await this.#bind(tx, principalId, profile, principalId);
         log.push({
@@ -337,13 +324,8 @@ export class SigninService {
     const account = { provider: profile.provider, subject: profile.subject, emails: profile.emails };
     if (ctx.caller.principal.type !== 'user') throw forbidden('only people link sign-in accounts');
     return audited(this.#deps, async (tx, log) => {
-      const [bound] = await tx
-        .select({ principalId: identities.principalId })
-        .from(identities)
-        .where(
-          and(eq(identities.provider, profile.provider), eq(identities.subject, profile.subject), isNull(identities.revokedAt)),
-        );
-      if (bound !== undefined) {
+      const bound = await findIdentity(tx, profile);
+      if (bound !== null) {
         if (bound.principalId === ctx.caller.principal.id) return { ok: true as const };
         throw new Refusal(
           new SigninRefused('already_linked'),
@@ -363,24 +345,17 @@ export class SigninService {
    */
   async #ensureRootRow(tx: Transaction, principalId: string): Promise<void> {
     if (!this.#isRoot(principalId)) return;
-    await insertIfAbsent(tx, principals, {
-      principalType: 'user',
-      principalId,
-      instanceRole: 'user',
-      createdBy: 'system:signin',
-      active: true,
-    });
-    await tx
-      .update(principals)
-      .set({ active: true })
-      .where(
-        and(eq(principals.principalType, 'user'), eq(principals.principalId, principalId), eq(principals.active, false)),
-      );
+    await upsert(
+      tx,
+      principals,
+      [{ principalType: 'user', principalId, instanceRole: 'user', createdBy: 'system:signin', active: true }],
+      { target: ['principalType', 'principalId'], columns: ['active'] },
+    );
   }
 
   async #bind(tx: Transaction, principalId: string, profile: SigninProfile, createdBy: string): Promise<string> {
     const id = randomUUID();
-    await tx.insert(identities).values({
+    await insert(tx, identities, {
       id,
       provider: profile.provider,
       subject: profile.subject,
@@ -398,21 +373,26 @@ export class SigninService {
    * names. The provider's primary address is tried first. Principal ids are
    * stored lowercase, and so are the emails a verified profile carries.
    */
-  async #principalForEmails(
-    tx: Transaction,
+  #principalForEmails(
+    rows: { principalId: string; active: boolean }[],
     emails: readonly string[],
-  ): Promise<{ id: string; active: boolean; email: string } | null> {
-    if (emails.length === 0) return null;
-    const rows = await tx
-      .select({ id: principals.principalId, active: principals.active })
-      .from(principals)
-      .where(and(eq(principals.principalType, 'user'), inArray(principals.principalId, [...emails])));
+  ): { id: string; active: boolean; email: string } | null {
     for (const email of emails) {
       if (this.#isRoot(email)) return { id: email, active: true, email };
-      const row = rows.find((candidate) => candidate.id === email);
-      if (row !== undefined) return { id: row.id, active: row.active, email };
+      const row = rows.find((candidate) => candidate.principalId === email);
+      if (row !== undefined) return { id: row.principalId, active: row.active, email };
     }
     return null;
+  }
+
+  /**
+   * Lock someone's row before minting them a credential. Removing someone
+   * locks it to revoke everything they hold, so a credential is either
+   * minted first and revoked with the rest, or refused.
+   */
+  async #lockHolder(tx: Transaction, principal: PrincipalRef) {
+    const [row] = await lock(tx, principals, { principalType: principal.type, principalId: principal.id });
+    return row;
   }
 
   async #issue(
@@ -421,19 +401,9 @@ export class SigninService {
     principal: PrincipalRef,
     options: { identityId: string | null; label: string | null; createdBy: string; expiresAt: Date },
   ): Promise<IssuedCredential> {
-    // Removing someone locks this row to revoke everything they hold, so a
-    // credential is either minted first and revoked with the rest, or refused.
-    const [row] = await forUpdate(
-      tx
-        .select({ active: principals.active })
-        .from(principals)
-        .where(and(eq(principals.principalType, principal.type), eq(principals.principalId, principal.id))),
-    );
-    if (row?.active !== true) throw new SigninRefused('deactivated');
-
     const token = generateToken(kind);
     const id = randomUUID();
-    await tx.insert(credentials).values({
+    await insert(tx, credentials, {
       id,
       kind,
       tokenHash: hashToken(token),
@@ -462,42 +432,15 @@ export class SigninService {
     const { db } = this.#deps;
     const now = new Date();
 
-    const [row] = await db
-      .select({
-        id: credentials.id,
-        principalType: credentials.principalType,
-        principalId: credentials.principalId,
-        lastUsedAt: credentials.lastUsedAt,
-        subject: identities.subject,
-      })
-      .from(credentials)
-      .innerJoin(
-        principals,
-        and(
-          eq(principals.principalType, credentials.principalType),
-          eq(principals.principalId, credentials.principalId),
-        ),
-      )
-      .leftJoin(identities, eq(identities.id, credentials.identityId))
-      .where(
-        and(
-          eq(credentials.tokenHash, hashToken(token)),
-          isLiveCredential(now),
-          eq(principals.active, true),
-          or(isNull(credentials.identityId), isNull(identities.revokedAt)),
-        ),
-      );
-    if (row === undefined) throw new Error('unknown, expired or revoked credential');
+    const row = await findCredential(db, { tokenHash: hashToken(token) });
+    const live = row !== null && row.revokedAt === null && row.expiresAt > now && row.active && row.identityRevokedAt === null;
+    if (!live) throw new Error('unknown, expired or revoked credential');
 
     const lastUsed = row.lastUsedAt?.getTime() ?? 0;
     if (now.getTime() - lastUsed > TOUCH_INTERVAL_MS) {
       // Coarse on purpose: one write per credential per five minutes, not
       // one per request. Losing it must never cost the request.
-      await db
-        .update(credentials)
-        .set({ lastUsedAt: now, lastUsedIp: request.sourceIp })
-        .where(eq(credentials.id, row.id))
-        .catch(() => {});
+      await update(db, credentials, { id: row.id }, { lastUsedAt: now, lastUsedIp: request.sourceIp }).catch(() => 0);
     }
 
     return row.principalType === 'service'
@@ -517,22 +460,15 @@ export class SigninService {
   async signOut(token: string, meta: Omit<ClientMeta, 'label'>): Promise<void> {
     if (!isCoffreToken(token)) return;
     await audited(this.#deps, async (tx, log) => {
-      const [row] = await forUpdate(
-        tx
-          .select({
-            id: credentials.id,
-            kind: credentials.kind,
-            principalType: credentials.principalType,
-            principalId: credentials.principalId,
-          })
-          .from(credentials)
-          .where(and(eq(credentials.tokenHash, hashToken(token)), isNull(credentials.revokedAt))),
+      const row = await findCredential(tx, { tokenHash: hashToken(token) });
+      if (row === null) return;
+      const revoked = await update(
+        tx,
+        credentials,
+        { id: row.id, revokedAt: null },
+        { revokedAt: new Date(), revokedBy: row.principalId },
       );
-      if (row === undefined) return;
-      await tx
-        .update(credentials)
-        .set({ revokedAt: new Date(), revokedBy: row.principalId })
-        .where(eq(credentials.id, row.id));
+      if (revoked === 0) return;
       log.push({
         actorType: row.principalType as PrincipalRef['type'],
         actorId: row.principalId,
@@ -548,18 +484,13 @@ export class SigninService {
   /** Revoke one credential: your own, or anyone's if you own the instance. */
   async revokeCredential(ctx: Asker, credentialId: string): Promise<{ revoked: true }> {
     return audited(this.#deps, async (tx, log) => {
-      const [row] = await forUpdate(
-        tx
-          .select({ kind: credentials.kind, principalType: credentials.principalType, principalId: credentials.principalId })
-          .from(credentials)
-          .where(and(eq(credentials.id, credentialId), isNull(credentials.revokedAt))),
-      );
-      if (row === undefined) {
-        throw new Refusal(
+      const row = await findCredential(tx, { id: credentialId });
+      const unknown = () =>
+        new Refusal(
           notFound('unknown credential'),
           denied(ctx, 'credential.revoke', 'unknown_credential', { metadata: { credentialId } }),
         );
-      }
+      if (row === null || row.revokedAt !== null) throw unknown();
       const { principal } = ctx.caller;
       const own = row.principalType === principal.type && row.principalId === principal.id;
       if (!own && !ctx.caller.isOwner) {
@@ -568,10 +499,13 @@ export class SigninService {
           denied(ctx, 'credential.revoke', 'requires_instance_owner', { metadata: { credentialId } }),
         );
       }
-      await tx
-        .update(credentials)
-        .set({ revokedAt: new Date(), revokedBy: principal.id })
-        .where(eq(credentials.id, credentialId));
+      const revoked = await update(
+        tx,
+        credentials,
+        { id: credentialId, revokedAt: null },
+        { revokedAt: new Date(), revokedBy: principal.id },
+      );
+      if (revoked === 0) throw unknown();
       log.push(
         allowed(ctx, 'credential.revoke', {
           metadata: { credentialId, kind: row.kind, principalType: row.principalType, principalId: row.principalId },
@@ -585,38 +519,27 @@ export class SigninService {
   async unlinkIdentity(ctx: Asker, identityId: string): Promise<{ unlinked: true }> {
     const { principal } = ctx.caller;
     return audited(this.#deps, async (tx, log) => {
-      const [row] = await forUpdate(
-        tx
-          .select({ provider: identities.provider, subject: identities.subject })
-          .from(identities)
-          .where(
-            and(
-              eq(identities.id, identityId),
-              eq(identities.principalType, principal.type),
-              eq(identities.principalId, principal.id),
-              isNull(identities.revokedAt),
-            ),
-          ),
-      );
-      if (row === undefined) {
+      const now = new Date();
+      const [self] = await members(tx, { member: principal }, now);
+      const identity = self?.identities.find((candidate) => candidate.id === identityId);
+      const unbound =
+        identity === undefined
+          ? 0
+          : await update(tx, identities, { id: identityId, revokedAt: null }, { revokedAt: now, revokedBy: principal.id });
+      if (identity === undefined || unbound === 0) {
         throw new Refusal(
           notFound('unknown sign-in account'),
           denied(ctx, 'identity.unbind', 'unknown_identity', { metadata: { identityId } }),
         );
       }
-      const now = new Date();
-      const sessions = await tx
-        .select({ id: credentials.id })
-        .from(credentials)
-        .where(and(eq(credentials.identityId, identityId), isNull(credentials.revokedAt)));
-      await tx.update(identities).set({ revokedAt: now, revokedBy: principal.id }).where(eq(identities.id, identityId));
-      if (sessions.length > 0) {
-        await tx
-          .update(credentials)
-          .set({ revokedAt: now, revokedBy: principal.id })
-          .where(inArray(credentials.id, sessions.map((session) => session.id)));
-      }
-      log.push(allowed(ctx, 'identity.unbind', { metadata: { identityId, ...row, sessionsEnded: sessions.length } }));
+      const sessionsEnded = await update(
+        tx,
+        credentials,
+        { identityId, revokedAt: null },
+        { revokedAt: now, revokedBy: principal.id },
+      );
+      const row = { provider: identity.provider, subject: identity.subject };
+      log.push(allowed(ctx, 'identity.unbind', { metadata: { identityId, ...row, sessionsEnded } }));
       return { unlinked: true as const };
     });
   }
@@ -624,66 +547,36 @@ export class SigninService {
   // --- listing --------------------------------------------------------------
 
   async listSessions(ctx: Asker, currentCredentialId: string | null): Promise<SessionRow[]> {
-    const { principal } = ctx.caller;
-    const rows = await this.#deps.db
-      .select({
-        id: credentials.id,
-        kind: credentials.kind,
-        label: credentials.label,
-        hint: credentials.tokenHint,
-        provider: identities.provider,
-        createdAt: credentials.createdAt,
-        expiresAt: credentials.expiresAt,
-        lastUsedAt: credentials.lastUsedAt,
-        lastUsedIp: credentials.lastUsedIp,
-      })
-      .from(credentials)
-      .leftJoin(identities, eq(identities.id, credentials.identityId))
-      .where(
-        and(
-          eq(credentials.principalType, principal.type),
-          eq(credentials.principalId, principal.id),
-          inArray(credentials.kind, ['browser', 'cli']),
-          isLiveCredential(new Date()),
-        ),
-      );
-    const lastSeen = (row: (typeof rows)[number]) => (row.lastUsedAt ?? row.createdAt).getTime();
-    return rows
+    const [self] = await members(this.#deps.db, { member: ctx.caller.principal }, new Date());
+    const lastSeen = (row: { lastUsedAt: Date | null; createdAt: Date }) => (row.lastUsedAt ?? row.createdAt).getTime();
+    return (self?.credentials ?? [])
+      .filter((row) => row.kind === 'browser' || row.kind === 'cli')
       .sort((a, b) => lastSeen(b) - lastSeen(a))
       .map((row) => ({
-        ...row,
+        id: row.id,
         kind: row.kind as SessionRow['kind'],
+        label: row.label,
+        hint: row.tokenHint,
+        provider: row.provider,
         createdAt: row.createdAt.toISOString(),
         expiresAt: row.expiresAt.toISOString(),
         lastUsedAt: row.lastUsedAt?.toISOString() ?? null,
+        lastUsedIp: row.lastUsedIp,
         current: row.id === currentCredentialId,
       }));
   }
 
   async listIdentities(ctx: Asker): Promise<IdentityRow[]> {
-    const { principal } = ctx.caller;
-    const rows = await this.#deps.db
-      .select({
-        id: identities.id,
-        provider: identities.provider,
-        email: identities.email,
-        createdAt: identities.createdAt,
-        lastSignInAt: identities.lastSignInAt,
-      })
-      .from(identities)
-      .where(
-        and(
-          eq(identities.principalType, principal.type),
-          eq(identities.principalId, principal.id),
-          isNull(identities.revokedAt),
-        ),
-      )
-      .orderBy(identities.createdAt);
-    return rows.map((row) => ({
-      ...row,
-      createdAt: row.createdAt.toISOString(),
-      lastSignInAt: row.lastSignInAt?.toISOString() ?? null,
-    }));
+    const [self] = await members(this.#deps.db, { member: ctx.caller.principal }, new Date());
+    return (self?.identities ?? [])
+      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+      .map((row) => ({
+        id: row.id,
+        provider: row.provider,
+        email: row.email,
+        createdAt: row.createdAt.toISOString(),
+        lastSignInAt: row.lastSignInAt?.toISOString() ?? null,
+      }));
   }
 
   // --- service tokens -------------------------------------------------------
@@ -692,32 +585,19 @@ export class SigninService {
     const { principal } = ctx.caller;
     const self = principal.type === 'service' && principal.id === serviceId;
     if (!self && !ctx.caller.isOwner) throw forbidden('only owners may see service tokens');
-    const rows = await this.#deps.db
-      .select({
-        id: credentials.id,
-        label: credentials.label,
-        hint: credentials.tokenHint,
-        createdAt: credentials.createdAt,
-        createdBy: credentials.createdBy,
-        expiresAt: credentials.expiresAt,
-        lastUsedAt: credentials.lastUsedAt,
-        lastUsedIp: credentials.lastUsedIp,
-      })
-      .from(credentials)
-      .where(
-        and(
-          eq(credentials.principalType, 'service'),
-          eq(credentials.principalId, serviceId),
-          isLiveCredential(new Date()),
-        ),
-      )
-      .orderBy(desc(credentials.createdAt));
-    return rows.map((row) => ({
-      ...row,
-      createdAt: row.createdAt.toISOString(),
-      expiresAt: row.expiresAt.toISOString(),
-      lastUsedAt: row.lastUsedAt?.toISOString() ?? null,
-    }));
+    const [service] = await members(this.#deps.db, { member: { type: 'service', id: serviceId } }, new Date());
+    return (service?.credentials ?? [])
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .map((row) => ({
+        id: row.id,
+        label: row.label,
+        hint: row.tokenHint,
+        createdAt: row.createdAt.toISOString(),
+        createdBy: row.createdBy,
+        expiresAt: row.expiresAt.toISOString(),
+        lastUsedAt: row.lastUsedAt?.toISOString() ?? null,
+        lastUsedIp: row.lastUsedIp,
+      }));
   }
 
   /**
@@ -741,17 +621,17 @@ export class SigninService {
         );
       }
       const service = { type: 'service' as const, id: serviceId };
+      if ((await this.#lockHolder(tx, service))?.active !== true) {
+        throw new Refusal(
+          notFound('unknown service'),
+          denied(ctx, 'credential.issue', 'unknown_principal', { metadata: details }),
+        );
+      }
       const credential = await this.#issue(tx, 'service', service, {
         identityId: null,
         label: input.label,
         createdBy: ctx.caller.principal.id,
         expiresAt: new Date(Date.now() + input.expiresInDays * 86_400_000),
-      }).catch((error: unknown) => {
-        if (!(error instanceof SigninRefused)) throw error;
-        throw new Refusal(
-          notFound('unknown service'),
-          denied(ctx, 'credential.issue', 'unknown_principal', { metadata: details }),
-        );
       });
       log.push(
         allowed(ctx, 'credential.issue', {
@@ -774,14 +654,9 @@ export class SigninService {
   async startDevice(input: { clientLabel: string | null; sourceIp: string | null }): Promise<DeviceStart> {
     const { db } = this.#deps;
     const now = new Date();
-    const open = await db
-      .select({ clientIp: deviceAuthorizations.clientIp, n: count() })
-      .from(deviceAuthorizations)
-      .where(and(isNull(deviceAuthorizations.decidedAt), gt(deviceAuthorizations.expiresAt, now)))
-      .groupBy(deviceAuthorizations.clientIp);
-    const total = open.reduce((sum, row) => sum + row.n, 0);
-    const fromIp = open.find((row) => row.clientIp === input.sourceIp)?.n ?? 0;
-    if (fromIp >= DEVICE_PENDING_PER_IP || total >= DEVICE_PENDING_TOTAL) {
+    const open = await findDeviceAuthorizations(db, { openAt: now });
+    const fromIp = open.filter((row) => row.clientIp === input.sourceIp).length;
+    if (fromIp >= DEVICE_PENDING_PER_IP || open.length >= DEVICE_PENDING_TOTAL) {
       throw new ApiError('too_many_requests', 'too many sign-in requests are waiting; try again in a few minutes');
     }
 
@@ -791,7 +666,7 @@ export class SigninService {
     for (let attempt = 0; ; attempt += 1) {
       const code = userCode();
       try {
-        await db.insert(deviceAuthorizations).values({
+        await insert(db, deviceAuthorizations, {
           id: randomUUID(),
           deviceCodeHash: hashToken(deviceCode),
           userCode: code,
@@ -819,24 +694,16 @@ export class SigninService {
   async describeDevice(userCodeInput: string): Promise<DeviceRequest | null> {
     const code = normalizeUserCode(userCodeInput);
     if (code === null) return null;
-    const [row] = await this.#deps.db
-      .select({
-        userCode: deviceAuthorizations.userCode,
-        clientLabel: deviceAuthorizations.clientLabel,
-        clientIp: deviceAuthorizations.clientIp,
-        createdAt: deviceAuthorizations.createdAt,
-        expiresAt: deviceAuthorizations.expiresAt,
-      })
-      .from(deviceAuthorizations)
-      .where(
-        and(
-          eq(deviceAuthorizations.userCode, code),
-          isNull(deviceAuthorizations.decidedAt),
-          gt(deviceAuthorizations.expiresAt, new Date()),
-        ),
-      );
+    const now = new Date();
+    const [row] = (await findDeviceAuthorizations(this.#deps.db, { userCode: code })).filter(isOpen(now));
     if (row === undefined) return null;
-    return { ...row, createdAt: row.createdAt.toISOString(), expiresAt: row.expiresAt.toISOString() };
+    return {
+      userCode: row.userCode,
+      clientLabel: row.clientLabel,
+      clientIp: row.clientIp,
+      createdAt: row.createdAt.toISOString(),
+      expiresAt: row.expiresAt.toISOString(),
+    };
   }
 
   async decideDevice(ctx: Asker, userCodeInput: string, approve: boolean): Promise<{ decided: true }> {
@@ -845,39 +712,25 @@ export class SigninService {
     if (ctx.caller.principal.type !== 'user') throw forbidden('only people approve sign-ins');
     return audited(this.#deps, async (tx, log) => {
       const now = new Date();
-      const [row] =
-        code === null
-          ? []
-          : await forUpdate(
-              tx
-                .select({
-                  id: deviceAuthorizations.id,
-                  clientLabel: deviceAuthorizations.clientLabel,
-                  clientIp: deviceAuthorizations.clientIp,
-                })
-                .from(deviceAuthorizations)
-                .where(
-                  and(
-                    eq(deviceAuthorizations.userCode, code),
-                    isNull(deviceAuthorizations.decidedAt),
-                    gt(deviceAuthorizations.expiresAt, now),
-                  ),
-                ),
+      const [row] = code === null ? [] : (await findDeviceAuthorizations(tx, { userCode: code })).filter(isOpen(now));
+      // Deciding only an undecided code makes two approvers racing agree on one answer.
+      const decided =
+        row === undefined
+          ? 0
+          : await update(
+              tx,
+              deviceAuthorizations,
+              { id: row.id, decidedAt: null },
+              approve
+                ? { decidedAt: now, decision: 'approved', principalType: 'user', principalId: ctx.caller.principal.id }
+                : { decidedAt: now, decision: 'denied' },
             );
-      if (row === undefined) {
+      if (row === undefined || decided === 0) {
         throw new Refusal(
           notFound('that code is unknown or has expired'),
           denied(ctx, action, 'unknown_code', { metadata: { userCode: code ?? userCodeInput.slice(0, 16) } }),
         );
       }
-      await tx
-        .update(deviceAuthorizations)
-        .set(
-          approve
-            ? { decidedAt: now, decision: 'approved', principalType: 'user', principalId: ctx.caller.principal.id }
-            : { decidedAt: now, decision: 'denied' },
-        )
-        .where(eq(deviceAuthorizations.id, row.id));
       log.push(
         allowed(ctx, action, {
           metadata: { deviceAuthorizationId: row.id, clientLabel: row.clientLabel, clientIp: row.clientIp },
@@ -891,21 +744,7 @@ export class SigninService {
   async pollDevice(deviceCode: string, meta: Omit<ClientMeta, 'label'>): Promise<DevicePoll> {
     return audited(this.#deps, async (tx, log): Promise<DevicePoll> => {
       const now = new Date();
-      const [row] = await forUpdate(
-        tx
-          .select({
-            id: deviceAuthorizations.id,
-            decision: deviceAuthorizations.decision,
-            principalId: deviceAuthorizations.principalId,
-            clientLabel: deviceAuthorizations.clientLabel,
-            clientIp: deviceAuthorizations.clientIp,
-            decidedAt: deviceAuthorizations.decidedAt,
-            expiresAt: deviceAuthorizations.expiresAt,
-            consumedAt: deviceAuthorizations.consumedAt,
-          })
-          .from(deviceAuthorizations)
-          .where(eq(deviceAuthorizations.deviceCodeHash, hashToken(deviceCode))),
-      );
+      const [row] = await findDeviceAuthorizations(tx, { deviceCodeHash: hashToken(deviceCode) });
       if (row === undefined || row.consumedAt !== null) return { status: 'expired' };
       if (row.decision === 'denied') return { status: 'denied' };
       // An approval is only good within the code's lifetime: one the CLI
@@ -913,22 +752,14 @@ export class SigninService {
       if (row.expiresAt <= now) return { status: 'expired' };
       if (row.decision === null) return { status: 'pending' };
 
+      // Consumed only if still unconsumed: of two polls racing, one gets the session.
+      const consumed = await update(tx, deviceAuthorizations, { id: row.id, consumedAt: null }, { consumedAt: now });
+      if (consumed === 0) return { status: 'expired' };
       const principalId = row.principalId!;
-      await tx.update(deviceAuthorizations).set({ consumedAt: now }).where(eq(deviceAuthorizations.id, row.id));
       // An approval given before the person was last added is void: someone
       // removed and re-added in between starts with nothing from before.
-      const [active] = await tx
-        .select({ id: principals.principalId })
-        .from(principals)
-        .where(
-          and(
-            eq(principals.principalType, 'user'),
-            eq(principals.principalId, principalId),
-            eq(principals.active, true),
-            lte(principals.createdAt, row.decidedAt!),
-          ),
-        );
-      if (active === undefined) return { status: 'denied' };
+      const holder = await this.#lockHolder(tx, { type: 'user', id: principalId });
+      if (holder?.active !== true || holder.createdAt > row.decidedAt!) return { status: 'denied' };
 
       const principal: PrincipalRef = { type: 'user', id: principalId };
       const credential = await this.#issue(tx, 'cli', principal, {
@@ -957,6 +788,9 @@ export class SigninService {
     });
   }
 }
+
+const isOpen = (now: Date) => (row: { decidedAt: Date | null; expiresAt: Date }) =>
+  row.decidedAt === null && row.expiresAt > now;
 
 function refusalOrThrow(error: unknown): { ok: false; reason: SigninRefusal } {
   if (error instanceof SigninRefused) return { ok: false, reason: error.reason };

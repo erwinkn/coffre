@@ -238,7 +238,7 @@ export const auditLog = pgTable(
     seq: bigint({ mode: 'bigint' }).primaryKey(),
     id: uuid().notNull().defaultRandom(),
     // A string, not a Date: the chain covers it to the microsecond, and a
-    // Date keeps milliseconds. See canonicalTimestamp in audit.ts.
+    // Date keeps milliseconds. See canonicalTimestamp in dialect.ts.
     occurredAt: timestamp('occurred_at', { withTimezone: true, mode: 'string' })
       .notNull()
       .defaultNow(),
@@ -542,11 +542,6 @@ export const syncKeys = pgTable(
 // which read a row and what hangs off it in one statement on every dialect.
 // They add no constraints; the foreign keys above do that.
 
-const holder = (table: typeof grants | typeof credentials | typeof identities) => ({
-  fields: [table.principalType, table.principalId],
-  references: [principals.principalType, principals.principalId],
-});
-
 export const principalsRelations = relations(principals, ({ many }) => ({
   grants: many(grants),
   credentials: many(credentials),
@@ -554,18 +549,27 @@ export const principalsRelations = relations(principals, ({ many }) => ({
 }));
 
 export const grantsRelations = relations(grants, ({ one }) => ({
-  principal: one(principals, holder(grants)),
+  principal: one(principals, {
+    fields: [grants.principalType, grants.principalId],
+    references: [principals.principalType, principals.principalId],
+  }),
   project: one(projects, { fields: [grants.projectId], references: [projects.id] }),
   environment: one(environments, { fields: [grants.environmentId], references: [environments.id] }),
 }));
 
 export const credentialsRelations = relations(credentials, ({ one }) => ({
-  principal: one(principals, holder(credentials)),
+  principal: one(principals, {
+    fields: [credentials.principalType, credentials.principalId],
+    references: [principals.principalType, principals.principalId],
+  }),
   identity: one(identities, { fields: [credentials.identityId], references: [identities.id] }),
 }));
 
 export const identitiesRelations = relations(identities, ({ one }) => ({
-  principal: one(principals, holder(identities)),
+  principal: one(principals, {
+    fields: [identities.principalType, identities.principalId],
+    references: [principals.principalType, principals.principalId],
+  }),
 }));
 
 export const environmentsRelations = relations(environments, ({ one }) => ({
