@@ -1,14 +1,9 @@
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
-import pg from 'pg';
 
-import { LocalKekProvider } from '../../../packages/core/src/kek/local.ts';
-import { KekRegistry } from '../../../packages/core/src/kek/registry.ts';
-import {
-  TEST_OWNER_DATABASE_URL,
-  TEST_RUNTIME_DATABASE_URL,
-} from '../../../packages/db/test/connections.ts';
+import { asc, eq } from 'drizzle-orm';
+
+import { auditLog, secrets, syncs } from '../../../packages/db/src/schema.ts';
 import {
   SyncConfigError,
   SyncProviderError,
@@ -16,16 +11,12 @@ import {
   type SyncProvider,
   type SyncProviderKind,
 } from '../../../packages/sync/src/index.ts';
-import { AdminService } from '../src/server/services/admin.ts';
-import { AccessDenied, SecretsService } from '../src/server/services/secrets.ts';
-import { planSync, SyncService } from '../src/server/services/sync.ts';
-import { requestContext } from './service-fixture.ts';
+import { planSync, SyncRunner } from '../src/server/api/syncs.ts';
+import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
-const CHAIN_KEY = randomBytes(32);
 const ROOT = 'admin@acme.example';
-const root = requestContext(ROOT);
-const developer = requestContext('dev@acme.example');
-const maintainer = requestContext('lead@acme.example');
+const DEV = 'dev@acme.example';
+const LEAD = 'lead@acme.example';
 const CREDENTIAL = 'ops/sync/DEST_TOKEN';
 
 // --- a destination that lives in memory ---------------------------------------
@@ -76,95 +67,58 @@ class FakeDestination {
   };
 }
 
-let pool: pg.Pool;
-let runtimePool: pg.Pool;
+let db: ReturnType<typeof openTestDatabase>;
+let deps: FixtureDeps;
+let runner: SyncRunner;
 let destination: FakeDestination;
-let admin: AdminService;
-let secrets: SecretsService;
-let syncs: SyncService;
+let root: ReturnType<typeof clientFor>;
+let developer: ReturnType<typeof clientFor>;
+let maintainer: ReturnType<typeof clientFor>;
 const background: Promise<unknown>[] = [];
 
-function waitUntil(promise: Promise<unknown>) {
-  background.push(promise);
-}
-
-/** Let every run the services started in the background finish. */
+/** Let every run the API started in the background finish. */
 async function settle() {
   while (background.length > 0) await Promise.all(background.splice(0));
 }
 
-async function cleanSyncTables() {
-  await pool.query('DELETE FROM sync_keys');
-  await pool.query('DELETE FROM syncs');
-}
-
 before(() => {
-  pool = new pg.Pool({ connectionString: TEST_OWNER_DATABASE_URL });
-  runtimePool = new pg.Pool({ connectionString: TEST_RUNTIME_DATABASE_URL });
-  const keks = new KekRegistry(LocalKekProvider.generate('test-kek-1'));
-  const deps = { pool: runtimePool, keks, auditChainKey: CHAIN_KEY, rootAdmins: [ROOT] };
-  admin = new AdminService({ pool: runtimePool, auditChainKey: CHAIN_KEY, rootAdmins: [ROOT] });
-  syncs = new SyncService({
+  db = openTestDatabase();
+  deps = testDeps(db.runtime, [ROOT], { waitUntil: (promise) => void background.push(promise) });
+  runner = new SyncRunner({
     ...deps,
-    waitUntil,
     resolveProvider: (kind) => (kind === 'fake' ? (destination.provider as SyncProvider<unknown>) : null),
   });
-  secrets = new SecretsService({
-    ...deps,
-    onChange: (environmentId) => waitUntil(syncs.runForEnvironment(environmentId)),
-  });
+  deps.syncs = runner;
+  root = clientFor(deps, ROOT);
+  developer = clientFor(deps, DEV);
+  maintainer = clientFor(deps, LEAD);
 });
 
 after(async () => {
   await settle();
-  // Other suites delete secrets and projects, which these rows would block.
-  await cleanSyncTables();
-  await runtimePool.end();
-  await pool.end();
+  await resetDatabase(db.owner);
+  await db.close();
 });
 
 beforeEach(async () => {
   await settle();
   destination = new FakeDestination();
-  await cleanSyncTables();
-  await pool.query('DELETE FROM audit_log');
-  await pool.query(
-    "UPDATE audit_chain_head SET next_seq = 0, head_hash = decode(repeat('00', 32), 'hex')",
-  );
-  await pool.query('UPDATE secrets SET current_version_id = NULL');
-  await pool.query('DELETE FROM secret_versions');
-  await pool.query('DELETE FROM secrets');
-  await pool.query('DELETE FROM grants');
-  await pool.query('DELETE FROM principals');
-  await pool.query('DELETE FROM environments');
-  await pool.query('DELETE FROM projects');
-  await pool.query(
-    `INSERT INTO principals (principal_type, principal_id, instance_role, created_by, active)
-     VALUES ('user', $1, 'user', $3, true), ('user', $2, 'user', $3, true)`,
-    [developer.principal.id, maintainer.principal.id, ROOT],
-  );
-  await admin.createProject(root, 'market', 'Market');
-  await admin.createEnvironment(root, 'market', 'prod', 'Production');
-  await admin.createProject(root, 'ops', 'Ops');
-  await admin.createEnvironment(root, 'ops', 'sync', 'Sync credentials');
-  await admin.createGrant(root, 'market', {
-    principalType: 'user',
-    principalId: developer.principal.id,
-    role: 'developer',
-  });
-  await admin.createGrant(root, 'market', {
-    principalType: 'user',
-    principalId: maintainer.principal.id,
-    role: 'maintainer',
-  });
-  await secrets.writeSecret(root, 'ops', 'sync', 'DEST_TOKEN', 'token-v1');
-  await secrets.writeSecret(root, 'market', 'prod', 'API_KEY', 'api-1');
-  await secrets.writeSecret(root, 'market', 'prod', 'DB_URL', 'postgres://db');
+  await resetDatabase(db.owner);
+  await root.members.add(`user:${DEV}`);
+  await root.members.add(`user:${LEAD}`);
+  await root.projects.create('market', { name: 'Market' });
+  await root.environments.create('market/prod', { name: 'Production' });
+  await root.projects.create('ops', { name: 'Ops' });
+  await root.environments.create('ops/sync', { name: 'Sync credentials' });
+  await root.access.set(`user:${DEV}`, { market: 'developer' });
+  await root.access.set(`user:${LEAD}`, { market: 'maintainer' });
+  await root.secrets.set('ops/sync', { DEST_TOKEN: 'token-v1' });
+  await root.secrets.set('market/prod', { API_KEY: 'api-1', DB_URL: 'postgres://db' });
   await settle();
 });
 
-async function createSync(ctx = root) {
-  const view = await syncs.create(ctx, 'market', 'prod', {
+async function createSync(client = root) {
+  const view = await client.syncs.add('market/prod', {
     provider: 'fake',
     config: { target: 'app' },
     credential: CREDENTIAL,
@@ -174,22 +128,23 @@ async function createSync(ctx = root) {
 }
 
 async function auditActions(action: string) {
-  const rows = await pool.query<{
-    actor_type: string;
-    actor_id: string;
-    environment_id: string | null;
-    secret_id: string | null;
-    metadata: Record<string, unknown>;
-  }>(
-    `SELECT actor_type, actor_id, environment_id, secret_id, metadata::jsonb AS metadata
-       FROM audit_log WHERE action = $1 ORDER BY seq`,
-    [action],
-  );
-  return rows.rows;
+  const rows = await db.owner
+    .select({
+      actorType: auditLog.actorType,
+      actorId: auditLog.actorId,
+      decision: auditLog.decision,
+      environmentId: auditLog.environmentId,
+      secretId: auditLog.secretId,
+      metadata: auditLog.metadata,
+    })
+    .from(auditLog)
+    .where(eq(auditLog.action, action))
+    .orderBy(asc(auditLog.seq));
+  return rows.map((row) => ({ ...row, metadata: JSON.parse(row.metadata) as Record<string, unknown> }));
 }
 
 async function view(id: string) {
-  const listed = await syncs.list(root, 'market', 'prod');
+  const listed = await root.syncs.list('market/prod');
   const found = listed.syncs.find((sync) => sync.id === id);
   assert.ok(found, 'sync is listed');
   return found;
@@ -245,7 +200,7 @@ test('keys the destination cannot hold are skipped with its reason', () => {
 // --- creating -----------------------------------------------------------------
 
 test('creating a sync pushes the environment with the credential, and never the credential itself', async () => {
-  await secrets.writeSecret(root, 'market', 'prod', 'RESERVED_NAME', 'x');
+  await root.secrets.set('market/prod', { RESERVED_NAME: 'x' });
   await settle();
   const created = await createSync();
 
@@ -267,27 +222,26 @@ test('each pushed value is audited, and opening the credential is filed under th
 
   const pushes = await auditActions('sync.push');
   assert.deepEqual(pushes.map((row) => row.metadata.key).sort(), ['API_KEY', 'DB_URL']);
-  assert.ok(pushes.every((row) => row.actor_type === 'system' && row.actor_id === `sync:${created.id}`));
+  assert.ok(pushes.every((row) => row.actorType === 'system' && row.actorId === `sync:${created.id}`));
   assert.ok(pushes.every((row) => row.metadata.destination === 'fake:app' && row.metadata.trigger === 'create'));
 
   const [run] = await auditActions('sync.run');
-  const credential = await pool.query<{ id: string; environment_id: string }>(
-    "SELECT id, environment_id FROM secrets WHERE key = 'DEST_TOKEN'",
-  );
-  assert.equal(run.secret_id, credential.rows[0].id);
-  assert.equal(run.environment_id, credential.rows[0].environment_id);
+  const [credential] = await db.owner
+    .select({ id: secrets.id, environmentId: secrets.environmentId })
+    .from(secrets)
+    .where(eq(secrets.key, 'DEST_TOKEN'));
+  assert.equal(run.secretId, credential.id);
+  assert.equal(run.environmentId, credential.environmentId);
   assert.equal(run.metadata.source, 'market/prod');
 
   const [creation] = await auditActions('sync.create');
-  assert.equal(creation.actor_id, ROOT);
+  assert.equal(creation.actorId, ROOT);
   assert.equal(creation.metadata.credential, CREDENTIAL);
 });
 
 test('creating a sync needs environment.manage and secret.read, and a refusal is logged', async () => {
-  await assert.rejects(createSync(developer), AccessDenied);
-  const [denied] = await pool.query<{ decision: string; metadata: { reason: string } }>(
-    "SELECT decision, metadata::jsonb AS metadata FROM audit_log WHERE action = 'sync.create'",
-  ).then((result) => result.rows);
+  await assert.rejects(createSync(developer), { status: 403 });
+  const [denied] = await auditActions('sync.create');
   assert.equal(denied.decision, 'deny');
   assert.equal(denied.metadata.reason, 'missing_environment_manage');
   assert.equal(destination.applied.length, 0);
@@ -295,40 +249,37 @@ test('creating a sync needs environment.manage and secret.read, and a refusal is
 
 test('a credential the creator cannot read is refused like one that does not exist', async () => {
   // The maintainer manages market but has no grant on ops.
-  await assert.rejects(createSync(maintainer), (error: Error & { statusCode?: number }) => {
-    assert.equal(error.statusCode, 400);
-    assert.equal(error.message, `${CREDENTIAL} is not a secret you can read`);
-    return true;
+  await assert.rejects(createSync(maintainer), {
+    status: 400,
+    message: `${CREDENTIAL} is not a secret you can read`,
   });
   await assert.rejects(
-    syncs.create(root, 'market', 'prod', { provider: 'fake', config: { target: 'app' }, credential: 'ops/sync/NOPE' }),
-    /ops\/sync\/NOPE is not a secret you can read/,
+    root.syncs.add('market/prod', { provider: 'fake', config: { target: 'app' }, credential: 'ops/sync/NOPE' }),
+    { status: 400, message: 'ops/sync/NOPE is not a secret you can read' },
   );
 });
 
 test('unknown destinations and bad configs are refused with a message for the caller', async () => {
   await assert.rejects(
-    syncs.create(root, 'market', 'prod', { provider: 'dropbox', config: {}, credential: CREDENTIAL }),
-    (error: Error & { statusCode?: number; expose?: boolean }) =>
-      error.statusCode === 400 && error.expose === true && /dropbox/.test(error.message),
+    root.syncs.add('market/prod', { provider: 'dropbox', config: {}, credential: CREDENTIAL }),
+    { status: 400, message: /dropbox/ },
   );
   await assert.rejects(
-    syncs.create(root, 'market', 'prod', { provider: 'fake', config: {}, credential: CREDENTIAL }),
-    /Fake: target is required/,
+    root.syncs.add('market/prod', { provider: 'fake', config: {}, credential: CREDENTIAL }),
+    { status: 400, message: /Fake: target is required/ },
   );
   await assert.rejects(
-    syncs.create(root, 'market', 'prod', { provider: 'fake', config: { target: 'x' }, credential: 'DEST_TOKEN' }),
-    /project\/environment\/KEY/,
+    root.syncs.add('market/prod', { provider: 'fake', config: { target: 'x' }, credential: 'DEST_TOKEN' }),
+    { status: 400, message: /project\/environment\/KEY/ },
   );
 });
 
 test('one destination cannot be fed by two syncs', async () => {
   await createSync();
-  await admin.createEnvironment(root, 'market', 'staging', 'Staging');
+  await root.environments.create('market/staging', { name: 'Staging' });
   await assert.rejects(
-    syncs.create(root, 'market', 'staging', { provider: 'fake', config: { target: 'app' }, credential: CREDENTIAL }),
-    (error: Error & { statusCode?: number }) =>
-      error.statusCode === 409 && error.message === 'fake:app is already synced from market/prod',
+    root.syncs.add('market/staging', { provider: 'fake', config: { target: 'app' }, credential: CREDENTIAL }),
+    { status: 409, message: 'fake:app is already synced from market/prod' },
   );
 });
 
@@ -338,7 +289,7 @@ test('a write pushes only the key that changed', async () => {
   await createSync();
   destination.applied = [];
 
-  await secrets.writeSecret(developer, 'market', 'prod', 'API_KEY', 'api-2');
+  await developer.secrets.set('market/prod', { API_KEY: 'api-2' });
   await settle();
 
   assert.equal(destination.values.get('API_KEY'), 'api-2');
@@ -349,8 +300,8 @@ test('archiving and renaming remove what coffre pushed, and nothing else', async
   destination.values.set('SET_BY_HAND', 'keep me');
   await createSync();
 
-  await secrets.setSecretArchived(root, 'market', 'prod', 'DB_URL', true);
-  await secrets.renameSecret(root, 'market', 'prod', 'API_KEY', 'PUBLIC_API_KEY');
+  await root.secrets.set('market/prod', { DB_URL: null });
+  await root.secrets.rename('market/prod/API_KEY', 'PUBLIC_API_KEY');
   await settle();
 
   assert.deepEqual(Object.fromEntries(destination.values), { SET_BY_HAND: 'keep me', PUBLIC_API_KEY: 'api-1' });
@@ -362,9 +313,9 @@ test('a key deleted at the destination is pushed again by the hourly check', asy
   const created = await createSync();
   destination.values.delete('DB_URL');
 
-  assert.deepEqual(await syncs.reconcile(), { ran: 0 }, 'nothing is due yet');
-  await pool.query("UPDATE syncs SET last_run_at = now() - interval '2 hours'");
-  assert.deepEqual(await syncs.reconcile(), { ran: 1 });
+  assert.deepEqual(await runner.reconcile(), { ran: 0 }, 'nothing is due yet');
+  await db.owner.update(syncs).set({ lastRunAt: new Date(Date.now() - 2 * 60 * 60_000) });
+  assert.deepEqual(await runner.reconcile(), { ran: 1 });
 
   assert.equal(destination.values.get('DB_URL'), 'postgres://db');
   const pushes = await auditActions('sync.push');
@@ -375,13 +326,13 @@ test('a key deleted at the destination is pushed again by the hourly check', asy
 test('the scheduler picks up changes a run missed', async () => {
   const created = await createSync();
   // A write whose after-change run never happened, e.g. the Worker was stopped.
-  await pool.query("UPDATE syncs SET paused_at = now() WHERE id = $1", [created.id]);
-  await secrets.writeSecret(root, 'market', 'prod', 'API_KEY', 'api-3');
+  await db.owner.update(syncs).set({ pausedAt: new Date() }).where(eq(syncs.id, created.id));
+  await root.secrets.set('market/prod', { API_KEY: 'api-3' });
   await settle();
-  await pool.query('UPDATE syncs SET paused_at = NULL WHERE id = $1', [created.id]);
+  await db.owner.update(syncs).set({ pausedAt: null }).where(eq(syncs.id, created.id));
   assert.equal((await view(created.id)).pending, 1);
 
-  assert.deepEqual(await syncs.reconcile(), { ran: 1 });
+  assert.deepEqual(await runner.reconcile(), { ran: 1 });
   assert.equal(destination.values.get('API_KEY'), 'api-3');
 });
 
@@ -399,7 +350,7 @@ test('a key the destination refuses leaves the run partial and the rest pushed',
   assert.deepEqual([...destination.values.keys()], ['API_KEY']);
 
   // Retried, but not every five minutes.
-  assert.deepEqual(await syncs.reconcile(), { ran: 0 });
+  assert.deepEqual(await runner.reconcile(), { ran: 0 });
 });
 
 test('a destination that is down fails the run with its message and frees the lease', async () => {
@@ -417,9 +368,9 @@ test('a destination that is down fails the run with its message and frees the le
 
 test('an archived credential stops the sync with a sentence saying so', async () => {
   const created = await createSync();
-  await secrets.setSecretArchived(root, 'ops', 'sync', 'DEST_TOKEN', true);
+  await root.secrets.set('ops/sync', { DEST_TOKEN: null });
 
-  const { outcome } = await syncs.runNow(root, created.id);
+  const { outcome } = await root.syncs.run(created.id);
   assert.equal(outcome.status, 'failed');
   assert.equal(
     outcome.status === 'failed' ? outcome.error : null,
@@ -429,20 +380,20 @@ test('an archived credential stops the sync with a sentence saying so', async ()
 
 test('rotating the credential is writing a new version of it', async () => {
   const created = await createSync();
-  await secrets.writeSecret(root, 'ops', 'sync', 'DEST_TOKEN', 'token-v2');
+  await root.secrets.set('ops/sync', { DEST_TOKEN: 'token-v2' });
   destination.tokens = [];
 
-  await syncs.runNow(root, created.id);
+  await root.syncs.run(created.id);
   assert.ok(destination.tokens.length > 0);
   assert.ok(destination.tokens.every((token) => token === 'token-v2'));
 });
 
 test('a sync already running is left alone', async () => {
   const created = await createSync();
-  await pool.query("UPDATE syncs SET lease_until = now() + interval '1 minute' WHERE id = $1", [created.id]);
+  await db.owner.update(syncs).set({ leaseUntil: new Date(Date.now() + 60_000) }).where(eq(syncs.id, created.id));
   destination.applied = [];
 
-  const { outcome, sync } = await syncs.runNow(root, created.id);
+  const { outcome, sync } = await root.syncs.run(created.id);
   assert.deepEqual(outcome, { status: 'busy' });
   assert.equal(sync.running, true);
   assert.equal(destination.applied.length, 0);
@@ -452,12 +403,12 @@ test('a sync already running is left alone', async () => {
 
 test('a paused sync holds changes back and pushes them when resumed', async () => {
   const created = await createSync();
-  await syncs.setPaused(maintainer, created.id, true);
-  await secrets.writeSecret(root, 'market', 'prod', 'API_KEY', 'api-paused');
+  await maintainer.syncs.update(created.id, { paused: true });
+  await root.secrets.set('market/prod', { API_KEY: 'api-paused' });
   await settle();
   assert.equal(destination.values.get('API_KEY'), 'api-1');
 
-  const resumed = await syncs.setPaused(maintainer, created.id, false);
+  const resumed = await maintainer.syncs.update(created.id, { paused: false });
   assert.equal(resumed.paused, false);
   await settle();
   assert.equal(destination.values.get('API_KEY'), 'api-paused');
@@ -465,28 +416,27 @@ test('a paused sync holds changes back and pushes them when resumed', async () =
 
 test('archiving a sync stops it and leaves the destination as it was', async () => {
   const created = await createSync();
-  await syncs.archive(maintainer, created.id);
+  await maintainer.syncs.remove(created.id);
 
-  await secrets.writeSecret(root, 'market', 'prod', 'API_KEY', 'api-after');
+  await root.secrets.set('market/prod', { API_KEY: 'api-after' });
   await settle();
   assert.deepEqual(Object.fromEntries(destination.values), { API_KEY: 'api-1', DB_URL: 'postgres://db' });
-  assert.deepEqual((await syncs.list(root, 'market', 'prod')).syncs, []);
+  assert.deepEqual((await root.syncs.list('market/prod')).syncs, []);
 });
 
 test('developers may run a sync but not pause or remove it', async () => {
   const created = await createSync();
-  const { outcome } = await syncs.runNow(developer, created.id);
+  const { outcome } = await developer.syncs.run(created.id);
   assert.equal(outcome.status, 'ok');
 
-  await assert.rejects(syncs.setPaused(developer, created.id, true), AccessDenied);
-  await assert.rejects(syncs.archive(developer, created.id), AccessDenied);
+  await assert.rejects(developer.syncs.update(created.id, { paused: true }), { status: 403 });
+  await assert.rejects(developer.syncs.remove(created.id), { status: 403 });
 
-  const listed = await syncs.list(developer, 'market', 'prod');
-  assert.equal(listed.canManage, false);
-  assert.equal((await syncs.list(maintainer, 'market', 'prod')).canManage, true);
+  assert.equal((await developer.syncs.list('market/prod')).canManage, false);
+  assert.equal((await maintainer.syncs.list('market/prod')).canManage, true);
 });
 
 test('people with no access to the environment cannot see its syncs', async () => {
   await createSync();
-  await assert.rejects(syncs.list(requestContext('stranger@acme.example'), 'market', 'prod'), AccessDenied);
+  await assert.rejects(clientFor(deps, 'stranger@acme.example').syncs.list('market/prod'), { status: 403 });
 });

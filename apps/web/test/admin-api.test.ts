@@ -1,171 +1,149 @@
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
-import pg from 'pg';
 
-import { LocalKekProvider } from '../../../packages/core/src/kek/local.ts';
-import { KekRegistry } from '../../../packages/core/src/kek/registry.ts';
+import { asc, count, eq } from 'drizzle-orm';
+
+import type { CoffreClient } from '../../../packages/client/src/index.ts';
+import { auditLog, grants, projects } from '../../../packages/db/src/schema.ts';
 import {
-  TEST_OWNER_DATABASE_URL,
-  TEST_RUNTIME_DATABASE_URL,
-} from '../../../packages/db/test/connections.ts';
-import { AccessDenied, NotFound } from '../src/server/services/secrets.ts';
-import { requestContext, serviceFixture } from './service-fixture.ts';
+  clientFor,
+  openTestDatabase,
+  resetDatabase,
+  testDeps,
+  type FixtureDeps,
+} from './api-fixture.ts';
 
-const CHAIN_KEY = randomBytes(32);
 const ROOT = 'admin@acme.example';
-const root = requestContext(ROOT);
-const lead = requestContext('lead@acme.example');
-const reader = requestContext('reader@acme.example');
-const outsider = requestContext('outsider@acme.example');
-let pool: pg.Pool;
-let runtimePool: pg.Pool;
-let services: ReturnType<typeof serviceFixture>;
+const LEAD = 'user:lead@acme.example';
+const READER = 'user:reader@acme.example';
+const OWNER = 'user:instance-owner@acme.example';
+const CI = 'token:ci-deploy';
+
+let db: ReturnType<typeof openTestDatabase>;
+let deps: FixtureDeps;
+let root: CoffreClient;
+let lead: CoffreClient;
+let reader: CoffreClient;
+let owner: CoffreClient;
+let outsider: CoffreClient;
 
 before(() => {
-  pool = new pg.Pool({ connectionString: TEST_OWNER_DATABASE_URL });
-  runtimePool = new pg.Pool({ connectionString: TEST_RUNTIME_DATABASE_URL });
-  services = serviceFixture({
-    pool: runtimePool,
-    keks: new KekRegistry(LocalKekProvider.generate('test-kek-1')),
-    auditChainKey: CHAIN_KEY,
-    rootAdmins: [ROOT],
-  });
+  db = openTestDatabase();
+  deps = testDeps(db.runtime, [ROOT]);
+  root = clientFor(deps, ROOT);
+  lead = clientFor(deps, 'lead@acme.example');
+  reader = clientFor(deps, 'reader@acme.example');
+  owner = clientFor(deps, 'instance-owner@acme.example');
+  outsider = clientFor(deps, 'outsider@acme.example');
 });
 
 after(async () => {
-  await runtimePool.end();
-  await pool.end();
+  await db.close();
 });
 
 beforeEach(async () => {
-  await pool.query('DELETE FROM audit_log');
-  await pool.query(
-    "UPDATE audit_chain_head SET next_seq = 0, head_hash = decode(repeat('00', 32), 'hex')",
-  );
-  await pool.query('UPDATE secrets SET current_version_id = NULL');
-  await pool.query('DELETE FROM secret_versions');
-  await pool.query('DELETE FROM secrets');
-  await pool.query('DELETE FROM grants');
-  await pool.query('DELETE FROM principals');
-  await pool.query('DELETE FROM environments');
-  await pool.query('DELETE FROM projects');
-  await pool.query(
-    `INSERT INTO principals (principal_type, principal_id, instance_role, created_by, active)
-     VALUES
-       ('user', $1, 'user', $3, true),
-       ('user', $2, 'user', $3, true),
-       ('service', 'ci-deploy.access', 'user', $3, true)`,
-    [lead.principal.id, reader.principal.id, ROOT],
-  );
+  await resetDatabase(db.owner);
+  await root.members.add(LEAD);
+  await root.members.add(READER);
+  await root.members.add(CI);
 });
 
 async function seedProject(): Promise<void> {
-  await services.admin.createProject(root, 'market', 'Acme Market');
-  await services.admin.createEnvironment(root, 'market', 'prod', 'Production');
-  await services.admin.createGrant(root, 'market', {
-    principalType: 'user',
-    principalId: lead.principal.id,
-    role: 'owner',
-  });
+  await root.projects.create('market', { name: 'Acme Market' });
+  await root.environments.create('market/prod', { name: 'Production' });
+  await root.access.set(LEAD, { market: 'owner' });
 }
 
 async function auditActions(): Promise<{ action: string; decision: string }[]> {
-  const result = await pool.query('SELECT action, decision FROM audit_log ORDER BY seq');
-  return result.rows;
+  return db.owner
+    .select({ action: auditLog.action, decision: auditLog.decision })
+    .from(auditLog)
+    .orderBy(asc(auditLog.seq));
 }
 
-function isConflict(error: unknown): boolean {
-  return (error as { statusCode?: number }).statusCode === 409;
+async function auditCount(): Promise<number> {
+  const [row] = await db.owner.select({ n: count() }).from(auditLog);
+  return row.n;
 }
 
 test('root admins and instance owners create projects without implicit secret grants', async () => {
-  const owner = requestContext('instance-owner@acme.example');
-  await services.admin.addDirectoryPrincipal(root, {
-    principalType: 'user',
-    principalId: owner.principal.id,
-    instanceRole: 'owner',
+  await root.members.add(OWNER, { owner: true });
+  assert.deepEqual(await root.projects.create('market', { name: 'Market' }), {
+    project: { slug: 'market', name: 'Market', archivedAt: null },
+    created: true,
   });
-  assert.deepEqual(await services.admin.createProject(root, 'market', 'Market'), {
-    slug: 'market',
-    name: 'Market',
+  assert.deepEqual(await owner.projects.create('operations', { name: 'Operations' }), {
+    project: { slug: 'operations', name: 'Operations', archivedAt: null },
+    created: true,
   });
-  assert.deepEqual(await services.admin.createProject(owner, 'operations', 'Operations'), {
-    slug: 'operations',
-    name: 'Operations',
-  });
-  await assert.rejects(
-    services.admin.createProject(outsider, 'sneaky', 'Sneaky'),
-    AccessDenied,
-  );
-  assert.deepEqual(await auditActions(), [
+  await assert.rejects(outsider.projects.create('sneaky', { name: 'Sneaky' }), { status: 403 });
+  assert.deepEqual((await auditActions()).slice(-4), [
     { action: 'directory.create', decision: 'allow' },
     { action: 'project.create', decision: 'allow' },
     { action: 'project.create', decision: 'allow' },
     { action: 'project.create', decision: 'deny' },
   ]);
-  assert.equal(
-    (await pool.query('SELECT count(*)::int AS n FROM projects')).rows[0].n,
-    2,
-  );
+  assert.equal((await db.owner.select({ n: count() }).from(projects))[0].n, 2);
   assert.equal(
     (
-      await pool.query(
-        'SELECT count(*)::int AS n FROM grants WHERE principal_id = $1',
-        [owner.principal.id],
-      )
-    ).rows[0].n,
+      await db.owner
+        .select({ n: count() })
+        .from(grants)
+        .where(eq(grants.principalId, 'instance-owner@acme.example'))
+    )[0].n,
     0,
   );
 });
 
-test('only configured bootstrap principals project as root admins', async () => {
-  assert.equal(await services.admin.instanceRole(root.principal), 'root-admin');
-  assert.equal(await services.admin.instanceRole(outsider.principal), 'user');
-  assert.equal(await services.audit.canRead(root), true);
-  assert.equal(await services.audit.canRead(outsider), false);
+test('creating a project or environment that exists changes nothing and logs nothing', async () => {
+  await root.projects.create('market', { name: 'Market' });
+  await root.environments.create('market/prod', { name: 'Production' });
+  const logged = await auditCount();
+  assert.deepEqual(await root.projects.create('market', { name: 'Again' }), {
+    project: { slug: 'market', name: 'Market', archivedAt: null },
+    created: false,
+  });
+  assert.deepEqual(await root.environments.create('market/prod', { name: 'Again' }), {
+    environment: { slug: 'prod', name: 'Production', archivedAt: null },
+    created: false,
+  });
+  assert.equal(await auditCount(), logged);
 });
 
-test('duplicate project slugs are conflicts', async () => {
-  await services.admin.createProject(root, 'market', 'Market');
-  await assert.rejects(
-    services.admin.createProject(root, 'market', 'Again'),
-    isConflict,
-  );
+test('only configured bootstrap principals project as root admins', async () => {
+  const me = await root.me();
+  assert.equal(me.instanceRole, 'root-admin');
+  assert.equal(me.canReadAudit, true);
+  const them = await outsider.me();
+  assert.equal(them.instanceRole, 'user');
+  assert.equal(them.canReadAudit, false);
 });
 
 test('renaming a project slug preserves its encrypted secrets', async () => {
   await seedProject();
-  await services.secrets.writeSecret(root, 'market', 'prod', 'DATABASE_URL', 'postgres://x');
-  await services.admin.updateProject(root, 'market', { slug: 'marketplace' });
+  await root.secrets.set('market/prod', { DATABASE_URL: 'postgres://x' });
+  await root.projects.update('market', { slug: 'marketplace' });
   assert.equal(
-    (await services.secrets.readSecret(root, 'marketplace', 'prod', 'DATABASE_URL')).value,
+    (await root.secrets.reveal('marketplace/prod/DATABASE_URL')).values.DATABASE_URL,
     'postgres://x',
   );
 });
 
 test('renaming projects and environments to existing slugs is a conflict and is audited', async () => {
   await seedProject();
-  await services.admin.createProject(root, 'other', 'Other');
-  await services.admin.createEnvironment(root, 'market', 'dev', 'Development');
+  await root.projects.create('other', { name: 'Other' });
+  await root.environments.create('market/dev', { name: 'Development' });
 
-  await assert.rejects(
-    services.admin.updateProject(root, 'market', { slug: 'other' }),
-    isConflict,
-  );
-  await assert.rejects(
-    services.admin.updateEnvironment(root, 'market', 'prod', { slug: 'dev' }),
-    isConflict,
-  );
+  await assert.rejects(root.projects.update('market', { slug: 'other' }), { status: 409 });
+  await assert.rejects(root.environments.update('market/prod', { slug: 'dev' }), { status: 409 });
 
-  const denials = await pool.query(
-    `SELECT action, metadata
-       FROM audit_log
-      WHERE decision = 'deny' AND action IN ('project.update', 'environment.update')
-      ORDER BY seq`,
-  );
+  const denials = await db.owner
+    .select({ action: auditLog.action, metadata: auditLog.metadata })
+    .from(auditLog)
+    .where(eq(auditLog.decision, 'deny'))
+    .orderBy(asc(auditLog.seq));
   assert.deepEqual(
-    denials.rows.map((row) => [row.action, JSON.parse(row.metadata).reason]),
+    denials.map((row) => [row.action, JSON.parse(row.metadata).reason]),
     [
       ['project.update', 'slug_taken'],
       ['environment.update', 'slug_taken'],
@@ -175,113 +153,81 @@ test('renaming projects and environments to existing slugs is a conflict and is 
 
 test('project owners create environments; environment-scoped grants do not', async () => {
   await seedProject();
-  assert.deepEqual(
-    await services.admin.createEnvironment(lead, 'market', 'staging', 'Staging'),
-    { slug: 'staging', name: 'Staging' },
-  );
-  await services.admin.createGrant(root, 'market', {
-    principalType: 'user',
-    principalId: reader.principal.id,
-    role: 'developer',
-    environmentSlug: 'prod',
+  assert.deepEqual(await lead.environments.create('market/staging', { name: 'Staging' }), {
+    environment: { slug: 'staging', name: 'Staging', archivedAt: null },
+    created: true,
   });
-  await assert.rejects(
-    services.admin.createEnvironment(reader, 'market', 'nope', 'Nope'),
-    AccessDenied,
-  );
-  assert.equal((await auditActions()).at(-1)?.action, 'environment.create');
-  assert.equal((await auditActions()).at(-1)?.decision, 'deny');
+  await root.access.set(READER, { 'market/prod': 'developer' });
+  await assert.rejects(reader.environments.create('market/nope', { name: 'Nope' }), { status: 403 });
+  assert.deepEqual((await auditActions()).at(-1), { action: 'environment.create', decision: 'deny' });
 });
 
 test('project-only roles cannot be scoped to one environment', async () => {
   await seedProject();
-  await assert.rejects(
-    services.admin.createGrant(root, 'market', {
-      principalType: 'user',
-      principalId: reader.principal.id,
-      role: 'owner',
-      environmentSlug: 'prod',
-    }),
-    isConflict,
-  );
-  assert.equal((await auditActions()).at(-1)?.decision, 'deny');
+  await assert.rejects(root.access.set(READER, { 'market/prod': 'owner' }), { status: 409 });
+  const [last] = await db.owner
+    .select({ decision: auditLog.decision, metadata: auditLog.metadata })
+    .from(auditLog)
+    .orderBy(asc(auditLog.seq))
+    .then((rows) => rows.slice(-1));
+  assert.equal(last.decision, 'deny');
+  assert.equal(JSON.parse(last.metadata).reason, 'role_is_project_scoped');
 });
 
 test('environment archiving hides reads, is reversible, and preserves values', async () => {
   await seedProject();
-  await services.secrets.writeSecret(root, 'market', 'prod', 'API_KEY', 'still-here');
-  await services.admin.setEnvironmentArchived(root, 'market', 'prod', true);
-  await assert.rejects(
-    services.secrets.readSecret(root, 'market', 'prod', 'API_KEY'),
-    NotFound,
-  );
-  assert.deepEqual(await services.secrets.listAccessible(root), []);
-  await services.admin.setEnvironmentArchived(root, 'market', 'prod', false);
-  assert.equal(
-    (await services.secrets.readSecret(root, 'market', 'prod', 'API_KEY')).value,
-    'still-here',
-  );
+  await root.secrets.set('market/prod', { API_KEY: 'still-here' });
+  await root.environments.update('market/prod', { archived: true });
+  await assert.rejects(root.secrets.reveal('market/prod/API_KEY'), { status: 404 });
+  assert.deepEqual((await root.me()).environments, []);
+  await root.environments.update('market/prod', { archived: false });
+  assert.equal((await root.secrets.reveal('market/prod/API_KEY')).values.API_KEY, 'still-here');
 });
 
 test('project archiving hides every environment', async () => {
   await seedProject();
-  await services.admin.createEnvironment(root, 'market', 'dev', 'Development');
-  await services.admin.setProjectArchived(root, 'market', true);
-  assert.deepEqual(await services.secrets.listAccessible(root), []);
+  await root.environments.create('market/dev', { name: 'Development' });
+  await root.projects.update('market', { archived: true });
+  assert.deepEqual((await root.me()).environments, []);
 });
 
 test('archived projects stay visible only to project and instance administrators', async () => {
   await seedProject();
-  await services.admin.createGrant(root, 'market', {
-    principalType: 'user',
-    principalId: reader.principal.id,
-    role: 'viewer',
-  });
-  await services.admin.setProjectArchived(root, 'market', true);
+  await root.access.set(READER, { market: 'viewer' });
+  await root.projects.update('market', { archived: true });
 
-  assert.deepEqual(await services.admin.listProjects(reader), []);
-  assert.equal((await services.admin.listProjects(lead))[0].archivedAt === null, false);
-  assert.equal((await services.admin.listProjects(root))[0].archivedAt === null, false);
+  assert.deepEqual((await reader.projects.list()).projects, []);
+  assert.notEqual((await lead.projects.list()).projects[0].archivedAt, null);
+  assert.notEqual((await root.projects.list()).projects[0].archivedAt, null);
 });
 
 test('project grants cover every environment and combine with environment grants', async () => {
   await seedProject();
-  await services.admin.createEnvironment(root, 'market', 'dev', 'Development');
-  await services.admin.createGrant(root, 'market', {
-    principalType: 'user',
-    principalId: reader.principal.id,
-    role: 'viewer',
-  });
-  await services.admin.createGrant(root, 'market', {
-    principalType: 'user',
-    principalId: reader.principal.id,
-    role: 'developer',
-    environmentSlug: 'prod',
-  });
-  const access = await services.secrets.listAccessible(reader);
-  assert.deepEqual(access.map((entry) => entry.environment).sort(), ['dev', 'prod']);
+  await root.environments.create('market/dev', { name: 'Development' });
+  await root.access.set(READER, { market: 'viewer', 'market/prod': 'developer' });
+  const { environments } = await reader.me();
+  assert.deepEqual(environments.map((entry) => entry.environment).sort(), ['dev', 'prod']);
   assert.deepEqual(
-    access.find((entry) => entry.environment === 'prod')?.permissions.sort(),
+    environments.find((entry) => entry.environment === 'prod')?.permissions.sort(),
     ['secret.read', 'secret.write'],
   );
 });
 
-test('revoking and updating grants changes access in place and is audited', async () => {
+test('changing and revoking access works in place and is audited', async () => {
   await seedProject();
-  const created = await services.admin.createGrant(root, 'market', {
-    principalType: 'user',
-    principalId: reader.principal.id,
-    role: 'viewer',
-  });
-  assert.equal((await services.secrets.listAccessible(reader)).length, 1);
-  await services.admin.updateGrant(root, 'market', created.id, 'developer');
-  assert.ok(
-    (await services.secrets.listAccessible(reader))[0].permissions.includes('secret.write'),
-  );
-  await services.admin.revokeGrant(root, 'market', created.id);
-  assert.deepEqual(await services.secrets.listAccessible(reader), []);
+  assert.deepEqual(await root.access.set(READER, { market: 'viewer' }), { changes: { market: 'created' } });
+  assert.equal((await reader.me()).environments.length, 1);
+
+  const logged = await auditCount();
+  assert.deepEqual(await root.access.set(READER, { market: 'viewer' }), { changes: { market: 'unchanged' } });
+  assert.equal(await auditCount(), logged);
+
+  assert.deepEqual(await root.access.set(READER, { market: 'developer' }), { changes: { market: 'updated' } });
+  assert.ok((await reader.me()).environments[0].permissions.includes('secret.write'));
+  assert.deepEqual(await root.access.set(READER, { market: null }), { changes: { market: 'revoked' } });
+  assert.deepEqual((await reader.me()).environments, []);
   assert.equal(
-    (await services.admin.listGrants(root, 'market')).some((grant) => grant.id === created.id),
+    (await root.members.list('market')).members.some((entry) => entry.member === READER),
     false,
   );
   const actions = await auditActions();
@@ -289,45 +235,38 @@ test('revoking and updating grants changes access in place and is audited', asyn
   assert.ok(actions.some(({ action }) => action === 'grant.revoke'));
 });
 
-test('removing a principal revokes every grant and is audited', async () => {
+test('an access change that fails anywhere changes nothing', async () => {
   await seedProject();
-  await services.admin.createEnvironment(root, 'market', 'dev', 'Development');
-  await services.admin.createGrant(root, 'market', {
-    principalType: 'user',
-    principalId: reader.principal.id,
-    role: 'viewer',
-  });
-  await services.admin.createGrant(root, 'market', {
-    principalType: 'user',
-    principalId: reader.principal.id,
-    role: 'developer',
-    environmentSlug: 'dev',
-  });
-  assert.deepEqual(await services.admin.removePrincipal(root, 'user', reader.principal.id), {
-    revoked: 2,
-  });
-  assert.deepEqual(await services.secrets.listAccessible(reader), []);
-  assert.ok((await auditActions()).some(({ action }) => action === 'principal.remove'));
+  await assert.rejects(
+    root.access.set(READER, { market: 'viewer', 'market/prod': 'owner' }),
+    { status: 409 },
+  );
+  assert.deepEqual((await reader.me()).environments, []);
+  assert.equal(
+    (await db.owner.select({ n: count() }).from(grants).where(eq(grants.principalId, 'reader@acme.example')))[0].n,
+    0,
+  );
+});
+
+test('removing a member revokes every grant and is audited', async () => {
+  await seedProject();
+  await root.environments.create('market/dev', { name: 'Development' });
+  await root.access.set(READER, { market: 'viewer', 'market/dev': 'developer' });
+  assert.equal((await root.members.remove(READER)).revoked.grants, 2);
+  assert.deepEqual((await reader.me()).environments, []);
+  assert.ok((await auditActions()).some(({ action }) => action === 'directory.remove'));
 });
 
 test('instance owners manage every project without receiving secret access', async () => {
   await seedProject();
-  const owner = requestContext('instance-owner@acme.example');
-  await services.admin.addDirectoryPrincipal(root, {
-    principalType: 'user',
-    principalId: owner.principal.id,
-    instanceRole: 'owner',
-  });
-  await services.admin.addDirectoryPrincipal(owner, {
-    principalType: 'service',
-    principalId: 'reporting.access',
-    instanceRole: 'user',
-  });
-  await services.admin.createEnvironment(owner, 'market', 'staging', 'Staging');
-  await services.admin.updateProject(owner, 'market', { name: 'Market platform' });
-  assert.equal(await services.admin.instanceRole(owner.principal), 'owner');
-  assert.deepEqual(await services.secrets.listAccessible(owner), []);
-  const project = (await services.admin.listProjects(owner))[0];
+  await root.members.add(OWNER, { owner: true });
+  await owner.members.add('token:reporting');
+  await owner.environments.create('market/staging', { name: 'Staging' });
+  await owner.projects.update('market', { name: 'Market platform' });
+  const me = await owner.me();
+  assert.equal(me.instanceRole, 'owner');
+  assert.deepEqual(me.environments, []);
+  const project = (await owner.projects.list()).projects[0];
   assert.equal(project.name, 'Market platform');
   assert.deepEqual(project.permissions.sort(), [
     'environment.manage',
@@ -342,26 +281,17 @@ test('instance owners manage every project without receiving secret access', asy
         && environment.details.secretCount === null,
     ),
   );
-  assert.ok(
-    (await services.admin.listDirectory(owner)).some(
-      (entry) => entry.principalId === 'reporting.access',
-    ),
-  );
+  assert.ok((await owner.members.list()).members.some((entry) => entry.member === 'token:reporting'));
 });
 
 test('environment grants expose only the listed names of inaccessible siblings', async () => {
   await seedProject();
-  await services.admin.createEnvironment(root, 'market', 'dev', 'Development');
-  await services.secrets.writeSecret(root, 'market', 'prod', 'PROD_ONLY', 'one');
-  await services.secrets.writeSecret(root, 'market', 'dev', 'DEV_ONLY', 'two');
-  await services.admin.createGrant(root, 'market', {
-    principalType: 'user',
-    principalId: reader.principal.id,
-    role: 'viewer',
-    environmentSlug: 'dev',
-  });
+  await root.environments.create('market/dev', { name: 'Development' });
+  await root.secrets.set('market/prod', { PROD_ONLY: 'one' });
+  await root.secrets.set('market/dev', { DEV_ONLY: 'two' });
+  await root.access.set(READER, { 'market/dev': 'viewer' });
 
-  const project = (await services.admin.listProjects(reader))[0];
+  const project = (await reader.projects.list()).projects[0];
   const dev = project.environments.find((environment) => environment.slug === 'dev');
   const prod = project.environments.find((environment) => environment.slug === 'prod');
   assert.deepEqual(dev, {
@@ -378,105 +308,55 @@ test('environment grants expose only the listed names of inaccessible siblings',
   });
 });
 
-test('offboarded principals must be explicitly re-added before regranting access', async () => {
+test('removed members must be explicitly re-added before regranting access', async () => {
   await seedProject();
-  await services.admin.createGrant(root, 'market', {
-    principalType: 'user',
-    principalId: reader.principal.id,
-    role: 'viewer',
-  });
-  await services.admin.removeDirectoryPrincipal(root, 'user', reader.principal.id);
-  await assert.rejects(
-    services.admin.createGrant(root, 'market', {
-      principalType: 'user',
-      principalId: reader.principal.id,
-      role: 'viewer',
-    }),
-    isConflict,
-  );
-  await services.admin.addDirectoryPrincipal(root, {
-    principalType: 'user',
-    principalId: reader.principal.id,
-    instanceRole: 'user',
-  });
-  await services.admin.createGrant(root, 'market', {
-    principalType: 'user',
-    principalId: reader.principal.id,
-    role: 'viewer',
-  });
-  assert.equal((await services.secrets.listAccessible(reader)).length, 1);
+  await root.access.set(READER, { market: 'viewer' });
+  await root.members.remove(READER);
+  await assert.rejects(root.access.set(READER, { market: 'viewer' }), { status: 409 });
+  await root.members.add(READER);
+  await root.access.set(READER, { market: 'viewer' });
+  assert.equal((await reader.me()).environments.length, 1);
 });
 
 test('ordinary users cannot manage the instance directory', async () => {
   await seedProject();
-  await assert.rejects(services.admin.listDirectory(lead), AccessDenied);
-  await assert.rejects(
-    services.admin.addDirectoryPrincipal(lead, {
-      principalType: 'user',
-      principalId: 'new@acme.example',
-      instanceRole: 'user',
-    }),
-    AccessDenied,
+  await assert.rejects(reader.members.list(), { status: 403 });
+  await assert.rejects(lead.members.add('user:new@acme.example'), { status: 403 });
+  await assert.rejects(lead.members.get(READER), { status: 403 });
+  await assert.rejects(lead.members.remove(READER), { status: 403 });
+  // A project owner sees only the members of their own projects.
+  assert.deepEqual(
+    (await lead.members.list()).members.map((entry) => entry.member),
+    [LEAD],
   );
 });
 
 test('service accounts cannot be owners and configured roots cannot be edited', async () => {
-  await assert.rejects(
-    services.admin.addDirectoryPrincipal(root, {
-      principalType: 'service',
-      principalId: 'service.access',
-      instanceRole: 'owner',
-    }),
-    isConflict,
-  );
-  await assert.rejects(
-    services.admin.updateDirectoryPrincipalRole(root, ROOT, 'user'),
-    isConflict,
-  );
-  await assert.rejects(
-    services.admin.removeDirectoryPrincipal(root, 'user', ROOT),
-    isConflict,
-  );
+  await assert.rejects(root.members.add('token:service', { owner: true }), { status: 409 });
+  await assert.rejects(root.members.add(`user:${ROOT}`, { owner: false }), { status: 409 });
+  await assert.rejects(root.members.remove(`user:${ROOT}`), { status: 409 });
 });
 
-test('service principals receive grants by common name', async () => {
+test('service principals receive grants by token name', async () => {
   await seedProject();
-  const service = requestContext('ci-deploy.access', 'service');
-  await services.admin.createGrant(root, 'market', {
-    principalType: 'service',
-    principalId: service.principal.id,
-    role: 'viewer',
-  });
-  assert.equal((await services.secrets.listAccessible(service)).length, 1);
+  await root.access.set(CI, { market: 'viewer' });
+  assert.equal((await clientFor(deps, 'ci-deploy', 'service').me()).environments.length, 1);
 });
 
-test('project owners cannot revoke a grant belonging to another project', async () => {
+test('project owners cannot change access in another project', async () => {
   await seedProject();
-  await services.admin.createProject(root, 'other', 'Other');
-  const foreign = await services.admin.createGrant(root, 'other', {
-    principalType: 'user',
-    principalId: reader.principal.id,
-    role: 'viewer',
-  });
-  await assert.rejects(
-    services.admin.revokeGrant(lead, 'market', foreign.id),
-    NotFound,
-  );
-  assert.ok(
-    (await services.admin.listGrants(root, 'other')).some((grant) => grant.id === foreign.id),
-  );
+  await root.projects.create('other', { name: 'Other' });
+  await root.access.set(READER, { other: 'viewer' });
+  await assert.rejects(lead.access.set(READER, { other: null }), { status: 403 });
+  assert.ok((await root.members.list('other')).members.some((entry) => entry.member === READER));
 });
 
 test('the audit chain verifies after structural changes', async () => {
   await seedProject();
-  const grant = await services.admin.createGrant(root, 'market', {
-    principalType: 'user',
-    principalId: reader.principal.id,
-    role: 'viewer',
-  });
-  await services.admin.updateGrant(root, 'market', grant.id, 'developer');
-  await services.admin.updateEnvironment(root, 'market', 'prod', { slug: 'live' });
-  await services.admin.setEnvironmentArchived(root, 'market', 'live', true);
-  await services.admin.revokeGrant(root, 'market', grant.id);
-  assert.equal((await services.audit.verify(root)).ok, true);
+  await root.access.set(READER, { market: 'viewer' });
+  await root.access.set(READER, { market: 'developer' });
+  await root.environments.update('market/prod', { slug: 'live' });
+  await root.environments.update('market/live', { archived: true });
+  await root.access.set(READER, { market: null });
+  assert.equal((await root.audit.verify()).ok, true);
 });

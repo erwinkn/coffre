@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { loadConfig, parseRootAdmins } from '../src/server/config.ts';
-import { isRootAdmin } from '../src/server/services/permissions.ts';
+import { isConfiguredRootAdmin } from '../src/server/api/caller.ts';
 
 test('cloudflare mode requires valid human email bootstrap identities', () => {
   assert.deepEqual(
@@ -37,7 +37,7 @@ test('cloudflare mode requires valid human email bootstrap identities', () => {
 test('only a user principal can match a configured root-admin email', () => {
   const roots = ['root@example.com'];
   assert.equal(
-    isRootAdmin(
+    isConfiguredRootAdmin(
       {
         type: 'user',
         id: 'root@example.com',
@@ -49,7 +49,7 @@ test('only a user principal can match a configured root-admin email', () => {
     true,
   );
   assert.equal(
-    isRootAdmin(
+    isConfiguredRootAdmin(
       {
         type: 'service',
         id: 'root@example.com',

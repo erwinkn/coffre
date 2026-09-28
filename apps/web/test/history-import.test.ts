@@ -1,75 +1,65 @@
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
-import pg from 'pg';
 
-import { LocalKekProvider } from '../../../packages/core/src/kek/local.ts';
-import { KekRegistry } from '../../../packages/core/src/kek/registry.ts';
-import {
-  TEST_OWNER_DATABASE_URL,
-  TEST_RUNTIME_DATABASE_URL,
-} from '../../../packages/db/test/connections.ts';
+import { and, asc, count, eq } from 'drizzle-orm';
+
+import { planImport, type CoffreClient } from '../../../packages/client/src/index.ts';
 import { parseDotenv } from '../../../packages/core/src/dotenv.ts';
-import { AccessDenied, NotFound } from '../src/server/services/secrets.ts';
-import { requestContext, serviceFixture } from './service-fixture.ts';
+import { auditLog, grants, secrets, secretVersions } from '../../../packages/db/src/schema.ts';
+import { clientFor, openTestDatabase, resetDatabase, testDeps } from './api-fixture.ts';
 
-const CHAIN_KEY = randomBytes(32);
 const ROOT = 'admin@acme.example';
-const root = requestContext(ROOT);
-const viewer = requestContext('viewer@acme.example');
-let pool: pg.Pool;
-let runtimePool: pg.Pool;
-let services: ReturnType<typeof serviceFixture>;
+const VIEWER = 'viewer@acme.example';
+const READER = 'reader@acme.example';
+
+let db: ReturnType<typeof openTestDatabase>;
+let root: CoffreClient;
+let viewer: CoffreClient;
+let reader: CoffreClient;
 
 before(() => {
-  pool = new pg.Pool({ connectionString: TEST_OWNER_DATABASE_URL });
-  runtimePool = new pg.Pool({ connectionString: TEST_RUNTIME_DATABASE_URL });
-  services = serviceFixture({
-    pool: runtimePool,
-    keks: new KekRegistry(LocalKekProvider.generate('test-kek-1')),
-    auditChainKey: CHAIN_KEY,
-    rootAdmins: [ROOT],
-  });
+  db = openTestDatabase();
 });
 
 after(async () => {
-  await runtimePool.end();
-  await pool.end();
+  await db.close();
 });
 
 beforeEach(async () => {
-  await pool.query('DELETE FROM audit_log');
-  await pool.query(
-    "UPDATE audit_chain_head SET next_seq = 0, head_hash = decode(repeat('00', 32), 'hex')",
-  );
-  await pool.query('UPDATE secrets SET current_version_id = NULL');
-  await pool.query('DELETE FROM secret_versions');
-  await pool.query('DELETE FROM secrets');
-  await pool.query('DELETE FROM grants');
-  await pool.query('DELETE FROM principals');
-  await pool.query('DELETE FROM environments');
-  await pool.query('DELETE FROM projects');
-  await pool.query(
-    `INSERT INTO principals (principal_type, principal_id, instance_role, created_by, active)
-     VALUES
-       ('user', $1, 'user', $3, true),
-       ('user', $2, 'user', $3, true)`,
-    [viewer.principal.id, 'leaver@acme.example', ROOT],
-  );
-  await services.admin.createProject(root, 'market', 'Market');
-  await services.admin.createEnvironment(root, 'market', 'dev', 'Dev');
+  await resetDatabase(db.owner);
+  const deps = testDeps(db.runtime, [ROOT]);
+  root = clientFor(deps, ROOT);
+  viewer = clientFor(deps, VIEWER);
+  reader = clientFor(deps, READER);
+
+  await root.members.add(`user:${VIEWER}`);
+  await root.members.add(`user:${READER}`);
+  await root.members.add('user:leaver@acme.example');
+  await root.projects.create('market', { name: 'Market' });
+  await root.environments.create('market/dev', { name: 'Dev' });
+  await root.access.set(`user:${READER}`, { 'market/dev': 'viewer' });
 });
 
-async function importText(content: string, dryRun: boolean) {
-  const parsed = parseDotenv(content);
-  const imported = await services.secrets.importSecrets(
-    root,
-    'market',
-    'dev',
-    parsed.entries,
-    dryRun,
-  );
-  return { ...imported, problems: parsed.problems };
+/** What `coffre import` does: parse, compare, then write the difference in one patch. */
+async function importText(content: string, dryRun: boolean, as = root) {
+  const { entries, problems } = parseDotenv(content);
+  const { plan, changes } = await planImport(as, 'market/dev', entries);
+  if (!dryRun) await as.secrets.set('market/dev', changes);
+  return { plan, changes, problems };
+}
+
+async function auditRows(action: string, decision: 'allow' | 'deny') {
+  const rows = await db.owner
+    .select({ metadata: auditLog.metadata, bundleId: auditLog.bundleId })
+    .from(auditLog)
+    .where(and(eq(auditLog.action, action), eq(auditLog.decision, decision)))
+    .orderBy(asc(auditLog.seq));
+  return rows.map((row) => ({ bundleId: row.bundleId, metadata: JSON.parse(row.metadata) }));
+}
+
+async function versionCount(): Promise<number> {
+  const [row] = await db.owner.select({ n: count() }).from(secretVersions);
+  return row.n;
 }
 
 test('parses the shapes a real .env file contains', () => {
@@ -114,80 +104,50 @@ test('reports malformed lines rather than silently mangling them', () => {
 
 test('version history reports authors and current version without values', async () => {
   for (const value of ['v1', 'v2', 'v3']) {
-    await services.secrets.writeSecret(root, 'market', 'dev', 'API_KEY', value);
+    await root.secrets.set('market/dev', { API_KEY: value });
   }
-  const history = await services.secrets.listVersions(root, 'market', 'dev', 'API_KEY');
+  const history = await root.secrets.history('market/dev/API_KEY');
   assert.deepEqual(history.versions.map((version) => version.version), [3, 2, 1]);
   assert.equal(history.versions[0].current, true);
   assert.equal(history.versions[1].current, false);
   assert.equal(history.versions[0].createdBy, ROOT);
-  assert.equal(typeof history.versions[0].createdAt, 'string');
   assert.match(history.versions[0].createdAt, /^\d{4}-\d{2}-\d{2}T/);
   assert.equal(JSON.stringify(history).includes('v3'), false);
 });
 
 test('version history requires secret.read', async () => {
-  await services.secrets.writeSecret(root, 'market', 'dev', 'API_KEY', 'v1');
-  await assert.rejects(
-    services.secrets.listVersions(viewer, 'market', 'dev', 'API_KEY'),
-    AccessDenied,
-  );
+  await root.secrets.set('market/dev', { API_KEY: 'v1' });
+  await assert.rejects(viewer.secrets.history('market/dev/API_KEY'), { status: 403 });
 });
 
-test('rollback repoints without copying and subsequent writes continue forward', async () => {
+test('restoring adds a version holding the old value, and writes continue forward', async () => {
   for (const value of ['first', 'second', 'third']) {
-    await services.secrets.writeSecret(root, 'market', 'dev', 'API_KEY', value);
+    await root.secrets.set('market/dev', { API_KEY: value });
   }
-  assert.deepEqual(
-    await services.secrets.rollback(root, 'market', 'dev', 'API_KEY', 1),
-    { key: 'API_KEY', version: 1 },
-  );
-  assert.equal(
-    (await services.secrets.readSecret(root, 'market', 'dev', 'API_KEY')).value,
-    'first',
-  );
-  assert.equal(
-    (await pool.query('SELECT count(*)::int AS n FROM secret_versions')).rows[0].n,
-    3,
-  );
-  assert.equal(
-    (await services.secrets.writeSecret(root, 'market', 'dev', 'API_KEY', 'fourth')).version,
-    4,
-  );
+  assert.deepEqual(await root.secrets.restore('market/dev/API_KEY', 1), { key: 'API_KEY', version: 4 });
+  assert.equal((await root.secrets.reveal('market/dev/API_KEY')).values.API_KEY, 'first');
+  assert.equal(await versionCount(), 4);
+  assert.deepEqual((await root.secrets.set('market/dev', { API_KEY: 'fifth' })).keys.API_KEY, { version: 5 });
 });
 
-test('rollback is audited with both versions and denial without write permission', async () => {
-  await services.secrets.writeSecret(root, 'market', 'dev', 'API_KEY', 'v1');
-  await services.secrets.writeSecret(root, 'market', 'dev', 'API_KEY', 'v2');
-  await services.secrets.rollback(root, 'market', 'dev', 'API_KEY', 1);
-  const allowed = await pool.query(
-    "SELECT metadata FROM audit_log WHERE action = 'secret.rollback' AND decision = 'allow'",
-  );
-  assert.deepEqual(JSON.parse(allowed.rows[0].metadata), {
+test('a restore is audited with both versions, and refused without write permission', async () => {
+  await root.secrets.set('market/dev', { API_KEY: 'v1' });
+  await root.secrets.set('market/dev', { API_KEY: 'v2' });
+  await root.secrets.restore('market/dev/API_KEY', 1);
+  assert.deepEqual((await auditRows('secret.rollback', 'allow'))[0].metadata, {
     key: 'API_KEY',
     fromVersion: 2,
     toVersion: 1,
+    version: 3,
   });
-  await assert.rejects(
-    services.secrets.rollback(viewer, 'market', 'dev', 'API_KEY', 2),
-    AccessDenied,
-  );
-  const denied = await pool.query(
-    "SELECT metadata FROM audit_log WHERE action = 'secret.rollback' AND decision = 'deny'",
-  );
-  assert.equal(JSON.parse(denied.rows[0].metadata).reason, 'missing_secret_write');
+  await assert.rejects(reader.secrets.restore('market/dev/API_KEY', 2), { status: 403 });
+  assert.equal((await auditRows('secret.rollback', 'deny'))[0].metadata.reason, 'missing_secret_write');
 });
 
-test('rolling back to an unknown version is rejected and audited', async () => {
-  await services.secrets.writeSecret(root, 'market', 'dev', 'API_KEY', 'v1');
-  await assert.rejects(
-    services.secrets.rollback(root, 'market', 'dev', 'API_KEY', 99),
-    NotFound,
-  );
-  const row = await pool.query(
-    "SELECT metadata FROM audit_log WHERE action = 'secret.rollback' AND decision = 'deny'",
-  );
-  assert.equal(JSON.parse(row.rows[0].metadata).reason, 'unknown_version');
+test('restoring an unknown version is rejected and audited', async () => {
+  await root.secrets.set('market/dev', { API_KEY: 'v1' });
+  await assert.rejects(root.secrets.restore('market/dev/API_KEY', 99), { status: 404 });
+  assert.equal((await auditRows('secret.rollback', 'deny'))[0].metadata.reason, 'unknown_version');
 });
 
 test('a dry run reports the plan and writes nothing', async () => {
@@ -196,61 +156,41 @@ test('a dry run reports the plan and writes nothing', async () => {
     ['A', 'create'],
     ['B', 'create'],
   ]);
-  assert.equal((await pool.query('SELECT count(*)::int AS n FROM secrets')).rows[0].n, 0);
+  assert.equal((await db.owner.select().from(secrets)).length, 0);
 });
 
-test('a preview audits every existing secret that it compares', async () => {
-  await services.secrets.writeSecret(root, 'market', 'dev', 'A', 'one');
-  await services.secrets.writeSecret(root, 'market', 'dev', 'B', 'two');
-  await pool.query('DELETE FROM audit_log');
+test('a preview logs a read of every existing secret it compares', async () => {
+  await root.secrets.set('market/dev', { A: 'one', B: 'two' });
   await importText('A=one\nB=changed\nC=new', true);
-
-  const reads = await pool.query(
-    "SELECT metadata FROM audit_log WHERE action = 'secret.read' ORDER BY metadata",
-  );
-  assert.deepEqual(
-    reads.rows.map((row) => JSON.parse(row.metadata).key).sort(),
-    ['A', 'B'],
-  );
-  assert.equal(
-    (
-      await pool.query(
-        "SELECT count(*)::int AS n FROM audit_log WHERE action = 'secret.import.preview'",
-      )
-    ).rows[0].n,
-    1,
-  );
+  const reads = await auditRows('secret.read', 'allow');
+  assert.deepEqual(reads.map((row) => row.metadata.key).sort(), ['A', 'B']);
 });
 
-test('import creates every secret and audits one row per key', async () => {
+test('import creates every secret, one audit entry per key in one bundle', async () => {
   await importText('A=one\nB=two\nC=three', false);
-  assert.deepEqual(
-    (await services.secrets.readEnvironment(root, 'market', 'dev')).secrets,
-    { A: 'one', B: 'two', C: 'three' },
-  );
-  const rows = await pool.query(
-    "SELECT metadata, bundle_id FROM audit_log WHERE action = 'secret.import' AND decision = 'allow'",
-  );
-  assert.equal(rows.rowCount, 3);
-  assert.equal(new Set(rows.rows.map((row) => row.bundle_id)).size, 1);
+  assert.deepEqual({ ...(await root.secrets.reveal('market/dev')).values }, { A: 'one', B: 'two', C: 'three' });
+  const rows = await auditRows('secret.write', 'allow');
+  assert.equal(rows.length, 3);
+  assert.equal(new Set(rows.map((row) => row.bundleId)).size, 1);
 });
 
 test('re-importing unchanged values adds no versions', async () => {
   await importText('A=one\nB=two', false);
-  const before = await pool.query('SELECT count(*)::int AS n FROM secret_versions');
+  const before = await versionCount();
   const again = await importText('A=one\nB=two', false);
   assert.deepEqual(again.plan.map(({ action }) => action), ['unchanged', 'unchanged']);
-  const after = await pool.query('SELECT count(*)::int AS n FROM secret_versions');
-  assert.equal(after.rows[0].n, before.rows[0].n);
+  assert.deepEqual(again.changes, {});
+  assert.equal(await versionCount(), before);
 });
 
 test('import distinguishes create from update', async () => {
-  await services.secrets.writeSecret(root, 'market', 'dev', 'A', 'old');
+  await root.secrets.set('market/dev', { A: 'old' });
   const result = await importText('A=new\nB=created', false);
-  assert.deepEqual(result.plan.map(({ key, action }) => [key, action]), [
-    ['A', 'update'],
-    ['B', 'create'],
+  assert.deepEqual(result.plan.map(({ key, action, version }) => [key, action, version]), [
+    ['A', 'update', 1],
+    ['B', 'create', null],
   ]);
+  assert.equal((await root.secrets.reveal('market/dev/A')).values.A, 'new');
 });
 
 test('import reports parse problems alongside valid entries', async () => {
@@ -260,61 +200,48 @@ test('import reports parse problems alongside valid entries', async () => {
   assert.equal(result.problems[0].line, 2);
 });
 
-test('import requires read and write and audits the denial', async () => {
-  await assert.rejects(
-    services.secrets.importSecrets(
-      viewer,
-      'market',
-      'dev',
-      [{ key: 'A', value: 'one' }],
-      false,
-    ),
-    AccessDenied,
-  );
-  const row = await pool.query(
-    "SELECT metadata FROM audit_log WHERE action LIKE 'secret.import%' AND decision = 'deny'",
-  );
-  assert.match(JSON.parse(row.rows[0].metadata).reason, /^missing_secret\./);
+test('import refuses to write over an archived secret', async () => {
+  await root.secrets.set('market/dev', { A: 'one' });
+  await root.secrets.set('market/dev', { A: null });
+  await assert.rejects(importText('A=two', false), { status: 409 });
 });
 
-test('the audit chain verifies across history, rollback, and import', async () => {
-  await services.secrets.writeSecret(root, 'market', 'dev', 'API_KEY', 'v1');
-  await services.secrets.writeSecret(root, 'market', 'dev', 'API_KEY', 'v2');
-  await services.secrets.rollback(root, 'market', 'dev', 'API_KEY', 1);
+test('import needs read to plan and write to apply, and refusals are audited', async () => {
+  await assert.rejects(importText('A=one', false, viewer), { status: 403 });
+  assert.equal((await auditRows('secret.list', 'deny'))[0].metadata.reason, 'missing_secret_read');
+  await assert.rejects(importText('A=one', false, reader), { status: 403 });
+  assert.equal((await auditRows('secret.write', 'deny'))[0].metadata.reason, 'missing_secret_write');
+  assert.equal((await db.owner.select().from(secrets)).length, 0);
+});
+
+test('the audit chain verifies across history, restore, and import', async () => {
+  await root.secrets.set('market/dev', { API_KEY: 'v1' });
+  await root.secrets.set('market/dev', { API_KEY: 'v2' });
+  await root.secrets.restore('market/dev/API_KEY', 1);
   await importText('A=one\nB=two', false);
-  assert.equal((await services.audit.verify(root)).ok, true);
+  assert.equal((await root.audit.verify()).ok, true);
 });
 
-test('structural project creation does not create an implicit secret grant', async () => {
-  const grants = await services.admin.listGrants(root, 'market');
-  assert.equal(grants.some((grant) => grant.principalId === ROOT), false);
+test('creating a project does not grant its creator access to secrets', async () => {
+  assert.equal((await db.owner.select().from(grants).where(eq(grants.principalId, ROOT))).length, 0);
+  assert.deepEqual((await root.members.list('market')).members.map((entry) => entry.member), [`user:${READER}`]);
 });
 
-test('the principal view answers what a person still holds', async () => {
-  await services.admin.createGrant(root, 'market', {
-    principalType: 'user',
-    principalId: 'leaver@acme.example',
-    role: 'auditor',
-  });
-  const principal = (await services.admin.listPrincipals(root)).find(
-    (entry) => entry.principalId === 'leaver@acme.example',
+test('a member shows what they still hold', async () => {
+  await root.access.set('user:leaver@acme.example', { market: 'auditor' });
+  const leaver = (await root.members.list()).members.find(
+    (entry) => entry.member === 'user:leaver@acme.example',
   );
-  assert.equal(principal?.grants[0].project, 'market');
-  assert.equal(principal?.grants[0].role, 'auditor');
+  assert.deepEqual(leaver?.grants.map(({ project, environment, role }) => ({ project, environment, role })), [
+    { project: 'market', environment: null, role: 'auditor' },
+  ]);
 });
 
-test('the principal directory is independent of project permissions', async () => {
-  await services.admin.addDirectoryPrincipal(root, {
-    principalType: 'user',
-    principalId: 'grantless@acme.example',
-    instanceRole: 'user',
-  });
-  const directory = await services.admin.listDirectory(root);
-  assert.ok(directory.some((entry) => entry.principalId === 'grantless@acme.example'));
+test('members exist independently of project access', async () => {
+  await root.members.add('user:grantless@acme.example');
+  assert.ok((await root.members.list()).members.some((entry) => entry.member === 'user:grantless@acme.example'));
   assert.equal(
-    (await services.admin.listPrincipals(root)).some(
-      (entry) => entry.principalId === 'grantless@acme.example',
-    ),
+    (await root.members.list('market')).members.some((entry) => entry.member === 'user:grantless@acme.example'),
     false,
   );
 });

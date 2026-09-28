@@ -1,157 +1,114 @@
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
-import pg from 'pg';
 
-import { LocalKekProvider } from '../../../packages/core/src/kek/local.ts';
-import { KekRegistry } from '../../../packages/core/src/kek/registry.ts';
+import { and, asc, eq } from 'drizzle-orm';
+
+import type { CoffreClient } from '../../../packages/client/src/index.ts';
+import { assignableToEnvironment, ROLES } from '../../../packages/core/src/access.ts';
+import { auditLog, grants, principals } from '../../../packages/db/src/schema.ts';
 import {
-  TEST_OWNER_DATABASE_URL,
-  TEST_RUNTIME_DATABASE_URL,
-} from '../../../packages/db/test/connections.ts';
-import { AccessDenied, NotFound } from '../src/server/services/secrets.ts';
-import { requestContext, serviceFixture } from './service-fixture.ts';
+  clientFor,
+  openTestDatabase,
+  resetDatabase,
+  testDeps,
+  type FixtureDeps,
+} from './api-fixture.ts';
 
-const CHAIN_KEY = randomBytes(32);
 const ROOT = 'admin@acme.example';
-const root = requestContext(ROOT);
-const auditor = requestContext('auditor@acme.example');
-const accessManager = requestContext('accessmgr@acme.example');
-const developer = requestContext('dev@acme.example');
+const AUDITOR = 'user:auditor@acme.example';
+const ACCESS_MANAGER = 'user:accessmgr@acme.example';
+const DEVELOPER = 'user:dev@acme.example';
 
-let pool: pg.Pool;
-let runtimePool: pg.Pool;
-let services: ReturnType<typeof serviceFixture>;
+let db: ReturnType<typeof openTestDatabase>;
+let deps: FixtureDeps;
+let root: CoffreClient;
+let auditor: CoffreClient;
+let accessManager: CoffreClient;
+let developer: CoffreClient;
 
 before(() => {
-  pool = new pg.Pool({ connectionString: TEST_OWNER_DATABASE_URL });
-  runtimePool = new pg.Pool({ connectionString: TEST_RUNTIME_DATABASE_URL });
-  services = serviceFixture({
-    pool: runtimePool,
-    keks: new KekRegistry(LocalKekProvider.generate('test-kek-1')),
-    auditChainKey: CHAIN_KEY,
-    rootAdmins: [ROOT],
-  });
+  db = openTestDatabase();
+  deps = testDeps(db.runtime, [ROOT]);
+  root = clientFor(deps, ROOT);
+  auditor = clientFor(deps, 'auditor@acme.example');
+  accessManager = clientFor(deps, 'accessmgr@acme.example');
+  developer = clientFor(deps, 'dev@acme.example');
 });
 
 after(async () => {
-  await runtimePool.end();
-  await pool.end();
+  await db.close();
 });
 
 beforeEach(async () => {
-  await pool.query('DELETE FROM audit_log');
-  await pool.query(
-    "UPDATE audit_chain_head SET next_seq = 0, head_hash = decode(repeat('00', 32), 'hex')",
-  );
-  await pool.query('UPDATE secrets SET current_version_id = NULL');
-  await pool.query('DELETE FROM secret_versions');
-  await pool.query('DELETE FROM secrets');
-  await pool.query('DELETE FROM grants');
-  await pool.query('DELETE FROM principals');
-  await pool.query('DELETE FROM environments');
-  await pool.query('DELETE FROM projects');
-  await pool.query(
-    `INSERT INTO principals (principal_type, principal_id, instance_role, created_by, active)
-     VALUES
-       ('user', $1, 'user', $4, true),
-       ('user', $2, 'user', $4, true),
-       ('user', $3, 'user', $4, true)`,
-    [auditor.principal.id, accessManager.principal.id, developer.principal.id, ROOT],
-  );
-
-  await services.admin.createProject(root, 'market', 'Market');
-  await services.admin.createEnvironment(root, 'market', 'prod', 'Production');
-  await services.secrets.writeSecret(root, 'market', 'prod', 'API_KEY', 'sk_live_secret');
+  await resetDatabase(db.owner);
+  await root.members.add(AUDITOR);
+  await root.members.add(ACCESS_MANAGER);
+  await root.members.add(DEVELOPER);
+  await root.projects.create('market', { name: 'Market' });
+  await root.environments.create('market/prod', { name: 'Production' });
+  await root.secrets.set('market/prod', { API_KEY: 'sk_live_secret' });
 });
 
-async function grant(
-  principalId: string,
-  role: string,
-  options: { environmentSlug?: string; expiresAt?: string } = {},
-) {
-  return services.admin.createGrant(root, 'market', {
-    principalType: 'user',
-    principalId,
-    role,
-    ...options,
-  });
+async function lastAudit(action: string): Promise<{ decision: string; reason: unknown }> {
+  const rows = await db.owner
+    .select({ decision: auditLog.decision, metadata: auditLog.metadata })
+    .from(auditLog)
+    .where(eq(auditLog.action, action))
+    .orderBy(asc(auditLog.seq));
+  const row = rows.at(-1)!;
+  return { decision: row.decision, reason: JSON.parse(row.metadata).reason };
 }
 
 test('an auditor reads audit data without being able to read secrets', async () => {
-  await grant(auditor.principal.id, 'auditor');
-  assert.ok((await services.audit.list(auditor, { limit: 100 })).length > 0);
-  await assert.rejects(
-    services.secrets.readSecret(auditor, 'market', 'prod', 'API_KEY'),
-    AccessDenied,
-  );
-  await assert.rejects(
-    services.secrets.readEnvironment(auditor, 'market', 'prod'),
-    AccessDenied,
-  );
+  await root.access.set(AUDITOR, { market: 'auditor' });
+  assert.ok((await auditor.audit.list()).entries.length > 0);
+  await assert.rejects(auditor.secrets.reveal('market/prod/API_KEY'), { status: 403 });
+  await assert.rejects(auditor.secrets.reveal('market/prod'), { status: 403 });
+  await assert.rejects(auditor.secrets.list('market/prod'), { status: 403 });
 });
 
 test('only instance-wide administrators can verify the complete chain', async () => {
-  await grant(auditor.principal.id, 'auditor');
-  await assert.rejects(services.audit.verify(auditor), AccessDenied);
-  assert.equal((await services.audit.verify(root)).ok, true);
+  await root.access.set(AUDITOR, { market: 'auditor' });
+  await assert.rejects(auditor.audit.verify(), { status: 403 });
+  assert.equal((await root.audit.verify()).ok, true);
 });
 
 test('an access manager grants access without being able to read secrets', async () => {
-  await grant(accessManager.principal.id, 'access-manager');
-  await services.admin.createGrant(accessManager, 'market', {
-    principalType: 'user',
-    principalId: developer.principal.id,
-    role: 'developer',
-  });
-  const principals = await services.admin.listPrincipals(accessManager);
-  assert.equal(
-    principals.find((entry) => entry.principalId === developer.principal.id)?.grants[0]
-      .project,
-    'market',
-  );
-  await assert.rejects(
-    services.secrets.readSecret(accessManager, 'market', 'prod', 'API_KEY'),
-    AccessDenied,
-  );
-  await assert.rejects(
-    services.secrets.listKeys(accessManager, 'market', 'prod'),
-    AccessDenied,
-  );
+  await root.access.set(ACCESS_MANAGER, { market: 'access-manager' });
+  await accessManager.access.set(DEVELOPER, { market: 'developer' });
+  const { members } = await accessManager.members.list();
+  assert.equal(members.find((entry) => entry.member === DEVELOPER)?.grants[0].project, 'market');
+  await assert.rejects(accessManager.secrets.reveal('market/prod/API_KEY'), { status: 403 });
+  await assert.rejects(accessManager.secrets.list('market/prod'), { status: 403 });
 });
 
-test('a project access manager cannot add an unknown principal to the directory', async () => {
-  await grant(accessManager.principal.id, 'access-manager');
+test('a project access manager cannot add an unknown member to the directory', async () => {
+  await root.access.set(ACCESS_MANAGER, { market: 'access-manager' });
   await assert.rejects(
-    services.admin.createGrant(accessManager, 'market', {
-      principalType: 'user',
-      principalId: 'unknown@acme.example',
-      role: 'developer',
-    }),
-    (error) => (error as { statusCode?: number }).statusCode === 409,
+    accessManager.access.set('user:unknown@acme.example', { market: 'developer' }),
+    { status: 409 },
   );
-  assert.equal(
-    (
-      await pool.query(
-        'SELECT 1 FROM principals WHERE principal_id = $1',
-        ['unknown@acme.example'],
-      )
-    ).rowCount,
-    0,
+  await assert.rejects(accessManager.members.add('user:unknown@acme.example'), { status: 403 });
+  assert.deepEqual(
+    await db.owner
+      .select({ id: principals.principalId })
+      .from(principals)
+      .where(eq(principals.principalId, 'unknown@acme.example')),
+    [],
   );
 });
 
 test('an access manager cannot read the audit log', async () => {
-  await grant(accessManager.principal.id, 'access-manager');
-  await assert.rejects(services.audit.list(accessManager, { limit: 100 }), AccessDenied);
+  await root.access.set(ACCESS_MANAGER, { market: 'access-manager' });
+  await assert.rejects(accessManager.audit.list(), { status: 403 });
 });
 
 test('an auditor sees only projects on which they hold audit.read', async () => {
-  await services.admin.createProject(root, 'other', 'Other');
-  await services.admin.createEnvironment(root, 'other', 'prod', 'Production');
-  await services.secrets.writeSecret(root, 'other', 'prod', 'OTHER_KEY', 'x');
-  await grant(auditor.principal.id, 'auditor');
-  const keys = (await services.audit.list(auditor, { limit: 200 }))
+  await root.projects.create('other', { name: 'Other' });
+  await root.environments.create('other/prod', { name: 'Production' });
+  await root.secrets.set('other/prod', { OTHER_KEY: 'x' });
+  await root.access.set(AUDITOR, { market: 'auditor' });
+  const keys = (await auditor.audit.list({ limit: 200 })).entries
     .map((entry) => entry.metadata.key)
     .filter(Boolean);
   assert.ok(keys.includes('API_KEY'));
@@ -159,124 +116,106 @@ test('an auditor sees only projects on which they hold audit.read', async () => 
 });
 
 test('an archived-environment audit grant remains meaningful', async () => {
-  await services.admin.createEnvironment(root, 'market', 'dev', 'Development');
-  await services.secrets.writeSecret(root, 'market', 'dev', 'DEV_KEY', 'not-visible');
-  await grant(auditor.principal.id, 'auditor', { environmentSlug: 'prod' });
-  await services.admin.setEnvironmentArchived(root, 'market', 'prod', true);
-  assert.deepEqual(await services.secrets.listAccessible(auditor), []);
-  assert.equal(await services.audit.canRead(auditor), true);
-  const entries = await services.audit.list(auditor, { limit: 100 });
+  await root.environments.create('market/dev', { name: 'Development' });
+  await root.secrets.set('market/dev', { DEV_KEY: 'not-visible' });
+  await root.access.set(AUDITOR, { 'market/prod': 'auditor' });
+  await root.environments.update('market/prod', { archived: true });
+  const me = await auditor.me();
+  assert.deepEqual(me.environments, []);
+  assert.equal(me.canReadAudit, true);
+  const { entries } = await auditor.audit.list();
   assert.ok(entries.length > 0);
   assert.ok(entries.every((entry) => entry.environment === 'prod'));
   assert.equal(entries.some((entry) => entry.metadata.key === 'DEV_KEY'), false);
 });
 
-test('the role catalogue identifies environment-scopable roles', async () => {
-  const roles = Object.fromEntries(
-    (await services.admin.listRoles()).map((role) => [role.slug, role]),
-  );
-  assert.equal(roles.auditor.assignableToEnvironment, true);
-  assert.equal(roles.developer.assignableToEnvironment, true);
-  assert.equal(roles.owner.assignableToEnvironment, false);
-  assert.equal(roles.auditor.permissions.includes('secret.read'), false);
+test('the role catalogue identifies environment-scopable roles', () => {
+  assert.equal(assignableToEnvironment('auditor'), true);
+  assert.equal(assignableToEnvironment('developer'), true);
+  assert.equal(assignableToEnvironment('owner'), false);
+  assert.equal((ROLES.auditor.permissions as readonly string[]).includes('secret.read'), false);
 });
 
-test('an unknown role is rejected and audited', async () => {
-  await assert.rejects(grant(developer.principal.id, 'made-up'), NotFound);
-  const row = await pool.query(
-    "SELECT decision, metadata FROM audit_log WHERE action = 'grant.create' ORDER BY seq DESC LIMIT 1",
+test('an unknown role is rejected before anything is granted', async () => {
+  await assert.rejects(
+    root.access.set(DEVELOPER, { market: 'made-up' as 'viewer' }),
+    { status: 400 },
   );
-  assert.equal(row.rows[0].decision, 'deny');
-  assert.equal(JSON.parse(row.rows[0].metadata).reason, 'unknown_role');
+  assert.deepEqual(
+    await db.owner.select({ id: grants.id }).from(grants).where(eq(grants.principalId, 'dev@acme.example')),
+    [],
+  );
 });
 
 test('an expired grant confers nothing while a live grant works', async () => {
-  await grant(developer.principal.id, 'viewer', {
-    expiresAt: new Date(Date.now() - 60_000).toISOString(),
-  });
-  await assert.rejects(
-    services.secrets.readSecret(developer, 'market', 'prod', 'API_KEY'),
-    AccessDenied,
-  );
-  assert.equal(
-    (await services.admin.listPrincipals(root)).some(
-      (principal) => principal.principalId === developer.principal.id,
-    ),
-    false,
+  const until = new Date(Date.now() + 60_000).toISOString();
+  await root.access.set(DEVELOPER, { market: { role: 'viewer', until } });
+  await db.owner
+    .update(grants)
+    .set({ expiresAt: new Date(Date.now() - 60_000) })
+    .where(and(eq(grants.principalType, 'user'), eq(grants.principalId, 'dev@acme.example')));
+  await assert.rejects(developer.secrets.reveal('market/prod/API_KEY'), { status: 403 });
+  assert.deepEqual(
+    (await root.members.list()).members.find((entry) => entry.member === DEVELOPER)?.grants,
+    [],
   );
 
-  await pool.query('DELETE FROM grants WHERE principal_id = $1', [developer.principal.id]);
-  await grant(developer.principal.id, 'viewer', {
-    expiresAt: new Date(Date.now() + 60_000).toISOString(),
-  });
+  assert.deepEqual(
+    await root.access.set(DEVELOPER, { market: { role: 'viewer', until } }),
+    { changes: { market: 'created' } },
+  );
   assert.equal(
-    (await services.secrets.readSecret(developer, 'market', 'prod', 'API_KEY')).value,
+    (await developer.secrets.reveal('market/prod/API_KEY')).values.API_KEY,
     'sk_live_secret',
   );
 });
 
 test('archiving a secret removes it from reads and bulk fetch', async () => {
-  await services.secrets.setSecretArchived(root, 'market', 'prod', 'API_KEY', true);
-  await assert.rejects(
-    services.secrets.readSecret(root, 'market', 'prod', 'API_KEY'),
-    NotFound,
-  );
-  assert.deepEqual(
-    (await services.secrets.readEnvironment(root, 'market', 'prod')).secrets,
-    {},
-  );
+  await root.secrets.update('market/prod/API_KEY', { archived: true });
+  await assert.rejects(root.secrets.reveal('market/prod/API_KEY'), { status: 404 });
+  assert.deepEqual((await root.secrets.reveal('market/prod')).values, {});
 });
 
 test('archiving is audited, reversible, and preserves the value', async () => {
-  await services.secrets.setSecretArchived(root, 'market', 'prod', 'API_KEY', true);
-  await services.secrets.setSecretArchived(root, 'market', 'prod', 'API_KEY', false);
+  await root.secrets.update('market/prod/API_KEY', { archived: true });
+  await root.secrets.update('market/prod/API_KEY', { archived: false });
   assert.equal(
-    (await services.secrets.readSecret(root, 'market', 'prod', 'API_KEY')).value,
+    (await root.secrets.reveal('market/prod/API_KEY')).values.API_KEY,
     'sk_live_secret',
   );
-  const actions = await pool.query(
-    "SELECT action FROM audit_log WHERE action LIKE 'secret.%' ORDER BY seq",
-  );
-  assert.ok(actions.rows.some((row) => row.action === 'secret.archive'));
-  assert.ok(actions.rows.some((row) => row.action === 'secret.restore'));
+  const actions = (await db.owner.select({ action: auditLog.action }).from(auditLog)).map((row) => row.action);
+  assert.ok(actions.includes('secret.archive'));
+  assert.ok(actions.includes('secret.restore'));
 });
 
 test('a developer cannot archive a secret and the denial is audited', async () => {
-  await grant(developer.principal.id, 'developer');
+  await root.access.set(DEVELOPER, { market: 'developer' });
   await assert.rejects(
-    services.secrets.setSecretArchived(developer, 'market', 'prod', 'API_KEY', true),
-    AccessDenied,
+    developer.secrets.update('market/prod/API_KEY', { archived: true }),
+    { status: 403 },
   );
-  const row = await pool.query(
-    "SELECT decision, metadata FROM audit_log WHERE action = 'secret.archive' ORDER BY seq DESC LIMIT 1",
-  );
-  assert.equal(row.rows[0].decision, 'deny');
-  assert.equal(JSON.parse(row.rows[0].metadata).reason, 'missing_secret_archive');
+  assert.deepEqual(await lastAudit('secret.update'), { decision: 'deny', reason: 'missing_secret_archive' });
+  await assert.rejects(developer.secrets.set('market/prod', { API_KEY: null }), { status: 403 });
+  assert.deepEqual(await lastAudit('secret.write'), { decision: 'deny', reason: 'missing_secret_archive' });
 });
 
 test('writing to an archived key requires an explicit restore', async () => {
-  await services.secrets.setSecretArchived(root, 'market', 'prod', 'API_KEY', true);
-  await assert.rejects(
-    services.secrets.writeSecret(root, 'market', 'prod', 'API_KEY', 'rotated'),
-    (error) => (error as { statusCode?: number }).statusCode === 409,
+  await root.secrets.update('market/prod/API_KEY', { archived: true });
+  await assert.rejects(root.secrets.set('market/prod', { API_KEY: 'rotated' }), { status: 409 });
+  await root.secrets.update('market/prod/API_KEY', { archived: false });
+  assert.deepEqual(
+    (await root.secrets.set('market/prod', { API_KEY: 'rotated' })).keys,
+    { API_KEY: { version: 2 } },
   );
-  await services.secrets.setSecretArchived(root, 'market', 'prod', 'API_KEY', false);
-  assert.equal(
-    (await services.secrets.writeSecret(root, 'market', 'prod', 'API_KEY', 'rotated')).version,
-    2,
-  );
-  assert.equal(
-    (await services.secrets.readSecret(root, 'market', 'prod', 'API_KEY')).value,
-    'rotated',
-  );
+  assert.equal((await root.secrets.reveal('market/prod/API_KEY')).values.API_KEY, 'rotated');
 });
 
 test('the audit chain verifies across roles, expiry, and archiving', async () => {
-  await grant(auditor.principal.id, 'auditor');
-  await grant(developer.principal.id, 'viewer', {
-    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  await root.access.set(AUDITOR, { market: 'auditor' });
+  await root.access.set(DEVELOPER, {
+    market: { role: 'viewer', until: new Date(Date.now() + 60_000).toISOString() },
   });
-  await services.secrets.readSecret(developer, 'market', 'prod', 'API_KEY');
-  await services.secrets.setSecretArchived(root, 'market', 'prod', 'API_KEY', true);
-  assert.equal((await services.audit.verify(root)).ok, true);
+  await developer.secrets.reveal('market/prod/API_KEY');
+  await root.secrets.update('market/prod/API_KEY', { archived: true });
+  assert.equal((await root.audit.verify()).ok, true);
 });
