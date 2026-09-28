@@ -270,14 +270,15 @@ What differs between them stays in the schemas and one module,
 
 - **Schemas and migrations.** Drizzle's table builders are per dialect
   (`pgTable`, `mysqlTable`, `sqliteTable`), so there are three schemas and
-  three migration trees under `packages/db/migrations/`. Postgres keeps its
-  history; MySQL and SQLite start from a baseline equal to Postgres after
-  `0005_portable_schema`. Every schema change adds a migration to all three
-  (`pnpm db:generate` writes them), and tests fail when a tree falls behind:
-  the parity test, a check that each tree's last snapshot equals its schema,
-  and one that the app requires every migration of each tree. Types differ on
-  purpose: bytes are `bytea`, `longblob` (`blob` is too small for a 64 KiB
-  secret) and `blob`.
+  three migration trees under `packages/db/migrations/`, each a single
+  baseline: the generated tables inside a hand-written template
+  (`packages/db/baseline/`) that adds the first audit rows, MySQL's
+  collation and the Postgres runtime role. Until the first deployment,
+  schema changes are regenerated into the baseline (`pnpm db:generate`)
+  rather than added as new migrations. Tests fail when a tree falls behind:
+  the parity test, and a check that each baseline is what its schema and
+  template generate. Types differ on purpose: bytes are `bytea`, `longblob`
+  (`blob` is too small for a 64 KiB secret) and `blob`.
 - **Ids come from the application**, never from the database: MySQL has no
   `RETURNING`, and no write reads one back.
 - **Named operations, never branches in the services.** Insert if absent,

@@ -13,7 +13,7 @@ import type { Engine } from './dialect.ts';
  * Applied history must be a prefix of the local journal, byte for byte,
  * before and after. Only one migrator runs at a time: Postgres takes an
  * advisory lock, MySQL a named lock, and SQLite's own write lock covers the
- * whole run. The restricted runtime role is Postgres-only (0001_bootstrap).
+ * whole run. The restricted runtime role is Postgres-only (baseline/postgres.sql).
  */
 
 const MIGRATION_LOCK_KEY = '7165058122361679213';

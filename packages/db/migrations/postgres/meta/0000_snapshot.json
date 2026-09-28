@@ -1,48 +1,46 @@
 {
-  "version": "6",
-  "dialect": "sqlite",
-  "id": "4d3a418f-871b-4e9f-a212-84b2a62ae97c",
+  "id": "ae3e65e8-2095-4099-ace6-f1bb999f8fb5",
   "prevId": "00000000-0000-0000-0000-000000000000",
+  "version": "7",
+  "dialect": "postgresql",
   "tables": {
-    "audit_chain_head": {
+    "public.audit_chain_head": {
       "name": "audit_chain_head",
+      "schema": "",
       "columns": {
         "only_row": {
           "name": "only_row",
-          "type": "integer",
+          "type": "boolean",
           "primaryKey": true,
           "notNull": true,
-          "autoincrement": false,
           "default": true
         },
         "next_seq": {
           "name": "next_seq",
-          "type": "integer",
+          "type": "bigint",
           "primaryKey": false,
           "notNull": true,
-          "autoincrement": false,
           "default": "0"
         },
         "head_hash": {
           "name": "head_hash",
-          "type": "blob",
+          "type": "bytea",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "updated_at": {
           "name": "updated_at",
-          "type": "integer",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
-          "autoincrement": false,
-          "default": "(CAST(unixepoch('subsec') * 1000 AS INTEGER))"
+          "default": "now()"
         }
       },
       "indexes": {},
       "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
+      "policies": {},
       "checkConstraints": {
         "audit_chain_head_only_row_check": {
           "name": "audit_chain_head_only_row_check",
@@ -52,91 +50,88 @@
           "name": "audit_chain_head_head_hash_check",
           "value": "octet_length(\"audit_chain_head\".\"head_hash\") = 32"
         }
-      }
+      },
+      "isRLSEnabled": false
     },
-    "audit_checkpoints": {
+    "public.audit_checkpoints": {
       "name": "audit_checkpoints",
+      "schema": "",
       "columns": {
         "id": {
           "name": "id",
-          "type": "text",
+          "type": "uuid",
           "primaryKey": true,
           "notNull": true,
-          "autoincrement": false
+          "default": "gen_random_uuid()"
         },
         "seq": {
           "name": "seq",
-          "type": "integer",
+          "type": "bigint",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "head_hash": {
           "name": "head_hash",
-          "type": "blob",
+          "type": "bytea",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "created_at": {
           "name": "created_at",
-          "type": "integer",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
-          "autoincrement": false,
-          "default": "(CAST(unixepoch('subsec') * 1000 AS INTEGER))"
+          "default": "now()"
         },
         "exported_at": {
           "name": "exported_at",
-          "type": "integer",
+          "type": "timestamp with time zone",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         },
         "export_target": {
           "name": "export_target",
           "type": "text",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         }
       },
       "indexes": {},
       "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
+      "policies": {},
       "checkConstraints": {
         "audit_checkpoints_head_hash_check": {
           "name": "audit_checkpoints_head_hash_check",
           "value": "octet_length(\"audit_checkpoints\".\"head_hash\") = 32"
         }
-      }
+      },
+      "isRLSEnabled": false
     },
-    "audit_heartbeat": {
+    "public.audit_heartbeat": {
       "name": "audit_heartbeat",
+      "schema": "",
       "columns": {
         "only_row": {
           "name": "only_row",
-          "type": "integer",
+          "type": "boolean",
           "primaryKey": true,
           "notNull": true,
-          "autoincrement": false,
           "default": true
         },
         "last_beat_at": {
           "name": "last_beat_at",
-          "type": "integer",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
-          "autoincrement": false,
-          "default": "(CAST(unixepoch('subsec') * 1000 AS INTEGER))"
+          "default": "now()"
         },
         "last_seq": {
           "name": "last_seq",
-          "type": "integer",
+          "type": "bigint",
           "primaryKey": false,
           "notNull": true,
-          "autoincrement": false,
           "default": "0"
         }
       },
@@ -144,177 +139,218 @@
       "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
+      "policies": {},
       "checkConstraints": {
         "audit_heartbeat_only_row_check": {
           "name": "audit_heartbeat_only_row_check",
           "value": "\"audit_heartbeat\".\"only_row\""
         }
-      }
+      },
+      "isRLSEnabled": false
     },
-    "audit_log": {
+    "public.audit_log": {
       "name": "audit_log",
+      "schema": "",
       "columns": {
         "seq": {
           "name": "seq",
-          "type": "integer",
+          "type": "bigint",
           "primaryKey": true,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "id": {
           "name": "id",
-          "type": "text",
+          "type": "uuid",
           "primaryKey": false,
           "notNull": true,
-          "autoincrement": false
+          "default": "gen_random_uuid()"
         },
         "occurred_at": {
           "name": "occurred_at",
-          "type": "text",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
-          "autoincrement": false,
-          "default": "(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+          "default": "now()"
         },
         "actor_type": {
           "name": "actor_type",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "actor_id": {
           "name": "actor_id",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "action": {
           "name": "action",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "decision": {
           "name": "decision",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "project_id": {
           "name": "project_id",
-          "type": "text",
+          "type": "uuid",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         },
         "environment_id": {
           "name": "environment_id",
-          "type": "text",
+          "type": "uuid",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         },
         "secret_id": {
           "name": "secret_id",
-          "type": "text",
+          "type": "uuid",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         },
         "bundle_id": {
           "name": "bundle_id",
-          "type": "text",
+          "type": "uuid",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         },
         "request_id": {
           "name": "request_id",
           "type": "text",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         },
         "source_ip": {
           "name": "source_ip",
           "type": "text",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         },
         "metadata": {
           "name": "metadata",
           "type": "text",
           "primaryKey": false,
           "notNull": true,
-          "autoincrement": false,
           "default": "'{}'"
         },
         "prev_hash": {
           "name": "prev_hash",
-          "type": "blob",
+          "type": "bytea",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "hash": {
           "name": "hash",
-          "type": "blob",
+          "type": "bytea",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         }
       },
       "indexes": {
         "audit_log_occurred_idx": {
           "name": "audit_log_occurred_idx",
           "columns": [
-            "occurred_at"
+            {
+              "expression": "occurred_at",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
           ],
-          "isUnique": false
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         },
         "audit_log_actor_idx": {
           "name": "audit_log_actor_idx",
           "columns": [
-            "actor_type",
-            "actor_id",
-            "occurred_at"
+            {
+              "expression": "actor_type",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "actor_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "occurred_at",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
           ],
-          "isUnique": false
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         },
         "audit_log_secret_idx": {
           "name": "audit_log_secret_idx",
           "columns": [
-            "secret_id",
-            "occurred_at"
+            {
+              "expression": "secret_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "occurred_at",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
           ],
-          "isUnique": false
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         },
         "audit_log_environment_idx": {
           "name": "audit_log_environment_idx",
           "columns": [
-            "environment_id",
-            "occurred_at"
+            {
+              "expression": "environment_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "occurred_at",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
           ],
-          "isUnique": false
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         },
         "audit_log_bundle_idx": {
           "name": "audit_log_bundle_idx",
           "columns": [
-            "bundle_id"
+            {
+              "expression": "bundle_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
           ],
-          "isUnique": false
-        },
-        "audit_log_id_key": {
-          "name": "audit_log_id_key",
-          "columns": [
-            "id"
-          ],
-          "isUnique": true
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -359,7 +395,16 @@
         }
       },
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "audit_log_id_key": {
+          "name": "audit_log_id_key",
+          "nullsNotDistinct": false,
+          "columns": [
+            "id"
+          ]
+        }
+      },
+      "policies": {},
       "checkConstraints": {
         "audit_log_actor_type_check": {
           "name": "audit_log_actor_type_check",
@@ -371,7 +416,7 @@
         },
         "audit_log_metadata_check": {
           "name": "audit_log_metadata_check",
-          "value": "json_valid(\"audit_log\".\"metadata\")"
+          "value": "\"audit_log\".\"metadata\"::jsonb IS NOT NULL"
         },
         "audit_log_prev_hash_check": {
           "name": "audit_log_prev_hash_check",
@@ -381,133 +426,127 @@
           "name": "audit_log_hash_check",
           "value": "octet_length(\"audit_log\".\"hash\") = 32"
         }
-      }
+      },
+      "isRLSEnabled": false
     },
-    "credentials": {
+    "public.credentials": {
       "name": "credentials",
+      "schema": "",
       "columns": {
         "id": {
           "name": "id",
-          "type": "text",
+          "type": "uuid",
           "primaryKey": true,
           "notNull": true,
-          "autoincrement": false
+          "default": "gen_random_uuid()"
         },
         "kind": {
           "name": "kind",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "token_hash": {
           "name": "token_hash",
-          "type": "blob",
+          "type": "bytea",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "token_hint": {
           "name": "token_hint",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "principal_type": {
           "name": "principal_type",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "principal_id": {
           "name": "principal_id",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "identity_id": {
           "name": "identity_id",
-          "type": "text",
+          "type": "uuid",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         },
         "label": {
           "name": "label",
           "type": "text",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         },
         "created_at": {
           "name": "created_at",
-          "type": "integer",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
-          "autoincrement": false,
-          "default": "(CAST(unixepoch('subsec') * 1000 AS INTEGER))"
+          "default": "now()"
         },
         "created_by": {
           "name": "created_by",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "expires_at": {
           "name": "expires_at",
-          "type": "integer",
+          "type": "timestamp with time zone",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "last_used_at": {
           "name": "last_used_at",
-          "type": "integer",
+          "type": "timestamp with time zone",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         },
         "last_used_ip": {
           "name": "last_used_ip",
           "type": "text",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         },
         "revoked_at": {
           "name": "revoked_at",
-          "type": "integer",
+          "type": "timestamp with time zone",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         },
         "revoked_by": {
           "name": "revoked_by",
           "type": "text",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         }
       },
       "indexes": {
         "credentials_principal_idx": {
           "name": "credentials_principal_idx",
           "columns": [
-            "principal_type",
-            "principal_id"
+            {
+              "expression": "principal_type",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "principal_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
           ],
-          "isUnique": false
-        },
-        "credentials_token_hash_key": {
-          "name": "credentials_token_hash_key",
-          "columns": [
-            "token_hash"
-          ],
-          "isUnique": true
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -541,7 +580,16 @@
         }
       },
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "credentials_token_hash_key": {
+          "name": "credentials_token_hash_key",
+          "nullsNotDistinct": false,
+          "columns": [
+            "token_hash"
+          ]
+        }
+      },
+      "policies": {},
       "checkConstraints": {
         "credentials_kind_check": {
           "name": "credentials_kind_check",
@@ -555,113 +603,89 @@
           "name": "credentials_token_hash_check",
           "value": "octet_length(\"credentials\".\"token_hash\") = 32"
         }
-      }
+      },
+      "isRLSEnabled": false
     },
-    "device_authorizations": {
+    "public.device_authorizations": {
       "name": "device_authorizations",
+      "schema": "",
       "columns": {
         "id": {
           "name": "id",
-          "type": "text",
+          "type": "uuid",
           "primaryKey": true,
           "notNull": true,
-          "autoincrement": false
+          "default": "gen_random_uuid()"
         },
         "device_code_hash": {
           "name": "device_code_hash",
-          "type": "blob",
+          "type": "bytea",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "user_code": {
           "name": "user_code",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "client_label": {
           "name": "client_label",
           "type": "text",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         },
         "client_ip": {
           "name": "client_ip",
           "type": "text",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         },
         "created_at": {
           "name": "created_at",
-          "type": "integer",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
-          "autoincrement": false,
-          "default": "(CAST(unixepoch('subsec') * 1000 AS INTEGER))"
+          "default": "now()"
         },
         "expires_at": {
           "name": "expires_at",
-          "type": "integer",
+          "type": "timestamp with time zone",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "decided_at": {
           "name": "decided_at",
-          "type": "integer",
+          "type": "timestamp with time zone",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         },
         "decision": {
           "name": "decision",
           "type": "text",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         },
         "principal_type": {
           "name": "principal_type",
           "type": "text",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         },
         "principal_id": {
           "name": "principal_id",
           "type": "text",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         },
         "consumed_at": {
           "name": "consumed_at",
-          "type": "integer",
+          "type": "timestamp with time zone",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         }
       },
-      "indexes": {
-        "device_authorizations_device_code_hash_key": {
-          "name": "device_authorizations_device_code_hash_key",
-          "columns": [
-            "device_code_hash"
-          ],
-          "isUnique": true
-        },
-        "device_authorizations_user_code_key": {
-          "name": "device_authorizations_user_code_key",
-          "columns": [
-            "user_code"
-          ],
-          "isUnique": true
-        }
-      },
+      "indexes": {},
       "foreignKeys": {
         "device_authorizations_principal_fkey": {
           "name": "device_authorizations_principal_fkey",
@@ -680,7 +704,23 @@
         }
       },
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "device_authorizations_device_code_hash_key": {
+          "name": "device_authorizations_device_code_hash_key",
+          "nullsNotDistinct": false,
+          "columns": [
+            "device_code_hash"
+          ]
+        },
+        "device_authorizations_user_code_key": {
+          "name": "device_authorizations_user_code_key",
+          "nullsNotDistinct": false,
+          "columns": [
+            "user_code"
+          ]
+        }
+      },
+      "policies": {},
       "checkConstraints": {
         "device_authorizations_decision_check": {
           "name": "device_authorizations_decision_check",
@@ -690,73 +730,53 @@
           "name": "device_authorizations_approval_names_principal",
           "value": "(\"device_authorizations\".\"decision\" = 'approved') = (\"device_authorizations\".\"principal_id\" IS NOT NULL)"
         }
-      }
+      },
+      "isRLSEnabled": false
     },
-    "environments": {
+    "public.environments": {
       "name": "environments",
+      "schema": "",
       "columns": {
         "id": {
           "name": "id",
-          "type": "text",
+          "type": "uuid",
           "primaryKey": true,
           "notNull": true,
-          "autoincrement": false
+          "default": "gen_random_uuid()"
         },
         "project_id": {
           "name": "project_id",
-          "type": "text",
+          "type": "uuid",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "slug": {
           "name": "slug",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "name": {
           "name": "name",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "created_at": {
           "name": "created_at",
-          "type": "integer",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
-          "autoincrement": false,
-          "default": "(CAST(unixepoch('subsec') * 1000 AS INTEGER))"
+          "default": "now()"
         },
         "archived_at": {
           "name": "archived_at",
-          "type": "integer",
+          "type": "timestamp with time zone",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         }
       },
-      "indexes": {
-        "environments_project_id_slug_key": {
-          "name": "environments_project_id_slug_key",
-          "columns": [
-            "project_id",
-            "slug"
-          ],
-          "isUnique": true
-        },
-        "environments_project_scoped": {
-          "name": "environments_project_scoped",
-          "columns": [
-            "id",
-            "project_id"
-          ],
-          "isUnique": true
-        }
-      },
+      "indexes": {},
       "foreignKeys": {
         "environments_project_id_fkey": {
           "name": "environments_project_id_fkey",
@@ -773,109 +793,175 @@
         }
       },
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "environments_project_id_slug_key": {
+          "name": "environments_project_id_slug_key",
+          "nullsNotDistinct": false,
+          "columns": [
+            "project_id",
+            "slug"
+          ]
+        },
+        "environments_project_scoped": {
+          "name": "environments_project_scoped",
+          "nullsNotDistinct": false,
+          "columns": [
+            "id",
+            "project_id"
+          ]
+        }
+      },
+      "policies": {},
       "checkConstraints": {
         "environments_slug_check": {
           "name": "environments_slug_check",
-          "value": "length(\"environments\".\"slug\") BETWEEN 1 AND 63 AND \"environments\".\"slug\" GLOB '[a-z0-9]*' AND \"environments\".\"slug\" NOT GLOB '*[^a-z0-9-]*'"
+          "value": "\"environments\".\"slug\" ~ '^[a-z0-9][a-z0-9-]{0,62}$'"
         }
-      }
+      },
+      "isRLSEnabled": false
     },
-    "grants": {
+    "public.grants": {
       "name": "grants",
+      "schema": "",
       "columns": {
         "id": {
           "name": "id",
-          "type": "text",
+          "type": "uuid",
           "primaryKey": true,
           "notNull": true,
-          "autoincrement": false
+          "default": "gen_random_uuid()"
         },
         "principal_type": {
           "name": "principal_type",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "principal_id": {
           "name": "principal_id",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "environment_id": {
           "name": "environment_id",
-          "type": "text",
+          "type": "uuid",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         },
         "created_at": {
           "name": "created_at",
-          "type": "integer",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
-          "autoincrement": false,
-          "default": "(CAST(unixepoch('subsec') * 1000 AS INTEGER))"
+          "default": "now()"
         },
         "created_by": {
           "name": "created_by",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "project_id": {
           "name": "project_id",
-          "type": "text",
+          "type": "uuid",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         },
         "role": {
           "name": "role",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "expires_at": {
           "name": "expires_at",
-          "type": "integer",
+          "type": "timestamp with time zone",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         }
       },
       "indexes": {
         "grants_lookup_idx": {
           "name": "grants_lookup_idx",
           "columns": [
-            "principal_type",
-            "principal_id",
-            "environment_id"
+            {
+              "expression": "principal_type",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "principal_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "environment_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
           ],
-          "isUnique": false
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         },
         "grants_environment_unique": {
           "name": "grants_environment_unique",
           "columns": [
-            "principal_type",
-            "principal_id",
-            "environment_id"
+            {
+              "expression": "principal_type",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "principal_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "environment_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
           ],
-          "isUnique": true
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         },
         "grants_project_unique": {
           "name": "grants_project_unique",
           "columns": [
-            "principal_type",
-            "principal_id",
-            "project_id"
+            {
+              "expression": "principal_type",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "principal_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "project_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
           ],
-          "isUnique": true
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -923,6 +1009,7 @@
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
+      "policies": {},
       "checkConstraints": {
         "grants_principal_type_check": {
           "name": "grants_principal_type_check",
@@ -936,97 +1023,88 @@
           "name": "grants_role_check",
           "value": "\"grants\".\"role\" IN ('viewer', 'developer', 'maintainer', 'access-manager', 'auditor', 'owner')"
         }
-      }
+      },
+      "isRLSEnabled": false
     },
-    "identities": {
+    "public.identities": {
       "name": "identities",
+      "schema": "",
       "columns": {
         "id": {
           "name": "id",
-          "type": "text",
+          "type": "uuid",
           "primaryKey": true,
           "notNull": true,
-          "autoincrement": false
+          "default": "gen_random_uuid()"
         },
         "provider": {
           "name": "provider",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "subject": {
           "name": "subject",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "principal_type": {
           "name": "principal_type",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "principal_id": {
           "name": "principal_id",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "email": {
           "name": "email",
           "type": "text",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         },
         "created_at": {
           "name": "created_at",
-          "type": "integer",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
-          "autoincrement": false,
-          "default": "(CAST(unixepoch('subsec') * 1000 AS INTEGER))"
+          "default": "now()"
         },
         "created_by": {
           "name": "created_by",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "last_sign_in_at": {
           "name": "last_sign_in_at",
-          "type": "integer",
+          "type": "timestamp with time zone",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         },
         "revoked_at": {
           "name": "revoked_at",
-          "type": "integer",
+          "type": "timestamp with time zone",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         },
         "revoked_by": {
           "name": "revoked_by",
           "type": "text",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         },
         "active_subject": {
           "name": "active_subject",
           "type": "text",
           "primaryKey": false,
           "notNull": false,
-          "autoincrement": false,
           "generated": {
-            "as": "(CASE WHEN revoked_at IS NULL THEN subject END)",
+            "as": "CASE WHEN revoked_at IS NULL THEN subject END",
             "type": "stored"
           }
         }
@@ -1035,18 +1113,44 @@
         "identities_active_subject": {
           "name": "identities_active_subject",
           "columns": [
-            "provider",
-            "active_subject"
+            {
+              "expression": "provider",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "active_subject",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
           ],
-          "isUnique": true
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         },
         "identities_principal_idx": {
           "name": "identities_principal_idx",
           "columns": [
-            "principal_type",
-            "principal_id"
+            {
+              "expression": "principal_type",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "principal_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
           ],
-          "isUnique": false
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -1068,6 +1172,7 @@
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
+      "policies": {},
       "checkConstraints": {
         "identities_principal_type_check": {
           "name": "identities_principal_type_check",
@@ -1075,56 +1180,52 @@
         },
         "identities_provider_check": {
           "name": "identities_provider_check",
-          "value": "length(\"identities\".\"provider\") BETWEEN 1 AND 32 AND \"identities\".\"provider\" GLOB '[a-z0-9]*' AND \"identities\".\"provider\" NOT GLOB '*[^a-z0-9-]*'"
+          "value": "\"identities\".\"provider\" ~ '^[a-z0-9][a-z0-9-]{0,31}$'"
         }
-      }
+      },
+      "isRLSEnabled": false
     },
-    "principals": {
+    "public.principals": {
       "name": "principals",
+      "schema": "",
       "columns": {
         "principal_type": {
           "name": "principal_type",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "principal_id": {
           "name": "principal_id",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "instance_role": {
           "name": "instance_role",
           "type": "text",
           "primaryKey": false,
           "notNull": true,
-          "autoincrement": false,
           "default": "'user'"
         },
         "created_at": {
           "name": "created_at",
-          "type": "integer",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
-          "autoincrement": false,
-          "default": "(CAST(unixepoch('subsec') * 1000 AS INTEGER))"
+          "default": "now()"
         },
         "created_by": {
           "name": "created_by",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "active": {
           "name": "active",
-          "type": "integer",
+          "type": "boolean",
           "primaryKey": false,
           "notNull": true,
-          "autoincrement": false,
           "default": true
         }
       },
@@ -1132,14 +1233,15 @@
       "foreignKeys": {},
       "compositePrimaryKeys": {
         "principals_pkey": {
+          "name": "principals_pkey",
           "columns": [
             "principal_type",
             "principal_id"
-          ],
-          "name": "principals_pkey"
+          ]
         }
       },
       "uniqueConstraints": {},
+      "policies": {},
       "checkConstraints": {
         "principals_principal_type_check": {
           "name": "principals_principal_type_check",
@@ -1157,179 +1259,173 @@
           "name": "principals_user_id_lowercase",
           "value": "\"principals\".\"principal_type\" <> 'user' OR \"principals\".\"principal_id\" = lower(\"principals\".\"principal_id\")"
         }
-      }
+      },
+      "isRLSEnabled": false
     },
-    "projects": {
+    "public.projects": {
       "name": "projects",
+      "schema": "",
       "columns": {
         "id": {
           "name": "id",
-          "type": "text",
+          "type": "uuid",
           "primaryKey": true,
           "notNull": true,
-          "autoincrement": false
+          "default": "gen_random_uuid()"
         },
         "slug": {
           "name": "slug",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "name": {
           "name": "name",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "created_at": {
           "name": "created_at",
-          "type": "integer",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
-          "autoincrement": false,
-          "default": "(CAST(unixepoch('subsec') * 1000 AS INTEGER))"
+          "default": "now()"
         },
         "archived_at": {
           "name": "archived_at",
-          "type": "integer",
+          "type": "timestamp with time zone",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         }
       },
-      "indexes": {
-        "projects_slug_key": {
-          "name": "projects_slug_key",
-          "columns": [
-            "slug"
-          ],
-          "isUnique": true
-        }
-      },
+      "indexes": {},
       "foreignKeys": {},
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "projects_slug_key": {
+          "name": "projects_slug_key",
+          "nullsNotDistinct": false,
+          "columns": [
+            "slug"
+          ]
+        }
+      },
+      "policies": {},
       "checkConstraints": {
         "projects_slug_check": {
           "name": "projects_slug_check",
-          "value": "length(\"projects\".\"slug\") BETWEEN 1 AND 63 AND \"projects\".\"slug\" GLOB '[a-z0-9]*' AND \"projects\".\"slug\" NOT GLOB '*[^a-z0-9-]*'"
+          "value": "\"projects\".\"slug\" ~ '^[a-z0-9][a-z0-9-]{0,62}$'"
         }
-      }
+      },
+      "isRLSEnabled": false
     },
-    "secret_versions": {
+    "public.secret_versions": {
       "name": "secret_versions",
+      "schema": "",
       "columns": {
         "id": {
           "name": "id",
-          "type": "text",
+          "type": "uuid",
           "primaryKey": true,
           "notNull": true,
-          "autoincrement": false
+          "default": "gen_random_uuid()"
         },
         "secret_id": {
           "name": "secret_id",
-          "type": "text",
+          "type": "uuid",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "version": {
           "name": "version",
           "type": "integer",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "envelope_version": {
           "name": "envelope_version",
           "type": "integer",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "ciphertext": {
           "name": "ciphertext",
-          "type": "blob",
+          "type": "bytea",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "iv": {
           "name": "iv",
-          "type": "blob",
+          "type": "bytea",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "auth_tag": {
           "name": "auth_tag",
-          "type": "blob",
+          "type": "bytea",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "wrapped_dek": {
           "name": "wrapped_dek",
-          "type": "blob",
+          "type": "bytea",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "kek_provider": {
           "name": "kek_provider",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "kek_id": {
           "name": "kek_id",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "kek_version": {
           "name": "kek_version",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "created_at": {
           "name": "created_at",
-          "type": "integer",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
-          "autoincrement": false,
-          "default": "(CAST(unixepoch('subsec') * 1000 AS INTEGER))"
+          "default": "now()"
         },
         "created_by": {
           "name": "created_by",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         }
       },
       "indexes": {
         "secret_versions_secret_idx": {
           "name": "secret_versions_secret_idx",
           "columns": [
-            "secret_id",
-            "version"
+            {
+              "expression": "secret_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "version",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
           ],
-          "isUnique": false
-        },
-        "secret_versions_secret_id_version_key": {
-          "name": "secret_versions_secret_id_version_key",
-          "columns": [
-            "secret_id",
-            "version"
-          ],
-          "isUnique": true
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -1348,7 +1444,17 @@
         }
       },
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "secret_versions_secret_id_version_key": {
+          "name": "secret_versions_secret_id_version_key",
+          "nullsNotDistinct": false,
+          "columns": [
+            "secret_id",
+            "version"
+          ]
+        }
+      },
+      "policies": {},
       "checkConstraints": {
         "secret_versions_version_check": {
           "name": "secret_versions_version_check",
@@ -1362,96 +1468,99 @@
           "name": "secret_versions_auth_tag_check",
           "value": "octet_length(\"secret_versions\".\"auth_tag\") = 16"
         }
-      }
+      },
+      "isRLSEnabled": false
     },
-    "secrets": {
+    "public.secrets": {
       "name": "secrets",
+      "schema": "",
       "columns": {
         "id": {
           "name": "id",
-          "type": "text",
+          "type": "uuid",
           "primaryKey": true,
           "notNull": true,
-          "autoincrement": false
+          "default": "gen_random_uuid()"
         },
         "project_id": {
           "name": "project_id",
-          "type": "text",
+          "type": "uuid",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "environment_id": {
           "name": "environment_id",
-          "type": "text",
+          "type": "uuid",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "key": {
           "name": "key",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "created_at": {
           "name": "created_at",
-          "type": "integer",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
-          "autoincrement": false,
-          "default": "(CAST(unixepoch('subsec') * 1000 AS INTEGER))"
+          "default": "now()"
         },
         "updated_at": {
           "name": "updated_at",
-          "type": "integer",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
-          "autoincrement": false,
-          "default": "(CAST(unixepoch('subsec') * 1000 AS INTEGER))"
+          "default": "now()"
         },
         "current_version_id": {
           "name": "current_version_id",
-          "type": "text",
+          "type": "uuid",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         },
         "current_version": {
           "name": "current_version",
           "type": "integer",
           "primaryKey": false,
           "notNull": true,
-          "autoincrement": false,
           "default": 0
         },
         "archived_at": {
           "name": "archived_at",
-          "type": "integer",
+          "type": "timestamp with time zone",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         }
       },
       "indexes": {
         "secrets_lookup_idx": {
           "name": "secrets_lookup_idx",
           "columns": [
-            "project_id",
-            "environment_id",
-            "key"
+            {
+              "expression": "project_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "environment_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
           ],
-          "isUnique": false
-        },
-        "secrets_project_id_environment_id_key_key": {
-          "name": "secrets_project_id_environment_id_key_key",
-          "columns": [
-            "project_id",
-            "environment_id",
-            "key"
-          ],
-          "isUnique": true
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -1511,52 +1620,60 @@
         }
       },
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "secrets_project_id_environment_id_key_key": {
+          "name": "secrets_project_id_environment_id_key_key",
+          "nullsNotDistinct": false,
+          "columns": [
+            "project_id",
+            "environment_id",
+            "key"
+          ]
+        }
+      },
+      "policies": {},
       "checkConstraints": {
         "secrets_key_check": {
           "name": "secrets_key_check",
-          "value": "length(\"secrets\".\"key\") BETWEEN 1 AND 128 AND \"secrets\".\"key\" GLOB '[A-Za-z_]*' AND \"secrets\".\"key\" NOT GLOB '*[^A-Za-z0-9_]*'"
+          "value": "\"secrets\".\"key\" ~ '^[A-Za-z_][A-Za-z0-9_]{0,127}$'"
         }
-      }
+      },
+      "isRLSEnabled": false
     },
-    "sync_keys": {
+    "public.sync_keys": {
       "name": "sync_keys",
+      "schema": "",
       "columns": {
         "sync_id": {
           "name": "sync_id",
-          "type": "text",
+          "type": "uuid",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "key": {
           "name": "key",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "secret_version_id": {
           "name": "secret_version_id",
-          "type": "text",
+          "type": "uuid",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         },
         "pushed_at": {
           "name": "pushed_at",
-          "type": "integer",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
-          "autoincrement": false,
-          "default": "(CAST(unixepoch('subsec') * 1000 AS INTEGER))"
+          "default": "now()"
         },
         "removed_at": {
           "name": "removed_at",
-          "type": "integer",
+          "type": "timestamp with time zone",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         }
       },
       "indexes": {},
@@ -1590,126 +1707,124 @@
       },
       "compositePrimaryKeys": {
         "sync_keys_pkey": {
+          "name": "sync_keys_pkey",
           "columns": [
             "sync_id",
             "key"
-          ],
-          "name": "sync_keys_pkey"
+          ]
         }
       },
       "uniqueConstraints": {},
-      "checkConstraints": {}
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
     },
-    "syncs": {
+    "public.syncs": {
       "name": "syncs",
+      "schema": "",
       "columns": {
         "id": {
           "name": "id",
-          "type": "text",
+          "type": "uuid",
           "primaryKey": true,
           "notNull": true,
-          "autoincrement": false
+          "default": "gen_random_uuid()"
         },
         "project_id": {
           "name": "project_id",
-          "type": "text",
+          "type": "uuid",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "environment_id": {
           "name": "environment_id",
-          "type": "text",
+          "type": "uuid",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "provider": {
           "name": "provider",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "config": {
           "name": "config",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "credential_secret_id": {
           "name": "credential_secret_id",
-          "type": "text",
+          "type": "uuid",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "created_at": {
           "name": "created_at",
-          "type": "integer",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
-          "autoincrement": false,
-          "default": "(CAST(unixepoch('subsec') * 1000 AS INTEGER))"
+          "default": "now()"
         },
         "created_by": {
           "name": "created_by",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
+          "notNull": true
         },
         "paused_at": {
           "name": "paused_at",
-          "type": "integer",
+          "type": "timestamp with time zone",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         },
         "archived_at": {
           "name": "archived_at",
-          "type": "integer",
+          "type": "timestamp with time zone",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         },
         "lease_until": {
           "name": "lease_until",
-          "type": "integer",
+          "type": "timestamp with time zone",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         },
         "last_run_at": {
           "name": "last_run_at",
-          "type": "integer",
+          "type": "timestamp with time zone",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         },
         "last_status": {
           "name": "last_status",
           "type": "text",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         },
         "last_error": {
           "name": "last_error",
           "type": "text",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": false
         }
       },
       "indexes": {
         "syncs_environment_idx": {
           "name": "syncs_environment_idx",
           "columns": [
-            "environment_id"
+            {
+              "expression": "environment_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
           ],
-          "isUnique": false
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -1744,26 +1859,29 @@
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
+      "policies": {},
       "checkConstraints": {
         "syncs_config_check": {
           "name": "syncs_config_check",
-          "value": "json_valid(\"syncs\".\"config\")"
+          "value": "\"syncs\".\"config\"::jsonb IS NOT NULL"
         },
         "syncs_last_status_check": {
           "name": "syncs_last_status_check",
           "value": "\"syncs\".\"last_status\" IS NULL OR \"syncs\".\"last_status\" IN ('ok', 'partial', 'failed')"
         }
-      }
+      },
+      "isRLSEnabled": false
     }
   },
-  "views": {},
   "enums": {},
+  "schemas": {},
+  "sequences": {},
+  "roles": {},
+  "policies": {},
+  "views": {},
   "_meta": {
+    "columns": {},
     "schemas": {},
-    "tables": {},
-    "columns": {}
-  },
-  "internal": {
-    "indexes": {}
+    "tables": {}
   }
 }

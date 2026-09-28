@@ -127,8 +127,9 @@ Grant revocation and removal use the existing expiry/archive columns.
 **Owner and runtime are separate identities.** The one-shot migration process
 receives the owner `DATABASE_URL`; the Worker receives only the `HYPERDRIVE`
 binding backed by the restricted runtime login. Terraform creates and
-password-manages the stable `coffre_runtime` login; the Drizzle bootstrap
-validates it and grants membership in the append-only `coffre_app` role:
+password-manages the stable `coffre_runtime` login; the Postgres baseline
+migration validates it and grants membership in the append-only `coffre_app`
+role:
 
 ```sh
 DATABASE_URL='<owner-database-url>' pnpm db:migrate
@@ -187,7 +188,7 @@ Individual pieces:
 ```sh
 pnpm db:up            # Postgres on :55432
 pnpm db:migrate
-pnpm db:generate       # a migration per engine from the three schemas in packages/db/src
+pnpm db:generate       # regenerate each engine's baseline from its schema (no deployment yet)
 pnpm db:check          # validate the three Drizzle journals
 pnpm seed             # directory + market/dev|prod + grants; loads .env.dev
 pnpm test             # lint + unit + integration tests on Postgres (needs it up)

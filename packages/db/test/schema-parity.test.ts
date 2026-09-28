@@ -1,22 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 
 import { getTableName, is, Table } from 'drizzle-orm';
 import { getTableConfig as mysqlConfig } from 'drizzle-orm/mysql-core';
 import { getTableConfig as postgresConfig } from 'drizzle-orm/pg-core';
 import { getTableConfig as sqliteConfig } from 'drizzle-orm/sqlite-core';
-import {
-  generateDrizzleJson,
-  generateMigration,
-  generateMySQLDrizzleJson,
-  generateMySQLMigration,
-  generateSQLiteDrizzleJson,
-  generateSQLiteMigration,
-} from 'drizzle-kit/api';
 
-import type { Engine } from '../src/dialect.ts';
-import { migrationsFolder } from '../src/migrate.ts';
+import { ENGINES, journal, staleness } from '../src/baseline.ts';
 import { REQUIRED_MIGRATIONS } from '../src/schema-version.ts';
 import * as postgres from '../src/schema.ts';
 import * as mysql from '../src/schema.mysql.ts';
@@ -26,7 +16,7 @@ import * as sqlite from '../src/schema.sqlite.ts';
  * The three schemas are one schema, and each migration tree ends where its
  * schema is. Together: the trees are in step. A schema change made on one
  * engine fails the first test until the other two schemas follow, and the
- * second until each tree has a migration for it.
+ * second until `pnpm db:generate` has regenerated each baseline.
  *
  * Row types are checked at compile time, in portable.ts. Check constraints
  * are compared by name only: their bodies are each dialect's own.
@@ -83,29 +73,14 @@ test('the MySQL and SQLite schemas have the Postgres tables, columns, nullabilit
   assert.deepEqual(shapes(sqlite, sqliteConfig), expected);
 });
 
-async function journal(engine: Engine): Promise<{ idx: number; tag: string }[]> {
-  const text = await readFile(`${migrationsFolder(engine)}/meta/_journal.json`, 'utf8');
-  return (JSON.parse(text) as { entries: { idx: number; tag: string }[] }).entries;
-}
-
-async function lastSnapshot(engine: Engine): Promise<never> {
-  const entries = await journal(engine);
-  const last = String(entries.at(-1)!.idx).padStart(4, '0');
-  return JSON.parse(await readFile(`${migrationsFolder(engine)}/meta/${last}_snapshot.json`, 'utf8')) as never;
-}
-
-test('each migration tree ends at its schema, so none has fallen behind', async () => {
-  const pending = {
-    postgres: await generateMigration(await lastSnapshot('postgres'), generateDrizzleJson(postgres) as never),
-    mysql: await generateMySQLMigration(await lastSnapshot('mysql'), (await generateMySQLDrizzleJson(mysql)) as never),
-    sqlite: await generateSQLiteMigration(await lastSnapshot('sqlite'), (await generateSQLiteDrizzleJson(sqlite)) as never),
-  };
-  // Anything listed here needs `pnpm db:generate` and a migration in that tree.
-  assert.deepEqual(pending, { postgres: [], mysql: [], sqlite: [] });
+test('each migration tree is its baseline, generated from its schema and template', async () => {
+  const stale = Object.fromEntries(await Promise.all(ENGINES.map(async (engine) => [engine, await staleness(engine)])));
+  // Anything listed here needs `pnpm db:generate`.
+  assert.deepEqual(stale, { postgres: [], mysql: [], sqlite: [] });
 });
 
 test('the app requires every migration of each tree', async () => {
-  for (const engine of ['postgres', 'mysql', 'sqlite'] as const) {
+  for (const engine of ENGINES) {
     assert.equal(REQUIRED_MIGRATIONS[engine], (await journal(engine)).length, engine);
   }
 });

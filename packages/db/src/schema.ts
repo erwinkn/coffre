@@ -216,7 +216,8 @@ export const grants = pgTable(
     // One grant per member per place. Revoking expires the row rather than
     // deleting it, and granting again reuses it. The scope left empty is
     // null, and nulls never collide, so each index only bites on its own
-    // kind of grant.
+    // kind of grant: a plain index does what a partial one on "scope is not
+    // null" would, and MySQL, which has no partial indexes, can say it too.
     uniqueIndex('grants_environment_unique').on(table.principalType, table.principalId, table.environmentId),
     uniqueIndex('grants_project_unique').on(table.principalType, table.principalId, table.projectId),
   ],
@@ -347,6 +348,8 @@ export const identities = pgTable(
       columns: [table.principalType, table.principalId],
       foreignColumns: [principals.principalType, principals.principalId],
     }).onDelete('restrict'),
+    // An account is bound to one person at a time: the subject counts only
+    // while the identity is not revoked (see ACTIVE_SUBJECT).
     uniqueIndex('identities_active_subject').on(table.provider, table.activeSubject),
     index('identities_principal_idx').on(table.principalType, table.principalId),
   ],
