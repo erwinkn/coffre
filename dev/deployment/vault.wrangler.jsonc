@@ -1,4 +1,4 @@
-// The vault Worker of `vite dev` (dev/vault.ts), an auxiliary Worker of the
+// The vault Worker of `vite dev` (vault.ts), an auxiliary Worker of the
 // app's: examples/workers/vault/wrangler.jsonc, with its keys from .env.dev.
 {
   "$schema": "../node_modules/wrangler/config-schema.json",

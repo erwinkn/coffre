@@ -278,7 +278,7 @@ async function smoke() {
         check(!busy, `port ${p} is taken; set SMOKE_PORT to a free run of three`);
     }
 
-    start('dev-idp', process.execPath, [join(root, 'apps/dev-idp/src/server.ts')], {
+    start('dev-idp', process.execPath, [join(root, 'dev/idp/src/server.ts')], {
         COFFRE_AUTH_MODE: 'dev',
         COFFRE_DEV_IDP_PORT: String(port + 1),
     });

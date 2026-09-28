@@ -4,7 +4,7 @@ import { createRemoteJWKSet, decodeJwt, jwtVerify } from 'jose';
 
 import { DevIdp } from '../src/idp.ts';
 import { defaultSubject, PERSONAS } from '../src/people.ts';
-import { LOCAL_SEED_DIRECTORY } from '../../../scripts/seed-config.mjs';
+import { LOCAL_SEED_DIRECTORY } from '../../seed-config.mjs';
 import { basic, form, get, location, pkce, REDIRECT_URI } from './helpers.ts';
 
 const CLIENT_ID = 'coffre-local';

@@ -2,7 +2,7 @@ import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPair, SignJWT, UnsecuredJWT } from 'jose';
 
-import { DevIdp } from '../../../apps/dev-idp/src/idp.ts';
+import { DevIdp } from '../../../dev/idp/src/idp.ts';
 import { AccessIdentityVerifier } from '../src/identity/verifier.ts';
 
 const AUD = 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90';

@@ -1,5 +1,5 @@
-// The app Worker of `vite dev` (dev/app.ts): examples/workers/wrangler.jsonc,
-// on loopback. scripts/dev.sh points Hyperdrive at local Postgres with
+// The app Worker of `vite dev` (app.ts): examples/workers/wrangler.jsonc,
+// on loopback. dev/start.sh points Hyperdrive at local Postgres with
 // CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE, and its
 // environment overrides these vars: Wrangler hands the Worker the names
 // declared here, from the shell when it has them, and nothing else.

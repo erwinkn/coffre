@@ -114,9 +114,9 @@ that holds the keys and decides who may decrypt. The design is in
    `packages/vault` holds the KEK, grants, principal status, root admins and
    a hash-chained log of its own, over SQLite; the app keeps ciphertext and
    wrapped keys, and asks the vault to wrap and unwrap, once per batch. It
-   runs as its own Worker, then `apps/vault`, a Durable Object behind a service
-   binding, next to the app in dev and the smoke test, or in process over
-   libSQL for the tests. Callers' grants come from the vault once per
+   runs as its own Worker, a Durable Object behind a service binding, next
+   to the app in dev and the smoke test, or in process over libSQL for the
+   tests. Callers' grants come from the vault once per
    request; changing access and removing a member are vault calls, and a
    refusal is a 403 with the vault's code. Unwraps are capped per principal
    (`1000/15m` by default), syncs read as `sync:<id>`, and the vault signs

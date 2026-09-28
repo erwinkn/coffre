@@ -31,4 +31,4 @@ case "$COFFRE_TEST_ENGINE" in
         ;;
 esac
 
-node --test --test-concurrency=1 "scripts/*.test.mjs" "packages/**/test/*.test.ts" "apps/**/test/*.test.ts" "examples/**/test/*.test.ts"
+node --test --test-concurrency=1 "scripts/*.test.mjs" "packages/**/test/*.test.ts" "dev/**/test/*.test.ts" "examples/**/test/*.test.ts"

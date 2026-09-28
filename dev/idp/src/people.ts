@@ -9,7 +9,7 @@ export interface Persona {
 
 /**
  * The people the sign-in pages offer. Mirrors the users in
- * `scripts/seed-config.mjs` (a test keeps the two in step), so each button
+ * `dev/seed-config.mjs` (a test keeps the two in step), so each button
  * lands on a seeded account.
  */
 export const PERSONAS: readonly Persona[] = Object.freeze([

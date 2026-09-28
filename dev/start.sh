@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Bring the whole local stack up: Postgres, dev IdP, coffre and its vault as
-# two Workers under `vite dev` (packages/ui/dev), and seed data.
+# two Workers under `vite dev` (deployment/), and seed data.
 #
 #   pnpm dev          dev mode: the dev IdP's persona picker stands in for
 #                     Cloudflare Access
@@ -35,10 +35,10 @@ set +a
 port="${COFFRE_DEV_PORT:-3000}"
 idp_port="${COFFRE_DEV_IDP_PORT:-8081}"
 database="${COFFRE_DEV_DATABASE:-coffre}"
-state_dir="${COFFRE_STATE_DIR:-$root/packages/ui/.wrangler/state}"
+state_dir="${COFFRE_STATE_DIR:-$root/dev/.wrangler/state}"
 owner_url="postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/$database"
 
-# What dev/app.ts, the dev IdP, the seed and the CLI read. The app's
+# What deployment/app.ts, the dev IdP, the seed and the CLI read. The app's
 # Hyperdrive binding reaches Postgres as the restricted runtime login.
 export COFFRE_AUTH_MODE="$mode"
 export COFFRE_PUBLIC_URL="http://127.0.0.1:$port"
@@ -90,7 +90,7 @@ logs="$root/.logs"
 mkdir -p "$logs"
 
 log "starting dev IdP on :$idp_port"
-COFFRE_AUTH_MODE=dev node apps/dev-idp/src/server.ts >"$logs/dev-idp.log" 2>&1 &
+COFFRE_AUTH_MODE=dev node dev/idp/src/server.ts >"$logs/dev-idp.log" 2>&1 &
 sleep 1
 
 # The seed starts the app's database over, so the vault starts over with it:
@@ -100,7 +100,7 @@ if [ "$mode" = dev ]; then
 fi
 
 log "starting coffre and its vault on :$port ($mode)"
-./packages/ui/node_modules/.bin/vite dev packages/ui --port "$port" --strictPort >"$logs/web.log" 2>&1 &
+./dev/node_modules/.bin/vite dev --config dev/vite.config.ts --port "$port" --strictPort >"$logs/web.log" 2>&1 &
 until curl -sf "$COFFRE_PUBLIC_URL/livez" >/dev/null 2>&1; do sleep 1; done
 
 # The seed writes through the API with dev IdP tokens, which only dev mode
@@ -108,7 +108,7 @@ until curl -sf "$COFFRE_PUBLIC_URL/livez" >/dev/null 2>&1; do sleep 1; done
 # empty, as a new deployment does.
 if [ "$mode" = dev ]; then
     log 'seeding'
-    DATABASE_URL="$owner_url" node scripts/seed.mjs
+    DATABASE_URL="$owner_url" node dev/seed.mjs
 fi
 
 cli="node packages/cli/src/main.ts"

@@ -9,9 +9,9 @@
   },
   "scripts": {
     "build": "pnpm -r --filter \"./packages/*\" run build",
-    "typecheck": "pnpm -r --filter \"./packages/*\" --filter \"./examples/*\" run typecheck",
-    "dev": "./scripts/dev.sh",
-    "dev:signin": "./scripts/dev.sh signin",
+    "typecheck": "pnpm -r --filter \"./packages/*\" --filter \"./examples/*\" --filter ./dev run typecheck",
+    "dev": "./dev/start.sh",
+    "dev:signin": "./dev/start.sh signin",
     "test": "pnpm lint && ./scripts/test-suite.sh",
     "test:sqlite": "pnpm lint && COFFRE_TEST_ENGINE=sqlite ./scripts/test-suite.sh",
     "test:mysql": "pnpm lint && COFFRE_TEST_ENGINE=mysql ./scripts/test-suite.sh",
@@ -27,7 +27,7 @@
     "db:migrate": "pnpm --dir packages/db run migrate",
     "db:generate": "pnpm --dir packages/db generate",
     "db:check": "pnpm --dir packages/db check",
-    "seed": "DATABASE_URL=postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/coffre node --env-file=.env.dev scripts/seed.mjs",
+    "seed": "DATABASE_URL=postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/coffre node --env-file=.env.dev dev/seed.mjs",
     "add:dep": "pnpm add --save-exact"
   },
   "dependencies": {

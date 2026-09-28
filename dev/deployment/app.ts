@@ -3,7 +3,7 @@
 // page instead, with the dev IdP standing in for GitHub and for an OpenID
 // Connect provider, so both provider kinds run without a network.
 //
-// Every value is a local fixture; see dev/wrangler.jsonc and .env.dev.
+// Every value is a local fixture; see wrangler.jsonc and .env.dev.
 import { coffre, devIdp, github, oidc, postgres, signin } from '@coffre/server/cloudflare';
 
 import type { Vault } from '@coffre/server/cloudflare';

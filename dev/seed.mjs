@@ -66,7 +66,7 @@ const member = ({ principalType, principalId }) =>
 // sessions, device logins and linked accounts to principals, so they go next.
 //
 // Grants, who is still a member, and the checkpoints of this log live in the
-// vault, not here. scripts/dev.sh starts the vault empty before it seeds;
+// vault, not here. dev/start.sh starts the vault empty before it seeds;
 // seeding against a vault that remembers an older log would leave its
 // checkpoints behind a log that no longer exists.
 console.log('==> resetting local data');
