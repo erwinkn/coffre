@@ -39,7 +39,19 @@ export type ClientOptions = {
 };
 
 /** The API's error shape, `{ error, message }`, with the HTTP status. */
+const COFFRE_ERROR = Symbol.for('@coffre/client:CoffreError');
+
 export class CoffreError extends Error {
+  /**
+   * `@coffre/ui` and `@coffre/server` each bundle a copy of this class, and
+   * a page is handed a client from the server's copy. So `instanceof` asks
+   * for the mark every copy leaves, rather than for this copy's prototype.
+   */
+  static [Symbol.hasInstance](value: unknown): boolean {
+    return typeof value === 'object' && value !== null && COFFRE_ERROR in value;
+  }
+
+  readonly [COFFRE_ERROR] = true;
   readonly status: number;
   readonly code: string;
   /** The vault's own code when it refused: `no_grant`, `removed`, `bulk_limit`, ... */
