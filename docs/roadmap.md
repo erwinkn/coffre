@@ -91,10 +91,11 @@ that holds the keys and decides who may decrypt. The design is in
    ([report](spikes/drizzle-dialects.md)).
 2. ~~**The API**~~ ([design](architecture.md#the-api)): done. One route
    table under `/api`, on Drizzle against Postgres, with roles in code and
-   one role per member per place; every query in one module of
-   `packages/db`; `@coffre/client` typed from it; the CLI on the client. The
-   old routes and services are gone. Import has no endpoint: the client plans
-   it (a reveal and a list) and writes the changed keys with one `PATCH`.
+   one role per member per place; every query in one module
+   (`packages/server/src/db/queries.ts`); `@coffre/client` typed from it; the
+   CLI on the client. The old routes and services are gone. Import has no
+   endpoint: the client plans it (a reveal and a list) and writes the changed
+   keys with one `PATCH`.
 3. ~~**The UI on the client**~~: done. Loaders read through
    `context.client`, built per request: in the browser `fetch` to `/api`, in
    the server render an in-process call to the API carrying only the

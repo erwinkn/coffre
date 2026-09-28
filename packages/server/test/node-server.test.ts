@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { devIdp } from '../../core/src/identity/auth-mode.ts';
-import { migrateDatabase } from '../../db/src/migrate.ts';
+import { migrateDatabase } from '../src/db/migrate.ts';
 import { serveWith, type Server } from '../src/node-server.ts';
 import { testVault } from './api-fixture.ts';
 

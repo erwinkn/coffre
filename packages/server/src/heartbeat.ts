@@ -1,8 +1,8 @@
-import { appendAudit } from '../../db/src/audit.ts';
-import type { Database } from '../../db/src/database.ts';
-import { appliedMigrations, auditHead, auditRange, heartbeat, update } from '../../db/src/queries.ts';
-import { auditHeartbeat } from '../../db/src/schema.ts';
-import { requiredMigrations } from '../../db/src/schema-version.ts';
+import { appendAudit } from './db/audit.ts';
+import type { Database } from './db/database.ts';
+import { appliedMigrations, auditHead, auditRange, heartbeat, update } from './db/queries.ts';
+import { auditHeartbeat } from './db/schema.ts';
+import { requiredMigrations } from './db/schema-version.ts';
 import type { Vault } from '../../vault/src/types.ts';
 
 export type HeartbeatLogger = {

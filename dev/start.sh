@@ -83,7 +83,7 @@ log 'starting Postgres'
 
 log "applying migrations to $database"
 node scripts/ensure-database.mjs "$database"
-DATABASE_URL="$owner_url" pnpm --dir packages/db run migrate >/dev/null
+DATABASE_URL="$owner_url" pnpm --dir packages/server run db:migrate >/dev/null
 
 # Service logs go to files rather than stdout so the seed output stays legible.
 logs="$root/.logs"

@@ -75,14 +75,13 @@ Object).
 | Package | What | Holds |
 |---|---|---|
 | `@coffre/ui` | the web UI, server-rendered, and its static files | nothing sensitive |
-| `@coffre/server` | `/api`, sign-in, syncs, the heartbeat; hands pages to the UI | sessions, the app database |
+| `@coffre/server` | `/api`, sign-in, syncs and their providers, the heartbeat, the database layer and its migrations; hands pages to the UI | sessions, the app database |
 | `@coffre/vault` | wraps and unwraps data keys, decides who may, logs every use | the keys, the vault's store |
-| `@coffre/client` | the typed API client | |
+| `@coffre/client` | the typed API client, and the sync destinations' fields | |
 | `@coffre/cli` | `init`, `login`, secrets, syncs, audit; built on the client | a CLI session |
 
-`packages/core`, `packages/db` and `packages/sync` stay internal and are
-bundled into the packages above by tsdown; third-party code stays a
-dependency. Everything ships as compiled JavaScript with declarations: Node
+`packages/core` stays internal and is bundled into the packages above by
+tsdown; third-party code stays a dependency. Everything ships as compiled JavaScript with declarations: Node
 refuses to strip TypeScript types inside `node_modules`. The CLI bundles all
 it runs, so it installs with no dependencies.
 
@@ -384,8 +383,9 @@ Drizzle; none is written by hand. The integration suite runs against all
 three. [A spike](spikes/drizzle-dialects.md) ran the same queries,
 joins, a transaction, an upsert and 24 concurrent audit appends on all three.
 
-Every query lives in one module, `packages/db/src/queries.ts`, and the server
-writes no SQL (lint keeps `drizzle-orm` out of the server and the pages). There are named
+Every query lives in one module, `packages/server/src/db/queries.ts`, and the
+rest of the server writes no SQL (lint keeps `drizzle-orm` inside
+`packages/server/src/db/`, and the vault's own store). There are named
 reads, one per shape of data the server needs (the caller, a path, an
 environment's secrets, the members, the syncs, a page of the log), each
 returning everything its callers use in one statement. There are also four
@@ -398,8 +398,8 @@ leases, version counters), and each one says which race it guards.
 
 The database comes from its URL: `postgres://` opens node-postgres,
 `mysql://` mysql2 and `file:` or `libsql:` @libsql/client (SQLite), each
-loaded only when asked for (`packages/db/src/connect.ts`). The Worker does not
-come through there: it builds its Postgres database from the Hyperdrive pool
+loaded only when asked for (`packages/server/src/db/connect.ts`). The
+Worker does not come through there: it builds its Postgres database from the Hyperdrive pool
 with `createDatabase`, and stays on Postgres.
 
 Each query is written once, typed against the Postgres schema. Drizzle has no
@@ -413,14 +413,14 @@ and foreign keys), and the whole suite on every engine, on every Drizzle
 upgrade.
 
 What differs between them stays in the schemas and one module,
-`packages/db/src/dialect.ts`:
+`packages/server/src/db/dialect.ts`:
 
 - **Schemas and migrations.** Drizzle's table builders are per dialect
   (`pgTable`, `mysqlTable`, `sqliteTable`), so there are three schemas and
-  three migration trees under `packages/db/migrations/`, each a single
-  baseline: the generated tables inside a hand-written template
-  (`packages/db/baseline/`) that adds the first audit rows, MySQL's
-  collation and the Postgres runtime role. Until the first deployment,
+  three migration trees under `packages/server/src/db/migrations/`, each a
+  single baseline: the generated tables inside a hand-written template
+  (`packages/server/src/db/baseline/`) that adds the first audit rows,
+  MySQL's collation and the Postgres runtime role. Until the first deployment,
   schema changes are regenerated into the baseline (`pnpm db:generate`)
   rather than added as new migrations. Tests fail when a tree falls behind:
   the parity test, and a check that each baseline is what its schema and

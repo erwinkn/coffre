@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
 
 import { mayManageAccess, type Permission } from '../../../core/src/access.ts';
-import type { AuditEntry } from '../../../db/src/audit.ts';
-import type { Database, Queryable, Transaction } from '../../../db/src/database.ts';
+import type { AuditEntry } from '../db/audit.ts';
+import type { Database, Queryable, Transaction } from '../db/database.ts';
 import {
   findSyncs,
   insert,
@@ -11,15 +11,15 @@ import {
   update,
   upsert,
   type SyncRow,
-} from '../../../db/src/queries.ts';
-import { syncKeys, syncs } from '../../../db/src/schema.ts';
+} from '../db/queries.ts';
+import { syncKeys, syncs } from '../db/schema.ts';
 import {
   getProvider,
   SyncConfigError,
   SyncProviderError,
   type SyncApplyResult,
   type SyncProvider,
-} from '../../../sync/src/index.ts';
+} from '../sync/index.ts';
 import type { GrantChange, Vault } from '../../../vault/src/types.ts';
 import type { SyncTiming } from '../config.ts';
 import { can } from './caller.ts';

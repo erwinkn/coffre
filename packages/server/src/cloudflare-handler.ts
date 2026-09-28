@@ -1,4 +1,4 @@
-import { createDatabase } from '../../db/src/database.ts';
+import { createDatabase } from './db/database.ts';
 import { handleRequest, runScheduled } from './app.ts';
 import { cloudflareSourceIp } from './auth.ts';
 import { resolveConfig, type CoffreConfig, type ResolvedConfig } from './config.ts';

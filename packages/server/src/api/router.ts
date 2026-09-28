@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-import { resolvePath, type ResolvedPath } from '../../../db/src/queries.ts';
+import { resolvePath, type ResolvedPath } from '../db/queries.ts';
 import { secretKey, slug } from '../../../core/src/schemas.ts';
 import { errorResponse, jsonResponse, readJson } from '../http.ts';
 import { can } from './caller.ts';

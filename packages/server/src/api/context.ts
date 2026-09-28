@@ -1,6 +1,6 @@
 import type { Permission } from '../../../core/src/access.ts';
-import { appendAudit, type AuditEntry } from '../../../db/src/audit.ts';
-import type { Database, Transaction } from '../../../db/src/database.ts';
+import { appendAudit, type AuditEntry } from '../db/audit.ts';
+import type { Database, Transaction } from '../db/database.ts';
 import type { Refusal as VaultRefusal, Vault } from '../../../vault/src/types.ts';
 import { can, type Caller, type Place } from './caller.ts';
 import { forbidden, vaultRefused, type ApiError } from './errors.ts';

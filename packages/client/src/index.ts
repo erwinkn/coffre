@@ -12,6 +12,22 @@
 import type { Api, AuthInfo, DryRunOutcome, DryRunResult, SetResult } from './api.ts';
 
 export type { Api, AuthInfo, DryRunOutcome, DryRunResult, Json, SetResult } from './api.ts';
+export {
+  DESTINATIONS,
+  configFromArguments,
+  destination,
+  destinationConfig,
+  firstMissing,
+  initialValues,
+  isAsked,
+} from './destinations.ts';
+export type {
+  Destination,
+  DestinationField,
+  DestinationKind,
+  FormValues,
+  SyncProviderKind,
+} from './destinations.ts';
 
 export type RouteKey = keyof Api;
 /** What a caller sends: the body, or the query string for a GET. */

@@ -3,7 +3,7 @@ import {
   AccessIdentityVerifier,
   type AccessVerifierConfig,
 } from '../../core/src/identity/verifier.ts';
-import type { Database } from '../../db/src/database.ts';
+import type { Database } from './db/database.ts';
 import type { Vault } from '../../vault/src/types.ts';
 import type { ApiContext } from './api/context.ts';
 import { SigninService } from './api/signin.ts';

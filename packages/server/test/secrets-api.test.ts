@@ -10,8 +10,8 @@ import {
   environments,
   secrets,
   secretVersions,
-} from '../../db/test/tables.ts';
-import { postgresOnly } from '../../db/test/engine.ts';
+} from './db/tables.ts';
+import { postgresOnly } from './db/engine.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 const ROOT = 'admin@acme.example';

@@ -17,13 +17,13 @@ case "$COFFRE_TEST_ENGINE" in
     mysql)
         ./scripts/ensure-mysql.sh
         export COFFRE_TEST_DATABASE_URL='mysql://root:local-dev-only@127.0.0.1:53306/coffre_test'
-        node packages/db/test/create-database.ts "$COFFRE_TEST_DATABASE_URL"
+        node packages/server/test/db/create-database.ts "$COFFRE_TEST_DATABASE_URL"
         ;;
     sqlite)
         scratch="$(mktemp -d "${TMPDIR:-/tmp}/coffre-test.XXXXXX")"
         trap 'rm -rf "$scratch"' EXIT
         export COFFRE_TEST_DATABASE_URL="file:$scratch/coffre_test.db"
-        node packages/db/test/create-database.ts "$COFFRE_TEST_DATABASE_URL"
+        node packages/server/test/db/create-database.ts "$COFFRE_TEST_DATABASE_URL"
         ;;
     *)
         echo "COFFRE_TEST_ENGINE must be postgres, mysql or sqlite" >&2
@@ -31,4 +31,4 @@ case "$COFFRE_TEST_ENGINE" in
         ;;
 esac
 
-node --test --test-concurrency=1 "scripts/*.test.mjs" "packages/**/test/*.test.ts" "dev/**/test/*.test.ts" "examples/**/test/*.test.ts"
+node --test --test-concurrency=1 "scripts/*.test.mjs" "packages/*/test/**/*.test.ts" "dev/**/test/*.test.ts" "examples/**/test/*.test.ts"

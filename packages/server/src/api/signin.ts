@@ -11,9 +11,9 @@ import {
   tokenHint,
   type CredentialKind,
 } from '../../../core/src/identity/tokens.ts';
-import type { AuditEntry } from '../../../db/src/audit.ts';
-import type { Database, Transaction } from '../../../db/src/database.ts';
-import { isUniqueViolation } from '../../../db/src/dialect.ts';
+import type { AuditEntry } from '../db/audit.ts';
+import type { Database, Transaction } from '../db/database.ts';
+import { isUniqueViolation } from '../db/dialect.ts';
 import {
   findCredential,
   findDeviceAuthorizations,
@@ -23,8 +23,8 @@ import {
   lock,
   members,
   update,
-} from '../../../db/src/queries.ts';
-import { credentials, deviceAuthorizations, identities, principals } from '../../../db/src/schema.ts';
+} from '../db/queries.ts';
+import { credentials, deviceAuthorizations, identities, principals } from '../db/schema.ts';
 import type { Access, Vault } from '../../../vault/src/types.ts';
 import type { PrincipalRef } from './caller.ts';
 import { allowed, audited, denied, Refusal, type ApiContext } from './context.ts';

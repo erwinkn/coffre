@@ -26,14 +26,16 @@ import {
   type Store,
   type Target,
 } from './instance.ts';
-import { createClient, planImport, type CoffreClient } from '../../client/src/index.ts';
-import { assignableToEnvironment, isRole, ROLES, type Role } from '../../core/src/access.ts';
-import { formatDotenv, formatShellExports, parseDotenv } from '../../core/src/dotenv.ts';
 import {
   DESTINATIONS,
   configFromArguments,
+  createClient,
+  planImport,
+  type CoffreClient,
   type DestinationField,
-} from '../../sync/src/destinations.ts';
+} from '../../client/src/index.ts';
+import { assignableToEnvironment, isRole, ROLES, type Role } from '../../core/src/access.ts';
+import { formatDotenv, formatShellExports, parseDotenv } from '../../core/src/dotenv.ts';
 
 const CREDENTIALS_PATH = join(homedir(), '.coffre', 'credentials.json');
 

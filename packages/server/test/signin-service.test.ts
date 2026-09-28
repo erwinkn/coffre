@@ -12,14 +12,14 @@ import {
 } from '../../core/src/identity/signin/config.ts';
 import type { SigninProfile } from '../../core/src/identity/signin/types.ts';
 import { hashToken, isCoffreToken } from '../../core/src/identity/tokens.ts';
-import type { Database } from '../../db/src/database.ts';
+import type { Database } from '../src/db/database.ts';
 import {
   auditLog,
   credentials,
   deviceAuthorizations,
   identities,
   principals,
-} from '../../db/test/tables.ts';
+} from './db/tables.ts';
 import { verifyAudit } from '../src/api/audit.ts';
 import {
   normalizeUserCode,

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { asc, count, eq } from 'drizzle-orm';
 
 import type { CoffreClient } from '../../client/src/index.ts';
-import { auditLog, principals, projects } from '../../db/test/tables.ts';
+import { auditLog, principals, projects } from './db/tables.ts';
 import {
   clientFor,
   openTestDatabase,

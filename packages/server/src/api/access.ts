@@ -1,5 +1,5 @@
 import { assignableToEnvironment, ROLES, type Role } from '../../../core/src/access.ts';
-import { places } from '../../../db/src/queries.ts';
+import { places } from '../db/queries.ts';
 import type { AccessChange } from '../../../vault/src/types.ts';
 import { allowed, audited, denied, need, Refusal, vaultRefusal, type ApiContext } from './context.ts';
 import { badRequest, conflict, notFound } from './errors.ts';

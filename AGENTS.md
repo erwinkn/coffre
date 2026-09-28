@@ -1,19 +1,19 @@
 # AGENTS.md
 
 `coffre` is a pnpm monorepo secrets manager, shipped as packages a deployment imports
-and configures in code: `packages/server` (`@coffre/server`: `/api`, sign-in, syncs,
-migrations; `/cloudflare` and `/node` entry points), `packages/ui` (`@coffre/ui`: the
-TanStack Start pages, prebuilt), `packages/vault` (`@coffre/vault`: keys, grants,
-members, its own log), `packages/client` (the typed API client the CLI and UI call),
-`packages/cli` (`coffre`, including `coffre init`), and the internal `packages/core`,
-`packages/db`, `packages/sync`, bundled into them. `examples/workers` and
-`examples/node` are deployments, exactly what `coffre init` writes (a test diffs
-them). `dev/` holds what only the dev loop uses and nothing ships: `dev/start.sh`
-(`pnpm dev`), the deployment it runs, the dev IdP (`dev/idp`, the local stand-in for
-Cloudflare Access, GitHub and OIDC, which the smokes use too) and the seed.
-`scripts/` holds what dev, tests and CI share.
-The root `README.md` and the `package.json` scripts are the source of truth for
-commands; this file only adds what they leave implicit.
+and configures in code: `packages/server` (`@coffre/server`: `/api`, sign-in, syncs and
+their providers in `src/sync`, the Drizzle schema, queries and migrations in `src/db`;
+`/cloudflare` and `/node` entry points), `packages/ui` (`@coffre/ui`: the TanStack
+Start pages, prebuilt), `packages/vault` (`@coffre/vault`: keys, grants, members, its
+own log), `packages/client` (the typed API client the CLI and UI call), `packages/cli`
+(`coffre`, including `coffre init`), and the internal `packages/core`, bundled into
+them. `examples/workers` and `examples/node` are deployments, exactly what `coffre
+init` writes (a test diffs them). `dev/` holds what only the dev loop uses and nothing
+ships: `dev/start.sh` (`pnpm dev`), the deployment it runs, the dev IdP (`dev/idp`, the
+local stand-in for Cloudflare Access, GitHub and OIDC, which the smokes use too) and
+the seed. `scripts/` holds what dev, tests and CI share. The root `README.md` and the
+`package.json` scripts are the source of truth for commands; this file only adds what
+they leave implicit.
 
 ## Setup
 
