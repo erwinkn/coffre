@@ -1,8 +1,6 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    // `@coffre/ui` is a build; its types come from their source here.
-    "paths": { "@coffre/ui": ["../ui/src/types.ts"] },
     // For the tests of the repo's own scripts, which are plain JavaScript.
     "allowJs": true
   },

@@ -10,9 +10,10 @@ import { parseArgs } from 'node:util';
 import { execFile, spawn } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { isJsonContentType } from './auth-mode.ts';
+import { init, KINDS, type Kind } from './init.ts';
 import {
   credentialHeaders,
   emptyStore,
@@ -958,7 +959,34 @@ function printSync(entry: SyncView): void {
   }
 }
 
+/** `coffre init --workers|--node [<dir>]`: a new deployment of coffre. */
+function initProject(args: string[]): void {
+  const { values, positionals } = parseArgs({
+    args,
+    options: { workers: { type: 'boolean' }, node: { type: 'boolean' } },
+    allowPositionals: true,
+  });
+  const kinds = KINDS.filter((kind) => values[kind]);
+  if (kinds.length !== 1 || positionals.length > 1) fail('usage: coffre init --workers|--node [<dir>]');
+  const kind: Kind = kinds[0];
+  const dir = resolve(positionals[0] ?? '.');
+  const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
+  const files = attempt(() => init(kind, dir, version));
+  for (const file of files) process.stdout.write(`  ${file}\n`);
+  // Where it went, as the person wrote it.
+  const at = dir === process.cwd() ? null : (positionals[0] ?? null);
+  process.stdout.write(
+    `\nA ${kind === 'workers' ? 'Cloudflare Workers' : 'Node'} deployment of coffre ${version}` +
+      `${at === null ? ' here' : ` in ${at}`}. README.md takes it from there:\n\n` +
+      `${at === null ? '' : `  cd ${/\s/.test(at) ? `'${at}'` : at}\n`}  pnpm install\n`,
+  );
+}
+
 const USAGE = `coffre - secrets, with an audit log
+
+  New deployment
+    coffre init --workers [<dir>]           two Cloudflare Workers: the app and its vault
+    coffre init --node [<dir>]              a Node server, and its vault beside it
 
   Session
     coffre login [<url>] [--no-browser]     sign in, and make <url> the current instance
@@ -1006,6 +1034,9 @@ const USAGE = `coffre - secrets, with an audit log
 const [command, ...rest] = process.argv.slice(2);
 
 switch (command) {
+  case 'init':
+    initProject(rest);
+    break;
   case 'login':
     await login(rest);
     break;
