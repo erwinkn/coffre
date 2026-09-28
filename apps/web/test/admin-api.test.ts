@@ -318,6 +318,18 @@ test('removed members must be explicitly re-added before regranting access', asy
   assert.equal((await reader.me()).environments.length, 1);
 });
 
+test('two owners adding the same member at once both succeed, and one of them creates it', async () => {
+  await root.members.add(OWNER, { owner: true });
+  const added = await Promise.all([
+    root.members.add('user:new@acme.example'),
+    owner.members.add('user:new@acme.example'),
+  ]);
+  assert.deepEqual(added.map((result) => result.created).sort(), [false, true]);
+  const creates = (await auditActions()).filter((entry) => entry.action === 'directory.create');
+  // LEAD, READER, CI, OWNER, then the new member once.
+  assert.equal(creates.length, 5);
+});
+
 test('ordinary users cannot manage the instance directory', async () => {
   await seedProject();
   await assert.rejects(reader.members.list(), { status: 403 });
