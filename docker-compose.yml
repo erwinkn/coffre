@@ -16,7 +16,6 @@ services:
       retries: 30
     volumes:
       - coffre-pgdata-v16:/var/lib/postgresql/data
-      - ./packages/db/migrations:/migrations:ro
 
 volumes:
   # Versioned so adopting the PostgreSQL 16 production baseline never mounts

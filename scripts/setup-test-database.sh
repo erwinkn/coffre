@@ -5,11 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-coffre}"
 
-docker compose up -d postgres >/dev/null
-until docker compose exec -T postgres \
-    pg_isready -U coffre_owner -d postgres >/dev/null 2>&1; do
-    sleep 1
-done
+./scripts/ensure-postgres.sh
 
 docker compose exec -T postgres \
     psql -v ON_ERROR_STOP=1 -U coffre_owner -d postgres <<'SQL' >/dev/null
