@@ -302,7 +302,8 @@ test('ciphertext relocated between environments cannot be decrypted', async () =
   const [prod] = await current('prod');
   const { id: _, ...envelope } = dev;
   await db.owner.update(secretVersions).set(envelope).where(eq(secretVersions.id, prod.id));
-  await assert.rejects(root.secrets.reveal('market/prod/DATABASE_URL'), { status: 500 });
+  // The vault unwraps a key only as the secret it was wrapped for: dev's key is not prod's.
+  await assert.rejects(root.secrets.reveal('market/prod/DATABASE_URL'), { status: 403, code: 'vault_refused', reason: 'bad_claim' });
 });
 
 test('the audit chain verifies over a realistic mixed workload', async () => {

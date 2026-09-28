@@ -1,8 +1,9 @@
 import { appendAudit } from '../../../../packages/db/src/audit.ts';
 import type { Database } from '../../../../packages/db/src/database.ts';
-import { appliedMigrations, heartbeat, update } from '../../../../packages/db/src/queries.ts';
+import { appliedMigrations, auditHead, auditRange, heartbeat, update } from '../../../../packages/db/src/queries.ts';
 import { auditHeartbeat } from '../../../../packages/db/src/schema.ts';
 import { requiredMigrations } from '../../../../packages/db/src/schema-version.ts';
+import type { Vault } from '../../../../packages/vault/src/types.ts';
 
 export type HeartbeatLogger = {
   warn: (obj: unknown, msg: string) => void;
@@ -22,12 +23,26 @@ class MissingSingleton extends Error {}
  * monitor alerts when `last_beat_at` goes stale, which turns "the audit log
  * stopped receiving writes" into a paging event rather than an audit finding.
  * `/readyz` surfaces it too.
+ *
+ * Then the vault signs the new head; see `checkpointAudit`.
  */
 export async function writeAuditHeartbeat(
   db: Database,
   chainKey: Buffer,
+  vault: Vault,
   log: HeartbeatLogger,
 ): Promise<boolean> {
+  const beat = await writeBeat(db, chainKey, log);
+  if (!beat) return false;
+  try {
+    return await checkpointAudit(db, vault, log);
+  } catch (error) {
+    log.warn({ err: (error as Error).message }, 'audit checkpoint failed');
+    return false;
+  }
+}
+
+async function writeBeat(db: Database, chainKey: Buffer, log: HeartbeatLogger): Promise<boolean> {
   try {
     return await db.transaction(async (tx) => {
       const { nextSeq, occurredAt } = await appendAudit(tx, chainKey, [
@@ -53,6 +68,38 @@ export async function writeAuditHeartbeat(
     // A heartbeat that cannot write is itself the signal.
     log.warn({ err: (error as Error).message }, 'audit heartbeat failed to write');
     return false;
+  }
+}
+
+/**
+ * Have the vault sign the app log's head. The vault signs a head only if the
+ * log still holds, at the last checkpoint's seq, the hash it signed then; so
+ * a log rewritten behind a checkpoint and chained again, which the chain key
+ * alone cannot catch, is refused here and fails `GET /api/audit/verification`.
+ *
+ * Two heartbeats racing look like that too, to the one that loses, so a
+ * refusal is tried once more against the new checkpoint.
+ */
+export async function checkpointAudit(db: Database, vault: Vault, log: HeartbeatLogger): Promise<boolean> {
+  for (let attempt = 0; ; attempt++) {
+    const [head, { checkpoint: latest }] = await Promise.all([auditHead(db), vault.latestCheckpoint()]);
+    if (head === null || head.nextSeq === 0n) return true;
+    let previous = null;
+    if (latest !== null) {
+      const [row] = await auditRange(db, BigInt(latest.seq), 1);
+      // Gone, it cannot match: the vault refuses, and logs it.
+      previous = { seq: latest.seq, hash: row?.seq === BigInt(latest.seq) ? row.hash.toString('hex') : '' };
+    }
+    const signed = await vault.checkpoint({
+      seq: Number(head.nextSeq - 1n),
+      headHash: head.headHash.toString('hex'),
+      previous,
+    });
+    if (signed.ok) return true;
+    if (attempt === 1) {
+      log.warn({ code: signed.refusal.code }, 'the vault refused to checkpoint the audit log');
+      return false;
+    }
   }
 }
 

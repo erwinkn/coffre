@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { asc, count, eq } from 'drizzle-orm';
 
 import type { CoffreClient } from '../../../packages/client/src/index.ts';
-import { auditLog, grants, principals, projects } from '../../../packages/db/test/tables.ts';
+import { auditLog, principals, projects } from '../../../packages/db/test/tables.ts';
 import {
   clientFor,
   openTestDatabase,
@@ -84,15 +84,7 @@ test('root admins and instance owners create projects without implicit secret gr
     { action: 'project.create', decision: 'deny' },
   ]);
   assert.equal((await db.owner.select({ n: count() }).from(projects))[0].n, 2);
-  assert.equal(
-    (
-      await db.owner
-        .select({ n: count() })
-        .from(grants)
-        .where(eq(grants.principalId, 'instance-owner@acme.example'))
-    )[0].n,
-    0,
-  );
+  assert.deepEqual((await deps.vault.access('user:instance-owner@acme.example')).grants, []);
 });
 
 test('creating a project or environment that exists changes nothing and logs nothing', async () => {
@@ -242,10 +234,7 @@ test('an access change that fails anywhere changes nothing', async () => {
     { status: 409 },
   );
   assert.deepEqual((await reader.me()).environments, []);
-  assert.equal(
-    (await db.owner.select({ n: count() }).from(grants).where(eq(grants.principalId, 'reader@acme.example')))[0].n,
-    0,
-  );
+  assert.deepEqual((await deps.vault.access('user:reader@acme.example')).grants, []);
 });
 
 test('removing a member revokes every grant and is audited', async () => {

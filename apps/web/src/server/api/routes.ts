@@ -3,11 +3,11 @@ import { z } from 'zod';
 import { ROLE_NAMES, type Permission } from '../../../../../packages/core/src/access.ts';
 import { displayName, secretKey, slug } from '../../shared/schemas.ts';
 import { setAccess } from './access.ts';
-import { listAudit, verifyAudit } from './audit.ts';
+import { listAudit, vaultLog, verifyAudit } from './audit.ts';
 import type { ApiContext } from './context.ts';
 import { notFound } from './errors.ts';
 import { listMembers, memberReport, putMember, removeMember } from './members.ts';
-import { parseMember, parsePath, type ResolvedPath } from './paths.ts';
+import { parseGrantee, parseMember, parsePath, type ResolvedPath } from './paths.ts';
 import { listProjects, me, patchEnvironment, patchProject, putEnvironment, putProject } from './projects.ts';
 import {
   dryRunSecrets,
@@ -212,7 +212,7 @@ export const routes = {
       z.string().max(200),
       z.union([role, z.object({ role, until: z.string().max(40).nullable() }).strict(), z.null()]),
     ),
-    run: (ctx, { params, input }) => setAccess(ctx, parseMember(params.member), input),
+    run: (ctx, { params, input }) => setAccess(ctx, parseGrantee(params.member), input),
   }),
 
   // Your own sign-in: where you are signed in, the accounts you sign in
@@ -286,6 +286,14 @@ export const routes = {
       }),
   }),
   ...route('GET /audit/verification', { run: (ctx) => verifyAudit(ctx) }),
+  // The vault's own log: every unwrap it allowed or refused, every change of access.
+  ...route('GET /audit/vault', {
+    input: z.object({
+      before: z.coerce.number().int().positive().optional(),
+      limit: z.coerce.number().int().min(1).max(200).default(50),
+    }),
+    run: (ctx, { input }) => vaultLog(ctx, input),
+  }),
 };
 
 export type Routes = typeof routes;

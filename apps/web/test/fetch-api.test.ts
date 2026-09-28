@@ -32,10 +32,9 @@ let deps: FixtureDeps;
 function runtimeFor(auth: AuthConfig): CoffreRuntime {
   return {
     db: deps.db,
-    keks: deps.keks,
+    vault: deps.vault,
     chainKey: deps.chainKey,
-    rootAdmins: deps.rootAdmins,
-    syncs: new SyncRunner({ db: deps.db, keks: deps.keks, chainKey: deps.chainKey }),
+    syncs: new SyncRunner({ db: deps.db, vault: deps.vault, chainKey: deps.chainKey }),
     signin: null,
     auth,
     verifier: { verify: async (token: string): Promise<Principal> => ({ type: 'user', id: token, email: token, subject: token }) },

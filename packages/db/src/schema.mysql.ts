@@ -168,10 +168,8 @@ export const principals = mysqlTable(
   {
     principalType: principalType().notNull(),
     principalId: principalId().notNull(),
-    instanceRole: text('instance_role').notNull().default(sql`('user')`),
     createdAt: createdAt(),
     createdBy: text('created_by').notNull(),
-    active: boolean().notNull().default(true),
   },
   (table) => [
     primaryKey({
@@ -179,59 +177,10 @@ export const principals = mysqlTable(
       columns: [table.principalType, table.principalId],
     }),
     check('principals_principal_type_check', sql`${table.principalType} IN ('user', 'service')`),
-    check('principals_instance_role_check', sql`${table.instanceRole} IN ('user', 'owner')`),
-    check(
-      'principals_service_role_check',
-      sql`${table.principalType} = 'user' OR ${table.instanceRole} = 'user'`,
-    ),
     check(
       'principals_user_id_lowercase',
       sql`${table.principalType} <> 'user' OR ${table.principalId} = lower(${table.principalId})`,
     ),
-  ],
-);
-
-export const grants = mysqlTable(
-  'grants',
-  {
-    id: id().primaryKey(),
-    principalType: principalType().notNull(),
-    principalId: principalId().notNull(),
-    environmentId: id('environment_id'),
-    createdAt: createdAt(),
-    createdBy: text('created_by').notNull(),
-    projectId: id('project_id'),
-    role: text().notNull(),
-    expiresAt: time('expires_at'),
-  },
-  (table) => [
-    check('grants_principal_type_check', sql`${table.principalType} IN ('user', 'service')`),
-    check(
-      'grants_exactly_one_scope',
-      sql`(${table.projectId} IS NULL) <> (${table.environmentId} IS NULL)`,
-    ),
-    foreignKey({
-      name: 'grants_principal_fkey',
-      columns: [table.principalType, table.principalId],
-      foreignColumns: [principals.principalType, principals.principalId],
-    }).onDelete('restrict'),
-    foreignKey({
-      name: 'grants_environment_id_fkey',
-      columns: [table.environmentId],
-      foreignColumns: [environments.id],
-    }).onDelete('restrict'),
-    foreignKey({
-      name: 'grants_project_id_fkey',
-      columns: [table.projectId],
-      foreignColumns: [projects.id],
-    }).onDelete('restrict'),
-    check(
-      'grants_role_check',
-      sql`${table.role} IN ('viewer', 'developer', 'maintainer', 'access-manager', 'auditor', 'owner')`,
-    ),
-    index('grants_lookup_idx').on(table.principalType, table.principalId, table.environmentId),
-    uniqueIndex('grants_environment_unique').on(table.principalType, table.principalId, table.environmentId),
-    uniqueIndex('grants_project_unique').on(table.principalType, table.principalId, table.projectId),
   ],
 );
 
@@ -296,21 +245,6 @@ export const auditChainHead = mysqlTable(
   (table) => [
     check('audit_chain_head_only_row_check', sql`${table.onlyRow} = true`),
     check('audit_chain_head_head_hash_check', sql`octet_length(${table.headHash}) = 32`),
-  ],
-);
-
-export const auditCheckpoints = mysqlTable(
-  'audit_checkpoints',
-  {
-    id: id().primaryKey(),
-    seq: bigint({ mode: 'bigint' }).notNull(),
-    headHash: varbinary('head_hash', { length: 32 }).notNull(),
-    createdAt: createdAt(),
-    exportedAt: time('exported_at'),
-    exportTarget: text('export_target'),
-  },
-  (table) => [
-    check('audit_checkpoints_head_hash_check', sql`octet_length(${table.headHash}) = 32`),
   ],
 );
 
@@ -493,7 +427,6 @@ export const syncKeys = mysqlTable(
 
 export const {
   principalsRelations,
-  grantsRelations,
   credentialsRelations,
   identitiesRelations,
   environmentsRelations,
@@ -501,5 +434,5 @@ export const {
   syncsRelations,
   syncKeysRelations,
 } = relationsOf(
-  asPostgres({ projects, environments, secrets, secretVersions, principals, grants, identities, credentials, syncs, syncKeys }),
+  asPostgres({ projects, environments, secrets, secretVersions, principals, identities, credentials, syncs, syncKeys }),
 );

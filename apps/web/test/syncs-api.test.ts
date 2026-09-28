@@ -424,6 +424,33 @@ test('archiving a sync stops it and leaves the destination as it was', async () 
   assert.deepEqual((await root.syncs.list('market/prod')).syncs, []);
 });
 
+test('a sync reads as sync:<id>, and revoking its grant stops it', async () => {
+  const created = await createSync();
+  const principal = `sync:${created.id}`;
+  assert.deepEqual(
+    (await deps.vault.access(principal)).grants.map(({ role }) => role),
+    ['viewer', 'viewer'],
+    'its source and its credential',
+  );
+
+  await root.access.set(principal, { 'market/prod': null });
+  await root.secrets.set('market/prod', { API_KEY: 'api-after' });
+  await settle();
+  assert.equal(destination.values.get('API_KEY'), 'api-1');
+  const { outcome } = await root.syncs.run(created.id);
+  assert.equal(outcome.status === 'failed' ? outcome.error : null, 'the vault refused: no grant covers this');
+  // Refused twice: the run the write started, and the one asked for by hand.
+  const denials = (await auditActions('sync.run')).filter((row) => row.decision === 'deny');
+  assert.deepEqual(denials.map((row) => [row.actorId, row.metadata.reason]), [
+    [principal, 'vault_no_grant'],
+    [ROOT, 'vault_no_grant'],
+  ]);
+
+  // Archiving it removes the principal altogether.
+  await maintainer.syncs.remove(created.id);
+  assert.equal((await deps.vault.access(principal)).status, 'removed');
+});
+
 test('developers may run a sync but not pause or remove it', async () => {
   const created = await createSync();
   const { outcome } = await developer.syncs.run(created.id);

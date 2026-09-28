@@ -41,7 +41,7 @@ export default {
         // Independent: a destination that is down must not stop the heartbeat,
         // and a failed heartbeat must not hold back pending syncs.
         const [heartbeat, syncs] = await Promise.allSettled([
-          writeAuditHeartbeat(runtime.db, runtime.chainKey, runtimeLogger()),
+          writeAuditHeartbeat(runtime.db, runtime.chainKey, runtime.vault, runtimeLogger()),
           runtime.syncs.reconcile(),
         ]);
         if (syncs.status === 'rejected') console.error('scheduled syncs failed', syncs.reason);

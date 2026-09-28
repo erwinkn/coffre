@@ -1,9 +1,11 @@
-import type { KekRegistry } from '../../../../../packages/core/src/kek/registry.ts';
 import type { Permission } from '../../../../../packages/core/src/access.ts';
 import { appendAudit, type AuditEntry } from '../../../../../packages/db/src/audit.ts';
 import type { Database, Transaction } from '../../../../../packages/db/src/database.ts';
+import type { Refusal as VaultRefusal, Vault } from '../../../../../packages/vault/src/types.ts';
 import { can, type Caller, type Place } from './caller.ts';
-import { forbidden, type ApiError } from './errors.ts';
+import { forbidden, vaultRefused, type ApiError } from './errors.ts';
+import type { Asking } from './keys.ts';
+import { formatMember } from './paths.ts';
 import type { SigninService } from './signin.ts';
 import type { SyncRunner } from './syncs.ts';
 
@@ -11,8 +13,8 @@ import type { SyncRunner } from './syncs.ts';
 export type ApiContext = {
   db: Database;
   chainKey: Buffer;
-  keks: KekRegistry;
-  rootAdmins: readonly string[];
+  /** Keys, grants, who is a member, root admins: every decision the app cannot make alone. */
+  vault: Vault;
   /** Background work that must outlive the response, such as syncs. */
   waitUntil: (promise: Promise<unknown>) => void;
   /** Runs syncs: after a commit that changed an environment's secrets, and on request. */
@@ -129,6 +131,25 @@ export function need(
       ...fields,
     }),
   );
+}
+
+/** The caller, as the vault knows them, for this request. */
+export function asking(ctx: Pick<ApiContext, 'caller' | 'requestId'>): Asking {
+  return { principal: formatMember(ctx.caller.principal), requestId: ctx.requestId };
+}
+
+/**
+ * The vault said no. The app logs it too, as `vault_<code>`: the app's log
+ * then tells the whole story, and the vault's own log is the one the app
+ * cannot rewrite.
+ */
+export function vaultRefusal(
+  ctx: Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp'>,
+  refusal: VaultRefusal,
+  action: string,
+  fields: EntryFields = {},
+): Refusal {
+  return new Refusal(vaultRefused(refusal), denied(ctx, action, `vault_${refusal.code}`, fields));
 }
 
 /** Refuse, and log the refusal, unless the caller is an instance owner or a root admin. */

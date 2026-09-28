@@ -33,12 +33,15 @@ export type ClientOptions = {
 export class CoffreError extends Error {
   readonly status: number;
   readonly code: string;
+  /** The vault's own code when it refused: `no_grant`, `removed`, `bulk_limit`, ... */
+  readonly reason: string | undefined;
 
-  constructor(status: number, code: string, message: string) {
+  constructor(status: number, code: string, message: string, reason?: string) {
     super(message);
     this.name = 'CoffreError';
     this.status = status;
     this.code = code;
+    this.reason = reason;
   }
 }
 
@@ -75,11 +78,12 @@ export function createClient(options: ClientOptions) {
     const response = await transport(new Request(url, { method, headers, body }));
     const payload = await response.json().catch(() => null);
     if (!response.ok) {
-      const error = payload as { error?: unknown; message?: unknown } | null;
+      const error = payload as { error?: unknown; message?: unknown; reason?: unknown } | null;
       throw new CoffreError(
         response.status,
         typeof error?.error === 'string' ? error.error : 'http_error',
         typeof error?.message === 'string' ? error.message : `request failed with status ${response.status}`,
+        typeof error?.reason === 'string' ? error.reason : undefined,
       );
     }
     return payload;
@@ -208,6 +212,8 @@ export function createClient(options: ClientOptions) {
     audit: {
       list: (query: RouteInput<'GET /audit'> = {}) => call('GET /audit', {}, query),
       verify: () => call('GET /audit/verification', {}),
+      /** The vault's own log, newest first, and whether its whole chain holds. Root admins only. */
+      vault: (query: RouteInput<'GET /audit/vault'> = {}) => call('GET /audit/vault', {}, query),
     },
   };
 }

@@ -1,10 +1,4 @@
-import { LocalKekProvider } from '../../../../packages/core/src/kek/local.ts';
-import { KekRegistry } from '../../../../packages/core/src/kek/registry.ts';
-import {
-  loadAuthConfig,
-  type AuthConfig,
-  type AuthMode,
-} from '../../../../packages/core/src/identity/auth-mode.ts';
+import { loadAuthConfig, type AuthConfig } from '../../../../packages/core/src/identity/auth-mode.ts';
 
 type Environment = Readonly<Record<string, string | undefined>>;
 
@@ -27,69 +21,11 @@ function requiredKey(env: Environment, name: string): Buffer {
 export type Config = {
   databaseUrl: string;
   auth: AuthConfig;
-  keks: KekRegistry;
   auditChainKey: Buffer;
-  /** Configuration-owned bootstrap authority. */
-  rootAdmins: readonly string[];
 };
 
-function isHumanEmail(value: string): boolean {
-  if (value.length > 254) return false;
-
-  const parts = value.split('@');
-  if (parts.length !== 2) return false;
-  const [local, domain] = parts;
-  if (
-    local.length === 0 ||
-    local.length > 64 ||
-    local.startsWith('.') ||
-    local.endsWith('.') ||
-    local.includes('..') ||
-    !/^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+$/.test(local)
-  ) {
-    return false;
-  }
-
-  const labels = domain.split('.');
-  if (labels.length < 2) return false;
-  return labels.every(
-    (label) =>
-      label.length > 0 &&
-      label.length <= 63 &&
-      /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/.test(label),
-  );
-}
-
-export function parseRootAdmins(mode: AuthMode, raw: string | undefined): string[] {
-  const rootAdmins = [
-    ...new Set(
-      (raw ?? '')
-        .split(',')
-        .map((entry) => entry.trim())
-        .filter((entry) => entry.length > 0),
-    ),
-  ];
-
-  if (mode === 'cloudflare' || mode === 'signin') {
-    if (rootAdmins.length === 0) {
-      throw new Error(
-        mode === 'cloudflare'
-          ? 'COFFRE_ROOT_ADMINS must name at least one Cloudflare Access email in cloudflare mode'
-          : 'COFFRE_ROOT_ADMINS must name at least one email in signin mode, or nobody can sign in',
-      );
-    }
-    const invalid = rootAdmins.find((entry) => !isHumanEmail(entry));
-    if (invalid) {
-      throw new Error(
-        `COFFRE_ROOT_ADMINS entries must be human email identities in ${mode} mode; invalid: ${invalid}`,
-      );
-    }
-  }
-
-  // People are their lowercased email in every mode, so root admins are kept
-  // the way they will be compared.
-  return rootAdmins.map((entry) => entry.toLowerCase());
-}
+/** What the vault Worker holds now; the app refuses to start with any of it. */
+const VAULT_ONLY = ['COFFRE_KEK_LOCAL', 'COFFRE_KEK_ID', 'COFFRE_KEK_LOCAL_PREVIOUS', 'COFFRE_ROOT_ADMINS', 'COFFRE_VAULT_SIGNING_KEY'];
 
 /**
  * Load and validate web-runtime configuration.
@@ -104,35 +40,14 @@ export function loadConfig(env: Environment = process.env): Config {
     );
   }
 
-  const auth = loadAuthConfig(env);
-  const rootAdmins = parseRootAdmins(auth.mode, env.COFFRE_ROOT_ADMINS);
-
-  const primary = LocalKekProvider.fromBase64(
-    required(env, 'COFFRE_KEK_LOCAL'),
-    env.COFFRE_KEK_ID ?? 'local-dev-1',
-  );
-
-  const secondary = (env.COFFRE_KEK_LOCAL_PREVIOUS ?? '')
-    .split(',')
-    .filter((entry) => entry.length > 0)
-    .map((entry) => {
-      const separator = entry.indexOf(':');
-      if (separator <= 0 || separator === entry.length - 1) {
-        throw new Error(
-          'COFFRE_KEK_LOCAL_PREVIOUS entries must use the form key-id:base64-material',
-        );
-      }
-      return LocalKekProvider.fromBase64(
-        entry.slice(separator + 1),
-        entry.slice(0, separator),
-      );
-    });
+  const misplaced = VAULT_ONLY.filter((name) => env[name] !== undefined);
+  if (misplaced.length > 0) {
+    throw new Error(`${misplaced.join(', ')} belong to the vault Worker; the app holds no key`);
+  }
 
   return {
     databaseUrl: required(env, 'DATABASE_URL'),
-    auth,
-    keks: new KekRegistry(primary, secondary),
+    auth: loadAuthConfig(env),
     auditChainKey: requiredKey(env, 'COFFRE_AUDIT_CHAIN_KEY'),
-    rootAdmins,
   };
 }

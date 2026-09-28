@@ -162,10 +162,8 @@ export const principals = sqliteTable(
   {
     principalType: text('principal_type').notNull(),
     principalId: text('principal_id').notNull(),
-    instanceRole: text('instance_role').notNull().default('user'),
     createdAt: createdAt(),
     createdBy: text('created_by').notNull(),
-    active: flag('active').notNull().default(true),
   },
   (table) => [
     primaryKey({
@@ -173,61 +171,12 @@ export const principals = sqliteTable(
       columns: [table.principalType, table.principalId],
     }),
     check('principals_principal_type_check', sql`${table.principalType} IN ('user', 'service')`),
-    check('principals_instance_role_check', sql`${table.instanceRole} IN ('user', 'owner')`),
-    check(
-      'principals_service_role_check',
-      sql`${table.principalType} = 'user' OR ${table.instanceRole} = 'user'`,
-    ),
     // SQLite's lower() folds ASCII only; the server lowercases every email
     // with toLowerCase() before it gets here.
     check(
       'principals_user_id_lowercase',
       sql`${table.principalType} <> 'user' OR ${table.principalId} = lower(${table.principalId})`,
     ),
-  ],
-);
-
-export const grants = sqliteTable(
-  'grants',
-  {
-    id: text().primaryKey(),
-    principalType: text('principal_type').notNull(),
-    principalId: text('principal_id').notNull(),
-    environmentId: text('environment_id'),
-    createdAt: createdAt(),
-    createdBy: text('created_by').notNull(),
-    projectId: text('project_id'),
-    role: text().notNull(),
-    expiresAt: time('expires_at'),
-  },
-  (table) => [
-    check('grants_principal_type_check', sql`${table.principalType} IN ('user', 'service')`),
-    check(
-      'grants_exactly_one_scope',
-      sql`(${table.projectId} IS NULL) <> (${table.environmentId} IS NULL)`,
-    ),
-    foreignKey({
-      name: 'grants_principal_fkey',
-      columns: [table.principalType, table.principalId],
-      foreignColumns: [principals.principalType, principals.principalId],
-    }).onDelete('restrict'),
-    foreignKey({
-      name: 'grants_environment_id_fkey',
-      columns: [table.environmentId],
-      foreignColumns: [environments.id],
-    }).onDelete('restrict'),
-    foreignKey({
-      name: 'grants_project_id_fkey',
-      columns: [table.projectId],
-      foreignColumns: [projects.id],
-    }).onDelete('restrict'),
-    check(
-      'grants_role_check',
-      sql`${table.role} IN ('viewer', 'developer', 'maintainer', 'access-manager', 'auditor', 'owner')`,
-    ),
-    index('grants_lookup_idx').on(table.principalType, table.principalId, table.environmentId),
-    uniqueIndex('grants_environment_unique').on(table.principalType, table.principalId, table.environmentId),
-    uniqueIndex('grants_project_unique').on(table.principalType, table.principalId, table.projectId),
   ],
 );
 
@@ -292,21 +241,6 @@ export const auditChainHead = sqliteTable(
   (table) => [
     check('audit_chain_head_only_row_check', sql`${table.onlyRow}`),
     check('audit_chain_head_head_hash_check', sql`octet_length(${table.headHash}) = 32`),
-  ],
-);
-
-export const auditCheckpoints = sqliteTable(
-  'audit_checkpoints',
-  {
-    id: text().primaryKey(),
-    seq: int64('seq').notNull(),
-    headHash: bytes('head_hash').notNull(),
-    createdAt: createdAt(),
-    exportedAt: time('exported_at'),
-    exportTarget: text('export_target'),
-  },
-  (table) => [
-    check('audit_checkpoints_head_hash_check', sql`octet_length(${table.headHash}) = 32`),
   ],
 );
 
@@ -489,7 +423,6 @@ export const syncKeys = sqliteTable(
 
 export const {
   principalsRelations,
-  grantsRelations,
   credentialsRelations,
   identitiesRelations,
   environmentsRelations,
@@ -497,5 +430,5 @@ export const {
   syncsRelations,
   syncKeysRelations,
 } = relationsOf(
-  asPostgres({ projects, environments, secrets, secretVersions, principals, grants, identities, credentials, syncs, syncKeys }),
+  asPostgres({ projects, environments, secrets, secretVersions, principals, identities, credentials, syncs, syncKeys }),
 );

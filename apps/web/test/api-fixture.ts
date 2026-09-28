@@ -1,9 +1,15 @@
 import { randomBytes, randomUUID } from 'node:crypto';
+import { rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { createClient, type CoffreClient } from '../../../packages/client/src/index.ts';
 import { LocalKekProvider } from '../../../packages/core/src/kek/local.ts';
 import { KekRegistry } from '../../../packages/core/src/kek/registry.ts';
 import { tablesOf, type Database } from '../../../packages/db/src/database.ts';
+import { DEFAULT_BULK_LIMIT, type VaultConfig } from '../../../packages/vault/src/config.ts';
+import { localVault, type LocalVault } from '../../../packages/vault/src/local.ts';
+import type { Vault } from '../../../packages/vault/src/types.ts';
 import { loadCaller } from '../src/server/api/caller.ts';
 import type { ApiContext } from '../src/server/api/context.ts';
 import { serveApi } from '../src/server/api/router.ts';
@@ -12,13 +18,78 @@ import { SyncRunner } from '../src/server/api/syncs.ts';
 
 export type FixtureDeps = {
   db: Database;
-  keks: KekRegistry;
+  vault: TestVault;
   chainKey: Buffer;
-  rootAdmins: readonly string[];
   waitUntil?: ApiContext['waitUntil'];
   syncs?: SyncRunner;
   signin?: SigninService;
 };
+
+/**
+ * The vault in this process, over a libSQL file of its own, opened on first
+ * use. `resetDatabase` starts every one of them afresh, so a suite's tests
+ * do not share members, grants, checkpoints or bulk-limit counts.
+ */
+export type TestVault = Vault & {
+  config: VaultConfig;
+  /** The raw primary KEK, which no database may hold. */
+  kek: Buffer;
+  /** The vault's file, while it is open. */
+  file(): string | null;
+  /** Move the vault's clock, for expiry and the bulk limit. */
+  advance(ms: number): void;
+  reset(): Promise<void>;
+};
+
+const vaults = new Set<TestVault>();
+
+export function testVault(rootAdmins: readonly string[], config: Partial<VaultConfig> = {}): TestVault {
+  const kek = randomBytes(32);
+  const full: VaultConfig = {
+    keks: new KekRegistry(LocalKekProvider.fromBase64(kek.toString('base64'), 'test-kek-1')),
+    rootAdmins,
+    signingKey: randomBytes(32),
+    bulkLimit: DEFAULT_BULK_LIMIT,
+    ...config,
+  };
+  let offset = 0;
+  let file: string | null = null;
+  let current: Promise<LocalVault> | null = null;
+  const open = () => {
+    file = join(tmpdir(), `coffre-vault-${randomUUID()}.db`);
+    return localVault(file, full, { now: () => Date.now() + offset });
+  };
+  const call = (name: keyof Vault) => async (...args: unknown[]) =>
+    ((await (current ??= open()))[name] as (...args: unknown[]) => Promise<unknown>)(...args);
+  const vault = {
+    unwrap: call('unwrap'),
+    wrap: call('wrap'),
+    rewrap: call('rewrap'),
+    access: call('access'),
+    members: call('members'),
+    setAccess: call('setAccess'),
+    admit: call('admit'),
+    remove: call('remove'),
+    checkpoint: call('checkpoint'),
+    latestCheckpoint: call('latestCheckpoint'),
+    log: call('log'),
+    config: full,
+    kek,
+    file: () => file,
+    advance: (ms: number) => void (offset += ms),
+    async reset() {
+      const opened = current;
+      current = null;
+      offset = 0;
+      if (opened === null) return;
+      (await opened).close();
+      for (const suffix of ['', '-wal', '-shm']) rmSync(`${file}${suffix}`, { force: true });
+      file = null;
+    },
+  } as TestVault;
+  vaults.add(vault);
+  return vault;
+}
 
 /** A handler context for one principal, loaded the way a request loads it. */
 export async function contextFor(
@@ -28,17 +99,16 @@ export async function contextFor(
 ): Promise<ApiContext> {
   return {
     db: deps.db,
-    keks: deps.keks,
+    vault: deps.vault,
     chainKey: deps.chainKey,
-    rootAdmins: deps.rootAdmins,
     waitUntil:
       deps.waitUntil ??
       ((promise) => {
         promise.catch((error: unknown) => console.error('background task failed', error));
       }),
-    syncs: deps.syncs ?? new SyncRunner({ db: deps.db, keks: deps.keks, chainKey: deps.chainKey }),
+    syncs: deps.syncs ?? new SyncRunner({ db: deps.db, vault: deps.vault, chainKey: deps.chainKey }),
     signin: deps.signin ?? null,
-    caller: await loadCaller(deps.db, { type, id }, deps.rootAdmins),
+    caller: await loadCaller(deps.vault, { type, id }),
     requestId: randomUUID(),
     sourceIp: null,
     credentialId: null,
@@ -63,28 +133,30 @@ export function clientFor(
 
 export { openTestDatabase } from '../../../packages/db/test/engine.ts';
 
-/** Deps for a fresh instance with one root admin, over the restricted role. */
+/** Deps for a fresh instance with these root admins, over the restricted role. */
 export function testDeps(db: Database, rootAdmins: readonly string[], extra: Partial<FixtureDeps> = {}): FixtureDeps {
   return {
     db,
-    keks: new KekRegistry(LocalKekProvider.generate('test-kek-1')),
+    vault: testVault(rootAdmins),
     chainKey: randomBytes(32),
-    rootAdmins,
     ...extra,
   };
 }
 
-/** Empty every table, children first, and rewind the audit chain. */
+/**
+ * Empty every table, children first, and rewind the audit chain; and start
+ * every test vault afresh, since its members, grants and checkpoints are
+ * about this data.
+ */
 export async function resetDatabase(owner: Database): Promise<void> {
+  for (const vault of vaults) await vault.reset();
   const {
     auditChainHead,
-    auditCheckpoints,
     auditHeartbeat,
     auditLog,
     credentials,
     deviceAuthorizations,
     environments,
-    grants,
     identities,
     principals,
     projects,
@@ -99,13 +171,11 @@ export async function resetDatabase(owner: Database): Promise<void> {
   await owner.delete(deviceAuthorizations);
   await owner.delete(identities);
   await owner.delete(auditLog);
-  await owner.delete(auditCheckpoints);
   await owner.update(auditChainHead).set({ nextSeq: 0n, headHash: Buffer.alloc(32) });
   await owner.update(auditHeartbeat).set({ lastSeq: 0n });
   await owner.update(secrets).set({ currentVersionId: null });
   await owner.delete(secretVersions);
   await owner.delete(secrets);
-  await owner.delete(grants);
   await owner.delete(principals);
   await owner.delete(environments);
   await owner.delete(projects);

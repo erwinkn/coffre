@@ -19,20 +19,23 @@ import {
   findDeviceAuthorizations,
   findIdentity,
   insert,
+  insertIfAbsent,
   lock,
   members,
   update,
-  upsert,
 } from '../../../../../packages/db/src/queries.ts';
 import { credentials, deviceAuthorizations, identities, principals } from '../../../../../packages/db/src/schema.ts';
-import { isConfiguredRootAdmin, type PrincipalRef } from './caller.ts';
+import type { Access, Vault } from '../../../../../packages/vault/src/types.ts';
+import type { PrincipalRef } from './caller.ts';
 import { allowed, audited, denied, Refusal, type ApiContext } from './context.ts';
 import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
+import { formatMember } from './paths.ts';
 
 export type SigninServiceDeps = {
   db: Database;
   chainKey: Buffer;
-  rootAdmins: readonly string[];
+  /** Who is a member, and who is a root admin, is the vault's to say. */
+  vault: Vault;
   signin: SigninConfig;
 };
 
@@ -216,10 +219,6 @@ export class SigninService {
     return unseal<PendingState>(this.#stateKey, value);
   }
 
-  #isRoot(principalId: string): boolean {
-    return isConfiguredRootAdmin({ type: 'user', id: principalId }, this.#deps.rootAdmins);
-  }
-
   // --- signing in ---------------------------------------------------------
 
   async completeSignin(profile: SigninProfile, meta: ClientMeta): Promise<SigninResult> {
@@ -259,9 +258,8 @@ export class SigninService {
       if (bound !== null) {
         principalId = bound.principalId;
         identityId = bound.id;
-        await this.#ensureRootRow(tx, principalId);
-        const holder = await this.#lockHolder(tx, { type: 'user', id: principalId });
-        if (holder?.active !== true) throw refuse('deactivated', principalId);
+        const standing = await this.#standing(tx, { type: 'user', id: principalId });
+        if (standing.status !== 'active') throw refuse('deactivated', principalId);
         await update(
           tx,
           identities,
@@ -270,15 +268,14 @@ export class SigninService {
         );
       } else {
         // Locked, so two accounts cannot both bind to one person at once.
-        const invited =
-          profile.emails.length === 0
-            ? []
-            : await lock(tx, principals, { principalType: 'user', principalId: [...profile.emails] });
-        const match = this.#principalForEmails(invited, profile.emails);
+        if (profile.emails.length > 0) {
+          await lock(tx, principals, { principalType: 'user', principalId: [...profile.emails] });
+        }
+        const match = await this.#principalForEmails(profile.emails);
         if (match === null) throw refuse('not_registered');
         principalId = match.id;
-        if (!match.active && !this.#isRoot(principalId)) throw refuse('deactivated', principalId);
-        await this.#ensureRootRow(tx, principalId);
+        if (match.status !== 'active') throw refuse('deactivated', principalId);
+        await this.#ensureRow(tx, principalId);
 
         const [person] = await members(tx, { member: { type: 'user', id: principalId } }, now);
         const other = (person?.identities ?? []).some(
@@ -339,18 +336,11 @@ export class SigninService {
   }
 
   /**
-   * Configured root admins need no invitation, but identities and
-   * credentials need a principals row to point at, and verify() requires it
-   * to be active.
+   * Root admins need no invitation, so the vault may know someone the app's
+   * directory does not yet; identities and credentials need a row to point at.
    */
-  async #ensureRootRow(tx: Transaction, principalId: string): Promise<void> {
-    if (!this.#isRoot(principalId)) return;
-    await upsert(
-      tx,
-      principals,
-      [{ principalType: 'user', principalId, instanceRole: 'user', createdBy: 'system:signin', active: true }],
-      { target: ['principalType', 'principalId'], columns: ['active'] },
-    );
+  async #ensureRow(tx: Transaction, principalId: string): Promise<void> {
+    await insertIfAbsent(tx, principals, { principalType: 'user', principalId, createdBy: 'system:signin' });
   }
 
   async #bind(tx: Transaction, principalId: string, profile: SigninProfile, createdBy: string): Promise<string> {
@@ -369,30 +359,30 @@ export class SigninService {
   }
 
   /**
-   * The invited person, or root admin, that one of these verified emails
-   * names. The provider's primary address is tried first. Principal ids are
-   * stored lowercase, and so are the emails a verified profile carries.
+   * The member, or root admin, that one of these verified emails names, as
+   * the vault knows them. The provider's primary address is tried first.
+   * Principal ids are lowercase, and so are the emails a verified profile
+   * carries.
    */
-  #principalForEmails(
-    rows: { principalId: string; active: boolean }[],
+  async #principalForEmails(
     emails: readonly string[],
-  ): { id: string; active: boolean; email: string } | null {
+  ): Promise<{ id: string; status: Access['status']; email: string } | null> {
     for (const email of emails) {
-      if (this.#isRoot(email)) return { id: email, active: true, email };
-      const row = rows.find((candidate) => candidate.principalId === email);
-      if (row !== undefined) return { id: row.principalId, active: row.active, email };
+      const { status } = await this.#deps.vault.access(formatMember({ type: 'user', id: email }));
+      if (status !== 'unknown') return { id: email, status, email };
     }
     return null;
   }
 
   /**
-   * Lock someone's row before minting them a credential. Removing someone
-   * locks it to revoke everything they hold, so a credential is either
-   * minted first and revoked with the rest, or refused.
+   * Lock someone's directory row, then ask the vault whether they are in,
+   * before minting them a credential. Removing someone locks the row while
+   * the vault removes them and the app revokes what they hold, so a
+   * credential is either minted first and revoked with the rest, or refused.
    */
-  async #lockHolder(tx: Transaction, principal: PrincipalRef) {
-    const [row] = await lock(tx, principals, { principalType: principal.type, principalId: principal.id });
-    return row;
+  async #standing(tx: Transaction, principal: PrincipalRef): Promise<Access> {
+    await lock(tx, principals, { principalType: principal.type, principalId: principal.id });
+    return this.#deps.vault.access(formatMember(principal));
   }
 
   async #issue(
@@ -423,9 +413,9 @@ export class SigninService {
   /**
    * Resolve a bearer token to its caller, or throw.
    *
-   * A token dies with its person: removing someone deactivates their
-   * principal, and the join on `principals.active` stops every credential
-   * they hold on the next request, before any revocation sweep.
+   * A token dies with its person: every request asks the vault who its
+   * caller is, and a removed member is turned away on the next request
+   * whatever credentials they still hold, before any revocation sweep.
    */
   async verify(token: string, request: { sourceIp: string | null } = { sourceIp: null }): Promise<CredentialPrincipal> {
     if (!isCoffreToken(token)) throw new Error('not a coffre credential');
@@ -433,7 +423,7 @@ export class SigninService {
     const now = new Date();
 
     const row = await findCredential(db, { tokenHash: hashToken(token) });
-    const live = row !== null && row.revokedAt === null && row.expiresAt > now && row.active && row.identityRevokedAt === null;
+    const live = row !== null && row.revokedAt === null && row.expiresAt > now && row.identityRevokedAt === null;
     if (!live) throw new Error('unknown, expired or revoked credential');
 
     const lastUsed = row.lastUsedAt?.getTime() ?? 0;
@@ -621,7 +611,7 @@ export class SigninService {
         );
       }
       const service = { type: 'service' as const, id: serviceId };
-      if ((await this.#lockHolder(tx, service))?.active !== true) {
+      if ((await this.#standing(tx, service)).status !== 'active') {
         throw new Refusal(
           notFound('unknown service'),
           denied(ctx, 'credential.issue', 'unknown_principal', { metadata: details }),
@@ -758,8 +748,9 @@ export class SigninService {
       const principalId = row.principalId!;
       // An approval given before the person was last added is void: someone
       // removed and re-added in between starts with nothing from before.
-      const holder = await this.#lockHolder(tx, { type: 'user', id: principalId });
-      if (holder?.active !== true || holder.createdAt > row.decidedAt!) return { status: 'denied' };
+      const standing = await this.#standing(tx, { type: 'user', id: principalId });
+      const since = standing.since === null ? null : new Date(standing.since);
+      if (standing.status !== 'active' || (since !== null && since > row.decidedAt!)) return { status: 'denied' };
 
       const principal: PrincipalRef = { type: 'user', id: principalId };
       const credential = await this.#issue(tx, 'cli', principal, {

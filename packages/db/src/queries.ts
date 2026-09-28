@@ -99,56 +99,7 @@ export async function lock<T extends Table>(tx: Transaction, table: T, match: Ma
   return (await forUpdate(tx, tx.select().from(mine as Table).where(matching(mine, match)))) as Row<T>[];
 }
 
-// --- the caller and places ----------------------------------------------------
-
-export type HeldGrant = {
-  id: string;
-  /** The project the grant is in, also for a grant on one of its environments. */
-  projectId: string;
-  /** Null for a grant on the whole project. */
-  environmentId: string | null;
-  role: string;
-  expiresAt: Date | null;
-};
-
-/** A principal's standing and live grants, or null when there is no such principal. */
-export async function callerGrants(
-  db: Queryable,
-  principal: { type: string; id: string },
-  now: Date,
-): Promise<{ active: boolean; instanceRole: string; grants: HeldGrant[] } | null> {
-  const { principals, grants, environments } = tablesOf(db);
-  const rows = await db
-    .select({
-      active: principals.active,
-      instanceRole: principals.instanceRole,
-      id: grants.id,
-      grantProjectId: grants.projectId,
-      environmentId: grants.environmentId,
-      environmentProjectId: environments.projectId,
-      role: grants.role,
-      expiresAt: grants.expiresAt,
-    })
-    .from(principals)
-    .leftJoin(
-      grants,
-      and(
-        eq(grants.principalType, principals.principalType),
-        eq(grants.principalId, principals.principalId),
-        or(isNull(grants.expiresAt), gt(grants.expiresAt, now)),
-      ),
-    )
-    .leftJoin(environments, eq(environments.id, grants.environmentId))
-    .where(and(eq(principals.principalType, principal.type), eq(principals.principalId, principal.id)));
-  if (rows.length === 0) return null;
-  const held: HeldGrant[] = [];
-  for (const row of rows) {
-    const projectId = row.grantProjectId ?? row.environmentProjectId;
-    if (row.id === null || projectId === null) continue;
-    held.push({ id: row.id, projectId, environmentId: row.environmentId, role: row.role!, expiresAt: row.expiresAt });
-  }
-  return { active: rows[0].active, instanceRole: rows[0].instanceRole, grants: held };
-}
+// --- places -----------------------------------------------------------------
 
 export type ResolvedPath = {
   project: { id: string; slug: string; name: string; archivedAt: Date | null };
@@ -257,20 +208,7 @@ export async function places(db: Queryable): Promise<PlaceRow[]> {
 export type MemberRow = {
   type: 'user' | 'service';
   id: string;
-  instanceRole: string;
-  active: boolean;
   createdAt: Date;
-  /** Every grant, expired ones included: revoking expires a grant, and granting again reuses it. */
-  grants: {
-    id: string;
-    projectId: string;
-    project: string;
-    /** Null for a grant on the whole project. */
-    environmentId: string | null;
-    environment: string | null;
-    role: string;
-    expiresAt: Date | null;
-  }[];
   /** Live credentials: neither revoked nor expired. */
   credentials: {
     id: string;
@@ -298,9 +236,9 @@ export type MemberRow = {
 };
 
 /**
- * Principals with everything they hold: one of them, or everyone, by type
- * and id. The member list, offboarding, access changes and the account page
- * all read this.
+ * Principals in the directory with their live sessions, tokens and sign-in
+ * accounts: one of them, or everyone, by type and id. What they may reach
+ * is the vault's to say; offboarding and the account page read this.
  */
 export async function members(
   db: Queryable,
@@ -313,12 +251,6 @@ export async function members(
     where: member === undefined ? undefined : and(eq(principals.principalType, member.type), eq(principals.principalId, member.id)),
     orderBy: [asc(principals.principalType), asc(principals.principalId)],
     with: {
-      grants: {
-        with: {
-          project: { columns: { slug: true } },
-          environment: { columns: { slug: true, projectId: true }, with: { project: { columns: { slug: true } } } },
-        },
-      },
       credentials: {
         columns: { tokenHash: false },
         where: and(isNull(credentials.revokedAt), gt(credentials.expiresAt, now)),
@@ -330,18 +262,7 @@ export async function members(
   return rows.map((row) => ({
     type: row.principalType as MemberRow['type'],
     id: row.principalId,
-    instanceRole: row.instanceRole,
-    active: row.active,
     createdAt: row.createdAt,
-    grants: row.grants.map((grant) => ({
-      id: grant.id,
-      projectId: grant.projectId ?? grant.environment!.projectId,
-      project: grant.project?.slug ?? grant.environment!.project.slug,
-      environmentId: grant.environmentId,
-      environment: grant.environment?.slug ?? null,
-      role: grant.role,
-      expiresAt: grant.expiresAt,
-    })),
     credentials: row.credentials.map(({ identity, principalType: _type, principalId: _id, revokedAt: _at, revokedBy: _by, ...credential }) => ({
       ...credential,
       provider: identity?.provider ?? null,
@@ -417,12 +338,12 @@ export async function findIdentity(
 }
 
 /**
- * A credential by its token's hash or by id, with whether its principal is
- * active and its sign-in account still bound. Revoked and expired ones too:
- * the caller decides what is live.
+ * A credential by its token's hash or by id, with whether its sign-in
+ * account is still bound. Revoked and expired ones too: the caller decides
+ * what is live, and the vault whether its principal is still a member.
  */
 export async function findCredential(db: Queryable, by: { tokenHash: Buffer } | { id: string }) {
-  const { credentials, principals, identities } = tablesOf(db);
+  const { credentials, identities } = tablesOf(db);
   const [row] = await db
     .select({
       id: credentials.id,
@@ -432,15 +353,10 @@ export async function findCredential(db: Queryable, by: { tokenHash: Buffer } | 
       expiresAt: credentials.expiresAt,
       revokedAt: credentials.revokedAt,
       lastUsedAt: credentials.lastUsedAt,
-      active: principals.active,
       identityRevokedAt: identities.revokedAt,
       subject: identities.subject,
     })
     .from(credentials)
-    .innerJoin(
-      principals,
-      and(eq(principals.principalType, credentials.principalType), eq(principals.principalId, credentials.principalId)),
-    )
     .leftJoin(identities, eq(identities.id, credentials.identityId))
     .where('tokenHash' in by ? eq(credentials.tokenHash, by.tokenHash) : eq(credentials.id, by.id));
   return row ?? null;

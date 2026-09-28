@@ -7,8 +7,8 @@ import {
   AccessIdentityVerifier,
   type AccessVerifierConfig,
 } from '../../../../packages/core/src/identity/verifier.ts';
-import type { KekRegistry } from '../../../../packages/core/src/kek/registry.ts';
 import { createDatabase, type Database } from '../../../../packages/db/src/database.ts';
+import type { Vault } from '../../../../packages/vault/src/types.ts';
 import type { ApiContext } from './api/context.ts';
 import { SigninService } from './api/signin.ts';
 import { SyncRunner } from './api/syncs.ts';
@@ -18,25 +18,27 @@ import { HyperdrivePool } from './database.ts';
 
 export type CoffreRuntime = {
   db: Database;
-  keks: KekRegistry;
+  /** Keys, grants and members: the vault Worker, through its service binding. */
+  vault: Vault;
   chainKey: Buffer;
   syncs: SyncRunner;
   /** Present in signin mode only. */
   signin: SigninService | null;
   auth: Config['auth'];
   verifier: IdentityVerifier;
-  rootAdmins: readonly string[];
   /** Background work that must outlive the response, such as syncs. */
   waitUntil: (promise: Promise<unknown>) => void;
 };
 
 /**
- * The Worker's vars and secrets. Everything but Hyperdrive is a string, and
- * sign-in providers add their own `COFFRE_SIGNIN_<ID>_*` names, so the set
- * is open rather than listed.
+ * The Worker's bindings, vars and secrets. Everything but Hyperdrive and the
+ * vault is a string, and sign-in providers add their own
+ * `COFFRE_SIGNIN_<ID>_*` names, so the set is open rather than listed.
  */
 export type WorkerBindings = {
   HYPERDRIVE: { connectionString: string };
+  /** The vault Worker's `VaultEntrypoint`, whose RPC methods are the `Vault` interface. */
+  VAULT: Vault;
 } & Record<`COFFRE_${string}`, string | undefined>;
 
 const requestRuntime = new AsyncLocalStorage<CoffreRuntime>();
@@ -47,6 +49,7 @@ const requestRuntime = new AsyncLocalStorage<CoffreRuntime>();
 export function createRuntime(
   config: Config,
   db: Database,
+  vault: Vault,
   waitUntil: CoffreRuntime['waitUntil'] = (promise) => {
     promise.catch((error: unknown) => console.error('background task failed', error));
   },
@@ -57,7 +60,7 @@ export function createRuntime(
     signin = new SigninService({
       db,
       chainKey: config.auditChainKey,
-      rootAdmins: config.rootAdmins,
+      vault,
       signin: config.auth.signin,
     });
     verifier = signin;
@@ -66,13 +69,12 @@ export function createRuntime(
   }
   return {
     db,
-    keks: config.keks,
+    vault,
     chainKey: config.auditChainKey,
-    syncs: new SyncRunner({ db, keks: config.keks, chainKey: config.auditChainKey }),
+    syncs: new SyncRunner({ db, vault, chainKey: config.auditChainKey }),
     signin,
     auth: config.auth,
     verifier,
-    rootAdmins: config.rootAdmins,
     waitUntil,
   };
 }
@@ -82,8 +84,7 @@ export function apiContext(runtime: CoffreRuntime, identity: AuthenticatedIdenti
   return {
     db: runtime.db,
     chainKey: runtime.chainKey,
-    keks: runtime.keks,
-    rootAdmins: runtime.rootAdmins,
+    vault: runtime.vault,
     waitUntil: runtime.waitUntil,
     syncs: runtime.syncs,
     signin: runtime.signin,
@@ -130,7 +131,7 @@ export function runWithWorkerRuntime<T>(
   operation: () => T,
   context?: { waitUntil: (promise: Promise<unknown>) => void },
 ): T {
-  const { HYPERDRIVE, ...environment } = bindings;
+  const { HYPERDRIVE, VAULT, ...environment } = bindings;
   const config = loadConfig({
     ...environment,
     DATABASE_URL: HYPERDRIVE.connectionString,
@@ -138,6 +139,7 @@ export function runWithWorkerRuntime<T>(
   const runtime = createRuntime(
     config,
     createDatabase(new HyperdrivePool(HYPERDRIVE.connectionString)),
+    VAULT,
     context === undefined ? undefined : (promise) => context.waitUntil(promise),
   );
   return requestRuntime.run(runtime, operation);

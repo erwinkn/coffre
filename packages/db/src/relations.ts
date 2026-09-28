@@ -19,7 +19,6 @@ export function relationsOf(t: Pick<
   | 'secrets'
   | 'secretVersions'
   | 'principals'
-  | 'grants'
   | 'identities'
   | 'credentials'
   | 'syncs'
@@ -27,18 +26,8 @@ export function relationsOf(t: Pick<
 >) {
   return {
     principalsRelations: relations(t.principals, ({ many }) => ({
-      grants: many(t.grants),
       credentials: many(t.credentials),
       identities: many(t.identities),
-    })),
-
-    grantsRelations: relations(t.grants, ({ one }) => ({
-      principal: one(t.principals, {
-        fields: [t.grants.principalType, t.grants.principalId],
-        references: [t.principals.principalType, t.principals.principalId],
-      }),
-      project: one(t.projects, { fields: [t.grants.projectId], references: [t.projects.id] }),
-      environment: one(t.environments, { fields: [t.grants.environmentId], references: [t.environments.id] }),
     })),
 
     credentialsRelations: relations(t.credentials, ({ one }) => ({
