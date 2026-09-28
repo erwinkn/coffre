@@ -171,3 +171,34 @@ export function createClient(options: ClientOptions) {
 }
 
 export type CoffreClient = ReturnType<typeof createClient>;
+
+export type ImportAction = 'create' | 'update' | 'unchanged';
+
+/**
+ * What writing these entries (a parsed `.env` file) would do. It compares
+ * against the current values, so it reveals the environment, and that read is
+ * logged like any other. `changes` is what to pass to `secrets.set`: the keys
+ * that differ, so an unchanged value does not become a new version.
+ */
+export async function planImport(
+  coffre: CoffreClient,
+  path: string,
+  entries: readonly { key: string; value: string }[],
+): Promise<{
+  plan: { key: string; action: ImportAction; version: number | null }[];
+  changes: Record<string, string>;
+}> {
+  const [{ keys }, { values }] = await Promise.all([coffre.secrets.list(path), coffre.secrets.reveal(path)]);
+  const current = new Map(keys.map((entry) => [entry.key, entry]));
+  const plan: { key: string; action: ImportAction; version: number | null }[] = [];
+  const changes: Record<string, string> = {};
+  for (const { key, value } of entries) {
+    const existing = current.get(key);
+    if (existing?.archived) throw new CoffreError(409, 'conflict', `restore "${key}" before you import a new version`);
+    const action: ImportAction =
+      existing === undefined ? 'create' : Object.hasOwn(values, key) && values[key] === value ? 'unchanged' : 'update';
+    plan.push({ key, action, version: existing?.version ?? null });
+    if (action !== 'unchanged') changes[key] = value;
+  }
+  return { plan, changes };
+}
