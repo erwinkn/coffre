@@ -200,6 +200,12 @@ export type LogInput = {
   /** Entries before this sequence number; the newest when left out. */
   before?: number;
   limit?: number;
+  /**
+   * Rehash the chain from its first entry. Otherwise a view rehashes this
+   * page and what is new since the last view; `verify` in log.ts says what
+   * that leaves out.
+   */
+  full?: boolean;
 };
 
 export type LogEntry = {
@@ -216,6 +222,9 @@ export type LogEntry = {
 
 export type LogPage = {
   entries: LogEntry[];
-  /** Whether the whole chain, not just this page, recomputes. */
+  /**
+   * Whether the chain recomputes, this page and up to the head, with the
+   * number of entries in it.
+   */
   verification: { ok: true; entries: number } | { ok: false; failedAtSeq: number; reason: string };
 };

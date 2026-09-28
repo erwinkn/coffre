@@ -355,7 +355,12 @@ from it.
 The vault's own log is append-only (triggers refuse updates and deletes, and
 its code has no path to either) and hash-chained. It records every unwrap
 attempt and every change to grants or status. Root admins read it through
-the app (`GET /api/audit/vault`), and on the audit page.
+the app (`GET /api/audit/vault`), and on the audit page. Each page view
+verifies the chain without rehashing all of it, which grows with every
+unwrap: the rows shown, the head the vault verified last (which a rewrite
+re-chained to hide would change), and what was appended since. The first
+view after the vault starts, or one asking for `full`, rehashes from the
+first entry, one row in memory at a time.
 
 A sync reads as a principal of its own (`sync:<id>`), with a grant made when
 the sync is added and revoked when it is removed. Revoking that grant stops

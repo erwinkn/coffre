@@ -11,7 +11,7 @@ import {
 import type { SecretContext } from '../../core/src/context.ts';
 import { checkpointMessage, signer, type Signer } from './checkpoint.ts';
 import type { BulkLimit, ResolvedVaultConfig } from './config.ts';
-import { append, entry, verify, type Appended } from './log.ts';
+import { append, entry, UNVERIFIED, verify, type Anchor, type Appended } from './log.ts';
 import type { Sqlite } from './sqlite.ts';
 import { openStore, type GrantRow, type Store } from './store.ts';
 import type {
@@ -89,6 +89,8 @@ class VaultService implements Vault {
   readonly #config: ResolvedVaultConfig;
   readonly #signer: Signer;
   readonly #now: () => number;
+  /** How far the log is verified; `verify` in log.ts. In memory only: the store cannot vouch for itself. */
+  #verified: Anchor = UNVERIFIED;
   #queue: Promise<unknown> = Promise.resolve();
 
   constructor(store: Store, config: ResolvedVaultConfig, signer: Signer, now: () => number) {
@@ -592,7 +594,10 @@ class VaultService implements Vault {
           ]);
         }
         const limit = Math.min(Math.max(Math.trunc(input.limit ?? 50), 1), 200);
-        return { entries: this.#store.logPage(input.before, limit).map(entry), verification: verify(this.#store) };
+        const shown = this.#store.logPage(input.before, limit);
+        const { verification, anchor } = verify(this.#store, shown, this.#verified, input.full === true);
+        this.#verified = anchor;
+        return { entries: shown.map(entry), verification };
       });
     });
   }
