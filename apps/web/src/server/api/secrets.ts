@@ -38,6 +38,7 @@ export type SecretVersion = {
 
 /** What `PATCH /secrets/:project/:environment` did to each key it named. */
 export type SetOutcome = { version: number } | { archived: true };
+export type SetResult = { bundleId: string; keys: Record<string, SetOutcome> };
 
 type Environment = { projectId: string; environmentId: string };
 
@@ -130,7 +131,7 @@ export async function setSecrets(
   ctx: ApiContext,
   place: ResolvedPath,
   patch: Record<string, string | null>,
-): Promise<{ bundleId: string; keys: Record<string, SetOutcome> }> {
+): Promise<SetResult> {
   const environment = requireLive(place);
   const writes = Object.entries(patch).filter((entry): entry is [string, string] => entry[1] !== null);
   const archives = Object.keys(patch).filter((key) => patch[key] === null);
@@ -199,6 +200,63 @@ export async function setSecrets(
   });
   if (Object.keys(patch).length > 0) changed(ctx, environment.environmentId);
   return result;
+}
+
+/** What a merge patch would do to a key: the answer to `?dryRun=1`. */
+export type DryRunOutcome = 'added' | 'changed' | 'unchanged' | 'archived';
+export type DryRunResult = { dryRun: true; keys: Record<string, DryRunOutcome> };
+
+/**
+ * `setSecrets` without the write: what each key in the patch would become,
+ * as an outcome, never a value. Nothing is written but the audit entries.
+ *
+ * Telling `changed` from `unchanged` decrypts the current value, and the
+ * answer tells whoever sent the patch whether their guess was right: a read.
+ * So a dry run needs secret.read, and every value it opens is logged as a
+ * `secret.read` marked `dryRun`, one bundle per call, the way a reveal logs
+ * the values it opens. Keys that are new or being archived open nothing.
+ */
+export async function dryRunSecrets(
+  ctx: ApiContext,
+  place: ResolvedPath,
+  patch: Record<string, string | null>,
+): Promise<DryRunResult> {
+  const environment = requireLive(place);
+  const bundleId = randomUUID();
+  return audited(ctx, async (tx, log) => {
+    need(ctx, 'secret.read', environment, 'secret.read', { bundleId, metadata: { dryRun: true } });
+    const rows = new Map((await environmentSecrets(tx, environment.environmentId)).map((row) => [row.key, row]));
+    // Refuse what the write would refuse before opening anything.
+    for (const [key, value] of Object.entries(patch)) {
+      if (value !== null && rows.get(key)?.archivedAt != null) {
+        throw conflict(`${key} is archived; unarchive it before writing a new version`);
+      }
+    }
+
+    // A null-prototype record: a key named __proto__ is a key like any other.
+    const keys: Record<string, DryRunOutcome> = Object.create(null);
+    for (const [key, value] of Object.entries(patch)) {
+      const secret = rows.get(key);
+      if (value === null) {
+        // Archiving what is already gone changes nothing, as in setSecrets.
+        keys[key] = secret === undefined || secret.archivedAt !== null ? 'unchanged' : 'archived';
+        continue;
+      }
+      if (secret === undefined || secret.current === null) {
+        keys[key] = 'added';
+        continue;
+      }
+      const current = await open(secret.current.envelope, { ...environment, secretId: secret.id }, ctx.keks);
+      keys[key] = current.toString('utf8') === value ? 'unchanged' : 'changed';
+      log.push(allowed(ctx, 'secret.read', {
+        ...environment,
+        secretId: secret.id,
+        bundleId,
+        metadata: { key, version: secret.current.version, dryRun: true },
+      }));
+    }
+    return { dryRun: true as const, keys: { ...keys } };
+  });
 }
 
 /** Rename a secret, or archive or unarchive it. Its versions are untouched. */

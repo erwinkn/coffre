@@ -329,12 +329,14 @@ All five milestones are implemented and working locally.
 - **Version history and restore.** Every version records who wrote it and
   when. Restoring an old version writes it again as a new version, so nothing
   is overwritten and the history reads in order.
-- **Bulk `.env` import.** Previews as a diff (create / update / unchanged)
+- **Bulk `.env` import.** Previews as a diff (added / changed / unchanged)
   before writing. The CLI and the UI parse with the same parser
   (`packages/core/src/dotenv.ts`) and plan with the same client function, so
   they cannot disagree about what a `.env` file means; malformed lines are
-  reported, never silently mangled. Writing is one `PATCH` of the changed
-  keys, and the preview's comparison with current values is logged as a read.
+  reported, never silently mangled. The preview is a dry run of the write
+  (`PATCH …?dryRun=1`): the server compares with the current values and
+  answers per key, so no value leaves it, and each value it opens is logged
+  as a read. Writing is one `PATCH` of the changed keys.
 - **Identity directory.** Users and service accounts are managed separately
   from project permissions. Owners can manage the directory and read the full
   audit log; root admins remain deployment configuration.

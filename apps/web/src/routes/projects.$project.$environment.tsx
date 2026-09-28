@@ -1482,30 +1482,32 @@ function VersionHistory({
 /* -------------------------------------------------------------------------- */
 
 const PLAN_TAG: Record<ImportPlanEntry['action'], string> = {
-  create: 'tag tag-green',
-  update: 'tag tag-blue',
+  added: 'tag tag-green',
+  changed: 'tag tag-blue',
   unchanged: 'tag',
 };
 
-/** Plan a .env import against what is stored, and write it unless this is a dry run. */
-async function importEnv(coffre: CoffreClient, path: string, content: string, dryRun: boolean) {
+/** Plan a .env import against what is stored, with a dry run of the write. */
+async function planEnv(coffre: CoffreClient, path: string, content: string) {
   const parsed = parseDotenv(content);
-  if (parsed.entries.length === 0) return { plan: [], problems: parsed.problems };
-  const { plan, changes } = await planImport(coffre, path, parsed.entries);
-  if (!dryRun && Object.keys(changes).length > 0) await coffre.secrets.set(path, changes);
-  return { plan, problems: parsed.problems };
+  if (parsed.entries.length === 0) return { plan: [], changes: {}, problems: parsed.problems };
+  return { ...(await planImport(coffre, path, parsed.entries)), problems: parsed.problems };
 }
 
 /**
  * Bulk import from a .env file.
  *
- * Always previews first. The preview compares against current values, which
- * means it reads them -- so it needs secret.read as well as secret.write, and
- * both the preview and the import are audited.
+ * Always previews first, with a dry run of the write: the server compares
+ * the file against the current values and answers per key, so no value
+ * reaches this page. Comparing is still reading -- it needs secret.read as
+ * well as secret.write, and the values it opens are logged as reads. Writing
+ * then sends exactly the changes the preview showed, in one patch.
  */
 function ImportEnv({ project, environment }: { project: string; environment: string }) {
   const [content, setContent] = useState('');
-  const [plan, setPlan] = useState<ImportPlanEntry[] | null>(null);
+  const [plan, setPlan] = useState<{ entries: ImportPlanEntry[]; changes: Record<string, string> } | null>(
+    null,
+  );
   const [problems, setProblems] = useState<ImportProblem[]>([]);
   const [open, setOpen] = useState(false);
   const coffre = useCoffre();
@@ -1514,19 +1516,20 @@ function ImportEnv({ project, environment }: { project: string; environment: str
 
   function preview() {
     run(
-      () => importEnv(coffre, path, content, true),
+      () => planEnv(coffre, path, content),
       (result) => {
         setProblems(result.problems);
-        setPlan(result.plan);
+        setPlan({ entries: result.plan, changes: result.changes });
       },
     );
   }
 
   function apply() {
+    if (plan === null) return;
+    const written = Object.keys(plan.changes).length;
     run(
-      () => importEnv(coffre, path, content, false),
-      (result) => {
-        const written = result.plan.filter((entry) => entry.action !== 'unchanged').length;
+      () => coffre.secrets.set(path, plan.changes),
+      () => {
         toast.success(`Imported ${written} change${written === 1 ? '' : 's'}`);
         close();
       },
@@ -1541,7 +1544,7 @@ function ImportEnv({ project, environment }: { project: string; environment: str
     setError(null);
   }
 
-  const changes = plan?.filter((entry) => entry.action !== 'unchanged') ?? [];
+  const changes = plan?.entries.filter((entry) => entry.action !== 'unchanged') ?? [];
 
   return (
     <>
@@ -1566,8 +1569,8 @@ function ImportEnv({ project, environment }: { project: string; environment: str
           <>
             Paste a .env file. It is read by the CLI’s own parser, so this page and the CLI
             cannot disagree about what it means, and malformed lines are reported rather
-            than guessed at. The preview compares against current values, so both the preview and
-            the import are recorded in the audit log.
+            than guessed at. coffre compares it with the current values without sending any
+            to this page, and records both the comparison and the import in the audit log.
           </>
         }
       >
@@ -1588,7 +1591,7 @@ function ImportEnv({ project, environment }: { project: string; environment: str
             />
           </label>
 
-          {plan !== null && plan.length > 0 && (
+          {plan !== null && plan.entries.length > 0 && (
             <div className="card dt-wrap">
               <table className="dt">
                 <thead>
@@ -1599,7 +1602,7 @@ function ImportEnv({ project, environment }: { project: string; environment: str
                   </tr>
                 </thead>
                 <tbody>
-                  {plan.map((entry) => (
+                  {plan.entries.map((entry) => (
                     <tr key={entry.key}>
                       <td className="cell-key">{breakAfterUnderscores(entry.key)}</td>
                       <td className="col-shrink">
@@ -1615,7 +1618,7 @@ function ImportEnv({ project, environment }: { project: string; environment: str
             </div>
           )}
 
-          {plan !== null && plan.length > 0 && changes.length === 0 && (
+          {plan !== null && plan.entries.length > 0 && changes.length === 0 && (
             <Notice tone="good">Every key already has this value. There is nothing to write.</Notice>
           )}
 

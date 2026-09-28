@@ -575,9 +575,10 @@ async function rollback(args: string[]): Promise<void> {
 /**
  * Import a .env file. Previews by default; --apply writes.
  *
- * The preview compares against the current values, so it is a read of every
- * existing secret and is logged as one. --apply then writes the keys that
- * differ in one transaction, a new version each.
+ * The preview is a dry run of the write: the server compares against the
+ * current values, logs each one it opens as a read, and sends none back.
+ * --apply then writes the keys that differ in one transaction, a new version
+ * each.
  */
 async function importEnv(args: string[]): Promise<void> {
   const { values, positionals } = parseArgs({

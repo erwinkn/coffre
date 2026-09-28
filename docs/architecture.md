@@ -116,6 +116,7 @@ the verb:
 | the same for an environment | `PUT` / `PATCH /api/projects/market/prod` |
 | list an environment's secrets, never their values | `GET /api/secrets/market/prod` |
 | set, add or archive secrets, one or many, in one transaction | `PATCH /api/secrets/market/prod {"DATABASE_URL": "…", "OLD_KEY": null}` |
+| what that write would do, per key, without values and without writing | `PATCH /api/secrets/market/prod?dryRun=1 {…}` → `{"dryRun": true, "keys": {"DATABASE_URL": "changed", "OLD_KEY": "archived"}}` |
 | rename a secret | `PATCH /api/secrets/market/prod/DB_URL {"key": "DATABASE_URL"}` |
 | a secret's versions | `GET /api/secrets/market/prod/DATABASE_URL/versions` |
 | restore a version, as a new version | `POST /api/secrets/market/prod/DATABASE_URL/restore {"version": 3}` |
