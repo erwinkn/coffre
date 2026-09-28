@@ -86,9 +86,9 @@ that holds the keys and decides who may decrypt. The design is in
 [architecture.md](architecture.md). In order:
 
 1. ~~**Two spikes**~~: done, both positive. A prebuilt server-rendered UI
-   imported by another Worker ([report](../spikes/ssr-ui/REPORT.md)), and one
+   imported by another Worker ([report](spikes/ssr-ui.md)), and one
    set of Drizzle queries across three dialects
-   ([report](../spikes/drizzle-dialects/REPORT.md)).
+   ([report](spikes/drizzle-dialects.md)).
 2. ~~**The API**~~ ([design](architecture.md#the-api)): done. One route
    table under `/api`, on Drizzle against Postgres, with roles in code and
    one role per member per place; every query in one module of

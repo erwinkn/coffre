@@ -312,52 +312,6 @@ importers:
         specifier: 5.9.3
         version: 5.9.3
 
-  spikes/drizzle-dialects:
-    dependencies:
-      '@libsql/client':
-        specifier: 0.18.0
-        version: 0.18.0
-      drizzle-orm:
-        specifier: 0.45.2
-        version: 0.45.2(@cloudflare/workers-types@5.20260920.1)(@libsql/client@0.18.0)(@types/pg@8.20.0)(mysql2@3.24.4(@types/node@26.1.1))(pg@8.16.3)
-      mysql2:
-        specifier: 3.24.4
-        version: 3.24.4(@types/node@26.1.1)
-      pg:
-        specifier: 8.16.3
-        version: 8.16.3
-    devDependencies:
-      '@types/node':
-        specifier: 26.1.1
-        version: 26.1.1
-      '@types/pg':
-        specifier: 8.20.0
-        version: 8.20.0
-      drizzle-kit:
-        specifier: 0.31.10
-        version: 0.31.10
-      typescript:
-        specifier: 5.9.3
-        version: 5.9.3
-
-  spikes/ssr-ui/consumer:
-    dependencies:
-      '@coffre/ui-spike':
-        specifier: workspace:*
-        version: link:../ui-package
-    devDependencies:
-      '@types/node':
-        specifier: 26.1.1
-        version: 26.1.1
-      typescript:
-        specifier: 5.9.3
-        version: 5.9.3
-      wrangler:
-        specifier: 4.118.0
-        version: 4.118.0(@cloudflare/workers-types@5.20260920.1)
-
-  spikes/ssr-ui/ui-package: {}
-
 packages:
 
   '@babel/code-frame@7.27.1':

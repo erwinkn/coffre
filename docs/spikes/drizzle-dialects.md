@@ -1,5 +1,9 @@
 # One set of Drizzle queries across PostgreSQL, MySQL, and SQLite
 
+> The spike's code lived in `spikes/drizzle-dialects/` until commit
+> `e949e03a6e`, and paths below are relative to that directory. To run it
+> again, restore it with `git checkout e949e03a6e -- spikes/drizzle-dialects`.
+
 ## Recommendation
 
 Use one typed query module, three concrete Drizzle schemas, and a small dialect

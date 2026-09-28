@@ -1,5 +1,10 @@
 # Prebuilt TanStack Start UI spike
 
+> The spike's code lived in `spikes/ssr-ui/` (`consumer/` and `ui-package/`)
+> until commit `e949e03a6e`, and paths below are relative to that directory.
+> Its steps build `apps/web`, the UI before it became `packages/ui`, so run
+> them from `332991df6b`, the commit that added the spike.
+
 ## Verdict
 
 Yes. A separate Worker can import the current Cloudflare-built TanStack Start
@@ -35,10 +40,10 @@ necessary because the current generated entry hides the Start handler inside
 the whole-app Worker. The consumer passes `{ context: { cspNonce } }` there. The
 entry retains the current three-argument behavior when no options are supplied.
 
-The copied `dist/` is not checked in here; it is about 72,000 generated lines.
+The copied `dist/` was never checked in; it is about 72,000 generated lines.
 The runnable spike, copy and entry change included, is commit `ac32b3e` on
 branch `bb/coffre-spike-prebuilt-ssr-ui-package-thr_5ney5784rk`. To rebuild it
-from this tree, run `pnpm --dir apps/web build`, copy `apps/web/dist` to
+from `332991df6b`, run `pnpm --dir apps/web build`, copy `apps/web/dist` to
 `ui-package/dist`, and make the entry change above.
 
 `consumer/` is a separate package with its own `wrangler.jsonc`. It depends on

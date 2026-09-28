@@ -134,7 +134,7 @@ collide with a deployment's own paths:
   serves files under `/_coffre/` itself, immutable-cached, before handing
   anything else to the UI.
 
-[A spike](../spikes/ssr-ui/REPORT.md) first showed the approach: a separate
+[A spike](spikes/ssr-ui.md) first showed the approach: a separate
 Worker imported the built UI, rendered with one copy of React and hydrated
 with the nonce intact.
 
@@ -381,7 +381,7 @@ sign-in.
 
 The app database can be Postgres, MySQL or SQLite. Every query goes through
 Drizzle; none is written by hand. The integration suite runs against all
-three. [A spike](../spikes/drizzle-dialects/REPORT.md) ran the same queries,
+three. [A spike](spikes/drizzle-dialects.md) ran the same queries,
 joins, a transaction, an upsert and 24 concurrent audit appends on all three.
 
 Every query lives in one module, `packages/db/src/queries.ts`, and the server
