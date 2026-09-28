@@ -1,9 +1,11 @@
+import { CoffreError } from '../../../../packages/client/src/index.ts';
+import { ApiError } from '../server/api/errors.ts';
+
 type Failure = { ok: false; error: string };
 
-function statusOf(error: unknown): number | undefined {
-  return typeof error === 'object' && error !== null && 'statusCode' in error
-    ? (error as { statusCode?: number }).statusCode
-    : undefined;
+/** The HTTP status of an API error, from the client or straight from a handler. */
+export function statusOf(error: unknown): number | undefined {
+  return error instanceof CoffreError || error instanceof ApiError ? error.status : undefined;
 }
 
 export function uiFailure(error: unknown): Failure {
@@ -24,9 +26,9 @@ export function uiFailure(error: unknown): Failure {
       error: error instanceof Error ? error.message : 'That conflicts with existing data.',
     };
   }
-  // A 400 marked `expose` carries a sentence written for the person, such as
-  // which field of a sync's destination is wrong. Others stay generic.
-  if (status === 400 && error instanceof Error && (error as { expose?: unknown }).expose === true) {
+  // A 400 carries a sentence written for the person, such as which field of
+  // a sync's destination is wrong. Anything unexpected stays generic.
+  if (status === 400 && error instanceof Error) {
     return { ok: false, error: error.message };
   }
   return { ok: false, error: 'Coffre is unavailable. Nothing was read or written.' };

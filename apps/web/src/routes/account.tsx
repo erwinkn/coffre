@@ -8,7 +8,7 @@ import { Monitor, ProviderMark, SignOut, Terminal, X } from '../components/icons
 import { getAccountSignin, revokeSession, unlinkIdentity } from '../server-functions/signin';
 import { signinErrorMessage } from '../lib/signin-errors';
 import { useAction } from '../lib/use-action';
-import type { IdentityRow, SessionRow } from '../server/services/signin';
+import type { IdentityRow, SessionRow } from '../server/api/signin';
 
 type Search = { linked?: string; error?: string };
 

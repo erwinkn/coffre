@@ -1,21 +1,18 @@
 import { z } from 'zod';
 
-import { getRuntime } from '../server/runtime.ts';
 import { registeredServerFn } from '../server/server-fn.ts';
 import type { AuditRow } from '../shared/models.ts';
-import { currentRequestContext } from './session.ts';
+import { api } from './session.ts';
 import { uiFailure, uiResult } from './result.ts';
 
 export const listAudit = registeredServerFn({ method: 'GET' })
   .validator(z.object({ decision: z.literal('deny').optional(), actorId: z.string().optional() }))
-  .handler(async ({ data }) => {
-    const runtime = getRuntime();
-    const ctx = currentRequestContext();
-    return uiResult(async () => {
-      const entries = await runtime.audit.list(ctx, {
+  .handler(async ({ data }) =>
+    uiResult(async () => {
+      const { entries } = await api().audit.list({
         limit: 200,
         decision: data.decision,
-        actorId: data.actorId,
+        actor: data.actorId,
       });
       const rows: AuditRow[] = entries.map((entry) => ({
         seq: entry.seq,
@@ -32,14 +29,12 @@ export const listAudit = registeredServerFn({ method: 'GET' })
           '--',
       }));
       return { entries: rows };
-    });
-  });
+    }),
+  );
 
 export const verifyAuditChain = registeredServerFn({ method: 'GET' }).handler(async () => {
-  const runtime = getRuntime();
-  const ctx = currentRequestContext();
   try {
-    const result = await runtime.audit.verify(ctx);
+    const result = await api().audit.verify();
     if (!result.ok) {
       return {
         ok: true as const,

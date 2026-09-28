@@ -3,10 +3,10 @@ import { z } from 'zod';
 import { getRuntime } from '../server/runtime.ts';
 import { registeredServerFn } from '../server/server-fn.ts';
 import { publicProviders } from '../server/signin.ts';
-import type { IdentityRow, ServiceTokenRow, SessionRow } from '../server/services/signin.ts';
+import type { IdentityRow, ServiceTokenRow, SessionRow } from '../server/api/signin.ts';
 import { principalId } from '../shared/schemas.ts';
-import { currentIdentity, currentRequestContext } from './session.ts';
-import { uiFailure, uiMutation, uiResult } from './result.ts';
+import { api, currentIdentity, currentRequestContext } from './session.ts';
+import { statusOf, uiFailure, uiMutation, uiResult } from './result.ts';
 
 const credentialId = z.string().uuid();
 const userCode = z.string().trim().min(1).max(16);
@@ -81,7 +81,7 @@ export const decideDeviceRequest = registeredServerFn({ method: 'POST' })
       await signin.decideDevice(ctx, data.code, data.approve);
       return { ok: true as const };
     } catch (error) {
-      if ((error as { statusCode?: number }).statusCode === 404) {
+      if (statusOf(error) === 404) {
         return { ok: false as const, error: 'That code is unknown, already used, or expired. Run coffre login again.' };
       }
       return uiFailure(error);
@@ -96,10 +96,9 @@ export const listServiceTokens = registeredServerFn({ method: 'GET' })
     const runtime = getRuntime();
     const signin = runtime.signin;
     if (signin === null) return { ok: true as const, mode: runtime.auth.mode, tokens: [] as ServiceTokenRow[] };
-    const ctx = currentRequestContext();
     return uiResult(async () => ({
       mode: runtime.auth.mode,
-      tokens: await signin.listServiceTokens(ctx, data.serviceId),
+      tokens: (await api().tokens.list(`token:${data.serviceId}`)).tokens,
     }));
   });
 
@@ -114,9 +113,8 @@ export const issueServiceToken = registeredServerFn({ method: 'POST' })
   .handler(async ({ data }) => {
     const signin = getRuntime().signin;
     if (signin === null) return { ok: false as const, error: 'This instance issues no tokens of its own.' };
-    const ctx = currentRequestContext();
     return uiResult(async () => ({
-      credential: await signin.issueServiceToken(ctx, data.serviceId, {
+      credential: await api().tokens.issue(`token:${data.serviceId}`, {
         label: data.label === '' ? null : data.label,
         expiresInDays: data.expiresInDays,
       }),
