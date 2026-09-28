@@ -194,9 +194,10 @@ export async function setAccess(
         changes[want.path] = 'updated';
       } else {
         // An expired grant is the same place's row: bring it back as a new grant.
+        // The runtime role may not rewrite created_at; the log has when it came back.
         await tx
           .update(grants)
-          .set({ role: want.role, expiresAt: want.expiresAt, createdAt: now, createdBy })
+          .set({ role: want.role, expiresAt: want.expiresAt, createdBy })
           .where(eq(grants.id, row.id));
         log.push(entry('grant.create', { grantId: row.id, ...grant }));
         changes[want.path] = 'created';

@@ -87,6 +87,7 @@ export const routes = {
   ...route('GET /projects', { run: (ctx) => listProjects(ctx) }),
   ...route('PUT /projects/:project', {
     input: z.object({ name: displayName }),
+    creates: true,
     run: (ctx, { params, input }) => putProject(ctx, params.project, input),
   }),
   ...route('PATCH /projects/:project', {

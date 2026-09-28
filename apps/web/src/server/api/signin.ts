@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 
-import { and, count, desc, eq, gt, inArray, isNull, lte, or } from 'drizzle-orm';
+import { and, count, desc, eq, gt, inArray, isNull, lte, ne, or } from 'drizzle-orm';
 
 import type { Principal } from '../../../../../packages/core/src/identity/types.ts';
 import type { SigninConfig } from '../../../../../packages/core/src/identity/signin/config.ts';
@@ -293,6 +293,10 @@ export class SigninService {
               eq(identities.principalType, 'user'),
               eq(identities.principalId, principalId),
               isNull(identities.revokedAt),
+              // This very account, bound a moment ago by a racing sign-in, is
+              // no mismatch: binding it again hits the unique index, and the
+              // retry finds it bound.
+              or(ne(identities.provider, profile.provider), ne(identities.subject, profile.subject)),
             ),
           )
           .limit(1);

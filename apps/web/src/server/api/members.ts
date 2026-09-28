@@ -270,12 +270,33 @@ async function exposure(
     .where(and(inArray(secrets.id, touched), isNull(secrets.archivedAt)))
     .orderBy(asc(projects.slug), asc(environments.slug), asc(secrets.key));
 
+  // A restore is a new version holding an older one's value, so whoever saw
+  // that value has seen the restored version too.
+  const restores = await db
+    .select({ secretId: auditLog.secretId, metadata: auditLog.metadata })
+    .from(auditLog)
+    .where(
+      and(inArray(auditLog.secretId, touched), eq(auditLog.action, 'secret.rollback'), eq(auditLog.decision, 'allow')),
+    );
+  const restoredFrom = new Map<string, number>();
+  for (const row of restores) {
+    const { version, toVersion } = JSON.parse(row.metadata) as { version?: unknown; toVersion?: unknown };
+    if (typeof version === 'number' && typeof toVersion === 'number') {
+      restoredFrom.set(`${row.secretId}:${version}`, toVersion);
+    }
+  }
+
   for (const [key, bySecret] of seen) {
     const report = result.get(key)!;
     for (const secret of current) {
       const byVersion = bySecret.get(secret.secretId);
       if (byVersion === undefined) continue;
-      const hit = byVersion.get(secret.version);
+      // Restores only point back, so this walk ends.
+      let version: number | undefined = secret.version;
+      let hit: Seen | undefined;
+      while (version !== undefined && (hit = byVersion.get(version)) === undefined) {
+        version = restoredFrom.get(`${secret.secretId}:${version}`);
+      }
       if (hit === undefined) {
         report.rotated += 1;
         continue;

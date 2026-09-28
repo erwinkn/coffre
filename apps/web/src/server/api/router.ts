@@ -41,12 +41,19 @@ const PARAMS: Record<string, z.ZodType<string>> = {
 };
 
 /**
- * The routes a path could mean, most specific first: at the first segment
- * where two shapes differ, a literal beats a parameter. So
- * `/syncs/by-id/…` never reads as a project named `by-id`.
+ * The route a request means: of the shapes that fit the path and take its
+ * method, the most specific, where at the first segment two shapes differ,
+ * a literal beats a parameter. So `DELETE /syncs/by-id/…` names a sync,
+ * while `GET /syncs/by-id/prod` is still the syncs of a project named
+ * `by-id`. When no shape takes the method, `allowed` lists the methods
+ * the path does take.
  */
-function match(parts: string[]): { shape: string; params: Record<string, string> } | null {
+function match(
+  parts: string[],
+  method: string,
+): { route: Compiled; params: Record<string, string> } | { allowed: string[] } | null {
   let best: { route: Compiled; params: Record<string, string> } | null = null;
+  const allowed = new Set<string>();
   for (const route of compiled) {
     if (route.segments.length !== parts.length) continue;
     const params: Record<string, string> = {};
@@ -56,9 +63,12 @@ function match(parts: string[]): { shape: string; params: Record<string, string>
       return true;
     });
     if (!fits) continue;
+    allowed.add(route.method);
+    if (route.method !== method) continue;
     if (best === null || moreSpecific(route, best.route)) best = { route, params };
   }
-  return best === null ? null : { shape: best.route.shape, params: best.params };
+  if (best !== null) return best;
+  return allowed.size === 0 ? null : { allowed: [...allowed] };
 }
 
 function moreSpecific(a: Compiled, b: Compiled): boolean {
@@ -83,9 +93,12 @@ async function locate(
 ): Promise<ResolvedPath | null> {
   if (params.project === undefined) return null;
   const path = { project: params.project, environment: params.environment, key: params.key };
-  const place = await resolvePath(ctx.db, path);
-  if (place === null) throw notFound(`no project "${params.project}"`);
   const last = params.key !== undefined ? 'key' : params.environment !== undefined ? 'environment' : 'project';
+  const place = await resolvePath(ctx.db, path);
+  if (place === null) {
+    if (def.creates && last === 'project') return null;
+    throw notFound(`no project "${params.project}"`);
+  }
   if (params.environment !== undefined && place.environment === null && !(def.creates && last === 'environment')) {
     throw notFound(`no environment "${formatPath(path).split('/').slice(0, 2).join('/')}"`);
   }
@@ -113,15 +126,14 @@ export async function serveApi(request: Request, ctx: ApiContext): Promise<Respo
     } catch {
       throw badRequest('the path is not valid percent-encoding');
     }
-    const found = match(parts);
+    const found = match(parts, request.method);
     if (found === null) throw notFound(`no route for ${url.pathname}`);
-    const route = compiled.find((candidate) => candidate.shape === found.shape && candidate.method === request.method);
-    if (route === undefined) {
-      const allowed = compiled.filter((candidate) => candidate.shape === found.shape).map((candidate) => candidate.method);
-      return errorResponse(new ApiError('method_not_allowed', `use ${allowed.join(' or ')}`), {
-        allow: allowed.join(', '),
+    if ('allowed' in found) {
+      return errorResponse(new ApiError('method_not_allowed', `use ${found.allowed.join(' or ')}`), {
+        allow: found.allowed.join(', '),
       });
     }
+    const { route } = found;
     const { def } = route;
 
     for (const [name, value] of Object.entries(found.params)) {

@@ -238,7 +238,12 @@ export async function patchProject(
     if (Object.keys(changes).length > 0) {
       if (changes.slug !== undefined) {
         const [taken] = await tx.select({ id: projects.id }).from(projects).where(eq(projects.slug, changes.slug));
-        if (taken !== undefined) throw slugTaken('project', changes.slug);
+        if (taken !== undefined) {
+          throw new Refusal(
+            slugTaken('project', changes.slug),
+            denied(ctx, 'project.update', 'slug_taken', { projectId: project.id, metadata: { slug: changes.slug } }),
+          );
+        }
       }
       try {
         await tx.update(projects).set(changes).where(eq(projects.id, project.id));
@@ -343,7 +348,12 @@ export async function patchEnvironment(
           .select({ id: environments.id })
           .from(environments)
           .where(and(eq(environments.projectId, project.id), eq(environments.slug, changes.slug)));
-        if (taken !== undefined) throw slugTaken('environment', changes.slug);
+        if (taken !== undefined) {
+          throw new Refusal(
+            slugTaken('environment', changes.slug),
+            denied(ctx, 'environment.update', 'slug_taken', { ...scope, metadata: { slug: changes.slug } }),
+          );
+        }
       }
       try {
         await tx.update(environments).set(changes).where(eq(environments.id, environment.id));
