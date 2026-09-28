@@ -1,23 +1,12 @@
-import { createMiddleware } from '@tanstack/react-start';
-
 import type { Principal } from '../../../../packages/core/src/identity/types.ts';
 import { ACCESS_JWT_HEADER } from '../../../../packages/core/src/identity/types.ts';
 import type { AuthConfig } from '../../../../packages/core/src/identity/auth-mode.ts';
 import { loadCaller, type Caller } from './api/caller.ts';
-import { ApiError, badRequest } from './api/errors.ts';
+import { ApiError } from './api/errors.ts';
 import { errorResponse } from './http.ts';
-import { getRuntime, type CoffreRuntime } from './runtime.ts';
+import type { CoffreRuntime } from './runtime.ts';
 
 export const DEV_TOKEN_COOKIE = 'coffre_dev_token';
-export const PUBLIC_HEALTH_PATHS = new Set(['/livez', '/readyz']);
-
-type AnonymousRequestContext = {
-  principal: null;
-  registered: false;
-  caller: null;
-  requestId: string;
-  sourceIp: string | null;
-};
 
 /** A verified caller, loaded once with everything they hold. */
 export type AuthenticatedIdentity = {
@@ -30,24 +19,10 @@ export type AuthenticatedIdentity = {
   credentialId: string | null;
 };
 
-export type RequestIdentityContext =
-  | AuthenticatedIdentity
-  | AnonymousRequestContext;
-
 type AuthenticationRuntime = Pick<
   CoffreRuntime,
   'auth' | 'verifier' | 'db' | 'rootAdmins'
 >;
-
-const requestContexts = new WeakMap<Request, RequestIdentityContext>();
-
-export function isPublicHealthPath(pathname: string): boolean {
-  return PUBLIC_HEALTH_PATHS.has(pathname);
-}
-
-export function isApiPath(pathname: string): boolean {
-  return pathname === '/api' || pathname.startsWith('/api/');
-}
 
 function cookieValue(request: Request, name: string): string | null {
   const raw = request.headers.get('cookie');
@@ -122,10 +97,6 @@ export function unauthenticated(auth: AuthConfig): Response {
 export const registrationRequired = () =>
   errorResponse(new ApiError('registration_required', 'you are signed in, but not a member here'));
 
-function anonymousContext(requestId = crypto.randomUUID()): AnonymousRequestContext {
-  return { principal: null, registered: false, caller: null, requestId, sourceIp: null };
-}
-
 export async function authenticateRequest(
   request: Request,
   runtime: AuthenticationRuntime,
@@ -160,72 +131,3 @@ export async function authenticateRequest(
     return errorResponse(new ApiError('unavailable', 'coffre cannot check who you are right now'));
   }
 }
-
-export function requestIdentityContextFor(
-  request: Request,
-): RequestIdentityContext | undefined {
-  return requestContexts.get(request);
-}
-
-function remember(request: Request, context: RequestIdentityContext): void {
-  requestContexts.set(request, context);
-}
-
-/**
- * Pages render signed out (the sign-in page itself), and sign-in, callback
- * and sign-out routes check whatever session they need themselves.
- */
-export function allowsAnonymousTransport(
-  request: Request,
-  handlerType: 'serverFn' | 'router',
-  pathname: string,
-): boolean {
-  if (handlerType === 'router' && pathname.startsWith('/auth/')) return true;
-  return request.method === 'GET' || request.method === 'HEAD';
-}
-
-/**
- * Who is asking, for pages and sign-in routes. `/api` is not its business:
- * the API authenticates every call itself, from the page's own server render
- * too, so it has one front door; see `fetch-api.ts`.
- */
-export const requestIdentityMiddleware = createMiddleware().server(
-  async ({ request, pathname, handlerType, next }) => {
-    if (request.headers.has('x-middleware-subrequest')) {
-      return errorResponse(badRequest('x-middleware-subrequest is not accepted'));
-    }
-
-    if (isPublicHealthPath(pathname) || isApiPath(pathname)) {
-      const context: RequestIdentityContext = anonymousContext();
-      remember(request, context);
-      return next({ context: { coffreRequest: context } });
-    }
-
-    const runtime = getRuntime();
-    const token = accessTokenForRequest(request, runtime.auth);
-    if (
-      token === null &&
-      allowsAnonymousTransport(request, handlerType, pathname)
-    ) {
-      const context: RequestIdentityContext = anonymousContext();
-      remember(request, context);
-      return next({ context: { coffreRequest: context } });
-    }
-
-    const result = await authenticateRequest(request, runtime, crypto.randomUUID(), token);
-    if (result instanceof Response) {
-      // An expired or revoked session on a page is someone to send to the
-      // sign-in page, not a JSON error to show them.
-      if (result.status === 401 && allowsAnonymousTransport(request, handlerType, pathname)) {
-        const context: RequestIdentityContext = anonymousContext();
-        remember(request, context);
-        return next({ context: { coffreRequest: context } });
-      }
-      return result;
-    }
-    remember(request, result);
-    return next({
-      context: { coffreRequest: result as RequestIdentityContext },
-    });
-  },
-);

@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite dev",
-    "build": "vite build",
+    "build": "vite build && node ../../scripts/check-client-bundle.mjs",
     "preview": "vite preview",
     "cf-typegen": "wrangler types",
     "smoke:production": "../../scripts/smoke-web-production.sh",

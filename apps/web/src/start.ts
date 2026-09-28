@@ -5,7 +5,7 @@ import {
 import {
   isApiPath,
   requestIdentityMiddleware,
-} from './server/auth.ts';
+} from './server/request-identity.ts';
 
 // Defining a startInstance replaces Start's implicit default middleware. Keep
 // CSRF explicit so adding authentication does not silently remove it.

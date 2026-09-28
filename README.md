@@ -192,11 +192,11 @@ pnpm db:check          # validate the Drizzle journal
 pnpm seed             # directory + market/dev|prod + grants; loads .env.dev
 pnpm test             # lint + unit + integration tests (needs Postgres up)
 pnpm test:schema      # runtime-role guarantees in an isolated test database
-pnpm lint             # server-function authorization import boundaries
+pnpm lint             # no server functions or Drizzle queries in the web app
 pnpm check:pins       # every dependency exactly pinned
 pnpm check:contrast   # every admin-UI colour pair meets WCAG AA
 pnpm --dir apps/web typecheck
-pnpm --dir apps/web build
+pnpm --dir apps/web build            # then fails if database code reached the browser bundle
 pnpm --dir apps/web smoke:production
 ```
 

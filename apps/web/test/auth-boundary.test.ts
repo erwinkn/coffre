@@ -4,13 +4,12 @@ import assert from 'node:assert/strict';
 import type { AuthConfig } from '../../../packages/core/src/identity/auth-mode.ts';
 import type { Principal } from '../../../packages/core/src/identity/types.ts';
 import { createDatabase } from '../../../packages/db/src/database.ts';
+import { accessTokenForRequest, authenticateRequest } from '../src/server/auth.ts';
 import {
-  accessTokenForRequest,
-  authenticateRequest,
   allowsAnonymousTransport,
   isApiPath,
   isPublicHealthPath,
-} from '../src/server/auth.ts';
+} from '../src/server/request-identity.ts';
 import { shouldValidateCsrf, startInstance } from '../src/start.ts';
 
 const cloudflare: AuthConfig = {
