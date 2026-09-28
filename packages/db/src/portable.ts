@@ -41,12 +41,16 @@ type TableName = {
   [K in keyof PostgresSchema]: PostgresSchema[K] extends { $inferSelect: object } ? K : never;
 }[keyof PostgresSchema];
 
-type Rows<Schema extends Record<TableName, { $inferSelect: object }>> = {
-  [K in TableName]: Schema[K]['$inferSelect'];
-};
-
 type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
 
-// A column that differs in type, nullability or name breaks the build here.
-true satisfies Equal<Rows<typeof mysql>, Rows<PostgresSchema>>;
-true satisfies Equal<Rows<typeof sqlite>, Rows<PostgresSchema>>;
+/** The tables whose rows differ from their Postgres twin's; never if none. */
+type Mismatched<Schema extends Record<TableName, { $inferSelect: object }>> = {
+  [K in TableName]: Equal<Schema[K]['$inferSelect'], PostgresSchema[K]['$inferSelect']> extends true ? never : K;
+}[TableName];
+
+type None<T extends never> = T;
+
+// A column that differs in type, nullability or name breaks the typecheck
+// here, naming its table.
+export type MySqlRowsMatch = None<Mismatched<typeof mysql>>;
+export type SqliteRowsMatch = None<Mismatched<typeof sqlite>>;
