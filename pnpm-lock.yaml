@@ -112,9 +112,15 @@ importers:
 
   packages/db:
     dependencies:
+      '@libsql/client':
+        specifier: 0.18.0
+        version: 0.18.0
       drizzle-orm:
         specifier: 0.45.2
         version: 0.45.2(@libsql/client@0.18.0)(@types/pg@8.20.0)(mysql2@3.24.4(@types/node@26.1.1))(pg@8.16.3)
+      mysql2:
+        specifier: 3.24.4
+        version: 3.24.4(@types/node@26.1.1)
       pg:
         specifier: 8.16.3
         version: 8.16.3

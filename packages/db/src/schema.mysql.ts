@@ -4,56 +4,89 @@ import {
   boolean,
   check,
   customType,
+  datetime,
   foreignKey,
   index,
-  integer,
-  pgTable,
+  int,
+  mysqlTable,
   primaryKey,
   text,
-  timestamp,
   unique,
   uniqueIndex,
-  uuid,
-  type AnyPgColumn,
-} from 'drizzle-orm/pg-core';
+  varchar,
+  type AnyMySqlColumn,
+} from 'drizzle-orm/mysql-core';
 
+import { canonicalTimestamp } from './dialect.ts';
+import { asPostgres } from './portable.ts';
 import { ACTIVE_SUBJECT, relationsOf } from './relations.ts';
 
-const bytea = customType<{ data: Buffer }>({
-  dataType: () => 'bytea',
+/**
+ * The schema in schema.ts, for MySQL 8.4. Same tables, columns, keys and row
+ * types (portable.ts checks); only the column types differ:
+ *
+ * - A string that is part of a key is a `varchar` sized to what the server
+ *   accepts, since MySQL indexes no `text`. Ids are `varchar(36)`, with no
+ *   default: the application makes every id.
+ * - Bytes are `longblob` (a `blob` holds 64 KiB, less than a secret with its
+ *   envelope), or `varbinary` for the fixed-size hashes that are keys.
+ * - Times are `datetime` in UTC, which is what Drizzle reads and writes.
+ * - Comparisons are case-sensitive: the baseline migration sets the database
+ *   collation to `utf8mb4_bin`, so `API_KEY` and `api_key` are two secrets.
+ */
+
+const longblob = customType<{ data: Buffer }>({
+  dataType: () => 'longblob',
 });
 
-const createdAt = () => timestamp('created_at', { withTimezone: true }).notNull().defaultNow();
+const varbinary = customType<{ data: Buffer; config: { length: number } }>({
+  dataType: (config) => `varbinary(${config!.length})`,
+});
 
-export const projects = pgTable(
+/** audit_log.occurred_at: kept to the microsecond, read as text. See canonicalTimestamp. */
+const instant = customType<{ data: string; driverData: string }>({
+  dataType: () => 'datetime(6)',
+  toDriver: (value) => canonicalTimestamp(value).replace('T', ' ').slice(0, -1),
+});
+
+const time = (name: string) => datetime(name, { fsp: 3 });
+const now = sql`(UTC_TIMESTAMP(3))`;
+const createdAt = () => time('created_at').notNull().default(now);
+const id = (name = 'id') => varchar(name, { length: 36 });
+const slug = () => varchar('slug', { length: 63 });
+const principalType = () => varchar('principal_type', { length: 16 });
+/** An email address or a service name; the API accepts up to this. */
+const principalId = () => varchar('principal_id', { length: 330 });
+
+export const projects = mysqlTable(
   'projects',
   {
-    id: uuid().primaryKey().defaultRandom(),
-    slug: text().notNull(),
+    id: id().primaryKey(),
+    slug: slug().notNull(),
     name: text().notNull(),
     createdAt: createdAt(),
-    archivedAt: timestamp('archived_at', { withTimezone: true }),
+    archivedAt: time('archived_at'),
   },
   (table) => [
     unique('projects_slug_key').on(table.slug),
-    check('projects_slug_check', sql`${table.slug} ~ '^[a-z0-9][a-z0-9-]{0,62}$'`),
+    check('projects_slug_check', sql`regexp_like(${table.slug}, '^[a-z0-9][a-z0-9-]{0,62}$', 'c')`),
   ],
 );
 
-export const environments = pgTable(
+export const environments = mysqlTable(
   'environments',
   {
-    id: uuid().primaryKey().defaultRandom(),
-    projectId: uuid('project_id').notNull(),
-    slug: text().notNull(),
+    id: id().primaryKey(),
+    projectId: id('project_id').notNull(),
+    slug: slug().notNull(),
     name: text().notNull(),
     createdAt: createdAt(),
-    archivedAt: timestamp('archived_at', { withTimezone: true }),
+    archivedAt: time('archived_at'),
   },
   (table) => [
     unique('environments_project_id_slug_key').on(table.projectId, table.slug),
     unique('environments_project_scoped').on(table.id, table.projectId),
-    check('environments_slug_check', sql`${table.slug} ~ '^[a-z0-9][a-z0-9-]{0,62}$'`),
+    check('environments_slug_check', sql`regexp_like(${table.slug}, '^[a-z0-9][a-z0-9-]{0,62}$', 'c')`),
     foreignKey({
       name: 'environments_project_id_fkey',
       columns: [table.projectId],
@@ -62,31 +95,24 @@ export const environments = pgTable(
   ],
 );
 
-export const secrets = pgTable(
+export const secrets = mysqlTable(
   'secrets',
   {
-    id: uuid().primaryKey().defaultRandom(),
-    projectId: uuid('project_id').notNull(),
-    environmentId: uuid('environment_id').notNull(),
-    key: text().notNull(),
+    id: id().primaryKey(),
+    projectId: id('project_id').notNull(),
+    environmentId: id('environment_id').notNull(),
+    key: varchar({ length: 128 }).notNull(),
     createdAt: createdAt(),
-    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-    currentVersionId: uuid('current_version_id').references(
-      (): AnyPgColumn => secretVersions.id,
-      { onDelete: 'no action' },
-    ),
-    // The number of the current version, 0 before the first. Versions only
-    // append, so it is also the highest: the next one is this plus one.
-    currentVersion: integer('current_version').notNull().default(0),
-    archivedAt: timestamp('archived_at', { withTimezone: true }),
+    updatedAt: time('updated_at').notNull().default(now),
+    currentVersionId: id('current_version_id').references((): AnyMySqlColumn => secretVersions.id, {
+      onDelete: 'no action',
+    }),
+    currentVersion: int('current_version').notNull().default(0),
+    archivedAt: time('archived_at'),
   },
   (table) => [
-    unique('secrets_project_id_environment_id_key_key').on(
-      table.projectId,
-      table.environmentId,
-      table.key,
-    ),
-    check('secrets_key_check', sql`${table.key} ~ '^[A-Za-z_][A-Za-z0-9_]{0,127}$'`),
+    unique('secrets_project_id_environment_id_key_key').on(table.projectId, table.environmentId, table.key),
+    check('secrets_key_check', sql`regexp_like(${table.key}, '^[A-Za-z_][A-Za-z0-9_]{0,127}$', 'c')`),
     foreignKey({
       name: 'secrets_project_id_fkey',
       columns: [table.projectId],
@@ -106,17 +132,17 @@ export const secrets = pgTable(
   ],
 );
 
-export const secretVersions = pgTable(
+export const secretVersions = mysqlTable(
   'secret_versions',
   {
-    id: uuid().primaryKey().defaultRandom(),
-    secretId: uuid('secret_id').notNull(),
-    version: integer().notNull(),
-    envelopeVersion: integer('envelope_version').notNull(),
-    ciphertext: bytea().notNull(),
-    iv: bytea().notNull(),
-    authTag: bytea('auth_tag').notNull(),
-    wrappedDek: bytea('wrapped_dek').notNull(),
+    id: id().primaryKey(),
+    secretId: id('secret_id').notNull(),
+    version: int().notNull(),
+    envelopeVersion: int('envelope_version').notNull(),
+    ciphertext: longblob().notNull(),
+    iv: varbinary({ length: 12 }).notNull(),
+    authTag: varbinary('auth_tag', { length: 16 }).notNull(),
+    wrappedDek: longblob('wrapped_dek').notNull(),
     kekProvider: text('kek_provider').notNull(),
     kekId: text('kek_id').notNull(),
     kekVersion: text('kek_version').notNull(),
@@ -133,16 +159,16 @@ export const secretVersions = pgTable(
       columns: [table.secretId],
       foreignColumns: [secrets.id],
     }).onDelete('restrict'),
-    index('secret_versions_secret_idx').on(table.secretId, table.version.desc()),
+    index('secret_versions_secret_idx').on(table.secretId, table.version),
   ],
 );
 
-export const principals = pgTable(
+export const principals = mysqlTable(
   'principals',
   {
-    principalType: text('principal_type').notNull(),
-    principalId: text('principal_id').notNull(),
-    instanceRole: text('instance_role').notNull().default('user'),
+    principalType: principalType().notNull(),
+    principalId: principalId().notNull(),
+    instanceRole: text('instance_role').notNull().default(sql`('user')`),
     createdAt: createdAt(),
     createdBy: text('created_by').notNull(),
     active: boolean().notNull().default(true),
@@ -152,17 +178,12 @@ export const principals = pgTable(
       name: 'principals_pkey',
       columns: [table.principalType, table.principalId],
     }),
-    check(
-      'principals_principal_type_check',
-      sql`${table.principalType} IN ('user', 'service')`,
-    ),
+    check('principals_principal_type_check', sql`${table.principalType} IN ('user', 'service')`),
     check('principals_instance_role_check', sql`${table.instanceRole} IN ('user', 'owner')`),
     check(
       'principals_service_role_check',
       sql`${table.principalType} = 'user' OR ${table.instanceRole} = 'user'`,
     ),
-    // A person is their email address, stored lowercased, so matching a
-    // provider's verified email is plain equality on every database.
     check(
       'principals_user_id_lowercase',
       sql`${table.principalType} <> 'user' OR ${table.principalId} = lower(${table.principalId})`,
@@ -170,25 +191,21 @@ export const principals = pgTable(
   ],
 );
 
-export const grants = pgTable(
+export const grants = mysqlTable(
   'grants',
   {
-    id: uuid().primaryKey().defaultRandom(),
-    principalType: text('principal_type').notNull(),
-    principalId: text('principal_id').notNull(),
-    environmentId: uuid('environment_id'),
+    id: id().primaryKey(),
+    principalType: principalType().notNull(),
+    principalId: principalId().notNull(),
+    environmentId: id('environment_id'),
     createdAt: createdAt(),
     createdBy: text('created_by').notNull(),
-    projectId: uuid('project_id'),
-    /** One of the built-in roles in packages/core/src/access.ts. */
+    projectId: id('project_id'),
     role: text().notNull(),
-    expiresAt: timestamp('expires_at', { withTimezone: true }),
+    expiresAt: time('expires_at'),
   },
   (table) => [
-    check(
-      'grants_principal_type_check',
-      sql`${table.principalType} IN ('user', 'service')`,
-    ),
+    check('grants_principal_type_check', sql`${table.principalType} IN ('user', 'service')`),
     check(
       'grants_exactly_one_scope',
       sql`(${table.projectId} IS NULL) <> (${table.environmentId} IS NULL)`,
@@ -213,44 +230,36 @@ export const grants = pgTable(
       sql`${table.role} IN ('viewer', 'developer', 'maintainer', 'access-manager', 'auditor', 'owner')`,
     ),
     index('grants_lookup_idx').on(table.principalType, table.principalId, table.environmentId),
-    // One grant per member per place. Revoking expires the row rather than
-    // deleting it, and granting again reuses it. The scope left empty is
-    // null, and nulls never collide, so each index only bites on its own
-    // kind of grant.
     uniqueIndex('grants_environment_unique').on(table.principalType, table.principalId, table.environmentId),
     uniqueIndex('grants_project_unique').on(table.principalType, table.principalId, table.projectId),
   ],
 );
 
-export const auditLog = pgTable(
+export const auditLog = mysqlTable(
   'audit_log',
   {
     seq: bigint({ mode: 'bigint' }).primaryKey(),
-    id: uuid().notNull().defaultRandom(),
-    // A string, not a Date: the chain covers it to the microsecond, and a
-    // Date keeps milliseconds. See canonicalTimestamp in dialect.ts.
-    occurredAt: timestamp('occurred_at', { withTimezone: true, mode: 'string' })
-      .notNull()
-      .defaultNow(),
-    actorType: text('actor_type').notNull(),
-    actorId: text('actor_id').notNull(),
+    id: id().notNull(),
+    occurredAt: instant('occurred_at').notNull().default(sql`(UTC_TIMESTAMP(6))`),
+    actorType: varchar('actor_type', { length: 16 }).notNull(),
+    actorId: varchar('actor_id', { length: 330 }).notNull(),
     action: text().notNull(),
     decision: text().notNull(),
-    projectId: uuid('project_id'),
-    environmentId: uuid('environment_id'),
-    secretId: uuid('secret_id'),
-    bundleId: uuid('bundle_id'),
+    projectId: id('project_id'),
+    environmentId: id('environment_id'),
+    secretId: id('secret_id'),
+    bundleId: id('bundle_id'),
     requestId: text('request_id'),
     sourceIp: text('source_ip'),
-    metadata: text().notNull().default('{}'),
-    prevHash: bytea('prev_hash').notNull(),
-    hash: bytea().notNull(),
+    metadata: text().notNull().default(sql`('{}')`),
+    prevHash: varbinary('prev_hash', { length: 32 }).notNull(),
+    hash: varbinary({ length: 32 }).notNull(),
   },
   (table) => [
     unique('audit_log_id_key').on(table.id),
     check('audit_log_actor_type_check', sql`${table.actorType} IN ('user', 'service', 'system')`),
     check('audit_log_decision_check', sql`${table.decision} IN ('allow', 'deny')`),
-    check('audit_log_metadata_check', sql`${table.metadata}::jsonb IS NOT NULL`),
+    check('audit_log_metadata_check', sql`json_valid(${table.metadata})`),
     check('audit_log_prev_hash_check', sql`octet_length(${table.prevHash}) = 32`),
     check('audit_log_hash_check', sql`octet_length(${table.hash}) = 32`),
     foreignKey({
@@ -268,36 +277,36 @@ export const auditLog = pgTable(
       columns: [table.secretId],
       foreignColumns: [secrets.id],
     }).onDelete('restrict'),
-    index('audit_log_occurred_idx').on(table.occurredAt.desc()),
-    index('audit_log_actor_idx').on(table.actorType, table.actorId, table.occurredAt.desc()),
-    index('audit_log_secret_idx').on(table.secretId, table.occurredAt.desc()),
-    index('audit_log_environment_idx').on(table.environmentId, table.occurredAt.desc()),
+    index('audit_log_occurred_idx').on(table.occurredAt),
+    index('audit_log_actor_idx').on(table.actorType, table.actorId, table.occurredAt),
+    index('audit_log_secret_idx').on(table.secretId, table.occurredAt),
+    index('audit_log_environment_idx').on(table.environmentId, table.occurredAt),
     index('audit_log_bundle_idx').on(table.bundleId),
   ],
 );
 
-export const auditChainHead = pgTable(
+export const auditChainHead = mysqlTable(
   'audit_chain_head',
   {
     onlyRow: boolean('only_row').primaryKey().default(true),
     nextSeq: bigint('next_seq', { mode: 'bigint' }).notNull().default(sql`0`),
-    headHash: bytea('head_hash').notNull(),
-    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    headHash: varbinary('head_hash', { length: 32 }).notNull(),
+    updatedAt: time('updated_at').notNull().default(now),
   },
   (table) => [
-    check('audit_chain_head_only_row_check', sql`${table.onlyRow}`),
+    check('audit_chain_head_only_row_check', sql`${table.onlyRow} = true`),
     check('audit_chain_head_head_hash_check', sql`octet_length(${table.headHash}) = 32`),
   ],
 );
 
-export const auditCheckpoints = pgTable(
+export const auditCheckpoints = mysqlTable(
   'audit_checkpoints',
   {
-    id: uuid().primaryKey().defaultRandom(),
+    id: id().primaryKey(),
     seq: bigint({ mode: 'bigint' }).notNull(),
-    headHash: bytea('head_hash').notNull(),
+    headHash: varbinary('head_hash', { length: 32 }).notNull(),
     createdAt: createdAt(),
-    exportedAt: timestamp('exported_at', { withTimezone: true }),
+    exportedAt: time('exported_at'),
     exportTarget: text('export_target'),
   },
   (table) => [
@@ -305,43 +314,35 @@ export const auditCheckpoints = pgTable(
   ],
 );
 
-export const auditHeartbeat = pgTable(
+export const auditHeartbeat = mysqlTable(
   'audit_heartbeat',
   {
     onlyRow: boolean('only_row').primaryKey().default(true),
-    lastBeatAt: timestamp('last_beat_at', { withTimezone: true }).notNull().defaultNow(),
+    lastBeatAt: time('last_beat_at').notNull().default(now),
     lastSeq: bigint('last_seq', { mode: 'bigint' }).notNull().default(sql`0`),
   },
-  (table) => [check('audit_heartbeat_only_row_check', sql`${table.onlyRow}`)],
+  (table) => [check('audit_heartbeat_only_row_check', sql`${table.onlyRow} = true`)],
 );
 
-/**
- * An account at a sign-in provider, bound to one principal.
- *
- * Looked up by (provider, subject), never by email. An email address is
- * recycled when someone leaves; the provider's subject is not, so binding to
- * it is what stops a new holder of an old address from inheriting its access.
- * The email is kept for display only.
- */
-export const identities = pgTable(
+export const identities = mysqlTable(
   'identities',
   {
-    id: uuid().primaryKey().defaultRandom(),
-    provider: text().notNull(),
-    subject: text().notNull(),
-    principalType: text('principal_type').notNull(),
-    principalId: text('principal_id').notNull(),
+    id: id().primaryKey(),
+    provider: varchar({ length: 32 }).notNull(),
+    subject: varchar({ length: 255 }).notNull(),
+    principalType: principalType().notNull(),
+    principalId: principalId().notNull(),
     email: text(),
     createdAt: createdAt(),
     createdBy: text('created_by').notNull(),
-    lastSignInAt: timestamp('last_sign_in_at', { withTimezone: true }),
-    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    lastSignInAt: time('last_sign_in_at'),
+    revokedAt: time('revoked_at'),
     revokedBy: text('revoked_by'),
-    activeSubject: text('active_subject').generatedAlwaysAs(ACTIVE_SUBJECT),
+    activeSubject: varchar('active_subject', { length: 255 }).generatedAlwaysAs(ACTIVE_SUBJECT, { mode: 'stored' }),
   },
   (table) => [
     check('identities_principal_type_check', sql`${table.principalType} = 'user'`),
-    check('identities_provider_check', sql`${table.provider} ~ '^[a-z0-9][a-z0-9-]{0,31}$'`),
+    check('identities_provider_check', sql`regexp_like(${table.provider}, '^[a-z0-9][a-z0-9-]{0,31}$', 'c')`),
     foreignKey({
       name: 'identities_principal_fkey',
       columns: [table.principalType, table.principalId],
@@ -352,31 +353,23 @@ export const identities = pgTable(
   ],
 );
 
-/**
- * Bearer credentials coffre issues itself: browser sessions, CLI sessions and
- * service tokens.
- *
- * One table, so that revoking everything a principal holds is one statement.
- * Only a SHA-256 of each token is stored. Tokens carry 256 bits of entropy, so
- * a fast hash is enough; a database leak yields nothing that authenticates.
- */
-export const credentials = pgTable(
+export const credentials = mysqlTable(
   'credentials',
   {
-    id: uuid().primaryKey().defaultRandom(),
+    id: id().primaryKey(),
     kind: text().notNull(),
-    tokenHash: bytea('token_hash').notNull(),
+    tokenHash: varbinary('token_hash', { length: 32 }).notNull(),
     tokenHint: text('token_hint').notNull(),
-    principalType: text('principal_type').notNull(),
-    principalId: text('principal_id').notNull(),
-    identityId: uuid('identity_id'),
+    principalType: principalType().notNull(),
+    principalId: principalId().notNull(),
+    identityId: id('identity_id'),
     label: text(),
     createdAt: createdAt(),
     createdBy: text('created_by').notNull(),
-    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
-    lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
+    expiresAt: time('expires_at').notNull(),
+    lastUsedAt: time('last_used_at'),
     lastUsedIp: text('last_used_ip'),
-    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    revokedAt: time('revoked_at'),
     revokedBy: text('revoked_by'),
   },
   (table) => [
@@ -401,28 +394,21 @@ export const credentials = pgTable(
   ],
 );
 
-/**
- * A CLI asking to be signed in from a browser (RFC 8628, device flow).
- *
- * The CLI holds the device code and polls with it; a signed-in person approves
- * the short user code in their browser. It works the same on a laptop and on
- * a server reached over SSH, which a localhost redirect does not.
- */
-export const deviceAuthorizations = pgTable(
+export const deviceAuthorizations = mysqlTable(
   'device_authorizations',
   {
-    id: uuid().primaryKey().defaultRandom(),
-    deviceCodeHash: bytea('device_code_hash').notNull(),
-    userCode: text('user_code').notNull(),
+    id: id().primaryKey(),
+    deviceCodeHash: varbinary('device_code_hash', { length: 32 }).notNull(),
+    userCode: varchar('user_code', { length: 32 }).notNull(),
     clientLabel: text('client_label'),
     clientIp: text('client_ip'),
     createdAt: createdAt(),
-    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
-    decidedAt: timestamp('decided_at', { withTimezone: true }),
+    expiresAt: time('expires_at').notNull(),
+    decidedAt: time('decided_at'),
     decision: text(),
-    principalType: text('principal_type'),
-    principalId: text('principal_id'),
-    consumedAt: timestamp('consumed_at', { withTimezone: true }),
+    principalType: principalType(),
+    principalId: principalId(),
+    consumedAt: time('consumed_at'),
   },
   (table) => [
     unique('device_authorizations_device_code_hash_key').on(table.deviceCodeHash),
@@ -443,34 +429,26 @@ export const deviceAuthorizations = pgTable(
   ],
 );
 
-/**
- * An environment kept in step with a third-party service: GitHub Actions
- * secrets, Vercel or Railway variables, Worker secrets.
- *
- * The destination's API token is itself a coffre secret, referenced by id, so
- * it is encrypted, versioned and audited like everything else and never sits
- * in this table.
- */
-export const syncs = pgTable(
+export const syncs = mysqlTable(
   'syncs',
   {
-    id: uuid().primaryKey().defaultRandom(),
-    projectId: uuid('project_id').notNull(),
-    environmentId: uuid('environment_id').notNull(),
+    id: id().primaryKey(),
+    projectId: id('project_id').notNull(),
+    environmentId: id('environment_id').notNull(),
     provider: text().notNull(),
     config: text().notNull(),
-    credentialSecretId: uuid('credential_secret_id').notNull(),
+    credentialSecretId: id('credential_secret_id').notNull(),
     createdAt: createdAt(),
     createdBy: text('created_by').notNull(),
-    pausedAt: timestamp('paused_at', { withTimezone: true }),
-    archivedAt: timestamp('archived_at', { withTimezone: true }),
-    leaseUntil: timestamp('lease_until', { withTimezone: true }),
-    lastRunAt: timestamp('last_run_at', { withTimezone: true }),
+    pausedAt: time('paused_at'),
+    archivedAt: time('archived_at'),
+    leaseUntil: time('lease_until'),
+    lastRunAt: time('last_run_at'),
     lastStatus: text('last_status'),
     lastError: text('last_error'),
   },
   (table) => [
-    check('syncs_config_check', sql`${table.config}::jsonb IS NOT NULL`),
+    check('syncs_config_check', sql`json_valid(${table.config})`),
     check(
       'syncs_last_status_check',
       sql`${table.lastStatus} IS NULL OR ${table.lastStatus} IN ('ok', 'partial', 'failed')`,
@@ -489,22 +467,14 @@ export const syncs = pgTable(
   ],
 );
 
-/**
- * What a sync last pushed, one row per key.
- *
- * Most destinations are write-only, so coffre cannot diff against them. It
- * diffs against this instead: a key is stale when its secret has moved past
- * the version recorded here. It is also the list of keys coffre may delete at
- * the destination; a key it never pushed is never removed.
- */
-export const syncKeys = pgTable(
+export const syncKeys = mysqlTable(
   'sync_keys',
   {
-    syncId: uuid('sync_id').notNull(),
-    key: text().notNull(),
-    secretVersionId: uuid('secret_version_id'),
-    pushedAt: timestamp('pushed_at', { withTimezone: true }).notNull().defaultNow(),
-    removedAt: timestamp('removed_at', { withTimezone: true }),
+    syncId: id('sync_id').notNull(),
+    key: varchar({ length: 128 }).notNull(),
+    secretVersionId: id('secret_version_id'),
+    pushedAt: time('pushed_at').notNull().default(now),
+    removedAt: time('removed_at'),
   },
   (table) => [
     primaryKey({ name: 'sync_keys_pkey', columns: [table.syncId, table.key] }),
@@ -521,7 +491,6 @@ export const syncKeys = pgTable(
   ],
 );
 
-// For Drizzle's relational queries; see relations.ts.
 export const {
   principalsRelations,
   grantsRelations,
@@ -531,4 +500,6 @@ export const {
   secretsRelations,
   syncsRelations,
   syncKeysRelations,
-} = relationsOf({ projects, environments, secrets, secretVersions, principals, grants, identities, credentials, syncs, syncKeys });
+} = relationsOf(
+  asPostgres({ projects, environments, secrets, secretVersions, principals, grants, identities, credentials, syncs, syncKeys }),
+);

@@ -1,0 +1,282 @@
+-- The Postgres schema as of 0005_portable_schema, on MySQL. Generated from
+-- src/schema.mysql.ts, plus the first statement and the rows at the end.
+
+-- Compare strings byte for byte, as Postgres does: API_KEY and api_key are
+-- two secrets, and a slug check is case-sensitive.
+ALTER DATABASE CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+--> statement-breakpoint
+CREATE TABLE `audit_chain_head` (
+	`only_row` boolean NOT NULL DEFAULT true,
+	`next_seq` bigint NOT NULL DEFAULT 0,
+	`head_hash` varbinary(32) NOT NULL,
+	`updated_at` datetime(3) NOT NULL DEFAULT (UTC_TIMESTAMP(3)),
+	CONSTRAINT `audit_chain_head_only_row` PRIMARY KEY(`only_row`),
+	CONSTRAINT `audit_chain_head_only_row_check` CHECK(`audit_chain_head`.`only_row` = true),
+	CONSTRAINT `audit_chain_head_head_hash_check` CHECK(octet_length(`audit_chain_head`.`head_hash`) = 32)
+);
+--> statement-breakpoint
+CREATE TABLE `audit_checkpoints` (
+	`id` varchar(36) NOT NULL,
+	`seq` bigint NOT NULL,
+	`head_hash` varbinary(32) NOT NULL,
+	`created_at` datetime(3) NOT NULL DEFAULT (UTC_TIMESTAMP(3)),
+	`exported_at` datetime(3),
+	`export_target` text,
+	CONSTRAINT `audit_checkpoints_id` PRIMARY KEY(`id`),
+	CONSTRAINT `audit_checkpoints_head_hash_check` CHECK(octet_length(`audit_checkpoints`.`head_hash`) = 32)
+);
+--> statement-breakpoint
+CREATE TABLE `audit_heartbeat` (
+	`only_row` boolean NOT NULL DEFAULT true,
+	`last_beat_at` datetime(3) NOT NULL DEFAULT (UTC_TIMESTAMP(3)),
+	`last_seq` bigint NOT NULL DEFAULT 0,
+	CONSTRAINT `audit_heartbeat_only_row` PRIMARY KEY(`only_row`),
+	CONSTRAINT `audit_heartbeat_only_row_check` CHECK(`audit_heartbeat`.`only_row` = true)
+);
+--> statement-breakpoint
+CREATE TABLE `audit_log` (
+	`seq` bigint NOT NULL,
+	`id` varchar(36) NOT NULL,
+	`occurred_at` datetime(6) NOT NULL DEFAULT (UTC_TIMESTAMP(6)),
+	`actor_type` varchar(16) NOT NULL,
+	`actor_id` varchar(330) NOT NULL,
+	`action` text NOT NULL,
+	`decision` text NOT NULL,
+	`project_id` varchar(36),
+	`environment_id` varchar(36),
+	`secret_id` varchar(36),
+	`bundle_id` varchar(36),
+	`request_id` text,
+	`source_ip` text,
+	`metadata` text NOT NULL DEFAULT ('{}'),
+	`prev_hash` varbinary(32) NOT NULL,
+	`hash` varbinary(32) NOT NULL,
+	CONSTRAINT `audit_log_seq` PRIMARY KEY(`seq`),
+	CONSTRAINT `audit_log_id_key` UNIQUE(`id`),
+	CONSTRAINT `audit_log_actor_type_check` CHECK(`audit_log`.`actor_type` IN ('user', 'service', 'system')),
+	CONSTRAINT `audit_log_decision_check` CHECK(`audit_log`.`decision` IN ('allow', 'deny')),
+	CONSTRAINT `audit_log_metadata_check` CHECK(json_valid(`audit_log`.`metadata`)),
+	CONSTRAINT `audit_log_prev_hash_check` CHECK(octet_length(`audit_log`.`prev_hash`) = 32),
+	CONSTRAINT `audit_log_hash_check` CHECK(octet_length(`audit_log`.`hash`) = 32)
+);
+--> statement-breakpoint
+CREATE TABLE `credentials` (
+	`id` varchar(36) NOT NULL,
+	`kind` text NOT NULL,
+	`token_hash` varbinary(32) NOT NULL,
+	`token_hint` text NOT NULL,
+	`principal_type` varchar(16) NOT NULL,
+	`principal_id` varchar(330) NOT NULL,
+	`identity_id` varchar(36),
+	`label` text,
+	`created_at` datetime(3) NOT NULL DEFAULT (UTC_TIMESTAMP(3)),
+	`created_by` text NOT NULL,
+	`expires_at` datetime(3) NOT NULL,
+	`last_used_at` datetime(3),
+	`last_used_ip` text,
+	`revoked_at` datetime(3),
+	`revoked_by` text,
+	CONSTRAINT `credentials_id` PRIMARY KEY(`id`),
+	CONSTRAINT `credentials_token_hash_key` UNIQUE(`token_hash`),
+	CONSTRAINT `credentials_kind_check` CHECK(`credentials`.`kind` IN ('browser', 'cli', 'service')),
+	CONSTRAINT `credentials_kind_matches_principal` CHECK((`credentials`.`kind` = 'service') = (`credentials`.`principal_type` = 'service')),
+	CONSTRAINT `credentials_token_hash_check` CHECK(octet_length(`credentials`.`token_hash`) = 32)
+);
+--> statement-breakpoint
+CREATE TABLE `device_authorizations` (
+	`id` varchar(36) NOT NULL,
+	`device_code_hash` varbinary(32) NOT NULL,
+	`user_code` varchar(32) NOT NULL,
+	`client_label` text,
+	`client_ip` text,
+	`created_at` datetime(3) NOT NULL DEFAULT (UTC_TIMESTAMP(3)),
+	`expires_at` datetime(3) NOT NULL,
+	`decided_at` datetime(3),
+	`decision` text,
+	`principal_type` varchar(16),
+	`principal_id` varchar(330),
+	`consumed_at` datetime(3),
+	CONSTRAINT `device_authorizations_id` PRIMARY KEY(`id`),
+	CONSTRAINT `device_authorizations_device_code_hash_key` UNIQUE(`device_code_hash`),
+	CONSTRAINT `device_authorizations_user_code_key` UNIQUE(`user_code`),
+	CONSTRAINT `device_authorizations_decision_check` CHECK(`device_authorizations`.`decision` IS NULL OR `device_authorizations`.`decision` IN ('approved', 'denied')),
+	CONSTRAINT `device_authorizations_approval_names_principal` CHECK((`device_authorizations`.`decision` = 'approved') = (`device_authorizations`.`principal_id` IS NOT NULL))
+);
+--> statement-breakpoint
+CREATE TABLE `environments` (
+	`id` varchar(36) NOT NULL,
+	`project_id` varchar(36) NOT NULL,
+	`slug` varchar(63) NOT NULL,
+	`name` text NOT NULL,
+	`created_at` datetime(3) NOT NULL DEFAULT (UTC_TIMESTAMP(3)),
+	`archived_at` datetime(3),
+	CONSTRAINT `environments_id` PRIMARY KEY(`id`),
+	CONSTRAINT `environments_project_id_slug_key` UNIQUE(`project_id`,`slug`),
+	CONSTRAINT `environments_project_scoped` UNIQUE(`id`,`project_id`),
+	CONSTRAINT `environments_slug_check` CHECK(regexp_like(`environments`.`slug`, '^[a-z0-9][a-z0-9-]{0,62}$', 'c'))
+);
+--> statement-breakpoint
+CREATE TABLE `grants` (
+	`id` varchar(36) NOT NULL,
+	`principal_type` varchar(16) NOT NULL,
+	`principal_id` varchar(330) NOT NULL,
+	`environment_id` varchar(36),
+	`created_at` datetime(3) NOT NULL DEFAULT (UTC_TIMESTAMP(3)),
+	`created_by` text NOT NULL,
+	`project_id` varchar(36),
+	`role` text NOT NULL,
+	`expires_at` datetime(3),
+	CONSTRAINT `grants_id` PRIMARY KEY(`id`),
+	CONSTRAINT `grants_environment_unique` UNIQUE(`principal_type`,`principal_id`,`environment_id`),
+	CONSTRAINT `grants_project_unique` UNIQUE(`principal_type`,`principal_id`,`project_id`),
+	CONSTRAINT `grants_principal_type_check` CHECK(`grants`.`principal_type` IN ('user', 'service')),
+	CONSTRAINT `grants_exactly_one_scope` CHECK((`grants`.`project_id` IS NULL) <> (`grants`.`environment_id` IS NULL)),
+	CONSTRAINT `grants_role_check` CHECK(`grants`.`role` IN ('viewer', 'developer', 'maintainer', 'access-manager', 'auditor', 'owner'))
+);
+--> statement-breakpoint
+CREATE TABLE `identities` (
+	`id` varchar(36) NOT NULL,
+	`provider` varchar(32) NOT NULL,
+	`subject` varchar(255) NOT NULL,
+	`principal_type` varchar(16) NOT NULL,
+	`principal_id` varchar(330) NOT NULL,
+	`email` text,
+	`created_at` datetime(3) NOT NULL DEFAULT (UTC_TIMESTAMP(3)),
+	`created_by` text NOT NULL,
+	`last_sign_in_at` datetime(3),
+	`revoked_at` datetime(3),
+	`revoked_by` text,
+	`active_subject` varchar(255) GENERATED ALWAYS AS (CASE WHEN revoked_at IS NULL THEN subject END) STORED,
+	CONSTRAINT `identities_id` PRIMARY KEY(`id`),
+	CONSTRAINT `identities_active_subject` UNIQUE(`provider`,`active_subject`),
+	CONSTRAINT `identities_principal_type_check` CHECK(`identities`.`principal_type` = 'user'),
+	CONSTRAINT `identities_provider_check` CHECK(regexp_like(`identities`.`provider`, '^[a-z0-9][a-z0-9-]{0,31}$', 'c'))
+);
+--> statement-breakpoint
+CREATE TABLE `principals` (
+	`principal_type` varchar(16) NOT NULL,
+	`principal_id` varchar(330) NOT NULL,
+	`instance_role` text NOT NULL DEFAULT ('user'),
+	`created_at` datetime(3) NOT NULL DEFAULT (UTC_TIMESTAMP(3)),
+	`created_by` text NOT NULL,
+	`active` boolean NOT NULL DEFAULT true,
+	CONSTRAINT `principals_pkey` PRIMARY KEY(`principal_type`,`principal_id`),
+	CONSTRAINT `principals_principal_type_check` CHECK(`principals`.`principal_type` IN ('user', 'service')),
+	CONSTRAINT `principals_instance_role_check` CHECK(`principals`.`instance_role` IN ('user', 'owner')),
+	CONSTRAINT `principals_service_role_check` CHECK(`principals`.`principal_type` = 'user' OR `principals`.`instance_role` = 'user'),
+	CONSTRAINT `principals_user_id_lowercase` CHECK(`principals`.`principal_type` <> 'user' OR `principals`.`principal_id` = lower(`principals`.`principal_id`))
+);
+--> statement-breakpoint
+CREATE TABLE `projects` (
+	`id` varchar(36) NOT NULL,
+	`slug` varchar(63) NOT NULL,
+	`name` text NOT NULL,
+	`created_at` datetime(3) NOT NULL DEFAULT (UTC_TIMESTAMP(3)),
+	`archived_at` datetime(3),
+	CONSTRAINT `projects_id` PRIMARY KEY(`id`),
+	CONSTRAINT `projects_slug_key` UNIQUE(`slug`),
+	CONSTRAINT `projects_slug_check` CHECK(regexp_like(`projects`.`slug`, '^[a-z0-9][a-z0-9-]{0,62}$', 'c'))
+);
+--> statement-breakpoint
+CREATE TABLE `secret_versions` (
+	`id` varchar(36) NOT NULL,
+	`secret_id` varchar(36) NOT NULL,
+	`version` int NOT NULL,
+	`envelope_version` int NOT NULL,
+	`ciphertext` longblob NOT NULL,
+	`iv` varbinary(12) NOT NULL,
+	`auth_tag` varbinary(16) NOT NULL,
+	`wrapped_dek` longblob NOT NULL,
+	`kek_provider` text NOT NULL,
+	`kek_id` text NOT NULL,
+	`kek_version` text NOT NULL,
+	`created_at` datetime(3) NOT NULL DEFAULT (UTC_TIMESTAMP(3)),
+	`created_by` text NOT NULL,
+	CONSTRAINT `secret_versions_id` PRIMARY KEY(`id`),
+	CONSTRAINT `secret_versions_secret_id_version_key` UNIQUE(`secret_id`,`version`),
+	CONSTRAINT `secret_versions_version_check` CHECK(`secret_versions`.`version` > 0),
+	CONSTRAINT `secret_versions_iv_check` CHECK(octet_length(`secret_versions`.`iv`) = 12),
+	CONSTRAINT `secret_versions_auth_tag_check` CHECK(octet_length(`secret_versions`.`auth_tag`) = 16)
+);
+--> statement-breakpoint
+CREATE TABLE `secrets` (
+	`id` varchar(36) NOT NULL,
+	`project_id` varchar(36) NOT NULL,
+	`environment_id` varchar(36) NOT NULL,
+	`key` varchar(128) NOT NULL,
+	`created_at` datetime(3) NOT NULL DEFAULT (UTC_TIMESTAMP(3)),
+	`updated_at` datetime(3) NOT NULL DEFAULT (UTC_TIMESTAMP(3)),
+	`current_version_id` varchar(36),
+	`current_version` int NOT NULL DEFAULT 0,
+	`archived_at` datetime(3),
+	CONSTRAINT `secrets_id` PRIMARY KEY(`id`),
+	CONSTRAINT `secrets_project_id_environment_id_key_key` UNIQUE(`project_id`,`environment_id`,`key`),
+	CONSTRAINT `secrets_key_check` CHECK(regexp_like(`secrets`.`key`, '^[A-Za-z_][A-Za-z0-9_]{0,127}$', 'c'))
+);
+--> statement-breakpoint
+CREATE TABLE `sync_keys` (
+	`sync_id` varchar(36) NOT NULL,
+	`key` varchar(128) NOT NULL,
+	`secret_version_id` varchar(36),
+	`pushed_at` datetime(3) NOT NULL DEFAULT (UTC_TIMESTAMP(3)),
+	`removed_at` datetime(3),
+	CONSTRAINT `sync_keys_pkey` PRIMARY KEY(`sync_id`,`key`)
+);
+--> statement-breakpoint
+CREATE TABLE `syncs` (
+	`id` varchar(36) NOT NULL,
+	`project_id` varchar(36) NOT NULL,
+	`environment_id` varchar(36) NOT NULL,
+	`provider` text NOT NULL,
+	`config` text NOT NULL,
+	`credential_secret_id` varchar(36) NOT NULL,
+	`created_at` datetime(3) NOT NULL DEFAULT (UTC_TIMESTAMP(3)),
+	`created_by` text NOT NULL,
+	`paused_at` datetime(3),
+	`archived_at` datetime(3),
+	`lease_until` datetime(3),
+	`last_run_at` datetime(3),
+	`last_status` text,
+	`last_error` text,
+	CONSTRAINT `syncs_id` PRIMARY KEY(`id`),
+	CONSTRAINT `syncs_config_check` CHECK(json_valid(`syncs`.`config`)),
+	CONSTRAINT `syncs_last_status_check` CHECK(`syncs`.`last_status` IS NULL OR `syncs`.`last_status` IN ('ok', 'partial', 'failed'))
+);
+--> statement-breakpoint
+ALTER TABLE `audit_log` ADD CONSTRAINT `audit_log_project_id_fkey` FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE `audit_log` ADD CONSTRAINT `audit_log_environment_id_fkey` FOREIGN KEY (`environment_id`) REFERENCES `environments`(`id`) ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE `audit_log` ADD CONSTRAINT `audit_log_secret_id_fkey` FOREIGN KEY (`secret_id`) REFERENCES `secrets`(`id`) ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE `credentials` ADD CONSTRAINT `credentials_principal_fkey` FOREIGN KEY (`principal_type`,`principal_id`) REFERENCES `principals`(`principal_type`,`principal_id`) ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE `credentials` ADD CONSTRAINT `credentials_identity_id_fkey` FOREIGN KEY (`identity_id`) REFERENCES `identities`(`id`) ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE `device_authorizations` ADD CONSTRAINT `device_authorizations_principal_fkey` FOREIGN KEY (`principal_type`,`principal_id`) REFERENCES `principals`(`principal_type`,`principal_id`) ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE `environments` ADD CONSTRAINT `environments_project_id_fkey` FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE `grants` ADD CONSTRAINT `grants_principal_fkey` FOREIGN KEY (`principal_type`,`principal_id`) REFERENCES `principals`(`principal_type`,`principal_id`) ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE `grants` ADD CONSTRAINT `grants_environment_id_fkey` FOREIGN KEY (`environment_id`) REFERENCES `environments`(`id`) ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE `grants` ADD CONSTRAINT `grants_project_id_fkey` FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE `identities` ADD CONSTRAINT `identities_principal_fkey` FOREIGN KEY (`principal_type`,`principal_id`) REFERENCES `principals`(`principal_type`,`principal_id`) ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE `secret_versions` ADD CONSTRAINT `secret_versions_secret_id_fkey` FOREIGN KEY (`secret_id`) REFERENCES `secrets`(`id`) ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE `secrets` ADD CONSTRAINT `secrets_current_version_id_secret_versions_id_fk` FOREIGN KEY (`current_version_id`) REFERENCES `secret_versions`(`id`) ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE `secrets` ADD CONSTRAINT `secrets_project_id_fkey` FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE `secrets` ADD CONSTRAINT `secrets_environment_id_fkey` FOREIGN KEY (`environment_id`) REFERENCES `environments`(`id`) ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE `secrets` ADD CONSTRAINT `secrets_environment_in_project` FOREIGN KEY (`environment_id`,`project_id`) REFERENCES `environments`(`id`,`project_id`) ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE `sync_keys` ADD CONSTRAINT `sync_keys_sync_id_fkey` FOREIGN KEY (`sync_id`) REFERENCES `syncs`(`id`) ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE `sync_keys` ADD CONSTRAINT `sync_keys_secret_version_id_fkey` FOREIGN KEY (`secret_version_id`) REFERENCES `secret_versions`(`id`) ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE `syncs` ADD CONSTRAINT `syncs_environment_in_project` FOREIGN KEY (`environment_id`,`project_id`) REFERENCES `environments`(`id`,`project_id`) ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE `syncs` ADD CONSTRAINT `syncs_credential_secret_id_fkey` FOREIGN KEY (`credential_secret_id`) REFERENCES `secrets`(`id`) ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+CREATE INDEX `audit_log_occurred_idx` ON `audit_log` (`occurred_at`);--> statement-breakpoint
+CREATE INDEX `audit_log_actor_idx` ON `audit_log` (`actor_type`,`actor_id`,`occurred_at`);--> statement-breakpoint
+CREATE INDEX `audit_log_secret_idx` ON `audit_log` (`secret_id`,`occurred_at`);--> statement-breakpoint
+CREATE INDEX `audit_log_environment_idx` ON `audit_log` (`environment_id`,`occurred_at`);--> statement-breakpoint
+CREATE INDEX `audit_log_bundle_idx` ON `audit_log` (`bundle_id`);--> statement-breakpoint
+CREATE INDEX `credentials_principal_idx` ON `credentials` (`principal_type`,`principal_id`);--> statement-breakpoint
+CREATE INDEX `grants_lookup_idx` ON `grants` (`principal_type`,`principal_id`,`environment_id`);--> statement-breakpoint
+CREATE INDEX `identities_principal_idx` ON `identities` (`principal_type`,`principal_id`);--> statement-breakpoint
+CREATE INDEX `secret_versions_secret_idx` ON `secret_versions` (`secret_id`,`version`);--> statement-breakpoint
+CREATE INDEX `secrets_lookup_idx` ON `secrets` (`project_id`,`environment_id`,`key`);--> statement-breakpoint
+CREATE INDEX `syncs_environment_idx` ON `syncs` (`environment_id`);--> statement-breakpoint
+
+-- The chain starts at sequence 0 from 32 zero bytes, and the heartbeat row
+-- is always there to update.
+INSERT INTO `audit_chain_head` (`only_row`, `next_seq`, `head_hash`) VALUES (true, 0, UNHEX(REPEAT('00', 32)));
+--> statement-breakpoint
+INSERT INTO `audit_heartbeat` (`only_row`, `last_seq`) VALUES (true, 0);

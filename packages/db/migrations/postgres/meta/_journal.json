@@ -36,6 +36,13 @@
       "when": 1790583999146,
       "tag": "0004_secret_version_counter",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1790596884400,
+      "tag": "0005_portable_schema",
+      "breakpoints": true
     }
   ]
 }

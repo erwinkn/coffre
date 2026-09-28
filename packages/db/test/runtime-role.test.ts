@@ -64,7 +64,7 @@ test('Drizzle migrations preserve the restricted runtime database identity', asy
     const migrations = await owner.query<{ count: number }>(
       'SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations',
     );
-    assert.equal(migrations.rows[0].count, 5);
+    assert.equal(migrations.rows[0].count, 6);
 
     const identity = await runtime.query<{
       current_user: string;

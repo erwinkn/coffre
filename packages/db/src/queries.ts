@@ -1,37 +1,21 @@
 import { and, asc, count, desc, eq, getTableColumns, gt, gte, inArray, isNull, lt, or, sql, type SQL } from 'drizzle-orm';
 
 import type { Envelope } from '../../core/src/envelope.ts';
-import type { Queryable, Transaction } from './database.ts';
-import {
-  canonicalTimestamp,
-  changedRows,
-  forUpdate,
-  ignoreConflicts,
-  migrations,
-  onConflictUpdate,
-  type Table,
-} from './dialect.ts';
-import {
-  auditChainHead,
-  auditHeartbeat,
-  auditLog,
-  credentials,
-  deviceAuthorizations,
-  environments,
-  grants,
-  identities,
-  principals,
-  projects,
-  secrets,
-  secretVersions,
-  syncs,
-} from './schema.ts';
+import { own, tablesOf, type Queryable, type Transaction } from './database.ts';
+import * as dialect from './dialect.ts';
+import { canonicalTimestamp, changedRows, clock, forUpdate, migrationLedger, type Table } from './dialect.ts';
+import type * as schema from './schema.ts';
 
 /**
  * Every query coffre runs, and nowhere else: named reads, each returning all
  * that its callers need in one statement, four generic writes, and a lock.
  * The server works on what these return and never writes SQL; lint keeps
  * drizzle out of apps/web.
+ *
+ * Each query builds on the tables of the database it is given (`tablesOf`),
+ * so the one text runs on Postgres, MySQL and SQLite; see portable.ts. The
+ * server names a table for the generic writes by importing schema.ts, and
+ * `own` swaps in the database's twin.
  *
  * Writes do not check first and do not read back. A unique constraint
  * answers "is it taken", and a conditional update's row count answers "was
@@ -40,6 +24,7 @@ import {
 
 // --- generic writes -----------------------------------------------------------
 
+type Tables = typeof schema;
 type Row<T extends Table> = T['$inferSelect'];
 type NewRow<T extends Table> = T['$inferInsert'];
 
@@ -66,7 +51,7 @@ function matching<T extends Table>(table: T, match: Match<T>): SQL | undefined {
 
 export async function insert<T extends Table>(db: Queryable, table: T, rows: NewRow<T> | NewRow<T>[]): Promise<void> {
   if (Array.isArray(rows) && rows.length === 0) return;
-  await db.insert(table).values(rows as never);
+  await db.insert(own(db, table)).values(rows as never);
 }
 
 /** Insert the rows whose unique keys are free; returns how many that was. */
@@ -75,8 +60,9 @@ export async function insertIfAbsent<T extends Table>(
   table: T,
   rows: NewRow<T> | NewRow<T>[],
 ): Promise<number> {
-  if (Array.isArray(rows) && rows.length === 0) return 0;
-  return changedRows(await ignoreConflicts(db.insert(table).values(rows as never)));
+  const all = Array.isArray(rows) ? rows : [rows];
+  if (all.length === 0) return 0;
+  return dialect.insertIfAbsent(db, own(db, table), all);
 }
 
 /** Insert the rows, or where one repeats the unique key `target`, overwrite its `columns`. */
@@ -87,7 +73,7 @@ export async function upsert<T extends Table>(
   { target, columns }: { target: (keyof Row<T>)[]; columns: (keyof Row<T>)[] },
 ): Promise<void> {
   if (rows.length === 0) return;
-  await onConflictUpdate(db.insert(table).values(rows as never), table, target, columns);
+  await dialect.upsert(db, own(db, table), rows, target, columns);
 }
 
 /**
@@ -100,7 +86,8 @@ export async function update<T extends Table>(
   match: Match<T>,
   set: Partial<NewRow<T>>,
 ): Promise<number> {
-  return changedRows(await db.update(table).set(set as never).where(matching(table, match)));
+  const mine = own(db, table);
+  return changedRows(await db.update(mine).set(set as never).where(matching(mine, match)));
 }
 
 /**
@@ -108,7 +95,8 @@ export async function update<T extends Table>(
  * are once the lock is ours. Only for real races; each caller says which.
  */
 export async function lock<T extends Table>(tx: Transaction, table: T, match: Match<T>): Promise<Row<T>[]> {
-  return (await forUpdate(tx.select().from(table as Table).where(matching(table, match)))) as Row<T>[];
+  const mine = own(tx, table);
+  return (await forUpdate(tx, tx.select().from(mine as Table).where(matching(mine, match)))) as Row<T>[];
 }
 
 // --- the caller and places ----------------------------------------------------
@@ -129,6 +117,7 @@ export async function callerGrants(
   principal: { type: string; id: string },
   now: Date,
 ): Promise<{ active: boolean; instanceRole: string; grants: HeldGrant[] } | null> {
+  const { principals, grants, environments } = tablesOf(db);
   const rows = await db
     .select({
       active: principals.active,
@@ -184,6 +173,7 @@ export async function resolvePath(
   db: Queryable,
   path: { project: string; environment?: string; key?: string },
 ): Promise<ResolvedPath | null> {
+  const { projects, environments, secrets } = tablesOf(db);
   const [row] = await db
     .select({ project: projects, environment: environments, secret: secrets })
     .from(projects)
@@ -230,6 +220,7 @@ export type PlaceRow = {
 
 /** Every project with its environments and their live secret counts, by slug. */
 export async function places(db: Queryable): Promise<PlaceRow[]> {
+  const { projects, environments, secrets } = tablesOf(db);
   const rows = await db
     .select({
       project: projects,
@@ -316,6 +307,7 @@ export async function members(
   filter: { member?: { type: string; id: string } },
   now: Date,
 ): Promise<MemberRow[]> {
+  const { principals, credentials, identities } = tablesOf(db);
   const { member } = filter;
   const rows = await db.query.principals.findMany({
     where: member === undefined ? undefined : and(eq(principals.principalType, member.type), eq(principals.principalId, member.id)),
@@ -372,6 +364,7 @@ export async function members(
  * now: its key, current version, and whether it or its place is archived.
  */
 export async function memberActivity(db: Queryable, actorIds: string[]) {
+  const { auditLog, secrets, environments, projects } = tablesOf(db);
   const allowed = eq(auditLog.decision, 'allow');
   const seen = and(
     allowed,
@@ -389,7 +382,7 @@ export async function memberActivity(db: Queryable, actorIds: string[]) {
       occurredAt: auditLog.occurredAt,
       key: secrets.key,
       currentVersion: secrets.currentVersion,
-      archived: sql<boolean>`${secrets.archivedAt} IS NOT NULL OR ${environments.archivedAt} IS NOT NULL OR ${projects.archivedAt} IS NOT NULL`,
+      archived: sql`${secrets.archivedAt} IS NOT NULL OR ${environments.archivedAt} IS NOT NULL OR ${projects.archivedAt} IS NOT NULL`.mapWith(Boolean),
       project: projects.slug,
       environment: environments.slug,
     })
@@ -413,6 +406,7 @@ export async function findIdentity(
   db: Queryable,
   account: { provider: string; subject: string },
 ): Promise<{ id: string; principalId: string } | null> {
+  const { identities } = tablesOf(db);
   const [row] = await db
     .select({ id: identities.id, principalId: identities.principalId })
     .from(identities)
@@ -428,6 +422,7 @@ export async function findIdentity(
  * the caller decides what is live.
  */
 export async function findCredential(db: Queryable, by: { tokenHash: Buffer } | { id: string }) {
+  const { credentials, principals, identities } = tablesOf(db);
   const [row] = await db
     .select({
       id: credentials.id,
@@ -456,6 +451,7 @@ export async function findDeviceAuthorizations(
   db: Queryable,
   by: { userCode: string } | { deviceCodeHash: Buffer } | { openAt: Date },
 ) {
+  const { deviceAuthorizations } = tablesOf(db);
   return db
     .select()
     .from(deviceAuthorizations)
@@ -470,7 +466,7 @@ export async function findDeviceAuthorizations(
 
 // --- secrets ------------------------------------------------------------------
 
-const envelopeColumns = {
+const envelopeColumns = (secretVersions: Tables['secretVersions']) => ({
   envelopeVersion: secretVersions.envelopeVersion,
   kekProvider: secretVersions.kekProvider,
   kekId: secretVersions.kekId,
@@ -479,7 +475,7 @@ const envelopeColumns = {
   iv: secretVersions.iv,
   authTag: secretVersions.authTag,
   ciphertext: secretVersions.ciphertext,
-};
+});
 
 function envelopeOf(row: Envelope): Envelope {
   return {
@@ -518,6 +514,7 @@ export async function environmentSecrets(
   environmentId: string,
   secretId?: string,
 ): Promise<SecretRow[]> {
+  const { secrets, secretVersions } = tablesOf(db);
   const rows = await db
     .select({
       id: secrets.id,
@@ -527,7 +524,7 @@ export async function environmentSecrets(
       version: secretVersions.version,
       createdAt: secretVersions.createdAt,
       createdBy: secretVersions.createdBy,
-      ...envelopeColumns,
+      ...envelopeColumns(secretVersions),
     })
     .from(secrets)
     .leftJoin(secretVersions, eq(secretVersions.id, secrets.currentVersionId))
@@ -555,13 +552,14 @@ export async function secretHistory(
   db: Queryable,
   secretId: string,
 ): Promise<{ id: string; version: number; createdAt: Date; createdBy: string; envelope: Envelope }[]> {
+  const { secretVersions } = tablesOf(db);
   const rows = await db
     .select({
       id: secretVersions.id,
       version: secretVersions.version,
       createdAt: secretVersions.createdAt,
       createdBy: secretVersions.createdBy,
-      ...envelopeColumns,
+      ...envelopeColumns(secretVersions),
     })
     .from(secretVersions)
     .where(eq(secretVersions.secretId, secretId))
@@ -577,7 +575,7 @@ export async function secretHistory(
 
 // --- syncs --------------------------------------------------------------------
 
-export type SyncRow = typeof syncs.$inferSelect & {
+export type SyncRow = Tables['syncs']['$inferSelect'] & {
   project: string;
   environment: string;
   projectArchivedAt: Date | null;
@@ -592,6 +590,7 @@ export async function findSyncs(
   db: Queryable,
   filter: { id?: string; environmentId?: string; createdBy?: string; provider?: string },
 ): Promise<SyncRow[]> {
+  const { syncs } = tablesOf(db);
   const rows = await db.query.syncs.findMany({
     where: and(
       filter.id === undefined ? undefined : eq(syncs.id, filter.id),
@@ -639,15 +638,16 @@ export async function auditHead(
   db: Queryable,
   { lock: locking = false } = {},
 ): Promise<{ nextSeq: bigint; headHash: Buffer; now: string } | null> {
+  const { auditChainHead } = tablesOf(db);
   const query = db
-    .select({ nextSeq: auditChainHead.nextSeq, headHash: auditChainHead.headHash, now: sql<string>`CURRENT_TIMESTAMP` })
+    .select({ nextSeq: auditChainHead.nextSeq, headHash: auditChainHead.headHash, now: clock(db) })
     .from(auditChainHead)
     .limit(1);
-  const [head] = locking ? await forUpdate(query) : await query;
+  const [head] = locking ? await forUpdate(db, query) : await query;
   return head === undefined ? null : { ...head, now: canonicalTimestamp(head.now) };
 }
 
-const auditColumns = {
+const auditColumns = (auditLog: Tables['auditLog']) => ({
   seq: auditLog.seq,
   occurredAt: auditLog.occurredAt,
   actorType: auditLog.actorType,
@@ -661,12 +661,13 @@ const auditColumns = {
   requestId: auditLog.requestId,
   sourceIp: auditLog.sourceIp,
   metadata: auditLog.metadata,
-};
+});
 
 /** Rows in chain order from `fromSeq`, with every field as it was hashed. */
 export async function auditRange(db: Queryable, fromSeq = 0n, limit = 1000) {
+  const { auditLog } = tablesOf(db);
   const rows = await db
-    .select({ ...auditColumns, prevHash: auditLog.prevHash, hash: auditLog.hash })
+    .select({ ...auditColumns(auditLog), prevHash: auditLog.prevHash, hash: auditLog.hash })
     .from(auditLog)
     .where(gte(auditLog.seq, fromSeq))
     .orderBy(asc(auditLog.seq))
@@ -690,9 +691,10 @@ export type AuditFilter = {
 
 /** A page of the log, newest first, with the slugs of the places each entry names. */
 export async function auditPage(db: Queryable, filter: AuditFilter) {
+  const { auditLog, projects, environments } = tablesOf(db);
   const { within } = filter;
   const rows = await db
-    .select({ ...auditColumns, project: projects.slug, environment: environments.slug })
+    .select({ ...auditColumns(auditLog), project: projects.slug, environment: environments.slug })
     .from(auditLog)
     .leftJoin(projects, eq(projects.id, auditLog.projectId))
     .leftJoin(environments, eq(environments.id, auditLog.environmentId))
@@ -717,14 +719,15 @@ export async function auditPage(db: Queryable, filter: AuditFilter) {
 
 /** When the scheduler last wrote to the log, and the database clock now. */
 export async function heartbeat(db: Queryable): Promise<{ lastBeatAt: Date; now: string } | null> {
+  const { auditHeartbeat } = tablesOf(db);
   const [row] = await db
-    .select({ lastBeatAt: auditHeartbeat.lastBeatAt, now: sql<string>`CURRENT_TIMESTAMP` })
+    .select({ lastBeatAt: auditHeartbeat.lastBeatAt, now: clock(db) })
     .from(auditHeartbeat);
   return row === undefined ? null : { lastBeatAt: row.lastBeatAt, now: canonicalTimestamp(row.now) };
 }
 
 /** How many migrations the database has applied. */
 export async function appliedMigrations(db: Queryable): Promise<number> {
-  const [applied] = await db.select({ n: count() }).from(migrations);
+  const [applied] = await db.select({ n: count() }).from(migrationLedger(db));
   return applied?.n ?? 0;
 }
