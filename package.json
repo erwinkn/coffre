@@ -8,6 +8,8 @@
     "node": ">=24"
   },
   "scripts": {
+    "build": "pnpm -r --filter \"./packages/*\" run build",
+    "typecheck": "pnpm -r --filter \"./packages/*\" --filter \"./examples/*\" run typecheck",
     "dev": "./scripts/dev.sh",
     "dev:signin": "./scripts/dev.sh signin",
     "test": "pnpm lint && ./scripts/test-suite.sh",
@@ -15,7 +17,10 @@
     "test:mysql": "pnpm lint && COFFRE_TEST_ENGINE=mysql ./scripts/test-suite.sh",
     "test:all": "pnpm test && pnpm test:sqlite && pnpm test:mysql",
     "test:schema": "./scripts/test-schema.sh",
-    "lint": "eslint \"packages/ui/src/**/*.{ts,tsx}\"",
+    "smoke:workers": "node scripts/smoke.mjs workers",
+    "smoke:node": "node scripts/smoke.mjs node",
+    "test:consumer": "./scripts/consumer-test.sh",
+    "lint": "eslint \"packages/ui/src/**/*.{ts,tsx}\" \"packages/server/src/**/*.ts\"",
     "check:pins": "node scripts/check-pins.mjs",
     "check:contrast": "node scripts/check-contrast.mjs",
     "db:up": "docker compose up -d postgres",

@@ -44,9 +44,10 @@ for (const kind of KINDS) {
 
     const expected = exampleFiles(kind);
     assert.ok(expected.includes('package.json') && expected.includes('.gitignore'));
+    // The files come first, up to a blank line; the next steps follow it.
     const written = output
+      .slice(0, output.indexOf('\n\n'))
       .split('\n')
-      .filter((line) => line.startsWith('  ') && !line.startsWith('  cd') && !line.startsWith('  pnpm'))
       .map((line) => line.trim())
       .sort();
     assert.deepEqual(written, expected);

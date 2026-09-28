@@ -1,0 +1,6 @@
+# wrangler's esbuild and workerd each come with an install script that checks
+# the platform binary it already has as an optional dependency. Neither needs
+# to run, and pnpm wants to be told.
+allowBuilds:
+  esbuild: false
+  workerd: false

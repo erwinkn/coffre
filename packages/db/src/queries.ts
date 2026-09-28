@@ -10,7 +10,7 @@ import type * as schema from './schema.ts';
  * Every query coffre runs, and nowhere else: named reads, each returning all
  * that its callers need in one statement, four generic writes, and a lock.
  * The server works on what these return and never writes SQL; lint keeps
- * drizzle out of apps/web.
+ * drizzle out of the server and the pages.
  *
  * Each query builds on the tables of the database it is given (`tablesOf`),
  * so the one text runs on Postgres, MySQL and SQLite; see portable.ts. The
