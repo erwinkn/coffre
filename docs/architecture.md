@@ -53,7 +53,7 @@ trigger, the UI's static files).
 |---|---|---|
 | `@coffre/ui` | the web UI, server-rendered, and its static files | nothing sensitive |
 | `@coffre/server` | `/api`, sign-in, syncs, the heartbeat; hands pages to the UI | sessions, the app database |
-| `@coffre/vault` | encrypts and decrypts, decides who may, logs every use | the keys, the vault's store |
+| `@coffre/vault` | wraps and unwraps data keys, decides who may, logs every use | the keys, the vault's store |
 | `@coffre/client` | the typed API client | |
 | `@coffre/cli` | `init`, `login`, secrets, syncs, audit; built on the client | a CLI session |
 
@@ -176,41 +176,126 @@ decrypt. The vault never sees a cookie, an OAuth flow or a session; the app
 passes it a claim:
 
 ```ts
-vault.unwrap(wrapped, {
-  principal: 'user:42',
-  secret: { project: 'market', environment: 'prod', key: 'DATABASE_URL', version: 4 },
-  purpose: 'reveal', // or 'run', 'sync'
+await vault.unwrap({
+  principal: 'user:dev@acme.example',
+  purpose: 'reveal', // or 'run', 'compare', 'sync'
+  requestId,
+  items: [{ secret: { projectId, environmentId, secretId, version: 4 }, wrapped }],
 });
+// { ok: true, keys: [...] }
+// { ok: false, refusal: { code: 'no_grant', message: '...' } }
 ```
 
-and before decrypting, the vault checks that the principal has not been
-removed, that a grant covers `market/prod` for reading and has not expired,
-and that the principal is under the bulk-read limit. It logs the attempt
-either way.
+Before it unwraps anything, the vault checks that the principal has not been
+removed, that an unexpired grant covers that environment for reading, that
+the wrapped key belongs to that secret (the key is bound to the ids, so a key
+moved to another row is refused as `bad_claim`), and that the principal is
+under the bulk limit. It logs the attempt either way. A batch is all or
+nothing: fifty keys for one `coffre run` are one decision and one refusal.
 
-The vault owns everything that decides access: the keys, grants, principal
-status (active or removed), the root admins (from its configuration, so no
-row anywhere makes someone one), and its own log. Changing a grant is a vault
-call (`vault.grant`, `vault.revoke`, `vault.remove`), and the app asks
-`vault.grantsFor(principal)` to decide what its pages show.
+The code lives in `packages/vault`: one `Vault` interface, one
+implementation, and a small storage layer, Drizzle over SQLite with its own
+schema and migrations. The interface:
 
-The separation comes from storage, not database privileges, so it holds
-whatever database either side uses: the vault's store is one the app has no
-credentials for.
+| Call | Does |
+|---|---|
+| `unwrap`, `wrap`, `rewrap` | data keys, for a principal whose grants cover the secret |
+| `access(principal)` | one principal's status, owner flag and grants; the app asks once per request |
+| `members()` | everyone's, in one call, for the Users and project access pages |
+| `setAccess` | several places for one principal, all or nothing (`PATCH /api/access/<member>`) |
+| `admit`, `remove` | add or restore a member, or remove one and revoke every grant |
+| `checkpoint`, `latestCheckpoint` | sign the app log's head; read the latest signature |
+| `log` | a page of the vault's own log, with its chain verified; root admins only |
 
-| | App database | Vault store |
+Every argument and result is plain data, and a refusal is a value, not a
+thrown error, so the same interface works across a process boundary. The app
+turns a refusal into a 403 `vault_refused` carrying the vault's code
+(`removed`, `no_grant`, `expired`, ...), or a 403 `bulk_limit`, and logs it
+in its own log as `vault_<code>`.
+
+The vault owns everything that decides access: the key encryption key (KEK),
+grants (`(principal, place) → role`, one per member per place, with an
+optional expiry), principal status (active or removed), the root admins (from
+its configuration, so no row anywhere makes someone one), and its own log.
+The app keeps a directory row per member for names and sessions, but whether
+that member is still in comes only from `vault.access`. `can()` stays a plain
+function over the grants that call returned.
+
+### Transports
+
+- **In process** (`localVault`): the vault over a libSQL file of its own,
+  for the tests and for anything that runs coffre outside Workers. Each
+  call's arguments and results go through JSON on the way, as over RPC, so
+  nothing that only works in-process gets in.
+- **Workers**: `apps/vault` is a Worker of its own, `coffre-vault`, with no
+  route and no HTTP surface. It holds one Durable Object, `VaultObject`,
+  whose SQLite is the store. The app reaches it only through the `VAULT`
+  service binding, whose calls land on `VaultEntrypoint` (RPC).
+- **Locally**, the vault runs next to the app as an auxiliary Worker of the
+  app's Vite build, in `vite dev`, `vite build` (into `dist/coffre_vault`)
+  and `vite preview` alike, so `pnpm dev` and the production smoke test run
+  both Workers with no second command. Wrangler names it
+  `coffre-vault-<environment>` in a named environment, which the app's
+  development and signin bindings follow. `COFFRE_STATE_DIR` moves where
+  local Durable Objects keep their SQLite.
+
+### Where each secret lives
+
+| | App (Worker `coffre`) | Vault (Worker `coffre-vault`) |
 |---|---|---|
-| Holds | projects, environments, ciphertext and wrapped keys, the directory, sessions, syncs, the app's audit log | grants, principal status, its log |
-| Workers | Postgres or MySQL through Hyperdrive | a Durable Object's SQLite, bound to the vault Worker alone |
-| Node | Postgres, MySQL or a SQLite file | a SQLite file the vault process owns |
+| Config | `COFFRE_AUDIT_CHAIN_KEY`, Access or sign-in settings | `COFFRE_KEK_LOCAL`, `COFFRE_KEK_ID`, `COFFRE_ROOT_ADMINS`, `COFFRE_VAULT_SIGNING_KEY`, `COFFRE_BULK_LIMIT` |
+| Store | projects, environments, ciphertext and wrapped keys, the directory, sessions, syncs, the app's audit log | grants, principal status, unwrap counts, checkpoints, its own log |
+| Where | Postgres or MySQL through Hyperdrive; any of the three in Node | the Durable Object's SQLite; a libSQL file in Node |
 
-The app's audit log stays tamper-evident without database permissions: the
-vault signs its checkpoints, so a rewritten log no longer verifies. The
-vault's own log is append-only by construction, since its code has no path
-that updates or deletes a row, and hash-chained.
+Wrangler hands each Worker only the names its own config declares, and the
+app refuses to start if it is given a vault name. The separation comes from
+storage, not database privileges, so it holds whatever database either side
+uses: the vault's store is one the app has no credentials for, and neither
+store holds a key.
+
+### The bulk limit
+
+At most `COFFRE_BULK_LIMIT` data keys unwrapped per principal in any rolling
+window, `1000/15m` by default: twenty `coffre run`s of a 50-key environment
+back to back, which no person or pipeline does, while a script pulling every
+value it can reach stops within seconds. Each unwrapped key counts, so one
+50-key run is 50. A refusal is logged and answers 403 `bulk_limit`; the
+principal reads again as the window rolls on.
+
+### Checkpoints
+
+The app's audit log is hash-chained with `COFFRE_AUDIT_CHAIN_KEY`, which
+catches someone who can write the database but not read the app's config.
+Someone who holds the app could rewrite the log and chain it again. So after
+each heartbeat, the app asks the vault to sign the log's head:
+
+```
+checkpoint({ seq: 812, headHash, previous: { seq: 640, hash } })
+```
+
+The vault signs it with an Ed25519 key only it holds, and only if `previous`
+is the head it signed last and the log still holds that hash at that seq. A
+log rewritten behind a checkpoint no longer matches, so the vault refuses
+(`checkpoint_diverged`, logged) and `GET /api/audit/verification` fails:
+it recomputes the chain and checks the entry at the latest checkpoint's seq
+against the signed hash, with the vault's public key.
+
+`COFFRE_AUDIT_CHAIN_KEY` stays in the app. Signing covers someone who holds
+the app; the keyed chain still covers the entries written since the last
+checkpoint against someone who holds only the database. Moving the key would
+put a vault call on every audited write, and the sign-in state key is derived
+from it.
+
+### What the vault stops
+
+The vault's own log is append-only (triggers refuse updates and deletes, and
+its code has no path to either) and hash-chained. It records every unwrap
+attempt and every change to grants or status. Root admins read it through
+the app (`GET /api/audit/vault`), and on the audit page.
 
 A sync reads as a principal of its own (`sync:<id>`), with a grant made when
-the sync is added. Revoking that grant stops it.
+the sync is added and revoked when it is removed. Revoking that grant stops
+the sync: its next run is refused.
 
 What the vault stops:
 
@@ -221,6 +306,7 @@ What the vault stops:
 - **Someone removed getting back in.** An offboarding bug leaves a session
   alive; the vault refuses the principal, which only it can restore.
 - **A copy of either database.** Neither holds a key.
+- **A rewritten app log.** It no longer matches the signed checkpoint.
 
 What it does not stop: an app fully taken over, or someone who can write to
 the app's database and forge a session, can act as anyone who already has
