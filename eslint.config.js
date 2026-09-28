@@ -1,6 +1,11 @@
 import { defineConfig } from 'eslint/config';
 import tsParser from '@typescript-eslint/parser';
 
+const queriesLiveInDb = {
+  regex: '^drizzle-orm(/|$)',
+  message: 'Every query lives in packages/db/src/queries.ts; add or extend one there.',
+};
+
 const rawServerFunctionImport = {
   paths: [
     {
@@ -9,11 +14,13 @@ const rawServerFunctionImport = {
       message: 'Use registeredServerFn, or the reviewed sessionServerFn boundary.',
     },
   ],
+  patterns: [queriesLiveInDb],
 };
 
 const protectedServerFunctionImports = {
   ...rawServerFunctionImport,
   patterns: [
+    queriesLiveInDb,
     {
       regex: '(^|/)server/server-fn(?:\\.ts)?$',
       importNames: ['sessionServerFn'],

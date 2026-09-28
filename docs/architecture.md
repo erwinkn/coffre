@@ -223,6 +223,18 @@ Drizzle; none is written by hand. The integration suite runs against all
 three. [A spike](../spikes/drizzle-dialects/REPORT.md) ran the same queries,
 joins, a transaction, an upsert and 24 concurrent audit appends on all three.
 
+Every query lives in one module, `packages/db/src/queries.ts`, and the server
+writes no SQL (lint keeps `drizzle-orm` out of `apps/web`). There are named
+reads, one per shape of data the server needs (the caller, a path, an
+environment's secrets, the members, the syncs, a page of the log), each
+returning everything its callers use in one statement. There are also four
+generic writes (insert, insert if absent, upsert, update) and a row lock.
+Writes do not check first and do not read back. A unique constraint answers
+"is this slug taken". An update that matches the old value answers "was it
+still there": `{ id, revokedAt: null }` changes one row or none. Row locks are
+kept for real races (the audit head, offboarding against sign-in, sync
+leases, version counters), and each one says which race it guards.
+
 Each query is written once, typed against the Postgres schema. Drizzle has no
 type shared by its dialects, so the MySQL and SQLite databases are cast to the
 Postgres one in a single small module; at run time each database always
