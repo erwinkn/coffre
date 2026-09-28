@@ -8,6 +8,7 @@ import { z } from 'zod';
  *   401 unauthenticated    no credential, or one that did not verify
  *   403 forbidden          the caller lacks the permission
  *   403 registration_required  signed in, but not a member of this instance
+ *   403 cross_origin       a change sent with a browser cookie, from another site
  *   404 not_found          no such project, environment, secret, member or sync
  *   405 method_not_allowed
  *   409 conflict           the request is valid but the current state refuses it
@@ -21,6 +22,7 @@ export const ERROR_STATUS = {
   unauthenticated: 401,
   forbidden: 403,
   registration_required: 403,
+  cross_origin: 403,
   not_found: 404,
   method_not_allowed: 405,
   conflict: 409,

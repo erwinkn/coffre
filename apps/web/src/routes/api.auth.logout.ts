@@ -1,20 +1,22 @@
 import { createFileRoute } from '@tanstack/react-router';
 
 import { bearerToken } from '../server/auth.ts';
-import { errorResponse, jsonResponse, methodNotAllowed, requestContext } from '../server/http.ts';
+import { apiCaller } from '../server/fetch-api.ts';
+import { errorResponse, jsonResponse, methodNotAllowed } from '../server/http.ts';
 import { getRuntime } from '../server/runtime.ts';
 
 /** Revoke the bearer token this request carries: `coffre logout`. */
 export const Route = createFileRoute('/api/auth/logout')({
   server: {
     handlers: {
-      POST: async ({ request, context }) => {
+      POST: async ({ request }) => {
         try {
           const runtime = getRuntime();
-          const ctx = requestContext(context);
+          const identity = await apiCaller(request, runtime);
+          if (identity instanceof Response) return identity;
           const token = bearerToken(request);
           if (runtime.signin !== null && token !== null) {
-            await runtime.signin.signOut(token, ctx);
+            await runtime.signin.signOut(token, identity);
           }
           return jsonResponse({ signedOut: true });
         } catch (error) {

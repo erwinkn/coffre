@@ -10,11 +10,6 @@ import { getRuntime, type CoffreRuntime } from './runtime.ts';
 
 export const DEV_TOKEN_COOKIE = 'coffre_dev_token';
 export const PUBLIC_HEALTH_PATHS = new Set(['/livez', '/readyz']);
-/**
- * API endpoints a caller reaches before it has a credential: the CLI's
- * device-login start and poll.
- */
-export const PUBLIC_API_PATHS = new Set(['/api/auth/device', '/api/auth/device/token']);
 
 type AnonymousRequestContext = {
   principal: null;
@@ -101,24 +96,6 @@ export function accessTokenForRequest(request: Request, auth: AuthConfig): strin
 }
 
 /**
- * The API takes a header, the UI a cookie. In signin mode that header is a
- * standard bearer token; in dev mode it is the Access-shaped assertion the
- * dev IdP mints.
- */
-export function accessTokenForBoundary(
-  request: Request,
-  auth: AuthConfig,
-  pathname: string,
-): string | null {
-  if (auth.mode === 'signin' && isApiPath(pathname)) return bearerToken(request);
-  if (auth.mode === 'dev' && isApiPath(pathname)) {
-    const token = request.headers.get(ACCESS_JWT_HEADER);
-    return token === null || token.length === 0 ? null : token;
-  }
-  return accessTokenForRequest(request, auth);
-}
-
-/**
  * The caller's address, from Cloudflare's own header. The edge overwrites
  * `cf-connecting-ip` on every request, so a client cannot choose it; in dev
  * mode nothing sits in front to vouch for it.
@@ -133,7 +110,7 @@ export function trustedSourceIp(request: Request, auth: AuthConfig): string | nu
   return /^[0-9a-f]+(?::[0-9a-f]*)+$/i.test(value) ? value : null;
 }
 
-function unauthenticated(auth: AuthConfig): Response {
+export function unauthenticated(auth: AuthConfig): Response {
   return errorResponse(
     new ApiError(
       'unauthenticated',
@@ -142,7 +119,7 @@ function unauthenticated(auth: AuthConfig): Response {
   );
 }
 
-const registrationRequired = () =>
+export const registrationRequired = () =>
   errorResponse(new ApiError('registration_required', 'you are signed in, but not a member here'));
 
 function anonymousContext(requestId = crypto.randomUUID()): AnonymousRequestContext {
@@ -154,10 +131,10 @@ export async function authenticateRequest(
   runtime: AuthenticationRuntime,
   requestId = crypto.randomUUID(),
   token = accessTokenForRequest(request, runtime.auth),
+  sourceIp = trustedSourceIp(request, runtime.auth),
 ): Promise<AuthenticatedIdentity | Response> {
   if (token === null) return unauthenticated(runtime.auth);
 
-  const sourceIp = trustedSourceIp(request, runtime.auth);
   let principal: Principal;
   let credentialId: string | null = null;
   try {
@@ -197,35 +174,39 @@ function remember(request: Request, context: RequestIdentityContext): void {
   requestContexts.set(request, context);
 }
 
+/**
+ * Pages render signed out (the sign-in page itself), and sign-in, callback
+ * and sign-out routes check whatever session they need themselves.
+ */
 export function allowsAnonymousTransport(
   request: Request,
   handlerType: 'serverFn' | 'router',
   pathname: string,
 ): boolean {
   if (handlerType === 'serverFn') return true;
-  // Sign-in, callback and sign-out routes check whatever session they need
-  // themselves; the device endpoints are how a CLI gets a credential at all.
-  if (pathname.startsWith('/auth/') || PUBLIC_API_PATHS.has(pathname)) return true;
-  return (
-    (request.method === 'GET' || request.method === 'HEAD') &&
-    !isApiPath(pathname)
-  );
+  if (pathname.startsWith('/auth/')) return true;
+  return request.method === 'GET' || request.method === 'HEAD';
 }
 
+/**
+ * Who is asking, for pages and sign-in routes. `/api` is not its business:
+ * the API authenticates every call itself, from the page's own server render
+ * too, so it has one front door; see `fetch-api.ts`.
+ */
 export const requestIdentityMiddleware = createMiddleware().server(
   async ({ request, pathname, handlerType, next }) => {
     if (request.headers.has('x-middleware-subrequest')) {
       return errorResponse(badRequest('x-middleware-subrequest is not accepted'));
     }
 
-    if (isPublicHealthPath(pathname)) {
+    if (isPublicHealthPath(pathname) || isApiPath(pathname)) {
       const context: RequestIdentityContext = anonymousContext();
       remember(request, context);
       return next({ context: { coffreRequest: context } });
     }
 
     const runtime = getRuntime();
-    const token = accessTokenForBoundary(request, runtime.auth, pathname);
+    const token = accessTokenForRequest(request, runtime.auth);
     if (
       token === null &&
       allowsAnonymousTransport(request, handlerType, pathname)
@@ -245,9 +226,6 @@ export const requestIdentityMiddleware = createMiddleware().server(
         return next({ context: { coffreRequest: context } });
       }
       return result;
-    }
-    if (!result.registered && isApiPath(pathname)) {
-      return registrationRequired();
     }
     remember(request, result);
     return next({

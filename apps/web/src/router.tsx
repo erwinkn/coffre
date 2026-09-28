@@ -1,5 +1,6 @@
 import { createRouter as createTanStackRouter } from '@tanstack/react-router';
 import { getGlobalStartContext } from '@tanstack/react-start';
+import { createClient, type CoffreClient } from '../../../packages/client/src/index.ts';
 import { routeTree } from './routeTree.gen';
 import { NotFound, RouteError } from './components/route-states';
 
@@ -22,6 +23,28 @@ export function getRouter() {
     defaultNotFoundComponent: NotFound,
     defaultErrorComponent: RouteError,
     ssr: { nonce: cspNonce() },
+    context: { client: requestClient() },
+  });
+}
+
+/**
+ * The API as this visitor, which every loader reads through:
+ * `context.client.secrets.list('market/dev')`. On the server the Worker
+ * builds it per request, calling the API in process with the visitor's
+ * credential (`server/fetch-api.ts`); the UI only uses it. In the browser it
+ * is plain `fetch` to `/api`, which sends the session cookie itself.
+ */
+function requestClient(): CoffreClient {
+  if (typeof window !== 'undefined') return createClient({ url: window.location.origin });
+  try {
+    const client = getGlobalStartContext()?.client;
+    if (client !== undefined) return client;
+  } catch {
+    // As for the nonce, below: outside a request there is no one to ask as.
+  }
+  return createClient({
+    url: 'http://coffre.invalid',
+    transport: () => Promise.reject(new Error('no request to call the API for')),
   });
 }
 
@@ -40,7 +63,10 @@ function cspNonce(): string | undefined {
 }
 
 /** What worker.ts hands every request. */
-type RequestContext = { cspNonce: string };
+type RequestContext = { cspNonce: string; client: CoffreClient };
+
+/** What every loader and component can reach through the router. */
+export type RouterContext = { client: CoffreClient };
 
 // Start's server entry reads this `Register`, and its context helpers the
 // one below: the two do not merge, so each hears of the request context.

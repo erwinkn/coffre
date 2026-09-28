@@ -6,10 +6,8 @@ import type { Principal } from '../../../packages/core/src/identity/types.ts';
 import { createDatabase } from '../../../packages/db/src/database.ts';
 import {
   accessTokenForRequest,
-  accessTokenForBoundary,
   authenticateRequest,
   allowsAnonymousTransport,
-  DEV_TOKEN_COOKIE,
   isApiPath,
   isPublicHealthPath,
 } from '../src/server/auth.ts';
@@ -78,11 +76,11 @@ test('anonymous page and session transport reaches its route-specific boundary',
   );
   assert.equal(
     allowsAnonymousTransport(
-      new Request('https://coffre.test/api/me'),
+      new Request('https://coffre.test/auth/signout', { method: 'POST' }),
       'router',
-      '/api/me',
+      '/auth/signout',
     ),
-    false,
+    true,
   );
   assert.equal(
     allowsAnonymousTransport(
@@ -108,21 +106,12 @@ test('the Start instance keeps explicit CSRF and request identity layers', async
   assert.equal(options.functionMiddleware?.length ?? 0, 0);
 });
 
-test('native API mutations require origin checks unless the request is non-simple JSON', () => {
+test('Start checks the origin of page posts, and leaves /api to check its own', () => {
   assert.equal(
     shouldValidateCsrf('router', new Request('https://coffre.test/api/projects')),
     false,
   );
-  assert.equal(
-    shouldValidateCsrf(
-      'router',
-      new Request('https://coffre.test/api/projects', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-      }),
-    ),
-    false,
-  );
+  // /api knows whether a cookie or a token signed the change; see fetch-api.test.ts.
   assert.equal(
     shouldValidateCsrf(
       'router',
@@ -131,12 +120,22 @@ test('native API mutations require origin checks unless the request is non-simpl
         headers: { 'content-type': 'application/x-www-form-urlencoded' },
       }),
     ),
+    false,
+  );
+  assert.equal(
+    shouldValidateCsrf(
+      'router',
+      new Request('https://coffre.test/auth/signout', {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      }),
+    ),
     true,
   );
   assert.equal(
     shouldValidateCsrf(
-      'serverFn',
-      new Request('https://coffre.test/_serverFn/update', {
+      'router',
+      new Request('https://coffre.test/auth/dev', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
       }),
@@ -154,17 +153,6 @@ test('Cloudflare mode ignores the dev cookie and dev mode ignores the Access hea
   });
   assert.equal(accessTokenForRequest(request, cloudflare), 'access-token');
   assert.equal(accessTokenForRequest(request, dev), 'dev-token');
-});
-
-test('dev direct API calls accept only the local Access-shaped assertion', () => {
-  const request = new Request('http://127.0.0.1:3000/api/me', {
-    headers: {
-      cookie: `${DEV_TOKEN_COOKIE}=browser-token`,
-      'cf-access-jwt-assertion': 'cli-token',
-    },
-  });
-  assert.equal(accessTokenForBoundary(request, dev, '/api/me'), 'cli-token');
-  assert.equal(accessTokenForBoundary(request, dev, '/projects'), 'browser-token');
 });
 
 test('a configured root admin authenticates without a principals row lookup', async () => {

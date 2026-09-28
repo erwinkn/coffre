@@ -14,8 +14,9 @@ import type {
   RouteKey,
   RouteOutput,
 } from '../../../apps/web/src/server/api/routes.ts';
+import type { AuthInfo } from '../../../apps/web/src/server/fetch-api.ts';
 
-export type { RouteInput, RouteKey, RouteOutput };
+export type { AuthInfo, RouteInput, RouteKey, RouteOutput };
 
 export type Transport = (request: Request) => Promise<Response>;
 
@@ -57,12 +58,7 @@ export function createClient(options: ClientOptions) {
   const origin = options.url.replace(/\/+$/, '');
   const transport = options.transport ?? ((request: Request) => fetch(request));
 
-  /** Any route by its key: `call('GET /secrets/:project/:environment', { project, environment })`. */
-  async function call<K extends RouteKey>(key: K, ...[params, input]: Args<K>): Promise<RouteOutput<K>> {
-    const [method, pattern] = key.split(' ') as [string, string];
-    const path = pattern.replace(/:(\w+)/g, (_, name: string) =>
-      encodeURIComponent((params as Record<string, string>)[name]),
-    );
+  async function send(method: string, path: string, input: unknown): Promise<unknown> {
     const url = new URL(`${origin}/api${path}`);
     const headers = new Headers(await options.headers?.());
     let body: string | undefined;
@@ -85,11 +81,23 @@ export function createClient(options: ClientOptions) {
         typeof error?.message === 'string' ? error.message : `request failed with status ${response.status}`,
       );
     }
-    return payload as RouteOutput<K>;
+    return payload;
+  }
+
+  /** Any route by its key: `call('GET /secrets/:project/:environment', { project, environment })`. */
+  async function call<K extends RouteKey>(key: K, ...[params, input]: Args<K>): Promise<RouteOutput<K>> {
+    const [method, pattern] = key.split(' ') as [string, string];
+    const path = pattern.replace(/:(\w+)/g, (_, name: string) =>
+      encodeURIComponent((params as Record<string, string>)[name]),
+    );
+    return (await send(method, path, input)) as RouteOutput<K>;
   }
 
   return {
     call,
+
+    /** How this instance signs people in. Answers anyone, signed in or not. */
+    auth: () => send('GET', '/auth', undefined) as Promise<AuthInfo>,
 
     /** Who I am, and every place I can reach. */
     me: () => call('GET /me', {}),
@@ -151,6 +159,24 @@ export function createClient(options: ClientOptions) {
       /** What they should hold at each place; the server applies the difference. `null` revokes. */
       set: (member: string, access: RouteInput<'PATCH /access/:member'>) =>
         call('PATCH /access/:member', { member }, access),
+    },
+
+    /** Where I am signed in. Only where coffre runs its own sign-in. */
+    sessions: {
+      list: () => call('GET /sessions', {}),
+      revoke: (id: string) => call('DELETE /sessions/:id', { id }),
+    },
+
+    /** The accounts I sign in with. */
+    identities: {
+      list: () => call('GET /identities', {}),
+      unlink: (id: string) => call('DELETE /identities/:id', { id }),
+    },
+
+    /** A `coffre login` waiting for someone to approve it, by the code it shows. */
+    deviceLogins: {
+      get: (code: string) => call('GET /device-logins/:code', { code }),
+      decide: (code: string, approve: boolean) => call('POST /device-logins/:code', { code }, { approve }),
     },
 
     syncs: {

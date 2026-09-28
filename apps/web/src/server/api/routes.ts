@@ -63,9 +63,9 @@ const secretValue = z
 
 const role = z.enum(ROLE_NAMES);
 
-/** Service tokens are issued by coffre's own sign-in; behind Cloudflare Access there are none. */
+/** Sessions and service tokens are coffre's own sign-in; behind Cloudflare Access there are none. */
 function signin(ctx: ApiContext) {
-  if (ctx.signin === null) throw notFound('service tokens need signin mode');
+  if (ctx.signin === null) throw notFound("this instance has no sign-in of its own");
   return ctx.signin;
 }
 
@@ -191,6 +191,32 @@ export const routes = {
       z.union([role, z.object({ role, until: z.string().max(40).nullable() }).strict(), z.null()]),
     ),
     run: (ctx, { params, input }) => setAccess(ctx, parseMember(params.member), input),
+  }),
+
+  // Your own sign-in: where you are signed in, the accounts you sign in
+  // with, and approving `coffre login` from the browser.
+  ...route('GET /sessions', {
+    run: async (ctx) => ({ sessions: await signin(ctx).listSessions(ctx, ctx.credentialId) }),
+  }),
+  ...route('DELETE /sessions/:id', {
+    run: (ctx, { params }) => signin(ctx).revokeCredential(ctx, params.id),
+  }),
+  ...route('GET /identities', {
+    run: async (ctx) => ({ identities: await signin(ctx).listIdentities(ctx) }),
+  }),
+  ...route('DELETE /identities/:id', {
+    run: (ctx, { params }) => signin(ctx).unlinkIdentity(ctx, params.id),
+  }),
+  ...route('GET /device-logins/:code', {
+    // Null for a code that is unknown, used or expired.
+    run: async (ctx, { params }) => ({
+      request: await signin(ctx).describeDevice(params.code),
+      sessionDays: signin(ctx).config.cliSessionDays,
+    }),
+  }),
+  ...route('POST /device-logins/:code', {
+    input: z.object({ approve: z.boolean() }).strict(),
+    run: (ctx, { params, input }) => signin(ctx).decideDevice(ctx, params.code, input.approve),
   }),
 
   // Syncs
