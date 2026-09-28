@@ -10,7 +10,7 @@ import { DropdownMenu } from 'radix-ui';
 import { toast } from 'sonner';
 import { CoffreError, planImport, type CoffreClient } from '../../../../packages/client/src/index.ts';
 import { parseDotenv } from '../../../../packages/core/src/dotenv.ts';
-import { failureMessage, uiResult, useCoffre } from '../lib/coffre';
+import { failureMessage, Refusal, uiResult, useCoffre } from '../lib/coffre';
 import { useAction } from '../lib/use-action';
 import type {
   ImportPlanEntry,
@@ -229,23 +229,12 @@ function EnvironmentLedger({
   }
 
   /**
-   * Write every pending edit, stopping at the first refusal.
-   *
-   * Edits already written are dropped and the rest are kept, so pressing save
-   * again retries exactly what did not land rather than duplicating what did.
-   * There is no batch endpoint and inventing one client-side would only hide
-   * that this is several audited writes.
+   * Write every pending edit: renames one by one, then the rest as one patch
+   * that lands whole or not at all (see `applySecretEditBatch`). Whatever did
+   * not land stays pending, so pressing save again retries exactly that.
    */
   async function saveChanges() {
     if (!ready || saving) return;
-    // A refusal names the key it stopped at.
-    const named = async (key: string, write: () => Promise<unknown>) => {
-      try {
-        await write();
-      } catch (error) {
-        throw new Error(`${key}: ${failureMessage(error)}`);
-      }
-    };
     setSaving(true);
     setSaveError(null);
     const outcome = await applySecretEditBatch({
@@ -253,11 +242,21 @@ function EnvironmentLedger({
       drafts,
       changes,
       operations: {
-        archive: (key) =>
-          named(key, () => coffre.secrets.update(`${place}/${key}`, { archived: true })),
-        rename: (key, nextKey) =>
-          named(key, () => coffre.secrets.rename(`${place}/${key}`, nextKey)),
-        save: (key, value) => named(key, () => coffre.secrets.set(place, { [key]: value })),
+        rename: async (key, nextKey) => {
+          try {
+            await coffre.secrets.rename(`${place}/${key}`, nextKey);
+          } catch (error) {
+            // A refused rename names the key it stopped at.
+            throw new Refusal(`${key}: ${failureMessage(error)}`);
+          }
+        },
+        write: async (patch) => {
+          try {
+            await coffre.secrets.set(place, patch);
+          } catch (error) {
+            throw new Refusal(failureMessage(error));
+          }
+        },
       },
     });
 
@@ -276,14 +275,16 @@ function EnvironmentLedger({
     }
 
     if (outcome.error === null) {
-      toast.success(`Saved ${outcome.applied} change${outcome.applied === 1 ? '' : 's'}`);
+      // Counted as the save button counted them: a rename with a new value is one change.
+      toast.success(`Saved ${pendingCount} change${pendingCount === 1 ? '' : 's'}`);
     } else {
       const message =
         outcome.error instanceof Error ? outcome.error.message : 'The request could not be sent.';
+      // Only renames can have landed before a failure: the patch is all or nothing.
       setSaveError(
         outcome.applied === 0
           ? message
-          : `${message} Earlier changes were saved; the failed one and any after it are ready to retry.`,
+          : `${message} The renames before it were saved; nothing else was, and the rest is ready to retry.`,
       );
     }
     setSaving(false);
