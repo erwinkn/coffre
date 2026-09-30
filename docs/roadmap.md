@@ -55,7 +55,8 @@ Each item says what is wrong today.
    wraps *new* versions. Every old version still needs the old KEK forever, so
    a leaked KEK cannot be retired. Add a `rewrap` maintenance command: it
    re-wraps each DEK under the primary, leaves the ciphertext untouched, and
-   writes one audit row per secret.
+   writes one audit row per secret. It is also how data written under a local
+   key moves to KMS ([keys.md](keys.md#moving-from-a-local-key)).
 4. **A heartbeat someone hears.** Readiness now tolerates one late or missed
    Cron run (11 minutes, where it used to fail at 5, the Cron interval itself,
    and flapped). Nothing monitors it yet: attach an external check on
@@ -275,8 +276,10 @@ identity: signIn({
 
 ## Later
 
-- Add a KMS-backed `KekProvider`, for example Scaleway or AWS KMS, make it the
-  primary provider, then rewrap existing DEKs under it.
+- Move existing DEKs from a local KEK to AWS KMS (`awsKms`, see
+  [keys.md](keys.md)) with the rewrap command of item 3. New versions can
+  already be wrapped by KMS; a Scaleway provider would fit the same interface,
+  but its Audit Trail does not log Decrypt.
 - Write a retention policy that defines the only sanctioned way to destroy
   data.
 - Import from other secret managers such as Infisical, after settling how

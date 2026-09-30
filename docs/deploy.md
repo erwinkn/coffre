@@ -66,7 +66,8 @@ pnpm exec wrangler secret put GITHUB_CLIENT_SECRET -c app/wrangler.jsonc
 Keep a copy of `KEK` offline: without it, no stored secret can be read
 again. To rotate it, add a new `kek` and move the old one to `previousKeks`
 in `vault/src/worker.ts`; the vault unwraps with either and wraps with the
-new one.
+new one. To keep the KEK in AWS KMS instead, where it never leaves and
+CloudTrail logs every use, see [keys.md](keys.md).
 
 **4. Deploy.** `pnpm run deploy` deploys the vault, then the app, whose
 `VAULT` binding names it. `pnpm build` is the same as a dry run. Route the

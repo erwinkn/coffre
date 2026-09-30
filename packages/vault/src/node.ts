@@ -23,6 +23,7 @@ import { METHODS, openLocalVault, type LocalVault } from './local.ts';
 import type { VaultOptions } from './vault.ts';
 
 export type { Vault, VaultConfig };
+export * from './index.ts';
 export type { LocalVault, VaultOptions };
 
 export type NodeVaultConfig = VaultConfig & {

@@ -67,6 +67,10 @@ Consequences:
    protection, plus a Worker as a second layer whose log lives in a different
    trust domain. Cross-checking unwrap counts against our own audit log is a
    ready-made Article 12(2)(e) logging-failure detector.
+4. AWS KMS does log every Decrypt, in CloudTrail, with the encryption
+   context. So the first KMS provider is AWS's, `awsKms(…)`: it sends each
+   secret's ids as that context, and CloudTrail becomes the independent record
+   ([docs/keys.md](docs/keys.md)).
 
 ## Design decisions worth knowing
 
@@ -391,6 +395,9 @@ All five milestones are implemented and working locally.
   or Cloudflare Workers and kept current there: on every change, and hourly
   to repair drift. Only keys coffre pushed are ever removed, and every value
   that leaves is audited first. See [docs/syncs.md](docs/syncs.md).
+- **Keys.** The key-encryption key is a local key in the vault's
+  configuration, or an AWS KMS key it never leaves, whose every use
+  CloudTrail logs with the secret's ids. See [docs/keys.md](docs/keys.md).
 - **Offboarding.** Removing someone revokes their grants, sessions, CLI
   logins and linked sign-in accounts in one step. Their page then lists the
   values they read or wrote that are still current, the syncs they set up and
@@ -588,7 +595,9 @@ UI, the underlying role and scope are presented as one permissions value:
 - Syncs cover four destinations. Scaleway Secret Manager, AWS and the rest
   are not built in; `coffre run` or `coffre export` with a service token
   covers them.
-- The `scaleway` `KekProvider` does not exist yet; only `local` does.
+- The KEK is a local key or AWS KMS (`awsKms`). No Scaleway provider (its
+  Audit Trail does not log Decrypt), and no command yet to rewrap existing
+  data keys under a new KEK.
 - The vault signs checkpoints of both logs' heads, and the app records each
   in its own log, but nothing exports them further off-box yet.
 - `.env` import does not support literal multi-line values (use `\n` inside
@@ -624,10 +633,10 @@ login and the session time zone among them, and each says why when skipped.
 
 ## Deliberately out of scope
 
-No Terraform here (it lives in the infrastructure repository), and no real
-KMS yet. No rotation engine, no dynamic secrets, no PKI, no policy DSL (a
-grants table is enough), no HA. No Kubernetes operator — external-secrets has
-a generic `webhook` provider that can call this API later.
+No Terraform here (it lives in the infrastructure repository). No rotation
+engine, no dynamic secrets, no PKI, no policy DSL (a grants table is enough),
+no HA. No Kubernetes operator — external-secrets has a generic `webhook`
+provider that can call this API later.
 
 ## Open question
 

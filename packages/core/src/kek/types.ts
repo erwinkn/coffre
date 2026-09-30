@@ -25,10 +25,13 @@ export type WrappedDek = {
  *
  * `ctx` is passed through to the provider deliberately. A remote KEK service
  * cannot otherwise record *which* secret an unwrap was for, only that some
- * opaque DEK was unwrapped. Since Scaleway Audit Trail does not log Key Manager
- * Decrypt at all, an independent per-secret unwrap log is something we may need
- * to build ourselves later; this parameter is what makes that possible without
- * re-encrypting existing data.
+ * opaque DEK was unwrapped. AWS KMS logs it in CloudTrail as the encryption
+ * context (`aws-kms.ts`). Scaleway's Audit Trail does not log Key Manager
+ * Decrypt at all, which is why AWS came first.
+ *
+ * `unwrap` throws `KekUnavailableError` when the service cannot answer, and
+ * any other error when the wrapped DEK does not open under `ctx`: the vault
+ * refuses the second as a bad claim, and fails the call on the first.
  */
 export interface KekProvider {
   readonly provider: string;
@@ -41,3 +44,12 @@ export interface KekProvider {
 
 /** Length of the data encryption keys we generate, in bytes (AES-256). */
 export const DEK_BYTES = 32;
+
+/**
+ * The key service could not answer: it is down, throttling past the
+ * retries, or refusing coffre's own credentials. Nothing is known about the
+ * wrapped key, so the vault fails the call instead of refusing it.
+ */
+export class KekUnavailableError extends Error {
+  override readonly name = 'KekUnavailableError';
+}

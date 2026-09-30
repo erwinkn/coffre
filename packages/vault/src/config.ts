@@ -1,4 +1,4 @@
-import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
+import { KekRegistry, LocalKekProvider, type KekProvider } from '@coffre/core/kek';
 
 /** At most `count` data keys unwrapped per principal in any `windowMs`. */
 export type BulkLimit = { count: number; windowMs: number };
@@ -20,15 +20,18 @@ export type ResolvedVaultConfig = {
   bulkLimit: BulkLimit;
 };
 
-/** A key-encryption key: 32 random bytes, base64, and the id envelopes record it under. */
-export type Kek = { id: string; key: string };
+/**
+ * A key-encryption key: 32 random bytes, base64, and the id envelopes record
+ * it under; or one a key service holds, such as `awsKms({ keyArn, … })`.
+ */
+export type Kek = { id: string; key: string } | KekProvider;
 
 /**
  * What a deployment writes: every key coffre has, and who may always get
  * in. The app holds none of it.
  *
  *   {
- *     kek: { id: 'kek-2026-09', key: env.KEK },
+ *     kek: awsKms({ keyArn: env.KMS_KEY_ARN, credentials: { … } }),
  *     previousKeks: [{ id: 'kek-2025-01', key: env.KEK_2025_01 }],
  *     rootAdmins: ['admin@acme.example'],
  *     signingKey: env.SIGNING_KEY,
@@ -54,18 +57,35 @@ function key32(value: string, what: string): Buffer {
 }
 
 const KEK_ID = /^[A-Za-z0-9._-]{1,64}$/;
+const KEK_PROVIDER = /^[a-z0-9][a-z0-9-]{0,31}$/;
+/** Every row records it, and `provider:keyId` finds the KEK again: visible ASCII, bounded. */
+const KEK_NAME = /^[\x21-\x7e]{1,255}$/;
 
-function kek({ id, key }: Kek): LocalKekProvider {
-  if (!KEK_ID.test(id)) throw new Error(`KEK id "${id}" must be 1-64 letters, digits, dots, dashes or underscores`);
-  return new LocalKekProvider(key32(key, `KEK ${id}`), id);
+function kek(entry: Kek): KekProvider {
+  if (!('wrap' in entry)) {
+    const { id, key } = entry;
+    if (!KEK_ID.test(id)) throw new Error(`KEK id "${id}" must be 1-64 letters, digits, dots, dashes or underscores`);
+    return new LocalKekProvider(key32(key, `KEK ${id}`), id);
+  }
+  const { provider, keyId, keyVersion } = entry;
+  if (typeof provider !== 'string' || !KEK_PROVIDER.test(provider)) {
+    throw new Error(`a KEK provider's name must be 1-32 lowercase letters, digits or dashes; got "${String(provider)}"`);
+  }
+  if (typeof keyId !== 'string' || !KEK_NAME.test(keyId) || typeof keyVersion !== 'string' || !KEK_NAME.test(keyVersion)) {
+    throw new Error(`KEK ${provider}: keyId and keyVersion must be 1-255 visible ASCII characters`);
+  }
+  if (typeof entry.wrap !== 'function' || typeof entry.unwrap !== 'function') {
+    throw new Error(`KEK ${provider}:${keyId} needs wrap() and unwrap()`);
+  }
+  return entry;
 }
 
 /** Check a deployment's vault configuration, failing on the first problem. */
 export function resolveVaultConfig(config: VaultConfig): ResolvedVaultConfig {
-  const keks = [config.kek, ...(config.previousKeks ?? [])];
-  const ids = keks.map((entry) => entry.id);
-  if (new Set(ids).size !== ids.length) throw new Error('two KEKs share an id');
-  const [current, ...previous] = keks.map(kek);
+  const [current, ...previous] = [config.kek, ...(config.previousKeks ?? [])].map(kek);
+  const refs = [current, ...previous].map(({ provider, keyId }) => `${provider}:${keyId}`);
+  const twice = refs.find((ref, i) => refs.indexOf(ref) !== i);
+  if (twice !== undefined) throw new Error(`two KEKs share an id: ${twice}`);
   return {
     keks: new KekRegistry(current, previous),
     rootAdmins: checkRootAdmins(config.rootAdmins),

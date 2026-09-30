@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
+import { awsKms, KekRegistry, KekUnavailableError, LocalKekProvider, type KekProvider } from '@coffre/core/kek';
 import { verifyCheckpoint, type SecretRef, type WrappedKey } from '@coffre/core/vault';
 
 import { checkRootAdmins, resolveVaultConfig, type ResolvedVaultConfig } from '../src/config.ts';
@@ -157,6 +157,65 @@ test('a wrapped key presented as another secret is a bad claim', async (t) => {
     items: [{ secret: w.secret(w.prod), wrapped: await wrapped(w, devSecret) }],
   });
   assert.equal(!result.ok && result.refusal.code, 'bad_claim');
+});
+
+/** A local KEK that counts what reaches it, and can be made to act as a key service that is down. */
+function watched() {
+  const inner = LocalKekProvider.generate('test-kek-1');
+  const seen = { wrap: 0, unwrap: 0, down: false };
+  const kek: KekProvider = {
+    provider: inner.provider,
+    keyId: inner.keyId,
+    keyVersion: inner.keyVersion,
+    wrap: (dek, ctx) => (seen.wrap++, inner.wrap(dek, ctx)),
+    unwrap: async (wrapped, ctx) => {
+      seen.unwrap++;
+      if (seen.down) throw new KekUnavailableError('KMS Decrypt failed 3 times: KMSInternalException');
+      return inner.unwrap(wrapped, ctx);
+    },
+  };
+  return { keks: new KekRegistry(kek), seen };
+}
+
+test('only a call the rules allow reaches the KEK', async (t) => {
+  const { keks, seen } = watched();
+  const w = await world(t, { keks, bulkLimit: { count: 2, windowMs: 60_000 } });
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const [dev, prod] = [w.secret(w.dev), w.secret(w.prod)];
+  const items = [
+    { secret: dev, wrapped: await wrapped(w, dev) },
+    { secret: prod, wrapped: await wrapped(w, prod) },
+  ];
+  const before = { ...seen };
+  const code = (outcome: { ok: boolean; refusal?: { code: string } }) => outcome.refusal?.code;
+
+  assert.equal(code(await w.vault.unwrap({ principal: ADA, purpose: 'run', items })), 'no_grant');
+  assert.equal(code(await w.vault.unwrap({ principal: BOB, purpose: 'run', items: items.slice(0, 1) })), 'not_a_member');
+  assert.equal(code(await w.vault.wrap({ principal: ADA, items: [{ secret: dev, key: randomBytes(32).toString('base64') }] })), 'no_grant');
+  const again = { ...w.secret(w.dev), secretId: dev.secretId, version: 2 };
+  assert.equal(code(await w.vault.rewrap({ principal: ADA, items: [{ secret: again, from: 1, wrapped: items[0]!.wrapped }] })), 'no_grant');
+  assert.deepEqual(seen, before, 'refused, so no key was wrapped or unwrapped');
+
+  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'run', items: items.slice(0, 1) })).ok, true);
+  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'run', items: items.slice(0, 1) })).ok, true);
+  assert.equal(code(await w.vault.unwrap({ principal: ADA, purpose: 'run', items: items.slice(0, 1) })), 'bulk_limit');
+  assert.equal(seen.unwrap, before.unwrap + 2, 'past the bulk limit, nothing reaches the KEK either');
+});
+
+test('a key service that cannot answer fails the call, and refuses nothing', async (t) => {
+  const { keks, seen } = watched();
+  const w = await world(t, { keks });
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const secret = w.secret(w.dev);
+  const items = [{ secret, wrapped: await wrapped(w, secret) }];
+  seen.down = true;
+  await assert.rejects(w.vault.unwrap({ principal: ADA, purpose: 'run', items }), /KMS Decrypt failed 3 times/);
+  const log = await w.vault.log({ actor: ROOT });
+  assert.ok(log.ok);
+  assert.equal(log.entries.filter((entry) => entry.action === 'unwrap').length, 0, 'no refusal, and no read, to log');
+
+  seen.down = false;
+  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'run', items })).ok, true, 'and the next call goes through');
 });
 
 test('an expired grant refuses with its own code', async (t) => {
@@ -606,6 +665,24 @@ test('configuration', () => {
   assert.throws(() => resolveVaultConfig({ ...base, signingKey: '' }), /signing key/);
   assert.throws(() => resolveVaultConfig({ ...base, previousKeks: [{ id: 'kek-1', key }] }), /share an id/);
   assert.throws(() => resolveVaultConfig({ ...base, kek: { id: 'kek 1', key } }), /KEK id/);
+
+  // A key service's KEK, with the local one before it still opening what it wrapped.
+  const keyArn = 'arn:aws:kms:eu-west-3:123456789012:key/1234abcd-12ab-34cd-56ef-1234567890ab';
+  const credentials = { accessKeyId: 'AKIAEXAMPLE', secretAccessKey: 'secret' };
+  const kms = resolveVaultConfig({ ...base, kek: awsKms({ keyArn, credentials }), previousKeks: [base.kek] });
+  assert.deepEqual([kms.keks.primary.provider, kms.keks.primary.keyId], ['aws-kms', keyArn]);
+  assert.throws(
+    () => resolveVaultConfig({ ...base, kek: awsKms({ keyArn, credentials }), previousKeks: [awsKms({ keyArn, credentials })] }),
+    /two KEKs share an id: aws-kms:arn:aws:kms:eu-west-3/,
+  );
+  const own = LocalKekProvider.generate('own-1');
+  for (const [kek, message] of [
+    [Object.assign(Object.create(own) as KekProvider, { provider: 'Vault Transit' }), /name must be 1-32 lowercase letters/],
+    [Object.assign(Object.create(own) as KekProvider, { keyId: 'has space' }), /keyId and keyVersion must be 1-255 visible ASCII/],
+    [{ provider: 'transit', keyId: 'k', keyVersion: '1', wrap: own.wrap } as unknown as KekProvider, /transit:k needs wrap\(\) and unwrap\(\)/],
+  ] as const) {
+    assert.throws(() => resolveVaultConfig({ ...base, kek }), message);
+  }
   assert.deepEqual(checkRootAdmins(['First.Admin@example.com', ' second@example.org ']), ['first.admin@example.com', 'second@example.org']);
   assert.throws(() => checkRootAdmins([]), /at least one/);
   assert.throws(() => checkRootAdmins(['admin@example,com']), /human email/);

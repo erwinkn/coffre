@@ -9,6 +9,7 @@ import {
   type Role,
 } from '@coffre/core/access';
 import type { SecretContext } from '@coffre/core/envelope';
+import { KekUnavailableError } from '@coffre/core/kek';
 import {
   checkpointMessage,
   type Access,
@@ -86,10 +87,12 @@ const MESSAGES: Record<RefusalCode, string> = {
 
 /**
  * The one implementation of `Vault`. Every decision reads and writes the
- * store in one synchronous transaction, logging as it goes; key operations,
- * which may be asynchronous (a KMS), run before it, and their results are
- * dropped when the decision is no. Calls run one at a time, as they would in
- * a Durable Object, so nothing interleaves between the two.
+ * store in one synchronous transaction, logging as it goes. Key operations,
+ * which may be asynchronous (a KMS), run before it, and only for a call the
+ * rules allow: a KMS logs each one, and should never show a key opened for a
+ * read coffre refused. Calls run one at a time, as they would in a Durable
+ * Object, so nothing interleaves between that check, the key operations and
+ * the decision, which comes to the same answer.
  */
 class VaultService implements Vault {
   readonly #store: Store;
@@ -134,14 +137,17 @@ class VaultService implements Vault {
   unwrap(input: UnwrapInput): Promise<Outcome<{ keys: string[] }>> {
     return this.#serial(async () => {
       const at = this.#now();
-      const keys = await Promise.all(
-        input.items.map(({ secret, wrapped }) =>
-          this.#config.keks.unwrap(unwrappable(wrapped), context(secret)).then(
-            (key) => base64(key),
-            () => null,
-          ),
-        ),
-      );
+      const allowed =
+        this.#mayAll(input.principal, 'secret.read', input.items, at) &&
+        !this.#overBulkLimit(input.principal, input.items.length, at);
+      const keys = allowed
+        ? await Promise.all(
+            input.items.map(async ({ secret, wrapped }) => {
+              const key = await this.#open(wrapped, secret);
+              return key && base64(key);
+            }),
+          )
+        : [];
       const entry = (secret: SecretRef, outcome: 'allow' | 'refuse', code: RefusalCode | null): Appended => ({
         actor: input.principal,
         action: 'unwrap',
@@ -171,11 +177,13 @@ class VaultService implements Vault {
   wrap(input: WrapInput): Promise<Outcome<{ wrapped: WrappedKey[] }>> {
     return this.#serial(async () => {
       const at = this.#now();
-      const wrapped = await Promise.all(
-        input.items.map(({ secret, key }) =>
-          this.#config.keks.wrap(Buffer.from(key, 'base64'), context(secret)).then(serialisable),
-        ),
-      );
+      const wrapped = this.#mayAll(input.principal, 'secret.write', input.items, at)
+        ? await Promise.all(
+            input.items.map(({ secret, key }) =>
+              this.#config.keks.wrap(Buffer.from(key, 'base64'), context(secret)).then(serialisable),
+            ),
+          )
+        : [];
       return this.#decide(at, (log) => {
         this.#requireWrite(input.principal, 'wrap', input.items.map(({ secret }) => ({ secret })), at, input.requestId);
         log.push(
@@ -195,20 +203,19 @@ class VaultService implements Vault {
   rewrap(input: RewrapInput): Promise<Outcome<{ wrapped: WrappedKey[] }>> {
     return this.#serial(async () => {
       const at = this.#now();
-      const wrapped = await Promise.all(
-        input.items.map(async ({ secret, wrapped }) => {
-          try {
-            const key = await this.#config.keks.unwrap(unwrappable(wrapped), context(secret));
-            try {
-              return serialisable(await this.#config.keks.wrap(key, context(secret)));
-            } finally {
-              key.fill(0);
-            }
-          } catch {
-            return null;
-          }
-        }),
-      );
+      const wrapped = this.#mayAll(input.principal, 'secret.write', input.items, at)
+        ? await Promise.all(
+            input.items.map(async ({ secret, wrapped }) => {
+              const key = await this.#open(wrapped, secret);
+              if (key === null) return null;
+              try {
+                return serialisable(await this.#config.keks.wrap(key, context(secret)));
+              } finally {
+                key.fill(0);
+              }
+            }),
+          )
+        : [];
       return this.#decide(at, (log) => {
         this.#requireWrite(
           input.principal,
@@ -229,6 +236,25 @@ class VaultService implements Vault {
         return { wrapped: wrapped as WrappedKey[] };
       });
     });
+  }
+
+  /**
+   * The data key, or null when it does not open as this secret's: a claim
+   * that is not what it says. A key service that cannot answer is an outage,
+   * not a verdict on the claim, so it fails the call rather than refusing it.
+   */
+  async #open(wrapped: WrappedKey, secret: SecretRef): Promise<Buffer | null> {
+    try {
+      return await this.#config.keks.unwrap(unwrappable(wrapped), context(secret));
+    } catch (error) {
+      if (error instanceof KekUnavailableError) throw error;
+      return null;
+    }
+  }
+
+  /** Whether `principal` may do `permission` on every item's secret: the check before any key operation. */
+  #mayAll(principal: string, permission: Permission, items: readonly { secret: SecretRef }[], at: number): boolean {
+    return items.every(({ secret }) => this.#refuses(principal, permission, secret, at) === null);
   }
 
   /** Refuse, with every item logged, unless `principal` may write each secret. */
