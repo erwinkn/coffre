@@ -34,8 +34,10 @@ if ! docker info >/dev/null 2>&1; then
     exit 1
 fi
 
+# Over TCP, as in scripts/ensure-postgres.sh: a fresh volume's first server
+# answers on the socket only, and stops.
 postgres_ready() {
-    docker compose exec -T postgres pg_isready -U coffre_owner -d coffre >/dev/null 2>&1
+    docker compose exec -T postgres pg_isready -h 127.0.0.1 -U coffre_owner -d coffre >/dev/null 2>&1
 }
 
 docker compose up -d postgres >/dev/null

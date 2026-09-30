@@ -10,8 +10,12 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-coffre}"
 
+# Over TCP, not the socket: on a fresh volume the image first runs a
+# temporary server on the socket alone, to create the database, then stops
+# it and starts the real one. A socket check can pass in between, and the
+# next psql finds nothing there.
 ready() {
-    docker compose exec -T postgres pg_isready -U coffre_owner -d postgres >/dev/null 2>&1
+    docker compose exec -T postgres pg_isready -h 127.0.0.1 -U coffre_owner -d postgres >/dev/null 2>&1
 }
 
 ready && exit 0
