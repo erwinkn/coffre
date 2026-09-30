@@ -2,10 +2,9 @@ import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { CoffreError } from '@coffre/client';
-import type { AuthConfig, Principal } from '@coffre/core/identity';
+import { github, signin, type AuthConfig, type Principal } from '@coffre/core/identity';
 
 import { SyncRunner } from '../src/api/syncs.ts';
-import { DEV_TOKEN_COOKIE } from '../src/auth.ts';
 import { apiCredential, fetchApi as serveApi, pageClient as clientForPage, pageCredential } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
@@ -14,12 +13,12 @@ const ORIGIN = 'https://coffre.test';
 const ROOT = 'admin@acme.example';
 const DEV = 'dev@acme.example';
 
-const dev: AuthConfig = {
-  mode: 'dev',
-  access: { issuer: 'http://127.0.0.1:8081', jwksUrl: 'http://127.0.0.1:8081/certs', audience: 'aud' },
-  devIdpUrl: 'http://127.0.0.1:8081',
-};
-const signin = { mode: 'signin', signin: { publicUrl: ORIGIN } } as AuthConfig;
+const own: AuthConfig = signin({
+  providers: [github({ clientId: 'id', clientSecret: 'secret' })],
+  title: 'Acme secrets',
+}).resolve(ORIGIN);
+/** The browser's session cookie, over HTTPS. */
+const SESSION = '__Host-coffre_session';
 const cloudflare: AuthConfig = {
   mode: 'cloudflare',
   access: { issuer: 'https://acme.cloudflareaccess.com', jwksUrl: 'https://acme.cloudflareaccess.com/certs', audience: 'aud' },
@@ -75,8 +74,8 @@ beforeEach(async () => {
 });
 
 test('a change made with a browser cookie from another site is refused and changes nothing', async () => {
-  const runtime = runtimeFor(dev);
-  const cookie = `${DEV_TOKEN_COOKIE}=${ROOT}`;
+  const runtime = runtimeFor(own);
+  const cookie = `${SESSION}=${ROOT}`;
   for (const headers of [
     { cookie, 'sec-fetch-site': 'cross-site' } as Record<string, string>,
     // A sibling subdomain is the same site, and still not coffre.
@@ -94,8 +93,8 @@ test('a change made with a browser cookie from another site is refused and chang
 });
 
 test('a change made with a browser cookie from coffre itself goes through', async () => {
-  const runtime = runtimeFor(dev);
-  const cookie = `${DEV_TOKEN_COOKIE}=${ROOT}`;
+  const runtime = runtimeFor(own);
+  const cookie = `${SESSION}=${ROOT}`;
   const bySecFetch = await fetchApi(createProject('market', { cookie, 'sec-fetch-site': 'same-origin' }), runtime);
   assert.equal(bySecFetch.status, 200);
   const byOrigin = await fetchApi(createProject('web', { cookie, origin: ORIGIN }), runtime);
@@ -104,23 +103,23 @@ test('a change made with a browser cookie from coffre itself goes through', asyn
 
 test('reads with a browser cookie need no origin: another site cannot see the answer', async () => {
   const response = await fetchApi(
-    new Request(`${ORIGIN}/api/me`, { headers: { cookie: `${DEV_TOKEN_COOKIE}=${DEV}`, 'sec-fetch-site': 'cross-site' } }),
-    runtimeFor(dev),
+    new Request(`${ORIGIN}/api/me`, { headers: { cookie: `${SESSION}=${DEV}`, 'sec-fetch-site': 'cross-site' } }),
+    runtimeFor(own),
   );
   assert.equal(response.status, 200);
   assert.equal(((await response.json()) as { principal: { id: string } }).principal.id, DEV);
 });
 
 test('tokens in headers are not checked for origin: the CLI and service tokens send none', async () => {
-  const dev_ = await fetchApi(createProject('market', { 'cf-access-jwt-assertion': ROOT }), runtimeFor(dev));
-  assert.equal(dev_.status, 200);
+  const access = await fetchApi(createProject('market', { 'cf-access-jwt-assertion': ROOT }), runtimeFor(cloudflare));
+  assert.equal(access.status, 200);
   const bearer = await fetchApi(
     createProject('web', { authorization: `Bearer ${ROOT}`, 'sec-fetch-site': 'cross-site' }),
-    runtimeFor(signin),
+    runtimeFor(own),
   );
   assert.equal(bearer.status, 200);
-  // In signin mode the session cookie is the browser's, and checked.
-  const cookie = await fetchApi(createProject('ops', { cookie: `__Host-coffre_session=${ROOT}` }), runtimeFor(signin));
+  // The session cookie is the browser's, and checked.
+  const cookie = await fetchApi(createProject('ops', { cookie: `${SESSION}=${ROOT}` }), runtimeFor(own));
   assert.deepEqual(await refusal(cookie), { status: 403, error: 'cross_origin' });
 });
 
@@ -133,32 +132,34 @@ test('behind Cloudflare Access, the browser is the request carrying the Access c
   assert.deepEqual(apiCredential(browser, cloudflare), { token: 'jwt', ambient: true });
 });
 
-test('a header wins over a cookie, and dev mode reads no bearer token', () => {
+test('a header wins over a cookie, and each mode reads its own', () => {
   const request = new Request(`${ORIGIN}/api/me`, {
-    headers: { cookie: `${DEV_TOKEN_COOKIE}=browser`, 'cf-access-jwt-assertion': 'cli', authorization: 'Bearer other' },
+    headers: { cookie: `${SESSION}=browser`, 'cf-access-jwt-assertion': 'access', authorization: 'Bearer cli' },
   });
-  assert.deepEqual(apiCredential(request, dev), { token: 'cli', ambient: false });
-  assert.deepEqual(apiCredential(new Request(ORIGIN, { headers: { authorization: 'Bearer t' } }), dev), null);
+  assert.deepEqual(apiCredential(request, own), { token: 'cli', ambient: false });
+  assert.deepEqual(apiCredential(request, cloudflare), { token: 'access', ambient: false });
+  assert.deepEqual(apiCredential(new Request(ORIGIN, { headers: { 'cf-access-jwt-assertion': 'a' } }), own), null);
+  assert.deepEqual(apiCredential(new Request(ORIGIN, { headers: { authorization: 'Bearer t' } }), cloudflare), null);
 });
 
 test('a page render forwards the visitor credential and nothing else', () => {
   const page = new Request(`${ORIGIN}/projects`, {
     headers: {
-      cookie: `theme=dark; ${DEV_TOKEN_COOKIE}=${DEV}; _ga=1`,
+      cookie: `theme=dark; ${SESSION}=${DEV}; _ga=1`,
       authorization: 'Bearer smuggled',
       'cf-access-jwt-assertion': 'smuggled',
       'x-forwarded-for': '203.0.113.9',
     },
   });
-  assert.deepEqual(pageCredential(page, dev), { cookie: `${DEV_TOKEN_COOKIE}=${encodeURIComponent(DEV)}` });
+  assert.deepEqual(pageCredential(page, own), { cookie: `${SESSION}=${encodeURIComponent(DEV)}` });
   assert.deepEqual(pageCredential(page, cloudflare), { 'cf-access-jwt-assertion': 'smuggled' });
-  assert.deepEqual(pageCredential(new Request(`${ORIGIN}/projects`), dev), {});
+  assert.deepEqual(pageCredential(new Request(`${ORIGIN}/projects`), own), {});
 });
 
 test('a page render reads as the visitor, and cannot change anything', async () => {
-  const runtime = runtimeFor(dev);
+  const runtime = runtimeFor(own);
   const page = new Request(`${ORIGIN}/projects`, {
-    headers: { cookie: `${DEV_TOKEN_COOKIE}=${ROOT}`, 'sec-fetch-site': 'same-origin' },
+    headers: { cookie: `${SESSION}=${ROOT}`, 'sec-fetch-site': 'same-origin' },
   });
   const client = pageClient(page, runtime);
   assert.equal((await client.me()).principal.id, ROOT);
@@ -171,8 +172,8 @@ test('a page render reads as the visitor, and cannot change anything', async () 
 
 test('someone signed in but not a member reaches /me and nothing else', async () => {
   const client = pageClient(
-    new Request(`${ORIGIN}/projects`, { headers: { cookie: `${DEV_TOKEN_COOKIE}=new@acme.example` } }),
-    runtimeFor(dev),
+    new Request(`${ORIGIN}/projects`, { headers: { cookie: `${SESSION}=new@acme.example` } }),
+    runtimeFor(own),
   );
   const me = await client.me();
   assert.equal(me.registered, false);
@@ -181,11 +182,14 @@ test('someone signed in but not a member reaches /me and nothing else', async ()
 });
 
 test('how to sign in is public', async () => {
-  const anyone = pageClient(new Request(`${ORIGIN}/login`), runtimeFor(dev));
-  assert.deepEqual(await anyone.auth(), { mode: 'dev', accessAssertion: false, signin: null });
-  const behindAccess = pageClient(
-    new Request(`${ORIGIN}/login`, { headers: { 'cf-access-jwt-assertion': 'expired' } }),
-    runtimeFor(cloudflare),
-  );
-  assert.equal((await behindAccess.auth()).accessAssertion, true);
+  if (own.mode !== 'signin') throw new Error('unreachable');
+  const anyone = pageClient(new Request(`${ORIGIN}/login`), { ...runtimeFor(own), signin: { config: own.signin } as never });
+  assert.deepEqual(await anyone.auth(), {
+    signin: { title: 'Acme secrets', note: null, providers: [{ id: 'github', label: 'GitHub', brand: 'github' }] },
+    access: null,
+  });
+  const behindAccess = (headers: Record<string, string>) =>
+    pageClient(new Request(`${ORIGIN}/login`, { headers }), runtimeFor(cloudflare)).auth();
+  assert.deepEqual(await behindAccess({ 'cf-access-jwt-assertion': 'expired' }), { signin: null, access: { assertion: true } });
+  assert.deepEqual(await behindAccess({}), { signin: null, access: { assertion: false } });
 });

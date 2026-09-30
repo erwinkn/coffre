@@ -184,8 +184,12 @@ Built, on Workers, and on Node since phase 2 added its adapter. Where the
 build departed from the plan below: Microsoft takes one tenant, by GUID,
 because the multi-tenant endpoints publish an issuer template that standard
 validation rejects; the CLI signs in with a device code rather than a local
-port, which also works over SSH; and the page takes a title and a note but no
-logo yet. The plan, as written:
+port, which also works over SSH; the page takes a title and a note but no
+logo yet; and a provider is an interface, `SigninProvider`, which a
+deployment can implement for one that speaks neither protocol. The dev IdP's
+own mode is gone: the dev loop signs in through it as GitHub or OIDC, like
+conformance, and the pages and the CLI read `GET /api/auth` rather than a
+mode ([deployment-auth.md](deployment-auth.md)). The plan, as written:
 
 Behind Cloudflare Access, the login page is Access's own. GitHub, Google,
 Microsoft, one-time email codes and any OIDC or SAML provider are login

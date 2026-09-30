@@ -69,8 +69,13 @@ class SigninRefused extends Error {
   }
 }
 
+/** A provider's profile, and the id of the provider it came through. */
+export type SignedInAccount = SigninProfile & { provider: string };
+
 /** What rides in the sealed cookie between leaving for the provider and coming back. */
 export type PendingState = PendingSignin & {
+  /** The provider it left for: the callback must come back from the same one. */
+  provider: string;
   /** Where to land afterwards: a path on this origin. */
   next: string;
   /** Linking: the principal who asked to add this account. */
@@ -225,7 +230,7 @@ export class SigninService {
 
   // --- signing in ---------------------------------------------------------
 
-  async completeSignin(profile: SigninProfile, meta: ClientMeta): Promise<SigninResult> {
+  async completeSignin(profile: SignedInAccount, meta: ClientMeta): Promise<SigninResult> {
     try {
       return await this.#completeSignin(profile, meta);
     } catch (error) {
@@ -236,7 +241,7 @@ export class SigninService {
     }
   }
 
-  async #completeSignin(profile: SigninProfile, meta: ClientMeta): Promise<SigninResult> {
+  async #completeSignin(profile: SignedInAccount, meta: ClientMeta): Promise<SigninResult> {
     const claimed = profile.emails[0] ?? `${profile.provider}:${profile.subject}`;
     const base = {
       actorType: 'user' as const,
@@ -320,7 +325,7 @@ export class SigninService {
   /** Bind another provider account to the signed-in person. */
   async linkIdentity(
     ctx: Asker,
-    profile: SigninProfile,
+    profile: SignedInAccount,
   ): Promise<{ ok: true } | { ok: false; reason: SigninRefusal }> {
     const account = { provider: profile.provider, subject: profile.subject, emails: profile.emails };
     if (ctx.caller.principal.type !== 'user') throw forbidden('only people link sign-in accounts');
@@ -347,7 +352,7 @@ export class SigninService {
     await insertIfAbsent(tx, principals, { principalType: 'user', principalId, createdBy: 'system:signin' });
   }
 
-  async #bind(tx: Transaction, principalId: string, profile: SigninProfile, createdBy: string): Promise<string> {
+  async #bind(tx: Transaction, principalId: string, profile: SignedInAccount, createdBy: string): Promise<string> {
     const id = randomUUID();
     await insert(tx, identities, {
       id,

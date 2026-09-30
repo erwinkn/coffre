@@ -1,12 +1,11 @@
 import { createClient, type CoffreClient } from '@coffre/client';
-import { ACCESS_JWT_HEADER, type AuthConfig } from '@coffre/core/identity';
+import { ACCESS_JWT_HEADER, type AuthConfig, type SigninBrand } from '@coffre/core/identity';
 
 import { ApiError } from './api/errors.ts';
 import { serveApi } from './api/router.ts';
 import {
   authenticateRequest,
   bearerToken,
-  DEV_TOKEN_COOKIE,
   readCookie,
   registrationRequired,
   sessionCookieName,
@@ -30,20 +29,20 @@ export type ApiCredential = { token: string; ambient: boolean };
 const nonEmpty = (value: string | null) => (value === null || value.length === 0 ? null : value);
 
 /**
- * The credential an API call carries. The CLI and service tokens send a
- * header: a bearer token in signin mode, the Access assertion in dev mode.
- * The browser sends the cookie its sign-in set. Behind Cloudflare Access
- * every request carries Access's assertion, and the browser's carry Access's
- * cookie as well, which is what gives them away.
+ * The credential an API call carries. With coffre's sign-in, the CLI and
+ * service tokens send a bearer token, and the browser the cookie its sign-in
+ * set. Behind Cloudflare Access every request carries Access's assertion,
+ * and the browser's carry Access's cookie as well, which is what gives them
+ * away.
  */
 export function apiCredential(request: Request, auth: AuthConfig): ApiCredential | null {
   if (auth.mode === 'cloudflare') {
     const token = nonEmpty(request.headers.get(ACCESS_JWT_HEADER));
     return token === null ? null : { token, ambient: readCookie(request, ACCESS_COOKIE) !== null };
   }
-  const header = auth.mode === 'signin' ? bearerToken(request) : nonEmpty(request.headers.get(ACCESS_JWT_HEADER));
+  const header = bearerToken(request);
   if (header !== null) return { token: header, ambient: false };
-  const cookie = readCookie(request, auth.mode === 'signin' ? sessionCookieName(auth) : DEV_TOKEN_COOKIE);
+  const cookie = readCookie(request, sessionCookieName(auth));
   return cookie === null ? null : { token: cookie, ambient: true };
 }
 
@@ -82,28 +81,30 @@ export async function apiCaller(
   return authenticateRequest(request, runtime, crypto.randomUUID(), credential.token, sourceIp);
 }
 
-/** How this instance signs people in: what the sign-in page shows. */
+/**
+ * How this instance signs people in, which the sign-in page, the account
+ * page and the CLI read rather than being told a mode. Exactly one is set.
+ */
 export type AuthInfo = {
-  mode: AuthConfig['mode'];
-  /** Behind Cloudflare Access: whether Access forwarded an assertion with this request. */
-  accessAssertion: boolean;
-  /** coffre's own sign-in page, in signin mode. */
+  /** coffre's own sign-in: the page's heading, and a button per provider. */
   signin: {
     title: string;
     note: string | null;
-    providers: { id: string; label: string; brand: string }[];
+    providers: { id: string; label: string; brand: SigninBrand }[];
   } | null;
+  /** Cloudflare Access in front: whether it forwarded an assertion with this request. */
+  access: { assertion: boolean } | null;
 };
 
 function authInfo(request: Request, runtime: CoffreRuntime): AuthInfo {
   const { signin } = runtime;
   return {
-    mode: runtime.auth.mode,
-    accessAssertion: runtime.auth.mode === 'cloudflare' && nonEmpty(request.headers.get(ACCESS_JWT_HEADER)) !== null,
     signin:
       signin === null
         ? null
         : { title: signin.config.page.title, note: signin.config.page.note, providers: publicProviders(signin.config) },
+    access:
+      runtime.auth.mode === 'cloudflare' ? { assertion: nonEmpty(request.headers.get(ACCESS_JWT_HEADER)) !== null } : null,
   };
 }
 
@@ -136,16 +137,16 @@ export async function fetchApi(
 }
 
 /**
- * The page's credential, and nothing else of its request: the session cookie
- * (the dev cookie in dev mode), or Access's assertion behind Cloudflare.
- * Every other cookie and header stays behind.
+ * The page's credential, and nothing else of its request: the session
+ * cookie, or Access's assertion behind Cloudflare. Every other cookie and
+ * header stays behind.
  */
 export function pageCredential(page: Request, auth: AuthConfig): Record<string, string> {
   if (auth.mode === 'cloudflare') {
     const token = nonEmpty(page.headers.get(ACCESS_JWT_HEADER));
     return token === null ? {} : { [ACCESS_JWT_HEADER]: token };
   }
-  const name = auth.mode === 'signin' ? sessionCookieName(auth) : DEV_TOKEN_COOKIE;
+  const name = sessionCookieName(auth);
   const token = readCookie(page, name);
   return token === null ? {} : { cookie: `${name}=${encodeURIComponent(token)}` };
 }

@@ -419,7 +419,6 @@ function AccountMenu({
   instanceRole: InstanceRole;
   collapsed: boolean;
 }) {
-  const { authMode } = useLoaderData({ from: '__root__' });
   return (
     <DropdownMenu.Root>
       <CollapsedTip collapsed={collapsed} label={principal.id}>
@@ -454,16 +453,6 @@ function AccountMenu({
             <SignOut size={14} />
             Sign out
           </DropdownMenu.Item>
-
-          {authMode === 'dev' && (
-            <>
-              <DropdownMenu.Separator className="menu-sep" />
-              <p className="menu-note">
-                <span className="dot" aria-hidden />
-                Demo instance. Do not store real secrets here.
-              </p>
-            </>
-          )}
         </DropdownMenu.Content>
       </DropdownMenu.Portal>
     </DropdownMenu.Root>

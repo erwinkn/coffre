@@ -1,9 +1,9 @@
 import { useState } from 'react';
-import { createFileRoute, useLoaderData, useRouter } from '@tanstack/react-router';
+import { createFileRoute, useLoaderData } from '@tanstack/react-router';
 import { signinErrorMessage } from '../lib/signin-errors';
 import { ErrorLine, Spinner } from '../components/ui';
 import { ClosedDoor } from '../components/page';
-import { ArrowRight, Lock, ProviderMark, ShieldCheck } from '../components/icons';
+import { Lock, ProviderMark, ShieldCheck } from '../components/icons';
 
 export const Route = createFileRoute('/login')({
   // Where to resume after signing in. Same-origin paths only: an absolute URL
@@ -20,34 +20,17 @@ export const Route = createFileRoute('/login')({
   component: LoginPage,
 });
 
-const SEEDED: [email: string, role: string, note: string][] = [
-  ['admin@acme.example', 'root admin', 'Everything, including audit, users and tokens.'],
-  ['lead@acme.example', 'owner of market', 'Environments, access and secrets on one project.'],
-  ['dev@acme.example', 'developer', 'Reads and writes secrets on market/dev only.'],
-  ['auditor@acme.example', 'auditor', 'Reads the audit log. Cannot read a single secret value.'],
-  ['accessmgr@acme.example', 'access manager', 'Grants and revokes access. Cannot read secret values.'],
-  ['outsider@acme.example', 'no grants', 'Registered, but holds nothing. What a denial looks like.'],
-];
-
 /**
- * The front door, which depends on who authenticates people.
+ * The front door, as `GET /api/auth` describes it.
  *
- * In signin mode it is coffre's own: one button per configured provider. In
- * Cloudflare mode Access authenticates before any request arrives, so this
- * page only explains why it is showing at all. In dev mode it is a persona
- * picker backed by the dev IdP.
+ * With coffre's own sign-in, one button per provider. Behind Cloudflare
+ * Access, Access authenticates people before any request arrives, so this
+ * page only explains why it is showing at all.
  */
 function LoginPage() {
-  const { mode, accessAssertion, signin } = useLoaderData({ from: '__root__' }).auth;
+  const { signin, access } = useLoaderData({ from: '__root__' }).auth;
   if (signin !== null) return <ProviderLoginPage {...signin} />;
-  if (mode === 'cloudflare') {
-    return accessAssertion ? (
-      <CloudflareAuthenticationFailed />
-    ) : (
-      <CloudflareAccessRequired />
-    );
-  }
-  return <DevLoginPage />;
+  return access?.assertion ? <CloudflareAuthenticationFailed /> : <CloudflareAccessRequired />;
 }
 
 function CloudflareAccessRequired() {
@@ -60,7 +43,7 @@ function CloudflareAccessRequired() {
       </p>
       <p>
         Use the Access-protected hostname. A request straight to the origin is refused by
-        design, and no development persona or cookie can get around that.
+        design.
       </p>
     </ClosedDoor>
   );
@@ -142,137 +125,5 @@ function ProviderLoginPage({
         </ul>
       )}
     </section>
-  );
-}
-
-function DevLoginPage() {
-  const router = useRouter();
-  const { next } = Route.useSearch();
-  const [email, setEmail] = useState('admin@acme.example');
-  const [error, setError] = useState<string | null>(null);
-  const [pending, setPending] = useState<string | null>(null);
-
-  async function signIn(as: string) {
-    setPending(as);
-    try {
-      const response = await fetch('/auth/dev', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ email: as }),
-      });
-      if (!response.ok) {
-        const refusal = (await response.json().catch(() => null)) as { message?: string } | null;
-        setError(`Could not sign in: ${refusal?.message ?? `the server answered ${response.status}`}.`);
-        return;
-      }
-      setError(null);
-      // The cookie is set on that response, so the loaders have to run
-      // again before anything reflects the new identity.
-      await router.invalidate();
-      // `navigate` types `to` against the route tree at compile time, and
-      // `next` is only known at runtime, so resuming goes through history.
-      if (next === undefined) {
-        await router.navigate({ to: '/projects' });
-      } else {
-        router.history.push(next);
-      }
-    } catch {
-      setError('The sign-in request could not be sent.');
-    } finally {
-      setPending(null);
-    }
-  }
-
-  return (
-    <>
-      <section className="card signin" aria-labelledby="signin-title">
-        <div className="signin-head">
-          <h1 className="signin-title" id="signin-title">
-            Sign in to coffre
-          </h1>
-          <p className="signin-lede">
-            Local development only. In production Cloudflare Access authenticates you before
-            any request reaches coffre, and there is no sign-in page at all.
-          </p>
-        </div>
-
-        <form
-          className="signin-form"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void signIn(email);
-          }}
-        >
-          <label className="field">
-            <span className="label">Email</span>
-            <input
-              className="input"
-              name="email"
-              type="email"
-              autoComplete="off"
-              spellCheck={false}
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
-              placeholder="you@acme.example"
-            />
-          </label>
-          <button
-            className="btn btn-primary"
-            type="submit"
-            style={{ height: '2.125rem' }}
-            disabled={pending !== null || email === ''}
-          >
-            {pending === email && <Spinner />}
-            Continue
-          </button>
-        </form>
-
-        {error !== null && (
-          <div className="signin-error">
-            <ErrorLine error={error} />
-          </div>
-        )}
-
-        <p className="personas-head" id="seeded-identities">
-          Or pick a seeded identity. Each sees a different coffre.
-        </p>
-        <ul className="personas" aria-labelledby="seeded-identities">
-          {SEEDED.map(([seededEmail, role, note]) => (
-            <li key={seededEmail}>
-              <button
-                type="button"
-                className="persona"
-                aria-label={`Sign in as ${seededEmail}, ${role}`}
-                aria-describedby={`persona-${seededEmail}`}
-                disabled={pending !== null}
-                onClick={() => {
-                  setEmail(seededEmail);
-                  void signIn(seededEmail);
-                }}
-              >
-                <span className="avatar" aria-hidden>
-                  {seededEmail.slice(0, 1)}
-                </span>
-                <span className="persona-who">
-                  <span className="persona-email">{seededEmail}</span>
-                  <span className="tag">{role}</span>
-                </span>
-                <span className="persona-note" id={`persona-${seededEmail}`}>
-                  {note}
-                </span>
-                <span className="persona-go" aria-hidden>
-                  {pending === seededEmail ? <Spinner size={13} /> : <ArrowRight size={14} />}
-                </span>
-              </button>
-            </li>
-          ))}
-        </ul>
-      </section>
-
-      <p className="demo-note">
-        <span className="dot" aria-hidden />
-        Demo instance. Do not store real secrets here.
-      </p>
-    </>
   );
 }

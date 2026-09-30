@@ -9,6 +9,7 @@ import {
   oidc,
   publicOrigin,
 } from '../src/identity/signin/config.ts';
+import type { SigninProvider } from '../src/identity/signin/types.ts';
 
 const TENANT = '6f1c2a3b-4d5e-4f60-8a9b-0c1d2e3f4a5b';
 const CREDENTIALS = { clientId: 'id', clientSecret: 'secret' };
@@ -21,11 +22,10 @@ test('GitHub and Okta, as the docs write them', () => {
       oidc({ id: 'okta', label: 'Okta', issuer: 'https://acme.okta.com/', clientId: 'okta-id', clientSecret: 'okta-secret' }),
     ],
   });
-  assert.deepEqual(config, {
-    publicUrl: 'https://secrets.acme.example',
-    providers: [
+  assert.deepEqual(
+    config.providers.map((provider) => ('config' in provider ? provider.config : null)),
+    [
       {
-        kind: 'github',
         id: 'github',
         label: 'GitHub',
         brand: 'github',
@@ -36,7 +36,6 @@ test('GitHub and Okta, as the docs write them', () => {
         organization: 'acme',
       },
       {
-        kind: 'oidc',
         id: 'okta',
         label: 'Okta',
         brand: 'oidc',
@@ -48,10 +47,17 @@ test('GitHub and Okta, as the docs write them', () => {
         hostedDomain: null,
       },
     ],
-    page: { title: 'Sign in to coffre', note: null },
-    browserSessionHours: 12,
-    cliSessionDays: 30,
-  });
+  );
+  assert.deepEqual(
+    config.providers.map(({ id, label, brand }) => ({ id, label, brand })),
+    [
+      { id: 'github', label: 'GitHub', brand: 'github' },
+      { id: 'okta', label: 'Okta', brand: 'oidc' },
+    ],
+  );
+  assert.deepEqual(config.page, { title: 'Sign in to coffre', note: null });
+  assert.equal(config.browserSessionHours, 12);
+  assert.equal(config.cliSessionDays, 30);
 });
 
 test('GitHub Enterprise and a Google domain', () => {
@@ -61,10 +67,10 @@ test('GitHub Enterprise and a Google domain', () => {
     label: 'GitHub Enterprise',
     webUrl: 'https://git.acme.example/',
     apiUrl: 'https://git.acme.example/api/v3/',
-  });
+  }).config;
   assert.equal(gh.webUrl, 'https://git.acme.example');
   assert.equal(gh.apiUrl, 'https://git.acme.example/api/v3');
-  const goog = google({ ...CREDENTIALS, domain: 'Acme.EXAMPLE' });
+  const goog = google({ ...CREDENTIALS, domain: 'Acme.EXAMPLE' }).config;
   assert.equal(goog.brand, 'google');
   assert.equal(goog.issuer, 'https://accounts.google.com');
   assert.equal(goog.hostedDomain, 'acme.example');
@@ -74,7 +80,7 @@ test('GitHub Enterprise and a Google domain', () => {
 test('issuers keep their exact spelling apart from a trailing slash', () => {
   // Compared byte for byte with `iss`: normalizing more would break real issuers.
   assert.equal(
-    oidc({ ...CREDENTIALS, id: 'x', label: 'X', issuer: 'https://Example.com/tenant/' }).issuer,
+    oidc({ ...CREDENTIALS, id: 'x', label: 'X', issuer: 'https://Example.com/tenant/' }).config.issuer,
     'https://Example.com/tenant',
   );
 });
@@ -102,17 +108,17 @@ test('the Microsoft tenant must be a GUID, not a domain or a multi-tenant alias'
     assert.throws(() => microsoft({ ...CREDENTIALS, tenant }), /must be the directory \(tenant\) ID/, tenant);
   }
   assert.equal(
-    microsoft({ ...CREDENTIALS, tenant: ` ${TENANT} ` }).issuer,
+    microsoft({ ...CREDENTIALS, tenant: ` ${TENANT} ` }).config.issuer,
     `https://login.microsoftonline.com/${TENANT}/v2.0`,
   );
 });
 
 test('google() without a domain lets any account through the picker', () => {
-  const config = google(CREDENTIALS);
+  const { config } = google(CREDENTIALS);
   assert.equal(config.id, 'google');
   assert.equal(config.hostedDomain, null);
   assert.deepEqual(config.authorizationParams, { prompt: 'select_account' });
-  assert.equal(google({ ...CREDENTIALS, domain: '  ' }).hostedDomain, null);
+  assert.equal(google({ ...CREDENTIALS, domain: '  ' }).config.hostedDomain, null);
 });
 
 test('provider URLs must be HTTPS, except on loopback', () => {
@@ -124,7 +130,7 @@ test('provider URLs must be HTTPS, except on loopback', () => {
     );
   }
   for (const issuer of ['http://127.0.0.1:8081', 'http://localhost:8081', 'http://[::1]:8081']) {
-    assert.equal(oidc({ ...CREDENTIALS, id: 'dev', label: 'Dev', issuer }).issuer, issuer);
+    assert.equal(oidc({ ...CREDENTIALS, id: 'dev', label: 'Dev', issuer }).config.issuer, issuer);
   }
   assert.throws(
     () => github({ ...CREDENTIALS, webUrl: 'http://git.acme.example' }),
@@ -191,19 +197,11 @@ test('defineSignin needs a provider, and each needs a client id and secret', () 
     /at least one provider/,
   );
   assert.throws(
-    () =>
-      defineSignin({
-        publicUrl: 'https://secrets.acme.example',
-        providers: [github({ clientId: '', clientSecret: 'secret' })],
-      }),
+    () => github({ clientId: '', clientSecret: 'secret' }),
     /sign-in provider github needs a client id and a client secret/,
   );
   assert.throws(
-    () =>
-      defineSignin({
-        publicUrl: 'https://secrets.acme.example',
-        providers: [google({ clientId: 'id', clientSecret: '' })],
-      }),
+    () => google({ clientId: 'id', clientSecret: '' }),
     /sign-in provider google needs a client id and a client secret/,
   );
   assert.deepEqual(
@@ -221,4 +219,22 @@ test('defineSignin needs a provider, and each needs a client id and secret', () 
       cliSessionDays: 30,
     },
   );
+});
+
+test("a deployment's own provider is checked like coffre's", () => {
+  const own: SigninProvider = {
+    id: 'acme',
+    label: 'Acme SSO',
+    brand: 'oidc',
+    start: async () => ({ url: new URL('https://sso.acme.example/authorize'), pending: { state: 's', codeVerifier: 'v', nonce: null } }),
+    finish: async () => ({ subject: '1', emails: ['dev@acme.example'], name: null }),
+  };
+  const define = (provider: SigninProvider) =>
+    defineSignin({ publicUrl: 'https://secrets.acme.example', providers: [github(CREDENTIALS), provider] });
+  assert.equal(define(own).providers[1], own);
+  assert.throws(() => define({ ...own, id: 'Acme SSO' }), /"Acme SSO" must be 1-32 lowercase letters/);
+  assert.throws(() => define({ ...own, id: 'github' }), /"github" is used twice/);
+  assert.throws(() => define({ ...own, label: ' ' }), /sign-in provider acme needs a label/);
+  assert.throws(() => define({ ...own, brand: 'okta' as never }), /acme's brand must be one of github, google, microsoft, oidc/);
+  assert.throws(() => define({ ...own, finish: undefined as never }), /acme needs start\(\) and finish\(\)/);
 });

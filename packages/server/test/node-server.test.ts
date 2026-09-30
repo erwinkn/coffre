@@ -5,7 +5,7 @@ import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { devIdp } from '@coffre/core/identity';
+import { github, signin } from '@coffre/core/identity';
 
 import { migrateDatabase } from '../src/db/migrate.ts';
 import { serveWith, type Server } from '../src/node-server.ts';
@@ -42,7 +42,7 @@ test.before(async () => {
       publicUrl: 'http://127.0.0.1:3089',
       database,
       vault: testVault(['admin@acme.example']),
-      auth: devIdp({ url: 'http://127.0.0.1:3081' }),
+      auth: signin({ providers: [github({ clientId: 'id', clientSecret: 'secret' })] }),
       auditChainKey: Buffer.alloc(32, 1).toString('base64'),
       port: 0,
       schedule: false,

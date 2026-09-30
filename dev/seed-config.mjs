@@ -2,7 +2,6 @@ const LOCAL_SEED_CONFIG = Object.freeze({
     databaseUrl: 'postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/coffre',
     apiUrl: 'http://127.0.0.1:3000',
     idpUrl: 'http://127.0.0.1:8081',
-    audience: 'coffre-local-dev-aud',
     rootAdmin: 'admin@acme.example',
 });
 
@@ -20,7 +19,7 @@ export const LOCAL_SEED_DIRECTORY = Object.freeze([
     Object.freeze({ principalType: 'user', principalId: 'auditor@acme.example' }),
     Object.freeze({ principalType: 'user', principalId: 'accessmgr@acme.example' }),
     Object.freeze({ principalType: 'user', principalId: 'outsider@acme.example' }),
-    Object.freeze({ principalType: 'service', principalId: 'ci-deploy.access' }),
+    Object.freeze({ principalType: 'service', principalId: 'ci-deploy' }),
 ]);
 
 export const LOCAL_SEED_GRANTS = Object.freeze([
@@ -39,7 +38,7 @@ export const LOCAL_SEED_GRANTS = Object.freeze([
     }),
     Object.freeze({
         principalType: 'service',
-        principalId: 'ci-deploy.access',
+        principalId: 'ci-deploy',
         role: 'viewer',
         environmentSlug: 'prod',
     }),
@@ -54,7 +53,6 @@ const LOCAL_TARGETS = Object.freeze({
     databaseUrl: /^postgresql:\/\/coffre_owner:local-dev-only@127\.0\.0\.1:55432\/coffre[a-z0-9_]*$/,
     apiUrl: /^http:\/\/127\.0\.0\.1:\d{2,5}$/,
     idpUrl: /^http:\/\/127\.0\.0\.1:\d{2,5}$/,
-    audience: /^coffre-local-dev-aud$/,
     rootAdmin: /^admin@acme\.example$/,
 });
 
@@ -63,18 +61,13 @@ const LOCAL_TARGETS = Object.freeze({
  *
  * `node --env-file` deliberately gives already-exported variables precedence.
  * Without target validation, a production database URL exported by the
- * caller could be combined with COFFRE_AUTH_MODE=dev from `.env.dev`.
+ * caller could be combined with the rest of `.env.dev`.
  */
 export function loadLocalSeedConfig(env) {
-    if (env.COFFRE_AUTH_MODE !== 'dev') {
-        throw new Error('seed refuses to run unless COFFRE_AUTH_MODE=dev');
-    }
-
     const resolved = {
         databaseUrl: env.DATABASE_URL ?? LOCAL_SEED_CONFIG.databaseUrl,
         apiUrl: env.COFFRE_API_URL ?? LOCAL_SEED_CONFIG.apiUrl,
         idpUrl: env.COFFRE_DEV_IDP_URL ?? LOCAL_SEED_CONFIG.idpUrl,
-        audience: env.COFFRE_ACCESS_AUD ?? LOCAL_SEED_CONFIG.audience,
         rootAdmin: env.COFFRE_ROOT_ADMINS ?? LOCAL_SEED_CONFIG.rootAdmin,
     };
 

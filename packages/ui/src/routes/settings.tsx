@@ -10,13 +10,16 @@ export const Route = createFileRoute('/settings')({
   loader: async ({ context: { client }, parentMatchPromise }) => {
     const root = (await parentMatchPromise).loaderData;
     const canManage = root?.capabilities.canManageGrants ?? false;
-    return { authMode: root?.authMode, directory: canManage ? await loadDirectory(client, true) : null };
+    return { auth: root?.auth, directory: canManage ? await loadDirectory(client, true) : null };
   },
   component: SettingsPage,
 });
 
+const listFormat = new Intl.ListFormat('en', { type: 'disjunction' });
+
 function SettingsPage() {
-  const { authMode, directory } = Route.useLoaderData();
+  const { auth, directory } = Route.useLoaderData();
+  const providers = auth?.signin?.providers.map((provider) => provider.label) ?? [];
 
   const principals = directory?.ok === true ? directory.principals : null;
   const rootAdmins = principals?.filter((entry) => entry.isRootAdmin) ?? [];
@@ -34,16 +37,9 @@ function SettingsPage() {
       >
         <dl className="facts">
           <Fact label="Sign-in">
-            {authMode === 'cloudflare' ? (
-              'Cloudflare Access. coffre has no sign-in of its own; every request carries an Access assertion that is verified at the origin.'
-            ) : authMode === 'signin' ? (
-              'coffre’s own sign-in, through the identity providers this deployment configures. Only invited members get in.'
-            ) : (
-              <>
-                Local development. Personas are minted by the dev identity provider; production
-                runs with Cloudflare Access instead.
-              </>
-            )}
+            {auth?.signin
+              ? `coffre’s own sign-in, with ${listFormat.format(providers)}. Only invited members get in.`
+              : 'Cloudflare Access. coffre has no sign-in of its own; every request carries an Access assertion that is verified at the origin.'}
           </Fact>
           {principals !== null && (
             <>

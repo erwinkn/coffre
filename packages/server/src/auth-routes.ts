@@ -3,11 +3,11 @@ import { emailAddress } from '@coffre/core/schemas';
 import { z } from 'zod';
 
 import { ApiError, notFound } from './api/errors.ts';
+import type { SignedInAccount } from './api/signin.ts';
 import {
   accessTokenForRequest,
   authenticateRequest,
   bearerToken,
-  DEV_TOKEN_COOKIE,
   readCookie,
   sessionCookieName,
   type AuthenticatedIdentity,
@@ -23,7 +23,6 @@ import {
   pendingCookieName,
   redirectResponse,
   safeNext,
-  signinProvider,
 } from './signin.ts';
 
 // Sign-in's own routes: the device flow under `/api/auth`, and the browser's
@@ -119,46 +118,6 @@ export async function logout(request: Request, runtime: CoffreRuntime, sourceIp:
   }
 }
 
-const DEV_SESSION_SECONDS = 8 * 60 * 60;
-
-const devSignin = z.object({ email: emailAddress });
-
-/**
- * POST /auth/dev: sign in as anyone, in dev mode only. The dev IdP mints an
- * Access-shaped token for the email, and it becomes this browser's cookie.
- */
-export async function signInDev(request: Request, runtime: CoffreRuntime) {
-  const auth = runtime.auth;
-  if (auth.mode !== 'dev') return errorResponse(notFound('dev sign-in is off'));
-  try {
-    const { email } = devSignin.parse(await readJson(request));
-
-    const url = new URL('/dev/mint', auth.devIdpUrl);
-    url.searchParams.set('email', email);
-    url.searchParams.set('aud', auth.access.audience);
-    url.searchParams.set('expires_in', String(DEV_SESSION_SECONDS));
-
-    let minted: Response;
-    try {
-      minted = await fetch(url);
-    } catch {
-      throw new ApiError('unavailable', 'the dev IdP is unreachable');
-    }
-    if (!minted.ok) throw new ApiError('unavailable', 'the dev IdP refused to mint a token');
-
-    const { token } = (await minted.json()) as { token: string };
-    return new Response(null, {
-      status: 204,
-      headers: {
-        'cache-control': 'no-store',
-        'set-cookie': cookieHeader(auth, DEV_TOKEN_COOKIE, token, DEV_SESSION_SECONDS),
-      },
-    });
-  } catch (error) {
-    return errorResponse(error);
-  }
-}
-
 /**
  * GET /auth/signin/:provider: leave for the provider. `?next=` is where to
  * land afterwards; `?link=1` adds the account to the signed-in person
@@ -190,14 +149,17 @@ export async function startSignin(
 
   let started;
   try {
-    started = await signinProvider(config).start(callbackUrl(signin.config, config.id));
+    started = await config.start(callbackUrl(signin.config, config.id));
   } catch (error) {
     if (!(error instanceof SigninError)) console.error('sign-in start failed', error);
     return redirectResponse(`${back}?error=provider_unavailable`);
   }
 
   const sealed = signin.sealPending({
-    ...started.pending,
+    state: started.pending.state,
+    codeVerifier: started.pending.codeVerifier,
+    nonce: started.pending.nonce,
+    provider: config.id,
     next: linking ? '/account' : safeNext(url.searchParams.get('next'), signin.config.publicUrl),
     link,
   });
@@ -230,9 +192,9 @@ export async function finishSignin(
   const config = signin.config.providers.find((candidate) => candidate.id === provider);
   if (config === undefined) return fail('unknown_provider');
 
-  let profile: SigninProfile;
+  let profile: SignedInAccount;
   try {
-    profile = await signinProvider(config).finish(new URL(request.url), callbackUrl(signin.config, config.id), pending);
+    profile = signedIn(config.id, await config.finish(new URL(request.url), callbackUrl(signin.config, config.id), pending));
   } catch (error) {
     // The person sees a sentence; the operator needs the reason. Provider
     // messages name the step that failed and never carry tokens or codes.
@@ -281,6 +243,29 @@ export async function finishSignin(
 }
 
 /**
+ * What the provider vouched for, under the id coffre knows it by: a provider
+ * cannot pass its accounts off as another's. The profile is checked as well,
+ * since a deployment's own provider is typed, not trusted.
+ */
+function signedIn(provider: string, profile: SigninProfile): SignedInAccount {
+  const { subject, emails, name } = profile ?? {};
+  if (
+    typeof subject !== 'string' ||
+    subject.length === 0 ||
+    subject.length > 255 ||
+    !Array.isArray(emails) ||
+    !(name === null || typeof name === 'string')
+  ) {
+    throw new SigninError('invalid_response', `sign-in provider ${provider} returned a malformed profile`);
+  }
+  const addresses = emails
+    .filter((email): email is string => typeof email === 'string')
+    .map((email) => email.trim().toLowerCase())
+    .filter((email) => emailAddress.safeParse(email).success);
+  return { provider, subject, emails: [...new Set(addresses)], name };
+}
+
+/**
  * POST /auth/signout: end this browser's session. A POST, so a link or an
  * image elsewhere cannot sign anyone out.
  */
@@ -288,7 +273,6 @@ export async function signOut(request: Request, runtime: CoffreRuntime, sourceIp
   const auth = runtime.auth;
   // The session is Access's; its logout endpoint ends it.
   if (auth.mode === 'cloudflare') return redirectResponse('/cdn-cgi/access/logout', [], 303);
-  if (auth.mode === 'dev') return redirectResponse('/login', [clearCookieHeader(auth, DEV_TOKEN_COOKIE)], 303);
 
   const name = sessionCookieName(auth);
   const token = readCookie(request, name);

@@ -363,7 +363,7 @@ export function AddPrincipal({ principalType }: { principalType: PrincipalType }
               autoComplete="off"
               value={principalId}
               placeholder={
-                principalType === 'user' ? 'someone@acme.example' : 'ci-deploy.access'
+                principalType === 'user' ? 'someone@acme.example' : 'ci-deploy'
               }
               onChange={(event) => setPrincipalId(event.target.value)}
             />

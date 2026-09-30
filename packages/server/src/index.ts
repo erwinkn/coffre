@@ -3,16 +3,19 @@
 
 export {
   cloudflareAccess,
-  devIdp,
   github,
   google,
   microsoft,
   oidc,
   signin,
+  SigninError,
   type Auth,
-  type AuthMode,
+  type PendingSignin,
+  type SigninBrand,
+  type SigninErrorCode,
   type SigninOptions,
-  type SigninProviderConfig,
+  type SigninProfile,
+  type SigninProvider,
 } from '@coffre/core/identity';
 export type { Vault } from '@coffre/core/vault';
 export type { CoffreConfig, SyncSettings } from './config.ts';

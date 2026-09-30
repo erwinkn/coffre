@@ -5,6 +5,7 @@ import {
   SigninError,
   type PendingSignin,
   type ProviderOptions,
+  type SigninBrand,
   type SigninProfile,
   type SigninProvider,
 } from './types.ts';
@@ -26,14 +27,19 @@ type Discovered = { server: oauth.AuthorizationServer; fetchedAt: number };
  */
 export class OidcSigninProvider implements SigninProvider {
   readonly id: string;
-  readonly #config: OidcProviderConfig;
+  readonly label: string;
+  readonly brand: SigninBrand;
+  /** What it was made from, as checked. */
+  readonly config: OidcProviderConfig;
   readonly #fetch: typeof fetch | undefined;
   readonly #insecure: boolean;
   #discovered: Discovered | null = null;
 
   constructor(config: OidcProviderConfig, options: ProviderOptions = {}) {
     this.id = config.id;
-    this.#config = config;
+    this.label = config.label;
+    this.brand = config.brand;
+    this.config = config;
     this.#fetch = options.fetch;
     // Only ever true for the dev IdP: config rejects plain HTTP off loopback.
     this.#insecure = new URL(config.issuer).protocol === 'http:';
@@ -52,20 +58,20 @@ export class OidcSigninProvider implements SigninProvider {
   }
 
   get #client(): oauth.Client {
-    return { client_id: this.#config.clientId };
+    return { client_id: this.config.clientId };
   }
 
   async #server(): Promise<oauth.AuthorizationServer> {
     if (this.#discovered !== null && Date.now() - this.#discovered.fetchedAt < DISCOVERY_TTL_MS) {
       return this.#discovered.server;
     }
-    const issuer = new URL(this.#config.issuer);
+    const issuer = new URL(this.config.issuer);
     let server: oauth.AuthorizationServer;
     try {
       const response = await oauth.discoveryRequest(issuer, { ...this.#http<'GET'>(), algorithm: 'oidc' });
       server = await oauth.processDiscoveryResponse(issuer, response);
     } catch (error) {
-      throw unavailable(this.#config.label, error);
+      throw unavailable(this.config.label, error);
     }
     this.#discovered = { server, fetchedAt: Date.now() };
     return server;
@@ -76,12 +82,11 @@ export class OidcSigninProvider implements SigninProvider {
     if (server.authorization_endpoint === undefined) {
       throw new SigninError(
         'invalid_response',
-        `${this.#config.label} publishes no authorization endpoint`,
+        `${this.config.label} publishes no authorization endpoint`,
       );
     }
 
     const pending: PendingSignin = {
-      provider: this.id,
       state: oauth.generateRandomState(),
       codeVerifier: oauth.generateRandomCodeVerifier(),
       nonce: oauth.generateRandomNonce(),
@@ -89,15 +94,15 @@ export class OidcSigninProvider implements SigninProvider {
 
     const url = new URL(server.authorization_endpoint);
     const params = url.searchParams;
-    params.set('client_id', this.#config.clientId);
+    params.set('client_id', this.config.clientId);
     params.set('redirect_uri', redirectUri);
     params.set('response_type', 'code');
-    params.set('scope', this.#config.scopes.join(' '));
+    params.set('scope', this.config.scopes.join(' '));
     params.set('state', pending.state);
     params.set('nonce', pending.nonce as string);
     params.set('code_challenge', await oauth.calculatePKCECodeChallenge(pending.codeVerifier));
     params.set('code_challenge_method', 'S256');
-    for (const [name, value] of Object.entries(this.#config.authorizationParams)) {
+    for (const [name, value] of Object.entries(this.config.authorizationParams)) {
       params.set(name, value);
     }
     if (options.loginHint !== undefined) params.set('login_hint', options.loginHint);
@@ -107,7 +112,7 @@ export class OidcSigninProvider implements SigninProvider {
 
   async finish(callbackUrl: URL, redirectUri: string, pending: PendingSignin): Promise<SigninProfile> {
     const server = await this.#server();
-    const label = this.#config.label;
+    const label = this.config.label;
 
     let params: URLSearchParams;
     try {
@@ -124,7 +129,7 @@ export class OidcSigninProvider implements SigninProvider {
       const response = await oauth.authorizationCodeGrantRequest(
         server,
         this.#client,
-        oauth.ClientSecretPost(this.#config.clientSecret),
+        oauth.ClientSecretPost(this.config.clientSecret),
         params,
         redirectUri,
         pending.codeVerifier,
@@ -148,12 +153,12 @@ export class OidcSigninProvider implements SigninProvider {
   }
 
   #profile(claims: oauth.IDToken): SigninProfile {
-    const label = this.#config.label;
+    const label = this.config.label;
 
-    if (this.#config.hostedDomain !== null && claims.hd !== this.#config.hostedDomain) {
+    if (this.config.hostedDomain !== null && claims.hd !== this.config.hostedDomain) {
       throw new SigninError(
         'wrong_domain',
-        `only ${this.#config.hostedDomain} accounts may sign in with ${label}`,
+        `only ${this.config.hostedDomain} accounts may sign in with ${label}`,
       );
     }
 
@@ -164,7 +169,6 @@ export class OidcSigninProvider implements SigninProvider {
     const emails = email !== '' && claims.email_verified !== false ? [email] : [];
 
     return {
-      provider: this.id,
       subject: claims.sub,
       emails,
       name: typeof claims.name === 'string' ? claims.name : null,

@@ -5,7 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { createClient, type CoffreClient } from '@coffre/client';
 import { chainHash } from '@coffre/core/audit';
-import type { AuthConfig, Principal } from '@coffre/core/identity';
+import { github, signin, type Principal } from '@coffre/core/identity';
 import type { LogEntry } from '@coffre/core/vault';
 import { and, asc, eq, is, Table } from 'drizzle-orm';
 
@@ -14,7 +14,6 @@ import { auditRange } from '../src/db/queries.ts';
 import { auditChainHead, auditLog } from './db/tables.ts';
 import { serveApi } from '../src/api/router.ts';
 import { SyncRunner } from '../src/api/syncs.ts';
-import { DEV_TOKEN_COOKIE } from '../src/auth.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import { checkpointAudit } from '../src/heartbeat.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
@@ -162,11 +161,7 @@ test('a removed member stays out despite a live session, until the vault admits 
     chainKey: deps.chainKey,
     syncs: new SyncRunner({ db: deps.db, vault: deps.vault, chainKey: deps.chainKey }),
     signin: null,
-    auth: {
-      mode: 'dev',
-      access: { issuer: 'http://127.0.0.1:8081', jwksUrl: 'http://127.0.0.1:8081/certs', audience: 'aud' },
-      devIdpUrl: 'http://127.0.0.1:8081',
-    } satisfies AuthConfig,
+    auth: signin({ providers: [github({ clientId: 'id', clientSecret: 'secret' })] }).resolve('https://coffre.test'),
     publicUrl: 'https://coffre.test',
     // Every token is simply the email of whoever holds it, and never expires.
     verifier: { verify: async (token: string): Promise<Principal> => ({ type: 'user', id: token, email: token, subject: token }) },
@@ -176,7 +171,7 @@ test('a removed member stays out despite a live session, until the vault admits 
     fetchApi(
       new Request('https://coffre.test/api/reveals', {
         method: 'POST',
-        headers: { 'content-type': 'application/json', cookie: `${DEV_TOKEN_COOKIE}=${DEV}`, 'sec-fetch-site': 'same-origin' },
+        headers: { 'content-type': 'application/json', cookie: `__Host-coffre_session=${DEV}`, 'sec-fetch-site': 'same-origin' },
         body: JSON.stringify({ path: 'market/dev/API_KEY' }),
       }),
       runtime,

@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 
 import { DevIdp } from '@coffre/conformance/idp';
 import {
-  createSigninProvider,
   github,
+  GitHubSigninProvider,
   oidc,
+  OidcSigninProvider,
   SigninError,
   type OidcProviderConfig,
   type PendingSignin,
@@ -34,21 +35,19 @@ after(async () => {
 
 function oidcConfig(overrides: Partial<OidcProviderConfig> = {}): OidcProviderConfig {
   return {
-    ...oidc({ ...CREDENTIALS, id: 'dev', label: 'Dev IdP', issuer: idp.issuer }),
+    ...oidc({ ...CREDENTIALS, id: 'dev', label: 'Dev IdP', issuer: idp.issuer }).config,
     ...overrides,
   };
 }
 
 function githubProvider(options: { organization?: string; clientSecret?: string } = {}): SigninProvider {
-  return createSigninProvider(
-    github({
-      ...CREDENTIALS,
-      ...options,
-      id: 'dev-github',
-      webUrl: `${idp.origin}/github`,
-      apiUrl: `${idp.origin}/github/api`,
-    }),
-  );
+  return github({
+    ...CREDENTIALS,
+    ...options,
+    id: 'dev-github',
+    webUrl: `${idp.origin}/github`,
+    apiUrl: `${idp.origin}/github/api`,
+  });
 }
 
 /** Follow the provider's redirect back to coffre, as the browser would. */
@@ -111,7 +110,7 @@ function editIdToken(edit: (claims: Record<string, unknown>) => void): typeof fe
 // --- OpenID Connect ---------------------------------------------------------
 
 test('OIDC: a round trip yields the subject and the verified email', async () => {
-  const provider = createSigninProvider(oidcConfig());
+  const provider = new OidcSigninProvider(oidcConfig());
   const { url, pending } = await provider.start(REDIRECT_URI, { loginHint: 'Dev@Acme.example' });
 
   assert.equal(url.origin + url.pathname, `${idp.origin}/oauth/authorize`);
@@ -121,11 +120,9 @@ test('OIDC: a round trip yields the subject and the verified email', async () =>
   assert.equal(url.searchParams.get('state'), pending.state);
   assert.equal(url.searchParams.get('nonce'), pending.nonce);
   assert.equal(url.searchParams.get('code_challenge_method'), 'S256');
-  assert.equal(pending.provider, 'dev');
 
   const profile = await provider.finish(await authorize(url), REDIRECT_URI, pending);
   assert.deepEqual(profile, {
-    provider: 'dev',
     subject: idp.subjectFor('dev@acme.example'),
     emails: ['dev@acme.example'],
     name: 'Devon Dev',
@@ -133,7 +130,7 @@ test('OIDC: a round trip yields the subject and the verified email', async () =>
 });
 
 test('OIDC: the subject follows the account, not the email', async () => {
-  const provider = createSigninProvider(oidcConfig());
+  const provider = new OidcSigninProvider(oidcConfig());
   idp.setSubject('recycled@acme.example', 'someone-new');
   const profile = await signIn(provider, 'recycled@acme.example');
   assert.equal(profile.subject, 'someone-new');
@@ -141,7 +138,7 @@ test('OIDC: the subject follows the account, not the email', async () => {
 });
 
 test('OIDC: extra authorization parameters are sent', async () => {
-  const provider = createSigninProvider(
+  const provider = new OidcSigninProvider(
     oidcConfig({ authorizationParams: { prompt: 'select_account', hd: 'acme.example' } }),
   );
   const { url } = await provider.start(REDIRECT_URI);
@@ -151,7 +148,7 @@ test('OIDC: extra authorization parameters are sent', async () => {
 });
 
 test('OIDC: a callback for another sign-in is a state mismatch', async () => {
-  const provider = createSigninProvider(oidcConfig());
+  const provider = new OidcSigninProvider(oidcConfig());
   const first = await provider.start(REDIRECT_URI, { loginHint: 'dev@acme.example' });
   const second = await provider.start(REDIRECT_URI, { loginHint: 'dev@acme.example' });
   const callback = await authorize(first.url);
@@ -167,7 +164,7 @@ test('OIDC: a callback for another sign-in is a state mismatch', async () => {
 });
 
 test('OIDC: pressing Deny is a provider denial', async () => {
-  const provider = createSigninProvider(oidcConfig());
+  const provider = new OidcSigninProvider(oidcConfig());
   const { url, pending } = await provider.start(REDIRECT_URI);
   const callback = await deny(url);
   assert.equal(callback.searchParams.get('error'), 'access_denied');
@@ -175,7 +172,7 @@ test('OIDC: pressing Deny is a provider denial', async () => {
 });
 
 test('OIDC: a code is redeemed once, and only with its redirect URI and verifier', async () => {
-  const provider = createSigninProvider(oidcConfig());
+  const provider = new OidcSigninProvider(oidcConfig());
 
   const { url, pending } = await provider.start(REDIRECT_URI, { loginHint: 'dev@acme.example' });
   const callback = await authorize(url);
@@ -194,7 +191,7 @@ test('OIDC: a code is redeemed once, and only with its redirect URI and verifier
 });
 
 test('OIDC: a nonce that does not match is not trusted', async () => {
-  const provider = createSigninProvider(oidcConfig());
+  const provider = new OidcSigninProvider(oidcConfig());
   const { url, pending } = await provider.start(REDIRECT_URI, { loginHint: 'dev@acme.example' });
   await refusal(
     provider.finish(await authorize(url), REDIRECT_URI, { ...pending, nonce: 'another-nonce' }),
@@ -203,7 +200,7 @@ test('OIDC: a nonce that does not match is not trusted', async () => {
 });
 
 test('OIDC: an email the provider marks unverified is dropped', async () => {
-  const provider = createSigninProvider(oidcConfig(), {
+  const provider = new OidcSigninProvider(oidcConfig(), {
     fetch: editIdToken((claims) => {
       claims.email_verified = false;
     }),
@@ -214,7 +211,7 @@ test('OIDC: an email the provider marks unverified is dropped', async () => {
 });
 
 test('OIDC: a token without email yields no email; one without email_verified is trusted', async () => {
-  const missing = createSigninProvider(oidcConfig(), {
+  const missing = new OidcSigninProvider(oidcConfig(), {
     fetch: editIdToken((claims) => {
       delete claims.email;
     }),
@@ -222,7 +219,7 @@ test('OIDC: a token without email yields no email; one without email_verified is
   assert.deepEqual((await signIn(missing, 'dev@acme.example')).emails, []);
 
   // Entra sends no email_verified at all.
-  const silent = createSigninProvider(oidcConfig(), {
+  const silent = new OidcSigninProvider(oidcConfig(), {
     fetch: editIdToken((claims) => {
       delete claims.email_verified;
       claims.email = '  Dev@Acme.EXAMPLE ';
@@ -233,16 +230,16 @@ test('OIDC: a token without email yields no email; one without email_verified is
 
 test('OIDC: a hosted domain is checked on the hd claim, not the request', async () => {
   const config = oidcConfig({ hostedDomain: 'acme.example', authorizationParams: { hd: 'acme.example' } });
-  await refusal(signIn(createSigninProvider(config), 'dev@acme.example'), 'wrong_domain');
+  await refusal(signIn(new OidcSigninProvider(config), 'dev@acme.example'), 'wrong_domain');
 
-  const other = createSigninProvider(config, {
+  const other = new OidcSigninProvider(config, {
     fetch: editIdToken((claims) => {
       claims.hd = 'gmail.com';
     }),
   });
   await refusal(signIn(other, 'dev@acme.example'), 'wrong_domain');
 
-  const member = createSigninProvider(config, {
+  const member = new OidcSigninProvider(config, {
     fetch: editIdToken((claims) => {
       claims.hd = 'acme.example';
     }),
@@ -251,7 +248,7 @@ test('OIDC: a hosted domain is checked on the hd claim, not the request', async 
 });
 
 test('OIDC: an ID token for another client is not trusted', async () => {
-  const provider = createSigninProvider(oidcConfig(), {
+  const provider = new OidcSigninProvider(oidcConfig(), {
     fetch: editIdToken((claims) => {
       claims.aud = 'someone-else';
     }),
@@ -265,7 +262,7 @@ test('OIDC: an issuer that cannot be reached is provider_unavailable', async () 
   const issuer = gone.issuer;
   await gone.stop();
 
-  const provider = createSigninProvider(oidc({ ...CREDENTIALS, id: 'gone', label: 'Gone', issuer }));
+  const provider = oidc({ ...CREDENTIALS, id: 'gone', label: 'Gone', issuer });
   await refusal(provider.start(REDIRECT_URI), 'provider_unavailable');
 });
 
@@ -283,7 +280,6 @@ test('GitHub: a round trip yields the numeric id and verified emails, primary fi
   const profile = await provider.finish(await authorize(url), REDIRECT_URI, pending);
   const account = idp.gitHubUserFor('lead@acme.example');
   assert.deepEqual(profile, {
-    provider: 'dev-github',
     subject: String(account.id),
     emails: ['lead@acme.example'],
     name: 'Lea Lead',
@@ -320,8 +316,8 @@ test('GitHub: an account with no verified email yields none', async () => {
 
 test('GitHub: the name falls back to the login', async () => {
   // The fake always has a name; GitHub sends null for an account without one.
-  const provider = createSigninProvider(
-    github({ ...CREDENTIALS, id: 'dev-github', webUrl: `${idp.origin}/github`, apiUrl: `${idp.origin}/github/api` }),
+  const provider = new GitHubSigninProvider(
+    github({ ...CREDENTIALS, id: 'dev-github', webUrl: `${idp.origin}/github`, apiUrl: `${idp.origin}/github/api` }).config,
     {
       fetch: async (input, init) => {
         const response = await fetch(input, init);
@@ -395,9 +391,7 @@ test('GitHub: an API that cannot be reached is provider_unavailable', async () =
   const origin = gone.origin;
   await gone.stop();
 
-  const provider = createSigninProvider(
-    github({ ...CREDENTIALS, id: 'gone', webUrl: `${origin}/github`, apiUrl: `${origin}/github/api` }),
-  );
+  const provider = github({ ...CREDENTIALS, id: 'gone', webUrl: `${origin}/github`, apiUrl: `${origin}/github/api` });
   const { pending } = await provider.start(REDIRECT_URI);
   const callback = new URL(REDIRECT_URI);
   callback.searchParams.set('state', pending.state);

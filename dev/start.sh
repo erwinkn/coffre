@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
 # Bring the whole local stack up: Postgres, dev IdP, coffre and its vault as
-# two Workers under `vite dev` (deployment/), and seed data.
-#
-#   pnpm dev          dev mode: the dev IdP's persona picker stands in for
-#                     Cloudflare Access
-#   pnpm dev:signin   coffre's own sign-in page, with the dev IdP standing in
-#                     for GitHub and for an OpenID Connect provider
+# two Workers under `vite dev` (deployment/), and seed data. coffre signs
+# people in with its own page, the dev IdP standing in for GitHub and for an
+# OpenID Connect provider.
 #
 # A second stack can run beside the first, on its own ports and database:
 #
@@ -14,15 +11,6 @@
 #
 # Everything here is local. No Cloudflare calls, no real KMS.
 set -euo pipefail
-
-mode="${1:-dev}"
-case "$mode" in
-    dev | signin) ;;
-    *)
-        echo "usage: $0 [signin]" >&2
-        exit 2
-        ;;
-esac
 
 cd "$(dirname "$0")/.."
 root="$PWD"
@@ -40,7 +28,6 @@ owner_url="postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/$database"
 
 # What deployment/app.ts, the dev IdP, the seed and the CLI read. The app's
 # Hyperdrive binding reaches Postgres as the restricted runtime login.
-export COFFRE_AUTH_MODE="$mode"
 export COFFRE_PUBLIC_URL="http://127.0.0.1:$port"
 export COFFRE_API_URL="$COFFRE_PUBLIC_URL"
 export COFFRE_DEV_IDP_URL="http://127.0.0.1:$idp_port"
@@ -90,58 +77,33 @@ logs="$root/.logs"
 mkdir -p "$logs"
 
 log "starting dev IdP on :$idp_port"
-COFFRE_AUTH_MODE=dev node --conditions=coffre:source dev/idp/server.ts >"$logs/dev-idp.log" 2>&1 &
+node --conditions=coffre:source dev/idp/server.ts >"$logs/dev-idp.log" 2>&1 &
 sleep 1
 
 # The seed starts the app's database over, so the vault starts over with it:
 # its grants and audit checkpoints describe that database and no other.
-if [ "$mode" = dev ]; then
-    rm -rf "$state_dir/v3/do/coffre-dev-vault-VaultObject"
-fi
+rm -rf "$state_dir/v3/do/coffre-dev-vault-VaultObject"
 
-log "starting coffre and its vault on :$port ($mode)"
+log "starting coffre and its vault on :$port"
 ./dev/node_modules/.bin/vite dev --config dev/vite.config.ts --port "$port" --strictPort >"$logs/web.log" 2>&1 &
 until curl -sf "$COFFRE_PUBLIC_URL/livez" >/dev/null 2>&1; do sleep 1; done
 
-# The seed writes through the API with dev IdP tokens, which only dev mode
-# accepts. Sign-in mode keeps whatever the last `pnpm dev` left, or starts
-# empty, as a new deployment does.
-if [ "$mode" = dev ]; then
-    log 'seeding'
-    DATABASE_URL="$owner_url" node dev/seed.mjs
-fi
+log 'seeding'
+DATABASE_URL="$owner_url" node dev/seed.mjs
 
 cli="node --conditions=coffre:source packages/cli/src/main.ts"
-if [ "$mode" = signin ]; then
-    cat <<BANNER
+cat <<BANNER
 
-  coffre is up, with its own sign-in page, and the data \`pnpm dev\` last
-  seeded (not seeded again here).
+  coffre is up.
 
-    web + API   $COFFRE_PUBLIC_URL   (either button, then admin@acme.example)
+    web + API   $COFFRE_PUBLIC_URL   (either button, then admin@acme.example
+                or another persona)
     vault       beside it, reached only through the app's VAULT binding
     dev IdP     $COFFRE_DEV_IDP_URL
 
   CLI (a device login: approve it in the browser):
     $cli login $COFFRE_PUBLIC_URL
     $cli run market/dev -- printenv
-BANNER
-else
-    cat <<BANNER
-
-  coffre is up.
-
-    web + API   $COFFRE_PUBLIC_URL   (sign in as admin@acme.example)
-    vault       beside it, reached only through the app's VAULT binding
-    dev IdP     $COFFRE_DEV_IDP_URL
-
-  CLI:
-    COFFRE_API_URL=$COFFRE_API_URL COFFRE_DEV_IDP_URL=$COFFRE_DEV_IDP_URL \\
-      pnpm coffre login --email admin@acme.example
-    … then \`run market/dev -- printenv\` or \`verify\` the same way
-BANNER
-fi
-cat <<BANNER
 
   Logs:
     tail -f $logs/web.log $logs/dev-idp.log

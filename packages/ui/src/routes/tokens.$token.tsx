@@ -10,7 +10,7 @@ export const Route = createFileRoute('/tokens/$token')({
     // only earn a refusal. Only coffre's own sign-in issues any.
     const [page, credentials] = await Promise.all([
       loadPrincipalPage(client, 'service', params.token, root),
-      root?.capabilities.canManageGrants && root.authMode === 'signin'
+      root?.capabilities.canManageGrants && root.auth.signin !== null
         ? uiResult(() => client.tokens.list(memberRef('service', params.token)))
         : Promise.resolve(null),
     ]);

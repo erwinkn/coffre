@@ -52,9 +52,8 @@ export const Route = createRootRouteWithContext<RouterContext>()({
       throw redirect({ to: '/login', search: { next: location.href } });
     }
 
-    // `/login` is only an error boundary in Cloudflare mode and a persona
-    // picker in dev mode. Once the API has authenticated the caller, neither
-    // belongs on screen.
+    // Once the API has authenticated the caller, the sign-in page, or behind
+    // Access the page explaining why it could not, has no place on screen.
     if (shell.principal !== null && location.pathname === '/login') {
       throw redirect({ to: '/projects' });
     }
@@ -93,7 +92,6 @@ async function loadShell(client: CoffreClient) {
   const member: Me | null = me?.registered === true ? me : null;
   return {
     auth,
-    authMode: auth.mode,
     principal: me === null ? null : me.principal,
     instanceRole: member?.instanceRole ?? null,
     projects,

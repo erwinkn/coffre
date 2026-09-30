@@ -10,7 +10,6 @@
   "compatibility_date": "2026-08-06",
   "compatibility_flags": ["nodejs_compat"],
   "vars": {
-    "COFFRE_AUTH_MODE": "dev",
     "COFFRE_PUBLIC_URL": "http://127.0.0.1:3000",
     "COFFRE_DEV_IDP_URL": "http://127.0.0.1:8081"
   },

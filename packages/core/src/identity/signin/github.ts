@@ -5,6 +5,7 @@ import {
   SigninError,
   type PendingSignin,
   type ProviderOptions,
+  type SigninBrand,
   type SigninProfile,
   type SigninProvider,
 } from './types.ts';
@@ -23,30 +24,34 @@ type GitHubEmail = { email: string; primary: boolean; verified: boolean };
  */
 export class GitHubSigninProvider implements SigninProvider {
   readonly id: string;
-  readonly #config: GitHubProviderConfig;
+  readonly label: string;
+  readonly brand: SigninBrand;
+  /** What it was made from, as checked. */
+  readonly config: GitHubProviderConfig;
   readonly #fetch: typeof fetch;
 
   constructor(config: GitHubProviderConfig, options: ProviderOptions = {}) {
     this.id = config.id;
-    this.#config = config;
+    this.label = config.label;
+    this.brand = config.brand;
+    this.config = config;
     this.#fetch = options.fetch ?? ((input, init) => fetch(input, init));
   }
 
   async start(redirectUri: string, options: { loginHint?: string } = {}) {
     const pending: PendingSignin = {
-      provider: this.id,
       state: oauth.generateRandomState(),
       codeVerifier: oauth.generateRandomCodeVerifier(),
       nonce: null,
     };
 
-    const url = new URL(`${this.#config.webUrl}/login/oauth/authorize`);
+    const url = new URL(`${this.config.webUrl}/login/oauth/authorize`);
     const params = url.searchParams;
-    params.set('client_id', this.#config.clientId);
+    params.set('client_id', this.config.clientId);
     params.set('redirect_uri', redirectUri);
     // `read:org` lets the membership check see private memberships; without
     // it, GitHub only reports members who made theirs public.
-    params.set('scope', this.#config.organization ? 'read:user user:email read:org' : 'read:user user:email');
+    params.set('scope', this.config.organization ? 'read:user user:email read:org' : 'read:user user:email');
     params.set('state', pending.state);
     params.set('code_challenge', await oauth.calculatePKCECodeChallenge(pending.codeVerifier));
     params.set('code_challenge_method', 'S256');
@@ -57,7 +62,7 @@ export class GitHubSigninProvider implements SigninProvider {
   }
 
   async finish(callbackUrl: URL, redirectUri: string, pending: PendingSignin): Promise<SigninProfile> {
-    const label = this.#config.label;
+    const label = this.config.label;
     const query = callbackUrl.searchParams;
 
     if (query.get('state') !== pending.state) {
@@ -78,7 +83,7 @@ export class GitHubSigninProvider implements SigninProvider {
       throw new SigninError('invalid_response', `${label} did not say who signed in`);
     }
 
-    const organization = this.#config.organization;
+    const organization = this.config.organization;
     if (organization !== null && !(await this.#isMember(token, organization))) {
       throw new SigninError(
         'not_in_organization',
@@ -93,7 +98,6 @@ export class GitHubSigninProvider implements SigninProvider {
       .map((entry) => entry.email.trim().toLowerCase());
 
     return {
-      provider: this.id,
       subject: String(user.id),
       emails: [...new Set(emails)],
       name: user.name ?? user.login,
@@ -101,16 +105,16 @@ export class GitHubSigninProvider implements SigninProvider {
   }
 
   async #exchange(code: string, redirectUri: string, codeVerifier: string): Promise<string> {
-    const label = this.#config.label;
-    const response = await this.#send(`${this.#config.webUrl}/login/oauth/access_token`, {
+    const label = this.config.label;
+    const response = await this.#send(`${this.config.webUrl}/login/oauth/access_token`, {
       method: 'POST',
       headers: {
         accept: 'application/json',
         'content-type': 'application/x-www-form-urlencoded',
       },
       body: new URLSearchParams({
-        client_id: this.#config.clientId,
-        client_secret: this.#config.clientSecret,
+        client_id: this.config.clientId,
+        client_secret: this.config.clientSecret,
         code,
         redirect_uri: redirectUri,
         code_verifier: codeVerifier,
@@ -132,23 +136,23 @@ export class GitHubSigninProvider implements SigninProvider {
 
   async #isMember(token: string, organization: string): Promise<boolean> {
     const response = await this.#send(
-      `${this.#config.apiUrl}/user/memberships/orgs/${encodeURIComponent(organization)}`,
+      `${this.config.apiUrl}/user/memberships/orgs/${encodeURIComponent(organization)}`,
       { headers: apiHeaders(token) },
     );
     if (response.status === 404 || response.status === 403) return false;
     const body = (await readJson(response)) as { state?: unknown } | null;
     if (!response.ok || body === null) {
-      throw new SigninError('invalid_response', `${this.#config.label} answered the membership check with ${response.status}`);
+      throw new SigninError('invalid_response', `${this.config.label} answered the membership check with ${response.status}`);
     }
     return body.state === 'active';
   }
 
   async #api<T>(token: string, path: string): Promise<T | null> {
-    const response = await this.#send(`${this.#config.apiUrl}${path}`, {
+    const response = await this.#send(`${this.config.apiUrl}${path}`, {
       headers: apiHeaders(token),
     });
     if (!response.ok) {
-      throw new SigninError('invalid_response', `${this.#config.label} answered ${path} with ${response.status}`);
+      throw new SigninError('invalid_response', `${this.config.label} answered ${path} with ${response.status}`);
     }
     return (await readJson(response)) as T | null;
   }
@@ -160,7 +164,7 @@ export class GitHubSigninProvider implements SigninProvider {
     try {
       return await this.#fetch(url, { ...init, redirect: 'manual', signal: AbortSignal.timeout(10_000) });
     } catch (cause) {
-      const error = new SigninError('provider_unavailable', `${this.#config.label} could not be reached`);
+      const error = new SigninError('provider_unavailable', `${this.config.label} could not be reached`);
       (error as Error & { cause?: unknown }).cause = cause;
       throw error;
     }

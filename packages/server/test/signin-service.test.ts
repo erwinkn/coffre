@@ -2,7 +2,7 @@ import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 
-import { defineSignin, github, google, hashToken, isCoffreToken, type SigninProfile } from '@coffre/core/identity';
+import { defineSignin, github, google, hashToken, isCoffreToken } from '@coffre/core/identity';
 import { count, eq, isNotNull, isNull, type SQL } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 
@@ -20,6 +20,7 @@ import {
   SigninService,
   type Asker,
   type PendingState,
+  type SignedInAccount,
 } from '../src/api/signin.ts';
 import {
   clientFor,
@@ -90,7 +91,7 @@ function as(id: string, type: 'user' | 'service' = 'user'): Promise<Asker> {
   return contextFor(deps, id, type);
 }
 
-function profile(provider: string, subject: string, emails: string[], name: string | null = null): SigninProfile {
+function profile(provider: string, subject: string, emails: string[], name: string | null = null): SignedInAccount {
   return { provider, subject, emails, name };
 }
 
@@ -147,7 +148,7 @@ async function credentialRow(id: string) {
 const aSecondAgo = () => new Date(Date.now() - 1000);
 
 /** Sign in, expecting success. */
-async function signedIn(p: SigninProfile) {
+async function signedIn(p: SignedInAccount) {
   const result = await signin.completeSignin(p, meta());
   assert.equal(result.ok, true, `expected ${p.emails.join(',')} to be let in`);
   if (!result.ok) throw new Error('unreachable');
