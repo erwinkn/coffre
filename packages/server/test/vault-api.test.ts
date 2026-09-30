@@ -221,7 +221,7 @@ test('the vault log is hash-chained, and a row rewritten in its file fails', asy
 
 test('an app audit log rewritten and chained again fails against the signed checkpoint', async () => {
   await developer.secrets.reveal('market/dev/API_KEY');
-  assert.equal(await checkpointAudit(db.runtime, deps.vault, quiet), true);
+  assert.equal(await checkpointAudit(db.runtime, deps.chainKey, deps.vault, quiet), true);
   const verified = await root.audit.verify();
   assert.ok(verified.ok && verified.checkpoint !== null);
 
@@ -241,17 +241,63 @@ test('an app audit log rewritten and chained again fails against the signed chec
 
   const failed = await root.audit.verify();
   assert.equal(failed.ok, false);
+  assert.equal(!failed.ok && failed.log, 'audit');
   assert.match(!failed.ok ? failed.reason : '', /is not the one the vault signed at .*: it was rewritten/);
   // And the vault will not sign past it.
-  assert.equal(await checkpointAudit(db.runtime, deps.vault, { warn: () => {} }), false);
+  assert.equal(await checkpointAudit(db.runtime, deps.chainKey, deps.vault, { warn: () => {} }), false);
   assert.equal((await vaultLog()).find((entry) => entry.action === 'checkpoint')?.code, 'checkpoint_diverged');
+});
+
+test('the audit verification checks the vault log too, and finds a grant written around it', async () => {
+  await developer.secrets.reveal('market/dev/API_KEY');
+  assert.equal(await checkpointAudit(db.runtime, deps.chainKey, deps.vault, quiet), true);
+  const verified = await root.audit.verify();
+  const entries = (await vaultLog()).length;
+  assert.deepEqual(verified.ok && verified.vault, { entries });
+
+  // Someone with the vault's file gives the developer the whole project.
+  const file = new DatabaseSync(deps.vault.file()!);
+  let projectId: string;
+  try {
+    ({ project_id: projectId } = file.prepare('SELECT project_id FROM grants').get() as { project_id: string });
+    file
+      .prepare(`INSERT INTO grants VALUES (?, ?, NULL, 'owner', NULL, 0, ?)`)
+      .run(`user:${DEV}`, projectId, `user:${ROOT}`);
+  } finally {
+    file.close();
+  }
+  const reason = `the store holds a grant the log never gave: user:${DEV} as owner on ${projectId}`;
+  assert.deepEqual(await root.audit.verify(), { ok: false, log: 'vault', failedAtSeq: null, reason });
+  assert.deepEqual((await root.audit.vault({ full: '1' })).verification, { ok: false, failedAtSeq: null, reason });
+});
+
+test('a vault log cut back behind the checkpoint the app recorded fails the audit verification', async () => {
+  await developer.secrets.reveal('market/dev/API_KEY');
+  assert.equal(await checkpointAudit(db.runtime, deps.chainKey, deps.vault, quiet), true);
+
+  // Its last entry, the reveal, taken out: what is left chains, and replays.
+  const file = new DatabaseSync(deps.vault.file()!);
+  let head: number;
+  try {
+    file.exec('DROP TRIGGER log_no_delete');
+    ({ seq: head } = file.prepare('SELECT max(seq) AS seq FROM log').get() as { seq: number });
+    file.prepare('DELETE FROM log WHERE seq = ?').run(head);
+  } finally {
+    file.close();
+  }
+  assert.deepEqual(await root.audit.verify(), {
+    ok: false,
+    log: 'vault',
+    failedAtSeq: head,
+    reason: 'not the entry a checkpoint the app recorded signed: the log was rewritten or cut back',
+  });
 });
 
 // --- where keys live ----------------------------------------------------------
 
 test('neither database holds a key', async () => {
   await developer.secrets.reveal('market/dev');
-  await checkpointAudit(db.runtime, deps.vault, quiet);
+  await checkpointAudit(db.runtime, deps.chainKey, deps.vault, quiet);
 
   // Every row of every app table, and the vault's file as it lies on disk.
   const values: Buffer[] = [];

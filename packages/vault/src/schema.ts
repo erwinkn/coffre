@@ -75,15 +75,26 @@ const MIGRATIONS: readonly (readonly string[])[] = [
       SELECT RAISE(ABORT, 'the vault log is append-only');
     END`,
 
-    // Heads of the app's audit log the vault has signed, newest last. `seq`
-    // is the app log's last sequence number at that head.
+    // Heads of the app's audit log the vault has signed, newest last, each
+    // with the head of this log at the time. `seq` is the app log's last
+    // sequence number at that head. Append-only, as the log is.
     `CREATE TABLE checkpoints (
       seq INTEGER PRIMARY KEY,
       head_hash TEXT NOT NULL,
+      vault_seq INTEGER NOT NULL,
+      vault_hash TEXT NOT NULL,
       signed_at INTEGER NOT NULL,
       key_id TEXT NOT NULL,
       signature TEXT NOT NULL
     ) STRICT`,
+    `CREATE TRIGGER checkpoints_no_update BEFORE UPDATE ON checkpoints
+    BEGIN
+      SELECT RAISE(ABORT, 'checkpoints are append-only');
+    END`,
+    `CREATE TRIGGER checkpoints_no_delete BEFORE DELETE ON checkpoints
+    BEGIN
+      SELECT RAISE(ABORT, 'checkpoints are append-only');
+    END`,
   ],
 ];
 

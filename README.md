@@ -585,8 +585,8 @@ UI, the underlying role and scope are presented as one permissions value:
   are not built in; `coffre run` or `coffre export` with a service token
   covers them.
 - The `scaleway` `KekProvider` does not exist yet; only `local` does.
-- The vault signs checkpoints of the audit log's head and keeps them in its
-  own store, but nothing exports them further off-box yet.
+- The vault signs checkpoints of both logs' heads, and the app records each
+  in its own log, but nothing exports them further off-box yet.
 - `.env` import does not support literal multi-line values (use `\n` inside
   double quotes) or variable interpolation. Both are reported as parse problems
   rather than guessed at.

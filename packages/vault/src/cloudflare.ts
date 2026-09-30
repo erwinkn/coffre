@@ -23,6 +23,7 @@ import type {
   SetAccessInput,
   UnwrapInput,
   Vault,
+  VerifyLogInput,
   WrapInput,
 } from '@coffre/core/vault';
 import { DurableObject, WorkerEntrypoint } from 'cloudflare:workers';
@@ -66,6 +67,7 @@ export class VaultObject extends DurableObject<VaultBindings> implements Vault {
   checkpoint(input: CheckpointInput) { return this.#vault.checkpoint(input); }
   latestCheckpoint() { return this.#vault.latestCheckpoint(); }
   log(input: LogInput) { return this.#vault.log(input); }
+  verifyLog(input: VerifyLogInput) { return this.#vault.verifyLog(input); }
 }
 
 /**
@@ -88,6 +90,7 @@ export class VaultEntrypoint extends WorkerEntrypoint<VaultBindings> implements 
   checkpoint(input: CheckpointInput) { return this.#object.checkpoint(input); }
   latestCheckpoint() { return this.#object.latestCheckpoint(); }
   log(input: LogInput) { return this.#object.log(input); }
+  verifyLog(input: VerifyLogInput) { return this.#object.verifyLog(input); }
 
   /** No HTTP surface: only the app's service binding reaches the vault. */
   fetch() {

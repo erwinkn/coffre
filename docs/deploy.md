@@ -81,7 +81,8 @@ the vault's Durable Object holds grants, members, unwrap counts, audit
 checkpoints and its own log. Cloudflare can restore a Durable Object to any
 point in the last 30 days (Point-in-Time Recovery), but keeps no copy
 elsewhere, and nothing exports one yet. Restore the two to the same moment:
-the vault's checkpoints describe that database.
+each log records the other's head at every checkpoint, so verification fails
+while either is behind.
 
 ## On Node
 

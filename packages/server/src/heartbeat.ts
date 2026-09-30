@@ -1,8 +1,8 @@
-import type { Vault } from '@coffre/core/vault';
+import type { Checkpoint, Vault } from '@coffre/core/vault';
 
 import { appendAudit } from './db/audit.ts';
 import type { Database } from './db/database.ts';
-import { appliedMigrations, auditHead, auditRange, heartbeat, update } from './db/queries.ts';
+import { appliedMigrations, auditHead, auditRange, heartbeat, latestAudit, update } from './db/queries.ts';
 import { auditHeartbeat } from './db/schema.ts';
 import { requiredMigrations } from './db/schema-version.ts';
 
@@ -36,7 +36,7 @@ export async function writeAuditHeartbeat(
   const beat = await writeBeat(db, chainKey, log);
   if (!beat) return false;
   try {
-    return await checkpointAudit(db, vault, log);
+    return await checkpointAudit(db, chainKey, vault, log);
   } catch (error) {
     log.warn({ err: (error as Error).message }, 'audit checkpoint failed');
     return false;
@@ -73,18 +73,43 @@ async function writeBeat(db: Database, chainKey: Buffer, log: HeartbeatLogger): 
 }
 
 /**
- * Have the vault sign the app log's head. The vault signs a head only if the
- * log still holds, at the last checkpoint's seq, the hash it signed then; so
- * a log rewritten behind a checkpoint and chained again, which the chain key
- * alone cannot catch, is refused here and fails `GET /api/audit/verification`.
+ * Have the vault sign the app log's head, with its own log's, and record
+ * what it signed as an `audit.checkpoint` entry. Each log is then anchored
+ * in the other's store:
  *
- * Two heartbeats racing look like that too, to the one that loses, so a
+ * - The vault signs a head only if the app's log still holds, at the last
+ *   checkpoint's seq, the hash it signed then. A log rewritten behind a
+ *   checkpoint and chained again, which the chain key alone cannot catch, is
+ *   refused here and fails `GET /api/audit/verification`.
+ * - The vault signs only while its own log still holds the head it signed
+ *   last, and the app keeps each head it signed. A vault log rewritten, or a
+ *   vault store put back to an older copy, no longer matches that record.
+ *
+ * Two heartbeats racing look like a rewrite to the one that loses, so a
  * refusal is tried once more against the new checkpoint.
  */
-export async function checkpointAudit(db: Database, vault: Vault, log: HeartbeatLogger): Promise<boolean> {
+export async function checkpointAudit(
+  db: Database,
+  chainKey: Buffer,
+  vault: Vault,
+  log: HeartbeatLogger,
+): Promise<boolean> {
   for (let attempt = 0; ; attempt++) {
-    const [head, { checkpoint: latest }] = await Promise.all([auditHead(db), vault.latestCheckpoint()]);
+    const [head, recorded, { checkpoint: latest }] = await Promise.all([
+      auditHead(db),
+      recordedCheckpoint(db),
+      vault.latestCheckpoint(),
+    ]);
     if (head === null || head.nextSeq === 0n) return true;
+    if (recorded !== null && !recorded.ok) {
+      log.warn({ seq: recorded.seq }, 'the checkpoint the audit log recorded is not one');
+      return false;
+    }
+    const behind = vaultBehind(latest, recorded?.checkpoint ?? null);
+    if (behind !== null) {
+      log.warn({ recorded: recorded?.checkpoint.seq, latest: latest?.seq ?? null }, behind);
+      return false;
+    }
     let previous = null;
     if (latest !== null) {
       const [row] = await auditRange(db, BigInt(latest.seq), 1);
@@ -96,12 +121,72 @@ export async function checkpointAudit(db: Database, vault: Vault, log: Heartbeat
       headHash: head.headHash.toString('hex'),
       previous,
     });
-    if (signed.ok) return true;
+    if (signed.ok) {
+      if (signed.checkpoint.seq !== recorded?.checkpoint.seq) {
+        await db.transaction((tx) =>
+          appendAudit(tx, chainKey, [
+            {
+              actorType: 'system',
+              actorId: 'coffre-scheduler',
+              action: CHECKPOINT_ACTION,
+              decision: 'allow',
+              metadata: signed.checkpoint,
+            },
+          ]),
+        );
+      }
+      return true;
+    }
     if (attempt === 1) {
       log.warn({ code: signed.refusal.code }, 'the vault refused to checkpoint the audit log');
       return false;
     }
   }
+}
+
+/** The action of the entry that records a checkpoint; its metadata is the checkpoint. */
+export const CHECKPOINT_ACTION = 'audit.checkpoint';
+
+/**
+ * The checkpoint the app recorded last, from the entry that holds it, or
+ * null before the first. Not `ok` when that entry does not hold one.
+ */
+async function recordedCheckpoint(db: Database) {
+  const row = await latestAudit(db, CHECKPOINT_ACTION);
+  return row === null ? null : readCheckpoint(row.seq, row.metadata);
+}
+
+/** A checkpoint recorded at `seq`, from its entry's metadata. */
+export function readCheckpoint(
+  seq: bigint,
+  metadata: string,
+): { ok: true; seq: bigint; checkpoint: Checkpoint } | { ok: false; seq: bigint } {
+  const value = JSON.parse(metadata) as Partial<Checkpoint>;
+  const ok =
+    Number.isSafeInteger(value.seq) &&
+    typeof value.headHash === 'string' &&
+    Number.isSafeInteger(value.vault?.seq) &&
+    typeof value.vault?.hash === 'string' &&
+    typeof value.signedAt === 'string' &&
+    typeof value.keyId === 'string' &&
+    typeof value.signature === 'string';
+  return ok ? { ok, seq, checkpoint: value as Checkpoint } : { ok, seq };
+}
+
+/**
+ * Why the vault's latest checkpoint is behind the one the app recorded last,
+ * or null when it is that one or a later one. The vault only moves forward,
+ * so behind means its store was put back to an older copy, or emptied.
+ */
+export function vaultBehind(latest: Checkpoint | null, recorded: Checkpoint | null): string | null {
+  if (recorded === null) return null;
+  if (latest === null) {
+    return `the vault has no checkpoint, but the audit log recorded one at seq ${recorded.seq}: its store was emptied`;
+  }
+  if (latest.seq < recorded.seq || (latest.seq === recorded.seq && latest.signature !== recorded.signature)) {
+    return `the vault's latest checkpoint, at seq ${latest.seq}, is behind the one the audit log recorded at seq ${recorded.seq}: its store was put back to an older copy`;
+  }
+  return null;
 }
 
 /**

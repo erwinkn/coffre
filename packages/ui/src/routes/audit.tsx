@@ -37,9 +37,10 @@ export const Route = createFileRoute('/audit')({
       typeof search.actorId === 'string' && search.actorId !== '' ? search.actorId : undefined,
   }),
   loaderDeps: ({ search }) => search,
-  // The chain is recomputed on every visit rather than on demand. At this
-  // volume it is one HMAC per row and costs less than the query that fetched
-  // them, and a status that is always current beats a button nobody presses.
+  // Both logs are checked on every visit rather than on demand. At this
+  // volume it is one hash per row, of each, and costs less than the query
+  // that fetched them, and a status that is always current beats a button
+  // nobody presses.
   loader: async ({ context: { client }, deps, parentMatchPromise }) => {
     const rootAdmin = (await parentMatchPromise).loaderData?.instanceRole === 'root-admin';
     const [entries, chain, vault] = await Promise.all([
@@ -77,8 +78,14 @@ function verifyChain(client: CoffreClient) {
   return uiResult(async () => {
     const result = await client.audit.verify();
     return result.ok
-      ? { integrity: 'intact' as const, rows: result.rows, head: result.head, checkpoint: result.checkpoint }
-      : { integrity: 'broken' as const, failedAtSeq: result.failedAtSeq, reason: result.reason };
+      ? {
+          integrity: 'intact' as const,
+          rows: result.rows,
+          head: result.head,
+          checkpoint: result.checkpoint,
+          vaultEntries: result.vault.entries,
+        }
+      : { integrity: 'broken' as const, log: result.log, failedAtSeq: result.failedAtSeq, reason: result.reason };
   });
 }
 
@@ -106,10 +113,26 @@ function AuditPage() {
       {chain.ok && chain.integrity === 'broken' && (
         <div style={{ marginBottom: '1.25rem' }}>
           <Notice tone="bad">
-            <strong>Treat this as an incident.</strong> The chain breaks at entry{' '}
-            <span className="mono">{chain.failedAtSeq}</span>: {chain.reason}. Entries have been
-            altered or removed by something with direct database access, and nothing below can
-            be relied on until that is explained.
+            {chain.log === 'audit' ? (
+              <>
+                <strong>Treat this as an incident.</strong> The chain breaks at entry{' '}
+                <span className="mono">{chain.failedAtSeq}</span>: {chain.reason}. Entries have
+                been altered or removed by something with direct database access, and nothing
+                below can be relied on until that is explained.
+              </>
+            ) : (
+              <>
+                <strong>Treat this as an incident.</strong> The vault log does not hold
+                {chain.failedAtSeq !== null && (
+                  <>
+                    {' '}at entry <span className="mono">{chain.failedAtSeq}</span>
+                  </>
+                )}
+                : {chain.reason}. Something with direct access to the vault's storage has
+                changed its record or who holds what, and no grant can be relied on until that
+                is explained.
+              </>
+            )}
           </Notice>
         </div>
       )}
@@ -232,8 +255,14 @@ function VaultLog({ vault }: { vault: VaultResult }) {
           ) : (
             <span className="vault-verdict vault-verdict-bad" role="status">
               <AlertTriangle size={13} />
-              Broken at <span className="mono">{vault.verification.failedAtSeq}</span>:{' '}
-              {vault.verification.reason}
+              {vault.verification.failedAtSeq === null ? (
+                'Broken'
+              ) : (
+                <>
+                  Broken at <span className="mono">{vault.verification.failedAtSeq}</span>
+                </>
+              )}
+              : {vault.verification.reason}
             </span>
           ))}
       </div>
@@ -353,7 +382,7 @@ function AuditTableRow({ entry, deniedOnly }: { entry: AuditRow; deniedOnly: boo
  * earlier, somewhere coffre cannot write, is what proves it is unchanged.
  */
 /**
- * Whether the log still recomputes from its first entry, beside the title.
+ * Whether both logs still recompute from their first entry, beside the title.
  *
  * Intact is the normal state, so it is a seal that names itself on hover or
  * tap, next to the head a finding would cite. Anything else is spelled out:
@@ -375,7 +404,12 @@ function ChainStatus({ chain }: { chain: ChainResult }) {
     return (
       <span className="chain-flag chain-flag-bad" role="status">
         <AlertTriangle size={14} />
-        Chain broken at <span className="mono">{chain.failedAtSeq}</span>
+        {chain.log === 'audit' ? 'Chain broken' : 'Vault log broken'}
+        {chain.failedAtSeq !== null && (
+          <>
+            {' '}at <span className="mono">{chain.failedAtSeq}</span>
+          </>
+        )}
       </span>
     );
   }
@@ -384,9 +418,10 @@ function ChainStatus({ chain }: { chain: ChainResult }) {
     <div className="chain">
       <Toggletip
         label={
-          chain.checkpoint === null
+          (chain.checkpoint === null
             ? 'Chain intact. The vault has not signed a checkpoint yet.'
-            : `Chain intact, and unchanged through entry ${chain.checkpoint.seq}, which the vault signed at ${chain.checkpoint.signedAt}.`
+            : `Chain intact, and unchanged through entry ${chain.checkpoint.seq}, which the vault signed at ${chain.checkpoint.signedAt}.`) +
+          ` The vault's log holds too: ${chain.vaultEntries} entries, and every member and grant follows from them.`
         }
       >
         <button type="button" className="chain-seal" aria-label="Chain intact">

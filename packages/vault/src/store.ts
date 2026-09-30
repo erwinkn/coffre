@@ -29,12 +29,21 @@ export type LogRow = {
   hash: string;
 };
 
-export type CheckpointRow = { seq: number; headHash: string; signedAt: number; keyId: string; signature: string };
+export type CheckpointRow = {
+  seq: number;
+  headHash: string;
+  vaultSeq: number;
+  vaultHash: string;
+  signedAt: number;
+  keyId: string;
+  signature: string;
+};
 
 const GRANT = `principal, project_id AS projectId, environment_id AS environmentId, role,
   expires_at AS expiresAt, granted_at AS grantedAt, granted_by AS grantedBy`;
 const LOG = 'seq, at, actor, action, outcome, code, subject, detail, prev_hash AS prevHash, hash';
-const CHECKPOINT = 'seq, head_hash AS headHash, signed_at AS signedAt, key_id AS keyId, signature';
+const CHECKPOINT = `seq, head_hash AS headHash, vault_seq AS vaultSeq, vault_hash AS vaultHash,
+  signed_at AS signedAt, key_id AS keyId, signature`;
 
 /** The vault's store on `db`, migrated. */
 export function openStore(db: Sqlite): Store {
@@ -72,6 +81,13 @@ export class Store {
     return this.#db.all<{ principal: string }>('SELECT principal FROM principals').map((row) => row.principal);
   }
 
+  /** Every member's row, for the replay in `replay.ts`. */
+  allMembers(): Member[] {
+    return this.#db
+      .all<Omit<Member, 'owner'> & { owner: number }>('SELECT principal, status, owner, since, by FROM principals')
+      .map((row) => ({ ...row, owner: row.owner === 1 }));
+  }
+
   /** Admit, restore or remove: `member`'s row becomes this one. */
   putMember(member: Member): void {
     this.#db.run(
@@ -95,6 +111,11 @@ export class Store {
   /** Every grant `principal` has, lapsed ones too. */
   grants(principal: string): GrantRow[] {
     return this.#db.all<GrantRow>(`SELECT ${GRANT} FROM grants WHERE principal = ?`, principal);
+  }
+
+  /** Every grant anyone has, lapsed ones too. */
+  allGrants(): GrantRow[] {
+    return this.#db.all<GrantRow>(`SELECT ${GRANT} FROM grants`);
   }
 
   grant(principal: string, place: Place): GrantRow | undefined {
@@ -168,6 +189,14 @@ export class Store {
     return this.#db.iterate<LogRow>(`SELECT ${LOG} FROM log WHERE seq > ? ORDER BY seq`, seq);
   }
 
+  /** Every allowed entry of these actions, oldest first, read one at a time. */
+  logOf(actions: readonly string[]): Iterable<LogRow> {
+    return this.#db.iterate<LogRow>(
+      `SELECT ${LOG} FROM log WHERE outcome = 'allow' AND action IN (${actions.map(() => '?').join(', ')}) ORDER BY seq`,
+      ...actions,
+    );
+  }
+
   appendLog(row: LogRow): void {
     this.#db.run(
       `INSERT INTO log (seq, at, actor, action, outcome, code, subject, detail, prev_hash, hash)
@@ -193,9 +222,12 @@ export class Store {
 
   addCheckpoint(row: CheckpointRow): void {
     this.#db.run(
-      'INSERT INTO checkpoints (seq, head_hash, signed_at, key_id, signature) VALUES (?, ?, ?, ?, ?)',
+      `INSERT INTO checkpoints (seq, head_hash, vault_seq, vault_hash, signed_at, key_id, signature)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
       row.seq,
       row.headHash,
+      row.vaultSeq,
+      row.vaultHash,
       row.signedAt,
       row.keyId,
       row.signature,

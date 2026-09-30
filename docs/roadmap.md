@@ -60,12 +60,13 @@ Each item says what is wrong today.
    Cron run (11 minutes, where it used to fail at 5, the Cron interval itself,
    and flapped). Nothing monitors it yet: attach an external check on
    `/readyz` that pages you.
-5. **Checkpoints off the box.** `audit_checkpoints` exists but nothing exports
-   it. Whoever holds the database owner role can delete the last N audit rows
-   and rewind the head, and the chain still verifies. The scheduled handler
-   should write `(seq, head_hash)` somewhere outside the database's trust
-   domain (on Cloudflare, R2 with a bucket-lock retention rule), and `verify`
-   should compare against it.
+5. **Checkpoints off the box.** Each log now records the other's head, so
+   rewinding either alone fails verification. Whoever holds both stores can
+   still rewind both to an earlier checkpoint together, and the entries since
+   the last one (five minutes of Cron) are covered only by each chain. The
+   scheduled handler should write each checkpoint somewhere outside both
+   trust domains (on Cloudflare, R2 with a bucket-lock retention rule), and
+   `verify` should compare against it.
 6. **Backups.** Point-in-time recovery on whatever hosts Postgres, exercised by
    the drill in item 2.
 7. **Guard main.** `main` is unprotected. `.github/workflows/validate.yml`
@@ -121,7 +122,8 @@ that holds the keys and decides who may decrypt. The design is in
    request; changing access and removing a member are vault calls, and a
    refusal is a 403 with the vault's code. Unwraps are capped per principal
    (`1000/15m` by default), syncs read as `sync:<id>`, and the vault signs
-   checkpoints of the app's audit log, which verification checks.
+   checkpoints of both logs, which verification checks, replaying members
+   and grants from the vault's own.
 6. ~~**The packages**~~ ([design](architecture.md#packages)): done.
    `@coffre/server`, `@coffre/ui`, `@coffre/vault`, `@coffre/client` and
    `@coffre/cli` build with tsdown into JavaScript and declarations, the

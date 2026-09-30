@@ -1,7 +1,7 @@
 import { after, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { eq } from 'drizzle-orm';
+import { asc, eq } from 'drizzle-orm';
 
 import { createDatabase } from '../src/db/database.ts';
 import { heartbeat } from '../src/db/queries.ts';
@@ -10,6 +10,7 @@ import {
   auditReadiness,
   checkpointAudit,
   HEARTBEAT_STALE_AFTER_SECONDS,
+  vaultBehind,
   writeAuditHeartbeat,
 } from '../src/heartbeat.ts';
 import { openTestDatabase, resetDatabase, testVault } from './api-fixture.ts';
@@ -31,31 +32,34 @@ test('the scheduled heartbeat updates the database-owned signal', async () => {
   await beatAgo(600);
   assert.equal(await writeAuditHeartbeat(db.runtime, Buffer.alloc(32, 1), vault, quiet), true);
 
-  const logged = await db.owner.select().from(auditLog);
-  assert.equal(logged.length, 1);
-  assert.equal(logged[0].action, 'audit.heartbeat');
-  assert.equal(logged[0].actorId, 'coffre-scheduler');
-  const [head] = await db.owner.select().from(auditChainHead);
-  assert.equal(head.nextSeq, 1n);
-  assert.deepEqual(head.headHash, logged[0].hash);
+  const logged = await db.owner.select().from(auditLog).orderBy(asc(auditLog.seq));
+  assert.deepEqual(logged.map((row) => row.action), ['audit.heartbeat', 'audit.checkpoint']);
+  assert.ok(logged.every((row) => row.actorId === 'coffre-scheduler'));
   const [beat] = await db.owner.select().from(auditHeartbeat);
-  assert.equal(beat.lastSeq, head.nextSeq);
+  assert.equal(beat.lastSeq, 1n);
   assert.ok(Date.now() - beat.lastBeatAt.getTime() < 60_000);
 
-  // And the vault signed the head it left.
+  // The vault signed the head the beat left, with its own log's (empty),
+  // and the app recorded what it signed.
   const { checkpoint } = await vault.latestCheckpoint();
   assert.equal(checkpoint?.seq, 0);
-  assert.equal(checkpoint?.headHash, head.headHash.toString('hex'));
+  assert.equal(checkpoint?.headHash, logged[0].hash.toString('hex'));
+  assert.deepEqual(checkpoint?.vault, { seq: 0, hash: '0'.repeat(64) });
+  assert.deepEqual(JSON.parse(logged[1].metadata), checkpoint);
+  const [head] = await db.owner.select().from(auditChainHead);
+  assert.equal(head.nextSeq, 2n);
+  assert.deepEqual(head.headHash, logged[1].hash);
 });
 
 test('each beat checkpoints a head that extends the last one, and never a rewritten one', async () => {
   const chainKey = Buffer.alloc(32, 1);
   await writeAuditHeartbeat(db.runtime, chainKey, vault, quiet);
   await writeAuditHeartbeat(db.runtime, chainKey, vault, quiet);
-  assert.equal((await vault.latestCheckpoint()).checkpoint?.seq, 1);
+  // Beat, checkpoint recorded, beat: the second checkpoint covers the first's record.
+  assert.equal((await vault.latestCheckpoint()).checkpoint?.seq, 2);
 
-  // Someone with the database rewrites the first row: the vault will not sign past it.
-  await db.owner.update(auditLog).set({ hash: Buffer.alloc(32, 9) }).where(eq(auditLog.seq, 1n));
+  // Someone with the database rewrites that row: the vault will not sign past it.
+  await db.owner.update(auditLog).set({ hash: Buffer.alloc(32, 9) }).where(eq(auditLog.seq, 2n));
   let warned: unknown = null;
   const written = await writeAuditHeartbeat(db.runtime, chainKey, vault, {
     warn: (value: unknown) => {
@@ -64,11 +68,46 @@ test('each beat checkpoints a head that extends the last one, and never a rewrit
   });
   assert.equal(written, false);
   assert.deepEqual(warned, { code: 'checkpoint_diverged' });
-  assert.equal((await vault.latestCheckpoint()).checkpoint?.seq, 1);
+  assert.equal((await vault.latestCheckpoint()).checkpoint?.seq, 2);
+});
+
+test('a vault emptied behind the checkpoint the app recorded is not signed over', async () => {
+  const chainKey = Buffer.alloc(32, 1);
+  await writeAuditHeartbeat(db.runtime, chainKey, vault, quiet);
+
+  // Its store starts over, checkpoints and all: the app's record says it had one.
+  await vault.reset();
+  let warning = '';
+  const written = await writeAuditHeartbeat(db.runtime, chainKey, vault, {
+    warn: (_value: unknown, message: string) => {
+      warning = message;
+    },
+  });
+  assert.equal(written, false);
+  assert.match(warning, /^the vault has no checkpoint, but the audit log recorded one at seq 0/);
+  assert.equal((await vault.latestCheckpoint()).checkpoint, null);
+});
+
+test('a vault checkpoint behind the one recorded means its store went back', () => {
+  const checkpoint = (seq: number, signature = `s${seq}`) => ({
+    seq,
+    headHash: 'a'.repeat(64),
+    vault: { seq: 3, hash: 'b'.repeat(64) },
+    signedAt: '2026-09-30T00:00:00.000Z',
+    keyId: 'k',
+    signature,
+  });
+  assert.equal(vaultBehind(null, null), null);
+  assert.equal(vaultBehind(checkpoint(4), null), null);
+  assert.equal(vaultBehind(checkpoint(4), checkpoint(4)), null);
+  assert.equal(vaultBehind(checkpoint(6), checkpoint(4)), null);
+  assert.match(vaultBehind(checkpoint(2), checkpoint(4))!, /put back to an older copy$/);
+  assert.match(vaultBehind(checkpoint(4, 'other'), checkpoint(4))!, /put back to an older copy$/);
+  assert.match(vaultBehind(null, checkpoint(4))!, /its store was emptied$/);
 });
 
 test('an empty log has nothing to checkpoint', async () => {
-  assert.equal(await checkpointAudit(db.runtime, vault, quiet), true);
+  assert.equal(await checkpointAudit(db.runtime, Buffer.alloc(32, 1), vault, quiet), true);
   assert.equal((await vault.latestCheckpoint()).checkpoint, null);
 });
 

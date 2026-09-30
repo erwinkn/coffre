@@ -651,9 +651,13 @@ export type Api = {
         seq: number;
         signedAt: string;
       };
+      vault: {
+        entries: number;
+      };
     } | {
       ok: false;
-      failedAtSeq: number;
+      log: "audit" | "vault";
+      failedAtSeq: number | null;
       reason: string;
     };
   };
@@ -661,6 +665,7 @@ export type Api = {
     input: {
       before?: unknown;
       limit?: unknown;
+      full?: "1" | "true";
     };
     output: {
       entries: {
@@ -681,7 +686,7 @@ export type Api = {
         entries: number;
       } | {
         ok: false;
-        failedAtSeq: number;
+        failedAtSeq: number | null;
         reason: string;
       };
     };

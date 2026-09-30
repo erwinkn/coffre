@@ -1,9 +1,10 @@
 import type { Checkpoint } from './vault.ts';
 
-/** What a checkpoint's signature covers. */
+/** What a checkpoint's signature covers: the heads of both logs, and when. */
 export function checkpointMessage(checkpoint: Omit<Checkpoint, 'signature' | 'keyId'>): Uint8Array<ArrayBuffer> {
+  const { seq, headHash, vault, signedAt } = checkpoint;
   return new Uint8Array(
-    new TextEncoder().encode(`coffre.checkpoint.v1|${checkpoint.seq}|${checkpoint.headHash}|${checkpoint.signedAt}`),
+    new TextEncoder().encode(`coffre.checkpoint.v2|${seq}|${headHash}|${vault.seq}|${vault.hash}|${signedAt}`),
   );
 }
 

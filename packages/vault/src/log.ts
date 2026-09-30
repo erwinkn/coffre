@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import type { LogEntry, LogPage } from '@coffre/core/vault';
+import type { LogEntry, LogHead, LogVerification } from '@coffre/core/vault';
 
 import type { LogRow, Store } from './store.ts';
 
@@ -65,12 +65,20 @@ export function append(store: Store, at: number, entries: readonly Appended[]): 
 }
 
 /** An entry, and so the chain up to it, as this process last verified it. */
-export type Anchor = { seq: number; hash: string };
+export type Anchor = LogHead;
 
 /** Before the first entry: nothing verified yet. */
 export const UNVERIFIED: Anchor = { seq: 0, hash: GENESIS };
 
-type Verification = LogPage['verification'];
+/** The last entry, or `UNVERIFIED`'s zeros before the first. */
+export function head(store: Store): LogHead {
+  return store.logHead() ?? UNVERIFIED;
+}
+
+/** Whether the log still has `head` where it was: not rewritten, nor cut back before it. */
+export function carries(store: Store, head: LogHead): boolean {
+  return head.seq === 0 ? head.hash === GENESIS : store.logEntry(head.seq)?.hash === head.hash;
+}
 
 /**
  * Check the chain, one row in memory at a time, and return where it is now
@@ -93,7 +101,7 @@ export function verify(
   shown: readonly LogRow[],
   anchor: Anchor,
   full: boolean,
-): { verification: Verification; anchor: Anchor } {
+): { verification: LogVerification; anchor: Anchor } {
   const broken = (failedAtSeq: number, reason: string) => ({
     verification: { ok: false as const, failedAtSeq, reason },
     anchor,

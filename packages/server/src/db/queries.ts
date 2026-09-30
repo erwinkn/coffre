@@ -591,6 +591,18 @@ export async function auditRange(db: Queryable, fromSeq = 0n, limit = 1000) {
   return rows.map((row) => ({ ...row, occurredAt: canonicalTimestamp(row.occurredAt) }));
 }
 
+/** The newest entry of this action, or null. */
+export async function latestAudit(db: Queryable, action: string) {
+  const { auditLog } = tablesOf(db);
+  const [row] = await db
+    .select(auditColumns(auditLog))
+    .from(auditLog)
+    .where(eq(auditLog.action, action))
+    .orderBy(desc(auditLog.seq))
+    .limit(1);
+  return row === undefined ? null : { ...row, occurredAt: canonicalTimestamp(row.occurredAt) };
+}
+
 export type AuditFilter = {
   /** Entries in any of these projects or environments, for a caller who reads only those. */
   within?: { projectIds: string[]; environmentIds: string[] };

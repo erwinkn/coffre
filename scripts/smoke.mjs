@@ -345,19 +345,22 @@ async function smoke() {
     console.log('  reveal    smoke/dev, through the vault');
 
     // Each heartbeat has the vault sign the audit log's head, which must
-    // extend the last head it signed; a refusal fails the job. Two, so the
-    // second extends the first.
+    // extend the last head it signed, with its own log's, which must still
+    // carry the last it signed; a refusal fails the job. Two, so the second
+    // extends the first.
     const before = await api('GET', '/audit/verification');
     await scheduled();
     await scheduled();
     const verification = await api('GET', '/audit/verification');
     check(verification.ok && verification.checkpoint !== null, 'the audit log is not verified and checkpointed', verification);
     check(verification.checkpoint.seq >= before.rows, 'the checkpoint does not cover the reveal', { before, verification });
+    check(verification.vault.entries > 0, 'the audit verification did not check the vault log', verification);
     console.log(`  audit     ${verification.rows} rows verified, the vault's checkpoint at #${verification.checkpoint.seq}`);
 
     // The vault's own log, its chain rehashed from the first entry in its
-    // store: a Durable Object's SQLite, or the Node vault's file.
-    const vaultLog = await api('GET', '/audit/vault');
+    // store (a Durable Object's SQLite, or the Node vault's file), and every
+    // member and grant replayed from it.
+    const vaultLog = await api('GET', '/audit/vault?full=1');
     const unwrap = vaultLog.entries.find((entry) => entry.action === 'unwrap' && entry.subject === 'smoke/dev/GREETING');
     check(vaultLog.verification.ok && unwrap?.outcome === 'allow', 'the vault log does not verify, or lacks the reveal', vaultLog);
     console.log(`  vault log ${vaultLog.verification.entries} entries verified, the reveal among them`);

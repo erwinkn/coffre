@@ -18,8 +18,10 @@ import {
   type CheckpointInput,
   type Grant,
   type GrantChange,
+  type LogHead,
   type LogInput,
   type LogPage,
+  type LogVerification,
   type Outcome,
   type Refusal,
   type RefusalCode,
@@ -29,15 +31,17 @@ import {
   type SetAccessInput,
   type UnwrapInput,
   type Vault,
+  type VerifyLogInput,
   type WrapInput,
   type WrappedKey,
 } from '@coffre/core/vault';
 
 import { signer, type Signer } from './checkpoint.ts';
 import type { BulkLimit, ResolvedVaultConfig } from './config.ts';
-import { append, entry, UNVERIFIED, verify, type Anchor, type Appended } from './log.ts';
+import { append, carries, entry, head, UNVERIFIED, verify, type Anchor, type Appended } from './log.ts';
+import { replay } from './replay.ts';
 import type { Sqlite } from './sqlite.ts';
-import { openStore, type GrantRow, type Store } from './store.ts';
+import { openStore, type GrantRow, type LogRow, type Store } from './store.ts';
 
 export type VaultOptions = {
   /** The clock, in milliseconds; tests move it. */
@@ -77,6 +81,7 @@ const MESSAGES: Record<RefusalCode, string> = {
   root_admin: 'root admins are set in the vault configuration',
   invalid: 'not something the rules allow',
   checkpoint_diverged: 'the audit log does not extend the last checkpoint',
+  log_broken: 'the vault log does not hold from the last checkpoint',
 };
 
 /**
@@ -540,7 +545,9 @@ class VaultService implements Vault {
 
   #latest(): Checkpoint | null {
     const row = this.#store.latestCheckpoint();
-    return row === undefined ? null : { ...row, signedAt: iso(row.signedAt) };
+    if (row === undefined) return null;
+    const { vaultSeq, vaultHash, signedAt, ...rest } = row;
+    return { ...rest, vault: { seq: vaultSeq, hash: vaultHash }, signedAt: iso(signedAt) };
   }
 
   checkpoint(input: CheckpointInput): Promise<Outcome<{ checkpoint: Checkpoint }>> {
@@ -558,25 +565,44 @@ class VaultService implements Vault {
             input.previous.seq === latest.seq &&
             input.previous.hash === latest.headHash &&
             input.seq > latest.seq;
+      // This log too: still the one signed last, and whole from there. So a
+      // rewrite of it is never signed over, and the app's record of the head
+      // signed before shows it.
+      const { verification: held } = verify(this.#store, [], latest?.vault ?? UNVERIFIED, false);
+      const vault = head(this.#store);
       const signedAt = iso(at);
-      const signature = extends_
-        ? await this.#signer.sign(checkpointMessage({ seq: input.seq, headHash: input.headHash, signedAt }))
-        : '';
+      const signature =
+        extends_ && held.ok
+          ? await this.#signer.sign(checkpointMessage({ seq: input.seq, headHash: input.headHash, vault, signedAt }))
+          : '';
       return this.#decide(at, () => {
-        if (!extends_) {
-          throw new Refused(refusal('checkpoint_diverged', MESSAGES.checkpoint_diverged), [
+        const refused = (code: RefusalCode, detail: Record<string, unknown>) =>
+          new Refused(refusal(code, MESSAGES[code]), [
             {
               actor: 'app',
               action: 'checkpoint',
               outcome: 'refuse',
-              code: 'checkpoint_diverged',
+              code,
               subject: 'audit',
-              detail: { seq: input.seq, headHash: input.headHash, previous: input.previous, latest },
+              detail: { seq: input.seq, headHash: input.headHash, ...detail },
             },
           ]);
-        }
-        const checkpoint = { seq: input.seq, headHash: input.headHash, signedAt, keyId: this.#signer.keyId, signature };
-        this.#store.addCheckpoint({ ...checkpoint, signedAt: at });
+        if (!extends_) throw refused('checkpoint_diverged', { previous: input.previous, latest });
+        if (!held.ok) throw refused('log_broken', { failedAtSeq: held.failedAtSeq, reason: held.reason });
+        const checkpoint = {
+          seq: input.seq,
+          headHash: input.headHash,
+          vault,
+          signedAt,
+          keyId: this.#signer.keyId,
+          signature,
+        };
+        this.#store.addCheckpoint({
+          ...checkpoint,
+          vaultSeq: vault.seq,
+          vaultHash: vault.hash,
+          signedAt: at,
+        });
         return { checkpoint };
       });
     });
@@ -597,11 +623,38 @@ class VaultService implements Vault {
         }
         const limit = Math.min(Math.max(Math.trunc(input.limit ?? 50), 1), 200);
         const shown = this.#store.logPage(input.before, limit);
-        const { verification, anchor } = verify(this.#store, shown, this.#verified, input.full === true);
-        this.#verified = anchor;
+        const verification = input.full === true ? this.#verifyAll(shown, null, at) : this.#verifyNew(shown);
         return { entries: shown.map(entry), verification };
       });
     });
+  }
+
+  verifyLog(input: VerifyLogInput): Promise<LogVerification> {
+    return this.#serial(async () => this.#verifyAll([], input.through, this.#now()));
+  }
+
+  /** `shown`, and the chain since it was last verified; `verify` in log.ts. */
+  #verifyNew(shown: readonly LogRow[]): LogVerification {
+    const { verification, anchor } = verify(this.#store, shown, this.#verified, false);
+    this.#verified = anchor;
+    return verification;
+  }
+
+  /**
+   * `shown`, the chain from its first entry, the heads the app and the last
+   * checkpoint say it carries, and the members and grants replayed from it.
+   */
+  #verifyAll(shown: readonly LogRow[], through: LogHead | null, at: number): LogVerification {
+    const { verification, anchor } = verify(this.#store, shown, this.#verified, true);
+    this.#verified = anchor;
+    if (!verification.ok) return verification;
+    const signed = this.#latest()?.vault ?? null;
+    for (const [kept, by] of [[through, 'a checkpoint the app recorded'], [signed, 'the last checkpoint']] as const) {
+      if (kept === null || carries(this.#store, kept)) continue;
+      return { ok: false, failedAtSeq: kept.seq, reason: `not the entry ${by} signed: the log was rewritten or cut back` };
+    }
+    const reason = replay(this.#store, at);
+    return reason === null ? verification : { ok: false, failedAtSeq: null, reason };
   }
 }
 
