@@ -14,13 +14,15 @@ export function durableObjectSqlite(storage: DurableObjectStorage): Sqlite {
       exec(sql, params);
     },
     get<T>(sql: string, ...params: SqlValue[]) {
-      return exec(sql, params).next().value as T | undefined;
+      // Every row, though there is one at most: a cursor stopped at its first
+      // is not finished (see `finished`).
+      return exec(sql, params).toArray()[0] as T | undefined;
     },
     all<T>(sql: string, ...params: SqlValue[]) {
       return exec(sql, params).toArray() as T[];
     },
     iterate<T>(sql: string, ...params: SqlValue[]) {
-      return exec(sql, params) as Iterable<T>;
+      return finished(exec(sql, params)) as Iterable<T>;
     },
     transaction(fn) {
       if (open) throw new Error('vault transactions do not nest');
@@ -32,4 +34,19 @@ export function durableObjectSqlite(storage: DurableObjectStorage): Sqlite {
       }
     },
   };
+}
+
+/**
+ * A cursor's rows, read to the end even when the loop over them stops early.
+ * A cursor cannot be closed, and until its last row, or until it is
+ * collected, its statement holds a read open: on the database as it was when
+ * the read began, so a change made outside the object stays unseen, and the
+ * WAL cannot be checkpointed past it.
+ */
+function* finished(cursor: SqlStorageCursor<Record<string, SqlStorageValue>>) {
+  try {
+    yield* cursor;
+  } finally {
+    for (const _ of cursor);
+  }
 }
