@@ -20,14 +20,16 @@
     "smoke:workers": "node scripts/smoke.mjs workers",
     "smoke:node": "node scripts/smoke.mjs node",
     "test:consumer": "./scripts/consumer-test.sh",
-    "lint": "eslint \"packages/*/src/**/*.{ts,tsx}\"",
+    "lint": "eslint \"packages/*/{src,test,scripts}/**/*.{ts,tsx}\"",
     "check:pins": "node scripts/check-pins.mjs",
+    "bump": "node scripts/bump.mjs",
     "check:contrast": "node scripts/check-contrast.mjs",
     "db:up": "docker compose up -d postgres",
     "db:migrate": "pnpm --dir packages/server run db:migrate",
     "db:generate": "pnpm --dir packages/server run db:generate",
     "db:check": "pnpm --dir packages/server run db:check",
     "seed": "DATABASE_URL=postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/coffre node --env-file=.env.dev dev/seed.mjs",
+    "coffre": "node --conditions=coffre:source --env-file=.env.dev packages/cli/src/main.ts",
     "add:dep": "pnpm add --save-exact"
   },
   "dependencies": {

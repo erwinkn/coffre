@@ -1,5 +1,4 @@
-import { LocalKekProvider } from '../../core/src/kek/local.ts';
-import { KekRegistry } from '../../core/src/kek/registry.ts';
+import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 
 /** At most `count` data keys unwrapped per principal in any `windowMs`. */
 export type BulkLimit = { count: number; windowMs: number };

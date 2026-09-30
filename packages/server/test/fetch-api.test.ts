@@ -1,9 +1,9 @@
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { CoffreError } from '../../client/src/index.ts';
-import type { AuthConfig } from '../../core/src/identity/auth-mode.ts';
-import type { Principal } from '../../core/src/identity/types.ts';
+import { CoffreError } from '@coffre/client';
+import type { AuthConfig, Principal } from '@coffre/core/identity';
+
 import { SyncRunner } from '../src/api/syncs.ts';
 import { DEV_TOKEN_COOKIE } from '../src/auth.ts';
 import { apiCredential, fetchApi as serveApi, pageClient as clientForPage, pageCredential } from '../src/fetch-api.ts';

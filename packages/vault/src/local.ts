@@ -1,6 +1,7 @@
+import type { Vault } from '@coffre/core/vault';
+
 import type { ResolvedVaultConfig } from './config.ts';
 import { nodeSqlite } from './sqlite-node.ts';
-import type { Vault } from './types.ts';
 import { openVault, type VaultOptions } from './vault.ts';
 
 /** Every call the vault answers, in the order of the `Vault` interface. */

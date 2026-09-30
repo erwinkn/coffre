@@ -1,4 +1,5 @@
-import { chainHash, type ChainedAuditRow } from '../../../core/src/audit/chain.ts';
+import { chainHash, type ChainedAuditRow } from '@coffre/core/audit';
+
 import type { Transaction } from './database.ts';
 import { auditHead, insert, update } from './queries.ts';
 import { auditChainHead, auditLog } from './schema.ts';

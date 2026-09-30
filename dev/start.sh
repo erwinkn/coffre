@@ -111,7 +111,7 @@ if [ "$mode" = dev ]; then
     DATABASE_URL="$owner_url" node dev/seed.mjs
 fi
 
-cli="node packages/cli/src/main.ts"
+cli="node --conditions=coffre:source packages/cli/src/main.ts"
 if [ "$mode" = signin ]; then
     cat <<BANNER
 
@@ -137,7 +137,7 @@ else
 
   CLI:
     COFFRE_API_URL=$COFFRE_API_URL COFFRE_DEV_IDP_URL=$COFFRE_DEV_IDP_URL \\
-      node --env-file=.env.dev packages/cli/src/main.ts login --email admin@acme.example
+      pnpm coffre login --email admin@acme.example
     … then \`run market/dev -- printenv\` or \`verify\` the same way
 BANNER
 fi

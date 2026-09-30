@@ -3,16 +3,15 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 
+import { createClient, type CoffreClient } from '@coffre/client';
+import { chainHash } from '@coffre/core/audit';
+import type { AuthConfig, Principal } from '@coffre/core/identity';
+import type { LogEntry } from '@coffre/core/vault';
 import { and, asc, eq, is, Table } from 'drizzle-orm';
 
-import { createClient, type CoffreClient } from '../../client/src/index.ts';
-import { chainHash } from '../../core/src/audit/chain.ts';
-import type { AuthConfig } from '../../core/src/identity/auth-mode.ts';
-import type { Principal } from '../../core/src/identity/types.ts';
 import { tablesOf } from '../src/db/database.ts';
 import { auditRange } from '../src/db/queries.ts';
 import { auditChainHead, auditLog } from './db/tables.ts';
-import type { LogEntry } from '../../vault/src/types.ts';
 import { serveApi } from '../src/api/router.ts';
 import { SyncRunner } from '../src/api/syncs.ts';
 import { DEV_TOKEN_COOKIE } from '../src/auth.ts';
@@ -133,7 +132,7 @@ test('an expired grant refuses: in the app, and in the vault if the app were wro
 
 test('the bulk limit counts one read per secret, trips with its own code, and is logged', async () => {
   const limited = testDeps(db.runtime, [ROOT], {
-    vault: testVault([ROOT], { bulkLimit: { count: 3, windowMs: 60_000 } }),
+    vault: testVault([ROOT], { bulkLimit: { count: 3, windowMinutes: 1 } }),
   });
   const admin = clientFor(limited, ROOT);
   const dev = clientFor(limited, DEV);
@@ -268,7 +267,7 @@ test('neither database holds a key', async () => {
   const vault = Buffer.concat([file, `${file}-wal`].filter(existsSync).map((path) => readFileSync(path)));
   assert.ok(app.includes(Buffer.from(DEV)) && vault.includes(Buffer.from(`user:${DEV}`)), 'the dumps are real');
 
-  for (const key of [deps.vault.kek, Buffer.from(deps.vault.config.signingKey)]) {
+  for (const key of [deps.vault.kek, deps.vault.signingKey]) {
     for (const form of [key, ...(['base64', 'base64url', 'hex'] as const).map((encoding) => Buffer.from(key.toString(encoding)))]) {
       assert.equal(app.includes(form), false, 'the app database holds a key');
       assert.equal(vault.includes(form), false, 'the vault database holds a key');

@@ -5,8 +5,9 @@ import {
   type Permission,
   type Place,
   type Role,
-} from '../../../core/src/access.ts';
-import type { Access, Vault } from '../../../vault/src/types.ts';
+} from '@coffre/core/access';
+import type { Access, Vault } from '@coffre/core/vault';
+
 import { formatMember } from './paths.ts';
 
 export type { Place };

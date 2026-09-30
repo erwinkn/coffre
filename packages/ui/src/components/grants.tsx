@@ -1,7 +1,7 @@
+import type { CoffreClient } from '@coffre/client';
+import type { Role } from '@coffre/core/access';
 import type { ReactNode } from 'react';
 import { toast } from 'sonner';
-import type { CoffreClient } from '../../../client/src/index.ts';
-import type { Role } from '../../../core/src/access.ts';
 import { failureMessage, memberRef, uiFailure, useCoffre } from '../lib/coffre';
 import { useAction } from '../lib/use-action';
 import { projectAccessLabel } from '../lib/project-access';

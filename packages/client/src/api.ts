@@ -688,6 +688,26 @@ export type Api = {
   };
 };
 
+export type AccessValue = "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer" | null | {
+  role: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+  until: string | null;
+};
+
+export type AuditEntryView = {
+  seq: number;
+  occurredAt: string;
+  actorType: string;
+  actorId: string;
+  action: string;
+  decision: "allow" | "deny";
+  project: string | null;
+  environment: string | null;
+  bundleId: string | null;
+  metadata: {
+    [key: string]: unknown;
+  };
+};
+
 export type AuthInfo = {
   mode: "cloudflare" | "dev" | "signin";
   accessAssertion: boolean;
@@ -711,6 +731,183 @@ export type DryRunResult = {
   };
 };
 
+export type IdentityRow = {
+  id: string;
+  provider: string;
+  email: string | null;
+  createdAt: string;
+  lastSignInAt: string | null;
+};
+
+export type Me = {
+  principal: {
+    type: "service" | "user";
+    id: string;
+  };
+  registered: boolean;
+  instanceRole: "owner" | "root-admin" | "user";
+  isRootAdmin: boolean;
+  canReadAudit: boolean;
+  environments: {
+    project: string;
+    environment: string;
+    permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.write")[];
+  }[];
+};
+
+export type Member = {
+  member: string;
+  principalType: "service" | "user";
+  principalId: string;
+  instanceRole: "owner" | "root-admin" | "user";
+  isRootAdmin: boolean;
+  grants: {
+    id: string;
+    project: string;
+    environment: string | null;
+    role: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
+    roleName: string;
+    permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.write")[];
+    expiresAt: string | null;
+  }[];
+};
+
+export type OffboardingReport = {
+  principalType: "service" | "user";
+  principalId: string;
+  status: "active" | "removed";
+  instanceRole: "owner" | "root-admin" | "user";
+  isRootAdmin: boolean;
+  removedAt: string | null;
+  removedBy: string | null;
+  live: {
+    grants: number;
+    sessions: number;
+    tokens: number;
+    identities: number;
+  };
+  exposed: {
+    project: string;
+    environment: string;
+    key: string;
+    version: number;
+    how: "read" | "wrote";
+    at: string;
+  }[];
+  rotated: number;
+  issuedTokens: {
+    id: string;
+    service: string;
+    label: string | null;
+    hint: string;
+    expiresAt: string;
+    lastUsedAt: string | null;
+  }[];
+  syncs: {
+    id: string;
+    provider: string;
+    providerLabel: string;
+    destination: string;
+    config: {
+      [key: string]: string | number | boolean | null | Json[] | {
+        [key: string]: Json;
+      };
+    };
+    credential: string;
+    createdAt: string;
+    createdBy: string;
+    paused: boolean;
+    running: boolean;
+    lastRunAt: string | null;
+    lastStatus: "failed" | "ok" | "partial" | null;
+    lastError: string | null;
+    synced: number;
+    pending: number;
+    skipped: {
+      key: string;
+      reason: string;
+    }[];
+    project: string;
+    environment: string;
+  }[];
+};
+
+export type ProjectSummary = {
+  slug: string;
+  name: string;
+  archivedAt: string | null;
+  permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.write")[];
+  environments: {
+    slug: string;
+    name: string;
+    accessible: boolean;
+    details: null | {
+      archivedAt: string | null;
+      secretCount: number | null;
+    };
+  }[];
+};
+
+export type RemovedMember = {
+  principalType: "service" | "user";
+  principalId: string;
+  toRotate: number;
+};
+
+export type RunOutcome = {
+  status: "busy";
+} | {
+  status: "failed" | "ok" | "partial";
+  upserted: string[];
+  deleted: string[];
+  failed: {
+    key: string;
+    operation: "delete" | "upsert";
+    message: string;
+  }[];
+  error: string | null;
+};
+
+export type SecretKey = {
+  key: string;
+  archived: boolean;
+  version: number | null;
+  updatedAt: string | null;
+  updatedBy: string | null;
+};
+
+export type SecretVersion = {
+  version: number;
+  createdAt: string;
+  createdBy: string;
+  current: boolean;
+  kek: string;
+};
+
+export type ServiceTokenRow = {
+  id: string;
+  label: string | null;
+  hint: string;
+  createdAt: string;
+  createdBy: string;
+  expiresAt: string;
+  lastUsedAt: string | null;
+  lastUsedIp: string | null;
+};
+
+export type SessionRow = {
+  id: string;
+  kind: "browser" | "cli";
+  label: string | null;
+  hint: string;
+  provider: string | null;
+  createdAt: string;
+  expiresAt: string;
+  lastUsedAt: string | null;
+  lastUsedIp: string | null;
+  current: boolean;
+};
+
 export type SetResult = {
   bundleId: string;
   keys: {
@@ -720,6 +917,32 @@ export type SetResult = {
       archived: true;
     };
   };
+};
+
+export type SyncView = {
+  id: string;
+  provider: string;
+  providerLabel: string;
+  destination: string;
+  config: {
+    [key: string]: string | number | boolean | null | Json[] | {
+      [key: string]: Json;
+    };
+  };
+  credential: string;
+  createdAt: string;
+  createdBy: string;
+  paused: boolean;
+  running: boolean;
+  lastRunAt: string | null;
+  lastStatus: "failed" | "ok" | "partial" | null;
+  lastError: string | null;
+  synced: number;
+  pending: number;
+  skipped: {
+    key: string;
+    reason: string;
+  }[];
 };
 
 export type Json = string | number | boolean | null | Json[] | {

@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { secretKey, slug } from '../../core/src/schemas.ts';
+import { secretKey, slug } from '@coffre/core/schemas';
+
 import { secretKeyProblem, slugProblem } from '../src/lib/validation.ts';
 
 // The form hints are a copy of the server's rules. If the two ever disagree, a

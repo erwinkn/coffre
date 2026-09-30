@@ -13,18 +13,22 @@
     "node": ">=24"
   },
   "files": [
-    "dist"
+    "dist",
+    "src"
   ],
   "exports": {
     ".": {
+      "coffre:source": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
     "./cloudflare": {
+      "coffre:source": "./src/cloudflare.ts",
       "types": "./dist/cloudflare.d.ts",
       "default": "./dist/cloudflare.js"
     },
     "./node": {
+      "coffre:source": "./src/node.ts",
       "types": "./dist/node.d.ts",
       "default": "./dist/node.js"
     },
@@ -33,7 +37,10 @@
   "scripts": {
     "build": "tsdown",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.cloudflare.json",
-    "test": "node --test"
+    "test": "node --conditions=coffre:source --test"
+  },
+  "dependencies": {
+    "@coffre/core": "workspace:*"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20260920.1",

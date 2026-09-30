@@ -48,3 +48,21 @@ test('ESLint keeps node:sqlite in the vault\'s Node adapter, out of the Worker',
   }
   assert.deepEqual(await lintImport(source, 'packages/vault/src/sqlite-node.ts'), []);
 });
+
+test('ESLint has a package import another by name, never by path', async () => {
+  const across = "import { Vault } from '../../vault/src/vault.ts';";
+  for (const filePath of ['packages/server/src/example.ts', 'packages/server/test/example.test.ts']) {
+    assert.equal((await lintImport(across, filePath))[0]?.ruleId, 'coffre/package-imports', filePath);
+  }
+  assert.equal(
+    (await lintImport("export * from '../../../core/src/vault.ts';", 'packages/client/src/lib/example.ts'))[0]?.ruleId,
+    'coffre/package-imports',
+  );
+  assert.deepEqual(await lintImport("import { vault } from '@coffre/vault';", 'packages/server/src/example.ts'), []);
+  assert.deepEqual(await lintImport("import { plan } from '../lib/plan.ts';", 'packages/server/src/api/example.ts'), []);
+
+  // Tests may use the dev IdP; what ships may not.
+  const devIdp = "import { DevIdp } from '../../../dev/idp/src/idp.ts';";
+  assert.deepEqual(await lintImport(devIdp, 'packages/core/test/example.test.ts'), []);
+  assert.equal((await lintImport(devIdp, 'packages/core/src/example.ts'))[0]?.ruleId, 'coffre/package-imports');
+});

@@ -1,13 +1,17 @@
-import type { ImportAction } from '../../../client/src/index.ts';
-import type { Permission as CorePermission } from '../../../core/src/access.ts';
-import type { AuditEntryView } from '../../../server/src/api/audit.ts';
-import type { Member, OffboardingReport, RemovedMember } from '../../../server/src/api/members.ts';
-import type { Me as ApiMe, ProjectSummary as ApiProjectSummary } from '../../../server/src/api/projects.ts';
 import type {
+  AuditEntryView,
+  ImportAction,
+  Me as ApiMe,
+  Member,
+  OffboardingReport,
+  ProjectSummary as ApiProjectSummary,
+  RemovedMember,
+  RunOutcome as ApiRunOutcome,
   SecretKey as ApiSecretKey,
   SecretVersion as ApiSecretVersion,
-} from '../../../server/src/api/secrets.ts';
-import type { RunOutcome as ApiRunOutcome, SyncView as ApiSyncView } from '../../../server/src/api/syncs.ts';
+  SyncView as ApiSyncView,
+} from '@coffre/client';
+import type { Permission as CorePermission } from '@coffre/core/access';
 
 /** Browser-safe projections of what the API returns. */
 export type Permission = CorePermission;

@@ -4,6 +4,8 @@ import { encodeAad } from './context.ts';
 import type { KekRegistry } from './kek/registry.ts';
 import { DEK_BYTES } from './kek/types.ts';
 
+export * from './context.ts';
+
 const IV_BYTES = 12;
 const TAG_BYTES = 16;
 

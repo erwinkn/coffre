@@ -1,6 +1,6 @@
 // `@coffre/ui`'s public types, which its `.d.ts` is built from. The package
 // itself is the Start build of `entry.ts`.
-import type { CoffreClient } from '../../client/src/index.ts';
+import type { CoffreClient } from '@coffre/client';
 
 export type { CoffreClient };
 

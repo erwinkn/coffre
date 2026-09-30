@@ -1,7 +1,7 @@
+import { ROLE_NAMES, type Permission } from '@coffre/core/access';
+import { displayName, secretKey, slug } from '@coffre/core/schemas';
 import { z } from 'zod';
 
-import { ROLE_NAMES, type Permission } from '../../../core/src/access.ts';
-import { displayName, secretKey, slug } from '../../../core/src/schemas.ts';
 import { setAccess } from './access.ts';
 import { listAudit, vaultLog, verifyAudit } from './audit.ts';
 import type { ApiContext } from './context.ts';

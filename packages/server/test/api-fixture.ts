@@ -3,13 +3,11 @@ import { rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { createClient, type CoffreClient } from '../../client/src/index.ts';
-import { LocalKekProvider } from '../../core/src/kek/local.ts';
-import { KekRegistry } from '../../core/src/kek/registry.ts';
+import { createClient, type CoffreClient } from '@coffre/client';
+import type { Vault } from '@coffre/core/vault';
+import { localVault, type LocalVault, type VaultConfig } from '@coffre/vault/node';
+
 import { tablesOf, type Database } from '../src/db/database.ts';
-import { DEFAULT_BULK_LIMIT, type ResolvedVaultConfig } from '../../vault/src/config.ts';
-import { openLocalVault, type LocalVault } from '../../vault/src/local.ts';
-import type { Vault } from '../../vault/src/types.ts';
 import { loadCaller } from '../src/api/caller.ts';
 import type { ApiContext } from '../src/api/context.ts';
 import { serveApi } from '../src/api/router.ts';
@@ -31,9 +29,9 @@ export type FixtureDeps = {
  * do not share members, grants, checkpoints or bulk-limit counts.
  */
 export type TestVault = Vault & {
-  config: ResolvedVaultConfig;
-  /** The raw primary KEK, which no database may hold. */
+  /** The raw KEK and signing key, which no database may hold. */
   kek: Buffer;
+  signingKey: Buffer;
   /** The vault's file, while it is open. */
   file(): string | null;
   /** Move the vault's clock, for expiry and the bulk limit. */
@@ -43,21 +41,24 @@ export type TestVault = Vault & {
 
 const vaults = new Set<TestVault>();
 
-export function testVault(rootAdmins: readonly string[], config: Partial<ResolvedVaultConfig> = {}): TestVault {
+export function testVault(rootAdmins: readonly string[], config: Pick<VaultConfig, 'bulkLimit'> = {}): TestVault {
   const kek = randomBytes(32);
-  const full: ResolvedVaultConfig = {
-    keks: new KekRegistry(LocalKekProvider.fromBase64(kek.toString('base64'), 'test-kek-1')),
-    rootAdmins,
-    signingKey: randomBytes(32),
-    bulkLimit: DEFAULT_BULK_LIMIT,
-    ...config,
-  };
+  const signingKey = randomBytes(32);
   let offset = 0;
   let file: string | null = null;
   let current: Promise<LocalVault> | null = null;
   const open = () => {
     file = join(tmpdir(), `coffre-vault-${randomUUID()}.db`);
-    return openLocalVault(file, full, { now: () => Date.now() + offset });
+    return localVault(
+      {
+        store: file,
+        kek: { id: 'test-kek-1', key: kek.toString('base64') },
+        rootAdmins,
+        signingKey: signingKey.toString('base64'),
+        ...config,
+      },
+      { now: () => Date.now() + offset },
+    );
   };
   const call = (name: keyof Vault) => async (...args: unknown[]) =>
     ((await (current ??= open()))[name] as (...args: unknown[]) => Promise<unknown>)(...args);
@@ -73,8 +74,8 @@ export function testVault(rootAdmins: readonly string[], config: Partial<Resolve
     checkpoint: call('checkpoint'),
     latestCheckpoint: call('latestCheckpoint'),
     log: call('log'),
-    config: full,
     kek,
+    signingKey,
     file: () => file,
     advance: (ms: number) => void (offset += ms),
     async reset() {

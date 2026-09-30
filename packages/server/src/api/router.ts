@@ -1,7 +1,7 @@
+import { secretKey, slug } from '@coffre/core/schemas';
 import { z } from 'zod';
 
 import { resolvePath, type ResolvedPath } from '../db/queries.ts';
-import { secretKey, slug } from '../../../core/src/schemas.ts';
 import { errorResponse, jsonResponse, readJson } from '../http.ts';
 import { can } from './caller.ts';
 import { denied, missing, refuse, Refusal, type ApiContext } from './context.ts';

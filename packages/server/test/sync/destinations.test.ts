@@ -1,7 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { getProvider } from '../../src/sync/index.ts';
 import {
   DESTINATIONS,
   configFromArguments,
@@ -9,7 +8,9 @@ import {
   destinationConfig,
   firstMissing,
   initialValues,
-} from '../../../client/src/destinations.ts';
+} from '@coffre/client';
+
+import { getProvider } from '../../src/sync/index.ts';
 
 // The form builds what each provider's own parser accepts; the parser is the
 // judge, so a field renamed on one side fails here rather than in a dialog.

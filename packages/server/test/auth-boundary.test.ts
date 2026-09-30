@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import type { AuthConfig } from '../../core/src/identity/auth-mode.ts';
-import type { Principal } from '../../core/src/identity/types.ts';
-import type { Access } from '../../vault/src/types.ts';
+import type { AuthConfig, Principal } from '@coffre/core/identity';
+import type { Access } from '@coffre/core/vault';
+
 import { handleRequest } from '../src/app.ts';
 import { accessTokenForRequest, authenticateRequest, cloudflareSourceIp } from '../src/auth.ts';
 

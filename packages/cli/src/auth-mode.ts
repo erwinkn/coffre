@@ -1,4 +1,4 @@
-import type { AuthMode } from '../../core/src/identity/auth-mode.ts';
+import type { AuthMode } from '@coffre/core/identity';
 
 export function cloudflareApiUrl(raw: string | undefined): string {
   const value = raw?.trim();

@@ -2,16 +2,10 @@ import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 
+import { defineSignin, github, google, hashToken, isCoffreToken, type SigninProfile } from '@coffre/core/identity';
 import { count, eq, isNotNull, isNull, type SQL } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 
-import {
-  defineSignin,
-  github,
-  google,
-} from '../../core/src/identity/signin/config.ts';
-import type { SigninProfile } from '../../core/src/identity/signin/types.ts';
-import { hashToken, isCoffreToken } from '../../core/src/identity/tokens.ts';
 import type { Database } from '../src/db/database.ts';
 import {
   auditLog,

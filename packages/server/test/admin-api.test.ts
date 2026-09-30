@@ -1,9 +1,9 @@
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
+import type { CoffreClient } from '@coffre/client';
 import { asc, count, eq } from 'drizzle-orm';
 
-import type { CoffreClient } from '../../client/src/index.ts';
 import { auditLog, principals, projects } from './db/tables.ts';
 import {
   clientFor,

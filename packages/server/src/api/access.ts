@@ -1,6 +1,7 @@
-import { assignableToEnvironment, ROLES, type Role } from '../../../core/src/access.ts';
+import { assignableToEnvironment, ROLES, type Role } from '@coffre/core/access';
+import type { AccessChange } from '@coffre/core/vault';
+
 import { places } from '../db/queries.ts';
-import type { AccessChange } from '../../../vault/src/types.ts';
 import { allowed, audited, denied, need, Refusal, vaultRefusal, type ApiContext } from './context.ts';
 import { badRequest, conflict, notFound } from './errors.ts';
 import { formatGrantee, formatMember, formatPath, parsePath, type GranteeRef } from './paths.ts';

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
-import type { Permission } from '../../../core/src/access.ts';
+import type { Permission } from '@coffre/core/access';
+
 import { isUniqueViolation } from '../db/dialect.ts';
 import { insert, places, update, type ResolvedPath } from '../db/queries.ts';
 import { environments, projects } from '../db/schema.ts';

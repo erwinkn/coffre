@@ -33,9 +33,9 @@ import {
   planImport,
   type CoffreClient,
   type DestinationField,
-} from '../../client/src/index.ts';
-import { assignableToEnvironment, isRole, ROLES, type Role } from '../../core/src/access.ts';
-import { formatDotenv, formatShellExports, parseDotenv } from '../../core/src/dotenv.ts';
+} from '@coffre/client';
+import { assignableToEnvironment, isRole, ROLES, type Role } from '@coffre/core/access';
+import { formatDotenv, formatShellExports, parseDotenv } from '@coffre/core/dotenv';
 
 const CREDENTIALS_PATH = join(homedir(), '.coffre', 'credentials.json');
 

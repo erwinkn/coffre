@@ -1,10 +1,10 @@
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
+import type { CoffreClient } from '@coffre/client';
+import { assignableToEnvironment, ROLES } from '@coffre/core/access';
 import { and, asc, eq } from 'drizzle-orm';
 
-import type { CoffreClient } from '../../client/src/index.ts';
-import { assignableToEnvironment, ROLES } from '../../core/src/access.ts';
 import { auditLog, principals } from './db/tables.ts';
 import {
   clientFor,

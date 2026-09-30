@@ -6,16 +6,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-import { LocalKekProvider } from '../../core/src/kek/local.ts';
-import { KekRegistry } from '../../core/src/kek/registry.ts';
-import { verifyCheckpoint } from '../src/checkpoint.ts';
+import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
+import { verifyCheckpoint, type SecretRef, type WrappedKey } from '@coffre/core/vault';
+
 import { checkRootAdmins, resolveVaultConfig, type ResolvedVaultConfig } from '../src/config.ts';
 import { openLocalVault, type LocalVault } from '../src/local.ts';
 import { entryHash } from '../src/log.ts';
 import type { Sqlite, SqlValue } from '../src/sqlite.ts';
 import { nodeSqlite } from '../src/sqlite-node.ts';
 import type { LogRow } from '../src/store.ts';
-import type { SecretRef, WrappedKey } from '../src/types.ts';
 import { openVault } from '../src/vault.ts';
 
 const ROOT = 'user:root@acme.example';

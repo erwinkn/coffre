@@ -5,7 +5,8 @@ import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { devIdp } from '../../core/src/identity/auth-mode.ts';
+import { devIdp } from '@coffre/core/identity';
+
 import { migrateDatabase } from '../src/db/migrate.ts';
 import { serveWith, type Server } from '../src/node-server.ts';
 import { testVault } from './api-fixture.ts';

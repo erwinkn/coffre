@@ -7,35 +7,37 @@ import {
   type Holdings,
   type Permission,
   type Role,
-} from '../../core/src/access.ts';
-import type { SecretContext } from '../../core/src/context.ts';
-import { checkpointMessage, signer, type Signer } from './checkpoint.ts';
+} from '@coffre/core/access';
+import type { SecretContext } from '@coffre/core/envelope';
+import {
+  checkpointMessage,
+  type Access,
+  type AccessChange,
+  type AdmitInput,
+  type Checkpoint,
+  type CheckpointInput,
+  type Grant,
+  type GrantChange,
+  type LogInput,
+  type LogPage,
+  type Outcome,
+  type Refusal,
+  type RefusalCode,
+  type RemoveInput,
+  type RewrapInput,
+  type SecretRef,
+  type SetAccessInput,
+  type UnwrapInput,
+  type Vault,
+  type WrapInput,
+  type WrappedKey,
+} from '@coffre/core/vault';
+
+import { signer, type Signer } from './checkpoint.ts';
 import type { BulkLimit, ResolvedVaultConfig } from './config.ts';
 import { append, entry, UNVERIFIED, verify, type Anchor, type Appended } from './log.ts';
 import type { Sqlite } from './sqlite.ts';
 import { openStore, type GrantRow, type Store } from './store.ts';
-import type {
-  Access,
-  AccessChange,
-  AdmitInput,
-  Checkpoint,
-  CheckpointInput,
-  Grant,
-  GrantChange,
-  LogInput,
-  LogPage,
-  Outcome,
-  Refusal,
-  RefusalCode,
-  RemoveInput,
-  RewrapInput,
-  SecretRef,
-  SetAccessInput,
-  UnwrapInput,
-  Vault,
-  WrapInput,
-  WrappedKey,
-} from './types.ts';
 
 export type VaultOptions = {
   /** The clock, in milliseconds; tests move it. */

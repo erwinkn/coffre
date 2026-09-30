@@ -1,15 +1,13 @@
-// The dev deployment runs on Workers against the packages' sources, as
-// ../vite.config.ts aliases them, but typechecks against their declarations,
-// as a real deployment does: build @coffre/server and @coffre/vault first.
+// The dev deployment runs on Workers against the packages' sources (the
+// `coffre:source` condition in ../vite.config.ts), but typechecks against
+// their declarations, as a real deployment does: build @coffre/server and
+// @coffre/vault first.
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "lib": ["ES2023"],
     "types": ["@cloudflare/workers-types"],
-    "paths": {
-      "@coffre/server/cloudflare": ["../../packages/server/dist/cloudflare.d.ts"],
-      "@coffre/vault/cloudflare": ["../../packages/vault/dist/cloudflare.d.ts"]
-    }
+    "customConditions": []
   },
   "include": ["*.ts"]
 }

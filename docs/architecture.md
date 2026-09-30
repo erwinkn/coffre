@@ -77,13 +77,21 @@ Object).
 | `@coffre/ui` | the web UI, server-rendered, and its static files | nothing sensitive |
 | `@coffre/server` | `/api`, sign-in, syncs and their providers, the heartbeat, the database layer and its migrations; hands pages to the UI | sessions, the app database |
 | `@coffre/vault` | wraps and unwraps data keys, decides who may, logs every use | the keys, the vault's store |
-| `@coffre/client` | the typed API client, and the sync destinations' fields | |
+| `@coffre/client` | the typed API client, the API's types printed from the server's routes, and the sync destinations' fields | |
+| `@coffre/core` | what the others share: access rules, envelope encryption, KEK providers, the audit chain, identity and sign-in, and `Vault`, the contract between server and vault | |
 | `@coffre/cli` | `init`, `login`, secrets, syncs, audit; built on the client | a CLI session |
 
-`packages/core` stays internal and is bundled into the packages above by
-tsdown; third-party code stays a dependency. Everything ships as compiled JavaScript with declarations: Node
-refuses to strip TypeScript types inside `node_modules`. The CLI bundles all
-it runs, so it installs with no dependencies.
+A package imports another by name, never by a relative path (a lint rule
+holds every package to it), and all six are released together at one
+version. So each builds and ships on its own, and a deployment can take one
+in, as its own code, to change it. Everything ships as compiled JavaScript
+with declarations, since Node refuses to strip TypeScript types inside
+`node_modules`, and with its sources beside them. The CLI bundles all it
+runs, so it installs with no dependencies.
+
+Inside this repository, a `coffre:source` export condition points each
+package at its sources instead, for dev, the tests and typecheck: an edit to
+one package is seen by the others without a build. Builds leave it off.
 
 | Entry point | What a deployment calls |
 |---|---|

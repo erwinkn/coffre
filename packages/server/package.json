@@ -13,21 +13,26 @@
     "node": ">=24"
   },
   "files": [
-    "dist"
+    "bin",
+    "dist",
+    "src"
   ],
   "bin": {
-    "coffre-server": "./dist/bin.js"
+    "coffre-server": "./bin/coffre-server.js"
   },
   "exports": {
     ".": {
+      "coffre:source": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
     "./cloudflare": {
+      "coffre:source": "./src/cloudflare.ts",
       "types": "./dist/cloudflare.d.ts",
       "default": "./dist/cloudflare.js"
     },
     "./node": {
+      "coffre:source": "./src/node.ts",
       "types": "./dist/node.d.ts",
       "default": "./dist/node.js"
     },
@@ -36,25 +41,26 @@
   "scripts": {
     "build": "tsdown && cp -r src/db/migrations dist/migrations",
     "typecheck": "tsc --noEmit",
-    "test": "node --test",
-    "db:generate": "node src/db/baseline.ts",
-    "db:migrate": "node src/db/migrate-main.ts",
+    "test": "node --conditions=coffre:source --test",
+    "db:generate": "node --conditions=coffre:source src/db/baseline.ts",
+    "db:migrate": "node --conditions=coffre:source src/db/migrate-main.ts",
     "db:check": "cd src/db && for engine in postgres mysql sqlite; do drizzle-kit check --config drizzle.$engine.config.ts || exit 1; done",
-    "db:verify:runtime": "node src/db/verify-runtime.ts"
+    "db:verify:runtime": "node --conditions=coffre:source src/db/verify-runtime.ts"
   },
   "dependencies": {
+    "@coffre/client": "workspace:*",
+    "@coffre/core": "workspace:*",
     "@coffre/ui": "workspace:*",
     "@libsql/client": "0.18.0",
     "@noble/hashes": "2.4.0",
     "drizzle-orm": "0.45.2",
-    "jose": "6.2.3",
     "mysql2": "3.24.4",
-    "oauth4webapi": "3.8.8",
     "pg": "8.16.3",
     "tweetnacl": "1.0.3",
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "@coffre/vault": "workspace:*",
     "@types/node": "26.1.1",
     "@types/pg": "8.20.0",
     "drizzle-kit": "0.31.10",

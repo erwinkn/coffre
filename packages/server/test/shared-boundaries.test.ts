@@ -1,9 +1,10 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 
+import { displayName, principalId } from '@coffre/core/schemas';
+
 import { loadCaller } from '../src/api/caller.ts';
 import { me } from '../src/api/projects.ts';
-import { displayName, principalId } from '../../core/src/schemas.ts';
 import { contextFor, openTestDatabase, resetDatabase, testDeps } from './api-fixture.ts';
 
 const db = await openTestDatabase();

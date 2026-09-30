@@ -2,9 +2,9 @@ import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 
+import { defineSignin, github } from '@coffre/core/identity';
 import { and, eq, isNull } from 'drizzle-orm';
 
-import { defineSignin, github } from '../../core/src/identity/signin/config.ts';
 import { auditLog, credentials, secrets, syncs } from './db/tables.ts';
 import { SigninService } from '../src/api/signin.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';

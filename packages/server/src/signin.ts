@@ -2,11 +2,11 @@ import { createHash } from 'node:crypto';
 
 import {
   createSigninProvider,
+  type AuthConfig,
   type SigninConfig,
   type SigninProvider,
   type SigninProviderConfig,
-} from '../../core/src/identity/signin/index.ts';
-import type { AuthConfig } from '../../core/src/identity/auth-mode.ts';
+} from '@coffre/core/identity';
 
 const providers = new Map<string, SigninProvider>();
 
