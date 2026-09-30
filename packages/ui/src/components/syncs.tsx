@@ -1,23 +1,21 @@
 import {
-  DESTINATIONS,
-  destination,
-  destinationConfig,
+  configFromForm,
   firstMissing,
   initialValues,
   isAsked,
-  type DestinationKind,
   type FormValues,
+  type SyncProviderInfo,
 } from '@coffre/client';
 import { Fragment, useEffect, useState, type ReactNode } from 'react';
 import { useRouter } from '@tanstack/react-router';
 import { DropdownMenu } from 'radix-ui';
 import { toast } from 'sonner';
-import { useCoffre } from '../lib/coffre';
+import { uiResult, useCoffre } from '../lib/coffre';
 import { useAction } from '../lib/use-action';
 import type { RunOutcome, SyncView } from '../shared/models';
 import { Card } from './page';
 import { ConfirmDialog, EmptyState, ErrorLine, Modal, Notice, Spinner, Timestamp, Toggletip } from './ui';
-import { AlertTriangle, DestinationMark, MoreHorizontal, Pause, Play, Plus, Sync, X } from './icons';
+import { AlertTriangle, MoreHorizontal, Pause, Play, Plus, Sync, SyncMark, X } from './icons';
 
 /** How often the card refreshes while a run is in flight. */
 const RUNNING_POLL_MS = 2000;
@@ -67,7 +65,7 @@ export function Syncs({
         </div>
       ) : result.syncs.length === 0 ? (
         <EmptyState title="Not synced anywhere">
-          Push these secrets to GitHub Actions, Vercel, Railway or Cloudflare Workers, and keep
+          Push these secrets where your code runs, such as GitHub Actions or Vercel, and keep
           them current there. Anything else can read them with <code>coffre run</code>.
         </EmptyState>
       ) : (
@@ -126,7 +124,7 @@ function SyncRow({ sync, canRun, canManage }: { sync: SyncView; canRun: boolean;
       <tr>
         <td>
           <span className="cell-account">
-            <DestinationMark provider={sync.provider} size={15} />
+            <SyncMark brand={sync.brand} size={15} />
             <span className="cell-stack">
               <span>{sync.providerLabel}</span>
               <small className="mono">{sync.destination}</small>
@@ -295,30 +293,6 @@ function capitalize(text: string): string {
 
 function AddSync({ project, environment }: { project: string; environment: string }) {
   const [open, setOpen] = useState(false);
-  const [kind, setKind] = useState<DestinationKind>('github-actions');
-  const [values, setValues] = useState<FormValues>(() => initialValues(destination(kind)));
-  const [credential, setCredential] = useState('');
-  const coffre = useCoffre();
-  const { pending, error, setError, run } = useAction();
-
-  const entry = destination(kind);
-  const missing = firstMissing(entry, values);
-
-  function pick(next: DestinationKind) {
-    setKind(next);
-    setValues(initialValues(destination(next)));
-    setError(null);
-  }
-
-  function close() {
-    setOpen(false);
-    pick('github-actions');
-    setCredential('');
-  }
-
-  function set(name: string, value: string | string[]) {
-    setValues((current) => ({ ...current, [name]: value }));
-  }
 
   return (
     <>
@@ -328,7 +302,7 @@ function AddSync({ project, environment }: { project: string; environment: strin
       </button>
       <Modal
         open={open}
-        onOpenChange={(next) => (next ? setOpen(true) : close())}
+        onOpenChange={setOpen}
         title={
           <>
             Sync <span className="mono">{project}/{environment}</span>
@@ -337,132 +311,220 @@ function AddSync({ project, environment }: { project: string; environment: strin
         description="Every key in this environment is pushed to the destination and kept current. coffre only ever removes keys it pushed itself."
         wide
       >
-        <form
-          className="form"
-          style={{ marginTop: '1.25rem' }}
-          onSubmit={(event) => {
-            event.preventDefault();
-            run(
-              () =>
-                coffre.syncs.add(`${project}/${environment}`, {
-                  provider: kind,
-                  config: destinationConfig(entry, values),
-                  credential: credential.trim(),
-                }),
-              (sync) => {
-                toast.success(`Syncing to ${sync.destination}`, {
-                  description: 'The first push has started.',
-                });
-                close();
-              },
-            );
-          }}
-        >
-          <div className="choice-grid destinations" role="group" aria-label="Destination">
-            {DESTINATIONS.map((option) => (
-              <button
-                key={option.kind}
-                type="button"
-                className="choice"
-                aria-pressed={option.kind === kind}
-                onClick={() => pick(option.kind)}
-              >
-                <DestinationMark provider={option.kind} />
-                {option.label}
-              </button>
-            ))}
-          </div>
-
-          <div className="form-row">
-            {entry.fields.map((field) => {
-              if (!isAsked(field, values)) return null;
-              if (field.type === 'text') {
-                return (
-                  <label key={`${kind}.${field.name}`} className="field">
-                    <span className="label">
-                      {field.label}
-                      {field.optional === true && <span className="hint"> (optional)</span>}
-                    </span>
-                    <input
-                      className="input input-mono"
-                      value={values[field.name] as string}
-                      placeholder={field.placeholder}
-                      spellCheck={false}
-                      autoComplete="off"
-                      onChange={(event) => set(field.name, event.target.value)}
-                    />
-                    {field.hint !== undefined && <span className="hint">{field.hint}</span>}
-                  </label>
-                );
-              }
-              const picked = values[field.name] as string[];
-              return (
-                <div key={`${kind}.${field.name}`} className="field" role="group" aria-label={field.label}>
-                  <span className="label">{field.label}</span>
-                  <div className="segmented">
-                    {field.options.map((option) => (
-                      <button
-                        key={option.value}
-                        type="button"
-                        aria-pressed={picked.includes(option.value)}
-                        onClick={() =>
-                          set(
-                            field.name,
-                            !field.multiple
-                              ? [option.value]
-                              : picked.includes(option.value)
-                                ? picked.filter((value) => value !== option.value)
-                                : [...picked, option.value],
-                          )
-                        }
-                      >
-                        {option.label}
-                      </button>
-                    ))}
-                  </div>
-                  {field.hint !== undefined && <span className="hint">{field.hint}</span>}
-                </div>
-              );
-            })}
-          </div>
-
-          <label className="field">
-            <span className="label">Token</span>
-            <input
-              className="input input-mono"
-              value={credential}
-              placeholder={entry.credentialExample}
-              spellCheck={false}
-              autoComplete="off"
-              onChange={(event) => setCredential(event.target.value)}
+        {/* Mounted while open, so every opening starts from a blank form. */}
+        <SyncProviders>
+          {(providers) => (
+            <AddSyncForm
+              project={project}
+              environment={environment}
+              providers={providers}
+              onDone={() => setOpen(false)}
             />
-            <span className="hint">
-              The secret that holds it, as <code>project/environment/KEY</code>. An environment of
-              its own, such as <code>ops/sync</code>, keeps it from everyone who reads these
-              secrets. You need read access to it.
-            </span>
-          </label>
-
-          <Notice tone="info">{entry.token}</Notice>
-
-          <ErrorLine error={error} />
-
-          <div className="dialog-actions">
-            <button className="btn" type="button" onClick={close}>
-              Cancel
-            </button>
-            <button
-              className="btn btn-primary"
-              type="submit"
-              disabled={pending || missing !== null || credential.trim() === ''}
-              title={missing !== null ? `${missing} is required` : undefined}
-            >
-              {pending && <Spinner />}
-              Start syncing
-            </button>
-          </div>
-        </form>
+          )}
+        </SyncProviders>
       </Modal>
     </>
+  );
+}
+
+type Offered = { ok: true; providers: SyncProviderInfo[] } | { ok: false; error: string };
+
+/** Where this instance can sync to, as the deployment lists it. */
+function SyncProviders({ children }: { children: (providers: SyncProviderInfo[]) => ReactNode }) {
+  const coffre = useCoffre();
+  const [offered, setOffered] = useState<Offered | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    void uiResult(() => coffre.syncs.providers()).then((result) => {
+      if (live) setOffered(result);
+    });
+    return () => {
+      live = false;
+    };
+  }, [coffre]);
+
+  if (offered === null) {
+    return (
+      <p className="picker-empty sync-providers-state">
+        <Spinner size={13} />
+        Loading where coffre can sync to…
+      </p>
+    );
+  }
+  if (!offered.ok) {
+    return (
+      <div className="sync-providers-state">
+        <ErrorLine error={offered.error} />
+      </div>
+    );
+  }
+  if (offered.providers.length === 0) {
+    return (
+      <p className="picker-empty sync-providers-state">
+        This instance offers nowhere to sync to. Whoever runs coffre lists the providers in its{' '}
+        <span className="mono">syncs</span> settings.
+      </p>
+    );
+  }
+  return children(offered.providers);
+}
+
+function AddSyncForm({
+  project,
+  environment,
+  providers,
+  onDone,
+}: {
+  project: string;
+  environment: string;
+  providers: SyncProviderInfo[];
+  onDone: () => void;
+}) {
+  const [provider, setProvider] = useState(providers[0]);
+  const [values, setValues] = useState<FormValues>(() => initialValues(providers[0]));
+  const [credential, setCredential] = useState('');
+  const coffre = useCoffre();
+  const { pending, error, setError, run } = useAction();
+  const missing = firstMissing(provider, values);
+
+  function pick(next: SyncProviderInfo) {
+    setProvider(next);
+    setValues(initialValues(next));
+    setError(null);
+  }
+
+  function set(name: string, value: string | string[]) {
+    setValues((current) => ({ ...current, [name]: value }));
+  }
+
+  return (
+    <form
+      className="form"
+      style={{ marginTop: '1.25rem' }}
+      onSubmit={(event) => {
+        event.preventDefault();
+        run(
+          () =>
+            coffre.syncs.add(`${project}/${environment}`, {
+              provider: provider.id,
+              config: configFromForm(provider, values),
+              credential: credential.trim(),
+            }),
+          (sync) => {
+            toast.success(`Syncing to ${sync.destination}`, {
+              description: 'The first push has started.',
+            });
+            onDone();
+          },
+        );
+      }}
+    >
+      {providers.length > 1 && (
+        <div className="choice-grid sync-providers" role="group" aria-label="Destination">
+          {providers.map((option) => (
+            <button
+              key={option.id}
+              type="button"
+              className="choice"
+              aria-pressed={option.id === provider.id}
+              onClick={() => pick(option)}
+            >
+              <SyncMark brand={option.brand} />
+              {option.label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div className="form-row">
+        {provider.fields.map((field) => {
+          if (!isAsked(field, values)) return null;
+          if (field.type === 'text') {
+            return (
+              <label key={`${provider.id}.${field.name}`} className="field">
+                <span className="label">
+                  {field.label}
+                  {field.optional === true && <span className="hint"> (optional)</span>}
+                </span>
+                <input
+                  className="input input-mono"
+                  value={values[field.name] as string}
+                  placeholder={field.placeholder}
+                  spellCheck={false}
+                  autoComplete="off"
+                  onChange={(event) => set(field.name, event.target.value)}
+                />
+                {field.hint !== undefined && <span className="hint">{field.hint}</span>}
+              </label>
+            );
+          }
+          const picked = values[field.name] as string[];
+          return (
+            <div key={`${provider.id}.${field.name}`} className="field field-options" role="group" aria-label={field.label}>
+              <span className="label">{field.label}</span>
+              <div className="segmented">
+                {field.options.map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    aria-pressed={picked.includes(option.value)}
+                    onClick={() =>
+                      set(
+                        field.name,
+                        !field.multiple
+                          ? [option.value]
+                          : picked.includes(option.value)
+                            ? picked.filter((value) => value !== option.value)
+                            : [...picked, option.value],
+                      )
+                    }
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+              {field.hint !== undefined && <span className="hint">{field.hint}</span>}
+            </div>
+          );
+        })}
+      </div>
+
+      <label className="field">
+        <span className="label">Token</span>
+        <input
+          className="input input-mono"
+          value={credential}
+          placeholder={provider.credential.placeholder}
+          spellCheck={false}
+          autoComplete="off"
+          onChange={(event) => setCredential(event.target.value)}
+        />
+        <span className="hint">
+          The secret that holds it, as <code>project/environment/KEY</code>. An environment of
+          its own, such as <code>ops/sync</code>, keeps it from everyone who reads these
+          secrets. You need read access to it.
+        </span>
+      </label>
+
+      <Notice tone="info">{provider.credential.hint}</Notice>
+
+      <ErrorLine error={error} />
+
+      <div className="dialog-actions">
+        <button className="btn" type="button" onClick={onDone}>
+          Cancel
+        </button>
+        <button
+          className="btn btn-primary"
+          type="submit"
+          disabled={pending || missing !== null || credential.trim() === ''}
+          title={missing !== null ? `${missing} is required` : undefined}
+        >
+          {pending && <Spinner />}
+          Start syncing
+        </button>
+      </div>
+    </form>
   );
 }

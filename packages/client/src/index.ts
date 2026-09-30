@@ -31,24 +31,12 @@ export type {
   ServiceTokenRow,
   SessionRow,
   SetResult,
+  SyncField,
+  SyncProviderInfo,
   SyncView,
 } from './api.ts';
-export {
-  DESTINATIONS,
-  configFromArguments,
-  destination,
-  destinationConfig,
-  firstMissing,
-  initialValues,
-  isAsked,
-} from './destinations.ts';
-export type {
-  Destination,
-  DestinationField,
-  DestinationKind,
-  FormValues,
-  SyncProviderKind,
-} from './destinations.ts';
+export { configFromArguments, configFromForm, firstMissing, initialValues, isAsked } from './sync-fields.ts';
+export type { FormValues } from './sync-fields.ts';
 
 export type RouteKey = keyof Api;
 /** What a caller sends: the body, or the query string for a GET. */
@@ -258,6 +246,8 @@ export function createClient(options: ClientOptions) {
     },
 
     syncs: {
+      /** Where a sync can push on this instance, and what each asks for. */
+      providers: () => call('GET /syncs/providers', {}),
       list: (path: string) => call('GET /syncs/:project/:environment', place(path)),
       add: (path: string, input: RouteInput<'POST /syncs/:project/:environment'>) =>
         call('POST /syncs/:project/:environment', place(path), input),

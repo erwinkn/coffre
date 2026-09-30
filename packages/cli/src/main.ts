@@ -28,12 +28,12 @@ import {
   type Target,
 } from './instance.ts';
 import {
-  DESTINATIONS,
   configFromArguments,
   createClient,
   planImport,
   type CoffreClient,
-  type DestinationField,
+  type SyncField,
+  type SyncProviderInfo,
 } from '@coffre/client';
 import { assignableToEnvironment, isRole, ROLES, type Role } from '@coffre/core/access';
 import { formatDotenv, formatShellExports, parseDotenv } from '@coffre/core/dotenv';
@@ -788,25 +788,54 @@ async function verify(): Promise<void> {
 type SyncView = Awaited<ReturnType<CoffreClient['syncs']['list']>>['syncs'][number];
 
 const SYNC_USAGE = `usage:
+  coffre sync providers
   coffre sync list   <project>/<environment>
-  coffre sync add    <project>/<environment> <destination> name=value… --credential <project>/<environment>/<KEY>
+  coffre sync add    <project>/<environment> <provider> name=value… --credential <project>/<environment>/<KEY>
   coffre sync run    <project>/<environment> <sync>
   coffre sync pause  <project>/<environment> <sync>
   coffre sync resume <project>/<environment> <sync>
   coffre sync remove <project>/<environment> <sync>
 
-<sync> is the start of an id from \`coffre sync list\`, or the destination's name
-when the environment syncs to only one of that kind.
-
-Destinations, and what they take. What is in brackets can be left out, and a
-choice left out is its first option. Several targets go comma-separated.
-${DESTINATIONS.map((entry) => `  ${entry.kind.padEnd(19)} ${entry.fields.map(fieldUsage).join(' ')}`).join('\n')}
+\`coffre sync providers\` lists where this instance can sync to, and what each
+provider takes. <sync> is the start of an id from \`coffre sync list\`, or the
+provider's id when the environment syncs there only once.
 `;
 
-function fieldUsage(field: DestinationField): string {
+/** Where this instance can sync to, one provider to a paragraph. */
+function printProviders(providers: SyncProviderInfo[]): void {
+  if (providers.length === 0) {
+    process.stdout.write('This instance offers no sync providers.\n');
+    return;
+  }
+  process.stdout.write(
+    'What is in brackets can be left out. A choice left out is what comes\n' +
+      'before the first |, and several choices go comma-separated.\n',
+  );
+  for (const provider of providers) {
+    process.stdout.write(
+      `\n${provider.id}  ${provider.label}\n` +
+        `    ${[...provider.fields.map(fieldUsage), `--credential ${provider.credential.placeholder}`].join(' ')}\n` +
+        `${indented(provider.credential.hint)}\n`,
+    );
+  }
+}
+
+/** Prose under a usage line, indented and wrapped to a terminal's 80 columns. */
+function indented(text: string): string {
+  const lines: string[] = [];
+  for (const word of text.split(/\s+/)) {
+    const last = lines.length - 1;
+    if (last >= 0 && lines[last]!.length + 1 + word.length <= 76) lines[last] += ` ${word}`;
+    else lines.push(word);
+  }
+  return lines.map((line) => `    ${line}`).join('\n');
+}
+
+function fieldUsage(field: SyncField): string {
   if (field.type === 'text') return field.optional ? `[${field.name}=…]` : `${field.name}=…`;
-  const options = field.options.map((option) => option.value).join('|');
-  return `[${field.name}=${options}]`;
+  // What is picked when the field is left out comes first.
+  const others = field.options.map((option) => option.value).filter((value) => !field.initial.includes(value));
+  return `[${field.name}=${[field.initial.join(','), ...others].join('|')}]`;
 }
 
 /**
@@ -815,6 +844,11 @@ function fieldUsage(field: DestinationField): string {
  */
 async function sync(args: string[]): Promise<void> {
   const [verb, path, ...rest] = args;
+  if (verb === 'providers') {
+    const { providers } = await client().syncs.providers();
+    printProviders(providers);
+    return;
+  }
   if (verb === undefined || verb === '--help' || path === undefined) {
     process.stdout.write(SYNC_USAGE);
     process.exit(verb === undefined || verb === '--help' ? 0 : 1);
@@ -837,14 +871,18 @@ async function sync(args: string[]): Promise<void> {
       options: { credential: { type: 'string' } },
       allowPositionals: true,
     });
-    const [kind, ...assignments] = positionals;
-    const entry = DESTINATIONS.find((candidate) => candidate.kind === kind);
-    if (entry === undefined) fail(`name a destination: ${DESTINATIONS.map((candidate) => candidate.kind).join(', ')}`);
-    if (values.credential === undefined) {
-      fail(`--credential names the secret holding the ${entry.label} token, such as ${entry.credentialExample}`);
+    const [id, ...assignments] = positionals;
+    const { providers } = await coffre.syncs.providers();
+    const provider = providers.find((candidate) => candidate.id === id);
+    if (provider === undefined) {
+      const offered = providers.length === 0 ? 'none' : providers.map((candidate) => candidate.id).join(', ');
+      fail(`name a provider this instance offers (${offered}); \`coffre sync providers\` shows what each takes`);
     }
-    const config = attempt(() => configFromArguments(entry, assignments));
-    const created = await coffre.syncs.add(place, { provider: entry.kind, config, credential: values.credential });
+    if (values.credential === undefined) {
+      fail(`--credential names the secret holding the ${provider.label} token, such as ${provider.credential.placeholder}`);
+    }
+    const config = attempt(() => configFromArguments(provider, assignments));
+    const created = await coffre.syncs.add(place, { provider: provider.id, config, credential: values.credential });
     process.stdout.write(
       `Syncing ${project}/${environment} to ${created.destination} (${created.providerLabel}), id ${created.id.slice(0, 8)}.\n` +
         `The first push has started; \`coffre sync list ${project}/${environment}\` shows how it went.\n`,
@@ -894,12 +932,12 @@ async function sync(args: string[]): Promise<void> {
   );
 }
 
-/** By id prefix, or by destination when only one sync goes to that kind. */
+/** By id prefix, or by provider when only one sync here goes there. */
 function pickSync(syncs: SyncView[], reference: string): SyncView {
-  const byKind = syncs.filter((entry) => entry.provider === reference);
-  if (byKind.length === 1) return byKind[0];
-  if (byKind.length > 1) throw new Error(`more than one ${reference} sync here; name it by id (coffre sync list)`);
-  if (reference.length < 4) throw new Error('give at least 4 characters of a sync id, or a destination name');
+  const byProvider = syncs.filter((entry) => entry.provider === reference);
+  if (byProvider.length === 1) return byProvider[0];
+  if (byProvider.length > 1) throw new Error(`more than one ${reference} sync here; name it by id (coffre sync list)`);
+  if (reference.length < 4) throw new Error('give at least 4 characters of a sync id, or a provider id');
   const byId = syncs.filter((entry) => entry.id.startsWith(reference.toLowerCase()));
   if (byId.length === 1) return byId[0];
   if (byId.length > 1) throw new Error(`"${reference}" starts more than one sync id; give more of it`);
@@ -984,9 +1022,9 @@ const USAGE = `coffre - secrets, with an audit log
     coffre offboard <principal> [--service] [--apply]
                                             what removing them revokes, and what to rotate
 
-  Syncs (coffre sync --help for destinations)
+  Syncs (coffre sync providers for where to, and what each takes)
     coffre sync list   <project>/<environment>
-    coffre sync add    <project>/<environment> <destination> name=value…
+    coffre sync add    <project>/<environment> <provider> name=value…
                        --credential <project>/<environment>/<KEY>
     coffre sync run|pause|resume|remove <project>/<environment> <sync>
 

@@ -1,9 +1,10 @@
 # Syncs
 
 A sync pushes every secret in one environment to a service that runs code,
-and keeps it current there. coffre ships four destinations:
+and keeps it current there. Each kind of service is a provider, and coffre
+ships four:
 
-| Destination         | Writes                                              | Token it needs                                   |
+| Provider            | Writes                                              | Token it needs                                   |
 | ------------------- | --------------------------------------------------- | ------------------------------------------------ |
 | GitHub Actions      | repository secrets, or one environment's secrets    | fine-grained PAT: Secrets (or Environments) R/W  |
 | Vercel              | project variables, for chosen targets (and branch)  | access token scoped to the owning team           |
@@ -11,8 +12,9 @@ and keeps it current there. coffre ships four destinations:
 | Cloudflare Workers  | a Worker's secrets                                  | API token with Workers Scripts: Edit             |
 
 Anything else reads secrets at run time with `coffre run` or `coffre export`
-and a service token (see the README). Each destination's exact fields, name
-rules and quirks are in [packages/server/src/sync/README.md](../packages/server/src/sync/README.md).
+and a service token (see the README), or gets a [provider of its
+own](#a-provider-of-your-own). Each provider's exact fields, name rules and
+quirks are in [packages/server/src/sync/README.md](../packages/server/src/sync/README.md).
 
 ## Setting one up
 
@@ -36,11 +38,95 @@ coffre sync run    app/prod github-actions   # push now; a destination name or a
 coffre sync pause  app/prod github-actions
 coffre sync resume app/prod github-actions
 coffre sync remove app/prod github-actions   # stops syncing; what was pushed stays
-coffre sync --help                           # every destination's fields
+coffre sync providers                        # what this instance offers, and each one's fields
 ```
 
 Rotating the destination's token is writing a new version of
 `ops/sync/GITHUB_TOKEN`; the next run uses it.
+
+## Which providers a deployment offers
+
+A deployment that says nothing offers all four. Listing them picks which,
+in the order the pages and `coffre sync providers` show them:
+
+```ts
+import { coffre, githubActions, vercel } from '@coffre/server/cloudflare';
+
+export default coffre((env: Env) => ({
+  // …
+  syncs: { providers: [githubActions(), vercel()] },
+}));
+```
+
+`providers: []` offers none, and the page says so instead of a form. A
+provider dropped from the list takes nothing with it: its syncs still list,
+with a plain mark, and each run fails with `this deployment no longer lists
+the sync provider "railway"` until it is listed again or they are removed.
+
+### A provider of your own
+
+A provider is a `SyncProvider`: the form a person fills in, a parser that
+turns what they typed into a config, and two calls, one to list the keys the
+destination has and one to write and delete some. A deployment can write one
+for a service coffre does not know, and list it beside the others:
+
+```ts
+import { SyncConfigError, SyncProviderError, type SyncProvider } from '@coffre/server/cloudflare';
+
+const acme: SyncProvider<{ app: string }> = {
+  id: 'acme-deploy',           // stable: stored with every sync to it, and what `coffre sync add` takes
+  label: 'Acme Deploy',
+  brand: 'other',              // the mark: github, vercel, railway, cloudflare, or other (the sync glyph)
+  fields: [{ type: 'text', name: 'app', label: 'App', placeholder: 'my-app' }],
+  credential: { placeholder: 'ops/sync/ACME_TOKEN', hint: 'A deploy token limited to this app.' },
+  parseConfig(input) {
+    const app = (input as { app?: unknown } | null)?.app;
+    if (typeof app !== 'string' || !/^[a-z0-9-]{2,63}$/.test(app)) {
+      throw new SyncConfigError('Acme Deploy: app must be an app name, like my-app');
+    }
+    return { app };
+  },
+  describe: ({ app }) => `Acme app ${app}`,
+  checkKey: (key) => (key.startsWith('ACME_') ? { ok: false, reason: 'ACME_ names are Acme’s own' } : { ok: true }),
+  async listKeys(ctx, { app }) {
+    const response = await (ctx.fetch ?? fetch)(`https://deploy.acme.example/apps/${app}/secrets`, {
+      headers: { authorization: `Bearer ${ctx.token}` },
+      signal: ctx.signal,
+    });
+    if (!response.ok) throw new SyncProviderError(`Acme answered ${response.status}`, 'upstream', response.status);
+    return ((await response.json()) as { name: string }[]).map((secret) => secret.name);
+  },
+  async apply(ctx, { app }, plan) {
+    // Write plan.upsert and delete plan.delete; report each key that fails in `failed`.
+    return { upserted: [], deleted: [], failed: [] };
+  },
+};
+
+syncs: { providers: [githubActions(), acme] },
+```
+
+coffre does everything around the calls: it decides what changed, opens the
+token, logs every value before it leaves, retries, and checks for drift. It
+also holds every provider, its own four included, to two rules it enforces
+itself. A key `checkKey` refuses is reported as skipped and never reaches
+`apply`. And no error, thrown or per key, carries the token or a value out:
+both are replaced with `[redacted]`, even when an upstream quotes the request
+back. What the provider owns is the protocol: `parseConfig` must refuse
+anything it cannot write to (its message is shown as is), `apply` reports a
+key the destination refuses in `failed` and throws only when the whole call
+cannot succeed, and `listKeys` returns only names. A provider's shape (its
+id, fields and credential) is checked with the rest of the configuration, so
+a malformed one fails the deployment on start.
+
+The pages and the CLI render the form from what `GET /api/syncs/providers`
+returns, so a provider of your own needs no change to either. A text field
+can be asked only when an options field has some exact set of options
+picked, like Vercel's branch, asked only when previews are the one target:
+
+```ts
+{ type: 'text', name: 'gitBranch', label: 'Branch', placeholder: 'staging', optional: true,
+  when: { field: 'targets', is: ['preview'] } }
+```
 
 ## What a run does
 

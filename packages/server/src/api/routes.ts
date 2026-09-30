@@ -242,6 +242,9 @@ export const routes = {
   }),
 
   // Syncs
+  ...route('GET /syncs/providers', {
+    run: async (ctx) => ({ providers: ctx.syncs.providers() }),
+  }),
   ...route('GET /syncs/:project/:environment', {
     needs: 'secret.read',
     action: 'sync.list',

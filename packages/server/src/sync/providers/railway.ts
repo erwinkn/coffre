@@ -30,9 +30,42 @@ const DELETE = `mutation variableDelete($input: VariableDeleteInput!) {
 
 type GraphQLBody<T> = { data?: T | null; errors?: { message?: string }[] };
 
-export const railway: SyncProvider<RailwayConfig> = {
-  kind: 'railway',
+/** One Railway environment's variables: a service's, or the shared ones. */
+export function railway(): SyncProvider<RailwayConfig> {
+  return provider;
+}
+
+const provider: SyncProvider<RailwayConfig> = {
+  id: 'railway',
   label: 'Railway',
+  brand: 'railway',
+  fields: [
+    { type: 'text', name: 'projectId', label: 'Project ID', placeholder: 'UUID' },
+    { type: 'text', name: 'environmentId', label: 'Environment ID', placeholder: 'UUID' },
+    {
+      type: 'text',
+      name: 'serviceId',
+      label: 'Service ID',
+      placeholder: 'UUID',
+      optional: true,
+      hint: 'Leave empty to write shared variables.',
+    },
+    {
+      type: 'options',
+      name: 'tokenKind',
+      label: 'Token',
+      options: [
+        { value: 'project', label: 'Project token' },
+        { value: 'account', label: 'Account or workspace token' },
+      ],
+      multiple: false,
+      initial: ['project'],
+    },
+  ],
+  credential: {
+    placeholder: 'ops/sync/RAILWAY_TOKEN',
+    hint: 'A project token for this one environment is the narrowest grant. Railway redeploys the service after every change.',
+  },
 
   parseConfig(input) {
     const fields = readFields(input, 'Railway', ['projectId', 'environmentId', 'serviceId', 'tokenKind']);

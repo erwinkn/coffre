@@ -38,6 +38,8 @@ const NAMED = {
   ServiceTokenRow: 'api/signin.ts',
   SessionRow: 'api/signin.ts',
   SetResult: 'api/secrets.ts',
+  SyncField: 'sync/types.ts',
+  SyncProviderInfo: 'sync/types.ts',
   SyncView: 'api/syncs.ts',
 } as const;
 
@@ -163,8 +165,11 @@ function printer(checker: ts.TypeChecker) {
       return `[${checker.getTypeArguments(type as ts.TypeReference).map((member) => print(member, indent)).join(', ')}]`;
     }
     if (checker.isArrayType(type)) {
-      const printed = print(checker.getTypeArguments(type as ts.TypeReference)[0], indent);
-      return /[|&]/.test(printed) && !printed.startsWith('{') ? `(${printed})[]` : `${printed}[]`;
+      const element = checker.getTypeArguments(type as ts.TypeReference)[0];
+      const printed = print(element, indent);
+      // `A | B[]` is an A or a list of B; a list of either needs `(A | B)[]`.
+      // An intersection prints as one object, and `boolean` as one word.
+      return element.isUnion() && printed.includes(' | ') ? `(${printed})[]` : `${printed}[]`;
     }
     if (type.getCallSignatures().length > 0) throw new Error(`a function is not JSON: ${checker.typeToString(type)}`);
 

@@ -2,12 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import nacl from 'tweetnacl';
 
-import { getProvider, providers, SyncConfigError, SyncProviderError } from '../../src/sync/index.ts';
+import { githubActions, resolveSyncProviders, SyncConfigError, SyncProviderError } from '../../src/sync/index.ts';
 import { fromBase64, toBase64 } from '../../src/sync/base64.ts';
 import { sealNonce } from '../../src/sync/sealed-box.ts';
+import { guard } from '../../src/sync/guard.ts';
 import { assertNoLeak, fakeFetch, rejection } from './fake-fetch.ts';
 
-const github = providers['github-actions'];
+const github = guard(githubActions());
 const TOKEN = 'github_pat_11AAAAAAA0secrettokenvalue';
 const REPO = 'https://api.github.com/repos/erwinkn/app';
 const ENV = `${REPO}/environments/prod%2Feu/secrets`;
@@ -23,11 +24,9 @@ function open(encryptedValue: string): string {
   return new TextDecoder().decode(plain);
 }
 
-test('is registered under its kind', () => {
-  assert.equal(getProvider('github-actions'), github);
+test('is one of the providers a deployment gets by default', () => {
+  assert.ok(resolveSyncProviders().some((provider) => provider.id === 'github-actions'));
   assert.equal(github.label, 'GitHub Actions');
-  assert.equal(getProvider('nope'), null);
-  assert.equal(getProvider('toString'), null);
 });
 
 test('parses a config and rejects bad ones readably', () => {

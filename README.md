@@ -260,6 +260,7 @@ coffre grant market alice@acme.example --role developer --env dev
 coffre offboard alice@acme.example               # previews; --apply to remove (docs/offboarding.md)
 
 # syncs (docs/syncs.md)
+coffre sync providers                           # where this instance can sync to
 coffre sync add  market/prod github-actions owner=acme repo=market \
                  --credential ops/sync/GITHUB_TOKEN
 coffre sync list market/prod

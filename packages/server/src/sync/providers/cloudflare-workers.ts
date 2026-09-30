@@ -21,9 +21,23 @@ type Envelope = {
 
 type SecretBody = { name: string; text: string; type: 'secret_text' };
 
-export const cloudflareWorkers: SyncProvider<CloudflareWorkersConfig> = {
-  kind: 'cloudflare-workers',
+/** A Worker's secrets on Cloudflare, deployed as a new version on every change. */
+export function cloudflareWorkers(): SyncProvider<CloudflareWorkersConfig> {
+  return provider;
+}
+
+const provider: SyncProvider<CloudflareWorkersConfig> = {
+  id: 'cloudflare-workers',
   label: 'Cloudflare Workers',
+  brand: 'cloudflare',
+  fields: [
+    { type: 'text', name: 'accountId', label: 'Account ID', placeholder: '32 hex characters' },
+    { type: 'text', name: 'scriptName', label: 'Worker name', placeholder: 'api' },
+  ],
+  credential: {
+    placeholder: 'ops/sync/CLOUDFLARE_API_TOKEN',
+    hint: 'Use an API token with the Account › Workers Scripts › Edit permission. Each change deploys a new version of the Worker.',
+  },
 
   parseConfig(input) {
     const fields = readFields(input, 'Cloudflare Workers', ['accountId', 'scriptName']);

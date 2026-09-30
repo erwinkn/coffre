@@ -238,6 +238,7 @@ export type Api = {
         id: string;
         provider: string;
         providerLabel: string;
+        brand: "cloudflare" | "github" | "other" | "railway" | "vercel";
         destination: string;
         config: {
           [key: string]: string | number | boolean | null | Json[] | {
@@ -317,6 +318,7 @@ export type Api = {
           id: string;
           provider: string;
           providerLabel: string;
+          brand: "cloudflare" | "github" | "other" | "railway" | "vercel";
           destination: string;
           config: {
             [key: string]: string | number | boolean | null | Json[] | {
@@ -450,6 +452,43 @@ export type Api = {
       decided: true;
     };
   };
+  "GET /syncs/providers": {
+    input: undefined;
+    output: {
+      providers: {
+        brand: "cloudflare" | "github" | "other" | "railway" | "vercel";
+        id: string;
+        label: string;
+        credential: {
+          placeholder: string;
+          hint: string;
+        };
+        fields: ({
+          type: "text";
+          name: string;
+          label: string;
+          placeholder: string;
+          optional?: boolean;
+          hint?: string;
+          when?: {
+            field: string;
+            is: string[];
+          };
+        } | {
+          type: "options";
+          name: string;
+          label: string;
+          options: {
+            value: string;
+            label: string;
+          }[];
+          multiple: boolean;
+          initial: string[];
+          hint?: string;
+        })[];
+      }[];
+    };
+  };
   "GET /syncs/:project/:environment": {
     input: undefined;
     output: {
@@ -457,6 +496,7 @@ export type Api = {
         id: string;
         provider: string;
         providerLabel: string;
+        brand: "cloudflare" | "github" | "other" | "railway" | "vercel";
         destination: string;
         config: {
           [key: string]: string | number | boolean | null | Json[] | {
@@ -493,6 +533,7 @@ export type Api = {
       id: string;
       provider: string;
       providerLabel: string;
+      brand: "cloudflare" | "github" | "other" | "railway" | "vercel";
       destination: string;
       config: {
         [key: string]: string | number | boolean | null | Json[] | {
@@ -523,6 +564,7 @@ export type Api = {
       id: string;
       provider: string;
       providerLabel: string;
+      brand: "cloudflare" | "github" | "other" | "railway" | "vercel";
       destination: string;
       config: {
         [key: string]: string | number | boolean | null | Json[] | {
@@ -551,6 +593,7 @@ export type Api = {
       id: string;
       provider: string;
       providerLabel: string;
+      brand: "cloudflare" | "github" | "other" | "railway" | "vercel";
       destination: string;
       config: {
         [key: string]: string | number | boolean | null | Json[] | {
@@ -580,6 +623,7 @@ export type Api = {
         id: string;
         provider: string;
         providerLabel: string;
+        brand: "cloudflare" | "github" | "other" | "railway" | "vercel";
         destination: string;
         config: {
           [key: string]: string | number | boolean | null | Json[] | {
@@ -815,6 +859,7 @@ export type OffboardingReport = {
     id: string;
     provider: string;
     providerLabel: string;
+    brand: "cloudflare" | "github" | "other" | "railway" | "vercel";
     destination: string;
     config: {
       [key: string]: string | number | boolean | null | Json[] | {
@@ -927,10 +972,68 @@ export type SetResult = {
   };
 };
 
+export type SyncField = {
+  type: "text";
+  name: string;
+  label: string;
+  placeholder: string;
+  optional?: boolean;
+  hint?: string;
+  when?: {
+    field: string;
+    is: string[];
+  };
+} | {
+  type: "options";
+  name: string;
+  label: string;
+  options: {
+    value: string;
+    label: string;
+  }[];
+  multiple: boolean;
+  initial: string[];
+  hint?: string;
+};
+
+export type SyncProviderInfo = {
+  brand: "cloudflare" | "github" | "other" | "railway" | "vercel";
+  id: string;
+  label: string;
+  credential: {
+    placeholder: string;
+    hint: string;
+  };
+  fields: ({
+    type: "text";
+    name: string;
+    label: string;
+    placeholder: string;
+    optional?: boolean;
+    hint?: string;
+    when?: {
+      field: string;
+      is: string[];
+    };
+  } | {
+    type: "options";
+    name: string;
+    label: string;
+    options: {
+      value: string;
+      label: string;
+    }[];
+    multiple: boolean;
+    initial: string[];
+    hint?: string;
+  })[];
+};
+
 export type SyncView = {
   id: string;
   provider: string;
   providerLabel: string;
+  brand: "cloudflare" | "github" | "other" | "railway" | "vercel";
   destination: string;
   config: {
     [key: string]: string | number | boolean | null | Json[] | {

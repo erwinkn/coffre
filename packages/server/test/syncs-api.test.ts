@@ -5,11 +5,11 @@ import { asc, eq } from 'drizzle-orm';
 
 import { auditLog, secrets, syncs } from './db/tables.ts';
 import {
+  resolveSyncProviders,
   SyncConfigError,
   SyncProviderError,
   type SyncPlan,
   type SyncProvider,
-  type SyncProviderKind,
 } from '../src/sync/index.ts';
 import { planSync, SyncRunner } from '../src/api/syncs.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
@@ -31,8 +31,11 @@ class FakeDestination {
   outage: SyncProviderError | null = null;
 
   provider: SyncProvider<FakeConfig> = {
-    kind: 'fake' as SyncProviderKind,
+    id: 'fake',
     label: 'Fake',
+    brand: 'other',
+    fields: [{ type: 'text', name: 'target', label: 'Target', placeholder: 'app' }],
+    credential: { placeholder: 'ops/sync/DEST_TOKEN', hint: 'Any token will do.' },
     parseConfig: (input) => {
       const target = (input as { target?: unknown } | null)?.target;
       if (typeof target !== 'string' || target === '') throw new SyncConfigError('Fake: target is required');
@@ -84,11 +87,6 @@ async function settle() {
 before(async () => {
   db = await openTestDatabase();
   deps = testDeps(db.runtime, [ROOT], { waitUntil: (promise) => void background.push(promise) });
-  runner = new SyncRunner({
-    ...deps,
-    resolveProvider: (kind) => (kind === 'fake' ? (destination.provider as SyncProvider<unknown>) : null),
-  });
-  deps.syncs = runner;
   root = clientFor(deps, ROOT);
   developer = clientFor(deps, DEV);
   maintainer = clientFor(deps, LEAD);
@@ -103,6 +101,9 @@ after(async () => {
 beforeEach(async () => {
   await settle();
   destination = new FakeDestination();
+  // Each test gets a destination of its own, so a runner of its own that offers it.
+  runner = new SyncRunner({ ...deps, providers: resolveSyncProviders([destination.provider]) });
+  deps.syncs = runner;
   await resetDatabase(db.owner);
   await root.members.add(`user:${DEV}`);
   await root.members.add(`user:${LEAD}`);
@@ -259,11 +260,28 @@ test('a credential the creator cannot read is refused like one that does not exi
   );
 });
 
-test('unknown destinations and bad configs are refused with a message for the caller', async () => {
-  await assert.rejects(
-    root.syncs.add('market/prod', { provider: 'dropbox', config: {}, credential: CREDENTIAL }),
-    { status: 400, message: /dropbox/ },
-  );
+test('a member sees where this instance can sync to, and what each asks for', async () => {
+  assert.deepEqual(await developer.syncs.providers(), {
+    providers: [
+      {
+        id: 'fake',
+        label: 'Fake',
+        brand: 'other',
+        fields: [{ type: 'text', name: 'target', label: 'Target', placeholder: 'app' }],
+        credential: { placeholder: 'ops/sync/DEST_TOKEN', hint: 'Any token will do.' },
+      },
+    ],
+  });
+});
+
+test('unknown providers and bad configs are refused with a message for the caller', async () => {
+  // github-actions is built in, but this deployment does not list it.
+  for (const provider of ['dropbox', 'github-actions', 'toString']) {
+    await assert.rejects(
+      root.syncs.add('market/prod', { provider, config: {}, credential: CREDENTIAL }),
+      { status: 400, message: `"${provider}" is not a sync provider this instance offers` },
+    );
+  }
   await assert.rejects(
     root.syncs.add('market/prod', { provider: 'fake', config: {}, credential: CREDENTIAL }),
     { status: 400, message: /Fake: target is required/ },
@@ -375,6 +393,19 @@ test('an archived credential stops the sync with a sentence saying so', async ()
   assert.equal(
     outcome.status === 'failed' ? outcome.error : null,
     'ops/sync/DEST_TOKEN is archived; restore it or point this sync at another secret',
+  );
+});
+
+test('a sync whose provider the deployment stopped listing still lists, and says why it cannot run', async () => {
+  const created = await createSync();
+  deps.syncs = new SyncRunner({ ...deps, providers: [] });
+
+  const listed = await view(created.id);
+  assert.deepEqual([listed.provider, listed.providerLabel, listed.brand], ['fake', 'fake', 'other']);
+  const { outcome } = await root.syncs.run(created.id);
+  assert.equal(
+    outcome.status === 'failed' ? outcome.error : null,
+    'this deployment no longer lists the sync provider "fake"',
   );
 });
 

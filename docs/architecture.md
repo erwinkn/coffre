@@ -77,7 +77,7 @@ Object).
 | `@coffre/ui` | the web UI, server-rendered, and its static files | nothing sensitive |
 | `@coffre/server` | `/api`, sign-in, syncs and their providers, the heartbeat, the database layer and its migrations; hands pages to the UI | sessions, the app database |
 | `@coffre/vault` | wraps and unwraps data keys, decides who may, logs every use | the keys, the vault's store |
-| `@coffre/client` | the typed API client, the API's types printed from the server's routes, and the sync destinations' fields | |
+| `@coffre/client` | the typed API client, the API's types printed from the server's routes, and the helpers that turn a sync provider's fields into its config | |
 | `@coffre/core` | what the others share: access rules, envelope encryption, KEK providers, the audit chain, identity and sign-in, and `Vault`, the contract between server and vault | |
 | `@coffre/cli` | `init`, `login`, secrets, syncs, audit; built on the client | a CLI session |
 
@@ -97,7 +97,7 @@ one package is seen by the others without a build. Builds leave it off.
 |---|---|
 | `@coffre/server/cloudflare` | `coffre(env => config)` → `{ fetch, scheduled }`; `postgres(env.HYPERDRIVE)` |
 | `@coffre/server/node` | `serve({ port?, host?, database, …config })` → `{ url, close }`; `migrate(url)` |
-| `@coffre/server` (both) | `signin`, `github`, `google`, `microsoft`, `oidc`, `cloudflareAccess`, `SigninError`, and the config types, `SigninProvider` among them |
+| `@coffre/server` (both) | `signin`, `github`, `google`, `microsoft`, `oidc`, `cloudflareAccess`, `SigninError`; `githubActions`, `vercel`, `railway`, `cloudflareWorkers`, `SyncConfigError`, `SyncProviderError`; and the config types, `SigninProvider` and `SyncProvider` among them |
 | `@coffre/vault/cloudflare` | `vault(env => config)`, the Worker's default export; `VaultObject`, its Durable Object |
 | `@coffre/vault/node` | `serveVault({ socket, store, …config })`, `connectVault(socket)`, `localVault({ store, …config })` |
 | `@coffre/ui` | `createUi()` → `{ fetch(request, { context: { cspNonce, client } }) }`; files in `dist/client` |
@@ -187,7 +187,7 @@ the verb:
 | what a member holds and has seen, before offboarding | `GET /api/members/user:ada@acme.example` |
 | list, issue or revoke a token's credentials | `GET` / `POST /api/members/token:ci-deploy/tokens`, `DELETE …/tokens/:id` |
 | change someone's access, in one transaction | `PATCH /api/access/user:ada@acme.example {"market": "developer", "market/prod": null}` |
-| syncs | `GET` / `POST /api/syncs/market/prod`, `PATCH` / `DELETE /api/syncs/by-id/:id`, `POST …/:id/runs` |
+| syncs, and where this instance can sync to | `GET` / `POST /api/syncs/market/prod`, `PATCH` / `DELETE /api/syncs/by-id/:id`, `POST …/:id/runs`, `GET /api/syncs/providers` |
 | my sessions and linked sign-in accounts, and ending them | `GET` / `DELETE /api/sessions/:id`, `GET` / `DELETE /api/identities/:id` |
 | approve or deny a `coffre login` device code | `GET` / `POST /api/device-logins/:code {"approve": true}` |
 | the audit log, and verifying it | `GET /api/audit?path=market/prod`, `GET /api/audit/verification` |

@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { providers, SyncConfigError, SyncProviderError } from '../../src/sync/index.ts';
+import { SyncConfigError, SyncProviderError, vercel as vercelProvider } from '../../src/sync/index.ts';
+import { guard } from '../../src/sync/guard.ts';
 import { assertNoLeak, fakeFetch, rejection } from './fake-fetch.ts';
 
-const vercel = providers.vercel;
+const vercel = guard(vercelProvider());
 const TOKEN = 'vcp_secrettokenvalue0123456789';
 const PROJECT = 'https://api.vercel.com/v10/projects/prj_abc/env';
 const RECORD = 'https://api.vercel.com/v9/projects/prj_abc/env';

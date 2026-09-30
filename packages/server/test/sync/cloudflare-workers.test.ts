@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { getProvider, providers, SyncConfigError, SyncProviderError } from '../../src/sync/index.ts';
+import { cloudflareWorkers, resolveSyncProviders, SyncConfigError, SyncProviderError } from '../../src/sync/index.ts';
+import { guard } from '../../src/sync/guard.ts';
 import { assertNoLeak, fakeFetch, rejection } from './fake-fetch.ts';
 
-const cloudflare = providers['cloudflare-workers'];
+const cloudflare = guard(cloudflareWorkers());
 const TOKEN = 'cf_api_token_0123456789abcdefSECRET';
 const ACCOUNT = '023e105f4ecef8ad9ca31a8372d0c353';
 const SCRIPT = `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT}/workers/scripts/coffre-web`;
@@ -17,8 +18,8 @@ const failed = (status: number, code: number, message: string) => ({
 });
 const listed = (...names: string[]) => ok(names.map((name) => ({ name, type: 'secret_text' })));
 
-test('is registered under its kind', () => {
-  assert.equal(getProvider('cloudflare-workers'), cloudflare);
+test('is one of the providers a deployment gets by default', () => {
+  assert.ok(resolveSyncProviders().some((provider) => provider.id === 'cloudflare-workers'));
   assert.equal(cloudflare.label, 'Cloudflare Workers');
 });
 
