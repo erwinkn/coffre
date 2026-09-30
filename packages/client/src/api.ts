@@ -635,6 +635,7 @@ export type Api = {
         project: string | null;
         environment: string | null;
         bundleId: string | null;
+        requestId: string | null;
         metadata: {
           [key: string]: unknown;
         };
@@ -708,6 +709,7 @@ export type AuditEntryView = {
   project: string | null;
   environment: string | null;
   bundleId: string | null;
+  requestId: string | null;
   metadata: {
     [key: string]: unknown;
   };

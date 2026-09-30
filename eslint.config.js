@@ -52,8 +52,8 @@ const vaultBoundaries = {
  * A relative import stays inside its package: another package is imported by
  * name, `@coffre/core/vault` and not `../../core/src/vault.ts`, so that each
  * one builds, ships and can be internalized on its own. Tests and scripts may
- * also reach the dev tooling beside the packages, such as the dev IdP; what
- * ships in `src/` may not.
+ * also reach the dev tooling beside the packages, such as the seed's
+ * config; what ships in `src/` may not.
  */
 const packageImports = {
   meta: {

@@ -21,7 +21,7 @@ product that deployments import and configure in their own repositories.
 | Phase | Goal | Done when |
 |---|---|---|
 | 1. Harden | Safe to hold real secrets | Every item below shipped; restore and rotation drills pass |
-| ~~2. Package~~ | The product apart from its instances; Cloudflare and Node adapters; a vault; three databases | A deployment is a small project importing `@coffre/server` and `@coffre/vault`; the suite passes on Postgres, MySQL and SQLite, and the smoke suite on both adapters |
+| ~~2. Package~~ | The product apart from its instances; Cloudflare and Node adapters; a vault; three databases | A deployment is a small project importing `@coffre/server` and `@coffre/vault`; the suite passes on Postgres, MySQL and SQLite, and a smoke run on both adapters, now [conformance](conformance.md) |
 | 3. erwinkn.com | Dogfood | Your secrets live in it, the CLI and sync are in daily use, a few weeks pass with no open bugs |
 | 4. Sign-in | Deployable without a proxy in front | A Node deployment signs in with Google, GitHub and an arbitrary OIDC issuer, and the CLI logs in through it |
 
@@ -117,7 +117,7 @@ that holds the keys and decides who may decrypt. The design is in
    a hash-chained log of its own, over SQLite; the app keeps ciphertext and
    wrapped keys, and asks the vault to wrap and unwrap, once per batch. It
    runs as its own Worker, a Durable Object behind a service binding, next
-   to the app in dev and the smoke test, or in process over a SQLite file
+   to the app in dev and conformance, or in process over a SQLite file
    for the tests. Callers' grants come from the vault once per
    request; changing access and removing a member are vault calls, and a
    refusal is a 403 with the vault's code. Unwraps are capped per principal
@@ -134,10 +134,10 @@ that holds the keys and decides who may decrypt. The design is in
    own. `@coffre/ui` is the pages alone, a prebuilt handler the server calls,
    with its static files served by Workers' assets or by `serve`.
    `examples/workers` and `examples/node` are what `coffre init` writes, a
-   test diffs them, and `scripts/smoke.mjs` runs each through sign-in, a
-   reveal via the vault, the heartbeat and its checkpoint.
-   `pnpm test:consumer` does the same from packed tarballs installed outside
-   the workspace.
+   test diffs them, and `coffre-conformance` holds each to what it must never
+   do ([conformance.md](conformance.md)), as every deployment's
+   `pnpm conformance`. `pnpm test:consumer` does the same from packed
+   tarballs installed outside the workspace.
 
 ## Phase 3: erwinkn.com
 
@@ -153,6 +153,9 @@ packages; this repository contains no instance-specific configuration.
 - **Moving in:** `coffre import` from your existing `.env` files.
 - **CLI:** run from a checkout until it is published as `@coffre/cli`.
   `coffre login` signs in with a device code.
+- **Conformance:** `pnpm conformance` passes in the deployment's repository
+  before each deploy, and `coffre-conformance probe` against the live URL
+  after it.
 - **Exit:** a few weeks of daily use with no open bugs, plus a rotation drill
   and a restore drill on the live instance.
 

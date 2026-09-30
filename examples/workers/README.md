@@ -73,3 +73,18 @@ elsewhere.
 database with `CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE`.
 `pnpm typecheck` checks the configuration against coffre's types, and
 `pnpm build` bundles both Workers without deploying them.
+
+## Conformance
+
+```sh
+pnpm conformance \
+  --postgres "postgres://owner:…@127.0.0.1:5432" \
+  --runtime "postgres://coffre_runtime:…@127.0.0.1:5432"
+```
+
+runs both Workers under `wrangler dev`, on a database of their own that it
+creates on that Postgres and drops after, signs people in through a
+stand-in GitHub, and checks what coffre must never do: show a value to
+someone without access, act for another site with someone's cookie, keep a
+removed member in, give a value it did not log. Run it after changing this
+project, and before deploying the change.

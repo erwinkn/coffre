@@ -90,7 +90,7 @@ logs="$root/.logs"
 mkdir -p "$logs"
 
 log "starting dev IdP on :$idp_port"
-COFFRE_AUTH_MODE=dev node dev/idp/src/server.ts >"$logs/dev-idp.log" 2>&1 &
+COFFRE_AUTH_MODE=dev node --conditions=coffre:source dev/idp/server.ts >"$logs/dev-idp.log" 2>&1 &
 sleep 1
 
 # The seed starts the app's database over, so the vault starts over with it:

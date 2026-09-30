@@ -2,7 +2,7 @@ import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import * as oauth from 'oauth4webapi';
 
-import { DevIdp } from '../src/idp.ts';
+import { DevIdp } from '../../src/idp/idp.ts';
 import { get, location, REDIRECT_URI } from './helpers.ts';
 
 // coffre's OIDC client is built on oauth4webapi; this is the same sequence of

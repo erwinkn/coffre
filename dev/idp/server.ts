@@ -7,7 +7,7 @@
  * audience differ. It also serves an OpenID Connect provider and a fake GitHub
  * for coffre's own sign-in.
  */
-import { DEFAULT_CLIENT, DevIdp } from './idp.ts';
+import { DEFAULT_CLIENT, DevIdp } from '@coffre/conformance/idp';
 
 if (process.env.COFFRE_AUTH_MODE !== 'dev') {
   throw new Error('dev-idp refuses to start unless COFFRE_AUTH_MODE=dev');

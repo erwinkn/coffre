@@ -1,7 +1,7 @@
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { DevIdp } from '../src/idp.ts';
+import { DevIdp } from '../../src/idp/idp.ts';
 import { form, get, location, pkce, REDIRECT_URI } from './helpers.ts';
 
 const CLIENT = { client_id: 'coffre-local', client_secret: 'coffre-local-secret' };

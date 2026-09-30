@@ -1,7 +1,7 @@
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { DevIdp } from '../../../dev/idp/src/idp.ts';
+import { DevIdp } from '@coffre/conformance/idp';
 import {
   createSigninProvider,
   github,

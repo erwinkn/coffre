@@ -9,13 +9,15 @@
     "vault": "node --env-file=vault.env src/vault.ts",
     "start": "node --env-file=server.env src/server.ts",
     "migrate": "coffre-server migrate",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "conformance": "coffre-conformance node"
   },
   "dependencies": {
     "@coffre/server": "0.1.0",
     "@coffre/vault": "0.1.0"
   },
   "devDependencies": {
+    "@coffre/conformance": "0.1.0",
     "@types/node": "26.1.1",
     "typescript": "5.9.3"
   }
