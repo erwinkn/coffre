@@ -438,7 +438,7 @@ export async function environmentSecrets(
   environmentId: string,
   secretId?: string,
 ): Promise<SecretRow[]> {
-  const { secrets, secretVersions } = tablesOf(db);
+  const { secrets, secretVersions, projects, environments } = tablesOf(db);
   const rows = await db
     .select({
       id: secrets.id,
@@ -451,8 +451,15 @@ export async function environmentSecrets(
       ...envelopeColumns(secretVersions),
     })
     .from(secrets)
+    .innerJoin(projects, eq(projects.id, secrets.projectId))
+    .innerJoin(environments, eq(environments.id, secrets.environmentId))
     .leftJoin(secretVersions, eq(secretVersions.id, secrets.currentVersionId))
-    .where(and(eq(secrets.environmentId, environmentId), secretId === undefined ? undefined : eq(secrets.id, secretId)))
+    .where(and(
+      eq(secrets.environmentId, environmentId),
+      isNull(projects.archivedAt),
+      isNull(environments.archivedAt),
+      secretId === undefined ? undefined : eq(secrets.id, secretId),
+    ))
     .orderBy(asc(secrets.key));
   return rows.map((row) => ({
     id: row.id,

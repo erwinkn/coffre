@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { mayManageAccess, type Permission } from '@coffre/core/access';
+import { allows, mayManageAccess, type Permission } from '@coffre/core/access';
 import type { GrantChange, Vault } from '@coffre/core/vault';
 
 import type { AuditEntry } from '../db/audit.ts';
@@ -439,6 +439,13 @@ export class SyncRunner {
         metadata: { syncId, source: sourcePath, trigger, reason: `vault_${refusal.code}` },
       });
 
+    const requireSource = async () => {
+      const access = await vault.access(asking.principal);
+      if (access.status !== 'active' || !allows(access, 'secret.read', scope)) {
+        throw refused({ code: 'no_grant', message: 'the sync no longer has read access to its source' }, scope);
+      }
+    };
+
     let outcome: Exclude<RunOutcome, { status: 'busy' }> = {
       status: 'failed',
       upserted: [],
@@ -464,6 +471,8 @@ export class SyncRunner {
       // Opening the credential is a use of a secret, so it is audited as the
       // run itself, in the same transaction as the read.
       const token = await audited({ db, chainKey }, async (tx, log) => {
+        // Deletion-only runs open no source values, but need its grant too.
+        await requireSource();
         const [credential] = await currentEnvelopes(tx, sync.credential.environmentId, sync.credentialSecretId);
         if (credential === undefined) {
           throw new SyncFailure(`${credentialPath(sync)} is archived; restore it or point this sync at another secret`);
@@ -495,6 +504,7 @@ export class SyncRunner {
       // any value leaves. If the push then fails, the log says more left than
       // did, never less.
       const plan = await audited({ db, chainKey }, async (tx, log) => {
+        await requireSource();
         const current = (await currentEnvelopes(tx, sync.environmentId)).filter(
           (entry) => entry.secretId !== sync.credentialSecretId,
         );
