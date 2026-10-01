@@ -36,7 +36,7 @@ export function further(a: Anchor, b: Anchor): Anchor {
   return b.nextSeq > a.nextSeq ? b : a;
 }
 
-const BATCH = 1000;
+export const VERIFY_BATCH = 1000;
 
 type Verified = { verification: LogVerification; anchor: Anchor };
 
@@ -78,12 +78,12 @@ export async function verifyChain(
 
   let verified = anchor;
   for (;;) {
-    const batch = await entriesFrom(db, verified.nextSeq, BATCH);
+    const batch = await entriesFrom(db, verified.nextSeq, VERIFY_BATCH);
     if (batch.length === 0) break;
     const result = verifyEntries(batch, { ...keys, startSeq: verified.nextSeq, startPrevHash: verified.hash });
     if (!result.ok) return broken(result.failedAtSeq, result.reason);
     verified = { nextSeq: result.nextSeq, hash: result.head, vaultEntries: verified.vaultEntries + result.authenticated };
-    if (batch.length < BATCH) break;
+    if (batch.length < VERIFY_BATCH) break;
   }
   return { verification: { ok: true, entries: verified.vaultEntries }, anchor: verified };
 }

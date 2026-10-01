@@ -98,6 +98,7 @@ async function verifyChain(client: CoffreClient) {
           head: result.head,
           checkpoint: result.checkpoint,
           vaultEntries: result.vault.entries,
+          pending: result.vault.pending ?? 0,
         }
       : { integrity: 'broken' as const, log: result.log, failedAtSeq: result.failedAtSeq, reason: result.reason };
   } catch (error) {
@@ -537,6 +538,11 @@ function ChainStatus({ chain }: { chain: ChainResult }) {
           Verified
         </button>
       </Toggletip>
+      {chain.pending > 0 && (
+        <span className="chain-head-label" role="status">
+          {chain.pending} key operation{chain.pending === 1 ? '' : 's'} in flight
+        </span>
+      )}
       <span className="chain-head">
         <span className="chain-head-label">head</span>
         <Tip label={chain.head}>

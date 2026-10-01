@@ -1093,11 +1093,19 @@ for (const overdue of [false, true]) {
     }]));
     if (overdue) w.clock.offset = 120_000;
     const verification = await w.vault.verifyLog({ through: null });
-    assert.equal(verification.ok, false);
-    if (!verification.ok) {
+    if (overdue) {
+      assert.ok(!verification.ok);
       assert.equal(verification.failedAtSeq, Number(appended.seqStart));
-      assert.match(verification.reason, overdue ? /overdue/ : /still running/);
+      assert.match(verification.reason, /overdue/);
+    } else {
+      assert.deepEqual(verification, { ok: true, entries: 1, pending: 1 });
+      const page = await w.vault.log({ actor: ROOT, full: true });
+      assert.ok(page.ok);
+      assert.deepEqual(page.verification, verification);
     }
+    const view = await w.vault.log({ actor: ROOT });
+    assert.ok(view.ok);
+    assert.deepEqual(view.verification, { ok: true, entries: 1 }, 'ordinary pages check the chain incrementally');
   });
 }
 
@@ -1154,10 +1162,11 @@ for (const duplicate of [false, true]) {
       metadata: JSON.stringify({ item: 0, subject: secret.path, secretId: secret.secretId, version: secret.version }),
     };
     await db.vault.transaction((tx) => appendEntries(tx, VAULT_KEY, duplicate ? [outcome, outcome] : [outcome]));
+    if (!duplicate) w.clock.offset = 120_000;
     const result = await w.vault.verifyLog({ through: null });
     assert.equal(result.ok, false);
     if (!result.ok) assert.match(result.reason, duplicate ? /does not identify one item/ : /1 of 2 outcomes missing/);
-    const page = await w.vault.log({ actor: ROOT });
+    const page = await w.vault.log({ actor: ROOT, full: true });
     assert.ok(page.ok && !page.verification.ok);
   });
 }

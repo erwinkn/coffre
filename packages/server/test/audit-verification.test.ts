@@ -1,8 +1,9 @@
 import { after, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 
-import { entryHash } from '@coffre/core/audit';
-import { LogHeadMismatch } from '@coffre/db/log';
+import { deriveLogKey, entryHash } from '@coffre/core/audit';
+import { appendEntries, LogHeadMismatch } from '@coffre/db/log';
 import { eq } from 'drizzle-orm';
 
 import { appendAudit, type AuditEntry } from '../src/db/audit.ts';
@@ -92,3 +93,24 @@ async function write(entries: number): Promise<void> {
     await db.runtime.transaction((tx) => appendAudit(tx, deps.chainKey, Array.from({ length: batch }, () => entry)));
   }
 }
+
+test('audit verification reports live key operations without calling the log broken', async () => {
+  await db.owner.transaction((tx) => appendEntries(tx, deriveLogKey('vault', deps.vault.signingKey), [{
+    actor: 'user:root@acme.example', action: 'key.intent', decision: 'allow', operationId: randomUUID(),
+    metadata: JSON.stringify({ operation: 'wrap', expiresAt: Date.now() + 60_000, keys: [{
+      item: 0, secretId: randomUUID(), subject: 'market/dev/KEY', version: 1,
+    }] }),
+  }]));
+  const verified = await root.audit.verify();
+  assert.ok(verified.ok);
+  assert.equal(verified.vault.pending, 1);
+  const page = await root.audit.vault({ full: 'true' });
+  assert.ok(page.verification.ok);
+  assert.equal(page.verification.pending, 1);
+
+  deps.vault.advance(120_000);
+  const overdue = await root.audit.verify();
+  assert.ok(!overdue.ok);
+  assert.equal(overdue.log, 'vault');
+  assert.match(overdue.reason, /overdue/);
+});

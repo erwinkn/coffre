@@ -270,7 +270,8 @@ export type VerifyLogInput = {
  * failure, the entry where it breaks, or null when the chain holds but the
  * members and grants do not follow from it. Then `fault` says which, as
  * facts the app can word with names: `reason` has only ids.
+ * Full checks report live key batches in `pending`; overdue ones fail.
  */
 export type LogVerification =
-  | { ok: true; entries: number }
+  | { ok: true; entries: number; pending?: number }
   | { ok: false; failedAtSeq: number | null; reason: string; fault?: AccessFault };

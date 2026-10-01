@@ -706,6 +706,7 @@ export type Api = {
       };
       vault: {
         entries: number;
+        pending?: number;
       };
     } | {
       ok: false;
@@ -737,6 +738,7 @@ export type Api = {
       verification: {
         ok: true;
         entries: number;
+        pending?: number;
       } | {
         ok: false;
         failedAtSeq: number | null;

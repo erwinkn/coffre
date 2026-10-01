@@ -850,10 +850,7 @@ class VaultService implements Vault {
     const limit = Math.min(Math.max(Math.trunc(input.limit ?? 50), 1), 200);
     const shown = await store.vaultPage(this.#db, input.before === undefined ? undefined : BigInt(input.before), limit);
     const verification =
-      input.full === true ? await this.#verifyAll(shown, null, null) : await this.#db.transaction(async (tx) => {
-        const chain = await this.#verify(tx, shown, this.#prepared.verified);
-        return chain.ok ? (await verifyAccounting(tx, await this.#now(tx))) ?? chain : chain;
-      }, SNAPSHOT);
+      input.full === true ? await this.#verifyAll(shown, null, null) : await this.#verify(this.#db, shown, this.#prepared.verified);
     return { ok: true, entries: shown.map(entryView), verification };
   }
 
@@ -890,9 +887,10 @@ class VaultService implements Vault {
       }
       const at = await this.#now(tx);
       const accounting = await verifyAccounting(tx, at);
-      if (accounting !== null) return accounting;
+      if (!accounting.ok) return accounting;
       const fault = await replay(tx, at);
-      return fault === null ? verification : { ok: false, failedAtSeq: null, reason: describeAccessFault(fault), fault };
+      if (fault !== null) return { ok: false, failedAtSeq: null, reason: describeAccessFault(fault), fault };
+      return accounting.pending === 0 ? verification : { ...verification, pending: accounting.pending };
     }, SNAPSHOT);
   }
 }
