@@ -540,3 +540,76 @@ for (const parent of ['environment', 'project']) {
     assert.deepEqual(destination.tokens, []);
   });
 }
+
+test('a sync is committed and paused before its vault grant, then enabled', async (t) => {
+  const setAccess = deps.vault.setAccess;
+  t.mock.method(deps.vault, 'setAccess', async (input: Parameters<typeof setAccess>[0]) => {
+    const [row] = await db.owner.select().from(syncs);
+    assert.ok(row, 'the sync is committed before its principal is granted access');
+    assert.notEqual(row.pausedAt, null);
+    assert.deepEqual(await runner.runSettled(row.id, 'scheduled', { actorType: 'system', actorId: 'test' }), { status: 'busy' });
+    assert.equal(destination.applied.length, 0);
+    return setAccess(input);
+  });
+  const created = await createSync();
+  const [row] = await db.owner.select().from(syncs).where(eq(syncs.id, created.id));
+  assert.equal(row.pausedAt, null);
+  assert.equal(destination.values.get('API_KEY'), 'api-1');
+});
+
+test('a failed sync grant leaves a paused sync that cannot push', async (t) => {
+  t.mock.method(deps.vault, 'setAccess', async () => { throw new Error('vault unavailable'); });
+  await assert.rejects(createSync(), { status: 500 });
+  const [row] = await db.owner.select().from(syncs);
+  assert.ok(row);
+  assert.notEqual(row.pausedAt, null);
+  assert.deepEqual(await runner.runSettled(row.id, 'scheduled', { actorType: 'system', actorId: 'test' }), { status: 'busy' });
+  assert.deepEqual(destination.applied, []);
+});
+
+test('archiving stops scheduling before vault removal and a failed removal can be retried', async (t) => {
+  const created = await createSync();
+  const remove = deps.vault.remove;
+  let fail = true;
+  t.mock.method(deps.vault, 'remove', async (input: Parameters<typeof remove>[0]) => {
+    const [row] = await db.owner.select().from(syncs).where(eq(syncs.id, created.id));
+    assert.notEqual(row.archivedAt, null);
+    assert.deepEqual(await runner.runSettled(row.id, 'scheduled', { actorType: 'system', actorId: 'test' }), { status: 'busy' });
+    if (fail) { fail = false; throw new Error('vault unavailable'); }
+    return remove(input);
+  });
+  await assert.rejects(root.syncs.remove(created.id), { status: 500 });
+  await root.syncs.remove(created.id);
+  assert.equal((await deps.vault.access(`sync:${created.id}`)).status, 'removed');
+});
+
+for (const release of ['credential', 'values'] as const) {
+  test(`a failed app audit after releasing sync ${release} prevents the provider push`, async (t) => {
+    const created = await createSync();
+    destination.values.clear();
+    destination.applied = [];
+    destination.tokens = [];
+    let failCommit = false;
+    const unwrap = deps.vault.unwrap;
+    t.mock.method(deps.vault, 'unwrap', async (input: Parameters<typeof unwrap>[0]) => {
+      const result = await unwrap(input);
+      const credential = input.items.some(({ secret }) => secret.path === CREDENTIAL);
+      if (credential === (release === 'credential')) failCommit = true;
+      return result;
+    });
+    const transaction = db.runtime.transaction.bind(db.runtime);
+    t.mock.method(db.runtime, 'transaction', ((work, options) => transaction(async (tx) => {
+      const result = await work(tx);
+      if (failCommit) {
+        failCommit = false;
+        throw new Error('audit commit failed');
+      }
+      return result;
+    }, options)) as typeof db.runtime.transaction);
+    const { outcome } = await root.syncs.run(created.id);
+    assert.equal(outcome.status, 'failed');
+    assert.deepEqual(destination.applied, []);
+    assert.equal(destination.values.size, 0);
+    if (release === 'credential') assert.deepEqual(destination.tokens, []);
+  });
+}

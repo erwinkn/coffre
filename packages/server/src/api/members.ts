@@ -6,14 +6,13 @@ import { credentials, identities, principals } from '@coffre/db/schema';
 import {
   insertIfAbsent,
   revokePriorMembership,
-  lock,
   memberActivity,
   members as loadMembers,
   places,
   updateAuth,
 } from '../db/queries.ts';
 import { can } from './caller.ts';
-import { allowed, audited, denied, Refusal, requireOwner, vaultRefusal, type ApiContext } from './context.ts';
+import { allowed, audited, denied, Refusal, requireOwner, vaultRefusal, withRefusals, type ApiContext } from './context.ts';
 import { conflict, forbidden, notFound } from './errors.ts';
 import { formatMember, parseGrantee, type MemberRef, type Path } from './paths.ts';
 import { syncsCreatedBy, type PlacedSyncView } from './syncs.ts';
@@ -356,9 +355,8 @@ export async function putMember(
 ): Promise<{ member: string; instanceRole: 'user' | 'owner'; created: boolean }> {
   const principal = formatMember(member);
   const fields = { principalType: member.type, principalId: member.id, instanceRole: input.owner === true ? 'owner' : 'user' };
-  return audited(ctx, async (tx, log) => {
+  return withRefusals(ctx, async () => {
     requireOwner(ctx, 'directory.create', { metadata: fields });
-    await lock(tx, principals, { principalType: member.type, principalId: member.id });
     const standing = await ctx.vault.access(principal);
     if (standing.isRootAdmin) throw rootAdminRefusal(ctx, 'directory.create', member);
     if (member.type === 'service' && input.owner === true) {
@@ -376,19 +374,21 @@ export async function putMember(
     });
     if (!result.ok) throw vaultRefusal(ctx, result.refusal, 'directory.create', { metadata: fields });
     const current = await ctx.vault.access(principal);
-    await revokePriorMembership(tx, ctx.chainKey, member, current.generation, ctx.caller.principal.id);
-    const role = result.owner ? 'owner' : 'user';
-    await insertIfAbsent(tx, principals, {
-      principalType: member.type,
-      principalId: member.id,
-      createdBy: ctx.caller.principal.id,
+    return audited(ctx, async (tx, log) => {
+      await revokePriorMembership(tx, ctx.chainKey, member, current.generation, ctx.caller.principal.id);
+      const role = result.owner ? 'owner' : 'user';
+      await insertIfAbsent(tx, principals, {
+        principalType: member.type,
+        principalId: member.id,
+        createdBy: ctx.caller.principal.id,
+      });
+      if (result.created) {
+        log.push(allowed(ctx, 'directory.create', { metadata: { ...fields, instanceRole: role } }));
+      } else if (result.owner !== standing.isOwner) {
+        log.push(allowed(ctx, 'directory.update', { metadata: { ...fields, instanceRole: role } }));
+      }
+      return { member: principal, instanceRole: role, created: result.created };
     });
-    if (result.created) {
-      log.push(allowed(ctx, 'directory.create', { metadata: { ...fields, instanceRole: role } }));
-    } else if (result.owner !== standing.isOwner) {
-      log.push(allowed(ctx, 'directory.update', { metadata: { ...fields, instanceRole: role } }));
-    }
-    return { member: principal, instanceRole: role, created: result.created };
   });
 }
 
@@ -404,7 +404,7 @@ export async function removeMember(
 ): Promise<{ revoked: { grants: number; sessions: number; tokens: number; identities: number }; report: OffboardingReport }> {
   const principal = formatMember(member);
   const fields = { principalType: member.type, principalId: member.id };
-  const revoked = await audited(ctx, async (tx, log) => {
+  const revoked = await withRefusals(ctx, async () => {
     requireOwner(ctx, 'directory.remove', { metadata: fields });
     const standing = await ctx.vault.access(principal);
     if (standing.isRootAdmin) throw rootAdminRefusal(ctx, 'directory.remove', member);
@@ -415,46 +415,45 @@ export async function removeMember(
       );
     }
 
-    const key = { principalType: member.type, principalId: member.id };
-    // Locking the row makes a token issue that races this wait, then find its credentials revoked.
-    await lock(tx, principals, key);
     const result = await ctx.vault.remove({
       actor: formatMember(ctx.caller.principal),
       principal,
       requestId: ctx.requestId,
     });
     if (!result.ok) throw vaultRefusal(ctx, result.refusal, 'directory.remove', { metadata: fields });
+    const current = await ctx.vault.access(principal);
+    return audited(ctx, async (tx, log) => {
+      const now = new Date();
+      const [held] = await loadMembers(tx, ctx.chainKey, { member }, now);
+      const liveCredentials = (held?.credentials ?? []).filter((row) => row.generation < current.generation);
+      const liveIdentities = (held?.identities ?? []).filter((row) => row.generation < current.generation);
+      const revokedBy = ctx.caller.principal.id;
+      const ids = (rows: { id: string }[]) => rows.map((row) => row.id);
+      if (liveCredentials.length > 0) {
+        await updateAuth(tx, ctx.chainKey, credentials, { id: ids(liveCredentials) }, { revokedAt: now, revokedBy });
+      }
+      if (liveIdentities.length > 0) {
+        await updateAuth(tx, ctx.chainKey, identities, { id: ids(liveIdentities) }, { revokedAt: now, revokedBy });
+      }
 
-    const now = new Date();
-    const [held] = await loadMembers(tx, ctx.chainKey, { member }, now);
-    const liveCredentials = held?.credentials ?? [];
-    const liveIdentities = held?.identities ?? [];
-    const revokedBy = ctx.caller.principal.id;
-    const ids = (rows: { id: string }[]) => rows.map((row) => row.id);
-    if (liveCredentials.length > 0) {
-      await updateAuth(tx, ctx.chainKey, credentials, { id: ids(liveCredentials) }, { revokedAt: now, revokedBy });
-    }
-    if (liveIdentities.length > 0) {
-      await updateAuth(tx, ctx.chainKey, identities, { id: ids(liveIdentities) }, { revokedAt: now, revokedBy });
-    }
-
-    const counts = {
-      grants: result.revoked.length,
-      sessions: liveCredentials.filter((row) => row.kind !== 'service').length,
-      tokens: liveCredentials.filter((row) => row.kind === 'service').length,
-      identities: liveIdentities.length,
-    };
-    const perProject = new Map<string, number>();
-    for (const grant of result.revoked) {
-      perProject.set(grant.projectId, (perProject.get(grant.projectId) ?? 0) + 1);
-    }
-    const { grants: revokedGrants, ...signedOut } = counts;
-    log.push(allowed(ctx, 'directory.remove', { metadata: { ...fields, revoked: revokedGrants, ...signedOut } }));
-    // One row per project too, so each project's own log shows who lost access to it.
-    for (const [projectId, n] of [...perProject].sort(([a], [b]) => a.localeCompare(b))) {
-      log.push(allowed(ctx, 'directory.remove', { projectId, metadata: { ...fields, revoked: n } }));
-    }
-    return counts;
+      const counts = {
+        grants: result.revoked.length,
+        sessions: liveCredentials.filter((row) => row.kind !== 'service').length,
+        tokens: liveCredentials.filter((row) => row.kind === 'service').length,
+        identities: liveIdentities.length,
+      };
+      const perProject = new Map<string, number>();
+      for (const grant of result.revoked) {
+        perProject.set(grant.projectId, (perProject.get(grant.projectId) ?? 0) + 1);
+      }
+      const { grants: revokedGrants, ...signedOut } = counts;
+      log.push(allowed(ctx, 'directory.remove', { metadata: { ...fields, revoked: revokedGrants, ...signedOut } }));
+      // One row per project too, so each project's own log shows who lost access to it.
+      for (const [projectId, n] of [...perProject].sort(([a], [b]) => a.localeCompare(b))) {
+        log.push(allowed(ctx, 'directory.remove', { projectId, metadata: { ...fields, revoked: n } }));
+      }
+      return counts;
+    });
   });
   return { revoked, report: await memberReport(ctx, member) };
 }

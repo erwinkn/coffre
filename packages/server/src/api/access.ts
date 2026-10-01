@@ -2,7 +2,7 @@ import { assignableToEnvironment, ROLES, type Role } from '@coffre/core/access';
 import type { AccessChange } from '@coffre/core/vault';
 
 import { places } from '../db/queries.ts';
-import { allowed, audited, denied, need, Refusal, vaultRefusal, type ApiContext } from './context.ts';
+import { allowed, recorded, denied, need, Refusal, vaultRefusal, type ApiContext } from './context.ts';
 import { badRequest, conflict, notFound } from './errors.ts';
 import { formatGrantee, formatMember, formatPath, parsePath, type GranteeRef } from './paths.ts';
 
@@ -65,8 +65,8 @@ export async function setAccess(
   if (wanted.length === 0) return { changes: {} };
 
   const principal = formatGrantee(grantee);
-  return audited(ctx, async (tx, log) => {
-    const known = await places(tx);
+  return recorded(ctx, async (log) => {
+    const known = await places(ctx.db);
     const located = wanted.map((want) => {
       const project = known.find((place) => place.slug === want.project);
       if (project === undefined) throw notFound(`no project "${want.project}"`);

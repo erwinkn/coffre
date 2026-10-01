@@ -3,7 +3,7 @@ import { own, tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import * as dialect from '@coffre/db/dialect';
 import { canonicalTimestamp, changedRows, clock, forUpdate, migrationLedger, truth, type Table } from '@coffre/db/dialect';
 import type * as schema from '@coffre/db/schema';
-import { and, asc, count, desc, eq, getTableColumns, getTableName, gt, gte, inArray, isNull, lt, ne, notInArray, or, sql, type SQL } from 'drizzle-orm';
+import { and, asc, count, desc, eq, getTableColumns, getTableName, gt, gte, inArray, isNull, lt, notInArray, or, sql, type SQL } from 'drizzle-orm';
 
 import { authMac, verifyAuthRow, type AuthRow, type AuthTable } from '../auth-rows.ts';
 
@@ -238,6 +238,7 @@ export type MemberRow = {
   credentials: {
     id: string;
     kind: string;
+    generation: number;
     label: string | null;
     tokenHint: string;
     identityId: string | null;
@@ -419,7 +420,7 @@ export async function revokePriorMembership(
   for (const table of [credentials, identities]) {
     const rows = await db.select().from(table).where(and(
       eq(table.principalType, principal.type), eq(table.principalId, principal.id),
-      ne(table.generation, generation),
+      lt(table.generation, generation),
     ));
     for (const row of rows) {
       verifyAuthRow(chainKey, getTableName(table) as AuthTable, row);
@@ -450,6 +451,20 @@ export async function findDeviceAuthorizations(
 }
 
 // --- secrets ------------------------------------------------------------------
+
+/** The committed state to compare after the vault prepares a write or restore. */
+export async function secretHeads(db: Queryable, environmentId: string, by: { keys: string[] } | { id: string }) {
+  const { secrets } = tablesOf(db);
+  return db.select({
+    id: secrets.id,
+    key: secrets.key,
+    currentVersion: secrets.currentVersion,
+    archivedAt: secrets.archivedAt,
+  }).from(secrets).where(and(
+    eq(secrets.environmentId, environmentId),
+    'id' in by ? eq(secrets.id, by.id) : inArray(secrets.key, by.keys),
+  ));
+}
 
 const envelopeColumns = (secretVersions: Tables['secretVersions']) => ({
   envelopeVersion: secretVersions.envelopeVersion,

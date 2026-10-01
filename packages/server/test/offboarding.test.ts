@@ -347,3 +347,97 @@ test('device approval cannot survive removal when the vault clock moves backward
   await root.members.add(`user:${DEV}`);
   assert.deepEqual(await signin.pollDevice(started.deviceCode, meta()), { status: 'denied' });
 });
+
+for (const flow of ['browser', 'link', 'device approval', 'device poll', 'service token'] as const) {
+  test(`${flow} cannot finish with a generation observed before removal and re-admission`, async (t) => {
+    if (flow === 'link') await browserSession(DEV, 'existing-account');
+    const asker = await contextFor(deps, flow === 'service token' ? ROOT : DEV);
+    const device = flow.startsWith('device') ? await signin.startDevice({ clientLabel: null, sourceIp: IP }) : null;
+    if (flow === 'device poll') await signin.decideDevice(asker, device!.userCode, true);
+    const member = flow === 'service token' ? `token:${SERVICE}` : `user:${DEV}`;
+    const access = deps.vault.access;
+    const generation = (await access(member)).generation;
+    let interrupted = false;
+    t.mock.method(deps.vault, 'access', async (principal: string) => {
+      const standing = await access(principal);
+      if (principal === member && !interrupted) {
+        interrupted = true;
+        await root.members.remove(member);
+        await root.members.add(member);
+      }
+      return standing;
+    });
+
+    const profile = { provider: 'github', subject: 'late-account', emails: [DEV], name: null };
+    switch (flow) {
+      case 'browser':
+        assert.deepEqual(await signin.completeSignin(profile, meta()), { ok: false, reason: 'deactivated' });
+        break;
+      case 'link':
+        assert.deepEqual(await signin.linkIdentity(asker, profile), { ok: false, reason: 'deactivated' });
+        break;
+      case 'device approval':
+        await assert.rejects(signin.decideDevice(asker, device!.userCode, true), { status: 403 });
+        assert.deepEqual(await signin.pollDevice(device!.deviceCode, meta()), { status: 'denied' });
+        break;
+      case 'device poll':
+        assert.deepEqual(await signin.pollDevice(device!.deviceCode, meta()), { status: 'denied' });
+        break;
+      case 'service token':
+        await assert.rejects(signin.issueServiceToken(asker, SERVICE, { label: null, expiresInDays: 1 }), { status: 404 });
+        break;
+    }
+    assert.equal(interrupted, true);
+    assert.ok((await access(member)).generation > generation);
+    assert.equal((await db.owner.select().from(credentials).where(isNull(credentials.revokedAt))).length, 0);
+    if (flow !== 'service token') {
+      const fresh = await browserSession(DEV, 'fresh-account');
+      assert.equal((await signin.verify(fresh.token)).id, DEV);
+    }
+  });
+}
+
+test('a removal sweep delayed past re-admission preserves the new session and binding', async (t) => {
+  const old = await browserSession(DEV, 'old-account');
+  const remove = deps.vault.remove;
+  let fresh: Awaited<ReturnType<typeof browserSession>> | undefined;
+  t.mock.method(deps.vault, 'remove', async (input: Parameters<typeof remove>[0]) => {
+    const removed = await remove(input);
+    await root.members.add(`user:${DEV}`);
+    fresh = await browserSession(DEV, 'fresh-account');
+    return removed;
+  });
+  await root.members.remove(`user:${DEV}`);
+  await assert.rejects(signin.verify(old.token));
+  assert.ok(fresh);
+  assert.equal((await signin.verify(fresh.token)).id, DEV);
+  assert.equal((await signin.listIdentities(await contextFor(deps, DEV))).length, 1);
+});
+
+test('a failed post-commit generation check leaves no usable credential or obstacle to a fresh binding', async (t) => {
+  const access = deps.vault.access;
+  let phase = 0;
+  t.mock.method(deps.vault, 'access', async (principal: string) => {
+    const standing = await access(principal);
+    if (principal === `user:${DEV}` && phase === 0) {
+      phase = 1;
+      await root.members.remove(`user:${DEV}`);
+      await root.members.add(`user:${DEV}`);
+      phase = 2;
+    } else if (principal === `user:${DEV}` && phase === 2) {
+      phase = 3;
+      throw new Error('vault unavailable after commit');
+    }
+    return standing;
+  });
+  await assert.rejects(signin.completeSignin(
+    { provider: 'github', subject: 'late-account', emails: [DEV], name: null }, meta(),
+  ), /vault unavailable after commit/);
+  const [stale] = await db.owner.select().from(credentials);
+  assert.ok(stale);
+  const fresh = await browserSession(DEV, 'fresh-account');
+  assert.equal((await signin.verify(fresh.token)).id, DEV);
+  const [cleaned] = await db.owner.select().from(credentials).where(eq(credentials.id, stale.id));
+  assert.notEqual(cleaned.revokedAt, null);
+  assert.equal((await signin.listIdentities(await contextFor(deps, DEV))).length, 1);
+});

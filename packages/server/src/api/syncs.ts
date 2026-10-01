@@ -26,7 +26,7 @@ import {
 } from '../sync/index.ts';
 import type { SyncTiming } from '../config.ts';
 import { can } from './caller.ts';
-import { allowed, audited, denied, missing, Refusal, vaultRefusal, type ApiContext } from './context.ts';
+import { allowed, audited, denied, missing, recorded, Refusal, vaultRefusal, withRefusals, type ApiContext } from './context.ts';
 import { badRequest, conflict, forbidden, notFound } from './errors.ts';
 import { openValues } from './keys.ts';
 import { formatMember, formatPath, parsePath } from './paths.ts';
@@ -468,12 +468,11 @@ export class SyncRunner {
       const destination = provider.describe(config);
       const signal = AbortSignal.timeout(RUN_TIMEOUT_MS);
 
-      // Opening the credential is a use of a secret, so it is audited as the
-      // run itself, in the same transaction as the read.
-      const token = await audited({ db, chainKey }, async (tx, log) => {
+      // Commit the credential's audit before using it at the provider.
+      const token = await recorded({ db, chainKey }, async (log) => {
         // Deletion-only runs open no source values, but need its grant too.
         await requireSource();
-        const [credential] = await currentEnvelopes(tx, sync.credential.environmentId, sync.credentialSecretId);
+        const [credential] = await currentEnvelopes(db, sync.credential.environmentId, sync.credentialSecretId);
         if (credential === undefined) {
           throw new SyncFailure(`${credentialPath(sync)} is archived; restore it or point this sync at another secret`);
         }
@@ -500,12 +499,11 @@ export class SyncRunner {
 
       const remote = new Set(await provider.listKeys(ctx, config));
 
-      // Plan and decrypt in one transaction, and write a row per key before
-      // any value leaves. If the push then fails, the log says more left than
-      // did, never less.
-      const plan = await audited({ db, chainKey }, async (tx, log) => {
+      // Audit every planned push before any value leaves. A failed push
+      // can make the log say more left than did, never less.
+      const plan = await recorded({ db, chainKey }, async (log) => {
         await requireSource();
-        const current = (await currentEnvelopes(tx, sync.environmentId)).filter(
+        const current = (await currentEnvelopes(db, sync.environmentId)).filter(
           (entry) => entry.secretId !== sync.credentialSecretId,
         );
         // Read with the lease: only this run writes the record until it lets go.
@@ -667,7 +665,7 @@ export async function createSync(
   const destination = provider.describe(config);
   const metadata = { provider: provider.id, destination, credential: formatPath(credentialPath) };
 
-  const syncId = await audited(ctx, async (tx, log) => {
+  const prepared = await audited(ctx, async (tx, log) => {
     const credential = await resolvePath(tx, credentialPath);
     const credentialPlace =
       credential?.environment == null ? null : { projectId: credential.project.id, environmentId: credential.environment.id };
@@ -716,18 +714,24 @@ export async function createSync(
       config: JSON.stringify(config),
       credentialSecretId: credential!.secret.id,
       createdBy: ctx.caller.principal.id,
+      // The vault must see a committed sync; the scheduler must not run it yet.
+      pausedAt: new Date(),
     });
-    // Last, so nothing the app checks can fail after the vault has granted.
+    log.push(allowed(ctx, 'sync.create', { ...place, metadata: { ...metadata, syncId: id } }));
+    return { id, reads };
+  });
+
+  const syncId = prepared.id;
+  await withRefusals(ctx, async () => {
     const granted = await ctx.vault.setAccess({
       actor: formatMember(ctx.caller.principal),
-      principal,
+      principal: syncPrincipal(syncId),
       requestId: ctx.requestId,
-      changes: reads,
+      changes: prepared.reads,
     });
-    if (!granted.ok) throw vaultRefusal(ctx, granted.refusal, 'sync.create', { ...place, metadata });
-    log.push(allowed(ctx, 'sync.create', { ...place, metadata: { ...metadata, syncId: id } }));
-    return id;
+    if (!granted.ok) throw vaultRefusal(ctx, granted.refusal, 'sync.create', { ...place, metadata: { ...metadata, syncId } });
   });
+  await manage(ctx, syncId, 'sync.resume', ['environment.manage'], () => ({ pausedAt: null }));
 
   ctx.waitUntil(ctx.syncs.runSettled(syncId, 'create', systemActor(syncId)));
   return ctx.syncs.view(syncId);
@@ -743,22 +747,22 @@ async function manage(
   action: string,
   anyOf: readonly Permission[],
   change: ((row: SyncRow) => Partial<typeof syncs.$inferInsert>) | null,
-  /** Runs in the same transaction, after the checks; a refusal rolls the change back. */
-  also?: (row: SyncRow) => Promise<void>,
-): Promise<void> {
-  await audited(ctx, async (tx, log) => {
+  /** Retrying archive must finish revoking its vault principal after an RPC failure. */
+  includeArchived = false,
+): Promise<SyncRow> {
+  return audited(ctx, async (tx, log) => {
     const row = await lockSync(tx, syncId);
-    if (row === null || !serves(row)) {
+    if (row === null || !serves(includeArchived ? { ...row, archivedAt: null } : row)) {
       throw new Refusal(notFound('unknown sync'), denied(ctx, action, 'unknown_sync', { metadata: { syncId } }));
     }
     const scope = { projectId: row.projectId, environmentId: row.environmentId };
     if (!anyOf.some((permission) => can(ctx.caller, permission, scope))) {
       throw new Refusal(forbidden(), denied(ctx, action, missing(anyOf[0]), { ...scope, metadata: { syncId } }));
     }
-    if (change === null) return;
+    if (change === null) return row;
     await update(tx, syncs, { id: syncId }, change(row));
-    await also?.(row);
     log.push(allowed(ctx, action, { ...scope, metadata: { syncId, provider: row.provider } }));
+    return row;
   });
 }
 
@@ -779,7 +783,8 @@ export async function setSyncPaused(ctx: ApiContext, syncId: string, paused: boo
  * service, not a side effect of tidying up coffre.
  */
 export async function archiveSync(ctx: ApiContext, syncId: string): Promise<SyncView> {
-  await manage(ctx, syncId, 'sync.archive', ['environment.manage'], () => ({ archivedAt: new Date() }), async (row) => {
+  const row = await manage(ctx, syncId, 'sync.archive', ['environment.manage'], (current) => ({ archivedAt: current.archivedAt ?? new Date() }), true);
+  await withRefusals(ctx, async () => {
     const removed = await ctx.vault.remove({
       actor: formatMember(ctx.caller.principal),
       principal: syncPrincipal(syncId),
