@@ -89,9 +89,8 @@ log "restoring into $restored_db"
 # The logins and their passwords, which a dump of one database leaves out.
 node scripts/ensure-database.mjs "$restored_db"
 docker compose exec -T postgres pg_restore -U coffre_owner --dbname="$restored_db" --exit-on-error <"$scratch/backup.dump"
-# Privileges on the database itself, which a dump of it leaves out too.
-psql_as_owner -d "$restored_db" -c \
-    "REVOKE CREATE, TEMPORARY ON DATABASE $restored_db FROM PUBLIC, coffre_app, coffre_runtime, coffre_vault, coffre_vault_runtime"
+# Migrate reasserts database privileges, which a dump of one database leaves out.
+DATABASE_URL="$(owner_url "$restored_db")" pnpm --dir packages/db run db:migrate >/dev/null
 COFFRE_RUNTIME_ROLE=coffre_runtime DATABASE_URL="postgresql://coffre_runtime:local-runtime-only@127.0.0.1:55432/$restored_db" \
     pnpm --dir packages/db run db:verify:runtime >/dev/null
 

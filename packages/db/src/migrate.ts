@@ -13,7 +13,7 @@ import type { Engine } from './dialect.ts';
  * Applied history must be a prefix of the local journal, byte for byte,
  * before and after. Only one migrator runs at a time: Postgres takes an
  * advisory lock, and SQLite's own write lock covers the
- * whole run. The restricted runtime role is Postgres-only (baseline/postgres.sql).
+ * whole run. Restricted runtime roles are Postgres-only (baseline/postgres.sql).
  */
 
 const MIGRATION_LOCK_KEY = '7165058122361679213';
@@ -42,6 +42,8 @@ interface Migrator {
   lock(): Promise<void>;
   unlock(): Promise<void>;
   migrate(migrationsFolder: string): Promise<void>;
+  /** Reassert privileges a one-database backup does not carry. */
+  restrict(): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -137,6 +139,15 @@ async function postgresMigrator(url: string): Promise<Migrator> {
       await client.query('SELECT pg_advisory_unlock($1::bigint)', [MIGRATION_LOCK_KEY]);
     },
     migrate: (migrationsFolder) => migrate(drizzle(client), { migrationsFolder }),
+    async restrict() {
+      // pg_dump carries table privileges, but not privileges on the database itself.
+      await client.query(`DO $$ BEGIN
+        EXECUTE format(
+          'REVOKE CREATE, TEMPORARY ON DATABASE %I FROM PUBLIC, coffre_app, coffre_runtime, coffre_vault, coffre_vault_runtime',
+          current_database()
+        );
+      END $$`);
+    },
     async close() {
       client.release();
       await pool.end();
@@ -165,11 +176,12 @@ async function sqliteMigrator(url: string): Promise<Migrator> {
     async lock() {},
     async unlock() {},
     migrate: (migrationsFolder) => migrate(sqlite, { migrationsFolder }),
+    async restrict() {},
     close,
   };
 }
 
-/** Apply every migration the database lacks, checking the history on both sides. */
+/** Apply missing migrations, check their history and reassert database privileges. */
 export async function migrateDatabase(url: string): Promise<void> {
   const engine = engineOfUrl(url);
   const expected = await expectedMigrations(engine);
@@ -183,6 +195,7 @@ export async function migrateDatabase(url: string): Promise<void> {
     verifyHistory(expected, await migrator.applied(), false);
     await migrator.migrate(migrationsFolder(engine));
     verifyHistory(expected, await migrator.applied(), true);
+    await migrator.restrict();
   } finally {
     try {
       if (locked) await migrator.unlock();
