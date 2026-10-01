@@ -2,10 +2,10 @@ import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 
-import { defineSignin, github } from '@coffre/core/identity';
+import { defineSignin, generateToken, github, hashToken } from '@coffre/core/identity';
 import { eq, isNull } from 'drizzle-orm';
 
-import { auditLog, credentials, secrets, syncs } from './db/tables.ts';
+import { auditLog, credentials, identities, secrets, syncs } from './db/tables.ts';
 import { SigninService } from '../src/api/signin.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
@@ -125,6 +125,57 @@ test('a CLI sign-in approved before removal cannot be collected after re-adding'
     { status: 'denied' },
   );
   assert.equal((await db.owner.select().from(credentials).where(eq(credentials.kind, 'cli'))).length, 0);
+});
+
+test('R4: a junk credential inserted by the app login does not break listings or offboarding', async (t) => {
+  const report = t.mock.method(console, 'error', () => {});
+  const browser = await browserSession(DEV, 'gh-101');
+  const cli = await cliSession(DEV);
+  const [row] = await db.owner.select().from(credentials).where(eq(credentials.id, cli.id));
+  const token = generateToken('cli');
+  const id = randomUUID();
+  await db.runtime.insert(credentials).values({ ...row, id, tokenHash: hashToken(token) });
+
+  assert.ok((await root.members.list()).members.some((entry) => entry.member === `user:${DEV}`));
+  assert.deepEqual((await root.members.get(`user:${DEV}`)).live, { grants: 1, sessions: 2, tokens: 0, identities: 1 });
+  assert.equal((await signin.verify(browser.token)).id, DEV);
+  await assert.rejects(signin.verify(token), /authentic|tamper|unknown/i);
+  assert.ok(report.mock.calls.some((call) => {
+    const event = call.arguments[0] as { event: string; table: string; id: string };
+    return event.event === 'auth_row_tampered' && event.table === 'credentials' && event.id === id;
+  }));
+
+  const { revoked } = await root.members.remove(`user:${DEV}`);
+  assert.deepEqual(revoked, { grants: 1, sessions: 2, tokens: 0, identities: 1 });
+  await root.members.add(`user:${DEV}`);
+  await assert.rejects(signin.verify(browser.token), /unknown, expired or revoked/);
+  await assert.rejects(signin.verify(cli.token), /unknown, expired or revoked/);
+  await assert.rejects(signin.verify(token), /authentic|tamper|unknown/i);
+  assert.equal((await signin.verify((await browserSession(DEV, 'gh-101')).token)).id, DEV);
+});
+
+test('R4: a bad identity and the session depending on it are dead while healthy sessions can be offboarded', async (t) => {
+  const report = t.mock.method(console, 'error', () => {});
+  const browser = await browserSession(DEV, 'gh-101');
+  const cli = await cliSession(DEV);
+  const [identity] = await db.owner.select().from(identities).where(eq(identities.principal, `user:${DEV}`));
+  await db.owner.update(identities).set({ subject: 'edited-around-the-app' }).where(eq(identities.id, identity.id));
+
+  assert.ok((await root.members.list()).members.some((entry) => entry.member === `user:${DEV}`));
+  assert.deepEqual((await root.members.get(`user:${DEV}`)).live, { grants: 1, sessions: 1, tokens: 0, identities: 0 });
+  assert.equal((await signin.verify(cli.token)).id, DEV);
+  await assert.rejects(signin.verify(browser.token), /authentic|tamper|unknown/i);
+  assert.ok(report.mock.calls.some((call) => {
+    const event = call.arguments[0] as { event: string; table: string; id: string };
+    return event.event === 'auth_row_tampered' && event.table === 'identities' && event.id === identity.id;
+  }));
+
+  const { revoked } = await root.members.remove(`user:${DEV}`);
+  assert.deepEqual(revoked, { grants: 1, sessions: 1, tokens: 0, identities: 0 });
+  await root.members.add(`user:${DEV}`);
+  await assert.rejects(signin.verify(cli.token), /unknown, expired or revoked/);
+  await assert.rejects(signin.verify(browser.token), /authentic|tamper|unknown/i);
+  assert.equal((await signin.verify((await browserSession(DEV, 'gh-101')).token)).id, DEV);
 });
 
 // --- the report ---------------------------------------------------------------

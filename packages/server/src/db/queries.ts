@@ -7,7 +7,7 @@ import { canonicalTimestamp, changedRows, clock, clockMillis, forUpdate, migrati
 import type * as schema from '@coffre/db/schema';
 import { and, asc, count, desc, eq, getTableColumns, getTableName, gt, gte, inArray, isNull, lt, notInArray, or, sql, type SQL } from 'drizzle-orm';
 
-import { authMac, verifyAuthRow, type AuthRow, type AuthTable } from '../auth-rows.ts';
+import { authMac, checkAuthRow, verifyAuthRow, type AuthRow, type AuthTable } from '../auth-rows.ts';
 
 /**
  * Every query coffre runs, and nowhere else: named reads returning all
@@ -108,7 +108,8 @@ export async function updateAuth<T extends Tables['identities'] | Tables['creden
   let changed = 0;
   for (const raw of rows) {
     const row = raw as AuthRow;
-    verifyAuthRow(chainKey, kind, row);
+    // An unauthenticated row is dead; never sign its claimed contents again.
+    if (!checkAuthRow(chainKey, kind, row)) continue;
     const next = { ...row, ...changes } as AuthRow;
     changed += await update(db, table, { ...match, id: row.id, authMac: row.authMac } as Match<T>, {
       ...changes, authMac: authMac(chainKey, kind, next),
@@ -350,6 +351,23 @@ async function tamperedMembers(db: Queryable, principal?: string): Promise<Set<s
   return new Set(found.filter((row) => row.seq > (changed.get(row.principal!) ?? -1n)).map((row) => row.principal!));
 }
 
+/** The vault retains removed members too: an access entry without its row means tampering. */
+export async function missingMembers(db: Queryable, member?: { type: string; id: string }): Promise<string[]> {
+  const { auditLog, vaultMembers } = tablesOf(db);
+  const rows = await db.selectDistinct({ principal: auditLog.subjectPrincipal })
+    .from(auditLog)
+    .leftJoin(vaultMembers, eq(vaultMembers.principal, auditLog.subjectPrincipal))
+    .where(and(
+      eq(auditLog.author, 'vault'),
+      eq(auditLog.decision, 'allow'),
+      inArray(auditLog.action, [...ACCESS_ACTIONS]),
+      or(sql`${auditLog.subjectPrincipal} LIKE 'user:%'`, sql`${auditLog.subjectPrincipal} LIKE 'token:%'`),
+      isNull(vaultMembers.principal),
+      member === undefined ? undefined : eq(auditLog.subjectPrincipal, principalOf(member)),
+    ));
+  return rows.map((row) => row.principal!);
+}
+
 /**
  * People and services in the vault's directory, with their live sessions,
  * tokens and sign-in accounts: one of them, or everyone. What they may
@@ -400,9 +418,11 @@ export async function members(
       .where(and(of(vaultGrants.principal), or(isNull(vaultGrants.expiresAt), gt(vaultGrants.expiresAt, now.getTime())))),
     tamperedMembers(db, principal),
   ]);
-  for (const identity of bound) verifyAuthRow(chainKey, 'identities', identity);
-  for (const credential of held) verifyAuthRow(chainKey, 'credentials', credential);
-  const providers = new Map(bound.map((row) => [row.id, row.provider]));
+  const validIdentities = bound.filter((row) => checkAuthRow(chainKey, 'identities', row));
+  const providers = new Map(validIdentities.filter((row) => row.revokedAt === null).map((row) => [row.id, row.provider]));
+  // A session is dead too when the account it depends on cannot authenticate.
+  const validCredentials = held.filter((row) => checkAuthRow(chainKey, 'credentials', row)
+    && (row.identityId === null || providers.has(row.identityId)));
   return rows.map((row) => ({
     ...memberOf(row.principal),
     createdAt: new Date(row.createdAt),
@@ -415,13 +435,13 @@ export async function members(
       .filter((grant) => grant.principal === row.principal)
       .map(({ projectId, environmentId, role, expiresAt }) => ({ projectId, environmentId, role, expiresAt })),
     tampered: tampered.has(row.principal),
-    credentials: held.filter((credential) => credential.principal === row.principal
+    credentials: validCredentials.filter((credential) => credential.principal === row.principal
       && credential.revokedAt === null && credential.expiresAt > now)
       .map(({ tokenHash: _hash, authMac: _mac, principal: _principal, revokedAt: _at, revokedBy: _by, ...credential }) => ({
         ...credential,
         provider: credential.identityId === null ? null : providers.get(credential.identityId) ?? null,
       })),
-    identities: bound.filter((identity) => identity.principal === row.principal
+    identities: validIdentities.filter((identity) => identity.principal === row.principal
       && identity.revokedAt === null).map((identity) => ({
       id: identity.id,
       provider: identity.provider,
@@ -543,7 +563,7 @@ export async function revokePriorMembership(
       lt(table.generation, generation),
     ));
     for (const row of rows) {
-      verifyAuthRow(chainKey, getTableName(table) as AuthTable, row);
+      if (!checkAuthRow(chainKey, getTableName(table) as AuthTable, row)) continue;
       if (row.revokedAt === null) await updateAuth(db, chainKey, table, { id: row.id, authMac: row.authMac }, { revokedAt, revokedBy });
     }
   }

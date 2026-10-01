@@ -40,9 +40,14 @@ export function authMac<K extends AuthTable>(chainKey: Buffer, table: K, row: Fi
 }
 
 /** Report without trusting the row's claimed actor, or writing inside a transaction that will roll back. */
-export function verifyAuthRow<K extends AuthTable>(chainKey: Buffer, table: K, row: Fields[K] & { id: string; authMac: Buffer }): void {
+export function checkAuthRow<K extends AuthTable>(chainKey: Buffer, table: K, row: Fields[K] & { id: string; authMac: Buffer }): boolean {
   const expected = authMac(chainKey, table, row);
-  if (row.authMac instanceof Uint8Array && row.authMac.length === expected.length && timingSafeEqual(row.authMac, expected)) return;
+  if (row.authMac instanceof Uint8Array && row.authMac.length === expected.length && timingSafeEqual(row.authMac, expected)) return true;
   console.error({ event: 'auth_row_tampered', table, id: row.id }, 'sign-in row failed authentication');
-  throw new Error('sign-in row failed authentication');
+  return false;
+}
+
+/** Authentication at use still refuses the whole request. */
+export function verifyAuthRow<K extends AuthTable>(chainKey: Buffer, table: K, row: Fields[K] & { id: string; authMac: Buffer }): void {
+  if (!checkAuthRow(chainKey, table, row)) throw new Error('sign-in row failed authentication');
 }

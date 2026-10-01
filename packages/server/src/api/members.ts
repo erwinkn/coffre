@@ -9,7 +9,7 @@ import {
   revokePriorMembership,
   memberActivity,
   members as loadMembers,
-  memberStanding,
+  missingMembers,
   places,
   updateAuth,
   type MemberRow,
@@ -138,7 +138,7 @@ function placed(grants: StoredGrant[], names: Map<string, string>): PlacedGrant[
 /** Someone in the directory, as the rows and the vault's findings say. */
 type Listed = {
   member: MemberRef;
-  /** Null for a root admin the vault has not met yet: it makes their row on first use. */
+  /** Null for a missing row, or a root admin the vault has not met yet. */
   row: MemberRow | null;
   isRootAdmin: boolean;
   status: 'active' | 'removed' | 'tampered';
@@ -152,18 +152,19 @@ type Listed = {
  * are the vault's configuration, so it says who they are, rows or not.
  */
 async function directory(ctx: ApiContext, now: Date, member?: MemberRef): Promise<Listed[]> {
-  const [rows, { rootAdmins }] = await Promise.all([
+  const [rows, missing, { rootAdmins }] = await Promise.all([
     loadMembers(ctx.db, ctx.chainKey, member === undefined ? {} : { member }, now),
+    missingMembers(ctx.db, member),
     ctx.vault.about(),
   ]);
   const byPrincipal = new Map(rows.map((row) => [formatMember(row), row]));
   const roots = new Set(rootAdmins);
   const wanted = member === undefined ? null : formatMember(member);
-  const principals = new Set([...byPrincipal.keys(), ...rootAdmins.filter((root) => wanted === null || root === wanted)]);
+  const principals = new Set([...byPrincipal.keys(), ...missing, ...rootAdmins.filter((root) => wanted === null || root === wanted)]);
   return [...principals].sort().map((principal) => {
     const row = byPrincipal.get(principal) ?? null;
     const isRootAdmin = roots.has(principal);
-    const status = isRootAdmin ? 'active' : row!.tampered ? 'tampered' : row!.status;
+    const status = isRootAdmin ? 'active' : row === null || row.tampered ? 'tampered' : row.status;
     return { member: parseGrantee(principal) as MemberRef, row, isRootAdmin, status, grants: status === 'active' ? row?.grants ?? [] : [] };
   });
 }
@@ -438,14 +439,6 @@ export async function removeMember(
   const revoked = await withRefusals(ctx, async () => {
     requireOwner(ctx, 'member.remove', { metadata: fields });
     if ((await ctx.vault.about()).rootAdmins.includes(principal)) throw rootAdminRefusal(ctx, 'member.remove', member);
-    // As the row says: a member whose record failed the vault's check is removed to start them over.
-    if ((await memberStanding(ctx.db, principal))?.status !== 'active') {
-      throw new Refusal(
-        notFound('no such member'),
-        denied(ctx, 'member.remove', 'unknown_principal', { metadata: fields }),
-      );
-    }
-
     // The vault logs the removal, and one `access.revoke` per grant it took, so each project's log shows it.
     const result = await ctx.vault.remove({
       actor: formatMember(ctx.caller.principal),
@@ -453,7 +446,15 @@ export async function removeMember(
       requestId: ctx.requestId,
       operationId: randomUUID(),
     });
-    if (!result.ok) throw vaultRefused(result.refusal);
+    if (!result.ok) {
+      if (result.refusal.code === 'not_a_member' || result.refusal.code === 'removed') {
+        throw new Refusal(
+          notFound('no such member'),
+          denied(ctx, 'member.remove', 'unknown_principal', { metadata: fields }),
+        );
+      }
+      throw vaultRefused(result.refusal);
+    }
     const { generation } = result;
     return audited(ctx, async (tx) => {
       const now = new Date();
