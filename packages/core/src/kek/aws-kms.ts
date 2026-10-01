@@ -1,6 +1,15 @@
 import { checkContext, type SecretContext } from '../context.ts';
 import { signV4, type AwsCredentials } from './sigv4.ts';
-import { DEK_BYTES, KekUnavailableError, type KekProvider, type WrappedDek } from './types.ts';
+import { cancellable, checkOperation, delay, operationSignal } from './cancellation.ts';
+import {
+  DEK_BYTES,
+  KekBadClaimError,
+  KekCancelledError,
+  KekUnavailableError,
+  type KeyOperation,
+  type KekProvider,
+  type WrappedDek,
+} from './types.ts';
 
 export type AwsKmsOptions = {
   /**
@@ -69,13 +78,13 @@ export class AwsKmsKekProvider implements KekProvider {
     this.#fetch = options.fetch ?? ((input, init) => fetch(input, init));
   }
 
-  async wrap(dek: Buffer, ctx: SecretContext): Promise<WrappedDek> {
+  async wrap(dek: Buffer, ctx: SecretContext, operation?: KeyOperation): Promise<WrappedDek> {
     if (dek.length !== DEK_BYTES) throw new Error(`DEK must be ${DEK_BYTES} bytes, got ${dek.length}`);
     const { CiphertextBlob } = await this.#call('Encrypt', {
       KeyId: this.keyId,
       Plaintext: base64(dek),
       EncryptionContext: encryptionContext(ctx),
-    });
+    }, operation);
     return {
       kekProvider: this.provider,
       kekId: this.keyId,
@@ -84,19 +93,22 @@ export class AwsKmsKekProvider implements KekProvider {
     };
   }
 
-  async unwrap(wrapped: WrappedDek, ctx: SecretContext): Promise<Buffer> {
+  async unwrap(wrapped: WrappedDek, ctx: SecretContext, operation?: KeyOperation): Promise<Buffer> {
     if (wrapped.kekProvider !== this.provider || wrapped.kekId !== this.keyId) {
-      throw new Error(`wrapped DEK is for ${wrapped.kekProvider}:${wrapped.kekId}, not ${this.provider}:${this.keyId}`);
+      throw new KekBadClaimError(`wrapped DEK is for ${wrapped.kekProvider}:${wrapped.kekId}, not ${this.provider}:${this.keyId}`);
     }
     // KeyId makes KMS refuse a ciphertext made under any other key.
     const { Plaintext, KeyId } = await this.#call('Decrypt', {
       KeyId: this.keyId,
       CiphertextBlob: base64(wrapped.bytes),
       EncryptionContext: encryptionContext(ctx),
-    });
-    if (KeyId !== this.keyId) throw new Error(`KMS decrypted under ${KeyId}, not ${this.keyId}`);
+    }, operation);
+    if (KeyId !== this.keyId) throw new KekUnavailableError(`KMS decrypted under ${KeyId}, not ${this.keyId}`, true);
     const dek = Buffer.from(Plaintext, 'base64');
-    if (dek.length !== DEK_BYTES) throw new Error('unwrapped DEK has the wrong length');
+    if (dek.length !== DEK_BYTES) {
+      dek.fill(0);
+      throw new KekUnavailableError('unwrapped DEK has the wrong length', true);
+    }
     return dek;
   }
 
@@ -106,32 +118,51 @@ export class AwsKmsKekProvider implements KekProvider {
    * open is a `KekUnavailableError`, retried or not: a key KMS will not use
    * or credentials it refuses say nothing about the claim either.
    */
-  async #call(action: 'Encrypt' | 'Decrypt', request: object): Promise<Record<string, string>> {
+  async #call(action: 'Encrypt' | 'Decrypt', request: object, operation?: KeyOperation): Promise<Record<string, string>> {
     const body = JSON.stringify(request);
+    const signal = operationSignal(operation);
     return this.#slots.run(async () => {
+      checkOperation(operation);
       let credentials: AwsCredentials;
       try {
-        credentials = await this.#credentials();
+        credentials = await cancellable(this.#credentials(), signal);
       } catch (error) {
+        if (error instanceof KekCancelledError) throw error;
         throw new KekUnavailableError(`no AWS credentials for KMS: ${messageOf(error)}`);
       }
+      let uncertain = false;
       for (let attempt = 1; ; attempt++) {
-        const answer = await this.#send(action, body, credentials);
+        checkOperation(operation, uncertain);
+        if (signal?.aborted) throw new KekCancelledError(uncertain);
+        const answer = await this.#send(action, body, credentials, signal, operation);
         if ('data' in answer) return answer.data;
-        if (NOT_THIS_KEY.has(answer.type)) throw new Error(`KMS ${action}: ${answer.type}`);
-        if (!answer.retry || attempt === ATTEMPTS) {
-          throw new KekUnavailableError(`KMS ${action} failed${attempt > 1 ? ` ${attempt} times` : ''}: ${answer.failure}`);
+        uncertain ||= answer.uncertain;
+        checkOperation(operation, uncertain);
+        if (signal?.aborted) throw new KekCancelledError(uncertain);
+        if (NOT_THIS_KEY.has(answer.type)) {
+          if (uncertain) throw new KekUnavailableError(`KMS ${action}: ${answer.type} after an unanswered request`, true);
+          throw new KekBadClaimError(`KMS ${action}: ${answer.type}`);
         }
-        await new Promise((resolve) => setTimeout(resolve, 100 * 4 ** (attempt - 1) * (1 + Math.random())));
+        if (!answer.retry || attempt === ATTEMPTS) {
+          throw new KekUnavailableError(`KMS ${action} failed${attempt > 1 ? ` ${attempt} times` : ''}: ${answer.failure}`, uncertain);
+        }
+        try {
+          await delay(100 * 4 ** (attempt - 1) * (1 + Math.random()), signal);
+        } catch (error) {
+          if (error instanceof KekCancelledError) throw new KekCancelledError(uncertain);
+          throw error;
+        }
       }
-    });
+    }, signal);
   }
 
   async #send(
     action: string,
     body: string,
     credentials: AwsCredentials,
-  ): Promise<{ data: Record<string, string> } | { type: string; failure: string; retry: boolean }> {
+    signal?: AbortSignal,
+    operation?: KeyOperation,
+  ): Promise<{ data: Record<string, string> } | { type: string; failure: string; retry: boolean; uncertain: boolean }> {
     const headers = signV4({
       method: 'POST',
       url: this.#url,
@@ -144,18 +175,25 @@ export class AwsKmsKekProvider implements KekProvider {
     });
     let response: Response;
     let text: string;
+    let sent = false;
     try {
-      response = await this.#fetch(this.#url, { method: 'POST', headers, body, signal: AbortSignal.timeout(TIMEOUT_MS) });
+      checkOperation(operation);
+      if (signal?.aborted) throw new KekCancelledError();
+      sent = true;
+      response = await this.#fetch(this.#url, {
+        method: 'POST', headers, body,
+        signal: AbortSignal.any([AbortSignal.timeout(TIMEOUT_MS), ...(signal === undefined ? [] : [signal])]),
+      });
       text = await response.text();
     } catch (error) {
-      return { type: 'network', failure: messageOf(error), retry: true };
+      return { type: 'network', failure: messageOf(error), retry: sent, uncertain: sent };
     }
     const parsed = parse(text);
     if (response.ok) {
       const complete =
         parsed !== null && (action === 'Encrypt' ? typeof parsed.CiphertextBlob === 'string' : typeof parsed.Plaintext === 'string');
       if (complete) return { data: parsed as Record<string, string> };
-      return { type: 'malformed', failure: `KMS answered ${response.status} without a result`, retry: true };
+      return { type: 'malformed', failure: `KMS answered ${response.status} without a result`, retry: true, uncertain: true };
     }
     // `__type` may carry a namespace (`com.amazonaws.kms#…`), the header a URL after `:`.
     const raw = response.headers.get('x-amzn-errortype') ?? (typeof parsed?.__type === 'string' ? parsed.__type : '');
@@ -164,6 +202,7 @@ export class AwsKmsKekProvider implements KekProvider {
     return {
       type,
       failure: `${type}${typeof message === 'string' ? `, ${message}` : ''}`,
+      uncertain: false,
       retry: response.status >= 500 || response.status === 429 || type === 'ThrottlingException',
     };
   }
@@ -203,20 +242,37 @@ function messageOf(error: unknown): string {
 /** At most `n` calls at once; the rest wait their turn. */
 class Slots {
   #free: number;
-  readonly #waiting: (() => void)[] = [];
+  readonly #waiting: { start: () => void; cancel: () => void }[] = [];
 
   constructor(n: number) {
     this.#free = n;
   }
 
-  async run<T>(work: () => Promise<T>): Promise<T> {
+  async run<T>(work: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    if (signal?.aborted) throw new KekCancelledError();
     if (this.#free > 0) this.#free--;
-    else await new Promise<void>((resolve) => this.#waiting.push(resolve));
+    else await new Promise<void>((resolve, reject) => {
+      const waiting = {
+        start: () => {
+          signal?.removeEventListener('abort', waiting.cancel);
+          resolve();
+        },
+        cancel: () => {
+          const index = this.#waiting.indexOf(waiting);
+          if (index >= 0) this.#waiting.splice(index, 1);
+          signal?.removeEventListener('abort', waiting.cancel);
+          reject(new KekCancelledError());
+        },
+      };
+      this.#waiting.push(waiting);
+      signal?.addEventListener('abort', waiting.cancel, { once: true });
+    });
     try {
+      if (signal?.aborted) throw new KekCancelledError();
       return await work();
     } finally {
       const next = this.#waiting.shift();
-      if (next) next();
+      if (next) next.start();
       else this.#free++;
     }
   }

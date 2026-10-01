@@ -46,7 +46,7 @@ export type AuditVerification =
        * the head the app last recorded from a checkpoint, and every member
        * and grant replayed from it.
        */
-      vault: { entries: number };
+      vault: { entries: number; pending?: number };
     }
   | {
       ok: false;
@@ -59,7 +59,7 @@ export type AuditVerification =
 
 /** The vault's verdict as the API gives it, its fault already in words. */
 export type VaultVerification =
-  | { ok: true; entries: number }
+  | { ok: true; entries: number; pending?: number }
   | { ok: false; failedAtSeq: number | null; reason: string };
 
 export type AuditQuery = {
@@ -258,7 +258,7 @@ export async function verifyAudit(ctx: ApiContext): Promise<AuditVerification> {
     rows,
     head,
     checkpoint: checkpoint === null ? null : { seq: checkpoint.seq, signedAt: checkpoint.signedAt },
-    vault: { entries: verified.entries },
+    vault: { entries: verified.entries, ...(verified.pending === undefined ? {} : { pending: verified.pending }) },
   };
 }
 

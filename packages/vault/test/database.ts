@@ -94,7 +94,10 @@ export async function run(db: Queryable, query: SQL): Promise<void> {
 /** Everything a vault test leaves behind, gone, and the heads this process remembers forgotten. */
 export async function emptyDatabase(owner: Database): Promise<void> {
   const { auditLog, auditChainHead, vaultGrants, vaultMembers, secrets, environments, projects } = tablesOf(owner);
-  await withLogUnlocked(owner, (db) => db.delete(auditLog));
+  await withLogUnlocked(owner, async (db) => {
+    await db.delete(auditLog).where(sql`${auditLog.relatedSeq} IS NOT NULL`);
+    await db.delete(auditLog);
+  });
   await owner.update(auditChainHead).set({ nextSeq: 0n, headHash: Buffer.alloc(32) });
   await owner.delete(vaultGrants);
   await owner.delete(vaultMembers);

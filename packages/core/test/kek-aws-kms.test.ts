@@ -217,3 +217,38 @@ test('the key is named by its ARN, whose region is where coffre calls', async ()
   }
   assert.deepEqual(urls, ['https://kms.us-east-1.amazonaws.com/', 'https://kms.cn-north-1.amazonaws.com.cn/']);
 });
+
+test('an expired operation never starts a KMS request', async () => {
+  const fake = fakeKms();
+  const operation = { deadline: Date.now() - 1, signal: new AbortController().signal };
+  await assert.rejects(kms(fake).wrap(randomBytes(32), context(), operation), KekUnavailableError);
+  assert.equal(fake.calls.length, 0);
+});
+
+test('cancellation interrupts a retry delay without starting the next request', async () => {
+  const controller = new AbortController();
+  let calls = 0;
+  const kek = awsKms({ keyArn: ARN, credentials: CREDENTIALS, fetch: async () => {
+    calls++;
+    setTimeout(() => controller.abort(), 10);
+    return kmsError('ThrottlingException');
+  } });
+  await assert.rejects(kek.wrap(randomBytes(32), context(), { deadline: Date.now() + 1000, signal: controller.signal }), KekUnavailableError);
+  assert.equal(calls, 1);
+});
+
+test('cancellation while credentials resolve never sends the request', async () => {
+  const fake = fakeKms();
+  const controller = new AbortController();
+  let resolveCredentials!: (value: typeof CREDENTIALS) => void;
+  let started!: () => void;
+  const credentials = new Promise<typeof CREDENTIALS>((resolve) => { resolveCredentials = resolve; });
+  const waiting = new Promise<void>((resolve) => { started = resolve; });
+  const kek = kms(fake, { credentials: () => (started(), credentials) });
+  const call = kek.wrap(randomBytes(32), context(), { deadline: Date.now() + 1000, signal: controller.signal });
+  await waiting;
+  controller.abort();
+  resolveCredentials(CREDENTIALS);
+  await assert.rejects(call, KekUnavailableError);
+  assert.equal(fake.calls.length, 0);
+});

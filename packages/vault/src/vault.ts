@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import {
   allows,
   assignableToEnvironment,
@@ -9,8 +11,16 @@ import {
   type Role,
 } from '@coffre/core/access';
 import type { LogKey, StoredEntry } from '@coffre/core/audit';
-import type { SecretContext } from '@coffre/core/envelope';
-import { KekUnavailableError, LocalKekProvider, type KekProvider } from '@coffre/core/kek';
+import { checkContext, type SecretContext } from '@coffre/core/envelope';
+import {
+  DEK_BYTES,
+  KekBadClaimError,
+  KekCancelledError,
+  KekUnavailableError,
+  LocalKekProvider,
+  type KeyOperation,
+  type KekProvider,
+} from '@coffre/core/kek';
 import {
   checkpointMessage,
   describeAccessFault,
@@ -42,6 +52,7 @@ import type { Database, Queryable, Transaction } from '@coffre/db';
 import { SNAPSHOT } from '@coffre/db/dialect';
 import { appendEntries, lockLogHead, type NewEntry } from '@coffre/db/log';
 
+import { verifyAccounting } from './accounting.ts';
 import { signer, type Signer } from './checkpoint.ts';
 import type { ResolvedVaultConfig } from './config.ts';
 import { carries, entryView, further, headOf, UNVERIFIED, vaultLogKey, verifyChain, type Anchor } from './log.ts';
@@ -119,10 +130,10 @@ class Refused {
 
 /** A key service that did not answer, and the entries that record what it did do. */
 class Outage {
-  readonly error: Error;
+  readonly error: unknown;
   readonly entries: NewEntry[];
 
-  constructor(error: Error, entries: NewEntry[]) {
+  constructor(error: unknown, entries: NewEntry[]) {
     this.error = error;
     this.entries = entries;
   }
@@ -169,7 +180,7 @@ type Standing = { principal: string; status: Access['status']; live: Holdings; a
  * key that does not open as the secret it was presented as; or no answer
  * from the key service.
  */
-type KeyOutcome<T> = { ok: true; value: T } | { ok: false; outage: boolean };
+type KeyOutcome<T> = { ok: true; value: T } | { ok: false; code: string; error?: unknown };
 
 /**
  * The one implementation of `Vault`. Every decision is one transaction on
@@ -222,7 +233,10 @@ class VaultService implements Vault {
       return { ok: true, ...result };
     } catch (error) {
       if (!(error instanceof Refused || error instanceof Outage)) throw error;
-      await this.#db.transaction((tx) => appendEntries(tx, this.#prepared.logKey, error.entries));
+      await this.#db.transaction(async (tx) => {
+        await store.boundLockWaits(tx, LOCK_TIMEOUT_MS);
+        await appendEntries(tx, this.#prepared.logKey, error.entries);
+      });
       if (error instanceof Outage) throw error.error;
       return { ok: false, refusal: error.refusal };
     }
@@ -234,14 +248,18 @@ class VaultService implements Vault {
   // cannot be wiped, so this is best-effort memory hygiene.
   async unwrap(input: UnwrapInput): Promise<Outcome<{ keys: string[] }>> {
     const { principal, items } = input;
+    validateItems(items, 'wrapped');
+    validateText(principal);
+    if (input.requestId != null) validateText(input.requestId);
     const entry = (secret: SecretRef, decision: 'allow' | 'deny', code: string | null): NewEntry =>
       keyEntry('unwrap', principal, secret, decision, code, input.requestId, { purpose: input.purpose });
+    validateText(input.purpose);
     const remote = items.some(({ wrapped }) => this.#remote(this.#config.keks.providerOf(wrapped)));
     return this.#keys(
       { action: 'unwrap', principal, permission: 'secret.read', secrets: items.map((item) => item.secret), remote, entry, input },
       () =>
-        items.map(({ secret, wrapped }) => async () => {
-          const key = await this.#open(wrapped, secret);
+        items.map(({ secret, wrapped }) => async (operation: KeyOperation) => {
+          const key = await this.#open(wrapped, secret, operation);
           return key && { key, wipe: () => key.fill(0) };
         }),
       (opened) => ({
@@ -258,6 +276,9 @@ class VaultService implements Vault {
 
   async wrap(input: WrapInput): Promise<Outcome<{ wrapped: WrappedKey[] }>> {
     const { principal, items } = input;
+    validateItems(items, 'key');
+    validateText(principal);
+    if (input.requestId != null) validateText(input.requestId);
     const entry = (secret: SecretRef, decision: 'allow' | 'deny', code: string | null): NewEntry =>
       keyEntry('wrap', principal, secret, decision, code, input.requestId);
     return this.#keys(
@@ -271,10 +292,10 @@ class VaultService implements Vault {
         input,
       },
       () =>
-        items.map(({ secret, key }) => async () => {
+        items.map(({ secret, key }) => async (operation: KeyOperation) => {
           const dek = Buffer.from(key, 'base64');
           try {
-            return { wrapped: serialisable(await this.#config.keks.wrap(dek, context(secret))), wipe: () => {} };
+            return { wrapped: serialisable(await this.#config.keks.wrap(dek, context(secret), operation)), wipe: () => {} };
           } finally {
             dek.fill(0);
           }
@@ -285,6 +306,10 @@ class VaultService implements Vault {
 
   async rewrap(input: RewrapInput): Promise<Outcome<{ wrapped: WrappedKey[] }>> {
     const { principal, items } = input;
+    validateItems(items, 'wrapped');
+    validateText(principal);
+    if (input.requestId != null) validateText(input.requestId);
+    for (const item of items) if (!Number.isSafeInteger(item.from) || item.from < 1) throw new Error('source version must be a positive integer');
     const from = new Map(items.map((item) => [item.secret, item.from]));
     const entry = (secret: SecretRef, decision: 'allow' | 'deny', code: string | null): NewEntry =>
       keyEntry('rewrap', principal, secret, decision, code, input.requestId, { from: from.get(secret) });
@@ -293,11 +318,11 @@ class VaultService implements Vault {
     return this.#keys(
       { action: 'rewrap', principal, permission: 'secret.write', secrets: items.map((item) => item.secret), remote, entry, input },
       () =>
-        items.map(({ secret, wrapped }) => async () => {
-          const key = await this.#open(wrapped, secret);
+        items.map(({ secret, wrapped }) => async (operation: KeyOperation) => {
+          const key = await this.#open(wrapped, secret, operation);
           if (key === null) return null;
           try {
-            return { wrapped: serialisable(await this.#config.keks.wrap(key, context(secret))), wipe: () => {} };
+            return { wrapped: serialisable(await this.#config.keks.wrap(key, context(secret), operation)), wipe: () => {} };
           } finally {
             key.fill(0);
           }
@@ -311,12 +336,12 @@ class VaultService implements Vault {
    * that is not what it says. A key service that cannot answer is an outage,
    * not a verdict on the claim, and throws.
    */
-  async #open(wrapped: WrappedKey, secret: SecretRef): Promise<Buffer | null> {
+  async #open(wrapped: WrappedKey, secret: SecretRef, operation: KeyOperation): Promise<Buffer | null> {
     try {
-      return await this.#config.keks.unwrap(unwrappable(wrapped), context(secret));
+      return await this.#config.keks.unwrap(unwrappable(wrapped), context(secret), operation);
     } catch (error) {
-      if (error instanceof KekUnavailableError) throw error;
-      return null;
+      if (error instanceof KekBadClaimError) return null;
+      throw error;
     }
   }
 
@@ -342,11 +367,12 @@ class VaultService implements Vault {
       entry: (secret: SecretRef, decision: 'allow' | 'deny', code: string | null) => NewEntry;
       input: { requestId?: string | null; purpose?: string };
     },
-    /** One per secret; each resolves to null for a bad claim, and throws `KekUnavailableError` for no answer. */
-    operations: () => (() => Promise<T | null>)[],
+    /** One per secret; null for a bad claim, an error for an outage or an unexpected fault. */
+    operations: () => ((operation: KeyOperation) => Promise<T | null>)[],
     result: (done: T[]) => R,
   ): Promise<Outcome<R>> {
     const { action, principal, secrets, entry } = call;
+    for (const secret of secrets) entry(secret, 'allow', null);
     if (this.#isRootAdmin(principal)) await this.#rootRow(principal);
     const check = async (d: Decision) => {
       const reader = await this.#standing(d.tx, principal, d.members.get(principal), d.at);
@@ -361,48 +387,76 @@ class VaultService implements Vault {
       }
     };
 
+    const operationId = call.remote ? randomUUID() : null;
+    let intentSeq: bigint | null = null;
+    const outcomeEntry = (secret: SecretRef, item: number, decision: 'allow' | 'deny', code: string | null): NewEntry => {
+      const outcome = entry(secret, decision, code);
+      return intentSeq === null ? outcome : {
+        ...outcome,
+        operationId,
+        relatedSeq: intentSeq,
+        metadata: JSON.stringify({
+          ...JSON.parse(outcome.metadata ?? '{}'),
+          item,
+          ...(['key_error', 'kms_uncertain'].includes(code ?? '') ? { uncertain: true } : {}),
+        }),
+      };
+    };
     if (call.remote) {
       const intent = await this.#decide([principal], async (d) => {
         await check(d);
-        d.log.push({
+        await lockLogHead(d.tx);
+        const at = await this.#now(d.tx);
+        const appended = await appendEntries(d.tx, this.#prepared.logKey, [{
           actor: principal,
           action: 'key.intent',
           decision: 'allow',
+          operationId,
           requestId: call.input.requestId ?? null,
           metadata: JSON.stringify({
             operation: action,
+            // Member and outcome locks can each wait before accounting is overdue.
+            expiresAt: at + this.#prepared.options.keyBudgetMs + 2 * LOCK_TIMEOUT_MS,
             ...(call.input.purpose === undefined ? {} : { purpose: call.input.purpose }),
-            keys: secrets.map((secret) => ({ subject: secret.path, secretId: secret.secretId, version: secret.version })),
+            keys: secrets.map((secret, item) => ({ item, subject: secret.path, secretId: secret.secretId, version: secret.version })),
           }),
-        });
-        return {};
+        }]);
+        return { seq: appended.seqStart };
       });
       if (!intent.ok) return intent;
+      intentSeq = intent.seq;
     }
 
     return this.#decide([principal], async (d) => {
-      await check(d);
-      const outcomes = await settle(operations(), this.#prepared.options.keyBudgetMs);
+      try {
+        await check(d);
+      } catch (error) {
+        if (error instanceof Refused) {
+          throw new Refused(error.refusal, secrets.map((secret, item) =>
+            outcomeEntry(secret, item, 'deny', error.entries[item].code ?? error.refusal.code)));
+        }
+        throw error;
+      }
+      const { outcomes, expired } = await settle(operations(), this.#prepared.options.keyBudgetMs);
       const done = outcomes.flatMap((outcome) => (outcome.ok ? [outcome.value] : []));
       try {
-        const unanswered = outcomes.filter((outcome) => !outcome.ok && outcome.outage).length;
+        const entries = () => secrets.map((secret, i) =>
+          outcomeEntry(secret, i, 'deny', outcomes[i].ok ? 'withheld' : outcomes[i].code));
+        const fault = outcomes.find((outcome) => !outcome.ok && outcome.code === 'key_error');
+        if (fault !== undefined && !fault.ok) throw new Outage(fault.error, entries());
+        const unanswered = outcomes.filter((outcome) => !outcome.ok && outcome.code !== 'bad_claim').length;
         if (unanswered > 0) {
-          // The call fails as an outage, not a verdict on the claim, but
-          // what the key service did is on the record first: each key it
-          // opened and the vault withheld, each it did not answer for.
-          const code = (outcome: KeyOutcome<T>) => (outcome.ok ? 'withheld' : outcome.outage ? 'kms_unavailable' : 'bad_claim');
           throw new Outage(
-            new KekUnavailableError(`the key service did not answer for ${unanswered} of ${secrets.length} keys`),
-            secrets.map((secret, i) => entry(secret, 'deny', code(outcomes[i]))),
+            new KekUnavailableError(`the key service did not answer for ${unanswered} of ${secrets.length} keys`,
+              outcomes.some((outcome) => !outcome.ok && outcome.code === 'kms_uncertain')),
+            entries(),
           );
         }
+        if (expired) throw new Outage(new KekUnavailableError('key operation exceeded its deadline'), entries());
         if (done.length < outcomes.length) {
-          throw new Refused(
-            refusal('bad_claim', MESSAGES.bad_claim),
-            secrets.map((secret) => entry(secret, 'deny', 'bad_claim')),
-          );
+          throw new Refused(refusal('bad_claim', MESSAGES.bad_claim), entries());
         }
-        d.log.push(...secrets.map((secret) => entry(secret, 'allow', null)));
+        d.log.push(...secrets.map((secret, i) => outcomeEntry(secret, i, 'allow', null)));
         return result(done);
       } finally {
         for (const value of done) value.wipe();
@@ -831,48 +885,72 @@ class VaultService implements Vault {
         if (kept === null || (await carries(tx, kept))) continue;
         return { ok: false, failedAtSeq: kept.seq, reason: `not the entry ${by} signed: the log was rewritten or cut back` };
       }
-      const fault = await replay(tx, await this.#now(tx));
-      return fault === null ? verification : { ok: false, failedAtSeq: null, reason: describeAccessFault(fault), fault };
+      const at = await this.#now(tx);
+      const accounting = await verifyAccounting(tx, at);
+      if (!accounting.ok) return accounting;
+      const fault = await replay(tx, at);
+      if (fault !== null) return { ok: false, failedAtSeq: null, reason: describeAccessFault(fault), fault };
+      return accounting.pending === 0 ? verification : { ...verification, pending: accounting.pending };
     }, SNAPSHOT);
   }
 }
 
-/**
- * Run a call's key operations at once and wait for every one, within the
- * budget: settled, all of them, so a failure never leaves the others
- * unseen. One that has not answered by then counts as an outage, and what
- * it answers later is wiped. Any other error is a fault, thrown once
- * everything that answered is wiped.
- */
+/** Settle every operation before releasing the member lock, including cancelled requests. */
 async function settle<T extends { wipe: () => void }>(
-  operations: (() => Promise<T | null>)[],
+  operations: ((operation: KeyOperation) => Promise<T | null>)[],
   budgetMs: number,
-): Promise<KeyOutcome<T>[]> {
-  const outcomes: (KeyOutcome<T> | undefined)[] = operations.map(() => undefined);
-  const faults: unknown[] = [];
-  let over = false;
-  const all = Promise.all(
-    operations.map(async (operation, i) => {
+): Promise<{ outcomes: KeyOutcome<T>[]; expired: boolean }> {
+  const controller = new AbortController();
+  const operation = { deadline: Date.now() + budgetMs, signal: controller.signal };
+  const timer = setTimeout(() => controller.abort(), budgetMs);
+  try {
+    const outcomes = await Promise.all(operations.map(async (work): Promise<KeyOutcome<T>> => {
       try {
-        const value = await operation();
-        if (over) value?.wipe();
-        else outcomes[i] = value === null ? { ok: false, outage: false } : { ok: true, value };
+        if (operation.signal.aborted || Date.now() >= operation.deadline) throw new KekCancelledError();
+        const value = await work(operation);
+        return value === null ? { ok: false, code: 'bad_claim' } : { ok: true, value };
       } catch (error) {
-        if (over) return;
-        if (error instanceof KekUnavailableError) outcomes[i] = { ok: false, outage: true };
-        else faults.push(error);
+        if (error instanceof KekUnavailableError) {
+          return { ok: false, code: error.uncertain ? 'kms_uncertain' : error instanceof KekCancelledError ? 'cancelled' : 'kms_unavailable' };
+        }
+        return { ok: false, code: 'key_error', error };
       }
-    }),
-  );
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  await Promise.race([all, new Promise((resolve) => (timer = setTimeout(resolve, budgetMs)))]);
-  clearTimeout(timer);
-  over = true;
-  if (faults.length > 0) {
-    for (const outcome of outcomes) if (outcome?.ok) outcome.value.wipe();
-    throw faults[0];
+    }));
+    return { outcomes, expired: controller.signal.aborted || Date.now() >= operation.deadline };
+  } finally {
+    clearTimeout(timer);
   }
-  return outcomes.map((outcome) => outcome ?? { ok: false, outage: true });
+}
+
+function validateText(value: string): void {
+  if (typeof value !== 'string' || /[\uD800-\uDFFF]/u.test(value)) throw new Error('key request strings must be well-formed Unicode');
+}
+
+/** Validate the entire batch before any provider sees a key. */
+function validateItems(items: readonly { secret: SecretRef; key?: string; wrapped?: WrappedKey }[], field: 'key' | 'wrapped'): void {
+  for (const { secret, key, wrapped } of items) {
+    if (field === 'key' && typeof key !== 'string') throw new Error('DEK must be base64');
+    if (field === 'wrapped' && (wrapped === undefined || wrapped === null)) throw new Error('wrapped key is required');
+    checkContext(context(secret));
+    if (!Number.isSafeInteger(secret.version) || secret.version < 1) throw new Error('secret version must be a positive integer');
+    if (typeof secret.path !== 'string' || /[\uD800-\uDFFF]/u.test(secret.path)) throw new Error('secret path must be a well-formed string');
+    if (key !== undefined) {
+      const dek = Buffer.from(key, 'base64');
+      try {
+        if (dek.length !== DEK_BYTES) throw new Error(`DEK must be ${DEK_BYTES} bytes, got ${dek.length}`);
+        if (base64(dek) !== key) throw new Error('DEK must be canonical base64');
+      } finally {
+        dek.fill(0);
+      }
+    }
+    if (wrapped !== undefined) {
+      for (const field of [wrapped.kekProvider, wrapped.kekId, wrapped.kekVersion]) {
+        if (typeof field !== 'string' || field.length === 0 || /[\uD800-\uDFFF]/u.test(field)) throw new Error('wrapped key metadata must be nonempty well-formed strings');
+      }
+      const bytes = Buffer.from(wrapped.bytes, 'base64');
+      if (bytes.length === 0 || base64(bytes) !== wrapped.bytes) throw new Error('wrapped key must be nonempty canonical base64');
+    }
+  }
 }
 
 /** Why `reader` may not do `permission` on `secret`, or null if they may. */
