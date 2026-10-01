@@ -3,7 +3,7 @@ import type { PrincipalReport, RemovedPrincipal } from '../shared/models';
 import { Card } from './page';
 import { EmptyState, Notice, Timestamp } from './ui';
 import { PrincipalLink } from './principal';
-import { Key, SyncMark, User } from './icons';
+import { ChevronRight, Key, SyncMark, User } from './icons';
 
 /**
  * The part of a user's or token's page that answers "if they left, what would
@@ -74,12 +74,12 @@ export function RemovedList({
                 <th className="col-principal">
                   <span className="th">
                     {users ? <User size={14} /> : <Key size={14} />}
-                    {users ? 'Email' : 'Common name'}
+                    {users ? 'Email' : 'Name'}
                   </span>
                 </th>
                 <th className="col-role">Still to rotate</th>
                 <th className="col-actions">
-                  <span className="visually-hidden">Actions</span>
+                  <span className="visually-hidden">Report</span>
                 </th>
               </tr>
             </thead>
@@ -87,7 +87,7 @@ export function RemovedList({
               {rows.map((principal, index) => (
                 <tr key={principal.principalId} className="row-link">
                   <td className="n">{index + 1}</td>
-                  <td className="col-lead" data-label={users ? 'Email' : 'Common name'}>
+                  <td className="col-lead" data-label={users ? 'Email' : 'Name'}>
                     <PrincipalLink type={principal.principalType} id={principal.principalId} stretch />
                   </td>
                   <td className="col-role" data-label="Still to rotate">
@@ -97,7 +97,10 @@ export function RemovedList({
                       `${principal.toRotate} ${principal.toRotate === 1 ? 'value' : 'values'}`
                     )}
                   </td>
-                  <td className="col-actions" />
+                  {/* The row opens the report; the chevron says it does. */}
+                  <td className="col-actions col-open cell-muted" aria-hidden="true">
+                    <ChevronRight size={16} />
+                  </td>
                 </tr>
               ))}
             </tbody>

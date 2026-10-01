@@ -50,17 +50,28 @@ export const KIND: Record<PrincipalType, string> = {
 export function DirectoryTable({
   principalType,
   principals,
+  hasRemoved = false,
 }: {
   principalType: PrincipalType;
   principals: DirectoryPrincipal[];
+  /** Whether some were removed, listed beneath, so an empty table is not "yet". */
+  hasRemoved?: boolean;
 }) {
   const users = principalType === 'user';
   return (
     <section className="card" aria-label={users ? 'Users' : 'Tokens'}>
       {principals.length === 0 ? (
-        <EmptyState title={users ? 'Nobody is registered' : 'No tokens yet'}>
-          Add the first {KIND[principalType]} to let it through the door. Project access is a
-          separate step, granted from each project's page.
+        <EmptyState
+          title={
+            hasRemoved
+              ? `No active ${KIND[principalType]}s`
+              : users
+                ? 'Nobody is registered'
+                : 'No tokens yet'
+          }
+        >
+          {hasRemoved ? `Add a ${KIND[principalType]}` : `Add the first ${KIND[principalType]}`} to let
+          it through the door. Project access is a separate step, granted from each project's page.
         </EmptyState>
       ) : (
         <div className="dt-wrap">
@@ -71,7 +82,7 @@ export function DirectoryTable({
                 <th className="col-principal">
                   <span className="th">
                     {users ? <User size={14} /> : <Key size={14} />}
-                    {users ? 'Email' : 'Common name'}
+                    {users ? 'Email' : 'Name'}
                   </span>
                 </th>
                 {users && (
@@ -93,7 +104,7 @@ export function DirectoryTable({
                   <td className="n">{index + 1}</td>
                   <td
                     className="col-lead"
-                    data-label={principal.principalType === 'user' ? 'Email' : 'Common name'}
+                    data-label={principal.principalType === 'user' ? 'Email' : 'Name'}
                   >
                     <PrincipalLink
                       type={principal.principalType}

@@ -56,10 +56,13 @@ export function Tip({
 export function Toggletip({
   label,
   side,
+  align,
   children,
 }: {
   label: ReactNode;
   side?: 'top' | 'right' | 'bottom' | 'left';
+  /** `end` for a trigger at the right edge, so the tip opens leftwards. */
+  align?: 'start' | 'center' | 'end';
   children: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
@@ -88,8 +91,9 @@ export function Toggletip({
         <Popover.Content
           className="tooltip"
           side={side}
+          align={align}
           sideOffset={6}
-          collisionPadding={8}
+          collisionPadding={16}
           onOpenAutoFocus={(event: Event) => event.preventDefault()}
         >
           {label}

@@ -2085,6 +2085,16 @@ a.crumb-link:hover {
   padding-top: 0.25rem;
 }
 
+/* A row that opens a page, said at its end. */
+.col-open {
+  vertical-align: middle;
+}
+
+.col-open svg {
+  display: block;
+  margin-left: auto;
+}
+
 /* Pending changes: a dark bar floating at the foot of the page. */
 .savebar {
   position: fixed;
@@ -2658,16 +2668,35 @@ a.env-card-name:hover {
 }
 
 .chain-seal {
-  display: grid;
-  place-items: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
   flex: none;
-  width: 2rem;
   height: 2rem;
-  padding: 0;
-  border: 0;
-  border-radius: 50%;
+  padding: 0 0.75rem 0 0.625rem;
+  border: 1px solid color-mix(in oklab, var(--green) 30%, var(--border));
+  border-radius: var(--radius);
   background: var(--green-wash);
   color: var(--green);
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+/* Not a verdict: who can see one. Quiet, so it does not read as a fault. */
+.chain-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  height: 2rem;
+  padding: 0 0.25rem;
+  border: 0;
+  background: none;
+  color: var(--ink-3);
+  font-size: 0.8125rem;
+}
+
+.chain-note:hover {
+  color: var(--ink-2);
 }
 
 .chain-flag {
@@ -2688,6 +2717,12 @@ a.env-card-name:hover {
   border-color: color-mix(in oklab, var(--red) 40%, var(--border));
   background: var(--red-wash);
   color: var(--red);
+}
+
+.chain-flag-warn {
+  border-color: color-mix(in oklab, var(--amber) 40%, var(--border));
+  background: var(--amber-wash);
+  color: var(--amber);
 }
 
 .chain-head {
@@ -2727,6 +2762,17 @@ a.env-card-name:hover {
   margin: 0;
 }
 
+.section-head-first {
+  margin-top: 0;
+}
+
+/* What a section is, in a line under its title. */
+.section-desc {
+  margin: -0.375rem 0 0.875rem;
+  color: var(--ink-3);
+  font-size: 0.8125rem;
+}
+
 .vault-verdict {
   display: inline-flex;
   align-items: center;
@@ -2759,6 +2805,43 @@ a.env-card-name:hover {
 .audit tr.is-denied .n {
   box-shadow: inset 3px 0 var(--red);
   color: var(--red);
+}
+
+/* Where a log stops verifying: a stronger tint than a denial, ruled above
+   and below, with a solid mark that says so in words. */
+.audit tr.is-break,
+.audit tr.is-break:hover {
+  background: color-mix(in oklab, var(--red) 14%, var(--panel));
+}
+
+.audit tr.is-break td {
+  box-shadow:
+    inset 0 1px color-mix(in oklab, var(--red) 55%, transparent),
+    inset 0 -1px color-mix(in oklab, var(--red) 55%, transparent);
+}
+
+.audit tr.is-break td.n {
+  box-shadow:
+    inset 4px 0 var(--red),
+    inset 0 1px color-mix(in oklab, var(--red) 55%, transparent),
+    inset 0 -1px color-mix(in oklab, var(--red) 55%, transparent);
+  color: var(--red);
+  font-weight: 700;
+}
+
+.break-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-left: 0.5rem;
+  padding: 0.0625rem 0.375rem;
+  border-radius: var(--radius-sm);
+  background: var(--red);
+  color: var(--panel);
+  font-family: var(--font-sans);
+  font-size: 0.6875rem;
+  font-weight: 650;
+  vertical-align: 0.0625rem;
 }
 
 .actor {
@@ -3620,6 +3703,11 @@ a.env-card-name:hover {
     padding: 0;
   }
 
+  .dt.directory.stacks td.col-open {
+    display: flex;
+    align-items: center;
+  }
+
   /* Tokens have no role to show: the name and its menu. */
   .dt.directory-service.stacks tr {
     grid-template-columns: minmax(0, 1fr) 1.75rem;
@@ -3666,6 +3754,38 @@ a.env-card-name:hover {
 
   .dt.grants.stacks tr.row-error {
     grid-template-areas: none;
+  }
+
+  /* Syncs: the destination and its actions on one line, the state beneath,
+     and an error, when there is one, under both. */
+  .dt.syncs.stacks tr {
+    grid-template-areas:
+      'destination actions'
+      'status status';
+    align-items: center;
+  }
+
+  .dt.syncs.stacks td.col-destination {
+    grid-area: destination;
+  }
+
+  .dt.syncs.stacks td.col-status {
+    grid-area: status;
+    padding-left: 1.5rem;
+  }
+
+  .dt.syncs.stacks td.col-actions {
+    grid-area: actions;
+  }
+
+  .dt.syncs.stacks tr.has-error {
+    padding-bottom: 0.25rem;
+    border-bottom: 0;
+  }
+
+  .dt.syncs.stacks tr.row-error {
+    grid-template-areas: none;
+    padding-top: 0;
   }
 
   /* Secrets: key, version and actions on one line, the value beneath. */
@@ -3773,6 +3893,17 @@ a.env-card-name:hover {
 
   .dt.audit.stacks tr.is-denied {
     box-shadow: inset 3px 0 var(--red);
+  }
+
+  .dt.audit.stacks tr.is-break {
+    box-shadow:
+      inset 4px 0 var(--red),
+      inset 0 1px var(--red),
+      inset 0 -1px var(--red);
+  }
+
+  .dt.audit.stacks tr.is-break td {
+    box-shadow: none;
   }
 
   .dt.stacks .detail-row > td {

@@ -26,7 +26,11 @@ function TokensPage() {
   return (
     <>
       <PageHeader title="Tokens" actions={<AddPrincipal principalType="service" />} />
-      <DirectoryTable principalType="service" principals={tokens} />
+      <DirectoryTable
+        principalType="service"
+        principals={tokens}
+        hasRemoved={result.removed.some((principal) => principal.principalType === 'service')}
+      />
       <RemovedList principalType="service" removed={result.removed} />
     </>
   );
