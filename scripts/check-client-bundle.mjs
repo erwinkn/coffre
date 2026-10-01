@@ -1,26 +1,33 @@
 #!/usr/bin/env node
-// Fail if database code reached the browser bundle.
+// Fail if `@coffre/ui`'s build holds anything but pages.
 //
-// The browser gets `start.ts` along with the pages, and a single import from
-// it into server code can carry Drizzle, the schema and every query with it:
-// a bundler keeps a module whose top level has side effects, such as
-// `pgTable(...)`, even when nothing uses its exports. Nothing errors when that
-// happens; the bundle just grows by the database layer. So look for it.
+// The UI renders; `@coffre/server` owns the API, the database and the
+// configuration. Nothing errors when a page imports across that line: a
+// bundler keeps a module whose top level has side effects, such as
+// `pgTable(...)`, even when nothing uses its exports, and the build just grows
+// by the database layer. So look for it, in both halves of the build: what
+// the browser loads (`dist/client`) and what renders it (`dist/server`).
 //
-// Two markers: Drizzle's own `drizzle:` symbol keys, which any of its code
-// carries, and the schema's snake_case table names, read from schema.ts so a
-// new table is covered without editing this file. Single-word names such as
-// `secrets` also appear in the pages' own copy, so they are not markers.
+// The markers:
+// - Drizzle's own `drizzle:` symbol keys, which any of its code carries, and
+//   the schema's snake_case table names, read from schema.ts so a new table
+//   is covered without editing this file. Single-word names such as
+//   `secrets` also appear in the pages' own copy, so they are not markers.
+// - The database drivers, by strings their code cannot do without.
+// - A read of a `COFFRE_*` variable: the UI has no configuration.
+// - The Agentation toolbar, which is for `vite dev` only.
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
 const root = new URL('..', import.meta.url).pathname;
-const clientDir = join(root, 'apps/web/dist/client');
+const distDir = join(root, 'packages/ui/dist');
 
-if (!existsSync(clientDir)) {
-    console.error(`No client build at ${relative(root, clientDir)}; run the web build first.`);
-    process.exit(1);
+for (const half of ['client', 'server']) {
+    if (!existsSync(join(distDir, half))) {
+        console.error(`No build at ${relative(root, join(distDir, half))}; run \`pnpm --dir packages/ui build\` first.`);
+        process.exit(1);
+    }
 }
 
 const schema = readFileSync(join(root, 'packages/db/src/schema.ts'), 'utf8');
@@ -34,19 +41,24 @@ if (tables.length === 0) {
 const markers = [
     { label: 'drizzle-orm', pattern: /drizzle:[A-Z]/ },
     ...tables.map((name) => ({ label: `table ${name}`, pattern: new RegExp(`\\b${name}\\b`) })),
+    { label: 'pg', pattern: /cloudflare:sockets|pg-protocol|pgpass/ },
+    { label: 'mysql2', pattern: /mysql2|mysql_native_password/ },
+    { label: 'libsql', pattern: /@libsql|libsql/ },
+    { label: 'a COFFRE_ variable read', pattern: /env\s*(\.|\[\s*['"`])COFFRE_/ },
+    { label: 'agentation', pattern: /agentation-(theme|root|color)/ },
 ];
 
 function* scripts(dir) {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
         const path = join(dir, entry.name);
         if (entry.isDirectory()) yield* scripts(path);
-        else if (/\.m?js$/.test(entry.name)) yield path;
+        else if (/\.(m?js|css)$/.test(entry.name)) yield path;
     }
 }
 
 const problems = [];
 let checked = 0;
-for (const file of scripts(clientDir)) {
+for (const file of scripts(distDir)) {
     checked += 1;
     const source = readFileSync(file, 'utf8');
     for (const { label, pattern } of markers) {
@@ -55,10 +67,10 @@ for (const file of scripts(clientDir)) {
 }
 
 if (problems.length > 0) {
-    console.error('Database code reached the browser bundle:');
+    console.error("Something other than pages reached @coffre/ui's build:");
     for (const problem of problems) console.error(`  ${problem}`);
-    console.error('Something the browser loads imports server code; see apps/web/src/server/request-identity.ts.');
+    console.error('A page imports server code; pages reach the API only through context.client.');
     process.exit(1);
 }
 
-console.log(`Client bundle check passed (${checked} scripts, no database code).`);
+console.log(`UI bundle check passed (${checked} files: no database, driver, configuration or Agentation code).`);

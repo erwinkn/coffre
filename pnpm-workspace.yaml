@@ -1,8 +1,13 @@
 packages:
   - packages/*
   - apps/*
+  - examples/*
   - spikes/*
   - spikes/ssr-ui/*
+
+# The examples pin `@coffre/*` at a version, exactly as `coffre init` writes
+# them; this links those to the packages here rather than the registry.
+linkWorkspacePackages: true
 
 # Supply-chain settings.
 #

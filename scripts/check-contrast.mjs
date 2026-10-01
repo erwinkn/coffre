@@ -61,7 +61,7 @@ function outOfGamut(oklch) {
 }
 
 // --- The palette ------------------------------------------------------------
-// Keep in lockstep with apps/web/src/styles/globals.css, where each token is
+// Keep in lockstep with packages/ui/src/styles/globals.css, where each token is
 // one light-dark() declaration. Surfaces and text are true neutrals; hue is
 // kept for meaning: blue for links, focus and edits not yet saved, amber for a
 // revealed value, red for archive and denial, green for allow, violet for

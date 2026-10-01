@@ -73,6 +73,16 @@ test('an error answer throws a CoffreError with its code and message', async () 
   });
 });
 
+test("another copy of the client's errors are CoffreErrors too", async () => {
+  // As the UI sees a client from the server's bundle: the same module, loaded twice.
+  const other = (await import(`../src/index.ts?copy=${Date.now()}`)) as typeof import('../src/index.ts');
+  assert.notEqual(other.CoffreError, CoffreError);
+  assert.ok(new other.CoffreError(401, 'unauthenticated', 'sign in first') instanceof CoffreError);
+  assert.ok(new CoffreError(401, 'unauthenticated', 'sign in first') instanceof other.CoffreError);
+  assert.ok(!(new Error('sign in first') instanceof CoffreError));
+  assert.ok(!((null as unknown) instanceof CoffreError));
+});
+
 test('an error that is not JSON still throws with its status', async () => {
   const { client } = recording(() => new Response('<html>', { status: 502 }));
   await assert.rejects(client.me(), { name: 'CoffreError', status: 502, code: 'http_error' });

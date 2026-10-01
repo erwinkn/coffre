@@ -1,16 +1,7 @@
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
-import type { IdentityVerifier, Principal } from './types.ts';
+import type { AccessVerifierConfig, IdentityVerifier, Principal } from './types.ts';
 
-export type AccessVerifierConfig = {
-  /** Cloudflare Access team domain, e.g. https://acme.cloudflareaccess.com */
-  issuer: string;
-  /** Usually `${issuer}/cdn-cgi/access/certs`. */
-  jwksUrl: string;
-  /** The AUD tag of the specific Access application. */
-  audience: string;
-  /** Seconds of clock skew tolerated. Kept at 0 by default deliberately. */
-  clockToleranceSeconds?: number;
-};
+export type { AccessVerifierConfig };
 
 /**
  * Signature algorithms we accept, as an explicit allowlist.

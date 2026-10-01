@@ -3,15 +3,14 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "exports": {
-    ".": "./src/index.ts",
-    "./destinations": "./src/destinations.ts"
-  },
   "scripts": {
     "test": "node --test"
   },
   "dependencies": {
     "@noble/hashes": "2.4.0",
     "tweetnacl": "1.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "26.1.1"
   }
 }

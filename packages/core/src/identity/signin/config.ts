@@ -9,17 +9,10 @@
  * `microsoft()` is OIDC with a tenant's issuer. A provider that is not listed
  * needs no code, only `oidc()` and its issuer URL.
  *
- * A deployment usually configures this through environment variables (see
- * `loadSigninConfig`), so a prebuilt Worker or container needs nothing but
- * vars and secrets:
+ * A deployment writes them in its own code, where a misspelt option fails
+ * the typecheck:
  *
- *   COFFRE_SIGNIN_PROVIDERS=github,okta
- *   COFFRE_SIGNIN_GITHUB_CLIENT_ID=Iv23li...
- *   COFFRE_SIGNIN_GITHUB_CLIENT_SECRET=...        (a secret)
- *   COFFRE_SIGNIN_OKTA_TYPE=oidc
- *   COFFRE_SIGNIN_OKTA_ISSUER=https://acme.okta.com
- *   COFFRE_SIGNIN_OKTA_CLIENT_ID=...
- *   COFFRE_SIGNIN_OKTA_CLIENT_SECRET=...
+ *   signin({ providers: [github({ clientId, clientSecret: env.GITHUB_SECRET, organization: 'acme' })] })
  */
 
 /** Which mark the sign-in button carries. */
@@ -237,115 +230,14 @@ function baseUrl(value: string, what: string): string {
 }
 
 export function publicOrigin(value: string): string {
-  const url = checkedUrl(value, 'COFFRE_PUBLIC_URL');
+  const url = checkedUrl(value, 'the public URL');
   if (url.pathname !== '/') {
-    throw new Error('COFFRE_PUBLIC_URL must be an origin, with no path');
+    throw new Error('the public URL must be an origin, with no path');
   }
   return url.origin;
 }
 
-type Environment = Readonly<Record<string, string | undefined>>;
-
-function envName(id: string, field: string): string {
-  return `COFFRE_SIGNIN_${id.toUpperCase().replaceAll('-', '_')}_${field}`;
-}
-
-function optional(env: Environment, name: string): string | undefined {
-  const value = env[name]?.trim();
-  return value ? value : undefined;
-}
-
-function required(env: Environment, name: string): string {
-  const value = optional(env, name);
-  if (value === undefined) throw new Error(`missing required environment variable: ${name}`);
-  return value;
-}
-
-function positiveNumber(env: Environment, name: string, fallback: number, max: number): number {
-  const raw = optional(env, name);
-  if (raw === undefined) return fallback;
-  const value = Number(raw);
-  if (!Number.isFinite(value) || value <= 0 || value > max) {
-    throw new Error(`${name} must be a number between 0 and ${max}`);
-  }
-  return value;
-}
-
-const PRESETS = new Set(['github', 'google', 'microsoft', 'oidc']);
-
-function providerFromEnv(env: Environment, id: string): SigninProviderConfig {
-  checkId(id);
-  const type = optional(env, envName(id, 'TYPE')) ?? (PRESETS.has(id) ? id : undefined);
-  if (type === undefined) {
-    throw new Error(
-      `${envName(id, 'TYPE')} is required: one of github, google, microsoft or oidc`,
-    );
-  }
-
-  const credentials = {
-    clientId: required(env, envName(id, 'CLIENT_ID')),
-    clientSecret: required(env, envName(id, 'CLIENT_SECRET')),
-  };
-  const label = optional(env, envName(id, 'LABEL'));
-
-  switch (type) {
-    case 'github':
-      return github({
-        ...credentials,
-        id,
-        label,
-        organization: optional(env, envName(id, 'ORGANIZATION')),
-        webUrl: optional(env, envName(id, 'WEB_URL')),
-        apiUrl: optional(env, envName(id, 'API_URL')),
-      });
-    case 'google':
-      return google({ ...credentials, id, label, domain: optional(env, envName(id, 'DOMAIN')) });
-    case 'microsoft':
-      return microsoft({
-        ...credentials,
-        id,
-        label,
-        tenant: required(env, envName(id, 'TENANT')),
-      });
-    case 'oidc': {
-      const scopes = optional(env, envName(id, 'SCOPES'));
-      return oidc({
-        ...credentials,
-        id,
-        label: label ?? id,
-        issuer: required(env, envName(id, 'ISSUER')),
-        scopes: scopes?.split(/[\s,]+/).filter(Boolean),
-      });
-    }
-    default:
-      throw new Error(`${envName(id, 'TYPE')} must be one of github, google, microsoft or oidc`);
-  }
-}
-
-/** Read `COFFRE_SIGNIN_*` into a validated configuration, failing on the first problem. */
-export function loadSigninConfig(env: Environment): SigninConfig {
-  const publicUrl = publicOrigin(required(env, 'COFFRE_PUBLIC_URL'));
-
-  const ids = required(env, 'COFFRE_SIGNIN_PROVIDERS')
-    .split(/[\s,]+/)
-    .filter(Boolean);
-  if (new Set(ids).size !== ids.length) {
-    throw new Error('COFFRE_SIGNIN_PROVIDERS names a provider twice');
-  }
-
-  return defineSignin({
-    publicUrl,
-    providers: ids.map((id) => providerFromEnv(env, id)),
-    page: {
-      title: optional(env, 'COFFRE_SIGNIN_TITLE'),
-      note: optional(env, 'COFFRE_SIGNIN_NOTE'),
-    },
-    browserSessionHours: positiveNumber(env, 'COFFRE_SESSION_HOURS', 12, 24 * 7),
-    cliSessionDays: positiveNumber(env, 'COFFRE_CLI_SESSION_DAYS', 30, 365),
-  });
-}
-
-/** The same validation for configuration written as code. */
+/** Sign-in configuration, checked: at least one provider, ids unique, lifetimes sane. */
 export function defineSignin(options: {
   publicUrl: string;
   providers: SigninProviderConfig[];
@@ -371,7 +263,15 @@ export function defineSignin(options: {
       title: options.page?.title ?? 'Sign in to coffre',
       note: options.page?.note ?? null,
     },
-    browserSessionHours: options.browserSessionHours ?? 12,
-    cliSessionDays: options.cliSessionDays ?? 30,
+    browserSessionHours: lifetime(options.browserSessionHours, 'browserSessionHours', 12, 24 * 7),
+    cliSessionDays: lifetime(options.cliSessionDays, 'cliSessionDays', 30, 365),
   };
+}
+
+function lifetime(value: number | undefined, name: string, fallback: number, max: number): number {
+  if (value === undefined) return fallback;
+  if (!Number.isFinite(value) || value <= 0 || value > max) {
+    throw new Error(`${name} must be a number above 0 and at most ${max}`);
+  }
+  return value;
 }

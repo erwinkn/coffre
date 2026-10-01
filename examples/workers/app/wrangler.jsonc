@@ -1,0 +1,32 @@
+// The app Worker. Settings that are not secret are `vars` below; the secrets
+// go in with `wrangler secret put <NAME> -c app/wrangler.jsonc`, and locally
+// in app/.dev.vars.
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "coffre",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-08-06",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "observability": { "enabled": true },
+  "vars": {
+    // Where people reach coffre: an origin, no path. Add it as a route or
+    // custom domain too.
+    "PUBLIC_URL": "https://secrets.example.com",
+    // A GitHub OAuth app whose callback is <PUBLIC_URL>/auth/callback/github.
+    "GITHUB_CLIENT_ID": "replace-with-your-client-id"
+  },
+  "secrets": {
+    "required": ["GITHUB_CLIENT_SECRET", "AUDIT_CHAIN_KEY"]
+  },
+  // `wrangler hyperdrive create coffre --connection-string=<runtime login URL>`
+  // prints the id. Locally, CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE
+  // stands in for it.
+  "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "replace-with-your-hyperdrive-id" }],
+  // The vault Worker, vault/wrangler.jsonc. Deploy it first.
+  "services": [{ "binding": "VAULT", "service": "coffre-vault" }],
+  // The heartbeat, audit checkpoints and due syncs.
+  "triggers": { "crons": ["*/5 * * * *"] },
+  // The pages' scripts, styles and fonts, all under /_coffre/assets/.
+  "assets": { "directory": "../node_modules/@coffre/ui/dist/client" }
+}

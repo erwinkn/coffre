@@ -104,7 +104,7 @@ from making it in the visitor's name; the CLI and service tokens send a header
 and are unaffected. Page middleware only rejects `x-middleware-subrequest` and
 works out who is looking, for the sign-in routes.
 
-**One route table is the whole API.** `apps/web/src/server/api/routes.ts` maps
+**One route table is the whole API.** `packages/server/src/api/routes.ts` maps
 each `METHOD /route` to its input schema, the permission it needs and its
 handler, and one catch-all route serves it under `/api`. The client in
 `packages/client` is typed from that table, and both the CLI and the UI call
@@ -118,7 +118,7 @@ place where free text becomes credential material. Unrecognised escapes are
 preserved verbatim, trailing text after a closing quote is an error, NUL bytes
 are rejected (`execve` truncates at them), and all three line-ending
 conventions are split. Writing tests for it found four ways it silently
-corrupted values — see `apps/web/test/dotenv.test.ts`.
+corrupted values — see `packages/core/test/dotenv.test.ts`.
 
 **Append-only by grant, not convention.** `coffre_app` has no `UPDATE`, no
 `DELETE`, or `TRUNCATE` on history, and no `DELETE` or `TRUNCATE` anywhere.
@@ -133,7 +133,7 @@ migration validates it and grants membership in the append-only `coffre_app`
 role:
 
 ```sh
-DATABASE_URL='<owner-database-url>' pnpm db:migrate
+pnpm exec coffre-server migrate '<owner-database-url>'   # in a deployment
 ```
 
 Hyperdrive contains the runtime credential, so no database password is exposed
@@ -160,31 +160,41 @@ published six days before we tried to install it.
 ## Layout
 
 ```
-packages/core   envelope encryption, KEK providers, audit hash chain, identity
-packages/db     Drizzle schema/migrations, audit writer, privilege tests
-packages/vault  the vault: the KEK, grants, members, root admins, its own log; over SQLite
-packages/sync   destinations syncs push to: GitHub Actions, Vercel, Railway, Cloudflare
-apps/dev-idp    local stand-in for Cloudflare Access, an OIDC provider and GitHub
-packages/client @coffre/client: the API as typed calls, one fetch each
-apps/cli        login, secrets, access, syncs, audit; on the client, no npm dependencies
-apps/web        TanStack Start UI, auth boundary, and the API's route table and handlers
-apps/vault      the vault's Worker: one Durable Object, reached only by the app's VAULT binding
+packages/server  @coffre/server: /api, sign-in, syncs, the heartbeat, migrations; /cloudflare and /node
+packages/ui      @coffre/ui: the pages, a prebuilt TanStack Start handler and its static files
+packages/vault   @coffre/vault: the KEK, grants, members, root admins, its own log; /cloudflare and /node
+packages/client  @coffre/client: the API as typed calls, one fetch each
+packages/cli     @coffre/cli: `coffre`, from init and login to secrets, syncs and audit
+packages/core    internal: envelope encryption, KEK providers, audit hash chain, identity
+packages/db      internal: Drizzle schema, migrations and every query, on three engines
+packages/sync    internal: destinations syncs push to: GitHub Actions, Vercel, Railway, Cloudflare
+apps/dev-idp     local stand-in for Cloudflare Access, an OIDC provider and GitHub
+examples/workers what `coffre init --workers` writes: two Workers
+examples/node    what `coffre init --node` writes: a server and its vault process
 ```
+
+The five `@coffre/*` packages are the product, compiled with their
+declarations; the internal ones are bundled into them. A deployment is one of
+the examples: a small project that imports the packages and configures them
+in code ([docs/architecture.md](docs/architecture.md),
+[docs/deploy.md](docs/deploy.md)).
 
 ## Running it
 
 ```sh
 pnpm install
-pnpm dev              # Postgres + dev IdP + web/API with its vault Worker + seed data
+pnpm dev              # Postgres + dev IdP + coffre and its vault as two Workers + seed data
 ```
 
 Then open http://127.0.0.1:3000 and sign in as `admin@acme.example`.
 
-`pnpm dev` picks a persona, which exists only under `COFFRE_AUTH_MODE=dev`.
-`pnpm dev:signin` runs the real sign-in page instead, with the dev IdP playing
-GitHub and an OIDC provider, on the data `pnpm dev` seeded. A deployment runs
-in `signin` mode ([docs/deploy.md](docs/deploy.md)) or behind Cloudflare
-Access ([docs/deployment-auth.md](docs/deployment-auth.md)).
+`pnpm dev` runs a deployment like `examples/workers` under `vite dev`
+(`packages/ui/dev/`), on the packages' sources, so an edit to a page, the
+server or the vault reloads in place. It signs in with the dev IdP's persona
+picker (`devIdp(…)`). `pnpm dev:signin` runs the real sign-in page instead,
+with the dev IdP playing GitHub and an OIDC provider, on the data `pnpm dev`
+seeded. A deployment uses `signin(…)` ([docs/deploy.md](docs/deploy.md)) or
+Cloudflare Access ([docs/deployment-auth.md](docs/deployment-auth.md)).
 
 Individual pieces:
 
@@ -199,27 +209,32 @@ pnpm test:sqlite      # the same suite on SQLite, in a temporary file
 pnpm test:mysql       # the same suite on MySQL 8.4 on :53306, started if nothing answers there
 pnpm test:all         # all three, one after another
 pnpm test:schema      # runtime-role guarantees in an isolated test database (Postgres only)
-pnpm lint             # no server functions or Drizzle queries in the web app
+pnpm lint             # no server functions or Drizzle queries in the pages or the server
 pnpm check:pins       # every dependency exactly pinned
 pnpm check:contrast   # every admin-UI colour pair meets WCAG AA
-pnpm --dir apps/web typecheck
-pnpm --dir apps/web build            # then fails if database code reached the browser bundle
-pnpm --dir apps/web smoke:production
+pnpm build            # every package; @coffre/ui's fails if server code reached it
+pnpm typecheck        # every package and both examples (after pnpm build)
+pnpm smoke:workers    # examples/workers under wrangler dev, on Postgres (after pnpm build)
+pnpm smoke:node       # examples/node, its server and vault processes, on SQLite
+pnpm test:consumer    # pack the packages, init both examples from the packed CLI, install, smoke
 ```
 
-`.env.dev` configures both Workers, and Wrangler hands each only the names its
-own config declares. The app gets `COFFRE_AUDIT_CHAIN_KEY` and its sign-in
-settings. The vault (`apps/vault/wrangler.jsonc`) gets `COFFRE_KEK_LOCAL`,
-`COFFRE_KEK_ID`, `COFFRE_ROOT_ADMINS`, `COFFRE_VAULT_SIGNING_KEY` (a 32-byte
-Ed25519 seed, base64, for audit checkpoints) and the `COFFRE_BULK_LIMIT` var
-(`1000/15m`: unwraps per principal per rolling window). The app refuses to
-start if it is handed any of the vault's. `pnpm dev` empties the vault's
-local store each time it seeds, since the seed starts the database over.
+`.env.dev` holds the local fixtures (keys, root admins) that
+`packages/ui/dev/` hands each Worker: the app its audit chain key and
+sign-in settings, the vault its KEK, root admins and checkpoint signing key.
+`pnpm dev` empties the vault's local store each time it seeds, since the
+seed starts the database over.
+
+The smokes take a deployment through a first day: health, a sign-in through
+the dev IdP standing in for GitHub, a page, a reveal through the vault, the
+scheduled heartbeat and the vault's signed checkpoint, and the security
+headers. `node scripts/smoke.mjs workers|node <dir>` runs one against any
+copy of an example.
 
 CLI:
 
 ```sh
-coffre() { node --env-file=.env.dev apps/cli/src/main.ts "$@"; }
+coffre() { node --env-file=.env.dev packages/cli/src/main.ts "$@"; }
 
 coffre login --email admin@acme.example          # local only: a dev IdP persona
 
@@ -363,9 +378,9 @@ All five milestones are implemented and working locally.
   the provider's stable user id, never to an email. The CLI signs in with a
   device code, and machines use service tokens coffre issues. See
   [phase 4 of the roadmap](docs/roadmap.md#phase-4-sign-in).
-- **Deployment.** Until the packages described in the architecture land,
-  configure and deploy `apps/web` directly with Wrangler. See
-  [docs/deploy.md](docs/deploy.md).
+- **Deployment.** `coffre init --workers` or `--node` writes a small project
+  that imports `@coffre/server`, `@coffre/ui` and `@coffre/vault` and
+  configures them in code. See [docs/deploy.md](docs/deploy.md).
 - **Syncs.** An environment can be pushed to GitHub Actions, Vercel, Railway
   or Cloudflare Workers and kept current there: on every change, and hourly
   to repair drift. Only keys coffre pushed are ever removed, and every value
@@ -467,13 +482,12 @@ code expecting the old shape:
 - **The Vite 8 toolchain runs no install scripts.** It uses Rolldown and
   lightningcss, both shipped as prebuilt platform packages, so `ignoreScripts:
   true` costs nothing here. That was worth checking before committing to it.
-- **The production build is a Cloudflare Worker.** The custom entrypoint wraps
-  TanStack's fetch handler in one invocation-scoped runtime and exposes a
-  five-minute scheduled audit heartbeat. Hyperdrive maintains the origin pool;
-  Coffre never keeps a `pg` client across Worker requests. `smoke:production`
-  runs the built bundle in workerd, points the local Hyperdrive binding at the
-  test database, proves stale readiness, invokes Cron, and proves the protected
-  `/api` boundary still fails closed without Access.
+- **The build is a handler, not an app.** `vite build` produces
+  `@coffre/ui`: TanStack Start's fetch handler for the pages alone, which
+  `@coffre/server` calls for every path that is not `/api`, `/auth` or a
+  health check, on Workers and Node alike. The server owns the runtime:
+  Hyperdrive's pool on Workers (coffre never keeps a `pg` client across
+  requests), the five-minute heartbeat, and the security headers.
 - `src/routeTree.gen.ts` is generated and gitignored; `vite build` writes it.
 
 ### There is no delete, and that is deliberate
@@ -558,7 +572,7 @@ Principals are `user` (matched on the Access `email` claim) or `service`
 (matched on `common_name`, because service-token JWTs carry no email at all).
 
 `root-admin` is not a project role. It is deployment-wide bootstrap authority
-from the vault's `COFFRE_ROOT_ADMINS`, and is shown only in the cross-project Users view.
+from the vault's `rootAdmins`, and is shown only in the cross-project Users view.
 Creating a project writes a real `owner` grant for the creator. In the project
 UI, the underlying role and scope are presented as one permissions value:
 `Owner`, `Read: all`, `Write: all`, or read/write for one named environment.

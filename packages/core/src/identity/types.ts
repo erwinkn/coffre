@@ -37,3 +37,15 @@ export interface IdentityVerifier {
 
 /** Access delivers the JWT to the origin in this header. */
 export const ACCESS_JWT_HEADER = 'cf-access-jwt-assertion';
+
+/** Where Access-shaped tokens are checked: Cloudflare Access, or the dev IdP. */
+export type AccessVerifierConfig = {
+  /** Cloudflare Access team domain, e.g. https://acme.cloudflareaccess.com */
+  issuer: string;
+  /** Usually `${issuer}/cdn-cgi/access/certs`. */
+  jwksUrl: string;
+  /** The AUD tag of the specific Access application. */
+  audience: string;
+  /** Seconds of clock skew tolerated. Kept at 0 by default deliberately. */
+  clockToleranceSeconds?: number;
+};

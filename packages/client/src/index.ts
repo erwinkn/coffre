@@ -1,5 +1,6 @@
 /**
- * The coffre API as function calls, typed from the server's route table.
+ * The coffre API as function calls, typed from the server's route table
+ * (`api.ts`, generated from it).
  *
  *   const coffre = createClient({ url: 'https://coffre.acme.example' });
  *   await coffre.secrets.set('market/prod', { DATABASE_URL: '…', OLD_KEY: null });
@@ -8,16 +9,24 @@
  * else: the web app hands requests straight to its router, and the CLI adds
  * its own handling of Cloudflare Access redirects.
  */
-import type {
-  Params,
-  RouteInput,
-  RouteKey,
-  RouteOutput,
-} from '../../../apps/web/src/server/api/routes.ts';
-import type { DryRunOutcome, DryRunResult, SetResult } from '../../../apps/web/src/server/api/secrets.ts';
-import type { AuthInfo } from '../../../apps/web/src/server/fetch-api.ts';
+import type { Api, AuthInfo, DryRunOutcome, DryRunResult, SetResult } from './api.ts';
 
-export type { AuthInfo, DryRunOutcome, RouteInput, RouteKey, RouteOutput };
+export type { Api, AuthInfo, DryRunOutcome, DryRunResult, Json, SetResult } from './api.ts';
+
+export type RouteKey = keyof Api;
+/** What a caller sends: the body, or the query string for a GET. */
+export type RouteInput<K extends RouteKey> = Api[K]['input'];
+/** What comes back, as JSON. */
+export type RouteOutput<K extends RouteKey> = Api[K]['output'];
+
+type ParamNames<Pattern> = Pattern extends `${string}:${infer Name}/${infer Rest}`
+  ? Name | ParamNames<`/${Rest}`>
+  : Pattern extends `${string}:${infer Name}`
+    ? Name
+    : never;
+
+/** `GET /members/:member` takes `{ member }`. */
+export type Params<Key> = { [Name in ParamNames<Key>]: string };
 
 export type Transport = (request: Request) => Promise<Response>;
 
@@ -30,7 +39,19 @@ export type ClientOptions = {
 };
 
 /** The API's error shape, `{ error, message }`, with the HTTP status. */
+const COFFRE_ERROR = Symbol.for('@coffre/client:CoffreError');
+
 export class CoffreError extends Error {
+  /**
+   * `@coffre/ui` and `@coffre/server` each bundle a copy of this class, and
+   * a page is handed a client from the server's copy. So `instanceof` asks
+   * for the mark every copy leaves, rather than for this copy's prototype.
+   */
+  static [Symbol.hasInstance](value: unknown): boolean {
+    return typeof value === 'object' && value !== null && COFFRE_ERROR in value;
+  }
+
+  readonly [COFFRE_ERROR] = true;
   readonly status: number;
   readonly code: string;
   /** The vault's own code when it refused: `no_grant`, `removed`, `bulk_limit`, ... */

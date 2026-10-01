@@ -10,7 +10,7 @@ jobs:
   validate:
     name: Validate
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
       - name: Check out the selected revision
@@ -29,10 +29,10 @@ jobs:
       - name: Install frozen dependencies
         run: pnpm install --frozen-lockfile
 
-      # First, because it also generates src/routeTree.gen.ts, which the
-      # typecheck needs and a fresh checkout lacks. The smoke reuses the build.
-      - name: Build the Worker
-        run: pnpm --dir apps/web build
+      # First: the typecheck needs what it generates (the UI's route tree, and
+      # its .d.ts for the server), and the smokes run the built packages.
+      - name: Build the packages
+        run: pnpm build
 
       - name: Validate application and database contracts
         run: |
@@ -40,5 +40,10 @@ jobs:
           pnpm test:schema
           pnpm check:pins
           pnpm check:contrast
-          pnpm --dir apps/web typecheck
-          pnpm --dir apps/web smoke:production
+          pnpm typecheck
+
+      - name: Smoke both examples, from the workspace and from packed tarballs
+        run: |
+          pnpm smoke:workers
+          pnpm smoke:node
+          pnpm test:consumer

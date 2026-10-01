@@ -217,10 +217,3 @@ export async function migrateDatabase(url: string): Promise<void> {
     }
   }
 }
-
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const url = process.env.DATABASE_URL?.trim();
-  if (!url) throw new Error('DATABASE_URL is required');
-  await migrateDatabase(url);
-  console.log('database schema is up to date');
-}

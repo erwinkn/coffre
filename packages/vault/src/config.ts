@@ -1,8 +1,6 @@
 import { LocalKekProvider } from '../../core/src/kek/local.ts';
 import { KekRegistry } from '../../core/src/kek/registry.ts';
 
-type Environment = Readonly<Record<string, string | undefined>>;
-
 /** At most `count` data keys unwrapped per principal in any `windowMs`. */
 export type BulkLimit = { count: number; windowMs: number };
 
@@ -13,7 +11,8 @@ export type BulkLimit = { count: number; windowMs: number };
  */
 export const DEFAULT_BULK_LIMIT: BulkLimit = { count: 1000, windowMs: 15 * 60_000 };
 
-export type VaultConfig = {
+/** The vault as it runs: keys decoded, emails checked. */
+export type ResolvedVaultConfig = {
   keks: KekRegistry;
   /** Emails, lowercased: always active, always owners, never changed through the API. */
   rootAdmins: readonly string[];
@@ -22,71 +21,65 @@ export type VaultConfig = {
   bulkLimit: BulkLimit;
 };
 
-function required(env: Environment, name: string): string {
-  const value = env[name];
-  if (value === undefined || value === '') {
-    throw new Error(`missing required environment variable: ${name}`);
-  }
-  return value;
-}
+/** A key-encryption key: 32 random bytes, base64, and the id envelopes record it under. */
+export type Kek = { id: string; key: string };
 
-function requiredKey(env: Environment, name: string): Buffer {
-  const raw = Buffer.from(required(env, name), 'base64');
-  if (raw.length !== 32) {
-    throw new Error(`${name} must decode to exactly 32 bytes, got ${raw.length}`);
-  }
+/**
+ * What a deployment writes: every key coffre has, and who may always get
+ * in. The app holds none of it.
+ *
+ *   {
+ *     kek: { id: 'kek-2026-09', key: env.KEK },
+ *     previousKeks: [{ id: 'kek-2025-01', key: env.KEK_2025_01 }],
+ *     rootAdmins: ['admin@acme.example'],
+ *     signingKey: env.SIGNING_KEY,
+ *   }
+ */
+export type VaultConfig = {
+  /** Wraps every new data key. */
+  kek: Kek;
+  /** Older KEKs, still unwrapping what they wrapped until a rewrap moves it on. */
+  previousKeks?: readonly Kek[];
+  /** At least one email: the only way into a fresh instance, and the only members nobody can remove. */
+  rootAdmins: readonly string[];
+  /** 32 random bytes, base64: the Ed25519 seed audit checkpoints are signed with. */
+  signingKey: string;
+  /** At most `count` data keys unwrapped per principal in any `windowMinutes`; 1000 in 15 unless set. */
+  bulkLimit?: { count: number; windowMinutes: number };
+};
+
+function key32(value: string, what: string): Buffer {
+  const raw = Buffer.from(value, 'base64');
+  if (raw.length !== 32) throw new Error(`${what} must be 32 bytes, base64; got ${raw.length} bytes`);
   return raw;
 }
 
-/**
- * The vault's configuration: every key coffre has, and who may always get
- * in. The app has none of it.
- *
- *   COFFRE_KEK_LOCAL, COFFRE_KEK_ID    the primary KEK and its id
- *   COFFRE_KEK_LOCAL_PREVIOUS          older KEKs, `id:base64,...`, still unwrapping
- *   COFFRE_ROOT_ADMINS                 emails, comma-separated; at least one
- *   COFFRE_VAULT_SIGNING_KEY           a 32-byte Ed25519 seed, base64
- *   COFFRE_BULK_LIMIT                  `<count>/<window>`, e.g. `1000/15m`
- */
-export function loadVaultConfig(env: Environment): VaultConfig {
-  const primary = LocalKekProvider.fromBase64(
-    required(env, 'COFFRE_KEK_LOCAL'),
-    env.COFFRE_KEK_ID ?? 'local-dev-1',
-  );
+const KEK_ID = /^[A-Za-z0-9._-]{1,64}$/;
 
-  const secondary = (env.COFFRE_KEK_LOCAL_PREVIOUS ?? '')
-    .split(',')
-    .filter((entry) => entry.length > 0)
-    .map((entry) => {
-      const separator = entry.indexOf(':');
-      if (separator <= 0 || separator === entry.length - 1) {
-        throw new Error(
-          'COFFRE_KEK_LOCAL_PREVIOUS entries must use the form key-id:base64-material',
-        );
-      }
-      return LocalKekProvider.fromBase64(
-        entry.slice(separator + 1),
-        entry.slice(0, separator),
-      );
-    });
+function kek({ id, key }: Kek): LocalKekProvider {
+  if (!KEK_ID.test(id)) throw new Error(`KEK id "${id}" must be 1-64 letters, digits, dots, dashes or underscores`);
+  return new LocalKekProvider(key32(key, `KEK ${id}`), id);
+}
 
+/** Check a deployment's vault configuration, failing on the first problem. */
+export function resolveVaultConfig(config: VaultConfig): ResolvedVaultConfig {
+  const keks = [config.kek, ...(config.previousKeks ?? [])];
+  const ids = keks.map((entry) => entry.id);
+  if (new Set(ids).size !== ids.length) throw new Error('two KEKs share an id');
+  const [current, ...previous] = keks.map(kek);
   return {
-    keks: new KekRegistry(primary, secondary),
-    rootAdmins: parseRootAdmins(env.COFFRE_ROOT_ADMINS),
-    signingKey: requiredKey(env, 'COFFRE_VAULT_SIGNING_KEY'),
-    bulkLimit: env.COFFRE_BULK_LIMIT ? parseBulkLimit(env.COFFRE_BULK_LIMIT) : DEFAULT_BULK_LIMIT,
+    keks: new KekRegistry(current, previous),
+    rootAdmins: checkRootAdmins(config.rootAdmins),
+    signingKey: key32(config.signingKey, 'the signing key'),
+    bulkLimit: config.bulkLimit === undefined ? DEFAULT_BULK_LIMIT : checkBulkLimit(config.bulkLimit),
   };
 }
 
-/** `1000/15m`: a count, then a window in seconds, minutes or hours. */
-export function parseBulkLimit(raw: string): BulkLimit {
-  const match = /^\s*(\d+)\s*\/\s*(\d+)\s*([smh])\s*$/.exec(raw);
-  const count = Number(match?.[1]);
-  const windowMs = Number(match?.[2]) * { s: 1000, m: 60_000, h: 3_600_000 }[match?.[3] as 's' | 'm' | 'h'];
-  if (!match || count < 1 || !(windowMs > 0)) {
-    throw new Error(`COFFRE_BULK_LIMIT must look like 1000/15m, got: ${raw}`);
+function checkBulkLimit({ count, windowMinutes }: { count: number; windowMinutes: number }): BulkLimit {
+  if (!Number.isInteger(count) || count < 1 || !(windowMinutes > 0)) {
+    throw new Error('bulkLimit needs a whole count of at least 1 and a window above 0 minutes');
   }
-  return { count, windowMs };
+  return { count, windowMs: windowMinutes * 60_000 };
 }
 
 function isHumanEmail(value: string): boolean {
@@ -121,21 +114,14 @@ function isHumanEmail(value: string): boolean {
  * mode: they are the only way into a fresh instance, and the only members
  * nobody can remove.
  */
-export function parseRootAdmins(raw: string | undefined): string[] {
-  const rootAdmins = [
-    ...new Set(
-      (raw ?? '')
-        .split(',')
-        .map((entry) => entry.trim())
-        .filter((entry) => entry.length > 0),
-    ),
-  ];
+export function checkRootAdmins(emails: readonly string[]): string[] {
+  const rootAdmins = [...new Set(emails.map((entry) => entry.trim()).filter((entry) => entry.length > 0))];
   if (rootAdmins.length === 0) {
-    throw new Error('COFFRE_ROOT_ADMINS must name at least one email, or nobody can manage coffre');
+    throw new Error('rootAdmins must name at least one email, or nobody can manage coffre');
   }
   const invalid = rootAdmins.find((entry) => !isHumanEmail(entry));
   if (invalid) {
-    throw new Error(`COFFRE_ROOT_ADMINS entries must be human email identities; invalid: ${invalid}`);
+    throw new Error(`rootAdmins must be human email identities; invalid: ${invalid}`);
   }
   return rootAdmins.map((entry) => entry.toLowerCase());
 }

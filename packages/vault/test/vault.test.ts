@@ -10,9 +10,9 @@ import Database from 'libsql';
 import { LocalKekProvider } from '../../core/src/kek/local.ts';
 import { KekRegistry } from '../../core/src/kek/registry.ts';
 import { verifyCheckpoint } from '../src/checkpoint.ts';
-import { parseBulkLimit, parseRootAdmins, type VaultConfig } from '../src/config.ts';
+import { checkRootAdmins, resolveVaultConfig, type ResolvedVaultConfig } from '../src/config.ts';
 import { embeddedMigrations } from '../src/generate.ts';
-import { localVault, type LocalVault } from '../src/local.ts';
+import { openLocalVault, type LocalVault } from '../src/local.ts';
 import type { SecretRef, WrappedKey } from '../src/types.ts';
 
 const ROOT = 'user:root@acme.example';
@@ -29,11 +29,11 @@ type World = {
   secret(environmentId: string, key?: string): SecretRef;
 };
 
-async function world(t: test.TestContext, config: Partial<VaultConfig> = {}): Promise<World> {
+async function world(t: test.TestContext, config: Partial<ResolvedVaultConfig> = {}): Promise<World> {
   const dir = mkdtempSync(join(tmpdir(), 'coffre-vault-'));
   const path = join(dir, 'vault.db');
   const clock = { now: Date.UTC(2026, 8, 1, 12) };
-  const vault = await localVault(
+  const vault = await openLocalVault(
     path,
     {
       keks: new KekRegistry(LocalKekProvider.generate('test-kek-1')),
@@ -371,14 +371,25 @@ test('the store holds no key', async (t) => {
 });
 
 test('configuration', () => {
-  assert.deepEqual(parseBulkLimit('1000/15m'), { count: 1000, windowMs: 900_000 });
-  assert.deepEqual(parseBulkLimit(' 20 / 30s '), { count: 20, windowMs: 30_000 });
-  assert.throws(() => parseBulkLimit('1000'), /1000\/15m/);
-  assert.throws(() => parseBulkLimit('0/1m'), /1000\/15m/);
-  assert.deepEqual(parseRootAdmins('First.Admin@example.com, second@example.org'), ['first.admin@example.com', 'second@example.org']);
-  assert.throws(() => parseRootAdmins(''), /at least one/);
-  assert.throws(() => parseRootAdmins('admin@example,com'), /human email/);
-  assert.throws(() => parseRootAdmins('ci-deploy.access'), /human email/);
+  const key = randomBytes(32).toString('base64');
+  const base = { kek: { id: 'kek-1', key }, rootAdmins: ['admin@example.com'], signingKey: key };
+  const resolved = resolveVaultConfig({
+    ...base,
+    previousKeks: [{ id: 'kek-0', key: randomBytes(32).toString('base64') }],
+    bulkLimit: { count: 20, windowMinutes: 0.5 },
+  });
+  assert.equal(resolved.keks.primary.keyId, 'kek-1');
+  assert.deepEqual(resolved.bulkLimit, { count: 20, windowMs: 30_000 });
+  assert.deepEqual(resolveVaultConfig(base).bulkLimit, { count: 1000, windowMs: 900_000 });
+  assert.throws(() => resolveVaultConfig({ ...base, bulkLimit: { count: 0, windowMinutes: 1 } }), /bulkLimit/);
+  assert.throws(() => resolveVaultConfig({ ...base, kek: { id: 'kek-1', key: 'c2hvcnQ=' } }), /32 bytes/);
+  assert.throws(() => resolveVaultConfig({ ...base, signingKey: '' }), /signing key/);
+  assert.throws(() => resolveVaultConfig({ ...base, previousKeks: [{ id: 'kek-1', key }] }), /share an id/);
+  assert.throws(() => resolveVaultConfig({ ...base, kek: { id: 'kek 1', key } }), /KEK id/);
+  assert.deepEqual(checkRootAdmins(['First.Admin@example.com', ' second@example.org ']), ['first.admin@example.com', 'second@example.org']);
+  assert.throws(() => checkRootAdmins([]), /at least one/);
+  assert.throws(() => checkRootAdmins(['admin@example,com']), /human email/);
+  assert.throws(() => checkRootAdmins(['ci-deploy.access']), /human email/);
   for (const malformed of [
     'admin@.example.com',
     'admin@example..com',
@@ -387,6 +398,6 @@ test('configuration', () => {
     'admin..root@example.com',
     'admin@-example.com',
   ]) {
-    assert.throws(() => parseRootAdmins(malformed), /human email/, malformed);
+    assert.throws(() => checkRootAdmins([malformed]), /human email/, malformed);
   }
 });

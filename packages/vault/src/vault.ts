@@ -12,7 +12,7 @@ import {
 } from '../../core/src/access.ts';
 import type { SecretContext } from '../../core/src/context.ts';
 import { checkpointMessage, signer, type Signer } from './checkpoint.ts';
-import type { BulkLimit, VaultConfig } from './config.ts';
+import type { BulkLimit, ResolvedVaultConfig } from './config.ts';
 import { append, page, verify, type Appended } from './log.ts';
 import * as schema from './schema.ts';
 import { openStore, type SqlStorage, type Store } from './store.ts';
@@ -47,7 +47,7 @@ export type VaultOptions = {
 /** The vault over `storage`, migrated and ready. */
 export async function openVault(
   storage: SqlStorage,
-  config: VaultConfig,
+  config: ResolvedVaultConfig,
   options: VaultOptions = {},
 ): Promise<Vault> {
   return new VaultService(await openStore(storage), config, await signer(config.signingKey), options.now ?? Date.now);
@@ -94,12 +94,12 @@ const MESSAGES: Record<RefusalCode, string> = {
  */
 class VaultService implements Vault {
   readonly #db: Store;
-  readonly #config: VaultConfig;
+  readonly #config: ResolvedVaultConfig;
   readonly #signer: Signer;
   readonly #now: () => number;
   #queue: Promise<unknown> = Promise.resolve();
 
-  constructor(db: Store, config: VaultConfig, signer: Signer, now: () => number) {
+  constructor(db: Store, config: ResolvedVaultConfig, signer: Signer, now: () => number) {
     this.#db = db;
     this.#config = config;
     this.#signer = signer;
@@ -136,7 +136,7 @@ class VaultService implements Vault {
       const keys = await Promise.all(
         input.items.map(({ secret, wrapped }) =>
           this.#config.keks.unwrap(unwrappable(wrapped), context(secret)).then(
-            (key) => key.toString('base64'),
+            (key) => base64(key),
             () => null,
           ),
         ),
@@ -672,5 +672,14 @@ function unwrappable(wrapped: WrappedKey) {
 }
 
 function serialisable(wrapped: { kekProvider: string; kekId: string; kekVersion: string; bytes: Buffer }): WrappedKey {
-  return { ...wrapped, bytes: wrapped.bytes.toString('base64') };
+  return { ...wrapped, bytes: base64(wrapped.bytes) };
+}
+
+/**
+ * Bytes as base64. Through `Buffer.from`, a view of the same memory, because
+ * Workers' types declare their own `Buffer` and a bare one loses its
+ * `toString(encoding)` to them.
+ */
+function base64(bytes: Uint8Array): string {
+  return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('base64');
 }

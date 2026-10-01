@@ -1,0 +1,8 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // For the tests of the repo's own scripts, which are plain JavaScript.
+    "allowJs": true
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

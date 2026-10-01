@@ -106,9 +106,11 @@ saying which. Every row of one run shares a bundle id.
 
 ## Operating notes
 
-- The scheduler is the Worker's cron trigger (`*/5 * * * *` in
-  `apps/web/wrangler.jsonc`). Without it, syncs still run after changes and by
-  hand, but nothing retries or repairs drift.
+- The scheduler is the app Worker's Cron trigger (`*/5 * * * *` in
+  `app/wrangler.jsonc`), or on Node a timer in `serve`, at the same rate.
+  Without it, syncs still run after changes and by hand, but nothing retries
+  or repairs drift. `syncs: { driftCheckMinutes, retryAfterMinutes }` in the
+  server's configuration tunes it.
 - Railway redeploys the service on every change, and Cloudflare deploys a new
   Worker version, so a burst of edits means a burst of deploys. Writing
   several keys at once (`coffre import --apply`) goes out as one run.

@@ -1,0 +1,27 @@
+// The vault Worker. No route and no workers.dev address: only the app
+// Worker's service binding reaches it. Its secrets go in with
+// `wrangler secret put <NAME> -c vault/wrangler.jsonc`, and locally in
+// vault/.dev.vars.
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "coffre-vault",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-08-06",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "observability": { "enabled": true },
+  "vars": {
+    // Names the KEK below; a rotation gives the new one a new id.
+    "KEK_ID": "kek-1",
+    // Comma-separated emails: the first people in, whom nobody can remove.
+    "ROOT_ADMINS": "you@example.com"
+  },
+  "secrets": {
+    // Each 32 random bytes, base64: `openssl rand -base64 32`.
+    "required": ["KEK", "SIGNING_KEY"]
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "VAULT_OBJECT", "class_name": "VaultObject" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["VaultObject"] }]
+}

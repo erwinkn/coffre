@@ -1,0 +1,100 @@
+import type { IdentityVerifier } from '../../core/src/identity/types.ts';
+import {
+  AccessIdentityVerifier,
+  type AccessVerifierConfig,
+} from '../../core/src/identity/verifier.ts';
+import type { Database } from '../../db/src/database.ts';
+import type { Vault } from '../../vault/src/types.ts';
+import type { ApiContext } from './api/context.ts';
+import { SigninService } from './api/signin.ts';
+import { SyncRunner } from './api/syncs.ts';
+import type { AuthenticatedIdentity } from './auth.ts';
+import type { ResolvedConfig } from './config.ts';
+
+export type CoffreRuntime = {
+  db: Database;
+  /** Keys, grants and members: the vault Worker's binding, or a Node vault. */
+  vault: Vault;
+  chainKey: Buffer;
+  syncs: SyncRunner;
+  /** Present in signin mode only. */
+  signin: SigninService | null;
+  auth: ResolvedConfig['auth'];
+  publicUrl: string;
+  verifier: IdentityVerifier;
+  /** Background work that must outlive the response, such as syncs. */
+  waitUntil: (promise: Promise<unknown>) => void;
+};
+
+/**
+ * The application's services around a database: once per invocation on
+ * Workers, whose database clients belong to one request; once per process
+ * on Node.
+ */
+export function createRuntime(
+  config: ResolvedConfig,
+  db: Database,
+  vault: Vault,
+  waitUntil: CoffreRuntime['waitUntil'] = (promise) => {
+    promise.catch((error: unknown) => console.error('background task failed', error));
+  },
+): CoffreRuntime {
+  let signin: SigninService | null = null;
+  let verifier: IdentityVerifier;
+  if (config.auth.mode === 'signin') {
+    signin = new SigninService({
+      db,
+      chainKey: config.auditChainKey,
+      vault,
+      signin: config.auth.signin,
+    });
+    verifier = signin;
+  } else {
+    verifier = accessVerifier(config.auth.access);
+  }
+  return {
+    db,
+    vault,
+    chainKey: config.auditChainKey,
+    syncs: new SyncRunner({ db, vault, chainKey: config.auditChainKey, timing: config.syncs }),
+    signin,
+    auth: config.auth,
+    publicUrl: config.publicUrl,
+    verifier,
+    waitUntil,
+  };
+}
+
+/** What a handler gets: the runtime's stores and the request's caller. */
+export function apiContext(runtime: CoffreRuntime, identity: AuthenticatedIdentity): ApiContext {
+  return {
+    db: runtime.db,
+    chainKey: runtime.chainKey,
+    vault: runtime.vault,
+    waitUntil: runtime.waitUntil,
+    syncs: runtime.syncs,
+    signin: runtime.signin,
+    caller: identity.caller,
+    requestId: identity.requestId,
+    sourceIp: identity.sourceIp,
+    credentialId: identity.credentialId,
+  };
+}
+
+const accessVerifiers = new Map<string, AccessIdentityVerifier>();
+
+/**
+ * One verifier per Access application for the isolate's lifetime. On
+ * Workers the runtime is rebuilt on every invocation; the verifier holds the JWKS cache,
+ * and rebuilding it with the runtime would fetch Access's keys on every
+ * request.
+ */
+function accessVerifier(config: AccessVerifierConfig): AccessIdentityVerifier {
+  const key = JSON.stringify([config.issuer, config.jwksUrl, config.audience]);
+  let verifier = accessVerifiers.get(key);
+  if (verifier === undefined) {
+    verifier = new AccessIdentityVerifier(config);
+    accessVerifiers.set(key, verifier);
+  }
+  return verifier;
+}

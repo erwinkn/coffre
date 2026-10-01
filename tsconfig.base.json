@@ -1,0 +1,19 @@
+// What every package's tsconfig extends. Source runs as TypeScript under
+// Node 24's type stripping and is bundled for publishing, so imports keep
+// their `.ts` extensions and nothing is emitted from here.
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["node"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "allowImportingTsExtensions": true
+  }
+}

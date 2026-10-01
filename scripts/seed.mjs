@@ -139,6 +139,6 @@ for (const [environment, secrets] of Object.entries(values)) {
 await pool.end();
 
 console.log('\nSeeded. Try:');
-console.log('  node --env-file=.env.dev apps/cli/src/main.ts login --email admin@acme.example');
-console.log('  node --env-file=.env.dev apps/cli/src/main.ts list market/dev');
-console.log('  node --env-file=.env.dev apps/cli/src/main.ts run market/dev -- printenv');
+console.log('  node --env-file=.env.dev packages/cli/src/main.ts login --email admin@acme.example');
+console.log('  node --env-file=.env.dev packages/cli/src/main.ts list market/dev');
+console.log('  node --env-file=.env.dev packages/cli/src/main.ts run market/dev -- printenv');

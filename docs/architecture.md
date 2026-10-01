@@ -1,9 +1,9 @@
 # Architecture: coffre as a library
 
-Where coffre is going: a set of packages a deployment imports and configures
-in code, rather than an app you fork or check out. This is the target; the
-[roadmap](roadmap.md) says what exists today and in what order the rest
-lands.
+coffre is a set of packages a deployment imports and configures in code,
+rather than an app you fork or check out. The [roadmap](roadmap.md) says how
+it got here and what comes next; [deploy.md](deploy.md) walks through a
+deployment.
 
 ## A deployment is a small project
 
@@ -11,26 +11,29 @@ A Workers deployment is two Workers in one small repository of your own:
 
 ```ts
 // app/src/worker.ts
-import { coffre, signin, github, postgres } from '@coffre/server/cloudflare';
+import { coffre, github, postgres, signin } from '@coffre/server/cloudflare';
 
 export default coffre((env: Env) => ({
-  publicUrl: 'https://coffre.erwinkn.com',
+  publicUrl: env.PUBLIC_URL,
   database: postgres(env.HYPERDRIVE),
   vault: env.VAULT, // a service binding to the Worker below
   auth: signin({
-    title: 'coffre',
-    providers: [github({ clientId: 'Ov23li…', clientSecret: env.GITHUB_CLIENT_SECRET })],
+    providers: [github({ clientId: env.GITHUB_CLIENT_ID, clientSecret: env.GITHUB_CLIENT_SECRET })],
   }),
+  auditChainKey: env.AUDIT_CHAIN_KEY,
 }));
 ```
 
 ```ts
 // vault/src/worker.ts
 import { vault } from '@coffre/vault/cloudflare';
+export { VaultObject } from '@coffre/vault/cloudflare';
 
 export default vault((env: Env) => ({
-  keys: { current: { id: 'erwinkn-2026-09', key: env.COFFRE_KEK } },
+  kek: { id: env.KEK_ID, key: env.KEK },
+  previousKeks: [], // older KEKs, still unwrapping what they wrapped
   rootAdmins: ['erwin@example.com'],
+  signingKey: env.SIGNING_KEY,
 }));
 ```
 
@@ -38,14 +41,34 @@ All configuration is passed to these functions. coffre reads no environment
 variable of its own: a deployment brings values however it likes (Worker
 secrets, a password manager, a file) and hands them over. Settings are typed,
 so a misspelt provider option fails the typecheck rather than a sign-in.
+`coffre(…)` returns the Worker's `{ fetch, scheduled }`, and calls the
+function once for each `env` object Workers hands it: in practice, once per
+isolate.
 
-A Node deployment is the same idea: `serve({ port, database, vault, auth })`
-from `@coffre/server/node`, with the vault in a second process or, where
-isolation does not matter, in the same one.
+A Node deployment is the same idea, as two processes:
 
-`coffre init --workers` or `coffre init --node` writes such a project,
-including its `wrangler.jsonc` (Hyperdrive, the service binding, the Cron
-trigger, the UI's static files).
+```ts
+// src/server.ts
+import { github, serve, signin } from '@coffre/server/node';
+import { connectVault } from '@coffre/vault/node';
+
+await serve({ port: 3000, publicUrl, database: 'postgres://…', vault: connectVault('vault.sock'), auth, auditChainKey });
+
+// src/vault.ts
+import { serveVault } from '@coffre/vault/node';
+
+await serveVault({ socket: 'vault.sock', store: 'vault.db', kek, rootAdmins, signingKey });
+```
+
+or as one, with `vault: await localVault({ store, kek, rootAdmins, signingKey })`
+in the server. `database` is a URL there: `postgres://`, `mysql://` or
+`file:` for SQLite.
+
+`coffre init --workers` or `coffre init --node` writes such a project:
+[examples/workers](../examples/workers) or [examples/node](../examples/node)
+exactly, including the Workers' `wrangler.jsonc` files (Hyperdrive, the
+service binding, the Cron trigger, the UI's static files, the vault's Durable
+Object).
 
 ## Packages
 
@@ -57,9 +80,27 @@ trigger, the UI's static files).
 | `@coffre/client` | the typed API client | |
 | `@coffre/cli` | `init`, `login`, secrets, syncs, audit; built on the client | a CLI session |
 
-`packages/core` and `packages/db` stay internal and are bundled into the
-packages above. Everything ships as compiled JavaScript with declarations:
-Node refuses to strip TypeScript types inside `node_modules`.
+`packages/core`, `packages/db` and `packages/sync` stay internal and are
+bundled into the packages above by tsdown; third-party code stays a
+dependency. Everything ships as compiled JavaScript with declarations: Node
+refuses to strip TypeScript types inside `node_modules`. The CLI bundles all
+it runs, so it installs with no dependencies.
+
+| Entry point | What a deployment calls |
+|---|---|
+| `@coffre/server/cloudflare` | `coffre(env => config)` → `{ fetch, scheduled }`; `postgres(env.HYPERDRIVE)` |
+| `@coffre/server/node` | `serve({ port?, host?, database, …config })` → `{ url, close }`; `migrate(url)` |
+| `@coffre/server` (both) | `signin`, `github`, `google`, `microsoft`, `oidc`, `cloudflareAccess`, `devIdp`, and the config types |
+| `@coffre/vault/cloudflare` | `vault(env => config)`, the Worker's default export; `VaultObject`, its Durable Object |
+| `@coffre/vault/node` | `serveVault({ socket, store, …config })`, `connectVault(socket)`, `localVault({ store, …config })` |
+| `@coffre/ui` | `createUi()` → `{ fetch(request, { context: { cspNonce, client } }) }`; files in `dist/client` |
+| `@coffre/client` | `createClient({ url, headers?, transport? })` |
+
+Where `config` is, for the server, `{ publicUrl, vault, auth, auditChainKey,
+syncs? }` and, for the vault, `{ kek, previousKeks?, rootAdmins, signingKey,
+bulkLimit? }`. Each is checked when the deployment starts, and a bad value
+(a 31-byte key, a public URL with a path, no root admin) fails it with a message
+naming the setting.
 
 Migrations ship with `@coffre/server`, not the CLI, because the schema must
 match the server's version exactly and the CLI's may differ:
@@ -79,14 +120,28 @@ export function createUi(options?: UiOptions): Ui;
 ```
 
 The server mints the nonce, builds the request's client and sets the security
-headers; the UI only renders. Its static files are served straight from
+headers; the UI only renders. It reads no configuration, API or database of
+its own, and `scripts/check-client-bundle.mjs` fails its build if database or
+server code reached it. Its static files sit in
 `node_modules/@coffre/ui/dist/client`, under `/_coffre/assets/` so they cannot
-collide with a deployment's own paths. [A spike](../spikes/ssr-ui/REPORT.md)
-showed this works: a separate Worker imported today's built UI, served its
-files through pnpm's symlink, rendered on the server with one copy of React and
-hydrated with the nonce intact, and Node 24 ran the same build behind a small
-`node:http` adapter. Still unproven: uploading symlinked files to Cloudflare
-(check with `wrangler deploy --dry-run` in CI).
+collide with a deployment's own paths:
+
+- **On Workers**, `app/wrangler.jsonc` names that directory as the Worker's
+  static assets, so Cloudflare serves them before the Worker runs.
+  `wrangler deploy --dry-run` reads all of them through pnpm's symlink, and
+  `pnpm test:consumer` runs it on an installed project.
+- **On Node**, `serve` finds the directory with `import.meta.resolve` and
+  serves files under `/_coffre/` itself, immutable-cached, before handing
+  anything else to the UI.
+
+[A spike](../spikes/ssr-ui/REPORT.md) first showed the approach: a separate
+Worker imported the built UI, rendered with one copy of React and hydrated
+with the nonce intact.
+
+`@coffre/ui` and `@coffre/server` each bundle `@coffre/client`, so a page is
+handed a client built from the server's copy. Anything the pages check by
+class must survive that: `CoffreError` answers `instanceof` by a
+`Symbol.for` mark every copy sets, not by its prototype.
 
 Pages get their data through `@coffre/client`, the same client the CLI uses,
 never by reaching into the services. The client takes a transport: HTTP in the
@@ -223,40 +278,46 @@ function over the grants that call returned.
 
 ### Transports
 
-- **In process** (`localVault`): the vault over a libSQL file of its own,
-  for the tests and for anything that runs coffre outside Workers. Each
-  call's arguments and results go through JSON on the way, as over RPC, so
-  nothing that only works in-process gets in.
-- **Workers**: `apps/vault` is a Worker of its own, `coffre-vault`, with no
+- **Workers**: the vault is a Worker of its own, `coffre-vault`, with no
   route and no HTTP surface. It holds one Durable Object, `VaultObject`,
   whose SQLite is the store. The app reaches it only through the `VAULT`
-  service binding, whose calls land on `VaultEntrypoint` (RPC).
-- **Locally**, the vault runs next to the app as an auxiliary Worker of the
-  app's Vite build, in `vite dev`, `vite build` (into `dist/coffre_vault`)
-  and `vite preview` alike, so `pnpm dev` and the production smoke test run
-  both Workers with no second command. Wrangler names it
-  `coffre-vault-<environment>` in a named environment, which the app's
-  development and signin bindings follow. `COFFRE_STATE_DIR` moves where
-  local Durable Objects keep their SQLite.
+  service binding, whose calls land on the Worker's entrypoint (RPC).
+- **Node, its own process** (`serveVault` and `connectVault`): the vault
+  over a libSQL file, answering on a Unix socket. The socket is the whole of
+  its authentication: a file made `0660`, which only the vault's user and a
+  group it shares with the server may open. So there is no port to reach
+  and no shared secret to leak or rotate, and the process facing the network
+  holds no key. Each call is one HTTP POST over the socket, `/<method>` with
+  the arguments as a JSON array. A TCP port with a shared token was the
+  alternative; it would reach across machines, which the vault has no reason
+  to.
+- **Node, in process** (`localVault`): the same vault in the server's
+  process, for the tests and for deployments where one process is enough.
+  Each call's arguments and results go through JSON on the way, as over RPC,
+  so nothing that only works in-process gets in.
+- **Locally**, `pnpm dev` runs the vault as an auxiliary Worker of the
+  app's `vite dev`, and the smoke test runs both with
+  `wrangler dev -c app/wrangler.jsonc -c vault/wrangler.jsonc`. Either way
+  the app's `VAULT` binding reaches it as in production.
 
 ### Where each secret lives
 
 | | App (Worker `coffre`) | Vault (Worker `coffre-vault`) |
 |---|---|---|
-| Config | `COFFRE_AUDIT_CHAIN_KEY`, Access or sign-in settings | `COFFRE_KEK_LOCAL`, `COFFRE_KEK_ID`, `COFFRE_ROOT_ADMINS`, `COFFRE_VAULT_SIGNING_KEY`, `COFFRE_BULK_LIMIT` |
+| Config | `auditChainKey`, `auth` (sign-in or Access settings) | `kek`, `previousKeks`, `rootAdmins`, `signingKey`, `bulkLimit` |
 | Store | projects, environments, ciphertext and wrapped keys, the directory, sessions, syncs, the app's audit log | grants, principal status, unwrap counts, checkpoints, its own log |
 | Where | Postgres or MySQL through Hyperdrive; any of the three in Node | the Durable Object's SQLite; a libSQL file in Node |
 
-Wrangler hands each Worker only the names its own config declares, and the
-app refuses to start if it is given a vault name. The separation comes from
+Each Worker gets only the secrets its own `wrangler.jsonc` declares, and no
+config type has a field for the other side's keys. The separation comes from
 storage, not database privileges, so it holds whatever database either side
 uses: the vault's store is one the app has no credentials for, and neither
 store holds a key.
 
 ### The bulk limit
 
-At most `COFFRE_BULK_LIMIT` data keys unwrapped per principal in any rolling
-window, `1000/15m` by default: twenty `coffre run`s of a 50-key environment
+At most `bulkLimit` data keys unwrapped per principal in any rolling window,
+`{ count: 1000, windowMinutes: 15 }` by default: twenty `coffre run`s of a 50-key environment
 back to back, which no person or pipeline does, while a script pulling every
 value it can reach stops within seconds. Each unwrapped key counts, so one
 50-key run is 50. A refusal is logged and answers 403 `bulk_limit`; the
@@ -264,7 +325,7 @@ principal reads again as the window rolls on.
 
 ### Checkpoints
 
-The app's audit log is hash-chained with `COFFRE_AUDIT_CHAIN_KEY`, which
+The app's audit log is hash-chained with `auditChainKey`, which
 catches someone who can write the database but not read the app's config.
 Someone who holds the app could rewrite the log and chain it again. So after
 each heartbeat, the app asks the vault to sign the log's head:
@@ -280,7 +341,7 @@ log rewritten behind a checkpoint no longer matches, so the vault refuses
 it recomputes the chain and checks the entry at the latest checkpoint's seq
 against the signed hash, with the vault's public key.
 
-`COFFRE_AUDIT_CHAIN_KEY` stays in the app. Signing covers someone who holds
+`auditChainKey` stays in the app. Signing covers someone who holds
 the app; the keyed chain still covers the entries written since the last
 checkpoint against someone who holds only the database. Moving the key would
 put a vault call on every audited write, and the sign-in state key is derived
@@ -324,7 +385,7 @@ three. [A spike](../spikes/drizzle-dialects/REPORT.md) ran the same queries,
 joins, a transaction, an upsert and 24 concurrent audit appends on all three.
 
 Every query lives in one module, `packages/db/src/queries.ts`, and the server
-writes no SQL (lint keeps `drizzle-orm` out of `apps/web`). There are named
+writes no SQL (lint keeps `drizzle-orm` out of the server and the pages). There are named
 reads, one per shape of data the server needs (the caller, a path, an
 environment's secrets, the members, the syncs, a page of the log), each
 returning everything its callers use in one statement. There are also four
