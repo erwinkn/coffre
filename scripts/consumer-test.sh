@@ -25,7 +25,7 @@ rm -rf "$work/tarballs" "$work/cli" "$work/coffre-workers" "$work/coffre-node"
 
 echo '==> build and pack'
 pnpm --dir "$root" build
-packages=(client ui server vault cli)
+packages=(core client ui server vault cli)
 for name in "${packages[@]}"; do
     pnpm --dir "$root/packages/$name" pack --pack-destination "$work/tarballs" >/dev/null
 done

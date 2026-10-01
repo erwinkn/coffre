@@ -165,7 +165,7 @@ packages/ui      @coffre/ui: the pages, a prebuilt TanStack Start handler and it
 packages/vault   @coffre/vault: the KEK, grants, members, root admins, its own log; /cloudflare and /node
 packages/client  @coffre/client: the API as typed calls, one fetch each, and the sync destinations
 packages/cli     @coffre/cli: `coffre`, from init and login to secrets, syncs and audit
-packages/core    internal: envelope encryption, KEK providers, audit hash chain, identity
+packages/core    @coffre/core: access rules, envelope encryption, KEKs, the audit chain, identity, the vault contract
 examples/workers what `coffre init --workers` writes: two Workers
 examples/node    what `coffre init --node` writes: a server and its vault process
 dev/start.sh     `pnpm dev`: Postgres, the dev IdP, the dev deployment, then dev/seed.mjs
@@ -174,8 +174,9 @@ dev/idp          local stand-in for Cloudflare Access, an OIDC provider and GitH
 scripts          what dev, tests and CI share: databases, the smokes, the checks
 ```
 
-The five `@coffre/*` packages are the product, compiled with their
-declarations; the internal one, core, is bundled into them. A deployment is
+The six `@coffre/*` packages are the product, compiled with their
+declarations and released together at one version; each imports the others
+by name only. A deployment is
 one of the examples: a small project that imports the packages and configures them
 in code ([docs/architecture.md](docs/architecture.md),
 [docs/deploy.md](docs/deploy.md)).
@@ -235,7 +236,7 @@ copy of an example.
 CLI:
 
 ```sh
-coffre() { node --env-file=.env.dev packages/cli/src/main.ts "$@"; }
+coffre() { node --conditions=coffre:source --env-file=.env.dev packages/cli/src/main.ts "$@"; }
 
 coffre login --email admin@acme.example          # local only: a dev IdP persona
 

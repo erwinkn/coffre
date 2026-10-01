@@ -1,3 +1,5 @@
+import { CoffreError, planImport, type CoffreClient } from '@coffre/client';
+import { parseDotenv } from '@coffre/core/dotenv';
 import {
   useEffect,
   useRef,
@@ -8,8 +10,6 @@ import {
 import { createFileRoute, Link, useLoaderData, useRouter } from '@tanstack/react-router';
 import { DropdownMenu } from 'radix-ui';
 import { toast } from 'sonner';
-import { CoffreError, planImport, type CoffreClient } from '../../../client/src/index.ts';
-import { parseDotenv } from '../../../core/src/dotenv.ts';
 import { failureMessage, Refusal, uiResult, useCoffre } from '../lib/coffre';
 import { useAction } from '../lib/use-action';
 import type {

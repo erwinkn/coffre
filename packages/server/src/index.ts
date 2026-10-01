@@ -4,12 +4,15 @@
 export {
   cloudflareAccess,
   devIdp,
+  github,
+  google,
+  microsoft,
+  oidc,
   signin,
   type Auth,
   type AuthMode,
   type SigninOptions,
-} from '../../core/src/identity/auth-mode.ts';
-export { github, google, microsoft, oidc } from '../../core/src/identity/signin/config.ts';
-export type { SigninProviderConfig } from '../../core/src/identity/signin/config.ts';
+  type SigninProviderConfig,
+} from '@coffre/core/identity';
+export type { Vault } from '@coffre/core/vault';
 export type { CoffreConfig, SyncSettings } from './config.ts';
-export type { Vault } from '../../vault/src/types.ts';

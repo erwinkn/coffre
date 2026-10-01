@@ -13,10 +13,12 @@
     "node": ">=24"
   },
   "files": [
-    "dist"
+    "dist",
+    "src"
   ],
   "exports": {
     ".": {
+      "coffre:source": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
@@ -26,7 +28,7 @@
     "build": "tsdown",
     "generate": "node scripts/generate-api.ts",
     "typecheck": "tsc --noEmit",
-    "test": "node --test"
+    "test": "node --conditions=coffre:source --test"
   },
   "devDependencies": {
     "@types/node": "26.1.1",

@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
-# Recreate the isolated local database used by the serial integration suite.
+# Recreate the isolated local database used by the serial integration suite:
+# coffre_test, or the one COFFRE_TEST_DATABASE names.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-coffre}"
+database="${COFFRE_TEST_DATABASE:-coffre_test}"
 
 ./scripts/ensure-postgres.sh
 
 docker compose exec -T postgres \
-    psql -v ON_ERROR_STOP=1 -U coffre_owner -d postgres <<'SQL' >/dev/null
-DROP DATABASE IF EXISTS coffre_test WITH (FORCE);
-CREATE DATABASE coffre_test;
+    psql -v ON_ERROR_STOP=1 -v database="$database" -U coffre_owner -d postgres <<'SQL' >/dev/null
+DROP DATABASE IF EXISTS :"database" WITH (FORCE);
+CREATE DATABASE :"database";
 
 DO $$
 BEGIN
@@ -27,5 +29,5 @@ END
 $$;
 SQL
 
-DATABASE_URL='postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/coffre_test' \
+DATABASE_URL="postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/$database" \
     pnpm --filter @coffre/server run db:migrate >/dev/null

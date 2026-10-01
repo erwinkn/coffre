@@ -1,11 +1,14 @@
-import type { Role } from '../../core/src/access.ts';
+import type { Role } from './access.ts';
+
+export { checkpointMessage, verifyCheckpoint } from './checkpoint.ts';
 
 /**
- * The vault as the app sees it. Every argument and result is plain JSON:
- * strings, numbers, booleans, arrays and objects, never a Buffer, a Date,
- * a class or a function. So it crosses a Workers RPC boundary, or a process
- * boundary later, as it is, and the in-process transport proves it by
- * round-tripping everything through JSON.
+ * The vault as the app sees it: the contract between `@coffre/server` and
+ * `@coffre/vault`, kept in core so that neither side owns it. Every argument
+ * and result is plain JSON: strings, numbers, booleans, arrays and objects,
+ * never a Buffer, a Date, a class or a function. So it crosses a Workers RPC
+ * boundary, or a process boundary later, as it is, and the in-process
+ * transport proves it by round-tripping everything through JSON.
  *
  * The app says who is asking and the vault decides. The app never holds a
  * key: it encrypts a value under a fresh data key, has the vault wrap that

@@ -1,4 +1,5 @@
-import type { AuthMode } from '../../core/src/identity/auth-mode.ts';
+import type { AuthMode } from '@coffre/core/identity';
+
 import { cliAuthHeader } from './auth-mode.ts';
 
 /**

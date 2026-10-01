@@ -31,6 +31,12 @@ importers:
       '@cloudflare/workers-types':
         specifier: 5.20260920.1
         version: 5.20260920.1
+      '@coffre/server':
+        specifier: workspace:*
+        version: link:../packages/server
+      '@coffre/vault':
+        specifier: workspace:*
+        version: link:../packages/vault
       '@tanstack/react-start':
         specifier: 1.168.32
         version: 1.168.32(esbuild@0.28.1)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(rolldown@1.2.9)(vite@8.1.5(@types/node@26.1.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.1))
@@ -99,6 +105,12 @@ importers:
 
   packages/cli:
     devDependencies:
+      '@coffre/client':
+        specifier: workspace:*
+        version: link:../client
+      '@coffre/core':
+        specifier: workspace:*
+        version: link:../core
       '@types/node':
         specifier: 26.1.1
         version: 26.1.1
@@ -136,9 +148,21 @@ importers:
       '@types/node':
         specifier: 26.1.1
         version: 26.1.1
+      tsdown:
+        specifier: 0.23.0
+        version: 0.23.0(tsx@4.23.1)(typescript@5.9.3)
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
 
   packages/server:
     dependencies:
+      '@coffre/client':
+        specifier: workspace:*
+        version: link:../client
+      '@coffre/core':
+        specifier: workspace:*
+        version: link:../core
       '@coffre/ui':
         specifier: workspace:*
         version: link:../ui
@@ -151,15 +175,9 @@ importers:
       drizzle-orm:
         specifier: 0.45.2
         version: 0.45.2(@cloudflare/workers-types@5.20260920.1)(@libsql/client@0.18.0)(@types/pg@8.20.0)(mysql2@3.24.4(@types/node@26.1.1))(pg@8.16.3)
-      jose:
-        specifier: 6.2.3
-        version: 6.2.3
       mysql2:
         specifier: 3.24.4
         version: 3.24.4(@types/node@26.1.1)
-      oauth4webapi:
-        specifier: 3.8.8
-        version: 3.8.8
       pg:
         specifier: 8.16.3
         version: 8.16.3
@@ -170,6 +188,9 @@ importers:
         specifier: 4.4.3
         version: 4.4.3
     devDependencies:
+      '@coffre/vault':
+        specifier: workspace:*
+        version: link:../vault
       '@types/node':
         specifier: 26.1.1
         version: 26.1.1
@@ -187,6 +208,10 @@ importers:
         version: 5.9.3
 
   packages/ui:
+    dependencies:
+      '@coffre/client':
+        specifier: workspace:*
+        version: link:../client
     devDependencies:
       '@cloudflare/vite-plugin':
         specifier: 1.50.0
@@ -194,6 +219,9 @@ importers:
       '@cloudflare/workers-types':
         specifier: 5.20260920.1
         version: 5.20260920.1
+      '@coffre/core':
+        specifier: workspace:*
+        version: link:../core
       '@fontsource-variable/inter':
         specifier: 5.3.0
         version: 5.3.0
@@ -248,11 +276,12 @@ importers:
       wrangler:
         specifier: 4.118.0
         version: 4.118.0(@cloudflare/workers-types@5.20260920.1)
-      zod:
-        specifier: 4.4.3
-        version: 4.4.3
 
   packages/vault:
+    dependencies:
+      '@coffre/core':
+        specifier: workspace:*
+        version: link:../core
     devDependencies:
       '@cloudflare/workers-types':
         specifier: 5.20260920.1

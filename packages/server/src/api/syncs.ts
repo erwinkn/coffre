@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 
-import { mayManageAccess, type Permission } from '../../../core/src/access.ts';
+import { mayManageAccess, type Permission } from '@coffre/core/access';
+import type { GrantChange, Vault } from '@coffre/core/vault';
+
 import type { AuditEntry } from '../db/audit.ts';
 import type { Database, Queryable, Transaction } from '../db/database.ts';
 import {
@@ -20,7 +22,6 @@ import {
   type SyncApplyResult,
   type SyncProvider,
 } from '../sync/index.ts';
-import type { GrantChange, Vault } from '../../../vault/src/types.ts';
 import type { SyncTiming } from '../config.ts';
 import { can } from './caller.ts';
 import { allowed, audited, denied, missing, Refusal, vaultRefusal, type ApiContext } from './context.ts';

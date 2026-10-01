@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 
+import type { LogEntry, LogPage } from '@coffre/core/vault';
+
 import type { LogRow, Store } from './store.ts';
-import type { LogEntry, LogPage } from './types.ts';
 
 /** Part of the format: a change to what is hashed changes this too. */
 const LOG_VERSION = 'coffre.vault.log.v1';

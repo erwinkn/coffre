@@ -1,5 +1,5 @@
+import type { CoffreClient } from '@coffre/client';
 import { createFileRoute, Link } from '@tanstack/react-router';
-import type { CoffreClient } from '../../../client/src/index.ts';
 import { uiResult } from '../lib/coffre';
 import type { AuditRow } from '../shared/models';
 import {

@@ -1,13 +1,13 @@
 import test, { before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
+import { verifyChain, GENESIS_HASH } from '@coffre/core/audit';
 import { eq, sql } from 'drizzle-orm';
 
 import { appendAudit } from '../../src/db/audit.ts';
 import type { Database, Transaction } from '../../src/db/database.ts';
 import { canonicalTimestamp } from '../../src/db/dialect.ts';
 import { auditRange } from '../../src/db/queries.ts';
-import { verifyChain, GENESIS_HASH } from '../../../core/src/audit/chain.ts';
 import { openTestDatabase, postgresOnly } from './engine.ts';
 import { auditChainHead, auditLog } from './tables.ts';
 

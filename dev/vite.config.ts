@@ -3,9 +3,27 @@ import { fileURLToPath } from 'node:url';
 import { cloudflare } from '@cloudflare/vite-plugin';
 import { tanstackStart } from '@tanstack/react-start/plugin/vite';
 import viteReact from '@vitejs/plugin-react';
-import { defineConfig } from 'vite';
+import { defaultClientConditions, defaultServerConditions, defineConfig, type Plugin } from 'vite';
 
 const here = (path: string) => fileURLToPath(new URL(path, import.meta.url));
+
+/**
+ * The packages' sources rather than their builds, in every environment: each
+ * package's `exports` maps the `coffre:source` condition to its `src/`. It
+ * runs last, to add to the conditions the Workers' environments already have.
+ */
+function workspaceSources(): Plugin {
+  return {
+    name: 'coffre:workspace-sources',
+    enforce: 'post',
+    configEnvironment(name, config) {
+      const consumer = config.consumer ?? (name === 'client' ? 'client' : 'server');
+      const conditions =
+        config.resolve?.conditions ?? (consumer === 'client' ? defaultClientConditions : defaultServerConditions);
+      config.resolve = { ...config.resolve, conditions: ['coffre:source', ...conditions] };
+    },
+  };
+}
 
 // `vite dev` of a whole deployment of coffre around the pages
 // (deployment/wrangler.jsonc, deployment/app.ts), with its vault beside it
@@ -33,14 +51,6 @@ export default defineConfig({
     },
   },
 
-  resolve: {
-    alias: {
-      '@coffre/server/cloudflare': here('../packages/server/src/cloudflare.ts'),
-      '@coffre/vault/cloudflare': here('../packages/vault/src/cloudflare.ts'),
-      '@coffre/ui': here('../packages/ui/src/entry.ts'),
-    },
-  },
-
   plugins: [
     cloudflare({
       viteEnvironment: { name: 'ssr' },
@@ -55,5 +65,6 @@ export default defineConfig({
     // server. Must come before the React plugin.
     tanstackStart(),
     viteReact(),
+    workspaceSources(),
   ],
 });

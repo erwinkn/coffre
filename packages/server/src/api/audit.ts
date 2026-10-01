@@ -1,5 +1,7 @@
-import { roleGrants } from '../../../core/src/access.ts';
-import { GENESIS_HASH, verifyChain } from '../../../core/src/audit/chain.ts';
+import { roleGrants } from '@coffre/core/access';
+import { GENESIS_HASH, verifyChain } from '@coffre/core/audit';
+import { verifyCheckpoint, type LogPage } from '@coffre/core/vault';
+
 import { SNAPSHOT } from '../db/dialect.ts';
 import {
   auditHead,
@@ -8,8 +10,6 @@ import {
   resolvePath,
   type AuditFilter,
 } from '../db/queries.ts';
-import { verifyCheckpoint } from '../../../vault/src/checkpoint.ts';
-import type { LogPage } from '../../../vault/src/types.ts';
 import type { ApiContext } from './context.ts';
 import { forbidden, notFound, vaultRefused } from './errors.ts';
 import { formatMember, parseMember, type Path } from './paths.ts';

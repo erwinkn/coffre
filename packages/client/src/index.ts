@@ -11,7 +11,28 @@
  */
 import type { Api, AuthInfo, DryRunOutcome, DryRunResult, SetResult } from './api.ts';
 
-export type { Api, AuthInfo, DryRunOutcome, DryRunResult, Json, SetResult } from './api.ts';
+export type {
+  AccessValue,
+  Api,
+  AuditEntryView,
+  AuthInfo,
+  DryRunOutcome,
+  DryRunResult,
+  IdentityRow,
+  Json,
+  Me,
+  Member,
+  OffboardingReport,
+  ProjectSummary,
+  RemovedMember,
+  RunOutcome,
+  SecretKey,
+  SecretVersion,
+  ServiceTokenRow,
+  SessionRow,
+  SetResult,
+  SyncView,
+} from './api.ts';
 export {
   DESTINATIONS,
   configFromArguments,
@@ -59,9 +80,9 @@ const COFFRE_ERROR = Symbol.for('@coffre/client:CoffreError');
 
 export class CoffreError extends Error {
   /**
-   * `@coffre/ui` and `@coffre/server` each bundle a copy of this class, and
-   * a page is handed a client from the server's copy. So `instanceof` asks
-   * for the mark every copy leaves, rather than for this copy's prototype.
+   * `@coffre/ui`'s prebuilt pages bundle a copy of this class, and a page is
+   * handed a client the server made with this package's. So `instanceof`
+   * asks for the mark every copy leaves, rather than for this copy's prototype.
    */
   static [Symbol.hasInstance](value: unknown): boolean {
     return typeof value === 'object' && value !== null && COFFRE_ERROR in value;

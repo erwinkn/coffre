@@ -14,10 +14,6 @@
  *
  * The Worker's config binds the Durable Object as `VAULT_OBJECT`.
  */
-import { DurableObject, WorkerEntrypoint } from 'cloudflare:workers';
-
-import { resolveVaultConfig, type VaultConfig } from './config.ts';
-import { durableObjectSqlite } from './sqlite-durable-object.ts';
 import type {
   AdmitInput,
   CheckpointInput,
@@ -28,7 +24,11 @@ import type {
   UnwrapInput,
   Vault,
   WrapInput,
-} from './types.ts';
+} from '@coffre/core/vault';
+import { DurableObject, WorkerEntrypoint } from 'cloudflare:workers';
+
+import { resolveVaultConfig, type VaultConfig } from './config.ts';
+import { durableObjectSqlite } from './sqlite-durable-object.ts';
 import { openVault } from './vault.ts';
 
 export type { Vault, VaultConfig };

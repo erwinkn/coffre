@@ -1,9 +1,3 @@
-import { Fragment, useEffect, useState, type ReactNode } from 'react';
-import { useRouter } from '@tanstack/react-router';
-import { DropdownMenu } from 'radix-ui';
-import { toast } from 'sonner';
-import { useCoffre } from '../lib/coffre';
-import { useAction } from '../lib/use-action';
 import {
   DESTINATIONS,
   destination,
@@ -13,7 +7,13 @@ import {
   isAsked,
   type DestinationKind,
   type FormValues,
-} from '../../../client/src/index.ts';
+} from '@coffre/client';
+import { Fragment, useEffect, useState, type ReactNode } from 'react';
+import { useRouter } from '@tanstack/react-router';
+import { DropdownMenu } from 'radix-ui';
+import { toast } from 'sonner';
+import { useCoffre } from '../lib/coffre';
+import { useAction } from '../lib/use-action';
 import type { RunOutcome, SyncView } from '../shared/models';
 import { Card } from './page';
 import { ConfirmDialog, EmptyState, ErrorLine, Modal, Notice, Spinner, Timestamp, Toggletip } from './ui';

@@ -24,9 +24,11 @@
   "scripts": {
     "build": "tsdown && node scripts/copy-templates.ts",
     "typecheck": "tsc --noEmit",
-    "test": "node --test"
+    "test": "node --conditions=coffre:source --test"
   },
   "devDependencies": {
+    "@coffre/client": "workspace:*",
+    "@coffre/core": "workspace:*",
     "@types/node": "26.1.1",
     "tsdown": "0.23.0",
     "typescript": "5.9.3"

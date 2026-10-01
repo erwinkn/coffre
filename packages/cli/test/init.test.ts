@@ -26,7 +26,7 @@ function exampleFiles(kind: string): string[] {
 }
 
 function coffre(args: string[], cwd: string, home: string): string {
-  return execFileSync(process.execPath, [main, ...args], {
+  return execFileSync(process.execPath, ['--conditions=coffre:source', main, ...args], {
     cwd,
     encoding: 'utf8',
     env: { ...process.env, HOME: home },

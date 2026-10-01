@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { cloudflareAccess, devIdp, signin } from '../../core/src/identity/auth-mode.ts';
-import { github } from '../../core/src/identity/signin/config.ts';
+import { cloudflareAccess, devIdp, github, signin } from '@coffre/core/identity';
+
 import { resolveConfig, type CoffreConfig } from '../src/config.ts';
 
 const vault = {} as CoffreConfig['vault'];

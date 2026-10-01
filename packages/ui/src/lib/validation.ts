@@ -1,7 +1,7 @@
 /**
  * Client-side hints for the two identifier shapes people type.
  *
- * The server validates with the zod schemas in `shared/schemas.ts` and stays
+ * The server validates with the zod schemas in `@coffre/core/schemas` and stays
  * the authority; these only let a form say what is wrong before a round trip.
  * They are plain patterns rather than imports of those schemas so the browser
  * bundle does not carry zod, and `test/validation.test.ts` holds the two in

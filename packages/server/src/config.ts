@@ -1,6 +1,5 @@
-import type { Auth, AuthConfig } from '../../core/src/identity/auth-mode.ts';
-import { publicOrigin } from '../../core/src/identity/signin/config.ts';
-import type { Vault } from '../../vault/src/types.ts';
+import { publicOrigin, type Auth, type AuthConfig } from '@coffre/core/identity';
+import type { Vault } from '@coffre/core/vault';
 
 /**
  * What every deployment writes, on either runtime. The runtime adds where

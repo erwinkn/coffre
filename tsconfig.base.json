@@ -1,6 +1,7 @@
 // What every package's tsconfig extends. Source runs as TypeScript under
 // Node 24's type stripping and is bundled for publishing, so imports keep
-// their `.ts` extensions and nothing is emitted from here.
+// their `.ts` extensions and nothing is emitted from here. `coffre:source`
+// reads the other packages' sources, as Node and Vite do in the workspace.
 {
   "compilerOptions": {
     "target": "ES2023",
@@ -14,6 +15,7 @@
     "moduleResolution": "bundler",
     "resolveJsonModule": true,
     "isolatedModules": true,
-    "allowImportingTsExtensions": true
+    "allowImportingTsExtensions": true,
+    "customConditions": ["coffre:source"]
   }
 }

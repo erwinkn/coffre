@@ -1,4 +1,4 @@
-import type { SyncProviderKind } from '../../../client/src/destinations.ts';
+import type { SyncProviderKind } from '@coffre/client';
 
 export type { SyncProviderKind };
 

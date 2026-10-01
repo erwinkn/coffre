@@ -1,5 +1,6 @@
-import type { Role } from '../../../core/src/access.ts';
-import type { AccessValue } from '../../../server/src/api/access.ts';
+import type { AccessValue } from '@coffre/client';
+import type { Role } from '@coffre/core/access';
+
 import type { GrantRow } from '../shared/models';
 
 /** Read or write on one environment, and when it ends: an ISO instant, or null for never. */

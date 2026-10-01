@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { revealIsCurrent, type Reveal } from '../../ui/src/lib/reveal.ts';
+import { revealIsCurrent, type Reveal } from '../src/lib/reveal.ts';
 
 const revealed: Reveal = { value: 'postgres://old', version: 3, at: 0 };
 

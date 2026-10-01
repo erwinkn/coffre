@@ -1,3 +1,4 @@
+import { CoffreError, type CoffreClient } from '@coffre/client';
 import type { ReactNode } from 'react';
 import {
   createRootRouteWithContext,
@@ -10,7 +11,6 @@ import {
 } from '@tanstack/react-router';
 import { Toaster } from 'sonner';
 import globalsCss from '../styles/globals.css?url';
-import { CoffreError, type CoffreClient } from '../../../client/src/index.ts';
 import { deriveUiCapabilities } from '../lib/capabilities';
 import type { RouterContext } from '../router';
 import type { Me } from '../shared/models';

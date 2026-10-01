@@ -1,16 +1,21 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 
-import type { Principal } from '../../../core/src/identity/types.ts';
-import type { SigninConfig } from '../../../core/src/identity/signin/config.ts';
-import type { PendingSignin, SigninProfile } from '../../../core/src/identity/signin/types.ts';
-import { deriveKey, seal, unseal } from '../../../core/src/identity/signin/sealed.ts';
 import {
+  deriveKey,
   generateToken,
   hashToken,
   isCoffreToken,
+  seal,
   tokenHint,
+  unseal,
   type CredentialKind,
-} from '../../../core/src/identity/tokens.ts';
+  type PendingSignin,
+  type Principal,
+  type SigninConfig,
+  type SigninProfile,
+} from '@coffre/core/identity';
+import type { Access, Vault } from '@coffre/core/vault';
+
 import type { AuditEntry } from '../db/audit.ts';
 import type { Database, Transaction } from '../db/database.ts';
 import { isUniqueViolation } from '../db/dialect.ts';
@@ -25,7 +30,6 @@ import {
   update,
 } from '../db/queries.ts';
 import { credentials, deviceAuthorizations, identities, principals } from '../db/schema.ts';
-import type { Access, Vault } from '../../../vault/src/types.ts';
 import type { PrincipalRef } from './caller.ts';
 import { allowed, audited, denied, Refusal, type ApiContext } from './context.ts';
 import { ApiError, badRequest, forbidden, notFound } from './errors.ts';

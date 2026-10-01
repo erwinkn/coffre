@@ -6,14 +6,33 @@ their providers in `src/sync`, the Drizzle schema, queries and migrations in `sr
 `/cloudflare` and `/node` entry points), `packages/ui` (`@coffre/ui`: the TanStack
 Start pages, prebuilt), `packages/vault` (`@coffre/vault`: keys, grants, members, its
 own log), `packages/client` (the typed API client the CLI and UI call), `packages/cli`
-(`coffre`, including `coffre init`), and the internal `packages/core`, bundled into
-them. `examples/workers` and `examples/node` are deployments, exactly what `coffre
+(`coffre`, including `coffre init`), and `packages/core` (`@coffre/core`: access
+rules, the audit chain, envelope encryption, KEKs, identity and sign-in, and the
+contract between server and vault in `src/vault.ts`). `examples/workers` and `examples/node` are deployments, exactly what `coffre
 init` writes (a test diffs them). `dev/` holds what only the dev loop uses and nothing
 ships: `dev/start.sh` (`pnpm dev`), the deployment it runs, the dev IdP (`dev/idp`, the
 local stand-in for Cloudflare Access, GitHub and OIDC, which the smokes use too) and
 the seed. `scripts/` holds what dev, tests and CI share. The root `README.md` and the
 `package.json` scripts are the source of truth for commands; this file only adds what
 they leave implicit.
+
+## Packages
+
+A package imports another only by name (`@coffre/core/vault`, never
+`../../core/src/vault.ts`); the `coffre/package-imports` lint rule holds every
+`src`, `test` and `scripts` to it, so each package builds, ships and can be
+internalized into a deployment on its own. The `@coffre/*` dependencies are
+`workspace:*` and every package carries one version: `pnpm bump <version>` moves
+them all and the examples' pins, and `pnpm check:pins` fails on any drift.
+
+Every package's `exports` lists a `coffre:source` condition first, pointing at
+`src/*.ts`. Inside the workspace, dev, tests and typecheck turn it on and read the
+other packages' sources: `tsconfig.base.json` (`customConditions`), Node
+(`--conditions=coffre:source`, in every test script and in `pnpm coffre`), and
+`dev/vite.config.ts` (every Vite environment). Builds leave it off and read each
+other's `dist/`, in pnpm's dependency order, as `dev/deployment` and the examples
+do in their typecheck, like any deployment. Published, the condition is inert.
+Running a package's `.ts` with plain `node` outside those scripts needs the flag.
 
 ## Setup
 
@@ -32,48 +51,51 @@ DB-backed tests need it up. Export `COMPOSE_PROJECT_NAME=coffre` whenever you in
 seed data. It runs the deployment in `dev/deployment/` (`app.ts`, `vault.ts`, their
 `wrangler.jsonc`) under `vite dev`, with the vault as an auxiliary Worker beside the
 app and no port of its own. `dev/vite.config.ts` roots Vite in `packages/ui` (where
-TanStack Start finds the routes) and aliases `@coffre/server/cloudflare`,
-`@coffre/vault/cloudflare` and `@coffre/ui` to their sources, so edits to any of them
-hot-reload without a build. The vault keeps its Durable Object SQLite under
+TanStack Start finds the routes) and resolves every `@coffre/*` import to its
+sources through `coffre:source`, so an edit to any package hot-reloads without a
+build. The vault keeps its Durable Object SQLite under
 `dev/.wrangler/state` (or `$COFFRE_STATE_DIR`), which `pnpm dev` empties before it
 seeds. `COFFRE_DEV_PORT`, `COFFRE_DEV_IDP_PORT` and `COFFRE_DEV_DATABASE` run a
 second stack beside the first (see `dev/start.sh`). Sign in at
 `http://127.0.0.1:3000/login` as `admin@acme.example` (root admin) or any of the
-seeded personas. CLI: `node --env-file=.env.dev packages/cli/src/main.ts <cmd>`.
+seeded personas. CLI: `pnpm coffre <cmd>` (from the root, against `.env.dev`).
 
 **Config is code.** The packages read no environment variable of their own; a
 deployment passes everything to `coffre(env => …)`, `serve({…})`, `vault(env => …)`
 or `serveVault({…})`. The env vars left are the CLI's user-facing ones (`COFFRE_API_URL`,
 `COFFRE_TOKEN`, …), `DATABASE_URL` for `coffre-server migrate`, and the dev and test
 tooling's (`COFFRE_AUTH_MODE` for the dev IdP and seed, `COFFRE_DEV_*`,
-`COFFRE_STATE_DIR`, `COFFRE_TEST_ENGINE`, `SMOKE_PORT`). Don't add another to a package.
+`COFFRE_STATE_DIR`, `COFFRE_TEST_ENGINE`, `COFFRE_TEST_DATABASE`, `SMOKE_PORT`). Don't add another to a package.
 
 **Tests / checks.**
 - `pnpm test` = lint + recreate `coffre_test` + `node --test --test-concurrency=1`
   (serial: the integration suite shares one DB and resets it per test). Needs Postgres.
+  `COFFRE_TEST_DATABASE` names another database, for a second checkout sharing the
+  compose Postgres (and `pnpm test:schema` and MySQL follow it).
 - `pnpm test:sqlite` and `pnpm test:mysql` run the same suite on the other engines
   (`COFFRE_TEST_ENGINE`); `pnpm test:all` runs all three. SQLite needs nothing.
   MySQL uses whatever answers on **:53306**, else starts the compose `mysql`
   service (profile `mysql`, data on tmpfs) via `scripts/ensure-mysql.sh`.
 - `pnpm test:schema` verifies the restricted runtime role's privileges. Postgres only,
   as is the runtime role itself.
-- `pnpm build` builds every package in dependency order (the UI before the server,
-  whose typecheck reads the UI's `dist/index.d.ts`). Most checks below want it first.
+- `pnpm build` builds every package in dependency order (core and client first, the
+  UI before the server, whose build reads their `dist/`). The smokes, the
+  examples' typecheck and `test:consumer` want it first.
 - `pnpm smoke:workers` / `pnpm smoke:node` run `scripts/smoke.mjs` against an example,
   on ports `SMOKE_PORT` (3082) to +2. Workers needs Postgres and uses its own
   `coffre_smoke` database, dropped after; Node runs on SQLite in a temp dir.
-- `pnpm test:consumer [<dir>]` packs the five public packages, runs the packed CLI's
+- `pnpm test:consumer [<dir>]` packs the six packages, runs the packed CLI's
   `init` for both kinds outside the workspace, diffs them against the examples,
   installs the tarballs (pnpm overrides, no workspace links), then typechecks,
   builds and smokes each. It needs network for third-party packages.
 - `pnpm lint`, `pnpm check:pins`, `pnpm check:contrast` do not need Postgres.
-- `pnpm typecheck` covers every package and both examples. It does not need
-  Postgres, but on a fresh checkout it fails until `pnpm build` has run: that writes
-  `packages/ui/src/routeTree.gen.ts` and the `.d.ts` files the server and examples
-  import.
+- `pnpm typecheck` covers every package, `dev/deployment` and both examples. It does
+  not need Postgres, but on a fresh checkout it fails until `pnpm build` has run:
+  that writes `packages/ui/src/routeTree.gen.ts`, and the `dist/` the deployments
+  typecheck against.
 - Run an example's scripts from the root, `pnpm --filter coffre-workers <script>`, not
-  with `--dir`: `examples/workers` has its own `pnpm-workspace.yaml` (as `init`
-  output needs), so pnpm would treat it as a separate, uninstalled workspace.
+  with `--dir`: each example has its own `pnpm-workspace.yaml` (as `init` output
+  needs), so pnpm would treat it as a separate, uninstalled workspace.
 
 **Dependencies.** `pnpm install` enforces exact pins, `ignore-scripts`, and a 7-day
 `minimumReleaseAge` (`pnpm-workspace.yaml`). Add deps with `pnpm run add:dep`
@@ -81,7 +103,9 @@ tooling's (`COFFRE_AUTH_MODE` for the dev IdP and seed, `COFFRE_DEV_*`,
 `packages/ui/src/routeTree.gen.ts` is generated by `vite build`/`vite dev` and
 gitignored, so it is absent on a fresh checkout (see the typecheck note above). The
 examples pin `@coffre/*` at the packages' version, and `linkWorkspacePackages` links
-them to the workspace; keep those versions in step when bumping.
+them to the workspace; `pnpm bump` keeps them in step. The same `minimumReleaseAge`
+is in each example's `pnpm-workspace.yaml`, so in every deployment `init` writes,
+with `@coffre/*` exempt so that a coffre fix is not held back a week.
 
 ## Cursor
 

@@ -1,3 +1,4 @@
+import type { IdentityRow, SessionRow } from '@coffre/client';
 import { createFileRoute, useLoaderData } from '@tanstack/react-router';
 import { toast } from 'sonner';
 import { Card, Fact, PageHeader } from '../components/page';
@@ -8,7 +9,6 @@ import { Monitor, ProviderMark, SignOut, Terminal, X } from '../components/icons
 import { signinErrorMessage } from '../lib/signin-errors';
 import { uiResult, useCoffre } from '../lib/coffre';
 import { useAction } from '../lib/use-action';
-import type { IdentityRow, SessionRow } from '../../../server/src/api/signin';
 
 type Search = { linked?: string; error?: string };
 

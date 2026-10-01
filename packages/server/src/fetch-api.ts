@@ -1,6 +1,6 @@
-import { createClient, type CoffreClient } from '../../client/src/index.ts';
-import type { AuthConfig } from '../../core/src/identity/auth-mode.ts';
-import { ACCESS_JWT_HEADER } from '../../core/src/identity/types.ts';
+import { createClient, type CoffreClient } from '@coffre/client';
+import { ACCESS_JWT_HEADER, type AuthConfig } from '@coffre/core/identity';
+
 import { ApiError } from './api/errors.ts';
 import { serveApi } from './api/router.ts';
 import {

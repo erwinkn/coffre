@@ -1,4 +1,4 @@
-import type { CoffreClient } from '../../client/src/index.ts';
+import type { CoffreClient } from '@coffre/client';
 
 /**
  * The pages: `@coffre/ui`'s handler, or a stand-in in tests. It renders with

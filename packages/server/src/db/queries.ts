@@ -1,6 +1,6 @@
+import type { Envelope } from '@coffre/core/envelope';
 import { and, asc, count, desc, eq, getTableColumns, gt, gte, inArray, isNull, lt, or, sql, type SQL } from 'drizzle-orm';
 
-import type { Envelope } from '../../../core/src/envelope.ts';
 import { own, tablesOf, type Queryable, type Transaction } from './database.ts';
 import * as dialect from './dialect.ts';
 import { canonicalTimestamp, changedRows, clock, forUpdate, migrationLedger, truth, type Table } from './dialect.ts';

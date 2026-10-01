@@ -16,12 +16,14 @@
 import { chmodSync, existsSync, lstatSync, rmSync } from 'node:fs';
 import { Agent, createServer, request as httpRequest, type IncomingMessage } from 'node:http';
 
+import type { Vault } from '@coffre/core/vault';
+
 import { resolveVaultConfig, type VaultConfig } from './config.ts';
 import { METHODS, openLocalVault, type LocalVault } from './local.ts';
-import type { Vault } from './types.ts';
+import type { VaultOptions } from './vault.ts';
 
 export type { Vault, VaultConfig };
-export type { LocalVault };
+export type { LocalVault, VaultOptions };
 
 export type NodeVaultConfig = VaultConfig & {
   /** The vault's own SQLite file, e.g. `./vault.db`. Nothing else may open it. */
@@ -29,8 +31,8 @@ export type NodeVaultConfig = VaultConfig & {
 };
 
 /** The vault in this process. */
-export async function localVault(config: NodeVaultConfig): Promise<LocalVault> {
-  return openLocalVault(config.store, resolveVaultConfig(config));
+export async function localVault(config: NodeVaultConfig, options: VaultOptions = {}): Promise<LocalVault> {
+  return openLocalVault(config.store, resolveVaultConfig(config), options);
 }
 
 const METHOD_NAMES = new Set<string>(METHODS);

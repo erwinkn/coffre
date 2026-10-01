@@ -1,7 +1,7 @@
+import { SigninError, type SigninProfile } from '@coffre/core/identity';
+import { emailAddress } from '@coffre/core/schemas';
 import { z } from 'zod';
 
-import { SigninError, type SigninProfile } from '../../core/src/identity/signin/types.ts';
-import { emailAddress } from '../../core/src/schemas.ts';
 import { ApiError, notFound } from './api/errors.ts';
 import {
   accessTokenForRequest,

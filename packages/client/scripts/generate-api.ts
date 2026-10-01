@@ -16,12 +16,29 @@ import ts from 'typescript';
 const root = fileURLToPath(new URL('../../server/src/', import.meta.url));
 const target = fileURLToPath(new URL('../src/api.ts', import.meta.url));
 
-/** The named types the client re-exports, beside the route map. */
+/**
+ * The named types the client re-exports, beside the route map: what callers
+ * hold on to and pass around, such as the pages' views of a member or a sync.
+ */
 const NAMED = {
+  AccessValue: 'api/access.ts',
+  AuditEntryView: 'api/audit.ts',
   AuthInfo: 'fetch-api.ts',
   DryRunOutcome: 'api/secrets.ts',
   DryRunResult: 'api/secrets.ts',
+  IdentityRow: 'api/signin.ts',
+  Me: 'api/projects.ts',
+  Member: 'api/members.ts',
+  OffboardingReport: 'api/members.ts',
+  ProjectSummary: 'api/projects.ts',
+  RemovedMember: 'api/members.ts',
+  RunOutcome: 'api/syncs.ts',
+  SecretKey: 'api/secrets.ts',
+  SecretVersion: 'api/secrets.ts',
+  ServiceTokenRow: 'api/signin.ts',
+  SessionRow: 'api/signin.ts',
   SetResult: 'api/secrets.ts',
+  SyncView: 'api/syncs.ts',
 } as const;
 
 const PROBE = `${root}__api_probe.ts`;
@@ -49,6 +66,8 @@ function program(probe: string): ts.Program {
     noEmit: true,
     skipLibCheck: true,
     types: ['node'],
+    // The server imports the other packages by name; read their sources, as tsconfig.base.json does.
+    customConditions: ['coffre:source'],
   };
   const host = ts.createCompilerHost(options);
   const getSourceFile = host.getSourceFile;

@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit && tsc --noEmit -p deployment",
-    "test": "node --test"
+    "test": "node --conditions=coffre:source --test"
   },
   "dependencies": {
     "jose": "6.2.3"
@@ -13,6 +13,8 @@
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.50.0",
     "@cloudflare/workers-types": "5.20260920.1",
+    "@coffre/server": "workspace:*",
+    "@coffre/vault": "workspace:*",
     "@tanstack/react-start": "1.168.32",
     "@types/node": "26.1.1",
     "@vitejs/plugin-react": "6.0.3",

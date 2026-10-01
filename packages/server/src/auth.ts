@@ -1,6 +1,5 @@
-import type { Principal } from '../../core/src/identity/types.ts';
-import { ACCESS_JWT_HEADER } from '../../core/src/identity/types.ts';
-import type { AuthConfig } from '../../core/src/identity/auth-mode.ts';
+import { ACCESS_JWT_HEADER, type AuthConfig, type Principal } from '@coffre/core/identity';
+
 import { loadCaller, type Caller } from './api/caller.ts';
 import { ApiError } from './api/errors.ts';
 import { errorResponse } from './http.ts';
