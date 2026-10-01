@@ -4,12 +4,18 @@ import { Browser } from '../browser.ts';
 import { using, type Sql } from '../database.ts';
 import type { Deployment } from '../harness.ts';
 import { defaultGitHubAccount } from '../idp/people.ts';
-import { expect } from '../report.ts';
+import { expect, until } from '../report.ts';
 import { member } from './members.ts';
 import { signIn, type People } from './people.ts';
 import { query, restoreRow } from './storage.ts';
 
 const hash = (value: string) => createHash('sha256').update(value).digest();
+
+// Wrangler can forward console output after the HTTP refusal arrives.
+async function reported(deployment: Deployment, id: string): Promise<void> {
+  const event = new RegExp(`auth_row_tampered[^}]*${id}`);
+  await until(`the sign-in row failure report for ${id}`, async () => event.test(deployment.output()), 10);
+}
 
 async function insertRow(sql: Sql, table: string, row: Record<string, unknown>): Promise<void> {
   const fields = Object.keys(row).filter((field) => field !== 'active_subject');
@@ -28,7 +34,7 @@ export async function forgedCredential(deployment: Deployment, people: People): 
     try {
       const response = await fetch(`${deployment.origin}/api/me`, { headers: { authorization: `Bearer ${token}` } });
       expect(response.status === 401, 'an owner-forged credential authenticated', await response.text());
-      expect(deployment.output().includes('auth_row_tampered') && deployment.output().includes(forged.id), 'the forged credential was not reported');
+      await reported(deployment, forged.id);
     } finally {
       await query(sql, 'DELETE FROM credentials WHERE id = $1', [forged.id]);
     }
@@ -51,7 +57,7 @@ export async function forgedIdentity(deployment: Deployment, people: People): Pr
       // The callback can answer a sanitized server error for a row it cannot authenticate.
       await signIn(deployment, browser, email).catch(() => {});
       expect((await browser.fetch('/api/me')).status === 401, 'an owner-forged identity minted a session');
-      expect(deployment.output().includes('auth_row_tampered') && deployment.output().includes(forged.id), 'the forged identity was not reported');
+      await reported(deployment, forged.id);
     } finally {
       await query(sql, 'DELETE FROM credentials WHERE identity_id = $1', [forged.id]);
       await query(sql, 'DELETE FROM identities WHERE id = $1', [forged.id]);
@@ -85,7 +91,7 @@ export async function forgedApproval(deployment: Deployment, people: People): Pr
       const response = await pollDevice(deployment, device.device_code);
       const body = await response.text();
       expect(!response.ok && !body.includes('access_token'), 'an owner-forged approval minted a session', body);
-      expect(deployment.output().includes('auth_row_tampered') && deployment.output().includes(String(row.id)), 'the forged approval was not reported');
+      await reported(deployment, String(row.id));
     } finally {
       await query(sql, 'DELETE FROM device_authorizations WHERE id = $1', [row.id]);
     }
@@ -115,7 +121,7 @@ export async function editedGeneration(deployment: Deployment, people: People): 
     try {
       const response = await fetch(`${deployment.origin}/api/me`, { headers: { authorization: `Bearer ${issued.token}` } });
       expect(response.status === 401, 'editing the credential generation revived the token', await response.text());
-      expect(deployment.output().includes('auth_row_tampered') && deployment.output().includes(String(old.id)), 'the edited generation was not reported');
+      await reported(deployment, String(old.id));
     } finally {
       await restoreRow(sql, 'credentials', current, 'id');
     }
