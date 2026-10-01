@@ -283,7 +283,7 @@ export async function dryRunSecrets(
 
     // A null-prototype record: a key named __proto__ is a key like any other.
     const keys: Record<string, DryRunOutcome> = Object.create(null);
-    const comparing: { key: string; value: string; secret: SecretRef; envelope: Envelope }[] = [];
+    const comparing: { key: string; value: string; secretVersionId: string; secret: SecretRef; envelope: Envelope }[] = [];
     for (const [key, value] of Object.entries(patch)) {
       const secret = rows.get(key);
       if (value === null) {
@@ -296,7 +296,7 @@ export async function dryRunSecrets(
         continue;
       }
       const { version, envelope } = secret.current;
-      comparing.push({ key, value, secret: secretRef(place, environment, secret, version), envelope });
+      comparing.push({ key, value, secretVersionId: secret.current.id, secret: secretRef(place, environment, secret, version), envelope });
     }
     const opened = await openValues(ctx.vault, { ...asking(ctx, operationId), purpose: 'compare' }, comparing);
     if (!opened.ok) throw vaultRefused(opened.refusal);
@@ -471,6 +471,7 @@ export async function reveal(
       ctx.vault,
       { ...asking(ctx, operationId), purpose: path.key === undefined ? 'run' : 'reveal' },
       rows.map((row) => ({
+        secretVersionId: row.secretVersionId,
         secret: secretRef(place, environment, { id: row.secretId, key: row.key }, row.version),
         envelope: row.envelope,
       })),

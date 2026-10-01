@@ -593,12 +593,13 @@ for (const release of ['credential', 'values'] as const) {
     destination.values.clear();
     destination.applied = [];
     destination.tokens = [];
+    const [credential] = await db.owner.select({ versionId: secrets.currentVersionId }).from(secrets).where(eq(secrets.key, 'DEST_TOKEN'));
     let failCommit = false;
     const unwrap = deps.vault.unwrap;
     t.mock.method(deps.vault, 'unwrap', async (input: Parameters<typeof unwrap>[0]) => {
       const result = await unwrap(input);
-      const credential = input.items.some(({ secret }) => secret.path === CREDENTIAL);
-      if (credential === (release === 'credential')) failCommit = true;
+      const opensCredential = input.items.some(({ secretVersionId }) => secretVersionId === credential.versionId);
+      if (opensCredential === (release === 'credential')) failCommit = true;
       return result;
     });
     const transaction = db.runtime.transaction.bind(db.runtime);

@@ -17,7 +17,7 @@ import { openLocalVault, type LocalVault } from '../src/local.ts';
 import { entryView, vaultLogKey } from '../src/log.ts';
 import { memberMac, rowKey } from '../src/rows.ts';
 import * as store from '../src/store.ts';
-import type { VaultOptions } from '../src/vault.ts';
+import { openVault, prepareVault, type VaultOptions } from '../src/vault.ts';
 import {
   emptyDatabase,
   ENGINE,
@@ -25,6 +25,7 @@ import {
   newProject,
   openTestDatabase,
   places,
+  storedVersions,
   postgresOnly,
   rows,
   run,
@@ -100,6 +101,10 @@ async function wrapped(w: World, secret: SecretRef): Promise<WrappedKey> {
   return result.wrapped[0];
 }
 
+function versionItems(items: { secret: SecretRef; wrapped: WrappedKey }[]) {
+  return storedVersions(db.owner, items);
+}
+
 /** The vault's entries, oldest first, as stored in the log. */
 async function vaultLog(_w: World) {
   return (await store.vaultPage(db.owner, undefined, 200)).map(entryView).reverse();
@@ -115,18 +120,112 @@ test('a read needs a live grant on the environment, and unwraps the key it was w
   const key = randomBytes(32).toString('base64');
   const wrap = await w.vault.wrap({ principal: ADA, items: [{ secret: devSecret, key }] });
   assert.ok(wrap.ok);
-  const read = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: [{ secret: devSecret, wrapped: wrap.wrapped[0] }] });
+  const read = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: await versionItems([{ secret: devSecret, wrapped: wrap.wrapped[0] }]) });
   assert.deepEqual(read, { ok: true, keys: [key] });
 
   const prodSecret = await w.secret(w.prod);
   const refused = await w.vault.unwrap({
     principal: ADA,
     purpose: 'reveal',
-    items: [{ secret: prodSecret, wrapped: await wrapped(w, prodSecret) }],
+    items: await versionItems([{ secret: prodSecret, wrapped: await wrapped(w, prodSecret) }]),
   });
   assert.equal(!refused.ok && refused.refusal.code, 'no_grant');
   const write = await w.vault.wrap({ principal: ADA, items: [{ secret: prodSecret, key }] });
   assert.equal(!write.ok && write.refusal.code, 'no_grant');
+});
+
+test('a read records the stored version instead of the app claim', async () => {
+  const w = await world();
+  const secret = await w.secret(w.dev);
+  const key = randomBytes(32).toString('base64');
+  const sealed = await w.vault.wrap({ principal: ROOT, items: [{ secret, key }] });
+  assert.ok(sealed.ok);
+  const { secretVersions, auditLog } = tablesOf(db.owner);
+  const id = randomUUID();
+  await db.owner.insert(secretVersions).values({
+    id, secretId: secret.secretId, version: 1, envelopeVersion: 1,
+    ciphertext: Buffer.from('value'), iv: Buffer.alloc(12), authTag: Buffer.alloc(16),
+    wrappedDek: Buffer.from(sealed.wrapped[0].bytes, 'base64'),
+    kekProvider: sealed.wrapped[0].kekProvider, kekId: sealed.wrapped[0].kekId,
+    kekVersion: sealed.wrapped[0].kekVersion, createdBy: ROOT,
+  });
+  // Extra fields from an app acting outside the contract must not name the released version.
+  const input = { principal: ROOT, purpose: 'reveal' as const, items: [{
+    secretVersionId: id, secret: { ...secret, version: 9 }, wrapped: sealed.wrapped[0],
+  }] };
+  assert.deepEqual(await w.vault.unwrap(input), { ok: true, keys: [key] });
+  const [entry] = await db.owner.select().from(auditLog).where(eq(auditLog.action, 'secret.read'));
+  assert.equal(JSON.parse(entry.metadata!).version, 1);
+  assert.equal(entry.secretVersionId, id);
+});
+
+test('a restore records the stored source version instead of the app claim', async () => {
+  const w = await world();
+  const secret = await w.secret(w.dev);
+  const sealed = await wrapped(w, secret);
+  const [source] = await versionItems([{ secret, wrapped: sealed }]);
+  const input = { principal: ROOT, items: [{
+    secret: { ...secret, version: 2 }, ...source, from: 9, wrapped: sealed,
+  }] };
+  assert.ok((await w.vault.rewrap(input)).ok);
+  const { auditLog } = tablesOf(db.owner);
+  const [entry] = await db.owner.select().from(auditLog).where(eq(auditLog.action, 'key.rewrap'));
+  assert.equal(JSON.parse(entry.metadata!).from, 1);
+  assert.equal(entry.secretVersionId, source.secretVersionId);
+});
+
+test('a missing version refuses the whole batch before a key service sees it', async () => {
+  const remote = service();
+  const w = await world({ keks: remote.keks });
+  const secret = await w.secret(w.dev);
+  const sealed = await wrapped(w, secret);
+  const [source] = await versionItems([{ secret, wrapped: sealed }]);
+  const missing = randomUUID();
+  const input = { principal: ROOT, purpose: 'run' as const, items: [
+    { ...source, secret, wrapped: sealed },
+    { secretVersionId: missing, secret, wrapped: sealed },
+  ] };
+  const result = await w.vault.unwrap(input);
+  assert.equal(!result.ok && result.refusal.code, 'bad_claim');
+  assert.equal(remote.seen.unwrap, 0);
+  const { auditLog } = tablesOf(db.owner);
+  const entries = await db.owner.select().from(auditLog).where(eq(auditLog.action, 'secret.read')).orderBy(asc(auditLog.seq));
+  assert.deepEqual(entries.map((entry) => [entry.decision, entry.code, entry.secretVersionId]), [
+    ['deny', 'bad_claim', source.secretVersionId], ['deny', 'bad_claim', null],
+  ]);
+  assert.equal(JSON.parse(entries[1].metadata!).secretVersionId, missing);
+});
+
+test('a restore cannot use a stored version belonging to another secret', async () => {
+  const w = await world();
+  const secret = await w.secret(w.dev);
+  const other = await w.secret(w.dev);
+  const sealed = await wrapped(w, secret);
+  // Even a source row carrying the target's wrapped key cannot change which secret it belongs to.
+  const [source] = await versionItems([{ secret: other, wrapped: sealed }]);
+  const input = { principal: ROOT, items: [{ secret, ...source, from: 1, wrapped: sealed }] };
+  const result = await w.vault.rewrap(input);
+  assert.equal(!result.ok && result.refusal.code, 'bad_claim');
+});
+
+test('aliased restore targets keep each source version in its own entry', async () => {
+  const config = configure();
+  const w = await world(config);
+  const first = await w.secret(w.dev);
+  const second = { ...first, version: 2 };
+  const wrappedKeys = [await wrapped(w, first), await wrapped(w, second)];
+  const sources = await versionItems([first, second].map((secret, i) => ({ secret, wrapped: wrappedKeys[i] })));
+  const target = { ...first, version: 3 };
+  // Workers RPC can preserve aliases; use the implementation without the local JSON transport.
+  const vault = openVault(db.vault, await prepareVault(config));
+  const result = await vault.rewrap({ principal: ROOT, items: sources.map((source, i) => ({
+    secret: target, ...source, from: i + 1, wrapped: wrappedKeys[i],
+  })) });
+  assert.ok(result.ok);
+  const { auditLog } = tablesOf(db.owner);
+  const entries = await db.owner.select().from(auditLog).where(eq(auditLog.action, 'key.rewrap')).orderBy(asc(auditLog.seq));
+  assert.deepEqual(entries.map((entry) => entry.secretVersionId), sources.map((source) => source.secretVersionId));
+  assert.deepEqual(entries.map((entry) => JSON.parse(entry.metadata!).from), [1, 2]);
 });
 
 test('a batch is all or nothing, and every item is logged either way', async () => {
@@ -138,15 +237,15 @@ test('a batch is all or nothing, and every item is logged either way', async () 
     { secret: devSecret, wrapped: await wrapped(w, devSecret) },
     { secret: prodSecret, wrapped: await wrapped(w, prodSecret) },
   ];
-  const result = await w.vault.unwrap({ principal: ADA, purpose: 'run', items, requestId: 'req-1' });
+  const result = await w.vault.unwrap({ principal: ADA, purpose: 'run', items: await versionItems(items), requestId: 'req-1' });
   assert.equal(!result.ok && result.refusal.code, 'no_grant');
 
   const reads = (await vaultLog(w)).filter((entry) => entry.action === 'secret.read');
   assert.deepEqual(
     reads.map((entry) => [entry.subject, entry.outcome, entry.code, entry.detail.purpose, entry.detail.secretId, entry.detail.requestId]),
     [
-      ['market/dev/DATABASE_URL', 'refuse', 'no_grant', 'run', devSecret.secretId, 'req-1'],
-      ['market/prod/DATABASE_URL', 'refuse', 'no_grant', 'run', prodSecret.secretId, 'req-1'],
+      [devSecret.path, 'refuse', 'no_grant', 'run', devSecret.secretId, 'req-1'],
+      [prodSecret.path, 'refuse', 'no_grant', 'run', prodSecret.secretId, 'req-1'],
     ],
   );
 });
@@ -158,7 +257,7 @@ test('a wrapped key presented as another secret is a bad claim', async () => {
   const result = await w.vault.unwrap({
     principal: ADA,
     purpose: 'reveal',
-    items: [{ secret: await w.secret(w.prod), wrapped: await wrapped(w, devSecret) }],
+    items: await versionItems([{ secret: await w.secret(w.prod), wrapped: await wrapped(w, devSecret) }]),
   });
   assert.equal(!result.ok && result.refusal.code, 'bad_claim');
 });
@@ -248,7 +347,7 @@ for (const [operation, failure] of [
     if (failure === 'log') t.after(await failAppends(db.owner, [LOGGED[operation]]));
     const call = operation === 'wrap'
       ? w.vault.wrap({ principal: ROOT, items: [{ secret, key }] })
-      : w.vault.unwrap({ principal: ROOT, purpose: 'reveal', items: [{ secret, wrapped: sealed.wrapped[0] }] });
+      : w.vault.unwrap({ principal: ROOT, purpose: 'reveal', items: await versionItems([{ secret, wrapped: sealed.wrapped[0] }]) });
     if (failure === 'log') {
       await assert.rejects(call, (error) => /test log failure/.test(`${error} ${(error as { cause?: unknown }).cause}`));
     } else if (failure === 'provider') {
@@ -275,16 +374,16 @@ test('only a call the rules allow reaches the KEK', async () => {
   const before = { ...seen };
   const code = (outcome: { ok: boolean; refusal?: { code: string } }) => outcome.refusal?.code;
 
-  assert.equal(code(await w.vault.unwrap({ principal: ADA, purpose: 'run', items })), 'no_grant');
-  assert.equal(code(await w.vault.unwrap({ principal: BOB, purpose: 'run', items: items.slice(0, 1) })), 'not_a_member');
+  assert.equal(code(await w.vault.unwrap({ principal: ADA, purpose: 'run', items: await versionItems(items) })), 'no_grant');
+  assert.equal(code(await w.vault.unwrap({ principal: BOB, purpose: 'run', items: await versionItems(items.slice(0, 1)) })), 'not_a_member');
   assert.equal(code(await w.vault.wrap({ principal: ADA, items: [{ secret: dev, key: randomBytes(32).toString('base64') }] })), 'no_grant');
   const again = { ...dev, version: 2 };
-  assert.equal(code(await w.vault.rewrap({ principal: ADA, items: [{ secret: again, from: 1, wrapped: items[0]!.wrapped }] })), 'no_grant');
+  assert.equal(code(await w.vault.rewrap({ principal: ADA, items: [{ secret: again, ...(await versionItems(items.slice(0, 1)))[0] }] })), 'no_grant');
   assert.deepEqual({ wrap: seen.wrap, unwrap: seen.unwrap }, { wrap: before.wrap, unwrap: before.unwrap }, 'refused, so no key was wrapped or unwrapped');
 
-  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'run', items: items.slice(0, 1) })).ok, true);
-  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'run', items: items.slice(0, 1) })).ok, true);
-  assert.equal(code(await w.vault.unwrap({ principal: ADA, purpose: 'run', items: items.slice(0, 1) })), 'bulk_limit');
+  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'run', items: await versionItems(items.slice(0, 1)) })).ok, true);
+  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'run', items: await versionItems(items.slice(0, 1)) })).ok, true);
+  assert.equal(code(await w.vault.unwrap({ principal: ADA, purpose: 'run', items: await versionItems(items.slice(0, 1)) })), 'bulk_limit');
   assert.equal(seen.unwrap, before.unwrap + 2, 'past the bulk limit, nothing reaches the KEK either');
 
   // With a key service, each call that reaches it is announced first, and a
@@ -300,7 +399,7 @@ test('a key service that cannot answer fails the call, with each key it was aske
   const secret = await w.secret(w.dev);
   const items = [{ secret, wrapped: await wrapped(w, secret) }];
   seen.down = true;
-  await assert.rejects(w.vault.unwrap({ principal: ADA, purpose: 'run', items }), KekUnavailableError);
+  await assert.rejects(w.vault.unwrap({ principal: ADA, purpose: 'run', items: await versionItems(items) }), KekUnavailableError);
   const entries = (await vaultLog(w)).filter((entry) => entry.actor === ADA);
   assert.deepEqual(
     entries.map((entry) => [entry.action, entry.outcome, entry.code]),
@@ -309,7 +408,7 @@ test('a key service that cannot answer fails the call, with each key it was aske
   );
 
   seen.down = false;
-  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'run', items })).ok, true, 'and the next call goes through');
+  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'run', items: await versionItems(items) })).ok, true, 'and the next call goes through');
 });
 
 test('a key service failing part of a batch leaves each key\'s outcome, and the keys it opened are withheld', async () => {
@@ -322,20 +421,20 @@ test('a key service failing part of a batch leaves each key\'s outcome, and the 
   seen.failing.add(secrets[1].secretId);
   seen.opened.length = 0;
 
-  await assert.rejects(w.vault.unwrap({ principal: ADA, purpose: 'run', items }), /did not answer for 1 of 3 keys/);
+  await assert.rejects(w.vault.unwrap({ principal: ADA, purpose: 'run', items: await versionItems(items) }), /did not answer for 1 of 3 keys/);
   const entries = (await vaultLog(w)).filter((entry) => entry.actor === ADA);
   assert.deepEqual(
     entries.map((entry) => [entry.action, entry.subject, entry.code]),
     [
       ['key.intent', null, null],
-      ['secret.read', 'market/dev/A', 'withheld'],
-      ['secret.read', 'market/dev/B', 'kms_unavailable'],
-      ['secret.read', 'market/dev/C', 'withheld'],
+      ['secret.read', items[0].secret.path, 'withheld'],
+      ['secret.read', items[1].secret.path, 'kms_unavailable'],
+      ['secret.read', items[2].secret.path, 'withheld'],
     ],
   );
   assert.deepEqual(
     (entries[0].detail.keys as { subject: string }[]).map((key) => key.subject),
-    ['market/dev/A', 'market/dev/B', 'market/dev/C'],
+    items.map((item) => item.secret.path),
   );
   assert.equal(seen.opened.length, 2);
   assert.ok(seen.opened.every((key) => key.equals(Buffer.alloc(32))), 'the keys KMS opened are wiped, not released');
@@ -350,7 +449,7 @@ test('a key service past the budget is cancelled, and opened keys are wiped', as
   seen.hanging.add(slow.secretId);
   seen.opened.length = 0;
 
-  await assert.rejects(w.vault.unwrap({ principal: ADA, purpose: 'run', items }), KekUnavailableError);
+  await assert.rejects(w.vault.unwrap({ principal: ADA, purpose: 'run', items: await versionItems(items) }), KekUnavailableError);
   const outcomes = (await vaultLog(w)).filter((entry) => entry.action === 'secret.read' && entry.actor === ADA);
   assert.deepEqual(outcomes.map((entry) => entry.code), ['withheld', 'kms_uncertain']);
   assert.equal(seen.opened.length, 1, 'the slow operation was cancelled');
@@ -389,9 +488,9 @@ test('an expired grant refuses with its own code', async () => {
   await member(w, ADA, [[w.dev, 'viewer', Date.now() + 60_000]]);
   const secret = await w.secret(w.dev);
   const items = [{ secret, wrapped: await wrapped(w, secret) }];
-  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items })).ok, true);
+  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: await versionItems(items) })).ok, true);
   w.clock.offset += 61_000;
-  const result = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items });
+  const result = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: await versionItems(items) });
   assert.equal(!result.ok && result.refusal.code, 'expired');
   assert.deepEqual((await w.vault.access(ADA)).grants, []);
 });
@@ -403,17 +502,17 @@ test('the bulk limit counts keys per principal over a rolling window', async () 
   const secrets = [await w.secret(w.dev), await w.secret(w.dev), await w.secret(w.dev)];
   const items = await Promise.all(secrets.map(async (secret) => ({ secret, wrapped: await wrapped(w, secret) })));
 
-  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'run', items })).ok, true);
-  const over = await w.vault.unwrap({ principal: ADA, purpose: 'run', items });
+  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'run', items: await versionItems(items) })).ok, true);
+  const over = await w.vault.unwrap({ principal: ADA, purpose: 'run', items: await versionItems(items) });
   assert.equal(!over.ok && over.refusal.code, 'bulk_limit');
   // Refusals do not count, and neither does anyone else's reading.
-  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'run', items: items.slice(0, 2) })).ok, true);
-  assert.equal((await w.vault.unwrap({ principal: BOB, purpose: 'run', items })).ok, true);
-  const stillOver = await w.vault.unwrap({ principal: ADA, purpose: 'run', items: items.slice(0, 1) });
+  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'run', items: await versionItems(items.slice(0, 2)) })).ok, true);
+  assert.equal((await w.vault.unwrap({ principal: BOB, purpose: 'run', items: await versionItems(items) })).ok, true);
+  const stillOver = await w.vault.unwrap({ principal: ADA, purpose: 'run', items: await versionItems(items.slice(0, 1)) });
   assert.equal(!stillOver.ok && stillOver.refusal.code, 'bulk_limit');
 
   w.clock.offset += 60_001;
-  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'run', items })).ok, true);
+  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'run', items: await versionItems(items) })).ok, true);
   assert.equal((await vaultLog(w)).filter((entry) => entry.code === 'bulk_limit').length, 4);
 });
 
@@ -427,7 +526,7 @@ test('two instances share one log, one bulk limit and one set of generations', a
   const items = [{ secret, wrapped: await wrapped(w, secret) }];
 
   const reads = await Promise.all(
-    Array.from({ length: 12 }, (_, i) => (i % 2 === 0 ? w.vault : other).unwrap({ principal: ADA, purpose: 'run', items })),
+    Array.from({ length: 12 }, async (_, i) => (i % 2 === 0 ? w.vault : other).unwrap({ principal: ADA, purpose: 'run', items: await versionItems(items) })),
   );
   assert.equal(reads.filter((read) => read.ok).length, 5, 'exactly the limit, across both');
   assert.ok(reads.filter((read) => !read.ok).every((read) => !read.ok && read.refusal.code === 'bulk_limit'));
@@ -449,7 +548,7 @@ test('two processes on one SQLite file share the bulk limit exactly', { skip: EN
   const w = await world({ keks: new KekRegistry(new LocalKekProvider(kek, 'test-kek-1')), bulkLimit });
   await member(w, ADA, [[w.dev, 'viewer']]);
   const secret = await w.secret(w.dev);
-  const input = { principal: ADA, purpose: 'run' as const, items: [{ secret, wrapped: await wrapped(w, secret) }] };
+  const input = { principal: ADA, purpose: 'run' as const, items: await versionItems([{ secret, wrapped: await wrapped(w, secret) }]) };
 
   const reader = spawn(
     process.execPath,
@@ -481,7 +580,7 @@ test('a removal waits for a read in flight at the key service, and the next read
   const secret = await w.secret(w.dev);
   const items = [{ secret, wrapped: await wrapped(w, secret) }];
 
-  const read = w.vault.unwrap({ principal: ADA, purpose: 'reveal', items });
+  const read = w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: await versionItems(items) });
   await sleep(150);
   const asked = seen.unwrap;
   const removal = other.remove({ actor: ROOT, principal: ADA });
@@ -493,7 +592,7 @@ test('a removal waits for a read in flight at the key service, and the next read
   const removal_ = log.find((entry) => entry.action === 'member.remove')!;
   assert.ok(release.seq < removal_.seq, 'and is logged before the removal, which waited for it');
 
-  const next = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items });
+  const next = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: await versionItems(items) });
   assert.equal(!next.ok && next.refusal.code, 'removed');
   assert.equal(seen.unwrap, asked, 'refused before the key service is asked');
 });
@@ -512,7 +611,7 @@ test('a vault checks its KEK before its first key operation, against a check val
   const w = await world({ keks });
   await member(w, ADA, [[w.dev, 'viewer']]);
   const secret = await w.secret(w.dev);
-  const items = [{ secret, wrapped: await wrapped(w, secret) }];
+  const items = await versionItems([{ secret, wrapped: await wrapped(w, secret) }]);
   // A fresh database holds nothing to prove the KEK on: its check value is recorded.
   const [check] = await keyChecks(w);
   assert.deepEqual(
@@ -594,7 +693,7 @@ test('a removed member is refused everything until admitted again, with no grant
   const removed = await w.vault.remove({ actor: ROOT, principal: ADA });
   assert.ok(removed.ok);
   assert.deepEqual(removed.revoked.map((grant) => grant.role).sort(), ['access-manager', 'viewer']);
-  const read = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items });
+  const read = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: await versionItems(items) });
   assert.equal(!read.ok && read.refusal.code, 'removed');
   const manage = await w.vault.setAccess({
     actor: ADA,
@@ -613,7 +712,7 @@ test('a removed member is refused everything until admitted again, with no grant
   const access = await w.vault.access(ADA);
   assert.equal(access.status, 'active');
   assert.deepEqual(access.grants, []);
-  const again = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items });
+  const again = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: await versionItems(items) });
   assert.equal(!again.ok && again.refusal.code, 'no_grant');
 });
 
@@ -679,9 +778,9 @@ test('a sync is a member from its first grant, and whoever manages environments 
 
   const secret = await w.secret(w.dev);
   const items = [{ secret, wrapped: await wrapped(w, secret) }];
-  assert.equal((await w.vault.unwrap({ principal: sync, purpose: 'sync', items })).ok, true);
+  assert.equal((await w.vault.unwrap({ principal: sync, purpose: 'sync', items: await versionItems(items) })).ok, true);
   assert.deepEqual(await grant(null), { ok: true, changes: ['revoked'] });
-  const stopped = await w.vault.unwrap({ principal: sync, purpose: 'sync', items });
+  const stopped = await w.vault.unwrap({ principal: sync, purpose: 'sync', items: await versionItems(items) });
   assert.equal(!stopped.ok && stopped.refusal.code, 'no_grant');
 
   assert.equal((await grant('viewer')).ok, true);
@@ -711,7 +810,7 @@ test('the log is chained, append-only, and shows a rewritten entry', async () =>
   const { auditLog } = tablesOf(db.owner);
   await member(w, ADA, [[w.dev, 'viewer']]);
   const secret = await w.secret(w.dev);
-  await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: [{ secret, wrapped: await wrapped(w, secret) }] });
+  await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: await versionItems([{ secret, wrapped: await wrapped(w, secret) }]) });
 
   assert.equal((await w.vault.verifyLog({})).ok, true);
 
@@ -986,7 +1085,7 @@ for (const edit of ['forged', 'edited', 'deleted'] as const) {
     await member(w, ADA, [[w.dev, 'viewer']]);
     const secret = await w.secret(w.dev);
     const items = [{ secret, wrapped: await wrapped(w, secret) }];
-    assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items })).ok, true);
+    assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: await versionItems(items) })).ok, true);
 
     if (edit === 'forged') {
       await db.owner.insert(vaultGrants).values({
@@ -1000,7 +1099,7 @@ for (const edit of ['forged', 'edited', 'deleted'] as const) {
 
     const access = await w.vault.access(ADA);
     assert.deepEqual([access.status, access.grants], ['tampered', []]);
-    const read = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items });
+    const read = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: await versionItems(items) });
     assert.equal(!read.ok && read.refusal.code, 'tampered');
     const regrant = await w.vault.setAccess({
       actor: ROOT, principal: ADA, changes: [{ projectId: w.project, environmentId: w.prod, role: 'viewer', expiresAt: null }],
@@ -1020,7 +1119,7 @@ for (const edit of ['forged', 'edited', 'deleted'] as const) {
     assert.equal((await w.vault.access(ADA)).status, 'removed');
     assert.equal((await w.vault.admit({ actor: ROOT, principal: ADA })).ok, true);
     await member(w, ADA, [[w.dev, 'viewer']]);
-    assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items })).ok, true);
+    assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: await versionItems(items) })).ok, true);
     assert.equal((await w.vault.verifyLog({})).ok, true);
   });
 }
@@ -1056,7 +1155,7 @@ test('an old member row put back with its grants is refused: the log holds the l
   await putBack();
   const access = await w.vault.access(ADA);
   assert.equal(access.status, 'tampered');
-  const read = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items });
+  const read = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: await versionItems(items) });
   assert.equal(!read.ok && read.refusal.code, 'tampered');
   assert.deepEqual((await tamperings(w)).map(([, code]) => code), ['stale']);
   const verdict = await w.vault.verifyLog({});
@@ -1114,7 +1213,7 @@ test('an entry forged in the vault\'s name about a member is passed over and rep
   await db.owner.update(auditChainHead).set({ nextSeq: head.nextSeq + 1n, headHash: hash });
 
   assert.equal((await w.vault.access(ADA)).status, 'active');
-  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items })).ok, true);
+  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: await versionItems(items) })).ok, true);
   assert.deepEqual(await tamperings(w), [[ADA, 'forged_entry']]);
   const verdict = await w.vault.verifyLog({});
   assert.deepEqual(verdict.ok ? null : [verdict.failedAtSeq, verdict.reason], [Number(fields.seq), 'not written by the vault: its MAC does not match']);
@@ -1143,7 +1242,7 @@ test('the database holds no key', async () => {
   const key = randomBytes(32);
   const wrap = await w.vault.wrap({ principal: ADA, items: [{ secret, key: key.toString('base64') }] });
   assert.ok(wrap.ok);
-  await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: [{ secret, wrapped: wrap.wrapped[0] }] });
+  await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: await versionItems([{ secret, wrapped: wrap.wrapped[0] }]) });
   const everything = [];
   for (const table of ['audit_log', 'audit_chain_head', 'vault_members', 'vault_grants']) {
     everything.push(...(await rows<Record<string, unknown>>(db.owner, sql.raw(`SELECT * FROM ${table}`))));
@@ -1253,7 +1352,7 @@ test('a deadline aborts KMS requests and drops queued keys before a removal can 
     items.push({ secret: await w.secret(w.dev), wrapped: { kekProvider: 'aws-kms', kekId: arn, kekVersion: '1', bytes: 'Y2lwaGVydGV4dA==' } });
   }
   try {
-    await assert.rejects(w.vault.unwrap({ principal: ADA, purpose: 'run', items }), KekUnavailableError);
+    await assert.rejects(w.vault.unwrap({ principal: ADA, purpose: 'run', items: await versionItems(items) }), KekUnavailableError);
     assert.equal(active, 0, 'all in-flight requests settled before the decision ended');
     assert.equal(started, 8, 'the queued key never reached KMS');
     assert.ok((await (await w.twin()).remove({ actor: ROOT, principal: ADA })).ok);
@@ -1274,8 +1373,8 @@ for (const action of ['unwrap', 'rewrap'] as const) {
     const sealed = await wrapped(w, good);
     const items = [{ secret: good, wrapped: sealed, from: 1 }, { secret: bad, wrapped: sealed, from: 1 }];
     const result = action === 'unwrap'
-      ? await w.vault.unwrap({ principal: ADA, purpose: 'run', items })
-      : await w.vault.rewrap({ principal: ADA, items });
+      ? await w.vault.unwrap({ principal: ADA, purpose: 'run', items: await versionItems(items) })
+      : await w.vault.rewrap({ principal: ADA, items: await Promise.all(items.map(async (item) => ({ secret: item.secret, ...(await versionItems([item]))[0] }))) });
     assert.equal(!result.ok && result.refusal.code, 'bad_claim');
     assert.equal(remote.seen.opened.length, 1);
     assert.ok(remote.seen.opened[0].every((byte) => byte === 0));
@@ -1376,8 +1475,11 @@ for (const action of ['wrap', 'unwrap', 'rewrap'] as const) {
     const items = [first, { ...second, secretId: 'not-a-uuid' }].map((secret) => ({
       secret, key: randomBytes(32).toString('base64'), wrapped: sealed, from: 1,
     }));
-    const input = { principal: ROOT, items, purpose: 'run' as const };
-    await assert.rejects(w.vault[action](input), /must be a lowercase UUID/);
+    const versions = await versionItems([{ secret: first, wrapped: sealed }, { secret: second, wrapped: sealed }]);
+    const call = action === 'wrap' ? w.vault.wrap({ principal: ROOT, items })
+      : action === 'unwrap' ? w.vault.unwrap({ principal: ROOT, purpose: 'run', items: [versions[0], { secretVersionId: 'not-a-uuid' }] })
+      : w.vault.rewrap({ principal: ROOT, items: items.map((item, i) => ({ secret: item.secret, ...versions[i] })) });
+    await assert.rejects(call, /must be a lowercase UUID/);
     assert.equal(remote.seen.wrap + remote.seen.unwrap, 0);
   });
 }
@@ -1394,7 +1496,10 @@ for (const action of ['unwrap', 'rewrap'] as const) {
     const w = await world({ keks: new KekRegistry(kek) });
     const secret = await w.secret(w.dev);
     const items = [{ secret, wrapped: await wrapped(w, secret), from: 1 }];
-    await assert.rejects(w.vault[action]({ principal: ROOT, purpose: 'run', items }), (error) => error === fault);
+    const versions = await versionItems(items);
+    const call = action === 'unwrap' ? w.vault.unwrap({ principal: ROOT, purpose: 'run', items: versions })
+      : w.vault.rewrap({ principal: ROOT, items: [{ secret, ...versions[0] }] });
+    await assert.rejects(call, (error) => error === fault);
     const outcomes = (await vaultLog(w)).filter((entry) => entry.action === LOGGED[action]);
     assert.deepEqual(outcomes.map((entry) => entry.code), ['key_error']);
     assert.equal(outcomes[0].detail.uncertain, true);

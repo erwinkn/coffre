@@ -16,15 +16,6 @@ export type Keyed<T> = { ok: true; values: T[] } | { ok: false; refusal: Refusal
 /** Keys the vault wrapped, and the seq of its `key.wrap` or `key.rewrap` entry for each. */
 export type Wrapped = { ok: true; values: Envelope[]; seqs: number[] } | { ok: false; refusal: Refusal };
 
-function wrappedKey(envelope: Envelope): WrappedKey {
-  return {
-    kekProvider: envelope.kekProvider,
-    kekId: envelope.kekId,
-    kekVersion: envelope.kekVersion,
-    bytes: envelope.wrappedDek.toString('base64'),
-  };
-}
-
 function withWrapped(sealed: Omit<Envelope, 'kekProvider' | 'kekId' | 'kekVersion' | 'wrappedDek'>, wrapped: WrappedKey): Envelope {
   return {
     ...sealed,
@@ -60,12 +51,12 @@ export async function sealValues(
 export async function openValues(
   vault: Vault,
   asking: Asking & { purpose: Purpose },
-  items: { secret: SecretRef; envelope: Envelope }[],
+  items: { secretVersionId: string; secret: SecretRef; envelope: Envelope }[],
 ): Promise<Keyed<string>> {
   if (items.length === 0) return { ok: true, values: [] };
   const result = await vault.unwrap({
     ...asking,
-    items: items.map(({ secret, envelope }) => ({ secret, wrapped: wrappedKey(envelope) })),
+    items: items.map(({ secretVersionId }) => ({ secretVersionId })),
   });
   if (!result.ok) return result;
   return {
@@ -90,11 +81,11 @@ export async function rewrapValue(
   vault: Vault,
   asking: Asking,
   secret: SecretRef,
-  from: { version: number; envelope: Envelope },
+  from: { id: string; envelope: Envelope },
 ): Promise<Wrapped> {
   const result = await vault.rewrap({
     ...asking,
-    items: [{ secret, from: from.version, wrapped: wrappedKey(from.envelope) }],
+    items: [{ secret, secretVersionId: from.id }],
   });
   if (!result.ok) return result;
   return { ok: true, values: [withWrapped(from.envelope, result.wrapped[0])], seqs: result.seqs };
