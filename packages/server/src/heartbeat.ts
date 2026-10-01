@@ -25,7 +25,8 @@ class MissingSingleton extends Error {}
  * stopped receiving writes" into a paging event rather than an audit finding.
  * `/readyz` surfaces it too.
  *
- * Then the vault signs the new head; see `checkpointAudit`.
+ * The signal advances only after the vault signs the head and the app
+ * commits its record of that checkpoint; see `checkpointAudit`.
  */
 export async function writeAuditHeartbeat(
   db: Database,
@@ -36,16 +37,26 @@ export async function writeAuditHeartbeat(
   const beat = await writeBeat(db, chainKey, log);
   if (!beat) return false;
   try {
-    return await checkpointAudit(db, chainKey, vault, log);
+    if (!(await checkpointAudit(db, chainKey, vault, log))) return false;
+    if ((await update(db, auditHeartbeat, { onlyRow: true }, beat)) === 0) {
+      log.warn({}, 'audit heartbeat singleton is missing');
+      return false;
+    }
+    return true;
   } catch (error) {
     log.warn({ err: (error as Error).message }, 'audit checkpoint failed');
     return false;
   }
 }
 
-async function writeBeat(db: Database, chainKey: Buffer, log: HeartbeatLogger): Promise<boolean> {
+async function writeBeat(
+  db: Database,
+  chainKey: Buffer,
+  log: HeartbeatLogger,
+): Promise<{ lastBeatAt: Date; lastSeq: bigint } | null> {
   try {
     return await db.transaction(async (tx) => {
+      if ((await heartbeat(tx)) === null) throw new MissingSingleton();
       const { nextSeq, occurredAt } = await appendAudit(tx, chainKey, [
         {
           actorType: 'system',
@@ -56,19 +67,17 @@ async function writeBeat(db: Database, chainKey: Buffer, log: HeartbeatLogger): 
         },
       ]);
       // The entry's own timestamp, which is the database clock.
-      const beat = { lastBeatAt: new Date(occurredAt), lastSeq: nextSeq };
-      if ((await update(tx, auditHeartbeat, { onlyRow: true }, beat)) === 0) throw new MissingSingleton();
-      return true;
+      return { lastBeatAt: new Date(occurredAt), lastSeq: nextSeq };
     });
   } catch (error) {
     if (error instanceof MissingSingleton) {
       // Rolled back, entry and all: a beat nobody can see is not a beat.
       log.warn({}, 'audit heartbeat singleton is missing');
-      return false;
+      return null;
     }
     // A heartbeat that cannot write is itself the signal.
     log.warn({ err: (error as Error).message }, 'audit heartbeat failed to write');
-    return false;
+    return null;
   }
 }
 
