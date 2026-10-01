@@ -15,10 +15,11 @@ import {
   type SigninProfile,
 } from '@coffre/core/identity';
 import type { Access, Vault } from '@coffre/core/vault';
+import type { Database, Transaction } from '@coffre/db';
+import { isUniqueViolation } from '@coffre/db/dialect';
+import { credentials, deviceAuthorizations, identities, principals } from '@coffre/db/schema';
 
 import type { AuditEntry } from '../db/audit.ts';
-import type { Database, Transaction } from '../db/database.ts';
-import { isUniqueViolation } from '../db/dialect.ts';
 import {
   findCredential,
   findDeviceAuthorizations,
@@ -29,7 +30,6 @@ import {
   members,
   update,
 } from '../db/queries.ts';
-import { credentials, deviceAuthorizations, identities, principals } from '../db/schema.ts';
 import type { PrincipalRef } from './caller.ts';
 import { allowed, audited, denied, Refusal, type ApiContext } from './context.ts';
 import { ApiError, badRequest, forbidden, notFound } from './errors.ts';

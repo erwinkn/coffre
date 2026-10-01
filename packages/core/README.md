@@ -8,5 +8,5 @@ A deployment does not import it. `@coffre/server` and `@coffre/vault`
 re-export what a deployment needs from it.
 
 Part of [coffre](https://github.com/erwinkn/coffre), a secrets manager you
-deploy as a small project of your own. Its seven `@coffre/*` packages are
+deploy as a small project of your own. Its eight `@coffre/*` packages are
 released together, at one version. MIT licensed.

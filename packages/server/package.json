@@ -39,22 +39,17 @@
     "./package.json": "./package.json"
   },
   "scripts": {
-    "build": "tsdown && cp -r src/db/migrations dist/migrations",
+    "build": "tsdown",
     "typecheck": "tsc --noEmit",
-    "test": "node --conditions=coffre:source --test",
-    "db:generate": "node --conditions=coffre:source src/db/baseline.ts",
-    "db:migrate": "node --conditions=coffre:source src/db/migrate-main.ts",
-    "db:check": "cd src/db && for engine in postgres sqlite; do drizzle-kit check --config drizzle.$engine.config.ts || exit 1; done",
-    "db:verify:runtime": "node --conditions=coffre:source src/db/verify-runtime.ts"
+    "test": "node --conditions=coffre:source --test"
   },
   "dependencies": {
     "@coffre/client": "workspace:*",
     "@coffre/core": "workspace:*",
+    "@coffre/db": "workspace:*",
     "@coffre/ui": "workspace:*",
-    "@libsql/client": "0.18.0",
     "@noble/hashes": "2.4.0",
     "drizzle-orm": "0.45.2",
-    "pg": "8.16.3",
     "tweetnacl": "1.0.3",
     "zod": "4.4.3"
   },
@@ -62,7 +57,7 @@
     "@coffre/vault": "workspace:*",
     "@types/node": "26.1.1",
     "@types/pg": "8.20.0",
-    "drizzle-kit": "0.31.10",
+    "pg": "8.16.3",
     "tsdown": "0.23.0",
     "typescript": "5.9.3",
     "wrangler": "4.118.0"

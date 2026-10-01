@@ -1,4 +1,5 @@
-import { asPostgres, type PostgresSchema } from '../../src/db/portable.ts';
+import { asPostgres, type PostgresSchema } from '@coffre/db/portable';
+
 import { TEST_ENGINE } from './engine.ts';
 
 /**
@@ -8,8 +9,8 @@ import { TEST_ENGINE } from './engine.ts';
  */
 const schema: PostgresSchema =
   TEST_ENGINE === 'sqlite'
-    ? asPostgres(await import('../../src/db/schema.sqlite.ts'))
-    : await import('../../src/db/schema.ts');
+    ? asPostgres(await import('@coffre/db/schema-sqlite'))
+    : await import('@coffre/db/schema');
 
 export const {
   projects,

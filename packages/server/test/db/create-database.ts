@@ -1,4 +1,4 @@
-import { migrateDatabase } from '../../src/db/migrate.ts';
+import { migrateDatabase } from '@coffre/db/migrate';
 
 /** Create and migrate the suite's SQLite file, which must not exist yet. */
 const url = process.argv[2];

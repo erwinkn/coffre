@@ -46,7 +46,7 @@ interface Migrator {
 }
 
 /**
- * Beside this module: src/db/migrations in the workspace, and dist/migrations
+ * Beside this module: src/migrations in the workspace, and dist/migrations
  * in the built package, where the build copies them.
  */
 export function migrationsFolder(engine: Engine): string {

@@ -5,10 +5,10 @@ import { getTableName, is, Table } from 'drizzle-orm';
 import { getTableConfig as postgresConfig } from 'drizzle-orm/pg-core';
 import { getTableConfig as sqliteConfig } from 'drizzle-orm/sqlite-core';
 
-import { ENGINES, journal, staleness } from '../../src/db/baseline.ts';
-import { REQUIRED_MIGRATIONS } from '../../src/db/schema-version.ts';
-import * as postgres from '../../src/db/schema.ts';
-import * as sqlite from '../../src/db/schema.sqlite.ts';
+import { ENGINES, journal, staleness } from '../src/baseline.ts';
+import { REQUIRED_MIGRATIONS } from '../src/schema-version.ts';
+import * as postgres from '../src/schema.ts';
+import * as sqlite from '../src/schema.sqlite.ts';
 
 /**
  * Both schemas are one schema, and each migration tree ends where its

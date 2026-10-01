@@ -14,5 +14,5 @@ token that reads one canary (`--token`, `--canary`); see
 with, which plays GitHub, an OIDC provider and Cloudflare Access.
 
 Part of [coffre](https://github.com/erwinkn/coffre), a secrets manager you
-deploy as a small project of your own. Its seven `@coffre/*` packages are
+deploy as a small project of your own. Its eight `@coffre/*` packages are
 released together, at one version. MIT licensed.

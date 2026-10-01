@@ -5,9 +5,9 @@ import { join } from 'node:path';
 
 import { createClient, type CoffreClient } from '@coffre/client';
 import type { Vault } from '@coffre/core/vault';
+import { tablesOf, type Database } from '@coffre/db';
 import { localVault, type LocalVault, type VaultConfig } from '@coffre/vault/node';
 
-import { tablesOf, type Database } from '../src/db/database.ts';
 import { loadCaller } from '../src/api/caller.ts';
 import type { ApiContext } from '../src/api/context.ts';
 import { serveApi } from '../src/api/router.ts';

@@ -1,7 +1,7 @@
 import { AccessIdentityVerifier, type AccessVerifierConfig, type IdentityVerifier } from '@coffre/core/identity';
 import type { Vault } from '@coffre/core/vault';
+import type { Database } from '@coffre/db';
 
-import type { Database } from './db/database.ts';
 import type { ApiContext } from './api/context.ts';
 import { SigninService } from './api/signin.ts';
 import { SyncRunner } from './api/syncs.ts';

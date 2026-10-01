@@ -5,7 +5,7 @@ import type { Queryable } from './database.ts';
 
 /**
  * Differences between Postgres and the SQLite used for tests and local dev.
- * Queries stay in queries.ts; the server never asks which database it has.
+ * Queries stay in the server's queries.ts; it never asks which database it has.
  *
  *                     Postgres                SQLite
  *   isolation         READ COMMITTED          one writer at a time

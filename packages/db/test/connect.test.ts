@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { engineOfUrl, openDatabase } from '../../src/db/connect.ts';
-import { migrateDatabase } from '../../src/db/migrate.ts';
+import { engineOfUrl, openDatabase } from '../src/connect.ts';
+import { migrateDatabase } from '../src/migrate.ts';
 
 test('MySQL URLs are refused before opening a connection or running migrations', async () => {
   const url = 'mysql://unused:unused@127.0.0.1:1/coffre';

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Publish the seven packages to npm at the workspace's version, dependencies
+# Publish the eight packages to npm at the workspace's version, dependencies
 # first, skipping any already there, so that a run which stopped halfway can
 # simply run again.
 #
@@ -29,7 +29,7 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 pnpm build
-for name in core client ui server vault conformance cli; do
+for name in core db client ui server vault conformance cli; do
     package="@coffre/$name"
     if npm view "$package@$version" version >/dev/null 2>&1; then
         echo "$package@$version is already on npm"

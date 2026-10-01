@@ -6,7 +6,8 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { extname, join, normalize, sep } from 'node:path';
 import { Readable } from 'node:stream';
 
-import { openDatabase } from './db/connect.ts';
+import { openDatabase } from '@coffre/db/connect';
+
 import { handleRequest, runScheduled } from './app.ts';
 import { resolveConfig, type CoffreConfig } from './config.ts';
 import { createRuntime } from './runtime.ts';

@@ -1,10 +1,9 @@
 import type { Envelope } from '@coffre/core/envelope';
+import { own, tablesOf, type Queryable, type Transaction } from '@coffre/db';
+import * as dialect from '@coffre/db/dialect';
+import { canonicalTimestamp, changedRows, clock, forUpdate, migrationLedger, truth, type Table } from '@coffre/db/dialect';
+import type * as schema from '@coffre/db/schema';
 import { and, asc, count, desc, eq, getTableColumns, gt, gte, inArray, isNull, lt, ne, notInArray, or, sql, type SQL } from 'drizzle-orm';
-
-import { own, tablesOf, type Queryable, type Transaction } from './database.ts';
-import * as dialect from './dialect.ts';
-import { canonicalTimestamp, changedRows, clock, forUpdate, migrationLedger, truth, type Table } from './dialect.ts';
-import type * as schema from './schema.ts';
 
 /**
  * Every query coffre runs, and nowhere else: named reads, each returning all

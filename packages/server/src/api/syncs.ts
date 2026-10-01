@@ -2,9 +2,10 @@ import { randomUUID } from 'node:crypto';
 
 import { allows, mayManageAccess, type Permission } from '@coffre/core/access';
 import type { GrantChange, Vault } from '@coffre/core/vault';
+import type { Database, Queryable, Transaction } from '@coffre/db';
+import { syncKeys, syncs } from '@coffre/db/schema';
 
 import type { AuditEntry } from '../db/audit.ts';
-import type { Database, Queryable, Transaction } from '../db/database.ts';
 import {
   findSyncs,
   insert,
@@ -14,7 +15,6 @@ import {
   upsert,
   type SyncRow,
 } from '../db/queries.ts';
-import { syncKeys, syncs } from '../db/schema.ts';
 import {
   resolveSyncProviders,
   SyncConfigError,

@@ -33,7 +33,7 @@ runtime=postgresql://coffre_runtime:local-runtime-only@127.0.0.1:55432
 
 echo '==> build and pack'
 pnpm --dir "$root" build
-packages=(core client ui server vault cli conformance)
+packages=(core db client ui server vault cli conformance)
 for name in "${packages[@]}"; do
     pnpm --dir "$root/packages/$name" pack --pack-destination "$work/tarballs" >/dev/null
 done
