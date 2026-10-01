@@ -131,9 +131,9 @@ skipped, and the run ends with the processes' output.
   as its owner, who can lift its triggers and pass its row-level security.
   They show that verification works, not that an attacker could get that
   far: the app's and the vault's logins cannot.
-- **A forged grant is caught, not stopped.** The vault honours the grant it
-  finds in the database until verification flags it. What stops it is who
-  can write the vault's tables: its own login, and the database's owner.
+- **What an owner can still destroy.** The owner can remove or corrupt
+  rows and stop access. Member MACs refuse forged grants and edited rows
+  at use; they do not make the database available after destructive writes.
 - **A live instance's keys and settings.** The run uses its own keys and a
   local database. `probe` sees what anyone on the network can, and what one
   token of its own can.
