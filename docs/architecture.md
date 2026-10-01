@@ -102,7 +102,7 @@ one package is seen by the others without a build. Builds leave it off.
 | `@coffre/server/node` | `serve({ port?, host?, database, …config })` → `{ url, close }`; `migrate(url)` |
 | `@coffre/server` (both) | `signin`, `github`, `google`, `microsoft`, `oidc`, `cloudflareAccess`, `SigninError`; `githubActions`, `vercel`, `railway`, `cloudflareWorkers`, `SyncConfigError`, `SyncProviderError`; and the config types, `SigninProvider` and `SyncProvider` among them |
 | `@coffre/vault/cloudflare` | `vault(env => config)`, the RPC Worker's default export; `postgres(env.VAULT_HYPERDRIVE)` |
-| `@coffre/vault` (both) | `awsKms`, `KekUnavailableError`, and the config types, `KekProvider` among them |
+| `@coffre/vault` (both) | `awsKms`, `KekUnavailableError`, `KekBadClaimError`, and the config types, `KekProvider` among them |
 | `@coffre/vault/node` | `serveVault({ socket, database, …config })`, `connectVault(socket)`, `localVault({ database, …config })` |
 | `@coffre/ui` | `createUi()` → `{ fetch(request, { context: { cspNonce, client } }) }`; files in `dist/client` |
 | `@coffre/client` | `createClient({ url, headers?, transport? })` |
@@ -232,10 +232,11 @@ literal and a name could both fit a path, the literal wins among the routes
 that take the request's method: `DELETE /api/syncs/by-id/…` names a sync,
 while `GET /api/syncs/by-id/prod` is still a project named `by-id`.
 
-Behind it, a request loads the caller and all their grants in one query, and
-every permission check after that is a plain function. With paths resolved in
-one join, the app needs about a dozen reads, down from about a hundred
-hand-written queries today.
+Behind it, a request asks the vault once who the caller is to this instance:
+whether they are still a member, and the grants they hold
+(`vault.access`). Every permission check after that is a plain function,
+`can()`, over that answer, and a path resolves to its project, environment
+and secret in one read.
 
 ## The vault
 
@@ -248,18 +249,23 @@ await vault.unwrap({
   principal: 'user:dev@acme.example',
   purpose: 'reveal', // or 'run', 'compare', 'sync'
   requestId,
-  items: [{ secret: { projectId, environmentId, secretId, version: 4 }, wrapped }],
+  operationId,
+  items: [{ secretVersionId }],
 });
 // { ok: true, keys: [...] }
 // { ok: false, refusal: { code: 'no_grant', message: '...' } }
 ```
 
-Before it unwraps anything, the vault checks that the principal has not been
-removed, that an unexpired grant covers that environment for reading, that
-the wrapped key belongs to that secret (the key is bound to the ids, so a key
-moved to another row is refused as `bad_claim`), and that the principal is
-under the bulk limit. It logs the attempt either way. A batch is all or
-nothing: fifty keys for one `coffre run` are one decision and one refusal.
+The app names stored versions; the vault reads each one's wrapped key, and
+the secret it belongs to, from the database itself, so the app cannot claim
+a version is something it is not. Before it unwraps anything, the vault
+checks that the principal is still a member and their row is the one it
+wrote, that an unexpired grant covers that environment for reading, and that
+the principal is under the bulk limit. A data key opens only for the secret
+it was wrapped for, so a wrapped key copied onto another secret's row is
+refused as `bad_claim`. The vault logs the attempt either way. A batch is all
+or nothing: fifty keys for one `coffre run` are one decision and one
+refusal.
 
 The code lives in `packages/vault`: one `Vault` interface, one
 implementation, and a Drizzle store over the shared database. The schemas
@@ -275,8 +281,7 @@ and membership generations. The interface:
 | `admit`, `remove` | add or restore a member, or remove one and revoke every grant; both answer the member's generation |
 | `checkpoint` | sign the shared log up to its last entry, in an entry of the vault's, and check every member's row |
 | `about` | the public key checkpoints verify under, and the root admins: what only its configuration says |
-| `log` | the shared log filtered to vault entries, with its chain verified; root admins only |
-| `verifyLog` | check the shared chain and the vault's MACs, and replay members and grants |
+| `verifyLog` | check the shared chain and the vault's MACs, every checkpoint, and replay members and grants |
 
 Every argument and result is plain data, and a refusal is a value, not a
 thrown error, so the same interface works across a process boundary. The app
@@ -285,6 +290,17 @@ turns a refusal into a 403 `vault_refused` carrying the vault's code
 logs what it refuses; the app adds its own entry, with code `vault_<code>`,
 only where the refusal is part of something larger it was doing, a write
 or a new sync's grants.
+
+**The KEK is checked before it is used.** Each KEK gets a check value, a
+known value wrapped under it the first time the vault uses it, kept in a
+`key.check` entry of the log. Before its first key operation, each vault
+process opens it again; a KEK with no check value yet is first tried on a
+few stored keys it wrapped. A KEK that opens neither is not the one that
+wrapped the data: every read and write is refused as `wrong_kek` (a 503),
+naming the provider and key id, and the next checkpoint is refused, so
+`/readyz` turns red. A key service that cannot answer is not a verdict; the
+next call asks again. [restore.md](restore.md#if-the-kek-is-wrong) shows
+what an operator sees.
 
 The vault owns everything that decides access: the key encryption key (KEK),
 grants (`(principal, place) → role`, one per member per place, with an
@@ -344,12 +360,14 @@ local development.
 
 ### Transactions
 
-No app transaction stays open across a vault call. A request prepares its
-keys outside SQL, then commits its app writes and audit entries together.
-A reveal gets keys from the vault, then commits the app's audit before
-returning values. If either audit append fails, no value is returned.
-An unused wrap or a vault release followed by a failed app transaction can
-remain in the log; it is evidence of that attempt, not a successful answer.
+No app transaction stays open across a vault call. A write asks the vault to
+wrap its new data keys first, outside any transaction, then stores the
+versions and its `secret.write` entries together in one short transaction
+that checks nothing changed meanwhile, and starts again, under a new
+operation id, if something did. A reveal needs no app transaction at all: the
+vault has committed its `secret.read` entries before it returns a key. A wrap
+whose write then failed stays in the log, under an operation no
+`secret.write` shares; it records the attempt, not a value stored.
 
 The vault locks affected members before the shared audit head. Its member
 and grant changes commit with their audit entries. With a local KEK, a read
@@ -390,10 +408,15 @@ and its own entries by their MACs, checks that the prefix its last
 checkpoint signed is still there, then signs the log up to its last entry
 with Ed25519, in an `audit.checkpoint` entry of its own. It signs nothing
 over a rewrite or a cut, anywhere in the log, and a call with nothing new
-returns the last one.
+returns the last one. The recomputation runs in a snapshot, without the
+log's lock, so writes never wait for it. The same checkpoint checks every
+member's row, as `access` would, and logs a `vault.tampered` for each one
+changed around the vault.
+
 `/readyz` is a query: ready while the newest heartbeat is under eleven
-minutes old and a checkpoint after it carries the vault's signature. There
-is no heartbeat table.
+minutes old and a checkpoint after it carries the vault's signature. A log
+that stops taking writes, a vault that stops signing, a cut in the log or a
+wrong KEK all turn it red within one beat. There is no heartbeat table.
 
 `GET /api/audit/verification` (owners only), also called by `coffre verify`,
 checks the chain from its first entry and authenticates the app's MACs.
@@ -412,35 +435,11 @@ One operation id ties together everything one action did. Sign-ins, tokens,
 the vault's key operations and the heartbeat are detail: in the log and its
 chain, but left out of `GET /api/audit` unless `detail=1`.
 
-The limits:
-
-- **A complete older backup can verify.** Someone able to restore the
-  database and its head needs no key to restore a valid history. A live
-  process remembers how far it got, but restarting it loses that witness.
-  There is no external checkpoint export yet. AWS CloudTrail, when using
-  KMS, records key use outside this database.
-- **A holder of an author's key can forge that author's entries.** A copied
-  database alone cannot do so. An app takeover can also act as a principal
-  who already has access; the vault does not authenticate browser sessions.
-- **Signing-key rotation is not implemented.** Checkpoints are verified
-  with the current key, and vault entry MACs derive from it. Keep that key
-  with backups. The app's audit key is needed for its entries and sign-in
-  rows too.
-
-### What the vault enforces and verifies
-
-The shared log is append-only. The vault records every unwrap attempt and
-every change to grants or status. Root admins read its entries through
-`GET /api/audit/vault` and on the audit page. Each page verifies the entries
-shown and the chain since the head the vault last verified. The first view
-after startup, or `?full=1`, verifies from the first entry; a full check also
-replays members and grants.
+### What the vault stops
 
 A sync reads as a principal of its own (`sync:<id>`), with a grant made when
 the sync is added and revoked when it is removed. Revoking that grant stops
 the sync: its next run is refused.
-
-What the vault stops:
 
 - **A permission bug in the app.** An endpoint checks the project but forgets
   the environment; someone with `market/dev` asks for
@@ -451,17 +450,21 @@ What the vault stops:
 - **A copy of the database.** It holds no KEK.
 - **Rewritten log entries without the author's key.** Their MACs fail, even
   if the owner rebuilds the public chain.
-- **Access granted around the vault.** Verification detects a grant or member
-  written straight into the database without a matching vault entry. The
-  vault can honour a forged grant until verification finds it; database
-  privileges are what keep the app from writing one.
+- **Access granted around the vault.** Each member's row carries the vault's
+  MAC over the row and every grant they hold, and names the newest log entry
+  that changed them. A grant written straight into the database fails the
+  MAC; an old row put back names an entry the log has moved past. Either way
+  the vault refuses the member as `tampered` at their next request, logs a
+  `vault.tampered`, and the next checkpoint finds it even if they never ask.
+  An owner removes them to start them over. A decision seals only the grants
+  it decided, so one written while it runs is refused, not sealed in.
 
-What it does not stop: an app fully taken over can act as anyone who already has
-access. The vault makes that loud rather than impossible: the key never
+What it does not stop: an app fully taken over can act as anyone who already
+has access. The vault makes that loud rather than impossible: the key never
 leaves it, every read lands in a log the app cannot edit, and bulk reads trip
 its limit. Closing it would take requests signed by keys the principals hold
 themselves, which fits this interface later without the vault learning about
-sign-in.
+sign-in. The rest of what coffre does not stop is under [Limits](#limits).
 
 ### Sign-in rows
 
@@ -495,10 +498,8 @@ denied device requests have no principal and use generation zero; an
 approval carries its member's generation. A credential's linked identity
 must belong to the same member and generation, enforced by a foreign key.
 
-A MAC authenticates a row, not its freshness. Restoring a genuine old row
-can undo an individual sign-out or revocation until expiry; the vault's
-generation still rejects rows from a membership that was removed. Changing
-`auditChainKey` invalidates these rows too.
+Changing `auditChainKey` invalidates these rows too. A MAC proves a row
+genuine, not current: see [Limits](#limits).
 
 ## Databases
 
@@ -567,3 +568,47 @@ D1 is not a fit for the app database: it has no interactive transactions, and
 the audit chain reads the previous hash, computes the next in JavaScript, then
 writes. Drizzle's D1 transactions send `BEGIN`, which D1 rejects. Both
 Workers use Postgres.
+
+## Limits
+
+Each limit is stated here once; the other documents link to it.
+
+- **Whoever controls the database can rewind it.** Restoring an older copy
+  of the whole database, or cutting its newest entries and putting the head
+  back, leaves a log that verifies: every entry kept is genuine, and nothing
+  in the database can show that newer ones existed. Two things notice: an
+  app or vault process that ran across the rewind, which refuses to append
+  behind the head it remembers, and, with AWS KMS, CloudTrail, whose Decrypts
+  then have no entries. Restarting both processes after a restore is what
+  makes a deliberate rewind work ([restore.md](restore.md)).
+- **A cut in the middle of the log is found at the next checkpoint, not at
+  once.** Say Ada was removed at entry 812, and the database's owner deletes
+  812 and puts back Ada's row from before. Her row and the entries that
+  remain agree, so the vault lets her in. Within five minutes the next
+  checkpoint recomputes the chain, finds the gap, refuses to sign and turns
+  `/readyz` red; full verification says the same. Until then, her reads are
+  logged under her name.
+- **The full recomputation grows with the log.** Every checkpoint recomputes
+  the chain from its first entry: about 4 seconds per 100,000 entries on a
+  small shared Postgres. A team's instance writes some 600 entries a day of
+  heartbeats and checkpoints alone, plus its own work. Past about 250,000
+  entries, ten seconds a pass, the recomputation should move to a slower
+  cadence or a pass that resumes where the last stopped; neither is built.
+- **What only KMS gives.** With a local KEK, whoever holds the vault's
+  configuration and a copy of the database holds every value, and nothing
+  outside coffre records either being used. AWS KMS adds a second record
+  (CloudTrail), lets the vault's access be revoked in IAM at once, and keeps
+  the key material from ever being copied out ([keys.md](keys.md)). It also
+  costs a round trip per key, and on the Workers Free plan an environment of
+  more than 50 secrets cannot be read in one call.
+- **A KEK cannot be retired yet.** A new KEK wraps new versions only; every
+  older version still needs the KEK that wrapped it, configured in
+  `previousKeks` and escrowed, until a rewrap command exists.
+- **A holder of an author's key can forge that author's entries.** A copied
+  database alone cannot.
+- **Signing-key rotation is not implemented.** Checkpoints and the vault's
+  entries are checked with the current signing key, and member rows are
+  sealed under a key derived from it. Keep it with the backups.
+- **A MAC proves a row is genuine, not current.** Putting back a genuine old
+  sign-in row can undo one sign-out until the session's own expiry; a
+  member's removal still ends it, through the generation.

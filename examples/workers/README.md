@@ -16,7 +16,8 @@ Worker secrets. Everything below runs from this directory.
 
 - `app/wrangler.jsonc`: `PUBLIC_URL`, and `GITHUB_CLIENT_ID` from a GitHub
   OAuth app whose callback is `<PUBLIC_URL>/auth/callback/github`.
-- `vault/wrangler.jsonc`: `ROOT_ADMINS`, the emails of the first people in.
+- `vault/wrangler.jsonc`: `ROOT_ADMINS`, the emails of the first people in,
+  and `KEK_ID`, a name for the key-encryption key below.
 
 ## 2. The database
 
@@ -88,13 +89,12 @@ sign in there as a root admin, and from a terminal:
 coffre login https://secrets.example.com
 ```
 
+Point a monitor at `<PUBLIC_URL>/readyz`: it turns red when the audit log
+stops taking writes or the vault stops checkpointing it.
+
 Everything coffre keeps is in the database: secrets, members, grants and
-the audit log. Back it up as one, and restore it with the escrowed keys.
-Point both Hyperdrive configs at the restored database, keeping caching
-disabled, then redeploy both Workers before `coffre verify` and a canary
-reveal. A running instance refuses to append behind a head it remembers.
-A complete older backup can still verify; the log alone cannot prove that
-it is the newest copy.
+the audit log. Back it up as one, keep the escrowed keys apart from it, and
+follow the [restore runbook](https://github.com/erwinkn/coffre/blob/main/docs/restore.md) to bring it back.
 
 ## Locally
 

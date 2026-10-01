@@ -32,7 +32,9 @@ psql "postgres://owner@db.example.com:5432/coffre?sslmode=require"
 
 Create two plain logins. `\password` prompts for passwords without putting
 them in SQL statements or shell history. Use different generated passwords
-and keep them in your password manager.
+and keep them in your password manager. On PlanetScale Postgres, these logins
+connect as `coffre_runtime.<branch id>` and `coffre_vault_runtime.<branch id>`;
+use those names in the connection strings below.
 
 ```sql
 CREATE ROLE coffre_runtime LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
@@ -187,35 +189,17 @@ SQLite file (`file:/tmp/coffre-local.db`), migrated once with `pnpm migrate`
 and that URL. SQLite has no per-login privileges. The deployed example
 uses Postgres; Node conformance uses SQLite to exercise the local option.
 
-## Backups and restore
+## Backups, restores and monitoring
 
-Back up **one database**, including ciphertext, wrapped keys, members,
-grants, sign-in rows and the shared audit log and head. Keep the escrowed
-keys separately. A database backup alone contains no KEK. A KEK alone is
-not enough to restore verification: keep `SIGNING_KEY` and `AUDIT_CHAIN_KEY`
-from that deployment too, plus its OAuth credentials and configuration.
+Back up the one database, and keep the escrowed keys apart from it: the
+backup holds no key, and the keys hold no data. [restore.md](restore.md) is
+the runbook, for PlanetScale Postgres and plain Postgres, with the checks to
+run before reopening traffic.
 
-For an intentional restore (the full runbook, for PlanetScale and plain
-Postgres, and the local drill: [restore.md](restore.md)):
-
-1. Stop traffic and both components. Restore the whole database to the same
-   point in time, preferably into a new database or managed-service branch.
-2. Restore both runtime logins and their group membership if your backup
-   excludes cluster roles. Set their passwords again if the provider reset
-   them. The restored table privileges and row-level policies must remain.
-3. Point both Hyperdrive configs, or both Node URLs, at the restored
-   database with their respective logins. Keep caching disabled. Restore the
-   same keys and older KEKs; do not generate replacements.
-4. Restart both Node processes, or redeploy both Workers, before using the
-   restored database. A live instance refuses to append behind a head it
-   remembers; that is expected after a rollback.
-5. Run `coffre verify` as an owner or root admin, reveal a canary secret,
-   and check readiness before reopening traffic.
-
-Verification authenticates the history retained in the backup. A complete
-older backup can still verify: the database alone cannot show that newer
-entries once existed. No external checkpoint export is implemented yet.
-See [architecture.md](architecture.md#one-log-two-authors) for these limits.
+Point an external monitor at `/readyz`, so that someone is paged when it
+turns red: it does when the log stops taking writes, the vault stops
+signing checkpoints, a checkpoint finds the log cut or rewritten, or the
+vault finds its KEK wrong. `/livez` only says the process answers.
 
 ## Conformance
 

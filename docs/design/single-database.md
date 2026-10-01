@@ -1,10 +1,13 @@
 # One database
 
-A design for running coffre on a single Postgres database: the vault's
-tables, one member directory and one audit log that both the app and
-the vault write. It says what the second store buys today, how much of that
-one database can keep, what it costs, and what is left to decide. Written on
-2026-10-01. Nothing here is built yet apart from step 0 (#22).
+The design for running coffre on a single Postgres database: the vault's
+tables, one member directory and one audit log that both the app and the
+vault write. Written on 2026-10-01 and built that week, in #22 to #46; it is
+kept as the record of what was decided and why. Throughout, "today" means
+coffre before this design, with the vault's own store; the
+[implementation plan](#implementation-plan) names the pull request that built
+each step, and what was parked is under its step 11, "Later".
+[architecture.md](../architecture.md) describes coffre as it now is.
 
 Every decision in it is settled; the list is at the end. This version folds
 in three reviews of that day. The security reviews of keys and integrity (F)
@@ -58,7 +61,7 @@ proposals are taken; "What the reviews change" says where each lands.
 - **Host on PlanetScale Postgres,** from $5 a month. Seventeen tables and
   two migration ledgers become thirteen and one.
 
-## What the second store buys today
+## What the second store bought
 
 | | App, Worker `coffre` | Vault, Worker `coffre-vault` |
 |---|---|---|
@@ -899,7 +902,7 @@ Hyperdrive, for both Workers:
 - **Placement.** Both Workers near the database's region, with Cloudflare's
   placement hint, since a decision makes several round trips.
 
-## What it costs to get there
+## What it took
 
 **Conformance** stops comparing two logs and checks facts that commit (S12).
 Today the tamper checks write the vault's store directly, `vault.db` on Node
@@ -1030,13 +1033,16 @@ makes rotation cheap is the one that never rotates.
 
 ## Implementation plan
 
-Each step is one pull request for one agent, from `main`, in this order
-unless it says otherwise. "The suite" means `pnpm test`, `pnpm test:sqlite`,
-`pnpm typecheck`, `pnpm lint` and `pnpm test:schema`. Steps 1 to 10 are the
-core change; step 11 lists what can follow without blocking it.
+Each step was one pull request, or a few, from `main`. "The suite" means
+`pnpm test`, `pnpm test:sqlite`, `pnpm typecheck`, `pnpm lint` and
+`pnpm test:schema`. Steps 0 to 10 are built; step 11 is what was parked.
+Built after the plan: the final independent review's fixes, #44 (recovery by
+removal, and one bad sign-in row no longer taking down a list) and #46 (a
+decision seals only the grants it decided; every checkpoint recomputes the
+whole chain; the member sweep reads one snapshot).
 
 0. **Hyperdrive's cache off.** Shipped as #22.
-1. **No app transaction across a vault call** (S12). On today's vault:
+1. **No app transaction across a vault call** (S12), built in #27. On the vault of the time:
    reveals read, then call the vault; writes and restores prepare, wrap,
    then store in one short transaction that checks the expected versions
    and retries as a new operation on conflict; a new secret's id is chosen
@@ -1045,7 +1051,8 @@ core change; step 11 lists what can follow without blocking it.
    Verified by the suite, a test that fails any vault call made while an
    app transaction is open, and #23's A08 regressions.
 2. **`@coffre/db`** (S10). Shipped as #25.
-3. **The log's v2 format, written by the app alone** (S1, S9, S11). The
+3. **The log's v2 format, written by the app alone** (S1, S9, S11), built in
+   #28 and hardened in #29. The
    codec and its test vectors in `@coffre/core`; the append in `@coffre/db`,
    which locks the head, checks that it names the last entry and reads the
    clock after the lock. New columns, integer milliseconds, `operation_id`
@@ -1054,7 +1061,8 @@ core change; step 11 lists what can follow without blocking it.
    Verification checks every link, the numbers from 0 and the app's MACs.
    Verified by the vectors, the suite and #21's sequence tests.
 4. **The vault on the shared database, owning the directory** (S2, S3, S5,
-   F2, F5). `vault_members`, which replaces both `principals` tables, and
+   F2, F5), built in #31 (the vault's tables and logins), #33 (one member
+   list), #34 (KMS deadlines and accounting) and #45 (version ids). `vault_members`, which replaces both `principals` tables, and
    `vault_grants` with one foreign key per grant; canonical principals; the
    sign-in tables pointing at `vault_members`, with #23's columns made NOT
    NULL. The `coffre_vault` role, the GRANTs and row-level security per
@@ -1071,14 +1079,16 @@ core change; step 11 lists what can follow without blocking it.
    two vault instances, and two SQLite processes, sharing the bulk limit and
    generations exactly; a removal during a slow KMS call waiting for the
    read in flight; the review's R4 and R6; and #23's A08 regressions.
-5. **Member integrity.** The member MAC over the member's grants,
+5. **Member integrity**, built in #35. The member MAC over the member's grants,
    `generation` and `access_seq`; the freshness check against the newest
    authenticated access entry; the `tampered` refusal and the
    `vault.tampered` entry, worded on the pages and in the CLI; forged vault
    entries ignored and reported. Verified by tests for a grant forged,
    edited and deleted; old member rows put back; a generation edited back,
    or restored with its row; a vault entry forged on SQLite.
-6. **One entry per human action, checkpoints and readiness** (S1, S3, S4).
+6. **One entry per human action, checkpoints and readiness** (S1, S3, S4),
+   built in #36 (the vocabulary, checkpoints and readiness), #37 and #38 (the
+   audit page) and #39 (lists as reads).
    The vocabulary of question 6: `secret.read` written by the vault at
    release, `secret.write` by the app with the version, access and member
    entries by the vault, sign-ins and technical steps as hidden detail; the
@@ -1090,13 +1100,13 @@ core change; step 11 lists what can follow without blocking it.
    visibility rules; `coffre verify` reports how far it got. Verified by
    the review's R1, R1b and R2, the app review's A01, "no audit, no access
    change", and the sample log rendered from a seeded instance.
-7. **Sign-in rows authenticated** (S6, S11). `auth_mac` on identities,
+7. **Sign-in rows authenticated** (S6, S11), built in #26. `auth_mac` on identities,
    credentials and device approvals, checked before use and recomputed on
    every change of state; the device-state check; the composite foreign key
    from a credential to its identity. Verified by sessions, identities and
    approvals inserted as the database's owner being refused, and #23's A07
    and A08 regressions.
-8. **Transports and deployments.** Workers:
+8. **Transports and deployments**, built in #31 and #32. Workers:
    `vault(env => ({ database: postgres(env.HYPERDRIVE), … }))`, no Durable
    Object. Node: `serveVault({ database })` on Postgres, with the example's
    `DATABASE_URL` a Postgres URL; `localVault({ database })` for tests.
@@ -1104,12 +1114,14 @@ core change; step 11 lists what can follow without blocking it.
    conformance harness (`--vault-runtime`, no `vaultStore`). Verified by
    `pnpm conformance:workers`, `pnpm conformance:node`, `test:consumer`,
    and a `pnpm dev` session that signs in and reveals.
-9. **Conformance around facts that commit** (S12). The nine invariants of
-   "What it costs to get there". Verified by both conformance runs, and by
+9. **Conformance around facts that commit** (S12), built in #40. The nine invariants of
+   "What it took". Verified by both conformance runs, and by
    each new check failing against a build with step 5, 6 or 7 reverted.
-10. **Docs and the restore drill.** The docs listed above, and a runbook for
-    PlanetScale Postgres. Verified by running the drill on a PlanetScale
-    branch.
+10. **Docs and the restore drill.** The runbook and a local drill (#41), the
+    database privileges reasserted by every migration (#42), the KEK check
+    the drill called for (#43), and a docs pass. The same drill on a
+    PlanetScale branch is part of erwinkn.com's exit
+    ([roadmap](../roadmap.md#phase-3-erwinkncom)).
 11. **Later, not blocking.**
     - The current-version pointer (S7): keep `secrets.current_version` with
       a composite foreign key to its own version, drop
@@ -1159,7 +1171,9 @@ Erwin settled every question on 2026-10-01.
 - Grant scope as exactly one foreign key.
 - `@coffre/db`, shipped as #25; Hyperdrive's cache off, shipped as #22.
 - Rollback by the database's owner is an accepted limit (question 7).
-  Witnesses and off-box checkpoints are parked under plan step 11.
+  Witnesses, off-box checkpoints and members' state under the checkpoint's
+  signature are parked under plan step 11. A cut in the middle of the log is
+  found by the next checkpoint's full recomputation (#46).
 
 ## Appendix A: spikes
 
