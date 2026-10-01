@@ -149,7 +149,8 @@ export const routes = {
       query.dryRun !== undefined ? dryRunSecrets(ctx, place, input) : setSecrets(ctx, place, input),
   }),
   ...route('PATCH /secrets/:project/:environment/:key', {
-    input: z.object({ key: secretKey, archived: z.boolean() }).partial().strict(),
+    input: z.object({ key: secretKey, archived: z.boolean() }).partial().strict()
+      .refine((patch) => patch.key !== undefined || patch.archived !== undefined, 'provide a key or archived flag'),
     needs: (patch) => [
       ...(patch.key !== undefined ? ['secret.write' as const] : []),
       ...(patch.archived !== undefined ? ['secret.archive' as const] : []),
