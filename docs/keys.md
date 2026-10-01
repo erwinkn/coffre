@@ -7,8 +7,8 @@ The KEK is one of two things:
 
 | | Where the KEK lives | Who can see a key being used |
 | --- | --- | --- |
-| A local key | 32 bytes in the vault's configuration (a Worker secret) | the vault's own log |
-| AWS KMS | inside KMS, which it never leaves | the vault's log, and CloudTrail |
+| A local key | 32 bytes in the vault's configuration (a Worker secret) | the vault's entries in the shared audit log |
+| AWS KMS | inside KMS, which it never leaves | vault entries in the shared log, and CloudTrail |
 
 ## A local key
 
@@ -26,9 +26,10 @@ records the use of either. Keep an offline copy
 ## AWS KMS
 
 ```ts
-import { awsKms, vault } from '@coffre/vault/cloudflare';
+import { awsKms, postgres, vault } from '@coffre/vault/cloudflare';
 
 export default vault((env: Env) => ({
+  database: postgres(env.VAULT_HYPERDRIVE),
   kek: awsKms({
     keyArn: env.KMS_KEY_ARN, // arn:aws:kms:eu-west-3:123456789012:key/…
     credentials: { accessKeyId: env.AWS_ACCESS_KEY_ID, secretAccessKey: env.AWS_SECRET_ACCESS_KEY },

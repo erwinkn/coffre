@@ -1,5 +1,5 @@
 // coffre's server: the API, sign-in, pages and scheduled job, in one
-// process. It holds no key: it asks the vault, a process of its own
+// process. It holds no KEK: it asks the vault, a process of its own
 // (src/vault.ts), over a Unix socket. Settings come from server.env.
 import { github, serve, signin } from '@coffre/server/node';
 import { connectVault } from '@coffre/vault/node';
@@ -15,7 +15,7 @@ const server = await serve({
   publicUrl: env('PUBLIC_URL'),
   database: env('DATABASE_URL'),
   vault: connectVault(env('VAULT_SOCKET')),
-  // Or the vault in this process, where keeping its keys apart matters less:
+  // For tests or local SQLite development only, the vault in this process:
   // vault: await localVault({ database: env('DATABASE_URL'), kek: …, rootAdmins: […], signingKey: … }),
   auth: signin({
     providers: [

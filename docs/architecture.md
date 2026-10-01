@@ -26,10 +26,10 @@ export default coffre((env: Env) => ({
 
 ```ts
 // vault/src/worker.ts
-import { vault } from '@coffre/vault/cloudflare';
-export { VaultObject } from '@coffre/vault/cloudflare';
+import { postgres, vault } from '@coffre/vault/cloudflare';
 
 export default vault((env: Env) => ({
+  database: postgres(env.VAULT_HYPERDRIVE),
   kek: { id: env.KEK_ID, key: env.KEK },
   previousKeks: [], // older KEKs, still unwrapping what they wrapped
   rootAdmins: ['erwin@example.com'],
@@ -52,32 +52,34 @@ A Node deployment is the same idea, as two processes:
 import { github, serve, signin } from '@coffre/server/node';
 import { connectVault } from '@coffre/vault/node';
 
-await serve({ port: 3000, publicUrl, database: 'postgres://…', vault: connectVault('vault.sock'), auth, auditChainKey });
+await serve({ port: 3000, publicUrl, database: 'postgres://coffre_runtime:…@db:5432/coffre', vault: connectVault('vault.sock'), auth, auditChainKey });
 
 // src/vault.ts
 import { serveVault } from '@coffre/vault/node';
 
-await serveVault({ socket: 'vault.sock', store: 'vault.db', kek, rootAdmins, signingKey });
+await serveVault({ socket: 'vault.sock', database: 'postgres://coffre_vault_runtime:…@db:5432/coffre', kek, rootAdmins, signingKey });
 ```
 
-or as one, with `vault: await localVault({ store, kek, rootAdmins, signingKey })`
-in the server. `database` is a Postgres URL, or `file:` for SQLite in
+For local development or tests, run one process with
+`vault: await localVault({ database, kek, rootAdmins, signingKey })` in the
+server. `database` is a Postgres URL, or `file:` for SQLite in
 local development and tests.
 
 `coffre init --workers` or `coffre init --node` writes such a project:
 [examples/workers](../examples/workers) or [examples/node](../examples/node)
 exactly, including the Workers' `wrangler.jsonc` files (Hyperdrive, the
-service binding, the Cron trigger, the UI's static files, the vault's Durable
-Object).
+service binding, the Cron trigger and the UI's static files). Both Workers
+use one Postgres database: `HYPERDRIVE` connects as `coffre_runtime`,
+`VAULT_HYPERDRIVE` as `coffre_vault_runtime`, with caching disabled on both.
 
 ## Packages
 
 | Package | What | Holds |
 |---|---|---|
 | `@coffre/ui` | the web UI, server-rendered, and its static files | nothing sensitive |
-| `@coffre/server` | `/api`, sign-in, syncs and their providers, the heartbeat, the queries; hands pages to the UI | sessions, the app database |
+| `@coffre/server` | `/api`, sign-in, syncs and their providers, the heartbeat, the queries; hands pages to the UI | sessions, the app login |
 | `@coffre/db` | the Drizzle schemas for Postgres and SQLite, their migrations and migrator, the dialect helpers, the connections, Hyperdrive's included | |
-| `@coffre/vault` | wraps and unwraps data keys, decides who may, logs every use | the keys, the vault's store |
+| `@coffre/vault` | wraps and unwraps data keys, decides who may, logs every use | the keys, the vault login |
 | `@coffre/client` | the typed API client, the API's types printed from the server's routes, and the helpers that turn a sync provider's fields into its config | |
 | `@coffre/core` | what the others share: access rules, envelope encryption, KEK providers, the audit chain, identity and sign-in, and `Vault`, the contract between server and vault | |
 | `@coffre/cli` | `init`, `login`, secrets, syncs, audit; built on the client | a CLI session |
@@ -99,14 +101,14 @@ one package is seen by the others without a build. Builds leave it off.
 | `@coffre/server/cloudflare` | `coffre(env => config)` → `{ fetch, scheduled }`; `postgres(env.HYPERDRIVE)` |
 | `@coffre/server/node` | `serve({ port?, host?, database, …config })` → `{ url, close }`; `migrate(url)` |
 | `@coffre/server` (both) | `signin`, `github`, `google`, `microsoft`, `oidc`, `cloudflareAccess`, `SigninError`; `githubActions`, `vercel`, `railway`, `cloudflareWorkers`, `SyncConfigError`, `SyncProviderError`; and the config types, `SigninProvider` and `SyncProvider` among them |
-| `@coffre/vault/cloudflare` | `vault(env => config)`, the Worker's default export; `VaultObject`, its Durable Object |
+| `@coffre/vault/cloudflare` | `vault(env => config)`, the RPC Worker's default export; `postgres(env.VAULT_HYPERDRIVE)` |
 | `@coffre/vault` (both) | `awsKms`, `KekUnavailableError`, and the config types, `KekProvider` among them |
-| `@coffre/vault/node` | `serveVault({ socket, store, …config })`, `connectVault(socket)`, `localVault({ store, …config })` |
+| `@coffre/vault/node` | `serveVault({ socket, database, …config })`, `connectVault(socket)`, `localVault({ database, …config })` |
 | `@coffre/ui` | `createUi()` → `{ fetch(request, { context: { cspNonce, client } }) }`; files in `dist/client` |
 | `@coffre/client` | `createClient({ url, headers?, transport? })` |
 
 Where `config` is, for the server, `{ publicUrl, vault, auth, auditChainKey,
-syncs? }` and, for the vault, `{ kek, previousKeks?, rootAdmins, signingKey,
+syncs? }` and, for the vault, `{ database, kek, previousKeks?, rootAdmins, signingKey,
 bulkLimit? }`, a KEK being a local key or `awsKms(…)` ([keys.md](keys.md)).
 Each is checked when the deployment starts, and a bad value (a 31-byte key,
 a public URL with a path, no root admin) fails it with a message naming the
@@ -260,11 +262,10 @@ under the bulk limit. It logs the attempt either way. A batch is all or
 nothing: fifty keys for one `coffre run` are one decision and one refusal.
 
 The code lives in `packages/vault`: one `Vault` interface, one
-implementation, and a small storage layer. Every query is plain SQL in one
-file, `store.ts`, over a five-call synchronous SQLite interface with two
-backends: a Durable Object's own SQLite, and a file through Node's built-in
-`node:sqlite`. Its migrations are SQL strings, applied in one transaction
-when the vault opens. The interface:
+implementation, and a Drizzle store over the shared database. The schemas
+and migrations live in `@coffre/db`. Postgres row locks serialize decisions
+about the same member, so separate vault instances share the bulk count
+and membership generations. The interface:
 
 | Call | Does |
 |---|---|
@@ -273,20 +274,20 @@ when the vault opens. The interface:
 | `members()` | everyone's, in one call, for the Users and project access pages |
 | `setAccess` | several places for one principal, all or nothing (`PATCH /api/access/<member>`) |
 | `admit`, `remove` | add or restore a member, or remove one and revoke every grant |
-| `checkpoint`, `latestCheckpoint` | sign the heads of both logs; read the latest signature |
-| `log` | a page of the vault's own log, with its chain verified; root admins only |
-| `verifyLog` | check the whole of that log, and replay members and grants from it |
+| `checkpoint`, `latestCheckpoint` | sign a checkpoint of the shared log; read the latest signature |
+| `log` | the shared log filtered to vault entries, with its chain verified; root admins only |
+| `verifyLog` | check the shared chain and the vault's MACs, and replay members and grants |
 
 Every argument and result is plain data, and a refusal is a value, not a
 thrown error, so the same interface works across a process boundary. The app
 turns a refusal into a 403 `vault_refused` carrying the vault's code
 (`removed`, `no_grant`, `expired`, ...), or a 403 `bulk_limit`, and logs it
-in its own log as `vault_<code>`.
+as an app entry with code `vault_<code>`.
 
 The vault owns everything that decides access: the key encryption key (KEK),
 grants (`(principal, place) → role`, one per member per place, with an
 optional expiry), principal status (active or removed), the root admins (from
-its configuration, so no row anywhere makes someone one), and its own log.
+its configuration, so no row anywhere makes someone one), and its log entries.
 The app keeps a directory row per member for names and sessions, but whether
 that member is still in comes only from `vault.access`. `can()` stays a plain
 function over the grants that call returned.
@@ -294,23 +295,19 @@ function over the grants that call returned.
 ### Transports
 
 - **Workers**: the vault is a Worker of its own, `coffre-vault`, with no
-  route and no HTTP surface. It holds one Durable Object, `VaultObject`,
-  whose SQLite is the store. The app reaches it only through the `VAULT`
-  service binding, whose calls land on the Worker's entrypoint (RPC).
+  public route. The app reaches its RPC entrypoint through the `VAULT`
+  service binding. Each call opens the shared Postgres database through
+  `VAULT_HYPERDRIVE`, using the vault's login. No database connection lives
+  across requests.
 - **Node, its own process** (`serveVault` and `connectVault`): the vault
-  over a SQLite file of its own (created `0600`; one that other users may
-  write is refused), answering on a Unix socket. The socket is the whole of
-  its authentication: a file made `0660`, which only the vault's user and a
-  group it shares with the server may open. So there is no port to reach
-  and no shared secret to leak or rotate, and the process facing the network
-  holds no key. Each call is one HTTP POST over the socket, `/<method>` with
-  the arguments as a JSON array. A TCP port with a shared token was the
-  alternative; it would reach across machines, which the vault has no reason
-  to.
-- **Node, in process** (`localVault`): the same vault in the server's
-  process, for the tests and for deployments where one process is enough.
-  Each call's arguments and results go through JSON on the way, as over RPC,
-  so nothing that only works in-process gets in.
+  opens the same Postgres database as the app, through its own login, and
+  answers on a Unix socket. The socket is its authentication: a file made
+  `0660`, which only the vault's user and a group it shares with the server
+  may open. Each call is one HTTP POST over the socket, `/<method>` with
+  the arguments as a JSON array. The process facing the network holds no KEK.
+- **Node, in process** (`localVault`): for tests and local development.
+  Both components use one SQLite file. Each call's arguments and results
+  go through JSON as over RPC, so nothing that only works in-process gets in.
 - **Locally**, `pnpm dev` runs the vault as an auxiliary Worker of the
   app's `vite dev`, and conformance runs both with
   `wrangler dev -c app/wrangler.jsonc -c vault/wrangler.jsonc`. Either way
@@ -321,14 +318,32 @@ function over the grants that call returned.
 | | App (Worker `coffre`) | Vault (Worker `coffre-vault`) |
 |---|---|---|
 | Config | `auditChainKey`, `auth` (sign-in or Access settings) | `kek`, `previousKeks`, `rootAdmins`, `signingKey`, `bulkLimit` |
-| Store | projects, environments, ciphertext and wrapped keys, the directory, sessions, syncs, the app's audit log | grants, principal status, unwrap counts, checkpoints, its own log |
-| Where | Postgres through Hyperdrive or Node; SQLite in Node for local dev and tests | the Durable Object's SQLite; a SQLite file in Node |
+| Tables it writes | projects, environments, ciphertext and wrapped keys, the directory, sessions, syncs; app entries in `audit_log` | `vault_members`, `vault_grants`; vault entries in `audit_log` |
+| Connection | `coffre_runtime`, through `HYPERDRIVE` or a Node Postgres URL | `coffre_vault_runtime`, through `VAULT_HYPERDRIVE` or a Node Postgres URL |
 
-Each Worker gets only the secrets its own `wrangler.jsonc` declares, and no
-config type has a field for the other side's keys. The separation comes from
-storage, not database privileges, so it holds whatever database either side
-uses: the vault's store is one the app has no credentials for, and neither
-store holds a key.
+Both connections reach the same database. Each Worker gets only its own
+configuration secrets. Neither stores a KEK or audit key in the database.
+The database's grants protect members and grants from the app's login;
+row-level security protects each author's entries from the other's login.
+The owner can bypass those restrictions, but cannot forge an entry's MAC
+without its author's key. SQLite has no logins and is only for tests and
+local development.
+
+### Transactions
+
+No app transaction stays open across a vault call. A request prepares its
+keys outside SQL, then commits its app writes and audit entries together.
+A reveal gets keys from the vault, then commits the app's audit before
+returning values. If either audit append fails, no value is returned.
+An unused wrap or a vault release followed by a failed app transaction can
+remain in the log; it is evidence of that attempt, not a successful answer.
+
+The vault locks affected members before the shared audit head. Its member
+and grant changes commit with their audit entries. With a local KEK, a read
+is one short transaction. With AWS KMS, the intent commits first; the member
+row stays locked across the KMS calls, which settle within five seconds,
+and each key's outcome is logged. Removal waits for a read already in
+flight; the next read is refused before KMS is called.
 
 ### The bulk limit
 
@@ -339,95 +354,60 @@ value it can reach stops within seconds. Each unwrapped key counts, so one
 50-key run is 50. A refusal is logged and answers 403 `bulk_limit`; the
 principal reads again as the window rolls on.
 
-### Checkpoints
+### One log, two authors
 
-The app's audit log has the format `coffre.audit.v2` (`@coffre/core/audit`),
-which the vault's entries will share once it writes to the same table: each
-entry carries an HMAC, under a key derived from `auditChainKey`, over the
-previous entry's hash and its own fields, and a public SHA-256 chain covers
-every entry and its MAC. The MACs authenticate the retained entries against
-changes by someone without the key; the public chain lets anyone who reads
-the table check the links. Each append, in `@coffre/db`, locks the log's
-head first, reads the database clock after the lock, and refuses when the
-head does not name the log's last entry, or is behind one the process found
-before. None of this establishes freshness: someone who can restore both the
-log and its head to an older copy needs no key to make that copy verify.
-Someone who holds the app could also rewrite the log and seal it again. The vault's log
-is the mirror: its chain is keyed from `signingKey`, and someone who holds
-the vault could rewrite it and chain it again. So after each heartbeat, the
-app has the vault sign both heads at once:
+Both authors append `coffre.audit.v2` entries to `audit_log`, sharing one
+`audit_chain_head`. Each entry has an `author` (`app` or `vault`), a MAC
+under a key derived from that author's configuration key, and a public
+SHA-256 hash over its fields and MAC. The app derives its MAC key from
+`auditChainKey`; the vault derives its own from `signingKey`. Neither can
+authenticate the other's entries alone.
 
-```ts
-await vault.checkpoint({ seq: 812, headHash, previous: { seq: 640, hash } });
-// { ok: true, checkpoint: { seq: 812, headHash, vault: { seq: 5031, hash }, signedAt, keyId, signature } }
-```
+An append locks the head, reads the database clock, and refuses a head that
+does not name the last entry or is behind one the process remembers. A new
+head is remembered only after commit. Postgres forbids both runtime logins
+from changing or deleting entries and permits each to append only as its
+own author. The owner can lift the triggers and bypass row-level security;
+the MACs still expose changes made without the keys.
 
-The vault signs `coffre.checkpoint.v2|812|<headHash>|5031|<hash>|<signedAt>`
-with an Ed25519 key only it holds, and only if both logs hold since the last
-one: `previous` is the app head it signed last (else `checkpoint_diverged`),
-and its own log still carries the vault head it signed last and hashes
-forward from it (else `log_broken`). Either refusal is logged, and fails the
-heartbeat. Its checkpoints table is append-only, like its log.
+After each heartbeat the app asks the vault for an Ed25519-signed checkpoint.
+The vault records it as an allowed `checkpoint` entry. The app records the
+signature as `audit.checkpoint`. These are entries in the same table, not
+separate stores. The checkpoint still contains the app-observed head and
+the latest vault entry's head; replacing that format is a later design step.
+A refused checkpoint fails the heartbeat.
 
-The app then writes the signed checkpoint into its own log, as an
-`audit.checkpoint` entry, so each log holds a signed record of the other's
-head:
+`GET /api/audit/verification` (owners only), also called by `coffre verify`,
+checks the chain from its first entry and authenticates the app's MACs.
+It asks the vault to check its MACs over the same prefix, verifies the signed
+checkpoint anchors, and has the vault replay member and grant changes.
+A grant inserted by the owner without a matching vault entry is detected
+by replay. A failure identifies the entry when one can be named.
+The audit page still has separate app and vault views of the shared table.
 
-| Rewritten | Caught by |
-|---|---|
-| the app log, behind a checkpoint | the vault's latest checkpoint: the app's entry 812 no longer hashes to `headHash` |
-| the vault log, behind a checkpoint | the `audit.checkpoint` entry: the vault's entry 5031 no longer hashes to its `hash` |
-| the vault's store, put back to an older copy | the same entry: the vault's latest checkpoint is behind it |
+The limits:
 
-`GET /api/audit/verification` (owners only) checks all three. It recomputes
-the app log's chain and checks the head the vault signed last, with the
-vault's public key. It checks the signature on the last `audit.checkpoint`
-entry, and that the vault's latest checkpoint is not behind it. Then it has
-the vault check its own log whole (`verifyLog`): the chain from the first
-entry, the vault heads both checkpoints signed, and the members and grants
-in its store against a replay of the log. Every change to them is logged in
-the transaction that makes it, so a grant inserted into the vault's SQLite,
-or a removal undone, is a row the log does not explain. A failure names the
-log (`log: 'audit'` or `'vault'`) and, when the fault is at one, the entry.
+- **A complete older backup can verify.** Someone able to restore the
+  database and its head needs no key to restore a valid history. A live
+  process remembers how far it got, but restarting it loses that witness.
+  There is no external checkpoint export yet. AWS CloudTrail, when using
+  KMS, records key use outside this database.
+- **A holder of an author's key can forge that author's entries.** A copied
+  database alone cannot do so. An app takeover can also act as a principal
+  who already has access; the vault does not authenticate browser sessions.
+- **Signing-key rotation is not implemented.** Checkpoints are verified
+  with the current key, and vault entry MACs derive from it. Keep that key
+  with backups. The app's audit key is needed for its entries and sign-in
+  rows too.
 
-`auditChainKey` stays in the app. Signing covers someone who holds
-the app; the entries' MACs authenticate those written since the last
-checkpoint against someone who holds only the database. Moving the key would
-put a vault call on every audited write, and the sign-in state key is derived
-from it.
+### What the vault enforces and verifies
 
-What checkpoints do not catch:
-
-- **Entries appended to the vault log by someone who holds its keys.** The
-  chain is an HMAC under a key derived from `signingKey`, so a copy of the
-  store alone (a backup, `vault.db` on a shared disk) cannot take a forged
-  `grant.create` entry that verifies. Whoever holds the configuration as
-  well can append one, with the grant it explains, and it replays cleanly.
-  The cost of the key: no one without it can recompute the chain, only check
-  the heads the vault signed.
-- **A rewrite of either log since the last checkpoint by someone holding
-  its key.** Entries sealed again under the right key verify.
-- **A rollback of the app log and its head within the uncheckpointed tail.**
-  A database owner can remove those newest entries and restore the matching
-  head without either key. The exposure window runs from the last successful
-  checkpoint to the next: normally five minutes, longer if heartbeats fail
-  or stop. Before the first checkpoint, the entire log is unanchored.
-- **A new signing key.** Each checkpoint is checked with the vault's current
-  public key, so rotating `signingKey` fails the recorded ones until
-  rotation is designed.
-
-### What the vault stops
-
-The vault's own log is append-only (triggers refuse updates and deletes, and
-its code has no path to either) and hash-chained. It records every unwrap
-attempt and every change to grants or status. Root admins read it through
-the app (`GET /api/audit/vault`), and on the audit page. Each page view
-verifies the chain without rehashing all of it, which grows with every
-unwrap: the rows shown, the head the vault verified last (which a rewrite
-re-chained to hide would change), and what was appended since. The first
-view after the vault starts, or one asking for `full` (`?full=1`), rehashes
-from the first entry, one row in memory at a time, and replays members and
-grants as `verifyLog` does.
+The shared log is append-only. The vault records every unwrap attempt and
+every change to grants or status. Root admins read its entries through
+`GET /api/audit/vault` and on the audit page. Each page verifies the entries
+shown and the chain since the head the vault last verified. The first view
+after startup, or `?full=1`, verifies from the first entry; a full check also
+replays members and grants.
 
 A sync reads as a principal of its own (`sync:<id>`), with a grant made when
 the sync is added and revoked when it is removed. Revoking that grant stops
@@ -441,12 +421,13 @@ What the vault stops:
   the grant covers `dev`.
 - **Someone removed getting back in.** An offboarding bug leaves a session
   alive; the vault refuses the principal, which only it can restore.
-- **A copy of either database.** Neither holds a key.
-- **A rewritten app log.** It no longer matches the signed checkpoint.
-- **A rewritten vault log, or its store put back.** It no longer carries the
-  head the app recorded from the last checkpoint.
-- **Access granted around the vault.** A grant or member written straight
-  into its store does not follow from its log.
+- **A copy of the database.** It holds no KEK.
+- **Rewritten log entries without the author's key.** Their MACs fail, even
+  if the owner rebuilds the public chain.
+- **Access granted around the vault.** Verification detects a grant or member
+  written straight into the database without a matching vault entry. The
+  vault can honour a forged grant until verification finds it; database
+  privileges are what keep the app from writing one.
 
 What it does not stop: an app fully taken over can act as anyone who already has
 access. The vault makes that loud rather than impossible: the key never
@@ -530,7 +511,7 @@ What differs stays in the schemas and `packages/db/src/dialect.ts`:
   and migration trees under `packages/db/src/migrations/`, each a
   single baseline. Generated tables sit inside a template in
   `packages/db/src/baseline/` that adds the first audit rows and the
-  Postgres runtime role. Until the first deployment, `pnpm db:generate`
+  Postgres runtime roles. Until the first deployment, `pnpm db:generate`
   regenerates the baseline rather than adding migrations. Tests catch a
   schema or template that no longer matches its migration. Encrypted bytes
   use `bytea` in Postgres and `blob` in SQLite.
@@ -550,11 +531,12 @@ What differs stays in the schemas and `packages/db/src/dialect.ts`:
   in each dialect. SQLite's `lower()` folds ASCII only, so the server folds
   non-ASCII case. No query filters on a JSON field.
 
-The restricted runtime login (`coffre_runtime`, which cannot rewrite the
-app audit log) and `pnpm test:schema` stay Postgres-only. SQLite has no logins;
-its file permissions protect access to the database.
+The restricted runtime logins (`coffre_runtime` and
+`coffre_vault_runtime`) and `pnpm test:schema` stay Postgres-only. The
+schema test checks both logins, including which author each may append as.
+SQLite has no logins; its file permissions protect access to the database.
 
 D1 is not a fit for the app database: it has no interactive transactions, and
 the audit chain reads the previous hash, computes the next in JavaScript, then
-writes. Drizzle's D1 transactions send `BEGIN`, which D1 rejects. A Durable
-Object's SQLite has them and stores the vault; the app stays on Postgres.
+writes. Drizzle's D1 transactions send `BEGIN`, which D1 rejects. Both
+Workers use Postgres.
