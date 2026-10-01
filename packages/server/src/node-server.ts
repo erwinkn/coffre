@@ -51,12 +51,20 @@ export async function serveWith(options: ServeOptions, ui: Ui, staticFiles: stri
 
   async function respond(req: IncomingMessage, res: ServerResponse) {
     const path = req.url ?? '/';
+    const url = URL.parse(path, origin);
+    // Node accepts absolute and network-path targets. They cannot choose the
+    // origin that the app uses for callbacks and browser mutations.
+    if (!path.startsWith('/') || /^[/\\]{2}/.test(path) || url === null || url.origin !== origin) {
+      res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' });
+      res.end('Invalid request target');
+      return;
+    }
     if (staticFiles !== null && (req.method === 'GET' || req.method === 'HEAD') && path.startsWith('/_coffre/')) {
       if (await sendStatic(staticFiles, path, req, res)) return;
     }
     const aborted = new AbortController();
     res.once('close', () => aborted.abort());
-    const request = toRequest(req, origin, aborted.signal);
+    const request = toRequest(req, url, aborted.signal);
     const response = await handleRequest(request, runtime, ui, peerAddress(req));
     await send(response, req, res);
   }
@@ -102,13 +110,13 @@ export async function serveWith(options: ServeOptions, ui: Ui, staticFiles: stri
  * the Host header, which the client chooses: sign-in callbacks and the
  * same-origin check both depend on it.
  */
-function toRequest(req: IncomingMessage, origin: string, signal: AbortSignal): Request {
+function toRequest(req: IncomingMessage, url: URL, signal: AbortSignal): Request {
   const headers = new Headers();
   for (const [name, values] of Object.entries(req.headersDistinct)) {
     for (const value of values ?? []) headers.append(name, value);
   }
   const bodyless = req.method === 'GET' || req.method === 'HEAD';
-  return new Request(new URL(req.url ?? '/', origin), {
+  return new Request(url, {
     method: req.method,
     headers,
     body: bodyless ? null : (Readable.toWeb(req) as ReadableStream<Uint8Array>),
