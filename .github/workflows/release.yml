@@ -1,0 +1,47 @@
+name: Release
+
+# Push a tag naming the packages' version (`pnpm bump 0.2.0`, merged, then
+# `git tag v0.2.0 && git push origin v0.2.0`) to publish it to npm.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # npm's trusted publisher for each package names this workflow file and
+    # this environment, so nothing else can publish as coffre.
+    environment: npm
+    permissions:
+      contents: read
+      # Trusted publishing: npm takes GitHub's OIDC token instead of a stored one.
+      id-token: write
+
+    steps:
+      - name: Check out the tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install frozen dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Trusted publishing needs npm 11.5.1 or later; Node 24 ships one.
+      - name: Build, pack and publish
+        run: |
+          npm --version
+          ./scripts/publish.sh "$GITHUB_REF_NAME"

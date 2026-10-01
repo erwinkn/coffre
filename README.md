@@ -161,6 +161,14 @@ Two traps found the hard way, both documented in `pnpm-workspace.yaml`:
 `minimumReleaseAge` earned its place immediately: it blocked `jose@6.2.4`,
 published six days before we tried to install it.
 
+**Releasing.** `pnpm bump 0.2.0`, merged, then a pushed tag, `v0.2.0`, has
+`.github/workflows/release.yml` publish the seven packages
+(`scripts/publish.sh`). npm takes the workflow's GitHub OIDC token rather
+than a stored one (trusted publishing), and attaches provenance: each
+version on npm names the commit and workflow run that built it. npm sets up
+a trusted publisher only for a package that exists, so each package's first
+version was published by hand, with the same script.
+
 ## Layout
 
 ```
