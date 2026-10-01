@@ -32,18 +32,12 @@
   },
   "scripts": {
     "build": "tsdown",
-    "generate": "drizzle-kit generate && node src/generate.ts",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.cloudflare.json",
     "test": "node --test"
-  },
-  "dependencies": {
-    "drizzle-orm": "0.45.2",
-    "libsql": "0.5.29"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20260920.1",
     "@types/node": "26.1.1",
-    "drizzle-kit": "0.31.10",
     "tsdown": "0.23.0",
     "typescript": "5.9.3"
   }

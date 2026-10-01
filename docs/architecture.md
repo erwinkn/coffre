@@ -248,8 +248,11 @@ under the bulk limit. It logs the attempt either way. A batch is all or
 nothing: fifty keys for one `coffre run` are one decision and one refusal.
 
 The code lives in `packages/vault`: one `Vault` interface, one
-implementation, and a small storage layer, Drizzle over SQLite with its own
-schema and migrations. The interface:
+implementation, and a small storage layer. Every query is plain SQL in one
+file, `store.ts`, over a five-call synchronous SQLite interface with two
+backends: a Durable Object's own SQLite, and a file through Node's built-in
+`node:sqlite`. Its migrations are SQL strings, applied in one transaction
+when the vault opens. The interface:
 
 | Call | Does |
 |---|---|
@@ -282,7 +285,8 @@ function over the grants that call returned.
   whose SQLite is the store. The app reaches it only through the `VAULT`
   service binding, whose calls land on the Worker's entrypoint (RPC).
 - **Node, its own process** (`serveVault` and `connectVault`): the vault
-  over a libSQL file, answering on a Unix socket. The socket is the whole of
+  over a SQLite file of its own (created `0600`; one that other users may
+  write is refused), answering on a Unix socket. The socket is the whole of
   its authentication: a file made `0660`, which only the vault's user and a
   group it shares with the server may open. So there is no port to reach
   and no shared secret to leak or rotate, and the process facing the network
@@ -305,7 +309,7 @@ function over the grants that call returned.
 |---|---|---|
 | Config | `auditChainKey`, `auth` (sign-in or Access settings) | `kek`, `previousKeks`, `rootAdmins`, `signingKey`, `bulkLimit` |
 | Store | projects, environments, ciphertext and wrapped keys, the directory, sessions, syncs, the app's audit log | grants, principal status, unwrap counts, checkpoints, its own log |
-| Where | Postgres or MySQL through Hyperdrive; any of the three in Node | the Durable Object's SQLite; a libSQL file in Node |
+| Where | Postgres or MySQL through Hyperdrive; any of the three in Node | the Durable Object's SQLite; a SQLite file in Node |
 
 Each Worker gets only the secrets its own `wrangler.jsonc` declares, and no
 config type has a field for the other side's keys. The separation comes from
@@ -351,7 +355,12 @@ from it.
 The vault's own log is append-only (triggers refuse updates and deletes, and
 its code has no path to either) and hash-chained. It records every unwrap
 attempt and every change to grants or status. Root admins read it through
-the app (`GET /api/audit/vault`), and on the audit page.
+the app (`GET /api/audit/vault`), and on the audit page. Each page view
+verifies the chain without rehashing all of it, which grows with every
+unwrap: the rows shown, the head the vault verified last (which a rewrite
+re-chained to hide would change), and what was appended since. The first
+view after the vault starts, or one asking for `full`, rehashes from the
+first entry, one row in memory at a time.
 
 A sync reads as a principal of its own (`sync:<id>`), with a grant made when
 the sync is added and revoked when it is removed. Revoking that grant stops

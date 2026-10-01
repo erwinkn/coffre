@@ -53,6 +53,8 @@ coffre login https://secrets.example.com
 ```
 
 Back up the database and `vault.db` together: the vault's grants and audit
-checkpoints describe that database.
+checkpoints describe that database. Copy `vault.db` while the vault is
+stopped, or with `sqlite3 vault.db ".backup vault-backup.db"` while it runs:
+its newest writes wait in `vault.db-wal` until SQLite moves them over.
 
 `pnpm typecheck` checks the configuration against coffre's types.

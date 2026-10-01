@@ -4,16 +4,19 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-
-import Database from 'libsql';
+import { DatabaseSync } from 'node:sqlite';
 
 import { LocalKekProvider } from '../../core/src/kek/local.ts';
 import { KekRegistry } from '../../core/src/kek/registry.ts';
 import { verifyCheckpoint } from '../src/checkpoint.ts';
 import { checkRootAdmins, resolveVaultConfig, type ResolvedVaultConfig } from '../src/config.ts';
-import { embeddedMigrations } from '../src/generate.ts';
 import { openLocalVault, type LocalVault } from '../src/local.ts';
+import { entryHash } from '../src/log.ts';
+import type { Sqlite, SqlValue } from '../src/sqlite.ts';
+import { nodeSqlite } from '../src/sqlite-node.ts';
+import type { LogRow } from '../src/store.ts';
 import type { SecretRef, WrappedKey } from '../src/types.ts';
+import { openVault } from '../src/vault.ts';
 
 const ROOT = 'user:root@acme.example';
 const ADA = 'user:ada@acme.example';
@@ -84,13 +87,8 @@ async function wrapped(w: World, secret: SecretRef): Promise<WrappedKey> {
 }
 
 function raw(w: World) {
-  return new Database(w.path);
+  return new DatabaseSync(w.path);
 }
-
-test('src/migrations.ts is migrations/, embedded', async () => {
-  const embedded = readFileSync(new URL('../src/migrations.ts', import.meta.url), 'utf8');
-  assert.equal(embedded, await embeddedMigrations(), 'run `pnpm --dir packages/vault generate`');
-});
 
 test('a read needs a live grant on the environment, and unwraps the key it was wrapped with', async (t) => {
   const w = await world(t);
@@ -330,6 +328,128 @@ test('the log is hash-chained, append-only, and shows a rewritten entry', async 
   assert.deepEqual(after.verification, { ok: false, failedAtSeq: tampered.seq, reason: 'hash does not match the entry' });
 });
 
+/** `db`, counting the rows it hands back. */
+function counting(db: Sqlite): Sqlite & { rows: number } {
+  const counted = {
+    rows: 0,
+    run: (sql: string, ...params: SqlValue[]) => db.run(sql, ...params),
+    get<T>(sql: string, ...params: SqlValue[]) {
+      const row = db.get<T>(sql, ...params);
+      if (row !== undefined) counted.rows += 1;
+      return row;
+    },
+    all<T>(sql: string, ...params: SqlValue[]) {
+      const rows = db.all<T>(sql, ...params);
+      counted.rows += rows.length;
+      return rows;
+    },
+    *iterate<T>(sql: string, ...params: SqlValue[]) {
+      for (const row of db.iterate<T>(sql, ...params)) {
+        counted.rows += 1;
+        yield row;
+      }
+    },
+    transaction: <T>(fn: () => T) => db.transaction(fn),
+  };
+  return counted;
+}
+
+/** A vault whose log holds `n` wraps and an admission, over a store that counts what it reads. */
+async function longLog(t: test.TestContext, n: number) {
+  const dir = mkdtempSync(join(tmpdir(), 'coffre-vault-'));
+  const path = join(dir, 'vault.db');
+  const file = nodeSqlite(path);
+  const db = counting(file);
+  const vault = await openVault(db, {
+    keks: new KekRegistry(LocalKekProvider.generate('test-kek-1')),
+    rootAdmins: ['root@acme.example'],
+    signingKey: randomBytes(32),
+    bulkLimit: { count: 1000, windowMs: 15 * 60_000 },
+  });
+  t.after(() => {
+    file.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const place = { projectId: randomUUID(), environmentId: randomUUID(), version: 1 };
+  const items = Array.from({ length: n }, (_, i) => ({
+    secret: { ...place, secretId: randomUUID(), path: `market/dev/KEY_${i}` },
+    key: randomBytes(32).toString('base64'),
+  }));
+  assert.ok((await vault.wrap({ principal: ROOT, items })).ok);
+  assert.ok((await vault.admit({ actor: ROOT, principal: ADA })).ok);
+  return { vault, db, path };
+}
+
+/** Rewrite entry `seq` in the file, as someone holding it could, and re-chain what follows when `rechain`. */
+function rewrite(path: string, seq: number, rechain: boolean) {
+  const file = new DatabaseSync(path);
+  try {
+    file.exec('DROP TRIGGER log_no_update');
+    const rows = file.prepare(`SELECT ${LOG_COLUMNS} FROM log WHERE seq >= ? ORDER BY seq`).all(seq) as LogRow[];
+    let prevHash = rows[0].prevHash;
+    for (const row of rechain ? rows : rows.slice(0, 1)) {
+      const actor = row.seq === seq ? BOB : row.actor;
+      const hash = rechain ? entryHash(prevHash, { ...row, actor }) : row.hash;
+      file.prepare('UPDATE log SET actor = ?, prev_hash = ?, hash = ? WHERE seq = ?').run(actor, prevHash, hash, row.seq);
+      prevHash = hash;
+    }
+  } finally {
+    file.close();
+  }
+}
+
+const LOG_COLUMNS = 'seq, at, actor, action, outcome, code, subject, detail, prev_hash AS prevHash, hash';
+
+test('a log view rehashes the page and what is new, not the whole chain', async (t) => {
+  const { vault, db } = await longLog(t, 300);
+  const view = async (input: { before?: number; full?: boolean } = {}) => {
+    db.rows = 0;
+    const page = await vault.log({ actor: ROOT, limit: 10, ...input });
+    assert.ok(page.ok);
+    assert.deepEqual(page.verification, { ok: true, entries: 301 });
+    return db.rows;
+  };
+  // The first view after a start has nothing to go on: all of it.
+  assert.ok((await view()) > 300);
+  assert.ok((await view()) < 20);
+  assert.ok((await view({ before: 100 })) < 20);
+  assert.ok((await view({ full: true })) > 300);
+});
+
+test('an entry edited in place is found on its page, or by a full check', async (t) => {
+  const { vault, path } = await longLog(t, 50);
+  assert.ok((await vault.log({ actor: ROOT })).ok);
+
+  // Off the page and edited in place: only a full check rehashes it.
+  rewrite(path, 3, false);
+  const view = await vault.log({ actor: ROOT, limit: 10 });
+  assert.ok(view.ok && view.verification.ok);
+  const onPage = await vault.log({ actor: ROOT, before: 10 });
+  assert.deepEqual(onPage.ok && onPage.verification, { ok: false, failedAtSeq: 3, reason: 'hash does not match the entry' });
+  const full = await vault.log({ actor: ROOT, limit: 10, full: true });
+  assert.deepEqual(full.ok && full.verification, { ok: false, failedAtSeq: 3, reason: 'hash does not match the entry' });
+});
+
+test('a rewrite re-chained to the head is found against the head the vault last verified', async (t) => {
+  const { vault, path } = await longLog(t, 50);
+  assert.ok((await vault.log({ actor: ROOT })).ok);
+
+  rewrite(path, 3, true);
+  const view = await vault.log({ actor: ROOT, limit: 10 });
+  assert.deepEqual(view.ok && view.verification, { ok: false, failedAtSeq: 51, reason: 'changed since the vault last verified it' });
+  // A vault that never saw the head before cannot tell: the chain is unkeyed.
+  const second = nodeSqlite(path);
+  t.after(() => second.close());
+  const fresh = await openVault(second, {
+    keks: new KekRegistry(LocalKekProvider.generate('test-kek-1')),
+    rootAdmins: ['root@acme.example'],
+    signingKey: randomBytes(32),
+    bulkLimit: { count: 1000, windowMs: 15 * 60_000 },
+  });
+  const unaware = await fresh.log({ actor: ROOT, full: true });
+  assert.ok(unaware.ok && unaware.verification.ok);
+});
+
 test('checkpoints are signed only while they extend the last one', async (t) => {
   const w = await world(t);
   const { checkpoint: none, publicKey } = await w.vault.latestCheckpoint();
@@ -363,7 +483,9 @@ test('the store holds no key', async (t) => {
   const wrap = await w.vault.wrap({ principal: ADA, items: [{ secret, key: key.toString('base64') }] });
   assert.ok(wrap.ok);
   await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: [{ secret, wrapped: wrap.wrapped[0] }] });
-  const file = readFileSync(w.path);
+  // In WAL, the newest writes are in the -wal until a checkpoint moves them.
+  const file = Buffer.concat([w.path, `${w.path}-wal`].map((name) => readFileSync(name)));
+  assert.ok(file.includes(secret.path), 'the log entry is where this looks');
   for (const needle of [kek, key]) {
     assert.equal(file.includes(needle), false);
     assert.equal(file.includes(Buffer.from(needle.toString('base64'))), false);

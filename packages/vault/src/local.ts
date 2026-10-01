@@ -1,5 +1,5 @@
 import type { ResolvedVaultConfig } from './config.ts';
-import { libsqlStorage } from './libsql.ts';
+import { nodeSqlite } from './sqlite-node.ts';
 import type { Vault } from './types.ts';
 import { openVault, type VaultOptions } from './vault.ts';
 
@@ -21,7 +21,7 @@ export const METHODS = [
 export type LocalVault = Vault & { close(): void };
 
 /**
- * The vault in this process, over a libSQL file of its own. Every argument
+ * The vault in this process, over a SQLite file of its own. Every argument
  * and result goes through JSON on the way, as it would over RPC or a socket,
  * so what works here does not rely on sharing objects with the caller.
  */
@@ -30,8 +30,11 @@ export async function openLocalVault(
   config: ResolvedVaultConfig,
   options: VaultOptions = {},
 ): Promise<LocalVault> {
-  const storage = libsqlStorage(path);
-  const vault = await openVault(storage, config, options);
+  const db = nodeSqlite(path);
+  const vault = await openVault(db, config, options).catch((error: unknown) => {
+    db.close();
+    throw error;
+  });
   const local = Object.fromEntries(
     METHODS.map((name) => [
       name,
@@ -39,7 +42,7 @@ export async function openLocalVault(
         json(await (vault[name] as (...args: unknown[]) => Promise<unknown>)(...(json(args) as unknown[]))),
     ]),
   ) as unknown as Vault;
-  return Object.assign(local, { close: () => storage.close() });
+  return Object.assign(local, { close: () => db.close() });
 }
 
 function json(value: unknown): unknown {
