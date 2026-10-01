@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHmac, hkdfSync } from 'node:crypto';
 
 import type { LogEntry, LogHead, LogVerification } from '@coffre/core/vault';
 
@@ -21,12 +21,21 @@ export type Appended = {
 };
 
 /**
- * SHA-256 over the previous hash and the row, as a JSON array: unambiguous,
- * since JSON quotes and escapes every string, and the same bytes in any
- * runtime. Unkeyed: anyone can recompute it, and what stops a rewrite being
- * re-chained is that only the vault can write here at all.
+ * The key the log is chained with, derived from the signing key, so that it
+ * is one more secret to hold, not one more to keep. Whoever holds the store
+ * but not the vault's configuration (a copy of `vault.db`, a backup) cannot
+ * write an entry that verifies, nor re-chain a rewritten one.
  */
-export function entryHash(prevHash: string, row: Omit<LogRow, 'prevHash' | 'hash'>): string {
+export function logKey(signingKey: Uint8Array): Buffer {
+  return Buffer.from(hkdfSync('sha256', signingKey, new Uint8Array(0), 'coffre.vault.log', 32));
+}
+
+/**
+ * HMAC-SHA256, under `logKey`, over the previous hash and the row as a JSON
+ * array: unambiguous, since JSON quotes and escapes every string, and the
+ * same bytes in any runtime.
+ */
+export function entryHash(key: Uint8Array, prevHash: string, row: Omit<LogRow, 'prevHash' | 'hash'>): string {
   const canonical = JSON.stringify([
     LOG_VERSION,
     row.seq,
@@ -38,11 +47,11 @@ export function entryHash(prevHash: string, row: Omit<LogRow, 'prevHash' | 'hash
     row.subject,
     row.detail,
   ]);
-  return createHash('sha256').update(prevHash).update(canonical).digest('hex');
+  return createHmac('sha256', key).update(prevHash).update(canonical).digest('hex');
 }
 
 /** Append entries in order. Call inside the transaction that made the decision. */
-export function append(store: Store, at: number, entries: readonly Appended[]): void {
+export function append(store: Store, key: Uint8Array, at: number, entries: readonly Appended[]): void {
   const head = store.logHead();
   let seq = head?.seq ?? 0;
   let prevHash = head?.hash ?? GENESIS;
@@ -58,7 +67,7 @@ export function append(store: Store, at: number, entries: readonly Appended[]): 
       subject: entry.subject ?? null,
       detail: JSON.stringify(entry.detail ?? {}),
     };
-    const hash = entryHash(prevHash, row);
+    const hash = entryHash(key, prevHash, row);
     store.appendLog({ ...row, prevHash, hash });
     prevHash = hash;
   }
@@ -98,6 +107,7 @@ export function carries(store: Store, head: LogHead): boolean {
  */
 export function verify(
   store: Store,
+  key: Uint8Array,
   shown: readonly LogRow[],
   anchor: Anchor,
   full: boolean,
@@ -109,7 +119,7 @@ export function verify(
 
   const page = [...shown].sort((a, b) => a.seq - b.seq);
   for (const [i, row] of page.entries()) {
-    const fault = unlinked(i === 0 ? { seq: row.seq - 1, hash: row.prevHash } : page[i - 1], row);
+    const fault = unlinked(key, i === 0 ? { seq: row.seq - 1, hash: row.prevHash } : page[i - 1], row);
     if (fault !== null) return broken(row.seq, fault);
   }
   const last = page.at(-1);
@@ -122,7 +132,7 @@ export function verify(
 
   let previous = full ? UNVERIFIED : anchor;
   for (const row of store.logAfter(previous.seq)) {
-    const fault = unlinked(previous, row);
+    const fault = unlinked(key, previous, row);
     if (fault !== null) return broken(row.seq, fault);
     previous = { seq: row.seq, hash: row.hash };
   }
@@ -130,10 +140,10 @@ export function verify(
 }
 
 /** Why `row` does not follow `previous` in the chain, or null when it does. */
-function unlinked(previous: Anchor, row: LogRow): string | null {
+function unlinked(key: Uint8Array, previous: Anchor, row: LogRow): string | null {
   if (row.seq !== previous.seq + 1) return `expected entry ${previous.seq + 1}`;
   if (row.prevHash !== previous.hash) return 'prev_hash does not match the entry before';
-  if (entryHash(row.prevHash, row) !== row.hash) return 'hash does not match the entry';
+  if (entryHash(key, row.prevHash, row) !== row.hash) return 'hash does not match the entry';
   return null;
 }
 
