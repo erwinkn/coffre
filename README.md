@@ -193,11 +193,12 @@ Then open http://127.0.0.1:3000 and sign in as `admin@acme.example`.
 
 `pnpm dev` runs a deployment like `examples/workers` under `vite dev`
 (`dev/deployment/`), on the packages' sources, so an edit to a page, the
-server or the vault reloads in place. It signs in with the dev IdP's persona
-picker (`devIdp(…)`). `pnpm dev:signin` runs the real sign-in page instead,
-with the dev IdP playing GitHub and an OIDC provider, on the data `pnpm dev`
-seeded. A deployment uses `signin(…)` ([docs/deploy.md](docs/deploy.md)) or
-Cloudflare Access ([docs/deployment-auth.md](docs/deployment-auth.md)).
+server or the vault reloads in place. It signs in as a deployment does, with
+`signin(…)`: the dev IdP plays GitHub and an OpenID Connect provider, and its
+page asks which seeded person you are. The seed signs in the same way, and
+prints a service token for `ci-deploy`. A deployment uses `signin(…)`
+([docs/deploy.md](docs/deploy.md)) or Cloudflare Access
+([docs/deployment-auth.md](docs/deployment-auth.md)).
 
 Individual pieces:
 
@@ -240,7 +241,7 @@ CLI:
 ```sh
 coffre() { node --conditions=coffre:source --env-file=.env.dev packages/cli/src/main.ts "$@"; }
 
-coffre login --email admin@acme.example          # local only: a dev IdP persona
+coffre login                                    # a device login: approve it in the browser
 
 # secrets
 coffre list     market/dev
@@ -269,8 +270,8 @@ coffre audit --denied
 coffre verify
 ```
 
-The local helper deliberately loads `.env.dev`, including the explicit dev
-authentication mode. Against a deployed instance, no settings are needed:
+The local helper loads `.env.dev` for the local `COFFRE_API_URL`. Against a
+deployed instance, no settings are needed:
 
 ```sh
 coffre login https://coffre.example.com   # shows a code to approve in the browser
@@ -279,11 +280,11 @@ coffre use                                # every instance you are signed in to
 coffre logout
 ```
 
-`coffre login` works out how the instance signs people in. With coffre's own
-sign-in it runs a device login: the CLI prints a link and a code, you approve
-it in a browser where you are signed in, and the CLI gets a session token of
-its own (30 days by default), listed and revocable on the account page. Behind Cloudflare
-Access it hands over to `cloudflared` (see
+`coffre login` asks the instance how it signs people in (`GET /api/auth`).
+With coffre's own sign-in it runs a device login: the CLI prints a link and a
+code, you approve it in a browser where you are signed in, and the CLI gets a
+session token of its own (30 days by default), listed and revocable on the
+account page. Behind Cloudflare Access it hands over to `cloudflared` (see
 [docs/deployment-auth.md](docs/deployment-auth.md)). Sessions are kept per
 instance in `~/.coffre/credentials.json` (mode 0600), so a company instance
 and a personal one coexist.

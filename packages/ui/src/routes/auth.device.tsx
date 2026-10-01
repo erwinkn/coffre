@@ -19,7 +19,7 @@ export const Route = createFileRoute('/auth/device')({
   loaderDeps: ({ search }) => ({ code: search.code }),
   loader: async ({ context: { client }, deps, parentMatchPromise }) => {
     if (deps.code === undefined) return null;
-    if ((await parentMatchPromise).loaderData?.authMode !== 'signin') {
+    if (!(await parentMatchPromise).loaderData?.auth.signin) {
       return { ok: false as const, error: 'This instance has no CLI sign-in.' };
     }
     const code = deps.code;

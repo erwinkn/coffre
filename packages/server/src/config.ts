@@ -10,7 +10,7 @@ export type CoffreConfig = {
   publicUrl: string;
   /** Keys, grants and members: the vault Worker's binding, or a Node vault. */
   vault: Vault;
-  /** `signin(…)`, `cloudflareAccess(…)`, or `devIdp(…)` locally. */
+  /** `signin(…)`, or `cloudflareAccess(…)` behind Cloudflare Access. */
   auth: Auth;
   /**
    * 32 random bytes, base64: the key of the audit log's hash chain. It lives

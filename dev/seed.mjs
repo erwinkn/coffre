@@ -3,7 +3,8 @@
 //
 // Writes go through the API, not straight into Postgres, so the seed itself is
 // audited like anything else -- and so the seed exercises the same envelope
-// and audit code path the CLI and UI use.
+// and audit code path the CLI and UI use. It signs in as the root admin the
+// way a browser does, through the dev IdP's stand-in GitHub.
 
 import {
     loadLocalSeedConfig,
@@ -14,7 +15,6 @@ import {
 const local = loadLocalSeedConfig(process.env);
 const API = local.apiUrl;
 const IDP = local.idpUrl;
-const AUD = local.audience;
 const ADMIN = local.rootAdmin;
 
 const pg = (await import('pg')).default;
@@ -22,30 +22,52 @@ const pool = new pg.Pool({
     connectionString: local.databaseUrl,
 });
 
-async function mint(params) {
-    const url = new URL('/dev/mint', IDP);
-    url.searchParams.set('aud', AUD);
-    for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`dev IdP returned ${response.status}`);
-    return (await response.json()).token;
+/** The cookie a redirect sets, not one it clears, as a request sends it back. */
+function cookieFrom(response, what) {
+    const set = response.headers.getSetCookie().find((cookie) => !/=;|max-age=0/i.test(cookie));
+    if (response.status !== 302 || set === undefined) {
+        throw new Error(`${what}: expected a redirect with a cookie, got ${response.status}`);
+    }
+    return set.split(';')[0];
 }
 
-async function call(token, method, path, body) {
+/**
+ * Sign in as a browser would: leave for the stand-in GitHub, answer its
+ * persona page with the email, and come back with a session cookie.
+ */
+async function signIn(email) {
+    const leave = await fetch(`${API}/auth/signin/github`, { redirect: 'manual' });
+    const pending = cookieFrom(leave, 'leaving for GitHub');
+    const authorize = new URL(leave.headers.get('location'));
+    if (authorize.origin !== new URL(IDP).origin) throw new Error(`sign-in went to ${authorize.origin}, not the dev IdP`);
+    const form = new URLSearchParams(authorize.searchParams);
+    form.set('email', email);
+    const approve = await fetch(authorize.origin + authorize.pathname, { method: 'POST', body: form, redirect: 'manual' });
+    const back = await fetch(approve.headers.get('location') ?? `${API}/`, {
+        headers: { cookie: pending },
+        redirect: 'manual',
+    });
+    return cookieFrom(back, `signing in as ${email}`);
+}
+
+/** A call as one of coffre's own pages makes it, with the session cookie. */
+async function call(session, method, path, body) {
     const response = await fetch(`${API}${path}`, {
         method,
-        headers: { 'cf-access-jwt-assertion': token, 'content-type': 'application/json' },
+        headers: { cookie: session, origin: API, 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' },
         body: body === undefined ? undefined : JSON.stringify(body),
+        redirect: 'manual',
     });
     if (!response.ok) {
         const detail = await response.text();
         throw new Error(`${method} ${path} -> ${response.status} ${detail}`);
     }
-    return response.json();
+    return response.status === 204 ? null : response.json();
 }
 
-const put = (token, path, body) => call(token, 'PUT', path, body);
-const patch = (token, path, body) => call(token, 'PATCH', path, body);
+const put = (session, path, body) => call(session, 'PUT', path, body);
+const patch = (session, path, body) => call(session, 'PATCH', path, body);
+const post = (session, path, body) => call(session, 'POST', path, body);
 const member = ({ principalType, principalId }) =>
     encodeURIComponent(`${principalType === 'user' ? 'user' : 'token'}:${principalId}`);
 
@@ -86,35 +108,35 @@ await pool.query(
     "UPDATE audit_chain_head SET next_seq = 0, head_hash = decode(repeat('00', 32), 'hex')",
 );
 
-const adminToken = await mint({ email: ADMIN });
+const admin = await signIn(ADMIN);
 
-await put(adminToken, '/api/projects/market', { name: 'Acme Market' });
+await put(admin, '/api/projects/market', { name: 'Acme Market' });
 for (const [slug, name] of [
     ['dev', 'Development'],
     ['prod', 'Production'],
 ]) {
-    await put(adminToken, `/api/projects/market/${slug}`, { name });
+    await put(admin, `/api/projects/market/${slug}`, { name });
 }
 console.log('==> created project market with environments dev, prod');
 
 // Members first. Access refuses anyone who is not a member (HTTP 409):
 // membership is a separate write from project access.
 for (const principal of LOCAL_SEED_DIRECTORY) {
-    await put(adminToken, `/api/members/${member(principal)}`, {});
+    await put(admin, `/api/members/${member(principal)}`, {});
 }
-console.log('==> registered directory principals (lead, dev, auditor, accessmgr, outsider, ci-deploy.access)');
+console.log('==> registered directory principals (lead, dev, auditor, accessmgr, outsider, ci-deploy)');
 
 // A mix of scopes, so the UI shows both kinds of grant:
 //   lead     -- project admin: can add environments and manage access
 //   dev      -- write, but only on dev
 //   auditor  -- read across the whole project
-//   ci       -- a machine principal, matched on its service-token common name
+//   ci       -- a service, with a token of its own
 // outsider is in the directory with no grants — the login page's closed door.
 for (const grant of LOCAL_SEED_GRANTS) {
     const place = grant.environmentSlug === undefined ? 'market' : `market/${grant.environmentSlug}`;
-    await patch(adminToken, `/api/access/${member(grant)}`, { [place]: grant.role });
+    await patch(admin, `/api/access/${member(grant)}`, { [place]: grant.role });
 }
-console.log('==> granted access to lead, dev, auditor, accessmgr and ci-deploy.access');
+console.log('==> granted access to lead, dev, auditor, accessmgr and ci-deploy');
 
 const values = {
     dev: {
@@ -132,13 +154,19 @@ const values = {
 };
 
 for (const [environment, secrets] of Object.entries(values)) {
-    await patch(adminToken, `/api/secrets/market/${environment}`, secrets);
+    await patch(admin, `/api/secrets/market/${environment}`, secrets);
     console.log(`==> wrote ${Object.keys(secrets).length} secrets to market/${environment}`);
 }
 
+const ci = await post(admin, '/api/members/token:ci-deploy/tokens', { label: 'local', expiresInDays: 30 });
+console.log('==> issued ci-deploy a token, for 30 days');
+
+// The seed's own session ends here, rather than lingering in the admin's list.
+await fetch(`${API}/auth/signout`, {
+    method: 'POST',
+    headers: { cookie: admin, origin: API, 'sec-fetch-site': 'same-origin' },
+    redirect: 'manual',
+});
 await pool.end();
 
-console.log('\nSeeded. Try:');
-console.log('  pnpm coffre login --email admin@acme.example');
-console.log('  pnpm coffre list market/dev');
-console.log('  pnpm coffre run market/dev -- printenv');
+console.log(`\nSeeded. As ci-deploy, which reads market/prod:\n  COFFRE_TOKEN=${ci.token}`);

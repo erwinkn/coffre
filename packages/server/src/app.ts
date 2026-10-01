@@ -3,7 +3,6 @@ import {
   finishSignin,
   logout,
   pollDevice,
-  signInDev,
   signOut,
   startDevice,
   startSignin,
@@ -33,7 +32,6 @@ const ROUTES: Record<string, { method: 'GET' | 'POST'; handler: Handler; browser
   '/api/auth/device/token': { method: 'POST', handler: pollDevice },
   '/api/auth/logout': { method: 'POST', handler: logout },
   // Posted by coffre's own pages, with the browser's cookies.
-  '/auth/dev': { method: 'POST', handler: signInDev, browserForm: true },
   '/auth/signout': { method: 'POST', handler: signOut, browserForm: true },
 };
 

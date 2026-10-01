@@ -5,6 +5,8 @@ import {
   credentialHeaders,
   emptyStore,
   instanceOrigin,
+  isJsonContentType,
+  loginMode,
   parseStore,
   resolveTarget,
   withSession,
@@ -42,12 +44,10 @@ test('an address is normalised to its origin, HTTPS by default', () => {
 
 test('credentials never travel over plain HTTP off this machine', () => {
   assert.throws(() => instanceOrigin('http://coffre.example.com'), /plain HTTP/);
-  assert.throws(() => instanceOrigin('http://coffre.example.com', 'cloudflare'), /plain HTTP/);
   assert.equal(instanceOrigin('http://127.0.0.1:3051'), 'http://127.0.0.1:3051');
   assert.equal(instanceOrigin('http://localhost:3000'), 'http://localhost:3000');
   assert.equal(instanceOrigin('http://[::1]:3000'), 'http://[::1]:3000');
-  // The dev IdP flow is local by construction.
-  assert.equal(instanceOrigin('http://devbox:3000', 'dev'), 'http://devbox:3000');
+  assert.throws(() => instanceOrigin('http://devbox:3000'), /plain HTTP/);
 });
 
 test('addresses with a path, query, or embedded password are refused', () => {
@@ -66,7 +66,7 @@ test('the single-token file older CLIs wrote reads as signed out, not as a sessi
   assert.deepEqual(parseStore('null'), emptyStore());
 });
 
-test('unknown modes and a dangling current are dropped on read', () => {
+test('unknown modes, like the dev mode older CLIs saved, and a dangling current are dropped on read', () => {
   const store = parseStore(
     JSON.stringify({
       version: 2,
@@ -74,6 +74,7 @@ test('unknown modes and a dangling current are dropped on read', () => {
       instances: {
         [OURS]: { mode: 'signin', token: 't', obtainedAt: 'x' },
         'https://odd.example.com': { mode: 'kerberos', obtainedAt: 'x' },
+        'http://127.0.0.1:3000': { mode: 'dev', token: 't', obtainedAt: 'x' },
       },
     }),
   );
@@ -144,10 +145,10 @@ test('an instance with no saved session asks for a login there', () => {
 
 test('a saved token is not sent to the same origin under a different mode', () => {
   assert.throws(
-    () => resolveTarget({ COFFRE_AUTH_MODE: 'dev' }, storeWith(), NOW),
+    () => resolveTarget({ COFFRE_AUTH_MODE: 'cloudflare' }, storeWith(), NOW),
     /not signed in to https:\/\/coffre\.example\.com/,
   );
-  assert.throws(() => resolveTarget({ COFFRE_AUTH_MODE: 'saml' }, storeWith(), NOW), /must be one of/);
+  assert.throws(() => resolveTarget({ COFFRE_AUTH_MODE: 'dev' }, storeWith(), NOW), /must be one of signin, cloudflare/);
 });
 
 test('an expired session is refused locally with the date it ended', () => {
@@ -173,7 +174,23 @@ test('each mode carries its credential the way its gatekeeper expects', () => {
     credentialHeaders('cloudflare', { kind: 'access-service-token', clientId: 'i', clientSecret: 's' }),
     { 'cf-access-client-id': 'i', 'cf-access-client-secret': 's' },
   );
-  assert.deepEqual(credentialHeaders('dev', { kind: 'token', token: 't' }), {
-    'cf-access-jwt-assertion': 't',
-  });
+});
+
+// --- login ----------------------------------------------------------------------
+
+test('login signs in the way GET /api/auth says, or the way Access turns it away', () => {
+  const signin = { signin: { title: 'coffre', note: null, providers: [] }, access: null };
+  assert.equal(loginMode(OURS, 200, signin), 'signin');
+  assert.equal(loginMode(THEIRS, 200, { signin: null, access: { assertion: false } }), 'cloudflare');
+  assert.equal(loginMode(THEIRS, 302, undefined), 'cloudflare');
+  assert.throws(() => loginMode(THEIRS, 403, undefined), /COFFRE_AUTH_MODE=cloudflare coffre login https:\/\/coffre\.acme\.example/);
+  assert.throws(() => loginMode(OURS, 404, undefined), /does not look like coffre: GET \/api\/auth answered 404/);
+  assert.throws(() => loginMode(OURS, 200, { hello: 'world' }), /does not look like coffre/);
+});
+
+test('JSON is recognised by its media type, parameters or not', () => {
+  assert.equal(isJsonContentType('application/json'), true);
+  assert.equal(isJsonContentType('application/problem+json; charset=utf-8'), true);
+  assert.equal(isJsonContentType('text/html; charset=utf-8'), false);
+  assert.equal(isJsonContentType(null), false);
 });

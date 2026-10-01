@@ -1,5 +1,5 @@
 /**
- * Sign-in providers as configuration.
+ * Sign-in providers, and the sign-in they make up.
  *
  * coffre speaks two protocols: OpenID Connect, which covers Google, Microsoft,
  * Okta, Auth0, Keycloak, Authentik, Clerk, WorkOS and nearly everyone else,
@@ -13,15 +13,16 @@
  * the typecheck:
  *
  *   signin({ providers: [github({ clientId, clientSecret: env.GITHUB_SECRET, organization: 'acme' })] })
+ *
+ * Each returns a `SigninProvider`, and a provider that speaks neither can be
+ * one of the deployment's own, in the same list.
  */
-
-/** Which mark the sign-in button carries. */
-export type SigninBrand = 'github' | 'google' | 'microsoft' | 'oidc';
+import { GitHubSigninProvider } from './github.ts';
+import { OidcSigninProvider } from './oidc.ts';
+import type { SigninBrand, SigninProvider } from './types.ts';
 
 type ProviderBase = {
-  /** Stable id: part of the callback URL and of every identity bound through it. */
   id: string;
-  /** Button text: "Continue with {label}". */
   label: string;
   brand: SigninBrand;
   clientId: string;
@@ -29,7 +30,6 @@ type ProviderBase = {
 };
 
 export type OidcProviderConfig = ProviderBase & {
-  kind: 'oidc';
   /** Issuer identifier; discovery is fetched from `${issuer}/.well-known/openid-configuration`. */
   issuer: string;
   scopes: string[];
@@ -44,7 +44,6 @@ export type OidcProviderConfig = ProviderBase & {
 };
 
 export type GitHubProviderConfig = ProviderBase & {
-  kind: 'github';
   /** https://github.com, or a GitHub Enterprise Server host. */
   webUrl: string;
   /** https://api.github.com, or `${host}/api/v3` on Enterprise Server. */
@@ -52,8 +51,6 @@ export type GitHubProviderConfig = ProviderBase & {
   /** When set, only active members of this organization may sign in. */
   organization: string | null;
 };
-
-export type SigninProviderConfig = OidcProviderConfig | GitHubProviderConfig;
 
 export type SigninPage = {
   /** Heading on the sign-in page, e.g. "Acme secrets". */
@@ -65,7 +62,7 @@ export type SigninPage = {
 export type SigninConfig = {
   /** The origin people reach coffre at. Callback URLs are built from it, never from the Host header. */
   publicUrl: string;
-  providers: SigninProviderConfig[];
+  providers: SigninProvider[];
   page: SigninPage;
   /** Absolute lifetime of a browser session. */
   browserSessionHours: number;
@@ -74,16 +71,24 @@ export type SigninConfig = {
 };
 
 const PROVIDER_ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
+const BRANDS: readonly SigninBrand[] = ['github', 'google', 'microsoft', 'oidc'];
 
 type Credentials = { clientId: string; clientSecret: string };
 
 function checkId(id: string): string {
-  if (!PROVIDER_ID.test(id)) {
+  if (typeof id !== 'string' || !PROVIDER_ID.test(id)) {
     throw new Error(
       `sign-in provider id "${id}" must be 1-32 lowercase letters, digits or dashes`,
     );
   }
   return id;
+}
+
+function credentials(id: string, options: Credentials): Credentials {
+  if (!options.clientId || !options.clientSecret) {
+    throw new Error(`sign-in provider ${id} needs a client id and a client secret`);
+  }
+  return { clientId: options.clientId, clientSecret: options.clientSecret };
 }
 
 /**
@@ -92,23 +97,26 @@ function checkId(id: string): string {
  * Okta, Auth0, Keycloak, Authentik, Zitadel, Clerk, WorkOS, Dex and the like
  * all live here; so does a broker, for providers that only speak SAML or LDAP.
  */
-export function oidc(
-  options: Credentials & {
-    id: string;
-    label: string;
-    issuer: string;
-    scopes?: string[];
-    authorizationParams?: Record<string, string>;
-  },
-): OidcProviderConfig {
+export function oidc(options: OidcOptions): OidcSigninProvider {
+  return new OidcSigninProvider(oidcConfig(options));
+}
+
+type OidcOptions = Credentials & {
+  id: string;
+  label: string;
+  issuer: string;
+  scopes?: string[];
+  authorizationParams?: Record<string, string>;
+};
+
+function oidcConfig(options: OidcOptions): OidcProviderConfig {
+  const id = checkId(options.id);
   return {
-    kind: 'oidc',
-    id: checkId(options.id),
+    id,
     label: options.label,
     brand: 'oidc',
-    clientId: options.clientId,
-    clientSecret: options.clientSecret,
-    issuer: issuerUrl(options.issuer, `sign-in provider ${options.id}`),
+    ...credentials(id, options),
+    issuer: issuerUrl(options.issuer, `sign-in provider ${id}`),
     scopes: options.scopes ?? ['openid', 'email', 'profile'],
     authorizationParams: options.authorizationParams ?? {},
     hostedDomain: null,
@@ -118,10 +126,10 @@ export function oidc(
 /** Google accounts; with `domain`, only that Google Workspace's accounts. */
 export function google(
   options: Credentials & { id?: string; label?: string; domain?: string },
-): OidcProviderConfig {
+): OidcSigninProvider {
   const domain = options.domain?.trim().toLowerCase() || null;
-  return {
-    ...oidc({
+  return new OidcSigninProvider({
+    ...oidcConfig({
       id: options.id ?? 'google',
       label: options.label ?? 'Google',
       issuer: 'https://accounts.google.com',
@@ -135,7 +143,7 @@ export function google(
     }),
     brand: 'google',
     hostedDomain: domain,
-  };
+  });
 }
 
 const TENANT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -150,15 +158,15 @@ const TENANT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
  */
 export function microsoft(
   options: Credentials & { id?: string; label?: string; tenant: string },
-): OidcProviderConfig {
+): OidcSigninProvider {
   const tenant = options.tenant.trim();
   if (!TENANT_ID.test(tenant)) {
     throw new Error(
       'the Microsoft sign-in tenant must be the directory (tenant) ID, a GUID, not a domain or "common"',
     );
   }
-  return {
-    ...oidc({
+  return new OidcSigninProvider({
+    ...oidcConfig({
       id: options.id ?? 'microsoft',
       label: options.label ?? 'Microsoft',
       issuer: `https://login.microsoftonline.com/${tenant.toLowerCase()}/v2.0`,
@@ -167,7 +175,7 @@ export function microsoft(
       authorizationParams: { prompt: 'select_account' },
     }),
     brand: 'microsoft',
-  };
+  });
 }
 
 /** GitHub accounts; with `organization`, only that organization's members. */
@@ -179,19 +187,17 @@ export function github(
     webUrl?: string;
     apiUrl?: string;
   },
-): GitHubProviderConfig {
+): GitHubSigninProvider {
   const id = checkId(options.id ?? 'github');
-  return {
-    kind: 'github',
+  return new GitHubSigninProvider({
     id,
     label: options.label ?? 'GitHub',
     brand: 'github',
-    clientId: options.clientId,
-    clientSecret: options.clientSecret,
+    ...credentials(id, options),
     webUrl: baseUrl(options.webUrl ?? 'https://github.com', `sign-in provider ${id} web URL`),
     apiUrl: baseUrl(options.apiUrl ?? 'https://api.github.com', `sign-in provider ${id} API URL`),
     organization: options.organization?.trim() || null,
-  };
+  });
 }
 
 function isLoopback(url: URL): boolean {
@@ -237,10 +243,10 @@ export function publicOrigin(value: string): string {
   return url.origin;
 }
 
-/** Sign-in configuration, checked: at least one provider, ids unique, lifetimes sane. */
+/** Sign-in configuration, checked: at least one provider, each whole, ids unique, lifetimes sane. */
 export function defineSignin(options: {
   publicUrl: string;
-  providers: SigninProviderConfig[];
+  providers: SigninProvider[];
   page?: { title?: string; note?: string };
   browserSessionHours?: number;
   cliSessionDays?: number;
@@ -250,11 +256,9 @@ export function defineSignin(options: {
   }
   const seen = new Set<string>();
   for (const provider of options.providers) {
+    checkProvider(provider);
     if (seen.has(provider.id)) throw new Error(`sign-in provider id "${provider.id}" is used twice`);
     seen.add(provider.id);
-    if (provider.clientId === '' || provider.clientSecret === '') {
-      throw new Error(`sign-in provider ${provider.id} needs a client id and a client secret`);
-    }
   }
   return {
     publicUrl: publicOrigin(options.publicUrl),
@@ -266,6 +270,20 @@ export function defineSignin(options: {
     browserSessionHours: lifetime(options.browserSessionHours, 'browserSessionHours', 12, 24 * 7),
     cliSessionDays: lifetime(options.cliSessionDays, 'cliSessionDays', 30, 365),
   };
+}
+
+/** A deployment's own provider is checked like coffre's: it is only typed, not trusted. */
+function checkProvider(provider: SigninProvider): void {
+  checkId(provider?.id);
+  if (typeof provider.label !== 'string' || provider.label.trim() === '') {
+    throw new Error(`sign-in provider ${provider.id} needs a label`);
+  }
+  if (!BRANDS.includes(provider.brand)) {
+    throw new Error(`sign-in provider ${provider.id}'s brand must be one of ${BRANDS.join(', ')}`);
+  }
+  if (typeof provider.start !== 'function' || typeof provider.finish !== 'function') {
+    throw new Error(`sign-in provider ${provider.id} needs start() and finish()`);
+  }
 }
 
 function lifetime(value: number | undefined, name: string, fallback: number, max: number): number {

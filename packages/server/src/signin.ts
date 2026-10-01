@@ -1,28 +1,4 @@
-import { createHash } from 'node:crypto';
-
-import {
-  createSigninProvider,
-  type AuthConfig,
-  type SigninConfig,
-  type SigninProvider,
-  type SigninProviderConfig,
-} from '@coffre/core/identity';
-
-const providers = new Map<string, SigninProvider>();
-
-/**
- * One provider object per configuration for the isolate's lifetime, so the
- * OIDC discovery document is fetched once rather than on every sign-in.
- */
-export function signinProvider(config: SigninProviderConfig): SigninProvider {
-  const key = createHash('sha256').update(JSON.stringify(config)).digest('base64url');
-  let provider = providers.get(key);
-  if (provider === undefined) {
-    provider = createSigninProvider(config);
-    providers.set(key, provider);
-  }
-  return provider;
-}
+import type { AuthConfig, SigninConfig } from '@coffre/core/identity';
 
 export function callbackUrl(config: SigninConfig, providerId: string): string {
   return `${config.publicUrl}/auth/callback/${providerId}`;

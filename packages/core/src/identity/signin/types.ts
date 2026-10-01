@@ -6,8 +6,6 @@
  * login name can be renamed and an email address can be handed to someone new.
  */
 export type SigninProfile = {
-  /** The configured provider id, e.g. "github". */
-  provider: string;
   subject: string;
   /** Verified addresses only, lowercased, the provider's primary first. */
   emails: string[];
@@ -21,7 +19,6 @@ export type SigninProfile = {
  * unauthenticated visitor cannot make coffre write anything.
  */
 export type PendingSignin = {
-  provider: string;
   state: string;
   codeVerifier: string;
   nonce: string | null;
@@ -56,13 +53,39 @@ export type ProviderOptions = {
   fetch?: typeof fetch;
 };
 
+/** Which mark the sign-in button carries: GitHub's, Google's, Microsoft's, or a plain key. */
+export type SigninBrand = 'github' | 'google' | 'microsoft' | 'oidc';
+
+/**
+ * A way to sign in: send the browser to whoever knows the person, and take
+ * back who they are. `github()`, `google()`, `microsoft()` and `oidc()` make
+ * one; so can a deployment, for a provider that is none of those. coffre
+ * does everything around it: the pending state, sealed in a cookie between
+ * the two calls, binding the profile to a member, sessions, CLI logins and
+ * service tokens.
+ *
+ *   const acme: SigninProvider = {
+ *     id: 'acme',
+ *     label: 'Acme SSO',
+ *     brand: 'oidc',
+ *     async start(redirectUri) { … return { url, pending: { state, codeVerifier, nonce: null } }; },
+ *     async finish(callbackUrl, redirectUri, pending) { … return { subject, emails, name }; },
+ *   };
+ */
 export interface SigninProvider {
+  /** Stable: part of the callback URL, `/auth/callback/{id}`, and of every account bound through it. */
   readonly id: string;
+  /** Button text: "Continue with {label}". */
+  readonly label: string;
+  readonly brand: SigninBrand;
   /** Where to send the browser, and what to remember until it comes back. */
   start(redirectUri: string, options?: { loginHint?: string }): Promise<{
     url: URL;
     pending: PendingSignin;
   }>;
-  /** Exchange the callback for a verified profile, or throw a SigninError. */
+  /**
+   * The person back from the provider, verified: check the callback against
+   * `pending`, and throw a SigninError for anything that does not hold.
+   */
   finish(callbackUrl: URL, redirectUri: string, pending: PendingSignin): Promise<SigninProfile>;
 }

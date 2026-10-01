@@ -97,7 +97,7 @@ one package is seen by the others without a build. Builds leave it off.
 |---|---|
 | `@coffre/server/cloudflare` | `coffre(env => config)` → `{ fetch, scheduled }`; `postgres(env.HYPERDRIVE)` |
 | `@coffre/server/node` | `serve({ port?, host?, database, …config })` → `{ url, close }`; `migrate(url)` |
-| `@coffre/server` (both) | `signin`, `github`, `google`, `microsoft`, `oidc`, `cloudflareAccess`, `devIdp`, and the config types |
+| `@coffre/server` (both) | `signin`, `github`, `google`, `microsoft`, `oidc`, `cloudflareAccess`, `SigninError`, and the config types, `SigninProvider` among them |
 | `@coffre/vault/cloudflare` | `vault(env => config)`, the Worker's default export; `VaultObject`, its Durable Object |
 | `@coffre/vault/node` | `serveVault({ socket, store, …config })`, `connectVault(socket)`, `localVault({ store, …config })` |
 | `@coffre/ui` | `createUi()` → `{ fetch(request, { context: { cspNonce, client } }) }`; files in `dist/client` |

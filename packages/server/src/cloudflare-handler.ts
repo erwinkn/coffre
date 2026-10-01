@@ -51,7 +51,7 @@ export function cloudflareHandler<Env>(configure: (env: Env) => WorkersConfig, u
   return {
     fetch(request, env, ctx) {
       const runtime = runtimeFor(env, ctx);
-      return handleRequest(request, runtime, ui, cloudflareSourceIp(request, runtime.auth));
+      return handleRequest(request, runtime, ui, cloudflareSourceIp(request));
     },
     async scheduled(_controller, env, ctx) {
       await runScheduled(runtimeFor(env, ctx));

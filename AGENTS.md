@@ -59,15 +59,17 @@ build. The vault keeps its Durable Object SQLite under
 `dev/.wrangler/state` (or `$COFFRE_STATE_DIR`), which `pnpm dev` empties before it
 seeds. `COFFRE_DEV_PORT`, `COFFRE_DEV_IDP_PORT` and `COFFRE_DEV_DATABASE` run a
 second stack beside the first (see `dev/start.sh`). Sign in at
-`http://127.0.0.1:3000/login` as `admin@acme.example` (root admin) or any of the
-seeded personas. CLI: `pnpm coffre <cmd>` (from the root, against `.env.dev`).
+`http://127.0.0.1:3000/login`, through either button (the dev IdP plays GitHub and
+an OIDC provider), as `admin@acme.example` (root admin) or any of the seeded
+personas; the seed signs in the same way. CLI: `pnpm coffre <cmd>` (from the root,
+against `.env.dev`); `pnpm coffre login` is a device login, approved in the browser.
 
 **Config is code.** The packages read no environment variable of their own; a
 deployment passes everything to `coffre(env => …)`, `serve({…})`, `vault(env => …)`
 or `serveVault({…})`. The env vars left are the CLI's user-facing ones (`COFFRE_API_URL`,
 `COFFRE_TOKEN`, …), `DATABASE_URL` for `coffre-server migrate`, and the dev and test
-tooling's (`COFFRE_AUTH_MODE` for the dev IdP and seed, `COFFRE_DEV_*`,
-`COFFRE_STATE_DIR`, `COFFRE_TEST_ENGINE`, `COFFRE_TEST_DATABASE`). Don't add another to a package.
+tooling's (`COFFRE_DEV_*`, `COFFRE_STATE_DIR`, `COFFRE_TEST_ENGINE`,
+`COFFRE_TEST_DATABASE`). Don't add another to a package.
 
 **Tests / checks.**
 - `pnpm test` = lint + recreate `coffre_test` + `node --test --test-concurrency=1`

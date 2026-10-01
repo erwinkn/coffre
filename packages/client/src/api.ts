@@ -716,16 +716,17 @@ export type AuditEntryView = {
 };
 
 export type AuthInfo = {
-  mode: "cloudflare" | "dev" | "signin";
-  accessAssertion: boolean;
   signin: null | {
     title: string;
     note: string | null;
     providers: {
       id: string;
       label: string;
-      brand: string;
+      brand: "github" | "google" | "microsoft" | "oidc";
     }[];
+  };
+  access: null | {
+    assertion: boolean;
   };
 };
 

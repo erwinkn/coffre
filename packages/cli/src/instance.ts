@@ -1,7 +1,3 @@
-import type { AuthMode } from '@coffre/core/identity';
-
-import { cliAuthHeader } from './auth-mode.ts';
-
 /**
  * Which coffre the CLI talks to, and how it proves who you are there.
  *
@@ -23,6 +19,11 @@ import { cliAuthHeader } from './auth-mode.ts';
  * service token) or `COFFRE_ACCESS_CLIENT_ID`/`_SECRET` (a Cloudflare Access
  * service token) authenticates, and nothing is written to disk.
  */
+
+import type { AuthInfo } from '@coffre/client';
+
+/** Who vouches for you there: coffre's own sign-in, or Cloudflare Access in front of it. */
+export type AuthMode = 'signin' | 'cloudflare';
 
 export type Session = {
   mode: AuthMode;
@@ -49,7 +50,7 @@ export type Target = { origin: string; mode: AuthMode; credential: Credential };
 
 type Environment = Readonly<Record<string, string | undefined>>;
 
-const MODES: readonly AuthMode[] = ['signin', 'cloudflare', 'dev'];
+const MODES: readonly AuthMode[] = ['signin', 'cloudflare'];
 
 export function emptyStore(): Store {
   return { version: 2, current: null, instances: {} };
@@ -108,7 +109,7 @@ function isLoopback(hostname: string): boolean {
  * listen on. A bare host name means HTTPS, or HTTP for this machine:
  * `coffre.example.com` and `127.0.0.1:3000` both do what they look like.
  */
-export function instanceOrigin(raw: string, mode: AuthMode = 'signin'): string {
+export function instanceOrigin(raw: string): string {
   const value = raw.trim();
   const invalid = () =>
     new Error(`"${raw}" is not a coffre address; expected something like https://coffre.example.com`);
@@ -130,10 +131,41 @@ export function instanceOrigin(raw: string, mode: AuthMode = 'signin'): string {
   if ((url.pathname !== '/' && url.pathname !== '') || url.search !== '' || url.hash !== '') {
     throw new Error(`the coffre address must be an origin, like ${url.origin}, without a path`);
   }
-  if (url.protocol === 'http:' && mode !== 'dev' && !isLoopback(url.hostname)) {
+  if (url.protocol === 'http:' && !isLoopback(url.hostname)) {
     throw new Error(`refusing to send credentials over plain HTTP; use https://${url.host}`);
   }
   return url.origin;
+}
+
+export function isJsonContentType(value: string | null): boolean {
+  if (value === null) return false;
+  const mediaType = value.split(';', 1)[0].trim().toLowerCase();
+  return mediaType === 'application/json' || mediaType.endsWith('+json');
+}
+
+/**
+ * How to sign in somewhere, from its answer to `GET /api/auth` without a
+ * credential. coffre says how it signs people in. Cloudflare Access, in front
+ * of it, turns the CLI away first, with a redirect to its own login page:
+ *
+ *   200 { signin: { providers: […] }, access: null }   → a device login
+ *   200 { signin: null, access: { … } }                 → cloudflared
+ *   302 Location: https://acme.cloudflareaccess.com/…   → cloudflared
+ */
+export function loginMode(origin: string, status: number, body: unknown): AuthMode {
+  if (status >= 300 && status < 400) return 'cloudflare';
+  const auth = status === 200 && typeof body === 'object' && body !== null ? (body as Partial<AuthInfo>) : null;
+  if (auth?.signin) return 'signin';
+  if (auth?.access) return 'cloudflare';
+  if (status === 401 || status === 403) {
+    // Access can be set to answer clients that are not browsers with a bare
+    // 401 or 403 rather than a redirect.
+    throw new Error(
+      `${origin} turned the CLI away (status ${status}). If it is behind Cloudflare Access,\n` +
+        `  run \`COFFRE_AUTH_MODE=cloudflare coffre login ${origin}\``,
+    );
+  }
+  throw new Error(`${origin} does not look like coffre: GET /api/auth answered ${status}`);
 }
 
 /**
@@ -151,7 +183,7 @@ export function resolveTarget(env: Environment, store: Store, now: Date = new Da
   const accessClientId = env.COFFRE_ACCESS_CLIENT_ID?.trim();
   const mode: AuthMode =
     explicitMode ?? session?.mode ?? (accessClientId ? 'cloudflare' : 'signin');
-  const origin = instanceOrigin(requested, mode);
+  const origin = instanceOrigin(requested);
 
   const token = env.COFFRE_TOKEN?.trim();
   if (token) return { origin, mode, credential: { kind: 'token', token } };
@@ -183,7 +215,7 @@ export function resolveTarget(env: Environment, store: Store, now: Date = new Da
 /** The stored session for an address, however it was typed. */
 function lookupSession(store: Store, requested: string): Session | undefined {
   try {
-    return store.instances[instanceOrigin(requested, 'dev')];
+    return store.instances[instanceOrigin(requested)];
   } catch {
     return undefined;
   }
@@ -192,8 +224,7 @@ function lookupSession(store: Store, requested: string): Session | undefined {
 /**
  * The headers that carry a credential, per mode. coffre's own sign-in takes a
  * standard bearer token. Cloudflare Access takes its user token, or a service
- * token's id and secret, at the edge. Dev hands the API an Access-shaped
- * assertion directly.
+ * token's id and secret, at the edge, and hands coffre its own assertion.
  */
 export function credentialHeaders(mode: AuthMode, credential: Credential, cloudflaredToken?: string): Record<string, string> {
   switch (credential.kind) {
@@ -204,11 +235,11 @@ export function credentialHeaders(mode: AuthMode, credential: Credential, cloudf
       };
     case 'cloudflared':
       if (!cloudflaredToken) throw new Error('cloudflared did not return a token');
-      return cliAuthHeader('cloudflare', cloudflaredToken);
+      return { 'cf-access-token': cloudflaredToken };
     case 'token':
-      return mode === 'signin'
-        ? { authorization: `Bearer ${credential.token}` }
-        : cliAuthHeader(mode, credential.token);
+      return mode === 'cloudflare'
+        ? { 'cf-access-token': credential.token }
+        : { authorization: `Bearer ${credential.token}` };
   }
 }
 

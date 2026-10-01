@@ -1,17 +1,98 @@
-# Signing in behind Cloudflare Access
+# How people sign in
 
-A deployed coffre signs people in one of two ways, chosen by the `auth` it
-is configured with:
+A deployment says who vouches for people with its `auth`, one of two:
 
 - `signin({ providers })`: coffre's own sign-in page, with GitHub, Google,
-  Microsoft or any OpenID Connect provider. `coffre init` sets up GitHub;
-  [deploy.md](deploy.md) walks through it.
+  Microsoft, any OpenID Connect provider, or one of the deployment's own.
+  `coffre init` sets up GitHub; [deploy.md](deploy.md) walks through it.
 - `cloudflareAccess({ teamDomain, audience })`: Cloudflare Access in front of
-  coffre, which verifies the token Access forwards. This page describes it.
+  coffre, which verifies the assertion Access forwards.
 
-Neither runs a password flow or a persona picker.
+Either way, coffre decides who is a member: signing in proves who someone
+is, not that they may enter. With `signin`, the sessions, the CLI's device
+logins and service tokens are coffre's too. Behind Access, Access keeps the
+browser's session, `cloudflared` the CLI's, and CI uses Access service
+tokens. Neither runs a password flow.
 
-## Cloudflare Access inputs
+## Providers
+
+```ts
+auth: signin({
+  providers: [
+    github({ clientId, clientSecret: env.GITHUB_CLIENT_SECRET, organization: 'acme' }),
+    google({ clientId, clientSecret: env.GOOGLE_CLIENT_SECRET, domain: 'acme.example' }),
+    oidc({ id: 'okta', label: 'Okta', issuer: 'https://acme.okta.com', clientId, clientSecret }),
+  ],
+  title: 'Acme secrets',
+}),
+```
+
+Each provider's callback is `<publicUrl>/auth/callback/<id>`. `github()`,
+`google()` and `microsoft()` are presets of GitHub's OAuth and of OpenID
+Connect; anything else that speaks OIDC (Okta, Auth0, Keycloak, Authentik,
+Clerk, WorkOS…) needs only `oidc()` and its issuer.
+
+### A provider of your own
+
+A provider is a `SigninProvider`: a way to send the browser to whoever knows
+the person, and to take back who they are. A deployment can write one for a
+provider that speaks neither protocol, and list it beside the others:
+
+```ts
+import type { SigninProvider } from '@coffre/server/cloudflare';
+
+const acme: SigninProvider = {
+  id: 'acme',                  // stable: in the callback URL and every account bound through it
+  label: 'Acme SSO',           // "Continue with Acme SSO"
+  brand: 'oidc',               // the button's mark: github, google, microsoft, or oidc (a key)
+  async start(redirectUri) {
+    const state = randomToken();
+    const url = new URL('https://sso.acme.example/authorize');
+    url.searchParams.set('redirect_uri', redirectUri);
+    url.searchParams.set('state', state);
+    return { url, pending: { state, codeVerifier: '', nonce: null } };
+  },
+  async finish(callbackUrl, redirectUri, pending) {
+    if (callbackUrl.searchParams.get('state') !== pending.state) {
+      throw new SigninError('state_mismatch', 'the callback is not for this sign-in');
+    }
+    const user = await exchange(callbackUrl.searchParams.get('code'), redirectUri);
+    return { subject: user.id, emails: user.verifiedEmails, name: user.name };
+  },
+};
+
+auth: signin({ providers: [github({ … }), acme] }),
+```
+
+coffre does everything around the two calls. It seals `pending` in a
+short-lived encrypted cookie between them. It files the profile under the
+provider's `id`, so one provider cannot pass its accounts off as another's.
+It binds `subject` to a member, and issues the session. What the provider
+owns is the protocol: `finish` must check `state` against `pending`, and
+return only addresses the provider has verified. A provider's shape is
+checked with the rest of the configuration, and its profile on every
+sign-in: a malformed one refuses that sign-in with `invalid_response`.
+
+## What the pages and the CLI read
+
+Neither branches on how the deployment is configured. They ask
+`GET /api/auth`, which anyone may call:
+
+```sh
+curl https://coffre.example.com/api/auth
+# {"signin":{"title":"Acme secrets","note":null,
+#            "providers":[{"id":"github","label":"GitHub","brand":"github"}]},
+#  "access":null}
+```
+
+Behind Access it answers `{"signin":null,"access":{"assertion":true}}`:
+`assertion` says whether this request carried one, so the page can tell
+"open coffre through Access" from "Access vouched, and coffre could not
+verify it". `coffre login` runs a device login when `signin` is set, and
+hands over to `cloudflared` when `access` is, or when Access turns the
+request away before it reaches coffre.
+
+## Behind Cloudflare Access
 
 Configure one Cloudflare Access application for the production hostname, then
 give the app Worker (`app/src/worker.ts`) that application instead of
@@ -79,12 +160,12 @@ The CLI refuses a plaintext, credentialed, or path-bearing address before
 sending anything, and never follows Access login redirects: a rejected or
 expired token is reported as such instead of loading the browser login page.
 
-## Closed-door behavior
+### Closed-door behavior
 
 The production hostname must be protected by an Access Allow policy. Coffre
-still fails closed at the origin boundary: every path except exact `/livez`
-and `/readyz` returns `401 unauthenticated` without the forwarded
-assertion. There is no production persona picker or local login route.
+still fails closed at the origin boundary: without the forwarded assertion,
+every `/api` route but `GET /api/auth` answers `401 unauthenticated`, and
+every page says to open coffre through Access.
 
 Do not treat this application check as a substitute for protecting the data
 plane. The Worker receives PostgreSQL access only through its Hyperdrive
@@ -101,33 +182,32 @@ rootAdmins: ['first.admin@example.com'],
 
 `coffre init` reads them from the vault's `ROOT_ADMINS` var, comma-separated.
 
-Each value must be an email and match the `email` claim Cloudflare Access
-emits. Service-token `common_name` values cannot be root admins. That person
-must also be allowed by the Access application policy. Root admins are the
+Each value must be an email, and match what the first person signs in with:
+a verified address of their GitHub or OIDC account, or the `email` claim
+Cloudflare Access emits (who must then be allowed by the Access policy).
+Service tokens cannot be root admins. Root admins are the
 configuration-owned bootstrap principals that can create the first project and
 grant; an empty or malformed list makes a new instance unadministrable, so the
 vault refuses to start with one.
 
-Every non-root identity must also be an active member, which the vault decides. Passing the Cloudflare Access policy authenticates the person; it
-does not register them in this Coffre instance. An authenticated but
-unregistered browser is confined to `/unregistered`, while `/api` returns
-`403 registration_required` for everything but `GET /api/me`.
+Every non-root identity must also be an active member, which the vault
+decides. Signing in, with a provider or through Access, authenticates the
+person; it does not register them in this Coffre instance. An authenticated
+but unregistered browser is confined to `/unregistered`, while `/api`
+returns `403 registration_required` for everything but `GET /api/me`.
 
 Changes to `rootAdmins` are deployment configuration changes. Keep at
 least one controlled bootstrap identity until the operational recovery path is
 defined and tested.
 
-## Local development is a separate mode
+## Local development
 
-Local development (`pnpm dev`, whose deployment is `dev/deployment/app.ts`)
-uses `devIdp({ url: 'http://127.0.0.1:8081' })`: the dev IdP stands in for
-Access, minting Access-shaped tokens for a persona picker. `devIdp` refuses
-any URL that is not on loopback, so no deployment can end up trusting it.
-
-The dev IdP (`@coffre/conformance/idp`, which `dev/idp` runs), `dev/seed.mjs`,
-the seeded persona page, and CLI email/service persona minting are local
-tooling. The dev IdP is not deployed: conformance runs it in its own process,
-for the run. Both `dev/idp` and the seed script refuse to run unless their
-shell has `COFFRE_AUTH_MODE=dev`. The seed additionally requires the exact checked-in
-loopback database, API, IdP, and local AUD values before performing its
-destructive reset.
+`pnpm dev` signs in as a deployment does, with `signin(…)`
+(`dev/deployment/app.ts`): the dev IdP (`@coffre/conformance/idp`, which
+`dev/idp` runs on :8081) stands in for GitHub and for an OpenID Connect
+provider, and its authorize page asks which seeded person you are. Plain
+HTTP is accepted for a provider on loopback only, so no deployment can end
+up trusting it. The seed signs in the same way, as the root admin, and
+conformance does too, with the dev IdP in its own process for the run.
+Nothing local stands in for Access: its verifier is covered by unit tests
+against Access-shaped tokens.

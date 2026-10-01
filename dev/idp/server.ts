@@ -1,30 +1,16 @@
 /**
- * Standalone dev IdP.
- *
- * Stands in for Cloudflare Access locally. It is a different implementation of
- * the same interface the API already verifies against -- not a bypass. The API
- * runs identical verification code either way; only issuer, JWKS URL and
- * audience differ. It also serves an OpenID Connect provider and a fake GitHub
- * for coffre's own sign-in.
+ * Standalone dev IdP, for `pnpm dev`: an OpenID Connect provider and a fake
+ * GitHub for coffre's own sign-in, each with a persona page instead of a
+ * password. It signs anyone in as anyone, so it listens on loopback only.
  */
 import { DEFAULT_CLIENT, DevIdp } from '@coffre/conformance/idp';
 
-if (process.env.COFFRE_AUTH_MODE !== 'dev') {
-  throw new Error('dev-idp refuses to start unless COFFRE_AUTH_MODE=dev');
-}
-
 const idp = new DevIdp();
 idp.listenPort = Number(process.env.COFFRE_DEV_IDP_PORT ?? 8081);
-idp.defaultAudience = process.env.COFFRE_ACCESS_AUD ?? 'coffre-local-dev-aud';
 
 await idp.start();
 
 console.log(`dev-idp listening on   ${idp.origin}`);
-console.log(`  issuer               ${idp.issuer}`);
-console.log(`  jwks_uri             ${idp.jwksUrl}`);
-console.log(`  audience             ${idp.defaultAudience}`);
-console.log(`  mint a user token    ${idp.origin}/dev/mint?email=admin@acme.example`);
-console.log(`  mint a service token ${idp.origin}/dev/mint?common_name=ci-deploy.access`);
 console.log(`OpenID Connect`);
 console.log(`  discovery            ${idp.origin}/.well-known/openid-configuration`);
 console.log(`  authorize            ${idp.origin}/oauth/authorize`);

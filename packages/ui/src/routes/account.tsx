@@ -28,14 +28,14 @@ export const Route = createFileRoute('/account')({
     return out;
   },
   // The sign-in half: which accounts you sign in with, where you are signed
-  // in, and which providers you could link. Empty outside signin mode, where
-  // someone else owns sessions.
+  // in, and which providers you could link. Absent behind Cloudflare Access,
+  // which owns sessions there.
   loader: async ({ context: { client }, parentMatchPromise }) => {
     const auth = (await parentMatchPromise).loaderData?.auth;
     if (auth === undefined || auth.signin === null) {
       return {
         ok: true as const,
-        mode: auth?.mode,
+        signin: false,
         providers: [] as { id: string; label: string; brand: string }[],
         identities: [] as IdentityRow[],
         sessions: [] as SessionRow[],
@@ -44,7 +44,7 @@ export const Route = createFileRoute('/account')({
     const { providers } = auth.signin;
     return uiResult(async () => {
       const [{ identities }, { sessions }] = await Promise.all([client.identities.list(), client.sessions.list()]);
-      return { mode: auth.mode, providers, identities, sessions };
+      return { signin: true, providers, identities, sessions };
     });
   },
   component: AccountPage,
@@ -90,7 +90,7 @@ function AccountPage() {
       {!signin.ok ? (
         <ErrorLine error={signin.error} />
       ) : (
-        signin.mode === 'signin' &&
+        signin.signin &&
         principal?.type === 'user' && (
           <>
             <SigninAccounts email={principal.id} {...signin} />

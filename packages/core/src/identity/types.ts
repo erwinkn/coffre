@@ -28,8 +28,8 @@ export type Principal =
 /**
  * Verifies a bearer token and returns the caller it identifies.
  *
- * Cloudflare mode verifies Access JWTs against the team domain, dev mode
- * against the dev IdP; signin mode looks up coffre's own credentials.
+ * Cloudflare mode verifies Access JWTs against the team domain; signin mode
+ * looks up coffre's own credentials.
  */
 export interface IdentityVerifier {
   verify(token: string, request?: { sourceIp: string | null }): Promise<Principal>;
@@ -38,7 +38,7 @@ export interface IdentityVerifier {
 /** Access delivers the JWT to the origin in this header. */
 export const ACCESS_JWT_HEADER = 'cf-access-jwt-assertion';
 
-/** Where Access-shaped tokens are checked: Cloudflare Access, or the dev IdP. */
+/** Where Access JWTs are checked: the team's keys, and the application's AUD tag. */
 export type AccessVerifierConfig = {
   /** Cloudflare Access team domain, e.g. https://acme.cloudflareaccess.com */
   issuer: string;

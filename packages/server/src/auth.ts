@@ -5,8 +5,6 @@ import { ApiError } from './api/errors.ts';
 import { errorResponse } from './http.ts';
 import type { CoffreRuntime } from './runtime.ts';
 
-export const DEV_TOKEN_COOKIE = 'coffre_dev_token';
-
 /** A verified caller, loaded once with everything they hold. */
 export type AuthenticatedIdentity = {
   principal: Principal;
@@ -61,22 +59,17 @@ export function bearerToken(request: Request): string | null {
 }
 
 export function accessTokenForRequest(request: Request, auth: AuthConfig): string | null {
-  if (auth.mode === 'cloudflare') {
-    const token = request.headers.get(ACCESS_JWT_HEADER);
-    return token === null || token.length === 0 ? null : token;
-  }
   if (auth.mode === 'signin') return cookieValue(request, sessionCookieName(auth));
-  return cookieValue(request, DEV_TOKEN_COOKIE);
+  const token = request.headers.get(ACCESS_JWT_HEADER);
+  return token === null || token.length === 0 ? null : token;
 }
 
 /**
  * The caller's address on Workers, from Cloudflare's own header. The edge
  * overwrites `cf-connecting-ip` on every request, so a client cannot choose
- * it; locally nothing sits in front to vouch for it. On Node the address is
- * the socket's, and this header means nothing.
+ * it. On Node the address is the socket's, and this header means nothing.
  */
-export function cloudflareSourceIp(request: Request, auth: AuthConfig): string | null {
-  if (auth.mode === 'dev') return null;
+export function cloudflareSourceIp(request: Request): string | null {
   const value = request.headers.get('cf-connecting-ip');
   if (value === null || value.length > 45) return null;
   if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(value)) {

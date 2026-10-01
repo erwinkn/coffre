@@ -8,11 +8,9 @@ import {
 } from '../../../dev/seed-config.mjs';
 
 const local = {
-  COFFRE_AUTH_MODE: 'dev',
   DATABASE_URL: 'postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/coffre',
   COFFRE_API_URL: 'http://127.0.0.1:3000',
   COFFRE_DEV_IDP_URL: 'http://127.0.0.1:8081',
-  COFFRE_ACCESS_AUD: 'coffre-local-dev-aud',
   COFFRE_ROOT_ADMINS: 'admin@acme.example',
 };
 
@@ -22,7 +20,6 @@ test('seed accepts the checked-in local development targets', () => {
       'postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/coffre',
     apiUrl: 'http://127.0.0.1:3000',
     idpUrl: 'http://127.0.0.1:8081',
-    audience: 'coffre-local-dev-aud',
     rootAdmin: 'admin@acme.example',
   });
 });
@@ -96,7 +93,7 @@ test('the closed-door persona is in the directory with no grant', () => {
   );
 });
 
-test('seed rejects remote API, IdP, audience, and a non-dev mode', () => {
+test('seed rejects a remote API or IdP', () => {
   assert.throws(
     () => loadLocalSeedConfig({ ...local, COFFRE_API_URL: 'https://coffre.example.com' }),
     /refuses non-local apiUrl/,
@@ -108,13 +105,5 @@ test('seed rejects remote API, IdP, audience, and a non-dev mode', () => {
         COFFRE_DEV_IDP_URL: 'https://idp.example.com',
       }),
     /refuses non-local idpUrl/,
-  );
-  assert.throws(
-    () => loadLocalSeedConfig({ ...local, COFFRE_ACCESS_AUD: 'production-aud' }),
-    /refuses non-local audience/,
-  );
-  assert.throws(
-    () => loadLocalSeedConfig({ ...local, COFFRE_AUTH_MODE: 'cloudflare' }),
-    /COFFRE_AUTH_MODE=dev/,
   );
 });

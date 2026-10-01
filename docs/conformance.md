@@ -50,8 +50,8 @@ Worker secrets from the environment, or `src/vault.ts` and `src/server.ts`
 with what `server.env` and `vault.env` would hold. Two things are the
 run's own: fixed local keys, and GitHub's URLs, pointed at the dev IdP
 (`@coffre/conformance/idp`) in the checker's process. So a deployment must
-sign in with `signin({ github })`, as `init` writes it; one behind Access or
-another provider cannot be booted as it is. Nothing from the shell's
+list `github(…)` among its `signin(…)` providers, as `init` writes it; one
+behind Access, or with only other providers, cannot be booted as it is. Nothing from the shell's
 `COFFRE_*` reaches it.
 
 The people:

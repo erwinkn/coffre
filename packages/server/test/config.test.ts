@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { cloudflareAccess, devIdp, github, signin } from '@coffre/core/identity';
+import { cloudflareAccess, github, signin } from '@coffre/core/identity';
 
 import { resolveConfig, type CoffreConfig } from '../src/config.ts';
 
@@ -49,9 +49,12 @@ test('a bad configuration fails on start, naming what is wrong', () => {
 
 test('auth constructors refuse what cannot be right', () => {
   assert.throws(() => cloudflareAccess({ teamDomain: 'acme.example.com', audience: 'aud' }), /cloudflareaccess\.com/);
-  assert.throws(() => devIdp({ url: 'http://10.0.0.5:8081' }), /loopback/);
   assert.throws(() => signin({ providers: [] }), /provider/);
   // Loopback is the one place plain HTTP is fine.
-  const local = resolveConfig({ ...base, publicUrl: 'http://127.0.0.1:3080', auth: devIdp({ url: 'http://127.0.0.1:3081' }) });
-  assert.equal(local.auth.mode, 'dev');
+  const local = resolveConfig({
+    ...base,
+    publicUrl: 'http://127.0.0.1:3080',
+    auth: signin({ providers: [github({ clientId: 'id', clientSecret: 'secret' })] }),
+  });
+  assert.equal(local.auth.mode, 'signin');
 });

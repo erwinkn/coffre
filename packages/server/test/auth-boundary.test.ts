@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import type { AuthConfig, Principal } from '@coffre/core/identity';
+import { github, signin, type AuthConfig, type Principal } from '@coffre/core/identity';
 import type { Access } from '@coffre/core/vault';
 
 import { handleRequest } from '../src/app.ts';
@@ -16,15 +16,9 @@ const cloudflare: AuthConfig = {
   },
 };
 
-const dev: AuthConfig = {
-  mode: 'dev',
-  access: {
-    issuer: 'http://127.0.0.1:8081',
-    jwksUrl: 'http://127.0.0.1:8081/cdn-cgi/access/certs',
-    audience: 'coffre-dev-aud',
-  },
-  devIdpUrl: 'http://127.0.0.1:8081',
-};
+const own: AuthConfig = signin({ providers: [github({ clientId: 'id', clientSecret: 'secret' })] }).resolve(
+  'https://coffre.test',
+);
 
 /**
  * A vault that knows only these members, by principal (`user:<email>`,
@@ -82,7 +76,7 @@ test('health is public, and every response carries the security headers', async 
 
 test('pages get the response nonce; everything else stays away from the UI', async () => {
   const ui = fakeUi();
-  const runtime = appRuntime(dev);
+  const runtime = appRuntime(own);
   const page = await handleRequest(new Request('https://coffre.test/projects'), runtime, ui, null);
   assert.equal(page.status, 200);
   assert.equal(ui.seen.length, 1);
@@ -101,7 +95,7 @@ test('pages get the response nonce; everything else stays away from the UI', asy
 test('the Next.js middleware header is refused outright', async () => {
   const response = await handleRequest(
     new Request('https://coffre.test/livez', { headers: { 'x-middleware-subrequest': 'middleware' } }),
-    appRuntime(dev),
+    appRuntime(own),
     fakeUi(),
     null,
   );
@@ -109,7 +103,7 @@ test('the Next.js middleware header is refused outright', async () => {
 });
 
 test('sign-in routes take one method, and browser posts only from coffre itself', async () => {
-  const runtime = appRuntime(dev);
+  const runtime = appRuntime(own);
   const signout = (headers: Record<string, string>, method = 'POST') =>
     handleRequest(new Request('https://coffre.test/auth/signout', { method, headers }), runtime, fakeUi(), null);
 
@@ -123,44 +117,43 @@ test('sign-in routes take one method, and browser posts only from coffre itself'
   const signedOut = await signout({ 'sec-fetch-site': 'same-origin' });
   assert.equal(signedOut.status, 303);
   assert.equal(signedOut.headers.get('location'), '/login');
-  assert.match(signedOut.headers.get('set-cookie') ?? '', /coffre_dev_token=;/);
+  assert.match(signedOut.headers.get('set-cookie') ?? '', /^__Host-coffre_session=;/);
 
-  const dev_ = await handleRequest(
-    new Request('https://coffre.test/auth/dev', { method: 'POST', headers: { origin: 'https://evil.test' } }),
-    runtime,
+  // Behind Access, the session is Access's, and so are CLI logins.
+  const behindAccess = appRuntime(cloudflare);
+  const accessSignout = await handleRequest(
+    new Request('https://coffre.test/auth/signout', { method: 'POST', headers: { 'sec-fetch-site': 'same-origin' } }),
+    behindAccess,
     fakeUi(),
     null,
   );
-  assert.equal(dev_.status, 403);
-  // Signin mode's own routes are not there in dev mode.
+  assert.equal(accessSignout.headers.get('location'), '/cdn-cgi/access/logout');
   const device = await handleRequest(
     new Request('https://coffre.test/api/auth/device', { method: 'POST' }),
-    runtime,
+    behindAccess,
     fakeUi(),
     null,
   );
   assert.equal(device.status, 404);
 });
 
-test('on Workers the address is Cloudflare\'s header, and nobody\'s in dev mode', () => {
+test('on Workers the address is Cloudflare\'s header, when it is an address', () => {
   const request = new Request('https://coffre.test/api/me', { headers: { 'cf-connecting-ip': '203.0.113.10' } });
-  assert.equal(cloudflareSourceIp(request, cloudflare), '203.0.113.10');
-  assert.equal(cloudflareSourceIp(request, dev), null);
-  assert.equal(
-    cloudflareSourceIp(new Request('https://coffre.test', { headers: { 'cf-connecting-ip': 'not an address' } }), cloudflare),
-    null,
-  );
+  assert.equal(cloudflareSourceIp(request), '203.0.113.10');
+  assert.equal(cloudflareSourceIp(new Request('https://coffre.test', { headers: { 'cf-connecting-ip': '2001:db8::1' } })), '2001:db8::1');
+  assert.equal(cloudflareSourceIp(new Request('https://coffre.test', { headers: { 'cf-connecting-ip': 'not an address' } })), null);
+  assert.equal(cloudflareSourceIp(new Request('https://coffre.test', { headers: { 'cf-connecting-ip': '300.1.1.1' } })), null);
 });
 
-test('Cloudflare mode ignores the dev cookie and dev mode ignores the Access header', () => {
+test('Cloudflare mode ignores the session cookie and signin mode ignores the Access header', () => {
   const request = new Request('https://coffre.example.test', {
     headers: {
       'cf-access-jwt-assertion': 'access-token',
-      cookie: 'coffre_dev_token=dev-token',
+      cookie: '__Host-coffre_session=session-token',
     },
   });
   assert.equal(accessTokenForRequest(request, cloudflare), 'access-token');
-  assert.equal(accessTokenForRequest(request, dev), 'dev-token');
+  assert.equal(accessTokenForRequest(request, own), 'session-token');
 });
 
 test('a root admin is whoever the vault says, in one call', async () => {
@@ -261,11 +254,11 @@ test('an active registered identity receives an auditable request context', asyn
     commonName: 'reporting.access',
   };
   const result = await authenticateRequest(
-    new Request('http://127.0.0.1:3000/api/me', {
-      headers: { cookie: 'coffre_dev_token=valid' },
+    new Request('https://coffre.test/api/me', {
+      headers: { cookie: '__Host-coffre_session=valid' },
     }),
     {
-      auth: dev,
+      auth: own,
       verifier: { verify: async () => principal },
       vault: vaultKnowing({ 'token:reporting.access': { status: 'active' } }),
     } as never,

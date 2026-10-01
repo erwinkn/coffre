@@ -12,12 +12,13 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { isJsonContentType } from './auth-mode.ts';
 import { init, KINDS, type Kind } from './init.ts';
 import {
   credentialHeaders,
   emptyStore,
   instanceOrigin,
+  isJsonContentType,
+  loginMode,
   parseMode,
   parseStore,
   resolveTarget,
@@ -45,7 +46,6 @@ process.stdout.on('error', (error: NodeJS.ErrnoException) => {
   if (error.code === 'EPIPE') process.exit(0);
   throw error;
 });
-const DEV_IDP_URL = process.env.COFFRE_DEV_IDP_URL ?? '';
 
 function readStore(): Store {
   return existsSync(CREDENTIALS_PATH) ? parseStore(readFileSync(CREDENTIALS_PATH, 'utf8')) : emptyStore();
@@ -160,35 +160,26 @@ function printMe(me: Me): void {
 
 /**
  * Sign in to an instance and make it the current one. How depends on who
- * vouches for people there, which the CLI finds out by asking:
+ * vouches for people there, which the CLI finds out by asking (`loginMode`):
  *
- * - coffre's own sign-in answers the device-flow request: the CLI shows a
- *   code, you approve it in a browser where you are signed in, and the CLI
- *   receives a session token of its own.
- * - Cloudflare Access answers with a redirect to its login page: the CLI hands
- *   over to `cloudflared`, which keeps the Access token from then on.
- * - The local dev IdP mints a persona token directly (COFFRE_AUTH_MODE=dev).
+ * - coffre's own sign-in: the CLI shows a code, you approve it in a browser
+ *   where you are signed in, and the CLI receives a session token of its own.
+ * - Cloudflare Access: the CLI hands over to `cloudflared`, which keeps the
+ *   Access token from then on.
  */
 async function login(args: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args,
     options: {
-      email: { type: 'string' },
-      'service-token': { type: 'string' },
       'no-browser': { type: 'boolean', default: false },
     },
     allowPositionals: true,
   });
 
-  const mode = attempt(() => parseMode(process.env.COFFRE_AUTH_MODE));
   const requested = positionals[0] ?? process.env.COFFRE_API_URL ?? readStore().current;
   if (!requested) fail('usage: coffre login <url>, for example `coffre login https://coffre.example.com`');
-  const origin = attempt(() => instanceOrigin(requested, mode ?? 'signin'));
-
-  if (mode === 'dev') return devLogin(origin, values.email, values['service-token']);
-  if (values.email || values['service-token']) {
-    fail('--email and --service-token pick a persona on the local dev IdP; they need COFFRE_AUTH_MODE=dev');
-  }
+  const origin = attempt(() => instanceOrigin(requested));
+  const mode = attempt(() => parseMode(process.env.COFFRE_AUTH_MODE)) ?? (await askMode(origin));
   if (mode === 'cloudflare') return accessLogin(origin);
 
   let started: Response;
@@ -202,18 +193,9 @@ async function login(args: string[]): Promise<void> {
   } catch (error) {
     fail(`could not reach ${origin}: ${error instanceof Error ? error.message : String(error)}`);
   }
-  if (started.status >= 300 && started.status < 400) return accessLogin(origin);
-  if (started.status === 404) {
-    fail(`${origin} does not offer coffre sign-in; if it is a local dev server, set COFFRE_AUTH_MODE=dev`);
-  }
   if (started.status === 429) fail('too many sign-in attempts from this address; wait a minute and retry');
   if (!started.ok || !isJsonContentType(started.headers.get('content-type'))) {
-    // Access normally redirects, but an application can be set to answer
-    // non-browser clients with a bare 401 or 403 instead.
-    fail(
-      `${origin} did not start a sign-in (status ${started.status}). If it is behind Cloudflare Access,\n` +
-        `  run \`COFFRE_AUTH_MODE=cloudflare coffre login ${origin}\``,
-    );
+    fail(`${origin} did not start a sign-in (status ${started.status})`);
   }
   const device = (await started.json()) as {
     device_code: string;
@@ -249,6 +231,20 @@ async function login(args: string[]): Promise<void> {
   );
   process.stdout.write(`Signed in to ${origin} as ${me.principal.id}\n`);
   printMe(me);
+}
+
+/** Ask the instance how it signs people in. */
+async function askMode(origin: string): Promise<'signin' | 'cloudflare'> {
+  let response: Response;
+  try {
+    response = await fetch(`${origin}/api/auth`, { redirect: 'manual', headers: { accept: 'application/json' } });
+  } catch (error) {
+    fail(`could not reach ${origin}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const body = isJsonContentType(response.headers.get('content-type'))
+    ? await response.json().catch(() => undefined)
+    : undefined;
+  return attempt(() => loginMode(origin, response.status, body));
 }
 
 type DeviceToken = {
@@ -335,43 +331,12 @@ async function accessLogin(origin: string): Promise<void> {
   printMe(me);
 }
 
-/** Local development only: the dev IdP mints an Access-shaped token for a persona. */
-async function devLogin(origin: string, email?: string, serviceToken?: string): Promise<void> {
-  if (DEV_IDP_URL === '') fail('COFFRE_DEV_IDP_URL is required when COFFRE_AUTH_MODE=dev');
-
-  const url = new URL('/dev/mint', DEV_IDP_URL);
-  if (serviceToken) {
-    url.searchParams.set('common_name', serviceToken);
-  } else {
-    url.searchParams.set('email', email ?? 'admin@acme.example');
-  }
-  if (process.env.COFFRE_ACCESS_AUD) {
-    url.searchParams.set('aud', process.env.COFFRE_ACCESS_AUD);
-  }
-
-  const response = await fetch(url);
-  if (!response.ok) fail(`dev IdP returned ${response.status}`);
-  const { token } = (await response.json()) as { token: string };
-
-  const me = await client({ origin, mode: 'dev', credential: { kind: 'token', token } }).me();
-  writeStore(
-    withSession(readStore(), origin, {
-      mode: 'dev',
-      token,
-      principal: me.principal,
-      obtainedAt: new Date().toISOString(),
-    }),
-  );
-  process.stdout.write(`logged in as ${me.principal.id} (${me.principal.type})\n`);
-  printMe(me);
-}
-
 /** End the session on the server, then forget it here. */
 async function logout(args: string[]): Promise<void> {
   const store = readStore();
   const requested = args[0] ?? process.env.COFFRE_API_URL ?? store.current;
   if (!requested) fail('not signed in anywhere');
-  const origin = attempt(() => instanceOrigin(requested, 'dev'));
+  const origin = attempt(() => instanceOrigin(requested));
   const session = store.instances[origin];
   if (session === undefined) fail(`not signed in to ${origin}`);
 
@@ -406,7 +371,7 @@ async function whoami(): Promise<void> {
       ? 'an Access service token'
       : process.env.COFFRE_TOKEN
         ? 'COFFRE_TOKEN'
-        : { signin: 'coffre sign-in', cloudflare: 'Cloudflare Access', dev: 'the dev IdP' }[to.mode];
+        : { signin: 'coffre sign-in', cloudflare: 'Cloudflare Access' }[to.mode];
   process.stdout.write(`${me.principal.id} (${me.principal.type}) on ${to.origin}, via ${via}\n`);
   if (!process.env.COFFRE_TOKEN && session?.expiresAt) {
     const days = Math.round((Date.parse(session.expiresAt) - Date.now()) / 86_400_000);
@@ -428,7 +393,7 @@ function use(args: string[]): void {
     }
     return;
   }
-  const origin = attempt(() => instanceOrigin(args[0], 'dev'));
+  const origin = attempt(() => instanceOrigin(args[0]));
   if (!(origin in store.instances)) fail(`not signed in to ${origin}: run \`coffre login ${origin}\``);
   writeStore({ ...store, current: origin });
   process.stdout.write(`Now using ${origin}\n`);
@@ -1034,7 +999,7 @@ const USAGE = `coffre - secrets, with an audit log
     COFFRE_TOKEN            a service token (coffre_svc_…), for CI
     COFFRE_ACCESS_CLIENT_ID, COFFRE_ACCESS_CLIENT_SECRET
                             a Cloudflare Access service token, for CI
-    COFFRE_AUTH_MODE        signin, cloudflare or dev; normally detected at login
+    COFFRE_AUTH_MODE        signin or cloudflare; normally detected at login
 `;
 
 const [command, ...rest] = process.argv.slice(2);
