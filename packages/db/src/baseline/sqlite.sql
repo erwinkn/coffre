@@ -12,6 +12,13 @@ INSERT INTO `audit_heartbeat` (`only_row`, `last_seq`) VALUES (true, 0);
 
 -- The audit log only grows: no statement may change or delete an entry.
 -- What gets past this anyway, the entries' MACs and chain show.
+-- REPLACE can delete without firing DELETE triggers, so refuse it before insert.
+CREATE TRIGGER `audit_log_no_replace` BEFORE INSERT ON `audit_log`
+WHEN EXISTS (SELECT 1 FROM `audit_log` WHERE `seq` = NEW.`seq`)
+BEGIN
+    SELECT RAISE(ABORT, 'audit_log is append-only');
+END;
+--> statement-breakpoint
 CREATE TRIGGER `audit_log_no_update` BEFORE UPDATE ON `audit_log`
 BEGIN
     SELECT RAISE(ABORT, 'audit_log is append-only');

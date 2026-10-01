@@ -1,6 +1,6 @@
 {
   "format": "coffre.audit.v2",
-  "about": "Entries of coffre.audit.v2 with their MACs and hashes, under the two keys below. Every writer and verifier of the log checks its encoder against these. The first four form a chain from the genesis hash; the fifth stands alone, with a sequence number past 2^53. Sequence numbers are decimal strings.",
+  "about": "Entries of coffre.audit.v2 with their MACs and hashes, under the two keys below. Every writer and verifier of the log checks its encoder against these. The first four form a chain from the genesis hash; the fifth stands alone, with a sequence number past 2^53. Sequence numbers are decimal strings. The sixth continues the first four with a subject principal and supplementary-plane text. Rejected fields must fail before encoding.",
   "keys": {
     "app": {
       "secret": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
@@ -138,6 +138,81 @@
       "prevHash": "abababababababababababababababababababababababababababababababab",
       "mac": "d124dee393b725aca2c3f6e1f787e1c32d87eeca811403b3a4a8d522237e3e5f",
       "hash": "1c37befa46a1df4b78ce625ad4a0887d5e3fea2c3e5ddbfbd61b5d59f6308bc8"
+    },
+    {
+      "fields": {
+        "seq": "4",
+        "author": "vault",
+        "keyId": "vault:99c1baa28806f80b",
+        "occurredAt": 1790841603000,
+        "actor": "token:ci-deploy",
+        "action": "access.grant",
+        "decision": "allow",
+        "code": null,
+        "subjectPrincipal": "user:zoë@acme.example",
+        "projectId": "6f1e0c2a-0000-4000-8000-000000000001",
+        "environmentId": "6f1e0c2a-0000-4000-8000-000000000002",
+        "secretId": "6f1e0c2a-0000-4000-8000-000000000003",
+        "secretVersionId": "6f1e0c2a-0000-4000-8000-000000000004",
+        "operationId": "6f1e0c2a-0000-4000-8000-000000000005",
+        "requestId": "req-1",
+        "sourceIp": "192.0.2.10",
+        "relatedSeq": null,
+        "metadata": "{\"note\":\"🔐 granted\"}"
+      },
+      "prevHash": "44ea6680dedab22231725a5aa561bc0b856e7a3f3ef08273dd6c620f6b8c5354",
+      "mac": "5d7933df61656c5f033b7bc21cdb6842d8a4747b8aa6cbdb465e8f877b2d9f03",
+      "hash": "07eb78691b723ff9a56432b5db4e017b5c5e68f10554f8082bdb308e022c7ab4"
+    }
+  ],
+  "rejected": [
+    {
+      "name": "lone high surrogate",
+      "fields": {
+        "seq": "4",
+        "author": "vault",
+        "keyId": "vault:99c1baa28806f80b",
+        "occurredAt": 1790841603000,
+        "actor": "token:ci-deploy",
+        "action": "access.grant",
+        "decision": "allow",
+        "code": "\ud800",
+        "subjectPrincipal": "user:zoë@acme.example",
+        "projectId": "6f1e0c2a-0000-4000-8000-000000000001",
+        "environmentId": "6f1e0c2a-0000-4000-8000-000000000002",
+        "secretId": "6f1e0c2a-0000-4000-8000-000000000003",
+        "secretVersionId": "6f1e0c2a-0000-4000-8000-000000000004",
+        "operationId": "6f1e0c2a-0000-4000-8000-000000000005",
+        "requestId": "req-1",
+        "sourceIp": "192.0.2.10",
+        "relatedSeq": null,
+        "metadata": "{\"note\":\"🔐 granted\"}"
+      },
+      "error": "code must be well-formed Unicode"
+    },
+    {
+      "name": "lone low surrogate",
+      "fields": {
+        "seq": "4",
+        "author": "vault",
+        "keyId": "vault:99c1baa28806f80b",
+        "occurredAt": 1790841603000,
+        "actor": "user:\udc00",
+        "action": "access.grant",
+        "decision": "allow",
+        "code": null,
+        "subjectPrincipal": "user:zoë@acme.example",
+        "projectId": "6f1e0c2a-0000-4000-8000-000000000001",
+        "environmentId": "6f1e0c2a-0000-4000-8000-000000000002",
+        "secretId": "6f1e0c2a-0000-4000-8000-000000000003",
+        "secretVersionId": "6f1e0c2a-0000-4000-8000-000000000004",
+        "operationId": "6f1e0c2a-0000-4000-8000-000000000005",
+        "requestId": "req-1",
+        "sourceIp": "192.0.2.10",
+        "relatedSeq": null,
+        "metadata": "{\"note\":\"🔐 granted\"}"
+      },
+      "error": "actor must be well-formed Unicode"
     }
   ]
 }

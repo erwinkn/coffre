@@ -1,6 +1,6 @@
 import { resolve } from 'node:path';
 
-import type { Client, Transaction as LibsqlTransaction, TransactionMode } from '@libsql/client';
+import type { Client, ResultSet, Transaction as LibsqlTransaction, TransactionMode } from '@libsql/client';
 import pg from 'pg';
 
 import { createDatabase, type Database } from './database.ts';
@@ -30,7 +30,7 @@ export async function openDatabase(url: string): Promise<OpenDatabase> {
         import('./schema.sqlite.ts'),
       ]);
       // A lone statement that finds the database locked waits this long.
-      const client = createClient({ url, timeout: 5_000 });
+      const client = createClient({ url, timeout: 5_000, intMode: 'bigint' });
       if (url.startsWith('file:')) await client.execute('PRAGMA journal_mode = WAL');
       const db = drizzle({ client: oneTransactionAtATime(client, writeQueueFor(url)), schema });
       return { engine: 'sqlite', db: asPostgresDatabase(db), close: async () => client.close() };
@@ -85,6 +85,9 @@ function writeQueueFor(url: string): WriteQueue {
 function oneTransactionAtATime(client: Client, queue: WriteQueue): Client {
   return new Proxy(client, {
     get(target, key) {
+      if (key === 'execute') {
+        return async (...args: Parameters<Client['execute']>) => numbers(await target.execute(...args));
+      }
       if (key === 'transaction') {
         return async (mode?: TransactionMode) => {
           const release = await queue.acquire();
@@ -100,7 +103,8 @@ function oneTransactionAtATime(client: Client, queue: WriteQueue): Client {
         return async (...args: unknown[]) => {
           const release = await queue.acquire();
           try {
-            return await (target[key] as (...args: unknown[]) => Promise<unknown>)(...args);
+            const result = await (target[key] as (...args: unknown[]) => Promise<ResultSet[] | void>)(...args);
+            return result?.map(numbers);
           } finally {
             release();
           }
@@ -120,7 +124,9 @@ function settling(tx: LibsqlTransaction, release: () => void): LibsqlTransaction
     settled = true;
     release();
   };
-  const { commit, rollback, close } = tx;
+  const { commit, rollback, close, execute, batch } = tx;
+  tx.execute = async (...args) => numbers(await execute.apply(tx, args));
+  tx.batch = async (...args) => (await batch.apply(tx, args)).map(numbers);
   tx.commit = async () => {
     try {
       return await commit.call(tx);
@@ -143,4 +149,20 @@ function settling(tx: LibsqlTransaction, release: () => void): LibsqlTransaction
     }
   };
   return tx;
+}
+
+/** Keep large counters exact; Drizzle's booleans and dates still need safe numbers. */
+function numbers(result: ResultSet): ResultSet {
+  result.rows = result.rows.map((row) => {
+    // libSQL exposes both named and immutable indexed values on each row.
+    const properties = Object.getOwnPropertyDescriptors(row);
+    for (const property of Object.values(properties)) {
+      const value = property.value;
+      if (typeof value === 'bigint' && value >= BigInt(Number.MIN_SAFE_INTEGER) && value <= BigInt(Number.MAX_SAFE_INTEGER)) {
+        property.value = Number(value);
+      }
+    }
+    return Object.create(Object.getPrototypeOf(row), properties);
+  });
+  return result;
 }
