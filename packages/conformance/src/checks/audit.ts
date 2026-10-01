@@ -12,7 +12,7 @@ import { query as update } from './storage.ts';
 import { DEV, PROJECT, valuesIn, type Canaries, type People } from './people.ts';
 
 /** One read per returned value, committed by the vault under the response's operation. */
-export async function revealAudited({ admin, reader }: People, canaries: Canaries, purpose: 'reveal' | 'run'): Promise<string> {
+export async function revealAudited({ admin, reader }: People, canaries: Canaries, purpose: 'reveal' | 'run', deployment: Deployment): Promise<string> {
   const path = purpose === 'reveal' ? `${DEV}/API_KEY` : DEV;
   const { operationId, values } = await reader.api.secrets.reveal(path);
   expect(typeof operationId === 'string' && operationId.length > 0, 'the read returned no operation id');
@@ -30,6 +30,18 @@ export async function revealAudited({ admin, reader }: People, canaries: Canarie
   for (const entry of bundle) {
     expect(entry.version === listed.find((key) => key.key === entry.key)?.version, `the entry for ${String(entry.key)} names another version`, entry);
   }
+  await using(deployment.database(), async (sql) => {
+    const rows = await update<{ author: string; action: string; decision: string; request_id: string | null; key: string; current_version: number; metadata: string }>(sql,
+      `SELECT l.author, l.action, l.decision, l.request_id, l.metadata, s.key, s.current_version
+       FROM audit_log l LEFT JOIN secrets s ON s.id = l.secret_id WHERE l.operation_id = $1`, [operationId]);
+    expect(JSON.stringify(rows.map((row) => row.key).sort()) === JSON.stringify(Object.keys(expected).sort()), 'the committed read is not once per value', rows);
+    for (const row of rows) {
+      const metadata = JSON.parse(row.metadata) as { purpose: string; version: number };
+      expect(row.author === 'vault' && row.action === 'secret.read' && row.decision === 'allow', 'the committed read is not the vault release', row);
+      expect(row.request_id !== null && row.request_id === rows[0].request_id && metadata.purpose === purpose, 'the committed reads have different requests or purposes', rows);
+      expect(metadata.version === row.current_version, 'the committed read names another version', row);
+    }
+  });
   return `${bundle.length} values, each read once by the vault for ${purpose}, under ${operationId}`;
 }
 
@@ -82,40 +94,44 @@ export async function checkpoints(deployment: Deployment, { admin }: People): Pr
  * the same member, request and operation, the same secret and version. And
  * every value read is the vault's to log: the app keeps no reads of its own.
  */
-export async function writesAgree(deployment: Deployment, { admin }: People): Promise<string> {
-  const entries = await everyAuditEntry(admin.api);
-  const bySeq = new Map(entries.map((entry) => [entry.seq, entry]));
-  let stored = 0;
-  for (const entry of entries) {
-    if (entry.author !== 'app' || entry.decision !== 'allow') continue;
-    expect(entry.action !== 'secret.read' || entry.key === null, 'the app logged a read of a value, which only the vault opens', entry);
-    const sealed = { 'secret.write': 'key.wrap', 'secret.restore': 'key.rewrap' }[entry.action];
-    if (sealed === undefined) continue;
-    const key = entry.relatedSeq === null ? undefined : bySeq.get(entry.relatedSeq);
-    expect(
-      key !== undefined && key.author === 'vault' && key.action === sealed && key.decision === 'allow',
-      `a ${entry.action} names no ${sealed} of the vault's`,
-      { entry, key },
-    );
-    const same = (fields: (keyof AuditEntryView)[]) => fields.every((field) => key[field] === entry[field]);
-    expect(same(['actorType', 'actorId', 'requestId', 'operationId']), `a ${entry.action} names a key sealed for another call`, { entry, key });
-    expect(same(['project', 'environment', 'key', 'version']), `a ${entry.action} names a key sealed for another version`, { entry, key });
-    stored++;
-  }
-  await using(deployment.database(), async (sql) => {
-    const versions = await update<{ environment: string; key: string; version: number }>(sql,
-      `SELECT e.slug AS environment, s.key, v.version FROM secret_versions v
-       JOIN secrets s ON s.id = v.secret_id JOIN environments e ON e.id = s.environment_id
+export async function writesAgree(deployment: Deployment): Promise<string> {
+  return using(deployment.database(), async (sql) => {
+    const entries = await sql.query<{
+      seq: number | string; author: string; action: string; decision: string; actor: string; metadata: string;
+      project_id: string | null; environment_id: string | null; secret_id: string | null;
+      request_id: string | null; operation_id: string | null; related_seq: string | number | null;
+    }>('SELECT * FROM audit_log ORDER BY seq');
+    const bySeq = new Map(entries.map((entry) => [String(entry.seq), entry]));
+    const writes = entries.filter((entry) => entry.author === 'app' && entry.decision === 'allow'
+      && (entry.action === 'secret.write' || entry.action === 'secret.restore'));
+    for (const entry of entries.filter((row) => row.author === 'app' && row.decision === 'allow')) {
+      expect(entry.action !== 'secret.read', 'the app logged an allowed read of a value', entry);
+    }
+    for (const entry of writes) {
+      const seal = entry.action === 'secret.write' ? 'key.wrap' : 'key.rewrap';
+      const key = entry.related_seq === null ? undefined : bySeq.get(String(entry.related_seq));
+      expect(key !== undefined && key.author === 'vault' && key.action === seal && key.decision === 'allow',
+        `a ${entry.action} names no ${seal} of the vault's`, { entry, key });
+      for (const field of ['actor', 'request_id', 'operation_id', 'project_id', 'environment_id'] as const) {
+        expect(entry[field] === key[field], `the write and its seal have different ${field}`, { entry, key });
+      }
+      expect(entry.operation_id !== null && entry.request_id !== null, 'the committed write has no operation or request', entry);
+      const metadata = JSON.parse(entry.metadata) as { version: number; key: string };
+      const sealed = JSON.parse(key.metadata) as { secretId?: string; version: number; subject: string };
+      expect((sealed.secretId ?? key.secret_id) === entry.secret_id && sealed.version === metadata.version
+        && sealed.subject.split('/').at(-1) === metadata.key, 'the write names a seal of another secret or version', { entry, key });
+    }
+    const versions = await update<{ secret_id: string; version: number }>(sql,
+      `SELECT v.secret_id, v.version FROM secret_versions v JOIN secrets s ON s.id = v.secret_id
        JOIN projects p ON p.id = s.project_id WHERE p.slug = $1`, [PROJECT]);
     expect(versions.length > 0, 'no stored versions were inspected');
     for (const version of versions) {
-      const matching = entries.filter((entry) => entry.author === 'app' && entry.decision === 'allow'
-        && (entry.action === 'secret.write' || entry.action === 'secret.restore')
-        && entry.project === PROJECT && entry.environment === version.environment && entry.key === version.key && entry.version === version.version);
+      const matching = writes.filter((entry) => entry.secret_id === version.secret_id
+        && (JSON.parse(entry.metadata) as { version: number }).version === version.version);
       expect(matching.length === 1, 'a stored version has no unique app write entry', { version, matching });
     }
+    return `${versions.length} stored versions, each with one app write naming the vault's seal in the same operation`;
   });
-  return `${stored} versions stored, each naming the vault's seal of its key, by the same member in the same operation`;
 }
 
 /**

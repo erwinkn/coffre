@@ -2,7 +2,6 @@ import { Browser } from '../browser.ts';
 import { using } from '../database.ts';
 import type { Deployment } from '../harness.ts';
 import { expect, refused } from '../report.ts';
-import { everyAuditEntry } from './audit.ts';
 import { DEV, PROD, signIn, type People, type Person } from './people.ts';
 import { logRefuses } from './readiness.ts';
 import { query, restoreRow } from './storage.ts';
@@ -47,9 +46,9 @@ export async function memberTampering(deployment: Deployment, people: People, ki
       const failure = await refused('a tampered member revealed a value', person.api.secrets.reveal(kind === 'grant' ? PROD : DEV));
       expect(failure.status === 401 && failure.code === 'unauthenticated', 'the tampered credential was not refused', failure);
       expect((await admin.api.members.get(person.member)).status === 'tampered', 'the refused member is not marked tampered');
-      const entries = await everyAuditEntry(admin.api);
-      expect(entries.some((entry) => entry.author === 'vault' && entry.action === 'vault.tampered'
-        && entry.subject === person.member && entry.reason === (kind === 'old' ? 'stale' : 'mac')), 'the tampering was not logged', entries.slice(0, 10));
+      const reports = await query(sql, `SELECT seq FROM audit_log WHERE author = 'vault' AND action = 'vault.tampered'
+        AND subject_principal = $1 AND code = $2`, [person.member, kind === 'old' ? 'stale' : 'mac']);
+      expect(reports.length > 0, 'the tampering was not logged', reports);
       const verified = await admin.api.audit.verify();
       expect(!verified.ok && verified.author === 'vault' && verified.failedAtSeq === null, 'the tampered member verifies', verified);
     } finally {
@@ -73,13 +72,15 @@ export async function accessAuthorship(deployment: Deployment, people: People): 
   await admin.api.access.set(person.member, { [DEV]: null });
   await admin.api.members.remove(person.member);
   await admin.api.members.add(person.member);
-  const entries = await everyAuditEntry(admin.api);
-  const access = entries.filter((entry) => /^(access\.|member\.|directory\.|grant\.|principal\.)/.test(entry.action) && entry.decision === 'allow');
-  expect(access.length > 0 && access.every((entry) => entry.author === 'vault'), 'an access change was written by the app', access.filter((entry) => entry.author !== 'vault'));
-  const actions = access.filter((entry) => entry.subject === person.member).map((entry) => entry.action);
-  for (const action of ['member.add', 'member.remove', 'member.restore', 'access.grant', 'access.revoke']) {
-    expect(actions.includes(action), `${action} left no vault entry`, actions);
-  }
+  await using(deployment.database(), async (sql) => {
+    const access = await sql.query<{ author: string; action: string; subject_principal: string }>(`SELECT author, action, subject_principal FROM audit_log
+      WHERE decision = 'allow' AND (action LIKE 'access.%' OR action LIKE 'member.%' OR action LIKE 'directory.%' OR action LIKE 'grant.%' OR action LIKE 'principal.%')`);
+    expect(access.length > 0 && access.every((entry) => entry.author === 'vault'), 'an access change was written by the app', access.filter((entry) => entry.author !== 'vault'));
+    const actions = access.filter((entry) => entry.subject_principal === person.member).map((entry) => entry.action);
+    for (const action of ['member.add', 'member.remove', 'member.restore', 'access.grant', 'access.revoke']) {
+      expect(actions.includes(action), `${action} left no vault entry`, actions);
+    }
+  });
   return 'admission, grant, revoke, removal and re-admission are only vault entries';
 }
 

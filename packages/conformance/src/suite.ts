@@ -30,8 +30,8 @@ export async function conform(deployment: Deployment, options: { bulkLimit: numb
 
   await report.check('members only', { people }, ({ people }) => membersOnly(deployment, people));
   await report.check('grant scoping', all, ({ people, canaries }) => grantScoping(people, canaries));
-  await report.check('reveals audited', all, ({ people, canaries }) => revealAudited(people, canaries, 'reveal'));
-  await report.check('runs audited', all, ({ people, canaries }) => revealAudited(people, canaries, 'run'));
+  await report.check('reveals audited', all, ({ people, canaries }) => revealAudited(people, canaries, 'reveal', deployment));
+  await report.check('runs audited', all, ({ people, canaries }) => revealAudited(people, canaries, 'run', deployment));
   await report.check('cross-site', all, ({ people, canaries }) => crossSite(people, canaries));
   const live = await report.check('live setup', { admin, canaries }, ({ admin, canaries }) => setUpLive(admin, canaries));
   await tokenChecks(report, deployment.origin, live ?? {});
@@ -39,7 +39,7 @@ export async function conform(deployment: Deployment, options: { bulkLimit: numb
   await report.check('bulk limit', { people }, ({ people }) => bulkLimit(people, options.bulkLimit));
 
   await report.check('checkpoints', { people }, ({ people }) => checkpoints(deployment, people));
-  await report.check('keys behind writes', { people }, ({ people }) => writesAgree(deployment, people));
+  await report.check('keys behind writes', { people }, ({ people }) => writesAgree(deployment));
   await report.check('no audit, no value', all, ({ people, canaries }) => noAuditNoValue(deployment, people, canaries));
 
   await report.check('access authorship', { people }, ({ people }) => accessAuthorship(deployment, people));
