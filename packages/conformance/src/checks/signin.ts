@@ -1,13 +1,16 @@
+// A sign-in row written by the database's owner mints nothing: a chosen
+// token, an account binding, an approval or an edited generation is refused
+// where it is used, and reported.
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 import { Browser } from '../browser.ts';
-import { using, type Sql } from '../database.ts';
+import { using } from '../database.ts';
 import type { Deployment } from '../harness.ts';
 import { defaultGitHubAccount } from '../idp/people.ts';
 import { expect, until } from '../report.ts';
 import { member } from './members.ts';
 import { signIn, type People } from './people.ts';
-import { query, restoreRow } from './storage.ts';
+import { insertRow, query, restoreRow } from './storage.ts';
 
 const hash = (value: string) => createHash('sha256').update(value).digest();
 
@@ -15,11 +18,6 @@ const hash = (value: string) => createHash('sha256').update(value).digest();
 async function reported(deployment: Deployment, id: string): Promise<void> {
   const event = new RegExp(`auth_row_tampered[^}]*${id}`);
   await until(`the sign-in row failure report for ${id}`, async () => event.test(deployment.output()), 10);
-}
-
-async function insertRow(sql: Sql, table: string, row: Record<string, unknown>): Promise<void> {
-  const fields = Object.keys(row).filter((field) => field !== 'active_subject');
-  await query(sql, `INSERT INTO ${table} (${fields.join(', ')}) VALUES (${fields.map((_, i) => `$${i + 1}`).join(', ')})`, fields.map((field) => row[field]));
 }
 
 /** Knowing the database password and a chosen token must not mint a credential. */

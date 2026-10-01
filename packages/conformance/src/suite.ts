@@ -30,8 +30,8 @@ export async function conform(deployment: Deployment, options: { bulkLimit: numb
 
   await report.check('members only', { people }, ({ people }) => membersOnly(deployment, people));
   await report.check('grant scoping', all, ({ people, canaries }) => grantScoping(people, canaries));
-  await report.check('reveals audited', all, ({ people, canaries }) => revealAudited(people, canaries, 'reveal', deployment));
-  await report.check('runs audited', all, ({ people, canaries }) => revealAudited(people, canaries, 'run', deployment));
+  await report.check('reveals audited', all, ({ people, canaries }) => revealAudited(deployment, people, canaries, 'reveal'));
+  await report.check('runs audited', all, ({ people, canaries }) => revealAudited(deployment, people, canaries, 'run'));
   await report.check('cross-site', all, ({ people, canaries }) => crossSite(people, canaries));
   const live = await report.check('live setup', { admin, canaries }, ({ admin, canaries }) => setUpLive(admin, canaries));
   await tokenChecks(report, deployment.origin, live ?? {});

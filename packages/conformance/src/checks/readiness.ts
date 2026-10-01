@@ -1,27 +1,9 @@
-import { using, type Sql } from '../database.ts';
+// Readiness needs both halves of the Cron's work: a recent heartbeat, and a
+// checkpoint the vault signed over it. Either missing turns /readyz red.
+import { using } from '../database.ts';
 import type { Deployment } from '../harness.ts';
 import { expect, until } from '../report.ts';
-import { appendOnlyLifted } from './audit.ts';
-import { query } from './storage.ts';
-
-/** A storage failure at append time, without changing the deployment's code. */
-export async function logRefuses<T>(sql: Sql, work: () => Promise<T>, action?: string): Promise<T> {
-  const when = action === undefined ? '' : ` WHEN (NEW.action = '${action}')`;
-  const create = sql.engine === 'postgres'
-    ? `CREATE FUNCTION conformance_refuse() RETURNS trigger LANGUAGE plpgsql AS $$
-       BEGIN RAISE EXCEPTION 'coffre-conformance: the log refuses writes'; END $$;
-       CREATE TRIGGER conformance_refuse BEFORE INSERT ON audit_log FOR EACH ROW${when} EXECUTE FUNCTION conformance_refuse();`
-    : `CREATE TRIGGER conformance_refuse BEFORE INSERT ON audit_log${when}
-       BEGIN SELECT RAISE(ABORT, 'coffre-conformance: the log refuses writes'); END;`;
-  await sql.exec(create);
-  try {
-    return await work();
-  } finally {
-    await sql.exec(sql.engine === 'postgres'
-      ? 'DROP TRIGGER conformance_refuse ON audit_log; DROP FUNCTION conformance_refuse();'
-      : 'DROP TRIGGER conformance_refuse;');
-  }
-}
+import { appendOnlyLifted, insertRow, logRefuses } from './storage.ts';
 
 async function red(deployment: Deployment): Promise<void> {
   await until('readiness red', async () => (await fetch(`${deployment.origin}/readyz`)).status === 503, 10);
@@ -54,10 +36,7 @@ export async function missingCheckpoint(deployment: Deployment): Promise<string>
     try {
       await red(deployment);
     } finally {
-      for (const row of rows) {
-        const fields = Object.keys(row);
-        await query(sql, `INSERT INTO audit_log (${fields.join(', ')}) VALUES (${fields.map((_, i) => `$${i + 1}`).join(', ')})`, Object.values(row));
-      }
+      for (const row of rows) await insertRow(sql, 'audit_log', row);
     }
   }));
   await until('readiness recovered', async () => (await fetch(`${deployment.origin}/readyz`)).ok, 20);

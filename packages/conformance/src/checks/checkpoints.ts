@@ -6,24 +6,8 @@ import { using } from '../database.ts';
 import { KEYS } from '../fixtures.ts';
 import type { Deployment } from '../harness.ts';
 import { expect } from '../report.ts';
-import { appendOnlyLifted } from './audit.ts';
 import type { People } from './people.ts';
-import { restoreRow, transaction } from './storage.ts';
-
-const FIELDS = [
-  'seq', 'author', 'key_id', 'occurred_at', 'actor', 'action', 'decision', 'code', 'subject_principal', 'project_id',
-  'environment_id', 'secret_id', 'secret_version_id', 'operation_id', 'request_id', 'source_ip', 'related_seq', 'metadata',
-];
-
-function encoded(row: Record<string, unknown>): Buffer {
-  return Buffer.concat(FIELDS.flatMap((field) => {
-    const header = Buffer.alloc(4);
-    if (row[field] === null) { header.writeInt32BE(-1); return [header]; }
-    const value = Buffer.from(String(row[field]));
-    header.writeInt32BE(value.length);
-    return [header, value];
-  }));
-}
+import { appendOnlyLifted, entryFields, restoreRow, transaction } from './storage.ts';
 
 /** Leave one old signature invalid, reseal the chain, and make later checkpoints valid. */
 export async function earlierCheckpoint(deployment: Deployment, { admin }: People): Promise<string> {
@@ -54,7 +38,7 @@ export async function earlierCheckpoint(deployment: Deployment, { admin }: Peopl
             }
             row.metadata = JSON.stringify(checkpoint);
           }
-          const fields = encoded(row);
+          const fields = entryFields(row);
           row.prev_hash = previous;
           row.mac = createHmac('sha256', keys[row.author as 'app' | 'vault']).update('coffre.audit.mac.v2').update(previous).update(fields).digest();
           previous = createHash('sha256').update('coffre.audit.chain.v2').update(previous).update(fields).update(row.mac as Buffer).digest();

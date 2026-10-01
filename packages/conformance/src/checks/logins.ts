@@ -1,3 +1,7 @@
+// Each component's database login writes its own tables and nothing else:
+// the app cannot write members, grants or the vault's entries, the vault
+// cannot write the app's tables, and neither can rewrite the log. Postgres
+// only: SQLite has no logins.
 import { using, type Sql } from '../database.ts';
 import type { Deployment } from '../harness.ts';
 import { expect, Skip } from '../report.ts';
@@ -17,6 +21,12 @@ const IMMUTABLE = [
   'ALTER TABLE audit_log DISABLE TRIGGER USER', "SET session_replication_role = 'replica'",
   'SET ROLE coffre_owner',
 ];
+
+/** A column of each app table, for an update that would change nothing, if it were allowed. */
+const APP_COLUMNS: Record<string, string> = {
+  projects: 'id', environments: 'id', secrets: 'id', secret_versions: 'id', identities: 'id',
+  credentials: 'id', device_authorizations: 'id', syncs: 'id', sync_keys: 'key',
+};
 
 async function refuses(sql: Sql, statements: string[]): Promise<number> {
   for (const statement of statements) {
@@ -87,7 +97,10 @@ export async function vaultLogin(deployment: Deployment): Promise<string> {
     const statements = [...IMMUTABLE, appendAs('app'), 'SET ROLE coffre_app',
       'UPDATE audit_chain_head SET only_row = only_row', 'DELETE FROM audit_chain_head', 'TRUNCATE audit_chain_head',
       'UPDATE vault_members SET principal = principal', 'UPDATE vault_grants SET role = role'];
-    for (const table of appTables.filter((name) => ['projects', 'environments', 'secrets', 'secret_versions', 'identities', 'credentials', 'device_authorizations', 'syncs', 'sync_keys'].includes(name))) statements.push(`UPDATE ${quoted(table)} SET ${table === 'sync_keys' ? 'key = key' : 'id = id'}`);
+    for (const table of appTables) {
+      const column = APP_COLUMNS[table];
+      if (column !== undefined) statements.push(`UPDATE ${quoted(table)} SET ${column} = ${column}`);
+    }
     const count = await refuses(sql, statements);
     return `${count} writes and bypasses refused; app tables have no write privileges`;
   });

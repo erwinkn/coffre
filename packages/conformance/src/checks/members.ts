@@ -1,10 +1,11 @@
+// Who holds what is the vault's record: an access change is its entry or
+// nothing, and a member row or grant written around it is refused at use.
 import { Browser } from '../browser.ts';
 import { using } from '../database.ts';
 import type { Deployment } from '../harness.ts';
 import { expect } from '../report.ts';
 import { DEV, PROD, signIn, type People, type Person } from './people.ts';
-import { logRefuses } from './readiness.ts';
-import { query, restoreRow } from './storage.ts';
+import { insertRow, logRefuses, query, restoreRow } from './storage.ts';
 
 export async function member(deployment: Deployment, { admin }: People, name: string): Promise<Person> {
   const email = `${name}@conformance.example`;
@@ -58,10 +59,7 @@ export async function memberTampering(deployment: Deployment, people: People, ki
     } finally {
       await restoreRow(sql, 'vault_members', restored, 'principal');
       await query(sql, 'DELETE FROM vault_grants WHERE principal = $1', [person.member]);
-      for (const grant of held) {
-        const fields = Object.keys(grant);
-        await query(sql, `INSERT INTO vault_grants (${fields.join(', ')}) VALUES (${fields.map((_, i) => `$${i + 1}`).join(', ')})`, Object.values(grant));
-      }
+      for (const grant of held) await insertRow(sql, 'vault_grants', grant);
     }
   });
   expect((await person.api.secrets.reveal(DEV)).values.API_KEY !== undefined, 'restoring the member did not restore legitimate use');

@@ -1,10 +1,10 @@
 // Who reaches what: members only, each to the places granted, from coffre's
 // own pages, until they leave, and never too much at once.
-import { pollDevice, startDevice } from './signin.ts';
 import { bearer } from '../browser.ts';
 import type { Deployment } from '../harness.ts';
 import { expect, refused } from '../report.ts';
 import { BULK, DEV, PROD, signIn, valuesIn, type Canaries, type People } from './people.ts';
+import { pollDevice, startDevice } from './signin.ts';
 
 export async function membersOnly(deployment: Deployment, { stranger }: People): Promise<string> {
   const attempt = await signIn(deployment, stranger.browser, stranger.email);

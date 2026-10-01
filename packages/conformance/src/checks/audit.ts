@@ -5,14 +5,14 @@ import { createHash } from 'node:crypto';
 
 import type { AuditEntryView, CoffreClient } from '@coffre/client';
 
-import { using, type Sql } from '../database.ts';
+import { using } from '../database.ts';
 import type { Deployment } from '../harness.ts';
 import { expect } from '../report.ts';
-import { query as update } from './storage.ts';
+import { appendOnlyLifted, entryFields, insertRow, logRefuses, query } from './storage.ts';
 import { DEV, PROJECT, valuesIn, type Canaries, type People } from './people.ts';
 
 /** One read per returned value, committed by the vault under the response's operation. */
-export async function revealAudited({ admin, reader }: People, canaries: Canaries, purpose: 'reveal' | 'run', deployment: Deployment): Promise<string> {
+export async function revealAudited(deployment: Deployment, { admin, reader }: People, canaries: Canaries, purpose: 'reveal' | 'run'): Promise<string> {
   const path = purpose === 'reveal' ? `${DEV}/API_KEY` : DEV;
   const { operationId, values } = await reader.api.secrets.reveal(path);
   expect(typeof operationId === 'string' && operationId.length > 0, 'the read returned no operation id');
@@ -31,7 +31,7 @@ export async function revealAudited({ admin, reader }: People, canaries: Canarie
     expect(entry.version === listed.find((key) => key.key === entry.key)?.version, `the entry for ${String(entry.key)} names another version`, entry);
   }
   await using(deployment.database(), async (sql) => {
-    const rows = await update<{ author: string; action: string; decision: string; request_id: string | null; key: string; current_version: number; metadata: string }>(sql,
+    const rows = await query<{ author: string; action: string; decision: string; request_id: string | null; key: string; current_version: number; metadata: string }>(sql,
       `SELECT l.author, l.action, l.decision, l.request_id, l.metadata, s.key, s.current_version
        FROM audit_log l LEFT JOIN secrets s ON s.id = l.secret_id WHERE l.operation_id = $1`, [operationId]);
     expect(JSON.stringify(rows.map((row) => row.key).sort()) === JSON.stringify(Object.keys(expected).sort()), 'the committed read is not once per value', rows);
@@ -121,7 +121,7 @@ export async function writesAgree(deployment: Deployment): Promise<string> {
       expect((sealed.secretId ?? key.secret_id) === entry.secret_id && sealed.version === metadata.version
         && sealed.subject.split('/').at(-1) === metadata.key, 'the write names a seal of another secret or version', { entry, key });
     }
-    const versions = await update<{ secret_id: string; version: number }>(sql,
+    const versions = await query<{ secret_id: string; version: number }>(sql,
       `SELECT v.secret_id, v.version FROM secret_versions v JOIN secrets s ON s.id = v.secret_id
        JOIN projects p ON p.id = s.project_id WHERE p.slug = $1`, [PROJECT]);
     expect(versions.length > 0, 'no stored versions were inspected');
@@ -140,33 +140,14 @@ export async function writesAgree(deployment: Deployment): Promise<string> {
  * the read, so a reveal fails and carries nothing.
  */
 export async function noAuditNoValue(deployment: Deployment, { admin }: People, canaries: Canaries): Promise<string> {
-  const [refuse, allow] =
-    deployment.kind === 'workers'
-      ? [
-          `CREATE FUNCTION conformance_no_audit() RETURNS trigger LANGUAGE plpgsql AS $$
-             BEGIN RAISE EXCEPTION 'coffre-conformance: the audit log refuses writes'; END $$;
-           CREATE TRIGGER conformance_no_audit BEFORE INSERT ON audit_log
-             FOR EACH ROW EXECUTE FUNCTION conformance_no_audit();`,
-          'DROP TRIGGER conformance_no_audit ON audit_log; DROP FUNCTION conformance_no_audit();',
-        ]
-      : [
-          `CREATE TRIGGER conformance_no_audit BEFORE INSERT ON audit_log
-           BEGIN SELECT RAISE(ABORT, 'coffre-conformance: the audit log refuses writes'); END;`,
-          'DROP TRIGGER conformance_no_audit;',
-        ];
   let status = 0;
-  await using(deployment.database(), async (sql) => {
-    await sql.exec(refuse);
-    try {
-      const response = await admin.browser.send('POST', '/api/reveals', { path: DEV });
-      const text = await response.text();
-      status = response.status;
-      expect(!response.ok, `a reveal answered ${response.status} while the audit log refused writes`, text);
-      expect(!Object.values(canaries).some((value) => text.includes(value)), 'a reveal that could not be logged carried a value', text);
-    } finally {
-      await sql.exec(allow);
-    }
-  });
+  await using(deployment.database(), (sql) => logRefuses(sql, async () => {
+    const response = await admin.browser.send('POST', '/api/reveals', { path: DEV });
+    const text = await response.text();
+    status = response.status;
+    expect(!response.ok, `a reveal answered ${response.status} while the audit log refused writes`, text);
+    expect(!Object.values(canaries).some((value) => text.includes(value)), 'a reveal that could not be logged carried a value', text);
+  }));
   const after = await admin.api.secrets.reveal(DEV);
   expect(after.values.API_KEY === canaries[`${DEV}/API_KEY`], 'reveals did not come back once the log took writes again');
   return `a reveal the audit log would not take: ${status}, and no value`;
@@ -185,25 +166,20 @@ export async function forgedVaultEntry(deployment: Deployment, { admin }: People
     expect(writer !== undefined, 'no vault key id to copy');
     const seq = BigInt(head.next_seq);
     const forged = {
-      seq, author: 'vault', keyId: writer.key_id, occurredAt: Date.now(), actor: 'user:forger@conformance.example',
+      seq, author: 'vault', key_id: writer.key_id, occurred_at: Date.now(), actor: 'user:forger@conformance.example',
       action: 'secret.read', decision: 'allow', metadata: '{}',
     };
     const prevHash = Buffer.from(head.head_hash);
     const mac = Buffer.alloc(32, 0x41);
-    const hash = chainHash(prevHash, forged, mac);
-    await update(
-      sql,
-      `INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, metadata, prev_hash, mac, hash)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-      [seq, forged.author, forged.keyId, forged.occurredAt, forged.actor, forged.action, forged.decision, forged.metadata, prevHash, mac, hash],
-    );
-    await update(sql, 'UPDATE audit_chain_head SET next_seq = $1, head_hash = $2', [seq + 1n, hash]);
+    const hash = createHash('sha256').update('coffre.audit.chain.v2').update(prevHash).update(entryFields(forged)).update(mac).digest();
+    await insertRow(sql, 'audit_log', { ...forged, prev_hash: prevHash, mac, hash });
+    await query(sql, 'UPDATE audit_chain_head SET next_seq = $1, head_hash = $2', [seq + 1n, hash]);
     let inserted;
     try {
       inserted = await verify();
     } finally {
-      await appendOnlyLifted(sql, () => update(sql, 'DELETE FROM audit_log WHERE seq = $1', [seq]));
-      await update(sql, 'UPDATE audit_chain_head SET next_seq = $1, head_hash = $2', [seq, prevHash]);
+      await appendOnlyLifted(sql, () => query(sql, 'DELETE FROM audit_log WHERE seq = $1', [seq]));
+      await query(sql, 'UPDATE audit_chain_head SET next_seq = $1, head_hash = $2', [seq, prevHash]);
     }
     expect(!inserted.ok && inserted.author === 'vault' && inserted.failedAtSeq === Number(seq), "an entry in the vault's name, chained but not by the vault, verifies", inserted);
     const removed = await verify();
@@ -212,45 +188,19 @@ export async function forgedVaultEntry(deployment: Deployment, { admin }: People
   return 'a publicly chained vault entry with a made-up MAC was refused at its sequence';
 }
 
-/**
- * An entry's public chain hash, as the log's format defines it
- * (@coffre/core/audit): SHA-256 over a domain, the previous hash, each
- * field length-prefixed in order, a null as length -1, and the MAC. Only
- * the fields given are set; the rest are null.
- */
-function chainHash(prevHash: Buffer, fields: Record<string, string | number | bigint>, mac: Buffer): Buffer {
-  const order = [
-    'seq', 'author', 'keyId', 'occurredAt', 'actor', 'action', 'decision', 'code', 'subjectPrincipal', 'projectId',
-    'environmentId', 'secretId', 'secretVersionId', 'operationId', 'requestId', 'sourceIp', 'relatedSeq', 'metadata',
-  ];
-  const hash = createHash('sha256').update('coffre.audit.chain.v2').update(prevHash);
-  for (const name of order) {
-    const length = Buffer.alloc(4);
-    const value = fields[name];
-    if (value === undefined) {
-      hash.update(length.fill(0xff));
-      continue;
-    }
-    const bytes = Buffer.from(String(value), 'utf8');
-    length.writeInt32BE(bytes.length);
-    hash.update(length).update(bytes);
-  }
-  return hash.update(mac).digest();
-}
-
 /** Rewrite either author's entry and require a fault at that exact sequence. */
 export async function rewrittenEntry(deployment: Deployment, { admin }: People, author: 'app' | 'vault'): Promise<string> {
   expect((await admin.api.audit.verify()).ok, 'the log does not verify before the rewrite');
   await using(deployment.database(), (sql) => appendOnlyLifted(sql, async () => {
-    const [row] = await update<{ seq: string | number; actor: string }>(sql,
+    const [row] = await query<{ seq: string | number; actor: string }>(sql,
       'SELECT seq, actor FROM audit_log WHERE author = $1 ORDER BY seq LIMIT 1', [author]);
     expect(row !== undefined, `no ${author} entry to rewrite`);
-    await update(sql, 'UPDATE audit_log SET actor = $1 WHERE seq = $2', ['user:nobody@conformance.example', row.seq]);
+    await query(sql, 'UPDATE audit_log SET actor = $1 WHERE seq = $2', ['user:nobody@conformance.example', row.seq]);
     try {
       const result = await admin.api.audit.verify();
       expect(!result.ok && result.failedAtSeq === Number(row.seq), 'a rewritten entry was not caught at its sequence', result);
     } finally {
-      await update(sql, 'UPDATE audit_log SET actor = $1 WHERE seq = $2', [row.actor, row.seq]);
+      await query(sql, 'UPDATE audit_log SET actor = $1 WHERE seq = $2', [row.actor, row.seq]);
     }
   }));
   expect((await admin.api.audit.verify()).ok, 'the restored entry did not verify');
@@ -264,17 +214,16 @@ export async function missingEntry(deployment: Deployment, { admin }: People, po
     const [row] = await sql.query(`SELECT * FROM audit_log WHERE ${position !== 'middle' ? `seq = ${position === 'first' ? 0 : 1000}` :
       "seq > 0 AND action = 'audit.heartbeat' AND NOT EXISTS (SELECT 1 FROM audit_log linked WHERE linked.related_seq = audit_log.seq)"} ORDER BY seq LIMIT 1`);
     expect(row !== undefined, 'no unreferenced entry to delete');
-    const linked = await update(sql, 'SELECT * FROM audit_log WHERE related_seq = $1', [row.seq]);
-    await update(sql, 'UPDATE audit_log SET related_seq = NULL WHERE related_seq = $1', [row.seq]);
-    await update(sql, 'DELETE FROM audit_log WHERE seq = $1', [row.seq]);
+    const linked = await query(sql, 'SELECT * FROM audit_log WHERE related_seq = $1', [row.seq]);
+    await query(sql, 'UPDATE audit_log SET related_seq = NULL WHERE related_seq = $1', [row.seq]);
+    await query(sql, 'DELETE FROM audit_log WHERE seq = $1', [row.seq]);
     try {
       const result = await admin.api.audit.verify();
       expect(!result.ok, 'a log with an entry missing verifies', result);
       if (position !== 'middle') expect(result.reason.includes(`sequence gap: expected seq ${position === 'first' ? 0 : 1000}`), 'the sequence gap was not reported', result);
     } finally {
-      const fields = Object.keys(row);
-      await update(sql, `INSERT INTO audit_log (${fields.join(', ')}) VALUES (${fields.map((_, i) => `$${i + 1}`).join(', ')})`, Object.values(row));
-      for (const entry of linked) await update(sql, 'UPDATE audit_log SET related_seq = $1 WHERE seq = $2', [entry.related_seq, entry.seq]);
+      await insertRow(sql, 'audit_log', row);
+      for (const entry of linked) await query(sql, 'UPDATE audit_log SET related_seq = $1 WHERE seq = $2', [entry.related_seq, entry.seq]);
     }
   }));
   expect((await admin.api.audit.verify()).ok, 'the restored log did not verify');
@@ -287,37 +236,12 @@ export async function deletedTail(deployment: Deployment, { admin }: People): Pr
   expect(intact.ok && intact.checkpoint !== null, 'the log is not intact and checkpointed');
   const signed = intact.checkpoint.seq;
   await using(deployment.database(), (sql) => appendOnlyLifted(sql, async () => {
-    await update(sql, 'UPDATE audit_log SET related_seq = NULL WHERE seq >= $1', [signed]);
-    await update(sql, 'DELETE FROM audit_log WHERE seq >= $1', [signed]);
+    await query(sql, 'UPDATE audit_log SET related_seq = NULL WHERE seq >= $1', [signed]);
+    await query(sql, 'DELETE FROM audit_log WHERE seq >= $1', [signed]);
   }));
   const result = await admin.api.audit.verify();
   expect(!result.ok && result.author === 'app' && result.reason.includes('removed from the end'), 'the log verifies with its newest entries deleted', result);
   return 'the newest entries deleted, with the head left alone, were caught';
-}
-
-/**
- * `work` with the audit log's append-only triggers lifted, as only its owner
- * can: Postgres disables them for the session, SQLite drops them and makes
- * them again after.
- */
-export async function appendOnlyLifted<T>(sql: Sql, work: () => Promise<T>): Promise<T> {
-  if (sql.engine === 'postgres') {
-    await sql.exec('ALTER TABLE audit_log DISABLE TRIGGER USER');
-    try {
-      return await work();
-    } finally {
-      await sql.exec('ALTER TABLE audit_log ENABLE TRIGGER USER');
-    }
-  }
-  const triggers = await sql.query<{ name: string; sql: string }>(
-    `SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'audit_log'`,
-  );
-  for (const trigger of triggers) await sql.exec(`DROP TRIGGER ${trigger.name}`);
-  try {
-    return await work();
-  } finally {
-    for (const trigger of triggers) await sql.exec(trigger.sql);
-  }
 }
 
 /** The whole log, detail included, newest first. */
