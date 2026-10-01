@@ -7,13 +7,22 @@
 #
 #   pnpm test:consumer [<dir>]    <dir> defaults to a new temporary one
 #
+# Temporary directories are removed on success and kept on failure. An explicit
+# directory is always kept.
+#
 # The deployments pin coffre's packages at the CLI's version, which is not on
 # npm yet, so each project's pnpm-workspace.yaml gets overrides pointing them
 # at the tarballs: the only change to what `init` wrote.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-work="${1:-$(mktemp -d "${TMPDIR:-/tmp}/coffre-consumer.XXXXXX")}"
+temporary=false
+if [[ -n "${1:-}" ]]; then
+    work="$1"
+else
+    work="$(mktemp -d "${TMPDIR:-/tmp}/coffre-consumer.XXXXXX")"
+    temporary=true
+fi
 case "$work" in
 "$root" | "$root"/*)
     echo "consumer-test: $work is inside the workspace; give it a directory outside" >&2
@@ -22,6 +31,20 @@ case "$work" in
 esac
 mkdir -p "$work"
 work="$(cd "$work" && pwd)"
+
+finish() {
+    result=$?
+    if ((result != 0)); then
+        echo "consumer test failed; kept work directory for inspection: $work" >&2
+    elif [[ "$temporary" == true ]]; then
+        rm -rf -- "$work"
+        echo "consumer test passed; removed work directory: $work"
+    else
+        echo "consumer test passed: $work"
+    fi
+}
+trap finish EXIT
+
 rm -rf "$work/tarballs" "$work/cli" "$work/coffre-workers" "$work/coffre-node"
 
 # The Workers deployment runs on the local Postgres, in a database the
@@ -83,5 +106,3 @@ for kind in workers node; do
         pnpm --dir "$project" conformance
     fi
 done
-
-echo "consumer test passed: $work"
