@@ -49,7 +49,8 @@ export type AuditRow = Pick<
   'seq' | 'occurredAt' | 'actorType' | 'actorId' | 'action' | 'decision' | 'project' | 'environment'
 > & { subject: string };
 
-export type DirectoryPrincipal = Pick<Member, 'principalType' | 'principalId' | 'instanceRole' | 'isRootAdmin'>;
+export type DirectoryPrincipal = Pick<Member, 'principalType' | 'principalId' | 'instanceRole' | 'isRootAdmin'> &
+  Partial<Pick<Member, 'tampered'>>;
 
 export type ImportPlanEntry = { key: string; action: ImportAction; version: number | null };
 

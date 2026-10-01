@@ -131,7 +131,7 @@ test('an expired grant refuses: in the app, and in the vault if the app were wro
 
 test('the bulk limit counts one read per secret, trips with its own code, and is logged', async () => {
   const limited = testDeps(db.runtime, [ROOT], {
-    vault: testVault([ROOT], { bulkLimit: { count: 3, windowMinutes: 1 } }),
+    vault: testVault([ROOT], { bulkLimit: { count: 3, windowMinutes: 1 } }, deps.vault),
   });
   const admin = clientFor(limited, ROOT);
   const dev = clientFor(limited, DEV);
@@ -262,8 +262,9 @@ test('the audit verification checks the vault log too, and finds a grant written
   await db.owner.insert(vaultGrants).values({
     principal: `user:${DEV}`, projectId, environmentId: null, role: 'owner', expiresAt: null, grantedAt: 0, grantedBy: `user:${ROOT}`,
   });
-  // Worded with the names the app knows; the vault has only ids.
-  const reason = `the store holds a grant the log never gave: ${DEV} as owner on market`;
+  // The developer's record no longer carries the vault's MAC, and the
+  // verdict names them as the app knows them.
+  const reason = `the store's ${DEV}, or their grants, were changed outside the vault`;
   assert.deepEqual(await root.audit.verify(), { ok: false, log: 'vault', failedAtSeq: null, reason });
   assert.deepEqual((await root.audit.vault({ full: '1' })).verification, { ok: false, failedAtSeq: null, reason });
 });

@@ -86,7 +86,13 @@ export type RefusalCode =
   /** The head does not extend the last checkpoint: the app's log was rewritten, or two heartbeats raced. */
   | 'checkpoint_diverged'
   /** The vault's own log no longer carries the head the last checkpoint signed, or does not rehash since. */
-  | 'log_broken';
+  | 'log_broken'
+  /**
+   * The member's row or grants were changed outside the vault, or put back
+   * from before a later change: it refuses them until an owner removes them,
+   * which starts their access over from the log.
+   */
+  | 'tampered';
 
 export type Outcome<T> = ({ ok: true } & T) | { ok: false; refusal: Refusal };
 
@@ -144,8 +150,12 @@ export type Grant = {
 
 export type Access = {
   principal: string;
-  /** `unknown` for someone never admitted. Root admins are always active. */
-  status: 'active' | 'removed' | 'unknown';
+  /**
+   * `unknown` for someone never admitted, `tampered` for a member whose row
+   * fails the vault's integrity check: refused everything, as `removed` is.
+   * Root admins are always active.
+   */
+  status: 'active' | 'removed' | 'unknown' | 'tampered';
   /** Advanced by removal, even if the app cannot commit its credential revocations. */
   generation: number;
   isRootAdmin: boolean;

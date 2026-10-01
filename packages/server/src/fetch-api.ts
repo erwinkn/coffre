@@ -7,6 +7,7 @@ import {
   authenticateRequest,
   bearerToken,
   readCookie,
+  accessTampered,
   registrationRequired,
   sessionCookieName,
   unauthenticated,
@@ -128,7 +129,7 @@ export async function fetchApi(
     const identity = await apiCaller(request, runtime, options.sourceIp);
     if (identity instanceof Response) return identity;
     if (!identity.registered && !(request.method === 'GET' && pathname === '/api/me')) {
-      return registrationRequired();
+      return identity.caller.tampered ? accessTampered() : registrationRequired();
     }
     return await serveApi(request, apiContext(runtime, identity));
   } catch (error) {

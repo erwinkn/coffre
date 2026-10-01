@@ -94,8 +94,10 @@ export async function run(db: Queryable, query: SQL): Promise<void> {
 /** Everything a vault test leaves behind, gone, and the heads this process remembers forgotten. */
 export async function emptyDatabase(owner: Database): Promise<void> {
   const { auditLog, auditChainHead, vaultGrants, vaultMembers, secrets, environments, projects } = tablesOf(owner);
+  // SQLite checks a RESTRICT foreign key row by row, so entries that point
+  // at others let go of them first.
   await withLogUnlocked(owner, async (db) => {
-    await db.delete(auditLog).where(sql`${auditLog.relatedSeq} IS NOT NULL`);
+    await db.update(auditLog).set({ relatedSeq: null });
     await db.delete(auditLog);
   });
   await owner.update(auditChainHead).set({ nextSeq: 0n, headHash: Buffer.alloc(32) });

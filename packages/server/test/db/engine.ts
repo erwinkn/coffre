@@ -107,8 +107,10 @@ export async function withLogUnlocked<T>(owner: Database, work: (db: Queryable) 
  */
 export async function emptyLog(owner: Database): Promise<void> {
   const { auditLog, auditChainHead } = tablesOf(owner);
+  // SQLite checks a RESTRICT foreign key row by row, so entries that point
+  // at others let go of them first.
   await withLogUnlocked(owner, async (db) => {
-    await db.delete(auditLog).where(sql`${auditLog.relatedSeq} IS NOT NULL`);
+    await db.update(auditLog).set({ relatedSeq: null });
     await db.delete(auditLog);
   });
   await owner.update(auditChainHead).set({ nextSeq: 0n, headHash: Buffer.alloc(32) });

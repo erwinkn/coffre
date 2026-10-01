@@ -214,6 +214,7 @@ test('an unregistered non-root identity is marked for the closed-door boundary',
     caller: {
       principal: { type: 'user', id: 'new@acme.example' },
       registered: false,
+      tampered: false,
       generation: 0,
       isRootAdmin: false,
       isOwner: false,
@@ -274,6 +275,7 @@ test('an active registered identity receives an auditable request context', asyn
       caller: {
         principal: { type: 'service', id: 'reporting.access' },
         registered: true,
+        tampered: false,
         generation: 0,
         isRootAdmin: false,
         isOwner: false,

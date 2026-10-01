@@ -21,6 +21,8 @@ const MESSAGES: Record<string, string> = {
   account_mismatch:
     'Your email already signs in with a different account. Use that one, then link this account from your account page.',
   already_linked: 'That account is already linked to someone else.',
+  tampered:
+    'Your access record failed coffre’s integrity check: it was changed outside coffre. An owner must remove you and add you again.',
   unknown_provider: 'That sign-in option is not configured here.',
   link_session: 'Your session changed while linking. Sign in again, then retry.',
 };

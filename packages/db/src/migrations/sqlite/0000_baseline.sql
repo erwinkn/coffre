@@ -263,6 +263,9 @@ CREATE TABLE `vault_members` (
 	`created_by` text NOT NULL,
 	`status_changed_at` integer NOT NULL,
 	`status_changed_by` text NOT NULL,
+	`access_seq` integer NOT NULL,
+	`mac` blob NOT NULL,
+	CONSTRAINT "vault_members_mac_check" CHECK(octet_length("vault_members"."mac") = 32),
 	CONSTRAINT "vault_members_principal_check" CHECK(("vault_members"."principal" GLOB 'user:?*' OR "vault_members"."principal" GLOB 'token:?*' OR "vault_members"."principal" GLOB 'sync:?*')
         AND substr("vault_members"."principal", instr("vault_members"."principal", ':') + 1, 1) <> ':'
         AND instr("vault_members"."principal", ' ') = 0 AND instr("vault_members"."principal", char(9)) = 0

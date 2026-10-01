@@ -174,7 +174,7 @@ TO coffre_vault;
 --> statement-breakpoint
 GRANT SELECT, INSERT ON audit_log TO coffre_vault;
 --> statement-breakpoint
-GRANT SELECT, INSERT, UPDATE (status, owner, generation, status_changed_at, status_changed_by)
+GRANT SELECT, INSERT, UPDATE (status, owner, generation, created_at, created_by, status_changed_at, status_changed_by, access_seq, mac)
     ON vault_members TO coffre_vault;
 --> statement-breakpoint
 GRANT SELECT, INSERT, DELETE ON vault_grants TO coffre_vault;

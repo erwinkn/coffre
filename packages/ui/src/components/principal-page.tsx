@@ -109,6 +109,7 @@ export function PrincipalPage({
           principalId,
           instanceRole: found.instanceRole,
           isRootAdmin: found.isRootAdmin,
+          tampered: found.status === 'tampered',
         }
       : undefined;
 

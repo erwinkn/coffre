@@ -10,7 +10,7 @@ import {
   type Permission,
   type Role,
 } from '@coffre/core/access';
-import type { LogKey, StoredEntry } from '@coffre/core/audit';
+import { verifyEntries, type LogKey, type StoredEntry } from '@coffre/core/audit';
 import { checkContext, type SecretContext } from '@coffre/core/envelope';
 import {
   DEK_BYTES,
@@ -26,6 +26,7 @@ import {
   describeAccessFault,
   type Access,
   type AccessChange,
+  type AccessFault,
   type AdmitInput,
   type Checkpoint,
   type CheckpointInput,
@@ -56,9 +57,10 @@ import { verifyAccounting } from './accounting.ts';
 import { signer, type Signer } from './checkpoint.ts';
 import type { ResolvedVaultConfig } from './config.ts';
 import { carries, entryView, further, headOf, UNVERIFIED, vaultLogKey, verifyChain, type Anchor } from './log.ts';
-import { replay } from './replay.ts';
+import { apply, replay, type LoggedMember, type Replayed } from './replay.ts';
+import { memberMac, rowKey, sealed } from './rows.ts';
 import * as store from './store.ts';
-import type { GrantRow, Member } from './store.ts';
+import { ACCESS_ACTIONS, type GrantRow, type Member } from './store.ts';
 
 export type VaultOptions = {
   /**
@@ -85,6 +87,10 @@ export type PreparedVault = {
   verified: Anchor;
   /** Root admins known to have a member row; rows are never deleted. */
   rooted: Set<string>;
+  /** What member rows are sealed under; rows.ts. */
+  rowKey: Buffer;
+  /** Tampering this process has logged already, so that a forged row is one entry, not one per request. */
+  reported: Set<string>;
 };
 
 export async function prepareVault(config: ResolvedVaultConfig, options: VaultOptions = {}): Promise<PreparedVault> {
@@ -95,6 +101,8 @@ export async function prepareVault(config: ResolvedVaultConfig, options: VaultOp
     options: { keyBudgetMs: options.keyBudgetMs ?? KEY_BUDGET_MS, clockOffset: options.clockOffset ?? (() => 0) },
     verified: UNVERIFIED,
     rooted: new Set(),
+    rowKey: rowKey(config.signingKey),
+    reported: new Set(),
   };
 }
 
@@ -113,6 +121,12 @@ const PRINCIPAL = /^(user|token|sync):[^\s:][^\s]*$/;
 
 /** Who acts for the vault itself, as when it gives a root admin a member row. */
 const VAULT_ACTOR = 'system:vault';
+
+/** A new member row, before the decision seals it (`#seal`). */
+const UNSEALED = { accessSeq: 0n, mac: Buffer.alloc(32) };
+
+/** Why a change to a tampered member is refused. */
+const TAMPERED_SUBJECT = "this member's record failed the vault's integrity check: remove them to start over";
 
 /** Who asks for checkpoints: the app's scheduled job. */
 const SCHEDULER = 'system:coffre-scheduler';
@@ -155,6 +169,7 @@ const MESSAGES: Record<RefusalCode, string> = {
   invalid: 'not something the rules allow',
   checkpoint_diverged: 'the audit log does not extend the last checkpoint',
   log_broken: 'the vault log does not hold from the last checkpoint',
+  tampered: "this member's record failed the vault's integrity check",
 };
 
 /**
@@ -170,10 +185,17 @@ type Decision = {
   at: number;
   log: NewEntry[];
   writes: ((at: number) => Promise<void>)[];
+  /** Members whose row or grants the writes change: sealed again once they have run. */
+  touched: Set<string>;
+  /** `vault.tampered` entries, committed with the decision whatever it decides. */
+  reports: NewEntry[];
 };
 
-/** What a reader holds, read once per decision. */
-type Standing = { principal: string; status: Access['status']; live: Holdings; all: Holdings };
+/** Why a member's row is not the one the vault last wrote; rows.ts. */
+type Fault = 'mac' | 'stale';
+
+/** What someone holds, read once per decision; `fault` when their row fails its check, and they hold nothing. */
+type Standing = { principal: string; status: Access['status']; live: Holdings; all: Holdings; fault: Fault | null };
 
 /**
  * How one key operation of a call came out: its value; or a bad claim, a
@@ -220,14 +242,28 @@ class VaultService implements Vault {
    * fails the call.
    */
   async #decide<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>): Promise<Outcome<T>> {
+    const reports: NewEntry[] = [];
     try {
       const result = await this.#db.transaction(async (tx) => {
         await store.boundLockWaits(tx, LOCK_TIMEOUT_MS);
         const members = principals.length === 0 ? new Map<string, Member>() : await store.lockMembers(tx, principals);
-        const d: Decision = { tx, members, at: await this.#now(tx), log: [], writes: [] };
+        const d: Decision = { tx, members, at: await this.#now(tx), log: [], writes: [], touched: new Set(), reports };
         const result = await decide(d);
-        const at = d.log.length === 0 ? d.at : (await appendEntries(tx, this.#prepared.logKey, d.log)).occurredAt;
+        const entries = [...reports, ...d.log];
+        let at = d.at;
+        // Each member's newest access entry, which their row names (rows.ts).
+        const accessSeq = new Map<string, bigint>();
+        if (entries.length > 0) {
+          const appended = await appendEntries(tx, this.#prepared.logKey, entries);
+          at = appended.occurredAt;
+          entries.forEach((entry, i) => {
+            if (isAccessEntry(entry)) accessSeq.set(entry.subjectPrincipal!, appended.seqStart + BigInt(i));
+          });
+        }
         for (const write of d.writes) await write(at);
+        for (const principal of new Set([...d.touched, ...accessSeq.keys()])) {
+          await this.#seal(tx, principal, accessSeq.get(principal));
+        }
         return result;
       });
       return { ok: true, ...result };
@@ -235,11 +271,76 @@ class VaultService implements Vault {
       if (!(error instanceof Refused || error instanceof Outage)) throw error;
       await this.#db.transaction(async (tx) => {
         await store.boundLockWaits(tx, LOCK_TIMEOUT_MS);
-        await appendEntries(tx, this.#prepared.logKey, error.entries);
+        await appendEntries(tx, this.#prepared.logKey, [...reports, ...error.entries]);
       });
       if (error instanceof Outage) throw error.error;
       return { ok: false, refusal: error.refusal };
     }
+  }
+
+  /**
+   * Seal `principal`'s row again over what it now holds, naming
+   * `accessSeq`, their newest access entry, when this decision wrote one.
+   */
+  async #seal(tx: Transaction, principal: string, accessSeq: bigint | undefined): Promise<void> {
+    const row = await store.member(tx, principal);
+    if (row === undefined) return;
+    const next = { ...row, accessSeq: accessSeq ?? row.accessSeq };
+    await store.updateMember(tx, principal, { accessSeq: next.accessSeq, mac: memberMac(this.#prepared.rowKey, next, await store.grants(tx, principal)) });
+  }
+
+  /**
+   * Whether `row`, with these grants, is the row the vault last wrote: its
+   * MAC holds, and it names the newest access entry the log has about the
+   * member. A genuine row put back from before a later change passes the
+   * first and fails the second. Entries in the vault's name that fail their
+   * MAC are passed over, and reported: otherwise whoever can insert a row
+   * could lock any member out.
+   */
+  async #integrity(db: Queryable, principal: string, row: Member | undefined, grants: readonly GrantRow[], reports: NewEntry[]): Promise<Fault | null> {
+    if (row !== undefined && !sealed(this.#prepared.rowKey, row, grants)) {
+      this.#report(reports, principal, 'mac', row.mac.toString('hex'));
+      return 'mac';
+    }
+    const newest = await this.#newestAccessSeq(db, principal, reports);
+    // No row, and no entry: someone never admitted. No row, but entries: one deleted.
+    if (row === undefined ? newest === null : newest === row.accessSeq) return null;
+    this.#report(reports, principal, 'stale', `${row?.accessSeq ?? 'none'}<${newest}`);
+    return 'stale';
+  }
+
+  /** The seq of the newest access entry about `principal` that carries the vault's MAC, or null. */
+  async #newestAccessSeq(db: Queryable, principal: string, reports: NewEntry[]): Promise<bigint | null> {
+    for (const entry of await store.accessEntriesAbout(db, principal, 32)) {
+      if (this.#authentic(entry)) return entry.seq;
+      this.#report(reports, principal, 'forged_entry', String(entry.seq), entry.seq);
+    }
+    return null;
+  }
+
+  #authentic(entry: StoredEntry): boolean {
+    return verifyEntries([entry], { startSeq: entry.seq, startPrevHash: entry.prevHash, keys: [this.#prepared.logKey] }).ok;
+  }
+
+  /** A `vault.tampered` entry, once per process for each thing found. */
+  #report(reports: NewEntry[], principal: string, code: Fault | 'forged_entry', detail: string, relatedSeq: bigint | null = null): void {
+    const key = `${principal}|${code}|${detail}`;
+    if (this.#prepared.reported.has(key)) return;
+    this.#prepared.reported.add(key);
+    reports.push({
+      actor: VAULT_ACTOR,
+      action: 'vault.tampered',
+      decision: 'deny',
+      code,
+      subjectPrincipal: principal,
+      relatedSeq,
+      metadata: '{}',
+    });
+  }
+
+  /** Reports found outside a decision, committed on their own. */
+  async #record(reports: NewEntry[]): Promise<void> {
+    if (reports.length > 0) await this.#db.transaction((tx) => appendEntries(tx, this.#prepared.logKey, reports));
   }
 
   // --- keys -------------------------------------------------------------------
@@ -375,7 +476,7 @@ class VaultService implements Vault {
     for (const secret of secrets) entry(secret, 'allow', null);
     if (this.#isRootAdmin(principal)) await this.#rootRow(principal);
     const check = async (d: Decision) => {
-      const reader = await this.#standing(d.tx, principal, d.members.get(principal), d.at);
+      const reader = await this.#standing(d.tx, principal, d.members.get(principal), d.at, d.reports);
       const codes = secrets.map((secret) => refuses(reader, call.permission, secret));
       let first = codes.find((code) => code !== null) ?? null;
       if (first === null && action === 'unwrap' && (await this.#overBulkLimit(d, principal, secrets.length))) first = 'bulk_limit';
@@ -489,7 +590,7 @@ class VaultService implements Vault {
     await this.#db.transaction(async (tx) => {
       await lockLogHead(tx);
       if ((await store.member(tx, principal)) !== undefined) return;
-      const { occurredAt } = await appendEntries(tx, this.#prepared.logKey, [
+      const appended = await appendEntries(tx, this.#prepared.logKey, [
         {
           actor: VAULT_ACTOR,
           action: 'principal.admit',
@@ -498,48 +599,57 @@ class VaultService implements Vault {
           metadata: JSON.stringify({ owner: false, rootAdmin: true }),
         },
       ]);
-      await store.insertMember(tx, {
+      const { occurredAt: at, seqStart } = appended;
+      const row = {
         principal,
-        status: 'active',
+        status: 'active' as const,
         owner: false,
         generation: 0,
-        createdAt: occurredAt,
+        createdAt: at,
         createdBy: VAULT_ACTOR,
-        statusChangedAt: occurredAt,
+        statusChangedAt: at,
         statusChangedBy: VAULT_ACTOR,
-      });
+        accessSeq: seqStart,
+      };
+      await store.insertMember(tx, { ...row, mac: memberMac(this.#prepared.rowKey, row, []) });
     });
     this.#prepared.rooted.add(principal);
   }
 
-  async #standing(db: Queryable, principal: string, row: Member | undefined, at: number): Promise<Standing> {
-    const status = this.#isRootAdmin(principal) ? 'active' : (row?.status ?? 'unknown');
+  /**
+   * What `principal` holds, their row checked first (`#integrity`): a row
+   * that fails holds nothing, and is `tampered`. A root admin's come from the
+   * configuration, which no row can change.
+   */
+  async #standing(db: Queryable, principal: string, row: Member | undefined, at: number, reports: NewEntry[]): Promise<Standing> {
+    const none = { isRootAdmin: false, isOwner: false, grants: [] };
     if (this.#isRootAdmin(principal)) {
       const root = { isRootAdmin: true, isOwner: true, grants: [] };
-      return { principal, status, live: root, all: root };
+      return { principal, status: 'active', live: root, all: root, fault: null };
     }
-    if (row?.status !== 'active') {
-      const none = { isRootAdmin: false, isOwner: false, grants: [] };
-      return { principal, status, live: none, all: none };
-    }
-    const held = (await store.grants(db, principal)).map((grant) => ({ ...grant, role: grant.role as Role }));
+    const grants = row === undefined ? [] : await store.grants(db, principal);
+    const fault = await this.#integrity(db, principal, row, grants, reports);
+    if (fault !== null) return { principal, status: 'tampered', live: none, all: none, fault };
+    if (row?.status !== 'active') return { principal, status: row?.status ?? 'unknown', live: none, all: none, fault };
+    const held = grants.map((grant) => ({ ...grant, role: grant.role as Role }));
     const isOwner = row.owner && principal.startsWith('user:');
     return {
       principal,
-      status,
+      status: 'active',
       live: { isRootAdmin: false, isOwner, grants: held.filter((grant) => live(grant, at)) },
       all: { isRootAdmin: false, isOwner, grants: held },
+      fault,
     };
   }
 
-  #access(principal: string, row: Member | undefined, held: readonly GrantRow[], at: number): Access {
+  #access(principal: string, row: Member | undefined, held: readonly GrantRow[], at: number, tampered: boolean): Access {
     if (this.#isRootAdmin(principal)) {
       return { principal, status: 'active', generation: row?.generation ?? 0, isRootAdmin: true, isOwner: true, grants: [], since: null, by: null };
     }
-    const active = row?.status === 'active';
+    const active = !tampered && row?.status === 'active';
     return {
       principal,
-      status: row?.status ?? 'unknown',
+      status: tampered ? 'tampered' : (row?.status ?? 'unknown'),
       generation: row?.generation ?? 0,
       isRootAdmin: false,
       isOwner: active && row.owner && principal.startsWith('user:'),
@@ -556,16 +666,43 @@ class VaultService implements Vault {
       store.grants(this.#db, principal),
       this.#now(this.#db),
     ]);
-    return this.#access(principal, row, held, at);
+    const reports: NewEntry[] = [];
+    const fault = this.#isRootAdmin(principal) ? null : await this.#integrity(this.#db, principal, row, held, reports);
+    await this.#record(reports);
+    return this.#access(principal, row, held, at, fault !== null);
   }
 
+  /**
+   * Everyone, each row checked as `access` checks it: their newest access
+   * entries read in one query, and the slow way only for a member whose
+   * newest fails its MAC.
+   */
   async members(): Promise<Access[]> {
-    const [rows, held, at] = await Promise.all([store.allMembers(this.#db), store.grants(this.#db), this.#now(this.#db)]);
+    const [rows, held, newest, at] = await Promise.all([
+      store.allMembers(this.#db),
+      store.grants(this.#db),
+      store.newestAccessEntries(this.#db),
+      this.#now(this.#db),
+    ]);
     const byPrincipal = new Map(rows.map((row) => [row.principal, row]));
     const everyone = new Set([...this.#config.rootAdmins.map((email) => `user:${email}`), ...byPrincipal.keys()]);
-    return [...everyone]
-      .sort()
-      .map((principal) => this.#access(principal, byPrincipal.get(principal), held.filter((grant) => grant.principal === principal), at));
+    const reports: NewEntry[] = [];
+    const all: Access[] = [];
+    for (const principal of [...everyone].sort()) {
+      const row = byPrincipal.get(principal);
+      const grants = held.filter((grant) => grant.principal === principal);
+      let tampered = false;
+      if (row !== undefined && !this.#isRootAdmin(principal)) {
+        const entry = newest.get(principal);
+        tampered =
+          entry !== undefined && this.#authentic(entry)
+            ? !sealed(this.#prepared.rowKey, row, grants) || entry.seq !== row.accessSeq
+            : (await this.#integrity(this.#db, principal, row, grants, reports)) !== null;
+      }
+      all.push(this.#access(principal, row, grants, at, tampered));
+    }
+    await this.#record(reports);
+    return all;
   }
 
   // --- changing access ----------------------------------------------------------
@@ -603,10 +740,14 @@ class VaultService implements Vault {
           throw refused('invalid', `no such place: ${environmentId === null ? projectId : `${projectId}/${environmentId}`}`);
         }
       }
-      const holder = (await this.#standing(d.tx, actor, d.members.get(actor), d.at)).live;
-      if (!input.changes.every((change) => mayManageAccess(holder, principal, change))) throw refused('not_allowed');
+      const acting = await this.#standing(d.tx, actor, d.members.get(actor), d.at, d.reports);
+      if (acting.status === 'tampered') throw refused('tampered');
+      if (!input.changes.every((change) => mayManageAccess(acting.live, principal, change))) throw refused('not_allowed');
 
       const row = d.members.get(principal);
+      if ((await this.#standing(d.tx, principal, row, d.at, d.reports)).status === 'tampered') {
+        throw refused('tampered', TAMPERED_SUBJECT);
+      }
       if (row?.status === 'removed') throw refused('removed');
       if (row === undefined) {
         // A sync is a member from its first grant; anyone else is admitted first.
@@ -624,11 +765,13 @@ class VaultService implements Vault {
             createdBy: actor,
             statusChangedAt: at,
             statusChangedBy: actor,
+            ...UNSEALED,
           });
         });
       }
       const held = row === undefined ? [] : await store.grants(d.tx, principal);
       const changes = input.changes.map((change) => this.#apply(d, actor, principal, held, change, input.requestId));
+      if (d.writes.length > 0) d.touched.add(principal);
       return { changes };
     });
   }
@@ -681,14 +824,19 @@ class VaultService implements Vault {
         accessEntry(actor, 'principal.admit', principal, 'deny', input.requestId, { owner: input.owner ?? null }, code),
       ]);
     return this.#decide([actor, principal], async (d) => {
-      const holder = (await this.#standing(d.tx, actor, d.members.get(actor), d.at)).live;
-      if (!holder.isOwner) throw refused('not_allowed', 'only owners may add or restore members');
+      const acting = await this.#standing(d.tx, actor, d.members.get(actor), d.at, d.reports);
+      if (acting.status === 'tampered') throw refused('tampered');
+      if (!acting.live.isOwner) throw refused('not_allowed', 'only owners may add or restore members');
       if (!PRINCIPAL.test(principal) || isSyncPrincipal(principal)) throw refused('invalid', `not a member: ${principal}`);
       if (this.#isRootAdmin(principal)) throw refused('root_admin');
       if (input.owner === true && !principal.startsWith('user:')) {
         throw refused('invalid', 'service accounts cannot be owners');
       }
       const row = d.members.get(principal);
+      if ((await this.#standing(d.tx, principal, row, d.at, d.reports)).status === 'tampered') {
+        throw refused('tampered', TAMPERED_SUBJECT);
+      }
+      d.touched.add(principal);
       const entry = (action: string, owner: boolean) =>
         d.log.push(accessEntry(actor, action, principal, 'allow', input.requestId, { owner }));
 
@@ -707,6 +855,7 @@ class VaultService implements Vault {
               createdBy: actor,
               statusChangedAt: at,
               statusChangedBy: actor,
+              ...UNSEALED,
             });
           } else {
             await store.updateMember(d.tx, principal, { status: 'active', owner, statusChangedAt: at, statusChangedBy: actor });
@@ -731,7 +880,14 @@ class VaultService implements Vault {
       if (this.#isRootAdmin(principal)) throw refused('root_admin');
       const row = d.members.get(principal);
       const held = row === undefined ? [] : await store.grants(d.tx, principal);
-      const holder = (await this.#standing(d.tx, actor, d.members.get(actor), d.at)).live;
+      const acting = await this.#standing(d.tx, actor, d.members.get(actor), d.at, d.reports);
+      if (acting.status === 'tampered') throw refused('tampered');
+      const holder = acting.live;
+      const subject = await this.#standing(d.tx, principal, row, d.at, d.reports);
+      if (subject.status === 'tampered') {
+        if (!holder.isOwner) throw refused('not_allowed', 'only owners may remove a member whose record failed its check');
+        return this.#startOver(d, actor, principal, row, subject.fault!, input.requestId, refused);
+      }
       // Owners remove anyone. Removing a sync only takes access away, so
       // whoever may take away one of its grants, or manage it at its
       // source, may remove it, and anyone may remove one that holds nothing.
@@ -755,19 +911,67 @@ class VaultService implements Vault {
           environmentId: grant.environmentId,
         });
       }
-      d.log.push(accessEntry(actor, 'principal.remove', principal, 'allow', input.requestId, { revoked: revoked.length }));
+      const generation = row.generation + 1;
+      d.log.push(accessEntry(actor, 'principal.remove', principal, 'allow', input.requestId, { revoked: revoked.length, generation }));
+      d.touched.add(principal);
       d.writes.push(async (at) => {
         await store.deleteGrants(d.tx, principal);
         await store.updateMember(d.tx, principal, {
           status: 'removed',
           owner: false,
-          generation: row.generation + 1,
+          generation,
           statusChangedAt: at,
           statusChangedBy: actor,
         });
       });
       return { revoked: revoked.map(view) };
     });
+  }
+
+  /**
+   * Remove a member whose row failed its check, from what the log says of
+   * them rather than what the row does: their grants go, whatever they were,
+   * and their generation moves past both the row's and the log's, so no
+   * session or token from any earlier membership comes back with a row put
+   * back. Admitted again, they start from nothing, as any removed member.
+   */
+  async #startOver(
+    d: Decision,
+    actor: string,
+    principal: string,
+    row: Member | undefined,
+    fault: Fault,
+    requestId: string | null | undefined,
+    refused: (code: RefusalCode, message?: string) => Refused,
+  ): Promise<{ revoked: Grant[] }> {
+    const logged = await this.#logged(d.tx, principal);
+    if (logged === undefined) throw refused('not_a_member', 'the log never admitted them: their row was written around the vault');
+    const generation = Math.max(row?.generation ?? 0, logged.generation) + 1;
+    d.log.push(accessEntry(actor, 'principal.remove', principal, 'allow', requestId, { revoked: 0, generation, tampered: fault }));
+    d.touched.add(principal);
+    d.writes.push(async (at) => {
+      await store.deleteGrants(d.tx, principal);
+      const fresh = {
+        status: 'removed' as const,
+        owner: false,
+        generation,
+        createdAt: logged.createdAt,
+        createdBy: logged.createdBy,
+        statusChangedAt: at,
+        statusChangedBy: actor,
+      };
+      if (row === undefined) await store.insertMember(d.tx, { principal, ...fresh, ...UNSEALED });
+      else await store.updateMember(d.tx, principal, fresh);
+    });
+    return { revoked: [] };
+  }
+
+  /** `principal` as the log says they are: their authenticated access entries, replayed. */
+  async #logged(db: Queryable, principal: string): Promise<LoggedMember | undefined> {
+    const state: Replayed = { members: new Map(), held: new Map() };
+    const entries = (await store.accessEntriesAbout(db, principal, 100_000)).filter((entry) => this.#authentic(entry));
+    for (const entry of entries.reverse()) apply(state, entry);
+    return state.members.get(principal);
   }
 
   // --- checkpoints and the log --------------------------------------------------
@@ -888,10 +1092,25 @@ class VaultService implements Vault {
       const at = await this.#now(tx);
       const accounting = await verifyAccounting(tx, at);
       if (!accounting.ok) return accounting;
-      const fault = await replay(tx, at);
+      const fault = (await this.#unsealed(tx)) ?? (await replay(tx, at));
       if (fault !== null) return { ok: false, failedAtSeq: null, reason: describeAccessFault(fault), fault };
       return accounting.pending === 0 ? verification : { ...verification, pending: accounting.pending };
     }, SNAPSHOT);
+  }
+
+  /**
+   * The first member whose row fails its MAC, or names an older access
+   * entry than the log's newest about them. The chain is verified by now,
+   * so every entry read here carries the vault's MAC.
+   */
+  async #unsealed(db: Queryable): Promise<AccessFault | null> {
+    const [rows, held, newest] = await Promise.all([store.allMembers(db), store.grants(db), store.newestAccessEntries(db)]);
+    for (const row of rows) {
+      const grants = held.filter((grant) => grant.principal === row.principal);
+      if (!sealed(this.#prepared.rowKey, row, grants)) return { kind: 'tampered-member', principal: row.principal, why: 'mac' };
+      if (newest.get(row.principal)?.seq !== row.accessSeq) return { kind: 'tampered-member', principal: row.principal, why: 'stale' };
+    }
+    return null;
   }
 }
 
@@ -955,6 +1174,7 @@ function validateItems(items: readonly { secret: SecretRef; key?: string; wrappe
 
 /** Why `reader` may not do `permission` on `secret`, or null if they may. */
 function refuses(reader: Standing, permission: Permission, secret: SecretRef): RefusalCode | null {
+  if (reader.status === 'tampered') return 'tampered';
   if (reader.status === 'removed') return 'removed';
   if (reader.status === 'unknown') return 'not_a_member';
   const where = { projectId: secret.projectId, environmentId: secret.environmentId };
@@ -992,6 +1212,16 @@ function keyEntry(
       ...detail,
     }),
   };
+}
+
+/** Whether `entry` changes a member's access: what their row's `access_seq` names. */
+function isAccessEntry(entry: NewEntry): boolean {
+  return (
+    entry.decision === 'allow' &&
+    entry.subjectPrincipal !== undefined &&
+    entry.subjectPrincipal !== null &&
+    (ACCESS_ACTIONS as readonly string[]).includes(entry.action)
+  );
 }
 
 /** An entry about a member's access. */

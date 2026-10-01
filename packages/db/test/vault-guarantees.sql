@@ -50,8 +50,9 @@ END
 $$;
 
 -- 4. The vault writes members and grants, and deletes only a grant.
-INSERT INTO vault_members (principal, status, created_at, created_by, status_changed_at, status_changed_by)
-VALUES ('user:ada@acme.example', 'active', 0, 'user:admin@acme.example', 0, 'user:admin@acme.example');
+INSERT INTO vault_members (principal, status, created_at, created_by, status_changed_at, status_changed_by, access_seq, mac)
+VALUES ('user:ada@acme.example', 'active', 0, 'user:admin@acme.example', 0, 'user:admin@acme.example', 1,
+        decode(repeat('00', 32), 'hex'));
 UPDATE vault_members SET status = 'removed', generation = generation + 1 WHERE principal = 'user:ada@acme.example';
 INSERT INTO vault_grants (principal, environment_id, role, granted_at, granted_by)
 VALUES ('user:ada@acme.example', '22222222-2222-2222-2222-222222222222', 'viewer', 0, 'user:admin@acme.example');
@@ -146,6 +147,43 @@ BEGIN
 EXCEPTION
     WHEN insufficient_privilege THEN
         RAISE NOTICE 'PASS: coffre_vault cannot run DDL';
+END
+$$;
+
+-- 8. Nor read the app's sign-in rows or syncs, empty any table, rewrite a
+-- grant, become the app, or create temporary objects. It may restore a
+-- member's created_at and created_by, from its own log, when it starts a
+-- tampered member over.
+DO $$
+DECLARE
+    statement text;
+BEGIN
+    FOREACH statement IN ARRAY ARRAY[
+        'SELECT * FROM identities',
+        'SELECT * FROM credentials',
+        'SELECT * FROM device_authorizations',
+        'SELECT * FROM syncs',
+        'SELECT * FROM sync_keys',
+        'SELECT * FROM audit_heartbeat',
+        'DELETE FROM identities',
+        'DELETE FROM device_authorizations',
+        'DELETE FROM syncs',
+        'DELETE FROM sync_keys',
+        'TRUNCATE vault_members',
+        'TRUNCATE vault_grants',
+        'TRUNCATE audit_log',
+        'UPDATE vault_grants SET role = role',
+        'SET ROLE coffre_app',
+        'CREATE TEMP TABLE vault_must_not_create_temp (id integer)'
+    ] LOOP
+        BEGIN
+            EXECUTE statement;
+            RAISE EXCEPTION 'FAIL: coffre_vault was able to run: %', statement;
+        EXCEPTION
+            WHEN insufficient_privilege THEN NULL;
+        END;
+    END LOOP;
+    RAISE NOTICE 'PASS: coffre_vault reads no sign-in row, empties nothing, rewrites no grant, and acts as no one else';
 END
 $$;
 

@@ -12,6 +12,7 @@ export type Api = {
         id: string;
       };
       registered: boolean;
+      tampered: boolean;
       instanceRole: "owner" | "root-admin" | "user";
       isRootAdmin: boolean;
       canReadAudit: boolean;
@@ -184,6 +185,7 @@ export type Api = {
         principalId: string;
         instanceRole: "owner" | "root-admin" | "user";
         isRootAdmin: boolean;
+        tampered: boolean;
         grants: {
           id: string;
           project: string;
@@ -206,7 +208,7 @@ export type Api = {
     output: {
       principalType: "service" | "user";
       principalId: string;
-      status: "active" | "removed";
+      status: "active" | "removed" | "tampered";
       instanceRole: "owner" | "root-admin" | "user";
       isRootAdmin: boolean;
       removedAt: string | null;
@@ -287,7 +289,7 @@ export type Api = {
       report: {
         principalType: "service" | "user";
         principalId: string;
-        status: "active" | "removed";
+        status: "active" | "removed" | "tampered";
         instanceRole: "owner" | "root-admin" | "user";
         isRootAdmin: boolean;
         removedAt: string | null;
@@ -807,6 +809,7 @@ export type Me = {
     id: string;
   };
   registered: boolean;
+  tampered: boolean;
   instanceRole: "owner" | "root-admin" | "user";
   isRootAdmin: boolean;
   canReadAudit: boolean;
@@ -823,6 +826,7 @@ export type Member = {
   principalId: string;
   instanceRole: "owner" | "root-admin" | "user";
   isRootAdmin: boolean;
+  tampered: boolean;
   grants: {
     id: string;
     project: string;
@@ -837,7 +841,7 @@ export type Member = {
 export type OffboardingReport = {
   principalType: "service" | "user";
   principalId: string;
-  status: "active" | "removed";
+  status: "active" | "removed" | "tampered";
   instanceRole: "owner" | "root-admin" | "user";
   isRootAdmin: boolean;
   removedAt: string | null;
