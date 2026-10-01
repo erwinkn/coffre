@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
 import { ROLES, type Permission, type Role } from '@coffre/core/access';
-import type { Access, Grant } from '@coffre/core/vault';
 import type { Queryable } from '@coffre/db';
 import { credentials, identities } from '@coffre/db/schema';
 
@@ -10,8 +9,11 @@ import {
   revokePriorMembership,
   memberActivity,
   members as loadMembers,
+  memberStanding,
   places,
   updateAuth,
+  type MemberRow,
+  type StoredGrant,
 } from '../db/queries.ts';
 import { can } from './caller.ts';
 import { audited, denied, Refusal, requireOwner, withRefusals, type ApiContext } from './context.ts';
@@ -39,8 +41,10 @@ export type Member = {
   instanceRole: 'user' | 'owner' | 'root-admin';
   isRootAdmin: boolean;
   /**
-   * The vault refuses them: their record failed its integrity check. They
-   * hold nothing until an owner removes them, which starts them over.
+   * The vault found their record changed around it, and refuses them: they
+   * hold nothing until an owner removes them, which starts them over. A
+   * change the vault has not met yet shows as stored; the vault refuses it
+   * at its first use, and the scheduled checkpoint looks every few minutes.
    */
   tampered: boolean;
   grants: MemberGrant[];
@@ -102,10 +106,10 @@ export type RemovedMember = {
   toRotate: number;
 };
 
-/** A vault grant, placed by slug. */
-type PlacedGrant = Grant & { project: string; environment: string | null };
+/** A stored grant, placed by slug. */
+type PlacedGrant = { project: string; environment: string | null; projectId: string; role: Role; expiresAt: string | null };
 
-/** The slugs of every project and environment, by id: the vault knows places only by id. */
+/** The slugs of every project and environment, by id: grants name places only by id. */
 async function slugs(db: Queryable): Promise<Map<string, string>> {
   return new Map(
     (await places(db)).flatMap((project) => [
@@ -115,23 +119,57 @@ async function slugs(db: Queryable): Promise<Map<string, string>> {
   );
 }
 
-function placed(grants: Grant[], names: Map<string, string>): PlacedGrant[] {
+function placed(grants: StoredGrant[], names: Map<string, string>): PlacedGrant[] {
   return grants.flatMap((grant) => {
     const project = names.get(grant.projectId);
     const environment = grant.environmentId === null ? null : names.get(grant.environmentId);
     // A grant on a place that is gone names nothing anyone can reach.
-    return project === undefined || environment === undefined ? [] : [{ ...grant, project, environment }];
+    if (project === undefined || environment === undefined) return [];
+    return [{
+      project,
+      environment,
+      projectId: grant.projectId,
+      role: grant.role as Role,
+      expiresAt: grant.expiresAt === null ? null : new Date(grant.expiresAt).toISOString(),
+    }];
   });
 }
 
-/** A vault principal as a member, or null for a sync, which is no one's to list. */
-function memberOf(access: Access): MemberRef | null {
-  const ref = parseGrantee(access.principal);
-  return ref.type === 'sync' ? null : ref;
+/** Someone in the directory, as the rows and the vault's findings say. */
+type Listed = {
+  member: MemberRef;
+  /** Null for a root admin the vault has not met yet: it makes their row on first use. */
+  row: MemberRow | null;
+  isRootAdmin: boolean;
+  status: 'active' | 'removed' | 'tampered';
+  /** What they hold as stored: nothing unless active. */
+  grants: StoredGrant[];
+};
+
+/**
+ * Everyone in the directory, or one member, read from the rows rather than
+ * asked of the vault: a list is a display, not a decision. The root admins
+ * are the vault's configuration, so it says who they are, rows or not.
+ */
+async function directory(ctx: ApiContext, now: Date, member?: MemberRef): Promise<Listed[]> {
+  const [rows, { rootAdmins }] = await Promise.all([
+    loadMembers(ctx.db, ctx.chainKey, member === undefined ? {} : { member }, now),
+    ctx.vault.about(),
+  ]);
+  const byPrincipal = new Map(rows.map((row) => [formatMember(row), row]));
+  const roots = new Set(rootAdmins);
+  const wanted = member === undefined ? null : formatMember(member);
+  const principals = new Set([...byPrincipal.keys(), ...rootAdmins.filter((root) => wanted === null || root === wanted)]);
+  return [...principals].sort().map((principal) => {
+    const row = byPrincipal.get(principal) ?? null;
+    const isRootAdmin = roots.has(principal);
+    const status = isRootAdmin ? 'active' : row!.tampered ? 'tampered' : row!.status;
+    return { member: parseGrantee(principal) as MemberRef, row, isRootAdmin, status, grants: status === 'active' ? row?.grants ?? [] : [] };
+  });
 }
 
-function instanceRole(access: Access): Member['instanceRole'] {
-  return access.isRootAdmin ? 'root-admin' : access.isOwner ? 'owner' : 'user';
+function instanceRole(listed: Listed): Member['instanceRole'] {
+  return listed.isRootAdmin ? 'root-admin' : listed.row?.owner === true && listed.status === 'active' ? 'owner' : 'user';
 }
 
 /** By project, then environment, with the project-wide grant after its environments. */
@@ -163,23 +201,23 @@ export async function listMembers(
     (grant.project === query.path.project &&
       (query.path.environment === undefined || grant.environment === query.path.environment));
 
-  const [all, names] = await Promise.all([ctx.vault.members(), slugs(ctx.db)]);
+  const [all, names] = await Promise.all([directory(ctx, new Date()), slugs(ctx.db)]);
   const members: Member[] = [];
-  for (const access of all) {
-    const ref = memberOf(access);
-    if (ref === null || (access.status !== 'active' && access.status !== 'tampered')) continue;
-    const visible = placed(access.grants, names)
+  for (const listed of all) {
+    if (listed.status === 'removed') continue;
+    const visible = placed(listed.grants, names)
       .filter((grant) => (caller.isOwner || manages(grant.projectId)) && inPath(grant))
       .sort(byPlace);
     if (!everyone && visible.length === 0) continue;
+    const ref = listed.member;
     const member = formatMember(ref);
     members.push({
       member,
       principalType: ref.type,
       principalId: ref.id,
-      instanceRole: instanceRole(access),
-      isRootAdmin: access.isRootAdmin,
-      tampered: access.status === 'tampered',
+      instanceRole: instanceRole(listed),
+      isRootAdmin: listed.isRootAdmin,
+      tampered: listed.status === 'tampered',
       grants: visible.map((grant) => ({
         id: `${member}/${grant.project}${grant.environment === null ? '' : `/${grant.environment}`}`,
         project: grant.project,
@@ -196,9 +234,7 @@ export async function listMembers(
 
   // Everyone removed, so their reports stay reachable: removal ends access,
   // not the work of rotating what they saw.
-  const removed = all
-    .filter((access) => access.status === 'removed')
-    .flatMap((access) => memberOf(access) ?? []);
+  const removed = all.filter((listed) => listed.status === 'removed').map((listed) => listed.member);
   const exposed = exposure(removed, removed.length === 0 ? [] : await memberActivity(ctx.db, removed.map((m) => m.id)));
   return {
     members,
@@ -295,19 +331,17 @@ const compare = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
  */
 export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<OffboardingReport> {
   if (!ctx.caller.isOwner) throw forbidden('only owners may see what someone has access to');
-  const now = new Date();
   // Everyone, not just them: the service tokens they issued belong to others.
-  const [everyone, directory] = await Promise.all([ctx.vault.members(), loadMembers(ctx.db, ctx.chainKey, {}, now)]);
-  const standing = new Map(everyone.map((access) => [access.principal, access]));
-  const access = standing.get(formatMember(member));
-  if (access === undefined || access.status === 'unknown') throw notFound('no such member');
-  const active = access.status === 'active';
-  const found = directory.find((row) => row.type === member.type && row.id === member.id);
+  const everyone = await directory(ctx, new Date());
+  const listed = everyone.find((entry) => formatMember(entry.member) === formatMember(member));
+  if (listed === undefined) throw notFound('no such member');
+  const { row, status } = listed;
+  const active = status === 'active';
 
-  const held = found?.credentials ?? [];
-  const issued = directory
-    .filter((row) => standing.get(formatMember(row))?.status === 'active')
-    .flatMap((row) => row.credentials.map((credential) => ({ service: row.id, ...credential })))
+  const held = row?.credentials ?? [];
+  const issued = everyone
+    .filter((entry) => entry.status === 'active')
+    .flatMap((entry) => (entry.row?.credentials ?? []).map((credential) => ({ service: entry.member.id, ...credential })))
     .filter((credential) => credential.kind === 'service' && credential.createdBy === member.id)
     .sort((a, b) => compare(a.service, b.service) || a.createdAt.getTime() - b.createdAt.getTime());
 
@@ -316,17 +350,17 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
   return {
     principalType: member.type,
     principalId: member.id,
-    status: access.status === 'tampered' ? 'tampered' : active ? 'active' : 'removed',
-    instanceRole: instanceRole(access),
-    isRootAdmin: access.isRootAdmin,
-    // The vault knows when and by whom: the removal is its decision.
-    removedAt: active ? null : access.since,
-    removedBy: active || access.by === null ? null : parseGrantee(access.by).id,
+    status,
+    instanceRole: instanceRole(listed),
+    isRootAdmin: listed.isRootAdmin,
+    // When and by whom, as the vault wrote it: the removal is its decision.
+    removedAt: status === 'removed' ? row!.statusChangedAt.toISOString() : null,
+    removedBy: status === 'removed' ? parseGrantee(row!.statusChangedBy).id : null,
     live: {
-      grants: access.grants.length,
+      grants: listed.grants.length,
       sessions: held.filter((credential) => credential.kind !== 'service').length,
       tokens: held.filter((credential) => credential.kind === 'service').length,
-      identities: found?.identities.length ?? 0,
+      identities: row?.identities.length ?? 0,
     },
     exposed,
     rotated,
@@ -366,8 +400,7 @@ export async function putMember(
   const fields = { principalType: member.type, principalId: member.id, instanceRole: input.owner === true ? 'owner' : 'user' };
   return withRefusals(ctx, async () => {
     requireOwner(ctx, 'member.add', { metadata: fields });
-    const standing = await ctx.vault.access(principal);
-    if (standing.isRootAdmin) throw rootAdminRefusal(ctx, 'member.add', member);
+    if ((await ctx.vault.about()).rootAdmins.includes(principal)) throw rootAdminRefusal(ctx, 'member.add', member);
     if (member.type === 'service' && input.owner === true) {
       throw new Refusal(
         conflict('service accounts cannot be instance owners'),
@@ -384,9 +417,8 @@ export async function putMember(
       operationId: randomUUID(),
     });
     if (!result.ok) throw vaultRefused(result.refusal);
-    const current = await ctx.vault.access(principal);
     // Housekeeping: rows of an earlier membership are dead already, by their generation.
-    await audited(ctx, (tx) => revokePriorMembership(tx, ctx.chainKey, member, current.generation, ctx.caller.principal.id));
+    await audited(ctx, (tx) => revokePriorMembership(tx, ctx.chainKey, member, result.generation, ctx.caller.principal.id));
     return { member: principal, instanceRole: result.owner ? 'owner' : 'user', created: result.created };
   });
 }
@@ -405,10 +437,9 @@ export async function removeMember(
   const fields = { principalType: member.type, principalId: member.id };
   const revoked = await withRefusals(ctx, async () => {
     requireOwner(ctx, 'member.remove', { metadata: fields });
-    const standing = await ctx.vault.access(principal);
-    if (standing.isRootAdmin) throw rootAdminRefusal(ctx, 'member.remove', member);
-    // A member whose record failed the vault's check is removed to start them over.
-    if (standing.status !== 'active' && standing.status !== 'tampered') {
+    if ((await ctx.vault.about()).rootAdmins.includes(principal)) throw rootAdminRefusal(ctx, 'member.remove', member);
+    // As the row says: a member whose record failed the vault's check is removed to start them over.
+    if ((await memberStanding(ctx.db, principal))?.status !== 'active') {
       throw new Refusal(
         notFound('no such member'),
         denied(ctx, 'member.remove', 'unknown_principal', { metadata: fields }),
@@ -423,12 +454,12 @@ export async function removeMember(
       operationId: randomUUID(),
     });
     if (!result.ok) throw vaultRefused(result.refusal);
-    const current = await ctx.vault.access(principal);
+    const { generation } = result;
     return audited(ctx, async (tx) => {
       const now = new Date();
       const [held] = await loadMembers(tx, ctx.chainKey, { member }, now);
-      const liveCredentials = (held?.credentials ?? []).filter((row) => row.generation < current.generation);
-      const liveIdentities = (held?.identities ?? []).filter((row) => row.generation < current.generation);
+      const liveCredentials = (held?.credentials ?? []).filter((row) => row.generation < generation);
+      const liveIdentities = (held?.identities ?? []).filter((row) => row.generation < generation);
       const revokedBy = ctx.caller.principal.id;
       const ids = (rows: { id: string }[]) => rows.map((row) => row.id);
       if (liveCredentials.length > 0) {

@@ -6,6 +6,7 @@ import { createDatabase } from '@coffre/db';
 import { asc, desc, eq } from 'drizzle-orm';
 
 import { appendAudit } from '../src/db/audit.ts';
+import { latestCheckpoint } from '../src/db/queries.ts';
 import { auditReadiness, HEARTBEAT_STALE_AFTER_SECONDS, writeAuditHeartbeat } from '../src/heartbeat.ts';
 import { openTestDatabase, resetDatabase, testVault } from './api-fixture.ts';
 import { auditLog } from './db/tables.ts';
@@ -45,7 +46,7 @@ test('a beat is an app entry, and the vault checkpoints it in an entry of its ow
     ['vault', 'system:coffre-scheduler', 'audit.checkpoint'],
   ]);
   // The checkpoint signs everything before it: here, the beat.
-  const { checkpoint, publicKey } = await vault.latestCheckpoint();
+  const [checkpoint, { publicKey }] = await Promise.all([latestCheckpoint(db.owner), vault.about()]);
   assert.equal(checkpoint?.seq, 0);
   assert.equal(checkpoint?.hash, logged[0].hash.toString('hex'));
   assert.deepEqual(JSON.parse(logged[1].metadata), checkpoint);
@@ -61,7 +62,7 @@ test('each checkpoint extends the last, and nothing new signs nothing new', asyn
   await writeAuditHeartbeat(db.runtime, chainKey, vault, quiet);
   await writeAuditHeartbeat(db.runtime, chainKey, vault, quiet);
   // Beat, checkpoint, beat, checkpoint: the second covers the first and the second beat.
-  assert.equal((await vault.latestCheckpoint()).checkpoint?.seq, 2);
+  assert.equal((await latestCheckpoint(db.owner))?.seq, 2);
 
   const again = await vault.checkpoint();
   assert.ok(again.ok);
@@ -83,7 +84,7 @@ test('a rewritten entry is never signed over, and readiness goes red', async () 
   });
   assert.equal(written, false);
   assert.deepEqual(warned, { code: 'log_broken' });
-  assert.equal((await vault.latestCheckpoint()).checkpoint?.seq, 2);
+  assert.equal((await latestCheckpoint(db.owner))?.seq, 2);
   // The refusal is in the log too.
   const [refused] = (await entries()).filter((row) => row.decision === 'deny');
   assert.equal(refused.action, 'audit.checkpoint');
@@ -131,7 +132,7 @@ test('an empty log has nothing to checkpoint, and logs nothing for it', async ()
   assert.ok(!refused.ok);
   assert.equal(refused.refusal.code, 'invalid');
   assert.deepEqual(await entries(), []);
-  assert.equal((await vault.latestCheckpoint()).checkpoint, null);
+  assert.equal(await latestCheckpoint(db.owner), null);
   assert.deepEqual(await auditReadiness(db.runtime, vault), { ok: false, heartbeatAgeSeconds: null, checkpointed: false });
 });
 

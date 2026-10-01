@@ -1,5 +1,5 @@
 import type { Author } from '@coffre/core/audit';
-import type { Checkpoint } from '@coffre/core/vault';
+import { ACCESS_ACTIONS, type Checkpoint } from '@coffre/core/vault';
 import type { Envelope } from '@coffre/core/envelope';
 import { own, tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import * as dialect from '@coffre/db/dialect';
@@ -248,26 +248,46 @@ export function memberOf(principal: string): { type: 'user' | 'service'; id: str
 
 /**
  * A member's status and generation as the vault last committed them, or
- * null for no member. Read without a lock: a member's row is the vault's to
- * lock. Inside a transaction that holds the log's head, any change the vault
- * is making waits for it, so what this reads holds until it commits.
+ * null for no member: `user:…`, `token:…` or `sync:…`. Read without a lock:
+ * a member's row is the vault's to lock. Inside a transaction that holds
+ * the log's head, any change the vault is making waits for it, so what this
+ * reads holds until it commits.
  */
-export async function memberStanding(
-  db: Queryable,
-  member: { type: string; id: string },
-): Promise<{ status: string; generation: number } | null> {
+export async function memberStanding(db: Queryable, principal: string): Promise<{ status: string; generation: number } | null> {
   const { vaultMembers } = tablesOf(db);
   const [row] = await db
     .select({ status: vaultMembers.status, generation: vaultMembers.generation })
     .from(vaultMembers)
-    .where(eq(vaultMembers.principal, principalOf(member)));
+    .where(eq(vaultMembers.principal, principal));
   return row ?? null;
 }
+
+/** A grant as `vault_grants` holds it: on a project, or one of its environments. */
+export type StoredGrant = { projectId: string; environmentId: string | null; role: string; expiresAt: number | null };
 
 export type MemberRow = {
   type: 'user' | 'service';
   id: string;
   createdAt: Date;
+  /** As the vault last wrote their row. */
+  status: 'active' | 'removed';
+  owner: boolean;
+  generation: number;
+  statusChangedAt: Date;
+  statusChangedBy: string;
+  /**
+   * Their live grants, as stored. The vault checks a member's row and
+   * grants against its MAC whenever they are used, which the app cannot:
+   * a list shows them as the database has them.
+   */
+  grants: StoredGrant[];
+  /**
+   * Whether the vault has found their row or grants changed around it
+   * since it last changed what they hold: its newest `vault.tampered`
+   * about them is newer than its newest access entry. The vault refuses
+   * them until an owner removes them.
+   */
+  tampered: boolean;
   /** Live credentials: neither revoked nor expired. */
   credentials: {
     id: string;
@@ -298,6 +318,39 @@ export type MemberRow = {
 };
 
 /**
+ * The members the vault has found changed around it, and not started over
+ * since: its newest `vault.tampered` about them, for their row (`mac`) or
+ * an older one put back (`stale`), is newer than its newest entry changing
+ * what they hold. Read from the log, which the vault writes and the app
+ * reads: the vault's own findings, which the app has no key to make. Both
+ * reads go by the log's (author, action, seq) and (author, subject, seq)
+ * indexes, and findings are few.
+ */
+async function tamperedMembers(db: Queryable, principal?: string): Promise<Set<string>> {
+  const { auditLog } = tablesOf(db);
+  const newest = (actions: readonly string[], extra?: SQL) =>
+    db
+      .select({ principal: auditLog.subjectPrincipal, seq: sql<string>`max(${auditLog.seq})`.mapWith(BigInt) })
+      .from(auditLog)
+      .where(
+        and(
+          eq(auditLog.author, 'vault'),
+          inArray(auditLog.action, [...actions]),
+          principal === undefined ? undefined : eq(auditLog.subjectPrincipal, principal),
+          extra,
+        ),
+      )
+      .groupBy(auditLog.subjectPrincipal);
+  const found = await newest(['vault.tampered'], inArray(auditLog.code, ['mac', 'stale']));
+  if (found.length === 0) return new Set();
+  const changed = new Map(
+    (await newest(ACCESS_ACTIONS, and(eq(auditLog.decision, 'allow'), inArray(auditLog.subjectPrincipal, found.map((row) => row.principal!)))))
+      .map((row) => [row.principal!, row.seq]),
+  );
+  return new Set(found.filter((row) => row.seq > (changed.get(row.principal!) ?? -1n)).map((row) => row.principal!));
+}
+
+/**
  * People and services in the vault's directory, with their live sessions,
  * tokens and sign-in accounts: one of them, or everyone. What they may
  * reach is the vault's to say; offboarding and the account page read this.
@@ -308,21 +361,44 @@ export async function members(
   filter: { member?: { type: string; id: string } },
   now: Date,
 ): Promise<MemberRow[]> {
-  const { vaultMembers, credentials, identities } = tablesOf(db);
+  const { vaultMembers, vaultGrants, environments, credentials, identities } = tablesOf(db);
   const principal = filter.member === undefined ? undefined : principalOf(filter.member);
-  const of = (column: typeof vaultMembers.principal | typeof credentials.principal | typeof identities.principal) =>
+  const of = (
+    column: typeof vaultMembers.principal | typeof vaultGrants.principal | typeof credentials.principal | typeof identities.principal,
+  ) =>
     principal === undefined ? undefined : eq(column, principal);
   // Read binary columns directly. Relational JSON encodes bytea on Postgres
   // and cannot hold blobs on SQLite, so it cannot carry these MACs unchanged.
-  const [rows, held, bound] = await Promise.all([
+  const [rows, held, bound, granted, tampered] = await Promise.all([
     db
-      .select({ principal: vaultMembers.principal, createdAt: vaultMembers.createdAt })
+      .select({
+        principal: vaultMembers.principal,
+        createdAt: vaultMembers.createdAt,
+        status: vaultMembers.status,
+        owner: vaultMembers.owner,
+        generation: vaultMembers.generation,
+        statusChangedAt: vaultMembers.statusChangedAt,
+        statusChangedBy: vaultMembers.statusChangedBy,
+      })
       .from(vaultMembers)
       // A sync is a member too, but signs nothing in.
       .where(and(of(vaultMembers.principal), or(sql`${vaultMembers.principal} LIKE 'user:%'`, sql`${vaultMembers.principal} LIKE 'token:%'`)))
       .orderBy(asc(vaultMembers.principal)),
     db.select().from(credentials).where(of(credentials.principal)),
     db.select().from(identities).where(of(identities.principal)),
+    db
+      .select({
+        principal: vaultGrants.principal,
+        // An environment's grant names only the environment.
+        projectId: sql<string>`coalesce(${vaultGrants.projectId}, ${environments.projectId})`,
+        environmentId: vaultGrants.environmentId,
+        role: vaultGrants.role,
+        expiresAt: vaultGrants.expiresAt,
+      })
+      .from(vaultGrants)
+      .leftJoin(environments, eq(environments.id, vaultGrants.environmentId))
+      .where(and(of(vaultGrants.principal), or(isNull(vaultGrants.expiresAt), gt(vaultGrants.expiresAt, now.getTime())))),
+    tamperedMembers(db, principal),
   ]);
   for (const identity of bound) verifyAuthRow(chainKey, 'identities', identity);
   for (const credential of held) verifyAuthRow(chainKey, 'credentials', credential);
@@ -330,6 +406,15 @@ export async function members(
   return rows.map((row) => ({
     ...memberOf(row.principal),
     createdAt: new Date(row.createdAt),
+    status: row.status as MemberRow['status'],
+    owner: row.owner,
+    generation: row.generation,
+    statusChangedAt: new Date(row.statusChangedAt),
+    statusChangedBy: row.statusChangedBy,
+    grants: granted
+      .filter((grant) => grant.principal === row.principal)
+      .map(({ projectId, environmentId, role, expiresAt }) => ({ projectId, environmentId, role, expiresAt })),
+    tampered: tampered.has(row.principal),
     credentials: held.filter((credential) => credential.principal === row.principal
       && credential.revokedAt === null && credential.expiresAt > now)
       .map(({ tokenHash: _hash, authMac: _mac, principal: _principal, revokedAt: _at, revokedBy: _by, ...credential }) => ({
@@ -776,6 +861,26 @@ export async function auditPage(db: Queryable, filter: AuditFilter) {
   return rows.map(shown);
 }
 
+/** The newest of one author's allowed entries of `action`, with the database's clock beside it. */
+function newestEntry(db: Queryable, author: 'app' | 'vault', action: string) {
+  const { auditLog } = tablesOf(db);
+  return db
+    .select({ seq: auditLog.seq, occurredAt: auditLog.occurredAt, metadata: auditLog.metadata, now: clockMillis(db) })
+    .from(auditLog)
+    .where(and(eq(auditLog.author, author), eq(auditLog.action, action), eq(auditLog.decision, 'allow')))
+    .orderBy(desc(auditLog.seq))
+    .limit(1);
+}
+
+/**
+ * The newest checkpoint the vault signed: its newest `audit.checkpoint`,
+ * whose signature whoever shows it checks with the vault's public key.
+ */
+export async function latestCheckpoint(db: Queryable): Promise<Checkpoint | null> {
+  const [row] = await newestEntry(db, 'vault', 'audit.checkpoint');
+  return row === undefined ? null : (JSON.parse(row.metadata) as Checkpoint);
+}
+
 /**
  * How many entries of each of `actions` match `filter`, but for its
  * exclusions and limit, from `fromSeq` on: one grouped count. Both authors
@@ -813,19 +918,8 @@ export async function readiness(db: Queryable): Promise<{
   beat: { seq: bigint; ageSeconds: number } | null;
   checkpoint: Checkpoint | null;
 }> {
-  const { auditLog } = tablesOf(db);
-  const newest = (author: 'app' | 'vault', action: string) =>
-    db
-      .select({ seq: auditLog.seq, occurredAt: auditLog.occurredAt, metadata: auditLog.metadata, now: clockMillis(db) })
-      .from(auditLog)
-      .where(and(eq(auditLog.author, author), eq(auditLog.action, action), eq(auditLog.decision, 'allow')))
-      .orderBy(desc(auditLog.seq))
-      .limit(1);
-  const [[beat], [checkpoint]] = await Promise.all([newest('app', 'audit.heartbeat'), newest('vault', 'audit.checkpoint')]);
-  return {
-    beat: beat === undefined ? null : { seq: beat.seq, ageSeconds: (beat.now - beat.occurredAt) / 1000 },
-    checkpoint: checkpoint === undefined ? null : (JSON.parse(checkpoint.metadata) as Checkpoint),
-  };
+  const [[beat], checkpoint] = await Promise.all([newestEntry(db, 'app', 'audit.heartbeat'), latestCheckpoint(db)]);
+  return { beat: beat === undefined ? null : { seq: beat.seq, ageSeconds: (beat.now - beat.occurredAt) / 1000 }, checkpoint };
 }
 
 /** How many migrations the database has applied. */

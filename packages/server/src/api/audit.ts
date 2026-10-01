@@ -9,6 +9,7 @@ import {
   auditHead,
   auditPage,
   auditRange,
+  latestCheckpoint,
   places,
   resolvePath,
   type AuditFilter,
@@ -270,7 +271,8 @@ export async function verifyAudit(ctx: ApiContext): Promise<AuditVerification> {
         return failed('app', nextSequence, 'the recomputed head does not match the stored chain head', nextSequence - 1n);
       }
       const last = nextSequence === 0n ? null : { seq: Number(nextSequence - 1n), hash: previousHash.toString('hex') };
-      return { ok: true as const, entries, last };
+      // In the same snapshot: the newest checkpoint of the prefix just verified, which the vault checks below.
+      return { ok: true as const, entries, last, checkpoint: await latestCheckpoint(tx) };
     },
     SNAPSHOT,
   );
@@ -279,12 +281,12 @@ export async function verifyAudit(ctx: ApiContext): Promise<AuditVerification> {
   // The vault's entries by its key, up to the entry the app verified to:
   // only then is every entry of the prefix authenticated, by its author.
   const verified = await named(ctx, await ctx.vault.verifyLog({ upTo: chain.last }));
+  const { checkpoint } = chain;
   if (!verified.ok) {
     // The app verified the chain whole, so the vault's fault is at the entry it names, or in no entry at all.
     const last = chain.last === null ? null : BigInt(chain.last.seq);
     return failed('vault', verified.failedAtSeq, verified.reason, verified.failedAtSeq === null ? last : BigInt(verified.failedAtSeq) - 1n);
   }
-  const { checkpoint } = await ctx.vault.latestCheckpoint();
   return {
     ok: true,
     through: chain.last?.seq ?? null,

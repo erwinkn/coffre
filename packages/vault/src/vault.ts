@@ -743,39 +743,24 @@ class VaultService implements Vault {
   }
 
   /**
-   * Everyone, each row checked as `access` checks it: their newest access
-   * entries read in one query, and the slow way only for a member whose
-   * newest fails its MAC.
+   * Every member's row checked as `access` checks it, each finding
+   * reported: their newest access entries read in one query, and the slow
+   * way only for a row that does not match. Lists of members read the rows
+   * without the vault, so this is what finds a row changed around it before
+   * its member next asks for anything; the checkpoint runs it, under the
+   * log's lock, where no decision can be half-written.
    */
-  async members(): Promise<Access[]> {
-    const reports: NewEntry[] = [];
-    const all = await this.#db.transaction((tx) => this.#everyone(tx, reports), SNAPSHOT);
-    await this.#record(reports);
-    return all;
-  }
-
-  async #everyone(db: Queryable, reports: NewEntry[]): Promise<Access[]> {
+  async #sweep(db: Queryable, reports: NewEntry[]): Promise<void> {
     const rows = await store.allMembers(db);
     const held = await store.grants(db);
     const newest = await store.newestAccessEntries(db);
-    const at = await this.#now(db);
-    const byPrincipal = new Map(rows.map((row) => [row.principal, row]));
-    const everyone = new Set([...this.#config.rootAdmins.map((email) => `user:${email}`), ...byPrincipal.keys()]);
-    const all: Access[] = [];
-    for (const principal of [...everyone].sort()) {
-      const row = byPrincipal.get(principal);
-      const grants = held.filter((grant) => grant.principal === principal);
-      let tampered = false;
-      if (row !== undefined && !this.#isRootAdmin(principal)) {
-        const entry = newest.get(principal);
-        tampered =
-          entry !== undefined && this.#authentic(entry)
-            ? !sealed(this.#prepared.rowKey, row, grants) || entry.seq !== row.accessSeq
-            : (await this.#integrity(db, principal, row, grants, reports)) !== null;
-      }
-      all.push(this.#access(principal, row, grants, at, tampered));
+    for (const row of rows) {
+      if (this.#isRootAdmin(row.principal)) continue;
+      const grants = held.filter((grant) => grant.principal === row.principal);
+      const entry = newest.get(row.principal);
+      const holds = entry !== undefined && this.#authentic(entry) && sealed(this.#prepared.rowKey, row, grants) && entry.seq === row.accessSeq;
+      if (!holds) await this.#integrity(db, row.principal, row, grants, reports);
     }
-    return all;
   }
 
   // --- changing access ----------------------------------------------------------
@@ -895,7 +880,7 @@ class VaultService implements Vault {
     return current === undefined ? 'created' : 'updated';
   }
 
-  admit(input: AdmitInput): Promise<Outcome<{ created: boolean; owner: boolean }>> {
+  admit(input: AdmitInput): Promise<Outcome<{ created: boolean; owner: boolean; generation: number }>> {
     const { actor, principal } = input;
     const refused = (code: RefusalCode, message = MESSAGES[code]) =>
       new Refused(refusal(code, message), [
@@ -940,18 +925,19 @@ class VaultService implements Vault {
             await store.updateMember(d.tx, principal, { status: 'active', owner, statusChangedAt: at, statusChangedBy: actor });
           }
         });
-        return { created: true, owner };
+        // A removal moved the generation on already; coming back keeps it.
+        return { created: true, owner, generation: row?.generation ?? 0 };
       }
       const owner = input.owner ?? row.owner;
       if (owner !== row.owner) {
         entry('member.owner', owner);
         d.writes.push(() => store.updateMember(d.tx, principal, { owner }));
       }
-      return { created: false, owner };
+      return { created: false, owner, generation: row.generation };
     });
   }
 
-  remove(input: RemoveInput): Promise<Outcome<{ revoked: Grant[] }>> {
+  remove(input: RemoveInput): Promise<Outcome<{ revoked: Grant[]; generation: number }>> {
     const { actor, principal } = input;
     const refused = (code: RefusalCode, message = MESSAGES[code]) =>
       new Refused(refusal(code, message), [accessEntry(actor, 'member.remove', principal, 'deny', input, {}, code)]);
@@ -1004,7 +990,7 @@ class VaultService implements Vault {
           statusChangedBy: actor,
         });
       });
-      return { revoked: revoked.map(view) };
+      return { revoked: revoked.map(view), generation };
     });
   }
 
@@ -1023,7 +1009,7 @@ class VaultService implements Vault {
     fault: Fault,
     correlation: Correlation,
     refused: (code: RefusalCode, message?: string) => Refused,
-  ): Promise<{ revoked: Grant[] }> {
+  ): Promise<{ revoked: Grant[]; generation: number }> {
     const logged = await this.#logged(d.tx, principal);
     if (logged === undefined) throw refused('not_a_member', 'the log never admitted them: their row was written around the vault');
     const generation = Math.max(row?.generation ?? 0, logged.generation) + 1;
@@ -1043,7 +1029,7 @@ class VaultService implements Vault {
       if (row === undefined) await store.insertMember(d.tx, { principal, ...fresh, ...UNSEALED });
       else await store.updateMember(d.tx, principal, fresh);
     });
-    return { revoked: [] };
+    return { revoked: [], generation };
   }
 
   /** `principal` as the log says they are: their authenticated access entries, replayed. */
@@ -1073,6 +1059,8 @@ class VaultService implements Vault {
         ]);
       // Logging the refusal would give the next call something to sign.
       if (head.nextSeq === 0n) throw new Refused(refusal('invalid', 'the log is empty'), []);
+      // Rows changed around the vault write nothing to the log, so this runs even when nothing new needs signing.
+      await this.#sweep(d.tx, d.reports);
       // Nothing since the last one: it is still the newest prefix.
       if (latest !== null && latest.seq === head.nextSeq - 1n) return { checkpoint: latest.checkpoint };
       // The prefix signed last is still there, and every entry since holds,
@@ -1095,8 +1083,8 @@ class VaultService implements Vault {
     });
   }
 
-  async latestCheckpoint(): Promise<{ checkpoint: Checkpoint | null; publicKey: string }> {
-    return { checkpoint: (await this.#latest(this.#db))?.checkpoint ?? null, publicKey: this.#prepared.signer.publicKey };
+  async about(): Promise<{ publicKey: string; rootAdmins: string[] }> {
+    return { publicKey: this.#prepared.signer.publicKey, rootAdmins: this.#config.rootAdmins.map((email) => `user:${email}`) };
   }
 
   async log(input: LogInput): Promise<Outcome<LogPage>> {

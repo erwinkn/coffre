@@ -520,7 +520,7 @@ test('a removed member is refused everything until admitted again, with no grant
   });
   assert.equal(!regrant.ok && regrant.refusal.code, 'removed');
 
-  assert.deepEqual(await w.vault.admit({ actor: ROOT, principal: ADA }), { ok: true, created: true, owner: false });
+  assert.deepEqual(await w.vault.admit({ actor: ROOT, principal: ADA }), { ok: true, created: true, owner: false, generation: 1 });
   const access = await w.vault.access(ADA);
   assert.equal(access.status, 'active');
   assert.deepEqual(access.grants, []);
@@ -570,15 +570,8 @@ test('access is managed with the same rules as the app, and root admins are fixe
   assert.deepEqual(revoked, { ok: true, changes: ['revoked', 'revoked'] });
   assert.deepEqual((await w.vault.access(BOB)).grants, []);
 
-  const members = await w.vault.members();
-  assert.deepEqual(
-    members.map((m) => [m.principal, m.status, m.isRootAdmin]),
-    [
-      [ADA, 'active', false],
-      [BOB, 'active', false],
-      [ROOT, 'active', true],
-    ],
-  );
+  // Root admins are the vault's configuration, which it says; members are rows anyone may list.
+  assert.deepEqual((await w.vault.about()).rootAdmins, [ROOT]);
 });
 
 test('a sync is a member from its first grant, and whoever manages environments can stop it', async () => {
@@ -736,8 +729,9 @@ test('a rewrite sealed again with the vault\'s key is found against the head it 
 test('a checkpoint signs the log up to its last entry, in an entry of its own', async () => {
   const w = await world();
   const { auditLog } = tablesOf(db.owner);
-  const { checkpoint: none, publicKey } = await w.vault.latestCheckpoint();
-  assert.equal(none, null);
+  const { publicKey } = await w.vault.about();
+  const signed = async () => (await vaultLog(w)).filter((entry) => entry.action === 'audit.checkpoint' && entry.outcome === 'allow');
+  assert.deepEqual(await signed(), []);
   // An empty log has nothing to sign, and the refusal writes nothing to sign next.
   const empty = await w.vault.checkpoint();
   assert.equal(!empty.ok && empty.refusal.code, 'invalid');
@@ -759,7 +753,7 @@ test('a checkpoint signs the log up to its last entry, in an entry of its own', 
   await member(w, BOB, []);
   const next = await w.vault.checkpoint();
   assert.ok(next.ok && next.checkpoint.seq > first.checkpoint.seq);
-  assert.deepEqual((await w.vault.latestCheckpoint()).checkpoint, next.checkpoint);
+  assert.deepEqual((await signed()).at(-1)?.detail, next.checkpoint);
 
   // Each is an entry of the log, and as append-only.
   await assert.rejects(db.owner.delete(auditLog).where(eq(auditLog.action, 'audit.checkpoint')), appendOnly);
@@ -950,7 +944,7 @@ for (const edit of ['forged', 'edited', 'deleted'] as const) {
 
     // An owner removes them, which starts over from the log, and adds them back.
     const removed = await w.vault.remove({ actor: ROOT, principal: ADA });
-    assert.deepEqual(removed, { ok: true, revoked: [] });
+    assert.deepEqual(removed, { ok: true, revoked: [], generation: 1 });
     assert.equal((await w.vault.access(ADA)).status, 'removed');
     assert.equal((await w.vault.admit({ actor: ROOT, principal: ADA })).ok, true);
     await member(w, ADA, [[w.dev, 'viewer']]);
@@ -958,6 +952,25 @@ for (const edit of ['forged', 'edited', 'deleted'] as const) {
     assert.equal((await w.vault.verifyLog({})).ok, true);
   });
 }
+
+test('a checkpoint finds a row changed around the vault before its member asks for anything', async () => {
+  const w = await world();
+  const { vaultGrants } = tablesOf(db.owner);
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  await member(w, BOB, [[w.dev, 'viewer']]);
+  assert.ok((await w.vault.checkpoint()).ok);
+  assert.deepEqual(await tamperings(w), []);
+
+  // Lists read rows without the vault, so the scheduled checkpoint is what looks.
+  await db.owner.insert(vaultGrants).values({
+    principal: ADA, projectId: w.project, environmentId: null, role: 'owner', expiresAt: null, grantedAt: Date.now(), grantedBy: ROOT,
+  });
+  assert.ok((await w.vault.checkpoint()).ok);
+  assert.deepEqual(await tamperings(w), [[ADA, 'mac']]);
+  // Found once, logged once.
+  assert.ok((await w.vault.checkpoint()).ok);
+  assert.deepEqual(await tamperings(w), [[ADA, 'mac']]);
+});
 
 test('an old member row put back with its grants is refused: the log holds the later change', async () => {
   const w = await world();

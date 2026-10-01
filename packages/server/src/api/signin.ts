@@ -418,7 +418,7 @@ export class SigninService {
    */
   async #stillMember(tx: Transaction, principal: PrincipalRef, standing: Access): Promise<boolean> {
     if (standing.status !== 'active') return false;
-    const row = await memberStanding(tx, principal);
+    const row = await memberStanding(tx, principalOf(principal));
     return row !== null && row.generation === standing.generation && (row.status === 'active' || standing.isRootAdmin);
   }
 

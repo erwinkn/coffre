@@ -79,7 +79,7 @@ const publicKeys = new WeakMap<Vault, Promise<string>>();
 function publicKeyOf(vault: Vault): Promise<string> {
   let key = publicKeys.get(vault);
   if (key === undefined) {
-    key = vault.latestCheckpoint().then(({ publicKey }) => publicKey);
+    key = vault.about().then(({ publicKey }) => publicKey);
     key.catch(() => publicKeys.delete(vault));
     publicKeys.set(vault, key);
   }

@@ -193,6 +193,30 @@ test('a removed member stays out despite a live session, until the vault admits 
   assert.equal((await reveal()).status, 200);
 });
 
+test('a grant forged in the database lists as stored until the vault meets it, which marks its member', async () => {
+  // Someone who owns the database gives the developer the whole project.
+  const { projects, vaultGrants } = tablesOf(db.owner);
+  const [{ id: projectId }] = await db.owner.select({ id: projects.id }).from(projects).where(eq(projects.slug, 'market'));
+  await db.owner.insert(vaultGrants).values({
+    principal: `user:${DEV}`, projectId, environmentId: null, role: 'owner', expiresAt: null, grantedAt: 0, grantedBy: `user:${ROOT}`,
+  });
+  const listed = async () => {
+    const { tampered, grants } = (await root.members.list()).members.find((entry) => entry.member === `user:${DEV}`)!;
+    return { tampered, roles: grants.map((grant) => grant.role).sort() };
+  };
+
+  // A list is a display: it shows the rows as stored, the forged grant among them.
+  assert.deepEqual(await listed(), { tampered: false, roles: ['developer', 'owner'] });
+  // The scheduled checkpoint checks every row, and finds it: the list says so, and the vault refuses them.
+  assert.equal(await writeAuditHeartbeat(db.runtime, deps.chainKey, deps.vault, quiet), true);
+  assert.deepEqual(await listed(), { tampered: true, roles: [] });
+  await assert.rejects(developer.secrets.reveal('market/dev/API_KEY'), { status: 403 });
+  // An owner removes them, which starts them over, and the mark goes with it.
+  await root.members.remove(`user:${DEV}`);
+  await root.members.add(`user:${DEV}`);
+  assert.deepEqual(await listed(), { tampered: false, roles: [] });
+});
+
 // --- logs -----------------------------------------------------------------------
 
 test('the vault\'s entries are chained, and one rewritten fails', async () => {
