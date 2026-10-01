@@ -14,8 +14,8 @@ export { describeAccessFault, type AccessFault, type FaultGrant, type FaultNames
  *
  * The app says who is asking and the vault decides. The app never holds a
  * key: it encrypts a value under a fresh data key, has the vault wrap that
- * key, and stores the result; to read, it hands the wrapped key back with
- * who wants it and why.
+ * key, and stores the result; to read, it names stored versions and the
+ * vault loads their keys itself.
  *
  * Decisions come back as values: `{ ok: false, refusal }` for a refusal, which
  * the vault has already logged. Only a fault (a bug, the store down) throws.
@@ -124,9 +124,9 @@ export type RefusalCode =
 export type Outcome<T> = ({ ok: true } & T) | { ok: false; refusal: Refusal };
 
 /**
- * One secret version, as the app names it. The ids bind the key: the vault
- * unwraps under exactly these, so a wrapped key presented as another
- * secret's fails. `path` is only the app's label for the log.
+ * A proposed version the app will store. The ids bind its key, and `path`
+ * is the app's label for the write's log. Reads name stored version ids
+ * instead, so the vault reads the binding and wrapped key itself.
  */
 export type SecretRef = {
   projectId: string;
@@ -156,7 +156,7 @@ type Correlation = {
 export type UnwrapInput = Correlation & {
   principal: string;
   purpose: Purpose;
-  items: { secret: SecretRef; wrapped: WrappedKey }[];
+  items: { secretVersionId: string }[];
 };
 
 export type WrapInput = Correlation & {
@@ -167,8 +167,8 @@ export type WrapInput = Correlation & {
 
 export type RewrapInput = Correlation & {
   principal: string;
-  /** `secret` is the new version; `from` the version whose key it reuses. */
-  items: { secret: SecretRef; from: number; wrapped: WrappedKey }[];
+  /** `secret` is the proposed new version; `secretVersionId` is the stored source. */
+  items: { secret: SecretRef; secretVersionId: string }[];
 };
 
 export type Grant = {

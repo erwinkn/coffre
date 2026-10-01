@@ -479,6 +479,7 @@ export class SyncRunner {
         }
         const where = { projectId: sync.credential.projectId, environmentId: sync.credential.environmentId };
         const opened = await openValues(vault, asking, [{
+          secretVersionId: credential.secretVersionId,
           secret: { ...where, secretId: credential.secretId, version: credential.version, path: credentialPath(sync) },
           envelope: credential.envelope,
         }]);
@@ -520,6 +521,7 @@ export class SyncRunner {
         const byVersion = new Map(current.map((entry) => [entry.secretVersionId, entry]));
         const rows = ids.upsert.map((entry) => byVersion.get(entry.versionId)!);
         const opened = await openValues(vault, asking, rows.map((row) => ({
+          secretVersionId: row.secretVersionId,
           secret: { ...scope, secretId: row.secretId, version: row.version, path: `${sourcePath}/${row.key}` },
           envelope: row.envelope,
         })));

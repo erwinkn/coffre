@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
+import assert from 'node:assert/strict';
 
-import type { SecretRef } from '@coffre/core/vault';
+import type { SecretRef, WrappedKey } from '@coffre/core/vault';
 import { createDatabase, tablesOf, type Database, type Queryable } from '@coffre/db';
 import { openDatabase } from '@coffre/db/connect';
 import { forgetLogHeads } from '@coffre/db/log';
-import { sql, type SQL } from 'drizzle-orm';
+import { and, eq, sql, type SQL } from 'drizzle-orm';
 import pg from 'pg';
 
 /**
@@ -126,7 +127,7 @@ export async function places(owner: Database) {
   const secret = async (environmentId: string, key = 'DATABASE_URL'): Promise<SecretRef> => {
     const id = randomUUID();
     await owner.insert(secrets).values({ id, projectId: project, environmentId, key: `${key}_${++n}` });
-    return { projectId: project, environmentId, secretId: id, version: 1, path: `market/${environmentId === dev ? 'dev' : 'prod'}/${key}` };
+    return { projectId: project, environmentId, secretId: id, version: 1, path: `p-${project.slice(0, 8)}/${environmentId === dev ? 'dev' : 'prod'}/${key}_${n}` };
   };
   return { project, dev, prod, secret };
 }
@@ -144,4 +145,20 @@ export async function newEnvironment(owner: Database, projectId: string): Promis
   const id = randomUUID();
   await owner.insert(environments).values({ id, projectId, slug: `e-${id.slice(0, 8)}`, name: 'Environment' });
   return id;
+}
+
+/** Commit fixture versions, as the app would, before asking the vault to open them. */
+export async function storedVersions(owner: Database, items: { secret: SecretRef; wrapped: WrappedKey }[]): Promise<{ secretVersionId: string }[]> {
+  const { secretVersions } = tablesOf(owner);
+  return Promise.all(items.map(async ({ secret, wrapped }) => {
+    await owner.insert(secretVersions).values({
+      id: randomUUID(), secretId: secret.secretId, version: secret.version, envelopeVersion: 1,
+      ciphertext: Buffer.from('fixture'), iv: Buffer.alloc(12), authTag: Buffer.alloc(16),
+      wrappedDek: Buffer.from(wrapped.bytes, 'base64'), kekProvider: wrapped.kekProvider,
+      kekId: wrapped.kekId, kekVersion: wrapped.kekVersion, createdBy: 'user:root@acme.example',
+    }).onConflictDoNothing({ target: [secretVersions.secretId, secretVersions.version] });
+    const [row] = await owner.select().from(secretVersions).where(and(eq(secretVersions.secretId, secret.secretId), eq(secretVersions.version, secret.version)));
+    assert.equal(row.wrappedDek.toString('base64'), wrapped.bytes, 'fixture version already has another wrapped key');
+    return { secretVersionId: row.id };
+  }));
 }

@@ -417,13 +417,17 @@ class VaultService implements Vault {
   // Raw DEKs are cleared on every path. JSON and base64 leave strings that
   // cannot be wiped, so this is best-effort memory hygiene.
   async unwrap(input: UnwrapInput): Promise<Outcome<{ keys: string[] }>> {
-    const { principal, items } = input;
-    validateItems(items, 'wrapped');
-    validateText(principal);
-    validateCorrelation(input);
-    const entry = (secret: SecretRef, decision: 'allow' | 'deny', code: string | null): NewEntry =>
-      keyEntry('secret.read', principal, secret, decision, code, input, { purpose: input.purpose });
+    const { principal } = input;
     validateText(input.purpose);
+    const loaded = await this.#versions(input, 'secret.read', { purpose: input.purpose });
+    if (!loaded.ok) return loaded;
+    const items = loaded.versions;
+    validateItems(items, 'wrapped');
+    const versionIds = new Map(items.map((item) => [item.secret, item.id]));
+    const entry = (secret: SecretRef, decision: 'allow' | 'deny', code: string | null): NewEntry => ({
+      ...keyEntry('secret.read', principal, secret, decision, code, input, { purpose: input.purpose }),
+      secretVersionId: versionIds.get(secret),
+    });
     const remote = items.some(({ wrapped }) => this.#remote(this.#config.keks.providerOf(wrapped)));
     return this.#keys(
       { action: 'secret.read', principal, permission: 'secret.read', secrets: items.map((item) => item.secret), remote, entry, input },
@@ -475,14 +479,24 @@ class VaultService implements Vault {
   }
 
   async rewrap(input: RewrapInput): Promise<Outcome<{ wrapped: WrappedKey[]; seqs: number[] }>> {
-    const { principal, items } = input;
+    const { principal } = input;
+    const loaded = await this.#versions(input, 'key.rewrap');
+    if (!loaded.ok) return loaded;
+    // RPC can preserve shared objects; each item needs its own source.
+    const items = input.items.map((item, i) => ({ secret: { ...item.secret }, wrapped: loaded.versions[i].wrapped }));
     validateItems(items, 'wrapped');
-    validateText(principal);
-    validateCorrelation(input);
-    for (const item of items) if (!Number.isSafeInteger(item.from) || item.from < 1) throw new Error('source version must be a positive integer');
-    const from = new Map(items.map((item) => [item.secret, item.from]));
-    const entry = (secret: SecretRef, decision: 'allow' | 'deny', code: string | null): NewEntry =>
-      keyEntry('key.rewrap', principal, secret, decision, code, input, { from: from.get(secret) });
+    const sameSecret = (secret: SecretRef, source: SecretRef) =>
+      secret.projectId === source.projectId && secret.environmentId === source.environmentId && secret.secretId === source.secretId;
+    if (items.some((item, i) => !sameSecret(item.secret, loaded.versions[i].secret))) {
+      return this.#badVersions(principal, loaded.versions.map((source) => ({
+        ...keyEntry('key.rewrap', principal, source.secret, 'deny', 'bad_claim', input), secretVersionId: source.id,
+      })));
+    }
+    const sources = new Map(items.map((item, i) => [item.secret, loaded.versions[i]]));
+    const entry = (secret: SecretRef, decision: 'allow' | 'deny', code: string | null): NewEntry => ({
+      ...keyEntry('key.rewrap', principal, secret, decision, code, input, { from: sources.get(secret)!.secret.version }),
+      secretVersionId: sources.get(secret)!.id,
+    });
     const remote =
       this.#remote(this.#config.keks.primary) || items.some(({ wrapped }) => this.#remote(this.#config.keks.providerOf(wrapped)));
     return this.#keys(
@@ -499,6 +513,42 @@ class VaultService implements Vault {
         }),
       (done) => ({ wrapped: done.map(({ wrapped }) => wrapped), seqs: [] as number[] }),
     );
+  }
+
+  /** Immutable versions need no lock; their ids determine the whole batch before any key call. */
+  async #versions(
+    input: Correlation & { principal: string; items: { secretVersionId: string }[] },
+    action: KeyAction,
+    detail: Record<string, unknown> = {},
+  ): Promise<Outcome<{ versions: store.SecretVersion[] }>> {
+    validateText(input.principal);
+    validateCorrelation(input);
+    const ids = input.items.map((item) => item.secretVersionId);
+    for (const id of ids) {
+      if (typeof id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)) {
+        throw new Error('secret version id must be a lowercase UUID');
+      }
+    }
+    const found = new Map((await store.versions(this.#db, ids)).map((version) => [version.id, version]));
+    if (ids.some((id) => !found.has(id))) {
+      return this.#badVersions(input.principal, ids.map((id) => {
+        const version = found.get(id);
+        if (version === undefined) return {
+          actor: input.principal, action, decision: 'deny', code: 'bad_claim',
+          operationId: input.operationId, requestId: input.requestId,
+          metadata: JSON.stringify({ ...detail, secretVersionId: id }),
+        };
+        return { ...keyEntry(action, input.principal, version.secret, 'deny', 'bad_claim', input, detail), secretVersionId: id };
+      }));
+    }
+    return { ok: true, versions: ids.map((id) => found.get(id)!) };
+  }
+
+  async #badVersions(principal: string, entries: NewEntry[]): Promise<Outcome<never>> {
+    if (this.#isRootAdmin(principal)) await this.#rootRow(principal);
+    return this.#decide([principal], async () => {
+      throw new Refused(refusal('bad_claim', MESSAGES.bad_claim), entries);
+    });
   }
 
   /**

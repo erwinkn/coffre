@@ -1,5 +1,5 @@
 import type { Author, StoredEntry } from '@coffre/core/audit';
-import { ACCESS_ACTIONS } from '@coffre/core/vault';
+import { ACCESS_ACTIONS, type SecretRef, type WrappedKey } from '@coffre/core/vault';
 import { tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import { clockMillis, engineOf, forUpdate } from '@coffre/db/dialect';
 import { and, asc, count, desc, eq, gt, gte, inArray, isNull, lt, sql } from 'drizzle-orm';
@@ -373,4 +373,48 @@ export async function vaultEntriesOf(
     .orderBy(asc(auditLog.seq))
     .limit(limit);
   return stored(rows);
+}
+
+/** A stored version and the binding and key the vault reads for itself. */
+export type SecretVersion = { id: string; secret: SecretRef; wrapped: WrappedKey };
+
+export async function versions(db: Queryable, ids: readonly string[]): Promise<SecretVersion[]> {
+  if (ids.length === 0) return [];
+  const { secretVersions, secrets, environments, projects } = tablesOf(db);
+  const rows = await db
+    .select({
+      id: secretVersions.id,
+      version: secretVersions.version,
+      secretId: secrets.id,
+      projectId: secrets.projectId,
+      environmentId: secrets.environmentId,
+      project: projects.slug,
+      environment: environments.slug,
+      key: secrets.key,
+      kekProvider: secretVersions.kekProvider,
+      kekId: secretVersions.kekId,
+      kekVersion: secretVersions.kekVersion,
+      wrappedDek: secretVersions.wrappedDek,
+    })
+    .from(secretVersions)
+    .innerJoin(secrets, eq(secrets.id, secretVersions.secretId))
+    .innerJoin(environments, eq(environments.id, secrets.environmentId))
+    .innerJoin(projects, eq(projects.id, secrets.projectId))
+    .where(inArray(secretVersions.id, [...new Set(ids)]));
+  return rows.map((row) => ({
+    id: row.id,
+    secret: {
+      projectId: row.projectId,
+      environmentId: row.environmentId,
+      secretId: row.secretId,
+      version: row.version,
+      path: `${row.project}/${row.environment}/${row.key}`,
+    },
+    wrapped: {
+      kekProvider: row.kekProvider,
+      kekId: row.kekId,
+      kekVersion: row.kekVersion,
+      bytes: row.wrappedDek.toString('base64'),
+    },
+  }));
 }
