@@ -6,14 +6,18 @@ import { Report } from './report.ts';
 import { bulkLimit, crossSite, grantScoping, membersOnly, offboarding } from './checks/access.ts';
 import { appendOnly, checkpoints, logsAgree, noAuditNoValue, revealAudited, tamper } from './checks/audit.ts';
 import { canaryScan } from './checks/canaries.ts';
-import { personas, setUp, signInAdmin } from './checks/people.ts';
-import { headers, health, reachable } from './checks/surface.ts';
+import { anonymousChecks, tokenChecks, type Canary } from './checks/live.ts';
+import { personas, setUp, setUpLive, signInAdmin } from './checks/people.ts';
+import { health } from './checks/surface.ts';
 
 /** The names of the checks that failed. */
 export async function conform(deployment: Deployment, options: { bulkLimit: number }): Promise<string[]> {
   const report = new Report();
   await report.check('health', {}, () => health(deployment));
-  await report.check('headers', {}, () => headers(deployment.origin));
+  // What `probe` checks of a running instance, from outside: as no one, and
+  // with a token reading one canary. The rest needs this run's own keys,
+  // database and processes.
+  await anonymousChecks(report, deployment.origin, { health: false });
   const admin = await report.check('sign-in', {}, () => signInAdmin(deployment));
   const canaries = await report.check('setup', { admin }, ({ admin }) => setUp(admin));
   const people = await report.check('personas', { admin, canaries }, ({ admin }) => personas(deployment, admin));
@@ -23,6 +27,8 @@ export async function conform(deployment: Deployment, options: { bulkLimit: numb
   await report.check('grant scoping', all, ({ people, canaries }) => grantScoping(people, canaries));
   await report.check('reveals audited', all, ({ people, canaries }) => revealAudited(people, canaries));
   await report.check('cross-site', all, ({ people, canaries }) => crossSite(people, canaries));
+  const live = await report.check('live setup', { admin, canaries }, ({ admin, canaries }) => setUpLive(admin, canaries));
+  await tokenChecks(report, deployment.origin, live ?? {});
   await report.check('offboarding', all, ({ people, canaries }) => offboarding(deployment, people, canaries));
   await report.check('bulk limit', { people }, ({ people }) => bulkLimit(people, options.bulkLimit));
 
@@ -38,10 +44,14 @@ export async function conform(deployment: Deployment, options: { bulkLimit: numb
   return report.failed;
 }
 
-/** What can be checked of an instance someone else runs, without signing in. */
-export async function probe(origin: string): Promise<string[]> {
+/**
+ * What can be checked of an instance someone else runs: as no one, and with
+ * a token that reads a canary when given one. Nothing is written but the
+ * audit log's entries for the token's reads.
+ */
+export async function probe(origin: string, live: { token?: string; canary?: Canary }): Promise<string[]> {
   const report = new Report();
-  await report.check('health', {}, () => reachable(origin));
-  await report.check('headers', {}, () => headers(origin));
+  await anonymousChecks(report, origin, { health: true });
+  if (live.token !== undefined) await tokenChecks(report, origin, live);
   return report.failed;
 }

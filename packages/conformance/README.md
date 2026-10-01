@@ -6,7 +6,9 @@ in `<dir>` on its own keys and a scratch database, takes a handful of people
 through it, and checks, among others, that no value leaks into any page,
 table or log, that every read is audited in both logs, and that tampering
 with either log is caught. `coffre-conformance probe <url>` checks a running
-instance's health and headers.
+instance from outside, without changing it: as no one, and with a service
+token that reads one canary (`--token`, `--canary`); see
+[Against a running instance](https://github.com/erwinkn/coffre/blob/main/docs/conformance.md#against-a-running-instance).
 
 `@coffre/conformance/idp` is the stand-in identity provider it signs in
 with, which plays GitHub, an OIDC provider and Cloudflare Access.
