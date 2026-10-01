@@ -1,6 +1,8 @@
+import type { AccessFault } from './access-fault.ts';
 import type { Role } from './access.ts';
 
 export { checkpointMessage, verifyCheckpoint } from './checkpoint.ts';
+export { describeAccessFault, type AccessFault, type FaultGrant, type FaultNames } from './access-fault.ts';
 
 /**
  * The vault as the app sees it: the contract between `@coffre/server` and
@@ -258,8 +260,9 @@ export type VerifyLogInput = {
 /**
  * Whether the vault's log holds, with the number of entries in it. On a
  * failure, the entry where it breaks, or null when the chain holds but the
- * members and grants do not follow from it.
+ * members and grants do not follow from it. Then `fault` says which, as
+ * facts the app can word with names: `reason` has only ids.
  */
 export type LogVerification =
   | { ok: true; entries: number }
-  | { ok: false; failedAtSeq: number | null; reason: string };
+  | { ok: false; failedAtSeq: number | null; reason: string; fault?: AccessFault };

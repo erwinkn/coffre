@@ -441,6 +441,27 @@ test('signing out revokes that credential only, once, and is audited', async () 
   assert.deepEqual(rows[3].metadata, { credentialId: ended.credential.id, kind: 'browser' });
 });
 
+test('sign-ins stay in the log, and the audit list leaves them out when asked', async () => {
+  const kept = await signedIn(profile('github', '101', [DEV]));
+  await signin.completeSignin(profile('github', '9001', ['stranger@example.com']), meta());
+  await signin.signOut(kept.credential.token, { requestId: randomUUID(), sourceIp: IP });
+
+  const audit = clientFor(deps, ROOT).audit;
+  const actions = async (query: Parameters<typeof audit.list>[0]) =>
+    (await audit.list(query)).entries.map((entry) => `${entry.action} ${entry.decision}`);
+  assert.deepEqual(await actions({}), [
+    'auth.signout allow',
+    'auth.signin deny',
+    'auth.signin allow',
+    'identity.bind allow',
+  ]);
+  assert.deepEqual(await actions({ exclude: 'sign-ins' }), ['identity.bind allow']);
+  // Filtered by the query, so a page of one is not an empty page.
+  assert.deepEqual(await actions({ exclude: 'sign-ins', limit: 1 }), ['identity.bind allow']);
+  // And the chain still covers what the list left out.
+  assert.equal((await audit.verify()).ok, true);
+});
+
 test('people revoke their own credentials; only owners revoke anyone else\'s', async () => {
   const devSession = await signedIn(profile('github', '101', [DEV]));
   const devOther = await signedIn(profile('github', '101', [DEV]));

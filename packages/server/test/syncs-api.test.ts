@@ -401,11 +401,14 @@ test('a sync whose provider the deployment stopped listing still lists, and says
   deps.syncs = new SyncRunner({ ...deps, providers: [] });
 
   const listed = await view(created.id);
-  assert.deepEqual([listed.provider, listed.providerLabel, listed.brand], ['fake', 'fake', 'other']);
+  assert.deepEqual(
+    [listed.provider, listed.providerLabel, listed.brand, listed.offered],
+    ['fake', 'fake', 'other', false],
+  );
   const { outcome } = await root.syncs.run(created.id);
   assert.equal(
     outcome.status === 'failed' ? outcome.error : null,
-    'this deployment no longer lists the sync provider "fake"',
+    'This deployment no longer offers the sync provider "fake". Remove this sync, or ask whoever runs coffre to list the provider again.',
   );
 });
 

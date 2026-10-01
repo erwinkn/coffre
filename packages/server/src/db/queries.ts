@@ -1,5 +1,5 @@
 import type { Envelope } from '@coffre/core/envelope';
-import { and, asc, count, desc, eq, getTableColumns, gt, gte, inArray, isNull, lt, or, sql, type SQL } from 'drizzle-orm';
+import { and, asc, count, desc, eq, getTableColumns, gt, gte, inArray, isNull, lt, notInArray, or, sql, type SQL } from 'drizzle-orm';
 
 import { own, tablesOf, type Queryable, type Transaction } from './database.ts';
 import * as dialect from './dialect.ts';
@@ -612,6 +612,8 @@ export type AuditFilter = {
   actorType?: string;
   actorId?: string;
   decision?: string;
+  /** Entries with none of these actions, filtered here so a page stays full. */
+  excludeActions?: readonly string[];
   /** Entries older than this, for paging backwards. */
   beforeSeq?: bigint;
   limit: number;
@@ -637,6 +639,9 @@ export async function auditPage(db: Queryable, filter: AuditFilter) {
         filter.actorType === undefined ? undefined : eq(auditLog.actorType, filter.actorType),
         filter.actorId === undefined ? undefined : eq(auditLog.actorId, filter.actorId),
         filter.decision === undefined ? undefined : eq(auditLog.decision, filter.decision),
+        filter.excludeActions === undefined || filter.excludeActions.length === 0
+          ? undefined
+          : notInArray(auditLog.action, [...filter.excludeActions]),
         filter.beforeSeq === undefined ? undefined : lt(auditLog.seq, filter.beforeSeq),
       ),
     )

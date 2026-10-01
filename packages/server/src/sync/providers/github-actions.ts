@@ -21,7 +21,7 @@ const provider: SyncProvider<GitHubActionsConfig> = {
   label: 'GitHub Actions',
   brand: 'github',
   fields: [
-    { type: 'text', name: 'owner', label: 'Owner', placeholder: 'erwinkn' },
+    { type: 'text', name: 'owner', label: 'Owner', placeholder: 'acme' },
     { type: 'text', name: 'repo', label: 'Repository', placeholder: 'app' },
     {
       type: 'text',

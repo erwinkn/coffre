@@ -279,6 +279,7 @@ export const routes = {
       path: z.string().max(200).optional(),
       actor: z.string().max(330).optional(),
       decision: z.enum(['allow', 'deny']).optional(),
+      exclude: z.enum(['sign-ins']).optional(),
       before: z.coerce.number().int().positive().optional(),
       limit: z.coerce.number().int().min(1).max(500).default(100),
     }),

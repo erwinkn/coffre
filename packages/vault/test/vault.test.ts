@@ -626,6 +626,7 @@ test('a full check replays who holds what from the log, and finds what was writt
     ok: false,
     failedAtSeq: null,
     reason: `the store holds a grant the log never gave: ${BOB} as owner on ${w.project}`,
+    fault: { kind: 'unlogged-grant', grant: { principal: BOB, projectId: w.project, environmentId: null, role: 'owner' } },
   };
   assert.deepEqual(await w.vault.verifyLog({ through: null }), extra);
   const full = await w.vault.log({ actor: ROOT, full: true });
@@ -643,6 +644,7 @@ test('a full check replays who holds what from the log, and finds what was writt
     ok: false,
     failedAtSeq: null,
     reason: `the store's ${ADA} differs from the log's in status, owner`,
+    fault: { kind: 'member-differs', principal: ADA, fields: ['status', 'owner'] },
   });
 });
 
