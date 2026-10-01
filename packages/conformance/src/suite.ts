@@ -4,7 +4,7 @@
 import type { Deployment } from './harness.ts';
 import { Report } from './report.ts';
 import { bulkLimit, crossSite, grantScoping, membersOnly, offboarding } from './checks/access.ts';
-import { appendOnly, checkpoints, logsAgree, noAuditNoValue, revealAudited, tamper } from './checks/audit.ts';
+import { appendOnly, checkpoints, logsAgree, noAuditNoValue, revealAudited, tamperApp, tamperVault } from './checks/audit.ts';
 import { canaryScan } from './checks/canaries.ts';
 import { anonymousChecks, tokenChecks, type Canary } from './checks/live.ts';
 import { personas, setUp, setUpLive, signInAdmin } from './checks/people.ts';
@@ -40,7 +40,8 @@ export async function conform(deployment: Deployment, options: { bulkLimit: numb
 
   await report.check('canary scan', all, ({ people, canaries }) => canaryScan(deployment, people, canaries));
   await report.check('append-only', {}, () => appendOnly(deployment));
-  await report.check('tampering', { people }, ({ people }) => tamper(deployment, people));
+  await report.check('vault tampering', { people }, ({ people }) => tamperVault(deployment, people));
+  await report.check('app tampering', { people }, ({ people }) => tamperApp(deployment, people));
   return report.failed;
 }
 

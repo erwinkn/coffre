@@ -151,12 +151,55 @@ export async function appendOnly(deployment: Deployment): Promise<string> {
   return `the app's login is refused ${statements.length} ways to change or remove what is written`;
 }
 
+/** A grant and an entry written around the vault must both fail verification. */
+export async function tamperVault(deployment: Deployment, { admin }: People): Promise<string> {
+  const store = deployment.vaultStore();
+  expect(store !== null, "the vault's store could not be found; vault tampering was not checked");
+  const caught: string[] = [];
+  const verify = () => admin.api.audit.verify();
+  const intact = await verify();
+  expect(intact.ok, 'the logs do not verify before any vault tampering', intact);
+  await using(sqlite(store), async (vault) => {
+    // A grant written straight into the store, which its log never gave.
+    const [place] = await vault.query<{ project_id: string }>('SELECT project_id FROM grants LIMIT 1');
+    expect(place !== undefined, "the vault's store holds no grant");
+    const forged = ['user:forger@conformance.example', place.project_id, 'owner', Date.now(), 'user:forger@conformance.example'];
+    await vault.query(
+      'INSERT INTO grants (principal, project_id, environment_id, role, expires_at, granted_at, granted_by) VALUES (?, ?, NULL, ?, NULL, ?, ?)',
+      forged,
+    );
+    const granted = await verify();
+    await vault.query('DELETE FROM grants WHERE principal = ?', [forged[0]]);
+    expect(!granted.ok && granted.log === 'vault', "a grant written into the vault's store verifies", granted);
+    const revoked = await verify();
+    expect(revoked.ok, "the vault's log did not verify once the grant was gone", revoked);
+    caught.push('a grant the vault never gave');
+
+    // An entry of its log rewritten, its trigger dropped for the time.
+    const [trigger] = await vault.query<{ sql: string }>(`SELECT sql FROM sqlite_master WHERE name = 'log_no_update'`);
+    const [entry] = await vault.query<{ seq: number; actor: string }>(`SELECT seq, actor FROM log WHERE action = 'unwrap' ORDER BY seq LIMIT 1`);
+    expect(trigger !== undefined && entry !== undefined, "the vault's store has no log_no_update trigger, or no unwrap");
+    await vault.exec('DROP TRIGGER log_no_update');
+    try {
+      await vault.query('UPDATE log SET actor = ? WHERE seq = ?', ['user:nobody@conformance.example', entry.seq]);
+      const rewritten = await verify();
+      await vault.query('UPDATE log SET actor = ? WHERE seq = ?', [entry.actor, entry.seq]);
+      expect(!rewritten.ok && rewritten.log === 'vault', "an entry rewritten in the vault's log verifies", rewritten);
+    } finally {
+      await vault.exec(trigger.sql);
+    }
+    const restored = await verify();
+    expect(restored.ok, "the vault's log did not verify once put back", restored);
+    caught.push(`a vault entry rewritten (at ${entry.seq})`);
+  });
+  return `caught: ${caught.join('; ')}`;
+}
+
 /**
- * Change the logs where they are stored, as someone with the database or the
- * vault's file could, and the verification must say which broke. Each is put
- * back after, but the last: the newest audit entries, deleted.
+ * Rewrite an app log entry and then remove its tail. The latter stays
+ * broken, so this runs after every check that needs intact logs.
  */
-export async function tamper(deployment: Deployment, { admin }: People): Promise<string> {
+export async function tamperApp(deployment: Deployment, { admin }: People): Promise<string> {
   const caught: string[] = [];
   const verify = () => admin.api.audit.verify();
   const intact = await verify();
@@ -177,45 +220,6 @@ export async function tamper(deployment: Deployment, { admin }: People): Promise
     expect(restored.ok, 'the audit log did not verify once put back', restored);
     caught.push(`an audit entry rewritten (at ${rewritten.failedAtSeq})`);
   });
-
-  const store = deployment.vaultStore();
-  if (store === null) {
-    caught.push("the vault's store not found, so not tampered with");
-  } else {
-    await using(sqlite(store), async (vault) => {
-      // A grant written straight into the store, which its log never gave.
-      const [place] = await vault.query<{ project_id: string }>('SELECT project_id FROM grants LIMIT 1');
-      expect(place !== undefined, "the vault's store holds no grant");
-      const forged = ['user:forger@conformance.example', place.project_id, 'owner', Date.now(), 'user:forger@conformance.example'];
-      await vault.query(
-        'INSERT INTO grants (principal, project_id, environment_id, role, expires_at, granted_at, granted_by) VALUES (?, ?, NULL, ?, NULL, ?, ?)',
-        forged,
-      );
-      const granted = await verify();
-      await vault.query('DELETE FROM grants WHERE principal = ?', [forged[0]]);
-      expect(!granted.ok && granted.log === 'vault', "a grant written into the vault's store verifies", granted);
-      const revoked = await verify();
-      expect(revoked.ok, "the vault's log did not verify once the grant was gone", revoked);
-      caught.push('a grant the vault never gave');
-
-      // An entry of its log rewritten, its trigger dropped for the time.
-      const [trigger] = await vault.query<{ sql: string }>(`SELECT sql FROM sqlite_master WHERE name = 'log_no_update'`);
-      const [entry] = await vault.query<{ seq: number; actor: string }>(`SELECT seq, actor FROM log WHERE action = 'unwrap' ORDER BY seq LIMIT 1`);
-      expect(trigger !== undefined && entry !== undefined, "the vault's store has no log_no_update trigger, or no unwrap");
-      await vault.exec('DROP TRIGGER log_no_update');
-      try {
-        await vault.query('UPDATE log SET actor = ? WHERE seq = ?', ['user:nobody@conformance.example', entry.seq]);
-        const rewritten = await verify();
-        await vault.query('UPDATE log SET actor = ? WHERE seq = ?', [entry.actor, entry.seq]);
-        expect(!rewritten.ok && rewritten.log === 'vault', "an entry rewritten in the vault's log verifies", rewritten);
-      } finally {
-        await vault.exec(trigger.sql);
-      }
-      const restored = await verify();
-      expect(restored.ok, "the vault's log did not verify once put back", restored);
-      caught.push(`a vault entry rewritten (at ${entry.seq})`);
-    });
-  }
 
   // Last, since nothing puts them back: the entries the vault last signed for.
   await using(deployment.database(), (sql) => update(sql, 'DELETE FROM audit_log WHERE seq >= $1', [signed]));

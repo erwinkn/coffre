@@ -105,10 +105,9 @@ export async function canaryScan(deployment: Deployment, people: People, canarie
     stored.push('the database file');
   }
   const store = deployment.vaultStore();
-  if (store !== null) {
-    look("the vault's store", files(store));
-    stored.push("the vault's store");
-  }
+  expect(store !== null, "the vault's store could not be found; its canaries were not checked");
+  look("the vault's store", files(store));
+  stored.push("the vault's store");
   look("the processes' output", deployment.output());
   stored.push("the processes' output");
 
@@ -118,6 +117,7 @@ export async function canaryScan(deployment: Deployment, people: People, canarie
 
 /** A SQLite file and its write-ahead log, as bytes: what anyone with the disk would read. */
 function files(path: string): Buffer {
+  expect(existsSync(path), `the store file could not be found: ${path}`);
   return Buffer.concat([path, `${path}-wal`]
     .filter((file) => existsSync(file))
     .map((file) => readFileSync(file)));
