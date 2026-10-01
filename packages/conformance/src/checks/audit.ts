@@ -5,32 +5,60 @@ import { createHash } from 'node:crypto';
 
 import type { AuditEntryView, CoffreClient } from '@coffre/client';
 
-import { using, type Sql } from '../database.ts';
+import { using } from '../database.ts';
 import type { Deployment } from '../harness.ts';
-import { expect, Skip } from '../report.ts';
-import { DEV, valuesIn, type Canaries, type People } from './people.ts';
+import { expect } from '../report.ts';
+import { appendOnlyLifted, entryFields, insertRow, logRefuses, query } from './storage.ts';
+import { DEV, PROJECT, valuesIn, type Canaries, type People } from './people.ts';
 
-/** One reveal, one `secret.read` per value, the vault's, all under the reveal's operation. */
-export async function revealAudited({ admin, reader }: People, canaries: Canaries): Promise<string> {
-  const { operationId } = await reader.api.secrets.reveal(DEV);
-  const { entries } = await admin.api.audit.list({ path: DEV, actor: reader.member, limit: 100 });
+/** One read per returned value, committed by the vault under the response's operation. */
+export async function revealAudited(deployment: Deployment, { admin, reader }: People, canaries: Canaries, purpose: 'reveal' | 'run'): Promise<string> {
+  const path = purpose === 'reveal' ? `${DEV}/API_KEY` : DEV;
+  const { operationId, values } = await reader.api.secrets.reveal(path);
+  expect(typeof operationId === 'string' && operationId.length > 0, 'the read returned no operation id');
+  const expected = purpose === 'reveal' ? { API_KEY: canaries[`${DEV}/API_KEY`] } : valuesIn(canaries, DEV);
+  expect(JSON.stringify(Object.entries(values).sort()) === JSON.stringify(Object.entries(expected).sort()), 'the read returned different values', values);
+  const entries = await everyAuditEntry(admin.api);
   const bundle = entries.filter((entry) => entry.operationId === operationId);
   const keys = bundle.map((entry) => entry.key).sort();
-  const expected = Object.keys(valuesIn(canaries, DEV)).sort();
-  expect(JSON.stringify(keys) === JSON.stringify(expected), 'the reveal is not logged once per value', bundle);
-  expect(
-    bundle.every((entry) =>
-      entry.author === 'vault' && entry.action === 'secret.read' && entry.decision === 'allow'
-      && entry.metadata.purpose === 'run' && entry.requestId === bundle[0]!.requestId),
-    "the reveal's entries are not the vault's reads for one request",
-    bundle,
-  );
+  expect(JSON.stringify(keys) === JSON.stringify(Object.keys(expected).sort()), 'the read is not logged once per value', bundle);
+  expect(bundle.every((entry) => entry.author === 'vault' && entry.action === 'secret.read' && entry.decision === 'allow'),
+    "the read's entries are not the vault's allowed reads", bundle);
+  expect(bundle.every((entry) => entry.metadata.purpose === purpose && entry.requestId !== null && entry.requestId === bundle[0]!.requestId),
+    'the reads do not name one request and its purpose', bundle);
   const { keys: listed } = await admin.api.secrets.list(DEV);
   for (const entry of bundle) {
-    const current = listed.find((key) => key.key === entry.key);
-    expect(entry.version === current?.version, `the entry for ${String(entry.key)} names another version`, entry);
+    expect(entry.version === listed.find((key) => key.key === entry.key)?.version, `the entry for ${String(entry.key)} names another version`, entry);
   }
-  return `${bundle.length} values revealed, ${bundle.length} secret.read entries of the vault's under the reveal's operation`;
+  await using(deployment.database(), async (sql) => {
+    const rows = await query<{ author: string; action: string; decision: string; request_id: string | null; key: string; current_version: number; metadata: string }>(sql,
+      `SELECT l.author, l.action, l.decision, l.request_id, l.metadata, s.key, s.current_version
+       FROM audit_log l LEFT JOIN secrets s ON s.id = l.secret_id WHERE l.operation_id = $1`, [operationId]);
+    expect(JSON.stringify(rows.map((row) => row.key).sort()) === JSON.stringify(Object.keys(expected).sort()), 'the committed read is not once per value', rows);
+    for (const row of rows) {
+      const metadata = JSON.parse(row.metadata) as { purpose: string; version: number };
+      expect(row.author === 'vault' && row.action === 'secret.read' && row.decision === 'allow', 'the committed read is not the vault release', row);
+      expect(row.request_id !== null && row.request_id === rows[0].request_id && metadata.purpose === purpose, 'the committed reads have different requests or purposes', rows);
+      expect(metadata.version === row.current_version, 'the committed read names another version', row);
+    }
+  });
+  return `${bundle.length} values, each read once by the vault for ${purpose}, under ${operationId}`;
+}
+
+/** Full verification must reach the stored head, not just some intact prefix. */
+export async function verification(deployment: Deployment, { admin }: People): Promise<string> {
+  const result = await admin.api.audit.verify();
+  expect(result.ok, 'the full log does not verify', result);
+  await using(deployment.database(), async (sql) => {
+    const [head] = await sql.query<{ next_seq: string | number; head_hash: Uint8Array }>('SELECT next_seq, head_hash FROM audit_chain_head');
+    const [last] = await sql.query<{ seq: string | number; hash: Uint8Array }>('SELECT seq, hash FROM audit_log ORDER BY seq DESC LIMIT 1');
+    expect(head !== undefined && last !== undefined, 'the head or newest entry is missing');
+    expect(BigInt(head.next_seq) === BigInt(last.seq) + 1n, 'the head does not name the newest entry');
+    expect(Buffer.from(head.head_hash).equals(Buffer.from(last.hash)), 'the head has another hash');
+    expect(result.through !== null && BigInt(result.through) === BigInt(last.seq), 'verification stopped before the head', { result, head: head.next_seq });
+    expect(BigInt(result.entries) === BigInt(head.next_seq), 'verification did not count every entry', result);
+  });
+  return `${result.entries} entries verified through the head at ${result.through}`;
 }
 
 /**
@@ -66,27 +94,44 @@ export async function checkpoints(deployment: Deployment, { admin }: People): Pr
  * the same member, request and operation, the same secret and version. And
  * every value read is the vault's to log: the app keeps no reads of its own.
  */
-export async function writesAgree({ admin }: People): Promise<string> {
-  const entries = await everyAuditEntry(admin.api);
-  const bySeq = new Map(entries.map((entry) => [entry.seq, entry]));
-  let stored = 0;
-  for (const entry of entries) {
-    if (entry.author !== 'app' || entry.decision !== 'allow') continue;
-    expect(entry.action !== 'secret.read' || entry.key === null, 'the app logged a read of a value, which only the vault opens', entry);
-    const sealed = { 'secret.write': 'key.wrap', 'secret.restore': 'key.rewrap' }[entry.action];
-    if (sealed === undefined) continue;
-    const key = entry.relatedSeq === null ? undefined : bySeq.get(entry.relatedSeq);
-    expect(
-      key !== undefined && key.author === 'vault' && key.action === sealed && key.decision === 'allow',
-      `a ${entry.action} names no ${sealed} of the vault's`,
-      { entry, key },
-    );
-    const same = (fields: (keyof AuditEntryView)[]) => fields.every((field) => key[field] === entry[field]);
-    expect(same(['actorType', 'actorId', 'requestId', 'operationId']), `a ${entry.action} names a key sealed for another call`, { entry, key });
-    expect(same(['project', 'environment', 'key', 'version']), `a ${entry.action} names a key sealed for another version`, { entry, key });
-    stored++;
-  }
-  return `${stored} versions stored, each naming the vault's seal of its key, by the same member in the same operation`;
+export async function writesAgree(deployment: Deployment): Promise<string> {
+  return using(deployment.database(), async (sql) => {
+    const entries = await sql.query<{
+      seq: number | string; author: string; action: string; decision: string; actor: string; metadata: string;
+      project_id: string | null; environment_id: string | null; secret_id: string | null;
+      request_id: string | null; operation_id: string | null; related_seq: string | number | null;
+    }>('SELECT * FROM audit_log ORDER BY seq');
+    const bySeq = new Map(entries.map((entry) => [String(entry.seq), entry]));
+    const writes = entries.filter((entry) => entry.author === 'app' && entry.decision === 'allow'
+      && (entry.action === 'secret.write' || entry.action === 'secret.restore'));
+    for (const entry of entries.filter((row) => row.author === 'app' && row.decision === 'allow')) {
+      expect(entry.action !== 'secret.read', 'the app logged an allowed read of a value', entry);
+    }
+    for (const entry of writes) {
+      const seal = entry.action === 'secret.write' ? 'key.wrap' : 'key.rewrap';
+      const key = entry.related_seq === null ? undefined : bySeq.get(String(entry.related_seq));
+      expect(key !== undefined && key.author === 'vault' && key.action === seal && key.decision === 'allow',
+        `a ${entry.action} names no ${seal} of the vault's`, { entry, key });
+      for (const field of ['actor', 'request_id', 'operation_id', 'project_id', 'environment_id'] as const) {
+        expect(entry[field] === key[field], `the write and its seal have different ${field}`, { entry, key });
+      }
+      expect(entry.operation_id !== null && entry.request_id !== null, 'the committed write has no operation or request', entry);
+      const metadata = JSON.parse(entry.metadata) as { version: number; key: string };
+      const sealed = JSON.parse(key.metadata) as { secretId?: string; version: number; subject: string };
+      expect((sealed.secretId ?? key.secret_id) === entry.secret_id && sealed.version === metadata.version
+        && sealed.subject.split('/').at(-1) === metadata.key, 'the write names a seal of another secret or version', { entry, key });
+    }
+    const versions = await query<{ secret_id: string; version: number }>(sql,
+      `SELECT v.secret_id, v.version FROM secret_versions v JOIN secrets s ON s.id = v.secret_id
+       JOIN projects p ON p.id = s.project_id WHERE p.slug = $1`, [PROJECT]);
+    expect(versions.length > 0, 'no stored versions were inspected');
+    for (const version of versions) {
+      const matching = writes.filter((entry) => entry.secret_id === version.secret_id
+        && (JSON.parse(entry.metadata) as { version: number }).version === version.version);
+      expect(matching.length === 1, 'a stored version has no unique app write entry', { version, matching });
+    }
+    return `${versions.length} stored versions, each with one app write naming the vault's seal in the same operation`;
+  });
 }
 
 /**
@@ -95,247 +140,117 @@ export async function writesAgree({ admin }: People): Promise<string> {
  * the read, so a reveal fails and carries nothing.
  */
 export async function noAuditNoValue(deployment: Deployment, { admin }: People, canaries: Canaries): Promise<string> {
-  const [refuse, allow] =
-    deployment.kind === 'workers'
-      ? [
-          `CREATE FUNCTION conformance_no_audit() RETURNS trigger LANGUAGE plpgsql AS $$
-             BEGIN RAISE EXCEPTION 'coffre-conformance: the audit log refuses writes'; END $$;
-           CREATE TRIGGER conformance_no_audit BEFORE INSERT ON audit_log
-             FOR EACH ROW EXECUTE FUNCTION conformance_no_audit();`,
-          'DROP TRIGGER conformance_no_audit ON audit_log; DROP FUNCTION conformance_no_audit();',
-        ]
-      : [
-          `CREATE TRIGGER conformance_no_audit BEFORE INSERT ON audit_log
-           BEGIN SELECT RAISE(ABORT, 'coffre-conformance: the audit log refuses writes'); END;`,
-          'DROP TRIGGER conformance_no_audit;',
-        ];
   let status = 0;
-  await using(deployment.database(), async (sql) => {
-    await sql.exec(refuse);
-    try {
-      const response = await admin.browser.send('POST', '/api/reveals', { path: DEV });
-      const text = await response.text();
-      status = response.status;
-      expect(!response.ok, `a reveal answered ${response.status} while the audit log refused writes`, text);
-      expect(!Object.values(canaries).some((value) => text.includes(value)), 'a reveal that could not be logged carried a value', text);
-    } finally {
-      await sql.exec(allow);
-    }
-  });
+  await using(deployment.database(), (sql) => logRefuses(sql, async () => {
+    const response = await admin.browser.send('POST', '/api/reveals', { path: DEV });
+    const text = await response.text();
+    status = response.status;
+    expect(!response.ok, `a reveal answered ${response.status} while the audit log refused writes`, text);
+    expect(!Object.values(canaries).some((value) => text.includes(value)), 'a reveal that could not be logged carried a value', text);
+  }));
   const after = await admin.api.secrets.reveal(DEV);
   expect(after.values.API_KEY === canaries[`${DEV}/API_KEY`], 'reveals did not come back once the log took writes again');
   return `a reveal the audit log would not take: ${status}, and no value`;
 }
 
-/**
- * The logins the app and the vault run as may add to the log, each only as
- * itself, and never change or remove what is there, nor any version of a
- * secret. Only the vault's writes members and grants.
- */
-export async function appendOnly(deployment: Deployment): Promise<string> {
-  if (deployment.runtime === null || deployment.vaultRuntime === null) {
-    throw new Skip('SQLite has no logins; the file is as safe as its permissions');
-  }
-  const changes = [
-    "UPDATE audit_log SET action = 'rewritten'",
-    'DELETE FROM audit_log',
-    'TRUNCATE audit_log',
-    'DROP TABLE audit_log',
-    'UPDATE secret_versions SET id = id',
-    'DELETE FROM secret_versions',
-    'DELETE FROM secrets',
-    'DELETE FROM vault_members',
-    'CREATE TABLE conformance_probe (id integer)',
-  ];
-  const zeros = "decode(repeat('00', 32), 'hex')";
-  const as = (author: string) =>
-    `INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
-      VALUES (9000000000, '${author}', '${author}:0', 0, 'system:conformance', 'probe', 'allow', ${zeros}, ${zeros}, ${zeros})`;
-  const logins = [
-    ["the app's login", deployment.runtime, [...changes, as('vault'), "UPDATE vault_members SET owner = true", 'DELETE FROM vault_grants']],
-    ["the vault's login", deployment.vaultRuntime, [...changes, as('app'), "UPDATE projects SET name = 'renamed'"]],
-  ] as const;
-  let refused = 0;
-  for (const [login, open, statements] of logins) {
-    await using(open(), async (sql) => {
-      for (const statement of statements) {
-        await sql.exec('BEGIN');
-        const error = await sql.exec(statement).then(
-          () => null,
-          (failure: unknown) => failure,
-        );
-        await sql.exec('ROLLBACK');
-        expect(error !== null, `${login} could: ${statement}`);
-        expect((error as { code?: string }).code === '42501', `${statement} failed, but not for want of privilege`, error);
-        refused++;
-      }
-    });
-  }
-  return `the app's and the vault's logins are refused ${refused} ways to change what is written, or to write as the other`;
-}
-
-/**
- * A grant and a vault entry written around the vault must both fail
- * verification: the grant by the vault's replay of its entries, the entry,
- * linked to the chain so every public check passes, by the vault's MAC,
- * which nobody without its key can make.
- */
-export async function tamperVault(deployment: Deployment, { admin }: People): Promise<string> {
-  const caught: string[] = [];
+/** A publicly chained entry still needs the vault's MAC. */
+export async function forgedVaultEntry(deployment: Deployment, { admin }: People): Promise<string> {
   const verify = () => admin.api.audit.verify();
-  const intact = await verify();
-  expect(intact.ok, 'the log does not verify before any vault tampering', intact);
+  expect((await verify()).ok, 'the log does not verify before the forged entry');
   await using(deployment.database(), async (sql) => {
-    // A grant written straight into the database, which the vault never gave.
-    const [place] = await sql.query<{ principal: string; project_id: string }>(
-      `SELECT m.principal, p.id AS project_id FROM vault_members m CROSS JOIN projects p
-        WHERE m.status = 'active' AND NOT EXISTS (
-          SELECT 1 FROM vault_grants g WHERE g.principal = m.principal AND g.project_id = p.id)
-        LIMIT 1`,
-    );
-    expect(place !== undefined, 'no member is without a grant on some project');
-    await update(
-      sql,
-      'INSERT INTO vault_grants (principal, project_id, role, granted_at, granted_by) VALUES ($1, $2, $3, $4, $5)',
-      [place.principal, place.project_id, 'owner', Date.now(), place.principal],
-    );
-    const granted = await verify();
-    await update(sql, 'DELETE FROM vault_grants WHERE principal = $1 AND project_id = $2', [place.principal, place.project_id]);
-    expect(!granted.ok && granted.author === 'vault', 'a grant written into the database verifies', granted);
-    const revoked = await verify();
-    expect(revoked.ok, 'the log did not verify once the grant was gone', revoked);
-    caught.push('a grant the vault never gave');
-
     // An entry in the vault's name, chained after the last, with a MAC made up.
     const [head] = await sql.query<{ next_seq: number | string; head_hash: Uint8Array }>(
       'SELECT next_seq, head_hash FROM audit_chain_head',
     );
+    const [writer] = await sql.query<{ key_id: string }>("SELECT key_id FROM audit_log WHERE author = 'vault' ORDER BY seq DESC LIMIT 1");
+    expect(writer !== undefined, 'no vault key id to copy');
     const seq = BigInt(head.next_seq);
     const forged = {
-      seq, author: 'vault', keyId: 'vault:0000000000000000', occurredAt: Date.now(), actor: 'user:forger@conformance.example',
+      seq, author: 'vault', key_id: writer.key_id, occurred_at: Date.now(), actor: 'user:forger@conformance.example',
       action: 'secret.read', decision: 'allow', metadata: '{}',
     };
     const prevHash = Buffer.from(head.head_hash);
     const mac = Buffer.alloc(32, 0x41);
-    const hash = chainHash(prevHash, forged, mac);
-    await update(
-      sql,
-      `INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, metadata, prev_hash, mac, hash)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-      [seq, forged.author, forged.keyId, forged.occurredAt, forged.actor, forged.action, forged.decision, forged.metadata, prevHash, mac, hash],
-    );
-    await update(sql, 'UPDATE audit_chain_head SET next_seq = $1, head_hash = $2', [seq + 1n, hash]);
-    const inserted = await verify();
-    await appendOnlyLifted(sql, () => update(sql, 'DELETE FROM audit_log WHERE seq = $1', [seq]));
-    await update(sql, 'UPDATE audit_chain_head SET next_seq = $1, head_hash = $2', [seq, prevHash]);
-    expect(!inserted.ok && inserted.author === 'vault', "an entry in the vault's name, chained but not by the vault, verifies", inserted);
+    const hash = createHash('sha256').update('coffre.audit.chain.v2').update(prevHash).update(entryFields(forged)).update(mac).digest();
+    await insertRow(sql, 'audit_log', { ...forged, prev_hash: prevHash, mac, hash });
+    await query(sql, 'UPDATE audit_chain_head SET next_seq = $1, head_hash = $2', [seq + 1n, hash]);
+    let inserted;
+    try {
+      inserted = await verify();
+    } finally {
+      await appendOnlyLifted(sql, () => query(sql, 'DELETE FROM audit_log WHERE seq = $1', [seq]));
+      await query(sql, 'UPDATE audit_chain_head SET next_seq = $1, head_hash = $2', [seq, prevHash]);
+    }
+    expect(!inserted.ok && inserted.author === 'vault' && inserted.failedAtSeq === Number(seq), "an entry in the vault's name, chained but not by the vault, verifies", inserted);
     const removed = await verify();
     expect(removed.ok, 'the log did not verify once the entry was gone', removed);
-    caught.push(`an entry forged in the vault's name (at ${seq})`);
   });
-  return `caught: ${caught.join('; ')}`;
+  return 'a publicly chained vault entry with a made-up MAC was refused at its sequence';
 }
 
-/**
- * An entry's public chain hash, as the log's format defines it
- * (@coffre/core/audit): SHA-256 over a domain, the previous hash, each
- * field length-prefixed in order, a null as length -1, and the MAC. Only
- * the fields given are set; the rest are null.
- */
-function chainHash(prevHash: Buffer, fields: Record<string, string | number | bigint>, mac: Buffer): Buffer {
-  const order = [
-    'seq', 'author', 'keyId', 'occurredAt', 'actor', 'action', 'decision', 'code', 'subjectPrincipal', 'projectId',
-    'environmentId', 'secretId', 'secretVersionId', 'operationId', 'requestId', 'sourceIp', 'relatedSeq', 'metadata',
-  ];
-  const hash = createHash('sha256').update('coffre.audit.chain.v2').update(prevHash);
-  for (const name of order) {
-    const length = Buffer.alloc(4);
-    const value = fields[name];
-    if (value === undefined) {
-      hash.update(length.fill(0xff));
-      continue;
-    }
-    const bytes = Buffer.from(String(value), 'utf8');
-    length.writeInt32BE(bytes.length);
-    hash.update(length).update(bytes);
-  }
-  return hash.update(mac).digest();
-}
-
-/**
- * Rewrite an entry and then remove the log's tail. The latter stays
- * broken, so this runs after every check that needs an intact log.
- */
-export async function tamperApp(deployment: Deployment, { admin }: People): Promise<string> {
-  const caught: string[] = [];
-  const verify = () => admin.api.audit.verify();
-  const intact = await verify();
-  expect(intact.ok && intact.checkpoint !== null, 'the log does not verify before any tampering', intact);
-  const signed = intact.checkpoint.seq;
-
-  await using(deployment.database(), (sql) =>
-    appendOnlyLifted(sql, async () => {
-      const [row] = await sql.query<{ seq: number | string; actor: string }>(
-        `SELECT seq, actor FROM audit_log WHERE action = 'secret.read' ORDER BY seq LIMIT 1`,
-      );
-      expect(row !== undefined, 'the audit log has no secret.read entry to rewrite');
-      const seq = Number(row.seq);
-      await update(sql, 'UPDATE audit_log SET actor = $1 WHERE seq = $2', ['user:nobody@conformance.example', seq]);
-      const rewritten = await verify();
-      expect(!rewritten.ok && rewritten.failedAtSeq === seq, 'an audit entry rewritten in the database verifies', rewritten);
-      await update(sql, 'UPDATE audit_log SET actor = $1 WHERE seq = $2', [row.actor, seq]);
-      const restored = await verify();
-      expect(restored.ok, 'the audit log did not verify once put back', restored);
-      caught.push(`an audit entry rewritten (at ${rewritten.failedAtSeq})`);
-    }),
-  );
-
-  // Last, since nothing puts them back: the entries the vault last signed for.
-  await using(deployment.database(), (sql) =>
-    appendOnlyLifted(sql, async () => {
-      // SQLite checks the link from a write to its key.wrap row by row: unlink the tail first.
-      await update(sql, 'UPDATE audit_log SET related_seq = NULL WHERE seq >= $1', [signed]);
-      await update(sql, 'DELETE FROM audit_log WHERE seq >= $1', [signed]);
-    }),
-  );
-  const truncated = await verify();
-  expect(!truncated.ok && truncated.author === 'app', 'the audit log verifies with its newest entries deleted', truncated);
-  caught.push('the newest audit entries deleted');
-  return `caught: ${caught.join('; ')}`;
-}
-
-/**
- * `work` with the audit log's append-only triggers lifted, as only its owner
- * can: Postgres disables them for the session, SQLite drops them and makes
- * them again after.
- */
-async function appendOnlyLifted<T>(sql: Sql, work: () => Promise<T>): Promise<T> {
-  if (sql.engine === 'postgres') {
-    await sql.exec('ALTER TABLE audit_log DISABLE TRIGGER USER');
+/** Rewrite either author's entry and require a fault at that exact sequence. */
+export async function rewrittenEntry(deployment: Deployment, { admin }: People, author: 'app' | 'vault'): Promise<string> {
+  expect((await admin.api.audit.verify()).ok, 'the log does not verify before the rewrite');
+  let seq = 0;
+  await using(deployment.database(), (sql) => appendOnlyLifted(sql, async () => {
+    const [row] = await query<{ seq: string | number; actor: string }>(sql,
+      'SELECT seq, actor FROM audit_log WHERE author = $1 ORDER BY seq LIMIT 1', [author]);
+    expect(row !== undefined, `no ${author} entry to rewrite`);
+    seq = Number(row.seq);
+    await query(sql, 'UPDATE audit_log SET actor = $1 WHERE seq = $2', ['user:nobody@conformance.example', row.seq]);
     try {
-      return await work();
+      const result = await admin.api.audit.verify();
+      expect(!result.ok && result.failedAtSeq === Number(row.seq), 'a rewritten entry was not caught at its sequence', result);
     } finally {
-      await sql.exec('ALTER TABLE audit_log ENABLE TRIGGER USER');
+      await query(sql, 'UPDATE audit_log SET actor = $1 WHERE seq = $2', [row.actor, row.seq]);
     }
-  }
-  const triggers = await sql.query<{ name: string; sql: string }>(
-    `SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'audit_log'`,
-  );
-  for (const trigger of triggers) await sql.exec(`DROP TRIGGER ${trigger.name}`);
-  try {
-    return await work();
-  } finally {
-    for (const trigger of triggers) await sql.exec(trigger.sql);
-  }
+  }));
+  expect((await admin.api.audit.verify()).ok, 'the restored entry did not verify');
+  return `entry ${seq}, the ${author}'s, rewritten: caught there, then put back`;
 }
 
-/** `$1` on Postgres, `?` on SQLite. */
-function update(sql: Sql, statement: string, params: unknown[]): Promise<unknown> {
-  return sql.query(sql.engine === 'sqlite' ? statement.replace(/\$\d+/g, '?') : statement, params);
+/** Remove an unreferenced entry, then put its exact bytes back. */
+export async function missingEntry(deployment: Deployment, { admin }: People, position: 'middle' | 'first' | 'batch'): Promise<string> {
+  expect((await admin.api.audit.verify()).ok, 'the log does not verify before deletion');
+  let seq = 0;
+  await using(deployment.database(), (sql) => appendOnlyLifted(sql, async () => {
+    const [row] = await sql.query(`SELECT * FROM audit_log WHERE ${position !== 'middle' ? `seq = ${position === 'first' ? 0 : 1000}` :
+      "seq > 0 AND action = 'audit.heartbeat' AND NOT EXISTS (SELECT 1 FROM audit_log linked WHERE linked.related_seq = audit_log.seq)"} ORDER BY seq LIMIT 1`);
+    expect(row !== undefined, 'no unreferenced entry to delete');
+    seq = Number(row.seq);
+    const linked = await query(sql, 'SELECT * FROM audit_log WHERE related_seq = $1', [row.seq]);
+    await query(sql, 'UPDATE audit_log SET related_seq = NULL WHERE related_seq = $1', [row.seq]);
+    await query(sql, 'DELETE FROM audit_log WHERE seq = $1', [row.seq]);
+    try {
+      const result = await admin.api.audit.verify();
+      expect(!result.ok, 'a log with an entry missing verifies', result);
+      if (position !== 'middle') expect(result.reason.includes(`sequence gap: expected seq ${position === 'first' ? 0 : 1000}`), 'the sequence gap was not reported', result);
+    } finally {
+      await insertRow(sql, 'audit_log', row);
+      for (const entry of linked) await query(sql, 'UPDATE audit_log SET related_seq = $1 WHERE seq = $2', [entry.related_seq, entry.seq]);
+    }
+  }));
+  expect((await admin.api.audit.verify()).ok, 'the restored log did not verify');
+  const which = { first: 'the first', batch: 'the first past a page of 1,000', middle: 'a heartbeat' }[position];
+  return `entry ${seq}, ${which}, deleted: caught, then put back`;
+}
+
+/** Last: keep the head, delete its newest entries, and require verification to notice. */
+export async function deletedTail(deployment: Deployment, { admin }: People): Promise<string> {
+  const intact = await admin.api.audit.verify();
+  expect(intact.ok && intact.checkpoint !== null, 'the log is not intact and checkpointed');
+  const signed = intact.checkpoint.seq;
+  await using(deployment.database(), (sql) => appendOnlyLifted(sql, async () => {
+    await query(sql, 'UPDATE audit_log SET related_seq = NULL WHERE seq >= $1', [signed]);
+    await query(sql, 'DELETE FROM audit_log WHERE seq >= $1', [signed]);
+  }));
+  const result = await admin.api.audit.verify();
+  expect(!result.ok && result.author === 'app' && result.reason.includes('removed from the end'), 'the log verifies with its newest entries deleted', result);
+  return 'the newest entries deleted, with the head left alone, were caught';
 }
 
 /** The whole log, detail included, newest first. */
-async function everyAuditEntry(api: CoffreClient): Promise<AuditEntryView[]> {
+export async function everyAuditEntry(api: CoffreClient): Promise<AuditEntryView[]> {
   const all: AuditEntryView[] = [];
   for (let before: number | undefined; ; ) {
     const { entries } = await api.audit.list({ before, limit: 500, detail: '1' });

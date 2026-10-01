@@ -1,9 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { TABLES } from '../src/checks/storage.ts';
 import { Browser } from '../src/browser.ts';
 import { canaryScan } from '../src/checks/canaries.ts';
 import { canary, type People } from '../src/checks/people.ts';
-import { postgres, using } from '../src/database.ts';
+import { postgres, sqlite, using } from '../src/database.ts';
 import type { Deployment } from '../src/harness.ts';
 
 test('the canary scan detects plaintext in a Postgres bytea column', {
@@ -25,15 +29,53 @@ test('the canary scan detects plaintext in a Postgres bytea column', {
   } as Deployment;
   const value = canary();
   await using(postgres(url), async (sql) => {
-    await sql.exec('CREATE TABLE conformance_canary_probe (value bytea)');
+    await sql.exec('CREATE TABLE conformance_leak_probe (value bytea)');
     try {
       await canaryScan(deployment, people, { KEY: value });
-      await sql.query('INSERT INTO conformance_canary_probe VALUES ($1)', [Buffer.from(value)]);
+      await sql.query('INSERT INTO conformance_leak_probe VALUES ($1)', [Buffer.from(value)]);
       await assert.rejects(canaryScan(deployment, people, { KEY: value }), /a value was found outside a reveal/);
-      await sql.exec('DELETE FROM conformance_canary_probe');
+      await sql.exec('DELETE FROM conformance_leak_probe');
       await canaryScan(deployment, people, { KEY: value });
     } finally {
-      await sql.exec('DROP TABLE conformance_canary_probe');
+      await sql.exec('DROP TABLE conformance_leak_probe');
     }
   });
 });
+
+test('a missing shared table fails the canary scan instead of passing an incomplete inspection', async (t) => {
+  const { deployment, people, sql } = await sqliteFixture(t);
+  await sql.exec('DROP TABLE vault_members');
+  await assert.rejects(canaryScan(deployment, people, { KEY: canary() }), /shared tables could not be inspected/);
+});
+
+test('the binary positive control fails a scanner whose driver hides bytes', async (t) => {
+  const { deployment, people, sql } = await sqliteFixture(t);
+  const original = sql.query.bind(sql);
+  t.mock.method(sql, 'query', async (statement: string, params?: unknown[]) => {
+    const rows = await original(statement, params);
+    return rows.map((row) => Object.fromEntries(Object.entries(row).map(([key, value]) =>
+      [key, value instanceof Uint8Array ? Buffer.from(value).toString('hex') : value])));
+  });
+  await assert.rejects(canaryScan(deployment, people, { KEY: canary() }), /scanner missed its planted binary canary/);
+});
+
+async function sqliteFixture(t: test.TestContext) {
+  const directory = mkdtempSync(join(tmpdir(), 'coffre-canary-test-'));
+  const file = join(directory, 'coffre.db');
+  const sql = sqlite(file);
+  t.after(async () => { await sql.close(); rmSync(directory, { recursive: true, force: true }); });
+  for (const table of TABLES) await sql.exec(`CREATE TABLE ${table} (id TEXT)`);
+  t.mock.method(globalThis, 'fetch', async () => new Response('{}'));
+  const browser = new Browser('http://conformance.test');
+  const person = { email: 'reader@conformance.example', member: 'user:reader@conformance.example', browser, api: browser.client() };
+  const people: People = {
+    admin: person, reader: person, bulk: person, stranger: person,
+    leaver: { ...person, cli: person.api, cliToken: 'removed' }, service: { member: 'token:removed', token: 'removed', api: person.api },
+  };
+  // The connection stays open so a test can change how the driver emits bytes.
+  const deployment = {
+    origin: 'http://conformance.test', database: async () => ({ ...sql, close: async () => {} }), databaseFile: file,
+    output: () => '',
+  } as Deployment;
+  return { deployment, people, sql };
+}

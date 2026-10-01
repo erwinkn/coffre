@@ -4,7 +4,8 @@ Checks a coffre deployment from outside: what it must never do, whatever
 code it runs. `coffre-conformance workers|node [<dir>]` boots the deployment
 in `<dir>` on its own keys and a scratch database, takes a handful of people
 through it, and checks, among others, that no value leaks into any page,
-table or log, that every read has app and vault entries in the shared log, and that
+table or log, that every read has the vault's entry in the shared log, every stored
+version has the app's entry naming its vault wrap, and that
 tampering with either author's entries is caught. Workers takes
 `--postgres <owner URL>`, `--runtime <coffre_runtime URL>` and
 `--vault-runtime <coffre_vault_runtime URL>` on a local Postgres server;

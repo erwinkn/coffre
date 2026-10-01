@@ -4,6 +4,7 @@ import { bearer } from '../browser.ts';
 import type { Deployment } from '../harness.ts';
 import { expect, refused } from '../report.ts';
 import { BULK, DEV, PROD, signIn, valuesIn, type Canaries, type People } from './people.ts';
+import { pollDevice, startDevice } from './signin.ts';
 
 export async function membersOnly(deployment: Deployment, { stranger }: People): Promise<string> {
   const attempt = await signIn(deployment, stranger.browser, stranger.email);
@@ -86,6 +87,8 @@ export async function crossSite({ admin }: People, canaries: Canaries): Promise<
 }
 
 export async function offboarding(deployment: Deployment, { admin, leaver, service }: People, canaries: Canaries) {
+  const device = await startDevice(deployment);
+  await leaver.api.deviceLogins.decide(device.user_code, true);
   // What they saw is what to rotate once they are gone.
   await leaver.cli.secrets.reveal(DEV);
   const { report } = await admin.api.members.remove(leaver.member);
@@ -100,7 +103,19 @@ export async function offboarding(deployment: Deployment, { admin, leaver, servi
 
   await admin.api.members.remove(service.member);
   await refused("a removed service's token read secrets", service.api.secrets.reveal(DEV));
-  return `the report names ${exposed.length} values to rotate; their browser and CLI sessions, and a removed service's token, stop at once`;
+  await admin.api.members.add(leaver.member);
+  await admin.api.access.set(leaver.member, { [DEV]: 'developer' });
+  await admin.api.members.add(service.member);
+  await admin.api.access.set(service.member, { [DEV]: 'viewer' });
+  expect((await leaver.browser.fetch('/api/me')).status === 401, 're-admission revived the browser session');
+  await refused('re-admission revived the CLI session', leaver.cli.secrets.reveal(DEV));
+  await refused('re-admission revived the service token', service.api.secrets.reveal(DEV));
+  expect(!(await pollDevice(deployment, device.device_code)).ok, 're-admission revived the old device approval');
+  const fresh = await signIn(deployment, leaver.browser, leaver.email);
+  expect(fresh.ok, 'a fresh provider callback could not sign the re-admitted member in');
+  await admin.api.members.remove(leaver.member);
+  await admin.api.members.remove(service.member);
+  return `the report names ${exposed.length} values; re-admission revives no old session, token or approval; a fresh provider callback works`;
 }
 
 /** Reading more values at once than the vault allows in its window is refused. */

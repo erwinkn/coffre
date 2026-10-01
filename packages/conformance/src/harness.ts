@@ -18,6 +18,7 @@ import { join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import { postgres, sqlite, using, type Sql } from './database.ts';
+import { KEYS } from './fixtures.ts';
 import { DevIdp } from './idp/index.ts';
 import { Failure, until } from './report.ts';
 
@@ -42,7 +43,7 @@ export type Deployment = {
   /** Whether no heartbeat has run yet, so /readyz fails until `scheduled` runs. */
   beforeFirstBeat: boolean;
   /** What the Cron trigger does every five minutes. */
-  scheduled(): Promise<void>;
+  scheduled(options?: { allowFailure?: boolean }): Promise<void>;
   /** The app's database, as its owner. */
   database(): Promise<Sql>;
   /** The app's database as the login the app runs as, on an engine that has logins. */
@@ -56,13 +57,6 @@ export type Deployment = {
   stop(): Promise<void>;
 };
 
-// Local fixtures, as in .env.dev: none of them is a secret anywhere else.
-const KEYS = {
-  KEK_ID: 'conformance-1',
-  KEK: 'Y29mZnJlLWxvY2FsLWRldi1rZWstMzItYnl0ZXMhISE=',
-  SIGNING_KEY: 'Y29mZnJlLWxvY2FsLXZhdWx0LXNpZ25pbmctc2VlZCE=',
-  AUDIT_CHAIN_KEY: 'Y29mZnJlLWxvY2FsLWF1ZGl0LWNoYWluLWtleS0zMmI=',
-};
 const ROOT_ADMIN = 'root@conformance.example';
 
 type Child = { name: string; child: ChildProcess; daemon: boolean; exited: boolean; output: Buffer[] };
@@ -212,9 +206,9 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       idp,
       rootAdmin: ROOT_ADMIN,
       beforeFirstBeat: true,
-      async scheduled() {
+      async scheduled(options = {}) {
         const response = await fetch(`${origin}/cdn-cgi/local/scheduled?cron=*/5+*+*+*+*`);
-        if (!response.ok) throw new Failure(`the scheduled handler answered ${response.status}`, `${await response.text()}\n${logs()}`);
+        if (!response.ok && !options.allowFailure) throw new Failure(`the scheduled handler answered ${response.status}`, `${await response.text()}\n${logs()}`);
       },
       database: () => postgres(owner),
       runtime: () => postgres(runtime),
@@ -262,7 +256,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
         process.kill(-server.child.pid!, 'SIGTERM');
         await exited;
         server = startServer();
-        await until('the restarted server', async () => (await fetch(`${origin}/readyz`)).ok, 30, alive);
+        await until('the restarted server', async () => (await fetch(`${origin}/livez`)).ok, 30, alive);
       },
       database: async () => sqlite(database),
       runtime: null,
