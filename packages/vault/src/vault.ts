@@ -1106,22 +1106,23 @@ class VaultService implements Vault {
    */
   #verifyAll(shown: readonly StoredEntry[], upTo: LogHead | null): Promise<LogVerification> {
     return this.#db.transaction(async (tx) => {
-      // What this vault last verified must still be there: whoever holds
-      // its key can seal a rewrite, but cannot put back the head it saw.
       const remembered = this.#prepared.verified;
       const verification = await this.#verify(tx, shown, UNVERIFIED);
       if (!verification.ok) return verification;
+      if (upTo !== null && !(await carries(tx, upTo))) {
+        return { ok: false, failedAtSeq: upTo.seq, reason: 'not the entry the app verified up to: the log changed between the two checks' };
+      }
+      const unsigned = await this.#checkpointFault(tx);
+      if (unsigned !== null) return unsigned;
+      // What this vault last verified must still be there: whoever holds
+      // its key can seal a rewrite, but cannot put back the head it saw. A
+      // checkpoint names an earlier break, so it is reported first.
       if (remembered.nextSeq > 0n) {
         const seq = remembered.nextSeq - 1n;
         if (!(await carries(tx, { seq: Number(seq), hash: remembered.hash.toString('hex') }))) {
           return { ok: false, failedAtSeq: Number(seq), reason: 'changed since the vault last verified it' };
         }
       }
-      if (upTo !== null && !(await carries(tx, upTo))) {
-        return { ok: false, failedAtSeq: upTo.seq, reason: 'not the entry the app verified up to: the log changed between the two checks' };
-      }
-      const unsigned = await this.#checkpointFault(tx);
-      if (unsigned !== null) return unsigned;
       const at = await this.#now(tx);
       const accounting = await verifyAccounting(tx, at);
       if (!accounting.ok) return accounting;
