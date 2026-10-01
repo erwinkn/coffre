@@ -701,6 +701,10 @@ export type Api = {
           [key: string]: unknown;
         };
       }[];
+      hidden?: {
+        action: string;
+        count: number;
+      }[];
     };
   };
   "GET /audit/verification": {

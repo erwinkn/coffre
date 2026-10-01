@@ -539,7 +539,16 @@ test('sign-ins stay in the log, and the audit list shows them only when asked', 
   assert.ok(shown.length > 0);
   assert.deepEqual(shown.map((entry) => entry.seq), all.filter((entry) => !entry.detail).map((entry) => entry.seq));
   // Filtered by the query, so a page of one is not an empty page.
-  assert.deepEqual((await audit.list({ limit: 1 })).entries.map((entry) => entry.seq), [shown[0].seq]);
+  const first = await audit.list({ limit: 1 });
+  assert.deepEqual(first.entries.map((entry) => entry.seq), [shown[0].seq]);
+  // Each page says what it left out of its stretch of the log, and the
+  // stretches tile it: the sign-ins, newer than every entry shown, are the
+  // first page's, and the next page's has none.
+  const hidden = [{ action: 'sign_in', count: 2 }, { action: 'account.link', count: 1 }, { action: 'sign_out', count: 1 }];
+  assert.deepEqual(first.hidden, hidden);
+  assert.deepEqual((await audit.list({ limit: 1, before: first.entries[0].seq })).hidden, []);
+  assert.deepEqual((await audit.list()).hidden, hidden);
+  assert.equal((await audit.list({ detail: '1' })).hidden, undefined);
   // And the chain still covers what the list left out.
   assert.equal((await audit.verify()).ok, true);
 });
