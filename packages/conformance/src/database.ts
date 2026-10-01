@@ -1,4 +1,4 @@
-// SQL on a deployment's database or the vault's store, as whoever holds its
+// SQL on a deployment's shared database, as whoever holds its
 // password or its file: what the checks use to go around coffre, to see
 // what it wrote, and to break what it must notice.
 import { DatabaseSync } from 'node:sqlite';

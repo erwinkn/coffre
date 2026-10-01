@@ -7,7 +7,8 @@ import { using } from '../database.ts';
 import type { Deployment } from '../harness.ts';
 import { expect } from '../report.ts';
 import { getCalls, getUrls } from '../routes.ts';
-import { BULK, DEV, PROD, PROJECT, SERVICE, type Canaries, type People } from './people.ts';
+import { scanTables, tables } from './storage.ts';
+import { canary, BULK, DEV, PROD, PROJECT, SERVICE, type Canaries, type People } from './people.ts';
 
 function calls(people: People) {
   const places = [DEV, PROD, BULK].map((path) => {
@@ -84,25 +85,25 @@ export async function canaryScan(deployment: Deployment, people: People, canarie
   }
 
   const stored: string[] = [];
-  if (deployment.databaseFile === null) {
-    await using(deployment.database(), async (sql) => {
-      const tables = await sql.query<{ name: string }>(
-        `SELECT table_name AS name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'`,
-      );
-      for (const { name } of tables) {
-        // A record cast to text hex-encodes bytea, hiding a plaintext leak.
-        const rows = await sql.query(`SELECT * FROM "${name.replaceAll('"', '""')}"`);
-        for (const row of rows) {
-          for (const value of Object.values(row)) {
-            look(`the database's ${name} table`, value instanceof Uint8Array ? value : JSON.stringify(value) ?? '');
-          }
-        }
-      }
-      stored.push(`${tables.length} tables`);
-    });
-  } else {
+  await using(deployment.database(), async (sql) => {
+    const names = await tables(sql);
+    // Prove the reader sees bytes before trusting an absence of plaintext.
+    const control = canary();
+    await sql.exec(`CREATE TABLE conformance_canary_probe (value ${sql.engine === 'postgres' ? 'bytea' : 'BLOB'})`);
+    try {
+      await sql.query(`INSERT INTO conformance_canary_probe VALUES (${sql.engine === 'postgres' ? '$1' : '?'})`, [Buffer.from(control)]);
+      let found = false;
+      await scanTables(sql, ['conformance_canary_probe'], (_, bytes) => { found ||= Buffer.from(bytes).includes(control); });
+      expect(found, 'the database scanner missed its planted binary canary');
+    } finally {
+      await sql.exec('DROP TABLE conformance_canary_probe');
+    }
+    await scanTables(sql, names, look);
+    stored.push(`${names.length} tables, with a binary positive control`);
+  });
+  if (deployment.databaseFile !== null) {
     look("the database's file", files(deployment.databaseFile));
-    stored.push('the database file');
+    stored.push('the database file and WAL');
   }
   look("the processes' output", deployment.output());
   stored.push("the processes' output");

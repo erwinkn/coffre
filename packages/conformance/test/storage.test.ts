@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { createClient } from '@coffre/client';
 
 import { Browser } from '../src/browser.ts';
-import { tamperVault } from '../src/checks/audit.ts';
+import { forgedVaultEntry } from '../src/checks/audit.ts';
 import type { People } from '../src/checks/people.ts';
 import { sqlite, using } from '../src/database.ts';
 import type { Deployment } from '../src/harness.ts';
@@ -49,6 +49,6 @@ test('unavailable vault tampering is a failed conformance result', async (t) => 
   t.mock.method(console, 'log', () => {});
   t.mock.method(console, 'error', () => {});
   const report = new Report();
-  await report.check('vault tampering', { people }, ({ people }) => tamperVault(deployment, people));
+  await report.check('vault tampering', { people }, ({ people }) => forgedVaultEntry(deployment, people));
   assert.deepEqual(report.failed, ['vault tampering']);
 });

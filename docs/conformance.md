@@ -35,7 +35,7 @@ are local; nothing is deployed.
 coffre takes `--port` (3082), the stand-in IdP the next port, and wrangler's
 inspector the one after. `--bulk-limit <n>` names the vault's `bulkLimit`
 when the deployment changed it. Each run starts from nothing and leaves
-nothing behind. It takes about 10 seconds on Node and 50 on Workers.
+nothing behind. It inspects the whole log several times, including deliberate rewrites; runtime depends on the deployment and database.
 
 In this repository, `pnpm conformance:workers` and `pnpm conformance:node`
 run it on the examples, and `pnpm test:consumer` on what the packed CLI's
@@ -83,7 +83,7 @@ In order, since each builds on the ones before:
 | setup, personas | The admin creates the project, its values and the people above |
 | members only | The stranger's sign-in is refused and leaves no session; no one gets 401 reading, revealing or writing, and a made-up token is refused |
 | grant scoping | The reader reads dev and nothing else, and changes nothing: no write, no grant, no member, no token, no vault log. So does the service, with its token. The bulk reader cannot read dev |
-| reveals audited | A reveal writes one `secret.read` of the vault's per value, under the reveal's operation and request, at the versions revealed |
+| reveals audited, runs audited | A single-secret reveal or an environment read writes one `secret.read` of the vault's per value, under the reveal's operation and request, at the versions revealed |
 | cross-site | A write, a reveal and a sign-out with the admin's cookie, from another site or from no page at all: 403, no value in the answer, nothing changed |
 | live setup | The admin sets up what `probe --token` asks an operator for: `conformance/live/CANARY`, and `token:conformance-live`, a viewer there and auditor on the project |
 | token, token reveal, token scan, token scope, token verification | What `probe --token` checks, with that token; see [below](#against-a-running-instance) |
@@ -93,15 +93,24 @@ In order, since each builds on the ones before:
 | keys behind writes | Every `secret.write` and `secret.restore` names, by `related_seq`, the vault's `key.wrap` or `key.rewrap` for the same member, request, operation, secret and version; and no value read is logged by the app, only by the vault |
 | no audit, no value | With the audit log refusing writes (a trigger), a reveal fails and carries no value; it works again once the log does |
 | canary scan | No value in any answer to any GET route, or any page, as each of the people, signed in or removed; nor in the database, in any column of any table; nor the processes' output |
-| append-only | Neither the app's login nor the vault's can update, delete, truncate or drop the audit log, append an entry as the other, change or delete a value's versions, delete a secret or a member, or create a table; nor can the app's write a member or a grant. Postgres only: SQLite has no logins |
-| tampering | Verification catches a grant written into the database around the vault, an entry in the vault's name chained to the log without its key, an audit entry rewritten in the database, and the newest audit entries deleted; each put back verifies again, but for the last, which is why it is last |
+| app login, vault login | Neither the app's login nor the vault's can update, delete, truncate or drop the audit log, append an entry as the other, change or delete a value's versions, delete a secret or a member, or create a table; nor can the app's write a member or a grant. Postgres only: SQLite has no logins |
+| access authorship | Admission, grant, revoke, removal and re-admission leave only vault entries |
+| no audit, no access | A refused append commits no grant, removal or admission |
+| full verification | Verification reaches the actual head and counts every entry |
+| checkpoint refused, checkpoint missing | A recent heartbeat without an accepted checkpoint turns readiness red; restoring checkpointing recovers |
+| grant tampering, member tampering, old tampering | A forged grant, edited member or authentic older row is refused at use, marked tampered, and logged as vault.tampered. Sign-in mode refuses the credential with 401 |
+| forged credential, forged identity, forged approval, edited generation | Owner-written authentication rows cannot mint sessions or revive old tokens, and the row failure is reported |
+| app rewritten, vault rewritten, vault forged | Verification catches rewrites at their sequence and a publicly chained vault entry without its MAC |
+| middle deleted, first gap, batch gap | Missing entries fail verification, including the first entry and the 1,000-entry paging boundary |
+| earlier checkpoint | An invalid earlier signature cannot be hidden by valid MACs and a later valid checkpoint |
+| tail deleted | The newest entries removed with the head retained fail verification; this runs last |
 
 All table inspection and tampering goes through the one database. There
 is no vault file or Durable Object to discover. On Postgres, the canary scan
 reads every public table as the owner, including binary columns as bytes.
-A regression test plants a canary in a `bytea` column to check the scanner.
-On SQLite it scans the database file and its write-ahead log; a missing
-file fails. Workers also tests both restricted logins and the author policies.
+Every run plants a binary canary to prove the table reader sees bytes.
+Missing shared tables fail. On SQLite it also scans the database file and
+its write-ahead log; a missing file fails. Workers also tests both restricted logins and the author policies.
 
 A read has one entry, the vault's, committed before any key leaves, so there
 is no second record of it to disagree. A write the app prepares again leaves
@@ -109,8 +118,9 @@ the vault's `key.wrap` for a version never stored, under an operation id no
 `secret.write` shares. The unit and integration suites also test two vault
 instances sharing the bulk limit and generations, removal during a KMS
 call, and partial KMS failure.
-The design's broader operation-by-operation conformance checks and unified
-audit view are later steps; this harness does not claim to test them yet.
+The suites cover races during sign-in and late callbacks as well. Those
+checks use controlled pauses inside requests; conformance cites their
+evidence rather than booting a second app and vault pair.
 
 A check that fails prints what it saw. The ones that need its result are
 skipped, and the run ends with the processes' output.
