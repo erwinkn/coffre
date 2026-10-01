@@ -102,18 +102,24 @@ re-encrypting anything, and the key material itself cannot be copied out.
 
 **Cost and speed.** Each data key opened is one Decrypt, and each value
 written one Encrypt. AWS charges about $1 a month per key and $0.03 per
-10,000 calls. The vault handles one call at a time and runs up to eight KMS
-requests of it at once, so a `coffre run` of 50 secrets is 50 Decrypts in
-about seven round trips. On Workers, each is a subrequest: the Free plan
-allows 50 per invocation, so an environment larger than that cannot be read
-in one call there. The Paid plan allows 10,000.
+10,000 calls. The vault sends up to eight requests at once, so a `coffre run`
+of 50 secrets is 50 Decrypts in about seven round trips. On Workers, each is
+a subrequest: the Free plan allows 50 per invocation, so an environment
+larger than that cannot be read in one call there. The Paid plan allows
+10,000.
 
-**When KMS fails.** A throttled, failed or timed-out request (5 seconds)
-is retried twice. If it still fails, or KMS refuses coffre's credentials,
-or the key is disabled, the call fails: the API answers 500, the server log
-names the KMS error, and the vault logs nothing, since nothing was decided.
-A wrapped key that KMS will not decrypt for this secret is refused as
-`bad_claim`, as with a local key.
+**When KMS fails.** Before it asks KMS anything, the vault commits a
+`key.intent` entry naming every key of the call; afterwards, it logs each
+key's outcome against it. A throttled or failed request is retried twice,
+and the whole call has 5 seconds. If KMS still has not answered, refuses
+coffre's credentials, or the key is disabled, the call fails (the API answers
+500, and the server log names the KMS error) and each key is logged with what
+happened to it: `kms_unavailable`, `kms_uncertain` when a request may have
+reached KMS, `cancelled` when it never left, or `withheld` for a key KMS did
+open but the call could not release. So the log accounts for every key KMS
+was asked about, and full verification fails on an intent whose outcomes
+never came. A wrapped key that KMS will not decrypt for this secret is
+refused as `bad_claim`, as with a local key.
 
 **Rotation.** KMS rotates the key material once a year under the same ARN,
 and keeps decrypting what older material wrapped. coffre has nothing to do.
@@ -157,8 +163,10 @@ const transit: KekProvider = {
 `ctx` is the secret's `{ projectId, environmentId, secretId }`. Bind it to
 the ciphertext, so that a wrapped key presented as another secret's fails to
 unwrap. `unwrap` throws `KekUnavailableError` when the service cannot answer,
-and any other error when the wrapped key does not open: the vault fails the
-call on the first and refuses the second.
+and `KekBadClaimError`, from `@coffre/core/kek`, when the wrapped key does
+not open for `ctx`: the vault fails the call on the first and refuses the
+second as `bad_claim`. Any other error is a fault: the vault logs it and
+fails the call.
 
 Scaleway's Key Manager would fit the same way, but its Audit Trail logs no
 Encrypt or Decrypt, only changes to keys, so it would bring no second record.

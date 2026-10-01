@@ -1,290 +1,161 @@
 # Roadmap
 
-From a source checkout that deploys one Cloudflare Worker to a packaged
-product that deployments import and configure in their own repositories.
+From a source checkout that deployed one Cloudflare Worker to packages that
+deployments import and configure in their own repositories, and then to a
+first live instance.
 
 ## Where we are
 
-- The product works end to end: API, CLI, web UI, audit chain, and now
-  coffre's own sign-in (phase 4), syncs (phase 3) and offboarding.
-- Phase 2 is done: coffre is packages a deployment imports and configures in
-  code, and `coffre init --workers` or `--node` writes that deployment
-  ([deploy.md](deploy.md)). Nothing is on npm yet.
-- erwinkn.com is next (phase 3): a deployment project in its own
-  repository, made with `coffre init --workers`.
-- Most of phase 1 is still open; only the security headers are done. The
-  README says *ready for a first deployment, still hardening* until the rest
-  is.
+- **The product works end to end:** the API, the CLI, the web UI, coffre's own
+  sign-in, syncs, offboarding, and conformance for every deployment.
+- **It is packages** (phase 2): `coffre init --workers` or `--node` writes a
+  deployment ([deploy.md](deploy.md)). The `@coffre` names are reserved on npm
+  with `0.0.0` placeholders; the first release is published from a tag.
+- **One database** (#22 to #46, designed in
+  [design/single-database.md](design/single-database.md)): one Postgres
+  database, two components each with its own login, one audit log, the
+  vault's member list, checkpoints as log entries, `/readyz` as a query, a
+  KEK check, and a restore runbook drilled locally
+  ([restore.md](restore.md)). A final independent review's findings are
+  fixed or parked.
+- **erwinkn.com is next** (phase 3).
 
 ## Sequence
 
-| Phase | Goal | Done when |
+| Phase | Goal | State |
 |---|---|---|
-| 1. Harden | Safe to hold real secrets | Every item below shipped; restore and rotation drills pass |
-| ~~2. Package~~ | The product apart from its instances; Cloudflare and Node adapters; a vault; Postgres with SQLite for local use | A deployment is a small project importing `@coffre/server` and `@coffre/vault`; the suite passes on Postgres and SQLite, and a smoke run on both adapters, now [conformance](conformance.md) |
-| 3. erwinkn.com | Dogfood | Your secrets live in it, the CLI and sync are in daily use, a few weeks pass with no open bugs |
-| 4. Sign-in | Deployable without a proxy in front | A Node deployment signs in with Google, GitHub and an arbitrary OIDC issuer, and the CLI logs in through it |
-
-Hardening comes first because it is mostly independent of the package layout,
-and it is what the README's status line is waiting on. Packaging comes before
-erwinkn.com so the first live instance uses the same package boundary as every
-other deployment. Sign-in was planned last but landed early because a public
-release must work without an identity-aware proxy.
+| 1. Harden | Safe to hold real secrets | Done, or parked under [Later](#later); what is left belongs to phase 3's setup |
+| 2. Package | The product apart from its instances | Done |
+| 3. erwinkn.com | Dogfood | Next |
+| 4. Sign-in | Deployable without a proxy in front | Done |
 
 ## Phase 1: harden
 
-Each item says what is wrong today.
-
-1. ~~**Security headers and a CSP.**~~ Done, in
-   `packages/server/src/security-headers.ts`. The Worker mints a nonce per
-   response and TanStack puts it on every script it renders, so `script-src`
-   is `'self'` plus that nonce; styles stay `'unsafe-inline'` for React's
-   `style` props. It is enforced in development too, so a script without the
-   nonce breaks where it is written. `Referrer-Policy` is `same-origin`, not
-   `no-referrer`: under `no-referrer` a same-origin POST carries
-   `Origin: null`, which the CSRF check refuses.
-2. **Escrow the keys, then prove recovery.** Keep `KEK` and its `KEK_ID`,
-   `SIGNING_KEY`, `AUDIT_CHAIN_KEY` and the OAuth client secret outside the
-   deployment, plus access to any KMS keys in use. Restore one database
-   backup with those keys, restart both components, then check that
-   `coffre verify` passes and a canary decrypts. The database now holds
-   members, grants and both authors' entries too.
-3. **Rotation that can retire a key.** Rotation today only changes which KEK
-   wraps *new* versions. Every old version still needs the old KEK forever, so
-   a leaked KEK cannot be retired. Add a `rewrap` maintenance command: it
-   re-wraps each DEK under the primary, leaves the ciphertext untouched, and
-   writes one audit row per secret. It is also how data written under a local
-   key moves to KMS ([keys.md](keys.md#moving-from-a-local-key)).
-4. **A heartbeat someone hears.** Readiness now tolerates one late or missed
-   Cron run (11 minutes, where it used to fail at 5, the Cron interval itself,
-   and flapped). Nothing monitors it yet: attach an external check on
-   `/readyz` that pages you.
-5. **Checkpoints off the box.** Both authors now write to one log. Its MACs
-   detect forged entries without the keys, but a complete older backup
-   still verifies. Export checkpoints to an independent witness and have
-   `verify` compare against it; nothing implements that freshness check yet.
-6. **Backups.** Point-in-time recovery on whatever hosts Postgres, exercised by
-   the drill in item 2.
-7. **Guard main.** `main` is unprotected. `.github/workflows/validate.yml`
-   runs the full contract suite on every pull request. What is left is a
-   setting: protect `main`, requiring a pull request and the `Validate` check.
-8. ~~**Machine callers in the CLI.**~~ Done: `COFFRE_TOKEN` for coffre's own
+1. ~~**Security headers and a CSP.**~~ Done
+   (`packages/server/src/security-headers.ts`). Each response gets its own
+   nonce, and `script-src` is `'self'` plus that nonce; styles stay
+   `'unsafe-inline'` for React's `style` props. `Referrer-Policy` is
+   `same-origin`, not `no-referrer`: under `no-referrer` a same-origin POST
+   carries `Origin: null`, which the cross-site check refuses.
+2. ~~**Escrow the keys, then prove recovery.**~~ Done locally:
+   `scripts/restore-drill.sh` restores one database backup with the escrowed
+   keys and checks values, members, grants, the log and verification, then
+   the wrong-KEK case ([restore.md](restore.md)). The same drill on a
+   PlanetScale branch is part of phase 3's exit.
+3. **Rotation that can retire a key.** Parked under [Later](#later): the
+   rewrap command.
+4. **A heartbeat someone hears.** Readiness tolerates one late or missed Cron
+   run (11 minutes), and turns red on a stopped log, an unsigned checkpoint,
+   a cut in the log or a wrong KEK. Attaching an external monitor to
+   `/readyz` is part of phase 3's setup.
+5. **Checkpoints off the box.** Parked under [Later](#later), with the other
+   defences against the database's owner.
+6. **Backups.** PlanetScale's point-in-time recovery, part of phase 3.
+7. **Guard main.** Still open, and only a setting: `main` is unprotected.
+   `.github/workflows/validate.yml` runs the whole suite on every pull
+   request; protect `main`, requiring a pull request and the `Validate`
+   check.
+8. ~~**Machine callers in the CLI.**~~ Done: `COFFRE_TOKEN` for coffre's
    service tokens, `COFFRE_ACCESS_CLIENT_ID` and `COFFRE_ACCESS_CLIENT_SECRET`
    behind Access.
 
-Then drop "still hardening" from the README's status line.
-
 ## Phase 2: package
 
-Done. coffre became packages a deployment imports and configures in code:
-`@coffre/ui`, `@coffre/server`, `@coffre/vault`, `@coffre/client` and
-`@coffre/cli`, on Postgres through Drizzle, with SQLite for local dev and a vault
-that holds the keys and decides who may decrypt. The design is in
-[architecture.md](architecture.md). In order:
+Done. coffre is eight packages a deployment imports and configures in code
+([architecture.md](architecture.md)):
 
-1. ~~**Two spikes**~~: done, both positive. A prebuilt server-rendered UI
-   imported by another Worker ([report](spikes/ssr-ui.md)), and one
-   set of Drizzle queries shared across dialects
-   ([current design](architecture.md#databases)).
-2. ~~**The API**~~ ([design](architecture.md#the-api)): done. One route
-   table under `/api`, on Drizzle against Postgres, with roles in code and
-   one role per member per place; every query in one module
-   (`packages/server/src/db/queries.ts`); `@coffre/client` typed from it; the
-   CLI on the client. The old routes and services are gone. Import has no
-   endpoint: the client plans it (a reveal and a list) and writes the changed
-   keys with one `PATCH`.
-3. ~~**The UI on the client**~~: done. Loaders read through
-   `context.client`, built per request: in the browser `fetch` to `/api`, in
-   the server render an in-process call to the API carrying only the
-   visitor's credential. Pages change things by calling the client from the
-   browser, and a cookie-authenticated change must be same-origin. The server
-   functions are gone, and sessions, linked accounts and device approval
-   joined the route table.
-4. ~~**SQLite for local use**~~ ([design](architecture.md#databases)): done.
-   The database comes from its URL; queries are written once against the
-   Postgres schema, with SQLite cast to it in one module, and a
-   parity test keeps both schemas and migration trees in step.
-   Postgres-only SQL (partial unique indexes, `lower()` matching) was
-   remodelled, the audit chain locks a head row, and SQLite queues its own
-   writes. The integration suite runs on both (`pnpm test:all`); the
-   restricted runtime login stays Postgres-only.
-5. ~~**The vault**~~ ([design](architecture.md#the-vault)): done.
-   `packages/vault` holds the KEK and decides access, writing members,
-   grants and its entries in the shared Postgres database through its own
-   login. It runs as a Worker behind a service binding, or as a Node process
-   behind a Unix socket. Tests and local development can use one SQLite
-   file. Callers' grants come from the vault once per request; a refusal is
-   a 403 with the vault's code. Vault instances share the bulk count and
-   generations. The vault signs checkpoints, and verification authenticates
-   both authors and replays members and grants from vault entries.
-6. ~~**The packages**~~ ([design](architecture.md#packages)): done.
-   `@coffre/server`, `@coffre/ui`, `@coffre/vault`, `@coffre/client` and
-   `@coffre/cli` build with tsdown into JavaScript and declarations, the
-   internal packages bundled in. Configuration is typed and passed in code:
-   `coffre(env => …)` and `vault(env => …)` on Workers, `serve({…})` and
-   `serveVault({…})` on Node, whose vault is a second process on a Unix
-   socket, or in process. No package reads an environment variable of its
-   own. `@coffre/ui` is the pages alone, a prebuilt handler the server calls,
-   with its static files served by Workers' assets or by `serve`.
-   `examples/workers` and `examples/node` are what `coffre init` writes, a
-   test diffs them, and `coffre-conformance` holds each to what it must never
-   do ([conformance.md](conformance.md)), as every deployment's
-   `pnpm conformance`. `pnpm test:consumer` does the same from packed
-   tarballs installed outside the workspace.
+- one route table under `/api`, with `@coffre/client` typed from it, and the
+  CLI and the pages built on the client;
+- the pages as `@coffre/ui`, a prebuilt handler the server calls, which reads
+  only through the client;
+- Postgres through Drizzle, with SQLite for tests and local development, and
+  one set of queries for both;
+- the vault, `@coffre/vault`, which holds the KEK and decides access, as a
+  Worker behind a service binding or a Node process behind a Unix socket;
+- `coffre init`, whose output is `examples/workers` and `examples/node`, a
+  test diffing the two, and `coffre-conformance`, which holds every
+  deployment to what it must never do ([conformance.md](conformance.md)).
 
 ## Phase 3: erwinkn.com
 
-The deployment lives in the erwinkn.com repository and imports coffre's
-packages; this repository contains no instance-specific configuration.
+The deployment lives in its own repository and imports the packages; this
+repository holds no instance's configuration.
 
-- **Postgres:** any TLS Postgres that Hyperdrive can reach. The database holds
-  ciphertext and the audit log, while values need the KEK, which lives in
-  Cloudflare. A database leak therefore exposes names and who read what, but
-  not values. That makes a public endpoint acceptable for a personal instance.
-- **Sign-in:** coffre's own, with GitHub, rather than an Access application
-  (phase 4 landed early). Machines get coffre service tokens.
-- **Moving in:** `coffre import` from your existing `.env` files.
-- **CLI:** run from a checkout until it is published as `@coffre/cli`.
-  `coffre login` signs in with a device code.
-- **Conformance:** `pnpm conformance` passes in the deployment's repository
-  before each deploy, and `coffre-conformance probe` against the live URL
-  after it.
-- **Exit:** a few weeks of daily use with no open bugs, plus a rotation drill
-  and a restore drill on the live instance.
+- **Database:** PlanetScale Postgres (the smallest cluster), reached through
+  two Hyperdrive configs with caching off
+  ([design, question 9](design/single-database.md#9-planetscale-and-hyperdrive)).
+- **Sign-in:** coffre's own, with GitHub. Machines get coffre service tokens.
+- **Moving in:** `coffre import` from the existing `.env` files.
+- **Monitoring:** an external check on `/readyz` that pages.
+- **Conformance:** `pnpm conformance` in the deployment's repository before
+  each deploy, and `coffre-conformance probe` against the live address after.
+- **Exit:** a few weeks of daily use with no open bugs, a restore drill on a
+  PlanetScale branch, and a rotation drill (a new KEK, the old one in
+  `previousKeks`).
 
-### Sync
+### Syncs
 
-Built, as a server-side engine rather than the CLI-driven push first planned:
-an environment is pushed to GitHub Actions, Vercel, Railway or Cloudflare
-Workers on every change, and checked hourly for drift. See
-[syncs.md](syncs.md).
-
-- **Why the engine won.** A CLI push only happens when someone remembers to
-  run it, and the point, as with Doppler, is that nobody has to. The cost the
-  plan named is real: coffre now holds deploy tokens. They are ordinary
-  secrets, named by path (`ops/sync/GITHUB_TOKEN`), so they get the same
-  encryption, versioning, grants and audit as everything else, and adding a
-  sync requires being able to read the token already.
-- **Write-only targets** are handled as planned: coffre records which version
-  it pushed where, so a run compares ids and decrypts only what changed.
-- **Providers are the deployment's**, like sign-in providers:
-  `syncs: { providers }` picks among the four, or adds one of its own
-  (`SyncProvider`). Each describes its own form, and the pages and the CLI
-  render whatever `GET /api/syncs/providers` returns, so neither changes when
-  a provider is added.
-- **Still open:** plain `.env` files as a target, and a declarative
-  `coffre.sync.toml` if keeping syncs in the repository that deploys turns
-  out to matter.
+Built as a server-side engine: an environment is pushed to GitHub Actions,
+Vercel, Railway or Cloudflare Workers on every change, and checked hourly for
+drift ([syncs.md](syncs.md)). A CLI push happens only when someone remembers
+to run it, and the point is that nobody has to. The cost is that coffre holds
+deploy tokens; they are ordinary secrets, so they get the same encryption,
+grants and log as everything else. Still open: plain `.env` files as a
+destination.
 
 ## Phase 4: sign-in
 
-Built, on Workers, and on Node since phase 2 added its adapter. Where the
-build departed from the plan below: Microsoft takes one tenant, by GUID,
-because the multi-tenant endpoints publish an issuer template that standard
-validation rejects; the CLI signs in with a device code rather than a local
-port, which also works over SSH; the page takes a title and a note but no
-logo yet; and a provider is an interface, `SigninProvider`, which a
-deployment can implement for one that speaks neither protocol. The dev IdP's
-own mode is gone: the dev loop signs in through it as GitHub or OIDC, like
-conformance, and the pages and the CLI read `GET /api/auth` rather than a
-mode ([deployment-auth.md](deployment-auth.md)). The plan, as written:
+Done. coffre has a sign-in page of its own, with providers as configuration:
+GitHub (with an organisation check, and Enterprise Server), Google (optionally
+one Workspace domain), Microsoft Entra (one tenant), and any OpenID Connect
+issuer, which covers Okta, Auth0, Keycloak and the like. A provider is an
+interface, `SigninProvider`, for one that speaks neither protocol. Behind
+Cloudflare Access, Access's own page does the job instead
+([deployment-auth.md](deployment-auth.md)).
 
-Behind Cloudflare Access, the login page is Access's own. GitHub, Google,
-Microsoft, one-time email codes and any OIDC or SAML provider are login
-methods toggled in the Cloudflare dashboard, and the page takes a logo,
-colours and text. That covers both deployments above. Anywhere else, "first
-put an identity-aware proxy in front" is where most people would give up on
-self-hosting coffre. So coffre gets a sign-in page of its own: a second
-identity mode beside the proxy one, producing the same principal.
+- **Accounts bind to a provider's user, never to an email.** A first sign-in
+  binds a registered, verified email to the provider's stable user id; every
+  later sign-in must match it. Say Bob leaves and IT deletes his Google
+  account, but his personal GitHub account still lists bob@acme.example as
+  verified: he still cannot get in through the GitHub button.
+- **The CLI signs in with a device code**, which also works over SSH, and
+  machines use service tokens coffre issues.
+- **Sessions are coffre's**, kept on the server; ending one revokes it
+  rather than deleting a row.
 
-A deployment lists the buttons its page shows:
-
-```ts
-identity: signIn({
-  providers: [
-    google({ clientId, clientSecret, domain: 'acme.example' }),
-    github({ clientId, clientSecret }),
-    microsoft({ tenant: 'organizations', clientId, clientSecret }),
-    oidc({ label: 'Okta', issuer: 'https://acme.okta.com', clientId, clientSecret }),
-  ],
-  page: { title: 'Acme secrets', note: 'No access yet? Ask in #it.' },
-})
-```
-
-- **One provider implementation, not one per vendor.** `oidc({ issuer })`
-  reads everything else from the issuer's discovery document, so Okta, Entra,
-  GitLab, Auth0, Keycloak, Authentik, Clerk and WorkOS take configuration and
-  no code. It runs the authorization-code flow with PKCE on `oauth4webapi`,
-  which has no dependencies and comes from the author of `jose`. Not
-  better-auth: its security advisories cluster in exactly this flow, and it
-  updates and deletes rows in tables of its own, where coffre's runtime role
-  has no DELETE anywhere.
-- **A preset is defaults plus at most one quirk.** `google` checks the `hd`
-  claim when `domain` is set, so only that Workspace domain gets in.
-  `microsoft` handles the multi-tenant endpoints, whose discovery document
-  gives the issuer as a `{tenantid}` template rather than a URL.
-- **GitHub is the one exception.** It speaks OAuth 2 but not OIDC: there is no
-  ID token, and a private address is only visible through `GET /user/emails`.
-  It gets a small implementation of its own, which a developer tool can
-  justify.
-- **Anything else goes through a broker.** For SAML, LDAP or Bitbucket, run
-  Dex, Authentik or WorkOS, which speak those and present coffre with one OIDC
-  issuer.
-- **Accounts bind to a provider's user, never to an email.** The principal
-  directory stays the allowlist. A first sign-in binds a registered email to
-  the provider's stable user id (`sub`, or GitHub's numeric id), and only if
-  the provider says the address is verified. Every later sign-in must match
-  that binding, and a second provider can only be linked by its owner while
-  signed in through the first. Example: Bob leaves Acme and IT deletes his
-  Google account. His personal GitHub account still lists bob@acme.example as
-  verified, because GitHub checked it once, when he added it. Matching on
-  email would let him back in through the GitHub button.
-- **Sessions are coffre's.** They are kept on the server and short-lived, and
-  ending one sets `revoked_at` rather than deleting a row. Sign-in, refused
-  sign-in and sign-out each write an audit row. Owning sessions also lets
-  Reveal ask for a recent sign-in.
-- **The CLI and machines don't depend on which providers are on.**
-  `coffre login` opens the browser and receives the result on a local port.
-  CI jobs and sync get tokens coffre issues itself: prefixed, stored hashed,
-  expiring, one per service principal.
-- **The page is configured, not replaced.** Title, logo, a note, and the order
-  and labels of the buttons come from configuration, and the logo is inlined
-  so the CSP stays strict. Swapping in components of your own would mean
-  shipping source instead of a prebuilt bundle.
-- **Not in v1: passwords and email links.** Both need a mail sender and an
-  account-recovery path. Passkeys are a good later addition, as the recent
-  sign-in that Reveal asks for.
-- **Tests.** The dev IdP, today a stand-in for Cloudflare Access, also becomes
-  an OIDC issuer, so the suite covers both modes without an account anywhere.
-  Each preset gets a setup guide and a check against a real tenant before a
-  release.
-- **Offboarding: built, by hand.** Removing someone from coffre's directory
-  ends their sessions, CLI logins, tokens and linked accounts at once, and
-  lists the values they saw that still need rotating (see
-  [offboarding.md](offboarding.md)). Still open: noticing removals at the
-  identity provider by itself. Until then, someone removed there cannot sign
-  in again, but keeps an open session until it expires. Entra and Okta can
-  push removals over SCIM; Google Workspace would need its directory polled.
+Still open: noticing a removal at the identity provider by itself (over SCIM
+for Entra and Okta, or by polling Google Workspace's directory); until then,
+someone removed there cannot sign in again but keeps an open session until it
+ends. Passkeys would make a good recent sign-in for revealing.
 
 ## Later
 
-- Move existing DEKs from a local KEK to AWS KMS (`awsKms`, see
-  [keys.md](keys.md)) with the rewrap command of item 3. New versions can
-  already be wrapped by KMS; a Scaleway provider would fit the same interface,
-  but its Audit Trail does not log Decrypt.
-- Write a retention policy that defines the only sanctioned way to destroy
-  data.
+- **Rewrap**, a maintenance command that wraps every stored data key again
+  under the current KEK, leaving the ciphertext alone, so an old or leaked
+  KEK can be retired, and data written under a local key can move to KMS
+  ([keys.md](keys.md#moving-from-a-local-key)).
+- **Defences against the database's owner**, should the threat model need
+  them ([the limits](architecture.md#limits)): witnesses, where each CLI and
+  browser remembers the newest entry it saw and checks the log still holds
+  it; checkpoints copied off the box behind a retention lock; and each
+  member's state under the checkpoint's signature, so a cut the checkpoint
+  covers is refused at use rather than found at the next one.
+- **A slower or resumable full recomputation**, once the log passes about
+  250,000 entries ([the limits](architecture.md#limits)).
+- **Signing-key rotation.**
+- **The current-version pointer, and sync results as log entries**, two
+  schema tidy-ups from the storage review
+  ([design, plan step 11](design/single-database.md#implementation-plan)).
+- A retention policy: the only sanctioned way to destroy data.
 - Import from other secret managers such as Infisical, after settling how
   nested folders map to coffre's flat `project/environment/key` model.
-- Add an external-secrets `webhook` provider for Kubernetes workloads.
-- Commission an external review of the cryptography and authentication
-  boundary.
+- An external-secrets `webhook` provider for Kubernetes.
+- An external review of the cryptography and the sign-in boundary.
 
-## Open decisions
+## Decided
 
-1. ~~**Where it is published, and under what license.**~~ Decided: publicly,
-   at [erwinkn/coffre](https://github.com/erwinkn/coffre), under MIT. On npm,
-   `coffre` is taken; the `@coffre` scope looks free but that is unconfirmed.
-2. **Postgres for erwinkn.com:** whichever host already runs your stack, given
-   the ciphertext argument above.
-3. ~~**Sync model.**~~ Decided: a server-side engine (see phase 3).
+- **Where it is published:** publicly, at
+  [erwinkn/coffre](https://github.com/erwinkn/coffre), under MIT, and on npm
+  under the `@coffre` scope.
+- **Sync model:** a server-side engine (phase 3).
+- **Postgres for erwinkn.com:** PlanetScale Postgres (phase 3).

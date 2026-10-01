@@ -29,16 +29,23 @@ removed alice@acme.example: revoked 3 grants, 2 sessions, 1 linked account
 …
 ```
 
-Removal is one transaction, under the same lock that sign-in takes, so a
-sign-in racing it either finishes first and is revoked, or is refused:
+The vault removes them in one transaction of its own: it revokes every
+grant on every project, marks them removed, and moves their *generation* on.
+Every session, CLI login, service token, linked account and device approval
+carries the generation it was issued under, so all of them stop working at
+that moment, whatever happens next. The vault logs one `member.remove`, and
+one `access.revoke` per grant, so each project's log shows who lost access to
+it. Then the app marks the sessions, tokens and linked accounts revoked, so
+they no longer list as live.
 
-- every grant, on every project, is revoked;
-- every browser session and CLI login ends (for a service: every token);
-- every sign-in account linked to them (GitHub, Google, …) is unlinked;
-- they are marked removed, and every request checks that, in both auth modes;
-- the vault logs one `member.remove`, who did it and the generation that ends
-  every session and token from before, and one `access.revoke` per grant, so
-  each project's log shows who lost access to it.
+A sign-in racing a removal either finishes first and is cut off by the new
+generation, or is refused. Every request checks the member, in both sign-in
+modes, so a session still open elsewhere answers 401 on its next call.
+
+**A member whose record failed its check** (marked "Integrity check failed",
+because their row or grants were changed outside the vault) is removed the
+same way. That starts them over from what the log says of them, and
+re-adding them gives them back nothing the tampering added.
 
 **Adding someone back starts from nothing.** No grants, no sessions, and their
 sign-in account binds again by email the next time they sign in. A CLI login
@@ -93,13 +100,6 @@ Services are `token:<name>`. From the client, `coffre.members.get(member)` and
 
 Both need the instance owner role (root admins have it).
 
-Removal advances a membership generation in the vault's own transaction. Browser
-and CLI sessions, service tokens, linked identities and device approvals carry
-the generation they were issued under. Re-admission cannot revive them, even if
-the app's revocation transaction failed after the vault committed. Retrying
-admission retires any stale directory records. Account linking and device
-approval recheck the initiating membership while holding the removal lock.
-
-This does not make vault access changes atomic with the app audit log. A failed
-app transaction can still leave a committed vault change; the shared-database
-redesign must join those writes into one transaction.
+The generation is what makes removal stick. Even if the app's own clean-up
+failed after the vault committed, re-adding someone cannot revive a session,
+token or approval from before.

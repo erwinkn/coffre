@@ -22,6 +22,7 @@
     "check:pins": "node scripts/check-pins.mjs",
     "bump": "node scripts/bump.mjs",
     "check:contrast": "node scripts/check-contrast.mjs",
+    "check:docs": "node scripts/check-docs.mjs",
     "db:up": "docker compose up -d postgres",
     "db:migrate": "pnpm --dir packages/db run db:migrate",
     "db:generate": "pnpm --dir packages/db run db:generate",

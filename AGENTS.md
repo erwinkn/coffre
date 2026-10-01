@@ -102,7 +102,12 @@ calls made inside them, including errors swallowed by handlers or background job
   `init` for both kinds outside the workspace, diffs them against the examples,
   installs the tarballs (pnpm overrides, no workspace links), then typechecks,
   builds and runs conformance on each. It needs network for third-party packages.
-- `pnpm lint`, `pnpm check:pins`, `pnpm check:contrast` do not need Postgres.
+- `pnpm lint`, `pnpm check:pins`, `pnpm check:contrast` and `pnpm check:docs`
+  (every path, script and link the docs name exists) do not need Postgres.
+- `scripts/restore-drill.sh` (after `pnpm build`) backs up a seeded Workers
+  stack with `pg_dump`, restores it, and checks it came back, then the
+  wrong-KEK case, on ports 3400 to 3402 and 8481 (`docs/restore.md`). It
+  drops its databases and stops its processes however it ends.
 - `pnpm typecheck` covers every package, `dev/deployment` and both examples. It does
   not need Postgres, but on a fresh checkout it fails until `pnpm build` has run:
   that writes `packages/ui/src/routeTree.gen.ts`, and the `dist/` the deployments

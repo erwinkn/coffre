@@ -75,12 +75,12 @@ Then sign in at `PUBLIC_URL` as a root admin, and from a terminal:
 coffre login https://secrets.example.com
 ```
 
+Point a monitor at `<PUBLIC_URL>/readyz`: it turns red when the audit log
+stops taking writes or the vault stops checkpointing it.
+
 Everything coffre keeps is in the database: secrets, members, grants and
-the audit log. Back it up as one, and restore it with the escrowed keys.
-After an intentional restore, restart both processes before verifying with
-`coffre verify` and revealing a canary. A running process refuses to append
-behind a head it remembers. A complete older backup can still verify; the
-log alone cannot prove that it is the newest copy.
+the audit log. Back it up as one, keep the escrowed keys apart from it, and
+follow the [restore runbook](https://github.com/erwinkn/coffre/blob/main/docs/restore.md) to bring it back.
 
 `pnpm typecheck` checks the configuration against coffre's types.
 

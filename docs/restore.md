@@ -158,9 +158,8 @@ Before reopening traffic:
    token and the canary ([conformance.md](conformance.md)).
 
 Verification proves the restored history is the one coffre wrote, up to the
-backup's moment. It cannot show what was written after it: anything newer is
-gone, and a complete older backup verifies as well as a recent one. See
-[architecture.md](architecture.md#one-log-two-authors).
+backup's moment. It cannot show what was written after it: a complete older
+backup verifies as well as a recent one ([Limits](architecture.md#limits)).
 
 ## If the KEK is wrong
 
