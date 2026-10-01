@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
 
+import { migrateDatabase } from '@coffre/db/migrate';
+
 import {
   TEST_OWNER_DATABASE_URL,
   TEST_RUNTIME_DATABASE_URL,
@@ -131,6 +133,50 @@ test(
       );
     } finally {
       await runtime.end();
+      await owner.end();
+    }
+  },
+);
+
+test(
+  'migrate reasserts database privileges even when no migrations are pending',
+  postgresOnly('SQLite has no database privileges'),
+  async () => {
+    const owner = new pg.Pool({ connectionString: TEST_OWNER_DATABASE_URL });
+    const revoke = `DO $$ BEGIN
+      EXECUTE format(
+        'REVOKE CREATE, TEMPORARY ON DATABASE %I FROM PUBLIC, coffre_app, coffre_runtime, coffre_vault, coffre_vault_runtime',
+        current_database()
+      );
+    END $$`;
+    const privileges = () => owner.query<{ role: string; create: boolean; temporary: boolean }>(
+      `SELECT role,
+              has_database_privilege(role, current_database(), 'CREATE') AS create,
+              has_database_privilege(role, current_database(), 'TEMPORARY') AS temporary
+         FROM unnest(ARRAY['coffre_app', 'coffre_runtime', 'coffre_vault', 'coffre_vault_runtime']) AS role
+        ORDER BY role`,
+    );
+    try {
+      // A one-database dump leaves these privileges behind, including PUBLIC's defaults.
+      await owner.query(`DO $$ BEGIN
+        EXECUTE format(
+          'GRANT CREATE, TEMPORARY ON DATABASE %I TO PUBLIC, coffre_app, coffre_runtime, coffre_vault, coffre_vault_runtime',
+          current_database()
+        );
+      END $$`);
+      assert.ok((await privileges()).rows.every((row) => row.create && row.temporary));
+
+      for (let run = 0; run < 2; run++) {
+        await migrateDatabase(TEST_OWNER_DATABASE_URL);
+        assert.deepEqual((await privileges()).rows, [
+          { role: 'coffre_app', create: false, temporary: false },
+          { role: 'coffre_runtime', create: false, temporary: false },
+          { role: 'coffre_vault', create: false, temporary: false },
+          { role: 'coffre_vault_runtime', create: false, temporary: false },
+        ]);
+      }
+    } finally {
+      await owner.query(revoke);
       await owner.end();
     }
   },

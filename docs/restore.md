@@ -69,8 +69,9 @@ role logs in to the new branch as `<role>.<new branch id>`.
    ```
 
 5. Run `pnpm migrate` with the owner's URL for the new branch. It applies
-   nothing to a backup of this release, the missing migrations to an older
-   one, and refuses a database a newer release migrated.
+   missing migrations and reasserts the database-level privileges on every
+   run, even when the schema is current. It refuses a database a newer
+   release migrated.
 6. Redeploy both Workers with `pnpm run deploy`, the same keys and settings:
    a fresh deployment remembers no log head.
 7. Check the result, below, then reopen traffic. Promote the branch, or
@@ -80,8 +81,9 @@ role logs in to the new branch as `<role>.<new branch id>`.
 
 A `pg_dump` is a logical copy of one database: its tables, rows, privileges
 and row-level policies, but not the cluster's roles or their passwords, and
-not the privileges on the database itself. The restore puts those back by
-hand. This is what the drill runs.
+not the privileges on the database itself. Provision the roles before
+restoring; `pnpm migrate` reasserts the database privileges afterwards.
+This is what the drill runs.
 
 Back up, as the owner, as often as you can afford to lose:
 
@@ -112,22 +114,23 @@ Restore:
    pg_restore --exit-on-error --dbname="$OWNER_URL_OF_COFFRE_RESTORED" coffre-….dump
    ```
 
-4. Take back what Postgres grants every new database, which the dump does
-   not carry:
+4. Run `pnpm migrate` with the owner's URL for the restored database:
 
-   ```sql
-   REVOKE CREATE, TEMPORARY ON DATABASE coffre_restored
-     FROM PUBLIC, coffre_app, coffre_runtime, coffre_vault, coffre_vault_runtime;
+   ```sh
+   DATABASE_URL="$OWNER_URL_OF_COFFRE_RESTORED" pnpm migrate
    ```
 
-   Then check the app's login has exactly its privileges:
+   Besides applying missing migrations, every run revokes `CREATE` and
+   `TEMPORARY` on that database from `PUBLIC`, both runtime logins and their
+   group roles. This repairs the defaults a one-database dump leaves out,
+   even when no schema migration is pending.
+5. Check the app's login has exactly its privileges:
 
    ```sh
    COFFRE_RUNTIME_ROLE=coffre_runtime DATABASE_URL="<coffre_runtime URL>" \
      pnpm --dir packages/db run db:verify:runtime
    ```
 
-5. Run `pnpm migrate` with the owner's URL, as on PlanetScale.
 6. Point both components at the restored database, each with its own login:
    both Hyperdrive configs on Workers, or `DATABASE_URL` in `server.env` and
    `vault.env` on Node. Keep the same keys and settings.
@@ -184,8 +187,9 @@ this machine, against the compose Postgres, after `pnpm build`:
    member access, removes another whose browser session it keeps, issues a
    service token, and lets two heartbeats checkpoint the log.
 2. It backs the database up with `pg_dump --format=custom`.
-3. It restores into `coffre_drill_restored` as above, logins and database
-   privileges included, and checks the app login's privileges.
+3. It restores into `coffre_drill_restored`, provisions the logins, runs
+   migrate to reassert database privileges, and checks the app login's
+   privileges.
 4. It starts the example over the restored database with the same keys, and
    checks:
    - verification passes through the newest entry, and the backup's last
@@ -202,4 +206,5 @@ this machine, against the compose Postgres, after `pnpm build`:
 It drops both databases and stops what it started, however it ends. It
 does not drill a PlanetScale branch: there, the steps that differ are the
 restore itself and the login names, and a physical restore brings back the
-roles and database privileges this drill restores by hand.
+roles and database privileges. The local drill provisions the roles and
+reasserts database privileges through migrate.
