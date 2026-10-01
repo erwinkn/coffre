@@ -11,11 +11,14 @@ import { verifyCheckpoint, type SecretRef, type WrappedKey } from '@coffre/core/
 
 import { checkRootAdmins, resolveVaultConfig, type ResolvedVaultConfig } from '../src/config.ts';
 import { openLocalVault, type LocalVault } from '../src/local.ts';
-import { entryHash } from '../src/log.ts';
+import { entryHash, logKey } from '../src/log.ts';
 import type { Sqlite, SqlValue } from '../src/sqlite.ts';
 import { nodeSqlite } from '../src/sqlite-node.ts';
 import type { LogRow } from '../src/store.ts';
 import { openVault } from '../src/vault.ts';
+
+/** Every vault here signs, and chains its log, with this; `reopen` needs the same to verify it. */
+const SIGNING_KEY = randomBytes(32);
 
 const ROOT = 'user:root@acme.example';
 const ADA = 'user:ada@acme.example';
@@ -40,7 +43,7 @@ async function world(t: test.TestContext, config: Partial<ResolvedVaultConfig> =
     {
       keks: new KekRegistry(LocalKekProvider.generate('test-kek-1')),
       rootAdmins: ['root@acme.example'],
-      signingKey: randomBytes(32),
+      signingKey: SIGNING_KEY,
       bulkLimit: { count: 1000, windowMs: 15 * 60_000 },
       ...config,
     },
@@ -96,7 +99,7 @@ async function reopen(t: test.TestContext, path: string) {
   return openVault(db, {
     keks: new KekRegistry(LocalKekProvider.generate('test-kek-1')),
     rootAdmins: ['root@acme.example'],
-    signingKey: randomBytes(32),
+    signingKey: SIGNING_KEY,
     bulkLimit: { count: 1000, windowMs: 15 * 60_000 },
   });
 }
@@ -433,7 +436,7 @@ async function longLog(t: test.TestContext, n: number) {
   const vault = await openVault(db, {
     keks: new KekRegistry(LocalKekProvider.generate('test-kek-1')),
     rootAdmins: ['root@acme.example'],
-    signingKey: randomBytes(32),
+    signingKey: SIGNING_KEY,
     bulkLimit: { count: 1000, windowMs: 15 * 60_000 },
   });
   t.after(() => {
@@ -450,8 +453,12 @@ async function longLog(t: test.TestContext, n: number) {
   return { vault, db, path };
 }
 
-/** Rewrite entry `seq` in the file, as someone holding it could, and re-chain what follows when `rechain`. */
-function rewrite(path: string, seq: number, rechain: boolean) {
+/**
+ * Rewrite entry `seq` in the file, as someone holding it could, and re-chain
+ * what follows under `rechain`: the vault's log key for someone who also
+ * holds its configuration, any other for someone who does not.
+ */
+function rewrite(path: string, seq: number, rechain: Uint8Array | null) {
   const file = new DatabaseSync(path);
   try {
     file.exec('DROP TRIGGER log_no_update');
@@ -459,7 +466,7 @@ function rewrite(path: string, seq: number, rechain: boolean) {
     let prevHash = rows[0].prevHash;
     for (const row of rechain ? rows : rows.slice(0, 1)) {
       const actor = row.seq === seq ? BOB : row.actor;
-      const hash = rechain ? entryHash(prevHash, { ...row, actor }) : row.hash;
+      const hash = rechain ? entryHash(rechain, prevHash, { ...row, actor }) : row.hash;
       file.prepare('UPDATE log SET actor = ?, prev_hash = ?, hash = ? WHERE seq = ?').run(actor, prevHash, hash, row.seq);
       prevHash = hash;
     }
@@ -491,7 +498,7 @@ test('an entry edited in place is found on its page, or by a full check', async 
   assert.ok((await vault.log({ actor: ROOT })).ok);
 
   // Off the page and edited in place: only a full check rehashes it.
-  rewrite(path, 3, false);
+  rewrite(path, 3, null);
   const view = await vault.log({ actor: ROOT, limit: 10 });
   assert.ok(view.ok && view.verification.ok);
   const onPage = await vault.log({ actor: ROOT, before: 10 });
@@ -500,15 +507,22 @@ test('an entry edited in place is found on its page, or by a full check', async 
   assert.deepEqual(full.ok && full.verification, { ok: false, failedAtSeq: 3, reason: 'hash does not match the entry' });
 });
 
-test('a rewrite re-chained to the head is found against the head the vault last verified', async (t) => {
+test('a rewrite re-chained without the vault\'s key is found by any full check', async (t) => {
+  const { path } = await longLog(t, 50);
+  rewrite(path, 3, randomBytes(32));
+  const fresh = await (await reopen(t, path)).log({ actor: ROOT, full: true });
+  assert.deepEqual(fresh.ok && fresh.verification, { ok: false, failedAtSeq: 3, reason: 'hash does not match the entry' });
+});
+
+test('a rewrite re-chained with the vault\'s key is found against the head it last verified', async (t) => {
   const { vault, path } = await longLog(t, 50);
   assert.ok((await vault.log({ actor: ROOT })).ok);
 
-  rewrite(path, 3, true);
+  rewrite(path, 3, logKey(SIGNING_KEY));
   const view = await vault.log({ actor: ROOT, limit: 10 });
   assert.deepEqual(view.ok && view.verification, { ok: false, failedAtSeq: 51, reason: 'changed since the vault last verified it' });
-  // A vault that never saw the head before cannot tell: the chain is
-  // unkeyed. The heads checkpoints signed can; see below.
+  // A vault that never saw the head before cannot tell: whoever holds the
+  // key can chain anything. The heads checkpoints signed can; see below.
   const unaware = await (await reopen(t, path)).log({ actor: ROOT, full: true });
   assert.ok(unaware.ok && unaware.verification.ok);
 });
@@ -556,9 +570,10 @@ test('a checkpoint signs the vault log\'s head too, and none is signed over that
   const { publicKey } = await w.vault.latestCheckpoint();
   assert.equal(await verifyCheckpoint({ ...first.checkpoint, vault: { ...head, seq: 1 } }, publicKey), false);
 
-  // Someone holding the file rewrites an entry the checkpoint covers, and chains again.
+  // Someone holding the file and the vault's keys rewrites an entry the
+  // checkpoint covers, and chains again.
   await member(w, BOB, [[w.dev, 'viewer']]);
-  rewrite(w.path, 1, true);
+  rewrite(w.path, 1, logKey(SIGNING_KEY));
   const next = await w.vault.checkpoint({ seq: 20, headHash: 'b'.repeat(64), previous: { seq: 10, hash: 'a'.repeat(64) } });
   assert.equal(!next.ok && next.refusal.code, 'log_broken');
 

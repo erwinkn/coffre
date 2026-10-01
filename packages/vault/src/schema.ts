@@ -44,11 +44,11 @@ const MIGRATIONS: readonly (readonly string[])[] = [
     // Every decision reads one principal's grants.
     `CREATE INDEX grants_by_principal ON grants (principal)`,
 
-    // The vault's log. Each row commits to the one before it (`hash` is
-    // SHA-256 over `prev_hash` and the row), and the only code that touches
-    // this table appends. Triggers refuse UPDATE and DELETE besides, so a bug
-    // cannot rewrite it either; only someone holding the raw storage can, and
-    // the chain shows it. `actor` is who asked: the principal an unwrap is
+    // The vault's log. Each row commits to the one before it (`hash` is an
+    // HMAC over `prev_hash` and the row, keyed from the signing key), and the
+    // only code that touches this table appends. Triggers refuse UPDATE and
+    // DELETE besides, so a bug cannot rewrite it either; only someone holding
+    // the raw storage can, and without the key the chain shows it. `actor` is who asked: the principal an unwrap is
     // for, or who changed access. `code` is why a refusal was one. `subject`
     // is what it was about: a secret's path, a principal, the app's log.
     // `detail` is everything else, as JSON: ids, roles, the purpose of a read.

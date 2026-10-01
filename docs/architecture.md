@@ -342,9 +342,9 @@ principal reads again as the window rolls on.
 The app's audit log is hash-chained with `auditChainKey`, which catches
 someone who can write the database but not read the app's config. Someone
 who holds the app could rewrite the log and chain it again. The vault's log
-has the mirror gap: its chain is a plain SHA-256, so someone who can write
-the vault's store could rewrite it and hash it again. So after each
-heartbeat, the app has the vault sign both heads at once:
+is the mirror: its chain is keyed from `signingKey`, and someone who holds
+the vault could rewrite it and chain it again. So after each heartbeat, the
+app has the vault sign both heads at once:
 
 ```ts
 await vault.checkpoint({ seq: 812, headHash, previous: { seq: 640, hash } });
@@ -387,11 +387,13 @@ from it.
 
 What checkpoints do not catch:
 
-- **Entries appended to the vault log by someone who can write its store.**
-  The chain is unkeyed, so a forged `grant.create` entry, appended with the
-  grant it explains, hashes and replays cleanly. Keying the chain with a
-  secret from the vault's config would close it, at the cost of no one else
-  being able to recompute it.
+- **Entries appended to the vault log by someone who holds its keys.** The
+  chain is an HMAC under a key derived from `signingKey`, so a copy of the
+  store alone (a backup, `vault.db` on a shared disk) cannot take a forged
+  `grant.create` entry that verifies. Whoever holds the configuration as
+  well can append one, with the grant it explains, and it replays cleanly.
+  The cost of the key: no one without it can recompute the chain, only check
+  the heads the vault signed.
 - **A rewrite of either log since the last checkpoint.** Heartbeats bound it
   to minutes; for the app log the keyed chain covers it too.
 - **A new signing key.** Each checkpoint is checked with the vault's current

@@ -39,7 +39,7 @@ import {
 
 import { signer, type Signer } from './checkpoint.ts';
 import type { BulkLimit, ResolvedVaultConfig } from './config.ts';
-import { append, carries, entry, head, UNVERIFIED, verify, type Anchor, type Appended } from './log.ts';
+import { append, carries, entry, head, logKey, UNVERIFIED, verify, type Anchor, type Appended } from './log.ts';
 import { replay } from './replay.ts';
 import type { Sqlite } from './sqlite.ts';
 import { openStore, type GrantRow, type LogRow, type Store } from './store.ts';
@@ -98,6 +98,8 @@ class VaultService implements Vault {
   readonly #store: Store;
   readonly #config: ResolvedVaultConfig;
   readonly #signer: Signer;
+  /** What the log is chained with; `logKey` in log.ts. */
+  readonly #logKey: Buffer;
   readonly #now: () => number;
   /** How far the log is verified; `verify` in log.ts. In memory only: the store cannot vouch for itself. */
   #verified: Anchor = UNVERIFIED;
@@ -107,6 +109,7 @@ class VaultService implements Vault {
     this.#store = store;
     this.#config = config;
     this.#signer = signer;
+    this.#logKey = logKey(config.signingKey);
     this.#now = now;
   }
 
@@ -122,12 +125,12 @@ class VaultService implements Vault {
       return this.#store.transaction(() => {
         const log: Appended[] = [];
         const result = decision(log);
-        append(this.#store, at, log);
+        append(this.#store, this.#logKey, at, log);
         return { ok: true as const, ...result };
       });
     } catch (error) {
       if (!(error instanceof Refused)) throw error;
-      this.#store.transaction(() => append(this.#store, at, error.entries));
+      this.#store.transaction(() => append(this.#store, this.#logKey, at, error.entries));
       return { ok: false, refusal: error.refusal };
     }
   }
@@ -594,7 +597,7 @@ class VaultService implements Vault {
       // This log too: still the one signed last, and whole from there. So a
       // rewrite of it is never signed over, and the app's record of the head
       // signed before shows it.
-      const { verification: held } = verify(this.#store, [], latest?.vault ?? UNVERIFIED, false);
+      const { verification: held } = verify(this.#store, this.#logKey, [], latest?.vault ?? UNVERIFIED, false);
       const vault = head(this.#store);
       const signedAt = iso(at);
       const signature =
@@ -661,7 +664,7 @@ class VaultService implements Vault {
 
   /** `shown`, and the chain since it was last verified; `verify` in log.ts. */
   #verifyNew(shown: readonly LogRow[]): LogVerification {
-    const { verification, anchor } = verify(this.#store, shown, this.#verified, false);
+    const { verification, anchor } = verify(this.#store, this.#logKey, shown, this.#verified, false);
     this.#verified = anchor;
     return verification;
   }
@@ -671,7 +674,7 @@ class VaultService implements Vault {
    * checkpoint say it carries, and the members and grants replayed from it.
    */
   #verifyAll(shown: readonly LogRow[], through: LogHead | null, at: number): LogVerification {
-    const { verification, anchor } = verify(this.#store, shown, this.#verified, true);
+    const { verification, anchor } = verify(this.#store, this.#logKey, shown, this.#verified, true);
     this.#verified = anchor;
     if (!verification.ok) return verification;
     const signed = this.#latest()?.vault ?? null;
