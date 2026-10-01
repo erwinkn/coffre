@@ -5,6 +5,7 @@ import { SNAPSHOT } from '@coffre/db/dialect';
 
 import { actorParts, appLogKey } from '../db/audit.ts';
 import {
+  auditActionCounts,
   auditHead,
   auditPage,
   auditRange,
@@ -72,6 +73,9 @@ export const DETAIL_ACTIONS = [
   'audit.checkpoint',
 ] as const;
 
+/** Detail entries a page left out, by action. */
+export type HiddenCount = { action: string; count: number };
+
 export type AuditVerification =
   | {
       ok: true;
@@ -115,11 +119,17 @@ export type AuditQuery = {
  * Newest first, both authors. Owners read everything; anyone else reads the
  * projects and environments where they hold `audit.read`, and nothing else:
  * an entry about no place, such as a member's removal, is owners' alone.
+ *
+ * Without `detail`, the page says what it left out: the detail entries the
+ * same filters match in the page's stretch of the log, by action. A page's
+ * stretch runs from its oldest entry, or the log's first on the last page,
+ * up to where it started, the head or `before`: pages tile the log, and
+ * each hidden entry is counted on exactly one.
  */
 export async function listAudit(
   ctx: ApiContext,
   query: AuditQuery,
-): Promise<{ entries: AuditEntryView[] }> {
+): Promise<{ entries: AuditEntryView[]; hidden?: HiddenCount[] }> {
   const filter: AuditFilter = {
     decision: query.decision,
     excludeActions: query.detail === true ? undefined : DETAIL_ACTIONS,
@@ -156,7 +166,13 @@ export async function listAudit(
   if (query.before !== undefined) filter.beforeSeq = BigInt(query.before);
 
   const rows = await auditPage(ctx.db, filter);
-  return { entries: rows.map(entryView) };
+  const entries = rows.map(entryView);
+  if (query.detail === true) return { entries };
+  const last = rows.length < query.limit ? undefined : rows[rows.length - 1].seq;
+  const hidden = await auditActionCounts(ctx.db, filter, DETAIL_ACTIONS, last);
+  // Most of what is hidden first.
+  hidden.sort((a, b) => b.count - a.count || (a.action < b.action ? -1 : a.action > b.action ? 1 : 0));
+  return { entries, hidden };
 }
 
 const DETAIL = new Set<string>(DETAIL_ACTIONS);

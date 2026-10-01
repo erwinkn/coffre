@@ -739,38 +739,69 @@ export type AuditFilter = {
   limit: number;
 };
 
+/** The conditions of `filter`, as a WHERE clause on the log. */
+function auditWhere(auditLog: ReturnType<typeof tablesOf>['auditLog'], filter: Omit<AuditFilter, 'limit'>): SQL | undefined {
+  const { within } = filter;
+  return and(
+    within === undefined
+      ? undefined
+      : or(inArray(auditLog.projectId, within.projectIds), inArray(auditLog.environmentId, within.environmentIds)),
+    filter.projectId === undefined ? undefined : eq(auditLog.projectId, filter.projectId),
+    filter.environmentId === undefined ? undefined : eq(auditLog.environmentId, filter.environmentId),
+    filter.secretId === undefined ? undefined : eq(auditLog.secretId, filter.secretId),
+    filter.actors === undefined ? undefined : inArray(auditLog.actor, filter.actors),
+    filter.decision === undefined ? undefined : eq(auditLog.decision, filter.decision),
+    filter.excludeActions === undefined || filter.excludeActions.length === 0
+      ? undefined
+      : notInArray(auditLog.action, [...filter.excludeActions]),
+    filter.beforeSeq === undefined ? undefined : lt(auditLog.seq, filter.beforeSeq),
+  );
+}
+
 /**
  * A page of the log, both authors, newest first, with the slugs of the
  * places each entry names and the key of its secret.
  */
 export async function auditPage(db: Queryable, filter: AuditFilter) {
   const { auditLog, projects, environments, secrets } = tablesOf(db);
-  const { within } = filter;
   const rows = await db
     .select({ ...auditColumns(auditLog), project: projects.slug, environment: environments.slug, key: secrets.key })
     .from(auditLog)
     .leftJoin(projects, eq(projects.id, auditLog.projectId))
     .leftJoin(environments, eq(environments.id, auditLog.environmentId))
     .leftJoin(secrets, eq(secrets.id, auditLog.secretId))
-    .where(
-      and(
-        within === undefined
-          ? undefined
-          : or(inArray(auditLog.projectId, within.projectIds), inArray(auditLog.environmentId, within.environmentIds)),
-        filter.projectId === undefined ? undefined : eq(auditLog.projectId, filter.projectId),
-        filter.environmentId === undefined ? undefined : eq(auditLog.environmentId, filter.environmentId),
-        filter.secretId === undefined ? undefined : eq(auditLog.secretId, filter.secretId),
-        filter.actors === undefined ? undefined : inArray(auditLog.actor, filter.actors),
-        filter.decision === undefined ? undefined : eq(auditLog.decision, filter.decision),
-        filter.excludeActions === undefined || filter.excludeActions.length === 0
-          ? undefined
-          : notInArray(auditLog.action, [...filter.excludeActions]),
-        filter.beforeSeq === undefined ? undefined : lt(auditLog.seq, filter.beforeSeq),
-      ),
-    )
+    .where(auditWhere(auditLog, filter))
     .orderBy(desc(auditLog.seq))
     .limit(filter.limit);
   return rows.map(shown);
+}
+
+/**
+ * How many entries of each of `actions` match `filter`, but for its
+ * exclusions and limit, from `fromSeq` on: one grouped count. Both authors
+ * are named so that the log's (author, action, seq) index serves it, a
+ * range per action, without reading the entries themselves when nothing
+ * else is filtered on.
+ */
+export async function auditActionCounts(
+  db: Queryable,
+  filter: AuditFilter,
+  actions: readonly string[],
+  fromSeq?: bigint,
+): Promise<{ action: string; count: number }[]> {
+  const { auditLog } = tablesOf(db);
+  return db
+    .select({ action: auditLog.action, count: count() })
+    .from(auditLog)
+    .where(
+      and(
+        inArray(auditLog.author, ['app', 'vault']),
+        inArray(auditLog.action, [...actions]),
+        fromSeq === undefined ? undefined : gte(auditLog.seq, fromSeq),
+        auditWhere(auditLog, { ...filter, excludeActions: undefined }),
+      ),
+    )
+    .groupBy(auditLog.action);
 }
 
 /**

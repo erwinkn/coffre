@@ -5,6 +5,7 @@ import type { CoffreClient } from '@coffre/client';
 import { assignableToEnvironment, ROLES } from '@coffre/core/access';
 import { and, asc, eq } from 'drizzle-orm';
 
+import { writeAuditHeartbeat } from '../src/heartbeat.ts';
 import { auditLog, vaultMembers } from './db/tables.ts';
 import {
   clientFor,
@@ -65,6 +66,18 @@ test('an auditor reads audit data without being able to read secrets', async () 
   await assert.rejects(auditor.secrets.reveal('market/prod/API_KEY'), { status: 403 });
   await assert.rejects(auditor.secrets.reveal('market/prod'), { status: 403 });
   await assert.rejects(auditor.secrets.list('market/prod'), { status: 403 });
+});
+
+test('a page says what it hides, as far as its reader may see', async () => {
+  await root.access.set(AUDITOR, { market: 'auditor' });
+  assert.equal(await writeAuditHeartbeat(db.runtime, deps.chainKey, deps.vault, { warn: () => assert.fail('the heartbeat warned') }), true);
+  // The write's key.wrap is in market; the heartbeat and its checkpoint are in no place, so owners' alone.
+  assert.deepEqual((await auditor.audit.list()).hidden, [{ action: 'key.wrap', count: 1 }]);
+  assert.deepEqual((await root.audit.list()).hidden, [
+    { action: 'audit.checkpoint', count: 1 },
+    { action: 'audit.heartbeat', count: 1 },
+    { action: 'key.wrap', count: 1 },
+  ]);
 });
 
 test('only instance-wide administrators can verify the complete chain', async () => {
