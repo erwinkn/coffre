@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "40fcae01-7178-4adb-a327-d53985128cc1",
+  "id": "fb7753af-5668-47bd-814a-c038dd4856c8",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "audit_chain_head": {
@@ -287,6 +287,26 @@
           "columns": [
             "author",
             "action",
+            "seq"
+          ],
+          "isUnique": false
+        },
+        "audit_log_releases_idx": {
+          "name": "audit_log_releases_idx",
+          "columns": [
+            "author",
+            "actor",
+            "action",
+            "decision",
+            "occurred_at"
+          ],
+          "isUnique": false
+        },
+        "audit_log_subject_idx": {
+          "name": "audit_log_subject_idx",
+          "columns": [
+            "author",
+            "subject_principal",
             "seq"
           ],
           "isUnique": false
@@ -1659,6 +1679,224 @@
         "syncs_last_status_check": {
           "name": "syncs_last_status_check",
           "value": "\"syncs\".\"last_status\" IS NULL OR \"syncs\".\"last_status\" IN ('ok', 'partial', 'failed')"
+        }
+      }
+    },
+    "vault_grants": {
+      "name": "vault_grants",
+      "columns": {
+        "principal": {
+          "name": "principal",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "project_id": {
+          "name": "project_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "environment_id": {
+          "name": "environment_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "role": {
+          "name": "role",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "granted_at": {
+          "name": "granted_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "granted_by": {
+          "name": "granted_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "vault_grants_on_project": {
+          "name": "vault_grants_on_project",
+          "columns": [
+            "principal",
+            "project_id"
+          ],
+          "isUnique": true
+        },
+        "vault_grants_on_environment": {
+          "name": "vault_grants_on_environment",
+          "columns": [
+            "principal",
+            "environment_id"
+          ],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {
+        "vault_grants_principal_fkey": {
+          "name": "vault_grants_principal_fkey",
+          "tableFrom": "vault_grants",
+          "tableTo": "vault_members",
+          "columnsFrom": [
+            "principal"
+          ],
+          "columnsTo": [
+            "principal"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "vault_grants_project_id_fkey": {
+          "name": "vault_grants_project_id_fkey",
+          "tableFrom": "vault_grants",
+          "tableTo": "projects",
+          "columnsFrom": [
+            "project_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "vault_grants_environment_id_fkey": {
+          "name": "vault_grants_environment_id_fkey",
+          "tableFrom": "vault_grants",
+          "tableTo": "environments",
+          "columnsFrom": [
+            "environment_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "vault_grants_one_place": {
+          "name": "vault_grants_one_place",
+          "value": "(\"vault_grants\".\"project_id\" IS NULL) <> (\"vault_grants\".\"environment_id\" IS NULL)"
+        },
+        "vault_grants_role_check": {
+          "name": "vault_grants_role_check",
+          "value": "\"vault_grants\".\"role\" IN ('viewer', 'developer', 'maintainer', 'access-manager', 'auditor', 'owner')"
+        },
+        "vault_grants_environment_role_check": {
+          "name": "vault_grants_environment_role_check",
+          "value": "\"vault_grants\".\"environment_id\" IS NULL OR \"vault_grants\".\"role\" IN ('viewer', 'developer', 'auditor')"
+        }
+      }
+    },
+    "vault_members": {
+      "name": "vault_members",
+      "columns": {
+        "principal": {
+          "name": "principal",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "owner": {
+          "name": "owner",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": false
+        },
+        "generation": {
+          "name": "generation",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_by": {
+          "name": "created_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "status_changed_at": {
+          "name": "status_changed_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "status_changed_by": {
+          "name": "status_changed_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "vault_members_principal_check": {
+          "name": "vault_members_principal_check",
+          "value": "(\"vault_members\".\"principal\" GLOB 'user:?*' OR \"vault_members\".\"principal\" GLOB 'token:?*' OR \"vault_members\".\"principal\" GLOB 'sync:?*')\n        AND substr(\"vault_members\".\"principal\", instr(\"vault_members\".\"principal\", ':') + 1, 1) <> ':'\n        AND instr(\"vault_members\".\"principal\", ' ') = 0 AND instr(\"vault_members\".\"principal\", char(9)) = 0\n        AND instr(\"vault_members\".\"principal\", char(10)) = 0 AND instr(\"vault_members\".\"principal\", char(13)) = 0"
+        },
+        "vault_members_user_lowercase": {
+          "name": "vault_members_user_lowercase",
+          "value": "\"vault_members\".\"principal\" NOT LIKE 'user:%' OR \"vault_members\".\"principal\" = lower(\"vault_members\".\"principal\")"
+        },
+        "vault_members_status_check": {
+          "name": "vault_members_status_check",
+          "value": "\"vault_members\".\"status\" IN ('active', 'removed')"
+        },
+        "vault_members_owner_check": {
+          "name": "vault_members_owner_check",
+          "value": "NOT \"vault_members\".\"owner\" OR (\"vault_members\".\"status\" = 'active' AND \"vault_members\".\"principal\" LIKE 'user:%')"
+        },
+        "vault_members_generation_check": {
+          "name": "vault_members_generation_check",
+          "value": "\"vault_members\".\"generation\" >= 0"
         }
       }
     }

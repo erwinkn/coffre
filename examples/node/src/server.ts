@@ -16,7 +16,7 @@ const server = await serve({
   database: env('DATABASE_URL'),
   vault: connectVault(env('VAULT_SOCKET')),
   // Or the vault in this process, where keeping its keys apart matters less:
-  // vault: await localVault({ store: 'vault.db', kek: …, rootAdmins: […], signingKey: … }),
+  // vault: await localVault({ database: env('DATABASE_URL'), kek: …, rootAdmins: […], signingKey: … }),
   auth: signin({
     providers: [
       github({

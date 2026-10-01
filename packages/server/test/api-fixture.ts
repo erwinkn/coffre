@@ -1,7 +1,4 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import { rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 
 import { createClient, type CoffreClient } from '@coffre/client';
 import type { Vault } from '@coffre/core/vault';
@@ -13,7 +10,7 @@ import type { ApiContext } from '../src/api/context.ts';
 import { serveApi } from '../src/api/router.ts';
 import type { SigninService } from '../src/api/signin.ts';
 import { SyncRunner } from '../src/api/syncs.ts';
-import { emptyLog } from './db/engine.ts';
+import { emptyLog, openVaultDatabase } from './db/engine.ts';
 import { assertOutsideTransaction } from './transaction-guard.ts';
 
 export type FixtureDeps = {
@@ -26,16 +23,15 @@ export type FixtureDeps = {
 };
 
 /**
- * The vault in this process, over a libSQL file of its own, opened on first
- * use. `resetDatabase` starts every one of them afresh, so a suite's tests
- * do not share members, grants, checkpoints or bulk-limit counts.
+ * The vault in this process, over the suite's database as the vault's own
+ * login, opened on first use. `resetDatabase` empties its members, grants
+ * and entries with everything else, and starts every one of them afresh, so
+ * a suite's tests do not share them, checkpoints or bulk-limit counts.
  */
 export type TestVault = Vault & {
   /** The raw KEK and signing key, which no database may hold. */
   kek: Buffer;
   signingKey: Buffer;
-  /** The vault's file, while it is open. */
-  file(): string | null;
   /** Move the vault's clock, for expiry and the bulk limit. */
   advance(ms: number): void;
   reset(): Promise<void>;
@@ -47,21 +43,18 @@ export function testVault(rootAdmins: readonly string[], config: Pick<VaultConfi
   const kek = randomBytes(32);
   const signingKey = randomBytes(32);
   let offset = 0;
-  let file: string | null = null;
   let current: Promise<LocalVault> | null = null;
-  const open = () => {
-    file = join(tmpdir(), `coffre-vault-${randomUUID()}.db`);
-    return localVault(
+  const open = async () =>
+    localVault(
       {
-        store: file,
+        database: await openVaultDatabase(),
         kek: { id: 'test-kek-1', key: kek.toString('base64') },
         rootAdmins,
         signingKey: signingKey.toString('base64'),
         ...config,
       },
-      { now: () => Date.now() + offset },
+      { clockOffset: () => offset },
     );
-  };
   const call = (name: keyof Vault) => async (...args: unknown[]) => {
     assertOutsideTransaction(name);
     return ((await (current ??= open()))[name] as (...args: unknown[]) => Promise<unknown>)(...args);
@@ -81,16 +74,10 @@ export function testVault(rootAdmins: readonly string[], config: Pick<VaultConfi
     verifyLog: call('verifyLog'),
     kek,
     signingKey,
-    file: () => file,
     advance: (ms: number) => void (offset += ms),
     async reset() {
-      const opened = current;
       current = null;
       offset = 0;
-      if (opened === null) return;
-      (await opened).close();
-      for (const suffix of ['', '-wal', '-shm']) rmSync(`${file}${suffix}`, { force: true });
-      file = null;
     },
   } as TestVault;
   vaults.add(vault);
@@ -168,6 +155,8 @@ export async function resetDatabase(owner: Database): Promise<void> {
     secretVersions,
     syncKeys,
     syncs,
+    vaultGrants,
+    vaultMembers,
   } = tablesOf(owner);
   await owner.delete(syncKeys);
   await owner.delete(syncs);
@@ -175,6 +164,8 @@ export async function resetDatabase(owner: Database): Promise<void> {
   await owner.delete(deviceAuthorizations);
   await owner.delete(identities);
   await emptyLog(owner);
+  await owner.delete(vaultGrants);
+  await owner.delete(vaultMembers);
   await owner.update(auditHeartbeat).set({ lastSeq: 0n });
   await owner.update(secrets).set({ currentVersionId: null });
   await owner.delete(secretVersions);

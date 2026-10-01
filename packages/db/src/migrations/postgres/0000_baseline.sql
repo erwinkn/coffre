@@ -215,6 +215,37 @@ CREATE TABLE "syncs" (
 	CONSTRAINT "syncs_last_status_check" CHECK ("syncs"."last_status" IS NULL OR "syncs"."last_status" IN ('ok', 'partial', 'failed'))
 );
 --> statement-breakpoint
+CREATE TABLE "vault_grants" (
+	"principal" text NOT NULL,
+	"project_id" uuid,
+	"environment_id" uuid,
+	"role" text NOT NULL,
+	"expires_at" bigint,
+	"granted_at" bigint NOT NULL,
+	"granted_by" text NOT NULL,
+	CONSTRAINT "vault_grants_on_project" UNIQUE("principal","project_id"),
+	CONSTRAINT "vault_grants_on_environment" UNIQUE("principal","environment_id"),
+	CONSTRAINT "vault_grants_one_place" CHECK (("vault_grants"."project_id" IS NULL) <> ("vault_grants"."environment_id" IS NULL)),
+	CONSTRAINT "vault_grants_role_check" CHECK ("vault_grants"."role" IN ('viewer', 'developer', 'maintainer', 'access-manager', 'auditor', 'owner')),
+	CONSTRAINT "vault_grants_environment_role_check" CHECK ("vault_grants"."environment_id" IS NULL OR "vault_grants"."role" IN ('viewer', 'developer', 'auditor'))
+);
+--> statement-breakpoint
+CREATE TABLE "vault_members" (
+	"principal" text PRIMARY KEY NOT NULL,
+	"status" text NOT NULL,
+	"owner" boolean DEFAULT false NOT NULL,
+	"generation" integer DEFAULT 0 NOT NULL,
+	"created_at" bigint NOT NULL,
+	"created_by" text NOT NULL,
+	"status_changed_at" bigint NOT NULL,
+	"status_changed_by" text NOT NULL,
+	CONSTRAINT "vault_members_principal_check" CHECK ("vault_members"."principal" ~ '^(user|token|sync):[^[:space:]:][^[:space:]]*$'),
+	CONSTRAINT "vault_members_user_lowercase" CHECK ("vault_members"."principal" NOT LIKE 'user:%' OR "vault_members"."principal" = lower("vault_members"."principal")),
+	CONSTRAINT "vault_members_status_check" CHECK ("vault_members"."status" IN ('active', 'removed')),
+	CONSTRAINT "vault_members_owner_check" CHECK (NOT "vault_members"."owner" OR ("vault_members"."status" = 'active' AND "vault_members"."principal" LIKE 'user:%')),
+	CONSTRAINT "vault_members_generation_check" CHECK ("vault_members"."generation" >= 0)
+);
+--> statement-breakpoint
 ALTER TABLE "audit_log" ADD CONSTRAINT "audit_log_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "audit_log" ADD CONSTRAINT "audit_log_environment_id_fkey" FOREIGN KEY ("environment_id") REFERENCES "public"."environments"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "audit_log" ADD CONSTRAINT "audit_log_secret_id_fkey" FOREIGN KEY ("secret_id") REFERENCES "public"."secrets"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
@@ -234,12 +265,17 @@ ALTER TABLE "sync_keys" ADD CONSTRAINT "sync_keys_sync_id_fkey" FOREIGN KEY ("sy
 ALTER TABLE "sync_keys" ADD CONSTRAINT "sync_keys_secret_version_id_fkey" FOREIGN KEY ("secret_version_id") REFERENCES "public"."secret_versions"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "syncs" ADD CONSTRAINT "syncs_environment_in_project" FOREIGN KEY ("environment_id","project_id") REFERENCES "public"."environments"("id","project_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "syncs" ADD CONSTRAINT "syncs_credential_secret_id_fkey" FOREIGN KEY ("credential_secret_id") REFERENCES "public"."secrets"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "vault_grants" ADD CONSTRAINT "vault_grants_principal_fkey" FOREIGN KEY ("principal") REFERENCES "public"."vault_members"("principal") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "vault_grants" ADD CONSTRAINT "vault_grants_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "vault_grants" ADD CONSTRAINT "vault_grants_environment_id_fkey" FOREIGN KEY ("environment_id") REFERENCES "public"."environments"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "audit_log_project_idx" ON "audit_log" USING btree ("project_id","seq");--> statement-breakpoint
 CREATE INDEX "audit_log_environment_idx" ON "audit_log" USING btree ("environment_id","seq");--> statement-breakpoint
 CREATE INDEX "audit_log_secret_idx" ON "audit_log" USING btree ("secret_id","seq");--> statement-breakpoint
 CREATE INDEX "audit_log_actor_idx" ON "audit_log" USING btree ("actor","seq");--> statement-breakpoint
 CREATE INDEX "audit_log_operation_idx" ON "audit_log" USING btree ("operation_id","seq");--> statement-breakpoint
 CREATE INDEX "audit_log_action_idx" ON "audit_log" USING btree ("author","action","seq");--> statement-breakpoint
+CREATE INDEX "audit_log_releases_idx" ON "audit_log" USING btree ("author","actor","action","decision","occurred_at");--> statement-breakpoint
+CREATE INDEX "audit_log_subject_idx" ON "audit_log" USING btree ("author","subject_principal","seq");--> statement-breakpoint
 CREATE INDEX "credentials_principal_idx" ON "credentials" USING btree ("principal_type","principal_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "identities_active_subject" ON "identities" USING btree ("provider","issuer_hash","active_subject");--> statement-breakpoint
 CREATE INDEX "identities_principal_idx" ON "identities" USING btree ("principal_type","principal_id");--> statement-breakpoint
@@ -275,17 +311,27 @@ CREATE TRIGGER audit_log_no_truncate BEFORE TRUNCATE ON audit_log
     FOR EACH STATEMENT EXECUTE FUNCTION audit_log_append_only();
 --> statement-breakpoint
 
--- The server connects as coffre_runtime, a login provisioned outside
--- coffre (its password is never ours), whose only rights come from
--- coffre_app: read and insert, UPDATE on named columns only, and never
--- DELETE. A revoked session, a used device code and a removed sync key are
--- rows that say so, not gaps; the audit log and secret versions are never
--- updated at all.
+-- Two logins, provisioned outside coffre (their passwords are never ours),
+-- each with only the rights of its group:
+--
+--   coffre_runtime        the server, through coffre_app: read and insert,
+--                         UPDATE on named columns only, and never DELETE. A
+--                         revoked session, a used device code and a removed
+--                         sync key are rows that say so, not gaps.
+--   coffre_vault_runtime  the vault, through coffre_vault: its members and
+--                         grants, and reading what it decides on.
+--
+-- Both append to the audit log, each only as its own author (row-level
+-- security, below), and neither may change or delete an entry.
 DO $$
+DECLARE
+    name text;
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'coffre_app') THEN
-        CREATE ROLE coffre_app;
-    END IF;
+    FOREACH name IN ARRAY ARRAY['coffre_app', 'coffre_vault'] LOOP
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = name) THEN
+            EXECUTE format('CREATE ROLE %I', name);
+        END IF;
+    END LOOP;
 END
 $$;
 --> statement-breakpoint
@@ -293,51 +339,61 @@ $$;
 ALTER ROLE coffre_app
     NOLOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 --> statement-breakpoint
+ALTER ROLE coffre_vault
+    NOLOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+--> statement-breakpoint
 
 DO $$
 DECLARE
+    name text;
     runtime_role oid;
 BEGIN
-    SELECT oid INTO runtime_role FROM pg_roles WHERE rolname = 'coffre_runtime';
-    IF runtime_role IS NULL THEN
-        RAISE EXCEPTION 'coffre_runtime must be provisioned before migrations';
-    END IF;
+    FOREACH name IN ARRAY ARRAY['coffre_runtime', 'coffre_vault_runtime'] LOOP
+        SELECT oid INTO runtime_role FROM pg_roles WHERE rolname = name;
+        IF runtime_role IS NULL THEN
+            RAISE EXCEPTION '% must be provisioned before migrations', name;
+        END IF;
 
-    IF EXISTS (
-        SELECT 1
-          FROM pg_roles
-         WHERE oid = runtime_role
-           AND (rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls)
-    ) THEN
-        RAISE EXCEPTION 'coffre_runtime has unsafe role attributes';
-    END IF;
+        IF EXISTS (
+            SELECT 1
+              FROM pg_roles
+             WHERE oid = runtime_role
+               AND (rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls)
+        ) THEN
+            RAISE EXCEPTION '% has unsafe role attributes', name;
+        END IF;
 
-    IF EXISTS (
-        SELECT 1
-          FROM pg_shdepend
-         WHERE refclassid = 'pg_authid'::regclass
-           AND refobjid = runtime_role
-           AND deptype = 'o'
-    ) THEN
-        RAISE EXCEPTION 'coffre_runtime owns database objects';
-    END IF;
+        IF EXISTS (
+            SELECT 1
+              FROM pg_shdepend
+             WHERE refclassid = 'pg_authid'::regclass
+               AND refobjid = runtime_role
+               AND deptype = 'o'
+        ) THEN
+            RAISE EXCEPTION '% owns database objects', name;
+        END IF;
+    END LOOP;
 END
 $$;
 --> statement-breakpoint
 
-REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM coffre_app, coffre_runtime;
+REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public
+    FROM coffre_app, coffre_runtime, coffre_vault, coffre_vault_runtime;
 --> statement-breakpoint
-REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM coffre_app, coffre_runtime;
+REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public
+    FROM coffre_app, coffre_runtime, coffre_vault, coffre_vault_runtime;
 --> statement-breakpoint
-REVOKE ALL PRIVILEGES ON ALL ROUTINES IN SCHEMA public FROM coffre_app, coffre_runtime;
+REVOKE ALL PRIVILEGES ON ALL ROUTINES IN SCHEMA public
+    FROM coffre_app, coffre_runtime, coffre_vault, coffre_vault_runtime;
 --> statement-breakpoint
-REVOKE ALL PRIVILEGES ON SCHEMA public FROM coffre_app, coffre_runtime;
+REVOKE ALL PRIVILEGES ON SCHEMA public
+    FROM coffre_app, coffre_runtime, coffre_vault, coffre_vault_runtime;
 --> statement-breakpoint
-GRANT USAGE ON SCHEMA public TO coffre_app;
+GRANT USAGE ON SCHEMA public TO coffre_app, coffre_vault;
 --> statement-breakpoint
-GRANT USAGE ON SCHEMA drizzle TO coffre_app;
+GRANT USAGE ON SCHEMA drizzle TO coffre_app, coffre_vault;
 --> statement-breakpoint
-GRANT SELECT ON drizzle.__drizzle_migrations TO coffre_app;
+GRANT SELECT ON drizzle.__drizzle_migrations TO coffre_app, coffre_vault;
 --> statement-breakpoint
 
 GRANT SELECT, INSERT ON
@@ -357,7 +413,9 @@ TO coffre_app;
 
 GRANT SELECT ON
     audit_chain_head,
-    audit_heartbeat
+    audit_heartbeat,
+    vault_members,
+    vault_grants
 TO coffre_app;
 --> statement-breakpoint
 
@@ -389,44 +447,85 @@ GRANT UPDATE (config, credential_secret_id, paused_at, archived_at, lease_until,
 GRANT UPDATE (secret_version_id, pushed_at, removed_at) ON sync_keys TO coffre_app;
 --> statement-breakpoint
 
+-- The vault reads what it decides on and the log it chains to, and writes
+-- its members and grants. A revoked grant is deleted: the log keeps it.
+GRANT SELECT ON
+    projects,
+    environments,
+    secrets,
+    secret_versions,
+    audit_chain_head
+TO coffre_vault;
+--> statement-breakpoint
+GRANT SELECT, INSERT ON audit_log TO coffre_vault;
+--> statement-breakpoint
+GRANT SELECT, INSERT, UPDATE (status, owner, generation, status_changed_at, status_changed_by)
+    ON vault_members TO coffre_vault;
+--> statement-breakpoint
+GRANT SELECT, INSERT, DELETE ON vault_grants TO coffre_vault;
+--> statement-breakpoint
+GRANT UPDATE (next_seq, head_hash) ON audit_chain_head TO coffre_vault;
+--> statement-breakpoint
+
 REVOKE DELETE, TRUNCATE ON ALL TABLES IN SCHEMA public FROM coffre_app;
 --> statement-breakpoint
-REVOKE UPDATE ON audit_log, secret_versions FROM coffre_app;
+REVOKE TRUNCATE ON ALL TABLES IN SCHEMA public FROM coffre_vault;
 --> statement-breakpoint
-REVOKE CREATE ON SCHEMA public FROM PUBLIC, coffre_app, coffre_runtime;
+REVOKE UPDATE ON audit_log, secret_versions FROM coffre_app, coffre_vault;
+--> statement-breakpoint
+REVOKE CREATE ON SCHEMA public FROM PUBLIC, coffre_app, coffre_runtime, coffre_vault, coffre_vault_runtime;
+--> statement-breakpoint
+
+-- Each login appends only as its own author. Its MAC is still what proves
+-- who wrote an entry: the table's owner passes these policies, as owners do.
+ALTER TABLE audit_log ENABLE ROW LEVEL SECURITY;
+--> statement-breakpoint
+CREATE POLICY audit_log_read ON audit_log FOR SELECT TO coffre_app, coffre_vault USING (true);
+--> statement-breakpoint
+CREATE POLICY audit_log_app_appends ON audit_log FOR INSERT TO coffre_app WITH CHECK (author = 'app');
+--> statement-breakpoint
+CREATE POLICY audit_log_vault_appends ON audit_log FOR INSERT TO coffre_vault WITH CHECK (author = 'vault');
 --> statement-breakpoint
 
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
-    REVOKE ALL PRIVILEGES ON TABLES FROM coffre_app, coffre_runtime;
+    REVOKE ALL PRIVILEGES ON TABLES FROM coffre_app, coffre_runtime, coffre_vault, coffre_vault_runtime;
 --> statement-breakpoint
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
-    REVOKE ALL PRIVILEGES ON SEQUENCES FROM coffre_app, coffre_runtime;
+    REVOKE ALL PRIVILEGES ON SEQUENCES FROM coffre_app, coffre_runtime, coffre_vault, coffre_vault_runtime;
 --> statement-breakpoint
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
-    REVOKE ALL PRIVILEGES ON ROUTINES FROM coffre_app, coffre_runtime;
+    REVOKE ALL PRIVILEGES ON ROUTINES FROM coffre_app, coffre_runtime, coffre_vault, coffre_vault_runtime;
 --> statement-breakpoint
 
+-- Each login is a member of its own group and of nothing else.
 DO $$
 DECLARE
+    login record;
     membership record;
 BEGIN
     EXECUTE format(
-        'REVOKE CREATE, TEMPORARY ON DATABASE %I FROM PUBLIC, coffre_app, coffre_runtime',
+        'REVOKE CREATE, TEMPORARY ON DATABASE %I FROM PUBLIC, coffre_app, coffre_runtime, coffre_vault, coffre_vault_runtime',
         current_database()
     );
 
-    FOR membership IN
-        SELECT granted.rolname
-          FROM pg_auth_members member_of
-          JOIN pg_roles member ON member.oid = member_of.member
-          JOIN pg_roles granted ON granted.oid = member_of.roleid
-         WHERE member.rolname = 'coffre_runtime'
-           AND granted.rolname <> 'coffre_app'
+    FOR login IN
+        SELECT * FROM (VALUES ('coffre_runtime', 'coffre_app'), ('coffre_vault_runtime', 'coffre_vault')) AS logins (name, grp)
     LOOP
-        EXECUTE format('REVOKE %I FROM coffre_runtime', membership.rolname);
+        FOR membership IN
+            SELECT granted.rolname
+              FROM pg_auth_members member_of
+              JOIN pg_roles member ON member.oid = member_of.member
+              JOIN pg_roles granted ON granted.oid = member_of.roleid
+             WHERE member.rolname = login.name
+               AND granted.rolname <> login.grp
+        LOOP
+            EXECUTE format('REVOKE %I FROM %I', membership.rolname, login.name);
+        END LOOP;
     END LOOP;
 END
 $$;
 --> statement-breakpoint
 
 GRANT coffre_app TO coffre_runtime WITH ADMIN FALSE, INHERIT TRUE, SET FALSE;
+--> statement-breakpoint
+GRANT coffre_vault TO coffre_vault_runtime WITH ADMIN FALSE, INHERIT TRUE, SET FALSE;

@@ -3,14 +3,16 @@
 // GitHub's URLs pointed at a stand-in IdP running in this process.
 //
 //   workers  two Workers under `wrangler dev`, on a Postgres database of
-//            their own, created for the run and dropped after
-//   node     the server and its vault process, on SQLite in a temp dir
+//            their own, created for the run and dropped after, each through
+//            its own login
+//   node     the server and its vault process, on one SQLite file in a temp
+//            dir
 //
 // Ports: coffre on `port`, the IdP on the next, wrangler's inspector on the
 // one after.
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -27,6 +29,8 @@ export type HarnessOptions = {
   postgres?: string;
   /** The same server as coffre_runtime, the login the app runs as; workers only. */
   runtime?: string;
+  /** The same server as coffre_vault_runtime, the login the vault runs as; workers only. */
+  vaultRuntime?: string;
 };
 
 export type Deployment = {
@@ -43,10 +47,10 @@ export type Deployment = {
   database(): Promise<Sql>;
   /** The app's database as the login the app runs as, on an engine that has logins. */
   runtime: (() => Promise<Sql>) | null;
-  /** The file holding the app's database, when it is one. */
+  /** The database as the login the vault runs as, likewise. */
+  vaultRuntime: (() => Promise<Sql>) | null;
+  /** The file holding the database, when it is one. */
   databaseFile: string | null;
-  /** The vault's SQLite file, when it can be found: the Durable Object's lives in wrangler's state. */
-  vaultStore(): string | null;
   /** The processes' output: all of it, or the last `tail` characters of each. */
   output(tail?: number): string;
   stop(): Promise<void>;
@@ -74,8 +78,10 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
     );
     if (busy) throw new Failure(`port ${taken} is taken; pass --port for a free run of three`);
   }
-  if (kind === 'workers' && (options.postgres === undefined || options.runtime === undefined)) {
-    throw new Failure('workers run on Postgres: pass --postgres <owner URL> and --runtime <coffre_runtime URL>');
+  if (kind === 'workers' && (options.postgres === undefined || options.runtime === undefined || options.vaultRuntime === undefined)) {
+    throw new Failure(
+      'workers run on Postgres: pass --postgres <owner URL>, --runtime <coffre_runtime URL> and --vault-runtime <coffre_vault_runtime URL>',
+    );
   }
 
   const scratch = mkdtempSync(join(tmpdir(), `coffre-conformance-${kind}-`));
@@ -169,6 +175,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
     const name = `coffre_conformance_${randomBytes(4).toString('hex')}`;
     const owner = withDatabase(options.postgres!, name);
     const runtime = withDatabase(options.runtime!, name);
+    const vaultRuntime = withDatabase(options.vaultRuntime!, name);
     await using(postgres(withDatabase(options.postgres!, 'postgres')), (sql) => sql.exec(`CREATE DATABASE ${name}`));
     cleanup = () =>
       using(postgres(withDatabase(options.postgres!, 'postgres')), (sql) =>
@@ -200,6 +207,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       SIGNING_KEY: KEYS.SIGNING_KEY,
       ROOT_ADMINS: ROOT_ADMIN,
       CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE: runtime,
+      CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_VAULT_HYPERDRIVE: vaultRuntime,
       WRANGLER_SEND_METRICS: 'false',
     });
     return {
@@ -214,8 +222,8 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       },
       database: () => postgres(owner),
       runtime: () => postgres(runtime),
+      vaultRuntime: () => postgres(vaultRuntime),
       databaseFile: null,
-      vaultStore: () => durableObjectFile(join(state, 'v3', 'do'), 'VaultObject'),
       output,
       stop,
     };
@@ -224,11 +232,10 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
   async function startNode(): Promise<Deployment> {
     const database = join(scratch, 'coffre.db');
     const socket = join(scratch, 'vault.sock');
-    const store = join(scratch, 'vault.db');
     await run(bin('coffre-server'), ['migrate', `file:${database}`]);
     start('vault', process.execPath, ['src/vault.ts'], {
       VAULT_SOCKET: socket,
-      VAULT_STORE: store,
+      DATABASE_URL: `file:${database}`,
       KEK_ID: KEYS.KEK_ID,
       KEK: KEYS.KEK,
       SIGNING_KEY: KEYS.SIGNING_KEY,
@@ -263,8 +270,8 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       },
       database: async () => sqlite(database),
       runtime: null,
+      vaultRuntime: null,
       databaseFile: database,
-      vaultStore: () => store,
       output,
       stop,
     };
@@ -275,15 +282,4 @@ function withDatabase(url: string, database: string): string {
   const parsed = new URL(url);
   parsed.pathname = `/${database}`;
   return parsed.href;
-}
-
-/** Where miniflare keeps a Durable Object's SQLite: `<class dir>/<id>.sqlite`. */
-function durableObjectFile(root: string, className: string): string | null {
-  if (!existsSync(root)) return null;
-  for (const entry of readdirSync(root)) {
-    if (!entry.endsWith(`-${className}`)) continue;
-    const files = readdirSync(join(root, entry)).filter((file) => file.endsWith('.sqlite') && file !== 'metadata.sqlite');
-    if (files.length === 1) return join(root, entry, files[0]!);
-  }
-  return null;
 }

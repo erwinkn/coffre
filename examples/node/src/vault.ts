@@ -1,7 +1,8 @@
-// The vault: the keys, grants and members, in a SQLite file of its own. It
-// answers only on a Unix socket, which it makes 0660: run it as its own
-// user, sharing a group with the server's, and nothing that faces the
-// network can read a key. Settings come from vault.env.
+// The vault: the keys, and the members and grants, which it keeps in the
+// server's database through a login of its own. It answers only on a Unix
+// socket, which it makes 0660: run it as its own user, sharing a group with
+// the server's, and nothing that faces the network can read a key.
+// Settings come from vault.env.
 import { serveVault } from '@coffre/vault/node';
 
 function env(name: string): string {
@@ -12,7 +13,7 @@ function env(name: string): string {
 
 const vault = await serveVault({
   socket: env('VAULT_SOCKET'),
-  store: env('VAULT_STORE'),
+  database: env('DATABASE_URL'),
   kek: { id: env('KEK_ID'), key: env('KEK') },
   // After a rotation, the KEKs before it, so the data keys they wrapped
   // still open: previousKeks: [{ id: 'kek-1', key: env('KEK_1') }],

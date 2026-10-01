@@ -1,163 +1,130 @@
-import { createHmac, hkdfSync } from 'node:crypto';
-
+import { deriveLogKey, GENESIS_HASH, verifyEntries, type LogKey, type StoredEntry } from '@coffre/core/audit';
 import type { LogEntry, LogHead, LogVerification } from '@coffre/core/vault';
+import type { Queryable } from '@coffre/db';
 
-import type { LogRow, Store } from './store.ts';
-
-/** Part of the format: a change to what is hashed changes this too. */
-const LOG_VERSION = 'coffre.vault.log.v1';
-
-/** The `prev_hash` of the first entry. */
-export const GENESIS = '0'.repeat(64);
-
-/** One entry to append; the log numbers, times and chains it. */
-export type Appended = {
-  actor: string;
-  action: string;
-  outcome: 'allow' | 'refuse';
-  code?: string | null;
-  subject?: string | null;
-  detail?: Record<string, unknown>;
-};
+import { entriesFrom, hashAt } from './store.ts';
 
 /**
- * The key the log is chained with, derived from the signing key, so that it
- * is one more secret to hold, not one more to keep. Whoever holds the store
- * but not the vault's configuration (a copy of `vault.db`, a backup) cannot
- * write an entry that verifies, nor re-chain a rewritten one.
+ * The vault's half of the one audit log: its entries are the ones it
+ * writes, `author = 'vault'`, each under its MAC, in the chain the app's
+ * entries share (@coffre/core/audit says what an entry covers). The app
+ * checks its own entries by its key; this checks the vault's by the vault's,
+ * and the app's only for their place in the chain.
  */
-export function logKey(signingKey: Uint8Array): Buffer {
-  return Buffer.from(hkdfSync('sha256', signingKey, new Uint8Array(0), 'coffre.vault.log', 32));
+
+/**
+ * The vault's log key, derived from its signing key, so that it is one more
+ * secret to hold, not one more to keep. Whoever can write the database but
+ * does not hold the vault's configuration cannot write an entry it accepts.
+ */
+export function vaultLogKey(signingKey: Uint8Array): LogKey {
+  return deriveLogKey('vault', signingKey);
 }
 
 /**
- * HMAC-SHA256, under `logKey`, over the previous hash and the row as a JSON
- * array: unambiguous, since JSON quotes and escapes every string, and the
- * same bytes in any runtime.
+ * How far this process has verified the chain: every entry before
+ * `nextSeq`, the last of which has `hash`, with `vaultEntries` of the
+ * vault's among them. In memory only: the database cannot vouch for itself.
  */
-export function entryHash(key: Uint8Array, prevHash: string, row: Omit<LogRow, 'prevHash' | 'hash'>): string {
-  const canonical = JSON.stringify([
-    LOG_VERSION,
-    row.seq,
-    row.at,
-    row.actor,
-    row.action,
-    row.outcome,
-    row.code,
-    row.subject,
-    row.detail,
-  ]);
-  return createHmac('sha256', key).update(prevHash).update(canonical).digest('hex');
-}
-
-/** Append entries in order. Call inside the transaction that made the decision. */
-export function append(store: Store, key: Uint8Array, at: number, entries: readonly Appended[]): void {
-  const head = store.logHead();
-  let seq = head?.seq ?? 0;
-  let prevHash = head?.hash ?? GENESIS;
-  for (const entry of entries) {
-    seq += 1;
-    const row = {
-      seq,
-      at,
-      actor: entry.actor,
-      action: entry.action,
-      outcome: entry.outcome,
-      code: entry.code ?? null,
-      subject: entry.subject ?? null,
-      detail: JSON.stringify(entry.detail ?? {}),
-    };
-    const hash = entryHash(key, prevHash, row);
-    store.appendLog({ ...row, prevHash, hash });
-    prevHash = hash;
-  }
-}
-
-/** An entry, and so the chain up to it, as this process last verified it. */
-export type Anchor = LogHead;
+export type Anchor = { nextSeq: bigint; hash: Buffer; vaultEntries: number };
 
 /** Before the first entry: nothing verified yet. */
-export const UNVERIFIED: Anchor = { seq: 0, hash: GENESIS };
+export const UNVERIFIED: Anchor = { nextSeq: 0n, hash: GENESIS_HASH, vaultEntries: 0 };
 
-/** The last entry, or `UNVERIFIED`'s zeros before the first. */
-export function head(store: Store): LogHead {
-  return store.logHead() ?? UNVERIFIED;
+/** The further of two anchors, when two calls verified at once. */
+export function further(a: Anchor, b: Anchor): Anchor {
+  return b.nextSeq > a.nextSeq ? b : a;
 }
 
-/** Whether the log still has `head` where it was: not rewritten, nor cut back before it. */
-export function carries(store: Store, head: LogHead): boolean {
-  return head.seq === 0 ? head.hash === GENESIS : store.logEntry(head.seq)?.hash === head.hash;
+const BATCH = 1000;
+
+type Verified = { verification: LogVerification; anchor: Anchor };
+
+/**
+ * Check the chain, a batch in memory at a time, and return where it is now
+ * verified to. Three parts:
+ *
+ * - `shown`, the page a reader is looking at: each entry against its own
+ *   hash and MAC;
+ * - `anchor`, the head at the last check: still there, unchanged. A rewrite
+ *   of anything before it, chained again to hide, changes its hash;
+ * - every entry after the anchor, or from the first.
+ *
+ * So a view rehashes only what is new since the last one. What it leaves
+ * out is an entry before the anchor edited in place, not chained again, and
+ * not on the page: a full check, which starts from `UNVERIFIED`, finds that,
+ * as does the first view after a start, which has no anchor.
+ */
+export async function verifyChain(
+  db: Queryable,
+  key: LogKey,
+  shown: readonly StoredEntry[],
+  anchor: Anchor,
+): Promise<Verified> {
+  const broken = (failedAtSeq: bigint, reason: string): Verified => ({
+    verification: { ok: false, failedAtSeq: Number(failedAtSeq), reason },
+    anchor,
+  });
+  const keys = { keys: [key], chainOnly: ['app' as const] };
+
+  for (const row of [...shown].sort((a, b) => (a.seq < b.seq ? -1 : 1))) {
+    const result = verifyEntries([row], { ...keys, startSeq: row.seq, startPrevHash: row.prevHash });
+    if (!result.ok) return broken(result.failedAtSeq, result.reason);
+  }
+
+  if (anchor.nextSeq > 0n && !(await hashAt(db, anchor.nextSeq - 1n))?.equals(anchor.hash)) {
+    return broken(anchor.nextSeq - 1n, 'changed since the vault last verified it');
+  }
+
+  let verified = anchor;
+  for (;;) {
+    const batch = await entriesFrom(db, verified.nextSeq, BATCH);
+    if (batch.length === 0) break;
+    const result = verifyEntries(batch, { ...keys, startSeq: verified.nextSeq, startPrevHash: verified.hash });
+    if (!result.ok) return broken(result.failedAtSeq, result.reason);
+    verified = { nextSeq: result.nextSeq, hash: result.head, vaultEntries: verified.vaultEntries + result.authenticated };
+    if (batch.length < BATCH) break;
+  }
+  return { verification: { ok: true, entries: verified.vaultEntries }, anchor: verified };
 }
 
 /**
- * Check the chain, one row in memory at a time, and return where it is now
- * verified to. Three parts:
- *
- * - `shown`, the page a reader is looking at: each row against its own hash,
- *   and linked to its neighbours and to the entry after it;
- * - `anchor`, the head at the last check: still there, unchanged. A rewrite
- *   of anything before it, re-chained to hide, changes every hash after it,
- *   the anchor's too;
- * - every entry after the anchor, or after the first when `full`.
- *
- * So a view rehashes only what is new since the last one. What it leaves
- * out is an entry before the anchor edited in place, not re-chained, and
- * not on the page: `full` finds that, as does the first view after a start,
- * which has no anchor.
+ * Whether the log still holds `head` where it was: not rewritten, nor cut
+ * back before it. A head of 64 zeros is before the first entry, which any
+ * log holds.
  */
-export function verify(
-  store: Store,
-  key: Uint8Array,
-  shown: readonly LogRow[],
-  anchor: Anchor,
-  full: boolean,
-): { verification: LogVerification; anchor: Anchor } {
-  const broken = (failedAtSeq: number, reason: string) => ({
-    verification: { ok: false as const, failedAtSeq, reason },
-    anchor,
-  });
-
-  const page = [...shown].sort((a, b) => a.seq - b.seq);
-  for (const [i, row] of page.entries()) {
-    const fault = unlinked(key, i === 0 ? { seq: row.seq - 1, hash: row.prevHash } : page[i - 1], row);
-    if (fault !== null) return broken(row.seq, fault);
-  }
-  const last = page.at(-1);
-  const after = last && store.logEntry(last.seq + 1);
-  if (after && after.prevHash !== last.hash) return broken(after.seq, 'prev_hash does not match the entry before');
-
-  if (anchor.seq > 0 && store.logEntry(anchor.seq)?.hash !== anchor.hash) {
-    return broken(anchor.seq, 'changed since the vault last verified it');
-  }
-
-  let previous = full ? UNVERIFIED : anchor;
-  for (const row of store.logAfter(previous.seq)) {
-    const fault = unlinked(key, previous, row);
-    if (fault !== null) return broken(row.seq, fault);
-    previous = { seq: row.seq, hash: row.hash };
-  }
-  return { verification: { ok: true, entries: previous.seq }, anchor: previous };
+export async function carries(db: Queryable, head: LogHead): Promise<boolean> {
+  if (head.hash === GENESIS_HASH.toString('hex')) return true;
+  return (await hashAt(db, BigInt(head.seq)))?.toString('hex') === head.hash;
 }
 
-/** Why `row` does not follow `previous` in the chain, or null when it does. */
-function unlinked(key: Uint8Array, previous: Anchor, row: LogRow): string | null {
-  if (row.seq !== previous.seq + 1) return `expected entry ${previous.seq + 1}`;
-  if (row.prevHash !== previous.hash) return 'prev_hash does not match the entry before';
-  if (entryHash(key, row.prevHash, row) !== row.hash) return 'hash does not match the entry';
-  return null;
+/** An entry's head, as checkpoints and the app record it. */
+export function headOf(row: StoredEntry | undefined): LogHead {
+  return row === undefined ? { seq: 0, hash: GENESIS_HASH.toString('hex') } : { seq: Number(row.seq), hash: row.hash.toString('hex') };
 }
 
-/** A row as the log's readers see it. */
-export function entry(row: LogRow): LogEntry {
+/**
+ * An entry as the vault log's readers see it. `subject` is the member an
+ * access change is about, or what else the entry names: a secret's path,
+ * the audit log, the vault's own.
+ */
+export function entryView(row: StoredEntry): LogEntry {
+  const { subject, ...detail } = JSON.parse(row.metadata) as Record<string, unknown>;
+  const ids = {
+    projectId: row.projectId,
+    environmentId: row.environmentId,
+    secretId: row.secretId,
+    requestId: row.requestId,
+  };
   return {
-    seq: row.seq,
-    at: new Date(row.at).toISOString(),
+    seq: Number(row.seq),
+    at: new Date(row.occurredAt).toISOString(),
     actor: row.actor,
     action: row.action,
-    outcome: row.outcome,
+    outcome: row.decision === 'allow' ? 'allow' : 'refuse',
     code: row.code,
-    subject: row.subject,
-    detail: JSON.parse(row.detail) as Record<string, unknown>,
-    hash: row.hash,
+    subject: row.subjectPrincipal ?? (typeof subject === 'string' ? subject : null),
+    detail: { ...Object.fromEntries(Object.entries(ids).filter(([, value]) => value !== null)), ...detail },
+    hash: row.hash.toString('hex'),
   };
 }

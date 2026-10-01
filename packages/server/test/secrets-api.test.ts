@@ -76,7 +76,7 @@ async function auditRows(): Promise<
       metadata: auditLog.metadata,
     })
     .from(auditLog)
-    .where(gte(auditLog.seq, firstSeq))
+    .where(and(eq(auditLog.author, 'app'), gte(auditLog.seq, firstSeq)))
     .orderBy(asc(auditLog.seq));
   return rows.map(({ actor, ...row }) => ({ actorId: actorParts(actor).actorId, ...row, metadata: JSON.parse(row.metadata) }));
 }

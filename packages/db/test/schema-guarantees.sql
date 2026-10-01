@@ -158,7 +158,8 @@ EXCEPTION
 END
 $$;
 
--- 11. An unknown author is rejected.
+-- 11. An unknown author is rejected: for a login, by row-level security
+-- before the table's check, which holds for the owner, who passes it.
 DO $$
 BEGIN
     INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
@@ -166,8 +167,56 @@ BEGIN
             decode(repeat('aa', 32), 'hex'), decode(repeat('99', 32), 'hex'), decode(repeat('dd', 32), 'hex'));
     RAISE EXCEPTION 'FAIL: an unknown author was accepted';
 EXCEPTION
-    WHEN check_violation THEN
+    WHEN insufficient_privilege THEN
         RAISE NOTICE 'PASS: unknown author is rejected';
+END
+$$;
+
+-- 12. The application appends only as itself: the vault's entries are the vault's.
+DO $$
+BEGIN
+    INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
+    VALUES (4, 'vault', 'vault:fixture', 0, 'user:x@acme.example', 'unwrap', 'allow',
+            decode(repeat('aa', 32), 'hex'), decode(repeat('99', 32), 'hex'), decode(repeat('ee', 32), 'hex'));
+    RAISE EXCEPTION 'FAIL: coffre_app appended an entry as the vault';
+EXCEPTION
+    WHEN insufficient_privilege THEN
+        RAISE NOTICE 'PASS: coffre_app cannot append as the vault';
+END
+$$;
+
+-- 13. The application reads members and grants, and writes neither.
+SELECT count(*) FROM vault_members;
+SELECT count(*) FROM vault_grants;
+DO $$
+BEGIN
+    INSERT INTO vault_members (principal, status, created_at, created_by, status_changed_at, status_changed_by)
+    VALUES ('user:x@acme.example', 'active', 0, 'user:x@acme.example', 0, 'user:x@acme.example');
+    RAISE EXCEPTION 'FAIL: coffre_app was able to add a member';
+EXCEPTION
+    WHEN insufficient_privilege THEN
+        RAISE NOTICE 'PASS: coffre_app cannot add a member';
+END
+$$;
+
+DO $$
+BEGIN
+    UPDATE vault_members SET owner = true;
+    RAISE EXCEPTION 'FAIL: coffre_app was able to change a member';
+EXCEPTION
+    WHEN insufficient_privilege THEN
+        RAISE NOTICE 'PASS: coffre_app cannot change a member';
+END
+$$;
+
+DO $$
+BEGIN
+    INSERT INTO vault_grants (principal, project_id, role, granted_at, granted_by)
+    VALUES ('user:x@acme.example', '11111111-1111-1111-1111-111111111111', 'owner', 0, 'user:x@acme.example');
+    RAISE EXCEPTION 'FAIL: coffre_app was able to grant';
+EXCEPTION
+    WHEN insufficient_privilege THEN
+        RAISE NOTICE 'PASS: coffre_app cannot grant';
 END
 $$;
 

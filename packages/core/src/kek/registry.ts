@@ -33,6 +33,11 @@ export class KekRegistry {
     return this.#primary;
   }
 
+  /** The KEK a wrapped key names, or undefined when none is configured. */
+  providerOf(wrapped: Pick<WrappedDek, 'kekProvider' | 'kekId'>): KekProvider | undefined {
+    return this.#byRef.get(refOf(wrapped.kekProvider, wrapped.kekId));
+  }
+
   /** Wrap under the primary KEK. Used for every new secret version. */
   wrap(dek: Buffer, ctx: SecretContext): Promise<WrappedDek> {
     return this.#primary.wrap(dek, ctx);

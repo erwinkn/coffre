@@ -17,3 +17,15 @@ docker compose exec -T \
     psql -v ON_ERROR_STOP=1 -h 127.0.0.1 \
         -U coffre_runtime -d "$database" \
     < packages/db/test/schema-guarantees.sql
+
+# The vault's login, against the same fixture.
+docker compose exec -T postgres \
+    psql -v ON_ERROR_STOP=1 -U coffre_owner -d "$database" \
+    < packages/db/test/schema-fixture.sql
+
+docker compose exec -T \
+    -e PGPASSWORD=local-vault-only \
+    postgres \
+    psql -v ON_ERROR_STOP=1 -h 127.0.0.1 \
+        -U coffre_vault_runtime -d "$database" \
+    < packages/db/test/vault-guarantees.sql

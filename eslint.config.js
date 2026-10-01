@@ -33,20 +33,27 @@ const uiBoundaries = {
   patterns: [noDrizzle],
 };
 
-const vaultBoundaries = {
-  paths: [
-    {
-      name: 'node:sqlite',
-      message: 'Only src/sqlite-node.ts opens SQLite on Node; the Worker must never import it.',
-    },
-  ],
-  patterns: [
-    {
-      regex: '^(drizzle-orm|libsql)(/|$)',
-      message: "The vault's queries are plain SQL in src/store.ts, over src/sqlite.ts.",
-    },
-  ],
-};
+/**
+ * What each of the vault's files may import: Drizzle only in its store, and
+ * what opens a database from a URL only in its Node entry, since the Worker
+ * cannot load it. SQLite only ever through @coffre/db.
+ */
+function vaultBoundaries({ drizzle = false, connect = false } = {}) {
+  return {
+    paths: connect
+      ? []
+      : [
+          {
+            name: '@coffre/db/connect',
+            message: 'Only src/node.ts opens a database from a URL; the Worker builds its own from Hyperdrive.',
+          },
+        ],
+    patterns: [
+      ...(drizzle ? [] : [{ ...noDrizzle, message: "The vault's queries live in src/store.ts; add or extend one there." }]),
+      { regex: '^(node:sqlite|@libsql/)', message: 'The vault reaches SQLite only through @coffre/db, and only on Node.' },
+    ],
+  };
+}
 
 /**
  * A relative import stays inside its package: another package is imported by
@@ -101,24 +108,40 @@ export default defineConfig([
     },
   },
   {
-    // Drizzle belongs to @coffre/db and the server's queries, and nowhere else.
+    // Drizzle belongs to @coffre/db, the server's queries and the vault's, and nowhere else.
     name: 'coffre/query-boundary',
     files: ['packages/*/src/**/*.{ts,tsx}'],
-    ignores: ['packages/db/src/**', 'packages/server/src/db/**', 'packages/ui/src/routeTree.gen.ts'],
+    ignores: ['packages/db/src/**', 'packages/server/src/db/**', 'packages/vault/src/**', 'packages/ui/src/routeTree.gen.ts'],
     ...parsing,
     rules: {
       'no-restricted-imports': ['error', { patterns: [noDrizzle] }],
     },
   },
   {
-    // The vault's queries are plain SQL in its store, and only its Node
-    // adapter may import node:sqlite, which the Worker cannot load.
+    // The vault's queries are in its store, and its Worker cannot load what
+    // opens a database on Node.
     name: 'coffre/vault-boundaries',
     files: ['packages/vault/src/**/*.ts'],
-    ignores: ['packages/vault/src/sqlite-node.ts'],
+    ignores: ['packages/vault/src/store.ts', 'packages/vault/src/node.ts'],
     ...parsing,
     rules: {
-      'no-restricted-imports': ['error', vaultBoundaries],
+      'no-restricted-imports': ['error', vaultBoundaries()],
+    },
+  },
+  {
+    name: 'coffre/vault-store',
+    files: ['packages/vault/src/store.ts'],
+    ...parsing,
+    rules: {
+      'no-restricted-imports': ['error', vaultBoundaries({ drizzle: true })],
+    },
+  },
+  {
+    name: 'coffre/vault-node',
+    files: ['packages/vault/src/node.ts'],
+    ...parsing,
+    rules: {
+      'no-restricted-imports': ['error', vaultBoundaries({ connect: true })],
     },
   },
   {

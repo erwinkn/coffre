@@ -33,7 +33,7 @@ test('the scheduled heartbeat updates the database-owned signal', async () => {
   await beatAgo(600);
   assert.equal(await writeAuditHeartbeat(db.runtime, Buffer.alloc(32, 1), vault, quiet), true);
 
-  const logged = await db.owner.select().from(auditLog).orderBy(asc(auditLog.seq));
+  const logged = await db.owner.select().from(auditLog).where(eq(auditLog.author, 'app')).orderBy(asc(auditLog.seq));
   assert.deepEqual(logged.map((row) => row.action), ['audit.heartbeat', 'audit.checkpoint']);
   assert.ok(logged.every((row) => row.actor === 'system:coffre-scheduler'));
   const [beat] = await db.owner.select().from(auditHeartbeat);
@@ -47,8 +47,9 @@ test('the scheduled heartbeat updates the database-owned signal', async () => {
   assert.equal(checkpoint?.headHash, logged[0].hash.toString('hex'));
   assert.deepEqual(checkpoint?.vault, { seq: 0, hash: '0'.repeat(64) });
   assert.deepEqual(JSON.parse(logged[1].metadata), checkpoint);
+  // Between the two, the vault's own entry of the checkpoint.
   const [head] = await db.owner.select().from(auditChainHead);
-  assert.equal(head.nextSeq, 2n);
+  assert.equal(head.nextSeq, 3n);
   assert.deepEqual(head.headHash, logged[1].hash);
 });
 
@@ -56,11 +57,12 @@ test('each beat checkpoints a head that extends the last one, and never a rewrit
   const chainKey = Buffer.alloc(32, 1);
   await writeAuditHeartbeat(db.runtime, chainKey, vault, quiet);
   await writeAuditHeartbeat(db.runtime, chainKey, vault, quiet);
-  // Beat, checkpoint recorded, beat: the second checkpoint covers the first's record.
-  assert.equal((await vault.latestCheckpoint()).checkpoint?.seq, 2);
+  // Beat, the vault's checkpoint, its record, beat: the second checkpoint
+  // covers the first, and its record.
+  assert.equal((await vault.latestCheckpoint()).checkpoint?.seq, 3);
 
   // Someone with the database rewrites that row: the vault will not sign past it.
-  await withLogUnlocked(db.owner, (owner) => owner.update(auditLog).set({ hash: Buffer.alloc(32, 9) }).where(eq(auditLog.seq, 2n)));
+  await withLogUnlocked(db.owner, (owner) => owner.update(auditLog).set({ hash: Buffer.alloc(32, 9) }).where(eq(auditLog.seq, 3n)));
   let warned: unknown = null;
   const written = await writeAuditHeartbeat(db.runtime, chainKey, vault, {
     warn: (value: unknown) => {
@@ -69,24 +71,7 @@ test('each beat checkpoints a head that extends the last one, and never a rewrit
   });
   assert.equal(written, false);
   assert.deepEqual(warned, { code: 'checkpoint_diverged' });
-  assert.equal((await vault.latestCheckpoint()).checkpoint?.seq, 2);
-});
-
-test('a vault emptied behind the checkpoint the app recorded is not signed over', async () => {
-  const chainKey = Buffer.alloc(32, 1);
-  await writeAuditHeartbeat(db.runtime, chainKey, vault, quiet);
-
-  // Its store starts over, checkpoints and all: the app's record says it had one.
-  await vault.reset();
-  let warning = '';
-  const written = await writeAuditHeartbeat(db.runtime, chainKey, vault, {
-    warn: (_value: unknown, message: string) => {
-      warning = message;
-    },
-  });
-  assert.equal(written, false);
-  assert.match(warning, /^the vault has no checkpoint, but the audit log recorded one at seq 0/);
-  assert.equal((await vault.latestCheckpoint()).checkpoint, null);
+  assert.equal((await vault.latestCheckpoint()).checkpoint?.seq, 3);
 });
 
 test('a refused checkpoint leaves readiness stale', async () => {
@@ -116,7 +101,7 @@ test('a checkpoint whose audit entry rolls back leaves readiness stale', async (
 
   assert.equal(await writeAuditHeartbeat(db.runtime, Buffer.alloc(32, 1), vault, { warn() {} }), false);
   assert.notEqual((await vault.latestCheckpoint()).checkpoint, null);
-  assert.deepEqual((await db.owner.select().from(auditLog)).map((row) => row.action), ['audit.heartbeat']);
+  assert.deepEqual((await db.owner.select().from(auditLog).where(eq(auditLog.author, 'app'))).map((row) => row.action), ['audit.heartbeat']);
   assert.equal((await auditReadiness(db.runtime)).ok, false);
   assert.deepEqual(await db.owner.select().from(auditHeartbeat), [before]);
 });

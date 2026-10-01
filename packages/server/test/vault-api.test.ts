@@ -1,10 +1,8 @@
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
-import { DatabaseSync } from 'node:sqlite';
 
 import { createClient, type CoffreClient } from '@coffre/client';
-import { sealEntry } from '@coffre/core/audit';
+import { entryHash, sealEntry } from '@coffre/core/audit';
 import { github, signin, type Principal } from '@coffre/core/identity';
 import type { LogEntry } from '@coffre/core/vault';
 import { tablesOf } from '@coffre/db';
@@ -197,20 +195,19 @@ test('a removed member stays out despite a live session, until the vault admits 
 
 // --- logs -----------------------------------------------------------------------
 
-test('the vault log is hash-chained, and a row rewritten in its file fails', async () => {
+test('the vault\'s entries are chained, and one rewritten fails', async () => {
   await developer.secrets.reveal('market/dev/API_KEY');
   const page = await root.audit.vault();
   assert.equal(page.verification.ok, true);
   await assert.rejects(developer.audit.vault(), { status: 403 });
 
-  // Someone with the vault's file, and the will to drop its trigger.
-  const file = new DatabaseSync(deps.vault.file()!);
-  try {
-    file.exec('DROP TRIGGER log_no_update');
-    file.prepare(`UPDATE log SET actor = 'user:nobody@acme.example' WHERE action = 'unwrap'`).run();
-  } finally {
-    file.close();
-  }
+  // Someone who owns the database, and lifts the log's triggers.
+  await withLogUnlocked(db.owner, (owner) =>
+    owner
+      .update(auditLog)
+      .set({ actor: 'user:nobody@acme.example' })
+      .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, 'unwrap'))),
+  );
   const tampered = await root.audit.vault();
   const unwrap = tampered.entries.find((entry) => entry.action === 'unwrap')!;
   assert.deepEqual(tampered.verification, { ok: false, failedAtSeq: unwrap.seq, reason: 'hash does not match the entry' });
@@ -222,13 +219,18 @@ test('an app audit log rewritten and chained again fails against the signed chec
   const verified = await root.audit.verify();
   assert.ok(verified.ok && verified.checkpoint !== null);
 
-  // Someone holding the app, chain key and all, puts the read on someone else and re-chains.
+  // Someone holding the app, chain key and all, puts the read on someone
+  // else and chains again: the app's entries sealed anew, the vault's
+  // linked to the new hashes with the MACs they cannot remake.
   const rows = await auditRange(db.owner, 0n, 10_000);
   let previous = rows[0].prevHash;
   await withLogUnlocked(db.owner, async (owner) => {
     for (const row of rows) {
       const rewritten = { ...row, actor: row.action === 'secret.read' ? `user:${ROOT}` : row.actor };
-      const { mac, hash } = sealEntry(appLogKey(deps.chainKey), previous, rewritten);
+      const { mac, hash } =
+        row.author === 'app'
+          ? sealEntry(appLogKey(deps.chainKey), previous, rewritten)
+          : { mac: row.mac, hash: entryHash(previous, rewritten, row.mac) };
       await owner
         .update(auditLog)
         .set({ actor: rewritten.actor, prevHash: previous, mac, hash })
@@ -254,53 +256,44 @@ test('the audit verification checks the vault log too, and finds a grant written
   const entries = (await vaultLog()).length;
   assert.deepEqual(verified.ok && verified.vault, { entries });
 
-  // Someone with the vault's file gives the developer the whole project.
-  const file = new DatabaseSync(deps.vault.file()!);
-  let projectId: string;
-  try {
-    ({ project_id: projectId } = file.prepare('SELECT project_id FROM grants').get() as { project_id: string });
-    file
-      .prepare(`INSERT INTO grants VALUES (?, ?, NULL, 'owner', NULL, 0, ?)`)
-      .run(`user:${DEV}`, projectId, `user:${ROOT}`);
-  } finally {
-    file.close();
-  }
+  // Someone who owns the database gives the developer the whole project.
+  const { projects, vaultGrants } = tablesOf(db.owner);
+  const [{ id: projectId }] = await db.owner.select({ id: projects.id }).from(projects).where(eq(projects.slug, 'market'));
+  await db.owner.insert(vaultGrants).values({
+    principal: `user:${DEV}`, projectId, environmentId: null, role: 'owner', expiresAt: null, grantedAt: 0, grantedBy: `user:${ROOT}`,
+  });
   // Worded with the names the app knows; the vault has only ids.
-  assert.match(projectId, /^[0-9a-f-]{36}$/);
   const reason = `the store holds a grant the log never gave: ${DEV} as owner on market`;
   assert.deepEqual(await root.audit.verify(), { ok: false, log: 'vault', failedAtSeq: null, reason });
   assert.deepEqual((await root.audit.vault({ full: '1' })).verification, { ok: false, failedAtSeq: null, reason });
 });
 
-test('a vault log cut back behind the checkpoint the app recorded fails the audit verification', async () => {
+test('a vault entry cut out of the log fails the audit verification', async () => {
   await developer.secrets.reveal('market/dev/API_KEY');
   assert.equal(await checkpointAudit(db.runtime, deps.chainKey, deps.vault, quiet), true);
 
-  // Its last entry, the reveal, taken out: what is left chains, and replays.
-  const file = new DatabaseSync(deps.vault.file()!);
-  let head: number;
-  try {
-    file.exec('DROP TRIGGER log_no_delete');
-    ({ seq: head } = file.prepare('SELECT max(seq) AS seq FROM log').get() as { seq: number });
-    file.prepare('DELETE FROM log WHERE seq = ?').run(head);
-  } finally {
-    file.close();
-  }
-  assert.deepEqual(await root.audit.verify(), {
-    ok: false,
-    log: 'vault',
-    failedAtSeq: head,
-    reason: 'not the entry a checkpoint the app recorded signed: the log was rewritten or cut back',
-  });
+  // The vault's entries no longer have a log of their own to be cut back
+  // in: taking the reveal out leaves a gap in the one chain.
+  const [release] = await db.owner
+    .select({ seq: auditLog.seq })
+    .from(auditLog)
+    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, 'unwrap')));
+  await withLogUnlocked(db.owner, (owner) => owner.delete(auditLog).where(eq(auditLog.seq, release.seq)));
+  const failed = await root.audit.verify();
+  assert.deepEqual(failed.ok ? null : [failed.log, failed.failedAtSeq, failed.reason], [
+    'audit',
+    Number(release.seq) + 1,
+    `sequence gap: expected seq ${release.seq}, found ${release.seq + 1n}`,
+  ]);
 });
 
 // --- where keys live ----------------------------------------------------------
 
-test('neither database holds a key', async () => {
+test('the database holds no key', async () => {
   await developer.secrets.reveal('market/dev');
   await checkpointAudit(db.runtime, deps.chainKey, deps.vault, quiet);
 
-  // Every row of every app table, and the vault's file as it lies on disk.
+  // Every row of every table, the app's and the vault's.
   const values: Buffer[] = [];
   for (const table of Object.values(tablesOf(db.owner)).filter((value) => is(value, Table))) {
     for (const row of await db.owner.select().from(table as Table)) {
@@ -309,15 +302,12 @@ test('neither database holds a key', async () => {
       }
     }
   }
-  const app = Buffer.concat(values);
-  const file = deps.vault.file()!;
-  const vault = Buffer.concat([file, `${file}-wal`].filter(existsSync).map((path) => readFileSync(path)));
-  assert.ok(app.includes(Buffer.from(DEV)) && vault.includes(Buffer.from(`user:${DEV}`)), 'the dumps are real');
+  const dump = Buffer.concat(values);
+  assert.ok(dump.includes(Buffer.from(`user:${DEV}`)), 'the dump is real');
 
   for (const key of [deps.vault.kek, deps.vault.signingKey]) {
     for (const form of [key, ...(['base64', 'base64url', 'hex'] as const).map((encoding) => Buffer.from(key.toString(encoding)))]) {
-      assert.equal(app.includes(form), false, 'the app database holds a key');
-      assert.equal(vault.includes(form), false, 'the vault database holds a key');
+      assert.equal(dump.includes(form), false, 'the database holds a key');
     }
   }
 });

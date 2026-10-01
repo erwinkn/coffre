@@ -716,7 +716,11 @@ export type AuditFilter = {
   limit: number;
 };
 
-/** A page of the log, newest first, with the slugs of the places each entry names. */
+/**
+ * A page of the app's entries, newest first, with the slugs of the places
+ * each entry names. The vault's entries share the table; its own page shows
+ * them, until the two become one list.
+ */
 export async function auditPage(db: Queryable, filter: AuditFilter) {
   const { auditLog, projects, environments } = tablesOf(db);
   const { within } = filter;
@@ -727,6 +731,7 @@ export async function auditPage(db: Queryable, filter: AuditFilter) {
     .leftJoin(environments, eq(environments.id, auditLog.environmentId))
     .where(
       and(
+        eq(auditLog.author, 'app'),
         within === undefined
           ? undefined
           : or(inArray(auditLog.projectId, within.projectIds), inArray(auditLog.environmentId, within.environmentIds)),

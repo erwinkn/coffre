@@ -4,8 +4,9 @@ Two processes, configured in code:
 
 - `src/server.ts`, the server: the API, sign-in, the pages and a job every
   five minutes, on one port. Put a proxy that terminates TLS in front of it.
-- `src/vault.ts`, the vault: the keys, grants and members, in a SQLite file
-  of its own. It answers only the server, on a Unix socket.
+- `src/vault.ts`, the vault: the keys, and the members and grants, which it
+  keeps in the server's database through a login of its own. It answers
+  only the server, on a Unix socket.
 
 Run them as two users that share a group, and the process facing the network
 never holds a key. Where that matters less, `server.ts` can run the vault
@@ -35,10 +36,12 @@ date now and after every upgrade of `@coffre/server`:
 pnpm migrate file:coffre.db
 ```
 
-On Postgres, migrate as the database's owner, after creating a plain login
-named `coffre_runtime` for the server (`CREATE ROLE coffre_runtime LOGIN
-PASSWORD '…'`): the first migration grants it rows to read and write, and
-nothing else. `DATABASE_URL` then names that login.
+On Postgres, migrate as the database's owner, after creating two plain
+logins: `coffre_runtime` for the server and `coffre_vault_runtime` for the
+vault (`CREATE ROLE coffre_runtime LOGIN PASSWORD '…'`, and the same for the
+other). The first migration grants each the rows it needs, and nothing
+else: only the vault's may write members and grants. `DATABASE_URL` names
+the server's login in `server.env`, and the vault's in `vault.env`.
 
 ## 3. Run
 
@@ -53,10 +56,8 @@ Then sign in at `PUBLIC_URL` as a root admin, and from a terminal:
 coffre login https://secrets.example.com
 ```
 
-Back up the database and `vault.db` together: the vault's grants and audit
-checkpoints describe that database. Copy `vault.db` while the vault is
-stopped, or with `sqlite3 vault.db ".backup vault-backup.db"` while it runs:
-its newest writes wait in `vault.db-wal` until SQLite moves them over.
+Everything coffre keeps is in the database: secrets, members, grants and
+the audit log. Back it up as one, and restore it as one.
 
 `pnpm typecheck` checks the configuration against coffre's types.
 
