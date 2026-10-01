@@ -10,12 +10,11 @@ export const METHODS = [
   'wrap',
   'rewrap',
   'access',
-  'members',
   'setAccess',
   'admit',
   'remove',
   'checkpoint',
-  'latestCheckpoint',
+  'about',
   'log',
   'verifyLog',
 ] as const satisfies readonly (keyof Vault)[];

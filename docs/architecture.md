@@ -270,27 +270,40 @@ and membership generations. The interface:
 | Call | Does |
 |---|---|
 | `unwrap`, `wrap`, `rewrap` | data keys, for a principal whose grants cover the secret |
-| `access(principal)` | one principal's status, owner flag and grants; the app asks once per request |
-| `members()` | everyone's, in one call, for the Users and project access pages |
+| `access(principal)` | one principal's status, owner flag and grants, their rows checked; the app asks once per request |
 | `setAccess` | several places for one principal, all or nothing (`PATCH /api/access/<member>`) |
-| `admit`, `remove` | add or restore a member, or remove one and revoke every grant |
-| `checkpoint`, `latestCheckpoint` | sign the shared log up to its last entry, in an entry of the vault's; read the latest |
+| `admit`, `remove` | add or restore a member, or remove one and revoke every grant; both answer the member's generation |
+| `checkpoint` | sign the shared log up to its last entry, in an entry of the vault's, and check every member's row |
+| `about` | the public key checkpoints verify under, and the root admins: what only its configuration says |
 | `log` | the shared log filtered to vault entries, with its chain verified; root admins only |
 | `verifyLog` | check the shared chain and the vault's MACs, and replay members and grants |
 
 Every argument and result is plain data, and a refusal is a value, not a
 thrown error, so the same interface works across a process boundary. The app
 turns a refusal into a 403 `vault_refused` carrying the vault's code
-(`removed`, `no_grant`, `expired`, ...), or a 403 `bulk_limit`, and logs it
-as an app entry with code `vault_<code>`.
+(`removed`, `no_grant`, `expired`, ...), or a 403 `bulk_limit`. The vault
+logs what it refuses; the app adds its own entry, with code `vault_<code>`,
+only where the refusal is part of something larger it was doing, a write
+or a new sync's grants.
 
 The vault owns everything that decides access: the key encryption key (KEK),
 grants (`(principal, place) → role`, one per member per place, with an
 optional expiry), principal status (active or removed), the root admins (from
 its configuration, so no row anywhere makes someone one), and its log entries.
-The app keeps a directory row per member for names and sessions, but whether
-that member is still in comes only from `vault.access`. `can()` stays a plain
-function over the grants that call returned.
+Whether a caller is still in, and what they may do, comes only from
+`vault.access`. `can()` stays a plain function over the grants that call
+returned.
+
+**Lists are reads.** The Users page, `coffre access`, a project's Access tab
+and a member's page read `vault_members` and `vault_grants` directly, with
+the app's sessions and sign-in accounts, in one query: a list is a display,
+not a decision. The app cannot check the vault's MAC over a member's row,
+so a row changed around the vault lists as stored; the vault refuses it at
+its first use. Every scheduled checkpoint has the vault check every row
+too, and log a `vault.tampered` for each one it finds changed. A list marks
+a member whose newest such finding is newer than the vault's newest change
+to what they hold, and shows them holding nothing, until an owner removes
+them, which starts them over.
 
 ### Transports
 

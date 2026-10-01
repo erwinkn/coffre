@@ -5,6 +5,7 @@ import type { CoffreClient } from '@coffre/client';
 import { assignableToEnvironment, ROLES } from '@coffre/core/access';
 import { and, asc, eq } from 'drizzle-orm';
 
+import { members } from '../src/db/queries.ts';
 import { writeAuditHeartbeat } from '../src/heartbeat.ts';
 import { auditLog, vaultMembers } from './db/tables.ts';
 import {
@@ -163,10 +164,9 @@ test('an expired grant confers nothing while a live grant works', async () => {
   // Two minutes later, by the vault's clock, which is the one that counts.
   deps.vault.advance(120_000);
   await assert.rejects(developer.secrets.reveal('market/prod/API_KEY'), { status: 403 });
-  assert.deepEqual(
-    (await root.members.list()).members.find((entry) => entry.member === DEVELOPER)?.grants,
-    [],
-  );
+  // Lists read the rows by the clock of whoever lists: two minutes on, it has lapsed there too.
+  const [listed] = await members(db.runtime, deps.chainKey, { member: { type: 'user', id: 'dev@acme.example' } }, new Date(Date.now() + 120_000));
+  assert.deepEqual(listed.grants, []);
 
   const later = new Date(Date.now() + 240_000).toISOString();
   assert.deepEqual(

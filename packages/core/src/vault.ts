@@ -36,26 +36,37 @@ export interface Vault {
    */
   rewrap(input: RewrapInput): Promise<Outcome<{ wrapped: WrappedKey[]; seqs: number[] }>>;
 
-  /** What one principal holds right now: the app asks once per request. */
+  /**
+   * What one principal holds right now: the app asks once per request. A
+   * decision, its rows checked: lists of who holds what read the rows
+   * themselves, and need not ask.
+   */
   access(principal: string): Promise<Access>;
-  /** Everyone admitted, removed or not, and the root admins, in one call. */
-  members(): Promise<Access[]>;
   /** Set roles at several places for one principal: all of it, or none. */
   setAccess(input: SetAccessInput): Promise<Outcome<{ changes: AccessChange[] }>>;
-  /** Add a member, bring back a removed one, or change whether they are an owner. */
-  admit(input: AdmitInput): Promise<Outcome<{ created: boolean; owner: boolean }>>;
-  /** Remove a member: revoke every grant and refuse them until admitted again. */
-  remove(input: RemoveInput): Promise<Outcome<{ revoked: Grant[] }>>;
+  /**
+   * Add a member, bring back a removed one, or change whether they are an
+   * owner. `generation` is theirs now: sessions and tokens of an earlier
+   * one are dead.
+   */
+  admit(input: AdmitInput): Promise<Outcome<{ created: boolean; owner: boolean; generation: number }>>;
+  /** Remove a member: revoke every grant and refuse them until admitted again, from `generation` on. */
+  remove(input: RemoveInput): Promise<Outcome<{ revoked: Grant[]; generation: number }>>;
 
   /**
    * Sign the log up to its last entry, in an `audit.checkpoint` entry of
    * the vault's, if the prefix the last checkpoint signed is still there and
    * every entry since holds, the vault's by their MACs. The vault reads the
-   * log itself: it takes nobody's word for where it ends.
+   * log itself: it takes nobody's word for where it ends. It checks every
+   * member's row too, as `access` would, and logs a `vault.tampered` for
+   * each one changed around it: lists read rows without asking the vault.
    */
   checkpoint(): Promise<Outcome<{ checkpoint: Checkpoint }>>;
-  /** The last prefix signed, and the key to check signatures with. */
-  latestCheckpoint(): Promise<{ checkpoint: Checkpoint | null; publicKey: string }>;
+  /**
+   * What only the vault's configuration says, which the app shows: the key
+   * its checkpoints verify under, and the root admins, as principals.
+   */
+  about(): Promise<{ publicKey: string; rootAdmins: string[] }>;
   /** A page of the vault's own log, newest first, with its chain verified. Root admins only. */
   log(input: LogInput): Promise<Outcome<LogPage>>;
   /**
@@ -67,6 +78,13 @@ export interface Vault {
    */
   verifyLog(input: VerifyLogInput): Promise<LogVerification>;
 }
+
+/**
+ * The vault's entries that change what a member holds: what their row's
+ * `access_seq` names, and what a finding about them is newer than while it
+ * stands.
+ */
+export const ACCESS_ACTIONS = ['member.add', 'member.restore', 'member.owner', 'member.remove', 'access.grant', 'access.revoke'] as const;
 
 /** A refusal, already logged by the time the app sees it. */
 export type Refusal = { code: RefusalCode; message: string };

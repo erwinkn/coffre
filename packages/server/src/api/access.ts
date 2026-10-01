@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { assignableToEnvironment, type Role } from '@coffre/core/access';
 import type { AccessChange } from '@coffre/core/vault';
 
-import { places } from '../db/queries.ts';
+import { memberStanding, places } from '../db/queries.ts';
 import { denied, need, Refusal, withRefusals, type ApiContext } from './context.ts';
 import { badRequest, conflict, notFound, vaultRefused } from './errors.ts';
 import { formatGrantee, formatMember, formatPath, parsePath, type GranteeRef } from './paths.ts';
@@ -92,7 +92,8 @@ export async function setAccess(
       });
     }
 
-    const standing = await ctx.vault.access(principal);
+    // As the row says, to answer in the app's words; the vault decides.
+    const standing = await memberStanding(ctx.db, principal);
     const refuse = (want: (typeof located)[number], message: string, reason: string) =>
       new Refusal(
         conflict(message),
@@ -101,10 +102,10 @@ export async function setAccess(
     for (const want of located) {
       if (want.role === null) continue;
       // A sync becomes a member with its first grant; anyone else is added first.
-      if (standing.status === 'unknown' && grantee.type !== 'sync') {
+      if (standing === null && grantee.type !== 'sync') {
         throw refuse(want, 'add them as a member before granting access', 'principal_not_registered');
       }
-      if (standing.status === 'removed') {
+      if (standing?.status === 'removed') {
         throw refuse(want, 'they were removed; add them as a member again before granting access', 'principal_inactive');
       }
       if (want.environmentId !== null && !assignableToEnvironment(want.role)) {

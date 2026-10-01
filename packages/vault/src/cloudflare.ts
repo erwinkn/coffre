@@ -70,12 +70,11 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
   async wrap(input: WrapInput) { return (await this.#vault()).wrap(input); }
   async rewrap(input: RewrapInput) { return (await this.#vault()).rewrap(input); }
   async access(principal: string) { return (await this.#vault()).access(principal); }
-  async members() { return (await this.#vault()).members(); }
   async setAccess(input: SetAccessInput) { return (await this.#vault()).setAccess(input); }
   async admit(input: AdmitInput) { return (await this.#vault()).admit(input); }
   async remove(input: RemoveInput) { return (await this.#vault()).remove(input); }
   async checkpoint() { return (await this.#vault()).checkpoint(); }
-  async latestCheckpoint() { return (await this.#vault()).latestCheckpoint(); }
+  async about() { return (await this.#vault()).about(); }
   async log(input: LogInput) { return (await this.#vault()).log(input); }
   async verifyLog(input: VerifyLogInput) { return (await this.#vault()).verifyLog(input); }
 

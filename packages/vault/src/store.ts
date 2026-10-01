@@ -1,4 +1,5 @@
 import type { Author, StoredEntry } from '@coffre/core/audit';
+import { ACCESS_ACTIONS } from '@coffre/core/vault';
 import { tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import { clockMillis, engineOf, forUpdate } from '@coffre/db/dialect';
 import { and, asc, count, desc, eq, gt, gte, inArray, isNull, lt, sql } from 'drizzle-orm';
@@ -30,7 +31,7 @@ export type Member = {
 };
 
 /** Every entry that changes who is a member or what they hold. */
-export const ACCESS_ACTIONS = ['member.add', 'member.restore', 'member.owner', 'member.remove', 'access.grant', 'access.revoke'] as const;
+export { ACCESS_ACTIONS };
 
 /** Where a grant applies: a project (`environmentId` null), or one of its environments. */
 export type Place = { projectId: string; environmentId: string | null };
