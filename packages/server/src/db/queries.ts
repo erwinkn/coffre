@@ -350,6 +350,23 @@ async function tamperedMembers(db: Queryable, principal?: string): Promise<Set<s
   return new Set(found.filter((row) => row.seq > (changed.get(row.principal!) ?? -1n)).map((row) => row.principal!));
 }
 
+/** The vault retains removed members too: an access entry without its row means tampering. */
+export async function missingMembers(db: Queryable, member?: { type: string; id: string }): Promise<string[]> {
+  const { auditLog, vaultMembers } = tablesOf(db);
+  const rows = await db.selectDistinct({ principal: auditLog.subjectPrincipal })
+    .from(auditLog)
+    .leftJoin(vaultMembers, eq(vaultMembers.principal, auditLog.subjectPrincipal))
+    .where(and(
+      eq(auditLog.author, 'vault'),
+      eq(auditLog.decision, 'allow'),
+      inArray(auditLog.action, [...ACCESS_ACTIONS]),
+      or(sql`${auditLog.subjectPrincipal} LIKE 'user:%'`, sql`${auditLog.subjectPrincipal} LIKE 'token:%'`),
+      isNull(vaultMembers.principal),
+      member === undefined ? undefined : eq(auditLog.subjectPrincipal, principalOf(member)),
+    ));
+  return rows.map((row) => row.principal!);
+}
+
 /**
  * People and services in the vault's directory, with their live sessions,
  * tokens and sign-in accounts: one of them, or everyone. What they may
