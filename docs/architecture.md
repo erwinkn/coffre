@@ -385,10 +385,12 @@ the MACs still expose changes made without the keys.
 
 Every five minutes the Cron trigger appends an `audit.heartbeat` entry, then
 asks the vault to checkpoint the log. The vault reads the log itself: it
-checks that the prefix its last checkpoint signed is still there and that
-every entry since holds, its own by their MACs, then signs the log up to its
-last entry with Ed25519, in an `audit.checkpoint` entry of its own. It signs
-nothing over a rewrite, and a call with nothing new returns the last one.
+recomputes the whole chain from its first entry, every hash from content
+and its own entries by their MACs, checks that the prefix its last
+checkpoint signed is still there, then signs the log up to its last entry
+with Ed25519, in an `audit.checkpoint` entry of its own. It signs nothing
+over a rewrite or a cut, anywhere in the log, and a call with nothing new
+returns the last one.
 `/readyz` is a query: ready while the newest heartbeat is under eleven
 minutes old and a checkpoint after it carries the vault's signature. There
 is no heartbeat table.

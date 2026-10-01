@@ -10,7 +10,7 @@ import { awsKms, KekRegistry, KekUnavailableError, LocalKekProvider, type KekPro
 import { verifyCheckpoint, type SecretRef, type WrappedKey } from '@coffre/core/vault';
 import { tablesOf, type Database } from '@coffre/db';
 import { appendEntries, LogHeadMismatch, LogRewound } from '@coffre/db/log';
-import { asc, desc, eq, gte, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, gte, sql } from 'drizzle-orm';
 
 import { checkRootAdmins, resolveVaultConfig, type ResolvedVaultConfig } from '../src/config.ts';
 import { openLocalVault, type LocalVault } from '../src/local.ts';
@@ -1123,6 +1123,109 @@ for (const edit of ['forged', 'edited', 'deleted'] as const) {
     assert.equal((await w.vault.verifyLog({})).ok, true);
   });
 }
+
+/**
+ * Hold the log's head as its owner, run `during` while a decision about
+ * someone waits for it, then let go: the window between the decision's
+ * check of a member's row and its seal, which the owner can widen at will.
+ */
+async function whileHeadHeld<T>(decision: () => Promise<T>, during: () => Promise<void>): Promise<T> {
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  let holding!: () => void;
+  const held = new Promise<void>((resolve) => (holding = resolve));
+  const holder = db.owner.transaction(async (tx) => {
+    await run(tx, sql`SELECT 1 FROM audit_chain_head FOR UPDATE`);
+    holding();
+    await released;
+  });
+  await held;
+  const pending = decision();
+  // Until the vault's login queues on the head.
+  for (let i = 0; ; i++) {
+    const [waiting] = await rows<{ n: number }>(db.owner, sql`SELECT count(*)::int AS n FROM pg_stat_activity
+      WHERE datname = current_database() AND usename = 'coffre_vault_runtime' AND wait_event_type = 'Lock'`);
+    if (waiting.n > 0) break;
+    assert.ok(i < 200, 'the decision never waited on the head');
+    await sleep(25);
+  }
+  await during();
+  release();
+  await holder;
+  return pending;
+}
+
+test('a grant written around the vault while it decides about its member is refused, not sealed in (review R2)', postgresOnly('SQLite lets no write in beside a decision'), async () => {
+  const w = await world();
+  const { vaultGrants } = tablesOf(db.owner);
+  // Mallory manages access on a sandbox project, holds nothing on market, and has the owner's login.
+  const sandbox = await newProject(db.owner);
+  const sandboxEnv = await newEnvironment(db.owner, sandbox);
+  assert.equal((await w.vault.admit({ actor: ROOT, principal: ADA })).ok, true);
+  assert.ok((await w.vault.setAccess({ actor: ROOT, principal: ADA, changes: [{ projectId: sandbox, environmentId: null, role: 'access-manager', expiresAt: null }] })).ok);
+  const prod = await w.secret(w.prod);
+  const items = await versionItems([{ secret: prod, wrapped: await wrapped(w, prod) }]);
+
+  // Through the app, as herself, she gives herself viewer on a sandbox environment; while that
+  // decision waits on the head she holds, she inserts a grant on market/prod for herself.
+  const change = await whileHeadHeld(
+    () => w.vault.setAccess({ actor: ADA, principal: ADA, changes: [{ projectId: sandbox, environmentId: sandboxEnv, role: 'viewer', expiresAt: null }] }),
+    async () => {
+      await db.owner.insert(vaultGrants).values({
+        principal: ADA, projectId: null, environmentId: w.prod, role: 'developer', expiresAt: null, grantedAt: Date.now(), grantedBy: ROOT,
+      });
+    },
+  );
+  // The decision finds the table holds more than it decided, and is refused; the finding is logged.
+  assert.equal(!change.ok && change.refusal.code, 'tampered');
+  assert.deepEqual(await tamperings(w), [[ADA, 'mac']]);
+  const read = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items });
+  assert.equal(!read.ok && read.refusal.code, 'tampered', 'a grant the database owner wrote is not honoured');
+  assert.ok(!(await w.vault.access(ADA)).grants.some((grant) => grant.environmentId === w.prod));
+});
+
+test('a grant written around the vault while it removes a member goes with the removal', postgresOnly('SQLite lets no write in beside a decision'), async () => {
+  const w = await world();
+  const { vaultGrants } = tablesOf(db.owner);
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const removal = await whileHeadHeld(
+    () => w.vault.remove({ actor: ROOT, principal: ADA }),
+    async () => {
+      await db.owner.insert(vaultGrants).values({
+        principal: ADA, projectId: null, environmentId: w.prod, role: 'developer', expiresAt: null, grantedAt: Date.now(), grantedBy: ROOT,
+      });
+    },
+  );
+  // The removal's own writes take every grant, the one written around it included, and seal none.
+  assert.equal(removal.ok, true);
+  assert.equal((await w.vault.access(ADA)).status, 'removed');
+  // Admitted again, they start from nothing: no grant written around the vault comes back with them.
+  assert.equal((await w.vault.admit({ actor: ROOT, principal: ADA })).ok, true);
+  assert.deepEqual((await w.vault.access(ADA)).grants, []);
+  assert.deepEqual(await tamperings(w), []);
+});
+
+test('a checkpoint refuses to sign over entries cut from the middle of the log (review R1b)', async () => {
+  const w = await world();
+  const { auditLog, vaultGrants, vaultMembers } = tablesOf(db.owner);
+  await member(w, ADA, [[w.dev, 'developer']]);
+  // Mallory keeps Ada's row and grants from before her removal.
+  const [kept] = await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, ADA));
+  const keptGrants = await db.owner.select().from(vaultGrants).where(eq(vaultGrants.principal, ADA));
+  assert.equal((await w.vault.remove({ actor: ROOT, principal: ADA })).ok, true);
+  await wrapped(w, await w.secret(w.prod));
+  assert.equal((await w.vault.checkpoint()).ok, true, 'a checkpoint signs a prefix that holds the removal');
+
+  // She cuts the removal out of the log, now before the newest checkpoint, and puts Ada's rows back.
+  await withLogUnlocked(db.owner, async (owned) => {
+    await owned.delete(auditLog).where(and(eq(auditLog.author, 'vault'), eq(auditLog.subjectPrincipal, ADA), gt(auditLog.seq, kept.accessSeq)));
+    await owned.update(vaultMembers).set(kept).where(eq(vaultMembers.principal, ADA));
+    await owned.insert(vaultGrants).values(keptGrants);
+  });
+  await wrapped(w, await w.secret(w.prod));
+  const checkpoint = await w.vault.checkpoint();
+  assert.equal(!checkpoint.ok && checkpoint.refusal.code, 'log_broken', 'a checkpoint signed over a log with entries cut from its middle');
+});
 
 test('a checkpoint finds a row changed around the vault before its member asks for anything', async () => {
   const w = await world();

@@ -57,7 +57,7 @@ import { signer, type Signer } from './checkpoint.ts';
 import type { ResolvedVaultConfig } from './config.ts';
 import { carries, further, UNVERIFIED, vaultLogKey, VERIFY_BATCH, verifyChain, type Anchor } from './log.ts';
 import { apply, replay, type LoggedMember, type Replayed } from './replay.ts';
-import { memberMac, rowKey, sealed } from './rows.ts';
+import { memberMac, rowKey, sameGrants, sealed } from './rows.ts';
 import * as store from './store.ts';
 import { ACCESS_ACTIONS, type GrantRow, type Member } from './store.ts';
 
@@ -215,6 +215,13 @@ type Decision = {
   writes: ((at: number) => Promise<void>)[];
   /** Members whose row or grants the writes change: sealed again once they have run. */
   touched: Set<string>;
+  /**
+   * What each member this decision changes holds once its writes have run:
+   * the grants it verified against their row's MAC, with its own changes
+   * applied as they run. `#seal` seals this set, never a fresh read, which
+   * could hold a grant inserted around the vault while it decided.
+   */
+  grants: Map<string, GrantRow[]>;
   /** `vault.tampered` entries, committed with the decision whatever it decides. */
   reports: NewEntry[];
   /** Run once the entries are appended, with the seq each was given. */
@@ -230,8 +237,12 @@ type Correlation = { requestId?: string | null; operationId?: string | null };
 /** Why a member's row is not the one the vault last wrote; rows.ts. */
 type Fault = 'mac' | 'stale';
 
-/** What someone holds, read once per decision; `fault` when their row fails its check, and they hold nothing. */
-type Standing = { principal: string; status: Access['status']; live: Holdings; all: Holdings; fault: Fault | null };
+/**
+ * What someone holds, read once per decision; `fault` when their row fails
+ * its check, and they hold nothing. `stored` is the grants as read, which
+ * the check verified when `fault` is null.
+ */
+type Standing = { principal: string; status: Access['status']; live: Holdings; all: Holdings; fault: Fault | null; stored: GrantRow[] };
 
 /**
  * How one key operation of a call came out: its value; or a bad claim, a
@@ -296,7 +307,9 @@ class VaultService implements Vault {
       const result = await this.#db.transaction(async (tx) => {
         await store.boundLockWaits(tx, LOCK_TIMEOUT_MS);
         const members = principals.length === 0 ? new Map<string, Member>() : await store.lockMembers(tx, principals);
-        const d: Decision = { tx, members, at: await this.#now(tx), log: [], writes: [], touched: new Set(), reports, after: [] };
+        const d: Decision = {
+          tx, members, at: await this.#now(tx), log: [], writes: [], touched: new Set(), grants: new Map(), reports, after: [],
+        };
         const result = await decide(d);
         const entries = [...reports, ...d.log];
         let at = d.at;
@@ -313,7 +326,7 @@ class VaultService implements Vault {
         }
         for (const write of d.writes) await write(at);
         for (const principal of new Set([...d.touched, ...accessSeq.keys()])) {
-          await this.#seal(tx, principal, accessSeq.get(principal));
+          await this.#seal(d, principal, accessSeq.get(principal));
         }
         return result;
       });
@@ -335,14 +348,23 @@ class VaultService implements Vault {
   }
 
   /**
-   * Seal `principal`'s row again over what it now holds, naming
-   * `accessSeq`, their newest access entry, when this decision wrote one.
+   * Seal `principal`'s row again over what this decision left them holding,
+   * naming `accessSeq`, their newest access entry, when it wrote one. The
+   * table must hold exactly that: a grant written around the vault while it
+   * decided (its row lock does not stop one) is refused, with the decision,
+   * rather than sealed in.
    */
-  async #seal(tx: Transaction, principal: string, accessSeq: bigint | undefined): Promise<void> {
-    const row = await store.member(tx, principal);
+  async #seal(d: Decision, principal: string, accessSeq: bigint | undefined): Promise<void> {
+    const row = await store.member(d.tx, principal);
     if (row === undefined) return;
+    const decided = d.grants.get(principal);
+    if (decided === undefined) throw new Error(`sealing ${principal} without the grants this decision verified`);
+    if (!sameGrants(await store.grants(d.tx, principal), decided)) {
+      this.#report(d.reports, principal, 'mac', row.mac.toString('hex'));
+      throw new Refused(refusal('tampered', MESSAGES.tampered), []);
+    }
     const next = { ...row, accessSeq: accessSeq ?? row.accessSeq };
-    await store.updateMember(tx, principal, { accessSeq: next.accessSeq, mac: memberMac(this.#prepared.rowKey, next, await store.grants(tx, principal)) });
+    await store.updateMember(d.tx, principal, { accessSeq: next.accessSeq, mac: memberMac(this.#prepared.rowKey, next, decided) });
   }
 
   /**
@@ -756,12 +778,12 @@ class VaultService implements Vault {
     const none = { isRootAdmin: false, isOwner: false, grants: [] };
     if (this.#isRootAdmin(principal)) {
       const root = { isRootAdmin: true, isOwner: true, grants: [] };
-      return { principal, status: 'active', live: root, all: root, fault: null };
+      return { principal, status: 'active', live: root, all: root, fault: null, stored: [] };
     }
     const grants = row === undefined ? [] : await store.grants(db, principal);
     const fault = await this.#integrity(db, principal, row, grants, reports);
-    if (fault !== null) return { principal, status: 'tampered', live: none, all: none, fault };
-    if (row?.status !== 'active') return { principal, status: row?.status ?? 'unknown', live: none, all: none, fault };
+    if (fault !== null) return { principal, status: 'tampered', live: none, all: none, fault, stored: grants };
+    if (row?.status !== 'active') return { principal, status: row?.status ?? 'unknown', live: none, all: none, fault, stored: grants };
     const held = grants.map((grant) => ({ ...grant, role: grant.role as Role }));
     const isOwner = row.owner && principal.startsWith('user:');
     return {
@@ -770,6 +792,7 @@ class VaultService implements Vault {
       live: { isRootAdmin: false, isOwner, grants: held.filter((grant) => live(grant, at)) },
       all: { isRootAdmin: false, isOwner, grants: held },
       fault,
+      stored: grants,
     };
   }
 
@@ -823,8 +846,10 @@ class VaultService implements Vault {
    * reported: their newest access entries read in one query, and the slow
    * way only for a row that does not match. Lists of members read the rows
    * without the vault, so this is what finds a row changed around it before
-   * its member next asks for anything; the checkpoint runs it, under the
-   * log's lock, where no decision can be half-written.
+   * its member next asks for anything. The checkpoint runs it in one
+   * snapshot: a change committed between two of its reads, such as a lapsed
+   * grant cleared, would otherwise pair a row with grants it was never
+   * sealed over.
    */
   async #sweep(db: Queryable, reports: NewEntry[]): Promise<void> {
     const rows = await store.allMembers(db);
@@ -884,9 +909,8 @@ class VaultService implements Vault {
       if (!input.changes.every((change) => mayManageAccess(acting.live, principal, change))) throw refused('not_allowed');
 
       const row = d.members.get(principal);
-      if ((await this.#standing(d.tx, principal, row, d.at, d.reports)).status === 'tampered') {
-        throw refused('tampered', TAMPERED_SUBJECT);
-      }
+      const subject = await this.#standing(d.tx, principal, row, d.at, d.reports);
+      if (subject.status === 'tampered') throw refused('tampered', TAMPERED_SUBJECT);
       if (row?.status === 'removed') throw refused('removed');
       if (row === undefined) {
         // A sync is a member from its first grant; anyone else is admitted first.
@@ -908,7 +932,9 @@ class VaultService implements Vault {
           });
         });
       }
-      const held = row === undefined ? [] : await store.grants(d.tx, principal);
+      // The grants the check verified, not a second read: what the decision changes, and seals.
+      const held = subject.stored;
+      d.grants.set(principal, [...held]);
       const changes = input.changes.map((change) => this.#apply(d, actor, principal, held, change, input));
       if (d.writes.length > 0) d.touched.add(principal);
       return { changes };
@@ -939,7 +965,11 @@ class VaultService implements Vault {
       });
     // A lapsed grant is cleared with no entry: it changes nothing anyone holds.
     const clear = () => {
-      if (existing !== undefined) d.writes.push(() => store.deleteGrant(d.tx, principal, place));
+      if (existing === undefined) return;
+      d.writes.push(async () => {
+        await store.deleteGrant(d.tx, principal, place);
+        d.grants.set(principal, d.grants.get(principal)!.filter((grant) => grant !== existing));
+      });
     };
 
     if (change.role === null) {
@@ -951,7 +981,11 @@ class VaultService implements Vault {
     if (current !== undefined && current.role === change.role && current.expiresAt === expiresAt) return 'unchanged';
     const role = change.role;
     clear();
-    d.writes.push((at) => store.insertGrant(d.tx, { principal, ...place, role, expiresAt, grantedAt: at, grantedBy: actor }));
+    d.writes.push(async (at) => {
+      const grant = { principal, ...place, role, expiresAt, grantedAt: at, grantedBy: actor };
+      await store.insertGrant(d.tx, grant);
+      d.grants.get(principal)!.push(grant);
+    });
     entry('access.grant', role);
     return current === undefined ? 'created' : 'updated';
   }
@@ -973,10 +1007,10 @@ class VaultService implements Vault {
         throw refused('invalid', 'service accounts cannot be owners');
       }
       const row = d.members.get(principal);
-      if ((await this.#standing(d.tx, principal, row, d.at, d.reports)).status === 'tampered') {
-        throw refused('tampered', TAMPERED_SUBJECT);
-      }
+      const subject = await this.#standing(d.tx, principal, row, d.at, d.reports);
+      if (subject.status === 'tampered') throw refused('tampered', TAMPERED_SUBJECT);
       d.touched.add(principal);
+      d.grants.set(principal, [...subject.stored]);
       const entry = (action: string, owner: boolean) =>
         d.log.push(accessEntry(actor, action, principal, 'allow', input, { owner }));
 
@@ -1021,11 +1055,11 @@ class VaultService implements Vault {
       validateCorrelation(input);
       if (this.#isRootAdmin(principal)) throw refused('root_admin');
       const row = d.members.get(principal);
-      const held = row === undefined ? [] : await store.grants(d.tx, principal);
       const acting = await this.#standing(d.tx, actor, d.members.get(actor), d.at, d.reports);
       if (acting.status === 'tampered') throw refused('tampered');
       const holder = acting.live;
       const subject = await this.#standing(d.tx, principal, row, d.at, d.reports);
+      const held = subject.stored;
       if (subject.status === 'tampered') {
         if (!holder.isOwner) throw refused('not_allowed', 'only owners may remove a member whose record failed its check');
         return this.#startOver(d, actor, principal, row, subject.fault!, input, refused);
@@ -1058,6 +1092,7 @@ class VaultService implements Vault {
       d.touched.add(principal);
       d.writes.push(async (at) => {
         await store.deleteGrants(d.tx, principal);
+        d.grants.set(principal, []);
         await store.updateMember(d.tx, principal, {
           status: 'removed',
           owner: false,
@@ -1093,6 +1128,7 @@ class VaultService implements Vault {
     d.touched.add(principal);
     d.writes.push(async (at) => {
       await store.deleteGrants(d.tx, principal);
+      d.grants.set(principal, []);
       const fresh = {
         status: 'removed' as const,
         owner: false,
@@ -1201,11 +1237,23 @@ class VaultService implements Vault {
     return row === undefined ? null : { checkpoint: JSON.parse(row.metadata) as Checkpoint, seq: row.seq };
   }
 
-  checkpoint(): Promise<Outcome<{ checkpoint: Checkpoint }>> {
+  async checkpoint(): Promise<Outcome<{ checkpoint: Checkpoint }>> {
     // A KEK found wrong turns readiness red: the checkpoint is refused. It does no key work of its
     // own, so it writes nothing more and never waits on a key service; a check under way, or none yet, is no verdict.
     const { wrongKek } = this.#prepared;
+    // Then, in one snapshot and without the log's lock, so that no append
+    // waits on it: every member's row checked, since rows changed around the
+    // vault write nothing to the log; and the whole chain recomputed from its
+    // first entry, every hash from content and every vault entry by its MAC,
+    // since an entry cut from the middle leaves the hashes around a later
+    // checkpoint as they were.
+    const found: NewEntry[] = [];
+    const whole = await this.#db.transaction(async (tx) => {
+      await this.#sweep(tx, found);
+      return verifyChain(tx, this.#prepared.logKey, [], UNVERIFIED);
+    }, SNAPSHOT);
     return this.#decide([], async (d) => {
+      for (const entry of found) if (!d.reports.includes(entry)) d.reports.push(entry);
       // Checkpoints one at a time, each against the one before.
       const head = await lockLogHead(d.tx);
       const latest = await this.#latest(d.tx);
@@ -1216,14 +1264,17 @@ class VaultService implements Vault {
       // Logging the refusal would give the next call something to sign.
       if (head.nextSeq === 0n) throw new Refused(refusal('invalid', 'the log is empty'), []);
       if (wrongKek !== null) throw refused('wrong_kek', { reason: wrongKek }, wrongKek);
-      // Rows changed around the vault write nothing to the log, so this runs even when nothing new needs signing.
-      await this.#sweep(d.tx, d.reports);
+      if (!whole.verification.ok) {
+        throw refused('log_broken', { failedAtSeq: whole.verification.failedAtSeq, reason: whole.verification.reason });
+      }
       // Nothing since the last one: it is still the newest prefix.
       if (latest !== null && latest.seq === head.nextSeq - 1n) return { checkpoint: latest.checkpoint };
-      // The prefix signed last is still there, and every entry since holds,
-      // the vault's by their MACs: a rewrite is never signed over.
-      const since = latest === null ? UNVERIFIED : anchorAt({ seq: latest.checkpoint.seq, hash: latest.checkpoint.hash });
-      const { verification: held, anchor: verified } = await verifyChain(d.tx, this.#prepared.logKey, [], since);
+      // Under the lock, the rest: the prefix signed last still where it was,
+      // and every entry since the snapshot. A rewrite is never signed over.
+      if (latest !== null && !(await carries(d.tx, latest.checkpoint))) {
+        throw refused('log_broken', { reason: `the log up to entry ${latest.checkpoint.seq} is not the prefix the last checkpoint signed` });
+      }
+      const { verification: held, anchor: verified } = await verifyChain(d.tx, this.#prepared.logKey, [], whole.anchor);
       if (!held.ok) throw refused('log_broken', { failedAtSeq: held.failedAtSeq, reason: held.reason });
       // It signs the entry it verified to, which the head, locked, must name.
       if (verified.nextSeq !== head.nextSeq || !verified.hash.equals(head.headHash)) {
@@ -1470,12 +1521,6 @@ function accessEntry(
     requestId: correlation.requestId ?? null,
     metadata: JSON.stringify(PRINCIPAL.test(principal) ? detail : { subject: principal, ...detail }),
   };
-}
-
-/** Where to verify from to check that the log still holds `head`: right after it. */
-function anchorAt(head: LogHead | null): Anchor {
-  if (head === null || head.hash === UNVERIFIED.hash.toString('hex')) return UNVERIFIED;
-  return { nextSeq: BigInt(head.seq) + 1n, hash: Buffer.from(head.hash, 'hex'), vaultEntries: 0 };
 }
 
 function live(grant: GrantRow, at: number): boolean {
