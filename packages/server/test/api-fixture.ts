@@ -149,7 +149,6 @@ export async function resetDatabase(owner: Database): Promise<void> {
     deviceAuthorizations,
     environments,
     identities,
-    principals,
     projects,
     secrets,
     secretVersions,
@@ -170,7 +169,6 @@ export async function resetDatabase(owner: Database): Promise<void> {
   await owner.update(secrets).set({ currentVersionId: null });
   await owner.delete(secretVersions);
   await owner.delete(secrets);
-  await owner.delete(principals);
   await owner.delete(environments);
   await owner.delete(projects);
 }

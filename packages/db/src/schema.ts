@@ -138,32 +138,6 @@ export const secretVersions = pgTable(
   ],
 );
 
-export const principals = pgTable(
-  'principals',
-  {
-    principalType: text('principal_type').notNull(),
-    principalId: text('principal_id').notNull(),
-    createdAt: createdAt(),
-    createdBy: text('created_by').notNull(),
-  },
-  (table) => [
-    primaryKey({
-      name: 'principals_pkey',
-      columns: [table.principalType, table.principalId],
-    }),
-    check(
-      'principals_principal_type_check',
-      sql`${table.principalType} IN ('user', 'service')`,
-    ),
-    // A person is their email address, stored lowercased, so matching a
-    // provider's verified email is plain equality on every database.
-    check(
-      'principals_user_id_lowercase',
-      sql`${table.principalType} <> 'user' OR ${table.principalId} = lower(${table.principalId})`,
-    ),
-  ],
-);
-
 /** The role catalogue, as SQL: every role, and those an environment may be granted. */
 const ROLES = sql.raw(ROLE_NAMES.map((role) => `'${role}'`).join(', '));
 const ENVIRONMENT_ROLES = sql.raw(ROLE_NAMES.filter(assignableToEnvironment).map((role) => `'${role}'`).join(', '));
@@ -363,8 +337,8 @@ export const identities = pgTable(
     subject: text().notNull(),
     issuerHash: text('issuer_hash').notNull(),
     generation: integer().notNull(),
-    principalType: text('principal_type').notNull(),
-    principalId: text('principal_id').notNull(),
+    // The member it signs in as, `user:<email>`, under the generation it was bound in.
+    principal: text().notNull(),
     email: text(),
     createdAt: createdAt(),
     createdBy: text('created_by').notNull(),
@@ -374,19 +348,19 @@ export const identities = pgTable(
     activeSubject: text('active_subject').generatedAlwaysAs(ACTIVE_SUBJECT),
   },
   (table) => [
-    check('identities_principal_type_check', sql`${table.principalType} = 'user'`),
+    check('identities_principal_check', sql`${table.principal} LIKE 'user:%'`),
     check('identities_provider_check', sql`${table.provider} ~ '^[a-z0-9][a-z0-9-]{0,31}$'`),
     check('identities_auth_mac_check', sql`octet_length(${table.authMac}) = 32`),
-    unique('identities_member_generation_key').on(table.id, table.principalType, table.principalId, table.generation),
+    unique('identities_member_generation_key').on(table.id, table.principal, table.generation),
     foreignKey({
       name: 'identities_principal_fkey',
-      columns: [table.principalType, table.principalId],
-      foreignColumns: [principals.principalType, principals.principalId],
+      columns: [table.principal],
+      foreignColumns: [vaultMembers.principal],
     }).onDelete('restrict'),
     // An account is bound to one person at a time: the subject counts only
     // while the identity is not revoked (see ACTIVE_SUBJECT).
     uniqueIndex('identities_active_subject').on(table.provider, table.issuerHash, table.activeSubject),
-    index('identities_principal_idx').on(table.principalType, table.principalId),
+    index('identities_principal_idx').on(table.principal, table.generation),
   ],
 );
 
@@ -407,8 +381,8 @@ export const credentials = pgTable(
     tokenHash: bytea('token_hash').notNull(),
     tokenHint: text('token_hint').notNull(),
     generation: integer().notNull(),
-    principalType: text('principal_type').notNull(),
-    principalId: text('principal_id').notNull(),
+    // The member it acts as, `user:<email>` or `token:<id>`, under the generation it was issued in.
+    principal: text().notNull(),
     identityId: uuid('identity_id'),
     label: text(),
     createdAt: createdAt(),
@@ -422,23 +396,22 @@ export const credentials = pgTable(
   (table) => [
     unique('credentials_token_hash_key').on(table.tokenHash),
     check('credentials_kind_check', sql`${table.kind} IN ('browser', 'cli', 'service')`),
-    check(
-      'credentials_kind_matches_principal',
-      sql`(${table.kind} = 'service') = (${table.principalType} = 'service')`,
-    ),
+    check('credentials_principal_check', sql`${table.principal} LIKE 'user:%' OR ${table.principal} LIKE 'token:%'`),
+    check('credentials_kind_matches_principal', sql`(${table.kind} = 'service') = (${table.principal} LIKE 'token:%')`),
     check('credentials_token_hash_check', sql`octet_length(${table.tokenHash}) = 32`),
     check('credentials_auth_mac_check', sql`octet_length(${table.authMac}) = 32`),
     foreignKey({
       name: 'credentials_principal_fkey',
-      columns: [table.principalType, table.principalId],
-      foreignColumns: [principals.principalType, principals.principalId],
+      columns: [table.principal],
+      foreignColumns: [vaultMembers.principal],
     }).onDelete('restrict'),
+    // A session's account is its own member's, bound in the same generation.
     foreignKey({
       name: 'credentials_identity_id_fkey',
-      columns: [table.identityId, table.principalType, table.principalId, table.generation],
-      foreignColumns: [identities.id, identities.principalType, identities.principalId, identities.generation],
+      columns: [table.identityId, table.principal, table.generation],
+      foreignColumns: [identities.id, identities.principal, identities.generation],
     }).onDelete('restrict'),
-    index('credentials_principal_idx').on(table.principalType, table.principalId),
+    index('credentials_principal_idx').on(table.principal, table.generation),
   ],
 );
 
@@ -463,8 +436,8 @@ export const deviceAuthorizations = pgTable(
     decidedAt: timestamp('decided_at', { withTimezone: true }),
     decision: text(),
     generation: integer().notNull().default(0),
-    principalType: text('principal_type'),
-    principalId: text('principal_id'),
+    // Who approved it, `user:<email>`, once approved.
+    principal: text(),
     consumedAt: timestamp('consumed_at', { withTimezone: true }),
   },
   (table) => [
@@ -477,16 +450,16 @@ export const deviceAuthorizations = pgTable(
     ),
     check(
       'device_authorizations_approval_names_principal',
-      sql`(${table.decision} IS NULL AND ${table.decidedAt} IS NULL AND ${table.principalType} IS NULL AND ${table.principalId} IS NULL AND ${table.generation} = 0 AND ${table.consumedAt} IS NULL)
+      sql`(${table.decision} IS NULL AND ${table.decidedAt} IS NULL AND ${table.principal} IS NULL AND ${table.generation} = 0 AND ${table.consumedAt} IS NULL)
         OR (${table.decision} IS NOT NULL AND ${table.decidedAt} IS NOT NULL AND (
-          (${table.decision} = 'denied' AND ${table.principalType} IS NULL AND ${table.principalId} IS NULL AND ${table.generation} = 0 AND ${table.consumedAt} IS NULL)
-          OR (${table.decision} = 'approved' AND ${table.principalType} IS NOT NULL AND ${table.principalType} = 'user' AND ${table.principalId} IS NOT NULL)
+          (${table.decision} = 'denied' AND ${table.principal} IS NULL AND ${table.generation} = 0 AND ${table.consumedAt} IS NULL)
+          OR (${table.decision} = 'approved' AND ${table.principal} IS NOT NULL AND ${table.principal} LIKE 'user:%')
         ))`,
     ),
     foreignKey({
       name: 'device_authorizations_principal_fkey',
-      columns: [table.principalType, table.principalId],
-      foreignColumns: [principals.principalType, principals.principalId],
+      columns: [table.principal],
+      foreignColumns: [vaultMembers.principal],
     }).onDelete('restrict'),
   ],
 );
@@ -571,11 +544,8 @@ export const syncKeys = pgTable(
 
 // For Drizzle's relational queries; see relations.ts.
 export const {
-  principalsRelations,
-  credentialsRelations,
-  identitiesRelations,
   environmentsRelations,
   secretsRelations,
   syncsRelations,
   syncKeysRelations,
-} = relationsOf({ projects, environments, secrets, secretVersions, principals, identities, credentials, syncs, syncKeys });
+} = relationsOf({ projects, environments, secrets, secretVersions, syncs, syncKeys });

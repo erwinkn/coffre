@@ -13,9 +13,9 @@ export type AuthTable = keyof Rows;
 // IDs and userCode bind a MAC to the row an approval or revocation selects.
 // decidedAt also matters: clearing it would make a device decidable again.
 const FIELDS = {
-  identities: ['id', 'provider', 'issuerHash', 'subject', 'principalType', 'principalId', 'generation', 'revokedAt'],
-  credentials: ['id', 'tokenHash', 'kind', 'principalType', 'principalId', 'generation', 'identityId', 'expiresAt', 'revokedAt'],
-  device_authorizations: ['id', 'deviceCodeHash', 'userCode', 'decision', 'decidedAt', 'principalType', 'principalId', 'generation', 'expiresAt', 'consumedAt'],
+  identities: ['id', 'provider', 'issuerHash', 'subject', 'principal', 'generation', 'revokedAt'],
+  credentials: ['id', 'tokenHash', 'kind', 'principal', 'generation', 'identityId', 'expiresAt', 'revokedAt'],
+  device_authorizations: ['id', 'deviceCodeHash', 'userCode', 'decision', 'decidedAt', 'principal', 'generation', 'expiresAt', 'consumedAt'],
 } as const satisfies { [K in AuthTable]: readonly (keyof Rows[K])[] };
 
 type Fields = { [K in AuthTable]: Pick<Rows[K], Extract<typeof FIELDS[K][number], keyof Rows[K]>> };
@@ -33,7 +33,7 @@ export function authMac<K extends AuthTable>(chainKey: Buffer, table: K, row: Fi
   });
   const key = deriveKey(chainKey, 'signin-rows/v1');
   try {
-    return createHmac('sha256', key).update(JSON.stringify(['coffre.auth.v1', table, ...values])).digest();
+    return createHmac('sha256', key).update(JSON.stringify(['coffre.auth.v2', table, ...values])).digest();
   } finally {
     key.fill(0);
   }

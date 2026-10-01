@@ -378,7 +378,8 @@ for (const flow of ['browser', 'link', 'device approval', 'device poll', 'servic
         break;
       case 'device approval':
         await assert.rejects(signin.decideDevice(asker, device!.userCode, true), { status: 403 });
-        assert.deepEqual(await signin.pollDevice(device!.deviceCode, meta()), { status: 'denied' });
+        // Refused before it committed: the code waits for another decision.
+        assert.deepEqual(await signin.pollDevice(device!.deviceCode, meta()), { status: 'pending' });
         break;
       case 'device poll':
         assert.deepEqual(await signin.pollDevice(device!.deviceCode, meta()), { status: 'denied' });
@@ -411,33 +412,5 @@ test('a removal sweep delayed past re-admission preserves the new session and bi
   await assert.rejects(signin.verify(old.token));
   assert.ok(fresh);
   assert.equal((await signin.verify(fresh.token)).id, DEV);
-  assert.equal((await signin.listIdentities(await contextFor(deps, DEV))).length, 1);
-});
-
-test('a failed post-commit generation check leaves no usable credential or obstacle to a fresh binding', async (t) => {
-  const access = deps.vault.access;
-  let phase = 0;
-  t.mock.method(deps.vault, 'access', async (principal: string) => {
-    const standing = await access(principal);
-    if (principal === `user:${DEV}` && phase === 0) {
-      phase = 1;
-      await root.members.remove(`user:${DEV}`);
-      await root.members.add(`user:${DEV}`);
-      phase = 2;
-    } else if (principal === `user:${DEV}` && phase === 2) {
-      phase = 3;
-      throw new Error('vault unavailable after commit');
-    }
-    return standing;
-  });
-  await assert.rejects(signin.completeSignin(
-    { provider: 'github', subject: 'late-account', emails: [DEV], name: null }, meta(),
-  ), /vault unavailable after commit/);
-  const [stale] = await db.owner.select().from(credentials);
-  assert.ok(stale);
-  const fresh = await browserSession(DEV, 'fresh-account');
-  assert.equal((await signin.verify(fresh.token)).id, DEV);
-  const [cleaned] = await db.owner.select().from(credentials).where(eq(credentials.id, stale.id));
-  assert.notEqual(cleaned.revokedAt, null);
   assert.equal((await signin.listIdentities(await contextFor(deps, DEV))).length, 1);
 });

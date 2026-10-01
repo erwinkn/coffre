@@ -231,6 +231,38 @@ export async function places(db: Queryable): Promise<PlaceRow[]> {
 
 // --- members and sign-in ------------------------------------------------------
 
+/**
+ * A member as the database names it, the vault's way: `user:<email>` for a
+ * person, `token:<id>` for a service. The API's `service` stays out of storage.
+ */
+export function principalOf(member: { type: string; id: string }): string {
+  return `${member.type === 'service' ? 'token' : 'user'}:${member.id}`;
+}
+
+/** `principalOf` undone. */
+export function memberOf(principal: string): { type: 'user' | 'service'; id: string } {
+  const colon = principal.indexOf(':');
+  return { type: principal.slice(0, colon) === 'token' ? 'service' : 'user', id: principal.slice(colon + 1) };
+}
+
+/**
+ * A member's status and generation as the vault last committed them, or
+ * null for no member. Read without a lock: a member's row is the vault's to
+ * lock. Inside a transaction that holds the log's head, any change the vault
+ * is making waits for it, so what this reads holds until it commits.
+ */
+export async function memberStanding(
+  db: Queryable,
+  member: { type: string; id: string },
+): Promise<{ status: string; generation: number } | null> {
+  const { vaultMembers } = tablesOf(db);
+  const [row] = await db
+    .select({ status: vaultMembers.status, generation: vaultMembers.generation })
+    .from(vaultMembers)
+    .where(eq(vaultMembers.principal, principalOf(member)));
+  return row ?? null;
+}
+
 export type MemberRow = {
   type: 'user' | 'service';
   id: string;
@@ -265,9 +297,9 @@ export type MemberRow = {
 };
 
 /**
- * Principals in the directory with their live sessions, tokens and sign-in
- * accounts: one of them, or everyone, by type and id. What they may reach
- * is the vault's to say; offboarding and the account page read this.
+ * People and services in the vault's directory, with their live sessions,
+ * tokens and sign-in accounts: one of them, or everyone. What they may
+ * reach is the vault's to say; offboarding and the account page read this.
  */
 export async function members(
   db: Queryable,
@@ -275,32 +307,35 @@ export async function members(
   filter: { member?: { type: string; id: string } },
   now: Date,
 ): Promise<MemberRow[]> {
-  const { principals, credentials, identities } = tablesOf(db);
-  const { member } = filter;
-  const ofMember = (table: typeof principals | typeof credentials | typeof identities) => member === undefined
-    ? undefined
-    : and(eq(table.principalType, member.type), eq(table.principalId, member.id));
+  const { vaultMembers, credentials, identities } = tablesOf(db);
+  const principal = filter.member === undefined ? undefined : principalOf(filter.member);
+  const of = (column: typeof vaultMembers.principal | typeof credentials.principal | typeof identities.principal) =>
+    principal === undefined ? undefined : eq(column, principal);
   // Read binary columns directly. Relational JSON encodes bytea on Postgres
   // and cannot hold blobs on SQLite, so it cannot carry these MACs unchanged.
   const [rows, held, bound] = await Promise.all([
-    db.select().from(principals).where(ofMember(principals)).orderBy(asc(principals.principalType), asc(principals.principalId)),
-    db.select().from(credentials).where(ofMember(credentials)),
-    db.select().from(identities).where(ofMember(identities)),
+    db
+      .select({ principal: vaultMembers.principal, createdAt: vaultMembers.createdAt })
+      .from(vaultMembers)
+      // A sync is a member too, but signs nothing in.
+      .where(and(of(vaultMembers.principal), or(sql`${vaultMembers.principal} LIKE 'user:%'`, sql`${vaultMembers.principal} LIKE 'token:%'`)))
+      .orderBy(asc(vaultMembers.principal)),
+    db.select().from(credentials).where(of(credentials.principal)),
+    db.select().from(identities).where(of(identities.principal)),
   ]);
   for (const identity of bound) verifyAuthRow(chainKey, 'identities', identity);
   for (const credential of held) verifyAuthRow(chainKey, 'credentials', credential);
   const providers = new Map(bound.map((row) => [row.id, row.provider]));
   return rows.map((row) => ({
-    type: row.principalType as MemberRow['type'],
-    id: row.principalId,
-    createdAt: row.createdAt,
-    credentials: held.filter((credential) => credential.principalType === row.principalType && credential.principalId === row.principalId
+    ...memberOf(row.principal),
+    createdAt: new Date(row.createdAt),
+    credentials: held.filter((credential) => credential.principal === row.principal
       && credential.revokedAt === null && credential.expiresAt > now)
-      .map(({ tokenHash: _hash, authMac: _mac, principalType: _type, principalId: _id, revokedAt: _at, revokedBy: _by, ...credential }) => ({
+      .map(({ tokenHash: _hash, authMac: _mac, principal: _principal, revokedAt: _at, revokedBy: _by, ...credential }) => ({
         ...credential,
         provider: credential.identityId === null ? null : providers.get(credential.identityId) ?? null,
       })),
-    identities: bound.filter((identity) => identity.principalType === row.principalType && identity.principalId === row.principalId
+    identities: bound.filter((identity) => identity.principal === row.principal
       && identity.revokedAt === null).map((identity) => ({
       id: identity.id,
       provider: identity.provider,
@@ -419,7 +454,7 @@ export async function revokePriorMembership(
   const revokedAt = new Date();
   for (const table of [credentials, identities]) {
     const rows = await db.select().from(table).where(and(
-      eq(table.principalType, principal.type), eq(table.principalId, principal.id),
+      eq(table.principal, principalOf(principal)),
       lt(table.generation, generation),
     ));
     for (const row of rows) {

@@ -1,11 +1,10 @@
 import { ROLES, type Permission, type Role } from '@coffre/core/access';
 import type { Access, Grant } from '@coffre/core/vault';
 import type { Queryable } from '@coffre/db';
-import { credentials, identities, principals } from '@coffre/db/schema';
+import { credentials, identities } from '@coffre/db/schema';
 
 import { actorParts } from '../db/audit.ts';
 import {
-  insertIfAbsent,
   revokePriorMembership,
   memberActivity,
   members as loadMembers,
@@ -347,8 +346,8 @@ function rootAdminRefusal(ctx: ApiContext, action: string, member: MemberRef): R
 /**
  * Add a member, bring back a removed one, or change whether they are an
  * owner. Adding someone who is already a member as they are changes nothing.
- * The vault decides and keeps who is in; the app keeps a directory row, which
- * their sessions and tokens hang off.
+ * The vault decides and keeps who is in, in the member row their sessions
+ * and tokens hang off.
  */
 export async function putMember(
   ctx: ApiContext,
@@ -377,13 +376,9 @@ export async function putMember(
     if (!result.ok) throw vaultRefusal(ctx, result.refusal, 'directory.create', { metadata: fields });
     const current = await ctx.vault.access(principal);
     return audited(ctx, async (tx, log) => {
+      // Housekeeping: rows of an earlier membership are dead already, by their generation.
       await revokePriorMembership(tx, ctx.chainKey, member, current.generation, ctx.caller.principal.id);
       const role = result.owner ? 'owner' : 'user';
-      await insertIfAbsent(tx, principals, {
-        principalType: member.type,
-        principalId: member.id,
-        createdBy: ctx.caller.principal.id,
-      });
       if (result.created) {
         log.push(allowed(ctx, 'directory.create', { metadata: { ...fields, instanceRole: role } }));
       } else if (result.owner !== standing.isOwner) {
