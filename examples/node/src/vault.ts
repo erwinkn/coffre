@@ -1,7 +1,7 @@
 // The vault: the keys, and the members and grants, which it keeps in the
 // server's database through a login of its own. It answers only on a Unix
 // socket, which it makes 0660: run it as its own user, sharing a group with
-// the server's, and nothing that faces the network can read a key.
+// the server's, and nothing that faces the network can read the KEK.
 // Settings come from vault.env.
 import { serveVault } from '@coffre/vault/node';
 

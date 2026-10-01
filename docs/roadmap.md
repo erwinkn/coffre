@@ -43,14 +43,12 @@ Each item says what is wrong today.
    nonce breaks where it is written. `Referrer-Policy` is `same-origin`, not
    `no-referrer`: under `no-referrer` a same-origin POST carries
    `Origin: null`, which the CSRF check refuses.
-2. **Escrow the keys, then prove recovery.** `COFFRE_KEK_LOCAL`,
-   `COFFRE_VAULT_SIGNING_KEY` (the vault's) and `COFFRE_AUDIT_CHAIN_KEY` (the
-   app's) are Worker secrets, and that store is write-only. The vault's
-   Durable Object, which holds every grant, needs a backup too.
-   If no other copy exists, losing the Worker
-   loses every secret. Keep an offline copy, then run a restore drill: a fresh
-   database from backup plus the escrowed KEK, then `coffre verify` passes
-   and a canary secret decrypts.
+2. **Escrow the keys, then prove recovery.** Keep `KEK` and its `KEK_ID`,
+   `SIGNING_KEY`, `AUDIT_CHAIN_KEY` and the OAuth client secret outside the
+   deployment, plus access to any KMS keys in use. Restore one database
+   backup with those keys, restart both components, then check that
+   `coffre verify` passes and a canary decrypts. The database now holds
+   members, grants and both authors' entries too.
 3. **Rotation that can retire a key.** Rotation today only changes which KEK
    wraps *new* versions. Every old version still needs the old KEK forever, so
    a leaked KEK cannot be retired. Add a `rewrap` maintenance command: it
@@ -61,13 +59,10 @@ Each item says what is wrong today.
    Cron run (11 minutes, where it used to fail at 5, the Cron interval itself,
    and flapped). Nothing monitors it yet: attach an external check on
    `/readyz` that pages you.
-5. **Checkpoints off the box.** Each log now records the other's head, so
-   rewinding either alone fails verification. Whoever holds both stores can
-   still rewind both to an earlier checkpoint together, and the entries since
-   the last one (five minutes of Cron) are covered only by each chain. The
-   scheduled handler should write each checkpoint somewhere outside both
-   trust domains (on Cloudflare, R2 with a bucket-lock retention rule), and
-   `verify` should compare against it.
+5. **Checkpoints off the box.** Both authors now write to one log. Its MACs
+   detect forged entries without the keys, but a complete older backup
+   still verifies. Export checkpoints to an independent witness and have
+   `verify` compare against it; nothing implements that freshness check yet.
 6. **Backups.** Point-in-time recovery on whatever hosts Postgres, exercised by
    the drill in item 2.
 7. **Guard main.** `main` is unprotected. `.github/workflows/validate.yml`
@@ -114,17 +109,14 @@ that holds the keys and decides who may decrypt. The design is in
    writes. The integration suite runs on both (`pnpm test:all`); the
    restricted runtime login stays Postgres-only.
 5. ~~**The vault**~~ ([design](architecture.md#the-vault)): done.
-   `packages/vault` holds the KEK, grants, principal status, root admins and
-   a hash-chained log of its own, over SQLite; the app keeps ciphertext and
-   wrapped keys, and asks the vault to wrap and unwrap, once per batch. It
-   runs as its own Worker, a Durable Object behind a service binding, next
-   to the app in dev and conformance, or in process over a SQLite file
-   for the tests. Callers' grants come from the vault once per
-   request; changing access and removing a member are vault calls, and a
-   refusal is a 403 with the vault's code. Unwraps are capped per principal
-   (`1000/15m` by default), syncs read as `sync:<id>`, and the vault signs
-   checkpoints of both logs, which verification checks, replaying members
-   and grants from the vault's own.
+   `packages/vault` holds the KEK and decides access, writing members,
+   grants and its entries in the shared Postgres database through its own
+   login. It runs as a Worker behind a service binding, or as a Node process
+   behind a Unix socket. Tests and local development can use one SQLite
+   file. Callers' grants come from the vault once per request; a refusal is
+   a 403 with the vault's code. Vault instances share the bulk count and
+   generations. The vault signs checkpoints, and verification authenticates
+   both authors and replays members and grants from vault entries.
 6. ~~**The packages**~~ ([design](architecture.md#packages)): done.
    `@coffre/server`, `@coffre/ui`, `@coffre/vault`, `@coffre/client` and
    `@coffre/cli` build with tsdown into JavaScript and declarations, the

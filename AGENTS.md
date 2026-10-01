@@ -7,7 +7,7 @@ points), `packages/db` (`@coffre/db`: the Drizzle schemas for Postgres and SQLit
 migrations and migrator, the dialect helpers, and the connections, Hyperdrive's
 included), `packages/ui` (`@coffre/ui`: the TanStack
 Start pages, prebuilt), `packages/vault` (`@coffre/vault`: keys, grants, members, its
-own log), `packages/client` (the typed API client the CLI and UI call), `packages/cli`
+entries in the shared log), `packages/client` (the typed API client the CLI and UI call), `packages/cli`
 (`coffre`, including `coffre init`), `packages/conformance` (`@coffre/conformance`:
 `coffre-conformance`, which boots a deployment and holds it to what it must never do,
 and the dev IdP, `@coffre/conformance/idp`, the local stand-in for Cloudflare Access,

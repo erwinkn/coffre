@@ -9,7 +9,7 @@ Two processes, configured in code:
   only the server, on a Unix socket.
 
 Run them as two users that share a group, and the process facing the network
-never holds a key. Where that matters less, `server.ts` can run the vault
+never holds the KEK. For local development, `server.ts` can run the vault
 in its own process instead; see the comment there. Everything below runs
 from this directory, on Node 24 or later.
 
@@ -23,25 +23,44 @@ cp vault.env.example vault.env
 
 Fill both in: `PUBLIC_URL`, a GitHub OAuth app whose callback is
 `<PUBLIC_URL>/auth/callback/github`, `ROOT_ADMINS`, and three keys from
-`openssl rand -base64 32`. Keep a copy of `KEK` somewhere safe and offline:
-without it, no secret stored in coffre can be read again.
+`openssl rand -base64 32`. Escrow `KEK` and its `KEK_ID`, `SIGNING_KEY`, `AUDIT_CHAIN_KEY` and the OAuth
+client secret in a password manager. Without the KEK, stored values cannot
+be read; without the other keys, the existing log cannot be verified.
 
 ## 2. The database
 
-`DATABASE_URL` is a Postgres database for deployment. The example defaults
-to a SQLite file for local development and tests. Bring the database up to
-date now and after every upgrade of `@coffre/server`:
+Use one Postgres database with three logins: its owner for migrations,
+`coffre_runtime` for the server, and `coffre_vault_runtime` for the vault.
+As an administrator, connect to the database with `psql` and create the
+runtime logins. `\password` prompts for each password without putting it
+in a SQL statement or shell history:
 
-```sh
-pnpm migrate file:coffre.db
+```sql
+CREATE ROLE coffre_runtime LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+CREATE ROLE coffre_vault_runtime LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+\password coffre_runtime
+\password coffre_vault_runtime
 ```
 
-On Postgres, migrate as the database's owner, after creating two plain
-logins: `coffre_runtime` for the server and `coffre_vault_runtime` for the
-vault (`CREATE ROLE coffre_runtime LOGIN PASSWORD '…'`, and the same for the
-other). The first migration grants each the rows it needs, and nothing
-else: only the vault's may write members and grants. `DATABASE_URL` names
-the server's login in `server.env`, and the vault's in `vault.env`.
+Migrate as the owner, who must also be able to create and grant roles:
+
+```sh
+pnpm migrate "postgres://owner:…@db.example.com:5432/coffre"
+```
+
+The migration creates the `coffre_app` and `coffre_vault` group roles and
+grants each login only its group's rights. Only the vault writes members
+and grants; each login appends to the audit log only as itself. Run the
+migration again after every package upgrade, before starting either process.
+
+Fill `DATABASE_URL` in each env file with the same host and database, using
+`coffre_runtime` in `server.env` and `coffre_vault_runtime` in `vault.env`.
+URL-encode special characters in passwords. Neither process gets the owner's
+URL. Keep each env file readable only by its process's user (`chmod 600`).
+
+For tests and local development only, both URLs may instead name the same
+absolute SQLite file, e.g. `file:/tmp/coffre-local.db`; migrate that URL once.
+SQLite has no database logins or separation of privileges.
 
 ## 3. Run
 
@@ -57,7 +76,11 @@ coffre login https://secrets.example.com
 ```
 
 Everything coffre keeps is in the database: secrets, members, grants and
-the audit log. Back it up as one, and restore it as one.
+the audit log. Back it up as one, and restore it with the escrowed keys.
+After an intentional restore, restart both processes before verifying with
+`coffre verify` and revealing a canary. A running process refuses to append
+behind a head it remembers. A complete older backup can still verify; the
+log alone cannot prove that it is the newest copy.
 
 `pnpm typecheck` checks the configuration against coffre's types.
 

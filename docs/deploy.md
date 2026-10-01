@@ -1,128 +1,234 @@
 # Deploying coffre
 
-A deployment is a small project of your own that imports coffre's packages
-and configures them in code; [architecture.md](architecture.md) explains the
-shape. `coffre init` writes one, and each comes with a README that walks
-through the same steps as this page.
+A deployment is a small project that imports coffre's packages and configures
+them in code. It runs an app and a vault, as two Workers or two Node
+processes. Both use one Postgres database, each through its own login.
 
 ```sh
-coffre init --workers acme-secrets   # two Workers, Postgres through Hyperdrive
-coffre init --node acme-secrets      # two Node processes, Postgres or local SQLite
+coffre init --workers acme-secrets   # two Workers, two Hyperdrive configs
+coffre init --node acme-secrets      # two Node processes, one Unix socket
+cd acme-secrets
+pnpm install
 ```
 
-What you get is [examples/workers](../examples/workers) or
-[examples/node](../examples/node), file for file, with the project named
-after its directory and coffre's packages pinned at the CLI's version. Until
-the `@coffre` packages are on npm, copy an example and install them from
-tarballs (`pnpm test:consumer` shows how).
+These are [examples/workers](../examples/workers) and
+[examples/node](../examples/node), with the project's name and the CLI's
+package version. Until the packages are published, install from tarballs;
+`pnpm test:consumer` exercises that path.
+
+## The database, for either deployment
+
+Provision a Postgres database, e.g. `coffre`, owned by a migration login.
+The owner must be able to create roles and grant their membership as well
+as create the schema. Runtime processes never get this login. On a managed
+service, use its administrative connection for this setup and check that it
+allows those operations.
+
+Connect to that database as its administrator with `psql`:
+
+```sh
+psql "postgres://owner@db.example.com:5432/coffre?sslmode=require"
+```
+
+Create two plain logins. `\password` prompts for passwords without putting
+them in SQL statements or shell history. Use different generated passwords
+and keep them in your password manager.
+
+```sql
+CREATE ROLE coffre_runtime LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+CREATE ROLE coffre_vault_runtime LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+\password coffre_runtime
+\password coffre_vault_runtime
+\q
+```
+
+Then migrate as the owner. Read the URL from your password manager into
+`DATABASE_URL`, including the password and the TLS settings your host requires:
+
+```sh
+pnpm migrate
+```
+
+`pnpm migrate` runs `coffre-server migrate`. It accepts the owner URL as an
+argument too. URL-encode special characters in passwords. Run it again
+after every package upgrade, before starting either component. Clear the
+owner's `DATABASE_URL` from the shell afterwards (`unset DATABASE_URL`).
+
+The migration creates two group roles and grants their membership:
+
+| Login | Group | Rights |
+|---|---|---|
+| `coffre_runtime` | `coffre_app` | app data, sessions and syncs; app entries in the log; read-only access to members and grants |
+| `coffre_vault_runtime` | `coffre_vault` | members and grants; read the secret context it decides on; vault entries in the log |
+
+Neither login owns tables or may change or delete audit entries. Row-level
+security permits each to append only as its own author. Do not run either
+component as the owner or give the runtime logins additional roles.
 
 ## On Workers
 
 ```
 acme-secrets/
   app/src/worker.ts      coffre(env => ({ publicUrl, database, vault, auth, auditChainKey }))
-  app/wrangler.jsonc     Hyperdrive, the VAULT service binding, the Cron trigger, @coffre/ui's files
-  vault/src/worker.ts    vault(env => ({ kek, rootAdmins, signingKey })), and its Durable Object
-  vault/wrangler.jsonc   the Durable Object and its migration
-  package.json           @coffre/server, @coffre/ui, @coffre/vault, wrangler; exact pins
-  pnpm-workspace.yaml    tells pnpm 11 not to run esbuild's and workerd's install scripts
+  app/wrangler.jsonc     HYPERDRIVE, VAULT service binding, Cron, UI assets
+  vault/src/worker.ts    vault(env => ({ database, kek, rootAdmins, signingKey }))
+  vault/wrangler.jsonc   VAULT_HYPERDRIVE; no public route
 ```
 
-**1. Settings.** Values that are not secret are `vars` in each
-`wrangler.jsonc`: `PUBLIC_URL` and `GITHUB_CLIENT_ID` for the app, from a
-GitHub OAuth app whose callback is `<PUBLIC_URL>/auth/callback/github`;
-`KEK_ID` and `ROOT_ADMINS` (the first people in) for the vault. The worker
-files turn them into coffre's typed configuration, so a deployment behind
-Cloudflare Access instead swaps `signin(…)` for `cloudflareAccess(…)`
+### 1. Settings
+
+Set `PUBLIC_URL` and `GITHUB_CLIENT_ID` in `app/wrangler.jsonc`. The GitHub
+OAuth app's callback is `<PUBLIC_URL>/auth/callback/github`. Set `KEK_ID`
+and `ROOT_ADMINS` in `vault/wrangler.jsonc`. The latter names the first
+people in, whom nobody can remove through the API.
+
+For Cloudflare Access instead, replace `signin(…)` with `cloudflareAccess(…)`
 ([deployment-auth.md](deployment-auth.md)).
 
-**2. The database.** A Postgres database with two logins: its owner, which
-migrates, and `coffre_runtime`, which the app runs as. Create
-`coffre_runtime` as a plain login; the first migration grants it rows to read
-and write, and nothing else.
+### 2. Two Hyperdrive configs
+
+Create one config per runtime login, both pointing to the same database.
+Substitute their passwords below, URL-encoded. Use the database's direct
+Postgres endpoint (normally port 5432), rather than another connection pool.
 
 ```sh
-pnpm install
-pnpm migrate "postgres://owner:…@db.example.com:5432/coffre"
 pnpm exec wrangler hyperdrive create coffre --caching-disabled \
   --connection-string="postgres://coffre_runtime:…@db.example.com:5432/coffre"
+pnpm exec wrangler hyperdrive create coffre-vault --caching-disabled \
+  --connection-string="postgres://coffre_vault_runtime:…@db.example.com:5432/coffre"
 ```
 
-Hyperdrive otherwise caches reads for up to a minute, and a write does not
-clear them, so a revoked token or a signed-out session could keep working
-for about a minute. The setting belongs to the Hyperdrive config, and
-`wrangler.jsonc` has no way to pin it: for a config made another way, check
-`caching` in `wrangler hyperdrive get <id>`, and turn it off with
-`wrangler hyperdrive update <id> --caching-disabled`.
+Put the first id in `app/wrangler.jsonc`, under the `HYPERDRIVE` binding,
+and the second in `vault/wrangler.jsonc`, under `VAULT_HYPERDRIVE`. The app's
+`VAULT` service binding names the vault Worker. The vault has no public URL.
 
-The id Hyperdrive prints goes in `app/wrangler.jsonc`. `pnpm migrate` is
-`coffre-server migrate`, which ships with `@coffre/server` and applies
-`@coffre/db`'s migrations at the same version, so the schema always matches
-the server's: run it after every upgrade, before deploying.
+Keep `--caching-disabled` on **both** configs. A cached session or grant
+could otherwise survive its revocation. `wrangler.jsonc` cannot set this:
+check `caching` with `wrangler hyperdrive get <id>`. Fix an existing config
+with `wrangler hyperdrive update <id> --caching-disabled`.
 
-**3. Secrets.** Each Worker declares the secrets it needs
-(`secrets.required`), and gets no others:
+### 3. Keys and secrets
+
+Generate three separate 32-byte keys with `openssl rand -base64 32`.
+Save them in a password manager **before** uploading them. Escrow the KEK
+with its `KEK_ID`, `SIGNING_KEY`, `AUDIT_CHAIN_KEY`, and the GitHub client
+secret. Each command below prompts for the saved value:
 
 ```sh
-openssl rand -base64 32 | pnpm exec wrangler secret put KEK -c vault/wrangler.jsonc
-openssl rand -base64 32 | pnpm exec wrangler secret put SIGNING_KEY -c vault/wrangler.jsonc
-openssl rand -base64 32 | pnpm exec wrangler secret put AUDIT_CHAIN_KEY -c app/wrangler.jsonc
+pnpm exec wrangler secret put KEK -c vault/wrangler.jsonc
+pnpm exec wrangler secret put SIGNING_KEY -c vault/wrangler.jsonc
+pnpm exec wrangler secret put AUDIT_CHAIN_KEY -c app/wrangler.jsonc
 pnpm exec wrangler secret put GITHUB_CLIENT_SECRET -c app/wrangler.jsonc
 ```
 
-Keep a copy of `KEK` offline: without it, no stored secret can be read
-again. To rotate it, add a new `kek` and move the old one to `previousKeks`
-in `vault/src/worker.ts`; the vault unwraps with either and wraps with the
-new one. To keep the KEK in AWS KMS instead, where it never leaves and
-CloudTrail logs every use, see [keys.md](keys.md).
+Only the vault gets the KEK and signing key; only the app gets the audit
+key and OAuth secret. Without the KEK, stored values cannot be read.
+Without the signing and audit keys, the existing log cannot be verified.
+Keep old KEKs too: a new KEK does not rewrap existing data keys. Configure
+older ones as `previousKeks`. For AWS KMS, see [keys.md](keys.md); recovery
+needs access to every KMS key that still wraps stored data keys.
 
-**4. Deploy.** `pnpm run deploy` deploys the vault, then the app, whose
-`VAULT` binding names it. `pnpm build` is the same as a dry run. Route the
-app to `PUBLIC_URL`, sign in there as a root admin, then:
+### 4. Deploy
+
+`pnpm run deploy` deploys the vault, then the app. `pnpm build` bundles
+both without deploying them. Route the app to `PUBLIC_URL`, sign in as a
+root admin, then try the CLI:
 
 ```sh
 coffre login https://secrets.example.com
 ```
 
-**Backups.** The database holds ciphertext, the directory and the audit log;
-the vault's Durable Object holds grants, members, unwrap counts, audit
-checkpoints and its own log. Cloudflare can restore a Durable Object to any
-point in the last 30 days (Point-in-Time Recovery), but keeps no copy
-elsewhere, and nothing exports one yet. Restore the two to the same moment:
-each log records the other's head at every checkpoint, so verification fails
-while either is behind.
-
 ## On Node
 
 ```
 acme-secrets/
-  src/server.ts          serve({ port, publicUrl, database, vault: connectVault(socket), auth, auditChainKey })
-  src/vault.ts           serveVault({ socket, store, kek, rootAdmins, signingKey })
-  server.env.example     each process's settings, read with node --env-file
-  vault.env.example
-  package.json           @coffre/server, @coffre/vault; exact pins
+  src/server.ts          serve({ database, vault: connectVault(socket), … })
+  src/vault.ts           serveVault({ socket, database, kek, rootAdmins, signingKey })
+  server.env.example     app settings
+  vault.env.example      vault settings
 ```
+
+Use Node 24 or later. Set up the database above, then:
 
 ```sh
-pnpm install
-cp server.env.example server.env && cp vault.env.example vault.env   # then fill them in
-pnpm migrate file:coffre.db     # local dev; use postgres://… as the owner for deployment
-pnpm vault                      # first: the server connects to its socket
-pnpm start
+cp server.env.example server.env
+cp vault.env.example vault.env
+chmod 600 server.env vault.env
 ```
 
-The server listens on `127.0.0.1:PORT`; put a proxy that terminates TLS in
-front of it. The vault answers only on its Unix socket, made `0660`: run the
-two as different users sharing a group, and the process facing the network
-never holds a key. Where that matters less, `server.ts` can hold the vault
-itself with `localVault(…)` (see the comment there). Back up the database
-and the vault's store together.
+Fill in `PUBLIC_URL`, the GitHub OAuth settings, `ROOT_ADMINS` and the
+three separately generated, escrowed keys. Set the two `DATABASE_URL`s to
+one database, using different logins:
+
+```dotenv
+# server.env
+DATABASE_URL=postgres://coffre_runtime:…@db.example.com:5432/coffre
+# vault.env
+DATABASE_URL=postgres://coffre_vault_runtime:…@db.example.com:5432/coffre
+```
+
+Include the TLS settings your database host requires. Run the processes as
+two users sharing a group. Each env file belongs to its own process's user;
+the app's user must not read `vault.env`. Set `VAULT_SOCKET` in both files
+to the same absolute path in a directory they can access. The vault makes
+the socket `0660`; its group must be the shared group.
+
+```sh
+pnpm vault    # first: creates the socket
+pnpm start    # in the server's process
+```
+
+The server listens on `127.0.0.1:PORT`. Put a TLS-terminating proxy in front
+of it and forward requests to that address. Its scheduled job runs in the
+server process.
+
+For tests and local development only, both URLs can name the same absolute
+SQLite file (`file:/tmp/coffre-local.db`), migrated once with `pnpm migrate`
+and that URL. SQLite has no per-login privileges. The deployed example
+uses Postgres; Node conformance uses SQLite to exercise the local option.
+
+## Backups and restore
+
+Back up **one database**, including ciphertext, wrapped keys, members,
+grants, sign-in rows and the shared audit log and head. Keep the escrowed
+keys separately. A database backup alone contains no KEK. A KEK alone is
+not enough to restore verification: keep `SIGNING_KEY` and `AUDIT_CHAIN_KEY`
+from that deployment too, plus its OAuth credentials and configuration.
+
+For an intentional restore:
+
+1. Stop traffic and both components. Restore the whole database to the same
+   point in time, preferably into a new database or managed-service branch.
+2. Restore both runtime logins and their group membership if your backup
+   excludes cluster roles. Set their passwords again if the provider reset
+   them. The restored table privileges and row-level policies must remain.
+3. Point both Hyperdrive configs, or both Node URLs, at the restored
+   database with their respective logins. Keep caching disabled. Restore the
+   same keys and older KEKs; do not generate replacements.
+4. Restart both Node processes, or redeploy both Workers, before using the
+   restored database. A live instance refuses to append behind a head it
+   remembers; that is expected after a rollback.
+5. Run `coffre verify` as an owner or root admin, reveal a canary secret,
+   and check readiness before reopening traffic.
+
+Verification authenticates the history retained in the backup. A complete
+older backup can still verify: the database alone cannot show that newer
+entries once existed. No external checkpoint export is implemented yet.
+See [architecture.md](architecture.md#one-log-two-authors) for these limits.
+
+## Conformance
+
+Before deploying a changed configuration, run its `pnpm conformance`.
+Workers needs three local Postgres URLs: `--postgres` for the owner,
+`--runtime` for the app and `--vault-runtime` for the vault. The harness
+creates, migrates and drops its own database. Node uses a temporary SQLite
+file shared by both processes. Both use test keys and a stand-in GitHub,
+not your live credentials. [conformance.md](conformance.md) lists the checks
+and the separate `probe` command for a live instance.
 
 ## Not configured by coffre
 
-coffre reads no environment variable of its own in a deployment. The names
-above (`PUBLIC_URL`, `KEK`, …) are the examples', and yours to change. The
-only ones coffre's code reads are the CLI's, for the person using it
-(`COFFRE_API_URL`, `COFFRE_TOKEN`, the Access service-token pair,
-`COFFRE_AUTH_MODE` for `coffre login`), and `DATABASE_URL` as a fallback for
-`coffre-server migrate` when no URL is given.
+The environment variable names above belong to the examples. Packages take
+typed configuration and read no deployment environment variables themselves.
+The exceptions are the CLI's user settings and the `DATABASE_URL` fallback
+for `coffre-server migrate` when no URL is given.

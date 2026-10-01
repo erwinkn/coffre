@@ -6,7 +6,8 @@ by a package taken in and rewritten. `coffre-conformance`
 (`@coffre/conformance`) checks what must hold whatever code it runs: nobody
 reads a value without access, another site cannot act with someone's
 cookie, a removed member is out at once, no value is given without an audit
-entry, and the two logs catch what is changed behind their back.
+entry, and both authors' entries in the shared log catch changes made
+without their keys.
 
 It checks from outside. It boots the deployment as its own scripts would,
 signs people in through a stand-in GitHub, and uses the API, the pages and
@@ -88,12 +89,27 @@ In order, since each builds on the ones before:
 | token, token reveal, token scan, token scope, token verification | What `probe --token` checks, with that token; see [below](#against-a-running-instance) |
 | offboarding | Removing the leaver names the values they read, to rotate; their browser session, their CLI session and a new sign-in all stop at once. A removed service's token stops too |
 | bulk limit | One more value at once than the limit allows is refused; a single value still opens, so the refusal was the quantity, not the grant |
-| checkpoints | The Cron trigger checkpoints both logs, and both verify |
-| two logs agree | Every key the vault opened or sealed is in the audit log, once, for the same member, request and version, and every read and write in the audit log is in the vault's |
+| checkpoints | The Cron trigger writes a signed checkpoint to the shared log, and both authors verify |
+| two logs agree (the check's current name) | In the successful flows exercised here, every key the vault opened or sealed is in the audit log, once, for the same member, request and version, and every app read and write has a vault entry in the same table |
 | no audit, no value | With the audit log refusing writes (a trigger), a reveal fails and carries no value; it works again once the log does |
 | canary scan | No value in any answer to any GET route, or any page, as each of the people, signed in or removed; nor in the database, in any column of any table; nor the processes' output |
 | append-only | Neither the app's login nor the vault's can update, delete, truncate or drop the audit log, append an entry as the other, change or delete a value's versions, delete a secret or a principal, or create a table; nor can the app's write a member or a grant. Postgres only: SQLite has no logins |
 | tampering | Verification catches a grant written into the database around the vault, an entry in the vault's name chained to the log without its key, an audit entry rewritten in the database, and the newest audit entries deleted; each put back verifies again, but for the last, which is why it is last |
+
+All table inspection and tampering goes through the one database. There
+is no vault file or Durable Object to discover. On Postgres, the canary scan
+reads every public table as the owner, including binary columns as bytes.
+A regression test plants a canary in a `bytea` column to check the scanner.
+On SQLite it scans the database file and its write-ahead log; a missing
+file fails. Workers also tests both restricted logins and the author policies.
+
+The “two logs agree” check compares app and vault entries in that table.
+It covers successful operations, not arbitrary partial failures: a vault
+release can commit before the app fails to record or return a value. The
+unit and integration suites also test two vault instances sharing the bulk
+limit and generations, removal during a KMS call, and partial KMS failure.
+The design's broader operation-by-operation conformance checks and unified
+audit view are later steps; this harness does not claim to test them yet.
 
 A check that fails prints what it saw. The ones that need its result are
 skipped, and the run ends with the processes' output.
@@ -234,10 +250,10 @@ Each run adds its two entries to the audit log.
 ### What it cannot check
 
 Everything that needs the deployment's insides, which only the local run
-has: offboarding (it would remove someone), the bulk limit, the two logs
-agreeing entry for entry, a value refused when the audit log is, the
-tables, the vault's store and the processes' output holding no value,
-append-only logins, and tampering with either log. Nor anything the
+has: offboarding (it would remove someone), the bulk limit, matching app
+and vault entries, a value refused when the audit log is, the tables and
+processes' output holding no value, append-only logins, and tampering with
+either author's entries. Nor anything the
 token would have to write to show: that a viewer cannot write, grant or
 add members is checked locally, not here. And it sees only what one token
 reads: a leak to another member, in a place the token cannot reach, is

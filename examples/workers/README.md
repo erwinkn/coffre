@@ -23,10 +23,20 @@ Worker secrets. Everything below runs from this directory.
 coffre wants a Postgres database with three logins: its owner, for
 migrations; `coffre_runtime`, which the app runs as; and
 `coffre_vault_runtime`, which the vault runs as. Create the two as plain
-logins (`CREATE ROLE coffre_runtime LOGIN PASSWORD '…'`, and the same for
-`coffre_vault_runtime`); the first migration grants each the rows it needs,
-and nothing else. Only the vault's may write members and grants, and each
-appends to the audit log only as itself.
+logins. As the database's administrator, connect with `psql` and run:
+
+```sql
+CREATE ROLE coffre_runtime LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+CREATE ROLE coffre_vault_runtime LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+\password coffre_runtime
+\password coffre_vault_runtime
+```
+
+Each `\password` prompts for a different generated password. The owner
+must be able to create and grant roles: the migration creates `coffre_app`
+and `coffre_vault`, and grants each login its own group. Only the vault may
+write members and grants, and each appends to the log only as itself.
+URL-encode special characters in the passwords in these URLs:
 
 ```sh
 pnpm install
@@ -49,15 +59,20 @@ deploying it.
 
 ## 3. Secrets
 
+Generate three separate keys with `openssl rand -base64 32` and save them
+in your password manager first. The commands below prompt for the saved
+values; save the GitHub client secret there too.
+
 ```sh
-openssl rand -base64 32 | pnpm exec wrangler secret put KEK -c vault/wrangler.jsonc
-openssl rand -base64 32 | pnpm exec wrangler secret put SIGNING_KEY -c vault/wrangler.jsonc
-openssl rand -base64 32 | pnpm exec wrangler secret put AUDIT_CHAIN_KEY -c app/wrangler.jsonc
+pnpm exec wrangler secret put KEK -c vault/wrangler.jsonc
+pnpm exec wrangler secret put SIGNING_KEY -c vault/wrangler.jsonc
+pnpm exec wrangler secret put AUDIT_CHAIN_KEY -c app/wrangler.jsonc
 pnpm exec wrangler secret put GITHUB_CLIENT_SECRET -c app/wrangler.jsonc
 ```
 
-Keep a copy of `KEK` somewhere safe and offline: without it, no secret stored
-in coffre can be read again.
+Escrow `KEK` with its `KEK_ID`, `SIGNING_KEY` and `AUDIT_CHAIN_KEY`.
+Without the KEK, stored values cannot be read; without the other keys, the
+existing log cannot be verified. Keep older KEKs after rotation too.
 
 ## 4. Deploy
 
@@ -74,7 +89,12 @@ coffre login https://secrets.example.com
 ```
 
 Everything coffre keeps is in the database: secrets, members, grants and
-the audit log. Back it up as one, and restore it as one.
+the audit log. Back it up as one, and restore it with the escrowed keys.
+Point both Hyperdrive configs at the restored database, keeping caching
+disabled, then redeploy both Workers before `coffre verify` and a canary
+reveal. A running instance refuses to append behind a head it remembers.
+A complete older backup can still verify; the log alone cannot prove that
+it is the newest copy.
 
 ## Locally
 

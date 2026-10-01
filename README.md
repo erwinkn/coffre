@@ -5,8 +5,8 @@ Google, Microsoft or any OpenID Connect provider, or through Cloudflare Access;
 Postgres is the backend of record, and the audit log is the point.
 
 **Status: ready for a first deployment, still hardening.** coffre runs as a
-Cloudflare Worker in front of Postgres, and [docs/deploy.md](docs/deploy.md)
-deploys one. [Phase 1 of the roadmap](docs/roadmap.md#phase-1-harden) is still
+pair of Cloudflare Workers or Node processes sharing Postgres.
+[docs/deploy.md](docs/deploy.md) walks through both. [Phase 1 of the roadmap](docs/roadmap.md#phase-1-harden) is still
 open, so until it is done, keep the keys escrowed and a copy of anything you
 move in.
 
@@ -124,26 +124,33 @@ are rejected (`execve` truncates at them), and all three line-ending
 conventions are split. Writing tests for it found four ways it silently
 corrupted values — see `packages/core/test/dotenv.test.ts`.
 
-**Append-only by grant, not convention.** `coffre_app` has no `UPDATE`, no
-`DELETE`, or `TRUNCATE` on history, and no `DELETE` or `TRUNCATE` anywhere.
-Grants, and whether someone is still a member, are not in this database at
-all: they live in the vault ([docs/architecture.md](docs/architecture.md#the-vault)).
+**Append-only by grant, not convention.** `coffre_app` cannot update,
+delete or truncate history. Grants and membership live in the same
+Postgres database, but only `coffre_vault` may change them. Both append to
+one audit log; row-level security lets each write only as its own author.
+Each entry also carries its author's MAC, which the database owner cannot
+forge without that author's key.
 
-**Owner and runtime are separate identities.** The one-shot migration process
-receives the owner `DATABASE_URL`; the Worker receives only the `HYPERDRIVE`
-binding backed by the restricted runtime login. Terraform creates and
-password-manages the stable `coffre_runtime` login; the Postgres baseline
-migration validates it and grants membership in the append-only `coffre_app`
-role:
+**Three database logins, two running processes.** The one-shot migration
+gets the owner's `DATABASE_URL`. The app runs as `coffre_runtime`, a member
+of `coffre_app`; the vault runs as `coffre_vault_runtime`, a member of
+`coffre_vault`. Provision both logins before migrating:
 
 ```sh
 pnpm exec coffre-server migrate '<owner-database-url>'   # in a deployment
 ```
 
-Hyperdrive contains the runtime credential, so no database password is exposed
-as a Worker variable or secret. Database routing and TLS remain infrastructure
-concerns. Local `pnpm dev` provisions its disposable runtime login automatically
-and emulates the Hyperdrive binding against loopback PostgreSQL.
+On Workers, each login has its own Hyperdrive config, with caching disabled.
+The app gets `HYPERDRIVE`; the vault gets `VAULT_HYPERDRIVE`. Neither gets
+the owner's credential. On Node, each process gets its own Postgres URL.
+[The deploy guide](docs/deploy.md) gives the role and password steps.
+`pnpm dev` provisions both local logins automatically.
+
+**One backup and escrowed keys.** The database holds ciphertext, access
+state and the log. Back it up as one; escrow the KEK and older KEKs, the
+vault's signing key and the app's audit key separately. Restoring a complete
+older backup can still verify. Without an external witness, verification
+proves the retained history, not that no newer history existed.
 
 ## Supply chain
 
@@ -175,7 +182,7 @@ version was published by hand, with the same script.
 packages/server       @coffre/server: /api, sign-in, syncs, the heartbeat, the queries; /cloudflare and /node
 packages/db           @coffre/db: the schema, its migrations and migrator, the connections
 packages/ui           @coffre/ui: the pages, a prebuilt TanStack Start handler and its static files
-packages/vault        @coffre/vault: the KEK, grants, members, root admins, its own log; /cloudflare and /node
+packages/vault        @coffre/vault: the KEK, grants, members, root admins, its entries in the shared log; /cloudflare and /node
 packages/client       @coffre/client: the API as typed calls, one fetch each, and the sync destinations
 packages/cli          @coffre/cli: `coffre`, from init and login to secrets, syncs and audit
 packages/conformance  @coffre/conformance: `coffre-conformance`, and the dev IdP it signs in through
@@ -238,13 +245,13 @@ pnpm test:consumer    # pack the packages, init both examples from the packed CL
 `.env.dev` holds the local fixtures (keys, root admins) that
 `dev/deployment/` hands each Worker: the app its audit chain key and
 sign-in settings, the vault its KEK, root admins and checkpoint signing key.
-`pnpm dev` empties the vault's local store each time it seeds, since the
-seed starts the database over.
+`pnpm dev` resets the one database when it seeds, including the vault's
+members, grants and log entries.
 
 Conformance boots a deployment, signs people in through the dev IdP
 standing in for GitHub, and checks what must hold whatever code it runs:
-access, cross-site requests, offboarding, the bulk limit, both logs and
-their tampering, and no value anywhere it should not be
+access, cross-site requests, offboarding, the bulk limit, both authors in
+the shared log and tampering, and no value anywhere it should not be
 ([docs/conformance.md](docs/conformance.md)). Every deployment has it as
 `pnpm conformance`.
 
@@ -511,7 +518,7 @@ code expecting the old shape:
   requests), the five-minute heartbeat, and the security headers.
 - `src/routeTree.gen.ts` is generated and gitignored; `vite build` writes it.
 
-### There is no delete, and that is deliberate
+### Secret history is never deleted
 
 `audit_log` holds `ON DELETE RESTRICT` references to projects, environments and
 secrets, so anything that has ever been read or written cannot be removed:
@@ -528,6 +535,10 @@ audit trail still valid. Archiving is reversible and the values survive intact.
 
 Archiving a secret matters operationally, not just tidily: a rotated-out
 credential stops being injected by `coffre run`.
+
+Revoking a grant removes its current row, but its vault audit entry remains.
+Member removal keeps the row and advances its generation, so re-admission
+does not revive old credentials.
 
 Actually destroying data belongs to a retention policy under Art 12(2)(a) —
 a decision to be written down and applied deliberately, not a button in an
@@ -606,8 +617,9 @@ UI, the underlying role and scope are presented as one permissions value:
 - The KEK is a local key or AWS KMS (`awsKms`). No Scaleway provider (its
   Audit Trail does not log Decrypt), and no command yet to rewrap existing
   data keys under a new KEK.
-- The vault signs checkpoints of both logs' heads, and the app records each
-  in its own log, but nothing exports them further off-box yet.
+- The vault signs checkpoints and both authors record them in the shared
+  log, but nothing exports them off-box yet. A complete database rollback
+  remains an accepted limit.
 - `.env` import does not support literal multi-line values (use `\n` inside
   double quotes) or variable interpolation. Both are reported as parse problems
   rather than guessed at.
