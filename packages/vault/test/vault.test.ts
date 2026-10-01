@@ -764,3 +764,16 @@ test('configuration', () => {
     assert.throws(() => checkRootAdmins([malformed]), /human email/, malformed);
   }
 });
+
+test('membership generations advance on removal even when time does not', async (t) => {
+  const w = await world(t);
+  await member(w, ADA, []);
+  assert.equal((await w.vault.access(ADA)).generation, 0);
+  assert.equal((await w.vault.remove({ actor: ROOT, principal: ADA })).ok, true);
+  assert.equal((await w.vault.access(ADA)).generation, 1);
+  assert.equal((await w.vault.admit({ actor: ROOT, principal: ADA })).ok, true);
+  assert.equal((await w.vault.access(ADA)).generation, 1);
+  assert.equal((await w.vault.remove({ actor: ROOT, principal: ADA })).ok, true);
+  assert.equal((await w.vault.access(ADA)).generation, 2);
+  assert.equal((await w.vault.verifyLog({ through: null })).ok, true);
+});

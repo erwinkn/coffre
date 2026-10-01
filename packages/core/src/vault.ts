@@ -146,6 +146,8 @@ export type Access = {
   principal: string;
   /** `unknown` for someone never admitted. Root admins are always active. */
   status: 'active' | 'removed' | 'unknown';
+  /** Advanced by removal, even if the app cannot commit its credential revocations. */
+  generation: number;
   isRootAdmin: boolean;
   /** Root admins and users admitted as owners, while active. */
   isOwner: boolean;

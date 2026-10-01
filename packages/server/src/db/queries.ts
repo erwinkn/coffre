@@ -1,5 +1,5 @@
 import type { Envelope } from '@coffre/core/envelope';
-import { and, asc, count, desc, eq, getTableColumns, gt, gte, inArray, isNull, lt, notInArray, or, sql, type SQL } from 'drizzle-orm';
+import { and, asc, count, desc, eq, getTableColumns, gt, gte, inArray, isNull, lt, ne, notInArray, or, sql, type SQL } from 'drizzle-orm';
 
 import { own, tablesOf, type Queryable, type Transaction } from './database.ts';
 import * as dialect from './dialect.ts';
@@ -230,6 +230,7 @@ export type MemberRow = {
     provider: string;
     subject: string;
     issuerHash: string | null;
+    generation: number | null;
     email: string | null;
     createdAt: Date;
     lastSignInAt: Date | null;
@@ -273,6 +274,7 @@ export async function members(
       provider: identity.provider,
       subject: identity.subject,
       issuerHash: identity.issuerHash,
+      generation: identity.generation,
       email: identity.email,
       createdAt: identity.createdAt,
       lastSignInAt: identity.lastSignInAt,
@@ -328,10 +330,10 @@ export async function memberActivity(db: Queryable, actorIds: string[]) {
 export async function findIdentity(
   db: Queryable,
   account: { provider: string; issuerHash: string; subject: string },
-): Promise<{ id: string; principalId: string } | null> {
+): Promise<{ id: string; principalId: string; generation: number | null } | null> {
   const { identities } = tablesOf(db);
   const [row] = await db
-    .select({ id: identities.id, principalId: identities.principalId })
+    .select({ id: identities.id, principalId: identities.principalId, generation: identities.generation })
     .from(identities)
     .where(
       and(eq(identities.provider, account.provider), eq(identities.issuerHash, account.issuerHash), eq(identities.subject, account.subject), isNull(identities.revokedAt)),
@@ -357,6 +359,7 @@ export async function findCredential(db: Queryable, by: { tokenHash: Buffer } | 
     .select({
       id: credentials.id,
       kind: credentials.kind,
+      generation: credentials.generation,
       principalType: credentials.principalType,
       principalId: credentials.principalId,
       expiresAt: credentials.expiresAt,
@@ -372,6 +375,23 @@ export async function findCredential(db: Queryable, by: { tokenHash: Buffer } | 
     .leftJoin(identities, eq(identities.id, credentials.identityId))
     .where('tokenHash' in by ? eq(credentials.tokenHash, by.tokenHash) : eq(credentials.id, by.id));
   return row ?? null;
+}
+
+/** Retire directory records from older memberships, including a sweep that rolled back. */
+export async function revokePriorMembership(
+  db: Queryable,
+  principal: { type: string; id: string },
+  generation: number,
+  revokedBy: string,
+): Promise<void> {
+  const { credentials, identities } = tablesOf(db);
+  const revokedAt = new Date();
+  for (const table of [credentials, identities]) {
+    await db.update(table).set({ revokedAt, revokedBy }).where(and(
+      eq(table.principalType, principal.type), eq(table.principalId, principal.id), isNull(table.revokedAt),
+      or(isNull(table.generation), ne(table.generation, generation)),
+    ));
+  }
 }
 
 /** Device authorizations: one by either of its codes, or every one still waiting for a decision. */

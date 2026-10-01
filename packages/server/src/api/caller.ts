@@ -32,6 +32,8 @@ export type Caller = {
   principal: PrincipalRef;
   /** An active member, or a root admin. Everyone else only reaches sign-in. */
   registered: boolean;
+  /** The membership this request authenticated, checked again before linking accounts. */
+  generation: number;
   /** Named in the vault's COFFRE_ROOT_ADMINS: everything, everywhere. */
   isRootAdmin: boolean;
   /** Root admins and active users with the instance `owner` role. */
@@ -50,6 +52,7 @@ export function callerFrom(principal: PrincipalRef, access: Access): Caller {
   return {
     principal,
     registered: access.status === 'active',
+    generation: access.generation,
     isRootAdmin: access.isRootAdmin,
     isOwner: access.isOwner,
     instanceRole: access.isRootAdmin ? 'root-admin' : access.isOwner ? 'owner' : 'user',

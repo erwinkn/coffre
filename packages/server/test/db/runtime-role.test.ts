@@ -21,6 +21,7 @@ const EXPECTED_UPDATE_COLUMNS = [
   'device_authorizations.consumed_at',
   'device_authorizations.decided_at',
   'device_authorizations.decision',
+  'device_authorizations.generation',
   'device_authorizations.principal_id',
   'device_authorizations.principal_type',
   'environments.archived_at',

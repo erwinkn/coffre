@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "88b4723d-ee24-4a14-8c78-0e0bab89f457",
+  "id": "d49a4b21-1c65-44c4-a000-c3c4305a0b5d",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "audit_chain_head": {
@@ -356,6 +356,13 @@
           "notNull": true,
           "autoincrement": false
         },
+        "generation": {
+          "name": "generation",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "principal_type": {
           "name": "principal_type",
           "type": "text",
@@ -566,6 +573,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "generation": {
+          "name": "generation",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "principal_type": {
           "name": "principal_type",
           "type": "text",
@@ -750,6 +764,13 @@
         "issuer_hash": {
           "name": "issuer_hash",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "generation": {
+          "name": "generation",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false

@@ -1,5 +1,5 @@
 {
-  "id": "016675df-520a-4db3-a5a1-783524e1ec14",
+  "id": "f9fa4345-a60d-4641-8d53-3abe850bd6b8",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -402,6 +402,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "generation": {
+          "name": "generation",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
         "principal_type": {
           "name": "principal_type",
           "type": "text",
@@ -610,6 +616,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "generation": {
+          "name": "generation",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
         "principal_type": {
           "name": "principal_type",
           "type": "text",
@@ -790,6 +802,12 @@
         "issuer_hash": {
           "name": "issuer_hash",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "generation": {
+          "name": "generation",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false
         },

@@ -257,6 +257,7 @@ export const identities = pgTable(
     subject: text().notNull(),
     // Null on a legacy binding: its authority must not be guessed.
     issuerHash: text('issuer_hash'),
+    generation: integer(),
     principalType: text('principal_type').notNull(),
     principalId: text('principal_id').notNull(),
     email: text(),
@@ -297,6 +298,7 @@ export const credentials = pgTable(
     kind: text().notNull(),
     tokenHash: bytea('token_hash').notNull(),
     tokenHint: text('token_hint').notNull(),
+    generation: integer(),
     principalType: text('principal_type').notNull(),
     principalId: text('principal_id').notNull(),
     identityId: uuid('identity_id'),
@@ -350,6 +352,7 @@ export const deviceAuthorizations = pgTable(
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
     decidedAt: timestamp('decided_at', { withTimezone: true }),
     decision: text(),
+    generation: integer(),
     principalType: text('principal_type'),
     principalId: text('principal_id'),
     consumedAt: timestamp('consumed_at', { withTimezone: true }),

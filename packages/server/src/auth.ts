@@ -101,17 +101,23 @@ export async function authenticateRequest(
 
   let principal: Principal;
   let credentialId: string | null = null;
+  let credentialGeneration: number | undefined;
   try {
     const verified = (await runtime.verifier.verify(token, { sourceIp })) as Principal & {
       credentialId?: string;
+      credentialGeneration?: number;
     };
-    ({ credentialId = null, ...principal } = verified);
+    ({ credentialId = null, credentialGeneration, ...principal } = verified);
   } catch {
     return errorResponse(new ApiError('unauthenticated', 'that credential is unknown, expired or revoked'));
   }
 
   try {
     const caller = await loadCaller(runtime.vault, principal);
+    // Removal may have raced the credential verification above.
+    if (credentialGeneration !== undefined && caller.generation !== credentialGeneration) {
+      return unauthenticated(runtime.auth);
+    }
     return {
       principal,
       registered: caller.registered,

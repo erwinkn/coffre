@@ -343,13 +343,14 @@ class VaultService implements Vault {
 
   #access(principal: string, at: number): Access {
     if (this.#isRootAdmin(principal)) {
-      return { principal, status: 'active', isRootAdmin: true, isOwner: true, grants: [], since: null, by: null };
+      return { principal, status: 'active', generation: 0, isRootAdmin: true, isOwner: true, grants: [], since: null, by: null };
     }
     const row = this.#store.member(principal);
     const active = row?.status === 'active';
     return {
       principal,
       status: row?.status ?? 'unknown',
+      generation: row?.generation ?? 0,
       isRootAdmin: false,
       isOwner: active && row.owner && principal.startsWith('user:'),
       grants: active ? this.#store.grants(principal).filter((grant) => live(grant, at)).map(view) : [],
@@ -415,7 +416,7 @@ class VaultService implements Vault {
           if (!isSyncPrincipal(principal) || input.changes.every((change) => change.role === null)) {
             throw refused('not_a_member');
           }
-          this.#store.putMember({ principal, status: 'active', owner: false, since: at, by: actor });
+          this.#store.putMember({ principal, status: 'active', owner: false, generation: 0, since: at, by: actor });
           log.push({
             actor,
             action: 'principal.admit',
@@ -507,7 +508,7 @@ class VaultService implements Vault {
         if (row === undefined || row.status === 'removed') {
           // Coming back is a fresh start: no owner role unless given again.
           const owner = input.owner ?? false;
-          this.#store.putMember({ principal, status: 'active', owner, since: at, by: actor });
+          this.#store.putMember({ principal, status: 'active', owner, generation: row?.generation ?? 0, since: at, by: actor });
           entry(row === undefined ? 'principal.admit' : 'principal.restore', owner);
           return { created: true, owner };
         }
@@ -553,7 +554,7 @@ class VaultService implements Vault {
         if (status !== 'active') throw refused(status === 'removed' ? 'removed' : 'not_a_member');
 
         this.#store.deleteGrants(principal);
-        this.#store.putMember({ principal, status: 'removed', owner: false, since: at, by: actor });
+        this.#store.putMember({ principal, status: 'removed', owner: false, generation: this.#store.member(principal)!.generation + 1, since: at, by: actor });
         const revoked = held.filter((grant) => live(grant, at));
         for (const grant of revoked) {
           log.push({

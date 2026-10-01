@@ -2,7 +2,7 @@ import { migrate } from './schema.ts';
 import type { Sqlite } from './sqlite.ts';
 
 /** A member's row; `schema.ts` says what each column means. */
-export type Member = { principal: string; status: 'active' | 'removed'; owner: boolean; since: number; by: string };
+export type Member = { principal: string; status: 'active' | 'removed'; owner: boolean; generation: number; since: number; by: string };
 
 /** Where a grant applies: a project (`environmentId` null), or one of its environments. */
 export type Place = { projectId: string; environmentId: string | null };
@@ -71,7 +71,7 @@ export class Store {
 
   member(principal: string): Member | undefined {
     const row = this.#db.get<Omit<Member, 'owner'> & { owner: number }>(
-      'SELECT principal, status, owner, since, by FROM principals WHERE principal = ?',
+      'SELECT principal, status, owner, generation, since, by FROM principals WHERE principal = ?',
       principal,
     );
     return row && { ...row, owner: row.owner === 1 };
@@ -84,19 +84,20 @@ export class Store {
   /** Every member's row, for the replay in `replay.ts`. */
   allMembers(): Member[] {
     return this.#db
-      .all<Omit<Member, 'owner'> & { owner: number }>('SELECT principal, status, owner, since, by FROM principals')
+      .all<Omit<Member, 'owner'> & { owner: number }>('SELECT principal, status, owner, generation, since, by FROM principals')
       .map((row) => ({ ...row, owner: row.owner === 1 }));
   }
 
   /** Admit, restore or remove: `member`'s row becomes this one. */
   putMember(member: Member): void {
     this.#db.run(
-      `INSERT INTO principals (principal, status, owner, since, by) VALUES (?, ?, ?, ?, ?)
+      `INSERT INTO principals (principal, status, owner, generation, since, by) VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT (principal) DO UPDATE
-       SET status = excluded.status, owner = excluded.owner, since = excluded.since, by = excluded.by`,
+       SET status = excluded.status, owner = excluded.owner, generation = excluded.generation, since = excluded.since, by = excluded.by`,
       member.principal,
       member.status,
       member.owner ? 1 : 0,
+      member.generation,
       member.since,
       member.by,
     );

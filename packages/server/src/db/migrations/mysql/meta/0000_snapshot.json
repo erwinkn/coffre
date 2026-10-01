@@ -1,7 +1,7 @@
 {
   "version": "5",
   "dialect": "mysql",
-  "id": "6b9dc0cf-e45b-428f-a933-97ac666f21c0",
+  "id": "a7a3ad78-6452-4612-b1be-5df05e88c44e",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "audit_chain_head": {
@@ -377,6 +377,13 @@
           "notNull": true,
           "autoincrement": false
         },
+        "generation": {
+          "name": "generation",
+          "type": "int",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "principal_type": {
           "name": "principal_type",
           "type": "varchar(16)",
@@ -594,6 +601,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "generation": {
+          "name": "generation",
+          "type": "int",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "principal_type": {
           "name": "principal_type",
           "type": "varchar(16)",
@@ -788,6 +802,13 @@
         "issuer_hash": {
           "name": "issuer_hash",
           "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "generation": {
+          "name": "generation",
+          "type": "int",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false

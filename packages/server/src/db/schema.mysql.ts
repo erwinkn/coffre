@@ -266,6 +266,7 @@ export const identities = mysqlTable(
     subject: varchar({ length: 255 }).notNull(),
     // Null on a legacy binding: its authority must not be guessed.
     issuerHash: varchar('issuer_hash', { length: 64 }),
+    generation: int(),
     principalType: principalType().notNull(),
     principalId: principalId().notNull(),
     email: text(),
@@ -296,6 +297,7 @@ export const credentials = mysqlTable(
     kind: text().notNull(),
     tokenHash: varbinary('token_hash', { length: 32 }).notNull(),
     tokenHint: text('token_hint').notNull(),
+    generation: int(),
     principalType: principalType().notNull(),
     principalId: principalId().notNull(),
     identityId: id('identity_id'),
@@ -342,6 +344,7 @@ export const deviceAuthorizations = mysqlTable(
     expiresAt: time('expires_at').notNull(),
     decidedAt: time('decided_at'),
     decision: text(),
+    generation: int(),
     principalType: principalType(),
     principalId: principalId(),
     consumedAt: time('consumed_at'),

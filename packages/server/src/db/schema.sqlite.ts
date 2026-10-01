@@ -262,6 +262,7 @@ export const identities = sqliteTable(
     subject: text().notNull(),
     // Null on a legacy binding: its authority must not be guessed.
     issuerHash: text('issuer_hash'),
+    generation: integer(),
     principalType: text('principal_type').notNull(),
     principalId: text('principal_id').notNull(),
     email: text(),
@@ -292,6 +293,7 @@ export const credentials = sqliteTable(
     kind: text().notNull(),
     tokenHash: bytes('token_hash').notNull(),
     tokenHint: text('token_hint').notNull(),
+    generation: integer(),
     principalType: text('principal_type').notNull(),
     principalId: text('principal_id').notNull(),
     identityId: text('identity_id'),
@@ -338,6 +340,7 @@ export const deviceAuthorizations = sqliteTable(
     expiresAt: time('expires_at').notNull(),
     decidedAt: time('decided_at'),
     decision: text(),
+    generation: integer(),
     principalType: text('principal_type'),
     principalId: text('principal_id'),
     consumedAt: time('consumed_at'),

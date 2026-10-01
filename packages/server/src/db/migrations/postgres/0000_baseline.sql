@@ -47,6 +47,7 @@ CREATE TABLE "credentials" (
 	"kind" text NOT NULL,
 	"token_hash" "bytea" NOT NULL,
 	"token_hint" text NOT NULL,
+	"generation" integer,
 	"principal_type" text NOT NULL,
 	"principal_id" text NOT NULL,
 	"identity_id" uuid,
@@ -74,6 +75,7 @@ CREATE TABLE "device_authorizations" (
 	"expires_at" timestamp with time zone NOT NULL,
 	"decided_at" timestamp with time zone,
 	"decision" text,
+	"generation" integer,
 	"principal_type" text,
 	"principal_id" text,
 	"consumed_at" timestamp with time zone,
@@ -100,6 +102,7 @@ CREATE TABLE "identities" (
 	"provider" text NOT NULL,
 	"subject" text NOT NULL,
 	"issuer_hash" text,
+	"generation" integer,
 	"principal_type" text NOT NULL,
 	"principal_id" text NOT NULL,
 	"email" text,
@@ -338,7 +341,7 @@ GRANT UPDATE (email, last_sign_in_at, revoked_at, revoked_by) ON identities TO c
 --> statement-breakpoint
 GRANT UPDATE (last_used_at, last_used_ip, revoked_at, revoked_by) ON credentials TO coffre_app;
 --> statement-breakpoint
-GRANT UPDATE (decided_at, decision, principal_type, principal_id, consumed_at)
+GRANT UPDATE (decided_at, decision, generation, principal_type, principal_id, consumed_at)
     ON device_authorizations TO coffre_app;
 --> statement-breakpoint
 GRANT UPDATE (config, credential_secret_id, paused_at, archived_at, lease_until,
