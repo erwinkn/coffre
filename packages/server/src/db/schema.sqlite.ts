@@ -260,6 +260,8 @@ export const identities = sqliteTable(
     id: text().primaryKey(),
     provider: text().notNull(),
     subject: text().notNull(),
+    // Null on a legacy binding: its authority must not be guessed.
+    issuerHash: text('issuer_hash'),
     principalType: text('principal_type').notNull(),
     principalId: text('principal_id').notNull(),
     email: text(),
@@ -278,7 +280,7 @@ export const identities = sqliteTable(
       columns: [table.principalType, table.principalId],
       foreignColumns: [principals.principalType, principals.principalId],
     }).onDelete('restrict'),
-    uniqueIndex('identities_active_subject').on(table.provider, table.activeSubject),
+    uniqueIndex('identities_active_subject').on(table.provider, table.issuerHash, table.activeSubject),
     index('identities_principal_idx').on(table.principalType, table.principalId),
   ],
 );

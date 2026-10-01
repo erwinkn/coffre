@@ -1,7 +1,7 @@
 {
   "version": "5",
   "dialect": "mysql",
-  "id": "5f171859-8a54-4946-aa25-e56a8e240d49",
+  "id": "6b9dc0cf-e45b-428f-a933-97ac666f21c0",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "audit_chain_head": {
@@ -785,6 +785,13 @@
           "notNull": true,
           "autoincrement": false
         },
+        "issuer_hash": {
+          "name": "issuer_hash",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "principal_type": {
           "name": "principal_type",
           "type": "varchar(16)",
@@ -859,6 +866,7 @@
           "name": "identities_active_subject",
           "columns": [
             "provider",
+            "issuer_hash",
             "active_subject"
           ],
           "isUnique": true

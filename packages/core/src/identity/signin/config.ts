@@ -278,6 +278,9 @@ export function defineSignin(options: {
 /** A deployment's own provider is checked like coffre's: it is only typed, not trusted. */
 function checkProvider(provider: SigninProvider): void {
   checkId(provider?.id);
+  if (typeof provider.issuer !== 'string' || provider.issuer.trim() === '') {
+    throw new Error(`sign-in provider ${provider.id} needs a stable issuer`);
+  }
   if (typeof provider.label !== 'string' || provider.label.trim() === '') {
     throw new Error(`sign-in provider ${provider.id} needs a label`);
   }

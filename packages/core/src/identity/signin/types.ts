@@ -66,6 +66,7 @@ export type SigninBrand = 'github' | 'google' | 'microsoft' | 'oidc';
  *
  *   const acme: SigninProvider = {
  *     id: 'acme',
+ *     issuer: 'https://sso.acme.example',
  *     label: 'Acme SSO',
  *     brand: 'oidc',
  *     async start(redirectUri) { … return { url, pending: { state, codeVerifier, nonce: null } }; },
@@ -75,6 +76,8 @@ export type SigninBrand = 'github' | 'google' | 'microsoft' | 'oidc';
 export interface SigninProvider {
   /** Stable: part of the callback URL, `/auth/callback/{id}`, and of every account bound through it. */
   readonly id: string;
+  /** The authority whose subjects these are; changing it requires linking accounts again. */
+  readonly issuer: string;
   /** Button text: "Continue with {label}". */
   readonly label: string;
   readonly brand: SigninBrand;

@@ -99,6 +99,7 @@ CREATE TABLE "identities" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"provider" text NOT NULL,
 	"subject" text NOT NULL,
+	"issuer_hash" text,
 	"principal_type" text NOT NULL,
 	"principal_id" text NOT NULL,
 	"email" text,
@@ -217,7 +218,7 @@ CREATE INDEX "audit_log_secret_idx" ON "audit_log" USING btree ("secret_id","occ
 CREATE INDEX "audit_log_environment_idx" ON "audit_log" USING btree ("environment_id","occurred_at" DESC NULLS LAST);--> statement-breakpoint
 CREATE INDEX "audit_log_bundle_idx" ON "audit_log" USING btree ("bundle_id");--> statement-breakpoint
 CREATE INDEX "credentials_principal_idx" ON "credentials" USING btree ("principal_type","principal_id");--> statement-breakpoint
-CREATE UNIQUE INDEX "identities_active_subject" ON "identities" USING btree ("provider","active_subject");--> statement-breakpoint
+CREATE UNIQUE INDEX "identities_active_subject" ON "identities" USING btree ("provider","issuer_hash","active_subject");--> statement-breakpoint
 CREATE INDEX "identities_principal_idx" ON "identities" USING btree ("principal_type","principal_id");--> statement-breakpoint
 CREATE INDEX "secret_versions_secret_idx" ON "secret_versions" USING btree ("secret_id","version" DESC NULLS LAST);--> statement-breakpoint
 CREATE INDEX "secrets_lookup_idx" ON "secrets" USING btree ("project_id","environment_id","key");--> statement-breakpoint

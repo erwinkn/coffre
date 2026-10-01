@@ -24,6 +24,7 @@ type GitHubEmail = { email: string; primary: boolean; verified: boolean };
  */
 export class GitHubSigninProvider implements SigninProvider {
   readonly id: string;
+  readonly issuer: string;
   readonly label: string;
   readonly brand: SigninBrand;
   /** What it was made from, as checked. */
@@ -32,6 +33,7 @@ export class GitHubSigninProvider implements SigninProvider {
 
   constructor(config: GitHubProviderConfig, options: ProviderOptions = {}) {
     this.id = config.id;
+    this.issuer = config.apiUrl;
     this.label = config.label;
     this.brand = config.brand;
     this.config = config;

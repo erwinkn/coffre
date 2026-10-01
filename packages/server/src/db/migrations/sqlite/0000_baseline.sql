@@ -112,6 +112,7 @@ CREATE TABLE `identities` (
 	`id` text PRIMARY KEY NOT NULL,
 	`provider` text NOT NULL,
 	`subject` text NOT NULL,
+	`issuer_hash` text,
 	`principal_type` text NOT NULL,
 	`principal_id` text NOT NULL,
 	`email` text,
@@ -126,7 +127,7 @@ CREATE TABLE `identities` (
 	CONSTRAINT "identities_provider_check" CHECK(length("identities"."provider") BETWEEN 1 AND 32 AND "identities"."provider" GLOB '[a-z0-9]*' AND "identities"."provider" NOT GLOB '*[^a-z0-9-]*')
 );
 --> statement-breakpoint
-CREATE UNIQUE INDEX `identities_active_subject` ON `identities` (`provider`,`active_subject`);--> statement-breakpoint
+CREATE UNIQUE INDEX `identities_active_subject` ON `identities` (`provider`,`issuer_hash`,`active_subject`);--> statement-breakpoint
 CREATE INDEX `identities_principal_idx` ON `identities` (`principal_type`,`principal_id`);--> statement-breakpoint
 CREATE TABLE `principals` (
 	`principal_type` text NOT NULL,

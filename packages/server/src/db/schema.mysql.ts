@@ -264,6 +264,8 @@ export const identities = mysqlTable(
     id: id().primaryKey(),
     provider: varchar({ length: 32 }).notNull(),
     subject: varchar({ length: 255 }).notNull(),
+    // Null on a legacy binding: its authority must not be guessed.
+    issuerHash: varchar('issuer_hash', { length: 64 }),
     principalType: principalType().notNull(),
     principalId: principalId().notNull(),
     email: text(),
@@ -282,7 +284,7 @@ export const identities = mysqlTable(
       columns: [table.principalType, table.principalId],
       foreignColumns: [principals.principalType, principals.principalId],
     }).onDelete('restrict'),
-    uniqueIndex('identities_active_subject').on(table.provider, table.activeSubject),
+    uniqueIndex('identities_active_subject').on(table.provider, table.issuerHash, table.activeSubject),
     index('identities_principal_idx').on(table.principalType, table.principalId),
   ],
 );

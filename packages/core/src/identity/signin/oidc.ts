@@ -27,6 +27,7 @@ type Discovered = { server: oauth.AuthorizationServer; fetchedAt: number };
  */
 export class OidcSigninProvider implements SigninProvider {
   readonly id: string;
+  readonly issuer: string;
   readonly label: string;
   readonly brand: SigninBrand;
   /** What it was made from, as checked. */
@@ -37,6 +38,7 @@ export class OidcSigninProvider implements SigninProvider {
 
   constructor(config: OidcProviderConfig, options: ProviderOptions = {}) {
     this.id = config.id;
+    this.issuer = config.issuer;
     this.label = config.label;
     this.brand = config.brand;
     this.config = config;

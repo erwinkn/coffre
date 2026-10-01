@@ -228,6 +228,12 @@ export class SigninService {
     return unseal<PendingState>(this.#stateKey, value);
   }
 
+  #issuerHash(providerId: string): string | null {
+    const provider = this.config.providers.find((candidate) => candidate.id === providerId);
+    // Fixed width keeps the identity index exact on every database engine.
+    return provider === undefined ? null : hashToken(provider.issuer).toString('hex');
+  }
+
   // --- signing in ---------------------------------------------------------
 
   async completeSignin(profile: SignedInAccount, meta: ClientMeta): Promise<SigninResult> {
@@ -260,7 +266,9 @@ export class SigninService {
 
     return audited(this.#deps, async (tx, log) => {
       const now = new Date();
-      const bound = await findIdentity(tx, profile);
+      const issuerHash = this.#issuerHash(profile.provider);
+      if (issuerHash === null) throw new SigninRefused('not_registered');
+      const bound = await findIdentity(tx, { ...profile, issuerHash });
 
       let principalId: string;
       let identityId: string;
@@ -291,7 +299,7 @@ export class SigninService {
           // This very account, bound a moment ago by a racing sign-in, is
           // no mismatch: binding it again hits the unique index, and the
           // retry finds it bound.
-          (identity) => identity.provider !== profile.provider || identity.subject !== profile.subject,
+          (identity) => identity.provider !== profile.provider || identity.issuerHash !== issuerHash || identity.subject !== profile.subject,
         );
         if (other) throw refuse('account_mismatch', principalId);
 
@@ -330,7 +338,9 @@ export class SigninService {
     const account = { provider: profile.provider, subject: profile.subject, emails: profile.emails };
     if (ctx.caller.principal.type !== 'user') throw forbidden('only people link sign-in accounts');
     return audited(this.#deps, async (tx, log) => {
-      const bound = await findIdentity(tx, profile);
+      const issuerHash = this.#issuerHash(profile.provider);
+      if (issuerHash === null) throw new SigninRefused('not_registered');
+      const bound = await findIdentity(tx, { ...profile, issuerHash });
       if (bound !== null) {
         if (bound.principalId === ctx.caller.principal.id) return { ok: true as const };
         throw new Refusal(
@@ -357,6 +367,7 @@ export class SigninService {
     await insert(tx, identities, {
       id,
       provider: profile.provider,
+      issuerHash: this.#issuerHash(profile.provider),
       subject: profile.subject,
       principalType: 'user',
       principalId,
@@ -433,7 +444,10 @@ export class SigninService {
 
     const row = await findCredential(db, { tokenHash: hashToken(token) });
     const live = row !== null && row.revokedAt === null && row.expiresAt > now && row.identityRevokedAt === null;
-    if (!live) throw new Error('unknown, expired or revoked credential');
+    if (!live || (row.kind === 'browser' && (row.identityIssuerHash === null
+      || row.identityIssuerHash !== this.#issuerHash(row.identityProvider ?? '')))) {
+      throw new Error('unknown, expired or revoked credential');
+    }
 
     const lastUsed = row.lastUsedAt?.getTime() ?? 0;
     if (now.getTime() - lastUsed > TOUCH_INTERVAL_MS) {

@@ -2,7 +2,7 @@ import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 
-import { defineSignin, github, google, hashToken, isCoffreToken } from '@coffre/core/identity';
+import { defineSignin, github, google, oidc, hashToken, isCoffreToken } from '@coffre/core/identity';
 import { count, eq, isNotNull, isNull, type SQL } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 
@@ -1045,4 +1045,35 @@ test('service tokens are issued, listed and revoked through the API, in signin m
   const access = clientFor({ ...deps, signin: undefined }, ROOT);
   await assert.rejects(access.tokens.list(member), { status: 404 });
   await assert.rejects(access.tokens.issue(member, { label: null, expiresInDays: 30 }), { status: 404 });
+});
+
+
+test('replacing an issuer requires an explicit re-link and invalidates its browser sessions', async () => {
+  const atIssuer = (issuer: string) => new SigninService({
+    ...deps,
+    signin: defineSignin({ ...CONFIG, providers: [
+      ...CONFIG.providers,
+      oidc({ id: 'company', label: 'Company', issuer, clientId: 'client', clientSecret: 'secret' }),
+    ] }),
+  });
+  signin = atIssuer('https://old-idp.example');
+  const old = await signedIn(profile('company', 'same-subject', [DEV]));
+  await signin.linkIdentity(dev, profile('github', 'backup', [DEV]));
+  const backup = await signedIn(profile('github', 'backup', [DEV]));
+  signin = atIssuer('https://new-idp.example');
+  assert.deepEqual(await signin.completeSignin(profile('company', 'same-subject', [DEV]), meta()),
+    { ok: false, reason: 'account_mismatch' });
+  await assert.rejects(signin.verify(old.credential.token), /unknown, expired or revoked/);
+  assert.equal((await signin.verify(backup.credential.token)).id, DEV);
+  assert.deepEqual(await signin.linkIdentity(dev, profile('company', 'same-subject', [])), { ok: true });
+  assert.equal((await signedIn(profile('company', 'same-subject', []))).principal.id, DEV);
+});
+
+test('a binding without an issuer cannot be reused or silently bound again by email', async () => {
+  await db.owner.insert(identities).values({
+    id: randomUUID(), provider: 'github', subject: 'legacy', principalType: 'user', principalId: DEV,
+    email: DEV, createdBy: DEV,
+  });
+  assert.deepEqual(await signin.completeSignin(profile('github', 'legacy', [DEV]), meta()),
+    { ok: false, reason: 'account_mismatch' });
 });

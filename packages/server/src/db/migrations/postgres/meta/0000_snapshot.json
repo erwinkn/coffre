@@ -1,5 +1,5 @@
 {
-  "id": "a10065a5-e1eb-4090-8d1f-8331a364d325",
+  "id": "016675df-520a-4db3-a5a1-783524e1ec14",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -787,6 +787,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "issuer_hash": {
+          "name": "issuer_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "principal_type": {
           "name": "principal_type",
           "type": "text",
@@ -853,6 +859,12 @@
           "columns": [
             {
               "expression": "provider",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "issuer_hash",
               "isExpression": false,
               "asc": true,
               "nulls": "last"

@@ -224,6 +224,7 @@ test('defineSignin needs a provider, and each needs a client id and secret', () 
 test("a deployment's own provider is checked like coffre's", () => {
   const own: SigninProvider = {
     id: 'acme',
+    issuer: 'https://sso.acme.example',
     label: 'Acme SSO',
     brand: 'oidc',
     start: async () => ({ url: new URL('https://sso.acme.example/authorize'), pending: { state: 's', codeVerifier: 'v', nonce: null } }),

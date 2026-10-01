@@ -255,6 +255,8 @@ export const identities = pgTable(
     id: uuid().primaryKey().defaultRandom(),
     provider: text().notNull(),
     subject: text().notNull(),
+    // Null on a legacy binding: its authority must not be guessed.
+    issuerHash: text('issuer_hash'),
     principalType: text('principal_type').notNull(),
     principalId: text('principal_id').notNull(),
     email: text(),
@@ -275,7 +277,7 @@ export const identities = pgTable(
     }).onDelete('restrict'),
     // An account is bound to one person at a time: the subject counts only
     // while the identity is not revoked (see ACTIVE_SUBJECT).
-    uniqueIndex('identities_active_subject').on(table.provider, table.activeSubject),
+    uniqueIndex('identities_active_subject').on(table.provider, table.issuerHash, table.activeSubject),
     index('identities_principal_idx').on(table.principalType, table.principalId),
   ],
 );

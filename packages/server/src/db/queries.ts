@@ -229,6 +229,7 @@ export type MemberRow = {
     id: string;
     provider: string;
     subject: string;
+    issuerHash: string | null;
     email: string | null;
     createdAt: Date;
     lastSignInAt: Date | null;
@@ -271,6 +272,7 @@ export async function members(
       id: identity.id,
       provider: identity.provider,
       subject: identity.subject,
+      issuerHash: identity.issuerHash,
       email: identity.email,
       createdAt: identity.createdAt,
       lastSignInAt: identity.lastSignInAt,
@@ -325,14 +327,14 @@ export async function memberActivity(db: Queryable, actorIds: string[]) {
 /** The person an account at a provider is bound to, if it is. */
 export async function findIdentity(
   db: Queryable,
-  account: { provider: string; subject: string },
+  account: { provider: string; issuerHash: string; subject: string },
 ): Promise<{ id: string; principalId: string } | null> {
   const { identities } = tablesOf(db);
   const [row] = await db
     .select({ id: identities.id, principalId: identities.principalId })
     .from(identities)
     .where(
-      and(eq(identities.provider, account.provider), eq(identities.subject, account.subject), isNull(identities.revokedAt)),
+      and(eq(identities.provider, account.provider), eq(identities.issuerHash, account.issuerHash), eq(identities.subject, account.subject), isNull(identities.revokedAt)),
     );
   return row ?? null;
 }
@@ -361,6 +363,8 @@ export async function findCredential(db: Queryable, by: { tokenHash: Buffer } | 
       revokedAt: credentials.revokedAt,
       lastUsedAt: credentials.lastUsedAt,
       identityRevokedAt: identities.revokedAt,
+      identityProvider: identities.provider,
+      identityIssuerHash: identities.issuerHash,
       subject: identities.subject,
       now: clock(db),
     })
