@@ -125,12 +125,12 @@ one of the app (A), found problems this design has to answer.
 | Finding | What it showed | Where the design answers it |
 |---|---|---|
 | F1, high | A checkpoint takes the caller's word that it extends the last one, and verification checks only the newest | Question 6: with one log there is no claim to check. A vault entry extends whatever head it finds, and its MAC pins everything before it. Plan step 7 |
-| F2, high | A second Durable Object loads the same KEK with an empty log and a fresh bulk counter | Question 2: no Durable Object, every instance decides under one database lock, and nothing in an instance's memory allows anything. Plan step 5. The fix in flight, refusing any object but the canonical one, still matters until then |
-| F3, medium | A refused checkpoint leaves `/readyz` green | Question 6: readiness needs a recent vault entry. Plan step 7 |
+| F2, high | A second Durable Object loads the same KEK with an empty log and a fresh bulk counter | Question 2: no Durable Object, every instance decides under one database lock, and nothing in an instance's memory allows anything. Plan step 5. Until then, #21 on `main` makes the vault refuse any object but the canonical one |
+| F3, medium | A refused checkpoint leaves `/readyz` green | Fixed on `main` by #21: readiness advances only once a checkpoint is recorded. In the one log, readiness needs a recent vault entry. Plan step 7 |
 | F5, medium | A KMS failure halfway through a batch leaves no vault record of the keys KMS did open | Question 2: the intent is logged before KMS, every call settles, and each key's outcome is logged. Plan step 5 |
-| F8, low | The database owner can cut the newest entries off the log and put its head back | Question 7: bounded by the vault's memory and by witnesses; `architecture.md` stops overstating the chain. Plan step 11 |
+| F8, low | The database owner can cut the newest entries off the log and put its head back | Question 7: bounded by the vault's memory and by witnesses. #21 already states the chain's limits in `architecture.md`. Plan step 11 |
 | A01, high | The vault commits an access change before the app's audit append; if that fails, the change stays live with no app entry, and a half-done removal revives old sessions | Question 6: the vault's entry is the record, in the transaction that makes the change. A removal revokes sessions first. Plan steps 1 and 7 |
-| A07, A08, medium, being fixed on #19 | An account binding survives a change of its provider's issuer; linking an account can race offboarding and survive re-admission | Their fixes change the schema this design moves: `identities` bound to their issuer, and a membership generation the vault keeps per member and bumps on removal. Question 5 carries both. Plan steps 2 to 6, rebased on #19 |
+| A07, A08, medium, being fixed on `app-fixes` | An account binding survives a change of its provider's issuer; linking an account can race offboarding and survive re-admission | Their fixes change the schema this design moves: `identities` bound to their issuer, and a membership generation the vault keeps per member and bumps on removal. Question 5 carries both. Plan steps 2 to 6, after `app-fixes` |
 | Closing note | The shared database needs separate logins, protected grant and log tables, and bulk and authorisation accounting that holds across instances | Questions 1, 2 and 4. Where logins do not exist, on PlanetScale MySQL and SQLite, MACs stand in, and question 4 says what that leaves open |
 
 ## The decisions
@@ -432,7 +432,7 @@ PlanetScale is a second bill.
 |---|---|---|---|
 | `audit_log` | the two logs' columns in one table (below); adds `author` and `mac`; the hash no longer keyed; no foreign keys | SELECT; INSERT of `author = 'app'` | SELECT; INSERT of `author = 'vault'` |
 | `audit_chain_head` | shared by both authors | SELECT, UPDATE of its columns | SELECT, UPDATE of its columns |
-| `vault_members` | `generation` from #19, then adds `access_seq` and `mac` | nothing | SELECT, INSERT, UPDATE |
+| `vault_members` | `generation` from `app-fixes`, then adds `access_seq` and `mac` | nothing | SELECT, INSERT, UPDATE |
 | `vault_grants` | adds `place_id`, the environment's id or, for a project grant, the project's; unique with `principal` | nothing | SELECT, INSERT, DELETE |
 | the app's other tables | none | as today | nothing |
 
@@ -463,7 +463,7 @@ a constraint as easily as a trigger.
 today. That follows the rule `architecture.md` set for the app: remodel
 what one engine cannot say, rather than write it three ways.
 
-Two changes to the app's tables are in flight on #19, from app review A07
+Two changes to the app's tables are in flight on `app-fixes`, from app review A07
 and A08, and the move carries them as they land. Its PR will give the
 exact columns. A07 binds each sign-in account to the authority that issued
 it: an OIDC issuer, or a GitHub server, beside the subject. That stays in
@@ -478,8 +478,8 @@ its tables move, so the move carries it: `vault_members.generation`, which
 the member MAC covers and which the replay reproduces from the log, since
 every removal is logged and each one adds one. A generation put back to an
 older value then fails the MAC if edited alone, or the replay if restored
-with its genuine old row. `access()` returns it, as it will once #19
-lands.
+with its genuine old row. `access()` returns it, as it will once
+`app-fixes` lands.
 
 `@coffre/vault` owns the `vault_*` tables and is the only code that queries
 them. `@coffre/server` owns the rest, and the two share the log. Appending
@@ -930,8 +930,8 @@ it says otherwise. "The suite" means `pnpm test:all`, `pnpm typecheck`,
    schemas, migrations, `dialect.ts`, `portable.ts`, `connect.ts`, the
    Hyperdrive pool and the migrator. The server imports it by name, and
    `coffre-server migrate` delegates to it. Nothing else changes; the
-   `identities` and `credentials` columns from #19 (A07, A08) move with the
-   rest, so this step lands after #19 (`app-fixes`) or rebases onto it.
+   `identities` and `credentials` columns from `app-fixes` (A07, A08) move with
+   the rest, so this step lands after `app-fixes` or rebases onto it.
    Verified by the suite on all three engines, `db:check`, `check:pins` and
    `test:consumer`.
 3. **The log's new format, written by the app alone.** `audit_log` gains
@@ -941,9 +941,9 @@ it says otherwise. "The suite" means `pnpm test:all`, `pnpm typecheck`,
    last entry, in `@coffre/db`. Append-only triggers on Postgres and
    SQLite. The app remembers the last head it saw and refuses to append
    behind it. Verification checks every link, the numbers from 0 and the
-   app's MACs. Verified by the suite, and the review's R3a and R3b
-   (sequence gaps), ported.
-4. **The vault's tables and logins.** `vault_members`, with #19's
+   app's MACs, keeping the sequence checks #21 added (F4). Verified by the
+   suite, whose tests from #21 carry over to the new format.
+4. **The vault's tables and logins.** `vault_members`, with `app-fixes`'s
    `generation`, `access_seq` and `mac`, and `vault_grants`, in all three
    schemas. On Postgres, the `coffre_vault` role, a check that
    `coffre_vault_runtime` exists, the GRANTs, and row-level security on
@@ -956,7 +956,7 @@ it says otherwise. "The suite" means `pnpm test:all`, `pnpm typecheck`,
    `lock_timeout`, and write vault entries under the vault's MAC: pre-check,
    intent when the KEK is in KMS, keys with every call settled, decide with
    each key's outcome logged. A decision refuses whenever its pre-check did.
-   The store keeps #19's generation, bumped on each removal in the same
+   The store keeps the generation from `app-fixes`, bumped on each removal in the same
    transaction, and `access()` returns it. `#serial` goes; the vault
    remembers the last head it saw. The vault's own chain code gives way to
    the shared append; delete `sqlite.ts`, `sqlite-node.ts`,
@@ -1007,9 +1007,8 @@ it says otherwise. "The suite" means `pnpm test:all`, `pnpm typecheck`,
     expects the admin's client to report it. Depends on step 7 only, so it
     can run beside 8 and 9.
 11. **Docs and the restore drill.** The docs listed in "What it costs to get
-    there", with `architecture.md` no longer claiming a chain protects the
-    newest entries against removal (F8), and a runbook for PlanetScale
-    Postgres. Verified by running the drill on a PlanetScale branch:
+    there", carrying over the chain's rollback limits #21 wrote into
+    `architecture.md` (F8), and a runbook for PlanetScale Postgres. Verified by running the drill on a PlanetScale branch:
     restore, set the passwords, repoint Hyperdrive, `coffre verify`, reveal
     a canary.
 12. **Later.** The Worker on MySQL through Hyperdrive (`mysql2`,
