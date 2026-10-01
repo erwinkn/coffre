@@ -188,8 +188,9 @@ C. app transaction    the outcome entries, each naming the vault entry it mirror
   for a token issued between A and B. A takes the principal's row lock,
   the one sign-in and account linking take once app review A08 is fixed,
   so no account is linked between A and C unseen, and C's sweep covers
-  linked accounts too. The membership generation (A08, question 5) makes a credential from before a removal useless after a
-  re-admission whatever else goes wrong.
+  linked accounts too. The membership generation (A08, question 5) makes
+  a credential from before a removal useless after a re-admission,
+  whatever else goes wrong.
 - **The intent is durable before anything changes.** Every live access
   change has its entry in the vault's log, written in the transaction that
   made it, and an intent in the app's log written before it.
