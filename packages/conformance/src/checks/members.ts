@@ -49,10 +49,10 @@ export async function memberTampering(deployment: Deployment, people: People, ki
       const text = await response.text();
       expect(response.status === 401 && (JSON.parse(text) as { error: string }).error === 'unauthenticated', 'the tampered credential was not refused', text);
       expect(!protectedValues.some((value) => text.includes(value)), 'the tampered refusal carried a value', text);
-      expect((await admin.api.members.get(person.member)).status === 'tampered', 'the refused member is not marked tampered');
       const reports = await query(sql, `SELECT seq FROM audit_log WHERE author = 'vault' AND action = 'vault.tampered'
         AND subject_principal = $1 AND code = $2`, [person.member, kind === 'old' ? 'stale' : 'mac']);
-      expect(reports.length > 0, 'the tampering was not logged', reports);
+      expect(reports.length > 0, 'the tampering was not logged at use', reports);
+      expect((await admin.api.members.get(person.member)).status === 'tampered', 'the refused member is not marked tampered');
       const verified = await admin.api.audit.verify();
       expect(!verified.ok && verified.author === 'vault' && verified.failedAtSeq === null, 'the tampered member verifies', verified);
     } finally {
