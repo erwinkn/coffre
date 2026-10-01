@@ -173,6 +173,8 @@ test('every other action has a sentence', () => {
     [{ action: 'device.approve' }, 'approved a CLI sign-in'],
     [{ action: 'account.link', metadata: { provider: 'github' } }, 'linked a github account'],
     [{ action: 'key.wrap', ...prod, key: 'DATABASE_URL', version: 5 }, 'sealed the key of market/prod/DATABASE_URL, version 5'],
+    [{ action: 'key.check', metadata: { kekProvider: 'local', kekId: 'kek-1' } }, 'recorded the check value of the local KEK kek-1'],
+    [{ action: 'secret.read', ...prod, key: 'API_KEY', decision: 'deny', reason: 'wrong_kek' }, "tried to reveal market/prod/API_KEY: the vault's KEK is not the one that wrapped the data"],
     [{ action: 'sync.run', ...prod, metadata: { destination: 'acme/market' } }, 'ran the sync of market/prod to acme/market'],
     [{ action: 'audit.heartbeat' }, 'checked in'],
     [{ action: 'audit.checkpoint', metadata: { seq: 5170 } }, 'signed the log through entry 5170'],
