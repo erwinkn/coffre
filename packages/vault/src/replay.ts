@@ -15,10 +15,11 @@ export const ACCESS_ACTIONS = [
 
 /**
  * Why the members and grants in the store do not follow from the log, or
- * null when they do; `describeAccessFault` words it. Every change to either is logged in the transaction
- * that makes it, so replaying the allowed ones from the first entry gives
- * the tables back, and a row the log does not explain was written around
- * the vault: a grant inserted into its SQLite, a removal undone.
+ * null when they do; `describeAccessFault` words it. Every change to either
+ * is logged in the transaction that makes it, so replaying the allowed ones
+ * from the first entry gives the tables back, and a row the log does not
+ * explain was written around the vault: a grant inserted into its SQLite, a
+ * removal undone.
  *
  * Grants are compared as they are live at `at`. Clearing one that has
  * lapsed changes nothing anyone holds, so it is not logged.
