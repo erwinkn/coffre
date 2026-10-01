@@ -162,11 +162,18 @@ export class OidcSigninProvider implements SigninProvider {
       );
     }
 
-    // Providers that do not send `email_verified` at all (Entra among them)
-    // are trusted to only assert addresses they manage; one that sends it as
-    // false is believed.
     const email = typeof claims.email === 'string' ? claims.email.trim().toLowerCase() : '';
-    const emails = email !== '' && claims.email_verified !== false ? [email] : [];
+    // Generic OIDC must prove address ownership. Google is authoritative for
+    // Gmail and Workspace, but a third-party address can since have changed hands.
+    // https://developers.google.com/identity/sign-in/web/backend-auth
+    const authoritative = this.config.brand !== 'google'
+      || email.endsWith('@gmail.com')
+      || (typeof claims.hd === 'string' && claims.hd !== '');
+    // Entra says email and preferred_username must not authorize access.
+    // Link its subject while signed in through another provider instead.
+    // https://learn.microsoft.com/en-us/entra/identity-platform/id-token-claims-reference
+    const emails = email !== '' && claims.email_verified === true
+      && authoritative && this.config.brand !== 'microsoft' ? [email] : [];
 
     return {
       subject: claims.sub,

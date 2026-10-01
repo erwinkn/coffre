@@ -155,6 +155,9 @@ const TENANT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
  * `organizations`) publish an issuer template rather than an issuer, which
  * standard OIDC validation rejects, and "any work account in the world" is not
  * an audience a secrets manager wants anyway.
+ *
+ * Entra email claims do not prove address ownership. Sign in through another
+ * provider and link the Microsoft account first; later sign-ins use its subject.
  */
 export function microsoft(
   options: Credentials & { id?: string; label?: string; tenant: string },

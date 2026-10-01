@@ -211,3 +211,15 @@ up trusting it. The seed signs in the same way, as the root admin, and
 conformance does too, with the dev IdP in its own process for the run.
 Nothing local stands in for Access: its verifier is covered by unit tests
 against Access-shaped tokens.
+
+### Email admission
+
+Generic OIDC providers must send `email_verified: true` before an address can
+match an invitation or bootstrap a root administrator. Google also requires a
+Gmail address or a Workspace `hd` claim. A third-party Google account may still
+carry an address whose ownership has changed.
+
+Microsoft Entra's email and username claims do not prove address ownership.
+Sign in through another provider and link the Microsoft account in Settings.
+Later sign-ins use its stable subject, without relying on an email claim. An
+Entra-only deployment needs another sign-in provider for initial admission.
