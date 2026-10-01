@@ -19,9 +19,11 @@
   "secrets": {
     "required": ["GITHUB_CLIENT_SECRET", "AUDIT_CHAIN_KEY"]
   },
-  // `wrangler hyperdrive create coffre --connection-string=<runtime login URL>`
-  // prints the id. Locally, CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE
-  // stands in for it.
+  // `wrangler hyperdrive create coffre --caching-disabled --connection-string=<runtime login URL>`
+  // prints the id. Caching must stay off, or a revoked session keeps working
+  // for about a minute, and this file cannot set it: see README.md. Locally,
+  // CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE stands in for
+  // the config.
   "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "replace-with-your-hyperdrive-id" }],
   // The vault Worker, vault/wrangler.jsonc. Deploy it first.
   "services": [{ "binding": "VAULT", "service": "coffre-vault" }],

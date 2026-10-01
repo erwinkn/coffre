@@ -44,9 +44,16 @@ and write, and nothing else.
 ```sh
 pnpm install
 pnpm migrate "postgres://owner:…@db.example.com:5432/coffre"
-pnpm exec wrangler hyperdrive create coffre \
+pnpm exec wrangler hyperdrive create coffre --caching-disabled \
   --connection-string="postgres://coffre_runtime:…@db.example.com:5432/coffre"
 ```
+
+Hyperdrive otherwise caches reads for up to a minute, and a write does not
+clear them, so a revoked token or a signed-out session could keep working
+for about a minute. The setting belongs to the Hyperdrive config, and
+`wrangler.jsonc` has no way to pin it: for a config made another way, check
+`caching` in `wrangler hyperdrive get <id>`, and turn it off with
+`wrangler hyperdrive update <id> --caching-disabled`.
 
 The id Hyperdrive prints goes in `app/wrangler.jsonc`. `pnpm migrate` is
 `coffre-server migrate`, which ships with `@coffre/server` so the schema

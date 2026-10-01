@@ -341,6 +341,13 @@ export async function findIdentity(
  * A credential by its token's hash or by id, with whether its sign-in
  * account is still bound. Revoked and expired ones too: the caller decides
  * what is live, and the vault whether its principal is still a member.
+ *
+ * It reads the database clock as well, which keeps it out of Hyperdrive's
+ * query cache: Hyperdrive caches no query that calls a stable or volatile
+ * function, CURRENT_TIMESTAMP among them. Every request looks its
+ * credential up outside a transaction, so on a Hyperdrive config created
+ * without `--caching-disabled`, a token revoked or a session signed out
+ * would otherwise keep working for up to a minute.
  */
 export async function findCredential(db: Queryable, by: { tokenHash: Buffer } | { id: string }) {
   const { credentials, identities } = tablesOf(db);
@@ -355,6 +362,7 @@ export async function findCredential(db: Queryable, by: { tokenHash: Buffer } | 
       lastUsedAt: credentials.lastUsedAt,
       identityRevokedAt: identities.revokedAt,
       subject: identities.subject,
+      now: clock(db),
     })
     .from(credentials)
     .leftJoin(identities, eq(identities.id, credentials.identityId))

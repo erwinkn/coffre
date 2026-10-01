@@ -28,9 +28,14 @@ nothing else.
 ```sh
 pnpm install
 pnpm migrate "postgres://owner:…@db.example.com:5432/coffre"
-pnpm exec wrangler hyperdrive create coffre \
+pnpm exec wrangler hyperdrive create coffre --caching-disabled \
   --connection-string="postgres://coffre_runtime:…@db.example.com:5432/coffre"
 ```
+
+Keep `--caching-disabled`: Hyperdrive otherwise caches reads for up to a
+minute, and a revoked token or a signed-out session could keep working that
+long. `app/wrangler.jsonc` cannot set it, so for a config made another way,
+check `caching` in `wrangler hyperdrive get <id>`.
 
 Put the id it prints in `app/wrangler.jsonc`, under `hyperdrive`. Run
 `pnpm migrate` again after every upgrade of `@coffre/server`, before
