@@ -160,21 +160,22 @@ published six days before we tried to install it.
 ## Layout
 
 ```
-packages/server  @coffre/server: /api, sign-in, syncs, the heartbeat, the database; /cloudflare and /node
-packages/ui      @coffre/ui: the pages, a prebuilt TanStack Start handler and its static files
-packages/vault   @coffre/vault: the KEK, grants, members, root admins, its own log; /cloudflare and /node
-packages/client  @coffre/client: the API as typed calls, one fetch each, and the sync destinations
-packages/cli     @coffre/cli: `coffre`, from init and login to secrets, syncs and audit
-packages/core    @coffre/core: access rules, envelope encryption, KEKs, the audit chain, identity, the vault contract
-examples/workers what `coffre init --workers` writes: two Workers
-examples/node    what `coffre init --node` writes: a server and its vault process
-dev/start.sh     `pnpm dev`: Postgres, the dev IdP, the dev deployment, then dev/seed.mjs
-dev/deployment   what `pnpm dev` runs: examples/workers, on the packages' sources
-dev/idp          local stand-in for Cloudflare Access, an OIDC provider and GitHub
-scripts          what dev, tests and CI share: databases, the smokes, the checks
+packages/server       @coffre/server: /api, sign-in, syncs, the heartbeat, the database; /cloudflare and /node
+packages/ui           @coffre/ui: the pages, a prebuilt TanStack Start handler and its static files
+packages/vault        @coffre/vault: the KEK, grants, members, root admins, its own log; /cloudflare and /node
+packages/client       @coffre/client: the API as typed calls, one fetch each, and the sync destinations
+packages/cli          @coffre/cli: `coffre`, from init and login to secrets, syncs and audit
+packages/conformance  @coffre/conformance: `coffre-conformance`, and the dev IdP it signs in through
+packages/core         @coffre/core: access rules, envelope encryption, KEKs, the audit chain, identity, the vault contract
+examples/workers      what `coffre init --workers` writes: two Workers
+examples/node         what `coffre init --node` writes: a server and its vault process
+dev/start.sh          `pnpm dev`: Postgres, the dev IdP, the dev deployment, then dev/seed.mjs
+dev/deployment        what `pnpm dev` runs: examples/workers, on the packages' sources
+dev/idp               runs the dev IdP, the local stand-in for Cloudflare Access, an OIDC provider and GitHub
+scripts               what dev, tests and CI share: databases, the checks
 ```
 
-The six `@coffre/*` packages are the product, compiled with their
+The seven `@coffre/*` packages are the product, compiled with their
 declarations and released together at one version; each imports the others
 by name only. A deployment is
 one of the examples: a small project that imports the packages and configures them
@@ -216,9 +217,9 @@ pnpm check:pins       # every dependency exactly pinned
 pnpm check:contrast   # every admin-UI colour pair meets WCAG AA
 pnpm build            # every package; @coffre/ui's fails if server code reached it
 pnpm typecheck        # every package and both examples (after pnpm build)
-pnpm smoke:workers    # examples/workers under wrangler dev, on Postgres (after pnpm build)
-pnpm smoke:node       # examples/node, its server and vault processes, on SQLite
-pnpm test:consumer    # pack the packages, init both examples from the packed CLI, install, smoke
+pnpm conformance:workers  # examples/workers under wrangler dev, held to docs/conformance.md (after pnpm build)
+pnpm conformance:node     # examples/node, its server and vault processes, on SQLite
+pnpm test:consumer    # pack the packages, init both examples from the packed CLI, install, conformance
 ```
 
 `.env.dev` holds the local fixtures (keys, root admins) that
@@ -227,11 +228,12 @@ sign-in settings, the vault its KEK, root admins and checkpoint signing key.
 `pnpm dev` empties the vault's local store each time it seeds, since the
 seed starts the database over.
 
-The smokes take a deployment through a first day: health, a sign-in through
-the dev IdP standing in for GitHub, a page, a reveal through the vault, the
-scheduled heartbeat and the vault's signed checkpoint, and the security
-headers. `node scripts/smoke.mjs workers|node <dir>` runs one against any
-copy of an example.
+Conformance boots a deployment, signs people in through the dev IdP
+standing in for GitHub, and checks what must hold whatever code it runs:
+access, cross-site requests, offboarding, the bulk limit, both logs and
+their tampering, and no value anywhere it should not be
+([docs/conformance.md](docs/conformance.md)). Every deployment has it as
+`pnpm conformance`.
 
 CLI:
 

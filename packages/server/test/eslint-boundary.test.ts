@@ -61,8 +61,8 @@ test('ESLint has a package import another by name, never by path', async () => {
   assert.deepEqual(await lintImport("import { vault } from '@coffre/vault';", 'packages/server/src/example.ts'), []);
   assert.deepEqual(await lintImport("import { plan } from '../lib/plan.ts';", 'packages/server/src/api/example.ts'), []);
 
-  // Tests may use the dev IdP; what ships may not.
-  const devIdp = "import { DevIdp } from '../../../dev/idp/src/idp.ts';";
-  assert.deepEqual(await lintImport(devIdp, 'packages/core/test/example.test.ts'), []);
-  assert.equal((await lintImport(devIdp, 'packages/core/src/example.ts'))[0]?.ruleId, 'coffre/package-imports');
+  // Tests may use the dev tooling beside the packages; what ships may not.
+  const seed = "import { LOCAL_SEED_DIRECTORY } from '../../../dev/seed-config.mjs';";
+  assert.deepEqual(await lintImport(seed, 'packages/server/test/example.test.ts'), []);
+  assert.equal((await lintImport(seed, 'packages/server/src/example.ts'))[0]?.ruleId, 'coffre/package-imports');
 });

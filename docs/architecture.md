@@ -308,7 +308,7 @@ function over the grants that call returned.
   Each call's arguments and results go through JSON on the way, as over RPC,
   so nothing that only works in-process gets in.
 - **Locally**, `pnpm dev` runs the vault as an auxiliary Worker of the
-  app's `vite dev`, and the smoke test runs both with
+  app's `vite dev`, and conformance runs both with
   `wrangler dev -c app/wrangler.jsonc -c vault/wrangler.jsonc`. Either way
   the app's `VAULT` binding reaches it as in production.
 

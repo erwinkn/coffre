@@ -27,6 +27,8 @@ export type AuditEntryView = {
   project: string | null;
   environment: string | null;
   bundleId: string | null;
+  /** The request that wrote it, which the vault logs too for each key it unwraps or wraps. */
+  requestId: string | null;
   metadata: Record<string, unknown>;
 };
 
@@ -118,6 +120,7 @@ export async function listAudit(
       project: row.project,
       environment: row.environment,
       bundleId: row.bundleId,
+      requestId: row.requestId,
       metadata: JSON.parse(row.metadata) as Record<string, unknown>,
     })),
   };

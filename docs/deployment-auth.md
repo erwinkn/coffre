@@ -124,9 +124,10 @@ uses `devIdp({ url: 'http://127.0.0.1:8081' })`: the dev IdP stands in for
 Access, minting Access-shaped tokens for a persona picker. `devIdp` refuses
 any URL that is not on loopback, so no deployment can end up trusting it.
 
-`dev/idp`, `dev/seed.mjs`, the seeded persona page, and CLI
-email/service persona minting are local tooling. The dev IdP is not deployed.
-Both the dev IdP and seed script refuse to run unless their shell has
-`COFFRE_AUTH_MODE=dev`. The seed additionally requires the exact checked-in
+The dev IdP (`@coffre/conformance/idp`, which `dev/idp` runs), `dev/seed.mjs`,
+the seeded persona page, and CLI email/service persona minting are local
+tooling. The dev IdP is not deployed: conformance runs it in its own process,
+for the run. Both `dev/idp` and the seed script refuse to run unless their
+shell has `COFFRE_AUTH_MODE=dev`. The seed additionally requires the exact checked-in
 loopback database, API, IdP, and local AUD values before performing its
 destructive reset.

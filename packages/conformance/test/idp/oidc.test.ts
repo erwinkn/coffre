@@ -2,9 +2,8 @@ import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRemoteJWKSet, decodeJwt, jwtVerify } from 'jose';
 
-import { DevIdp } from '../src/idp.ts';
-import { defaultSubject, PERSONAS } from '../src/people.ts';
-import { LOCAL_SEED_DIRECTORY } from '../../seed-config.mjs';
+import { DevIdp } from '../../src/idp/idp.ts';
+import { defaultSubject, PERSONAS } from '../../src/idp/people.ts';
 import { basic, form, get, location, pkce, REDIRECT_URI } from './helpers.ts';
 
 const CLIENT_ID = 'coffre-local';
@@ -326,12 +325,4 @@ test('the Access endpoints still work', async () => {
   assert.equal(decodeJwt(minted.token).email, 'dev@acme.example');
   const jwks = await (await get(idp.jwksUrl)).json();
   assert.equal(jwks.keys[0].kid, idp.kid);
-});
-
-test('the personas are the seeded users', () => {
-  const seeded = LOCAL_SEED_DIRECTORY.filter((p) => p.principalType === 'user').map((p) => p.principalId);
-  assert.deepEqual(
-    PERSONAS.map((p) => p.email).sort(),
-    ['admin@acme.example', ...seeded].sort(),
-  );
 });

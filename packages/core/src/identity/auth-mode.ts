@@ -99,7 +99,7 @@ export function cloudflareAccess(options: { teamDomain: string; audience: string
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '[::1]']);
 
 /**
- * The local dev IdP (`dev/idp`): a persona picker that mints
+ * The local dev IdP (`@coffre/conformance/idp`, run by `dev/idp`): a persona picker that mints
  * Access-shaped tokens for anyone. It is refused anywhere but on loopback,
  * so no deployment can end up trusting it.
  */

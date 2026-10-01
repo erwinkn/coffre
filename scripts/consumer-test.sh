@@ -2,7 +2,8 @@
 # Use coffre as someone outside this repository would: pack every public
 # package, let the packed CLI's `coffre init` write both deployments, check
 # they are the examples to the byte, install the tarballs into them with no
-# workspace in sight, then typecheck, build and smoke each one.
+# workspace in sight, then typecheck and build each one, and hold it to
+# `coffre-conformance`, as its own `pnpm conformance`.
 #
 #   pnpm test:consumer [<dir>]    <dir> defaults to a new temporary one
 #
@@ -23,9 +24,16 @@ mkdir -p "$work"
 work="$(cd "$work" && pwd)"
 rm -rf "$work/tarballs" "$work/cli" "$work/coffre-workers" "$work/coffre-node"
 
+# The Workers deployment runs on the local Postgres, in a database the
+# conformance run makes and drops; the login it runs as must exist.
+"$root/scripts/ensure-postgres.sh"
+node "$root/scripts/ensure-database.mjs" coffre
+postgres=postgresql://coffre_owner:local-dev-only@127.0.0.1:55432
+runtime=postgresql://coffre_runtime:local-runtime-only@127.0.0.1:55432
+
 echo '==> build and pack'
 pnpm --dir "$root" build
-packages=(core client ui server vault cli)
+packages=(core client ui server vault cli conformance)
 for name in "${packages[@]}"; do
     pnpm --dir "$root/packages/$name" pack --pack-destination "$work/tarballs" >/dev/null
 done
@@ -68,8 +76,12 @@ for kind in workers node; do
         grep -E 'Total Upload' "$work/$kind-build.log" | sed 's/^/    /'
     fi
 
-    echo "==> smoke coffre-$kind"
-    node "$root/scripts/smoke.mjs" "$kind" "$project"
+    echo "==> conformance of coffre-$kind"
+    if [[ "$kind" == workers ]]; then
+        pnpm --dir "$project" conformance --postgres "$postgres" --runtime "$runtime"
+    else
+        pnpm --dir "$project" conformance
+    fi
 done
 
 echo "consumer test passed: $work"

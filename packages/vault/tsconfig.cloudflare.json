@@ -2,5 +2,5 @@
   "extends": "../../tsconfig.base.json",
   // Workers' globals, and Node's that `nodejs_compat` adds: Buffer, node:crypto.
   "compilerOptions": { "lib": ["ES2023"], "types": ["@cloudflare/workers-types", "node"] },
-  "include": ["src/cloudflare.ts", "src/sqlite-durable-object.ts"]
+  "include": ["src/cloudflare.ts", "src/sqlite-durable-object.ts", "test/sqlite-durable-object.test.ts"]
 }

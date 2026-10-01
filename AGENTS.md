@@ -6,13 +6,15 @@ their providers in `src/sync`, the Drizzle schema, queries and migrations in `sr
 `/cloudflare` and `/node` entry points), `packages/ui` (`@coffre/ui`: the TanStack
 Start pages, prebuilt), `packages/vault` (`@coffre/vault`: keys, grants, members, its
 own log), `packages/client` (the typed API client the CLI and UI call), `packages/cli`
-(`coffre`, including `coffre init`), and `packages/core` (`@coffre/core`: access
-rules, the audit chain, envelope encryption, KEKs, identity and sign-in, and the
-contract between server and vault in `src/vault.ts`). `examples/workers` and `examples/node` are deployments, exactly what `coffre
-init` writes (a test diffs them). `dev/` holds what only the dev loop uses and nothing
-ships: `dev/start.sh` (`pnpm dev`), the deployment it runs, the dev IdP (`dev/idp`, the
-local stand-in for Cloudflare Access, GitHub and OIDC, which the smokes use too) and
-the seed. `scripts/` holds what dev, tests and CI share. The root `README.md` and the
+(`coffre`, including `coffre init`), `packages/conformance` (`@coffre/conformance`:
+`coffre-conformance`, which boots a deployment and holds it to what it must never do,
+and the dev IdP, `@coffre/conformance/idp`, the local stand-in for Cloudflare Access,
+GitHub and OIDC), and `packages/core` (`@coffre/core`: access rules, the audit chain,
+envelope encryption, KEKs, identity and sign-in, and the contract between server and
+vault in `src/vault.ts`). `examples/workers` and `examples/node` are deployments,
+exactly what `coffre init` writes (a test diffs them). `dev/` holds what only the dev
+loop uses and nothing ships: `dev/start.sh` (`pnpm dev`), the deployment it runs, the
+dev IdP's launcher (`dev/idp`) and the seed. `scripts/` holds what dev, tests and CI share. The root `README.md` and the
 `package.json` scripts are the source of truth for commands; this file only adds what
 they leave implicit.
 
@@ -65,7 +67,7 @@ deployment passes everything to `coffre(env => …)`, `serve({…})`, `vault(env
 or `serveVault({…})`. The env vars left are the CLI's user-facing ones (`COFFRE_API_URL`,
 `COFFRE_TOKEN`, …), `DATABASE_URL` for `coffre-server migrate`, and the dev and test
 tooling's (`COFFRE_AUTH_MODE` for the dev IdP and seed, `COFFRE_DEV_*`,
-`COFFRE_STATE_DIR`, `COFFRE_TEST_ENGINE`, `COFFRE_TEST_DATABASE`, `SMOKE_PORT`). Don't add another to a package.
+`COFFRE_STATE_DIR`, `COFFRE_TEST_ENGINE`, `COFFRE_TEST_DATABASE`). Don't add another to a package.
 
 **Tests / checks.**
 - `pnpm test` = lint + recreate `coffre_test` + `node --test --test-concurrency=1`
@@ -79,15 +81,17 @@ tooling's (`COFFRE_AUTH_MODE` for the dev IdP and seed, `COFFRE_DEV_*`,
 - `pnpm test:schema` verifies the restricted runtime role's privileges. Postgres only,
   as is the runtime role itself.
 - `pnpm build` builds every package in dependency order (core and client first, the
-  UI before the server, whose build reads their `dist/`). The smokes, the
+  UI before the server, whose build reads their `dist/`). Conformance, the
   examples' typecheck and `test:consumer` want it first.
-- `pnpm smoke:workers` / `pnpm smoke:node` run `scripts/smoke.mjs` against an example,
-  on ports `SMOKE_PORT` (3082) to +2. Workers needs Postgres and uses its own
-  `coffre_smoke` database, dropped after; Node runs on SQLite in a temp dir.
-- `pnpm test:consumer [<dir>]` packs the six packages, runs the packed CLI's
+- `pnpm conformance:workers` / `pnpm conformance:node` run an example's own
+  `pnpm conformance` (`docs/conformance.md`), on ports 3082 to +2; add `--port <n>`
+  for another three. Workers needs Postgres and makes its own
+  `coffre_conformance_<hex>` database, dropped after; Node runs on SQLite in a temp
+  dir. A check that fails prints what it saw, then the processes' output.
+- `pnpm test:consumer [<dir>]` packs the seven packages, runs the packed CLI's
   `init` for both kinds outside the workspace, diffs them against the examples,
   installs the tarballs (pnpm overrides, no workspace links), then typechecks,
-  builds and smokes each. It needs network for third-party packages.
+  builds and runs conformance on each. It needs network for third-party packages.
 - `pnpm lint`, `pnpm check:pins`, `pnpm check:contrast` do not need Postgres.
 - `pnpm typecheck` covers every package, `dev/deployment` and both examples. It does
   not need Postgres, but on a fresh checkout it fails until `pnpm build` has run:

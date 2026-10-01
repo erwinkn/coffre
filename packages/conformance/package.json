@@ -1,0 +1,48 @@
+{
+  "name": "@coffre/conformance",
+  "version": "0.1.0",
+  "description": "Checks a coffre deployment from outside: what it must never do, whatever code it runs.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/erwinkn/coffre.git",
+    "directory": "packages/conformance"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "src"
+  ],
+  "bin": {
+    "coffre-conformance": "./bin/coffre-conformance.js"
+  },
+  "exports": {
+    "./idp": {
+      "coffre:source": "./src/idp/index.ts",
+      "types": "./dist/idp.d.ts",
+      "default": "./dist/idp.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "tsdown",
+    "typecheck": "tsc --noEmit",
+    "test": "node --conditions=coffre:source --test"
+  },
+  "dependencies": {
+    "jose": "6.2.3",
+    "pg": "8.16.3"
+  },
+  "devDependencies": {
+    "@coffre/client": "workspace:*",
+    "@types/node": "26.1.1",
+    "@types/pg": "8.20.0",
+    "oauth4webapi": "3.8.8",
+    "tsdown": "0.23.0",
+    "typescript": "5.9.3"
+  }
+}

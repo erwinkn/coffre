@@ -30,7 +30,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       # First: the typecheck needs what it generates (the UI's route tree, and
-      # its .d.ts for the server), and the smokes run the built packages.
+      # its .d.ts for the server), and conformance runs the built packages.
       - name: Build the packages
         run: pnpm build
 
@@ -42,8 +42,8 @@ jobs:
           pnpm check:contrast
           pnpm typecheck
 
-      - name: Smoke both examples, from the workspace and from packed tarballs
+      - name: Hold both examples to conformance, from the workspace and from packed tarballs
         run: |
-          pnpm smoke:workers
-          pnpm smoke:node
+          pnpm conformance:workers
+          pnpm conformance:node
           pnpm test:consumer

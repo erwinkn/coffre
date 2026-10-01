@@ -58,3 +58,11 @@ stopped, or with `sqlite3 vault.db ".backup vault-backup.db"` while it runs:
 its newest writes wait in `vault.db-wal` until SQLite moves them over.
 
 `pnpm typecheck` checks the configuration against coffre's types.
+
+## Conformance
+
+`pnpm conformance` runs the vault and the server on SQLite in a temporary
+directory, signs people in through a stand-in GitHub, and checks what coffre
+must never do: show a value to someone without access, act for another site
+with someone's cookie, keep a removed member in, give a value it did not
+log. Run it after changing this project, and before deploying the change.
