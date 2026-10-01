@@ -2749,6 +2749,13 @@ a.env-card-name:hover {
   font-size: 0.8125rem;
 }
 
+/* A batch's number is its range, "36–39", on one line. */
+.audit .n {
+  width: 1%;
+  padding: 0 0.625rem;
+  white-space: nowrap;
+}
+
 .audit td {
   height: 2.25rem;
   padding-top: 0.25rem;
@@ -3933,7 +3940,7 @@ a.env-card-name:hover {
   /* Audit: the number first, then when, who, what they did, which wraps,
      and who decided it. */
   .dt.audit.stacks tr {
-    grid-template-columns: 3rem minmax(0, 1fr);
+    grid-template-columns: 4.5rem minmax(0, 1fr);
     grid-template-areas:
       'seq when'
       'seq who'
@@ -3950,9 +3957,11 @@ a.env-card-name:hover {
     display: block;
     grid-area: seq;
     width: auto;
+    min-width: 2.25rem;
+    padding: 0;
     text-align: left;
     box-shadow: none;
-    overflow-wrap: anywhere;
+    white-space: nowrap;
   }
 
   .dt.audit.stacks td:nth-child(2) {

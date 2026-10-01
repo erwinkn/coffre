@@ -282,7 +282,7 @@ function Line({
     <>
       <Row
         entry={lead}
-        seq={String(Math.min(...seqs))}
+        seq={grouped ? `${Math.min(...seqs)}–${Math.max(...seqs)}` : String(lead.seq)}
         parts={sentence.parts}
         refused={sentence.refused}
         decided={decidedBy(batch)}
