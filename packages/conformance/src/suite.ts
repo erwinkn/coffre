@@ -49,9 +49,9 @@ export async function conform(deployment: Deployment, options: { bulkLimit: numb
   await report.check('checkpoint missing', {}, () => missingCheckpoint(deployment));
   await report.check('app login', {}, () => appLogin(deployment));
   await report.check('vault login', {}, () => vaultLogin(deployment));
-  for (const kind of ['grant', 'member', 'old'] as const) {
-    await report.check(`${kind} tampering`, { people }, ({ people }) => memberTampering(deployment, people, kind));
-  }
+  await report.check('forged grant', { people }, ({ people }) => memberTampering(deployment, people, 'grant'));
+  await report.check('forged member', { people }, ({ people }) => memberTampering(deployment, people, 'member'));
+  await report.check('stale member', { people }, ({ people }) => memberTampering(deployment, people, 'stale'));
   await report.check('forged credential', { people }, ({ people }) => forgedCredential(deployment, people));
   await report.check('forged identity', { people }, ({ people }) => forgedIdentity(deployment, people));
   await report.check('forged approval', { people }, ({ people }) => forgedApproval(deployment, people));
@@ -61,7 +61,7 @@ export async function conform(deployment: Deployment, options: { bulkLimit: numb
     await report.check(`${author} rewritten`, { people }, ({ people }) => rewrittenEntry(deployment, people, author));
   }
   await report.check('vault forged', { people }, ({ people }) => forgedVaultEntry(deployment, people));
-  await report.check('middle deleted', { people }, ({ people }) => missingEntry(deployment, people));
+  await report.check('middle gap', { people }, ({ people }) => missingEntry(deployment, people, 'middle'));
   await report.check('first gap', { people }, ({ people }) => missingEntry(deployment, people, 'first'));
   await report.check('batch gap', { people }, ({ people }) => missingEntry(deployment, people, 'batch'));
   await report.check('earlier checkpoint', { people }, ({ people }) => earlierCheckpoint(deployment, people));

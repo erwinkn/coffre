@@ -191,10 +191,12 @@ export async function forgedVaultEntry(deployment: Deployment, { admin }: People
 /** Rewrite either author's entry and require a fault at that exact sequence. */
 export async function rewrittenEntry(deployment: Deployment, { admin }: People, author: 'app' | 'vault'): Promise<string> {
   expect((await admin.api.audit.verify()).ok, 'the log does not verify before the rewrite');
+  let seq = 0;
   await using(deployment.database(), (sql) => appendOnlyLifted(sql, async () => {
     const [row] = await query<{ seq: string | number; actor: string }>(sql,
       'SELECT seq, actor FROM audit_log WHERE author = $1 ORDER BY seq LIMIT 1', [author]);
     expect(row !== undefined, `no ${author} entry to rewrite`);
+    seq = Number(row.seq);
     await query(sql, 'UPDATE audit_log SET actor = $1 WHERE seq = $2', ['user:nobody@conformance.example', row.seq]);
     try {
       const result = await admin.api.audit.verify();
@@ -204,16 +206,18 @@ export async function rewrittenEntry(deployment: Deployment, { admin }: People, 
     }
   }));
   expect((await admin.api.audit.verify()).ok, 'the restored entry did not verify');
-  return `a rewritten ${author} entry was caught, then restored`;
+  return `entry ${seq}, the ${author}'s, rewritten: caught there, then put back`;
 }
 
 /** Remove an unreferenced entry, then put its exact bytes back. */
-export async function missingEntry(deployment: Deployment, { admin }: People, position: 'middle' | 'first' | 'batch' = 'middle'): Promise<string> {
+export async function missingEntry(deployment: Deployment, { admin }: People, position: 'middle' | 'first' | 'batch'): Promise<string> {
   expect((await admin.api.audit.verify()).ok, 'the log does not verify before deletion');
+  let seq = 0;
   await using(deployment.database(), (sql) => appendOnlyLifted(sql, async () => {
     const [row] = await sql.query(`SELECT * FROM audit_log WHERE ${position !== 'middle' ? `seq = ${position === 'first' ? 0 : 1000}` :
       "seq > 0 AND action = 'audit.heartbeat' AND NOT EXISTS (SELECT 1 FROM audit_log linked WHERE linked.related_seq = audit_log.seq)"} ORDER BY seq LIMIT 1`);
     expect(row !== undefined, 'no unreferenced entry to delete');
+    seq = Number(row.seq);
     const linked = await query(sql, 'SELECT * FROM audit_log WHERE related_seq = $1', [row.seq]);
     await query(sql, 'UPDATE audit_log SET related_seq = NULL WHERE related_seq = $1', [row.seq]);
     await query(sql, 'DELETE FROM audit_log WHERE seq = $1', [row.seq]);
@@ -227,7 +231,8 @@ export async function missingEntry(deployment: Deployment, { admin }: People, po
     }
   }));
   expect((await admin.api.audit.verify()).ok, 'the restored log did not verify');
-  return `a missing entry at ${position} was caught and restored`;
+  const which = { first: 'the first', batch: 'the first past a page of 1,000', middle: 'a heartbeat' }[position];
+  return `entry ${seq}, ${which}, deleted: caught, then put back`;
 }
 
 /** Last: keep the head, delete its newest entries, and require verification to notice. */

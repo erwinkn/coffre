@@ -18,7 +18,7 @@ export async function member(deployment: Deployment, { admin }: People, name: st
 }
 
 /** The row is refused at use, not only when someone explicitly verifies the log. */
-export async function memberTampering(deployment: Deployment, people: People, kind: 'grant' | 'member' | 'old'): Promise<string> {
+export async function memberTampering(deployment: Deployment, people: People, kind: 'grant' | 'member' | 'stale'): Promise<string> {
   const person = await member(deployment, people, `tamper-${kind}`);
   const { admin } = people;
   const path = kind === 'grant' ? PROD : DEV;
@@ -29,7 +29,7 @@ export async function memberTampering(deployment: Deployment, people: People, ki
     expect(before !== undefined && grants.length === 1, 'the fixture has no member row and grant');
     let restored = before;
     let held = grants;
-    if (kind === 'old') {
+    if (kind === 'stale') {
       await admin.api.access.set(person.member, { [DEV]: 'developer' });
       [restored] = await query(sql, 'SELECT * FROM vault_members WHERE principal = $1', [person.member]);
       held = await query(sql, 'SELECT * FROM vault_grants WHERE principal = $1', [person.member]);
@@ -51,7 +51,7 @@ export async function memberTampering(deployment: Deployment, people: People, ki
       expect(response.status === 401 && (JSON.parse(text) as { error: string }).error === 'unauthenticated', 'the tampered credential was not refused', text);
       expect(!protectedValues.some((value) => text.includes(value)), 'the tampered refusal carried a value', text);
       const reports = await query(sql, `SELECT seq FROM audit_log WHERE author = 'vault' AND action = 'vault.tampered'
-        AND subject_principal = $1 AND code = $2`, [person.member, kind === 'old' ? 'stale' : 'mac']);
+        AND subject_principal = $1 AND code = $2`, [person.member, kind === 'stale' ? 'stale' : 'mac']);
       expect(reports.length > 0, 'the tampering was not logged at use', reports);
       expect((await admin.api.members.get(person.member)).status === 'tampered', 'the refused member is not marked tampered');
       const verified = await admin.api.audit.verify();
@@ -64,7 +64,7 @@ export async function memberTampering(deployment: Deployment, people: People, ki
   });
   expect((await person.api.secrets.reveal(DEV)).values.API_KEY !== undefined, 'restoring the member did not restore legitimate use');
   expect((await admin.api.audit.verify()).ok, 'the restored member did not verify');
-  return `${kind === 'old' ? 'a genuine older row' : `a forged ${kind}`} refused as tampered, logged, then restored`;
+  return `${kind === 'stale' ? 'a genuine older member row, put back,' : `a forged ${kind}`} refused at use as tampered, logged, then restored`;
 }
 
 /** Access changes have one author, the vault that commits the changed rows. */

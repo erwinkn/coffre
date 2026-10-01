@@ -98,10 +98,10 @@ In order, since each builds on the ones before:
 | no audit, no access | A refused append commits no grant, removal or admission |
 | full verification | Verification reaches the actual head and counts every entry |
 | checkpoint refused, checkpoint missing | A recent heartbeat without an accepted checkpoint turns readiness red; restoring checkpointing recovers |
-| grant tampering, member tampering, old tampering | A forged grant, edited member or authentic older row is refused at use, marked tampered, and logged as vault.tampered. Sign-in mode refuses the credential with 401 |
+| forged grant, forged member, stale member | A forged grant, an edited member or a genuine older member row put back is refused at use, marked tampered, and logged as vault.tampered. Sign-in mode refuses the credential with 401 |
 | forged credential, forged identity, forged approval, edited generation | Owner-written authentication rows cannot mint sessions or revive old tokens, and the row failure is reported |
 | app rewritten, vault rewritten, vault forged | Verification catches rewrites at their sequence and a publicly chained vault entry without its MAC |
-| middle deleted, first gap, batch gap | Missing entries fail verification, including the first entry and the 1,000-entry paging boundary |
+| middle gap, first gap, batch gap | Missing entries fail verification, including the first entry and the 1,000-entry paging boundary |
 | earlier checkpoint | An invalid earlier signature cannot be hidden by valid MACs and a later valid checkpoint |
 | tail deleted | The newest entries removed with the head retained fail verification; this runs last |
 
