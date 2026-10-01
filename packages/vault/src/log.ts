@@ -98,11 +98,6 @@ export async function carries(db: Queryable, head: LogHead): Promise<boolean> {
   return (await hashAt(db, BigInt(head.seq)))?.toString('hex') === head.hash;
 }
 
-/** An entry's head, as checkpoints and the app record it. */
-export function headOf(row: StoredEntry | undefined): LogHead {
-  return row === undefined ? { seq: 0, hash: GENESIS_HASH.toString('hex') } : { seq: Number(row.seq), hash: row.hash.toString('hex') };
-}
-
 /**
  * An entry as the vault log's readers see it. `subject` is the member an
  * access change is about, or what else the entry names: a secret's path,

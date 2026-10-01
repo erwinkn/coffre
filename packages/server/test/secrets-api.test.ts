@@ -64,19 +64,20 @@ async function nextSeq(): Promise<bigint> {
   return head.nextSeq;
 }
 
-async function auditRows(): Promise<
-  { actorId: string; action: string; decision: string; bundleId: string | null; metadata: Record<string, unknown> }[]
+/** One author's entries since `firstSeq`: the app's by default, or the vault's, which logs reads. */
+async function auditRows(author: 'app' | 'vault' = 'app'): Promise<
+  { actorId: string; action: string; decision: string; operationId: string | null; metadata: Record<string, unknown> }[]
 > {
   const rows = await db.owner
     .select({
       actor: auditLog.actor,
       action: auditLog.action,
       decision: auditLog.decision,
-      bundleId: auditLog.operationId,
+      operationId: auditLog.operationId,
       metadata: auditLog.metadata,
     })
     .from(auditLog)
-    .where(and(eq(auditLog.author, 'app'), gte(auditLog.seq, firstSeq)))
+    .where(and(eq(auditLog.author, author), gte(auditLog.seq, firstSeq)))
     .orderBy(asc(auditLog.seq));
   return rows.map(({ actor, ...row }) => ({ actorId: actorParts(actor).actorId, ...row, metadata: JSON.parse(row.metadata) }));
 }
@@ -119,7 +120,7 @@ test('one patch writes one version and one audit entry per key, together', async
     ['secret.write', 'B'],
     ['secret.write', 'C'],
   ]);
-  assert.deepEqual([...new Set(rows.map((row) => row.bundleId))], [written.bundleId]);
+  assert.deepEqual([...new Set(rows.map((row) => row.operationId))], [written.operationId]);
 });
 
 test('a patch that fails on one key writes none of them', async () => {
@@ -223,10 +224,12 @@ test('a reader cannot write, and the denial is audited', async () => {
 test('a granted reader can read, and the read is attributed to them', async () => {
   await root.secrets.set('market/dev', { DATABASE_URL: 'the-value' });
   assert.equal((await reader.secrets.reveal('market/dev/DATABASE_URL')).values.DATABASE_URL, 'the-value');
-  const reads = (await auditRows()).filter((row) => row.action === 'secret.read');
+  const reads = (await auditRows('vault')).filter((row) => row.action === 'secret.read');
   assert.equal(reads.length, 1);
   assert.equal(reads[0].actorId, READER);
-  assert.equal(reads[0].metadata.key, 'DATABASE_URL');
+  assert.deepEqual([reads[0].metadata.subject, reads[0].metadata.purpose], ['market/dev/DATABASE_URL', 'reveal']);
+  // The vault's entry is the record of it: the app adds none.
+  assert.deepEqual((await auditRows()).filter((row) => row.action === 'secret.read'), []);
 });
 
 test('denied and grantless reads are audited', async () => {
@@ -241,7 +244,7 @@ test('denied and grantless reads are audited', async () => {
 test('a service read is attributed to the service principal', async () => {
   await root.secrets.set('market/prod', { STRIPE_KEY: 'sk_live_xxx' });
   await ci.secrets.reveal('market/prod/STRIPE_KEY');
-  const read = (await auditRows()).find((row) => row.action === 'secret.read' && row.decision === 'allow');
+  const read = (await auditRows('vault')).find((row) => row.action === 'secret.read' && row.decision === 'allow');
   assert.equal(read?.actorId, CI);
 });
 
@@ -254,10 +257,12 @@ test('revealing an environment returns every secret and logs one entry per secre
     JWT_SECRET: 'shhh',
     REDIS_URL: 'redis://y',
   });
-  const rows = await auditRows();
+  const rows = await auditRows('vault');
   assert.equal(rows.length, 3);
-  assert.deepEqual(rows.map((row) => row.metadata.key).sort(), ['DATABASE_URL', 'JWT_SECRET', 'REDIS_URL']);
-  assert.deepEqual([...new Set(rows.map((row) => row.bundleId))], [result.bundleId]);
+  assert.deepEqual(rows.map((row) => row.metadata.subject).sort(), ['market/dev/DATABASE_URL', 'market/dev/JWT_SECRET', 'market/dev/REDIS_URL']);
+  assert.ok(rows.every((row) => row.metadata.purpose === 'run'));
+  assert.deepEqual([...new Set(rows.map((row) => row.operationId))], [result.operationId]);
+  assert.deepEqual(await auditRows(), []);
 });
 
 test('keys that are also Object prototype property names survive a round trip', async () => {
@@ -320,7 +325,11 @@ test('truncating the tail is detected even when surviving rows are consistent', 
   await root.secrets.set('market/dev', { C: 'v' });
   assert.equal((await root.audit.verify()).ok, true);
   const kept = (await nextSeq()) - 2n;
-  await withLogUnlocked(db.owner, (owner) => owner.delete(auditLog).where(gte(auditLog.seq, kept)));
+  await withLogUnlocked(db.owner, async (owner) => {
+    // SQLite checks the link from a write to its key.wrap row by row: unlink the tail first.
+    await owner.update(auditLog).set({ relatedSeq: null }).where(gte(auditLog.seq, kept));
+    await owner.delete(auditLog).where(gte(auditLog.seq, kept));
+  });
   const result = await root.audit.verify();
   assert.equal(result.ok, false);
   if (!result.ok) {
@@ -334,7 +343,7 @@ test('verification reports the complete stored row count', async () => {
   const [stored] = await db.owner.select({ n: count() }).from(auditLog);
   const result = await root.audit.verify();
   assert.equal(result.ok, true);
-  if (result.ok) assert.equal(result.rows, stored.n);
+  if (result.ok) assert.equal(result.entries, stored.n);
 });
 
 test('a caller without audit.read cannot list or verify the audit log', async () => {
@@ -436,17 +445,19 @@ test('a secret archived while rewrapping cannot be restored by the prepared writ
 });
 
 for (const read of ['reveal', 'run', 'import preview'] as const) {
-  test(`${read} returns nothing when the app audit transaction fails after vault release`, async (t) => {
-    await root.secrets.set('market/dev', { VALUE: 'must stay inside the server' });
-    const transaction = db.runtime.transaction.bind(db.runtime);
-    t.mock.method(db.runtime, 'transaction', ((work, options) => transaction(async (tx) => {
-      await work(tx);
-      throw new Error('audit commit failed');
-    }, options)) as typeof db.runtime.transaction);
-    const operation = read === 'import preview'
-      ? root.secrets.dryRun('market/dev', { VALUE: 'must stay inside the server' })
-      : root.secrets.reveal(read === 'reveal' ? 'market/dev/VALUE' : 'market/dev');
-    await assert.rejects(operation, { status: 500, message: 'something went wrong; see the server log' });
-    assert.equal((await auditRows()).filter((row) => row.action === 'secret.read').length, 0);
+  test(`a ${read} is on the record before any value reaches the app, which writes nothing for it`, async (t) => {
+    await root.secrets.set('market/dev', { VALUE: 'the value' });
+    firstSeq = await nextSeq();
+    // From here no transaction of the app's commits: a read needs none, the vault's entry is its record.
+    t.mock.method(db.runtime, 'transaction', (() => Promise.reject(new Error('the app cannot write'))) as typeof db.runtime.transaction);
+    if (read === 'import preview') {
+      assert.deepEqual((await root.secrets.dryRun('market/dev', { VALUE: 'the value' })).keys, { VALUE: 'unchanged' });
+    } else {
+      assert.equal((await root.secrets.reveal(read === 'reveal' ? 'market/dev/VALUE' : 'market/dev')).values.VALUE, 'the value');
+    }
+    const [logged] = await auditRows('vault');
+    assert.deepEqual([logged.action, logged.decision, logged.metadata.purpose], [
+      'secret.read', 'allow', { reveal: 'reveal', run: 'run', 'import preview': 'compare' }[read],
+    ]);
   });
 }

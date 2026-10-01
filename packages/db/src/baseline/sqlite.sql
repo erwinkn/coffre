@@ -3,11 +3,8 @@
 
 -- @schema
 
--- The chain starts at sequence 0 from 32 zero bytes, and the heartbeat row
--- is always there to update.
+-- The chain starts at sequence 0 from 32 zero bytes.
 INSERT INTO `audit_chain_head` (`only_row`, `next_seq`, `head_hash`) VALUES (true, 0, zeroblob(32));
---> statement-breakpoint
-INSERT INTO `audit_heartbeat` (`only_row`, `last_seq`) VALUES (true, 0);
 --> statement-breakpoint
 
 -- The audit log only grows: no statement may change or delete an entry.

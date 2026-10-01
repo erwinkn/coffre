@@ -166,7 +166,7 @@ export const routes = {
   ...route('POST /secrets/:project/:environment/:key/restore', {
     input: z.object({ version: z.number().int().positive() }),
     needs: 'secret.write',
-    action: 'secret.rollback',
+    action: 'secret.restore',
     run: (ctx, { place, input }) => restoreVersion(ctx, place, input.version),
   }),
   ...route('POST /reveals', {
@@ -280,13 +280,15 @@ export const routes = {
       path: z.string().max(200).optional(),
       actor: z.string().max(330).optional(),
       decision: z.enum(['allow', 'deny']).optional(),
-      exclude: z.enum(['sign-ins']).optional(),
+      // `?detail=1` includes sign-ins and technical steps, `DETAIL_ACTIONS`.
+      detail: z.enum(['1', 'true']).optional(),
       before: z.coerce.number().int().positive().optional(),
       limit: z.coerce.number().int().min(1).max(500).default(100),
     }),
     run: (ctx, { input }) =>
       listAudit(ctx, {
         ...input,
+        detail: input.detail !== undefined,
         path: input.path === undefined ? undefined : parsePath(input.path, [1, 2]),
       }),
   }),

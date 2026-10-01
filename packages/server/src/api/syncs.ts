@@ -427,7 +427,8 @@ export class SyncRunner {
     const sourcePath = `${sync.project}/${sync.environment}`;
     const runId = randomUUID();
     const { db, chainKey, vault } = this.#deps;
-    const asking = { principal: syncPrincipal(syncId), requestId: actor.requestId ?? null, purpose: 'sync' as const };
+    // The vault logs each value it opens as a `secret.read` for the purpose `sync`, under the run's id.
+    const asking = { principal: syncPrincipal(syncId), requestId: actor.requestId ?? null, operationId: runId, purpose: 'sync' as const };
     /** The vault said no: log it here too, and fail the run with its reason. */
     const refused = (refusal: { code: string; message: string }, place: object) =>
       new Refusal(new SyncFailure(`the vault refused: ${refusal.message}`), {
@@ -435,7 +436,7 @@ export class SyncRunner {
         action: 'sync.run',
         decision: 'deny',
         ...place,
-        bundleId: runId,
+        operationId: runId,
         metadata: { syncId, source: sourcePath, trigger, reason: `vault_${refusal.code}` },
       });
 
@@ -490,7 +491,7 @@ export class SyncRunner {
           projectId: sync.credential.projectId,
           environmentId: sync.credential.environmentId,
           secretId: credential.secretId,
-          bundleId: runId,
+          operationId: runId,
           metadata: { syncId, source: sourcePath, provider: provider.id, destination, trigger, version: credential.version },
         });
         return opened.values[0];
@@ -515,7 +516,7 @@ export class SyncRunner {
         });
 
         const upsert: { key: string; value: string }[] = [];
-        const common = { ...actor, decision: 'allow' as const, ...scope, bundleId: runId };
+        const common = { ...actor, decision: 'allow' as const, ...scope, operationId: runId };
         const byVersion = new Map(current.map((entry) => [entry.secretVersionId, entry]));
         const rows = ids.upsert.map((entry) => byVersion.get(entry.versionId)!);
         const opened = await openValues(vault, asking, rows.map((row) => ({
@@ -664,6 +665,8 @@ export async function createSync(
   const credentialPath = parsePath(input.credential, [3]);
   const destination = provider.describe(config);
   const metadata = { provider: provider.id, destination, credential: formatPath(credentialPath) };
+  // One id for the sync's creation and the grants the vault gives it.
+  const operationId = randomUUID();
 
   const prepared = await audited(ctx, async (tx, log) => {
     const credential = await resolvePath(tx, credentialPath);
@@ -717,7 +720,7 @@ export async function createSync(
       // The vault must see a committed sync; the scheduler must not run it yet.
       pausedAt: new Date(),
     });
-    log.push(allowed(ctx, 'sync.create', { ...place, metadata: { ...metadata, syncId: id } }));
+    log.push(allowed(ctx, 'sync.create', { ...place, operationId, metadata: { ...metadata, syncId: id } }));
     return { id, reads };
   });
 
@@ -727,11 +730,15 @@ export async function createSync(
       actor: formatMember(ctx.caller.principal),
       principal: syncPrincipal(syncId),
       requestId: ctx.requestId,
+      operationId,
       changes: prepared.reads,
     });
-    if (!granted.ok) throw vaultRefusal(ctx, granted.refusal, 'sync.create', { ...place, metadata: { ...metadata, syncId } });
+    if (!granted.ok) {
+      throw vaultRefusal(ctx, granted.refusal, 'sync.create', { ...place, operationId, metadata: { ...metadata, syncId } });
+    }
   });
-  await manage(ctx, syncId, 'sync.resume', ['environment.manage'], () => ({ pausedAt: null }));
+  // Part of creating it, logged above.
+  await manage(ctx, syncId, null, ['environment.manage'], () => ({ pausedAt: null }));
 
   ctx.waitUntil(ctx.syncs.runSettled(syncId, 'create', systemActor(syncId)));
   return ctx.syncs.view(syncId);
@@ -739,38 +746,50 @@ export async function createSync(
 
 /**
  * A checked, audited change to one sync. `anyOf` lists the permissions that
- * each suffice; `change: null` checks and logs only a refusal.
+ * each suffice; `change: null` checks and logs only a refusal, and `action:
+ * null` changes without an entry, for a step of something logged already.
  */
 async function manage(
   ctx: ApiContext,
   syncId: string,
-  action: string,
+  action: string | null,
   anyOf: readonly Permission[],
   change: ((row: SyncRow) => Partial<typeof syncs.$inferInsert>) | null,
-  /** Retrying archive must finish revoking its vault principal after an RPC failure. */
-  includeArchived = false,
+  options: {
+    /** Retrying a delete must finish removing its vault principal after an RPC failure. */
+    includeArchived?: boolean;
+    operationId?: string;
+    metadata?: Record<string, unknown>;
+  } = {},
 ): Promise<SyncRow> {
+  const named = action ?? 'sync.update';
   return audited(ctx, async (tx, log) => {
     const row = await lockSync(tx, syncId);
-    if (row === null || !serves(includeArchived ? { ...row, archivedAt: null } : row)) {
-      throw new Refusal(notFound('unknown sync'), denied(ctx, action, 'unknown_sync', { metadata: { syncId } }));
+    if (row === null || !serves(options.includeArchived === true ? { ...row, archivedAt: null } : row)) {
+      throw new Refusal(notFound('unknown sync'), denied(ctx, named, 'unknown_sync', { metadata: { syncId } }));
     }
     const scope = { projectId: row.projectId, environmentId: row.environmentId };
     if (!anyOf.some((permission) => can(ctx.caller, permission, scope))) {
-      throw new Refusal(forbidden(), denied(ctx, action, missing(anyOf[0]), { ...scope, metadata: { syncId } }));
+      throw new Refusal(forbidden(), denied(ctx, named, missing(anyOf[0]), { ...scope, metadata: { syncId } }));
     }
     if (change === null) return row;
     await update(tx, syncs, { id: syncId }, change(row));
-    log.push(allowed(ctx, action, { ...scope, metadata: { syncId, provider: row.provider } }));
+    if (action !== null) {
+      log.push(allowed(ctx, action, {
+        ...scope,
+        operationId: options.operationId,
+        metadata: { syncId, provider: row.provider, ...options.metadata },
+      }));
+    }
     return row;
   });
 }
 
 /** Stop or restart pushing. A paused sync keeps its record of what it pushed. */
 export async function setSyncPaused(ctx: ApiContext, syncId: string, paused: boolean): Promise<SyncView> {
-  await manage(ctx, syncId, paused ? 'sync.pause' : 'sync.resume', ['environment.manage'], (row) => ({
+  await manage(ctx, syncId, 'sync.update', ['environment.manage'], (row) => ({
     pausedAt: paused ? (row.pausedAt ?? new Date()) : null,
-  }));
+  }), { metadata: { paused } });
   // Whatever changed while it was paused goes out now.
   if (!paused) ctx.waitUntil(ctx.syncs.runSettled(syncId, 'change', systemActor(syncId)));
   return ctx.syncs.view(syncId);
@@ -783,19 +802,25 @@ export async function setSyncPaused(ctx: ApiContext, syncId: string, paused: boo
  * service, not a side effect of tidying up coffre.
  */
 export async function archiveSync(ctx: ApiContext, syncId: string): Promise<SyncView> {
-  const row = await manage(ctx, syncId, 'sync.archive', ['environment.manage'], (current) => ({ archivedAt: current.archivedAt ?? new Date() }), true);
+  // One id for the deletion and the vault's removal of the sync's principal.
+  const operationId = randomUUID();
+  const row = await manage(ctx, syncId, 'sync.delete', ['environment.manage'], (current) => ({
+    archivedAt: current.archivedAt ?? new Date(),
+  }), { includeArchived: true, operationId });
   await withRefusals(ctx, async () => {
     const removed = await ctx.vault.remove({
       actor: formatMember(ctx.caller.principal),
       principal: syncPrincipal(syncId),
       requestId: ctx.requestId,
+      operationId,
       source: { projectId: row.projectId, environmentId: row.environmentId },
     });
     // One whose grants were all revoked already reads nothing, and may be gone.
     if (!removed.ok && removed.refusal.code !== 'removed' && removed.refusal.code !== 'not_a_member') {
-      throw vaultRefusal(ctx, removed.refusal, 'sync.archive', {
+      throw vaultRefusal(ctx, removed.refusal, 'sync.delete', {
         projectId: row.projectId,
         environmentId: row.environmentId,
+        operationId,
         metadata: { syncId },
       });
     }

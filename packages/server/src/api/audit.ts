@@ -1,6 +1,6 @@
 import { roleGrants } from '@coffre/core/access';
 import { GENESIS_HASH, verifyEntries } from '@coffre/core/audit';
-import { describeAccessFault, verifyCheckpoint, type Checkpoint, type LogEntry, type LogVerification } from '@coffre/core/vault';
+import { describeAccessFault, type LogEntry, type LogVerification } from '@coffre/core/vault';
 import { SNAPSHOT } from '@coffre/db/dialect';
 
 import { actorParts, appLogKey } from '../db/audit.ts';
@@ -12,7 +12,6 @@ import {
   resolvePath,
   type AuditFilter,
 } from '../db/queries.ts';
-import { CHECKPOINT_ACTION, readCheckpoint, vaultBehind } from '../heartbeat.ts';
 import type { ApiContext } from './context.ts';
 import { forbidden, notFound, vaultRefused } from './errors.ts';
 import { formatMember, parseMember, type Path } from './paths.ts';
@@ -21,39 +20,77 @@ const VERIFY_BATCH = 5_000;
 
 export type AuditEntryView = {
   seq: number;
+  /** Which component wrote it: the app, or the vault, which decides on keys and access. */
+  author: 'app' | 'vault';
   occurredAt: string;
-  actorType: string;
+  actorType: 'user' | 'service' | 'system';
+  /** A sync acts as the system, with `sync:<id>` as its id. */
   actorId: string;
+  /** What was done; `ACTIONS` below, and `DETAIL_ACTIONS` for the hidden ones. */
   action: string;
   decision: 'allow' | 'deny';
+  /** Why a refusal: the vault's code (`no_grant`, `bulk_limit`, `tampered`, …), or the app's reason. */
+  reason: string | null;
+  /** A technical step or a sign-in: left out unless asked for. */
+  detail: boolean;
+  /** The member an access or membership entry is about: `user:ada@acme.example`, `token:ci`, `sync:…`. */
+  subject: string | null;
   project: string | null;
   environment: string | null;
-  bundleId: string | null;
-  /** The request that wrote it, which the vault logs too for each key it unwraps or wraps. */
+  /** The secret's key, for an entry about one. */
+  key: string | null;
+  /** The version a read released, or a write or restore stored. */
+  version: number | null;
+  /** One id for everything one action did: a reveal's reads, a write's versions, an access change. */
+  operationId: string | null;
+  /** An earlier entry this one follows from, such as the `key.wrap` behind a `secret.write`. */
+  relatedSeq: number | null;
+  /** The request that wrote it. */
   requestId: string | null;
   metadata: Record<string, unknown>;
 };
 
+/**
+ * Technical steps and sign-ins: in the log and its chain like everything
+ * else, but not what someone did with secrets or access, so a page leaves
+ * them out unless asked.
+ */
+export const DETAIL_ACTIONS = [
+  'sign_in',
+  'sign_out',
+  'token.create',
+  'token.revoke',
+  'device.approve',
+  'device.deny',
+  'account.link',
+  'account.unlink',
+  'key.wrap',
+  'key.rewrap',
+  'key.intent',
+  'sync.run',
+  'audit.heartbeat',
+  'audit.checkpoint',
+] as const;
+
 export type AuditVerification =
   | {
       ok: true;
-      rows: number;
-      head: string;
-      /** The last head the vault signed, which the log still matches; null before the first. */
+      /** The last entry both authors verified, each its own by its key: "verified through 5170". */
+      through: number | null;
+      entries: number;
+      /** The newest prefix the vault signed, which the log still holds; null before the first. */
       checkpoint: { seq: number; signedAt: string } | null;
-      /**
-       * The vault's own log, checked whole: its chain from the first entry,
-       * the head the app last recorded from a checkpoint, and every member
-       * and grant replayed from it.
-       */
-      vault: { entries: number; pending?: number };
+      /** Key batches at a key service still under way: accounted for once they finish. */
+      pending?: number;
     }
   | {
       ok: false;
-      /** Which failed: the app's audit log, or the vault's log and store. */
-      log: 'audit' | 'vault';
-      /** The entry of that log where it breaks, or null when the fault is not at one. */
+      /** The last entry verified: the one before the fault, or the newest when the fault is in no entry. */
+      through: number | null;
+      /** The entry where it breaks, or null when the fault is not at one, such as a member's row. */
       failedAtSeq: number | null;
+      /** Whose check found it: the app's, of its entries and the chain, or the vault's, of its own and its rows. */
+      author: 'app' | 'vault';
       reason: string;
     };
 
@@ -67,23 +104,17 @@ export type AuditQuery = {
   /** `user:ada@acme.example`, `token:ci-deploy`, or a raw actor id such as `sync:…`. */
   actor?: string;
   decision?: 'allow' | 'deny';
-  /**
-   * `sign-ins` leaves out `auth.signin` and `auth.signout`, for a view about
-   * what was done with secrets and access. They stay in the log and its
-   * chain, and are returned unless asked otherwise.
-   */
-  exclude?: 'sign-ins';
+  /** Include the detail entries, `DETAIL_ACTIONS`. */
+  detail?: boolean;
   /** Entries older than this seq, for paging backwards. */
   before?: number;
   limit: number;
 };
 
-/** What `exclude=sign-ins` leaves out. Binding an account and issuing a credential stay. */
-export const SIGN_IN_ACTIONS = ['auth.signin', 'auth.signout'] as const;
-
 /**
- * Newest first. Owners read everything; anyone else reads the projects and
- * environments where they hold `audit.read`, and nothing else.
+ * Newest first, both authors. Owners read everything; anyone else reads the
+ * projects and environments where they hold `audit.read`, and nothing else:
+ * an entry about no place, such as a member's removal, is owners' alone.
  */
 export async function listAudit(
   ctx: ApiContext,
@@ -91,7 +122,7 @@ export async function listAudit(
 ): Promise<{ entries: AuditEntryView[] }> {
   const filter: AuditFilter = {
     decision: query.decision,
-    excludeActions: query.exclude === 'sign-ins' ? SIGN_IN_ACTIONS : undefined,
+    excludeActions: query.detail === true ? undefined : DETAIL_ACTIONS,
     limit: query.limit,
   };
   const { caller } = ctx;
@@ -125,61 +156,66 @@ export async function listAudit(
   if (query.before !== undefined) filter.beforeSeq = BigInt(query.before);
 
   const rows = await auditPage(ctx.db, filter);
+  return { entries: rows.map(entryView) };
+}
+
+const DETAIL = new Set<string>(DETAIL_ACTIONS);
+
+function entryView(row: Awaited<ReturnType<typeof auditPage>>[number]): AuditEntryView {
+  const metadata = JSON.parse(row.metadata) as Record<string, unknown>;
+  // The vault names a secret by its path, the app by its key.
+  const path = typeof metadata.subject === 'string' ? metadata.subject : null;
+  const key = row.key ?? (typeof metadata.key === 'string' ? metadata.key : path?.split('/').at(-1) ?? null);
   return {
-    entries: rows.map((row) => ({
-      seq: Number(row.seq),
-      occurredAt: row.occurredAt,
-      ...actorParts(row.actor),
-      action: row.action,
-      decision: row.decision as 'allow' | 'deny',
-      project: row.project,
-      environment: row.environment,
-      bundleId: row.operationId,
-      requestId: row.requestId,
-      metadata: JSON.parse(row.metadata) as Record<string, unknown>,
-    })),
+    seq: Number(row.seq),
+    author: row.author as 'app' | 'vault',
+    occurredAt: row.occurredAt,
+    ...actorParts(row.actor),
+    action: row.action,
+    decision: row.decision as 'allow' | 'deny',
+    reason: row.code ?? (typeof metadata.reason === 'string' ? metadata.reason : null),
+    detail: DETAIL.has(row.action),
+    subject: row.subjectPrincipal,
+    project: row.project,
+    environment: row.environment,
+    key,
+    version: typeof metadata.version === 'number' ? metadata.version : null,
+    operationId: row.operationId,
+    relatedSeq: row.relatedSeq === null ? null : Number(row.relatedSeq),
+    requestId: row.requestId,
+    metadata,
   };
 }
 
 /**
- * Recompute the whole chain and compare it with the stored head, in one
- * read-only snapshot so appends made meanwhile cannot look like tampering.
- * Each author authenticates its own entries: the app here, by its chain
- * key, and the vault by its own, over the same entries, up to the last one
- * the app verified. Anyone who can insert a row can link it to the chain,
- * so an entry whose author did not write it fails one check or the other.
- * Then check the log against the vault's latest signed checkpoint: the chain
- * key catches a row changed by someone who holds only the database, and the
- * checkpoint one changed and chained again by someone who holds the app too.
- * Then the other way: the vault's entries against the last checkpoint the
- * app recorded, which catches them rewritten or cut back. Owners only: a
- * partial view of the chain cannot be verified.
+ * Check the whole log: the app here, every link and hash and its own
+ * entries' MACs, from the first entry to the head, in one read-only
+ * snapshot so appends made meanwhile cannot look like tampering; then the
+ * vault, its own entries by its key over the same entries, every checkpoint
+ * against the prefix it signed, its key batches accounted for, and the
+ * members and grants replayed. Anyone who can insert a row can link it to
+ * the chain, so an entry whose author did not write it fails one check or
+ * the other. Owners only: a partial view of the chain cannot be verified.
  */
 export async function verifyAudit(ctx: ApiContext): Promise<AuditVerification> {
   if (!ctx.caller.isOwner) {
     throw forbidden('only a root admin or instance owner may verify the complete audit chain');
   }
-  const audit = (failedAtSeq: number | bigint, reason: string) =>
-    ({ ok: false, log: 'audit', failedAtSeq: Number(failedAtSeq), reason }) as const;
-  const vault = (failedAtSeq: number | null, reason: string) => ({ ok: false, log: 'vault', failedAtSeq, reason }) as const;
+  const failed = (author: 'app' | 'vault', failedAtSeq: number | bigint | null, reason: string, through: bigint | null) => ({
+    ok: false as const,
+    through: through === null || through < 0n ? null : Number(through),
+    failedAtSeq: failedAtSeq === null ? null : Number(failedAtSeq),
+    author,
+    reason,
+  });
 
-  const { checkpoint, publicKey } = await ctx.vault.latestCheckpoint();
-  if (checkpoint !== null && !(await verifyCheckpoint(checkpoint, publicKey))) {
-    return vault(null, `the latest checkpoint, at seq ${checkpoint.seq}, does not carry the vault's signature`);
-  }
-  const signedSeq = checkpoint === null ? null : BigInt(checkpoint.seq);
   const chain = await ctx.db.transaction(
     async (tx) => {
       const head = await auditHead(tx);
-      if (head === null) {
-        return audit(0, 'audit_chain_head is missing, so the length of the log cannot be established');
-      }
-
+      if (head === null) return failed('app', 0, 'audit_chain_head is missing, so the length of the log cannot be established', null);
       let previousHash = GENESIS_HASH;
       let nextSequence = 0n;
-      let rows = 0;
-      let signedHash: string | null = null;
-      let recorded: ReturnType<typeof readCheckpoint> | null = null;
+      let entries = 0;
       for (;;) {
         const batch = await auditRange(tx, nextSequence, VERIFY_BATCH);
         if (batch.length === 0) break;
@@ -193,72 +229,52 @@ export async function verifyAudit(ctx: ApiContext): Promise<AuditVerification> {
           keys: [appLogKey(ctx.chainKey)],
           chainOnly: ['vault'],
         });
-        if (!result.ok) return audit(result.failedAtSeq, result.reason);
-        rows += result.entries;
-        previousHash = result.head;
-        for (const row of batch) {
-          if (row.seq === signedSeq) signedHash = row.hash.toString('hex');
-          if (row.action === CHECKPOINT_ACTION) recorded = readCheckpoint(row.seq, row.metadata);
+        if (!result.ok) {
+          // Verified through the entry read before the faulty one: with a gap, not the seq before it.
+          const at = batch.findIndex((row) => row.seq === result.failedAtSeq);
+          return failed('app', result.failedAtSeq, result.reason, at > 0 ? batch[at - 1].seq : nextSequence - 1n);
         }
-        nextSequence = batch[batch.length - 1].seq + 1n;
+        entries += result.entries;
+        previousHash = result.head;
+        nextSequence = result.nextSeq;
         if (batch.length < VERIFY_BATCH) break;
       }
-
       if (nextSequence !== head.nextSeq) {
         const missing = head.nextSeq - nextSequence;
-        return audit(
+        return failed(
+          'app',
           nextSequence,
           missing > 0n
             ? `the log ends at seq ${nextSequence} but the chain head expects ${head.nextSeq}: ${missing} ${missing === 1n ? 'entry has' : 'entries have'} been removed from the end`
             : `the log runs to seq ${nextSequence} but the chain head only expects ${head.nextSeq}`,
+          nextSequence - 1n,
         );
       }
       if (!previousHash.equals(head.headHash)) {
-        return audit(nextSequence, 'the recomputed head does not match the stored chain head');
-      }
-      if (checkpoint !== null) {
-        if (signedHash === null) {
-          return audit(
-            nextSequence,
-            `the log ends before seq ${checkpoint.seq}, which the vault signed at ${checkpoint.signedAt}`,
-          );
-        }
-        if (signedHash !== checkpoint.headHash) {
-          return audit(
-            checkpoint.seq,
-            `the log up to seq ${checkpoint.seq} is not the one the vault signed at ${checkpoint.signedAt}: it was rewritten`,
-          );
-        }
+        return failed('app', nextSequence, 'the recomputed head does not match the stored chain head', nextSequence - 1n);
       }
       const last = nextSequence === 0n ? null : { seq: Number(nextSequence - 1n), hash: previousHash.toString('hex') };
-      return { ok: true as const, rows, head: previousHash.toString('hex'), last, recorded };
+      return { ok: true as const, entries, last };
     },
     SNAPSHOT,
   );
   if (!chain.ok) return chain;
-  const { rows, head, last, recorded } = chain;
 
-  // The vault's side. Its latest checkpoint is read again: one signed and
-  // recorded since the first read is in the snapshot, and is not behind.
-  let through: Checkpoint['vault'] | null = null;
-  if (recorded !== null) {
-    if (!recorded.ok || !(await verifyCheckpoint(recorded.checkpoint, publicKey))) {
-      return audit(recorded.seq, 'this entry records a checkpoint the vault did not sign');
-    }
-    const behind = vaultBehind((await ctx.vault.latestCheckpoint()).checkpoint, recorded.checkpoint);
-    if (behind !== null) return vault(null, behind);
-    through = recorded.checkpoint.vault;
-  }
   // The vault's entries by its key, up to the entry the app verified to:
   // only then is every entry of the prefix authenticated, by its author.
-  const verified = await named(ctx, await ctx.vault.verifyLog({ through, upTo: last }));
-  if (!verified.ok) return vault(verified.failedAtSeq, verified.reason);
+  const verified = await named(ctx, await ctx.vault.verifyLog({ upTo: chain.last }));
+  if (!verified.ok) {
+    // The app verified the chain whole, so the vault's fault is at the entry it names, or in no entry at all.
+    const last = chain.last === null ? null : BigInt(chain.last.seq);
+    return failed('vault', verified.failedAtSeq, verified.reason, verified.failedAtSeq === null ? last : BigInt(verified.failedAtSeq) - 1n);
+  }
+  const { checkpoint } = await ctx.vault.latestCheckpoint();
   return {
     ok: true,
-    rows,
-    head,
+    through: chain.last?.seq ?? null,
+    entries: chain.entries,
     checkpoint: checkpoint === null ? null : { seq: checkpoint.seq, signedAt: checkpoint.signedAt },
-    vault: { entries: verified.entries, ...(verified.pending === undefined ? {} : { pending: verified.pending }) },
+    ...(verified.pending === undefined ? {} : { pending: verified.pending }),
   };
 }
 

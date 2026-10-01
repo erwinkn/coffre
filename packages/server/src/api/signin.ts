@@ -256,7 +256,7 @@ export class SigninService {
     const claimed = profile.emails[0] ?? `${profile.provider}:${profile.subject}`;
     const base = {
       actorType: 'user' as const,
-      action: 'auth.signin',
+      action: 'sign_in',
       requestId: meta.requestId,
       sourceIp: meta.sourceIp,
     };
@@ -316,7 +316,7 @@ export class SigninService {
           log.push({
             ...base,
             actorId: principalId,
-            action: 'identity.bind',
+            action: 'account.link',
             decision: 'allow',
             metadata: { ...account, identityId, matchedEmail: match.email },
           });
@@ -351,7 +351,7 @@ export class SigninService {
     return audited(this.#deps, async (tx, log) => {
       const standing = await this.#currentCaller(tx, ctx, access);
       if (standing === null) {
-        throw new Refusal(new SigninRefused('deactivated'), denied(ctx, 'identity.bind', 'session_ended', { metadata: account }));
+        throw new Refusal(new SigninRefused('deactivated'), denied(ctx, 'account.link', 'session_ended', { metadata: account }));
       }
       const issuerHash = this.#issuerHash(profile.provider);
       if (issuerHash === null) throw new SigninRefused('not_registered');
@@ -360,11 +360,11 @@ export class SigninService {
         if (bound.principal === principalOf(ctx.caller.principal) && bound.generation === standing.generation) return { ok: true as const };
         throw new Refusal(
           new SigninRefused('already_linked'),
-          denied(ctx, 'identity.bind', 'already_linked', { metadata: account }),
+          denied(ctx, 'account.link', 'already_linked', { metadata: account }),
         );
       }
       const identityId = await this.#bind(tx, ctx.caller.principal.id, profile, ctx.caller.principal.id, standing.generation);
-      log.push(allowed(ctx, 'identity.bind', { metadata: { ...account, identityId } }));
+      log.push(allowed(ctx, 'account.link', { metadata: { ...account, identityId } }));
       return { ok: true as const };
     }).catch(refusalOrThrow);
   }
@@ -523,7 +523,7 @@ export class SigninService {
       log.push({
         actorType: member.type,
         actorId: member.id,
-        action: 'auth.signout',
+        action: 'sign_out',
         decision: 'allow',
         requestId: meta.requestId,
         sourceIp: meta.sourceIp,
@@ -539,7 +539,7 @@ export class SigninService {
       const unknown = () =>
         new Refusal(
           notFound('unknown credential'),
-          denied(ctx, 'credential.revoke', 'unknown_credential', { metadata: { credentialId } }),
+          denied(ctx, 'token.revoke', 'unknown_credential', { metadata: { credentialId } }),
         );
       if (row === null || row.revokedAt !== null) throw unknown();
       const { principal } = ctx.caller;
@@ -547,7 +547,7 @@ export class SigninService {
       if (!own && !ctx.caller.isOwner) {
         throw new Refusal(
           forbidden("only owners may revoke other people's credentials"),
-          denied(ctx, 'credential.revoke', 'requires_instance_owner', { metadata: { credentialId } }),
+          denied(ctx, 'token.revoke', 'requires_instance_owner', { metadata: { credentialId } }),
         );
       }
       const revoked = await updateAuth(
@@ -559,7 +559,7 @@ export class SigninService {
       );
       if (revoked === 0) throw unknown();
       log.push(
-        allowed(ctx, 'credential.revoke', {
+        allowed(ctx, 'token.revoke', {
           metadata: { credentialId, kind: row.kind, principalType: memberOf(row.principal).type, principalId: memberOf(row.principal).id },
         }),
       );
@@ -581,7 +581,7 @@ export class SigninService {
       if (identity === undefined || unbound === 0) {
         throw new Refusal(
           notFound('unknown sign-in account'),
-          denied(ctx, 'identity.unbind', 'unknown_identity', { metadata: { identityId } }),
+          denied(ctx, 'account.unlink', 'unknown_identity', { metadata: { identityId } }),
         );
       }
       const sessionsEnded = await updateAuth(
@@ -592,7 +592,7 @@ export class SigninService {
         { revokedAt: now, revokedBy: principal.id },
       );
       const row = { provider: identity.provider, subject: identity.subject };
-      log.push(allowed(ctx, 'identity.unbind', { metadata: { identityId, ...row, sessionsEnded } }));
+      log.push(allowed(ctx, 'account.unlink', { metadata: { identityId, ...row, sessionsEnded } }));
       return { unlinked: true as const };
     });
   }
@@ -670,14 +670,14 @@ export class SigninService {
       if (!ctx.caller.isOwner) {
         throw new Refusal(
           forbidden('only owners may issue service tokens'),
-          denied(ctx, 'credential.issue', 'requires_instance_owner', { metadata: details }),
+          denied(ctx, 'token.create', 'requires_instance_owner', { metadata: details }),
         );
       }
       const service = { type: 'service' as const, id: serviceId };
       const standing = await this.#standing(service);
       const refusal = () => new Refusal(
         notFound('unknown service'),
-        denied(ctx, 'credential.issue', 'unknown_principal', { metadata: details }),
+        denied(ctx, 'token.create', 'unknown_principal', { metadata: details }),
       );
       if (standing.status !== 'active') throw refusal();
       return audited(this.#deps, async (tx, log) => {
@@ -690,7 +690,7 @@ export class SigninService {
           expiresAt: new Date(Date.now() + input.expiresInDays * 86_400_000),
         });
         log.push(
-          allowed(ctx, 'credential.issue', {
+          allowed(ctx, 'token.create', {
             metadata: { ...details, credentialId: credential.id, expiresAt: credential.expiresAt },
           }),
         );
@@ -837,7 +837,7 @@ export class SigninService {
         if (standing.status !== 'active' || principalId !== principal.id || standing.generation !== row.generation) return { status: 'denied' };
         if (!(await this.#stillMember(tx, principal, standing))) {
           log.push({
-            actorType: 'user', actorId: principal.id, action: 'credential.issue', decision: 'deny',
+            actorType: 'user', actorId: principal.id, action: 'sign_in', decision: 'deny',
             requestId: meta.requestId, sourceIp: meta.sourceIp,
             metadata: { kind: 'cli', deviceAuthorizationId: row.id, reason: 'membership_changed' },
           });
@@ -854,7 +854,7 @@ export class SigninService {
         const entry: AuditEntry = {
           actorType: 'user',
           actorId: principalId,
-          action: 'credential.issue',
+          action: 'sign_in',
           decision: 'allow',
           requestId: meta.requestId,
           sourceIp: meta.sourceIp,

@@ -70,8 +70,8 @@ export function apply(state: Replayed, row: StoredEntry): AccessFault | null {
   const before = state.members.get(principal);
   const changed = { statusChangedAt: row.occurredAt, statusChangedBy: row.actor };
   switch (row.action) {
-    case 'principal.admit':
-    case 'principal.restore':
+    case 'member.add':
+    case 'member.restore':
       state.members.set(principal, {
         principal,
         status: 'active',
@@ -83,11 +83,11 @@ export function apply(state: Replayed, row: StoredEntry): AccessFault | null {
         ...changed,
       });
       return null;
-    case 'principal.owner':
+    case 'member.owner':
       if (before === undefined) return { kind: 'unadmitted-change', seq: Number(row.seq), principal };
       state.members.set(principal, { ...before, owner: detail.owner === true, accessSeq: row.seq });
       return null;
-    case 'principal.remove': {
+    case 'member.remove': {
       if (before === undefined) return { kind: 'unadmitted-change', seq: Number(row.seq), principal };
       // A removal names the generation it moved to; one before this format
       // was always the next.
@@ -96,8 +96,7 @@ export function apply(state: Replayed, row: StoredEntry): AccessFault | null {
       grantsOf.clear();
       return null;
     }
-    case 'grant.create':
-    case 'grant.update':
+    case 'access.grant':
       grantsOf.set(placeKey(place), {
         principal,
         ...place,
@@ -108,7 +107,7 @@ export function apply(state: Replayed, row: StoredEntry): AccessFault | null {
       });
       if (before !== undefined) state.members.set(principal, { ...before, accessSeq: row.seq });
       return null;
-    case 'grant.revoke':
+    case 'access.revoke':
       grantsOf.delete(placeKey(place));
       if (before !== undefined) state.members.set(principal, { ...before, accessSeq: row.seq });
       return null;

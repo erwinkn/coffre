@@ -21,7 +21,6 @@ export const {
   vaultGrants,
   auditLog,
   auditChainHead,
-  auditHeartbeat,
   identities,
   credentials,
   deviceAuthorizations,

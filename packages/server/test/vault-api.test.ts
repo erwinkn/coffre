@@ -4,7 +4,6 @@ import assert from 'node:assert/strict';
 import { createClient, type CoffreClient } from '@coffre/client';
 import { entryHash, sealEntry } from '@coffre/core/audit';
 import { github, signin, type Principal } from '@coffre/core/identity';
-import type { LogEntry } from '@coffre/core/vault';
 import { tablesOf } from '@coffre/db';
 import { and, asc, eq, is, Table } from 'drizzle-orm';
 
@@ -13,7 +12,7 @@ import { auditChainHead, auditLog } from './db/tables.ts';
 import { serveApi } from '../src/api/router.ts';
 import { SyncRunner } from '../src/api/syncs.ts';
 import { fetchApi } from '../src/fetch-api.ts';
-import { checkpointAudit } from '../src/heartbeat.ts';
+import { writeAuditHeartbeat } from '../src/heartbeat.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import {
   clientFor,
@@ -80,17 +79,17 @@ function buggyClientFor(on: FixtureDeps, id: string): CoffreClient {
   });
 }
 
-/** The vault's own log, newest first, read the one way there is: through the app, as a root admin. */
-async function vaultLog(client = root): Promise<LogEntry[]> {
-  return (await client.audit.vault({ limit: 200 })).entries;
+/** The vault's entries, newest first, as an owner reads them: in the one log, detail included. */
+async function vaultEntries(client = root) {
+  return (await client.audit.list({ detail: '1', limit: 200 })).entries.filter((entry) => entry.author === 'vault');
 }
 
-/** Why the app's log says `action` was denied, oldest first. */
+/** Why the app's own entries say `action` was denied, oldest first. */
 async function appDenials(action: string): Promise<unknown[]> {
   const rows = await db.owner
     .select({ metadata: auditLog.metadata })
     .from(auditLog)
-    .where(and(eq(auditLog.action, action), eq(auditLog.decision, 'deny')))
+    .where(and(eq(auditLog.author, 'app'), eq(auditLog.action, action), eq(auditLog.decision, 'deny')))
     .orderBy(asc(auditLog.seq));
   return rows.map((row) => JSON.parse(row.metadata).reason);
 }
@@ -106,12 +105,14 @@ test('an app permission bug does not reach prod: the vault refuses and logs the 
     reason: 'no_grant',
   });
 
-  const [refused] = await vaultLog();
+  const [refused] = await vaultEntries();
+  const { actorId, action, decision, reason, project, environment, key } = refused;
   assert.deepEqual(
-    { actor: refused.actor, action: refused.action, outcome: refused.outcome, code: refused.code, subject: refused.subject },
-    { actor: `user:${DEV}`, action: 'unwrap', outcome: 'refuse', code: 'no_grant', subject: 'market/prod/API_KEY' },
+    { actorId, action, decision, reason, project, environment, key },
+    { actorId: DEV, action: 'secret.read', decision: 'deny', reason: 'no_grant', project: 'market', environment: 'prod', key: 'API_KEY' },
   );
-  assert.deepEqual(await appDenials('secret.read'), ['vault_no_grant']);
+  // The vault's entry is the record: the app keeps no copy of it.
+  assert.deepEqual(await appDenials('secret.read'), []);
 });
 
 test('an expired grant refuses: in the app, and in the vault if the app were wrong', async () => {
@@ -126,7 +127,7 @@ test('an expired grant refuses: in the app, and in the vault if the app were wro
     code: 'vault_refused',
     reason: 'expired',
   });
-  assert.equal((await vaultLog())[0].code, 'expired');
+  assert.equal((await vaultEntries())[0].reason, 'expired');
 });
 
 test('the bulk limit counts one read per secret, trips with its own code, and is logged', async () => {
@@ -143,9 +144,8 @@ test('the bulk limit counts one read per secret, trips with its own code, and is
   // Two keys, then two more: four reads in the window, over three.
   assert.deepEqual(Object.keys((await dev.secrets.reveal('market/dev')).values).sort(), ['API_KEY', 'DB_URL']);
   await assert.rejects(dev.secrets.reveal('market/dev'), { status: 403, code: 'bulk_limit', reason: 'bulk_limit' });
-  const [refused] = await vaultLog(admin);
-  assert.deepEqual([refused.action, refused.outcome, refused.code], ['unwrap', 'refuse', 'bulk_limit']);
-  assert.ok((await appDenials('secret.read')).includes('vault_bulk_limit'));
+  const [refused] = await vaultEntries(admin);
+  assert.deepEqual([refused.action, refused.decision, refused.reason], ['secret.read', 'deny', 'bulk_limit']);
 
   // A rolling window: a minute later the same read goes through.
   limited.vault.advance(61_000);
@@ -183,7 +183,7 @@ test('a removed member stays out despite a live session, until the vault admits 
   const { report } = await root.members.remove(`user:${DEV}`);
   assert.deepEqual(report.exposed.map(({ environment, key, how }) => [environment, key, how]), [['dev', 'API_KEY', 'read']]);
   assert.equal((await reveal()).status, 403);
-  const removal = (await vaultLog()).find((entry) => entry.action === 'principal.remove');
+  const removal = (await vaultEntries()).find((entry) => entry.action === 'member.remove');
   assert.equal(removal?.subject, `user:${DEV}`);
 
   // Only the vault brings them back, and with nothing: access starts over.
@@ -197,25 +197,29 @@ test('a removed member stays out despite a live session, until the vault admits 
 
 test('the vault\'s entries are chained, and one rewritten fails', async () => {
   await developer.secrets.reveal('market/dev/API_KEY');
-  const page = await root.audit.vault();
-  assert.equal(page.verification.ok, true);
-  await assert.rejects(developer.audit.vault(), { status: 403 });
+  assert.equal((await root.audit.verify()).ok, true);
+  await assert.rejects(developer.audit.verify(), { status: 403 });
 
   // Someone who owns the database, and lifts the log's triggers.
   await withLogUnlocked(db.owner, (owner) =>
     owner
       .update(auditLog)
       .set({ actor: 'user:nobody@acme.example' })
-      .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, 'unwrap'))),
+      .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, 'secret.read'))),
   );
-  const tampered = await root.audit.vault();
-  const unwrap = tampered.entries.find((entry) => entry.action === 'unwrap')!;
-  assert.deepEqual(tampered.verification, { ok: false, failedAtSeq: unwrap.seq, reason: 'hash does not match the entry' });
+  const read = (await vaultEntries()).find((entry) => entry.action === 'secret.read')!;
+  assert.deepEqual(await root.audit.verify(), {
+    ok: false,
+    through: read.seq - 1,
+    failedAtSeq: read.seq,
+    author: 'app',
+    reason: 'hash does not match the entry',
+  });
 });
 
-test('an app audit log rewritten and chained again fails against the signed checkpoint', async () => {
+test('a read put on someone else and chained again fails: the vault wrote it, and only the vault can seal it', async () => {
   await developer.secrets.reveal('market/dev/API_KEY');
-  assert.equal(await checkpointAudit(db.runtime, deps.chainKey, deps.vault, quiet), true);
+  assert.equal(await writeAuditHeartbeat(db.runtime, deps.chainKey, deps.vault, quiet), true);
   const verified = await root.audit.verify();
   assert.ok(verified.ok && verified.checkpoint !== null);
 
@@ -240,21 +244,25 @@ test('an app audit log rewritten and chained again fails against the signed chec
   });
   await db.owner.update(auditChainHead).set({ headHash: previous });
 
-  const failed = await root.audit.verify();
-  assert.equal(failed.ok, false);
-  assert.equal(!failed.ok && failed.log, 'audit');
-  assert.match(!failed.ok ? failed.reason : '', /is not the one the vault signed at .*: it was rewritten/);
+  const read = rows.find((row) => row.action === 'secret.read')!;
+  assert.deepEqual(await root.audit.verify(), {
+    ok: false,
+    through: Number(read.seq) - 1,
+    failedAtSeq: Number(read.seq),
+    author: 'vault',
+    reason: 'not written by the vault: its MAC does not match',
+  });
   // And the vault will not sign past it.
-  assert.equal(await checkpointAudit(db.runtime, deps.chainKey, deps.vault, { warn: () => {} }), false);
-  assert.equal((await vaultLog()).find((entry) => entry.action === 'checkpoint')?.code, 'checkpoint_diverged');
+  assert.equal(await writeAuditHeartbeat(db.runtime, deps.chainKey, deps.vault, { warn: () => {} }), false);
+  const [refused] = await vaultEntries();
+  assert.deepEqual([refused.action, refused.decision, refused.reason], ['audit.checkpoint', 'deny', 'log_broken']);
 });
 
-test('the audit verification checks the vault log too, and finds a grant written around it', async () => {
+test('the audit verification checks the vault\'s rows too, and finds a grant written around it', async () => {
   await developer.secrets.reveal('market/dev/API_KEY');
-  assert.equal(await checkpointAudit(db.runtime, deps.chainKey, deps.vault, quiet), true);
+  assert.equal(await writeAuditHeartbeat(db.runtime, deps.chainKey, deps.vault, quiet), true);
   const verified = await root.audit.verify();
-  const entries = (await vaultLog()).length;
-  assert.deepEqual(verified.ok && verified.vault, { entries });
+  assert.ok(verified.ok);
 
   // Someone who owns the database gives the developer the whole project.
   const { projects, vaultGrants } = tablesOf(db.owner);
@@ -263,26 +271,25 @@ test('the audit verification checks the vault log too, and finds a grant written
     principal: `user:${DEV}`, projectId, environmentId: null, role: 'owner', expiresAt: null, grantedAt: 0, grantedBy: `user:${ROOT}`,
   });
   // The developer's record no longer carries the vault's MAC, and the
-  // verdict names them as the app knows them.
+  // verdict names them as the app knows them. The log itself holds.
   const reason = `the store's ${DEV}, or their grants, were changed outside the vault`;
-  assert.deepEqual(await root.audit.verify(), { ok: false, log: 'vault', failedAtSeq: null, reason });
-  assert.deepEqual((await root.audit.vault({ full: '1' })).verification, { ok: false, failedAtSeq: null, reason });
+  assert.deepEqual(await root.audit.verify(), { ok: false, through: verified.through, failedAtSeq: null, author: 'vault', reason });
 });
 
 test('a vault entry cut out of the log fails the audit verification', async () => {
   await developer.secrets.reveal('market/dev/API_KEY');
-  assert.equal(await checkpointAudit(db.runtime, deps.chainKey, deps.vault, quiet), true);
+  assert.equal(await writeAuditHeartbeat(db.runtime, deps.chainKey, deps.vault, quiet), true);
 
-  // The vault's entries no longer have a log of their own to be cut back
-  // in: taking the reveal out leaves a gap in the one chain.
+  // The vault's entries have no log of their own to be cut back in:
+  // taking the read out leaves a gap in the one chain.
   const [release] = await db.owner
     .select({ seq: auditLog.seq })
     .from(auditLog)
-    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, 'unwrap')));
+    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, 'secret.read')));
   await withLogUnlocked(db.owner, (owner) => owner.delete(auditLog).where(eq(auditLog.seq, release.seq)));
   const failed = await root.audit.verify();
-  assert.deepEqual(failed.ok ? null : [failed.log, failed.failedAtSeq, failed.reason], [
-    'audit',
+  assert.deepEqual(failed.ok ? null : [failed.author, failed.failedAtSeq, failed.reason], [
+    'app',
     Number(release.seq) + 1,
     `sequence gap: expected seq ${release.seq}, found ${release.seq + 1n}`,
   ]);
@@ -292,7 +299,7 @@ test('a vault entry cut out of the log fails the audit verification', async () =
 
 test('the database holds no key', async () => {
   await developer.secrets.reveal('market/dev');
-  await checkpointAudit(db.runtime, deps.chainKey, deps.vault, quiet);
+  await writeAuditHeartbeat(db.runtime, deps.chainKey, deps.vault, quiet);
 
   // Every row of every table, the app's and the vault's.
   const values: Buffer[] = [];

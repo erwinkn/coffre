@@ -18,7 +18,6 @@
  */
 import type {
   AdmitInput,
-  CheckpointInput,
   LogInput,
   RemoveInput,
   RewrapInput,
@@ -75,7 +74,7 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
   async setAccess(input: SetAccessInput) { return (await this.#vault()).setAccess(input); }
   async admit(input: AdmitInput) { return (await this.#vault()).admit(input); }
   async remove(input: RemoveInput) { return (await this.#vault()).remove(input); }
-  async checkpoint(input: CheckpointInput) { return (await this.#vault()).checkpoint(input); }
+  async checkpoint() { return (await this.#vault()).checkpoint(); }
   async latestCheckpoint() { return (await this.#vault()).latestCheckpoint(); }
   async log(input: LogInput) { return (await this.#vault()).log(input); }
   async verifyLog(input: VerifyLogInput) { return (await this.#vault()).verifyLog(input); }

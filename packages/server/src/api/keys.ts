@@ -8,10 +8,13 @@ import type { Purpose, Refusal, SecretRef, Vault, WrappedKey } from '@coffre/cor
  * One vault call per batch, so a `coffre run` of fifty keys is one decision.
  */
 
-/** Who is asking the vault, and why. */
-export type Asking = { principal: string; requestId: string | null };
+/** Who is asking the vault, and why: the operation id ties the vault's entries to the app's for the same action. */
+export type Asking = { principal: string; requestId: string | null; operationId: string | null };
 
 export type Keyed<T> = { ok: true; values: T[] } | { ok: false; refusal: Refusal };
+
+/** Keys the vault wrapped, and the seq of its `key.wrap` or `key.rewrap` entry for each. */
+export type Wrapped = { ok: true; values: Envelope[]; seqs: number[] } | { ok: false; refusal: Refusal };
 
 function wrappedKey(envelope: Envelope): WrappedKey {
   return {
@@ -37,8 +40,8 @@ export async function sealValues(
   vault: Vault,
   asking: Asking,
   items: { secret: SecretRef; value: string }[],
-): Promise<Keyed<Envelope>> {
-  if (items.length === 0) return { ok: true, values: [] };
+): Promise<Wrapped> {
+  if (items.length === 0) return { ok: true, values: [], seqs: [] };
   const deks = items.map(() => freshDek());
   try {
     const sealed = items.map(({ secret, value }, i) => encrypt(Buffer.from(value, 'utf8'), secret, deks[i]));
@@ -47,7 +50,7 @@ export async function sealValues(
       items: items.map(({ secret }, i) => ({ secret, key: deks[i].toString('base64') })),
     });
     if (!result.ok) return result;
-    return { ok: true, values: sealed.map((parts, i) => withWrapped(parts, result.wrapped[i])) };
+    return { ok: true, values: sealed.map((parts, i) => withWrapped(parts, result.wrapped[i])), seqs: result.seqs };
   } finally {
     for (const dek of deks) dek.fill(0);
   }
@@ -88,11 +91,11 @@ export async function rewrapValue(
   asking: Asking,
   secret: SecretRef,
   from: { version: number; envelope: Envelope },
-): Promise<Keyed<Envelope>> {
+): Promise<Wrapped> {
   const result = await vault.rewrap({
     ...asking,
     items: [{ secret, from: from.version, wrapped: wrappedKey(from.envelope) }],
   });
   if (!result.ok) return result;
-  return { ok: true, values: [withWrapped(from.envelope, result.wrapped[0])] };
+  return { ok: true, values: [withWrapped(from.envelope, result.wrapped[0])], seqs: result.seqs };
 }

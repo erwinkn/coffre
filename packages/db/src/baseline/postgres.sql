@@ -3,14 +3,9 @@
 
 -- @schema
 
--- The chain starts at sequence 0 from 32 zero bytes, and the heartbeat row
--- is always there to update.
+-- The chain starts at sequence 0 from 32 zero bytes.
 INSERT INTO audit_chain_head (only_row, next_seq, head_hash)
 VALUES (true, 0, decode(repeat('00', 32), 'hex'));
---> statement-breakpoint
-
-INSERT INTO audit_heartbeat (only_row, last_seq)
-VALUES (true, 0);
 --> statement-breakpoint
 
 -- The audit log only grows, for every login, its owner's included. The
@@ -132,7 +127,6 @@ TO coffre_app;
 
 GRANT SELECT ON
     audit_chain_head,
-    audit_heartbeat,
     vault_members,
     vault_grants
 TO coffre_app;
@@ -145,8 +139,6 @@ GRANT UPDATE (slug, name, archived_at) ON environments TO coffre_app;
 GRANT UPDATE (key, current_version_id, current_version, updated_at, archived_at) ON secrets TO coffre_app;
 --> statement-breakpoint
 GRANT UPDATE (next_seq, head_hash) ON audit_chain_head TO coffre_app;
---> statement-breakpoint
-GRANT UPDATE (last_beat_at, last_seq) ON audit_heartbeat TO coffre_app;
 --> statement-breakpoint
 GRANT UPDATE (email, last_sign_in_at, revoked_at, revoked_by, auth_mac) ON identities TO coffre_app;
 --> statement-breakpoint

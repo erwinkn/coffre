@@ -317,16 +317,6 @@ export const auditChainHead = pgTable(
   ],
 );
 
-export const auditHeartbeat = pgTable(
-  'audit_heartbeat',
-  {
-    onlyRow: boolean('only_row').primaryKey().default(true),
-    lastBeatAt: timestamp('last_beat_at', { withTimezone: true }).notNull().defaultNow(),
-    lastSeq: bigint('last_seq', { mode: 'bigint' }).notNull().default(sql`0`),
-  },
-  (table) => [check('audit_heartbeat_only_row_check', sql`${table.onlyRow}`)],
-);
-
 /**
  * An account at a sign-in provider, bound to one principal.
  *

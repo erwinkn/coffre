@@ -10,9 +10,12 @@ export type AuditEntry = {
   projectId?: string | null;
   environmentId?: string | null;
   secretId?: string | null;
-  bundleId?: string | null;
+  /** One id for everything one action did, shared with the vault's entries for it. */
+  operationId?: string | null;
   requestId?: string | null;
   sourceIp?: string | null;
+  /** The vault's entry this one follows from: a write's `key.wrap`, a restore's `key.rewrap`. */
+  relatedSeq?: number | null;
   metadata?: Record<string, unknown>;
 };
 
@@ -40,9 +43,10 @@ export async function appendAudit(tx: Transaction, chainKey: Buffer, entries: re
       projectId: entry.projectId,
       environmentId: entry.environmentId,
       secretId: entry.secretId,
-      operationId: entry.bundleId,
+      operationId: entry.operationId,
       requestId: entry.requestId,
       sourceIp: entry.sourceIp,
+      relatedSeq: entry.relatedSeq === undefined || entry.relatedSeq === null ? null : BigInt(entry.relatedSeq),
       metadata: JSON.stringify(entry.metadata ?? {}),
     })),
   );

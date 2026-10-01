@@ -112,7 +112,7 @@ test('a bulk read writes one entry per secret, sharing an operation id', async (
         actorId: 'ci.access',
         action: 'secret.read',
         decision: 'allow' as const,
-        bundleId: operationId,
+        operationId: operationId,
         metadata: { key },
       })),
     ),

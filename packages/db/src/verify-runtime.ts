@@ -68,8 +68,8 @@ try {
     audit_update: boolean;
     database_create: boolean;
     database_temporary: boolean;
-    heartbeat_last_beat_at_update: boolean;
-    heartbeat_last_seq_update: boolean;
+    head_next_seq_update: boolean;
+    head_hash_update: boolean;
     migrations_select: boolean;
     schema_create: boolean;
   }>(
@@ -80,11 +80,11 @@ try {
             has_table_privilege(current_user, 'public.audit_log', 'DELETE') AS audit_delete,
             has_table_privilege(current_user, 'public.audit_log', 'TRUNCATE') AS audit_truncate,
             has_column_privilege(
-              current_user, 'public.audit_heartbeat', 'last_beat_at', 'UPDATE'
-            ) AS heartbeat_last_beat_at_update,
+              current_user, 'public.audit_chain_head', 'next_seq', 'UPDATE'
+            ) AS head_next_seq_update,
             has_column_privilege(
-              current_user, 'public.audit_heartbeat', 'last_seq', 'UPDATE'
-            ) AS heartbeat_last_seq_update,
+              current_user, 'public.audit_chain_head', 'head_hash', 'UPDATE'
+            ) AS head_hash_update,
             has_table_privilege(
               current_user, 'drizzle.__drizzle_migrations', 'SELECT'
             ) AS migrations_select`,
@@ -95,8 +95,8 @@ try {
     audit_update: false,
     database_create: false,
     database_temporary: false,
-    heartbeat_last_beat_at_update: true,
-    heartbeat_last_seq_update: true,
+    head_next_seq_update: true,
+    head_hash_update: true,
     migrations_select: true,
     schema_create: false,
   }]);
@@ -104,14 +104,11 @@ try {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const heartbeat = await client.query<{ last_seq: string }>(
-      `UPDATE audit_heartbeat
-          SET last_beat_at = now(),
-              last_seq = (SELECT next_seq FROM audit_chain_head WHERE only_row)
-        WHERE only_row
-      RETURNING last_seq::text`,
+    // What every append does to the log's head, rolled back.
+    const head = await client.query(
+      `UPDATE audit_chain_head SET next_seq = next_seq, head_hash = head_hash WHERE only_row`,
     );
-    assert.equal(heartbeat.rowCount, 1, 'runtime heartbeat update did not affect the singleton');
+    assert.equal(head.rowCount, 1, 'runtime head update did not affect the singleton');
   } finally {
     await client.query('ROLLBACK');
     client.release();

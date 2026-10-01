@@ -181,7 +181,7 @@ test('archiving is audited, reversible, and preserves the value', async () => {
   );
   const actions = (await db.owner.select({ action: auditLog.action }).from(auditLog)).map((row) => row.action);
   assert.ok(actions.includes('secret.archive'));
-  assert.ok(actions.includes('secret.restore'));
+  assert.ok(actions.includes('secret.unarchive'));
 });
 
 test('a developer cannot archive a secret and the denial is audited', async () => {

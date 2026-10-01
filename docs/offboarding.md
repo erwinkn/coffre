@@ -36,7 +36,9 @@ sign-in racing it either finishes first and is revoked, or is refused:
 - every browser session and CLI login ends (for a service: every token);
 - every sign-in account linked to them (GitHub, Google, …) is unlinked;
 - they are marked removed, and every request checks that, in both auth modes;
-- one `directory.remove` audit row records who did it and the counts above.
+- the vault logs one `member.remove`, who did it and the generation that ends
+  every session and token from before, and one `access.revoke` per grant, so
+  each project's log shows who lost access to it.
 
 **Adding someone back starts from nothing.** No grants, no sessions, and their
 sign-in account binds again by email the next time they sign in. A CLI login
@@ -65,10 +67,11 @@ drop out of sight once they can no longer sign in.
 
 ### How "saw" is decided
 
-From the audit log: every allowed `secret.read`, `secret.write` or
-`secret.import` in their name, which records the exact version. That covers the
-web UI's Reveal, `coffre get`, `run` and `export`, and imports (which compare
-with the current value, a read).
+From the audit log: every allowed `secret.read` (the vault's) or
+`secret.write` in their name, which records the exact version, following each
+`secret.restore` back to the version it copied. That covers the web UI's
+Reveal, `coffre get`, `run` and `export`, and imports (which compare with the
+current value, a read).
 
 It lists what they *did* see, not what they *could* have. Someone with read
 access to `market/prod` who never opened it has nothing listed there. That is

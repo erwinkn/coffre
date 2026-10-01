@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "445a7ab9-ce9b-4671-a5ab-7fe1eb1f411d",
+  "id": "6de9e286-f9d7-4c08-ac7d-e963092320c1",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "audit_chain_head": {
@@ -47,45 +47,6 @@
         "audit_chain_head_head_hash_check": {
           "name": "audit_chain_head_head_hash_check",
           "value": "octet_length(\"audit_chain_head\".\"head_hash\") = 32"
-        }
-      }
-    },
-    "audit_heartbeat": {
-      "name": "audit_heartbeat",
-      "columns": {
-        "only_row": {
-          "name": "only_row",
-          "type": "integer",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": false,
-          "default": true
-        },
-        "last_beat_at": {
-          "name": "last_beat_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "(CAST(unixepoch('subsec') * 1000 AS INTEGER))"
-        },
-        "last_seq": {
-          "name": "last_seq",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "0"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "checkConstraints": {
-        "audit_heartbeat_only_row_check": {
-          "name": "audit_heartbeat_only_row_check",
-          "value": "\"audit_heartbeat\".\"only_row\""
         }
       }
     },

@@ -54,16 +54,16 @@ async function seedProject(): Promise<void> {
   await root.access.set(LEAD, { market: 'owner' });
 }
 
+/** The log's actions, the app's and the vault's, oldest first. */
 async function auditActions(): Promise<{ action: string; decision: string }[]> {
   return db.owner
     .select({ action: auditLog.action, decision: auditLog.decision })
     .from(auditLog)
-    .where(eq(auditLog.author, 'app'))
     .orderBy(asc(auditLog.seq));
 }
 
 async function auditCount(): Promise<number> {
-  const [row] = await db.owner.select({ n: count() }).from(auditLog).where(eq(auditLog.author, 'app'));
+  const [row] = await db.owner.select({ n: count() }).from(auditLog);
   return row.n;
 }
 
@@ -79,7 +79,7 @@ test('root admins and instance owners create projects without implicit secret gr
   });
   await assert.rejects(outsider.projects.create('sneaky', { name: 'Sneaky' }), { status: 403 });
   assert.deepEqual((await auditActions()).slice(-4), [
-    { action: 'directory.create', decision: 'allow' },
+    { action: 'member.add', decision: 'allow' },
     { action: 'project.create', decision: 'allow' },
     { action: 'project.create', decision: 'allow' },
     { action: 'project.create', decision: 'deny' },
@@ -224,9 +224,12 @@ test('changing and revoking access works in place and is audited', async () => {
     (await root.members.list('market')).members.some((entry) => entry.member === READER),
     false,
   );
-  const actions = await auditActions();
-  assert.ok(actions.some(({ action }) => action === 'grant.update'));
-  assert.ok(actions.some(({ action }) => action === 'grant.revoke'));
+  // Granted, granted again with another role, revoked: by the vault, and once each.
+  assert.deepEqual((await auditActions()).filter(({ action }) => action.startsWith('access.')).slice(-3), [
+    { action: 'access.grant', decision: 'allow' },
+    { action: 'access.grant', decision: 'allow' },
+    { action: 'access.revoke', decision: 'allow' },
+  ]);
 });
 
 test('an access change that fails anywhere changes nothing', async () => {
@@ -245,7 +248,8 @@ test('removing a member revokes every grant and is audited', async () => {
   await root.access.set(READER, { market: 'viewer', 'market/dev': 'developer' });
   assert.equal((await root.members.remove(READER)).revoked.grants, 2);
   assert.deepEqual((await reader.me()).environments, []);
-  assert.ok((await auditActions()).some(({ action }) => action === 'directory.remove'));
+  const actions = (await auditActions()).map(({ action }) => action);
+  assert.deepEqual(actions.slice(-3), ['access.revoke', 'access.revoke', 'member.remove']);
 });
 
 test('instance owners manage every project without receiving secret access', async () => {
@@ -316,9 +320,15 @@ test('two owners adding the same member at once both succeed, and one of them cr
     owner.members.add('user:new@acme.example'),
   ]);
   assert.deepEqual(added.map((result) => result.created).sort(), [false, true]);
-  const creates = (await auditActions()).filter((entry) => entry.action === 'directory.create');
-  // LEAD, READER, CI, OWNER, then the new member once.
-  assert.equal(creates.length, 5);
+  const creates = await db.owner
+    .select({ subject: auditLog.subjectPrincipal })
+    .from(auditLog)
+    .where(and(eq(auditLog.action, 'member.add'), eq(auditLog.decision, 'allow')))
+    .orderBy(asc(auditLog.seq));
+  // The root admin's own row, made on first use; LEAD, READER, CI, OWNER; then the new member once.
+  assert.deepEqual(creates.map(({ subject }) => subject), [
+    'user:admin@acme.example', LEAD, READER, CI, OWNER, 'user:new@acme.example',
+  ]);
 });
 
 test('an email is one member however it is capitalised, accents included', async () => {

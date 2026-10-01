@@ -115,7 +115,7 @@ export type Api = {
       [key: string]: string | null;
     };
     output: {
-      bundleId: string;
+      operationId: string;
       keys: {
         [key: string]: {
           version: number;
@@ -168,7 +168,7 @@ export type Api = {
       path: string;
     };
     output: {
-      bundleId: string;
+      operationId: string;
       values: {
         [key: string]: string;
       };
@@ -674,21 +674,28 @@ export type Api = {
       path?: string;
       actor?: string;
       decision?: "allow" | "deny";
-      exclude?: "sign-ins";
+      detail?: "1" | "true";
       before?: unknown;
       limit?: unknown;
     };
     output: {
       entries: {
         seq: number;
+        author: "app" | "vault";
         occurredAt: string;
-        actorType: string;
+        actorType: "service" | "system" | "user";
         actorId: string;
         action: string;
         decision: "allow" | "deny";
+        reason: string | null;
+        detail: boolean;
+        subject: string | null;
         project: string | null;
         environment: string | null;
-        bundleId: string | null;
+        key: string | null;
+        version: number | null;
+        operationId: string | null;
+        relatedSeq: number | null;
         requestId: string | null;
         metadata: {
           [key: string]: unknown;
@@ -700,20 +707,18 @@ export type Api = {
     input: undefined;
     output: {
       ok: true;
-      rows: number;
-      head: string;
+      through: number | null;
+      entries: number;
       checkpoint: null | {
         seq: number;
         signedAt: string;
       };
-      vault: {
-        entries: number;
-        pending?: number;
-      };
+      pending?: number;
     } | {
       ok: false;
-      log: "audit" | "vault";
+      through: number | null;
       failedAtSeq: number | null;
+      author: "app" | "vault";
       reason: string;
     };
   };
@@ -757,14 +762,21 @@ export type AccessValue = "access-manager" | "auditor" | "developer" | "maintain
 
 export type AuditEntryView = {
   seq: number;
+  author: "app" | "vault";
   occurredAt: string;
-  actorType: string;
+  actorType: "service" | "system" | "user";
   actorId: string;
   action: string;
   decision: "allow" | "deny";
+  reason: string | null;
+  detail: boolean;
+  subject: string | null;
   project: string | null;
   environment: string | null;
-  bundleId: string | null;
+  key: string | null;
+  version: number | null;
+  operationId: string | null;
+  relatedSeq: number | null;
   requestId: string | null;
   metadata: {
     [key: string]: unknown;
@@ -977,7 +989,7 @@ export type SessionRow = {
 };
 
 export type SetResult = {
-  bundleId: string;
+  operationId: string;
   keys: {
     [key: string]: {
       version: number;

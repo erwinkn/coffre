@@ -187,7 +187,7 @@ async function whoIsToken(origin: string, api: CoffreClient, canary: Canary): Pr
 /** Reveal the canary once, and find its `secret.read` in the audit log, by the reveal's request. */
 async function tokenReveal(api: CoffreClient, canary: Canary, token: Token): Promise<string> {
   const path = `${canary.project}/${canary.environment}`;
-  const { bundleId, values } = await api.secrets.reveal(`${path}/${canary.key}`);
+  const { operationId, values } = await api.secrets.reveal(`${path}/${canary.key}`);
   expect(values[canary.key] === canary.value, `${path}/${canary.key} is not the value given as the canary`);
   let entries;
   try {
@@ -198,11 +198,11 @@ async function tokenReveal(api: CoffreClient, canary: Canary, token: Token): Pro
     }
     throw error;
   }
-  const read = entries.filter((entry) => entry.bundleId === bundleId);
+  const read = entries.filter((entry) => entry.operationId === operationId);
   expect(read.length === 1, `the reveal is logged ${read.length} times, not once`, entries.slice(0, 5));
   const [entry] = read as [(typeof read)[number]];
   expect(
-    entry.action === 'secret.read' && entry.decision === 'allow' && entry.metadata.key === canary.key && entry.requestId !== null,
+    entry.action === 'secret.read' && entry.decision === 'allow' && entry.key === canary.key && entry.requestId !== null,
     "the reveal's entry is not an allowed read of the canary, under a request",
     entry,
   );
@@ -303,7 +303,7 @@ async function tokenVerification(api: CoffreClient): Promise<string> {
     throw error;
   }
   expect(verified.ok, 'the audit log does not verify', verified);
-  return `${verified.rows} audit entries and ${verified.vault.entries} vault entries verify`;
+  return `${verified.entries} entries verify, through entry ${verified.through}`;
 }
 
 // --- helpers --------------------------------------------------------------------

@@ -254,8 +254,8 @@ test('an email no one invited is refused and the refusal is audited', async () =
   assert.deepEqual(
     rows.map((row) => [row.action, row.decision, row.actorType, row.actorId, row.sourceIp]),
     [
-      ['auth.signin', 'deny', 'user', 'stranger@example.com', IP],
-      ['auth.signin', 'deny', 'user', 'github:9002', IP],
+      ['sign_in', 'deny', 'user', 'stranger@example.com', IP],
+      ['sign_in', 'deny', 'user', 'github:9002', IP],
     ],
   );
   assert.deepEqual(rows[0].metadata, {
@@ -302,8 +302,8 @@ test('a first sign-in with an invited email binds the account and opens a browse
 
   const rows = await auditRows();
   assert.deepEqual(rows.map((row) => `${row.action} ${row.decision} ${row.actorId}`), [
-    `identity.bind allow ${DEV}`,
-    `auth.signin allow ${DEV}`,
+    `account.link allow ${DEV}`,
+    `sign_in allow ${DEV}`,
   ]);
   assert.deepEqual(rows[0].metadata, {
     provider: 'github',
@@ -360,11 +360,11 @@ test('once bound, the account signs in as its person whatever its email says', a
   assert.equal(await countRows(identities), 1);
   assert.equal(await countRows(credentials), 4);
   assert.deepEqual(await auditActions(), [
-    `identity.bind allow ${DEV}`,
-    `auth.signin allow ${DEV}`,
-    `auth.signin allow ${DEV}`,
-    `auth.signin allow ${DEV}`,
-    `auth.signin allow ${DEV}`,
+    `account.link allow ${DEV}`,
+    `sign_in allow ${DEV}`,
+    `sign_in allow ${DEV}`,
+    `sign_in allow ${DEV}`,
+    `sign_in allow ${DEV}`,
   ]);
 });
 
@@ -384,8 +384,8 @@ test('another account with the same email is refused while one is bound', async 
 
   const rows = await auditRows();
   assert.deepEqual(rows.slice(2).map((row) => [row.action, row.decision, row.actorId, row.metadata.reason]), [
-    ['auth.signin', 'deny', DEV, 'account_mismatch'],
-    ['auth.signin', 'deny', DEV, 'account_mismatch'],
+    ['sign_in', 'deny', DEV, 'account_mismatch'],
+    ['sign_in', 'deny', DEV, 'account_mismatch'],
   ]);
   assert.equal(await countRows(identities), 1);
   assert.equal(await countRows(credentials), 1);
@@ -435,10 +435,10 @@ test('deactivated people are refused, bound or not, and their sessions stop', as
 
   const rows = await auditRows();
   assert.deepEqual(rows.map((row) => [row.action, row.decision, row.actorId, row.metadata.reason]), [
-    ['auth.signin', 'deny', GONE, 'deactivated'],
-    ['identity.bind', 'allow', DEV, undefined],
-    ['auth.signin', 'allow', DEV, undefined],
-    ['auth.signin', 'deny', DEV, 'deactivated'],
+    ['sign_in', 'deny', GONE, 'deactivated'],
+    ['account.link', 'allow', DEV, undefined],
+    ['sign_in', 'allow', DEV, undefined],
+    ['sign_in', 'deny', DEV, 'deactivated'],
   ]);
   assert.equal(await countRows(identities, eq(identities.principal, `user:${GONE}`)), 0);
 });
@@ -513,31 +513,33 @@ test('signing out revokes that credential only, once, and is audited', async () 
 
   const rows = await auditRows();
   assert.deepEqual(rows.map((row) => `${row.action} ${row.decision} ${row.actorId}`), [
-    `identity.bind allow ${DEV}`,
-    `auth.signin allow ${DEV}`,
-    `auth.signin allow ${DEV}`,
-    `auth.signout allow ${DEV}`,
+    `account.link allow ${DEV}`,
+    `sign_in allow ${DEV}`,
+    `sign_in allow ${DEV}`,
+    `sign_out allow ${DEV}`,
   ]);
   assert.deepEqual(rows[3].metadata, { credentialId: ended.credential.id, kind: 'browser' });
 });
 
-test('sign-ins stay in the log, and the audit list leaves them out when asked', async () => {
+test('sign-ins stay in the log, and the audit list shows them only when asked', async () => {
   const kept = await signedIn(profile('github', '101', [DEV]));
   await signin.completeSignin(profile('github', '9001', ['stranger@example.com']), meta());
   await signin.signOut(kept.credential.token, { requestId: randomUUID(), sourceIp: IP });
 
   const audit = clientFor(deps, ROOT).audit;
-  const actions = async (query: Parameters<typeof audit.list>[0]) =>
-    (await audit.list(query)).entries.map((entry) => `${entry.action} ${entry.decision}`);
-  assert.deepEqual(await actions({}), [
-    'auth.signout allow',
-    'auth.signin deny',
-    'auth.signin allow',
-    'identity.bind allow',
+  const all = (await audit.list({ detail: '1' })).entries;
+  assert.deepEqual(all.slice(0, 4).map((entry) => `${entry.action} ${entry.decision} ${entry.detail}`), [
+    'sign_out allow true',
+    'sign_in deny true',
+    'sign_in allow true',
+    'account.link allow true',
   ]);
-  assert.deepEqual(await actions({ exclude: 'sign-ins' }), ['identity.bind allow']);
+  // Left out by default: what is shown is the rest, the members admitted above.
+  const shown = (await audit.list()).entries;
+  assert.ok(shown.length > 0);
+  assert.deepEqual(shown.map((entry) => entry.seq), all.filter((entry) => !entry.detail).map((entry) => entry.seq));
   // Filtered by the query, so a page of one is not an empty page.
-  assert.deepEqual(await actions({ exclude: 'sign-ins', limit: 1 }), ['identity.bind allow']);
+  assert.deepEqual((await audit.list({ limit: 1 })).entries.map((entry) => entry.seq), [shown[0].seq]);
   // And the chain still covers what the list left out.
   assert.equal((await audit.verify()).ok, true);
 });
@@ -576,13 +578,13 @@ test('people revoke their own credentials; only owners revoke anyone else\'s', a
   assert.deepEqual(
     rows.map((row) => [row.action, row.decision, row.actorId, row.metadata.reason ?? null]),
     [
-      ['credential.revoke', 'deny', DEV, 'requires_instance_owner'],
-      ['credential.revoke', 'deny', DEV, 'requires_instance_owner'],
-      ['credential.revoke', 'allow', DEV, null],
-      ['credential.revoke', 'deny', DEV, 'unknown_credential'],
-      ['credential.revoke', 'deny', DEV, 'unknown_credential'],
-      ['credential.revoke', 'allow', LEAD, null],
-      ['credential.revoke', 'allow', ROOT, null],
+      ['token.revoke', 'deny', DEV, 'requires_instance_owner'],
+      ['token.revoke', 'deny', DEV, 'requires_instance_owner'],
+      ['token.revoke', 'allow', DEV, null],
+      ['token.revoke', 'deny', DEV, 'unknown_credential'],
+      ['token.revoke', 'deny', DEV, 'unknown_credential'],
+      ['token.revoke', 'allow', LEAD, null],
+      ['token.revoke', 'allow', ROOT, null],
     ],
   );
   assert.deepEqual(rows[5].metadata, {
@@ -625,10 +627,10 @@ test('a signed-in person links another account, which then signs them in', async
 
   const rows = await auditRows();
   assert.deepEqual(rows.map((row) => `${row.action} ${row.decision} ${row.actorId}`), [
-    `identity.bind allow ${DEV}`,
-    `auth.signin allow ${DEV}`,
-    `identity.bind allow ${DEV}`,
-    `auth.signin allow ${DEV}`,
+    `account.link allow ${DEV}`,
+    `sign_in allow ${DEV}`,
+    `account.link allow ${DEV}`,
+    `sign_in allow ${DEV}`,
   ]);
   assert.deepEqual(rows[2].metadata, {
     provider: 'google',
@@ -652,7 +654,7 @@ test('an account bound to someone else cannot be linked, and services link nothi
   assert.equal(await countRows(identities), 1);
   const rows = await auditRows();
   assert.deepEqual(rows.slice(2).map((row) => [row.action, row.decision, row.actorId, row.metadata.reason]), [
-    ['identity.bind', 'deny', DEV, 'already_linked'],
+    ['account.link', 'deny', DEV, 'already_linked'],
   ]);
 });
 
@@ -671,7 +673,7 @@ test('unlinking an account ends the sessions it opened, and no others', async ()
   assert.equal((await signin.verify(cli.token)).id, DEV);
   assert.deepEqual((await signin.listIdentities(dev)).map((row) => row.provider), ['google']);
 
-  const unbind = (await auditRows()).find((row) => row.action === 'identity.unbind');
+  const unbind = (await auditRows()).find((row) => row.action === 'account.unlink');
   assert.ok(unbind);
   assert.equal(unbind.decision, 'allow');
   assert.equal(unbind.actorId, DEV);
@@ -714,7 +716,7 @@ test('nobody unlinks someone else\'s account', async () => {
   await assert.rejects(signin.unlinkIdentity(root, identity.id), { status: 404 });
   assert.equal((await signin.listIdentities(lead)).length, 1);
 
-  const denied = (await auditRows()).filter((row) => row.action === 'identity.unbind');
+  const denied = (await auditRows()).filter((row) => row.action === 'account.unlink');
   assert.deepEqual(denied.map((row) => [row.decision, row.actorId, row.metadata.reason]), [
     ['deny', DEV, 'unknown_identity'],
     ['deny', ROOT, 'unknown_identity'],
@@ -774,8 +776,8 @@ test('owners issue service tokens that verify as the service', async () => {
 
   const rows = await auditRows();
   assert.deepEqual(rows.map((r) => `${r.action} ${r.decision} ${r.actorId}`), [
-    `credential.issue allow ${LEAD}`,
-    `credential.issue allow ${ROOT}`,
+    `token.create allow ${LEAD}`,
+    `token.create allow ${ROOT}`,
   ]);
   assert.deepEqual(rows[0].metadata, {
     kind: 'service',
@@ -824,11 +826,11 @@ test('only owners issue service tokens, for active services, for 1 to 366 whole 
 
   const rows = await auditRows();
   assert.deepEqual(rows.map((row) => [row.action, row.decision, row.actorId, row.metadata.reason]), [
-    ['credential.issue', 'deny', DEV, 'requires_instance_owner'],
-    ['credential.issue', 'deny', SERVICE, 'requires_instance_owner'],
-    ['credential.issue', 'deny', LEAD, 'unknown_principal'],
-    ['credential.issue', 'deny', LEAD, 'unknown_principal'],
-    ['credential.issue', 'deny', LEAD, 'unknown_principal'],
+    ['token.create', 'deny', DEV, 'requires_instance_owner'],
+    ['token.create', 'deny', SERVICE, 'requires_instance_owner'],
+    ['token.create', 'deny', LEAD, 'unknown_principal'],
+    ['token.create', 'deny', LEAD, 'unknown_principal'],
+    ['token.create', 'deny', LEAD, 'unknown_principal'],
   ]);
 });
 
@@ -930,7 +932,7 @@ test('device flow: start, describe, approve, then one poll gets a CLI session', 
   const rows = await auditRows();
   assert.deepEqual(rows.map((row) => `${row.action} ${row.decision} ${row.actorId}`), [
     `device.approve allow ${DEV}`,
-    `credential.issue allow ${DEV}`,
+    `sign_in allow ${DEV}`,
   ]);
   assert.deepEqual(rows[0].metadata, {
     deviceAuthorizationId: stored.id,
@@ -1102,7 +1104,7 @@ test('everything the sign-in service writes keeps the audit chain intact', async
   assert.equal(verified.ok, true);
   // Every entry, the vault's for the members set up here included; ten of them the app's.
   const [{ n }] = await db.owner.select({ n: count() }).from(auditLog);
-  if (verified.ok) assert.equal(verified.rows, n);
+  if (verified.ok) assert.equal(verified.entries, n);
   assert.equal((await auditRows()).length, 10);
 });
 

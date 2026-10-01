@@ -39,8 +39,8 @@ export type Deployment = {
   idp: DevIdp;
   /** The one root admin the vault is told of. */
   rootAdmin: string;
-  /** Whether the heartbeat was made an hour old, so /readyz fails until `scheduled` runs. */
-  staleHeartbeat: boolean;
+  /** Whether no heartbeat has run yet, so /readyz fails until `scheduled` runs. */
+  beforeFirstBeat: boolean;
   /** What the Cron trigger does every five minutes. */
   scheduled(): Promise<void>;
   /** The app's database, as its owner. */
@@ -181,12 +181,8 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       using(postgres(withDatabase(options.postgres!, 'postgres')), (sql) =>
         sql.exec(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`),
       );
+    // A fresh log has no heartbeat: only the scheduled job can make /readyz pass.
     await run(bin('coffre-server'), ['migrate', owner]);
-    // The migration stamps the heartbeat as it runs; make it an hour old, so
-    // only the scheduled job can make /readyz pass.
-    await using(postgres(owner), (sql) =>
-      sql.exec("UPDATE audit_heartbeat SET last_beat_at = now() - interval '1 hour' WHERE only_row"),
-    );
     const state = join(scratch, 'state');
     start('wrangler', bin('wrangler'), [
       'dev',
@@ -215,7 +211,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       origin,
       idp,
       rootAdmin: ROOT_ADMIN,
-      staleHeartbeat: true,
+      beforeFirstBeat: true,
       async scheduled() {
         const response = await fetch(`${origin}/cdn-cgi/local/scheduled?cron=*/5+*+*+*+*`);
         if (!response.ok) throw new Failure(`the scheduled handler answered ${response.status}`, `${await response.text()}\n${logs()}`);
@@ -257,7 +253,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       origin,
       idp,
       rootAdmin: ROOT_ADMIN,
-      staleHeartbeat: false,
+      beforeFirstBeat: false,
       // `serve` runs the job as it starts, and every five minutes after:
       // so restart the server.
       async scheduled() {

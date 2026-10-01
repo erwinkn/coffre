@@ -320,16 +320,6 @@ export const auditChainHead = sqliteTable(
   ],
 );
 
-export const auditHeartbeat = sqliteTable(
-  'audit_heartbeat',
-  {
-    onlyRow: flag('only_row').primaryKey().default(true),
-    lastBeatAt: time('last_beat_at').notNull().default(now),
-    lastSeq: int64('last_seq').notNull().default(sql`0`),
-  },
-  (table) => [check('audit_heartbeat_only_row_check', sql`${table.onlyRow}`)],
-);
-
 export const identities = sqliteTable(
   'identities',
   {

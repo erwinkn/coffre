@@ -1,11 +1,9 @@
 import type { Checkpoint } from './vault.ts';
 
-/** What a checkpoint's signature covers: the heads of both logs, and when. */
+/** What a checkpoint's signature covers: the prefix of the log up to entry `seq`, and when. */
 export function checkpointMessage(checkpoint: Omit<Checkpoint, 'signature' | 'keyId'>): Uint8Array<ArrayBuffer> {
-  const { seq, headHash, vault, signedAt } = checkpoint;
-  return new Uint8Array(
-    new TextEncoder().encode(`coffre.checkpoint.v2|${seq}|${headHash}|${vault.seq}|${vault.hash}|${signedAt}`),
-  );
+  const { seq, hash, signedAt } = checkpoint;
+  return new Uint8Array(new TextEncoder().encode(`coffre.checkpoint.v3|${seq}|${hash}|${signedAt}`));
 }
 
 /** Whether `checkpoint` was signed by the key whose raw public half is `publicKey`. */

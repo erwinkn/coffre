@@ -23,13 +23,13 @@ import {
 } from '@coffre/core/kek';
 import {
   checkpointMessage,
+  verifyCheckpoint,
   describeAccessFault,
   type Access,
   type AccessChange,
   type AccessFault,
   type AdmitInput,
   type Checkpoint,
-  type CheckpointInput,
   type Grant,
   type GrantChange,
   type LogHead,
@@ -56,7 +56,7 @@ import { appendEntries, lockLogHead, type NewEntry } from '@coffre/db/log';
 import { verifyAccounting } from './accounting.ts';
 import { signer, type Signer } from './checkpoint.ts';
 import type { ResolvedVaultConfig } from './config.ts';
-import { carries, entryView, further, headOf, UNVERIFIED, vaultLogKey, verifyChain, type Anchor } from './log.ts';
+import { carries, entryView, further, UNVERIFIED, vaultLogKey, VERIFY_BATCH, verifyChain, type Anchor } from './log.ts';
 import { apply, replay, type LoggedMember, type Replayed } from './replay.ts';
 import { memberMac, rowKey, sealed } from './rows.ts';
 import * as store from './store.ts';
@@ -128,6 +128,9 @@ const UNSEALED = { accessSeq: 0n, mac: Buffer.alloc(32) };
 /** Why a change to a tampered member is refused. */
 const TAMPERED_SUBJECT = "this member's record failed the vault's integrity check: remove them to start over";
 
+/** The action of the vault's entry that signs a prefix of the log. */
+const CHECKPOINT = 'audit.checkpoint';
+
 /** Who asks for checkpoints: the app's scheduled job. */
 const SCHEDULER = 'system:coffre-scheduler';
 
@@ -173,7 +176,6 @@ const MESSAGES: Record<RefusalCode, string> = {
   not_allowed: 'not allowed to change this',
   root_admin: 'root admins are set in the vault configuration',
   invalid: 'not something the rules allow',
-  checkpoint_diverged: 'the audit log does not extend the last checkpoint',
   log_broken: 'the vault log does not hold from the last checkpoint',
   tampered: "this member's record failed the vault's integrity check",
 };
@@ -195,7 +197,15 @@ type Decision = {
   touched: Set<string>;
   /** `vault.tampered` entries, committed with the decision whatever it decides. */
   reports: NewEntry[];
+  /** Run once the entries are appended, with the seq each was given. */
+  after: ((seqOf: (entry: NewEntry) => number) => void)[];
 };
+
+/** The actions of the entries the vault writes about keys. */
+type KeyAction = 'secret.read' | 'key.wrap' | 'key.rewrap';
+
+/** What ties an entry to the app's request, and to the one action it is part of. */
+type Correlation = { requestId?: string | null; operationId?: string | null };
 
 /** Why a member's row is not the one the vault last wrote; rows.ts. */
 type Fault = 'mac' | 'stale';
@@ -266,7 +276,7 @@ class VaultService implements Vault {
       const result = await this.#db.transaction(async (tx) => {
         await store.boundLockWaits(tx, LOCK_TIMEOUT_MS);
         const members = principals.length === 0 ? new Map<string, Member>() : await store.lockMembers(tx, principals);
-        const d: Decision = { tx, members, at: await this.#now(tx), log: [], writes: [], touched: new Set(), reports };
+        const d: Decision = { tx, members, at: await this.#now(tx), log: [], writes: [], touched: new Set(), reports, after: [] };
         const result = await decide(d);
         const entries = [...reports, ...d.log];
         let at = d.at;
@@ -278,6 +288,8 @@ class VaultService implements Vault {
           entries.forEach((entry, i) => {
             if (isAccessEntry(entry)) accessSeq.set(entry.subjectPrincipal!, appended.seqStart + BigInt(i));
           });
+          const seqs = new Map(entries.map((entry, i) => [entry, Number(appended.seqStart) + i]));
+          for (const then of d.after) then((entry) => seqs.get(entry)!);
         }
         for (const write of d.writes) await write(at);
         for (const principal of new Set([...d.touched, ...accessSeq.keys()])) {
@@ -289,10 +301,13 @@ class VaultService implements Vault {
       return { ok: true, ...result };
     } catch (error) {
       if (!(error instanceof Refused || error instanceof Outage)) throw error;
-      await this.#db.transaction(async (tx) => {
-        await store.boundLockWaits(tx, LOCK_TIMEOUT_MS);
-        await appendEntries(tx, this.#prepared.logKey, [...reports, ...error.entries]);
-      });
+      const entries = [...reports, ...error.entries];
+      if (entries.length > 0) {
+        await this.#db.transaction(async (tx) => {
+          await store.boundLockWaits(tx, LOCK_TIMEOUT_MS);
+          await appendEntries(tx, this.#prepared.logKey, entries);
+        });
+      }
       this.#reported(reports);
       if (error instanceof Outage) throw error.error;
       return { ok: false, refusal: error.refusal };
@@ -385,13 +400,13 @@ class VaultService implements Vault {
     const { principal, items } = input;
     validateItems(items, 'wrapped');
     validateText(principal);
-    if (input.requestId != null) validateText(input.requestId);
+    validateCorrelation(input);
     const entry = (secret: SecretRef, decision: 'allow' | 'deny', code: string | null): NewEntry =>
-      keyEntry('unwrap', principal, secret, decision, code, input.requestId, { purpose: input.purpose });
+      keyEntry('secret.read', principal, secret, decision, code, input, { purpose: input.purpose });
     validateText(input.purpose);
     const remote = items.some(({ wrapped }) => this.#remote(this.#config.keks.providerOf(wrapped)));
     return this.#keys(
-      { action: 'unwrap', principal, permission: 'secret.read', secrets: items.map((item) => item.secret), remote, entry, input },
+      { action: 'secret.read', principal, permission: 'secret.read', secrets: items.map((item) => item.secret), remote, entry, input },
       () =>
         items.map(({ secret, wrapped }) => async (operation: KeyOperation) => {
           const key = await this.#open(wrapped, secret, operation);
@@ -409,16 +424,16 @@ class VaultService implements Vault {
     );
   }
 
-  async wrap(input: WrapInput): Promise<Outcome<{ wrapped: WrappedKey[] }>> {
+  async wrap(input: WrapInput): Promise<Outcome<{ wrapped: WrappedKey[]; seqs: number[] }>> {
     const { principal, items } = input;
     validateItems(items, 'key');
     validateText(principal);
-    if (input.requestId != null) validateText(input.requestId);
+    validateCorrelation(input);
     const entry = (secret: SecretRef, decision: 'allow' | 'deny', code: string | null): NewEntry =>
-      keyEntry('wrap', principal, secret, decision, code, input.requestId);
+      keyEntry('key.wrap', principal, secret, decision, code, input);
     return this.#keys(
       {
-        action: 'wrap',
+        action: 'key.wrap',
         principal,
         permission: 'secret.write',
         secrets: items.map((item) => item.secret),
@@ -435,23 +450,23 @@ class VaultService implements Vault {
             dek.fill(0);
           }
         }),
-      (done) => ({ wrapped: done.map(({ wrapped }) => wrapped) }),
+      (done) => ({ wrapped: done.map(({ wrapped }) => wrapped), seqs: [] as number[] }),
     );
   }
 
-  async rewrap(input: RewrapInput): Promise<Outcome<{ wrapped: WrappedKey[] }>> {
+  async rewrap(input: RewrapInput): Promise<Outcome<{ wrapped: WrappedKey[]; seqs: number[] }>> {
     const { principal, items } = input;
     validateItems(items, 'wrapped');
     validateText(principal);
-    if (input.requestId != null) validateText(input.requestId);
+    validateCorrelation(input);
     for (const item of items) if (!Number.isSafeInteger(item.from) || item.from < 1) throw new Error('source version must be a positive integer');
     const from = new Map(items.map((item) => [item.secret, item.from]));
     const entry = (secret: SecretRef, decision: 'allow' | 'deny', code: string | null): NewEntry =>
-      keyEntry('rewrap', principal, secret, decision, code, input.requestId, { from: from.get(secret) });
+      keyEntry('key.rewrap', principal, secret, decision, code, input, { from: from.get(secret) });
     const remote =
       this.#remote(this.#config.keks.primary) || items.some(({ wrapped }) => this.#remote(this.#config.keks.providerOf(wrapped)));
     return this.#keys(
-      { action: 'rewrap', principal, permission: 'secret.write', secrets: items.map((item) => item.secret), remote, entry, input },
+      { action: 'key.rewrap', principal, permission: 'secret.write', secrets: items.map((item) => item.secret), remote, entry, input },
       () =>
         items.map(({ secret, wrapped }) => async (operation: KeyOperation) => {
           const key = await this.#open(wrapped, secret, operation);
@@ -462,7 +477,7 @@ class VaultService implements Vault {
             key.fill(0);
           }
         }),
-      (done) => ({ wrapped: done.map(({ wrapped }) => wrapped) }),
+      (done) => ({ wrapped: done.map(({ wrapped }) => wrapped), seqs: [] as number[] }),
     );
   }
 
@@ -494,13 +509,13 @@ class VaultService implements Vault {
    */
   async #keys<T extends { wipe: () => void }, R>(
     call: {
-      action: 'unwrap' | 'wrap' | 'rewrap';
+      action: KeyAction;
       principal: string;
       permission: Permission;
       secrets: readonly SecretRef[];
       remote: boolean;
       entry: (secret: SecretRef, decision: 'allow' | 'deny', code: string | null) => NewEntry;
-      input: { requestId?: string | null; purpose?: string };
+      input: Correlation & { purpose?: string };
     },
     /** One per secret; null for a bad claim, an error for an outage or an unexpected fault. */
     operations: () => ((operation: KeyOperation) => Promise<T | null>)[],
@@ -513,7 +528,7 @@ class VaultService implements Vault {
       const reader = await this.#standing(d.tx, principal, d.members.get(principal), d.at, d.reports);
       const codes = secrets.map((secret) => refuses(reader, call.permission, secret));
       let first = codes.find((code) => code !== null) ?? null;
-      if (first === null && action === 'unwrap' && (await this.#overBulkLimit(d, principal, secrets.length))) first = 'bulk_limit';
+      if (first === null && action === 'secret.read' && (await this.#overBulkLimit(d, principal, secrets.length))) first = 'bulk_limit';
       if (first !== null) {
         throw new Refused(
           refusal(first, MESSAGES[first]),
@@ -522,16 +537,17 @@ class VaultService implements Vault {
       }
     };
 
-    const operationId = call.remote ? randomUUID() : null;
+    // The intent's own identity; `operationId` is the app's, for the whole action.
+    const intentId = call.remote ? randomUUID() : null;
     let intentSeq: bigint | null = null;
     const outcomeEntry = (secret: SecretRef, item: number, decision: 'allow' | 'deny', code: string | null): NewEntry => {
       const outcome = entry(secret, decision, code);
       return intentSeq === null ? outcome : {
         ...outcome,
-        operationId,
         relatedSeq: intentSeq,
         metadata: JSON.stringify({
           ...JSON.parse(outcome.metadata ?? '{}'),
+          intent: intentId,
           item,
           ...(['key_error', 'kms_uncertain'].includes(code ?? '') ? { uncertain: true } : {}),
         }),
@@ -546,9 +562,10 @@ class VaultService implements Vault {
           actor: principal,
           action: 'key.intent',
           decision: 'allow',
-          operationId,
+          operationId: call.input.operationId ?? null,
           requestId: call.input.requestId ?? null,
           metadata: JSON.stringify({
+            intent: intentId,
             operation: action,
             // Member and outcome locks can each wait before accounting is overdue.
             expiresAt: at + this.#prepared.options.keyBudgetMs + 2 * LOCK_TIMEOUT_MS,
@@ -591,8 +608,12 @@ class VaultService implements Vault {
         if (done.length < outcomes.length) {
           throw new Refused(refusal('bad_claim', MESSAGES.bad_claim), entries());
         }
-        d.log.push(...secrets.map((secret, i) => outcomeEntry(secret, i, 'allow', null)));
-        return result(done);
+        const released = secrets.map((secret, i) => outcomeEntry(secret, i, 'allow', null));
+        d.log.push(...released);
+        const answer = result(done);
+        // A wrap's answer names its entries, which the app's writes refer to.
+        if (action !== 'secret.read') d.after.push((seqOf) => Object.assign(answer as object, { seqs: released.map(seqOf) }));
+        return answer;
       } finally {
         for (const value of done) value.wipe();
       }
@@ -627,7 +648,7 @@ class VaultService implements Vault {
       const appended = await appendEntries(tx, this.#prepared.logKey, [
         {
           actor: VAULT_ACTOR,
-          action: 'principal.admit',
+          action: 'member.add',
           decision: 'allow',
           subjectPrincipal: principal,
           metadata: JSON.stringify({ owner: false, rootAdmin: true }),
@@ -761,11 +782,16 @@ class VaultService implements Vault {
 
   setAccess(input: SetAccessInput): Promise<Outcome<{ changes: AccessChange[] }>> {
     const { actor, principal } = input;
+    const action = input.changes.every((change) => change.role === null) ? 'access.revoke' : 'access.grant';
+    // One place refused is shown where it is, to whoever reads that place's log; an invalid one may be no place at all.
+    const [only] = input.changes.length === 1 ? input.changes : [];
     const refused = (code: RefusalCode, message = MESSAGES[code]) =>
-      new Refused(refusal(code, message), [
-        accessEntry(actor, 'grant.set', principal, 'deny', input.requestId, { changes: input.changes }, code),
-      ]);
+      new Refused(refusal(code, message), [{
+        ...accessEntry(actor, action, principal, 'deny', input, { changes: input.changes }, code),
+        ...(only === undefined || code === 'invalid' ? {} : { projectId: only.projectId, environmentId: only.environmentId }),
+      }]);
     return this.#decide([actor, principal], async (d) => {
+      validateCorrelation(input);
       if (!PRINCIPAL.test(principal)) throw refused('invalid', `not a principal: ${principal}`);
       if (this.#isRootAdmin(principal)) throw refused('root_admin');
       const places = new Set<string>();
@@ -806,7 +832,7 @@ class VaultService implements Vault {
         if (!isSyncPrincipal(principal) || input.changes.every((change) => change.role === null)) {
           throw refused('not_a_member');
         }
-        d.log.push(accessEntry(actor, 'principal.admit', principal, 'allow', input.requestId, { owner: false }));
+        d.log.push(accessEntry(actor, 'member.add', principal, 'allow', input, { owner: false }));
         d.writes.push(async (at) => {
           await store.insertMember(d.tx, {
             principal,
@@ -822,7 +848,7 @@ class VaultService implements Vault {
         });
       }
       const held = row === undefined ? [] : await store.grants(d.tx, principal);
-      const changes = input.changes.map((change) => this.#apply(d, actor, principal, held, change, input.requestId));
+      const changes = input.changes.map((change) => this.#apply(d, actor, principal, held, change, input));
       if (d.writes.length > 0) d.touched.add(principal);
       return { changes };
     });
@@ -835,7 +861,7 @@ class VaultService implements Vault {
     principal: string,
     held: readonly GrantRow[],
     change: GrantChange,
-    requestId: string | null | undefined,
+    correlation: Correlation,
   ): AccessChange {
     const existing = held.find((grant) => grant.projectId === change.projectId && grant.environmentId === change.environmentId);
     const current = existing !== undefined && live(existing, d.at) ? existing : undefined;
@@ -843,7 +869,7 @@ class VaultService implements Vault {
     const place = { projectId: change.projectId, environmentId: change.environmentId };
     const entry = (action: string, role: string | null) =>
       d.log.push({
-        ...accessEntry(actor, action, principal, 'allow', requestId, {
+        ...accessEntry(actor, action, principal, 'allow', correlation, {
           role,
           expiresAt: expiresAt === null ? null : iso(expiresAt),
           previousRole: current?.role ?? null,
@@ -858,14 +884,14 @@ class VaultService implements Vault {
     if (change.role === null) {
       clear();
       if (current === undefined) return 'unchanged';
-      entry('grant.revoke', null);
+      entry('access.revoke', null);
       return 'revoked';
     }
     if (current !== undefined && current.role === change.role && current.expiresAt === expiresAt) return 'unchanged';
     const role = change.role;
     clear();
     d.writes.push((at) => store.insertGrant(d.tx, { principal, ...place, role, expiresAt, grantedAt: at, grantedBy: actor }));
-    entry(current === undefined ? 'grant.create' : 'grant.update', role);
+    entry('access.grant', role);
     return current === undefined ? 'created' : 'updated';
   }
 
@@ -873,9 +899,10 @@ class VaultService implements Vault {
     const { actor, principal } = input;
     const refused = (code: RefusalCode, message = MESSAGES[code]) =>
       new Refused(refusal(code, message), [
-        accessEntry(actor, 'principal.admit', principal, 'deny', input.requestId, { owner: input.owner ?? null }, code),
+        accessEntry(actor, 'member.add', principal, 'deny', input, { owner: input.owner ?? null }, code),
       ]);
     return this.#decide([actor, principal], async (d) => {
+      validateCorrelation(input);
       const acting = await this.#standing(d.tx, actor, d.members.get(actor), d.at, d.reports);
       if (acting.status === 'tampered') throw refused('tampered');
       if (!acting.live.isOwner) throw refused('not_allowed', 'only owners may add or restore members');
@@ -890,12 +917,12 @@ class VaultService implements Vault {
       }
       d.touched.add(principal);
       const entry = (action: string, owner: boolean) =>
-        d.log.push(accessEntry(actor, action, principal, 'allow', input.requestId, { owner }));
+        d.log.push(accessEntry(actor, action, principal, 'allow', input, { owner }));
 
       if (row === undefined || row.status === 'removed') {
         // Coming back is a fresh start: no owner role unless given again.
         const owner = input.owner ?? false;
-        entry(row === undefined ? 'principal.admit' : 'principal.restore', owner);
+        entry(row === undefined ? 'member.add' : 'member.restore', owner);
         d.writes.push(async (at) => {
           if (row === undefined) {
             await store.insertMember(d.tx, {
@@ -917,7 +944,7 @@ class VaultService implements Vault {
       }
       const owner = input.owner ?? row.owner;
       if (owner !== row.owner) {
-        entry('principal.owner', owner);
+        entry('member.owner', owner);
         d.writes.push(() => store.updateMember(d.tx, principal, { owner }));
       }
       return { created: false, owner };
@@ -927,8 +954,9 @@ class VaultService implements Vault {
   remove(input: RemoveInput): Promise<Outcome<{ revoked: Grant[] }>> {
     const { actor, principal } = input;
     const refused = (code: RefusalCode, message = MESSAGES[code]) =>
-      new Refused(refusal(code, message), [accessEntry(actor, 'principal.remove', principal, 'deny', input.requestId, {}, code)]);
+      new Refused(refusal(code, message), [accessEntry(actor, 'member.remove', principal, 'deny', input, {}, code)]);
     return this.#decide([actor, principal], async (d) => {
+      validateCorrelation(input);
       if (this.#isRootAdmin(principal)) throw refused('root_admin');
       const row = d.members.get(principal);
       const held = row === undefined ? [] : await store.grants(d.tx, principal);
@@ -938,7 +966,7 @@ class VaultService implements Vault {
       const subject = await this.#standing(d.tx, principal, row, d.at, d.reports);
       if (subject.status === 'tampered') {
         if (!holder.isOwner) throw refused('not_allowed', 'only owners may remove a member whose record failed its check');
-        return this.#startOver(d, actor, principal, row, subject.fault!, input.requestId, refused);
+        return this.#startOver(d, actor, principal, row, subject.fault!, input, refused);
       }
       // Owners remove anyone. Removing a sync only takes access away, so
       // whoever may take away one of its grants, or manage it at its
@@ -954,7 +982,7 @@ class VaultService implements Vault {
       const revoked = held.filter((grant) => live(grant, d.at));
       for (const grant of revoked) {
         d.log.push({
-          ...accessEntry(actor, 'grant.revoke', principal, 'allow', input.requestId, {
+          ...accessEntry(actor, 'access.revoke', principal, 'allow', input, {
             role: null,
             expiresAt: null,
             previousRole: grant.role,
@@ -964,7 +992,7 @@ class VaultService implements Vault {
         });
       }
       const generation = row.generation + 1;
-      d.log.push(accessEntry(actor, 'principal.remove', principal, 'allow', input.requestId, { revoked: revoked.length, generation }));
+      d.log.push(accessEntry(actor, 'member.remove', principal, 'allow', input, { revoked: revoked.length, generation }));
       d.touched.add(principal);
       d.writes.push(async (at) => {
         await store.deleteGrants(d.tx, principal);
@@ -993,13 +1021,13 @@ class VaultService implements Vault {
     principal: string,
     row: Member | undefined,
     fault: Fault,
-    requestId: string | null | undefined,
+    correlation: Correlation,
     refused: (code: RefusalCode, message?: string) => Refused,
   ): Promise<{ revoked: Grant[] }> {
     const logged = await this.#logged(d.tx, principal);
     if (logged === undefined) throw refused('not_a_member', 'the log never admitted them: their row was written around the vault');
     const generation = Math.max(row?.generation ?? 0, logged.generation) + 1;
-    d.log.push(accessEntry(actor, 'principal.remove', principal, 'allow', requestId, { revoked: 0, generation, tampered: fault }));
+    d.log.push(accessEntry(actor, 'member.remove', principal, 'allow', correlation, { revoked: 0, generation, tampered: fault }));
     d.touched.add(principal);
     d.writes.push(async (at) => {
       await store.deleteGrants(d.tx, principal);
@@ -1028,64 +1056,47 @@ class VaultService implements Vault {
 
   // --- checkpoints and the log --------------------------------------------------
 
-  /** The last checkpoint the vault signed: its newest allowed `checkpoint` entry. */
-  async #latest(db: Queryable): Promise<Checkpoint | null> {
-    const row = await store.latestVaultEntry(db, ['checkpoint']);
-    if (row === undefined) return null;
-    const { subject: _, ...checkpoint } = JSON.parse(row.metadata) as Checkpoint & { subject: string };
-    return checkpoint;
+  /** The last checkpoint the vault signed, and the entry that holds it: its newest allowed `audit.checkpoint`. */
+  async #latest(db: Queryable): Promise<{ checkpoint: Checkpoint; seq: bigint } | null> {
+    const row = await store.latestVaultEntry(db, [CHECKPOINT]);
+    return row === undefined ? null : { checkpoint: JSON.parse(row.metadata) as Checkpoint, seq: row.seq };
   }
 
-  checkpoint(input: CheckpointInput): Promise<Outcome<{ checkpoint: Checkpoint }>> {
+  checkpoint(): Promise<Outcome<{ checkpoint: Checkpoint }>> {
     return this.#decide([], async (d) => {
       // Checkpoints one at a time, each against the one before.
-      await lockLogHead(d.tx);
+      const head = await lockLogHead(d.tx);
       const latest = await this.#latest(d.tx);
-      // Signing the same head twice is one checkpoint.
-      if (latest !== null && latest.seq === input.seq && latest.headHash === input.headHash) return { checkpoint: latest };
       const refused = (code: RefusalCode, detail: Record<string, unknown>) =>
         new Refused(refusal(code, MESSAGES[code]), [
-          {
-            actor: SCHEDULER,
-            action: 'checkpoint',
-            decision: 'deny',
-            code,
-            metadata: JSON.stringify({ subject: 'audit', seq: input.seq, headHash: input.headHash, ...detail }),
-          },
+          { actor: SCHEDULER, action: CHECKPOINT, decision: 'deny', code, metadata: JSON.stringify(detail) },
         ]);
-      const extends_ =
-        latest === null
-          ? input.previous === null
-          : input.previous !== null &&
-            input.previous.seq === latest.seq &&
-            input.previous.hash === latest.headHash &&
-            input.seq > latest.seq;
-      if (!extends_) throw refused('checkpoint_diverged', { previous: input.previous, latest });
-      // The vault's entries too: the log still holds the head signed last,
-      // and is whole from there. So a rewrite is never signed over, and the
-      // app's record of the head signed before shows it.
-      const { verification: held } = await verifyChain(d.tx, this.#prepared.logKey, [], anchorAt(latest?.vault ?? null));
+      // Logging the refusal would give the next call something to sign.
+      if (head.nextSeq === 0n) throw new Refused(refusal('invalid', 'the log is empty'), []);
+      // Nothing since the last one: it is still the newest prefix.
+      if (latest !== null && latest.seq === head.nextSeq - 1n) return { checkpoint: latest.checkpoint };
+      // The prefix signed last is still there, and every entry since holds,
+      // the vault's by their MACs: a rewrite is never signed over.
+      const since = latest === null ? UNVERIFIED : anchorAt({ seq: latest.checkpoint.seq, hash: latest.checkpoint.hash });
+      const { verification: held, anchor: verified } = await verifyChain(d.tx, this.#prepared.logKey, [], since);
       if (!held.ok) throw refused('log_broken', { failedAtSeq: held.failedAtSeq, reason: held.reason });
-      const vault = headOf((await store.vaultPage(d.tx, undefined, 1))[0]);
-      const signedAt = iso(d.at);
-      const signed = { seq: input.seq, headHash: input.headHash, vault, signedAt };
+      // It signs the entry it verified to, which the head, locked, must name.
+      if (verified.nextSeq !== head.nextSeq || !verified.hash.equals(head.headHash)) {
+        throw refused('log_broken', { reason: 'the chain head does not name the last entry' });
+      }
+      const signed = { seq: Number(verified.nextSeq - 1n), hash: verified.hash.toString('hex'), signedAt: iso(d.at) };
       const checkpoint = {
         ...signed,
         keyId: this.#prepared.signer.keyId,
         signature: await this.#prepared.signer.sign(checkpointMessage(signed)),
       };
-      d.log.push({
-        actor: SCHEDULER,
-        action: 'checkpoint',
-        decision: 'allow',
-        metadata: JSON.stringify({ subject: 'audit', ...checkpoint }),
-      });
+      d.log.push({ actor: SCHEDULER, action: CHECKPOINT, decision: 'allow', metadata: JSON.stringify(checkpoint) });
       return { checkpoint };
     });
   }
 
   async latestCheckpoint(): Promise<{ checkpoint: Checkpoint | null; publicKey: string }> {
-    return { checkpoint: await this.#latest(this.#db), publicKey: this.#prepared.signer.publicKey };
+    return { checkpoint: (await this.#latest(this.#db))?.checkpoint ?? null, publicKey: this.#prepared.signer.publicKey };
   }
 
   async log(input: LogInput): Promise<Outcome<LogPage>> {
@@ -1106,12 +1117,12 @@ class VaultService implements Vault {
     const limit = Math.min(Math.max(Math.trunc(input.limit ?? 50), 1), 200);
     const shown = await store.vaultPage(this.#db, input.before === undefined ? undefined : BigInt(input.before), limit);
     const verification =
-      input.full === true ? await this.#verifyAll(shown, null, null) : await this.#verify(this.#db, shown, this.#prepared.verified);
+      input.full === true ? await this.#verifyAll(shown, null) : await this.#verify(this.#db, shown, this.#prepared.verified);
     return { ok: true, entries: shown.map(entryView), verification };
   }
 
   verifyLog(input: VerifyLogInput): Promise<LogVerification> {
-    return this.#verifyAll([], input.through, input.upTo ?? null);
+    return this.#verifyAll([], input.upTo ?? null);
   }
 
   /** `shown`, and the chain from `anchor`; the furthest verified is kept for the next view. */
@@ -1129,18 +1140,15 @@ class VaultService implements Vault {
    * checkpoint (`through`), and the last checkpoint's; and the members and
    * grants replayed from it.
    */
-  #verifyAll(shown: readonly StoredEntry[], through: LogHead | null, upTo: LogHead | null): Promise<LogVerification> {
+  #verifyAll(shown: readonly StoredEntry[], upTo: LogHead | null): Promise<LogVerification> {
     return this.#db.transaction(async (tx) => {
       const verification = await this.#verify(tx, shown, UNVERIFIED);
       if (!verification.ok) return verification;
       if (upTo !== null && !(await carries(tx, upTo))) {
         return { ok: false, failedAtSeq: upTo.seq, reason: 'not the entry the app verified up to: the log changed between the two checks' };
       }
-      const signed = (await this.#latest(tx))?.vault ?? null;
-      for (const [kept, by] of [[through, 'a checkpoint the app recorded'], [signed, 'the last checkpoint']] as const) {
-        if (kept === null || (await carries(tx, kept))) continue;
-        return { ok: false, failedAtSeq: kept.seq, reason: `not the entry ${by} signed: the log was rewritten or cut back` };
-      }
+      const unsigned = await this.#checkpointFault(tx);
+      if (unsigned !== null) return unsigned;
       const at = await this.#now(tx);
       const accounting = await verifyAccounting(tx, at);
       if (!accounting.ok) return accounting;
@@ -1148,6 +1156,27 @@ class VaultService implements Vault {
       if (fault !== null) return { ok: false, failedAtSeq: null, reason: describeAccessFault(fault), fault };
       return accounting.pending === 0 ? verification : { ...verification, pending: accounting.pending };
     }, SNAPSHOT);
+  }
+
+  /**
+   * Every checkpoint, not only the newest: each signed by the vault's key,
+   * over a prefix the log still holds, entry for entry. The chain is
+   * verified by now, so each checkpoint entry is the vault's.
+   */
+  async #checkpointFault(db: Queryable): Promise<Extract<LogVerification, { ok: false }> | null> {
+    for (let after = -1n; ; ) {
+      const batch = await store.vaultEntriesOf(db, [CHECKPOINT], after, VERIFY_BATCH);
+      for (const entry of batch) {
+        const checkpoint = JSON.parse(entry.metadata) as Checkpoint;
+        const broken = (reason: string) => ({ ok: false as const, failedAtSeq: Number(entry.seq), reason });
+        if (!(await verifyCheckpoint(checkpoint, this.#prepared.signer.publicKey))) return broken('a checkpoint the vault did not sign');
+        if (BigInt(checkpoint.seq) >= entry.seq || !(await carries(db, checkpoint))) {
+          return broken(`the log up to entry ${checkpoint.seq} is not the prefix this checkpoint signed: it was rewritten`);
+        }
+      }
+      if (batch.length < VERIFY_BATCH) return null;
+      after = batch[batch.length - 1].seq;
+    }
   }
 
   /**
@@ -1197,6 +1226,16 @@ function validateText(value: string): void {
   if (typeof value !== 'string' || /[\uD800-\uDFFF]/u.test(value)) throw new Error('key request strings must be well-formed Unicode');
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** The caller's ids go into the log as they are: a request id is text, an operation id a lowercase UUID. */
+function validateCorrelation(input: Correlation): void {
+  if (input.requestId != null) validateText(input.requestId);
+  if (input.operationId != null && (typeof input.operationId !== 'string' || !UUID.test(input.operationId))) {
+    throw new Error(`operationId must be a lowercase UUID, got: ${String(input.operationId)}`);
+  }
+}
+
 /** Validate the entire batch before any provider sees a key. */
 function validateItems(items: readonly { secret: SecretRef; key?: string; wrapped?: WrappedKey }[], field: 'key' | 'wrapped'): void {
   for (const { secret, key, wrapped } of items) {
@@ -1240,12 +1279,12 @@ function refuses(reader: Standing, permission: Permission, secret: SecretRef): R
  * wrapped, so a wrap names the secret in its payload; the others name it.
  */
 function keyEntry(
-  action: 'unwrap' | 'wrap' | 'rewrap',
+  action: KeyAction,
   principal: string,
   secret: SecretRef,
   decision: 'allow' | 'deny',
   code: string | null,
-  requestId: string | null | undefined,
+  correlation: Correlation,
   detail: Record<string, unknown> = {},
 ): NewEntry {
   return {
@@ -1255,11 +1294,12 @@ function keyEntry(
     code,
     projectId: secret.projectId,
     environmentId: secret.environmentId,
-    secretId: action === 'wrap' ? null : secret.secretId,
-    requestId: requestId ?? null,
+    secretId: action === 'key.wrap' ? null : secret.secretId,
+    operationId: correlation.operationId ?? null,
+    requestId: correlation.requestId ?? null,
     metadata: JSON.stringify({
       subject: secret.path,
-      ...(action === 'wrap' ? { secretId: secret.secretId } : {}),
+      ...(action === 'key.wrap' ? { secretId: secret.secretId } : {}),
       version: secret.version,
       ...detail,
     }),
@@ -1282,7 +1322,7 @@ function accessEntry(
   action: string,
   principal: string,
   decision: 'allow' | 'deny',
-  requestId: string | null | undefined,
+  correlation: Correlation,
   detail: Record<string, unknown>,
   code: RefusalCode | null = null,
 ): NewEntry {
@@ -1293,7 +1333,8 @@ function accessEntry(
     code,
     // A refusal may be about something that is no principal at all.
     subjectPrincipal: PRINCIPAL.test(principal) ? principal : null,
-    requestId: requestId ?? null,
+    operationId: correlation.operationId ?? null,
+    requestId: correlation.requestId ?? null,
     metadata: JSON.stringify(PRINCIPAL.test(principal) ? detail : { subject: principal, ...detail }),
   };
 }

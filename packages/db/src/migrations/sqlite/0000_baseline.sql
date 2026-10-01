@@ -10,13 +10,6 @@ CREATE TABLE `audit_chain_head` (
 	CONSTRAINT "audit_chain_head_head_hash_check" CHECK(octet_length("audit_chain_head"."head_hash") = 32)
 );
 --> statement-breakpoint
-CREATE TABLE `audit_heartbeat` (
-	`only_row` integer PRIMARY KEY DEFAULT true NOT NULL,
-	`last_beat_at` integer DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER)) NOT NULL,
-	`last_seq` integer DEFAULT 0 NOT NULL,
-	CONSTRAINT "audit_heartbeat_only_row_check" CHECK("audit_heartbeat"."only_row")
-);
---> statement-breakpoint
 CREATE TABLE `audit_log` (
 	`seq` integer PRIMARY KEY NOT NULL,
 	`author` text NOT NULL,
@@ -276,11 +269,8 @@ CREATE TABLE `vault_members` (
 	CONSTRAINT "vault_members_generation_check" CHECK("vault_members"."generation" >= 0)
 );--> statement-breakpoint
 
--- The chain starts at sequence 0 from 32 zero bytes, and the heartbeat row
--- is always there to update.
+-- The chain starts at sequence 0 from 32 zero bytes.
 INSERT INTO `audit_chain_head` (`only_row`, `next_seq`, `head_hash`) VALUES (true, 0, zeroblob(32));
---> statement-breakpoint
-INSERT INTO `audit_heartbeat` (`only_row`, `last_seq`) VALUES (true, 0);
 --> statement-breakpoint
 
 -- The audit log only grows: no statement may change or delete an entry.

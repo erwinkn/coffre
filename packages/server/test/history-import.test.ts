@@ -52,11 +52,11 @@ async function importText(content: string, dryRun: boolean, as = root) {
 
 async function auditRows(action: string, decision: 'allow' | 'deny') {
   const rows = await db.owner
-    .select({ metadata: auditLog.metadata, bundleId: auditLog.operationId })
+    .select({ metadata: auditLog.metadata, operationId: auditLog.operationId, relatedSeq: auditLog.relatedSeq })
     .from(auditLog)
     .where(and(eq(auditLog.action, action), eq(auditLog.decision, decision)))
     .orderBy(asc(auditLog.seq));
-  return rows.map((row) => ({ bundleId: row.bundleId, metadata: JSON.parse(row.metadata) }));
+  return rows.map((row) => ({ ...row, metadata: JSON.parse(row.metadata) }));
 }
 
 /** A raw PATCH, for query strings the client would never send. */
@@ -146,20 +146,19 @@ test('a restore is audited with both versions, and refused without write permiss
   await root.secrets.set('market/dev', { API_KEY: 'v1' });
   await root.secrets.set('market/dev', { API_KEY: 'v2' });
   await root.secrets.restore('market/dev/API_KEY', 1);
-  assert.deepEqual((await auditRows('secret.rollback', 'allow'))[0].metadata, {
-    key: 'API_KEY',
-    fromVersion: 2,
-    toVersion: 1,
-    version: 3,
-  });
+  const [restored] = await auditRows('secret.restore', 'allow');
+  assert.deepEqual(restored.metadata, { key: 'API_KEY', version: 3, from: 1 });
+  // It follows from the vault's rewrap, which shares its operation.
+  const [rewrap] = await db.owner.select().from(auditLog).where(eq(auditLog.action, 'key.rewrap'));
+  assert.deepEqual([restored.relatedSeq, restored.operationId], [rewrap.seq, rewrap.operationId]);
   await assert.rejects(reader.secrets.restore('market/dev/API_KEY', 2), { status: 403 });
-  assert.equal((await auditRows('secret.rollback', 'deny'))[0].metadata.reason, 'missing_secret_write');
+  assert.equal((await auditRows('secret.restore', 'deny'))[0].metadata.reason, 'missing_secret_write');
 });
 
 test('restoring an unknown version is rejected and audited', async () => {
   await root.secrets.set('market/dev', { API_KEY: 'v1' });
   await assert.rejects(root.secrets.restore('market/dev/API_KEY', 99), { status: 404 });
-  assert.equal((await auditRows('secret.rollback', 'deny'))[0].metadata.reason, 'unknown_version');
+  assert.equal((await auditRows('secret.restore', 'deny'))[0].metadata.reason, 'unknown_version');
 });
 
 test('a dry run reports the plan and writes nothing', async () => {
@@ -211,10 +210,11 @@ test('a dry run is spelled one way; anything else is refused before it writes', 
 test('a preview logs a read of every existing secret it compares', async () => {
   await root.secrets.set('market/dev', { A: 'one', B: 'two' });
   await importText('A=one\nB=changed\nC=new', true);
+  // The vault's, one per value it opened to compare, in one operation.
   const reads = await auditRows('secret.read', 'allow');
-  assert.deepEqual(reads.map((row) => row.metadata.key).sort(), ['A', 'B']);
-  assert.ok(reads.every((row) => row.metadata.dryRun === true));
-  assert.equal(new Set(reads.map((row) => row.bundleId)).size, 1);
+  assert.deepEqual(reads.map((row) => row.metadata.subject).sort(), ['market/dev/A', 'market/dev/B']);
+  assert.ok(reads.every((row) => row.metadata.purpose === 'compare'));
+  assert.equal(new Set(reads.map((row) => row.operationId)).size, 1);
 });
 
 test('import creates every secret, one audit entry per key in one bundle', async () => {
@@ -222,7 +222,7 @@ test('import creates every secret, one audit entry per key in one bundle', async
   assert.deepEqual({ ...(await root.secrets.reveal('market/dev')).values }, { A: 'one', B: 'two', C: 'three' });
   const rows = await auditRows('secret.write', 'allow');
   assert.equal(rows.length, 3);
-  assert.equal(new Set(rows.map((row) => row.bundleId)).size, 1);
+  assert.equal(new Set(rows.map((row) => row.operationId)).size, 1);
 });
 
 test('re-importing unchanged values adds no versions', async () => {
