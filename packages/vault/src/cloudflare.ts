@@ -50,6 +50,8 @@ export class VaultObject extends DurableObject<VaultBindings> implements Vault {
 
   constructor(ctx: DurableObjectState, env: VaultBindings) {
     super(ctx, env);
+    // Every decision must share the same log and bulk counter.
+    if (!ctx.id.equals(env.VAULT_OBJECT.idFromName('vault'))) throw new Error('only the canonical vault object may start');
     if (configure === null) throw new Error('the vault Worker must export default vault(…)');
     const config = resolveVaultConfig(configure(env as never));
     void ctx.blockConcurrencyWhile(async () => {
