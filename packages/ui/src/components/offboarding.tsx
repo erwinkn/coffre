@@ -3,7 +3,7 @@ import type { PrincipalReport, RemovedPrincipal } from '../shared/models';
 import { Card } from './page';
 import { EmptyState, Notice, Timestamp } from './ui';
 import { PrincipalLink } from './principal';
-import { DestinationMark, Key, User } from './icons';
+import { Key, SyncMark, User } from './icons';
 
 /**
  * The part of a user's or token's page that answers "if they left, what would
@@ -205,7 +205,7 @@ function CreatedSyncs({ report, person }: { report: PrincipalReport; person: boo
               <tr key={sync.id}>
                 <td>
                   <span className="cell-account">
-                    <DestinationMark provider={sync.provider} size={15} />
+                    <SyncMark brand={sync.brand} size={15} />
                     <span className="cell-stack">
                       <span>
                         {sync.providerLabel}

@@ -174,6 +174,11 @@ Workers on every change, and checked hourly for drift. See
   sync requires being able to read the token already.
 - **Write-only targets** are handled as planned: coffre records which version
   it pushed where, so a run compares ids and decrypts only what changed.
+- **Providers are the deployment's**, like sign-in providers:
+  `syncs: { providers }` picks among the four, or adds one of its own
+  (`SyncProvider`). Each describes its own form, and the pages and the CLI
+  render whatever `GET /api/syncs/providers` returns, so neither changes when
+  a provider is added.
 - **Still open:** plain `.env` files as a target, and a declarative
   `coffre.sync.toml` if keeping syncs in the repository that deploys turns
   out to matter.

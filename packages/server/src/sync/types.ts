@@ -1,7 +1,3 @@
-import type { SyncProviderKind } from '@coffre/client';
-
-export type { SyncProviderKind };
-
 export type SyncVariable = { key: string; value: string };
 
 export type SyncContext = {
@@ -26,10 +22,57 @@ export type SyncApplyResult = {
   failed: { key: string; operation: 'upsert' | 'delete'; message: string }[];
 };
 
-export type SyncProvider<Config> = {
-  kind: SyncProviderKind;
-  /** Human name for the UI, e.g. "GitHub Actions". */
+/** The mark beside a provider in the pages; `other` gets a generic one. */
+export type SyncBrand = 'github' | 'vercel' | 'railway' | 'cloudflare' | 'other';
+
+/**
+ * One key of a provider's config, as the pages' form and `coffre sync add`
+ * ask for it. Neither checks more than that a required field is filled in:
+ * `parseConfig` is the judge.
+ */
+export type SyncField =
+  | {
+      type: 'text';
+      /** The config's key. */
+      name: string;
+      label: string;
+      placeholder: string;
+      optional?: boolean;
+      hint?: string;
+      /** Asked only while an options field has exactly these picked. */
+      when?: { field: string; is: string[] };
+    }
+  | {
+      type: 'options';
+      name: string;
+      label: string;
+      options: { value: string; label: string }[];
+      /** Several may be picked (checkboxes), or exactly one (a segmented control). */
+      multiple: boolean;
+      /** Picked to begin with, and what `coffre sync add` sends when the field is left out. */
+      initial: string[];
+      hint?: string;
+    };
+
+/**
+ * A service a sync can push to. The pages and the CLI learn of it from its
+ * description (`id` to `credential`); the engine runs the rest.
+ */
+export type SyncProvider<Config = unknown> = {
+  /** Stable: stored with every sync to it, and how `coffre sync add` names it. */
+  id: string;
+  /** Human name for the pages, e.g. "GitHub Actions". */
   label: string;
+  brand: SyncBrand;
+  /** What to ask for; `parseConfig` gets the answers, by field name. */
+  fields: SyncField[];
+  /** The token coffre writes with, which a coffre secret holds. */
+  credential: {
+    /** Where one could be kept, as `project/environment/KEY`: the form's placeholder. */
+    placeholder: string;
+    /** Which token to create, and with what permissions, in a sentence or two. */
+    hint: string;
+  };
   /** Validate untrusted JSON into Config, throwing SyncConfigError with a readable message. */
   parseConfig(input: unknown): Config;
   /** One line naming the destination, e.g. "erwinkn/app · environment production". */
@@ -40,6 +83,9 @@ export type SyncProvider<Config> = {
   listKeys(ctx: SyncContext, config: Config): Promise<string[]>;
   apply(ctx: SyncContext, config: Config, plan: SyncPlan): Promise<SyncApplyResult>;
 };
+
+/** What the pages and the CLI learn of a provider: everything but its code. */
+export type SyncProviderInfo = Pick<SyncProvider, 'id' | 'label' | 'brand' | 'fields' | 'credential'>;
 
 export class SyncConfigError extends Error {
   override name = 'SyncConfigError';

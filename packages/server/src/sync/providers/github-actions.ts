@@ -11,9 +11,31 @@ const PAGE_SIZE = 100;
 // https://docs.github.com/en/actions/reference/security/secrets#limits-for-secrets
 const MAX_VALUE_BYTES = 48 * 1024;
 
-export const githubActions: SyncProvider<GitHubActionsConfig> = {
-  kind: 'github-actions',
+/** Repository secrets, or an environment's, in GitHub Actions. */
+export function githubActions(): SyncProvider<GitHubActionsConfig> {
+  return provider;
+}
+
+const provider: SyncProvider<GitHubActionsConfig> = {
+  id: 'github-actions',
   label: 'GitHub Actions',
+  brand: 'github',
+  fields: [
+    { type: 'text', name: 'owner', label: 'Owner', placeholder: 'erwinkn' },
+    { type: 'text', name: 'repo', label: 'Repository', placeholder: 'app' },
+    {
+      type: 'text',
+      name: 'environment',
+      label: 'Environment',
+      placeholder: 'production',
+      optional: true,
+      hint: 'Leave empty to write repository secrets.',
+    },
+  ],
+  credential: {
+    placeholder: 'ops/sync/GITHUB_TOKEN',
+    hint: 'Use a fine-grained token for this one repository, with Secrets: Read and write, or Environments: Read and write for an environment’s secrets. A classic token needs the repo scope.',
+  },
 
   parseConfig(input) {
     const fields = readFields(input, 'GitHub Actions', ['owner', 'repo', 'environment']);

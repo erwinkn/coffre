@@ -1,6 +1,8 @@
 import { publicOrigin, type Auth, type AuthConfig } from '@coffre/core/identity';
 import type { Vault } from '@coffre/core/vault';
 
+import { resolveSyncProviders, type SyncProvider } from './sync/index.ts';
+
 /**
  * What every deployment writes, on either runtime. The runtime adds where
  * the database is: `postgres(env.HYPERDRIVE)` on Workers, a URL on Node.
@@ -21,15 +23,21 @@ export type CoffreConfig = {
   syncs?: SyncSettings;
 };
 
-/** When the scheduler runs syncs by itself. A change is pushed at once either way. */
+/** Where syncs can push, and when the scheduler runs them by itself. */
 export type SyncSettings = {
+  /**
+   * `githubActions()`, `vercel()`, `railway()` and `cloudflareWorkers()`
+   * unless set; list some of them to offer fewer, and a provider of your own
+   * beside them.
+   */
+  providers?: SyncProvider<any>[];
   /** How often an idle, healthy destination is checked for keys that went missing there. 60 unless set. */
   driftCheckMinutes?: number;
   /** How long a sync whose last run failed waits before the next try. 15 unless set. */
   retryAfterMinutes?: number;
 };
 
-/** When the scheduler runs a sync by itself. */
+/** When the scheduler runs a sync by itself. A change is pushed at once either way. */
 export type SyncTiming = {
   /** How often it checks an idle, healthy destination for missing keys. */
   driftCheckMs: number;
@@ -41,7 +49,7 @@ export type ResolvedConfig = {
   publicUrl: string;
   auth: AuthConfig;
   auditChainKey: Buffer;
-  syncs: SyncTiming;
+  syncs: SyncTiming & { providers: SyncProvider<unknown>[] };
 };
 
 function minutes(value: number | undefined, name: string, fallback: number): number {
@@ -63,6 +71,7 @@ export function resolveConfig(config: CoffreConfig): ResolvedConfig {
     auth: config.auth.resolve(publicUrl),
     auditChainKey,
     syncs: {
+      providers: resolveSyncProviders(config.syncs?.providers),
       driftCheckMs: minutes(config.syncs?.driftCheckMinutes, 'driftCheckMinutes', 60),
       retryAfterMs: minutes(config.syncs?.retryAfterMinutes, 'retryAfterMinutes', 15),
     },

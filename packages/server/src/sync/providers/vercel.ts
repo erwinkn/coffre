@@ -49,9 +49,51 @@ type EnvRecord = {
 /** A record we want to exist: one key, one type, one set of targets. */
 type Wanted = { type: 'sensitive' | 'encrypted'; target: VercelTarget[] };
 
-export const vercel: SyncProvider<VercelConfig> = {
-  kind: 'vercel',
+/** A project's environment variables on Vercel, for some of its targets. */
+export function vercel(): SyncProvider<VercelConfig> {
+  return provider;
+}
+
+const provider: SyncProvider<VercelConfig> = {
+  id: 'vercel',
   label: 'Vercel',
+  brand: 'vercel',
+  fields: [
+    { type: 'text', name: 'projectId', label: 'Project ID', placeholder: 'prj_…' },
+    {
+      type: 'text',
+      name: 'teamId',
+      label: 'Team ID',
+      placeholder: 'team_…',
+      optional: true,
+      hint: 'Needed when a team owns the project.',
+    },
+    {
+      type: 'options',
+      name: 'targets',
+      label: 'Targets',
+      options: [
+        { value: 'production', label: 'Production' },
+        { value: 'preview', label: 'Preview' },
+        { value: 'development', label: 'Development' },
+      ],
+      multiple: true,
+      initial: ['production'],
+    },
+    {
+      type: 'text',
+      name: 'gitBranch',
+      label: 'Git branch',
+      placeholder: 'staging',
+      optional: true,
+      hint: 'Limit these values to one branch’s previews.',
+      when: { field: 'targets', is: ['preview'] },
+    },
+  ],
+  credential: {
+    placeholder: 'ops/sync/VERCEL_TOKEN',
+    hint: 'Use an access token scoped to the team that owns the project.',
+  },
 
   parseConfig(input) {
     const fields = readFields(input, 'Vercel', ['projectId', 'teamId', 'targets', 'gitBranch']);

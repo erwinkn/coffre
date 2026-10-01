@@ -16,11 +16,13 @@ import {
 } from '../db/queries.ts';
 import { syncKeys, syncs } from '../db/schema.ts';
 import {
-  getProvider,
+  resolveSyncProviders,
   SyncConfigError,
   SyncProviderError,
   type SyncApplyResult,
+  type SyncBrand,
   type SyncProvider,
+  type SyncProviderInfo,
 } from '../sync/index.ts';
 import type { SyncTiming } from '../config.ts';
 import { can } from './caller.ts';
@@ -73,8 +75,11 @@ export type Json = string | number | boolean | null | Json[] | { [key: string]: 
 
 export type SyncView = {
   id: string;
+  /** The provider's id, e.g. `github-actions`. */
   provider: string;
   providerLabel: string;
+  /** `other` for a provider the deployment no longer lists. */
+  brand: SyncBrand;
   /** One line naming the destination, e.g. "erwinkn/app · environment production". */
   destination: string;
   config: { [key: string]: Json };
@@ -112,8 +117,8 @@ export type SyncDeps = {
   db: Database;
   vault: Vault;
   chainKey: Buffer;
-  /** Injected by tests; defaults to the built-in providers. */
-  resolveProvider?: (kind: string) => SyncProvider<unknown> | null;
+  /** The deployment's providers, from `resolveSyncProviders`; the built-ins unless set. */
+  providers?: readonly SyncProvider<unknown>[];
   /** Injected by tests; defaults to the global fetch. */
   fetch?: typeof fetch;
   /** The deployment's `syncs` settings; the defaults below unless set. */
@@ -222,13 +227,26 @@ function systemActor(syncId: string): Actor {
  */
 export class SyncRunner {
   readonly #deps: SyncDeps;
+  readonly #providers: Map<string, SyncProvider<unknown>>;
 
   constructor(deps: SyncDeps) {
     this.#deps = deps;
+    this.#providers = new Map((deps.providers ?? resolveSyncProviders()).map((provider) => [provider.id, provider]));
   }
 
-  provider(kind: string): SyncProvider<unknown> | null {
-    return (this.#deps.resolveProvider ?? getProvider)(kind);
+  provider(id: string): SyncProvider<unknown> | null {
+    return this.#providers.get(id) ?? null;
+  }
+
+  /** Where a new sync can push, in the deployment's order, as the pages and the CLI offer it. */
+  providers(): SyncProviderInfo[] {
+    return [...this.#providers.values()].map(({ id, label, brand, fields, credential }) => ({
+      id,
+      label,
+      brand,
+      fields,
+      credential,
+    }));
   }
 
   /** After a secret changed: push it everywhere its environment syncs to. Never throws. */
@@ -305,6 +323,7 @@ export class SyncRunner {
         id: row.id,
         provider: row.provider,
         providerLabel: provider?.label ?? row.provider,
+        brand: provider?.brand ?? 'other',
         destination,
         // Stored as JSON text from an object the create call checked.
         config: config as SyncView['config'],
@@ -427,7 +446,7 @@ export class SyncRunner {
 
     try {
       const provider = this.provider(sync.provider);
-      if (provider === null) throw new SyncFailure(`coffre no longer knows the destination "${sync.provider}"`);
+      if (provider === null) throw new SyncFailure(`this deployment no longer lists the sync provider "${sync.provider}"`);
       const config = provider.parseConfig(JSON.parse(sync.config));
       const destination = provider.describe(config);
       const signal = AbortSignal.timeout(RUN_TIMEOUT_MS);
@@ -454,7 +473,7 @@ export class SyncRunner {
           environmentId: sync.credential.environmentId,
           secretId: credential.secretId,
           bundleId: runId,
-          metadata: { syncId, source: sourcePath, provider: provider.kind, destination, trigger, version: credential.version },
+          metadata: { syncId, source: sourcePath, provider: provider.id, destination, trigger, version: credential.version },
         });
         return opened.values[0];
       });
@@ -616,7 +635,7 @@ export async function createSync(
   input: { provider: string; config: unknown; credential: string },
 ): Promise<SyncView> {
   const provider = ctx.syncs.provider(input.provider);
-  if (provider === null) throw badRequest(`"${input.provider}" is not a sync destination coffre knows`);
+  if (provider === null) throw badRequest(`"${input.provider}" is not a sync provider this instance offers`);
   let config: unknown;
   try {
     config = provider.parseConfig(input.config);
@@ -626,7 +645,7 @@ export async function createSync(
   }
   const credentialPath = parsePath(input.credential, [3]);
   const destination = provider.describe(config);
-  const metadata = { provider: provider.kind, destination, credential: formatPath(credentialPath) };
+  const metadata = { provider: provider.id, destination, credential: formatPath(credentialPath) };
 
   const syncId = await audited(ctx, async (tx, log) => {
     const credential = await resolvePath(tx, credentialPath);
@@ -649,7 +668,7 @@ export async function createSync(
       );
     }
 
-    const others = (await findSyncs(tx, { provider: provider.kind })).filter((row) => row.archivedAt === null);
+    const others = (await findSyncs(tx, { provider: provider.id })).filter((row) => row.archivedAt === null);
     const wanted = canonicalJson(config);
     const duplicate = others.find((other) => canonicalJson(JSON.parse(other.config)) === wanted);
     if (duplicate !== undefined) {
@@ -673,7 +692,7 @@ export async function createSync(
     await insert(tx, syncs, {
       id,
       ...place,
-      provider: provider.kind,
+      provider: provider.id,
       config: JSON.stringify(config),
       credentialSecretId: credential!.secret.id,
       createdBy: ctx.caller.principal.id,

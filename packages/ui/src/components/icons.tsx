@@ -252,16 +252,16 @@ export function Vercel({ size = 16, className, style }: IconProps) {
 const Cloud = lucide(CloudGlyph);
 const Train = lucide(TrainFront);
 
-/** The mark beside a sync's destination. */
-export function DestinationMark({ provider, size = 16 }: { provider: string; size?: number }) {
-  switch (provider) {
-    case 'github-actions':
+/** The mark beside a sync provider; any other brand gets the sync glyph. */
+export function SyncMark({ brand, size = 16 }: { brand: string; size?: number }) {
+  switch (brand) {
+    case 'github':
       return <GitHub size={size} />;
     case 'vercel':
       return <Vercel size={size} />;
     case 'railway':
       return <Train size={size} />;
-    case 'cloudflare-workers':
+    case 'cloudflare':
       return <Cloud size={size} />;
     default:
       return <Sync size={size} />;

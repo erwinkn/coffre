@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { getProvider, providers, SyncConfigError, SyncProviderError } from '../../src/sync/index.ts';
+import { railway as railwayProvider, resolveSyncProviders, SyncConfigError, SyncProviderError } from '../../src/sync/index.ts';
+import { guard } from '../../src/sync/guard.ts';
 import { assertNoLeak, fakeFetch, rejection, type RecordedRequest, type Reply } from './fake-fetch.ts';
 
-const railway = providers.railway;
+const railway = guard(railwayProvider());
 const TOKEN = '8f2c1d4e-rail-way0-toke-n00000secret';
 const ROUTE = 'POST https://backboard.railway.com/graphql/v2';
 const PROJECT = '0b7c8a4e-3f1d-4c2a-9e5b-1a2b3c4d5e6f';
@@ -32,8 +33,8 @@ const listed = (names: string[]) => ({
 });
 const notAuthorized = { body: { data: null, errors: [{ message: 'Not Authorized' }] } };
 
-test('is registered under its kind', () => {
-  assert.equal(getProvider('railway'), railway);
+test('is one of the providers a deployment gets by default', () => {
+  assert.ok(resolveSyncProviders().some((provider) => provider.id === 'railway'));
   assert.equal(railway.label, 'Railway');
 });
 

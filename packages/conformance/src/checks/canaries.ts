@@ -38,6 +38,7 @@ function calls(people: People): Calls {
     'GET /sessions': [{ params: {} }],
     'GET /identities': [{ params: {} }],
     'GET /device-logins/:code': [{ params: { code: 'BCDF-GHJK' } }],
+    'GET /syncs/providers': [{ params: {} }],
     'GET /syncs/:project/:environment': places.map((params) => ({ params })),
     'GET /audit': [{ params: {}, input: { limit: 500 } }],
     'GET /audit/verification': [{ params: {} }],

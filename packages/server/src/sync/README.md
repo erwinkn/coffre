@@ -1,12 +1,13 @@
 # Syncs
 
 Pushes coffre's variables to the places that run code. There is one provider
-per target, and all of them have the same shape (`types.ts`):
+per target, and all of them have the same shape, `SyncProvider` (`types.ts`):
+the fields its form asks for, a parser for them, and two calls.
 
 ```ts
-import { getProvider } from './index.ts';
+import { githubActions, resolveSyncProviders } from './index.ts';
 
-const github = getProvider('github-actions')!;
+const [github] = resolveSyncProviders([githubActions()]);
 const config = github.parseConfig({ owner: 'acme', repo: 'app' });
 const ctx = { token };
 const current = await github.listKeys(ctx, config);
@@ -21,8 +22,11 @@ const result = await github.apply(ctx, config, {
 (the token is bad, the target is missing, the target is rate limiting us, or
 the upstream is down). A key the target refuses lands in `failed`, and the
 other keys still go through. Neither thrown errors nor `failed` messages ever
-contain the token or a value. The code runs as is in Node 24 and in
-Cloudflare Workers.
+contain the token or a value: `resolveSyncProviders` wraps each provider in
+`guard()`, which enforces both, and checks its shape. A deployment lists its
+providers in `syncs: { providers }`, all four below by default, and may add
+its own ([docs/syncs.md](../../../../docs/syncs.md#a-provider-of-your-own)).
+The code runs as is in Node 24 and in Cloudflare Workers.
 
 ## GitHub Actions
 
