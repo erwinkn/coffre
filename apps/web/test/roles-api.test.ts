@@ -5,7 +5,7 @@ import { and, asc, eq } from 'drizzle-orm';
 
 import type { CoffreClient } from '../../../packages/client/src/index.ts';
 import { assignableToEnvironment, ROLES } from '../../../packages/core/src/access.ts';
-import { auditLog, grants, principals } from '../../../packages/db/test/tables.ts';
+import { auditLog, principals } from '../../../packages/db/test/tables.ts';
 import {
   clientFor,
   openTestDatabase,
@@ -141,27 +141,23 @@ test('an unknown role is rejected before anything is granted', async () => {
     root.access.set(DEVELOPER, { market: 'made-up' as 'viewer' }),
     { status: 400 },
   );
-  assert.deepEqual(
-    await db.owner.select({ id: grants.id }).from(grants).where(eq(grants.principalId, 'dev@acme.example')),
-    [],
-  );
+  assert.deepEqual((await deps.vault.access('user:dev@acme.example')).grants, []);
 });
 
 test('an expired grant confers nothing while a live grant works', async () => {
   const until = new Date(Date.now() + 60_000).toISOString();
   await root.access.set(DEVELOPER, { market: { role: 'viewer', until } });
-  await db.owner
-    .update(grants)
-    .set({ expiresAt: new Date(Date.now() - 60_000) })
-    .where(and(eq(grants.principalType, 'user'), eq(grants.principalId, 'dev@acme.example')));
+  // Two minutes later, by the vault's clock, which is the one that counts.
+  deps.vault.advance(120_000);
   await assert.rejects(developer.secrets.reveal('market/prod/API_KEY'), { status: 403 });
   assert.deepEqual(
     (await root.members.list()).members.find((entry) => entry.member === DEVELOPER)?.grants,
     [],
   );
 
+  const later = new Date(Date.now() + 240_000).toISOString();
   assert.deepEqual(
-    await root.access.set(DEVELOPER, { market: { role: 'viewer', until } }),
+    await root.access.set(DEVELOPER, { market: { role: 'viewer', until: later } }),
     { changes: { market: 'created' } },
   );
   assert.equal(

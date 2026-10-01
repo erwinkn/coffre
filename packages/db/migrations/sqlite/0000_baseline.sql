@@ -10,16 +10,6 @@ CREATE TABLE `audit_chain_head` (
 	CONSTRAINT "audit_chain_head_head_hash_check" CHECK(octet_length("audit_chain_head"."head_hash") = 32)
 );
 --> statement-breakpoint
-CREATE TABLE `audit_checkpoints` (
-	`id` text PRIMARY KEY NOT NULL,
-	`seq` integer NOT NULL,
-	`head_hash` blob NOT NULL,
-	`created_at` integer DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER)) NOT NULL,
-	`exported_at` integer,
-	`export_target` text,
-	CONSTRAINT "audit_checkpoints_head_hash_check" CHECK(octet_length("audit_checkpoints"."head_hash") = 32)
-);
---> statement-breakpoint
 CREATE TABLE `audit_heartbeat` (
 	`only_row` integer PRIMARY KEY DEFAULT true NOT NULL,
 	`last_beat_at` integer DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER)) NOT NULL,
@@ -118,27 +108,6 @@ CREATE TABLE `environments` (
 --> statement-breakpoint
 CREATE UNIQUE INDEX `environments_project_id_slug_key` ON `environments` (`project_id`,`slug`);--> statement-breakpoint
 CREATE UNIQUE INDEX `environments_project_scoped` ON `environments` (`id`,`project_id`);--> statement-breakpoint
-CREATE TABLE `grants` (
-	`id` text PRIMARY KEY NOT NULL,
-	`principal_type` text NOT NULL,
-	`principal_id` text NOT NULL,
-	`environment_id` text,
-	`created_at` integer DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER)) NOT NULL,
-	`created_by` text NOT NULL,
-	`project_id` text,
-	`role` text NOT NULL,
-	`expires_at` integer,
-	FOREIGN KEY (`principal_type`,`principal_id`) REFERENCES `principals`(`principal_type`,`principal_id`) ON UPDATE no action ON DELETE restrict,
-	FOREIGN KEY (`environment_id`) REFERENCES `environments`(`id`) ON UPDATE no action ON DELETE restrict,
-	FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON UPDATE no action ON DELETE restrict,
-	CONSTRAINT "grants_principal_type_check" CHECK("grants"."principal_type" IN ('user', 'service')),
-	CONSTRAINT "grants_exactly_one_scope" CHECK(("grants"."project_id" IS NULL) <> ("grants"."environment_id" IS NULL)),
-	CONSTRAINT "grants_role_check" CHECK("grants"."role" IN ('viewer', 'developer', 'maintainer', 'access-manager', 'auditor', 'owner'))
-);
---> statement-breakpoint
-CREATE INDEX `grants_lookup_idx` ON `grants` (`principal_type`,`principal_id`,`environment_id`);--> statement-breakpoint
-CREATE UNIQUE INDEX `grants_environment_unique` ON `grants` (`principal_type`,`principal_id`,`environment_id`);--> statement-breakpoint
-CREATE UNIQUE INDEX `grants_project_unique` ON `grants` (`principal_type`,`principal_id`,`project_id`);--> statement-breakpoint
 CREATE TABLE `identities` (
 	`id` text PRIMARY KEY NOT NULL,
 	`provider` text NOT NULL,
@@ -162,14 +131,10 @@ CREATE INDEX `identities_principal_idx` ON `identities` (`principal_type`,`princ
 CREATE TABLE `principals` (
 	`principal_type` text NOT NULL,
 	`principal_id` text NOT NULL,
-	`instance_role` text DEFAULT 'user' NOT NULL,
 	`created_at` integer DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER)) NOT NULL,
 	`created_by` text NOT NULL,
-	`active` integer DEFAULT true NOT NULL,
 	PRIMARY KEY(`principal_type`, `principal_id`),
 	CONSTRAINT "principals_principal_type_check" CHECK("principals"."principal_type" IN ('user', 'service')),
-	CONSTRAINT "principals_instance_role_check" CHECK("principals"."instance_role" IN ('user', 'owner')),
-	CONSTRAINT "principals_service_role_check" CHECK("principals"."principal_type" = 'user' OR "principals"."instance_role" = 'user'),
 	CONSTRAINT "principals_user_id_lowercase" CHECK("principals"."principal_type" <> 'user' OR "principals"."principal_id" = lower("principals"."principal_id"))
 );
 --> statement-breakpoint

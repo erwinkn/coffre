@@ -2,7 +2,8 @@
 
 `coffre` is a pnpm monorepo secrets manager: `apps/web` (TanStack Start UI + native
 `/api`, deploys as a Cloudflare Worker), `apps/cli`, `apps/dev-idp` (local Cloudflare
-Access stand-in), `packages/core`, `packages/db`, `packages/client` (the typed API
+Access stand-in), `apps/vault` (the vault's own Worker), `packages/core`, `packages/db`,
+`packages/vault` (keys, grants, members, its own log), `packages/client` (the typed API
 client the CLI and UI call). The root `README.md` and the
 `package.json` scripts are the source of truth for commands; this file only adds what
 they leave implicit.
@@ -21,7 +22,12 @@ DB-backed tests need it up. Export `COMPOSE_PROJECT_NAME=coffre` whenever you in
 `docker compose` directly.
 
 **Run the stack.** `pnpm dev` brings up Postgres + dev IdP (:8081) + web/API
-(:3000) + seed data. Sign in at `http://127.0.0.1:3000/login` as
+(:3000) + seed data. The vault is a second Worker that Vite runs beside the app
+(`auxiliaryWorkers` in `apps/web/vite.config.ts`), with no port of its own; it keeps
+its Durable Object SQLite under `apps/web/.wrangler/state` (or `$COFFRE_STATE_DIR`),
+which `pnpm dev` empties before it seeds. Its config in `.env.dev` (`COFFRE_KEK_LOCAL`,
+`COFFRE_KEK_ID`, `COFFRE_ROOT_ADMINS`, `COFFRE_VAULT_SIGNING_KEY`) reaches only the
+vault: the app refuses to start if handed any of them. Sign in at `http://127.0.0.1:3000/login` as
 `admin@acme.example` (root admin) or any of the seeded personas. CLI:
 `node --env-file=.env.dev apps/cli/src/main.ts <cmd>`.
 
@@ -36,8 +42,9 @@ DB-backed tests need it up. Export `COMPOSE_PROJECT_NAME=coffre` whenever you in
   as is the runtime role itself.
 - `pnpm --dir apps/web smoke:production` sets `COMPOSE_PROJECT_NAME=coffre`,
   builds the Worker if `apps/web/.wrangler/deploy/config.json` is missing, and
-  writes production smoke secrets to `dist/server/.dev.vars` so a sourced
-  `.env.dev` cannot 500 `/livez`. Needs Postgres.
+  writes production smoke secrets to `dist/server/.dev.vars` (and the vault's to
+  `dist/coffre_vault/.dev.vars`) so a sourced `.env.dev` cannot 500 `/livez`. It
+  gives the vault a throwaway store, since it recreates `coffre_test`. Needs Postgres.
 - `pnpm lint`, `pnpm check:pins`, `pnpm check:contrast` do not need Postgres.
 - `pnpm --dir apps/web typecheck` does not need Postgres, but on a fresh checkout it fails
   until `apps/web/src/routeTree.gen.ts` exists — run `pnpm --dir apps/web build` (or start

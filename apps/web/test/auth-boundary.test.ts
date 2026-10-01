@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import type { AuthConfig } from '../../../packages/core/src/identity/auth-mode.ts';
 import type { Principal } from '../../../packages/core/src/identity/types.ts';
-import { createDatabase } from '../../../packages/db/src/database.ts';
+import type { Access } from '../../../packages/vault/src/types.ts';
 import { accessTokenForRequest, authenticateRequest } from '../src/server/auth.ts';
 import {
   allowsAnonymousTransport,
@@ -32,15 +32,16 @@ const dev: AuthConfig = {
 };
 
 /**
- * A database whose principal lookup answers `rows`, in Drizzle's array row
- * mode: active, instance role, then the joined grant columns.
+ * A vault that knows only these members, by principal (`user:<email>`,
+ * `token:<name>`); everyone else is a stranger to it.
  */
-function principalsDatabase(rows: unknown[][], onQuery = () => {}) {
-  const query = async () => {
-    onQuery();
-    return { rows, fields: [] };
+function vaultKnowing(known: Record<string, Partial<Access>>, onAsk = (_principal: string) => {}) {
+  return {
+    access: async (principal: string): Promise<Access> => {
+      onAsk(principal);
+      return { principal, status: 'unknown', isRootAdmin: false, isOwner: false, grants: [], since: null, by: null, ...known[principal] };
+    },
   };
-  return createDatabase({ query, connect: async () => ({ query, release: () => {} }) } as never);
 }
 
 const root: Principal = {
@@ -154,8 +155,8 @@ test('Cloudflare mode ignores the dev cookie and dev mode ignores the Access hea
   assert.equal(accessTokenForRequest(request, dev), 'dev-token');
 });
 
-test('a configured root admin authenticates without a principals row lookup', async () => {
-  let queried = false;
+test('a root admin is whoever the vault says, in one call', async () => {
+  const asked: string[] = [];
   const result = await authenticateRequest(
     new Request('https://coffre.example.test/api/me', {
       headers: {
@@ -166,16 +167,16 @@ test('a configured root admin authenticates without a principals row lookup', as
     {
       auth: cloudflare,
       verifier: { verify: async () => root },
-      db: principalsDatabase([], () => {
-        queried = true;
-      }),
-      rootAdmins: [root.id],
+      vault: vaultKnowing(
+        { 'user:admin@acme.example': { status: 'active', isRootAdmin: true, isOwner: true } },
+        (principal) => asked.push(principal),
+      ),
     } as never,
     'request-id',
   );
 
   assert.equal(result instanceof Response, false);
-  assert.equal(queried, false);
+  assert.deepEqual(asked, ['user:admin@acme.example']);
   if (!(result instanceof Response)) {
     assert.equal(result.requestId, 'request-id');
     assert.equal(result.registered, true);
@@ -198,8 +199,7 @@ test('an unregistered non-root identity is marked for the closed-door boundary',
     {
       auth: cloudflare,
       verifier: { verify: async () => principal },
-      db: principalsDatabase([]),
-      rootAdmins: [root.id],
+      vault: vaultKnowing({}),
     } as never,
     'unregistered-request',
   );
@@ -234,8 +234,7 @@ test('production fails closed when the Access assertion is missing', async () =>
           return root;
         },
       },
-      db: principalsDatabase([]),
-      rootAdmins: [root.id],
+      vault: vaultKnowing({}),
     } as never,
   );
 
@@ -258,8 +257,7 @@ test('an active registered identity receives an auditable request context', asyn
     {
       auth: dev,
       verifier: { verify: async () => principal },
-      db: principalsDatabase([[true, 'user', null, null, null, null, null, null]]),
-      rootAdmins: [],
+      vault: vaultKnowing({ 'token:reporting.access': { status: 'active' } }),
     } as never,
     'registered-request',
   );
@@ -298,10 +296,9 @@ test('a principal lookup that fails answers unavailable, not unauthenticated', a
     {
       auth: cloudflare,
       verifier: { verify: async () => principal },
-      db: principalsDatabase([], () => {
+      vault: vaultKnowing({}, () => {
         throw new Error('connection refused');
       }),
-      rootAdmins: [root.id],
     } as never,
   );
 

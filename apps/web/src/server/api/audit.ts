@@ -8,9 +8,11 @@ import {
   resolvePath,
   type AuditFilter,
 } from '../../../../../packages/db/src/queries.ts';
+import { verifyCheckpoint } from '../../../../../packages/vault/src/checkpoint.ts';
+import type { LogPage } from '../../../../../packages/vault/src/types.ts';
 import type { ApiContext } from './context.ts';
-import { forbidden, notFound } from './errors.ts';
-import { parseMember, type Path } from './paths.ts';
+import { forbidden, notFound, vaultRefused } from './errors.ts';
+import { formatMember, parseMember, type Path } from './paths.ts';
 
 const VERIFY_BATCH = 5_000;
 
@@ -28,7 +30,13 @@ export type AuditEntryView = {
 };
 
 export type AuditVerification =
-  | { ok: true; rows: number; head: string }
+  | {
+      ok: true;
+      rows: number;
+      head: string;
+      /** The last head the vault signed, which the log still matches; null before the first. */
+      checkpoint: { seq: number; signedAt: string } | null;
+    }
   | { ok: false; failedAtSeq: number; reason: string };
 
 export type AuditQuery = {
@@ -104,12 +112,21 @@ export async function listAudit(
 /**
  * Recompute the whole chain and compare it with the stored head, in one
  * read-only snapshot so appends made meanwhile cannot look like tampering.
+ * Then check the log against the vault's latest signed checkpoint: the chain
+ * key catches a row changed by someone who holds only the database, and the
+ * checkpoint one changed and chained again by someone who holds the app too.
  * Owners only: a partial view of the chain cannot be verified.
  */
 export async function verifyAudit(ctx: ApiContext): Promise<AuditVerification> {
   if (!ctx.caller.isOwner) {
     throw forbidden('only a root admin or instance owner may verify the complete audit chain');
   }
+  const { checkpoint, publicKey } = await ctx.vault.latestCheckpoint();
+  if (checkpoint !== null && !(await verifyCheckpoint(checkpoint, publicKey))) {
+    return { ok: false, failedAtSeq: checkpoint.seq, reason: 'the latest checkpoint does not carry the vault\'s signature' };
+  }
+  const signedSeq = checkpoint === null ? null : BigInt(checkpoint.seq);
+  let signedHash: string | null = null;
   return ctx.db.transaction(
     async (tx): Promise<AuditVerification> => {
       const head = await auditHead(tx);
@@ -133,6 +150,8 @@ export async function verifyAudit(ctx: ApiContext): Promise<AuditVerification> {
         }
         rows += result.rows;
         previousHash = result.head;
+        const signed = batch.find((row) => row.seq === signedSeq);
+        if (signed !== undefined) signedHash = signed.hash.toString('hex');
         nextSequence = batch[batch.length - 1].seq + 1n;
         if (batch.length < VERIFY_BATCH) break;
       }
@@ -155,8 +174,40 @@ export async function verifyAudit(ctx: ApiContext): Promise<AuditVerification> {
           reason: 'the recomputed head does not match the stored chain head',
         };
       }
-      return { ok: true, rows, head: previousHash.toString('hex') };
+      if (checkpoint !== null) {
+        if (signedHash === null) {
+          return {
+            ok: false,
+            failedAtSeq: Number(nextSequence),
+            reason: `the log ends before seq ${checkpoint.seq}, which the vault signed at ${checkpoint.signedAt}`,
+          };
+        }
+        if (signedHash !== checkpoint.headHash) {
+          return {
+            ok: false,
+            failedAtSeq: checkpoint.seq,
+            reason: `the log up to seq ${checkpoint.seq} is not the one the vault signed at ${checkpoint.signedAt}: it was rewritten`,
+          };
+        }
+      }
+      return {
+        ok: true,
+        rows,
+        head: previousHash.toString('hex'),
+        checkpoint: checkpoint === null ? null : { seq: checkpoint.seq, signedAt: checkpoint.signedAt },
+      };
     },
     SNAPSHOT,
   );
+}
+
+/**
+ * A page of the vault's own log, which the app can read but never write.
+ * Root admins only, which the vault decides; the app only refuses early.
+ */
+export async function vaultLog(ctx: ApiContext, query: { before?: number; limit: number }): Promise<LogPage> {
+  if (!ctx.caller.isRootAdmin) throw forbidden('only a root admin may read the vault log');
+  const page = await ctx.vault.log({ actor: formatMember(ctx.caller.principal), ...query });
+  if (!page.ok) throw vaultRefused(page.refusal);
+  return { entries: page.entries, verification: page.verification };
 }

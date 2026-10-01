@@ -68,7 +68,7 @@ function shapes(schema: Record<string, unknown>, config: (table: never) => unkno
 
 test('the MySQL and SQLite schemas have the Postgres tables, columns, nullability and keys', () => {
   const expected = shapes(postgres, postgresConfig);
-  assert.ok(Object.keys(expected).length >= 15);
+  assert.ok(Object.keys(expected).length >= 13);
   assert.deepEqual(shapes(mysql, mysqlConfig), expected);
   assert.deepEqual(shapes(sqlite, sqliteConfig), expected);
 });

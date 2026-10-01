@@ -122,7 +122,8 @@ corrupted values — see `apps/web/test/dotenv.test.ts`.
 
 **Append-only by grant, not convention.** `coffre_app` has no `UPDATE`, no
 `DELETE`, or `TRUNCATE` on history, and no `DELETE` or `TRUNCATE` anywhere.
-Grant revocation and removal use the existing expiry/archive columns.
+Grants, and whether someone is still a member, are not in this database at
+all: they live in the vault ([docs/architecture.md](docs/architecture.md#the-vault)).
 
 **Owner and runtime are separate identities.** The one-shot migration process
 receives the owner `DATABASE_URL`; the Worker receives only the `HYPERDRIVE`
@@ -161,18 +162,20 @@ published six days before we tried to install it.
 ```
 packages/core   envelope encryption, KEK providers, audit hash chain, identity
 packages/db     Drizzle schema/migrations, audit writer, privilege tests
+packages/vault  the vault: the KEK, grants, members, root admins, its own log; over SQLite
 packages/sync   destinations syncs push to: GitHub Actions, Vercel, Railway, Cloudflare
 apps/dev-idp    local stand-in for Cloudflare Access, an OIDC provider and GitHub
 packages/client @coffre/client: the API as typed calls, one fetch each
 apps/cli        login, secrets, access, syncs, audit; on the client, no npm dependencies
 apps/web        TanStack Start UI, auth boundary, and the API's route table and handlers
+apps/vault      the vault's Worker: one Durable Object, reached only by the app's VAULT binding
 ```
 
 ## Running it
 
 ```sh
 pnpm install
-pnpm dev              # Postgres + dev IdP + one web/API service + seed data
+pnpm dev              # Postgres + dev IdP + web/API with its vault Worker + seed data
 ```
 
 Then open http://127.0.0.1:3000 and sign in as `admin@acme.example`.
@@ -203,6 +206,15 @@ pnpm --dir apps/web typecheck
 pnpm --dir apps/web build            # then fails if database code reached the browser bundle
 pnpm --dir apps/web smoke:production
 ```
+
+`.env.dev` configures both Workers, and Wrangler hands each only the names its
+own config declares. The app gets `COFFRE_AUDIT_CHAIN_KEY` and its sign-in
+settings. The vault (`apps/vault/wrangler.jsonc`) gets `COFFRE_KEK_LOCAL`,
+`COFFRE_KEK_ID`, `COFFRE_ROOT_ADMINS`, `COFFRE_VAULT_SIGNING_KEY` (a 32-byte
+Ed25519 seed, base64, for audit checkpoints) and the `COFFRE_BULK_LIMIT` var
+(`1000/15m`: unwraps per principal per rolling window). The app refuses to
+start if it is handed any of the vault's. `pnpm dev` empties the vault's
+local store each time it seeds, since the seed starts the database over.
 
 CLI:
 
@@ -538,14 +550,15 @@ environment — `environment.manage` on a single environment would authorise
 creating its own siblings. The API rejects it with 409 rather than silently
 granting less than asked.
 
-Grants may carry an `expires_at`. Expiry is enforced in permission resolution,
-which is the single place every check goes through.
+Grants may carry an expiry. The vault enforces it on every unwrap, and the app's
+`can()`, the single place every check goes through, only sees grants the vault
+still counts.
 
 Principals are `user` (matched on the Access `email` claim) or `service`
 (matched on `common_name`, because service-token JWTs carry no email at all).
 
 `root-admin` is not a project role. It is deployment-wide bootstrap authority
-from `COFFRE_ROOT_ADMINS`, and is shown only in the cross-project Users view.
+from the vault's `COFFRE_ROOT_ADMINS`, and is shown only in the cross-project Users view.
 Creating a project writes a real `owner` grant for the creator. In the project
 UI, the underlying role and scope are presented as one permissions value:
 `Owner`, `Read: all`, `Write: all`, or read/write for one named environment.
@@ -556,8 +569,8 @@ UI, the underlying role and scope are presented as one permissions value:
   are not built in; `coffre run` or `coffre export` with a service token
   covers them.
 - The `scaleway` `KekProvider` does not exist yet; only `local` does.
-- Audit checkpoints have a table but nothing exports them off-box, so tail
-  truncation is currently detectable only in principle.
+- The vault signs checkpoints of the audit log's head and keeps them in its
+  own store, but nothing exports them further off-box yet.
 - `.env` import does not support literal multi-line values (use `\n` inside
   double quotes) or variable interpolation. Both are reported as parse problems
   rather than guessed at.

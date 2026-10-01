@@ -88,8 +88,8 @@ binding; the Scaleway database has no public endpoint.
 
 ## Root-admin bootstrap
 
-Set `COFFRE_ROOT_ADMINS` on the web service to at least one comma-separated human email
-identity:
+Set `COFFRE_ROOT_ADMINS` on the vault Worker (`coffre-vault`), not the web service, to at
+least one comma-separated human email identity:
 
 ```dotenv
 COFFRE_ROOT_ADMINS=first.admin@example.com
@@ -100,10 +100,9 @@ emits. Service-token `common_name` values cannot be root admins. That person
 must also be allowed by the Access application policy. Root admins are the
 configuration-owned bootstrap principals that can create the first project and
 grant; an empty or malformed list makes a new instance unadministrable, so the
-web service refuses to initialize with one in Cloudflare mode.
+vault refuses to start with one.
 
-Every non-root identity must also have an active row in Coffre's principal
-directory. Passing the Cloudflare Access policy authenticates the person; it
+Every non-root identity must also be an active member, which the vault decides. Passing the Cloudflare Access policy authenticates the person; it
 does not register them in this Coffre instance. An authenticated but
 unregistered browser is confined to `/unregistered`, while `/api` returns
 `403 registration_required` for everything but `GET /api/me`.

@@ -43,8 +43,10 @@ Each item says what is wrong today.
    nonce breaks where it is written. `Referrer-Policy` is `same-origin`, not
    `no-referrer`: under `no-referrer` a same-origin POST carries
    `Origin: null`, which the CSRF check refuses.
-2. **Escrow the keys, then prove recovery.** `COFFRE_KEK_LOCAL` and
-   `COFFRE_AUDIT_CHAIN_KEY` are Worker secrets, and that store is write-only.
+2. **Escrow the keys, then prove recovery.** `COFFRE_KEK_LOCAL`,
+   `COFFRE_VAULT_SIGNING_KEY` (the vault's) and `COFFRE_AUDIT_CHAIN_KEY` (the
+   app's) are Worker secrets, and that store is write-only. The vault's
+   Durable Object, which holds every grant, needs a backup too.
    If no other copy exists, losing the Worker
    loses every secret. Keep an offline copy, then run a restore drill: a fresh
    database from backup plus the escrowed KEK, then `coffre verify` passes
@@ -108,7 +110,17 @@ that holds the keys and decides who may decrypt. The design is in
    remodelled, the audit chain locks a head row, and SQLite queues its own
    writes. The integration suite runs on all three (`pnpm test:all`); the
    restricted runtime login stays Postgres-only.
-5. **The vault**: keys, grants, principal status and its log move behind it.
+5. ~~**The vault**~~ ([design](architecture.md#the-vault)): done.
+   `packages/vault` holds the KEK, grants, principal status, root admins and
+   a hash-chained log of its own, over SQLite; the app keeps ciphertext and
+   wrapped keys, and asks the vault to wrap and unwrap, once per batch. It
+   runs as its own Worker, `apps/vault`, a Durable Object behind a service
+   binding, next to the app in dev and the smoke test, or in process over
+   libSQL for the tests. Callers' grants come from the vault once per
+   request; changing access and removing a member are vault calls, and a
+   refusal is a 403 with the vault's code. Unwraps are capped per principal
+   (`1000/15m` by default), syncs read as `sync:<id>`, and the vault signs
+   checkpoints of the app's audit log, which verification checks.
 6. **The packages**: configuration in code, compiled output, the Node
    adapter, `coffre init`, and example deployments the smoke suite runs.
 

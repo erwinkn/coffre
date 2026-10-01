@@ -21,7 +21,7 @@ export type AuthenticatedIdentity = {
 
 type AuthenticationRuntime = Pick<
   CoffreRuntime,
-  'auth' | 'verifier' | 'db' | 'rootAdmins'
+  'auth' | 'verifier' | 'vault'
 >;
 
 function cookieValue(request: Request, name: string): string | null {
@@ -118,7 +118,7 @@ export async function authenticateRequest(
   }
 
   try {
-    const caller = await loadCaller(runtime.db, principal, runtime.rootAdmins);
+    const caller = await loadCaller(runtime.vault, principal);
     return {
       principal,
       registered: caller.registered,

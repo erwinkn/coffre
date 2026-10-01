@@ -142,10 +142,8 @@ export const principals = pgTable(
   {
     principalType: text('principal_type').notNull(),
     principalId: text('principal_id').notNull(),
-    instanceRole: text('instance_role').notNull().default('user'),
     createdAt: createdAt(),
     createdBy: text('created_by').notNull(),
-    active: boolean().notNull().default(true),
   },
   (table) => [
     primaryKey({
@@ -156,70 +154,12 @@ export const principals = pgTable(
       'principals_principal_type_check',
       sql`${table.principalType} IN ('user', 'service')`,
     ),
-    check('principals_instance_role_check', sql`${table.instanceRole} IN ('user', 'owner')`),
-    check(
-      'principals_service_role_check',
-      sql`${table.principalType} = 'user' OR ${table.instanceRole} = 'user'`,
-    ),
     // A person is their email address, stored lowercased, so matching a
     // provider's verified email is plain equality on every database.
     check(
       'principals_user_id_lowercase',
       sql`${table.principalType} <> 'user' OR ${table.principalId} = lower(${table.principalId})`,
     ),
-  ],
-);
-
-export const grants = pgTable(
-  'grants',
-  {
-    id: uuid().primaryKey().defaultRandom(),
-    principalType: text('principal_type').notNull(),
-    principalId: text('principal_id').notNull(),
-    environmentId: uuid('environment_id'),
-    createdAt: createdAt(),
-    createdBy: text('created_by').notNull(),
-    projectId: uuid('project_id'),
-    /** One of the built-in roles in packages/core/src/access.ts. */
-    role: text().notNull(),
-    expiresAt: timestamp('expires_at', { withTimezone: true }),
-  },
-  (table) => [
-    check(
-      'grants_principal_type_check',
-      sql`${table.principalType} IN ('user', 'service')`,
-    ),
-    check(
-      'grants_exactly_one_scope',
-      sql`(${table.projectId} IS NULL) <> (${table.environmentId} IS NULL)`,
-    ),
-    foreignKey({
-      name: 'grants_principal_fkey',
-      columns: [table.principalType, table.principalId],
-      foreignColumns: [principals.principalType, principals.principalId],
-    }).onDelete('restrict'),
-    foreignKey({
-      name: 'grants_environment_id_fkey',
-      columns: [table.environmentId],
-      foreignColumns: [environments.id],
-    }).onDelete('restrict'),
-    foreignKey({
-      name: 'grants_project_id_fkey',
-      columns: [table.projectId],
-      foreignColumns: [projects.id],
-    }).onDelete('restrict'),
-    check(
-      'grants_role_check',
-      sql`${table.role} IN ('viewer', 'developer', 'maintainer', 'access-manager', 'auditor', 'owner')`,
-    ),
-    index('grants_lookup_idx').on(table.principalType, table.principalId, table.environmentId),
-    // One grant per member per place. Revoking expires the row rather than
-    // deleting it, and granting again reuses it. The scope left empty is
-    // null, and nulls never collide, so each index only bites on its own
-    // kind of grant: a plain index does what a partial one on "scope is not
-    // null" would, and MySQL, which has no partial indexes, can say it too.
-    uniqueIndex('grants_environment_unique').on(table.principalType, table.principalId, table.environmentId),
-    uniqueIndex('grants_project_unique').on(table.principalType, table.principalId, table.projectId),
   ],
 );
 
@@ -288,21 +228,6 @@ export const auditChainHead = pgTable(
   (table) => [
     check('audit_chain_head_only_row_check', sql`${table.onlyRow}`),
     check('audit_chain_head_head_hash_check', sql`octet_length(${table.headHash}) = 32`),
-  ],
-);
-
-export const auditCheckpoints = pgTable(
-  'audit_checkpoints',
-  {
-    id: uuid().primaryKey().defaultRandom(),
-    seq: bigint({ mode: 'bigint' }).notNull(),
-    headHash: bytea('head_hash').notNull(),
-    createdAt: createdAt(),
-    exportedAt: timestamp('exported_at', { withTimezone: true }),
-    exportTarget: text('export_target'),
-  },
-  (table) => [
-    check('audit_checkpoints_head_hash_check', sql`octet_length(${table.headHash}) = 32`),
   ],
 );
 
@@ -527,11 +452,10 @@ export const syncKeys = pgTable(
 // For Drizzle's relational queries; see relations.ts.
 export const {
   principalsRelations,
-  grantsRelations,
   credentialsRelations,
   identitiesRelations,
   environmentsRelations,
   secretsRelations,
   syncsRelations,
   syncKeysRelations,
-} = relationsOf({ projects, environments, secrets, secretVersions, principals, grants, identities, credentials, syncs, syncKeys });
+} = relationsOf({ projects, environments, secrets, secretVersions, principals, identities, credentials, syncs, syncKeys });

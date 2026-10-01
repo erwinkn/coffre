@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import type { Permission } from '../../../../../packages/core/src/access.ts';
-import { open, seal, type Envelope } from '../../../../../packages/core/src/envelope.ts';
+import type { Envelope } from '../../../../../packages/core/src/envelope.ts';
 import type { Queryable, Transaction } from '../../../../../packages/db/src/database.ts';
 import { isUniqueViolation } from '../../../../../packages/db/src/dialect.ts';
 import {
@@ -15,9 +15,11 @@ import {
   type ResolvedPath,
 } from '../../../../../packages/db/src/queries.ts';
 import { secrets, secretVersions } from '../../../../../packages/db/src/schema.ts';
+import type { SecretRef } from '../../../../../packages/vault/src/types.ts';
 import { permissionsAt } from './caller.ts';
-import { allowed, audited, denied, need, Refusal, type ApiContext } from './context.ts';
+import { allowed, asking, audited, denied, need, Refusal, vaultRefusal, type ApiContext } from './context.ts';
 import { conflict, notFound } from './errors.ts';
+import { openValues, rewrapValue, sealValues } from './keys.ts';
 import { formatPath, type Path } from './paths.ts';
 
 export type SecretKey = {
@@ -57,6 +59,21 @@ function requireLive(place: ResolvedPath): Environment {
   const environment = liveEnvironment(place);
   if (environment === null) throw notFound('unknown project or environment');
   return environment;
+}
+
+/** One version of a secret, as the vault names it: bound to its ids, labelled with its path. */
+export function secretRef(
+  place: { project: { slug: string }; environment: { slug: string } | null },
+  environment: Environment,
+  secret: { id: string; key: string },
+  version: number,
+): SecretRef {
+  return {
+    ...environment,
+    secretId: secret.id,
+    version,
+    path: `${place.project.slug}/${place.environment!.slug}/${secret.key}`,
+  };
 }
 
 /** Tell the environment's syncs to push, once the change has committed. */
@@ -145,7 +162,7 @@ export async function setSecrets(
     const byKey = new Map(rows.map((row) => [row.key, row]));
 
     const keys: Record<string, SetOutcome> = {};
-    const versions: (typeof secretVersions.$inferInsert)[] = [];
+    const items: { key: string; secret: SecretRef; value: string }[] = [];
     for (const [key, value] of writes) {
       const secret = byKey.get(key)!;
       if (secret.archivedAt !== null) {
@@ -159,22 +176,28 @@ export async function setSecrets(
           }),
         );
       }
-      const version = secret.currentVersion + 1;
-      const envelope = await seal(
-        Buffer.from(value, 'utf8'),
-        { ...environment, secretId: secret.id },
-        ctx.keks,
-      );
-      versions.push({ id: randomUUID(), secretId: secret.id, version, ...envelope, createdBy: ctx.caller.principal.id });
+      items.push({ key, secret: secretRef(place, environment, secret, secret.currentVersion + 1), value });
+    }
+    // One vault call wraps every new key, or refuses them all.
+    const sealed = await sealValues(ctx.vault, asking(ctx), items);
+    if (!sealed.ok) throw vaultRefusal(ctx, sealed.refusal, 'secret.write', { ...environment, bundleId });
+    const versions = items.map(({ key, secret }, i) => {
       // The value is never logged. The log answers who and what, not what it was.
       log.push(allowed(ctx, 'secret.write', {
         ...environment,
-        secretId: secret.id,
+        secretId: secret.secretId,
         bundleId,
-        metadata: { key, version },
+        metadata: { key, version: secret.version },
       }));
-      keys[key] = { version };
-    }
+      keys[key] = { version: secret.version };
+      return {
+        id: randomUUID(),
+        secretId: secret.secretId,
+        version: secret.version,
+        ...sealed.values[i],
+        createdBy: ctx.caller.principal.id,
+      };
+    });
     await insert(tx, secretVersions, versions);
     const now = new Date();
     for (const { id, secretId, version } of versions) {
@@ -235,6 +258,7 @@ export async function dryRunSecrets(
 
     // A null-prototype record: a key named __proto__ is a key like any other.
     const keys: Record<string, DryRunOutcome> = Object.create(null);
+    const comparing: { key: string; value: string; secret: SecretRef; envelope: Envelope }[] = [];
     for (const [key, value] of Object.entries(patch)) {
       const secret = rows.get(key);
       if (value === null) {
@@ -246,15 +270,22 @@ export async function dryRunSecrets(
         keys[key] = 'added';
         continue;
       }
-      const current = await open(secret.current.envelope, { ...environment, secretId: secret.id }, ctx.keks);
-      keys[key] = current.toString('utf8') === value ? 'unchanged' : 'changed';
+      const { version, envelope } = secret.current;
+      comparing.push({ key, value, secret: secretRef(place, environment, secret, version), envelope });
+    }
+    const opened = await openValues(ctx.vault, { ...asking(ctx), purpose: 'compare' }, comparing);
+    if (!opened.ok) {
+      throw vaultRefusal(ctx, opened.refusal, 'secret.read', { ...environment, bundleId, metadata: { dryRun: true } });
+    }
+    comparing.forEach(({ key, value, secret }, i) => {
+      keys[key] = opened.values[i] === value ? 'unchanged' : 'changed';
       log.push(allowed(ctx, 'secret.read', {
         ...environment,
-        secretId: secret.id,
+        secretId: secret.secretId,
         bundleId,
-        metadata: { key, version: secret.current.version, dryRun: true },
+        metadata: { key, version: secret.version, dryRun: true },
       }));
-    }
+    });
     return { dryRun: true as const, keys: { ...keys } };
   });
 }
@@ -331,8 +362,10 @@ export async function listVersions(
 }
 
 /**
- * Bring back an old value as a new version. The old envelope is copied as it
- * is: it is bound to the secret, not to a version number, so it still opens.
+ * Bring back an old value as a new version. The old ciphertext is copied as
+ * it is: it is bound to the secret, not to a version number, so it still
+ * opens. The vault wraps its data key again under the current key, which
+ * takes a write grant and never opens the value.
  */
 export async function restoreVersion(
   ctx: ApiContext,
@@ -359,7 +392,11 @@ export async function restoreVersion(
     }
     const fromVersion = locked.currentVersion;
     const version = fromVersion + 1;
-    await appendVersion(tx, secret.id, version, target.envelope, ctx.caller.principal.id);
+    const rewrapped = await rewrapValue(ctx.vault, asking(ctx), secretRef(place, environment, secret, version), target);
+    if (!rewrapped.ok) {
+      throw vaultRefusal(ctx, rewrapped.refusal, 'secret.rollback', { ...where, metadata: { key: secret.key, toVersion } });
+    }
+    await appendVersion(tx, secret.id, version, rewrapped.values[0], ctx.caller.principal.id);
     log.push(allowed(ctx, 'secret.rollback', {
       ...where,
       metadata: { key: secret.key, fromVersion, toVersion, version },
@@ -406,11 +443,25 @@ export async function reveal(
     }
 
     const rows = await currentEnvelopes(tx, environment.environmentId, place.secret?.id);
+    const opened = await openValues(
+      ctx.vault,
+      { ...asking(ctx), purpose: path.key === undefined ? 'run' : 'reveal' },
+      rows.map((row) => ({
+        secret: secretRef(place, environment, { id: row.secretId, key: row.key }, row.version),
+        envelope: row.envelope,
+      })),
+    );
+    if (!opened.ok) {
+      throw vaultRefusal(ctx, opened.refusal, 'secret.read', {
+        ...environment,
+        bundleId,
+        metadata: path.key === undefined ? {} : { key: path.key },
+      });
+    }
     // A null-prototype record: a key named __proto__ is a key like any other.
     const values: Record<string, string> = Object.create(null);
-    for (const row of rows) {
-      const plaintext = await open(row.envelope, { ...environment, secretId: row.secretId }, ctx.keks);
-      values[row.key] = plaintext.toString('utf8');
+    for (const [i, row] of rows.entries()) {
+      values[row.key] = opened.values[i];
       log.push(allowed(ctx, 'secret.read', {
         ...environment,
         secretId: row.secretId,

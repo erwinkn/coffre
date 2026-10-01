@@ -84,3 +84,69 @@ export function assignableToEnvironment(role: Role): boolean {
     PROJECT_ONLY_PERMISSIONS.includes(permission),
   );
 }
+
+/** A place a permission applies to: a project, or one of its environments. */
+export type Place = { projectId: string; environmentId?: string | null };
+
+/**
+ * What someone holds: everything a permission check reads. The app builds
+ * it from what the vault says once per request; the vault builds it from
+ * its own store. Both then ask the same functions below, so the rules
+ * cannot drift apart.
+ */
+export type Holdings = {
+  /** Named in the vault's configuration: everything, everywhere. */
+  isRootAdmin: boolean;
+  /** Root admins and active users with the instance `owner` role. */
+  isOwner: boolean;
+  /** Live grants only. */
+  grants: readonly { projectId: string; environmentId: string | null; role: Role }[];
+};
+
+/**
+ * Whether `holder` may do `permission` at `place`.
+ *
+ *   on a project       its project grant; owners also manage every project
+ *   on an environment  its environment grant or its project's grant
+ *
+ * An environment grant never reaches up to the project: `developer` on
+ * `market/prod` does not let anyone rename `market`.
+ */
+export function allows(holder: Holdings, permission: Permission, place: Place): boolean {
+  if (holder.isRootAdmin) return true;
+  const environmentId = place.environmentId ?? null;
+  if (environmentId === null && holder.isOwner && PROJECT_ONLY_PERMISSIONS.includes(permission)) {
+    return true;
+  }
+  return holder.grants.some(
+    (grant) =>
+      grant.projectId === place.projectId &&
+      (grant.environmentId === null || grant.environmentId === environmentId) &&
+      roleGrants(grant.role, permission),
+  );
+}
+
+/** A sync reads as a principal of its own, `sync:<id>`. */
+export function isSyncPrincipal(principal: string): boolean {
+  return principal.startsWith('sync:');
+}
+
+/**
+ * Whether `actor` may set `subject`'s role at `place`, or take it away
+ * (`role` null). `grant.manage` on the project decides, with one addition:
+ * whoever may manage a project's environments may let a sync read an
+ * environment they can read themselves, and take that away again, since
+ * adding and removing syncs is theirs to do.
+ */
+export function mayManageAccess(
+  actor: Holdings,
+  subject: string,
+  change: Place & { role: Role | null },
+): boolean {
+  if (allows(actor, 'grant.manage', { projectId: change.projectId })) return true;
+  if (!isSyncPrincipal(subject) || !allows(actor, 'environment.manage', { projectId: change.projectId })) {
+    return false;
+  }
+  if (change.role === null) return true;
+  return change.role === 'viewer' && (change.environmentId ?? null) !== null && allows(actor, 'secret.read', change);
+}

@@ -64,6 +64,11 @@ const member = ({ principalType, principalId }) =>
 //
 // Syncs hold references to secrets, versions and environments, and sign-in
 // sessions, device logins and linked accounts to principals, so they go next.
+//
+// Grants, who is still a member, and the checkpoints of this log live in the
+// vault, not here. scripts/dev.sh starts the vault empty before it seeds;
+// seeding against a vault that remembers an older log would leave its
+// checkpoints behind a log that no longer exists.
 console.log('==> resetting local data');
 await pool.query('DELETE FROM audit_log');
 await pool.query('DELETE FROM sync_keys');
@@ -74,7 +79,6 @@ await pool.query('DELETE FROM identities');
 await pool.query('UPDATE secrets SET current_version_id = NULL');
 await pool.query('DELETE FROM secret_versions');
 await pool.query('DELETE FROM secrets');
-await pool.query('DELETE FROM grants');
 await pool.query('DELETE FROM principals');
 await pool.query('DELETE FROM environments');
 await pool.query('DELETE FROM projects');

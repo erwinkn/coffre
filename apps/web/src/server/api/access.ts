@@ -1,17 +1,14 @@
-import { randomUUID } from 'node:crypto';
-
 import { assignableToEnvironment, ROLES, type Role } from '../../../../../packages/core/src/access.ts';
-import type { AuditEntry } from '../../../../../packages/db/src/audit.ts';
-import { insert, lock, members, places, update } from '../../../../../packages/db/src/queries.ts';
-import { grants, principals } from '../../../../../packages/db/src/schema.ts';
-import { allowed, audited, denied, need, Refusal, type ApiContext } from './context.ts';
+import { places } from '../../../../../packages/db/src/queries.ts';
+import type { AccessChange } from '../../../../../packages/vault/src/types.ts';
+import { allowed, audited, denied, need, Refusal, vaultRefusal, type ApiContext } from './context.ts';
 import { badRequest, conflict, notFound } from './errors.ts';
-import { formatPath, parsePath, type MemberRef } from './paths.ts';
+import { formatGrantee, formatMember, formatPath, parsePath, type GranteeRef } from './paths.ts';
 
 /** A role, a role until a date, or `null` to take access away. */
 export type AccessValue = Role | { role: Role; until: string | null } | null;
 
-export type AccessChange = 'created' | 'updated' | 'revoked' | 'unchanged';
+export type { AccessChange };
 
 type Wanted = {
   path: string;
@@ -32,16 +29,20 @@ function parseUntil(until: string, now: Date): Date {
 /**
  * Set what one member holds, declaratively: each path names a project or an
  * environment, and says which role they should have there, or `null` for
- * none. Places left out are left alone. One transaction: all of it or none.
+ * none. Places left out are left alone. One vault call: all of it or none.
  *
  *   { "api": "developer", "api/prod": { "role": "viewer", "until": "2026-12-31" }, "web": null }
  *
  * Each place needs `grant.manage` on its project. A member holds at most one
- * role per place, so naming a new role replaces the old one.
+ * role per place, so naming a new role replaces the old one. A sync, as
+ * `sync:<id>`, holds grants the same way; taking its grant away stops it.
+ *
+ * The app checks first, to answer in its own words; the vault holds the
+ * grants and checks again, so a bug here cannot grant what the rules forbid.
  */
 export async function setAccess(
   ctx: ApiContext,
-  member: MemberRef,
+  grantee: GranteeRef,
   patch: Record<string, AccessValue>,
 ): Promise<{ changes: Record<string, AccessChange> }> {
   const now = new Date();
@@ -62,6 +63,7 @@ export async function setAccess(
   }
   if (wanted.length === 0) return { changes: {} };
 
+  const principal = formatGrantee(grantee);
   return audited(ctx, async (tx, log) => {
     const known = await places(tx);
     const located = wanted.map((want) => {
@@ -73,7 +75,7 @@ export async function setAccess(
       return { ...want, projectId: project.id, environmentId: environment.id };
     });
 
-    const subject = { principalType: member.type, principalId: member.id };
+    const subject = { principalType: grantee.type, principalId: grantee.id };
     const scoped = (want: (typeof located)[number]) => ({
       projectId: want.projectId,
       environmentId: want.environmentId,
@@ -85,8 +87,7 @@ export async function setAccess(
       });
     }
 
-    // Lock the member, so a removal racing this cannot leave a grant behind.
-    const [principal] = await lock(tx, principals, subject);
+    const standing = await ctx.vault.access(principal);
     const refuse = (want: (typeof located)[number], message: string, reason: string) =>
       new Refusal(
         conflict(message),
@@ -94,10 +95,11 @@ export async function setAccess(
       );
     for (const want of located) {
       if (want.role === null) continue;
-      if (principal === undefined) {
+      // A sync becomes a member with its first grant; anyone else is added first.
+      if (standing.status === 'unknown' && grantee.type !== 'sync') {
         throw refuse(want, 'add them as a member before granting access', 'principal_not_registered');
       }
-      if (!principal.active) {
+      if (standing.status === 'removed') {
         throw refuse(want, 'they were removed; add them as a member again before granting access', 'principal_inactive');
       }
       if (want.environmentId !== null && !assignableToEnvironment(want.role)) {
@@ -109,61 +111,38 @@ export async function setAccess(
       }
     }
 
-    // Expired grants too: granting a place again brings its row back.
-    const existing = principal === undefined ? [] : (await members(tx, { member }, now))[0].grants;
+    const result = await ctx.vault.setAccess({
+      actor: formatMember(ctx.caller.principal),
+      principal,
+      requestId: ctx.requestId,
+      changes: located.map((want) => ({
+        ...scoped(want),
+        role: want.role,
+        expiresAt: want.expiresAt?.toISOString() ?? null,
+      })),
+    });
+    if (!result.ok) {
+      const granting = located.some((want) => want.role !== null);
+      throw vaultRefusal(ctx, result.refusal, granting ? 'grant.create' : 'grant.revoke', { metadata: subject });
+    }
 
     const changes: Record<string, AccessChange> = {};
-    const createdBy = ctx.caller.principal.id;
-    for (const want of located) {
-      const row = existing.find((grant) =>
-        want.environmentId === null
-          ? grant.environmentId === null && grant.projectId === want.projectId
-          : grant.environmentId === want.environmentId,
+    for (const [i, want] of located.entries()) {
+      const change = result.changes[i];
+      changes[want.path] = change;
+      if (change === 'unchanged') continue;
+      const before = standing.grants.find(
+        (grant) => grant.projectId === want.projectId && grant.environmentId === want.environmentId,
       );
-      const isLive = row !== undefined && (row.expiresAt === null || row.expiresAt > now);
-      const expiresAt = want.expiresAt?.toISOString() ?? null;
-      const entry = (action: string, metadata: Record<string, unknown>): AuditEntry =>
-        allowed(ctx, action, { ...scoped(want), metadata: { ...subject, ...metadata } });
-
-      if (want.role === null) {
-        if (!isLive) {
-          changes[want.path] = 'unchanged';
-          continue;
-        }
-        await update(tx, grants, { id: row.id }, { expiresAt: now });
-        log.push(entry('grant.revoke', { grantId: row.id, role: row.role }));
-        changes[want.path] = 'revoked';
-        continue;
-      }
-
-      const grant = { role: want.role, roleName: ROLES[want.role].name, expiresAt };
-      if (row === undefined) {
-        const id = randomUUID();
-        await insert(tx, grants, {
-          id,
-          principalType: member.type,
-          principalId: member.id,
-          projectId: want.environmentId === null ? want.projectId : null,
-          environmentId: want.environmentId,
-          role: want.role,
-          expiresAt: want.expiresAt,
-          createdBy,
-        });
-        log.push(entry('grant.create', { grantId: id, ...grant }));
-        changes[want.path] = 'created';
-      } else if (isLive && row.role === want.role && row.expiresAt?.getTime() === want.expiresAt?.getTime()) {
-        changes[want.path] = 'unchanged';
-      } else if (isLive) {
-        await update(tx, grants, { id: row.id }, { role: want.role, expiresAt: want.expiresAt });
-        log.push(entry('grant.update', { grantId: row.id, from: row.role, ...grant }));
-        changes[want.path] = 'updated';
-      } else {
-        // An expired grant is the same place's row: bring it back as a new grant.
-        // The runtime role may not rewrite created_at; the log has when it came back.
-        await update(tx, grants, { id: row.id }, { role: want.role, expiresAt: want.expiresAt, createdBy });
-        log.push(entry('grant.create', { grantId: row.id, ...grant }));
-        changes[want.path] = 'created';
-      }
+      const action = { created: 'grant.create', updated: 'grant.update', revoked: 'grant.revoke' }[change];
+      const grant =
+        want.role === null
+          ? { role: before?.role ?? null }
+          : { role: want.role, roleName: ROLES[want.role].name, expiresAt: want.expiresAt?.toISOString() ?? null };
+      log.push(allowed(ctx, action, {
+        ...scoped(want),
+        metadata: { ...subject, ...(change === 'updated' ? { from: before?.role ?? null } : {}), ...grant },
+      }));
     }
     return { changes };
   });

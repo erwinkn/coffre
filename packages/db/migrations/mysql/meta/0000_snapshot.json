@@ -1,7 +1,7 @@
 {
   "version": "5",
   "dialect": "mysql",
-  "id": "a1f091d4-f8ed-450b-80af-5b85a4c188bb",
+  "id": "5f171859-8a54-4946-aa25-e56a8e240d49",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "audit_chain_head": {
@@ -58,71 +58,6 @@
         "audit_chain_head_head_hash_check": {
           "name": "audit_chain_head_head_hash_check",
           "value": "octet_length(`audit_chain_head`.`head_hash`) = 32"
-        }
-      }
-    },
-    "audit_checkpoints": {
-      "name": "audit_checkpoints",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "varchar(36)",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "seq": {
-          "name": "seq",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "head_hash": {
-          "name": "head_hash",
-          "type": "varbinary(32)",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "datetime(3)",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "(UTC_TIMESTAMP(3))"
-        },
-        "exported_at": {
-          "name": "exported_at",
-          "type": "datetime(3)",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "export_target": {
-          "name": "export_target",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {},
-      "compositePrimaryKeys": {
-        "audit_checkpoints_id": {
-          "name": "audit_checkpoints_id",
-          "columns": [
-            "id"
-          ]
-        }
-      },
-      "uniqueConstraints": {},
-      "checkConstraint": {
-        "audit_checkpoints_head_hash_check": {
-          "name": "audit_checkpoints_head_hash_check",
-          "value": "octet_length(`audit_checkpoints`.`head_hash`) = 32"
         }
       }
     },
@@ -826,170 +761,6 @@
         }
       }
     },
-    "grants": {
-      "name": "grants",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "varchar(36)",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "principal_type": {
-          "name": "principal_type",
-          "type": "varchar(16)",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "principal_id": {
-          "name": "principal_id",
-          "type": "varchar(330)",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "environment_id": {
-          "name": "environment_id",
-          "type": "varchar(36)",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "datetime(3)",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "(UTC_TIMESTAMP(3))"
-        },
-        "created_by": {
-          "name": "created_by",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "project_id": {
-          "name": "project_id",
-          "type": "varchar(36)",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "role": {
-          "name": "role",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "expires_at": {
-          "name": "expires_at",
-          "type": "datetime(3)",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        }
-      },
-      "indexes": {
-        "grants_lookup_idx": {
-          "name": "grants_lookup_idx",
-          "columns": [
-            "principal_type",
-            "principal_id",
-            "environment_id"
-          ],
-          "isUnique": false
-        },
-        "grants_environment_unique": {
-          "name": "grants_environment_unique",
-          "columns": [
-            "principal_type",
-            "principal_id",
-            "environment_id"
-          ],
-          "isUnique": true
-        },
-        "grants_project_unique": {
-          "name": "grants_project_unique",
-          "columns": [
-            "principal_type",
-            "principal_id",
-            "project_id"
-          ],
-          "isUnique": true
-        }
-      },
-      "foreignKeys": {
-        "grants_principal_fkey": {
-          "name": "grants_principal_fkey",
-          "tableFrom": "grants",
-          "tableTo": "principals",
-          "columnsFrom": [
-            "principal_type",
-            "principal_id"
-          ],
-          "columnsTo": [
-            "principal_type",
-            "principal_id"
-          ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
-        },
-        "grants_environment_id_fkey": {
-          "name": "grants_environment_id_fkey",
-          "tableFrom": "grants",
-          "tableTo": "environments",
-          "columnsFrom": [
-            "environment_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
-        },
-        "grants_project_id_fkey": {
-          "name": "grants_project_id_fkey",
-          "tableFrom": "grants",
-          "tableTo": "projects",
-          "columnsFrom": [
-            "project_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {
-        "grants_id": {
-          "name": "grants_id",
-          "columns": [
-            "id"
-          ]
-        }
-      },
-      "uniqueConstraints": {},
-      "checkConstraint": {
-        "grants_principal_type_check": {
-          "name": "grants_principal_type_check",
-          "value": "`grants`.`principal_type` IN ('user', 'service')"
-        },
-        "grants_exactly_one_scope": {
-          "name": "grants_exactly_one_scope",
-          "value": "(`grants`.`project_id` IS NULL) <> (`grants`.`environment_id` IS NULL)"
-        },
-        "grants_role_check": {
-          "name": "grants_role_check",
-          "value": "`grants`.`role` IN ('viewer', 'developer', 'maintainer', 'access-manager', 'auditor', 'owner')"
-        }
-      }
-    },
     "identities": {
       "name": "identities",
       "columns": {
@@ -1155,14 +926,6 @@
           "notNull": true,
           "autoincrement": false
         },
-        "instance_role": {
-          "name": "instance_role",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "('user')"
-        },
         "created_at": {
           "name": "created_at",
           "type": "datetime(3)",
@@ -1177,14 +940,6 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
-        },
-        "active": {
-          "name": "active",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": true
         }
       },
       "indexes": {},
@@ -1203,14 +958,6 @@
         "principals_principal_type_check": {
           "name": "principals_principal_type_check",
           "value": "`principals`.`principal_type` IN ('user', 'service')"
-        },
-        "principals_instance_role_check": {
-          "name": "principals_instance_role_check",
-          "value": "`principals`.`instance_role` IN ('user', 'owner')"
-        },
-        "principals_service_role_check": {
-          "name": "principals_service_role_check",
-          "value": "`principals`.`principal_type` = 'user' OR `principals`.`instance_role` = 'user'"
         },
         "principals_user_id_lowercase": {
           "name": "principals_user_id_lowercase",

@@ -16,17 +16,6 @@ CREATE TABLE `audit_chain_head` (
 	CONSTRAINT `audit_chain_head_head_hash_check` CHECK(octet_length(`audit_chain_head`.`head_hash`) = 32)
 );
 --> statement-breakpoint
-CREATE TABLE `audit_checkpoints` (
-	`id` varchar(36) NOT NULL,
-	`seq` bigint NOT NULL,
-	`head_hash` varbinary(32) NOT NULL,
-	`created_at` datetime(3) NOT NULL DEFAULT (UTC_TIMESTAMP(3)),
-	`exported_at` datetime(3),
-	`export_target` text,
-	CONSTRAINT `audit_checkpoints_id` PRIMARY KEY(`id`),
-	CONSTRAINT `audit_checkpoints_head_hash_check` CHECK(octet_length(`audit_checkpoints`.`head_hash`) = 32)
-);
---> statement-breakpoint
 CREATE TABLE `audit_heartbeat` (
 	`only_row` boolean NOT NULL DEFAULT true,
 	`last_beat_at` datetime(3) NOT NULL DEFAULT (UTC_TIMESTAMP(3)),
@@ -117,24 +106,6 @@ CREATE TABLE `environments` (
 	CONSTRAINT `environments_slug_check` CHECK(regexp_like(`environments`.`slug`, '^[a-z0-9][a-z0-9-]{0,62}$', 'c'))
 );
 --> statement-breakpoint
-CREATE TABLE `grants` (
-	`id` varchar(36) NOT NULL,
-	`principal_type` varchar(16) NOT NULL,
-	`principal_id` varchar(330) NOT NULL,
-	`environment_id` varchar(36),
-	`created_at` datetime(3) NOT NULL DEFAULT (UTC_TIMESTAMP(3)),
-	`created_by` text NOT NULL,
-	`project_id` varchar(36),
-	`role` text NOT NULL,
-	`expires_at` datetime(3),
-	CONSTRAINT `grants_id` PRIMARY KEY(`id`),
-	CONSTRAINT `grants_environment_unique` UNIQUE(`principal_type`,`principal_id`,`environment_id`),
-	CONSTRAINT `grants_project_unique` UNIQUE(`principal_type`,`principal_id`,`project_id`),
-	CONSTRAINT `grants_principal_type_check` CHECK(`grants`.`principal_type` IN ('user', 'service')),
-	CONSTRAINT `grants_exactly_one_scope` CHECK((`grants`.`project_id` IS NULL) <> (`grants`.`environment_id` IS NULL)),
-	CONSTRAINT `grants_role_check` CHECK(`grants`.`role` IN ('viewer', 'developer', 'maintainer', 'access-manager', 'auditor', 'owner'))
-);
---> statement-breakpoint
 CREATE TABLE `identities` (
 	`id` varchar(36) NOT NULL,
 	`provider` varchar(32) NOT NULL,
@@ -157,14 +128,10 @@ CREATE TABLE `identities` (
 CREATE TABLE `principals` (
 	`principal_type` varchar(16) NOT NULL,
 	`principal_id` varchar(330) NOT NULL,
-	`instance_role` text NOT NULL DEFAULT ('user'),
 	`created_at` datetime(3) NOT NULL DEFAULT (UTC_TIMESTAMP(3)),
 	`created_by` text NOT NULL,
-	`active` boolean NOT NULL DEFAULT true,
 	CONSTRAINT `principals_pkey` PRIMARY KEY(`principal_type`,`principal_id`),
 	CONSTRAINT `principals_principal_type_check` CHECK(`principals`.`principal_type` IN ('user', 'service')),
-	CONSTRAINT `principals_instance_role_check` CHECK(`principals`.`instance_role` IN ('user', 'owner')),
-	CONSTRAINT `principals_service_role_check` CHECK(`principals`.`principal_type` = 'user' OR `principals`.`instance_role` = 'user'),
 	CONSTRAINT `principals_user_id_lowercase` CHECK(`principals`.`principal_type` <> 'user' OR `principals`.`principal_id` = lower(`principals`.`principal_id`))
 );
 --> statement-breakpoint
@@ -251,9 +218,6 @@ ALTER TABLE `credentials` ADD CONSTRAINT `credentials_principal_fkey` FOREIGN KE
 ALTER TABLE `credentials` ADD CONSTRAINT `credentials_identity_id_fkey` FOREIGN KEY (`identity_id`) REFERENCES `identities`(`id`) ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE `device_authorizations` ADD CONSTRAINT `device_authorizations_principal_fkey` FOREIGN KEY (`principal_type`,`principal_id`) REFERENCES `principals`(`principal_type`,`principal_id`) ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE `environments` ADD CONSTRAINT `environments_project_id_fkey` FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE `grants` ADD CONSTRAINT `grants_principal_fkey` FOREIGN KEY (`principal_type`,`principal_id`) REFERENCES `principals`(`principal_type`,`principal_id`) ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE `grants` ADD CONSTRAINT `grants_environment_id_fkey` FOREIGN KEY (`environment_id`) REFERENCES `environments`(`id`) ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE `grants` ADD CONSTRAINT `grants_project_id_fkey` FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE `identities` ADD CONSTRAINT `identities_principal_fkey` FOREIGN KEY (`principal_type`,`principal_id`) REFERENCES `principals`(`principal_type`,`principal_id`) ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE `secret_versions` ADD CONSTRAINT `secret_versions_secret_id_fkey` FOREIGN KEY (`secret_id`) REFERENCES `secrets`(`id`) ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE `secrets` ADD CONSTRAINT `secrets_current_version_id_secret_versions_id_fk` FOREIGN KEY (`current_version_id`) REFERENCES `secret_versions`(`id`) ON DELETE no action ON UPDATE no action;--> statement-breakpoint
@@ -270,7 +234,6 @@ CREATE INDEX `audit_log_secret_idx` ON `audit_log` (`secret_id`,`occurred_at`);-
 CREATE INDEX `audit_log_environment_idx` ON `audit_log` (`environment_id`,`occurred_at`);--> statement-breakpoint
 CREATE INDEX `audit_log_bundle_idx` ON `audit_log` (`bundle_id`);--> statement-breakpoint
 CREATE INDEX `credentials_principal_idx` ON `credentials` (`principal_type`,`principal_id`);--> statement-breakpoint
-CREATE INDEX `grants_lookup_idx` ON `grants` (`principal_type`,`principal_id`,`environment_id`);--> statement-breakpoint
 CREATE INDEX `identities_principal_idx` ON `identities` (`principal_type`,`principal_id`);--> statement-breakpoint
 CREATE INDEX `secret_versions_secret_idx` ON `secret_versions` (`secret_id`,`version`);--> statement-breakpoint
 CREATE INDEX `secrets_lookup_idx` ON `secrets` (`project_id`,`environment_id`,`key`);--> statement-breakpoint

@@ -1,8 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import type { Permission } from '../../../../../packages/core/src/access.ts';
-import { open } from '../../../../../packages/core/src/envelope.ts';
-import type { KekRegistry } from '../../../../../packages/core/src/kek/registry.ts';
+import { mayManageAccess, type Permission } from '../../../../../packages/core/src/access.ts';
 import type { AuditEntry } from '../../../../../packages/db/src/audit.ts';
 import type { Database, Queryable, Transaction } from '../../../../../packages/db/src/database.ts';
 import {
@@ -22,10 +20,12 @@ import {
   type SyncApplyResult,
   type SyncProvider,
 } from '../../../../../packages/sync/src/index.ts';
+import type { GrantChange, Vault } from '../../../../../packages/vault/src/types.ts';
 import { can } from './caller.ts';
-import { allowed, audited, denied, missing, Refusal, type ApiContext } from './context.ts';
+import { allowed, audited, denied, missing, Refusal, vaultRefusal, type ApiContext } from './context.ts';
 import { badRequest, conflict, forbidden, notFound } from './errors.ts';
-import { formatPath, parsePath } from './paths.ts';
+import { openValues } from './keys.ts';
+import { formatMember, formatPath, parsePath } from './paths.ts';
 import { currentEnvelopes } from './secrets.ts';
 
 /**
@@ -49,6 +49,12 @@ import { currentEnvelopes } from './secrets.ts';
  * Only the keys that changed are decrypted, and each one gets a `sync.push`
  * audit row before its value leaves. Deletion only ever touches keys coffre
  * itself pushed; whatever else lives at the destination is left alone.
+ *
+ * A sync reads as a principal of its own, `sync:<id>`, which the vault
+ * grants `viewer` on the source environment, and on the credential's when
+ * that is elsewhere, as the sync is added. Every value a run opens goes
+ * through the vault in that name, so revoking the grant stops the sync, and
+ * archiving the sync removes the principal.
  *
  * Runs are triggered three ways: right after a secret in the environment
  * changes, by someone pressing "Run now", and by the scheduler, which picks up
@@ -102,7 +108,7 @@ export type RunOutcome =
 
 export type SyncDeps = {
   db: Database;
-  keks: KekRegistry;
+  vault: Vault;
   chainKey: Buffer;
   /** Injected by tests; defaults to the built-in providers. */
   resolveProvider?: (kind: string) => SyncProvider<unknown> | null;
@@ -195,6 +201,9 @@ function serves(row: SyncRow): boolean {
   return row.archivedAt === null && row.environmentArchivedAt === null && row.projectArchivedAt === null;
 }
 
+/** The principal a sync reads as. */
+export const syncPrincipal = (syncId: string) => `sync:${syncId}`;
+
 const credentialPath = (row: SyncRow) => `${row.credential.project}/${row.credential.environment}/${row.credential.key}`;
 
 // --- runner -------------------------------------------------------------------
@@ -203,7 +212,7 @@ type Actor = Pick<AuditEntry, 'actorType' | 'actorId' | 'requestId' | 'sourceIp'
 
 /** Runs nobody pressed a button for are the sync's own doing. */
 function systemActor(syncId: string): Actor {
-  return { actorType: 'system', actorId: `sync:${syncId}` };
+  return { actorType: 'system', actorId: syncPrincipal(syncId) };
 }
 
 /**
@@ -390,7 +399,18 @@ export class SyncRunner {
     const scope = { projectId: sync.projectId, environmentId: sync.environmentId };
     const sourcePath = `${sync.project}/${sync.environment}`;
     const runId = randomUUID();
-    const { db, chainKey, keks } = this.#deps;
+    const { db, chainKey, vault } = this.#deps;
+    const asking = { principal: syncPrincipal(syncId), requestId: actor.requestId ?? null, purpose: 'sync' as const };
+    /** The vault said no: log it here too, and fail the run with its reason. */
+    const refused = (refusal: { code: string; message: string }, place: object) =>
+      new Refusal(new SyncFailure(`the vault refused: ${refusal.message}`), {
+        ...actor,
+        action: 'sync.run',
+        decision: 'deny',
+        ...place,
+        bundleId: runId,
+        metadata: { syncId, source: sourcePath, trigger, reason: `vault_${refusal.code}` },
+      });
 
     let outcome: Exclude<RunOutcome, { status: 'busy' }> = {
       status: 'failed',
@@ -417,11 +437,12 @@ export class SyncRunner {
         if (credential === undefined) {
           throw new SyncFailure(`${credentialPath(sync)} is archived; restore it or point this sync at another secret`);
         }
-        const value = await open(
-          credential.envelope,
-          { projectId: sync.credential.projectId, environmentId: sync.credential.environmentId, secretId: credential.secretId },
-          keks,
-        );
+        const where = { projectId: sync.credential.projectId, environmentId: sync.credential.environmentId };
+        const opened = await openValues(vault, asking, [{
+          secret: { ...where, secretId: credential.secretId, version: credential.version, path: credentialPath(sync) },
+          envelope: credential.envelope,
+        }]);
+        if (!opened.ok) throw refused(opened.refusal, where);
         log.push({
           ...actor,
           action: 'sync.run',
@@ -433,7 +454,7 @@ export class SyncRunner {
           bundleId: runId,
           metadata: { syncId, source: sourcePath, provider: provider.kind, destination, trigger, version: credential.version },
         });
-        return value.toString('utf8');
+        return opened.values[0];
       });
       const ctx = { token, fetch: this.#deps.fetch, signal };
 
@@ -457,10 +478,15 @@ export class SyncRunner {
         const upsert: { key: string; value: string }[] = [];
         const common = { ...actor, decision: 'allow' as const, ...scope, bundleId: runId };
         const byVersion = new Map(current.map((entry) => [entry.secretVersionId, entry]));
-        for (const entry of ids.upsert) {
-          const row = byVersion.get(entry.versionId)!;
-          const value = await open(row.envelope, { ...scope, secretId: entry.secretId }, keks);
-          upsert.push({ key: entry.key, value: value.toString('utf8') });
+        const rows = ids.upsert.map((entry) => byVersion.get(entry.versionId)!);
+        const opened = await openValues(vault, asking, rows.map((row) => ({
+          secret: { ...scope, secretId: row.secretId, version: row.version, path: `${sourcePath}/${row.key}` },
+          envelope: row.envelope,
+        })));
+        if (!opened.ok) throw refused(opened.refusal, scope);
+        for (const [i, entry] of ids.upsert.entries()) {
+          const row = rows[i];
+          upsert.push({ key: entry.key, value: opened.values[i] });
           pushedVersions.set(entry.key, entry.versionId);
           log.push({
             ...common,
@@ -632,6 +658,16 @@ export async function createSync(
     }
 
     const id = randomUUID();
+    // The sync reads its source, and its credential where that lives elsewhere.
+    const reads: GrantChange[] = [place, ...(credentialPlace!.environmentId === place.environmentId ? [] : [credentialPlace!])]
+      .map((where) => ({ ...where, role: 'viewer', expiresAt: null }));
+    const principal = syncPrincipal(id);
+    if (!reads.every((change) => mayManageAccess(ctx.caller, principal, change))) {
+      throw new Refusal(
+        forbidden(`a sync reading ${metadata.credential} needs you to manage that project's environments`),
+        denied(ctx, 'sync.create', 'cannot_grant_sync', { ...place, metadata }),
+      );
+    }
     await insert(tx, syncs, {
       id,
       ...place,
@@ -640,6 +676,14 @@ export async function createSync(
       credentialSecretId: credential!.secret.id,
       createdBy: ctx.caller.principal.id,
     });
+    // Last, so nothing the app checks can fail after the vault has granted.
+    const granted = await ctx.vault.setAccess({
+      actor: formatMember(ctx.caller.principal),
+      principal,
+      requestId: ctx.requestId,
+      changes: reads,
+    });
+    if (!granted.ok) throw vaultRefusal(ctx, granted.refusal, 'sync.create', { ...place, metadata });
     log.push(allowed(ctx, 'sync.create', { ...place, metadata: { ...metadata, syncId: id } }));
     return id;
   });
@@ -658,6 +702,8 @@ async function manage(
   action: string,
   anyOf: readonly Permission[],
   change: ((row: SyncRow) => Partial<typeof syncs.$inferInsert>) | null,
+  /** Runs in the same transaction, after the checks; a refusal rolls the change back. */
+  also?: (row: SyncRow) => Promise<void>,
 ): Promise<void> {
   await audited(ctx, async (tx, log) => {
     const row = await lockSync(tx, syncId);
@@ -670,6 +716,7 @@ async function manage(
     }
     if (change === null) return;
     await update(tx, syncs, { id: syncId }, change(row));
+    await also?.(row);
     log.push(allowed(ctx, action, { ...scope, metadata: { syncId, provider: row.provider } }));
   });
 }
@@ -685,12 +732,28 @@ export async function setSyncPaused(ctx: ApiContext, syncId: string, paused: boo
 }
 
 /**
- * Stop syncing for good. What was pushed stays at the destination: removing
- * a service's configuration is a decision for whoever runs that service,
- * not a side effect of tidying up coffre.
+ * Stop syncing for good, and remove its principal from the vault, which
+ * takes back what it could read. What was pushed stays at the destination:
+ * removing a service's configuration is a decision for whoever runs that
+ * service, not a side effect of tidying up coffre.
  */
 export async function archiveSync(ctx: ApiContext, syncId: string): Promise<SyncView> {
-  await manage(ctx, syncId, 'sync.archive', ['environment.manage'], () => ({ archivedAt: new Date() }));
+  await manage(ctx, syncId, 'sync.archive', ['environment.manage'], () => ({ archivedAt: new Date() }), async (row) => {
+    const removed = await ctx.vault.remove({
+      actor: formatMember(ctx.caller.principal),
+      principal: syncPrincipal(syncId),
+      requestId: ctx.requestId,
+      source: { projectId: row.projectId, environmentId: row.environmentId },
+    });
+    // One whose grants were all revoked already reads nothing, and may be gone.
+    if (!removed.ok && removed.refusal.code !== 'removed' && removed.refusal.code !== 'not_a_member') {
+      throw vaultRefusal(ctx, removed.refusal, 'sync.archive', {
+        projectId: row.projectId,
+        environmentId: row.environmentId,
+        metadata: { syncId },
+      });
+    }
+  });
   return ctx.syncs.view(syncId);
 }
 

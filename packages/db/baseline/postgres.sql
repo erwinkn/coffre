@@ -84,7 +84,6 @@ GRANT SELECT, INSERT ON
     secrets,
     secret_versions,
     principals,
-    grants,
     audit_log,
     identities,
     credentials,
@@ -96,7 +95,6 @@ TO coffre_app;
 
 GRANT SELECT ON
     audit_chain_head,
-    audit_checkpoints,
     audit_heartbeat
 TO coffre_app;
 --> statement-breakpoint
@@ -107,9 +105,9 @@ GRANT UPDATE (slug, name, archived_at) ON environments TO coffre_app;
 --> statement-breakpoint
 GRANT UPDATE (key, current_version_id, current_version, updated_at, archived_at) ON secrets TO coffre_app;
 --> statement-breakpoint
-GRANT UPDATE (instance_role, active, created_at, created_by) ON principals TO coffre_app;
---> statement-breakpoint
-GRANT UPDATE (role, expires_at, created_by) ON grants TO coffre_app;
+-- Never changed, but SELECT ... FOR UPDATE needs UPDATE on some column, and
+-- sign-in and removal lock the directory row while they ask the vault.
+GRANT UPDATE (created_by) ON principals TO coffre_app;
 --> statement-breakpoint
 GRANT UPDATE (next_seq, head_hash, updated_at) ON audit_chain_head TO coffre_app;
 --> statement-breakpoint

@@ -72,15 +72,23 @@ after(async () => {
 beforeEach(async () => {
   await resetDatabase(db.owner);
   deps = testDeps(db.runtime, [ROOT]);
-  signin = new SigninService({ db: deps.db, chainKey: deps.chainKey, rootAdmins: [ROOT], signin: CONFIG });
+  signin = new SigninService({ db: deps.db, chainKey: deps.chainKey, vault: deps.vault, signin: CONFIG });
   deps.signin = signin;
-  await db.owner.insert(principals).values([
-    { principalType: 'user', principalId: LEAD, instanceRole: 'owner', createdBy: ROOT, active: true },
-    { principalType: 'user', principalId: DEV, instanceRole: 'user', createdBy: ROOT, active: true },
-    { principalType: 'user', principalId: GONE, instanceRole: 'user', createdBy: ROOT, active: false },
-    { principalType: 'service', principalId: SERVICE, instanceRole: 'user', createdBy: ROOT, active: true },
-    { principalType: 'service', principalId: RETIRED, instanceRole: 'user', createdBy: ROOT, active: false },
-  ]);
+  await db.owner.insert(principals).values(
+    [
+      ['user', LEAD],
+      ['user', DEV],
+      ['user', GONE],
+      ['service', SERVICE],
+      ['service', RETIRED],
+    ].map(([principalType, principalId]) => ({ principalType, principalId, createdBy: ROOT })),
+  );
+  // Who is in is the vault's to say.
+  for (const id of [LEAD, DEV, GONE, SERVICE, RETIRED]) {
+    assert.equal((await deps.vault.admit({ actor: `user:${ROOT}`, principal: member(id), owner: id === LEAD })).ok, true);
+  }
+  await deactivate(GONE);
+  await deactivate(RETIRED);
   [root, lead, dev] = await Promise.all([as(ROOT), as(LEAD), as(DEV)]);
 });
 
@@ -120,8 +128,16 @@ async function countRows(table: PgTable, where?: SQL): Promise<number> {
   return row.n;
 }
 
+/** `user:dev@acme.example`, or `token:ci-deploy`: people have an @. */
+function member(id: string): string {
+  return id.includes('@') ? `user:${id}` : `token:${id}`;
+}
+
+/** Remove someone in the vault, or admit them again: the only switch there is. */
 async function deactivate(id: string, active = false): Promise<void> {
-  await db.owner.update(principals).set({ active }).where(eq(principals.principalId, id));
+  const change = { actor: `user:${ROOT}`, principal: member(id) };
+  const result = active ? await deps.vault.admit(change) : await deps.vault.remove(change);
+  assert.equal(result.ok, true);
 }
 
 async function identityEmail(): Promise<string | null> {
@@ -338,7 +354,10 @@ test('deactivated people are refused, bound or not, and their sessions stop', as
     await signin.completeSignin(profile('github', '101', [DEV]), meta()),
     { ok: false, reason: 'deactivated' },
   );
-  await assert.rejects(signin.verify(session.credential.token), /unknown, expired or revoked/);
+  // The session still verifies, but every request asks the vault who its
+  // caller is, and a removed member is nobody.
+  assert.equal((await signin.verify(session.credential.token)).id, DEV);
+  assert.equal((await as(DEV)).caller.registered, false);
 
   const rows = await auditRows();
   assert.deepEqual(rows.map((row) => [row.action, row.decision, row.actorId, row.metadata.reason]), [
@@ -350,22 +369,20 @@ test('deactivated people are refused, bound or not, and their sessions stop', as
   assert.equal(await countRows(identities, eq(identities.principalId, GONE)), 0);
 });
 
-test('a root admin needs no invitation, and a deactivated row does not lock them out', async () => {
+test('a root admin needs no invitation, and nobody can remove them', async () => {
   const first = await signedIn(profile('google', 'g-root', [ROOT]));
   assert.deepEqual(first.principal, { type: 'user', id: ROOT });
-  const rootRow = () =>
-    db.owner
-      .select({ instanceRole: principals.instanceRole, createdBy: principals.createdBy, active: principals.active })
-      .from(principals)
-      .where(eq(principals.principalId, ROOT))
-      .then(([row]) => row);
-  assert.deepEqual(await rootRow(), { instanceRole: 'user', createdBy: 'system:signin', active: true });
+  const [row] = await db.owner
+    .select({ createdBy: principals.createdBy })
+    .from(principals)
+    .where(eq(principals.principalId, ROOT));
+  assert.deepEqual(row, { createdBy: 'system:signin' });
   assert.equal((await signin.verify(first.credential.token)).id, ROOT);
 
-  await deactivate(ROOT);
+  const removed = await deps.vault.remove({ actor: `user:${ROOT}`, principal: member(ROOT) });
+  assert.equal(removed.ok || removed.refusal.code, 'root_admin');
   const again = await signedIn(profile('google', 'g-root', [ROOT]));
   assert.equal((await signin.verify(again.credential.token)).id, ROOT);
-  assert.equal((await rootRow()).active, true);
 });
 
 // --- verifying, signing out, revoking -------------------------------------------
@@ -721,9 +738,10 @@ test('only owners issue service tokens, for active services, for 1 to 366 whole 
 test('a service token stops working when the service is deactivated, revoked or expired', async () => {
   const deactivated = await signin.issueServiceToken(lead, SERVICE, { label: null, expiresInDays: 1 });
   await deactivate(SERVICE);
-  await assert.rejects(signin.verify(deactivated.token), /unknown, expired or revoked/);
+  assert.equal((await as(SERVICE, 'service')).caller.registered, false);
   await deactivate(SERVICE, true);
   assert.equal((await signin.verify(deactivated.token)).id, SERVICE);
+  assert.equal((await as(SERVICE, 'service')).caller.registered, true);
 
   await db.owner.update(credentials).set({ expiresAt: aSecondAgo() });
   await assert.rejects(signin.verify(deactivated.token), /unknown, expired or revoked/);
@@ -961,7 +979,7 @@ test('pending sign-ins survive the round trip sealed, and only for this instance
   const other = new SigninService({
     db: deps.db,
     chainKey: randomBytes(32),
-    rootAdmins: [ROOT],
+    vault: deps.vault,
     signin: CONFIG,
   });
   assert.equal(other.openPending(sealed.value), null);

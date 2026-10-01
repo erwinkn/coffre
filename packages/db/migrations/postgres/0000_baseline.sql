@@ -10,16 +10,6 @@ CREATE TABLE "audit_chain_head" (
 	CONSTRAINT "audit_chain_head_head_hash_check" CHECK (octet_length("audit_chain_head"."head_hash") = 32)
 );
 --> statement-breakpoint
-CREATE TABLE "audit_checkpoints" (
-	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
-	"seq" bigint NOT NULL,
-	"head_hash" "bytea" NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"exported_at" timestamp with time zone,
-	"export_target" text,
-	CONSTRAINT "audit_checkpoints_head_hash_check" CHECK (octet_length("audit_checkpoints"."head_hash") = 32)
-);
---> statement-breakpoint
 CREATE TABLE "audit_heartbeat" (
 	"only_row" boolean PRIMARY KEY DEFAULT true NOT NULL,
 	"last_beat_at" timestamp with time zone DEFAULT now() NOT NULL,
@@ -105,21 +95,6 @@ CREATE TABLE "environments" (
 	CONSTRAINT "environments_slug_check" CHECK ("environments"."slug" ~ '^[a-z0-9][a-z0-9-]{0,62}$')
 );
 --> statement-breakpoint
-CREATE TABLE "grants" (
-	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
-	"principal_type" text NOT NULL,
-	"principal_id" text NOT NULL,
-	"environment_id" uuid,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"created_by" text NOT NULL,
-	"project_id" uuid,
-	"role" text NOT NULL,
-	"expires_at" timestamp with time zone,
-	CONSTRAINT "grants_principal_type_check" CHECK ("grants"."principal_type" IN ('user', 'service')),
-	CONSTRAINT "grants_exactly_one_scope" CHECK (("grants"."project_id" IS NULL) <> ("grants"."environment_id" IS NULL)),
-	CONSTRAINT "grants_role_check" CHECK ("grants"."role" IN ('viewer', 'developer', 'maintainer', 'access-manager', 'auditor', 'owner'))
-);
---> statement-breakpoint
 CREATE TABLE "identities" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"provider" text NOT NULL,
@@ -140,14 +115,10 @@ CREATE TABLE "identities" (
 CREATE TABLE "principals" (
 	"principal_type" text NOT NULL,
 	"principal_id" text NOT NULL,
-	"instance_role" text DEFAULT 'user' NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"created_by" text NOT NULL,
-	"active" boolean DEFAULT true NOT NULL,
 	CONSTRAINT "principals_pkey" PRIMARY KEY("principal_type","principal_id"),
 	CONSTRAINT "principals_principal_type_check" CHECK ("principals"."principal_type" IN ('user', 'service')),
-	CONSTRAINT "principals_instance_role_check" CHECK ("principals"."instance_role" IN ('user', 'owner')),
-	CONSTRAINT "principals_service_role_check" CHECK ("principals"."principal_type" = 'user' OR "principals"."instance_role" = 'user'),
 	CONSTRAINT "principals_user_id_lowercase" CHECK ("principals"."principal_type" <> 'user' OR "principals"."principal_id" = lower("principals"."principal_id"))
 );
 --> statement-breakpoint
@@ -230,9 +201,6 @@ ALTER TABLE "credentials" ADD CONSTRAINT "credentials_principal_fkey" FOREIGN KE
 ALTER TABLE "credentials" ADD CONSTRAINT "credentials_identity_id_fkey" FOREIGN KEY ("identity_id") REFERENCES "public"."identities"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "device_authorizations" ADD CONSTRAINT "device_authorizations_principal_fkey" FOREIGN KEY ("principal_type","principal_id") REFERENCES "public"."principals"("principal_type","principal_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "environments" ADD CONSTRAINT "environments_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "grants" ADD CONSTRAINT "grants_principal_fkey" FOREIGN KEY ("principal_type","principal_id") REFERENCES "public"."principals"("principal_type","principal_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "grants" ADD CONSTRAINT "grants_environment_id_fkey" FOREIGN KEY ("environment_id") REFERENCES "public"."environments"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "grants" ADD CONSTRAINT "grants_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "identities" ADD CONSTRAINT "identities_principal_fkey" FOREIGN KEY ("principal_type","principal_id") REFERENCES "public"."principals"("principal_type","principal_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "secret_versions" ADD CONSTRAINT "secret_versions_secret_id_fkey" FOREIGN KEY ("secret_id") REFERENCES "public"."secrets"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "secrets" ADD CONSTRAINT "secrets_current_version_id_secret_versions_id_fk" FOREIGN KEY ("current_version_id") REFERENCES "public"."secret_versions"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
@@ -249,9 +217,6 @@ CREATE INDEX "audit_log_secret_idx" ON "audit_log" USING btree ("secret_id","occ
 CREATE INDEX "audit_log_environment_idx" ON "audit_log" USING btree ("environment_id","occurred_at" DESC NULLS LAST);--> statement-breakpoint
 CREATE INDEX "audit_log_bundle_idx" ON "audit_log" USING btree ("bundle_id");--> statement-breakpoint
 CREATE INDEX "credentials_principal_idx" ON "credentials" USING btree ("principal_type","principal_id");--> statement-breakpoint
-CREATE INDEX "grants_lookup_idx" ON "grants" USING btree ("principal_type","principal_id","environment_id");--> statement-breakpoint
-CREATE UNIQUE INDEX "grants_environment_unique" ON "grants" USING btree ("principal_type","principal_id","environment_id");--> statement-breakpoint
-CREATE UNIQUE INDEX "grants_project_unique" ON "grants" USING btree ("principal_type","principal_id","project_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "identities_active_subject" ON "identities" USING btree ("provider","active_subject");--> statement-breakpoint
 CREATE INDEX "identities_principal_idx" ON "identities" USING btree ("principal_type","principal_id");--> statement-breakpoint
 CREATE INDEX "secret_versions_secret_idx" ON "secret_versions" USING btree ("secret_id","version" DESC NULLS LAST);--> statement-breakpoint
@@ -339,7 +304,6 @@ GRANT SELECT, INSERT ON
     secrets,
     secret_versions,
     principals,
-    grants,
     audit_log,
     identities,
     credentials,
@@ -351,7 +315,6 @@ TO coffre_app;
 
 GRANT SELECT ON
     audit_chain_head,
-    audit_checkpoints,
     audit_heartbeat
 TO coffre_app;
 --> statement-breakpoint
@@ -362,9 +325,9 @@ GRANT UPDATE (slug, name, archived_at) ON environments TO coffre_app;
 --> statement-breakpoint
 GRANT UPDATE (key, current_version_id, current_version, updated_at, archived_at) ON secrets TO coffre_app;
 --> statement-breakpoint
-GRANT UPDATE (instance_role, active, created_at, created_by) ON principals TO coffre_app;
---> statement-breakpoint
-GRANT UPDATE (role, expires_at, created_by) ON grants TO coffre_app;
+-- Never changed, but SELECT ... FOR UPDATE needs UPDATE on some column, and
+-- sign-in and removal lock the directory row while they ask the vault.
+GRANT UPDATE (created_by) ON principals TO coffre_app;
 --> statement-breakpoint
 GRANT UPDATE (next_seq, head_hash, updated_at) ON audit_chain_head TO coffre_app;
 --> statement-breakpoint

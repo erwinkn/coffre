@@ -5,7 +5,7 @@ import { and, asc, count, eq } from 'drizzle-orm';
 
 import { planImport, type CoffreClient } from '../../../packages/client/src/index.ts';
 import { parseDotenv } from '../../../packages/core/src/dotenv.ts';
-import { auditLog, grants, secrets, secretVersions } from '../../../packages/db/test/tables.ts';
+import { auditLog, secrets, secretVersions } from '../../../packages/db/test/tables.ts';
 import { serveApi } from '../src/server/api/router.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
@@ -278,7 +278,7 @@ test('the audit chain verifies across history, restore, and import', async () =>
 });
 
 test('creating a project does not grant its creator access to secrets', async () => {
-  assert.equal((await db.owner.select().from(grants).where(eq(grants.principalId, ROOT))).length, 0);
+  assert.deepEqual((await deps.vault.access(`user:${ROOT}`)).grants, []);
   assert.deepEqual((await root.members.list('market')).members.map((entry) => entry.member), [`user:${READER}`]);
 });
 

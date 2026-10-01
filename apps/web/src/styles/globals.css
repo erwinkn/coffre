@@ -2714,6 +2714,37 @@ a.env-card-name:hover {
   font-size: 0.75rem;
 }
 
+/* A section title with its status on the same line. */
+.section-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.25rem 0.75rem;
+  margin: 2rem 0 0.75rem;
+}
+
+.section-head .section-title {
+  margin: 0;
+}
+
+.vault-verdict {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  color: var(--ink-3);
+  font-size: 0.75rem;
+}
+
+.vault-verdict svg {
+  color: var(--green);
+  align-self: center;
+}
+
+.vault-verdict-bad,
+.vault-verdict-bad svg {
+  color: var(--red);
+}
+
 .audit td {
   height: 2.25rem;
   padding-top: 0.25rem;

@@ -27,7 +27,7 @@ test('/me projects only browser-safe principal fields', async () => {
   // The verified identity, with everything its provider said, loaded as a request loads it.
   const deps = testDeps(db.runtime, [principal.id]);
   const ctx = await contextFor(deps, principal.id);
-  ctx.caller = await loadCaller(db.runtime, principal, deps.rootAdmins);
+  ctx.caller = await loadCaller(deps.vault, principal);
   const result = await me(ctx);
 
   assert.deepEqual(result.principal, {

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Bring the whole local stack up: Postgres, dev IdP, the web app, and seed data.
+# Bring the whole local stack up: Postgres, dev IdP, the web app and its vault,
+# and seed data.
 #
 #   pnpm dev          dev mode: the dev IdP's persona picker stands in for
 #                     Cloudflare Access
@@ -80,7 +81,13 @@ log 'starting dev IdP on :8081'
 node apps/dev-idp/src/server.ts > .logs/dev-idp.log 2>&1 &
 sleep 1
 
-log "starting web app on :3000 ($mode)"
+# The seed starts the app's database over, so the vault starts over with it:
+# its grants and audit checkpoints describe that database and no other.
+if [ "$mode" = development ]; then
+    rm -rf apps/web/.wrangler/state/v3/do/coffre-vault-development-VaultObject
+fi
+
+log "starting web app and vault on :3000 ($mode)"
 export CLOUDFLARE_ENV="$mode"
 export CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE="$DATABASE_URL"
 # The dev IdP and the seed refuse anything but dev mode, so only the web app
@@ -108,6 +115,7 @@ if [ "$mode" = signin ]; then
   seeded (not seeded again here).
 
     web + API   http://127.0.0.1:3000   (either button, then admin@acme.example)
+    vault       beside it, reached only through the app's VAULT binding
     dev IdP     http://127.0.0.1:8081
 
   CLI (a device login: approve it in the browser):
@@ -120,6 +128,7 @@ else
   coffre is up.
 
     web + API   http://127.0.0.1:3000   (sign in as admin@acme.example)
+    vault       beside it, reached only through the app's VAULT binding
     dev IdP     http://127.0.0.1:8081
 
   CLI:
