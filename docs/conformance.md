@@ -88,10 +88,10 @@ In order, since each builds on the ones before:
 | live setup | The admin sets up what `probe --token` asks an operator for: `conformance/live/CANARY`, and `token:conformance-live`, a viewer there and auditor on the project |
 | token, token reveal, token scan, token scope, token verification | What `probe --token` checks, with that token; see [below](#against-a-running-instance) |
 | offboarding | Removing the leaver names the values they read, to rotate; their browser session, their CLI session and a new sign-in all stop at once. A removed service's token stops too |
-| bulk limit | One more value at once than the limit allows is refused; a single value still opens, so the refusal was the quantity, not the grant |
+| bulk limit | One more value at once than the limit allows gets 403 `bulk_limit`, with reason `bulk_limit`; a single value still opens |
 | checkpoints | Each Cron run has the vault sign the log up to its last entry, in an `audit.checkpoint` entry of its own that covers the one before, and the log verifies through it |
 | keys behind writes | Every `secret.write` and `secret.restore` names, by `related_seq`, the vault's `key.wrap` or `key.rewrap` for the same member, request, operation, secret and version; and no value read is logged by the app, only by the vault |
-| no audit, no value | With the audit log refusing writes (a trigger), a reveal fails and carries no value; it works again once the log does |
+| no audit, no value | With a trigger refusing `secret.read` appends, a reveal gets 500 `internal_error`, the injected cause appears in the process output, and no value leaves; it works again once the log does |
 | canary scan | No value in any answer to any GET route, or any page, as each of the people, signed in or removed; nor in the database, in any column of any table; nor the processes' output |
 | app login, vault login | Neither the app's login nor the vault's can update, delete, truncate or drop the audit log, append an entry as the other, change or delete a value's versions, delete a secret or a member, or create a table; nor can the app's write a member or a grant. Postgres only: SQLite has no logins |
 | access authorship | Admission, grant, revoke, removal and re-admission leave only vault entries |
@@ -99,9 +99,11 @@ In order, since each builds on the ones before:
 | full verification | Verification reaches the actual head and counts every entry |
 | checkpoint refused, checkpoint missing | A recent heartbeat without an accepted checkpoint turns readiness red; restoring checkpointing recovers |
 | forged grant, forged member, stale member | A forged grant, an edited member or a genuine older member row put back is refused at use, marked tampered, and logged as vault.tampered. Sign-in mode refuses the credential with 401 |
+| sealing race | On Postgres, a grant inserted while the vault's decision waits on the held log head is refused as `tampered` and logged; removal recovers the member. SQLite prevents that concurrent write; the vault suite covers review R2 on Postgres |
 | forged credential, forged identity, forged approval, edited generation | Owner-written authentication rows cannot mint sessions or revive old tokens, and the row failure is reported |
 | app rewritten, vault rewritten, vault forged | Verification catches rewrites at their sequence and a publicly chained vault entry without its MAC |
 | middle gap, first gap, batch gap | Missing entries fail verification, including the first entry and the 1,000-entry paging boundary |
+| middle cut | Two entries removed before the latest signed prefix make the next scheduled checkpoint refuse with `log_broken` and readiness turn red; restoring them recovers checkpointing |
 | earlier checkpoint | An invalid earlier signature cannot be hidden by valid MACs and a later valid checkpoint |
 | tail deleted | The newest entries removed with the head retained fail verification; this runs last |
 
@@ -269,4 +271,3 @@ token would have to write to show: that a viewer cannot write, grant or
 add members is checked locally, not here. And it sees only what one token
 reads: a leak to another member, in a place the token cannot reach, is
 not something it can see.
-

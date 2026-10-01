@@ -91,6 +91,8 @@ export async function appendOnlyLifted<T>(sql: Sql, work: () => Promise<T>): Pro
   }
 }
 
+export const LOG_REFUSAL = 'coffre-conformance: the log refuses writes';
+
 /**
  * `work` with the audit log refusing appends, of one action or all, as a
  * full disk or a lost connection would, without changing the deployment's
@@ -100,10 +102,10 @@ export async function logRefuses<T>(sql: Sql, work: () => Promise<T>, action?: s
   const when = action === undefined ? '' : ` WHEN (NEW.action = '${action}')`;
   const create = sql.engine === 'postgres'
     ? `CREATE FUNCTION conformance_refuse() RETURNS trigger LANGUAGE plpgsql AS $$
-       BEGIN RAISE EXCEPTION 'coffre-conformance: the log refuses writes'; END $$;
+       BEGIN RAISE EXCEPTION '${LOG_REFUSAL}'; END $$;
        CREATE TRIGGER conformance_refuse BEFORE INSERT ON audit_log FOR EACH ROW${when} EXECUTE FUNCTION conformance_refuse();`
     : `CREATE TRIGGER conformance_refuse BEFORE INSERT ON audit_log${when}
-       BEGIN SELECT RAISE(ABORT, 'coffre-conformance: the log refuses writes'); END;`;
+       BEGIN SELECT RAISE(ABORT, '${LOG_REFUSAL}'); END;`;
   await sql.exec(create);
   try {
     return await work();
