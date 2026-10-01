@@ -1,6 +1,5 @@
 import { useState } from 'react';
-import { createFileRoute, useRouter } from '@tanstack/react-router';
-import { devSignIn, getLoginAuthState } from '../server-functions/auth';
+import { createFileRoute, useLoaderData, useRouter } from '@tanstack/react-router';
 import { signinErrorMessage } from '../lib/signin-errors';
 import { ErrorLine, Spinner } from '../components/ui';
 import { ClosedDoor } from '../components/page';
@@ -18,7 +17,6 @@ export const Route = createFileRoute('/login')({
     if (typeof error === 'string' && /^[a-z_]{1,40}$/.test(error)) out.error = error;
     return out;
   },
-  loader: () => getLoginAuthState(),
   component: LoginPage,
 });
 
@@ -40,10 +38,10 @@ const SEEDED: [email: string, role: string, note: string][] = [
  * picker backed by the dev IdP.
  */
 function LoginPage() {
-  const { mode, hasForwardedAccessJwt, signin } = Route.useLoaderData();
+  const { mode, accessAssertion, signin } = useLoaderData({ from: '__root__' }).auth;
   if (signin !== null) return <ProviderLoginPage {...signin} />;
   if (mode === 'cloudflare') {
-    return hasForwardedAccessJwt ? (
+    return accessAssertion ? (
       <CloudflareAuthenticationFailed />
     ) : (
       <CloudflareAccessRequired />
@@ -157,14 +155,19 @@ function DevLoginPage() {
   async function signIn(as: string) {
     setPending(as);
     try {
-      const result = await devSignIn({ data: { email: as } });
-      if (!result.ok) {
-        setError(result.error);
+      const response = await fetch('/auth/dev', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ email: as }),
+      });
+      if (!response.ok) {
+        const refusal = (await response.json().catch(() => null)) as { message?: string } | null;
+        setError(`Could not sign in: ${refusal?.message ?? `the server answered ${response.status}`}.`);
         return;
       }
       setError(null);
-      // The cookie is set on the response to the server function, so the
-      // loaders have to run again before anything reflects the new identity.
+      // The cookie is set on that response, so the loaders have to run
+      // again before anything reflects the new identity.
       await router.invalidate();
       // `navigate` types `to` against the route tree at compile time, and
       // `next` is only known at runtime, so resuming goes through history.

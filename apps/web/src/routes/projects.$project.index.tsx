@@ -2,14 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { createFileRoute, Link, useLoaderData, useRouter } from '@tanstack/react-router';
 import { DropdownMenu } from 'radix-ui';
 import { toast } from 'sonner';
-import {
-  createEnvironment,
-  getProject,
-  setEnvironmentArchived,
-  setProjectArchived,
-  updateEnvironment,
-  updateProject,
-} from '../server-functions/projects';
+import { Refusal, useCoffre } from '../lib/coffre';
 import { useAction } from '../lib/use-action';
 import type { GrantRow, ProjectSummary } from '../shared/models';
 import {
@@ -26,7 +19,7 @@ import {
   Spinner,
 } from '../components/ui';
 import { Card, ClosedDoor, PageHeader } from '../components/page';
-import { ensureGrant, GrantRowView, GrantsTable } from '../components/grants';
+import { ensureGrant, GrantRowView, GrantsTable, loadProject } from '../components/grants';
 import { PrincipalLink } from '../components/principal';
 import { PrincipalPicker } from '../components/principal-picker';
 import {
@@ -58,7 +51,7 @@ export const Route = createFileRoute('/projects/$project/')({
         ? search.tab
         : undefined,
   }),
-  loader: ({ params }) => getProject({ data: { project: params.project } }),
+  loader: ({ context: { client }, params }) => loadProject(client, params.project),
   component: ProjectPage,
 });
 
@@ -265,6 +258,7 @@ function EnvironmentCard({
   const [confirming, setConfirming] = useState(false);
   const [slug, setSlug] = useState(environment.slug);
   const [name, setName] = useState(environment.name);
+  const coffre = useCoffre();
   const { pending, error, setError, run } = useAction();
   const details = environment.details;
   const isArchived = details !== null && details.archivedAt !== null;
@@ -367,9 +361,7 @@ function EnvironmentCard({
                 event.preventDefault();
                 run(
                   () =>
-                    updateEnvironment({
-                      data: { project, environment: environment.slug, slug, name },
-                    }),
+                    coffre.environments.update(`${project}/${environment.slug}`, { slug, name }),
                   () => {
                     setRenaming(false);
                     toast.success('Environment renamed');
@@ -459,9 +451,7 @@ function EnvironmentCard({
             onConfirm={() =>
               run(
                 () =>
-                  setEnvironmentArchived({
-                    data: { project, environment: environment.slug, archived: !isArchived },
-                  }),
+                  coffre.environments.update(`${project}/${environment.slug}`, { archived: !isArchived }),
                 () =>
                   toast.success(
                     isArchived ? `${environment.slug} restored` : `${environment.slug} archived`,
@@ -479,6 +469,7 @@ function NewEnvironment({ project }: { project: string }) {
   const [open, setOpen] = useState(false);
   const [slug, setSlug] = useState('');
   const [name, setName] = useState('');
+  const coffre = useCoffre();
   const { pending, error, setError, run } = useAction();
   const slugError = slug === '' ? null : slugProblem(slug);
 
@@ -508,7 +499,10 @@ function NewEnvironment({ project }: { project: string }) {
           onSubmit={(event) => {
             event.preventDefault();
             run(
-              () => createEnvironment({ data: { project, slug, name } }),
+              async () => {
+                const { created } = await coffre.environments.create(`${project}/${slug}`, { name });
+                if (!created) throw new Refusal(`An environment named "${slug}" already exists.`);
+              },
               () => {
                 toast.success(`Environment ${slug} added`);
                 setSlug('');
@@ -631,6 +625,7 @@ function NewGrant({
   const [principalId, setPrincipalId] = useState('');
   const [permission, setPermission] = useState('viewer:');
   const [expiresAt, setExpiresAt] = useState('');
+  const coffre = useCoffre();
   const { pending, error, setError, run } = useAction();
   const permissionOptions = projectAccessOptions(environments);
   const kind = principalType === 'user' ? 'user' : 'token';
@@ -665,7 +660,7 @@ function NewGrant({
             const access = parseProjectAccess(permission);
             run(
               () =>
-                ensureGrant({
+                ensureGrant(coffre, {
                   project,
                   principalType,
                   principalId: principalId.trim(),
@@ -760,6 +755,7 @@ function GeneralSettings({ project }: { project: ProjectSummary }) {
   const router = useRouter();
   const [slug, setSlug] = useState(project.slug);
   const [name, setName] = useState(project.name);
+  const coffre = useCoffre();
   const { pending, error, run } = useAction();
   const slugError = slug === '' ? null : slugProblem(slug);
   const dirty = slug !== project.slug || name.trim() !== project.name;
@@ -784,7 +780,7 @@ function GeneralSettings({ project }: { project: ProjectSummary }) {
         onSubmit={(event) => {
           event.preventDefault();
           run(
-            () => updateProject({ data: { project: project.slug, slug, name } }),
+            () => coffre.projects.update(project.slug, { slug, name }),
             async () => {
               toast.success('Project renamed');
               // The slug is part of the URL, so a rename has to navigate.
@@ -844,6 +840,7 @@ function GeneralSettings({ project }: { project: ProjectSummary }) {
 
 function DangerZone({ project }: { project: ProjectSummary }) {
   const [confirming, setConfirming] = useState(false);
+  const coffre = useCoffre();
   const { pending, error, run } = useAction();
   const isArchived = project.archivedAt !== null;
 
@@ -907,9 +904,7 @@ function DangerZone({ project }: { project: ProjectSummary }) {
         onConfirm={() =>
           run(
             () =>
-              setProjectArchived({
-                data: { project: project.slug, archived: !isArchived },
-              }),
+              coffre.projects.update(project.slug, { archived: !isArchived }),
             () =>
               toast.success(
                 isArchived ? `${project.slug} restored` : `${project.slug} archived`,

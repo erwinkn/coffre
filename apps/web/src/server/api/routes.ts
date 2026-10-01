@@ -9,7 +9,17 @@ import { notFound } from './errors.ts';
 import { listMembers, memberReport, putMember, removeMember } from './members.ts';
 import { parseMember, parsePath, type ResolvedPath } from './paths.ts';
 import { listProjects, me, patchEnvironment, patchProject, putEnvironment, putProject } from './projects.ts';
-import { listSecrets, listVersions, patchSecret, reveal, restoreVersion, setSecrets } from './secrets.ts';
+import {
+  dryRunSecrets,
+  listSecrets,
+  listVersions,
+  patchSecret,
+  reveal,
+  restoreVersion,
+  setSecrets,
+  type DryRunResult,
+  type SetResult,
+} from './secrets.ts';
 import { archiveSync, createSync, listSyncs, runSync, setSyncPaused } from './syncs.ts';
 
 /** A permission at the route's place, or at its project for project-wide ones. */
@@ -29,26 +39,30 @@ export type PlaceOf<Key> = 'project' extends ParamNames<Key> ? ResolvedPath : nu
 type Schema = z.ZodType | undefined;
 type Parsed<S extends Schema> = S extends z.ZodType ? z.output<S> : undefined;
 
-export type Route<Key extends string, S extends Schema, Output> = {
+export type Route<Key extends string, S extends Schema, Output, Q extends Schema = undefined> = {
   /** The body, or the query string for a GET. */
   input?: S;
+  /** Flags in the query string of a route that takes a body, such as `?dryRun=1`. */
+  query?: Q;
   /** Checked before `run`, and a refusal is logged. Handlers check anything subtler themselves. */
-  needs?: Check | readonly Check[] | ((input: Parsed<S>) => readonly Check[]);
+  needs?: Check | readonly Check[] | ((input: Parsed<S>, query: Parsed<Q>) => readonly Check[]);
   /** The audit action a refusal is logged under. */
   action?: string;
   /** The last level of the path may not exist yet: the route creates it. */
   creates?: true;
   run: (
     ctx: ApiContext,
-    call: { params: Params<Key>; place: PlaceOf<Key>; input: Parsed<S> },
+    call: { params: Params<Key>; place: PlaceOf<Key>; input: Parsed<S>; query: Parsed<Q> },
   ) => Promise<Output>;
 };
 
-function route<const Key extends string, S extends Schema = undefined, Output = unknown>(
-  key: Key,
-  def: Route<Key, S, Output>,
-): { [K in Key]: Route<Key, S, Output> } {
-  return { [key]: def } as { [K in Key]: Route<Key, S, Output> };
+function route<
+  const Key extends string,
+  S extends Schema = undefined,
+  Output = unknown,
+  Q extends Schema = undefined,
+>(key: Key, def: Route<Key, S, Output, Q>): { [K in Key]: Route<Key, S, Output, Q> } {
+  return { [key]: def } as { [K in Key]: Route<Key, S, Output, Q> };
 }
 
 const placePatch = z
@@ -63,9 +77,9 @@ const secretValue = z
 
 const role = z.enum(ROLE_NAMES);
 
-/** Service tokens are issued by coffre's own sign-in; behind Cloudflare Access there are none. */
+/** Sessions and service tokens are coffre's own sign-in; behind Cloudflare Access there are none. */
 function signin(ctx: ApiContext) {
-  if (ctx.signin === null) throw notFound('service tokens need signin mode');
+  if (ctx.signin === null) throw notFound("this instance has no sign-in of its own");
   return ctx.signin;
 }
 
@@ -118,13 +132,21 @@ export const routes = {
   }),
   ...route('PATCH /secrets/:project/:environment', {
     input: z.record(secretKey, secretValue.nullable()),
-    // Each key is checked against its own permission: archiving needs more than writing.
-    needs: (patch) => [
-      ...(Object.values(patch).some((value) => value !== null) ? ['secret.write' as const] : []),
-      ...(Object.values(patch).includes(null) ? ['secret.archive' as const] : []),
-    ],
+    // `?dryRun=1` answers what the patch would do and writes nothing. Any
+    // other query is refused, not ignored: a mistyped flag must not write.
+    query: z.object({ dryRun: z.enum(['1', 'true']).optional() }).strict(),
+    // Each key is checked against its own permission: archiving needs more
+    // than writing. A dry run is a read, which it checks and logs itself.
+    needs: (patch, { dryRun }) =>
+      dryRun !== undefined
+        ? []
+        : [
+            ...(Object.values(patch).some((value) => value !== null) ? ['secret.write' as const] : []),
+            ...(Object.values(patch).includes(null) ? ['secret.archive' as const] : []),
+          ],
     action: 'secret.write',
-    run: (ctx, { place, input }) => setSecrets(ctx, place, input),
+    run: (ctx, { place, input, query }): Promise<SetResult | DryRunResult> =>
+      query.dryRun !== undefined ? dryRunSecrets(ctx, place, input) : setSecrets(ctx, place, input),
   }),
   ...route('PATCH /secrets/:project/:environment/:key', {
     input: z.object({ key: secretKey, archived: z.boolean() }).partial().strict(),
@@ -191,6 +213,32 @@ export const routes = {
       z.union([role, z.object({ role, until: z.string().max(40).nullable() }).strict(), z.null()]),
     ),
     run: (ctx, { params, input }) => setAccess(ctx, parseMember(params.member), input),
+  }),
+
+  // Your own sign-in: where you are signed in, the accounts you sign in
+  // with, and approving `coffre login` from the browser.
+  ...route('GET /sessions', {
+    run: async (ctx) => ({ sessions: await signin(ctx).listSessions(ctx, ctx.credentialId) }),
+  }),
+  ...route('DELETE /sessions/:id', {
+    run: (ctx, { params }) => signin(ctx).revokeCredential(ctx, params.id),
+  }),
+  ...route('GET /identities', {
+    run: async (ctx) => ({ identities: await signin(ctx).listIdentities(ctx) }),
+  }),
+  ...route('DELETE /identities/:id', {
+    run: (ctx, { params }) => signin(ctx).unlinkIdentity(ctx, params.id),
+  }),
+  ...route('GET /device-logins/:code', {
+    // Null for a code that is unknown, used or expired.
+    run: async (ctx, { params }) => ({
+      request: await signin(ctx).describeDevice(params.code),
+      sessionDays: signin(ctx).config.cliSessionDays,
+    }),
+  }),
+  ...route('POST /device-logins/:code', {
+    input: z.object({ approve: z.boolean() }).strict(),
+    run: (ctx, { params, input }) => signin(ctx).decideDevice(ctx, params.code, input.approve),
   }),
 
   // Syncs

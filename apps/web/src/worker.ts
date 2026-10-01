@@ -6,6 +6,7 @@ import {
   runWithWorkerRuntime,
   type WorkerBindings,
 } from './server/runtime.ts';
+import { pageClient } from './server/fetch-api.ts';
 import { cspNonce, withSecurityHeaders } from './server/security-headers.ts';
 
 function runtimeLogger() {
@@ -19,10 +20,13 @@ function runtimeLogger() {
 export default {
   fetch(request, bindings, context) {
     return runWithWorkerRuntime(bindings, async () => {
-      // The router puts it on every script it renders; see router.tsx.
+      // The router puts the nonce on every script it renders, and hands the
+      // client to every loader; see router.tsx.
       const nonce = cspNonce();
-      const response = await handler.fetch(request, { context: { cspNonce: nonce } });
-      const auth = getRuntime().auth;
+      const runtime = getRuntime();
+      const client = pageClient(request, runtime);
+      const response = await handler.fetch(request, { context: { cspNonce: nonce, client } });
+      const auth = runtime.auth;
       return withSecurityHeaders(request, response, {
         nonce,
         formOrigins: auth.mode === 'cloudflare' ? [auth.access.issuer] : [],

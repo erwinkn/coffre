@@ -8,10 +8,13 @@ export type SecretChange = {
 
 type ActiveSecret = { key: string };
 
+/** A merge patch: a string sets a key, adding it if it is new; `null` archives it. */
+export type SecretPatch = Record<string, string | null>;
+
 type SecretEditOperations = {
-  archive: (key: string) => Promise<void>;
   rename: (key: string, nextKey: string) => Promise<void>;
-  save: (key: string, value: string) => Promise<void>;
+  /** One transaction: every key in it lands, or none does. */
+  write: (patch: SecretPatch) => Promise<void>;
 };
 
 type PlannedEdit = { sourceKey: string; change: SecretChange };
@@ -63,10 +66,14 @@ export function hasSecretEditConflict(
 }
 
 /**
- * Apply edits in order and return only work that still needs to run.
+ * Save every pending edit: renames first, one call each, then everything else
+ * as one merge patch.
  *
- * A rename and value update are two audited operations. If the rename lands but
- * the value update fails, the pending value follows the new key for the retry.
+ * The patch is a single transaction, so values, new keys and archives land
+ * together or not at all. Renames cannot join it: a merge patch names keys and
+ * has no way to move one with its history. A failed rename therefore stops the
+ * save before the patch. The renames before it stay done, and every other edit
+ * is kept for the retry, a value following its key to the new name.
  */
 export async function applySecretEditBatch({
   active,
@@ -79,70 +86,37 @@ export async function applySecretEditBatch({
   changes: Readonly<Record<string, SecretChange>>;
   operations: SecretEditOperations;
 }): Promise<SecretEditBatchResult> {
-  let applied = 0;
-  let remainingDrafts = [...drafts];
   const remainingChanges = { ...changes };
   const plan = planEdits(active, drafts, changes);
   if (plan instanceof Error) {
-    return {
-      applied,
-      drafts: remainingDrafts,
-      changes: remainingChanges,
-      error: plan,
-    };
+    return { applied: 0, drafts: [...drafts], changes: remainingChanges, error: plan };
   }
 
+  let applied = 0;
+  // A key named `__proto__` is a key like any other.
+  const patch: SecretPatch = Object.create(null);
   try {
     for (const { sourceKey, change } of plan) {
       if (change.archived) {
-        await operations.archive(sourceKey);
-        delete remainingChanges[sourceKey];
-        applied += 1;
+        patch[sourceKey] = null;
         continue;
       }
-
-      let currentKey = sourceKey;
-      if (change.key !== sourceKey) {
-        currentKey = change.key.trim();
-        await operations.rename(sourceKey, currentKey);
+      const key = change.key.trim();
+      if (key !== sourceKey) {
+        await operations.rename(sourceKey, key);
         delete remainingChanges[sourceKey];
         applied += 1;
-
-        if (change.value !== null) {
-          remainingChanges[currentKey] = {
-            key: currentKey,
-            value: change.value,
-            archived: false,
-          };
-        }
+        if (change.value !== null) remainingChanges[key] = { key, value: change.value, archived: false };
       }
-
-      if (change.value !== null) {
-        await operations.save(currentKey, change.value);
-        delete remainingChanges[currentKey];
-        applied += 1;
-      }
+      if (change.value !== null) patch[key] = change.value;
     }
+    for (const draft of drafts) patch[draft.key.trim()] = draft.value;
 
-    for (const draft of drafts) {
-      await operations.save(draft.key.trim(), draft.value);
-      remainingDrafts = remainingDrafts.filter((entry) => entry.id !== draft.id);
-      applied += 1;
-    }
-
-    return {
-      applied,
-      drafts: remainingDrafts,
-      changes: remainingChanges,
-      error: null,
-    };
+    const written = Object.keys(patch).length;
+    if (written > 0) await operations.write({ ...patch });
+    return { applied: applied + written, drafts: [], changes: {}, error: null };
   } catch (error) {
-    return {
-      applied,
-      drafts: remainingDrafts,
-      changes: remainingChanges,
-      error,
-    };
+    return { applied, drafts: [...drafts], changes: remainingChanges, error };
   }
 }
 

@@ -53,73 +53,116 @@ test('competing drafts and value edits still conflict', () => {
   );
 });
 
-test('a failed edit keeps that edit and every untried edit', async () => {
-  const attempted: string[] = [];
+test('values, new keys and archives are saved as one patch', async () => {
+  const patches: unknown[] = [];
   const result = await applySecretEditBatch({
     active,
-    drafts: [],
+    drafts: [{ id: 1, key: ' NEW ', value: 'fresh' }],
     changes: {
       A: change('A', 'one'),
-      B: change('B', 'two'),
-      C: change('C', 'three'),
+      B: { key: 'B', value: null, archived: true },
     },
     operations: {
-      archive: async () => {},
-      rename: async () => {},
-      save: async (key) => {
-        attempted.push(key);
-        if (key === 'B') throw new Error('B failed');
+      rename: async () => assert.fail('nothing was renamed'),
+      write: async (patch) => {
+        patches.push(patch);
       },
     },
   });
 
-  assert.deepEqual(attempted, ['A', 'B']);
-  assert.equal(result.applied, 1);
-  assert.deepEqual(Object.keys(result.changes), ['B', 'C']);
-  assert.match(String(result.error), /B failed/);
+  assert.deepEqual(patches, [{ A: 'one', B: null, NEW: 'fresh' }]);
+  assert.equal(result.error, null);
+  assert.equal(result.applied, 3);
+  assert.deepEqual(result.drafts, []);
+  assert.deepEqual(result.changes, {});
 });
 
-test('a value follows its new key when rename succeeds and save fails', async () => {
+test('a refused patch keeps every edit, since none of it landed', async () => {
+  const drafts: SecretDraft[] = [{ id: 1, key: 'NEW', value: 'fresh' }];
+  const changes = { A: change('A', 'one'), C: change('C', 'three') };
+  const result = await applySecretEditBatch({
+    active,
+    drafts,
+    changes,
+    operations: {
+      rename: async () => {},
+      write: async () => {
+        throw new Error('C is archived');
+      },
+    },
+  });
+
+  assert.equal(result.applied, 0);
+  assert.deepEqual(result.drafts, drafts);
+  assert.deepEqual(result.changes, changes);
+  assert.match(String(result.error), /C is archived/);
+});
+
+test('renames go first, and a value follows its new key when the patch fails', async () => {
+  const calls: string[] = [];
   const result = await applySecretEditBatch({
     active: [{ key: 'OLD' }],
     drafts: [],
     changes: { OLD: change('NEW', 'pending-value') },
     operations: {
-      archive: async () => {},
-      rename: async () => {},
-      save: async () => {
-        throw new Error('save failed');
+      rename: async (key, nextKey) => {
+        calls.push(`rename ${key}->${nextKey}`);
+      },
+      write: async (patch) => {
+        calls.push(`write ${Object.keys(patch).join(',')}`);
+        throw new Error('write failed');
       },
     },
   });
 
+  assert.deepEqual(calls, ['rename OLD->NEW', 'write NEW']);
   assert.equal(result.applied, 1);
   assert.deepEqual(result.changes, {
     NEW: { key: 'NEW', value: 'pending-value', archived: false },
   });
 });
 
-test('a failed draft keeps that draft and later drafts', async () => {
-  const drafts: SecretDraft[] = [
-    { id: 1, key: 'A', value: 'one' },
-    { id: 2, key: 'B', value: 'two' },
-    { id: 3, key: 'C', value: 'three' },
-  ];
+test('a failed rename stops the save before the patch', async () => {
+  let wrote = false;
   const result = await applySecretEditBatch({
-    active: [],
-    drafts,
-    changes: {},
+    active,
+    drafts: [{ id: 1, key: 'NEW', value: 'fresh' }],
+    changes: {
+      A: { key: 'A2', value: null, archived: false },
+      B: change('B', 'two'),
+    },
     operations: {
-      archive: async () => {},
-      rename: async () => {},
-      save: async (key) => {
-        if (key === 'B') throw new Error('B failed');
+      rename: async () => {
+        throw new Error('A: taken');
+      },
+      write: async () => {
+        wrote = true;
       },
     },
   });
 
-  assert.equal(result.applied, 1);
-  assert.deepEqual(result.drafts.map((draft) => draft.id), [2, 3]);
+  assert.equal(wrote, false);
+  assert.equal(result.applied, 0);
+  assert.deepEqual(Object.keys(result.changes), ['A', 'B']);
+  assert.equal(result.drafts.length, 1);
+});
+
+test('a key named __proto__ is written like any other', async () => {
+  const patches: Record<string, string | null>[] = [];
+  await applySecretEditBatch({
+    active: [],
+    drafts: [{ id: 1, key: '__proto__', value: 'x' }],
+    changes: {},
+    operations: {
+      rename: async () => {},
+      write: async (patch) => {
+        patches.push(patch);
+      },
+    },
+  });
+
+  assert.deepEqual(Object.keys(patches[0]), ['__proto__']);
+  assert.equal(JSON.stringify(patches[0]), '{"__proto__":"x"}');
 });
 
 test('dependent renames free destinations before they are reused', async () => {
@@ -132,9 +175,10 @@ test('dependent renames free destinations before they are reused', async () => {
       B: { key: 'C', value: null, archived: false },
     },
     operations: {
-      archive: async () => {},
-      rename: async (key, nextKey) => attempted.push(`${key}->${nextKey}`),
-      save: async () => {},
+      rename: async (key, nextKey) => {
+        attempted.push(`${key}->${nextKey}`);
+      },
+      write: async () => assert.fail('renames alone write no patch'),
     },
   });
 
@@ -153,9 +197,8 @@ test('cyclic renames fail before any mutation', async () => {
       B: { key: 'A', value: null, archived: false },
     },
     operations: {
-      archive: async () => { attempted = true; },
       rename: async () => { attempted = true; },
-      save: async () => { attempted = true; },
+      write: async () => { attempted = true; },
     },
   });
 
@@ -170,9 +213,8 @@ test('archive and rewrite of one key fails before any mutation', async () => {
     drafts: [{ id: 1, key: 'A', value: 'new' }],
     changes: { A: { key: 'A', value: null, archived: true } },
     operations: {
-      archive: async () => { attempted = true; },
       rename: async () => { attempted = true; },
-      save: async () => { attempted = true; },
+      write: async () => { attempted = true; },
     },
   });
 

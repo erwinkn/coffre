@@ -110,11 +110,13 @@ the verb:
 
 | Call | HTTP |
 |---|---|
+| how this instance signs people in (public) | `GET /api/auth` |
 | who I am, and everything I can reach | `GET /api/me` |
 | list, create, rename or archive a project | `GET /api/projects`, `PUT` / `PATCH /api/projects/market` |
 | the same for an environment | `PUT` / `PATCH /api/projects/market/prod` |
 | list an environment's secrets, never their values | `GET /api/secrets/market/prod` |
 | set, add or archive secrets, one or many, in one transaction | `PATCH /api/secrets/market/prod {"DATABASE_URL": "…", "OLD_KEY": null}` |
+| what that write would do, per key, without values and without writing | `PATCH /api/secrets/market/prod?dryRun=1 {…}` → `{"dryRun": true, "keys": {"DATABASE_URL": "changed", "OLD_KEY": "archived"}}` |
 | rename a secret | `PATCH /api/secrets/market/prod/DB_URL {"key": "DATABASE_URL"}` |
 | a secret's versions | `GET /api/secrets/market/prod/DATABASE_URL/versions` |
 | restore a version, as a new version | `POST /api/secrets/market/prod/DATABASE_URL/restore {"version": 3}` |
@@ -124,6 +126,8 @@ the verb:
 | list, issue or revoke a token's credentials | `GET` / `POST /api/members/token:ci-deploy/tokens`, `DELETE …/tokens/:id` |
 | change someone's access, in one transaction | `PATCH /api/access/user:ada@acme.example {"market": "developer", "market/prod": null}` |
 | syncs | `GET` / `POST /api/syncs/market/prod`, `PATCH` / `DELETE /api/syncs/by-id/:id`, `POST …/:id/runs` |
+| my sessions and linked sign-in accounts, and ending them | `GET` / `DELETE /api/sessions/:id`, `GET` / `DELETE /api/identities/:id` |
+| approve or deny a `coffre login` device code | `GET` / `POST /api/device-logins/:code {"approve": true}` |
 | the audit log, and verifying it | `GET /api/audit?path=market/prod`, `GET /api/audit/verification` |
 
 Three conventions carry it:
@@ -136,13 +140,23 @@ Three conventions carry it:
 - **One role per member per place.** A grant maps `(member, place)` to one of
   the built-in roles, which live in code, not in tables.
 
-Sign-in (OAuth callbacks, the device-code flow for `coffre login`) stays on
-its own routes; it is a protocol, not something done to the data.
+A change made with a cookie must come from coffre's own pages. The browser
+attaches its session cookie to every request to this origin, whichever site's
+page sent it, so any `/api` call other than a `GET` that authenticates by
+cookie needs `Sec-Fetch-Site: same-origin` (or, from a browser too old to
+send it, a matching `Origin`), and otherwise gets `403 cross_origin` before
+anyone is looked up. A bearer token or Access assertion in a header needs no
+such check: another site's page cannot make the browser send one.
+
+Sign-in itself (OAuth redirects and callbacks, the device-code exchange for
+`coffre login`, signing out) stays on its own routes; it is a protocol, not
+something done to the data. What a signed-in person does with their own
+sessions, and a device-code approval, are ordinary routes in the table.
 
 The server is one table keyed by method and route, each entry giving its input
 schema, the permission it needs and its handler. `@coffre/client` is typed
 from the same table by inference (`coffre.secrets.set('market/prod', {…})`),
-so the two cannot drift, and the UI's server functions go away.
+so the two cannot drift, and the UI calls it like any other client.
 
 Each segment names one level, so `/api/secrets/market/prod/versions` is a
 secret named `versions`, and its history is one level further down. Where a

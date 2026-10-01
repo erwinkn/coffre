@@ -2,10 +2,10 @@ import { createFileRoute } from '@tanstack/react-router';
 
 import {
   readCookie,
-  requestIdentityContextFor,
   sessionCookieName,
   trustedSourceIp,
 } from '../server/auth.ts';
+import { requestIdentityContextFor } from '../server/request-identity.ts';
 import { methodNotAllowed } from '../server/http.ts';
 import { getRuntime } from '../server/runtime.ts';
 import {

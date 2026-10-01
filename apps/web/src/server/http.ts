@@ -1,4 +1,3 @@
-import type { AuthenticatedIdentity, RequestIdentityContext } from './auth.ts';
 import { ApiError, badRequest, toErrorBody } from './api/errors.ts';
 
 export function jsonResponse(
@@ -23,18 +22,6 @@ export function methodNotAllowed(allowed: readonly string[]): Response {
     new ApiError('method_not_allowed', `use ${allowed.join(' or ')}`),
     { allow: allowed.join(', ') },
   );
-}
-
-/** The identity established by the global TanStack request middleware. */
-export function requestContext(context: unknown): AuthenticatedIdentity {
-  const identity = (context as { coffreRequest?: RequestIdentityContext }).coffreRequest;
-  if (identity === undefined || identity.principal === null) {
-    throw new ApiError('unauthenticated', 'sign in first');
-  }
-  if (!identity.registered) {
-    throw new ApiError('registration_required', 'you are signed in, but not a member here');
-  }
-  return identity;
 }
 
 /** A JSON body, or `fallback` when the body is empty. */

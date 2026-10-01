@@ -8,17 +8,9 @@ import {
 import { createFileRoute, Link, useLoaderData, useRouter } from '@tanstack/react-router';
 import { DropdownMenu } from 'radix-ui';
 import { toast } from 'sonner';
-import {
-  importEnv,
-  listKeys,
-  listVersions,
-  renameSecret,
-  revealSecret,
-  rollbackSecret,
-  saveSecret,
-  setSecretArchived,
-} from '../server-functions/secrets';
-import { listSyncs } from '../server-functions/syncs';
+import { CoffreError, planImport, type CoffreClient } from '../../../../packages/client/src/index.ts';
+import { parseDotenv } from '../../../../packages/core/src/dotenv.ts';
+import { failureMessage, Refusal, uiResult, useCoffre } from '../lib/coffre';
 import { useAction } from '../lib/use-action';
 import type {
   ImportPlanEntry,
@@ -81,17 +73,17 @@ import {
  */
 const REVEAL_TTL_SECONDS = 45;
 
-/** Referenced by every Reveal control, so the cost is announced before the click. */
-const REVEAL_COST_ID = 'reveal-cost';
-
 export const Route = createFileRoute('/projects/$project/$environment')({
   // `?filter=KEY` opens the ledger narrowed to matching keys, for links to one secret.
   validateSearch: (search: Record<string, unknown>): { filter?: string } => ({
     filter: typeof search.filter === 'string' && search.filter !== '' ? search.filter : undefined,
   }),
-  loader: async ({ params }) => {
-    const data = { project: params.project, environment: params.environment };
-    const [keys, syncs] = await Promise.all([listKeys({ data }), listSyncs({ data })]);
+  loader: async ({ context: { client }, params }) => {
+    const path = `${params.project}/${params.environment}`;
+    const [keys, syncs] = await Promise.all([
+      uiResult(() => client.secrets.list(path)),
+      uiResult(() => client.syncs.list(path)),
+    ]);
     return { keys, syncs };
   },
   component: EnvironmentPage,
@@ -153,6 +145,8 @@ function EnvironmentLedger({
   syncs: ComponentProps<typeof Syncs>['result'];
 }) {
   const router = useRouter();
+  const coffre = useCoffre();
+  const place = `${project}/${environment}`;
   const [drafts, setDrafts] = useState<SecretDraft[]>([]);
   const [changes, setChanges] = useState<Record<string, SecretChange>>({});
   // Rows opened for editing that may not have changed yet. A row with a
@@ -232,12 +226,9 @@ function EnvironmentLedger({
   }
 
   /**
-   * Write every pending edit, stopping at the first refusal.
-   *
-   * Edits already written are dropped and the rest are kept, so pressing save
-   * again retries exactly what did not land rather than duplicating what did.
-   * There is no batch endpoint and inventing one client-side would only hide
-   * that this is several audited writes.
+   * Write every pending edit: renames one by one, then the rest as one patch
+   * that lands whole or not at all (see `applySecretEditBatch`). Whatever did
+   * not land stays pending, so pressing save again retries exactly that.
    */
   async function saveChanges() {
     if (!ready || saving) return;
@@ -248,23 +239,20 @@ function EnvironmentLedger({
       drafts,
       changes,
       operations: {
-        archive: async (key) => {
-          const result = await setSecretArchived({
-            data: { project, environment, key, archived: true },
-          });
-          if (!result.ok) throw new Error(`${key}: ${result.error}`);
-        },
         rename: async (key, nextKey) => {
-          const result = await renameSecret({
-            data: { project, environment, key, nextKey },
-          });
-          if (!result.ok) throw new Error(`${key}: ${result.error}`);
+          try {
+            await coffre.secrets.rename(`${place}/${key}`, nextKey);
+          } catch (error) {
+            // A refused rename names the key it stopped at.
+            throw new Refusal(`${key}: ${failureMessage(error)}`);
+          }
         },
-        save: async (key, value) => {
-          const result = await saveSecret({
-            data: { project, environment, key, value },
-          });
-          if (!result.ok) throw new Error(`${key}: ${result.error}`);
+        write: async (patch) => {
+          try {
+            await coffre.secrets.set(place, patch);
+          } catch (error) {
+            throw new Refusal(failureMessage(error));
+          }
         },
       },
     });
@@ -284,14 +272,16 @@ function EnvironmentLedger({
     }
 
     if (outcome.error === null) {
-      toast.success(`Saved ${outcome.applied} change${outcome.applied === 1 ? '' : 's'}`);
+      // Counted as the save button counted them: a rename with a new value is one change.
+      toast.success(`Saved ${pendingCount} change${pendingCount === 1 ? '' : 's'}`);
     } else {
       const message =
         outcome.error instanceof Error ? outcome.error.message : 'The request could not be sent.';
+      // Only renames can have landed before a failure: the patch is all or nothing.
       setSaveError(
         outcome.applied === 0
           ? message
-          : `${message} Earlier changes were saved; the failed one and any after it are ready to retry.`,
+          : `${message} The renames before it were saved; nothing else was, and the rest is ready to retry.`,
       );
     }
     setSaving(false);
@@ -348,10 +338,6 @@ function EnvironmentLedger({
 
   return (
     <>
-      <p id={REVEAL_COST_ID} className="visually-hidden">
-        Revealing decrypts the value and records a read under your name in the audit log.
-      </p>
-
       <PageHeader
         tile={project}
         title={environment}
@@ -767,6 +753,7 @@ function SecretRow({
   onMarkArchive: () => void;
 }) {
   const [reveal, setReveal] = useState<Reveal | null>(null);
+  const coffre = useCoffre();
   const [revealing, setRevealing] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -801,16 +788,17 @@ function SecretRow({
     if (shown !== null) return shown.value;
     setRevealing(true);
     try {
-      const result = await revealSecret({ data: { project, environment, key: entry.key } });
-      if (!result.ok) {
-        setError(result.error);
-        return null;
-      }
+      const { values } = await coffre.secrets.reveal(`${project}/${environment}/${entry.key}`);
+      const value = values[entry.key];
       setError(null);
-      setReveal({ value: result.value, version: entry.version, at: Date.now() });
-      return result.value;
-    } catch {
-      setError('The request could not be sent. Nothing was read.');
+      setReveal({ value, version: entry.version, at: Date.now() });
+      return value;
+    } catch (failure) {
+      setError(
+        failure instanceof CoffreError
+          ? failureMessage(failure)
+          : 'The request could not be sent. Nothing was read.',
+      );
       return null;
     } finally {
       setRevealing(false);
@@ -899,7 +887,6 @@ function SecretRow({
                   <button
                     type="button"
                     className="act"
-                    aria-describedby={REVEAL_COST_ID}
                     disabled={revealing}
                     onClick={async () => {
                       const value = await readValue();
@@ -909,7 +896,7 @@ function SecretRow({
                     }}
                   >
                     {revealing && <Spinner size={12} />}
-                    Start from current value (logged)
+                    Start from current value
                   </button>
                 )}
               </span>
@@ -921,7 +908,7 @@ function SecretRow({
             >
               <span className="revealed-value">{shown.value === '' ? '(empty)' : shown.value}</span>
               <span className="revealed-note">
-                Read logged at {clock(shown.at)} · hides in {secondsLeft}s
+                Hides in {secondsLeft}s
               </span>
               <span className="revealed-meter" aria-hidden />
             </div>
@@ -977,12 +964,11 @@ function SecretRow({
                   <CopyButton variant="act" value={shown.value} label={`Copy ${entry.key}`} />
                 )}
                 <SecretReadOnly canReveal={canReveal}>
-                  <Tip label={shown === null ? 'Reveal (logged under your name)' : 'Hide'}>
+                  <Tip label={shown === null ? 'Reveal' : 'Hide'}>
                     <button
                       className="act act-icon act-accent"
                       onClick={toggleReveal}
                       disabled={revealing}
-                      aria-describedby={shown === null ? REVEAL_COST_ID : undefined}
                       aria-label={`${shown === null ? 'Reveal' : 'Hide'} ${entry.key}`}
                     >
                       {revealing ? (
@@ -1118,10 +1104,6 @@ function Written({ entry }: { entry: SecretKey }) {
   );
 }
 
-function clock(at: number): string {
-  return `${new Date(at).toISOString().slice(11, 19)} UTC`;
-}
-
 /**
  * A secret being typed, sitting in the table where it will end up.
  *
@@ -1240,11 +1222,12 @@ function ArchivedRow({
   canReveal: boolean;
 }) {
   const [historyOpen, setHistoryOpen] = useState(false);
+  const coffre = useCoffre();
   const { pending, error, run } = useAction();
 
   function setArchived(archived: boolean) {
     run(
-      () => setSecretArchived({ data: { project, environment, key: entry.key, archived } }),
+      () => coffre.secrets.update(`${project}/${environment}/${entry.key}`, { archived }),
       () =>
         // Restoring is fully reversible, so it gets an undo rather than a
         // confirmation dialog in front of it.
@@ -1345,29 +1328,32 @@ function VersionHistory({
 }) {
   const [versions, setVersions] = useState<SecretVersion[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const coffre = useCoffre();
   const { pending, error, run } = useAction();
 
   // Refetch whenever the current version moves, so a rollback -- here or by
   // anyone else -- is reflected in which row says "current".
   useEffect(() => {
     let cancelled = false;
-    listVersions({ data: { project, environment, key: secretKey } })
+    coffre.secrets
+      .history(`${project}/${environment}/${secretKey}`)
       .then((result) => {
         if (cancelled) return;
-        if (result.ok) {
-          setVersions(result.versions);
-          setLoadError(null);
-        } else {
-          setLoadError(result.error);
-        }
+        setVersions(result.versions);
+        setLoadError(null);
       })
-      .catch(() => {
-        if (!cancelled) setLoadError('The version history could not be loaded.');
+      .catch((failure: unknown) => {
+        if (cancelled) return;
+        setLoadError(
+          failure instanceof CoffreError
+            ? failureMessage(failure)
+            : 'The version history could not be loaded.',
+        );
       });
     return () => {
       cancelled = true;
     };
-  }, [project, environment, secretKey, currentVersion]);
+  }, [coffre, project, environment, secretKey, currentVersion]);
 
   return (
     <div className="history">
@@ -1446,14 +1432,10 @@ function VersionHistory({
                         onConfirm={() =>
                           run(
                             () =>
-                              rollbackSecret({
-                                data: {
-                                  project,
-                                  environment,
-                                  key: secretKey,
-                                  version: version.version,
-                                },
-                              }),
+                              coffre.secrets.restore(
+                                `${project}/${environment}/${secretKey}`,
+                                version.version,
+                              ),
                             () => {
                               onRolledBack();
                               toast.success(`${secretKey} rolled back to v${version.version}`);
@@ -1476,7 +1458,7 @@ function VersionHistory({
         </div>
       )}
       <p className="history-note">
-        Metadata only. Listing versions decrypts nothing and is not recorded as a read.
+        Metadata only. Listing versions decrypts nothing.
       </p>
     </div>
   );
@@ -1487,40 +1469,54 @@ function VersionHistory({
 /* -------------------------------------------------------------------------- */
 
 const PLAN_TAG: Record<ImportPlanEntry['action'], string> = {
-  create: 'tag tag-green',
-  update: 'tag tag-blue',
+  added: 'tag tag-green',
+  changed: 'tag tag-blue',
   unchanged: 'tag',
 };
+
+/** Plan a .env import against what is stored, with a dry run of the write. */
+async function planEnv(coffre: CoffreClient, path: string, content: string) {
+  const parsed = parseDotenv(content);
+  if (parsed.entries.length === 0) return { plan: [], changes: {}, problems: parsed.problems };
+  return { ...(await planImport(coffre, path, parsed.entries)), problems: parsed.problems };
+}
 
 /**
  * Bulk import from a .env file.
  *
- * Always previews first. The preview compares against current values, which
- * means it reads them -- so it needs secret.read as well as secret.write, and
- * both the preview and the import are audited.
+ * Always previews first, with a dry run of the write: the server compares
+ * the file against the current values and answers per key, so no value
+ * reaches this page. Comparing is still reading -- it needs secret.read as
+ * well as secret.write, and the values it opens are logged as reads. Writing
+ * then sends exactly the changes the preview showed, in one patch.
  */
 function ImportEnv({ project, environment }: { project: string; environment: string }) {
   const [content, setContent] = useState('');
-  const [plan, setPlan] = useState<ImportPlanEntry[] | null>(null);
+  const [plan, setPlan] = useState<{ entries: ImportPlanEntry[]; changes: Record<string, string> } | null>(
+    null,
+  );
   const [problems, setProblems] = useState<ImportProblem[]>([]);
   const [open, setOpen] = useState(false);
+  const coffre = useCoffre();
   const { pending, error, setError, run } = useAction();
+  const path = `${project}/${environment}`;
 
   function preview() {
     run(
-      () => importEnv({ data: { project, environment, content, dryRun: true } }),
+      () => planEnv(coffre, path, content),
       (result) => {
         setProblems(result.problems);
-        setPlan(result.plan);
+        setPlan({ entries: result.plan, changes: result.changes });
       },
     );
   }
 
   function apply() {
+    if (plan === null) return;
+    const written = Object.keys(plan.changes).length;
     run(
-      () => importEnv({ data: { project, environment, content, dryRun: false } }),
-      (result) => {
-        const written = result.plan.filter((entry) => entry.action !== 'unchanged').length;
+      () => coffre.secrets.set(path, plan.changes),
+      () => {
         toast.success(`Imported ${written} change${written === 1 ? '' : 's'}`);
         close();
       },
@@ -1535,7 +1531,7 @@ function ImportEnv({ project, environment }: { project: string; environment: str
     setError(null);
   }
 
-  const changes = plan?.filter((entry) => entry.action !== 'unchanged') ?? [];
+  const changes = plan?.entries.filter((entry) => entry.action !== 'unchanged') ?? [];
 
   return (
     <>
@@ -1558,10 +1554,10 @@ function ImportEnv({ project, environment }: { project: string; environment: str
         wide
         description={
           <>
-            Paste a .env file. It is parsed on the server, so this page and the CLI cannot
-            disagree about what it means, and malformed lines are reported rather than
-            guessed at. The preview compares against current values, so both the preview and
-            the import are recorded in the audit log.
+            Paste a .env file. It is read by the CLI’s own parser, so this page and the CLI
+            cannot disagree about what it means, and malformed lines are reported rather
+            than guessed at. coffre compares it with the current values without sending any
+            to this page.
           </>
         }
       >
@@ -1582,7 +1578,7 @@ function ImportEnv({ project, environment }: { project: string; environment: str
             />
           </label>
 
-          {plan !== null && plan.length > 0 && (
+          {plan !== null && plan.entries.length > 0 && (
             <div className="card dt-wrap">
               <table className="dt">
                 <thead>
@@ -1593,7 +1589,7 @@ function ImportEnv({ project, environment }: { project: string; environment: str
                   </tr>
                 </thead>
                 <tbody>
-                  {plan.map((entry) => (
+                  {plan.entries.map((entry) => (
                     <tr key={entry.key}>
                       <td className="cell-key">{breakAfterUnderscores(entry.key)}</td>
                       <td className="col-shrink">
@@ -1609,7 +1605,7 @@ function ImportEnv({ project, environment }: { project: string; environment: str
             </div>
           )}
 
-          {plan !== null && plan.length > 0 && changes.length === 0 && (
+          {plan !== null && plan.entries.length > 0 && changes.length === 0 && (
             <Notice tone="good">Every key already has this value. There is nothing to write.</Notice>
           )}
 

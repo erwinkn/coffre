@@ -14,8 +14,10 @@ import type {
   RouteKey,
   RouteOutput,
 } from '../../../apps/web/src/server/api/routes.ts';
+import type { DryRunOutcome, DryRunResult, SetResult } from '../../../apps/web/src/server/api/secrets.ts';
+import type { AuthInfo } from '../../../apps/web/src/server/fetch-api.ts';
 
-export type { RouteInput, RouteKey, RouteOutput };
+export type { AuthInfo, DryRunOutcome, RouteInput, RouteKey, RouteOutput };
 
 export type Transport = (request: Request) => Promise<Response>;
 
@@ -57,12 +59,7 @@ export function createClient(options: ClientOptions) {
   const origin = options.url.replace(/\/+$/, '');
   const transport = options.transport ?? ((request: Request) => fetch(request));
 
-  /** Any route by its key: `call('GET /secrets/:project/:environment', { project, environment })`. */
-  async function call<K extends RouteKey>(key: K, ...[params, input]: Args<K>): Promise<RouteOutput<K>> {
-    const [method, pattern] = key.split(' ') as [string, string];
-    const path = pattern.replace(/:(\w+)/g, (_, name: string) =>
-      encodeURIComponent((params as Record<string, string>)[name]),
-    );
+  async function send(method: string, path: string, input: unknown): Promise<unknown> {
     const url = new URL(`${origin}/api${path}`);
     const headers = new Headers(await options.headers?.());
     let body: string | undefined;
@@ -85,11 +82,29 @@ export function createClient(options: ClientOptions) {
         typeof error?.message === 'string' ? error.message : `request failed with status ${response.status}`,
       );
     }
-    return payload as RouteOutput<K>;
+    return payload;
+  }
+
+  /** A route key and its parameters as a method and a path. */
+  function address<K extends RouteKey>(key: K, params: Params<K>): [method: string, path: string] {
+    const [method, pattern] = key.split(' ') as [string, string];
+    const path = pattern.replace(/:(\w+)/g, (_, name: string) =>
+      encodeURIComponent((params as Record<string, string>)[name]),
+    );
+    return [method, path];
+  }
+
+  /** Any route by its key: `call('GET /secrets/:project/:environment', { project, environment })`. */
+  async function call<K extends RouteKey>(key: K, ...[params, input]: Args<K>): Promise<RouteOutput<K>> {
+    const [method, path] = address(key, params);
+    return (await send(method, path, input)) as RouteOutput<K>;
   }
 
   return {
     call,
+
+    /** How this instance signs people in. Answers anyone, signed in or not. */
+    auth: () => send('GET', '/auth', undefined) as Promise<AuthInfo>,
 
     /** Who I am, and every place I can reach. */
     me: () => call('GET /me', {}),
@@ -117,7 +132,16 @@ export function createClient(options: ClientOptions) {
       reveal: (path: string) => call('POST /reveals', {}, { path }),
       /** One transaction, a version and an audit entry per key; `null` archives. */
       set: (path: string, values: RouteInput<'PATCH /secrets/:project/:environment'>) =>
-        call('PATCH /secrets/:project/:environment', place(path), values),
+        call('PATCH /secrets/:project/:environment', place(path), values) as Promise<SetResult>,
+      /**
+       * What `set` would do to each key, `added`, `changed`, `unchanged` or
+       * `archived`, and nothing else: no value comes back and nothing is
+       * written. Comparing opens the current values, logged as reads.
+       */
+      dryRun: (path: string, values: RouteInput<'PATCH /secrets/:project/:environment'>) => {
+        const [method, route] = address('PATCH /secrets/:project/:environment', place(path));
+        return send(method, `${route}?dryRun=1`, values) as Promise<DryRunResult>;
+      },
       history: (path: string) => call('GET /secrets/:project/:environment/:key/versions', place(path)),
       /** A new version holding the old one's value. */
       restore: (path: string, version: number) =>
@@ -153,6 +177,24 @@ export function createClient(options: ClientOptions) {
         call('PATCH /access/:member', { member }, access),
     },
 
+    /** Where I am signed in. Only where coffre runs its own sign-in. */
+    sessions: {
+      list: () => call('GET /sessions', {}),
+      revoke: (id: string) => call('DELETE /sessions/:id', { id }),
+    },
+
+    /** The accounts I sign in with. */
+    identities: {
+      list: () => call('GET /identities', {}),
+      unlink: (id: string) => call('DELETE /identities/:id', { id }),
+    },
+
+    /** A `coffre login` waiting for someone to approve it, by the code it shows. */
+    deviceLogins: {
+      get: (code: string) => call('GET /device-logins/:code', { code }),
+      decide: (code: string, approve: boolean) => call('POST /device-logins/:code', { code }, { approve }),
+    },
+
     syncs: {
       list: (path: string) => call('GET /syncs/:project/:environment', place(path)),
       add: (path: string, input: RouteInput<'POST /syncs/:project/:environment'>) =>
@@ -172,13 +214,14 @@ export function createClient(options: ClientOptions) {
 
 export type CoffreClient = ReturnType<typeof createClient>;
 
-export type ImportAction = 'create' | 'update' | 'unchanged';
+export type ImportAction = Exclude<DryRunOutcome, 'archived'>;
 
 /**
- * What writing these entries (a parsed `.env` file) would do. It compares
- * against the current values, so it reveals the environment, and that read is
- * logged like any other. `changes` is what to pass to `secrets.set`: the keys
- * that differ, so an unchanged value does not become a new version.
+ * What writing these entries (a parsed `.env` file) would do, from a dry run
+ * of the write: the server compares, so no value leaves it, and the values it
+ * opens to compare are logged as reads. `changes` is what to pass to
+ * `secrets.set`: the keys that differ, so an unchanged value does not become
+ * a new version.
  */
 export async function planImport(
   coffre: CoffreClient,
@@ -188,17 +231,25 @@ export async function planImport(
   plan: { key: string; action: ImportAction; version: number | null }[];
   changes: Record<string, string>;
 }> {
-  const [{ keys }, { values }] = await Promise.all([coffre.secrets.list(path), coffre.secrets.reveal(path)]);
-  const current = new Map(keys.map((entry) => [entry.key, entry]));
+  // Null-prototype records: a key named __proto__ is a key like any other.
+  const values: Record<string, string> = Object.create(null);
+  for (const { key, value } of entries) values[key] = value;
+  // Settle both before throwing, so a refusal leaves no call still in flight.
+  const [listed, compared] = await Promise.allSettled([
+    coffre.secrets.list(path),
+    coffre.secrets.dryRun(path, { ...values }),
+  ]);
+  if (listed.status === 'rejected') throw listed.reason;
+  if (compared.status === 'rejected') throw compared.reason;
+  const [{ keys }, dryRun] = [listed.value, compared.value];
+  const versions = new Map(keys.map((entry) => [entry.key, entry.version]));
   const plan: { key: string; action: ImportAction; version: number | null }[] = [];
-  const changes: Record<string, string> = {};
-  for (const { key, value } of entries) {
-    const existing = current.get(key);
-    if (existing?.archived) throw new CoffreError(409, 'conflict', `restore "${key}" before you import a new version`);
-    const action: ImportAction =
-      existing === undefined ? 'create' : Object.hasOwn(values, key) && values[key] === value ? 'unchanged' : 'update';
-    plan.push({ key, action, version: existing?.version ?? null });
+  const changes: Record<string, string> = Object.create(null);
+  for (const [key, value] of Object.entries(values)) {
+    // A patch without nulls archives nothing, so every outcome is one of these.
+    const action = dryRun.keys[key] as ImportAction;
+    plan.push({ key, action, version: versions.get(key) ?? null });
     if (action !== 'unchanged') changes[key] = value;
   }
-  return { plan, changes };
+  return { plan, changes: { ...changes } };
 }

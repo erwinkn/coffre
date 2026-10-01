@@ -58,10 +58,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 log 'starting Postgres'
-docker compose up -d postgres
-until docker compose exec -T postgres pg_isready -U coffre_owner -d coffre >/dev/null 2>&1; do
-    sleep 1
-done
+./scripts/ensure-postgres.sh
 
 log 'applying migrations'
 # Production creates this login in Terraform. Local development creates the

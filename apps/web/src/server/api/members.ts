@@ -1,7 +1,7 @@
 import { ROLES, type Permission, type Role } from '../../../../../packages/core/src/access.ts';
 import type { Queryable } from '../../../../../packages/db/src/database.ts';
 import {
-  insert,
+  insertIfAbsent,
   lock,
   memberActivity,
   members as loadMembers,
@@ -362,11 +362,17 @@ export async function putMember(
 
     const key = { principalType: member.type, principalId: member.id };
     // Locked, so a removal racing this re-add or role change waits for it.
-    const [existing] = await lock(tx, principals, key);
+    let [existing] = await lock(tx, principals, key);
     const createdBy = ctx.caller.principal.id;
     if (existing === undefined) {
-      await insert(tx, principals, { ...key, instanceRole, createdBy, active: true });
-    } else if (!existing.active) {
+      if ((await insertIfAbsent(tx, principals, { ...key, instanceRole, createdBy, active: true })) === 1) {
+        log.push(allowed(ctx, 'directory.create', { metadata: fields }));
+        return { member: formatMember(member), instanceRole, created: true };
+      }
+      // Someone added them a moment ago: answer as if this add came second.
+      [existing] = await lock(tx, principals, key);
+    }
+    if (!existing.active) {
       await update(tx, principals, key, { instanceRole, active: true, createdAt: new Date(), createdBy });
     } else {
       // `owner` left out keeps the current role, as in any merge.

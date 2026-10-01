@@ -1,5 +1,6 @@
 import { createFileRoute, Link } from '@tanstack/react-router';
-import { listAudit, verifyAuditChain } from '../server-functions/audit';
+import type { CoffreClient } from '../../../../packages/client/src/index.ts';
+import { uiResult } from '../lib/coffre';
 import type { AuditRow } from '../shared/models';
 import {
   breakAfterUnderscores,
@@ -25,7 +26,7 @@ import {
 } from '../components/icons';
 
 type AuditSearch = { decision?: 'deny'; actorId?: string };
-type ChainResult = Awaited<ReturnType<typeof verifyAuditChain>>;
+type ChainResult = Awaited<ReturnType<typeof verifyChain>>;
 
 export const Route = createFileRoute('/audit')({
   // Filters live in the URL so a finding can cite the exact view it came from.
@@ -38,12 +39,42 @@ export const Route = createFileRoute('/audit')({
   // The chain is recomputed on every visit rather than on demand. At this
   // volume it is one HMAC per row and costs less than the query that fetched
   // them, and a status that is always current beats a button nobody presses.
-  loader: async ({ deps }) => {
-    const [entries, chain] = await Promise.all([listAudit({ data: deps }), verifyAuditChain()]);
+  loader: async ({ context: { client }, deps }) => {
+    const [entries, chain] = await Promise.all([listEntries(client, deps), verifyChain(client)]);
     return { entries, chain };
   },
   component: AuditPage,
 });
+
+function listEntries(client: CoffreClient, search: AuditSearch) {
+  return uiResult(async () => {
+    const { entries } = await client.audit.list({ limit: 200, decision: search.decision, actor: search.actorId });
+    const rows: AuditRow[] = entries.map((entry) => ({
+      seq: entry.seq,
+      occurredAt: entry.occurredAt,
+      actorType: entry.actorType,
+      actorId: entry.actorId,
+      action: entry.action,
+      decision: entry.decision,
+      project: entry.project,
+      environment: entry.environment,
+      subject:
+        (typeof entry.metadata.key === 'string' ? entry.metadata.key : null) ??
+        (typeof entry.metadata.reason === 'string' ? entry.metadata.reason : null) ??
+        '--',
+    }));
+    return { entries: rows };
+  });
+}
+
+function verifyChain(client: CoffreClient) {
+  return uiResult(async () => {
+    const result = await client.audit.verify();
+    return result.ok
+      ? { integrity: 'intact' as const, rows: result.rows, head: result.head }
+      : { integrity: 'broken' as const, failedAtSeq: result.failedAtSeq, reason: result.reason };
+  });
+}
 
 function AuditPage() {
   const { entries: result, chain } = Route.useLoaderData();

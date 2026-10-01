@@ -9,7 +9,7 @@ import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
 import { formatPath } from './paths.ts';
 import { routes, type Check, type Route } from './routes.ts';
 
-type AnyRoute = Route<string, z.ZodType | undefined, unknown>;
+type AnyRoute = Route<string, z.ZodType | undefined, unknown, z.ZodType | undefined>;
 
 type Compiled = {
   method: string;
@@ -39,6 +39,7 @@ const PARAMS: Record<string, z.ZodType<string>> = {
   key: secretKey,
   member: z.string().min(3).max(330),
   id: z.string().uuid(),
+  code: z.string().min(1).max(16),
 };
 
 /**
@@ -81,9 +82,9 @@ function moreSpecific(a: Compiled, b: Compiled): boolean {
   return false;
 }
 
-function checks(def: AnyRoute, input: unknown): readonly Check[] {
+function checks(def: AnyRoute, input: unknown, query: unknown): readonly Check[] {
   if (def.needs === undefined) return [];
-  if (typeof def.needs === 'function') return def.needs(input as never);
+  if (typeof def.needs === 'function') return def.needs(input as never, query as never);
   return typeof def.needs === 'string' || !Array.isArray(def.needs) ? [def.needs as Check] : def.needs;
 }
 
@@ -113,7 +114,8 @@ async function locate(
  * Serve one API request for an authenticated caller:
  *
  *   1. match `METHOD /route`; no route is 404, a route without this method 405
- *   2. check the path's segments and parse the input (a GET's query, or the body)
+ *   2. check the path's segments and parse the input (a GET's query, or the body
+ *      and any flags in the query string)
  *   3. resolve the path in one query; a missing place is 404, not logged
  *   4. check the route's permissions against the caller; a refusal is logged
  *   5. run the handler
@@ -144,9 +146,13 @@ export async function serveApi(request: Request, ctx: ApiContext): Promise<Respo
     }
     const raw = request.method === 'GET' ? Object.fromEntries(url.searchParams) : await readJson(request, {});
     const input = def.input === undefined ? undefined : def.input.parse(raw);
+    const query =
+      request.method === 'GET' || def.query === undefined
+        ? undefined
+        : def.query.parse(Object.fromEntries(url.searchParams));
 
     const place = await locate(ctx, def, found.params);
-    for (const check of checks(def, input)) {
+    for (const check of checks(def, input, query)) {
       const permission = typeof check === 'string' ? check : check.permission;
       const scope = {
         projectId: place!.project.id,
@@ -168,7 +174,7 @@ export async function serveApi(request: Request, ctx: ApiContext): Promise<Respo
       );
     }
 
-    return jsonResponse(await def.run(ctx, { params: found.params, place, input } as never));
+    return jsonResponse(await def.run(ctx, { params: found.params, place, input, query } as never));
   } catch (error) {
     return errorResponse(error);
   }

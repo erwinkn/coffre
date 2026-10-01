@@ -3,8 +3,9 @@ import {
   createStart,
 } from '@tanstack/react-start';
 import {
+  isApiPath,
   requestIdentityMiddleware,
-} from './server/auth.ts';
+} from './server/request-identity.ts';
 
 // Defining a startInstance replaces Start's implicit default middleware. Keep
 // CSRF explicit so adding authentication does not silently remove it.
@@ -13,9 +14,10 @@ const csrfMiddleware = createCsrfMiddleware({
 });
 
 /**
- * Browser server functions use origin validation. Native API mutations may
- * skip it only when they use a non-simple JSON content type, which browsers
- * must preflight and HTML forms cannot send.
+ * Start checks the origin of form posts to page routes, such as sign-out.
+ * `/api` checks its own, where it knows how the caller signed in: a change
+ * made with a browser cookie must come from coffre's own pages, and one made
+ * with a token needs no such check (see `server/fetch-api.ts`).
  */
 export function shouldValidateCsrf(
   handlerType: 'serverFn' | 'router',
@@ -23,9 +25,7 @@ export function shouldValidateCsrf(
 ): boolean {
   if (handlerType === 'serverFn') return true;
   if (['GET', 'HEAD', 'OPTIONS'].includes(request.method)) return false;
-
-  const mediaType = request.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase();
-  return mediaType !== 'application/json' && !mediaType?.endsWith('+json');
+  return !isApiPath(new URL(request.url).pathname);
 }
 
 export const startInstance = createStart(() => ({

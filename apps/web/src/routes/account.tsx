@@ -5,8 +5,8 @@ import { ThemeCards } from '../components/theme';
 import { InstanceRole } from '../components/directory';
 import { ConfirmButton, EmptyState, ErrorLine, Notice, Timestamp } from '../components/ui';
 import { Monitor, ProviderMark, SignOut, Terminal, X } from '../components/icons';
-import { getAccountSignin, revokeSession, unlinkIdentity } from '../server-functions/signin';
 import { signinErrorMessage } from '../lib/signin-errors';
+import { uiResult, useCoffre } from '../lib/coffre';
 import { useAction } from '../lib/use-action';
 import type { IdentityRow, SessionRow } from '../server/api/signin';
 
@@ -27,7 +27,26 @@ export const Route = createFileRoute('/account')({
     }
     return out;
   },
-  loader: () => getAccountSignin(),
+  // The sign-in half: which accounts you sign in with, where you are signed
+  // in, and which providers you could link. Empty outside signin mode, where
+  // someone else owns sessions.
+  loader: async ({ context: { client }, parentMatchPromise }) => {
+    const auth = (await parentMatchPromise).loaderData?.auth;
+    if (auth === undefined || auth.signin === null) {
+      return {
+        ok: true as const,
+        mode: auth?.mode,
+        providers: [] as { id: string; label: string; brand: string }[],
+        identities: [] as IdentityRow[],
+        sessions: [] as SessionRow[],
+      };
+    }
+    const { providers } = auth.signin;
+    return uiResult(async () => {
+      const [{ identities }, { sessions }] = await Promise.all([client.identities.list(), client.sessions.list()]);
+      return { mode: auth.mode, providers, identities, sessions };
+    });
+  },
   component: AccountPage,
 });
 
@@ -115,6 +134,7 @@ function SigninAccounts({
 }) {
   const { linked, error } = Route.useSearch();
   const message = signinErrorMessage(error);
+  const coffre = useCoffre();
   const { pending, error: actionError, run } = useAction();
 
   return (
@@ -202,7 +222,7 @@ function SigninAccounts({
                         confirmLabel="Unlink"
                         onConfirm={() =>
                           run(
-                            () => unlinkIdentity({ data: { id: identity.id } }),
+                            () => coffre.identities.unlink(identity.id),
                             () => toast.success(`${label} account unlinked`),
                           )
                         }
@@ -244,6 +264,7 @@ function Sessions({
   sessions: SessionRow[];
   providers: Provider[];
 }) {
+  const coffre = useCoffre();
   const { pending, error, run } = useAction();
 
   return (
@@ -317,7 +338,7 @@ function Sessions({
                         disabled={pending}
                         onClick={() =>
                           run(
-                            () => revokeSession({ data: { id: session.id } }),
+                            () => coffre.sessions.revoke(session.id),
                             () => toast.success('Session ended'),
                           )
                         }

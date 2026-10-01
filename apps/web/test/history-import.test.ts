@@ -6,13 +6,15 @@ import { and, asc, count, eq } from 'drizzle-orm';
 import { planImport, type CoffreClient } from '../../../packages/client/src/index.ts';
 import { parseDotenv } from '../../../packages/core/src/dotenv.ts';
 import { auditLog, grants, secrets, secretVersions } from '../../../packages/db/src/schema.ts';
-import { clientFor, openTestDatabase, resetDatabase, testDeps } from './api-fixture.ts';
+import { serveApi } from '../src/server/api/router.ts';
+import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 const ROOT = 'admin@acme.example';
 const VIEWER = 'viewer@acme.example';
 const READER = 'reader@acme.example';
 
 let db: ReturnType<typeof openTestDatabase>;
+let deps: FixtureDeps;
 let root: CoffreClient;
 let viewer: CoffreClient;
 let reader: CoffreClient;
@@ -27,7 +29,7 @@ after(async () => {
 
 beforeEach(async () => {
   await resetDatabase(db.owner);
-  const deps = testDeps(db.runtime, [ROOT]);
+  deps = testDeps(db.runtime, [ROOT]);
   root = clientFor(deps, ROOT);
   viewer = clientFor(deps, VIEWER);
   reader = clientFor(deps, READER);
@@ -55,6 +57,16 @@ async function auditRows(action: string, decision: 'allow' | 'deny') {
     .where(and(eq(auditLog.action, action), eq(auditLog.decision, decision)))
     .orderBy(asc(auditLog.seq));
   return rows.map((row) => ({ bundleId: row.bundleId, metadata: JSON.parse(row.metadata) }));
+}
+
+/** A raw PATCH, for query strings the client would never send. */
+async function patchAs(query: string, body: unknown): Promise<Response> {
+  const request = new Request(`https://coffre.test/api/secrets/market/dev${query}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return serveApi(request, await contextFor(deps, ROOT));
 }
 
 async function versionCount(): Promise<number> {
@@ -153,9 +165,46 @@ test('restoring an unknown version is rejected and audited', async () => {
 test('a dry run reports the plan and writes nothing', async () => {
   const result = await importText('A=one\nB=two', true);
   assert.deepEqual(result.plan.map(({ key, action }) => [key, action]), [
-    ['A', 'create'],
-    ['B', 'create'],
+    ['A', 'added'],
+    ['B', 'added'],
   ]);
+  assert.equal((await db.owner.select().from(secrets)).length, 0);
+});
+
+test('a dry run of a write answers per key, returns no value, and writes nothing', async () => {
+  await root.secrets.set('market/dev', { SAME: 'same-value', OLD: 'old-value', GONE: 'gone-value' });
+  const versions = await versionCount();
+  const writes = (await auditRows('secret.write', 'allow')).length;
+
+  const result = await root.secrets.dryRun('market/dev', {
+    SAME: 'same-value',
+    OLD: 'new-value',
+    NEW: 'fresh-value',
+    GONE: null,
+    NEVER: null,
+  });
+
+  assert.deepEqual(result, {
+    dryRun: true,
+    keys: { SAME: 'unchanged', OLD: 'changed', NEW: 'added', GONE: 'archived', NEVER: 'unchanged' },
+  });
+  assert.doesNotMatch(JSON.stringify(result), /-value/);
+  assert.equal(await versionCount(), versions);
+  assert.equal((await auditRows('secret.write', 'allow')).length, writes);
+  assert.equal((await db.owner.select().from(secrets)).length, 3);
+  assert.deepEqual({ ...(await root.secrets.reveal('market/dev')).values }, {
+    SAME: 'same-value',
+    OLD: 'old-value',
+    GONE: 'gone-value',
+  });
+});
+
+test('a dry run is spelled one way; anything else is refused before it writes', async () => {
+  for (const query of ['?dryRun=yes', '?dryrun=1', '?dryRun=1&apply=1']) {
+    assert.equal((await patchAs(query, { A: 'one' })).status, 400, query);
+  }
+  assert.equal((await db.owner.select().from(secrets)).length, 0);
+  assert.equal((await patchAs('?dryRun=true', { A: 'one' })).status, 200);
   assert.equal((await db.owner.select().from(secrets)).length, 0);
 });
 
@@ -164,6 +213,8 @@ test('a preview logs a read of every existing secret it compares', async () => {
   await importText('A=one\nB=changed\nC=new', true);
   const reads = await auditRows('secret.read', 'allow');
   assert.deepEqual(reads.map((row) => row.metadata.key).sort(), ['A', 'B']);
+  assert.ok(reads.every((row) => row.metadata.dryRun === true));
+  assert.equal(new Set(reads.map((row) => row.bundleId)).size, 1);
 });
 
 test('import creates every secret, one audit entry per key in one bundle', async () => {
@@ -183,12 +234,12 @@ test('re-importing unchanged values adds no versions', async () => {
   assert.equal(await versionCount(), before);
 });
 
-test('import distinguishes create from update', async () => {
+test('import distinguishes added from changed', async () => {
   await root.secrets.set('market/dev', { A: 'old' });
   const result = await importText('A=new\nB=created', false);
   assert.deepEqual(result.plan.map(({ key, action, version }) => [key, action, version]), [
-    ['A', 'update', 1],
-    ['B', 'create', null],
+    ['A', 'changed', 1],
+    ['B', 'added', null],
   ]);
   assert.equal((await root.secrets.reveal('market/dev/A')).values.A, 'new');
 });
@@ -209,6 +260,10 @@ test('import refuses to write over an archived secret', async () => {
 test('import needs read to plan and write to apply, and refusals are audited', async () => {
   await assert.rejects(importText('A=one', false, viewer), { status: 403 });
   assert.equal((await auditRows('secret.list', 'deny'))[0].metadata.reason, 'missing_secret_read');
+  assert.deepEqual((await auditRows('secret.read', 'deny'))[0].metadata, {
+    reason: 'missing_secret_read',
+    dryRun: true,
+  });
   await assert.rejects(importText('A=one', false, reader), { status: 403 });
   assert.equal((await auditRows('secret.write', 'deny'))[0].metadata.reason, 'missing_secret_write');
   assert.equal((await db.owner.select().from(secrets)).length, 0);

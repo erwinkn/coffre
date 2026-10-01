@@ -13,26 +13,21 @@ async function lintImport(source: string, filePath: string) {
   return result.messages.filter((message) => message.severity === 2);
 }
 
-test('ESLint reserves raw createServerFn for the factory', async () => {
+test('ESLint keeps server functions out of the web app', async () => {
   const source = "import { createServerFn } from '@tanstack/react-start';";
-  assert.equal(
-    (await lintImport(source, 'apps/web/src/server-functions/example.ts'))[0]?.ruleId,
-    'no-restricted-imports',
-  );
+  for (const filePath of ['apps/web/src/routes/example.tsx', 'apps/web/src/server/example.ts']) {
+    assert.equal((await lintImport(source, filePath))[0]?.ruleId, 'no-restricted-imports');
+  }
   assert.deepEqual(
-    await lintImport(source, 'apps/web/src/server/server-fn.ts'),
+    await lintImport("import { createMiddleware } from '@tanstack/react-start';", 'apps/web/src/start.ts'),
     [],
   );
 });
 
-test('ESLint reserves sessionServerFn for the reviewed boundaries', async () => {
-  const source = "import { sessionServerFn } from '../server/server-fn.ts';";
+test('ESLint keeps drizzle queries in packages/db', async () => {
   assert.equal(
-    (await lintImport(source, 'apps/web/src/server-functions/projects.ts'))[0]?.ruleId,
+    (await lintImport("import { eq } from 'drizzle-orm';", 'apps/web/src/server/example.ts'))[0]
+      ?.ruleId,
     'no-restricted-imports',
-  );
-  assert.deepEqual(
-    await lintImport(source, 'apps/web/src/server-functions/auth.ts'),
-    [],
   );
 });

@@ -10,6 +10,11 @@ import { conflict, notFound } from './errors.ts';
 
 export type Me = {
   principal: { type: 'user' | 'service'; id: string };
+  /**
+   * False for someone signed in but not a member: `/me` is the one call that
+   * answers them, so the UI can say who they are and that the door is shut.
+   */
+  registered: boolean;
   instanceRole: 'user' | 'owner' | 'root-admin';
   isRootAdmin: boolean;
   canReadAudit: boolean;
@@ -60,6 +65,7 @@ export async function me(ctx: ApiContext): Promise<Me> {
   }
   return {
     principal: caller.principal,
+    registered: caller.registered,
     instanceRole: caller.instanceRole,
     isRootAdmin: caller.isRootAdmin,
     canReadAudit: caller.isOwner || canAnywhere(caller, 'audit.read'),

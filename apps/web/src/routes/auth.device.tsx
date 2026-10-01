@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router';
-import { decideDeviceRequest, getDeviceRequest } from '../server-functions/signin';
+import { failureMessage, statusOf, uiResult, useCoffre } from '../lib/coffre';
 import { ClosedDoor } from '../components/page';
 import { ErrorLine, Spinner, Timestamp } from '../components/ui';
 import { CheckCircle, SlashCircle, Terminal } from '../components/icons';
@@ -17,8 +17,14 @@ export const Route = createFileRoute('/auth/device')({
     return typeof code === 'string' && code.length <= 16 ? { code } : {};
   },
   loaderDeps: ({ search }) => ({ code: search.code }),
-  loader: ({ deps }) =>
-    deps.code === undefined ? null : getDeviceRequest({ data: { code: deps.code } }),
+  loader: async ({ context: { client }, deps, parentMatchPromise }) => {
+    if (deps.code === undefined) return null;
+    if ((await parentMatchPromise).loaderData?.authMode !== 'signin') {
+      return { ok: false as const, error: 'This instance has no CLI sign-in.' };
+    }
+    const code = deps.code;
+    return uiResult(() => client.deviceLogins.get(code));
+  },
   component: DevicePage,
 });
 
@@ -109,17 +115,23 @@ function Approve({
   sessionDays: number;
   onDecided: (decision: 'approved' | 'denied') => void;
 }) {
+  const coffre = useCoffre();
   const [pending, setPending] = useState<'approve' | 'deny' | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   async function decide(approve: boolean) {
     setPending(approve ? 'approve' : 'deny');
     try {
-      const result = await decideDeviceRequest({ data: { code: request.userCode, approve } });
-      if (result.ok) onDecided(approve ? 'approved' : 'denied');
-      else setError(result.error);
-    } catch {
-      setError('The decision could not be sent. Nothing was approved.');
+      await coffre.deviceLogins.decide(request.userCode, approve);
+      onDecided(approve ? 'approved' : 'denied');
+    } catch (error) {
+      setError(
+        statusOf(error) === 404
+          ? 'That code is unknown, already used, or expired. Run coffre login again.'
+          : statusOf(error) === undefined
+            ? 'The decision could not be sent. Nothing was approved.'
+            : failureMessage(error),
+      );
     } finally {
       setPending(null);
     }

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   accessChanges,
+  accessPatch,
   dateFromExpiry,
   environmentAccess,
   expiryFromDate,
@@ -182,4 +183,19 @@ test('a date means access ends as that day closes, in UTC', () => {
   assert.equal(expiryFromDate(''), null);
   assert.equal(dateFromExpiry('2026-10-31T23:59:59.000Z'), '2026-10-31');
   assert.equal(dateFromExpiry(null), '');
+});
+
+test('the changes become one patch: a new level replaces the old at the same place', () => {
+  const expiresAt = '2026-12-31T23:59:59.000Z';
+  const grants = [held('g1', 'viewer', null), held('g2', 'developer', 'dev'), held('g3', 'viewer', 'prod')];
+  const plan = perEnvironment({ dev: 'developer', prod: ['viewer', expiresAt], staging: 'viewer' });
+  assert.deepEqual(accessPatch('market', accessChanges(grants, plan)), {
+    market: null,
+    'market/prod': { role: 'viewer', until: expiresAt },
+    'market/staging': 'viewer',
+  });
+  assert.deepEqual(
+    accessPatch('market', accessChanges([held('g1', 'viewer', null)], { level: 'developer', expiresAt: null, environments: {} })),
+    { market: 'developer' },
+  );
 });

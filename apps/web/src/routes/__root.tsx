@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import {
-  createRootRoute,
+  createRootRouteWithContext,
   HeadContent,
   Outlet,
   redirect,
@@ -10,14 +10,17 @@ import {
 } from '@tanstack/react-router';
 import { Toaster } from 'sonner';
 import globalsCss from '../styles/globals.css?url';
-import { getShell } from '../server-functions/shell';
+import { CoffreError, type CoffreClient } from '../../../../packages/client/src/index.ts';
+import { deriveUiCapabilities } from '../lib/capabilities';
+import type { RouterContext } from '../router';
+import type { Me } from '../shared/models';
 import { Brand, Shell, sidebarBootScript } from '../components/shell';
 import { TooltipProvider } from '../components/ui';
 import { ThemeToggle, themeBootScript } from '../components/theme';
 import { Agentation } from '../components/agentation';
 import { MARK_SVG } from '../components/icons';
 
-export const Route = createRootRoute({
+export const Route = createRootRouteWithContext<RouterContext>()({
   head: () => ({
     meta: [
       { charSet: 'utf-8' },
@@ -34,8 +37,8 @@ export const Route = createRootRoute({
   }),
 
   // Identity and the project tree, which the shell needs on every screen.
-  loader: async ({ location }) => {
-    const shell = await getShell();
+  loader: async ({ context: { client }, location }) => {
+    const shell = await loadShell(client);
 
     if (shell.registrationRequired && location.pathname !== '/unregistered') {
       throw redirect({ to: '/unregistered' });
@@ -69,6 +72,35 @@ export const Route = createRootRoute({
   shellComponent: RootDocument,
   component: RootComponent,
 });
+
+/**
+ * Who is looking, how this instance signs people in, and the projects they
+ * can see. Three calls at once: for someone signed out or not yet a member,
+ * the project list is refused, and they get the sign-in or closed-door page.
+ */
+async function loadShell(client: CoffreClient) {
+  const [auth, me, projects] = await Promise.all([
+    client.auth(),
+    client.me().catch((error: unknown) => {
+      if (error instanceof CoffreError && error.status === 401) return null;
+      throw error;
+    }),
+    client.projects.list().then(
+      ({ projects }) => projects,
+      () => [],
+    ),
+  ]);
+  const member: Me | null = me?.registered === true ? me : null;
+  return {
+    auth,
+    authMode: auth.mode,
+    principal: me === null ? null : me.principal,
+    instanceRole: member?.instanceRole ?? null,
+    projects,
+    capabilities: deriveUiCapabilities(member, projects),
+    registrationRequired: me !== null && !me.registered,
+  };
+}
 
 function RootDocument({ children }: { children: ReactNode }) {
   return (

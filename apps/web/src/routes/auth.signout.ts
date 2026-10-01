@@ -3,10 +3,10 @@ import { createFileRoute } from '@tanstack/react-router';
 import {
   DEV_TOKEN_COOKIE,
   readCookie,
-  requestIdentityContextFor,
   sessionCookieName,
   trustedSourceIp,
 } from '../server/auth.ts';
+import { requestIdentityContextFor } from '../server/request-identity.ts';
 import { methodNotAllowed } from '../server/http.ts';
 import { getRuntime } from '../server/runtime.ts';
 import { clearCookieHeader, redirectResponse } from '../server/signin.ts';

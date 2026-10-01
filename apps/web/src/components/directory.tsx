@@ -1,11 +1,8 @@
 import { useEffect, useState } from 'react';
 import { DropdownMenu } from 'radix-ui';
 import { toast } from 'sonner';
-import {
-  createDirectoryPrincipal,
-  removeDirectoryPrincipal,
-  updateDirectoryPrincipalRole,
-} from '../server-functions/access';
+import type { CoffreClient } from '../../../../packages/client/src/index.ts';
+import { memberRef, Refusal, uiResult, useCoffre } from '../lib/coffre';
 import { useAction } from '../lib/use-action';
 import type { DirectoryPrincipal } from '../shared/models';
 import { ConfirmDialog, EmptyState, ErrorLine, Modal, Spinner, Toggletip } from './ui';
@@ -21,6 +18,22 @@ import { Key, Lock, MoreHorizontal, Pencil, Plus, ShieldCheck, User, X } from '.
  */
 
 type PrincipalType = DirectoryPrincipal['principalType'];
+
+/**
+ * Everyone in the directory, and who was removed. The API shows grant
+ * managers the members of their projects; the directory pages stay the
+ * owners' own, and asking for anyone else would only log a refusal.
+ */
+export async function loadDirectory(client: CoffreClient, canManage: boolean) {
+  if (!canManage) return { ok: false as const, error: 'Only owners can manage users and service accounts.' };
+  return uiResult(async () => {
+    const { members, removed } = await client.members.list();
+    const principals: DirectoryPrincipal[] = members.map(
+      ({ principalType, principalId, instanceRole, isRootAdmin }) => ({ principalType, principalId, instanceRole, isRootAdmin }),
+    );
+    return { principals, removed };
+  });
+}
 
 export const ROLE_LABEL: Record<DirectoryPrincipal['instanceRole'], string> = {
   'root-admin': 'Root admin',
@@ -155,6 +168,7 @@ export function PrincipalActions({
   const [instanceRole, setInstanceRole] = useState<'user' | 'owner'>(
     principal.instanceRole === 'owner' ? 'owner' : 'user',
   );
+  const coffre = useCoffre();
   const { pending, error, setError, run } = useAction();
   const kind = KIND[principal.principalType];
 
@@ -223,8 +237,8 @@ export function PrincipalActions({
               event.preventDefault();
               void run(
                 () =>
-                  updateDirectoryPrincipalRole({
-                    data: { principalId: principal.principalId, instanceRole },
+                  coffre.members.add(memberRef('user', principal.principalId), {
+                    owner: instanceRole === 'owner',
                   }),
                 () => {
                   toast.success(
@@ -276,13 +290,7 @@ export function PrincipalActions({
         confirmLabel={`Remove ${kind}`}
         onConfirm={() =>
           void run(
-            () =>
-              removeDirectoryPrincipal({
-                data: {
-                  principalType: principal.principalType,
-                  principalId: principal.principalId,
-                },
-              }),
+            () => coffre.members.remove(memberRef(principal.principalType, principal.principalId)),
             async () => {
               toast.success(`${principal.principalId} removed`);
               await onRemoved?.();
@@ -298,6 +306,7 @@ export function AddPrincipal({ principalType }: { principalType: PrincipalType }
   const [open, setOpen] = useState(false);
   const [principalId, setPrincipalId] = useState('');
   const [instanceRole, setInstanceRole] = useState<'user' | 'owner'>('user');
+  const coffre = useCoffre();
   const { pending, error, setError, run } = useAction();
   const kind = KIND[principalType];
 
@@ -326,14 +335,16 @@ export function AddPrincipal({ principalType }: { principalType: PrincipalType }
           onSubmit={(event) => {
             event.preventDefault();
             void run(
-              () =>
-                createDirectoryPrincipal({
-                  data: {
-                    principalType,
-                    principalId: principalId.trim(),
-                    instanceRole: principalType === 'user' ? instanceRole : 'user',
-                  },
-                }),
+              async () => {
+                // Adding is an idempotent PUT that would also set the role of
+                // someone already here; this form is only for someone new.
+                const member = memberRef(principalType, principalId.trim());
+                const { members } = await coffre.members.list();
+                if (members.some((entry) => entry.member === member)) {
+                  throw new Refusal('That principal already exists.');
+                }
+                await coffre.members.add(member, { owner: principalType === 'user' && instanceRole === 'owner' });
+              },
               () => {
                 toast.success(`${principalId.trim()} added`);
                 close();
