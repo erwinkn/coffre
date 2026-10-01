@@ -17,6 +17,7 @@ import { openLocalVault, type LocalVault } from '../src/local.ts';
 import { entryView, vaultLogKey } from '../src/log.ts';
 import { memberMac, rowKey } from '../src/rows.ts';
 import * as store from '../src/store.ts';
+import { KekBadClaimError as ExportedBadClaim } from '../src/index.ts';
 import { openVault, prepareVault, type VaultOptions } from '../src/vault.ts';
 import {
   emptyDatabase,
@@ -454,6 +455,24 @@ test('a key service past the budget is cancelled, and opened keys are wiped', as
   assert.deepEqual(outcomes.map((entry) => entry.code), ['withheld', 'kms_uncertain']);
   assert.equal(seen.opened.length, 1, 'the slow operation was cancelled');
   assert.ok(seen.opened.every((key) => key.equals(Buffer.alloc(32))), 'and was wiped as it came');
+});
+
+test('a provider of a deployment\'s own refuses a key with the KekBadClaimError @coffre/vault exports', async () => {
+  const inner = LocalKekProvider.generate('test-kek-1');
+  let refusing = false;
+  const own: KekProvider = {
+    provider: inner.provider,
+    keyId: inner.keyId,
+    keyVersion: inner.keyVersion,
+    wrap: (key, ctx) => inner.wrap(key, ctx),
+    unwrap: (wrapped, ctx) => (refusing ? Promise.reject(new ExportedBadClaim('not this key')) : inner.unwrap(wrapped, ctx)),
+  };
+  const w = await world({ keks: new KekRegistry(own) });
+  const secret = await w.secret(w.dev);
+  const items = await versionItems([{ secret, wrapped: await wrapped(w, secret) }]);
+  refusing = true;
+  const read = await w.vault.unwrap({ principal: ROOT, purpose: 'reveal', items });
+  assert.equal(!read.ok && read.refusal.code, 'bad_claim', 'refused as a claim, not failed as a fault');
 });
 
 test('a key service failing for its own reasons fails the call, and is no verdict on the claim', async () => {

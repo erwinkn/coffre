@@ -144,7 +144,7 @@ written before the switch, without CloudTrail.
 Transit's) takes about as much code as `aws-kms.ts` in `@coffre/core`:
 
 ```ts
-import { KekUnavailableError, type KekProvider } from '@coffre/vault/cloudflare';
+import { KekBadClaimError, KekUnavailableError, type KekProvider } from '@coffre/vault/cloudflare';
 
 const transit: KekProvider = {
   provider: 'vault-transit', // with keyId, recorded on every row it wraps
@@ -155,7 +155,8 @@ const transit: KekProvider = {
   },
   async unwrap(wrapped, ctx) {
     // Decrypt `wrapped.bytes` bound to `ctx`; throw new KekUnavailableError(…)
-    // when the service cannot answer.
+    // when the service cannot answer, and new KekBadClaimError(…) when it
+    // answers that the key does not open for `ctx`.
   },
 };
 ```
@@ -163,9 +164,9 @@ const transit: KekProvider = {
 `ctx` is the secret's `{ projectId, environmentId, secretId }`. Bind it to
 the ciphertext, so that a wrapped key presented as another secret's fails to
 unwrap. `unwrap` throws `KekUnavailableError` when the service cannot answer,
-and `KekBadClaimError`, from `@coffre/core/kek`, when the wrapped key does
-not open for `ctx`: the vault fails the call on the first and refuses the
-second as `bad_claim`. Any other error is a fault: the vault logs it and
+and `KekBadClaimError` when the wrapped key does not open for `ctx`; both
+come from `@coffre/vault`, as above. The vault fails the call on the first
+and refuses the second as `bad_claim`. Any other error is a fault: the vault logs it and
 fails the call.
 
 Scaleway's Key Manager would fit the same way, but its Audit Trail logs no
