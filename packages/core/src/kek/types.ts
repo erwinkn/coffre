@@ -15,6 +15,9 @@ export type WrappedDek = {
   bytes: Buffer;
 };
 
+/** One deadline for a batch. Providers must abort and settle their work when its signal fires. */
+export type KeyOperation = { deadline: number; signal: AbortSignal };
+
 /**
  * The only interface any key encryption key backend must satisfy.
  *
@@ -30,16 +33,16 @@ export type WrappedDek = {
  * Decrypt at all, which is why AWS came first.
  *
  * `unwrap` throws `KekUnavailableError` when the service cannot answer, and
- * any other error when the wrapped DEK does not open under `ctx`: the vault
- * refuses the second as a bad claim, and fails the call on the first.
+ * `KekBadClaimError` when the wrapped DEK does not open under `ctx`. Other
+ * errors are unexpected faults; the vault records them and fails the call.
  */
 export interface KekProvider {
   readonly provider: string;
   readonly keyId: string;
   readonly keyVersion: string;
 
-  wrap(dek: Buffer, ctx: SecretContext): Promise<WrappedDek>;
-  unwrap(wrapped: WrappedDek, ctx: SecretContext): Promise<Buffer>;
+  wrap(dek: Buffer, ctx: SecretContext, operation?: KeyOperation): Promise<WrappedDek>;
+  unwrap(wrapped: WrappedDek, ctx: SecretContext, operation?: KeyOperation): Promise<Buffer>;
 }
 
 /** Length of the data encryption keys we generate, in bytes (AES-256). */
@@ -51,5 +54,26 @@ export const DEK_BYTES = 32;
  * wrapped key, so the vault fails the call instead of refusing it.
  */
 export class KekUnavailableError extends Error {
-  override readonly name = 'KekUnavailableError';
+  override readonly name: string = 'KekUnavailableError';
+
+  readonly uncertain: boolean;
+
+  constructor(message: string, uncertain = false) {
+    super(message);
+    this.uncertain = uncertain;
+  }
+}
+
+/** No more work may start. A request already sent may have been accepted by KMS. */
+export class KekCancelledError extends KekUnavailableError {
+  override readonly name = 'KekCancelledError';
+
+  constructor(uncertain = false) {
+    super('key operation was cancelled', uncertain);
+  }
+}
+
+/** The ciphertext does not open under the claimed key and context. */
+export class KekBadClaimError extends Error {
+  override readonly name = 'KekBadClaimError';
 }

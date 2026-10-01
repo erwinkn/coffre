@@ -6,10 +6,10 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
 import { entryHash, entryMac, type LogKey, type StoredEntry } from '@coffre/core/audit';
-import { awsKms, KekRegistry, KekUnavailableError, LocalKekProvider, type KekProvider } from '@coffre/core/kek';
+import { awsKms, KekRegistry, KekUnavailableError, LocalKekProvider, type KekProvider, type KeyOperation } from '@coffre/core/kek';
 import { verifyCheckpoint, type SecretRef, type WrappedKey } from '@coffre/core/vault';
 import { tablesOf, type Database } from '@coffre/db';
-import { LogRewound } from '@coffre/db/log';
+import { appendEntries, LogRewound } from '@coffre/db/log';
 import { asc, eq, gte, sql } from 'drizzle-orm';
 
 import { checkRootAdmins, resolveVaultConfig, type ResolvedVaultConfig } from '../src/config.ts';
@@ -168,9 +168,14 @@ test('a wrapped key presented as another secret is a bad claim', async () => {
 function service(options: { delayMs?: number } = {}) {
   const inner = LocalKekProvider.generate('test-kek-1');
   const seen = { wrap: 0, unwrap: 0, down: false, failing: new Set<string>(), hanging: new Set<string>(), opened: [] as Buffer[] };
-  const answer = async <T>(secretId: string, work: () => Promise<T>) => {
-    if (options.delayMs) await sleep(options.delayMs);
-    if (seen.hanging.has(secretId)) await sleep(500);
+  const answer = async <T>(secretId: string, work: () => Promise<T>, operation?: KeyOperation) => {
+    try {
+      if (options.delayMs) await sleep(options.delayMs, undefined, { signal: operation?.signal });
+      if (seen.hanging.has(secretId)) await sleep(500, undefined, { signal: operation?.signal });
+    } catch (error) {
+      if (operation?.signal.aborted) throw new KekUnavailableError('test key operation cancelled', true);
+      throw error;
+    }
     if (seen.down || seen.failing.has(secretId)) throw new KekUnavailableError('KMS Decrypt failed 3 times: KMSInternalException');
     return work();
   };
@@ -178,14 +183,14 @@ function service(options: { delayMs?: number } = {}) {
     provider: inner.provider,
     keyId: inner.keyId,
     keyVersion: inner.keyVersion,
-    wrap: (dek, ctx) => (seen.wrap++, answer(ctx.secretId, () => inner.wrap(dek, ctx))),
-    unwrap: (wrapped, ctx) => (
+    wrap: (dek, ctx, operation) => (seen.wrap++, answer(ctx.secretId, () => inner.wrap(dek, ctx, operation), operation)),
+    unwrap: (wrapped, ctx, operation) => (
       seen.unwrap++,
       answer(ctx.secretId, async () => {
-        const key = await inner.unwrap(wrapped, ctx);
+        const key = await inner.unwrap(wrapped, ctx, operation);
         seen.opened.push(key);
         return key;
-      })
+      }, operation)
     ),
   };
   return { keks: new KekRegistry(kek), seen };
@@ -333,7 +338,7 @@ test('a key service failing part of a batch leaves each key\'s outcome, and the 
   assert.ok(seen.opened.every((key) => key.equals(Buffer.alloc(32))), 'the keys KMS opened are wiped, not released');
 });
 
-test('a key service past the budget fails the call, and what it answers later is wiped', async () => {
+test('a key service past the budget is cancelled, and opened keys are wiped', async () => {
   const { keks, seen } = service();
   const w = await world({ keks }, { keyBudgetMs: 100 });
   await member(w, ADA, [[w.dev, 'viewer']]);
@@ -344,9 +349,8 @@ test('a key service past the budget fails the call, and what it answers later is
 
   await assert.rejects(w.vault.unwrap({ principal: ADA, purpose: 'run', items }), KekUnavailableError);
   const outcomes = (await vaultLog(w)).filter((entry) => entry.action === 'unwrap' && entry.actor === ADA);
-  assert.deepEqual(outcomes.map((entry) => entry.code), ['withheld', 'kms_unavailable']);
-  await sleep(600);
-  assert.equal(seen.opened.length, 2, 'the slow key opened after all');
+  assert.deepEqual(outcomes.map((entry) => entry.code), ['withheld', 'kms_uncertain']);
+  assert.equal(seen.opened.length, 1, 'the slow operation was cancelled');
   assert.ok(seen.opened.every((key) => key.equals(Buffer.alloc(32))), 'and was wiped as it came');
 });
 
@@ -368,9 +372,9 @@ test('a key service failing for its own reasons fails the call, and is no verdic
     /the key policy forbids Encrypt/,
   );
   assert.deepEqual(
-    (await vaultLog(w)).filter((entry) => entry.action === 'wrap'),
-    [],
-    'no refusal: nothing was refused',
+    (await vaultLog(w)).filter((entry) => entry.action === 'wrap').map((entry) => entry.code),
+    ['key_error'],
+    'the unexpected fault is recorded before it is rethrown',
   );
 });
 
@@ -965,3 +969,195 @@ test('membership generations advance on removal even when time does not', async 
   assert.equal((await w.vault.access(ADA)).generation, 2);
   assert.equal((await w.vault.verifyLog({ through: null })).ok, true);
 });
+
+
+test('a deadline aborts KMS requests and drops queued keys before a removal can commit', async () => {
+  const arn = 'arn:aws:kms:eu-west-3:123456789012:key/deadline';
+  let started = 0;
+  let active = 0;
+  const kek = awsKms({
+    keyArn: arn,
+    credentials: { accessKeyId: 'test', secretAccessKey: 'test' },
+    fetch: async (_url, init) => {
+      started++;
+      active++;
+      try {
+        await sleep(300, undefined, { signal: init?.signal ?? undefined });
+        return Response.json({ KeyId: arn, Plaintext: Buffer.alloc(32, 7).toString('base64') });
+      } finally {
+        active--;
+      }
+    },
+  });
+  const w = await world({ keks: new KekRegistry(kek) }, { keyBudgetMs: 100 });
+  await member(w, ADA, [[w.dev, 'developer']]);
+  const items = [];
+  for (let i = 0; i < 9; i++) {
+    items.push({ secret: await w.secret(w.dev), wrapped: { kekProvider: 'aws-kms', kekId: arn, kekVersion: '1', bytes: 'Y2lwaGVydGV4dA==' } });
+  }
+  try {
+    await assert.rejects(w.vault.unwrap({ principal: ADA, purpose: 'run', items }), KekUnavailableError);
+    assert.equal(active, 0, 'all in-flight requests settled before the decision ended');
+    assert.equal(started, 8, 'the queued key never reached KMS');
+    assert.ok((await (await w.twin()).remove({ actor: ROOT, principal: ADA })).ok);
+    const outcomes = (await vaultLog(w)).filter((entry) => entry.action === 'unwrap');
+    assert.deepEqual(outcomes.map((entry) => entry.code), [...Array<string>(8).fill('kms_uncertain'), 'cancelled']);
+  } finally {
+    await sleep(650);
+  }
+  assert.equal(started, 8, 'no queued request started after removal');
+});
+
+for (const action of ['unwrap', 'rewrap'] as const) {
+  test(`a mixed ${action} batch records opened keys as withheld and failed claims as bad_claim`, async () => {
+    const remote = service();
+    const w = await world({ keks: remote.keks });
+    await member(w, ADA, [[w.dev, 'developer']]);
+    const good = await w.secret(w.dev), bad = await w.secret(w.dev);
+    const sealed = await wrapped(w, good);
+    const items = [{ secret: good, wrapped: sealed, from: 1 }, { secret: bad, wrapped: sealed, from: 1 }];
+    const result = action === 'unwrap'
+      ? await w.vault.unwrap({ principal: ADA, purpose: 'run', items })
+      : await w.vault.rewrap({ principal: ADA, items });
+    assert.equal(!result.ok && result.refusal.code, 'bad_claim');
+    assert.equal(remote.seen.opened.length, 1);
+    assert.ok(remote.seen.opened[0].every((byte) => byte === 0));
+    assert.deepEqual((await vaultLog(w)).filter((entry) => entry.action === action).map((entry) => entry.code), ['withheld', 'bad_claim']);
+  });
+}
+
+test('the whole wrap batch is validated before any key reaches KMS', async () => {
+  const remote = service();
+  const w = await world({ keks: remote.keks });
+  await member(w, ADA, [[w.dev, 'developer']]);
+  const first = await w.secret(w.dev), second = await w.secret(w.dev);
+  await assert.rejects(w.vault.wrap({ principal: ADA, items: [
+    { secret: first, key: randomBytes(32).toString('base64') },
+    { secret: second, key: Buffer.alloc(1).toString('base64') },
+  ] }), /DEK must be/);
+  assert.equal(remote.seen.wrap, 0);
+  assert.equal((await vaultLog(w)).filter((entry) => entry.action === 'key.intent').length, 0);
+});
+
+test('unexpected provider errors are rethrown after every known key outcome commits', async () => {
+  const inner = LocalKekProvider.generate('test-kek-1');
+  const fault = new Error('unexpected provider error');
+  let calls = 0;
+  const kek: KekProvider = {
+    provider: inner.provider, keyId: inner.keyId, keyVersion: inner.keyVersion,
+    unwrap: (key, ctx) => inner.unwrap(key, ctx),
+    wrap: (key, ctx) => ++calls === 2 ? Promise.reject(fault) : inner.wrap(key, ctx),
+  };
+  const w = await world({ keks: new KekRegistry(kek) });
+  await member(w, ADA, [[w.dev, 'developer']]);
+  const items = [];
+  for (let i = 0; i < 2; i++) items.push({ secret: await w.secret(w.dev), key: randomBytes(32).toString('base64') });
+  await assert.rejects(w.vault.wrap({ principal: ADA, items }), (error) => error === fault);
+  assert.equal(calls, 2);
+  const outcomes = (await vaultLog(w)).filter((entry) => entry.action === 'wrap');
+  assert.deepEqual(outcomes.map((entry) => entry.code), ['withheld', 'key_error']);
+  assert.ok((await w.vault.verifyLog({ through: null })).ok);
+});
+
+test('intents and outcomes have their own identities even when caller request ids repeat', async () => {
+  const remote = service();
+  const w = await world({ keks: remote.keks });
+  const secret = await w.secret(w.dev);
+  for (let i = 0; i < 2; i++) {
+    assert.ok((await w.vault.wrap({ principal: ROOT, requestId: 'repeated', items: [
+      { secret, key: randomBytes(32).toString('base64') }, { secret, key: randomBytes(32).toString('base64') },
+    ] })).ok);
+  }
+  const { auditLog } = tablesOf(db.owner);
+  const log = await db.owner.select().from(auditLog).where(eq(auditLog.requestId, 'repeated')).orderBy(asc(auditLog.seq));
+  const intents = log.filter((entry) => entry.action === 'key.intent');
+  assert.equal(intents.length, 2);
+  assert.ok(intents[0].operationId);
+  assert.notEqual(intents[0].operationId, intents[1].operationId);
+  for (const intent of intents) {
+    const outcomes = log.filter((entry) => entry.relatedSeq === intent.seq);
+    assert.equal(outcomes.length, 2);
+    assert.deepEqual(outcomes.map((entry) => JSON.parse(entry.metadata).item), [0, 1]);
+    assert.ok(outcomes.every((entry) => entry.operationId === intent.operationId));
+  }
+  assert.ok((await w.vault.verifyLog({ through: null })).ok);
+});
+
+for (const overdue of [false, true]) {
+  test(`verification reports a ${overdue ? 'overdue' : 'still-running'} intent with no outcomes`, async () => {
+    const w = await world();
+    const operationId = randomUUID();
+    const appended = await db.vault.transaction((tx) => appendEntries(tx, VAULT_KEY, [{
+      actor: ADA, action: 'key.intent', decision: 'allow', operationId,
+      metadata: JSON.stringify({ operation: 'wrap', expiresAt: Date.now() + 60_000, keys: [{ item: 0, subject: 'market/dev/KEY', secretId: randomUUID(), version: 1 }] }),
+    }]));
+    if (overdue) w.clock.offset = 120_000;
+    const verification = await w.vault.verifyLog({ through: null });
+    assert.equal(verification.ok, false);
+    if (!verification.ok) {
+      assert.equal(verification.failedAtSeq, Number(appended.seqStart));
+      assert.match(verification.reason, overdue ? /overdue/ : /still running/);
+    }
+  });
+}
+
+for (const action of ['wrap', 'unwrap', 'rewrap'] as const) {
+  test(`a malformed later context prevents all remote ${action} work`, async () => {
+    const remote = service();
+    const w = await world({ keks: remote.keks });
+    const first = await w.secret(w.dev), second = await w.secret(w.dev);
+    const sealed = await wrapped(w, first);
+    remote.seen.wrap = 0;
+    remote.seen.unwrap = 0;
+    const items = [first, { ...second, secretId: 'not-a-uuid' }].map((secret) => ({
+      secret, key: randomBytes(32).toString('base64'), wrapped: sealed, from: 1,
+    }));
+    const input = { principal: ROOT, items, purpose: 'run' as const };
+    await assert.rejects(w.vault[action](input), /must be a lowercase UUID/);
+    assert.equal(remote.seen.wrap + remote.seen.unwrap, 0);
+  });
+}
+
+for (const action of ['unwrap', 'rewrap'] as const) {
+  test(`an unexpected ${action} error is recorded and rethrown rather than called a bad claim`, async () => {
+    const inner = LocalKekProvider.generate('test-kek-1');
+    const fault = new Error('unexpected decrypt fault');
+    const kek: KekProvider = {
+      provider: inner.provider, keyId: inner.keyId, keyVersion: inner.keyVersion,
+      wrap: (key, ctx) => inner.wrap(key, ctx),
+      unwrap: () => Promise.reject(fault),
+    };
+    const w = await world({ keks: new KekRegistry(kek) });
+    const secret = await w.secret(w.dev);
+    const items = [{ secret, wrapped: await wrapped(w, secret), from: 1 }];
+    await assert.rejects(w.vault[action]({ principal: ROOT, purpose: 'run', items }), (error) => error === fault);
+    const outcomes = (await vaultLog(w)).filter((entry) => entry.action === action);
+    assert.deepEqual(outcomes.map((entry) => entry.code), ['key_error']);
+    assert.equal(outcomes[0].detail.uncertain, true);
+    assert.ok((await w.vault.verifyLog({ through: null })).ok);
+  });
+}
+
+for (const duplicate of [false, true]) {
+  test(`verification refuses ${duplicate ? 'duplicate' : 'missing'} item outcomes`, async () => {
+    const w = await world();
+    const operationId = randomUUID();
+    const secret = await w.secret(w.dev);
+    const intent = await db.vault.transaction((tx) => appendEntries(tx, VAULT_KEY, [{
+      actor: ADA, action: 'key.intent', decision: 'allow', operationId,
+      metadata: JSON.stringify({ operation: 'wrap', expiresAt: Date.now() + 60_000, keys: [0, 1].map((item) => ({
+        item, subject: secret.path, secretId: secret.secretId, version: secret.version,
+      })) }),
+    }]));
+    const outcome = {
+      actor: ADA, action: 'wrap', decision: 'allow' as const, operationId, relatedSeq: intent.seqStart,
+      metadata: JSON.stringify({ item: 0, subject: secret.path, secretId: secret.secretId, version: secret.version }),
+    };
+    await db.vault.transaction((tx) => appendEntries(tx, VAULT_KEY, duplicate ? [outcome, outcome] : [outcome]));
+    const result = await w.vault.verifyLog({ through: null });
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.match(result.reason, duplicate ? /does not identify one item/ : /1 of 2 outcomes missing/);
+    const page = await w.vault.log({ actor: ROOT });
+    assert.ok(page.ok && !page.verification.ok);
+  });
+}

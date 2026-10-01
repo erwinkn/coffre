@@ -1,7 +1,8 @@
 import { createCipheriv, createDecipheriv, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { SecretContext } from '../context.ts';
 import { encodeAad } from '../context.ts';
-import { DEK_BYTES, type KekProvider, type WrappedDek } from './types.ts';
+import { checkOperation } from './cancellation.ts';
+import { DEK_BYTES, KekBadClaimError, type KeyOperation, type KekProvider, type WrappedDek } from './types.ts';
 
 const IV_BYTES = 12;
 const TAG_BYTES = 16;
@@ -55,7 +56,8 @@ export class LocalKekProvider implements KekProvider {
     ]);
   }
 
-  async wrap(dek: Buffer, ctx: SecretContext): Promise<WrappedDek> {
+  async wrap(dek: Buffer, ctx: SecretContext, operation?: KeyOperation): Promise<WrappedDek> {
+    checkOperation(operation);
     if (dek.length !== DEK_BYTES) {
       throw new Error(`DEK must be ${DEK_BYTES} bytes, got ${dek.length}`);
     }
@@ -74,14 +76,15 @@ export class LocalKekProvider implements KekProvider {
     };
   }
 
-  async unwrap(wrapped: WrappedDek, ctx: SecretContext): Promise<Buffer> {
+  async unwrap(wrapped: WrappedDek, ctx: SecretContext, operation?: KeyOperation): Promise<Buffer> {
+    checkOperation(operation);
     if (wrapped.kekProvider !== this.provider || wrapped.kekId !== this.keyId) {
-      throw new Error(
+      throw new KekBadClaimError(
         `wrapped DEK is for ${wrapped.kekProvider}:${wrapped.kekId}, not ${this.provider}:${this.keyId}`,
       );
     }
     if (wrapped.bytes.length !== IV_BYTES + TAG_BYTES + DEK_BYTES) {
-      throw new Error('wrapped DEK has the wrong length');
+      throw new KekBadClaimError('wrapped DEK has the wrong length');
     }
 
     const iv = wrapped.bytes.subarray(0, IV_BYTES);
@@ -94,11 +97,20 @@ export class LocalKekProvider implements KekProvider {
 
     // GCM raises on a tag mismatch, which is what a relocated or tampered
     // wrapped DEK produces. The error is deliberately not specific.
-    const dek = Buffer.concat([decipher.update(body), decipher.final()]);
+    let dek: Buffer;
+    const partial = decipher.update(body);
+    try {
+      dek = Buffer.concat([partial, decipher.final()]);
+    } catch {
+      throw new KekBadClaimError('wrapped DEK does not open under this context');
+    } finally {
+      partial.fill(0);
+    }
 
     // Defensive: a 32-byte plaintext is the only shape we ever wrap.
     if (dek.length !== DEK_BYTES) {
-      throw new Error('unwrapped DEK has the wrong length');
+      dek.fill(0);
+      throw new KekBadClaimError('unwrapped DEK has the wrong length');
     }
     return dek;
   }

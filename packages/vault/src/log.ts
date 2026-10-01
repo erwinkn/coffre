@@ -115,6 +115,8 @@ export function entryView(row: StoredEntry): LogEntry {
     environmentId: row.environmentId,
     secretId: row.secretId,
     requestId: row.requestId,
+    operationId: row.operationId,
+    relatedSeq: row.relatedSeq === null ? null : row.relatedSeq.toString(),
   };
   return {
     seq: Number(row.seq),

@@ -107,7 +107,10 @@ export async function withLogUnlocked<T>(owner: Database, work: (db: Queryable) 
  */
 export async function emptyLog(owner: Database): Promise<void> {
   const { auditLog, auditChainHead } = tablesOf(owner);
-  await withLogUnlocked(owner, (db) => db.delete(auditLog));
+  await withLogUnlocked(owner, async (db) => {
+    await db.delete(auditLog).where(sql`${auditLog.relatedSeq} IS NOT NULL`);
+    await db.delete(auditLog);
+  });
   await owner.update(auditChainHead).set({ nextSeq: 0n, headHash: Buffer.alloc(32) });
   forgetLogHeads();
 }

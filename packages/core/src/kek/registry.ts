@@ -1,5 +1,5 @@
 import type { SecretContext } from '../context.ts';
-import type { KekProvider, WrappedDek } from './types.ts';
+import type { KekProvider, WrappedDek, KeyOperation } from './types.ts';
 
 function refOf(provider: string, keyId: string): string {
   return `${provider}:${keyId}`;
@@ -39,12 +39,12 @@ export class KekRegistry {
   }
 
   /** Wrap under the primary KEK. Used for every new secret version. */
-  wrap(dek: Buffer, ctx: SecretContext): Promise<WrappedDek> {
-    return this.#primary.wrap(dek, ctx);
+  wrap(dek: Buffer, ctx: SecretContext, operation?: KeyOperation): Promise<WrappedDek> {
+    return this.#primary.wrap(dek, ctx, operation);
   }
 
   /** Unwrap under whichever KEK the row says produced it. */
-  unwrap(wrapped: WrappedDek, ctx: SecretContext): Promise<Buffer> {
+  unwrap(wrapped: WrappedDek, ctx: SecretContext, operation?: KeyOperation): Promise<Buffer> {
     const ref = refOf(wrapped.kekProvider, wrapped.kekId);
     const provider = this.#byRef.get(ref);
     if (!provider) {
@@ -53,6 +53,6 @@ export class KekRegistry {
       // error that looks like corruption.
       throw new Error(`no KEK configured for ${ref}; cannot unwrap`);
     }
-    return provider.unwrap(wrapped, ctx);
+    return provider.unwrap(wrapped, ctx, operation);
   }
 }
