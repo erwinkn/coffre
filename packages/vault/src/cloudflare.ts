@@ -7,7 +7,7 @@
  *   export { VaultObject } from '@coffre/vault/cloudflare';
  *
  *   export default vault((env: Env) => ({
- *     kek: { id: 'kek-1', key: env.KEK },
+ *     kek: { id: 'kek-1', key: env.KEK }, // or awsKms({ keyArn, credentials })
  *     rootAdmins: ['admin@acme.example'],
  *     signingKey: env.SIGNING_KEY,
  *   }));
@@ -33,6 +33,7 @@ import { durableObjectSqlite } from './sqlite-durable-object.ts';
 import { openVault } from './vault.ts';
 
 export type { Vault, VaultConfig };
+export * from './index.ts';
 
 /** The bindings the vault needs of its Worker; the deployment's own come on top. */
 export type VaultBindings = { VAULT_OBJECT: DurableObjectNamespace<VaultObject> };

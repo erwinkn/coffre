@@ -31,6 +31,13 @@ function assertUuid(value: string, field: string): void {
   }
 }
 
+/** Throw unless every field is a lowercase UUID. */
+export function checkContext(ctx: SecretContext): void {
+  assertUuid(ctx.projectId, 'projectId');
+  assertUuid(ctx.environmentId, 'environmentId');
+  assertUuid(ctx.secretId, 'secretId');
+}
+
 /**
  * Encode a context into AAD bytes.
  *
@@ -39,10 +46,7 @@ function assertUuid(value: string, field: string): void {
  * contexts can encode to the same bytes.
  */
 export function encodeAad(ctx: SecretContext): Buffer {
-  assertUuid(ctx.projectId, 'projectId');
-  assertUuid(ctx.environmentId, 'environmentId');
-  assertUuid(ctx.secretId, 'secretId');
-
+  checkContext(ctx);
   return Buffer.from(
     `${AAD_VERSION}|${ctx.projectId}|${ctx.environmentId}|${ctx.secretId}`,
     'utf8',

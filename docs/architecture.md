@@ -99,15 +99,17 @@ one package is seen by the others without a build. Builds leave it off.
 | `@coffre/server/node` | `serve({ port?, host?, database, …config })` → `{ url, close }`; `migrate(url)` |
 | `@coffre/server` (both) | `signin`, `github`, `google`, `microsoft`, `oidc`, `cloudflareAccess`, `SigninError`; `githubActions`, `vercel`, `railway`, `cloudflareWorkers`, `SyncConfigError`, `SyncProviderError`; and the config types, `SigninProvider` and `SyncProvider` among them |
 | `@coffre/vault/cloudflare` | `vault(env => config)`, the Worker's default export; `VaultObject`, its Durable Object |
+| `@coffre/vault` (both) | `awsKms`, `KekUnavailableError`, and the config types, `KekProvider` among them |
 | `@coffre/vault/node` | `serveVault({ socket, store, …config })`, `connectVault(socket)`, `localVault({ store, …config })` |
 | `@coffre/ui` | `createUi()` → `{ fetch(request, { context: { cspNonce, client } }) }`; files in `dist/client` |
 | `@coffre/client` | `createClient({ url, headers?, transport? })` |
 
 Where `config` is, for the server, `{ publicUrl, vault, auth, auditChainKey,
 syncs? }` and, for the vault, `{ kek, previousKeks?, rootAdmins, signingKey,
-bulkLimit? }`. Each is checked when the deployment starts, and a bad value
-(a 31-byte key, a public URL with a path, no root admin) fails it with a message
-naming the setting.
+bulkLimit? }`, a KEK being a local key or `awsKms(…)` ([keys.md](keys.md)).
+Each is checked when the deployment starts, and a bad value (a 31-byte key,
+a public URL with a path, no root admin) fails it with a message naming the
+setting.
 
 Migrations ship with `@coffre/server`, not the CLI, because the schema must
 match the server's version exactly and the CLI's may differ:
