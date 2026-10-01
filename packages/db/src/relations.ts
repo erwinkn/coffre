@@ -6,7 +6,7 @@ import type * as schema from './schema.ts';
  * What both schemas share beyond their columns: the relations and the
  * one generated column.
  *
- * Relations are for Drizzle's relational queries (`db.query.principals
+ * Relations are for Drizzle's relational queries (`db.query.syncs
  * .findMany({ with })`), which read a row and what hangs off it in one
  * statement on every dialect. They add no constraints; the foreign keys in
  * each schema do that. Each schema calls this with its own tables, so a
@@ -18,33 +18,10 @@ export function relationsOf(t: Pick<
   | 'environments'
   | 'secrets'
   | 'secretVersions'
-  | 'principals'
-  | 'identities'
-  | 'credentials'
   | 'syncs'
   | 'syncKeys'
 >) {
   return {
-    principalsRelations: relations(t.principals, ({ many }) => ({
-      credentials: many(t.credentials),
-      identities: many(t.identities),
-    })),
-
-    credentialsRelations: relations(t.credentials, ({ one }) => ({
-      principal: one(t.principals, {
-        fields: [t.credentials.principalType, t.credentials.principalId],
-        references: [t.principals.principalType, t.principals.principalId],
-      }),
-      identity: one(t.identities, { fields: [t.credentials.identityId], references: [t.identities.id] }),
-    })),
-
-    identitiesRelations: relations(t.identities, ({ one }) => ({
-      principal: one(t.principals, {
-        fields: [t.identities.principalType, t.identities.principalId],
-        references: [t.principals.principalType, t.principals.principalId],
-      }),
-    })),
-
     environmentsRelations: relations(t.environments, ({ one }) => ({
       project: one(t.projects, { fields: [t.environments.projectId], references: [t.projects.id] }),
     })),

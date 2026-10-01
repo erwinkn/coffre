@@ -84,24 +84,24 @@ const member = ({ principalType, principalId }) =>
 // owner, and lifts the log's append-only triggers for it. Neither runtime
 // login can do any of it: they have no DELETE on audit_log at all.
 //
-// The vault's members and grants go with the log that records them. Syncs
-// hold references to secrets, versions and environments, and sign-in
-// sessions, device logins and linked accounts to principals, so they go next.
+// Syncs hold references to secrets, versions and environments, and sign-in
+// sessions, device logins and linked accounts to the vault's members, so
+// they go next; then the members and grants, which go with the log that
+// records them.
 console.log('==> resetting local data');
 await pool.query('ALTER TABLE audit_log DISABLE TRIGGER USER');
 await pool.query('DELETE FROM audit_log');
 await pool.query('ALTER TABLE audit_log ENABLE TRIGGER USER');
-await pool.query('DELETE FROM vault_grants');
-await pool.query('DELETE FROM vault_members');
 await pool.query('DELETE FROM sync_keys');
 await pool.query('DELETE FROM syncs');
 await pool.query('DELETE FROM credentials');
 await pool.query('DELETE FROM device_authorizations');
 await pool.query('DELETE FROM identities');
+await pool.query('DELETE FROM vault_grants');
+await pool.query('DELETE FROM vault_members');
 await pool.query('UPDATE secrets SET current_version_id = NULL');
 await pool.query('DELETE FROM secret_versions');
 await pool.query('DELETE FROM secrets');
-await pool.query('DELETE FROM principals');
 await pool.query('DELETE FROM environments');
 await pool.query('DELETE FROM projects');
 await pool.query(

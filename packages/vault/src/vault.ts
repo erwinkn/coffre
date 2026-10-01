@@ -423,11 +423,12 @@ class VaultService implements Vault {
   }
 
   /**
-   * Give a root admin a member row before their first read or write, so
-   * their calls queue on it like anyone's. Logged, and made in a
-   * transaction of its own, under the log's lock: a decision that held the
-   * head and then waited for a member row would take the locks out of
-   * order. The row never makes anyone a root admin; the configuration does.
+   * Give a root admin a member row the first time anyone asks about them:
+   * the app's sign-ins and sessions point at it, and their reads queue on
+   * it like anyone's. Logged, and made in a transaction of its own, under
+   * the log's lock: a decision that held the head and then waited for a
+   * member row would take the locks out of order. The row never makes
+   * anyone a root admin; the configuration does.
    */
   async #rootRow(principal: string): Promise<void> {
     if (this.#prepared.rooted.has(principal)) return;
@@ -495,6 +496,7 @@ class VaultService implements Vault {
   }
 
   async access(principal: string): Promise<Access> {
+    if (this.#isRootAdmin(principal)) await this.#rootRow(principal);
     const [row, held, at] = await Promise.all([
       store.member(this.#db, principal),
       store.grants(this.#db, principal),

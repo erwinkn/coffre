@@ -93,7 +93,7 @@ In order, since each builds on the ones before:
 | two logs agree (the check's current name) | In the successful flows exercised here, every key the vault opened or sealed is in the audit log, once, for the same member, request and version, and every app read and write has a vault entry in the same table |
 | no audit, no value | With the audit log refusing writes (a trigger), a reveal fails and carries no value; it works again once the log does |
 | canary scan | No value in any answer to any GET route, or any page, as each of the people, signed in or removed; nor in the database, in any column of any table; nor the processes' output |
-| append-only | Neither the app's login nor the vault's can update, delete, truncate or drop the audit log, append an entry as the other, change or delete a value's versions, delete a secret or a principal, or create a table; nor can the app's write a member or a grant. Postgres only: SQLite has no logins |
+| append-only | Neither the app's login nor the vault's can update, delete, truncate or drop the audit log, append an entry as the other, change or delete a value's versions, delete a secret or a member, or create a table; nor can the app's write a member or a grant. Postgres only: SQLite has no logins |
 | tampering | Verification catches a grant written into the database around the vault, an entry in the vault's name chained to the log without its key, an audit entry rewritten in the database, and the newest audit entries deleted; each put back verifies again, but for the last, which is why it is last |
 
 All table inspection and tampering goes through the one database. There

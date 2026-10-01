@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import type { CoffreClient } from '@coffre/client';
 import { and, asc, count, eq } from 'drizzle-orm';
 
-import { auditLog, principals, projects } from './db/tables.ts';
+import { auditLog, projects, vaultMembers } from './db/tables.ts';
 import {
   clientFor,
   openTestDatabase,
@@ -326,11 +326,8 @@ test('an email is one member however it is capitalised, accents included', async
   // É; the server folds every email before it reaches the database.
   assert.equal((await root.members.add('user:Émile@Acme.example')).created, true);
   assert.equal((await root.members.add('user:ÉMILE@acme.EXAMPLE')).created, false);
-  const stored = await db.owner
-    .select({ id: principals.principalId })
-    .from(principals)
-    .where(eq(principals.principalType, 'user'));
-  assert.deepEqual(stored.map((row) => row.id).filter((id) => id.startsWith('é')), ['émile@acme.example']);
+  const stored = await db.owner.select({ principal: vaultMembers.principal }).from(vaultMembers);
+  assert.deepEqual(stored.map((row) => row.principal).filter((principal) => principal.startsWith('user:é')), ['user:émile@acme.example']);
 });
 
 test('ordinary users cannot manage the instance directory', async () => {

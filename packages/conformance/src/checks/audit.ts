@@ -138,7 +138,7 @@ export async function appendOnly(deployment: Deployment): Promise<string> {
     'UPDATE secret_versions SET id = id',
     'DELETE FROM secret_versions',
     'DELETE FROM secrets',
-    'DELETE FROM principals',
+    'DELETE FROM vault_members',
     'CREATE TABLE conformance_probe (id integer)',
   ];
   const zeros = "decode(repeat('00', 32), 'hex')";

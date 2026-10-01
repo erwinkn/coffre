@@ -460,11 +460,11 @@ export type Api = {
       providers: {
         brand: "cloudflare" | "github" | "other" | "railway" | "vercel";
         id: string;
-        label: string;
         credential: {
           placeholder: string;
           hint: string;
         };
+        label: string;
         fields: ({
           type: "text";
           name: string;
@@ -1008,11 +1008,11 @@ export type SyncField = {
 export type SyncProviderInfo = {
   brand: "cloudflare" | "github" | "other" | "railway" | "vercel";
   id: string;
-  label: string;
   credential: {
     placeholder: string;
     hint: string;
   };
+  label: string;
   fields: ({
     type: "text";
     name: string;

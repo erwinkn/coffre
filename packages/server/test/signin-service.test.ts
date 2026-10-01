@@ -12,7 +12,7 @@ import {
   credentials,
   deviceAuthorizations,
   identities,
-  principals,
+  vaultMembers,
 } from './db/tables.ts';
 import { authMac } from '../src/auth-rows.ts';
 import { verifyAudit } from '../src/api/audit.ts';
@@ -71,16 +71,7 @@ beforeEach(async () => {
   deps = testDeps(db.runtime, [ROOT]);
   signin = new SigninService({ db: deps.db, chainKey: deps.chainKey, vault: deps.vault, signin: CONFIG });
   deps.signin = signin;
-  await db.owner.insert(principals).values(
-    [
-      ['user', LEAD],
-      ['user', DEV],
-      ['user', GONE],
-      ['service', SERVICE],
-      ['service', RETIRED],
-    ].map(([principalType, principalId]) => ({ principalType, principalId, createdBy: ROOT })),
-  );
-  // Who is in is the vault's to say.
+  // Who is in is the vault's to say, and its member rows are the directory.
   for (const id of [LEAD, DEV, GONE, SERVICE, RETIRED]) {
     assert.equal((await deps.vault.admit({ actor: `user:${ROOT}`, principal: member(id), owner: id === LEAD })).ok, true);
   }
@@ -194,7 +185,7 @@ test('a device approval forged by the database owner cannot mint a session', asy
   const started = await signin.startDevice({ clientLabel: 'attacker', sourceIp: IP });
   const { generation } = await deps.vault.access(member(DEV));
   await db.owner.update(deviceAuthorizations).set({
-    decision: 'approved', decidedAt: new Date(), principalType: 'user', principalId: DEV, generation,
+    decision: 'approved', decidedAt: new Date(), principal: `user:${DEV}`, generation,
   });
   await assert.rejects(signin.pollDevice(started.deviceCode, meta()), /authentic|tamper/i);
   assert.equal(await countRows(credentials), 0);
@@ -202,7 +193,7 @@ test('a device approval forged by the database owner cannot mint a session', asy
 
 test('an undecided device row cannot name an approving principal', async () => {
   await signin.startDevice({ clientLabel: null, sourceIp: IP });
-  await assert.rejects(db.owner.update(deviceAuthorizations).set({ principalType: 'user', principalId: DEV }));
+  await assert.rejects(db.owner.update(deviceAuthorizations).set({ principal: `user:${DEV}` }));
 });
 
 test('the database owner cannot extend a credential or undo its revocation', async () => {
@@ -230,7 +221,7 @@ for (const mismatch of ['member', 'generation'] as const) {
     const row = await credentialRow(credential.id);
     await assert.rejects(db.owner.insert(credentials).values({
       ...row, id: randomUUID(), tokenHash: randomBytes(32),
-      ...(mismatch === 'member' ? { principalId: LEAD } : { generation: row.generation + 1 }),
+      ...(mismatch === 'member' ? { principal: `user:${LEAD}` } : { generation: row.generation + 1 }),
     }));
   });
 }
@@ -289,7 +280,7 @@ test('a first sign-in with an invited email binds the account and opens a browse
   const [identity] = identityRows;
   assert.equal(identity.provider, 'github');
   assert.equal(identity.subject, '101');
-  assert.equal(identity.principalId, DEV);
+  assert.equal(identity.principal, `user:${DEV}`);
   assert.equal(identity.email, DEV);
   assert.equal(identity.createdBy, DEV);
   assert.ok(identity.lastSignInAt);
@@ -422,8 +413,8 @@ test('racing first sign-ins bind one account per person', async () => {
     signin.completeSignin(profile('github', '102', [LEAD]), meta()),
   ]);
   assert.deepEqual(twice.map((result) => result.ok), [true, true]);
-  assert.equal(await countRows(identities, eq(identities.principalId, LEAD)), 1);
-  assert.equal(await countRows(identities, eq(identities.principalId, DEV)), 1);
+  assert.equal(await countRows(identities, eq(identities.principal, `user:${LEAD}`)), 1);
+  assert.equal(await countRows(identities, eq(identities.principal, `user:${DEV}`)), 1);
 });
 
 test('deactivated people are refused, bound or not, and their sessions stop', async () => {
@@ -449,17 +440,18 @@ test('deactivated people are refused, bound or not, and their sessions stop', as
     ['auth.signin', 'allow', DEV, undefined],
     ['auth.signin', 'deny', DEV, 'deactivated'],
   ]);
-  assert.equal(await countRows(identities, eq(identities.principalId, GONE)), 0);
+  assert.equal(await countRows(identities, eq(identities.principal, `user:${GONE}`)), 0);
 });
 
 test('a root admin needs no invitation, and nobody can remove them', async () => {
   const first = await signedIn(profile('google', 'g-root', [ROOT]));
   assert.deepEqual(first.principal, { type: 'user', id: ROOT });
+  // The vault gave them a member row the first time it was asked about them.
   const [row] = await db.owner
-    .select({ createdBy: principals.createdBy })
-    .from(principals)
-    .where(eq(principals.principalId, ROOT));
-  assert.deepEqual(row, { createdBy: 'system:signin' });
+    .select({ createdBy: vaultMembers.createdBy })
+    .from(vaultMembers)
+    .where(eq(vaultMembers.principal, `user:${ROOT}`));
+  assert.deepEqual(row, { createdBy: 'system:vault' });
   assert.equal((await signin.verify(first.credential.token)).id, ROOT);
 
   const removed = await deps.vault.remove({ actor: `user:${ROOT}`, principal: member(ROOT) });
@@ -775,7 +767,7 @@ test('owners issue service tokens that verify as the service', async () => {
 
   const row = await credentialRow(issued.id);
   assert.equal(row.kind, 'service');
-  assert.equal(row.principalType, 'service');
+  assert.equal(row.principal, `token:${SERVICE}`);
   assert.equal(row.identityId, null);
   assert.equal(row.createdBy, LEAD);
   assert.equal(row.label, 'deploys');
@@ -1164,7 +1156,7 @@ test('replacing an issuer requires an explicit re-link and invalidates its brows
 
 test('a binding without an issuer is rejected by the baseline', async () => {
   await assert.rejects(db.owner.insert(identities).values({
-    id: randomUUID(), provider: 'github', subject: 'legacy', principalType: 'user', principalId: DEV,
+    id: randomUUID(), provider: 'github', subject: 'legacy', principal: `user:${DEV}`,
     issuerHash: sql`NULL`, generation: 0, authMac: Buffer.alloc(32), email: DEV, createdBy: DEV,
   }));
 });

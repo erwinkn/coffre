@@ -1,5 +1,5 @@
 {
-  "id": "55a8953c-0f99-4108-9725-fe3efea9b802",
+  "id": "e2e492be-450c-44cb-a614-537e39148cdf",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -564,14 +564,8 @@
           "primaryKey": false,
           "notNull": true
         },
-        "principal_type": {
-          "name": "principal_type",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "principal_id": {
-          "name": "principal_id",
+        "principal": {
+          "name": "principal",
           "type": "text",
           "primaryKey": false,
           "notNull": true
@@ -637,13 +631,13 @@
           "name": "credentials_principal_idx",
           "columns": [
             {
-              "expression": "principal_type",
+              "expression": "principal",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
             },
             {
-              "expression": "principal_id",
+              "expression": "generation",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -659,14 +653,12 @@
         "credentials_principal_fkey": {
           "name": "credentials_principal_fkey",
           "tableFrom": "credentials",
-          "tableTo": "principals",
+          "tableTo": "vault_members",
           "columnsFrom": [
-            "principal_type",
-            "principal_id"
+            "principal"
           ],
           "columnsTo": [
-            "principal_type",
-            "principal_id"
+            "principal"
           ],
           "onDelete": "restrict",
           "onUpdate": "no action"
@@ -677,14 +669,12 @@
           "tableTo": "identities",
           "columnsFrom": [
             "identity_id",
-            "principal_type",
-            "principal_id",
+            "principal",
             "generation"
           ],
           "columnsTo": [
             "id",
-            "principal_type",
-            "principal_id",
+            "principal",
             "generation"
           ],
           "onDelete": "restrict",
@@ -707,9 +697,13 @@
           "name": "credentials_kind_check",
           "value": "\"credentials\".\"kind\" IN ('browser', 'cli', 'service')"
         },
+        "credentials_principal_check": {
+          "name": "credentials_principal_check",
+          "value": "\"credentials\".\"principal\" LIKE 'user:%' OR \"credentials\".\"principal\" LIKE 'token:%'"
+        },
         "credentials_kind_matches_principal": {
           "name": "credentials_kind_matches_principal",
-          "value": "(\"credentials\".\"kind\" = 'service') = (\"credentials\".\"principal_type\" = 'service')"
+          "value": "(\"credentials\".\"kind\" = 'service') = (\"credentials\".\"principal\" LIKE 'token:%')"
         },
         "credentials_token_hash_check": {
           "name": "credentials_token_hash_check",
@@ -795,14 +789,8 @@
           "notNull": true,
           "default": 0
         },
-        "principal_type": {
-          "name": "principal_type",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "principal_id": {
-          "name": "principal_id",
+        "principal": {
+          "name": "principal",
           "type": "text",
           "primaryKey": false,
           "notNull": false
@@ -819,14 +807,12 @@
         "device_authorizations_principal_fkey": {
           "name": "device_authorizations_principal_fkey",
           "tableFrom": "device_authorizations",
-          "tableTo": "principals",
+          "tableTo": "vault_members",
           "columnsFrom": [
-            "principal_type",
-            "principal_id"
+            "principal"
           ],
           "columnsTo": [
-            "principal_type",
-            "principal_id"
+            "principal"
           ],
           "onDelete": "restrict",
           "onUpdate": "no action"
@@ -861,7 +847,7 @@
         },
         "device_authorizations_approval_names_principal": {
           "name": "device_authorizations_approval_names_principal",
-          "value": "(\"device_authorizations\".\"decision\" IS NULL AND \"device_authorizations\".\"decided_at\" IS NULL AND \"device_authorizations\".\"principal_type\" IS NULL AND \"device_authorizations\".\"principal_id\" IS NULL AND \"device_authorizations\".\"generation\" = 0 AND \"device_authorizations\".\"consumed_at\" IS NULL)\n        OR (\"device_authorizations\".\"decision\" IS NOT NULL AND \"device_authorizations\".\"decided_at\" IS NOT NULL AND (\n          (\"device_authorizations\".\"decision\" = 'denied' AND \"device_authorizations\".\"principal_type\" IS NULL AND \"device_authorizations\".\"principal_id\" IS NULL AND \"device_authorizations\".\"generation\" = 0 AND \"device_authorizations\".\"consumed_at\" IS NULL)\n          OR (\"device_authorizations\".\"decision\" = 'approved' AND \"device_authorizations\".\"principal_type\" IS NOT NULL AND \"device_authorizations\".\"principal_type\" = 'user' AND \"device_authorizations\".\"principal_id\" IS NOT NULL)\n        ))"
+          "value": "(\"device_authorizations\".\"decision\" IS NULL AND \"device_authorizations\".\"decided_at\" IS NULL AND \"device_authorizations\".\"principal\" IS NULL AND \"device_authorizations\".\"generation\" = 0 AND \"device_authorizations\".\"consumed_at\" IS NULL)\n        OR (\"device_authorizations\".\"decision\" IS NOT NULL AND \"device_authorizations\".\"decided_at\" IS NOT NULL AND (\n          (\"device_authorizations\".\"decision\" = 'denied' AND \"device_authorizations\".\"principal\" IS NULL AND \"device_authorizations\".\"generation\" = 0 AND \"device_authorizations\".\"consumed_at\" IS NULL)\n          OR (\"device_authorizations\".\"decision\" = 'approved' AND \"device_authorizations\".\"principal\" IS NOT NULL AND \"device_authorizations\".\"principal\" LIKE 'user:%')\n        ))"
         }
       },
       "isRLSEnabled": false
@@ -994,14 +980,8 @@
           "primaryKey": false,
           "notNull": true
         },
-        "principal_type": {
-          "name": "principal_type",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "principal_id": {
-          "name": "principal_id",
+        "principal": {
+          "name": "principal",
           "type": "text",
           "primaryKey": false,
           "notNull": true
@@ -1086,13 +1066,13 @@
           "name": "identities_principal_idx",
           "columns": [
             {
-              "expression": "principal_type",
+              "expression": "principal",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
             },
             {
-              "expression": "principal_id",
+              "expression": "generation",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -1108,14 +1088,12 @@
         "identities_principal_fkey": {
           "name": "identities_principal_fkey",
           "tableFrom": "identities",
-          "tableTo": "principals",
+          "tableTo": "vault_members",
           "columnsFrom": [
-            "principal_type",
-            "principal_id"
+            "principal"
           ],
           "columnsTo": [
-            "principal_type",
-            "principal_id"
+            "principal"
           ],
           "onDelete": "restrict",
           "onUpdate": "no action"
@@ -1128,17 +1106,16 @@
           "nullsNotDistinct": false,
           "columns": [
             "id",
-            "principal_type",
-            "principal_id",
+            "principal",
             "generation"
           ]
         }
       },
       "policies": {},
       "checkConstraints": {
-        "identities_principal_type_check": {
-          "name": "identities_principal_type_check",
-          "value": "\"identities\".\"principal_type\" = 'user'"
+        "identities_principal_check": {
+          "name": "identities_principal_check",
+          "value": "\"identities\".\"principal\" LIKE 'user:%'"
         },
         "identities_provider_check": {
           "name": "identities_provider_check",
@@ -1147,61 +1124,6 @@
         "identities_auth_mac_check": {
           "name": "identities_auth_mac_check",
           "value": "octet_length(\"identities\".\"auth_mac\") = 32"
-        }
-      },
-      "isRLSEnabled": false
-    },
-    "public.principals": {
-      "name": "principals",
-      "schema": "",
-      "columns": {
-        "principal_type": {
-          "name": "principal_type",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "principal_id": {
-          "name": "principal_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "created_by": {
-          "name": "created_by",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {},
-      "compositePrimaryKeys": {
-        "principals_pkey": {
-          "name": "principals_pkey",
-          "columns": [
-            "principal_type",
-            "principal_id"
-          ]
-        }
-      },
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "principals_principal_type_check": {
-          "name": "principals_principal_type_check",
-          "value": "\"principals\".\"principal_type\" IN ('user', 'service')"
-        },
-        "principals_user_id_lowercase": {
-          "name": "principals_user_id_lowercase",
-          "value": "\"principals\".\"principal_type\" <> 'user' OR \"principals\".\"principal_id\" = lower(\"principals\".\"principal_id\")"
         }
       },
       "isRLSEnabled": false
