@@ -1246,6 +1246,8 @@ test('a deadline aborts KMS requests and drops queued keys before a removal can 
   });
   const w = await world({ keks: new KekRegistry(kek) }, { keyBudgetMs: 100 });
   await member(w, ADA, [[w.dev, 'developer']]);
+  // The KEK's check first, so that the batch below is all the KMS work there is.
+  await wrapped(w, await w.secret(w.dev));
   const items = [];
   for (let i = 0; i < 9; i++) {
     items.push({ secret: await w.secret(w.dev), wrapped: { kekProvider: 'aws-kms', kekId: arn, kekVersion: '1', bytes: 'Y2lwaGVydGV4dA==' } });
