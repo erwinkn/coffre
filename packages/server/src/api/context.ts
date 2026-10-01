@@ -3,6 +3,7 @@ import type { Refusal as VaultRefusal, Vault } from '@coffre/core/vault';
 import type { Database, Transaction } from '@coffre/db';
 
 import { appendAudit, type AuditEntry } from '../db/audit.ts';
+import { auditHead } from '../db/queries.ts';
 import { can, type Caller, type Place } from './caller.ts';
 import { forbidden, vaultRefused, type ApiError } from './errors.ts';
 import type { Asking } from './keys.ts';
@@ -86,6 +87,7 @@ export class Refusal extends Error {
  * The one transaction shape for anything the log should know about: do the
  * work and append its entries in the same transaction, so neither commits
  * without the other. Push entries onto `log` as the work goes.
+ * Vault calls belong before or after this transaction.
  *
  * A thrown Refusal rolls the work back and then commits its own entry: who
  * was turned away is half of what an audit log is for.
@@ -97,10 +99,38 @@ export async function audited<T>(
   try {
     return await ctx.db.transaction(async (tx) => {
       const log: AuditEntry[] = [];
+      // Take the head before any application rows.
+      if (await auditHead(tx, { lock: true }) === null) throw new Error('audit_chain_head is missing');
       const result = await work(tx, log);
       if (log.length > 0) await appendAudit(tx, ctx.chainKey, log);
       return result;
     });
+  } catch (error) {
+    if (!(error instanceof Refusal)) throw error;
+    return refuse(ctx, error);
+  }
+}
+
+/** Collect read and vault events without a transaction; commit before returning anything. */
+export async function recorded<T>(
+  ctx: Pick<ApiContext, 'db' | 'chainKey'>,
+  work: (log: AuditEntry[]) => Promise<T>,
+): Promise<T> {
+  return withRefusals(ctx, async () => {
+    const log: AuditEntry[] = [];
+    const result = await work(log);
+    if (log.length > 0) await audited(ctx, async (_tx, entries) => { entries.push(...log); });
+    return result;
+  });
+}
+
+/** Checks made before the write transaction still need their refusal recorded. */
+export async function withRefusals<T>(
+  ctx: Pick<ApiContext, 'db' | 'chainKey'>,
+  work: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await work();
   } catch (error) {
     if (!(error instanceof Refusal)) throw error;
     return refuse(ctx, error);

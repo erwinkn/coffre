@@ -73,6 +73,12 @@ or `serveVault({…})`. The env vars left are the CLI's user-facing ones (`COFFR
 tooling's (`COFFRE_DEV_*`, `COFFRE_STATE_DIR`, `COFFRE_TEST_ENGINE`,
 `COFFRE_TEST_DATABASE`). Don't add another to a package.
 
+**Transactions and the vault.** No app database transaction may stay open across
+any vault call. Prepare outside SQL; commit app writes and their audit together,
+taking the audit head before application rows. Reads commit their app audit before
+returning values. The integration fixture tracks transactions and rejects vault
+calls made inside them, including errors swallowed by handlers or background jobs.
+
 **Tests / checks.**
 - `pnpm test` = lint + recreate `coffre_test` + `node --test --test-concurrency=1`
   (serial: the integration suite shares one DB and resets it per test). Needs Postgres.

@@ -13,12 +13,13 @@ import {
   insertIfAbsent,
   lock,
   resolvePath,
+  secretHeads,
   secretHistory,
   update,
   type ResolvedPath,
 } from '../db/queries.ts';
 import { permissionsAt } from './caller.ts';
-import { allowed, asking, audited, denied, need, Refusal, vaultRefusal, type ApiContext } from './context.ts';
+import { allowed, asking, audited, denied, need, recorded, Refusal, vaultRefusal, withRefusals, type ApiContext } from './context.ts';
 import { conflict, notFound } from './errors.ts';
 import { openValues, rewrapValue, sealValues } from './keys.ts';
 import { formatPath, type Path } from './paths.ts';
@@ -140,6 +141,31 @@ async function appendVersion(
   await update(tx, secrets, { id: secretId }, { currentVersionId: id, currentVersion: version, updatedAt: new Date() });
 }
 
+/** A competing write invalidated the keys prepared outside the transaction. */
+class PrepareAgain extends Error {}
+
+async function optimistic<T>(ctx: ApiContext, work: () => Promise<T>): Promise<T> {
+  return withRefusals(ctx, async () => {
+    // Bound the work under sustained contention; an ordinary burst can retry.
+    for (let attempt = 0; attempt < 16; attempt++) {
+      try {
+        return await work();
+      } catch (error) {
+        if (!(error instanceof PrepareAgain)) throw error;
+      }
+    }
+    throw conflict('the secrets kept changing; try again');
+  });
+}
+
+/** The audit head is already held, so an archive cannot commit until we do. */
+async function checkEnvironment(tx: Transaction, place: ResolvedPath, expected: Environment): Promise<void> {
+  const current = await resolvePath(tx, { project: place.project.slug, environment: place.environment!.slug });
+  if (current === null) throw notFound('unknown project or environment');
+  const live = requireLive(current);
+  if (live.projectId !== expected.projectId || live.environmentId !== expected.environmentId) throw notFound('unknown project or environment');
+}
+
 /**
  * The only way to write. A string sets a key, adding it if it is new; `null`
  * archives it. One transaction, one version and one audit entry per key, so
@@ -153,74 +179,68 @@ export async function setSecrets(
   const environment = requireLive(place);
   const writes = Object.entries(patch).filter((entry): entry is [string, string] => entry[1] !== null);
   const archives = Object.keys(patch).filter((key) => patch[key] === null);
-  const bundleId = randomUUID();
-
-  const result = await audited(ctx, async (tx, log) => {
-    await insertIfAbsent(tx, secrets, writes.map(([key]) => ({ id: randomUUID(), ...environment, key })));
-    // Lock every named row: a racing write or archive waits for this one,
-    // and the version counter each row carries is ours until commit.
-    const rows = await lock(tx, secrets, { environmentId: environment.environmentId, key: Object.keys(patch) });
-    const byKey = new Map(rows.map((row) => [row.key, row]));
-
-    const keys: Record<string, SetOutcome> = {};
-    const items: { key: string; secret: SecretRef; value: string }[] = [];
-    for (const [key, value] of writes) {
-      const secret = byKey.get(key)!;
-      if (secret.archivedAt !== null) {
+  const result = await optimistic(ctx, async () => {
+    const bundleId = randomUUID();
+    const prepared = new Map((await secretHeads(ctx.db, environment.environmentId, { keys: Object.keys(patch) })).map((row) => [row.key, row]));
+    const items = writes.map(([key, value]) => {
+      const row = prepared.get(key);
+      if (row?.archivedAt != null) {
         throw new Refusal(
           conflict(`${key} is archived; unarchive it before writing a new version`),
-          denied(ctx, 'secret.write', 'secret_archived', {
-            ...environment,
-            secretId: secret.id,
-            bundleId,
-            metadata: { key },
-          }),
+          denied(ctx, 'secret.write', 'secret_archived', { ...environment, secretId: row.id, bundleId, metadata: { key } }),
         );
       }
-      items.push({ key, secret: secretRef(place, environment, secret, secret.currentVersion + 1), value });
-    }
-    // One vault call wraps every new key, or refuses them all.
+      const secret = { id: row?.id ?? randomUUID(), key };
+      return { key, secret: secretRef(place, environment, secret, (row?.currentVersion ?? 0) + 1), value };
+    });
+    // IDs and versions are provisional until the transaction checks them.
     const sealed = await sealValues(ctx.vault, asking(ctx), items);
     if (!sealed.ok) throw vaultRefusal(ctx, sealed.refusal, 'secret.write', { ...environment, bundleId });
-    const versions = items.map(({ key, secret }, i) => {
-      // The value is never logged. The log answers who and what, not what it was.
-      log.push(allowed(ctx, 'secret.write', {
-        ...environment,
-        secretId: secret.secretId,
-        bundleId,
-        metadata: { key, version: secret.version },
-      }));
-      keys[key] = { version: secret.version };
-      return {
-        id: randomUUID(),
-        secretId: secret.secretId,
-        version: secret.version,
-        ...sealed.values[i],
-        createdBy: ctx.caller.principal.id,
-      };
-    });
-    await insert(tx, secretVersions, versions);
-    const now = new Date();
-    for (const { id, secretId, version } of versions) {
-      await update(tx, secrets, { id: secretId }, { currentVersionId: id, currentVersion: version, updatedAt: now });
-    }
 
-    const archiving: string[] = [];
-    for (const key of archives) {
-      const secret = byKey.get(key);
-      keys[key] = { archived: true };
-      // Archiving what is already gone is a no-op, the way a merge patch's null is.
-      if (secret === undefined || secret.archivedAt !== null) continue;
-      archiving.push(secret.id);
-      log.push(allowed(ctx, 'secret.archive', {
-        ...environment,
-        secretId: secret.id,
-        bundleId,
-        metadata: { key },
-      }));
-    }
-    if (archiving.length > 0) await update(tx, secrets, { id: archiving }, { archivedAt: now });
-    return { bundleId, keys };
+    return audited(ctx, async (tx, log) => {
+      await checkEnvironment(tx, place, environment);
+      await insertIfAbsent(tx, secrets, items.filter(({ key }) => !prepared.has(key)).map(({ key, secret }) => ({
+        id: secret.secretId, ...environment, key,
+      })));
+      const rows = await lock(tx, secrets, { environmentId: environment.environmentId, key: Object.keys(patch) });
+      const byKey = new Map(rows.map((row) => [row.key, row]));
+      const created = new Map(items.map((item) => [item.key, item.secret.secretId]));
+      for (const key of Object.keys(patch)) {
+        const before = prepared.get(key);
+        const current = byKey.get(key);
+        if (before === undefined) {
+          if (current?.id !== created.get(key) || (current !== undefined && (current.currentVersion !== 0 || current.archivedAt !== null))) {
+            throw new PrepareAgain();
+          }
+        } else if (current === undefined || current.id !== before.id
+          || current.currentVersion !== before.currentVersion
+          || current.archivedAt?.getTime() !== before.archivedAt?.getTime()) {
+          throw new PrepareAgain();
+        }
+      }
+
+      const keys: Record<string, SetOutcome> = {};
+      const versions = items.map(({ key, secret }, i) => {
+        log.push(allowed(ctx, 'secret.write', {
+          ...environment, secretId: secret.secretId, bundleId, metadata: { key, version: secret.version },
+        }));
+        keys[key] = { version: secret.version };
+        return { id: randomUUID(), secretId: secret.secretId, version: secret.version, ...sealed.values[i], createdBy: ctx.caller.principal.id };
+      });
+      await insert(tx, secretVersions, versions);
+      const now = new Date();
+      for (const { id, secretId, version } of versions) {
+        await update(tx, secrets, { id: secretId }, { currentVersionId: id, currentVersion: version, updatedAt: now });
+      }
+      for (const key of archives) {
+        const secret = byKey.get(key);
+        keys[key] = { archived: true };
+        if (secret === undefined || secret.archivedAt !== null) continue;
+        await update(tx, secrets, { id: secret.id }, { archivedAt: now });
+        log.push(allowed(ctx, 'secret.archive', { ...environment, secretId: secret.id, bundleId, metadata: { key } }));
+      }
+      return { bundleId, keys };
+    });
   });
   if (Object.keys(patch).length > 0) changed(ctx, environment.environmentId);
   return result;
@@ -247,9 +267,9 @@ export async function dryRunSecrets(
 ): Promise<DryRunResult> {
   const environment = requireLive(place);
   const bundleId = randomUUID();
-  return audited(ctx, async (tx, log) => {
+  return recorded(ctx, async (log) => {
     need(ctx, 'secret.read', environment, 'secret.read', { bundleId, metadata: { dryRun: true } });
-    const rows = new Map((await environmentSecrets(tx, environment.environmentId)).map((row) => [row.key, row]));
+    const rows = new Map((await environmentSecrets(ctx.db, environment.environmentId)).map((row) => [row.key, row]));
     // Refuse what the write would refuse before opening anything.
     for (const [key, value] of Object.entries(patch)) {
       if (value !== null && rows.get(key)?.archivedAt != null) {
@@ -378,31 +398,34 @@ export async function restoreVersion(
   if (secret === null) throw notFound('unknown secret');
   const where = { ...environment, secretId: secret.id };
 
-  const result = await audited(ctx, async (tx, log) => {
-    // The lock makes the next version number ours, as in setSecrets.
-    const [locked] = await lock(tx, secrets, { id: secret.id });
-    if (locked.archivedAt !== null) {
-      throw conflict(`${secret.key} is archived; unarchive it before restoring a version`);
-    }
-    const target = (await secretHistory(tx, secret.id)).find((row) => row.version === toVersion);
+  const result = await optimistic(ctx, async () => {
+    const [prepared] = await secretHeads(ctx.db, environment.environmentId, { id: secret.id });
+    if (prepared === undefined) throw notFound('unknown secret');
+    if (prepared.archivedAt !== null) throw conflict(`${secret.key} is archived; unarchive it before restoring a version`);
+    const target = (await secretHistory(ctx.db, secret.id)).find((row) => row.version === toVersion);
     if (target === undefined) {
       throw new Refusal(
         notFound(`${secret.key} has no version ${toVersion}`),
         denied(ctx, 'secret.rollback', 'unknown_version', { ...where, metadata: { key: secret.key, toVersion } }),
       );
     }
-    const fromVersion = locked.currentVersion;
+    const fromVersion = prepared.currentVersion;
     const version = fromVersion + 1;
-    const rewrapped = await rewrapValue(ctx.vault, asking(ctx), secretRef(place, environment, secret, version), target);
+    const rewrapped = await rewrapValue(ctx.vault, asking(ctx), secretRef(place, environment, prepared, version), target);
     if (!rewrapped.ok) {
-      throw vaultRefusal(ctx, rewrapped.refusal, 'secret.rollback', { ...where, metadata: { key: secret.key, toVersion } });
+      throw vaultRefusal(ctx, rewrapped.refusal, 'secret.rollback', { ...where, metadata: { key: prepared.key, toVersion } });
     }
-    await appendVersion(tx, secret.id, version, rewrapped.values[0], ctx.caller.principal.id);
-    log.push(allowed(ctx, 'secret.rollback', {
-      ...where,
-      metadata: { key: secret.key, fromVersion, toVersion, version },
-    }));
-    return { key: secret.key, version };
+    return audited(ctx, async (tx, log) => {
+      await checkEnvironment(tx, place, environment);
+      const [current] = await lock(tx, secrets, { id: secret.id });
+      if (current === undefined || current.currentVersion !== fromVersion
+        || current.archivedAt !== null || current.key !== prepared.key) throw new PrepareAgain();
+      await appendVersion(tx, secret.id, version, rewrapped.values[0], ctx.caller.principal.id);
+      log.push(allowed(ctx, 'secret.rollback', {
+        ...where, metadata: { key: prepared.key, fromVersion, toVersion, version },
+      }));
+      return { key: prepared.key, version };
+    });
   });
   changed(ctx, environment.environmentId);
   return result;
@@ -419,8 +442,8 @@ export async function reveal(
   path: Path,
 ): Promise<{ bundleId: string; values: Record<string, string> }> {
   const bundleId = randomUUID();
-  return audited(ctx, async (tx, log) => {
-    const place = await resolvePath(tx, path);
+  return recorded(ctx, async (log) => {
+    const place = await resolvePath(ctx.db, path);
     const environment = place === null ? null : liveEnvironment(place);
     if (place === null || environment === null) {
       throw new Refusal(
@@ -443,7 +466,7 @@ export async function reveal(
       );
     }
 
-    const rows = await currentEnvelopes(tx, environment.environmentId, place.secret?.id);
+    const rows = await currentEnvelopes(ctx.db, environment.environmentId, place.secret?.id);
     const opened = await openValues(
       ctx.vault,
       { ...asking(ctx), purpose: path.key === undefined ? 'run' : 'reveal' },

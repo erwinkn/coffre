@@ -27,13 +27,13 @@ import {
   findIdentity,
   insert,
   insertIfAbsent,
-  lock,
   members,
+  revokePriorMembership,
   update,
   updateAuth,
 } from '../db/queries.ts';
 import type { PrincipalRef } from './caller.ts';
-import { allowed, audited, denied, Refusal, type ApiContext } from './context.ts';
+import { allowed, audited, denied, Refusal, withRefusals, type ApiContext } from './context.ts';
 import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
 import { formatMember } from './paths.ts';
 
@@ -202,9 +202,8 @@ export function normalizeUserCode(input: string): string | null {
  *
  * Every credential is a random bearer token stored only as its SHA-256.
  *
- * Two first sign-ins of one account race on the unique index over
- * `(provider, issuerHash, subject)`: the loser's transaction fails, and it retries once,
- * now finding the account bound.
+ * The app audit head serializes bindings. The unique index over
+ * `(provider, issuerHash, subject)` also prevents binding an account twice.
  */
 export class SigninService {
   readonly #deps: SigninServiceDeps;
@@ -266,73 +265,72 @@ export class SigninService {
         metadata: { ...account, reason },
       });
 
-    return audited(this.#deps, async (tx, log) => {
-      const now = new Date();
-      const issuerHash = this.#issuerHash(profile.provider);
-      if (issuerHash === null) throw new SigninRefused('not_registered');
-      const bound = await findIdentity(tx, this.#deps.chainKey, { ...profile, issuerHash });
+    const issuerHash = this.#issuerHash(profile.provider);
+    if (issuerHash === null) throw new SigninRefused('not_registered');
+    return withRefusals(this.#deps, async () => {
+      const previous = await findIdentity(this.#deps.db, this.#deps.chainKey, { ...profile, issuerHash });
+      const match = previous === null ? await this.#principalForEmails(profile.emails) : null;
+      if (previous === null && match === null) throw refuse('not_registered');
+      const preparedId = previous?.principalId ?? match!.id;
+      const principal = { type: 'user' as const, id: preparedId };
+      const standing = match?.access ?? await this.#standing(principal);
+      return this.#inMembership(principal, standing, refuse('deactivated', preparedId), async () => audited(this.#deps, async (tx, log) => {
+        const now = new Date();
+        const bound = await findIdentity(tx, this.#deps.chainKey, { ...profile, issuerHash });
+        let principalId: string;
+        let identityId: string;
+        let generation: number;
+        if (bound !== null) {
+          principalId = bound.principalId;
+          identityId = bound.id;
+          if (principalId !== preparedId || bound.generation !== standing.generation) throw refuse('deactivated', principalId);
+          generation = standing.generation;
+          await update(
+            tx,
+            identities,
+            { id: identityId },
+            { lastSignInAt: now, ...(profile.emails[0] === undefined ? {} : { email: profile.emails[0] }) },
+          );
+        } else {
+          // The audit head serializes bindings to the same person.
+          if (match === null) throw refuse('deactivated', preparedId);
+          principalId = preparedId;
+          generation = standing.generation;
+          await this.#ensureRow(tx, principalId);
+          // A crashed older attempt may have committed after the removal sweep.
+          await revokePriorMembership(tx, this.#deps.chainKey, principal, generation, 'system:signin');
 
-      let principalId: string;
-      let identityId: string;
-      let generation: number;
-      if (bound !== null) {
-        principalId = bound.principalId;
-        identityId = bound.id;
-        const standing = await this.#standing(tx, { type: 'user', id: principalId });
-        if (standing.status !== 'active' || bound.generation !== standing.generation) throw refuse('deactivated', principalId);
-        generation = standing.generation;
-        await update(
-          tx,
-          identities,
-          { id: identityId },
-          { lastSignInAt: now, ...(profile.emails[0] === undefined ? {} : { email: profile.emails[0] }) },
-        );
-      } else {
-        // Locked, so two accounts cannot both bind to one person at once.
-        if (profile.emails.length > 0) {
-          await lock(tx, principals, { principalType: 'user', principalId: [...profile.emails] });
+          const [person] = await members(tx, this.#deps.chainKey, { member: { type: 'user', id: principalId } }, now);
+          const other = (person?.identities ?? []).some(
+            (identity) => identity.provider !== profile.provider || identity.issuerHash !== issuerHash || identity.subject !== profile.subject,
+          );
+          if (other) throw refuse('account_mismatch', principalId);
+
+          identityId = await this.#bind(tx, principalId, profile, principalId, generation);
+          log.push({
+            ...base,
+            actorId: principalId,
+            action: 'identity.bind',
+            decision: 'allow',
+            metadata: { ...account, identityId, matchedEmail: match.email },
+          });
         }
-        const match = await this.#principalForEmails(profile.emails);
-        if (match === null) throw refuse('not_registered');
-        principalId = match.id;
-        if (match.status !== 'active') throw refuse('deactivated', principalId);
-        generation = match.generation;
-        await this.#ensureRow(tx, principalId);
 
-        const [person] = await members(tx, this.#deps.chainKey, { member: { type: 'user', id: principalId } }, now);
-        const other = (person?.identities ?? []).some(
-          // This very account, bound a moment ago by a racing sign-in, is
-          // no mismatch: binding it again hits the unique index, and the
-          // retry finds it bound.
-          (identity) => identity.provider !== profile.provider || identity.issuerHash !== issuerHash || identity.subject !== profile.subject,
-        );
-        if (other) throw refuse('account_mismatch', principalId);
-
-        identityId = await this.#bind(tx, principalId, profile, principalId, generation);
+        const credential = await this.#issue(tx, 'browser', principal, {
+          generation,
+          identityId,
+          label: meta.label,
+          createdBy: principalId,
+          expiresAt: new Date(now.getTime() + this.#deps.signin.browserSessionHours * 3_600_000),
+        });
         log.push({
           ...base,
           actorId: principalId,
-          action: 'identity.bind',
           decision: 'allow',
-          metadata: { ...account, identityId, matchedEmail: match.email },
+          metadata: { ...account, identityId, credentialId: credential.id },
         });
-      }
-
-      const principal: PrincipalRef = { type: 'user', id: principalId };
-      const credential = await this.#issue(tx, 'browser', principal, {
-        generation,
-        identityId,
-        label: meta.label,
-        createdBy: principalId,
-        expiresAt: new Date(now.getTime() + this.#deps.signin.browserSessionHours * 3_600_000),
-      });
-      log.push({
-        ...base,
-        actorId: principalId,
-        decision: 'allow',
-        metadata: { ...account, identityId, credentialId: credential.id },
-      });
-      return { ok: true as const, principal, credential };
+        return { ok: true as const, principal, credential };
+      }));
     });
   }
 
@@ -343,8 +341,10 @@ export class SigninService {
   ): Promise<{ ok: true } | { ok: false; reason: SigninRefusal }> {
     const account = { provider: profile.provider, subject: profile.subject, emails: profile.emails };
     if (ctx.caller.principal.type !== 'user') throw forbidden('only people link sign-in accounts');
-    return audited(this.#deps, async (tx, log) => {
-      const standing = await this.#currentCaller(tx, ctx);
+    const access = await this.#standing(ctx.caller.principal);
+    const refusal = new Refusal(new SigninRefused('deactivated'), denied(ctx, 'identity.bind', 'session_ended', { metadata: account }));
+    return this.#inMembership(ctx.caller.principal, access, refusal, async () => audited(this.#deps, async (tx, log) => {
+      const standing = await this.#currentCaller(tx, ctx, access);
       if (standing === null) {
         throw new Refusal(new SigninRefused('deactivated'), denied(ctx, 'identity.bind', 'session_ended', { metadata: account }));
       }
@@ -361,7 +361,7 @@ export class SigninService {
       const identityId = await this.#bind(tx, ctx.caller.principal.id, profile, ctx.caller.principal.id, standing.generation);
       log.push(allowed(ctx, 'identity.bind', { metadata: { ...account, identityId } }));
       return { ok: true as const };
-    }).catch(refusalOrThrow);
+    })).catch(refusalOrThrow);
   }
 
   /**
@@ -399,28 +399,50 @@ export class SigninService {
    */
   async #principalForEmails(
     emails: readonly string[],
-  ): Promise<{ id: string; status: Access['status']; generation: number; email: string } | null> {
+  ): Promise<{ id: string; access: Access; email: string } | null> {
     for (const email of emails) {
-      const { status, generation } = await this.#deps.vault.access(formatMember({ type: 'user', id: email }));
-      if (status !== 'unknown') return { id: email, status, generation, email };
+      const access = await this.#standing({ type: 'user', id: email });
+      if (access.status !== 'unknown') return { id: email, access, email };
     }
     return null;
   }
 
-  /**
-   * Lock someone's directory row, then ask the vault whether they are in,
-   * before minting them a credential. Removing someone locks the row while
-   * the vault removes them and the app revokes what they hold, so a
-   * credential is either minted first and revoked with the rest, or refused.
-   */
-  async #standing(tx: Transaction, principal: PrincipalRef): Promise<Access> {
-    await lock(tx, principals, { principalType: principal.type, principalId: principal.id });
+  async #standing(principal: PrincipalRef): Promise<Access> {
     return this.#deps.vault.access(formatMember(principal));
   }
 
-  /** Revalidate an in-flight browser action while holding the removal lock. */
-  async #currentCaller(tx: Transaction, ctx: Asker): Promise<Access | null> {
-    const standing = await this.#standing(tx, ctx.caller.principal);
+  /**
+   * Until members share the app database, check their generation around the
+   * transaction. Never stamp a credential with a newer generation to finish
+   * an old request. Even a crash before the second check leaves it unusable.
+   */
+  async #inMembership<T>(
+    principal: PrincipalRef,
+    standing: Access,
+    refusal: Refusal,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    return withRefusals(this.#deps, async () => {
+      if (standing.status !== 'active') throw refusal;
+      const result = await work();
+      await this.#checkMembership(principal, standing, refusal);
+      return result;
+    });
+  }
+
+  async #checkMembership(principal: PrincipalRef, standing: Access, refusal: Refusal): Promise<void> {
+    const current = await this.#standing(principal);
+    if (current.status === 'active' && current.generation === standing.generation) return;
+    // A delayed attempt must not revoke credentials issued after re-admission.
+    await audited(this.#deps, async (tx, log) => {
+      await revokePriorMembership(tx, this.#deps.chainKey, principal, current.generation, 'system:signin');
+      log.push(refusal.entry);
+    });
+    throw refusal.error;
+  }
+
+  /** Revalidate the initiating credential under the app audit head. */
+  async #currentCaller(tx: Transaction, ctx: Asker, standing: Access): Promise<Access | null> {
     if (standing.status !== 'active' || standing.generation !== ctx.caller.generation) return null;
     if (ctx.credentialId !== null) {
       const row = await findCredential(tx, this.#deps.chainKey, { id: ctx.credentialId });
@@ -663,7 +685,7 @@ export class SigninService {
       throw badRequest(`tokens last between 1 and ${MAX_SERVICE_TOKEN_DAYS} days`);
     }
     const details = { kind: 'service', principalType: 'service', principalId: serviceId, label: input.label };
-    return audited(this.#deps, async (tx, log) => {
+    return withRefusals(this.#deps, async () => {
       if (!ctx.caller.isOwner) {
         throw new Refusal(
           forbidden('only owners may issue service tokens'),
@@ -671,26 +693,26 @@ export class SigninService {
         );
       }
       const service = { type: 'service' as const, id: serviceId };
-      const standing = await this.#standing(tx, service);
-      if (standing.status !== 'active') {
-        throw new Refusal(
-          notFound('unknown service'),
-          denied(ctx, 'credential.issue', 'unknown_principal', { metadata: details }),
-        );
-      }
-      const credential = await this.#issue(tx, 'service', service, {
-        generation: standing.generation,
-        identityId: null,
-        label: input.label,
-        createdBy: ctx.caller.principal.id,
-        expiresAt: new Date(Date.now() + input.expiresInDays * 86_400_000),
-      });
-      log.push(
-        allowed(ctx, 'credential.issue', {
-          metadata: { ...details, credentialId: credential.id, expiresAt: credential.expiresAt },
-        }),
+      const standing = await this.#standing(service);
+      const refusal = new Refusal(
+        notFound('unknown service'),
+        denied(ctx, 'credential.issue', 'unknown_principal', { metadata: details }),
       );
-      return credential;
+      return this.#inMembership(service, standing, refusal, async () => audited(this.#deps, async (tx, log) => {
+        const credential = await this.#issue(tx, 'service', service, {
+          generation: standing.generation,
+          identityId: null,
+          label: input.label,
+          createdBy: ctx.caller.principal.id,
+          expiresAt: new Date(Date.now() + input.expiresInDays * 86_400_000),
+        });
+        log.push(
+          allowed(ctx, 'credential.issue', {
+            metadata: { ...details, credentialId: credential.id, expiresAt: credential.expiresAt },
+          }),
+        );
+        return credential;
+      }));
     });
   }
 
@@ -769,8 +791,10 @@ export class SigninService {
     const action = approve ? 'device.approve' : 'device.deny';
     const code = normalizeUserCode(userCodeInput);
     if (ctx.caller.principal.type !== 'user') throw forbidden('only people approve sign-ins');
-    return audited(this.#deps, async (tx, log) => {
-      const standing = await this.#currentCaller(tx, ctx);
+    const access = await this.#standing(ctx.caller.principal);
+    const refusal = new Refusal(forbidden('that session has ended'), denied(ctx, action, 'session_ended'));
+    return this.#inMembership(ctx.caller.principal, access, refusal, async () => audited(this.#deps, async (tx, log) => {
+      const standing = await this.#currentCaller(tx, ctx, access);
       if (standing === null) {
         throw new Refusal(forbidden('that session has ended'), denied(ctx, action, 'session_ended'));
       }
@@ -801,56 +825,72 @@ export class SigninService {
         }),
       );
       return { decided: true as const };
-    });
+    }));
   }
 
   /** The CLI's poll. An approved code is exchanged for a CLI session exactly once. */
   async pollDevice(deviceCode: string, meta: Omit<ClientMeta, 'label'>): Promise<DevicePoll> {
-    return audited(this.#deps, async (tx, log): Promise<DevicePoll> => {
-      const now = new Date();
-      const [row] = await findDeviceAuthorizations(tx, this.#deps.chainKey, { deviceCodeHash: hashToken(deviceCode) });
-      if (row === undefined || row.consumedAt !== null) return { status: 'expired' };
-      if (row.decision === 'denied') return { status: 'denied' };
-      // An approval is only good within the code's lifetime: one the CLI
-      // never collected must not stay redeemable for a session indefinitely.
-      if (row.expiresAt <= now) return { status: 'expired' };
-      if (row.decision === null) return { status: 'pending' };
-
-      // Consumed only if still unconsumed: of two polls racing, one gets the session.
-      const consumed = await updateAuth(tx, this.#deps.chainKey, deviceAuthorizations, { id: row.id, consumedAt: null }, { consumedAt: now });
-      if (consumed === 0) return { status: 'expired' };
-      const principalId = row.principalId!;
-      // An approval given before the person was last added is void: someone
-      // removed and re-added in between starts with nothing from before.
-      const standing = await this.#standing(tx, { type: 'user', id: principalId });
-      if (standing.status !== 'active' || standing.generation !== row.generation) return { status: 'denied' };
-
-      const principal: PrincipalRef = { type: 'user', id: principalId };
-      const credential = await this.#issue(tx, 'cli', principal, {
-        generation: standing.generation,
-        identityId: null,
-        label: row.clientLabel,
-        createdBy: principalId,
-        expiresAt: new Date(now.getTime() + this.#deps.signin.cliSessionDays * 86_400_000),
-      });
-      const entry: AuditEntry = {
-        actorType: 'user',
-        actorId: principalId,
-        action: 'credential.issue',
-        decision: 'allow',
-        requestId: meta.requestId,
-        sourceIp: meta.sourceIp,
-        metadata: {
-          kind: 'cli',
-          credentialId: credential.id,
-          deviceAuthorizationId: row.id,
-          clientLabel: row.clientLabel,
-          clientIp: row.clientIp,
-        },
-      };
-      log.push(entry);
-      return { status: 'approved', principal, credential };
+    const [prepared] = await findDeviceAuthorizations(this.#deps.db, this.#deps.chainKey, { deviceCodeHash: hashToken(deviceCode) });
+    if (prepared === undefined || prepared.consumedAt !== null || prepared.expiresAt <= new Date()) return { status: 'expired' };
+    if (prepared.decision === null) return { status: 'pending' };
+    if (prepared.decision === 'denied') return { status: 'denied' };
+    const principal = { type: 'user' as const, id: prepared.principalId! };
+    const standing = await this.#standing(principal);
+    const refusal = new Refusal(new SigninRefused('deactivated'), {
+      actorType: 'user', actorId: principal.id, action: 'credential.issue', decision: 'deny',
+      requestId: meta.requestId, sourceIp: meta.sourceIp,
+      metadata: { kind: 'cli', deviceAuthorizationId: prepared.id, reason: 'membership_changed' },
     });
+    try {
+      const result = await audited(this.#deps, async (tx, log): Promise<DevicePoll> => {
+        const now = new Date();
+        const [row] = await findDeviceAuthorizations(tx, this.#deps.chainKey, { deviceCodeHash: hashToken(deviceCode) });
+        if (row === undefined || row.consumedAt !== null) return { status: 'expired' };
+        if (row.decision === 'denied') return { status: 'denied' };
+        // An approval is only good within the code's lifetime: one the CLI
+        // never collected must not stay redeemable for a session indefinitely.
+        if (row.expiresAt <= now) return { status: 'expired' };
+        if (row.decision === null) return { status: 'pending' };
+
+        // Consumed only if still unconsumed: of two polls racing, one gets the session.
+        const consumed = await updateAuth(tx, this.#deps.chainKey, deviceAuthorizations, { id: row.id, consumedAt: null }, { consumedAt: now });
+        if (consumed === 0) return { status: 'expired' };
+        const principalId = row.principalId!;
+        // An approval given before the person was last added is void: someone
+        // removed and re-added in between starts with nothing from before.
+        if (standing.status !== 'active' || principalId !== principal.id || standing.generation !== row.generation) return { status: 'denied' };
+
+        const credential = await this.#issue(tx, 'cli', principal, {
+          generation: standing.generation,
+          identityId: null,
+          label: row.clientLabel,
+          createdBy: principalId,
+          expiresAt: new Date(now.getTime() + this.#deps.signin.cliSessionDays * 86_400_000),
+        });
+        const entry: AuditEntry = {
+          actorType: 'user',
+          actorId: principalId,
+          action: 'credential.issue',
+          decision: 'allow',
+          requestId: meta.requestId,
+          sourceIp: meta.sourceIp,
+          metadata: {
+            kind: 'cli',
+            credentialId: credential.id,
+            deviceAuthorizationId: row.id,
+            clientLabel: row.clientLabel,
+            clientIp: row.clientIp,
+          },
+        };
+        log.push(entry);
+        return { status: 'approved', principal, credential };
+      });
+      if (result.status === 'approved') await this.#checkMembership(principal, standing, refusal);
+      return result;
+    } catch (error) {
+      if (error instanceof SigninRefused) return { status: 'denied' };
+      throw error;
+    }
   }
 }
 
