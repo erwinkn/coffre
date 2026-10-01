@@ -1,6 +1,9 @@
 \set ON_ERROR_STOP on
 
+-- The log refuses deletions from everyone; the fixture lifts that for itself.
+ALTER TABLE audit_log DISABLE TRIGGER USER;
 DELETE FROM audit_log;
+ALTER TABLE audit_log ENABLE TRIGGER USER;
 UPDATE audit_chain_head
    SET next_seq = 0,
        head_hash = decode(repeat('00', 32), 'hex');
@@ -18,6 +21,6 @@ INSERT INTO environments (id, project_id, slug, name)
 VALUES ('22222222-2222-2222-2222-222222222222',
         '11111111-1111-1111-1111-111111111111', 'prod', 'Production');
 
-INSERT INTO audit_log (seq, actor_type, actor_id, action, decision, prev_hash, hash)
-VALUES (0, 'user', 'admin@acme.example', 'secret.read', 'allow',
-        decode(repeat('00', 32), 'hex'), decode(repeat('aa', 32), 'hex'));
+INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
+VALUES (0, 'app', 'app:fixture', 0, 'user:admin@acme.example', 'secret.read', 'allow',
+        decode(repeat('00', 32), 'hex'), decode(repeat('99', 32), 'hex'), decode(repeat('aa', 32), 'hex'));

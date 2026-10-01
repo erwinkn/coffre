@@ -9,15 +9,15 @@
 \echo '--- running through restricted runtime login ---'
 
 -- 1. The application may append to the audit log.
-INSERT INTO audit_log (seq, actor_type, actor_id, action, decision, prev_hash, hash)
-VALUES (1, 'user', 'admin@acme.example', 'secret.read', 'allow',
-        decode(repeat('aa', 32), 'hex'), decode(repeat('bb', 32), 'hex'));
+INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
+VALUES (1, 'app', 'app:fixture', 0, 'user:admin@acme.example', 'secret.read', 'allow',
+        decode(repeat('aa', 32), 'hex'), decode(repeat('99', 32), 'hex'), decode(repeat('bb', 32), 'hex'));
 \echo 'PASS: coffre_app can append to audit_log'
 
 -- 2. The application may NOT rewrite an audit row.
 DO $$
 BEGIN
-    UPDATE audit_log SET actor_id = 'someone.else@acme.example' WHERE seq = 0;
+    UPDATE audit_log SET actor = 'user:someone.else@acme.example' WHERE seq = 0;
     RAISE EXCEPTION 'FAIL: coffre_app was able to UPDATE audit_log';
 EXCEPTION
     WHEN insufficient_privilege THEN
@@ -122,9 +122,9 @@ $$;
 -- 8. Duplicate seq values are rejected, so a forked chain cannot be stored.
 DO $$
 BEGIN
-    INSERT INTO audit_log (seq, actor_type, actor_id, action, decision, prev_hash, hash)
-    VALUES (1, 'user', 'x@acme.example', 'secret.read', 'allow',
-            decode(repeat('aa', 32), 'hex'), decode(repeat('cc', 32), 'hex'));
+    INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
+    VALUES (1, 'app', 'app:fixture', 0, 'user:x@acme.example', 'secret.read', 'allow',
+            decode(repeat('aa', 32), 'hex'), decode(repeat('99', 32), 'hex'), decode(repeat('cc', 32), 'hex'));
     RAISE EXCEPTION 'FAIL: duplicate audit seq was accepted';
 EXCEPTION
     WHEN unique_violation THEN
@@ -135,9 +135,9 @@ $$;
 -- 9. A malformed hash length is rejected.
 DO $$
 BEGIN
-    INSERT INTO audit_log (seq, actor_type, actor_id, action, decision, prev_hash, hash)
-    VALUES (2, 'user', 'x@acme.example', 'secret.read', 'allow',
-            decode(repeat('aa', 32), 'hex'), decode('deadbeef', 'hex'));
+    INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
+    VALUES (2, 'app', 'app:fixture', 0, 'user:x@acme.example', 'secret.read', 'allow',
+            decode(repeat('aa', 32), 'hex'), decode(repeat('99', 32), 'hex'), decode('deadbeef', 'hex'));
     RAISE EXCEPTION 'FAIL: a short chain hash was accepted';
 EXCEPTION
     WHEN check_violation THEN
@@ -145,16 +145,29 @@ EXCEPTION
 END
 $$;
 
--- 10. An unknown actor_type is rejected.
+-- 10. An actor that is not a principal is rejected.
 DO $$
 BEGIN
-    INSERT INTO audit_log (seq, actor_type, actor_id, action, decision, prev_hash, hash)
-    VALUES (3, 'anonymous', 'x', 'secret.read', 'allow',
-            decode(repeat('aa', 32), 'hex'), decode(repeat('dd', 32), 'hex'));
-    RAISE EXCEPTION 'FAIL: an unknown actor_type was accepted';
+    INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
+    VALUES (3, 'app', 'app:fixture', 0, 'anonymous', 'secret.read', 'allow',
+            decode(repeat('aa', 32), 'hex'), decode(repeat('99', 32), 'hex'), decode(repeat('dd', 32), 'hex'));
+    RAISE EXCEPTION 'FAIL: an actor with no kind was accepted';
 EXCEPTION
     WHEN check_violation THEN
-        RAISE NOTICE 'PASS: unknown actor_type is rejected';
+        RAISE NOTICE 'PASS: an actor with no kind is rejected';
+END
+$$;
+
+-- 11. An unknown author is rejected.
+DO $$
+BEGIN
+    INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
+    VALUES (3, 'nobody', 'app:fixture', 0, 'user:x@acme.example', 'secret.read', 'allow',
+            decode(repeat('aa', 32), 'hex'), decode(repeat('99', 32), 'hex'), decode(repeat('dd', 32), 'hex'));
+    RAISE EXCEPTION 'FAIL: an unknown author was accepted';
+EXCEPTION
+    WHEN check_violation THEN
+        RAISE NOTICE 'PASS: unknown author is rejected';
 END
 $$;
 

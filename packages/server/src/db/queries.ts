@@ -1,3 +1,4 @@
+import type { Author } from '@coffre/core/audit';
 import type { Envelope } from '@coffre/core/envelope';
 import { own, tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import * as dialect from '@coffre/db/dialect';
@@ -324,14 +325,13 @@ export async function memberActivity(db: Queryable, actorIds: string[]) {
   const allowed = eq(auditLog.decision, 'allow');
   const seen = and(
     allowed,
-    inArray(auditLog.actorId, actorIds),
+    inArray(auditLog.actor, actorIds.flatMap((id) => [`user:${id}`, `token:${id}`])),
     inArray(auditLog.action, ['secret.read', 'secret.write', 'secret.import']),
   );
   const touched = db.select({ id: auditLog.secretId }).from(auditLog).where(seen);
   const rows = await db
     .select({
-      actorType: auditLog.actorType,
-      actorId: auditLog.actorId,
+      actor: auditLog.actor,
       action: auditLog.action,
       secretId: auditLog.secretId,
       metadata: auditLog.metadata,
@@ -354,7 +354,7 @@ export async function memberActivity(db: Queryable, actorIds: string[]) {
       ),
     )
     .orderBy(asc(auditLog.seq));
-  return rows.map((row) => ({ ...row, occurredAt: canonicalTimestamp(row.occurredAt) }));
+  return rows.map(shown);
 }
 
 /** The person an account at a provider is bound to, if it is. */
@@ -641,57 +641,63 @@ export async function findSyncs(
  * clock is the database's, not an application server's, so entries from
  * several servers still order by time (CDR 2024/1774 Art 12(2)(f)).
  */
-export async function auditHead(
-  db: Queryable,
-  { lock: locking = false } = {},
-): Promise<{ nextSeq: bigint; headHash: Buffer; now: string } | null> {
+export async function auditHead(db: Queryable): Promise<{ nextSeq: bigint; headHash: Buffer } | null> {
   const { auditChainHead } = tablesOf(db);
-  const query = db
-    .select({ nextSeq: auditChainHead.nextSeq, headHash: auditChainHead.headHash, now: clock(db) })
+  const [head] = await db
+    .select({ nextSeq: auditChainHead.nextSeq, headHash: auditChainHead.headHash })
     .from(auditChainHead)
     .limit(1);
-  const [head] = locking ? await forUpdate(db, query) : await query;
-  return head === undefined ? null : { ...head, now: canonicalTimestamp(head.now) };
+  return head ?? null;
 }
 
 const auditColumns = (auditLog: Tables['auditLog']) => ({
   seq: auditLog.seq,
+  author: auditLog.author,
+  keyId: auditLog.keyId,
   occurredAt: auditLog.occurredAt,
-  actorType: auditLog.actorType,
-  actorId: auditLog.actorId,
+  actor: auditLog.actor,
   action: auditLog.action,
   decision: auditLog.decision,
+  code: auditLog.code,
+  subjectPrincipal: auditLog.subjectPrincipal,
   projectId: auditLog.projectId,
   environmentId: auditLog.environmentId,
   secretId: auditLog.secretId,
-  bundleId: auditLog.bundleId,
+  secretVersionId: auditLog.secretVersionId,
+  operationId: auditLog.operationId,
   requestId: auditLog.requestId,
   sourceIp: auditLog.sourceIp,
+  relatedSeq: auditLog.relatedSeq,
   metadata: auditLog.metadata,
 });
+
+/** When an entry happened, as the API shows it. */
+function shown<Row extends { occurredAt: number }>(row: Row): Omit<Row, 'occurredAt'> & { occurredAt: string } {
+  return { ...row, occurredAt: new Date(row.occurredAt).toISOString() };
+}
 
 /** Rows in chain order from `fromSeq`, with every field as it was hashed. */
 export async function auditRange(db: Queryable, fromSeq = 0n, limit = 1000) {
   const { auditLog } = tablesOf(db);
   const rows = await db
-    .select({ ...auditColumns(auditLog), prevHash: auditLog.prevHash, hash: auditLog.hash })
+    .select({ ...auditColumns(auditLog), prevHash: auditLog.prevHash, mac: auditLog.mac, hash: auditLog.hash })
     .from(auditLog)
     .where(gte(auditLog.seq, fromSeq))
     .orderBy(asc(auditLog.seq))
     .limit(limit);
-  return rows.map((row) => ({ ...row, occurredAt: canonicalTimestamp(row.occurredAt) }));
+  return rows.map((row) => ({ ...row, author: row.author as Author, decision: row.decision as 'allow' | 'deny' }));
 }
 
-/** The newest entry of this action, or null. */
+/** The app's newest entry of this action, or null. */
 export async function latestAudit(db: Queryable, action: string) {
   const { auditLog } = tablesOf(db);
   const [row] = await db
     .select(auditColumns(auditLog))
     .from(auditLog)
-    .where(eq(auditLog.action, action))
+    .where(and(eq(auditLog.author, 'app'), eq(auditLog.action, action)))
     .orderBy(desc(auditLog.seq))
     .limit(1);
-  return row === undefined ? null : { ...row, occurredAt: canonicalTimestamp(row.occurredAt) };
+  return row === undefined ? null : shown(row);
 }
 
 export type AuditFilter = {
@@ -700,8 +706,8 @@ export type AuditFilter = {
   projectId?: string;
   environmentId?: string;
   secretId?: string;
-  actorType?: string;
-  actorId?: string;
+  /** Entries by any of these actors, as the log stores them: `user:ada@acme.example`. */
+  actors?: string[];
   decision?: string;
   /** Entries with none of these actions, filtered here so a page stays full. */
   excludeActions?: readonly string[];
@@ -727,8 +733,7 @@ export async function auditPage(db: Queryable, filter: AuditFilter) {
         filter.projectId === undefined ? undefined : eq(auditLog.projectId, filter.projectId),
         filter.environmentId === undefined ? undefined : eq(auditLog.environmentId, filter.environmentId),
         filter.secretId === undefined ? undefined : eq(auditLog.secretId, filter.secretId),
-        filter.actorType === undefined ? undefined : eq(auditLog.actorType, filter.actorType),
-        filter.actorId === undefined ? undefined : eq(auditLog.actorId, filter.actorId),
+        filter.actors === undefined ? undefined : inArray(auditLog.actor, filter.actors),
         filter.decision === undefined ? undefined : eq(auditLog.decision, filter.decision),
         filter.excludeActions === undefined || filter.excludeActions.length === 0
           ? undefined
@@ -738,7 +743,7 @@ export async function auditPage(db: Queryable, filter: AuditFilter) {
     )
     .orderBy(desc(auditLog.seq))
     .limit(filter.limit);
-  return rows.map((row) => ({ ...row, occurredAt: canonicalTimestamp(row.occurredAt) }));
+  return rows.map(shown);
 }
 
 /** When the scheduler last wrote to the log, and the database clock now. */

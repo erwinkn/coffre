@@ -206,27 +206,56 @@ export async function tamperApp(deployment: Deployment, { admin }: People): Prom
   expect(intact.ok && intact.checkpoint !== null, 'the logs do not verify before any tampering', intact);
   const signed = intact.checkpoint.seq;
 
-  await using(deployment.database(), async (sql) => {
-    const [row] = await sql.query<{ seq: number | string; actor_id: string }>(
-      `SELECT seq, actor_id FROM audit_log WHERE action = 'secret.read' ORDER BY seq LIMIT 1`,
-    );
-    expect(row !== undefined, 'the audit log has no secret.read entry to rewrite');
-    const seq = Number(row.seq);
-    await update(sql, 'UPDATE audit_log SET actor_id = $1 WHERE seq = $2', ['user:nobody@conformance.example', seq]);
-    const rewritten = await verify();
-    expect(!rewritten.ok && rewritten.log === 'audit', 'an audit entry rewritten in the database verifies', rewritten);
-    await update(sql, 'UPDATE audit_log SET actor_id = $1 WHERE seq = $2', [row.actor_id, seq]);
-    const restored = await verify();
-    expect(restored.ok, 'the audit log did not verify once put back', restored);
-    caught.push(`an audit entry rewritten (at ${rewritten.failedAtSeq})`);
-  });
+  await using(deployment.database(), (sql) =>
+    appendOnlyLifted(sql, async () => {
+      const [row] = await sql.query<{ seq: number | string; actor: string }>(
+        `SELECT seq, actor FROM audit_log WHERE action = 'secret.read' ORDER BY seq LIMIT 1`,
+      );
+      expect(row !== undefined, 'the audit log has no secret.read entry to rewrite');
+      const seq = Number(row.seq);
+      await update(sql, 'UPDATE audit_log SET actor = $1 WHERE seq = $2', ['user:nobody@conformance.example', seq]);
+      const rewritten = await verify();
+      expect(!rewritten.ok && rewritten.log === 'audit', 'an audit entry rewritten in the database verifies', rewritten);
+      await update(sql, 'UPDATE audit_log SET actor = $1 WHERE seq = $2', [row.actor, seq]);
+      const restored = await verify();
+      expect(restored.ok, 'the audit log did not verify once put back', restored);
+      caught.push(`an audit entry rewritten (at ${rewritten.failedAtSeq})`);
+    }),
+  );
 
   // Last, since nothing puts them back: the entries the vault last signed for.
-  await using(deployment.database(), (sql) => update(sql, 'DELETE FROM audit_log WHERE seq >= $1', [signed]));
+  await using(deployment.database(), (sql) =>
+    appendOnlyLifted(sql, () => update(sql, 'DELETE FROM audit_log WHERE seq >= $1', [signed])),
+  );
   const truncated = await verify();
   expect(!truncated.ok && truncated.log === 'audit', 'the audit log verifies with its newest entries deleted', truncated);
   caught.push('the newest audit entries deleted');
   return `caught: ${caught.join('; ')}`;
+}
+
+/**
+ * `work` with the audit log's append-only triggers lifted, as only its owner
+ * can: Postgres disables them for the session, SQLite drops them and makes
+ * them again after.
+ */
+async function appendOnlyLifted<T>(sql: Sql, work: () => Promise<T>): Promise<T> {
+  if (sql.engine === 'postgres') {
+    await sql.exec('ALTER TABLE audit_log DISABLE TRIGGER USER');
+    try {
+      return await work();
+    } finally {
+      await sql.exec('ALTER TABLE audit_log ENABLE TRIGGER USER');
+    }
+  }
+  const triggers = await sql.query<{ name: string; sql: string }>(
+    `SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'audit_log'`,
+  );
+  for (const trigger of triggers) await sql.exec(`DROP TRIGGER ${trigger.name}`);
+  try {
+    return await work();
+  } finally {
+    for (const trigger of triggers) await sql.exec(trigger.sql);
+  }
 }
 
 /** `$1` on Postgres, `?` on SQLite. */

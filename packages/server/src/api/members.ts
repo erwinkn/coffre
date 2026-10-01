@@ -3,6 +3,7 @@ import type { Access, Grant } from '@coffre/core/vault';
 import type { Queryable } from '@coffre/db';
 import { credentials, identities, principals } from '@coffre/db/schema';
 
+import { actorParts } from '../db/audit.ts';
 import {
   insertIfAbsent,
   revokePriorMembership,
@@ -230,7 +231,8 @@ function exposure(
       }
       continue;
     }
-    const key = formatMember({ type: row.actorType as 'user' | 'service', id: row.actorId });
+    const { actorType, actorId } = actorParts(row.actor);
+    const key = formatMember({ type: actorType as 'user' | 'service', id: actorId });
     if (row.action === 'directory.remove' || !result.has(key)) continue;
     const version = metadata.version;
     if (typeof version !== 'number') continue;

@@ -8,3 +8,16 @@
 INSERT INTO `audit_chain_head` (`only_row`, `next_seq`, `head_hash`) VALUES (true, 0, zeroblob(32));
 --> statement-breakpoint
 INSERT INTO `audit_heartbeat` (`only_row`, `last_seq`) VALUES (true, 0);
+--> statement-breakpoint
+
+-- The audit log only grows: no statement may change or delete an entry.
+-- What gets past this anyway, the entries' MACs and chain show.
+CREATE TRIGGER `audit_log_no_update` BEFORE UPDATE ON `audit_log`
+BEGIN
+    SELECT RAISE(ABORT, 'audit_log is append-only');
+END;
+--> statement-breakpoint
+CREATE TRIGGER `audit_log_no_delete` BEFORE DELETE ON `audit_log`
+BEGIN
+    SELECT RAISE(ABORT, 'audit_log is append-only');
+END;

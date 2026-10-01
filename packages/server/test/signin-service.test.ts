@@ -31,6 +31,7 @@ import {
   testDeps,
   type FixtureDeps,
 } from './api-fixture.ts';
+import { actorParts } from '../src/db/audit.ts';
 
 const ROOT = 'admin@acme.example';
 const LEAD = 'lead@acme.example';
@@ -105,14 +106,17 @@ async function auditRows() {
     .select({
       action: auditLog.action,
       decision: auditLog.decision,
-      actorType: auditLog.actorType,
-      actorId: auditLog.actorId,
+      actor: auditLog.actor,
       sourceIp: auditLog.sourceIp,
       metadata: auditLog.metadata,
     })
     .from(auditLog)
     .orderBy(auditLog.seq);
-  return rows.map((row) => ({ ...row, metadata: JSON.parse(row.metadata) as Record<string, unknown> }));
+  return rows.map(({ actor, ...row }) => ({
+    ...row,
+    ...actorParts(actor),
+    metadata: JSON.parse(row.metadata) as Record<string, unknown>,
+  }));
 }
 
 async function auditActions(): Promise<string[]> {

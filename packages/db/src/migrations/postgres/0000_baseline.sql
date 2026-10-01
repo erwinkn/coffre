@@ -5,8 +5,8 @@ CREATE TABLE "audit_chain_head" (
 	"only_row" boolean PRIMARY KEY DEFAULT true NOT NULL,
 	"next_seq" bigint DEFAULT 0 NOT NULL,
 	"head_hash" "bytea" NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "audit_chain_head_only_row_check" CHECK ("audit_chain_head"."only_row"),
+	CONSTRAINT "audit_chain_head_next_seq_check" CHECK ("audit_chain_head"."next_seq" >= 0),
 	CONSTRAINT "audit_chain_head_head_hash_check" CHECK (octet_length("audit_chain_head"."head_hash") = 32)
 );
 --> statement-breakpoint
@@ -19,26 +19,32 @@ CREATE TABLE "audit_heartbeat" (
 --> statement-breakpoint
 CREATE TABLE "audit_log" (
 	"seq" bigint PRIMARY KEY NOT NULL,
-	"id" uuid DEFAULT gen_random_uuid() NOT NULL,
-	"occurred_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"actor_type" text NOT NULL,
-	"actor_id" text NOT NULL,
+	"author" text NOT NULL,
+	"key_id" text NOT NULL,
+	"occurred_at" bigint NOT NULL,
+	"actor" text NOT NULL,
 	"action" text NOT NULL,
 	"decision" text NOT NULL,
+	"code" text,
+	"subject_principal" text,
 	"project_id" uuid,
 	"environment_id" uuid,
 	"secret_id" uuid,
-	"bundle_id" uuid,
+	"secret_version_id" uuid,
+	"operation_id" uuid,
 	"request_id" text,
 	"source_ip" text,
+	"related_seq" bigint,
 	"metadata" text DEFAULT '{}' NOT NULL,
 	"prev_hash" "bytea" NOT NULL,
+	"mac" "bytea" NOT NULL,
 	"hash" "bytea" NOT NULL,
-	CONSTRAINT "audit_log_id_key" UNIQUE("id"),
-	CONSTRAINT "audit_log_actor_type_check" CHECK ("audit_log"."actor_type" IN ('user', 'service', 'system')),
+	CONSTRAINT "audit_log_author_check" CHECK ("audit_log"."author" IN ('app', 'vault')),
+	CONSTRAINT "audit_log_actor_check" CHECK ("audit_log"."actor" ~ '^(user|token|sync|system):.+$'),
 	CONSTRAINT "audit_log_decision_check" CHECK ("audit_log"."decision" IN ('allow', 'deny')),
 	CONSTRAINT "audit_log_metadata_check" CHECK ("audit_log"."metadata"::jsonb IS NOT NULL),
 	CONSTRAINT "audit_log_prev_hash_check" CHECK (octet_length("audit_log"."prev_hash") = 32),
+	CONSTRAINT "audit_log_mac_check" CHECK (octet_length("audit_log"."mac") = 32),
 	CONSTRAINT "audit_log_hash_check" CHECK (octet_length("audit_log"."hash") = 32)
 );
 --> statement-breakpoint
@@ -212,6 +218,8 @@ CREATE TABLE "syncs" (
 ALTER TABLE "audit_log" ADD CONSTRAINT "audit_log_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "audit_log" ADD CONSTRAINT "audit_log_environment_id_fkey" FOREIGN KEY ("environment_id") REFERENCES "public"."environments"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "audit_log" ADD CONSTRAINT "audit_log_secret_id_fkey" FOREIGN KEY ("secret_id") REFERENCES "public"."secrets"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "audit_log" ADD CONSTRAINT "audit_log_secret_version_id_fkey" FOREIGN KEY ("secret_version_id") REFERENCES "public"."secret_versions"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "audit_log" ADD CONSTRAINT "audit_log_related_seq_fkey" FOREIGN KEY ("related_seq") REFERENCES "public"."audit_log"("seq") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "credentials" ADD CONSTRAINT "credentials_principal_fkey" FOREIGN KEY ("principal_type","principal_id") REFERENCES "public"."principals"("principal_type","principal_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "credentials" ADD CONSTRAINT "credentials_identity_id_fkey" FOREIGN KEY ("identity_id","principal_type","principal_id","generation") REFERENCES "public"."identities"("id","principal_type","principal_id","generation") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "device_authorizations" ADD CONSTRAINT "device_authorizations_principal_fkey" FOREIGN KEY ("principal_type","principal_id") REFERENCES "public"."principals"("principal_type","principal_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
@@ -226,11 +234,12 @@ ALTER TABLE "sync_keys" ADD CONSTRAINT "sync_keys_sync_id_fkey" FOREIGN KEY ("sy
 ALTER TABLE "sync_keys" ADD CONSTRAINT "sync_keys_secret_version_id_fkey" FOREIGN KEY ("secret_version_id") REFERENCES "public"."secret_versions"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "syncs" ADD CONSTRAINT "syncs_environment_in_project" FOREIGN KEY ("environment_id","project_id") REFERENCES "public"."environments"("id","project_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "syncs" ADD CONSTRAINT "syncs_credential_secret_id_fkey" FOREIGN KEY ("credential_secret_id") REFERENCES "public"."secrets"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
-CREATE INDEX "audit_log_occurred_idx" ON "audit_log" USING btree ("occurred_at" DESC NULLS LAST);--> statement-breakpoint
-CREATE INDEX "audit_log_actor_idx" ON "audit_log" USING btree ("actor_type","actor_id","occurred_at" DESC NULLS LAST);--> statement-breakpoint
-CREATE INDEX "audit_log_secret_idx" ON "audit_log" USING btree ("secret_id","occurred_at" DESC NULLS LAST);--> statement-breakpoint
-CREATE INDEX "audit_log_environment_idx" ON "audit_log" USING btree ("environment_id","occurred_at" DESC NULLS LAST);--> statement-breakpoint
-CREATE INDEX "audit_log_bundle_idx" ON "audit_log" USING btree ("bundle_id");--> statement-breakpoint
+CREATE INDEX "audit_log_project_idx" ON "audit_log" USING btree ("project_id","seq");--> statement-breakpoint
+CREATE INDEX "audit_log_environment_idx" ON "audit_log" USING btree ("environment_id","seq");--> statement-breakpoint
+CREATE INDEX "audit_log_secret_idx" ON "audit_log" USING btree ("secret_id","seq");--> statement-breakpoint
+CREATE INDEX "audit_log_actor_idx" ON "audit_log" USING btree ("actor","seq");--> statement-breakpoint
+CREATE INDEX "audit_log_operation_idx" ON "audit_log" USING btree ("operation_id","seq");--> statement-breakpoint
+CREATE INDEX "audit_log_action_idx" ON "audit_log" USING btree ("author","action","seq");--> statement-breakpoint
 CREATE INDEX "credentials_principal_idx" ON "credentials" USING btree ("principal_type","principal_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "identities_active_subject" ON "identities" USING btree ("provider","issuer_hash","active_subject");--> statement-breakpoint
 CREATE INDEX "identities_principal_idx" ON "identities" USING btree ("principal_type","principal_id");--> statement-breakpoint
@@ -246,6 +255,24 @@ VALUES (true, 0, decode(repeat('00', 32), 'hex'));
 
 INSERT INTO audit_heartbeat (only_row, last_seq)
 VALUES (true, 0);
+--> statement-breakpoint
+
+-- The audit log only grows, for every login, its owner's included. The
+-- grants below already keep the runtime login from changing it; this stops
+-- a bug or a careless statement by the owner too, who can still lift it
+-- with ALTER TABLE ... DISABLE TRIGGER. What an owner changes anyway, the
+-- entries' MACs and chain show.
+CREATE FUNCTION audit_log_append_only() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'audit_log is append-only' USING ERRCODE = 'insufficient_privilege';
+END
+$$;
+--> statement-breakpoint
+CREATE TRIGGER audit_log_no_change BEFORE UPDATE OR DELETE ON audit_log
+    FOR EACH ROW EXECUTE FUNCTION audit_log_append_only();
+--> statement-breakpoint
+CREATE TRIGGER audit_log_no_truncate BEFORE TRUNCATE ON audit_log
+    FOR EACH STATEMENT EXECUTE FUNCTION audit_log_append_only();
 --> statement-breakpoint
 
 -- The server connects as coffre_runtime, a login provisioned outside
@@ -344,7 +371,7 @@ GRANT UPDATE (key, current_version_id, current_version, updated_at, archived_at)
 -- sign-in and removal lock the directory row while they ask the vault.
 GRANT UPDATE (created_by) ON principals TO coffre_app;
 --> statement-breakpoint
-GRANT UPDATE (next_seq, head_hash, updated_at) ON audit_chain_head TO coffre_app;
+GRANT UPDATE (next_seq, head_hash) ON audit_chain_head TO coffre_app;
 --> statement-breakpoint
 GRANT UPDATE (last_beat_at, last_seq) ON audit_heartbeat TO coffre_app;
 --> statement-breakpoint

@@ -14,6 +14,7 @@ export default defineConfig({
     hyperdrive: 'src/hyperdrive.ts',
     connect: 'src/connect.ts',
     migrate: 'src/migrate.ts',
+    log: 'src/log.ts',
   },
   platform: 'node',
   dts: true,

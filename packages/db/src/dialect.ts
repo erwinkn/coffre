@@ -13,6 +13,7 @@ import type { Queryable } from './database.ts';
  *   rows changed      rowCount                rowsAffected
  *   duplicate key     SQLSTATE 23505          SQLITE_CONSTRAINT_UNIQUE
  *   clock             CURRENT_TIMESTAMP       strftime(…, 'now')
+ *   clock, in ms      clock_timestamp()       unixepoch('subsec')
  *   a condition read  true / false            1 / 0
  *
  * Nothing here imports SQLite code, so the Worker bundles none.
@@ -109,6 +110,21 @@ export function clock(db: Queryable): SQL<string> {
       return sql<string>`CURRENT_TIMESTAMP`;
     case 'sqlite':
       return sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`;
+  }
+}
+
+/**
+ * The database clock as milliseconds since the epoch, as the statement runs:
+ * Postgres's `clock_timestamp()`, not `CURRENT_TIMESTAMP`, which is the
+ * transaction's start and would date an entry that waited for the log's lock
+ * before one written while it waited. Read it in a statement after the lock.
+ */
+export function clockMillis(db: Queryable): SQL<number> {
+  switch (engineOf(db)) {
+    case 'postgres':
+      return sql`(extract(epoch from clock_timestamp()) * 1000)::bigint`.mapWith(Number);
+    case 'sqlite':
+      return sql`CAST(unixepoch('subsec') * 1000 AS INTEGER)`.mapWith(Number);
   }
 }
 

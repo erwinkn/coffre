@@ -14,6 +14,7 @@ import {
   writeAuditHeartbeat,
 } from '../src/heartbeat.ts';
 import { openTestDatabase, resetDatabase, testVault } from './api-fixture.ts';
+import { withLogUnlocked } from './db/engine.ts';
 
 const db = await openTestDatabase();
 const vault = testVault(['root@example.com']);
@@ -34,7 +35,7 @@ test('the scheduled heartbeat updates the database-owned signal', async () => {
 
   const logged = await db.owner.select().from(auditLog).orderBy(asc(auditLog.seq));
   assert.deepEqual(logged.map((row) => row.action), ['audit.heartbeat', 'audit.checkpoint']);
-  assert.ok(logged.every((row) => row.actorId === 'coffre-scheduler'));
+  assert.ok(logged.every((row) => row.actor === 'system:coffre-scheduler'));
   const [beat] = await db.owner.select().from(auditHeartbeat);
   assert.equal(beat.lastSeq, 1n);
   assert.ok(Date.now() - beat.lastBeatAt.getTime() < 60_000);
@@ -59,7 +60,7 @@ test('each beat checkpoints a head that extends the last one, and never a rewrit
   assert.equal((await vault.latestCheckpoint()).checkpoint?.seq, 2);
 
   // Someone with the database rewrites that row: the vault will not sign past it.
-  await db.owner.update(auditLog).set({ hash: Buffer.alloc(32, 9) }).where(eq(auditLog.seq, 2n));
+  await withLogUnlocked(db.owner, (owner) => owner.update(auditLog).set({ hash: Buffer.alloc(32, 9) }).where(eq(auditLog.seq, 2n)));
   let warned: unknown = null;
   const written = await writeAuditHeartbeat(db.runtime, chainKey, vault, {
     warn: (value: unknown) => {
@@ -91,7 +92,7 @@ test('a vault emptied behind the checkpoint the app recorded is not signed over'
 test('a refused checkpoint leaves readiness stale', async () => {
   const chainKey = Buffer.alloc(32, 1);
   await writeAuditHeartbeat(db.runtime, chainKey, vault, quiet);
-  await db.owner.update(auditLog).set({ hash: Buffer.alloc(32, 9) }).where(eq(auditLog.seq, 0n));
+  await withLogUnlocked(db.owner, (owner) => owner.update(auditLog).set({ hash: Buffer.alloc(32, 9) }).where(eq(auditLog.seq, 0n)));
   await beatAgo(HEARTBEAT_STALE_AFTER_SECONDS + 60);
   const [before] = await db.owner.select().from(auditHeartbeat);
   assert.equal((await auditReadiness(db.runtime)).ok, false);

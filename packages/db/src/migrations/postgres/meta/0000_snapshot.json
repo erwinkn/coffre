@@ -1,5 +1,5 @@
 {
-  "id": "92a33741-5feb-4d25-8150-eec4758e657a",
+  "id": "16c4dd3c-dcb6-43e0-a600-ef7a6320a7f8",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -27,13 +27,6 @@
           "type": "bytea",
           "primaryKey": false,
           "notNull": true
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
         }
       },
       "indexes": {},
@@ -45,6 +38,10 @@
         "audit_chain_head_only_row_check": {
           "name": "audit_chain_head_only_row_check",
           "value": "\"audit_chain_head\".\"only_row\""
+        },
+        "audit_chain_head_next_seq_check": {
+          "name": "audit_chain_head_next_seq_check",
+          "value": "\"audit_chain_head\".\"next_seq\" >= 0"
         },
         "audit_chain_head_head_hash_check": {
           "name": "audit_chain_head_head_hash_check",
@@ -102,28 +99,26 @@
           "primaryKey": true,
           "notNull": true
         },
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "occurred_at": {
-          "name": "occurred_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "actor_type": {
-          "name": "actor_type",
+        "author": {
+          "name": "author",
           "type": "text",
           "primaryKey": false,
           "notNull": true
         },
-        "actor_id": {
-          "name": "actor_id",
+        "key_id": {
+          "name": "key_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "occurred_at": {
+          "name": "occurred_at",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "actor": {
+          "name": "actor",
           "type": "text",
           "primaryKey": false,
           "notNull": true
@@ -139,6 +134,18 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
+        },
+        "code": {
+          "name": "code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "subject_principal": {
+          "name": "subject_principal",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         },
         "project_id": {
           "name": "project_id",
@@ -158,8 +165,14 @@
           "primaryKey": false,
           "notNull": false
         },
-        "bundle_id": {
-          "name": "bundle_id",
+        "secret_version_id": {
+          "name": "secret_version_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "operation_id": {
+          "name": "operation_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": false
@@ -176,6 +189,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "related_seq": {
+          "name": "related_seq",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
         "metadata": {
           "name": "metadata",
           "type": "text",
@@ -189,6 +208,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "mac": {
+          "name": "mac",
+          "type": "bytea",
+          "primaryKey": false,
+          "notNull": true
+        },
         "hash": {
           "name": "hash",
           "type": "bytea",
@@ -197,61 +222,19 @@
         }
       },
       "indexes": {
-        "audit_log_occurred_idx": {
-          "name": "audit_log_occurred_idx",
+        "audit_log_project_idx": {
+          "name": "audit_log_project_idx",
           "columns": [
             {
-              "expression": "occurred_at",
-              "isExpression": false,
-              "asc": false,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "audit_log_actor_idx": {
-          "name": "audit_log_actor_idx",
-          "columns": [
-            {
-              "expression": "actor_type",
+              "expression": "project_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
             },
             {
-              "expression": "actor_id",
+              "expression": "seq",
               "isExpression": false,
               "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "occurred_at",
-              "isExpression": false,
-              "asc": false,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "audit_log_secret_idx": {
-          "name": "audit_log_secret_idx",
-          "columns": [
-            {
-              "expression": "secret_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "occurred_at",
-              "isExpression": false,
-              "asc": false,
               "nulls": "last"
             }
           ],
@@ -270,9 +253,9 @@
               "nulls": "last"
             },
             {
-              "expression": "occurred_at",
+              "expression": "seq",
               "isExpression": false,
-              "asc": false,
+              "asc": true,
               "nulls": "last"
             }
           ],
@@ -281,11 +264,86 @@
           "method": "btree",
           "with": {}
         },
-        "audit_log_bundle_idx": {
-          "name": "audit_log_bundle_idx",
+        "audit_log_secret_idx": {
+          "name": "audit_log_secret_idx",
           "columns": [
             {
-              "expression": "bundle_id",
+              "expression": "secret_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "seq",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "audit_log_actor_idx": {
+          "name": "audit_log_actor_idx",
+          "columns": [
+            {
+              "expression": "actor",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "seq",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "audit_log_operation_idx": {
+          "name": "audit_log_operation_idx",
+          "columns": [
+            {
+              "expression": "operation_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "seq",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "audit_log_action_idx": {
+          "name": "audit_log_action_idx",
+          "columns": [
+            {
+              "expression": "author",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "action",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "seq",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -336,23 +394,45 @@
           ],
           "onDelete": "restrict",
           "onUpdate": "no action"
+        },
+        "audit_log_secret_version_id_fkey": {
+          "name": "audit_log_secret_version_id_fkey",
+          "tableFrom": "audit_log",
+          "tableTo": "secret_versions",
+          "columnsFrom": [
+            "secret_version_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "audit_log_related_seq_fkey": {
+          "name": "audit_log_related_seq_fkey",
+          "tableFrom": "audit_log",
+          "tableTo": "audit_log",
+          "columnsFrom": [
+            "related_seq"
+          ],
+          "columnsTo": [
+            "seq"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {
-        "audit_log_id_key": {
-          "name": "audit_log_id_key",
-          "nullsNotDistinct": false,
-          "columns": [
-            "id"
-          ]
-        }
-      },
+      "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {
-        "audit_log_actor_type_check": {
-          "name": "audit_log_actor_type_check",
-          "value": "\"audit_log\".\"actor_type\" IN ('user', 'service', 'system')"
+        "audit_log_author_check": {
+          "name": "audit_log_author_check",
+          "value": "\"audit_log\".\"author\" IN ('app', 'vault')"
+        },
+        "audit_log_actor_check": {
+          "name": "audit_log_actor_check",
+          "value": "\"audit_log\".\"actor\" ~ '^(user|token|sync|system):.+$'"
         },
         "audit_log_decision_check": {
           "name": "audit_log_decision_check",
@@ -365,6 +445,10 @@
         "audit_log_prev_hash_check": {
           "name": "audit_log_prev_hash_check",
           "value": "octet_length(\"audit_log\".\"prev_hash\") = 32"
+        },
+        "audit_log_mac_check": {
+          "name": "audit_log_mac_check",
+          "value": "octet_length(\"audit_log\".\"mac\") = 32"
         },
         "audit_log_hash_check": {
           "name": "audit_log_hash_check",

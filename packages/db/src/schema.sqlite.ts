@@ -25,9 +25,7 @@ import { ACTIVE_SUBJECT, relationsOf } from './relations.ts';
  * - Ids and strings are `text`, with no default for ids: the application
  *   makes every id.
  * - Bytes are `blob`.
- * - Times are integer milliseconds since the epoch, except
- *   audit_log.occurred_at, which is the canonical text of canonicalTimestamp
- *   and so sorts in time order.
+ * - Times are integer milliseconds since the epoch.
  * - Patterns are checked with GLOB, which is case-sensitive and needs no
  *   extension, rather than a regular expression.
  */
@@ -184,28 +182,45 @@ export const auditLog = sqliteTable(
   'audit_log',
   {
     seq: int64('seq').primaryKey(),
-    id: text().notNull(),
-    occurredAt: text('occurred_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
-    actorType: text('actor_type').notNull(),
-    actorId: text('actor_id').notNull(),
+    // Which component wrote the entry, under which of its keys; see
+    // @coffre/core/audit for what its MAC and hash cover.
+    author: text().notNull(),
+    keyId: text('key_id').notNull(),
+    // Milliseconds since the epoch, from the database's clock, read after the
+    // append took the head's lock.
+    occurredAt: integer('occurred_at', { mode: 'number' }).notNull(),
+    // Who acted: `user:<email>`, `token:<id>`, `sync:<id>` or `system:<name>`.
+    actor: text().notNull(),
     action: text().notNull(),
     decision: text().notNull(),
+    code: text(),
+    // The member an access change is about.
+    subjectPrincipal: text('subject_principal'),
     projectId: text('project_id'),
     environmentId: text('environment_id'),
     secretId: text('secret_id'),
-    bundleId: text('bundle_id'),
+    secretVersionId: text('secret_version_id'),
+    // One id for everything one action did: a reveal's keys, a write's versions.
+    operationId: text('operation_id'),
     requestId: text('request_id'),
     sourceIp: text('source_ip'),
+    // An earlier entry this one follows from, such as the wrap behind a write.
+    relatedSeq: int64('related_seq'),
     metadata: text().notNull().default('{}'),
     prevHash: bytes('prev_hash').notNull(),
+    mac: bytes('mac').notNull(),
     hash: bytes('hash').notNull(),
   },
   (table) => [
-    unique('audit_log_id_key').on(table.id),
-    check('audit_log_actor_type_check', sql`${table.actorType} IN ('user', 'service', 'system')`),
+    check('audit_log_author_check', sql`${table.author} IN ('app', 'vault')`),
+    check(
+      'audit_log_actor_check',
+      sql`${table.actor} GLOB 'user:?*' OR ${table.actor} GLOB 'token:?*' OR ${table.actor} GLOB 'sync:?*' OR ${table.actor} GLOB 'system:?*'`,
+    ),
     check('audit_log_decision_check', sql`${table.decision} IN ('allow', 'deny')`),
     check('audit_log_metadata_check', sql`json_valid(${table.metadata})`),
     check('audit_log_prev_hash_check', sql`octet_length(${table.prevHash}) = 32`),
+    check('audit_log_mac_check', sql`octet_length(${table.mac}) = 32`),
     check('audit_log_hash_check', sql`octet_length(${table.hash}) = 32`),
     foreignKey({
       name: 'audit_log_project_id_fkey',
@@ -222,11 +237,23 @@ export const auditLog = sqliteTable(
       columns: [table.secretId],
       foreignColumns: [secrets.id],
     }).onDelete('restrict'),
-    index('audit_log_occurred_idx').on(table.occurredAt),
-    index('audit_log_actor_idx').on(table.actorType, table.actorId, table.occurredAt),
-    index('audit_log_secret_idx').on(table.secretId, table.occurredAt),
-    index('audit_log_environment_idx').on(table.environmentId, table.occurredAt),
-    index('audit_log_bundle_idx').on(table.bundleId),
+    foreignKey({
+      name: 'audit_log_secret_version_id_fkey',
+      columns: [table.secretVersionId],
+      foreignColumns: [secretVersions.id],
+    }).onDelete('restrict'),
+    foreignKey({
+      name: 'audit_log_related_seq_fkey',
+      columns: [table.relatedSeq],
+      foreignColumns: [table.seq],
+    }).onDelete('restrict'),
+    // Pages read backwards by seq, within a place or an actor.
+    index('audit_log_project_idx').on(table.projectId, table.seq),
+    index('audit_log_environment_idx').on(table.environmentId, table.seq),
+    index('audit_log_secret_idx').on(table.secretId, table.seq),
+    index('audit_log_actor_idx').on(table.actor, table.seq),
+    index('audit_log_operation_idx').on(table.operationId, table.seq),
+    index('audit_log_action_idx').on(table.author, table.action, table.seq),
   ],
 );
 
@@ -236,10 +263,10 @@ export const auditChainHead = sqliteTable(
     onlyRow: flag('only_row').primaryKey().default(true),
     nextSeq: int64('next_seq').notNull().default(sql`0`),
     headHash: bytes('head_hash').notNull(),
-    updatedAt: time('updated_at').notNull().default(now),
   },
   (table) => [
     check('audit_chain_head_only_row_check', sql`${table.onlyRow}`),
+    check('audit_chain_head_next_seq_check', sql`${table.nextSeq} >= 0`),
     check('audit_chain_head_head_hash_check', sql`octet_length(${table.headHash}) = 32`),
   ],
 );

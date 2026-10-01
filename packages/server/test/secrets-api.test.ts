@@ -11,8 +11,9 @@ import {
   secrets,
   secretVersions,
 } from './db/tables.ts';
-import { postgresOnly } from './db/engine.ts';
+import { postgresOnly, withLogUnlocked } from './db/engine.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { actorParts } from '../src/db/audit.ts';
 
 const ROOT = 'admin@acme.example';
 const READER = 'reader@acme.example';
@@ -68,16 +69,16 @@ async function auditRows(): Promise<
 > {
   const rows = await db.owner
     .select({
-      actorId: auditLog.actorId,
+      actor: auditLog.actor,
       action: auditLog.action,
       decision: auditLog.decision,
-      bundleId: auditLog.bundleId,
+      bundleId: auditLog.operationId,
       metadata: auditLog.metadata,
     })
     .from(auditLog)
     .where(gte(auditLog.seq, firstSeq))
     .orderBy(asc(auditLog.seq));
-  return rows.map((row) => ({ ...row, metadata: JSON.parse(row.metadata) }));
+  return rows.map(({ actor, ...row }) => ({ actorId: actorParts(actor).actorId, ...row, metadata: JSON.parse(row.metadata) }));
 }
 
 async function versionCount(): Promise<number> {
@@ -319,7 +320,7 @@ test('truncating the tail is detected even when surviving rows are consistent', 
   await root.secrets.set('market/dev', { C: 'v' });
   assert.equal((await root.audit.verify()).ok, true);
   const kept = (await nextSeq()) - 2n;
-  await db.owner.delete(auditLog).where(gte(auditLog.seq, kept));
+  await withLogUnlocked(db.owner, (owner) => owner.delete(auditLog).where(gte(auditLog.seq, kept)));
   const result = await root.audit.verify();
   assert.equal(result.ok, false);
   if (!result.ok) {

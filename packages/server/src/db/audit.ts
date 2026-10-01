@@ -1,8 +1,6 @@
-import { chainHash, type ChainedAuditRow } from '@coffre/core/audit';
+import { deriveLogKey, type LogKey } from '@coffre/core/audit';
 import type { Transaction } from '@coffre/db';
-import { auditChainHead, auditLog } from '@coffre/db/schema';
-
-import { auditHead, insert, update } from './queries.ts';
+import { appendEntries, type Appended } from '@coffre/db/log';
 
 export type AuditEntry = {
   actorType: 'user' | 'service' | 'system';
@@ -19,7 +17,7 @@ export type AuditEntry = {
 };
 
 /**
- * Append entries to the audit log, inside the caller's transaction.
+ * Append the app's entries to the audit log, inside the caller's transaction.
  *
  * This is deliberately NOT a queue, NOT a background write, and NOT
  * best-effort. Infisical's audit queue returned early and dropped every entry
@@ -27,63 +25,60 @@ export type AuditEntry = {
  * throws, the caller's transaction rolls back and the read that would have
  * been unlogged does not happen either.
  *
- * Appends are serialised by locking the single audit_chain_head row. A hash
- * chain is meaningless under concurrent unordered appends, and at
- * secrets-manager volumes the resulting throughput ceiling does not matter.
+ * The append itself, which locks the log's head, dates, MACs and chains the
+ * entries, is @coffre/db's: the vault appends to the same log the same way,
+ * under its own key.
  */
-export async function appendAudit(
-  tx: Transaction,
-  chainKey: Buffer,
-  entries: readonly AuditEntry[],
-): Promise<{ seqStart: bigint; nextSeq: bigint; headHash: Buffer; occurredAt: string }> {
-  if (entries.length === 0) {
-    throw new Error('appendAudit called with no entries');
-  }
-
-  // Serialise. Every other appender blocks here until we commit or roll back.
-  const head = await auditHead(tx, { lock: true });
-  if (head === null) {
-    throw new Error('audit_chain_head is missing; refusing to write an unchained audit row');
-  }
-
-  // One timestamp for the whole append.
-  const occurredAt = head.now;
-
-  let seq = head.nextSeq;
-  const seqStart = seq;
-  let prevHash = head.headHash;
-  const rows: (typeof auditLog.$inferInsert)[] = [];
-
-  for (const entry of entries) {
-    const row: ChainedAuditRow = {
-      seq,
-      occurredAt,
-      actorType: entry.actorType,
-      actorId: entry.actorId,
+export async function appendAudit(tx: Transaction, chainKey: Buffer, entries: readonly AuditEntry[]): Promise<Appended> {
+  return appendEntries(
+    tx,
+    appLogKey(chainKey),
+    entries.map((entry) => ({
+      actor: actorOf(entry.actorType, entry.actorId),
       action: entry.action,
       decision: entry.decision,
-      projectId: entry.projectId ?? null,
-      environmentId: entry.environmentId ?? null,
-      secretId: entry.secretId ?? null,
-      bundleId: entry.bundleId ?? null,
-      requestId: entry.requestId ?? null,
-      sourceIp: entry.sourceIp ?? null,
+      projectId: entry.projectId,
+      environmentId: entry.environmentId,
+      secretId: entry.secretId,
+      operationId: entry.bundleId,
+      requestId: entry.requestId,
+      sourceIp: entry.sourceIp,
       metadata: JSON.stringify(entry.metadata ?? {}),
-    };
+    })),
+  );
+}
 
-    const hash = chainHash(chainKey, prevHash, row);
-    rows.push({ ...row, id: crypto.randomUUID(), prevHash, hash });
+const logKeys = new WeakMap<Buffer, LogKey>();
 
-    prevHash = hash;
-    seq += 1n;
-  }
+/**
+ * The key the app's entries are MACed with, derived from `auditChainKey`.
+ * One object per configured key, so the append's memory of the heads it
+ * found lasts as long as the configuration does.
+ */
+export function appLogKey(chainKey: Buffer): LogKey {
+  let key = logKeys.get(chainKey);
+  if (key === undefined) logKeys.set(chainKey, (key = deriveLogKey('app', chainKey)));
+  return key;
+}
 
-  await insert(tx, auditLog, rows);
-  await update(tx, auditChainHead, { onlyRow: true }, {
-    nextSeq: seq,
-    headHash: prevHash,
-    updatedAt: new Date(occurredAt),
-  });
+const ACTOR_PREFIX = { user: 'user', service: 'token', system: 'system' } as const;
 
-  return { seqStart, nextSeq: seq, headHash: prevHash, occurredAt };
+/**
+ * An entry's actor as the log stores it: `user:<email>`, `token:<id>`,
+ * `sync:<id>` or `system:<name>`. A sync acts as the system with its own
+ * principal as its id, which is already the canonical form.
+ */
+export function actorOf(type: AuditEntry['actorType'], id: string): string {
+  if (type === 'system' && id.startsWith('sync:')) return id;
+  return `${ACTOR_PREFIX[type]}:${id}`;
+}
+
+/** An actor as the API shows it, a type and an id: `actorOf` undone. */
+export function actorParts(actor: string): { actorType: AuditEntry['actorType']; actorId: string } {
+  const colon = actor.indexOf(':');
+  const [prefix, rest] = [actor.slice(0, colon), actor.slice(colon + 1)];
+  if (prefix === 'user') return { actorType: 'user', actorId: rest };
+  if (prefix === 'token') return { actorType: 'service', actorId: rest };
+  if (prefix === 'sync') return { actorType: 'system', actorId: actor };
+  return { actorType: 'system', actorId: rest };
 }
