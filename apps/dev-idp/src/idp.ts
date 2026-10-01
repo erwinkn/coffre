@@ -1,18 +1,64 @@
-import { createServer, type Server } from 'node:http';
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { exportJWK, generateKeyPair, SignJWT, type JWK, type CryptoKey } from 'jose';
 
+import { AuthorizationServer } from './authorize.ts';
+import { FakeGitHub } from './github.ts';
+import type { Route } from './http.ts';
+import { OidcProvider } from './oidc.ts';
+import {
+  defaultGitHubAccount,
+  defaultSubject,
+  displayName,
+  gitHubEmails,
+  normalizeEmail,
+  PERSONAS,
+  type GitHubAccount,
+  type GitHubAccountPatch,
+} from './people.ts';
+
+export interface DevIdpClient {
+  clientId: string;
+  clientSecret: string;
+  /** Matched exactly. */
+  redirectUris: readonly string[];
+}
+
+export interface RegisteredClient extends DevIdpClient {
+  /** Accept any http://127.0.0.1 or http://localhost redirect URI, on any port. */
+  anyLoopbackRedirect: boolean;
+}
+
+export interface DevIdpOptions {
+  /** Registered alongside the built-in `coffre-local` client. */
+  clients?: readonly DevIdpClient[];
+  /** Skip the persona page when the request carries a login hint. For tests. */
+  autoApprove?: boolean;
+}
+
+/** Built in, so local dev needs no registration step. */
+export const DEFAULT_CLIENT = Object.freeze({
+  clientId: 'coffre-local',
+  clientSecret: 'coffre-local-secret',
+});
+
 /**
- * A local stand-in for Cloudflare Access.
+ * A local stand-in for the identity providers coffre trusts.
  *
- * It generates a keypair, serves a JWKS at the same `cdn-cgi` path Access uses,
- * and mints Access-shaped tokens. The point is that the verifier under test
- * runs its real remote-JWKS code path against a real HTTP endpoint -- local
- * mode is a different implementation of the same interface, never a branch
- * that skips verification.
+ * For Cloudflare Access, it generates a keypair, serves a JWKS at the same
+ * `cdn-cgi` path Access uses, and mints Access-shaped tokens. It is also an
+ * OpenID Connect provider (under `/oauth`) signing with the same key, and an
+ * imitation of GitHub's OAuth apps and REST API (under `/github`). The
+ * point is that the code under test runs its real remote code paths against
+ * real HTTP endpoints -- local mode is a different implementation of the same
+ * interface, never a branch that skips verification.
  */
 export class DevIdp {
   #server: Server | null = null;
   #port = 0;
+  #clients = new Map<string, RegisteredClient>();
+  #subjects = new Map<string, string>();
+  #gitHubAccounts = new Map<string, GitHubAccount>();
+  #routes: Route[];
 
   privateKey!: CryptoKey;
   publicJwk!: JWK;
@@ -23,6 +69,22 @@ export class DevIdp {
 
   /** Fixed port for the standalone dev server; 0 (ephemeral) in tests. */
   listenPort = 0;
+
+  /** See {@link DevIdpOptions.autoApprove}. */
+  autoApprove: boolean;
+
+  constructor(options: DevIdpOptions = {}) {
+    this.autoApprove = options.autoApprove ?? false;
+    this.#clients.set(DEFAULT_CLIENT.clientId, {
+      ...DEFAULT_CLIENT,
+      redirectUris: [],
+      anyLoopbackRedirect: true,
+    });
+    for (const client of options.clients ?? []) this.registerClient(client);
+
+    const authz = new AuthorizationServer(this);
+    this.#routes = [...new OidcProvider(this, authz).routes(), ...new FakeGitHub(this, authz).routes()];
+  }
 
   get origin(): string {
     if (this.#port === 0) throw new Error('DevIdp is not started');
@@ -64,7 +126,7 @@ export class DevIdp {
 
         const minted = commonName
           ? this.mintServiceToken({ audience, commonName, expiresIn })
-          : this.mintUserToken({ audience, email: email ?? 'erwin@equisafe.io', expiresIn });
+          : this.mintUserToken({ audience, email: email ?? 'admin@acme.example', expiresIn });
 
         minted.then((token) => {
           res.writeHead(200, { 'content-type': 'application/json' });
@@ -77,12 +139,7 @@ export class DevIdp {
         res.end(JSON.stringify({ keys: [this.publicJwk] }));
         return;
       }
-      if (req.url === '/.well-known/openid-configuration') {
-        res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ issuer: this.issuer, jwks_uri: this.jwksUrl }));
-        return;
-      }
-      res.writeHead(404).end();
+      this.#dispatch(req, res);
     });
 
     await new Promise<void>((resolve) => {
@@ -102,6 +159,86 @@ export class DevIdp {
     this.#port = 0;
   }
 
+  registerClient(client: DevIdpClient): void {
+    this.#clients.set(client.clientId, {
+      clientId: client.clientId,
+      clientSecret: client.clientSecret,
+      redirectUris: [...client.redirectUris],
+      anyLoopbackRedirect: false,
+    });
+  }
+
+  client(clientId: string): RegisteredClient | undefined {
+    return this.#clients.get(clientId);
+  }
+
+  /** The OIDC `sub` for an email: derived, unless {@link setSubject} overrode it. */
+  subjectFor(email: string): string {
+    const normalized = normalizeEmail(email);
+    return this.#subjects.get(normalized) ?? defaultSubject(normalized);
+  }
+
+  /**
+   * From now on, whoever signs in with this email gets this subject. Simulates
+   * an address being recycled to a new person: same email, different account.
+   */
+  setSubject(email: string, subject: string): void {
+    this.#subjects.set(normalizeEmail(email), subject);
+  }
+
+  /** The fake GitHub account that signs in with this email. */
+  gitHubUserFor(email: string): GitHubAccount {
+    const normalized = normalizeEmail(email);
+    return this.#gitHubAccounts.get(normalized) ?? defaultGitHubAccount(normalized);
+  }
+
+  /**
+   * From now on, whoever picks this email on the fake GitHub gets this account,
+   * patched over the current one. A new `id` simulates a recycled address;
+   * `emails` can add several, unverified ones included; `orgs` sets memberships.
+   */
+  setGitHubUser(email: string, patch: GitHubAccountPatch): void {
+    const current = this.gitHubUserFor(email);
+    this.#gitHubAccounts.set(normalizeEmail(email), {
+      id: patch.id ?? current.id,
+      login: patch.login ?? current.login,
+      name: patch.name ?? current.name,
+      emails: patch.emails ? gitHubEmails(patch.emails) : current.emails,
+      orgs: patch.orgs ? [...patch.orgs] : current.orgs,
+    });
+  }
+
+  /** The email that signs in as a GitHub login, for GitHub's `login` hint. */
+  emailForGitHubLogin(login: string): string | undefined {
+    const wanted = login.toLowerCase();
+    for (const [email, account] of this.#gitHubAccounts) {
+      if (account.login.toLowerCase() === wanted) return email;
+    }
+    return PERSONAS.find((p) => this.gitHubUserFor(p.email).login.toLowerCase() === wanted)?.email;
+  }
+
+  /** An OIDC ID token, as the token endpoint issues it. */
+  async mintIdToken(opts: {
+    clientId: string;
+    email: string;
+    nonce?: string;
+    authTime?: number;
+    expiresIn?: number;
+  }): Promise<string> {
+    const email = normalizeEmail(opts.email);
+    return this.#sign(
+      {
+        sub: this.subjectFor(email),
+        auth_time: opts.authTime ?? Math.floor(Date.now() / 1000),
+        ...(opts.nonce !== undefined && { nonce: opts.nonce }),
+        email,
+        email_verified: true,
+        name: displayName(email),
+      },
+      { audience: opts.clientId, expiresIn: opts.expiresIn ?? 600 },
+    );
+  }
+
   /** Mint a token shaped like an Access identity (human) token. */
   async mintUserToken(opts: {
     audience: string;
@@ -114,7 +251,7 @@ export class DevIdp {
   }): Promise<string> {
     return this.#sign(
       {
-        email: opts.email ?? 'erwin@equisafe.io',
+        email: opts.email ?? 'admin@acme.example',
         sub: opts.sub ?? '0f9a1c2e-1111-2222-3333-444455556666',
         identity_nonce: 'devnonce',
       },
@@ -144,6 +281,27 @@ export class DevIdp {
       },
       opts,
     );
+  }
+
+  #dispatch(req: IncomingMessage, res: ServerResponse): void {
+    const url = new URL(req.url ?? '/', this.origin);
+    const matches = this.#routes.filter((route) =>
+      typeof route.path === 'string' ? route.path === url.pathname : route.path.test(url.pathname),
+    );
+    if (matches.length === 0) {
+      res.writeHead(404).end();
+      return;
+    }
+    const route = matches.find((r) => r.method === req.method);
+    if (!route) {
+      res.writeHead(405, { allow: matches.map((r) => r.method).join(', ') }).end();
+      return;
+    }
+    route.handler(req, res, url).catch((error: unknown) => {
+      console.error(error);
+      if (!res.headersSent) res.writeHead(500);
+      res.end();
+    });
   }
 
   async #sign(

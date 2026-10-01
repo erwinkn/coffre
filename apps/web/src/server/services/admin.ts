@@ -1,4 +1,5 @@
 import {
+  toIsoTimestamp,
   toNullableIsoTimestamp,
   type Database,
   type DatabaseClient,
@@ -8,6 +9,7 @@ import { appendAudit, type AuditEntry } from '../../../../../packages/db/src/aud
 import { AccessDenied, AuditedFailure, NotFound, type RequestContext } from './secrets.ts';
 import {
   has,
+  isInstanceOwner,
   isRootAdmin as isConfiguredRootAdmin,
   permissionsForProject,
   PROJECT_ONLY_PERMISSIONS,
@@ -77,6 +79,60 @@ export type InstancePrincipalRow = {
   principalId: string;
   instanceRole: 'user' | 'owner' | 'root-admin';
   isRootAdmin: boolean;
+};
+
+/** A value someone saw that is still the current one: what to rotate. */
+export type ExposedSecret = {
+  project: string;
+  environment: string;
+  key: string;
+  version: number;
+  /** `wrote` when they set this value themselves. */
+  how: 'read' | 'wrote';
+  /** The last time they read or wrote it. */
+  at: string;
+};
+
+export type IssuedToken = {
+  id: string;
+  service: string;
+  label: string | null;
+  hint: string;
+  expiresAt: string;
+  lastUsedAt: string | null;
+};
+
+/**
+ * What one person or service can still reach, and what they have seen.
+ *
+ * Built from the audit log, which records the version of every value read or
+ * written. A value they saw that is still current is one they could still use
+ * somewhere, so it is listed to rotate; writing a new version takes it off.
+ */
+export type OffboardingReport = {
+  principalType: 'user' | 'service';
+  principalId: string;
+  status: 'active' | 'removed';
+  instanceRole: InstancePrincipalRow['instanceRole'];
+  isRootAdmin: boolean;
+  removedAt: string | null;
+  removedBy: string | null;
+  /** What still lets them in. All zero once removed. */
+  live: { grants: number; sessions: number; tokens: number; identities: number };
+  /** Current values they read or wrote, by project, environment and key. */
+  exposed: ExposedSecret[];
+  /** Secrets they saw that have had a new version since. */
+  rotated: number;
+  /** Service tokens they issued that still work. */
+  issuedTokens: IssuedToken[];
+};
+
+/** Someone no longer in the directory, and how many of their report's values are left. */
+export type RemovedPrincipal = {
+  principalType: 'user' | 'service';
+  principalId: string;
+  /** The length of their report's `exposed`. */
+  toRotate: number;
 };
 
 /**
@@ -163,18 +219,7 @@ export class AdminService {
   }
 
   async #isInstanceOwner(tx: DatabaseClient, principal: PrincipalRef): Promise<boolean> {
-    if (this.#isRootAdmin(principal)) return true;
-    if (principal.type !== 'user') return false;
-
-    const result = await tx.query(
-      `SELECT 1 FROM principals
-        WHERE principal_type = 'user'
-          AND principal_id = $1
-          AND active
-          AND instance_role = 'owner'`,
-      [principal.id],
-    );
-    return result.rowCount !== 0;
+    return isInstanceOwner(tx, principal, this.#deps.rootAdmins);
   }
 
   async #requireInstanceOwner(
@@ -1321,7 +1366,7 @@ export class AdminService {
     ctx: RequestContext,
     principalType: 'user' | 'service',
     principalId: string,
-  ): Promise<{ revoked: number }> {
+  ): Promise<{ revoked: number; sessions: number; tokens: number; identities: number }> {
     return this.#audited(async (tx) => {
       const base = this.#base(ctx, 'directory.remove');
       await this.#lockPrincipals(tx, [
@@ -1389,18 +1434,43 @@ export class AdminService {
         [principalType, principalId],
       );
 
+      // Deactivating alone already stops every credential (verify() joins on
+      // principals.active), but re-adding the person would bring them all
+      // back. Revoking them and their linked sign-in accounts makes re-adding
+      // a fresh start. Credential issuing takes the same principal lock, so
+      // none slips in meanwhile.
+      const credentials = await tx.query<{ kind: 'browser' | 'cli' | 'service' }>(
+        `UPDATE credentials
+            SET revoked_at = now(), revoked_by = $3
+          WHERE principal_type = $1 AND principal_id = $2
+            AND revoked_at IS NULL AND expires_at > now()
+          RETURNING kind`,
+        [principalType, principalId, ctx.principal.id],
+      );
+      const identities = await tx.query(
+        `UPDATE identities
+            SET revoked_at = now(), revoked_by = $3
+          WHERE principal_type = $1 AND principal_id = $2 AND revoked_at IS NULL`,
+        [principalType, principalId, ctx.principal.id],
+      );
+
       const revoked = affectedProjects.rows.reduce(
         (total, project) => total + project.revoked,
         0,
       );
+      const signedOut = {
+        sessions: credentials.rows.filter((row) => row.kind !== 'service').length,
+        tokens: credentials.rows.filter((row) => row.kind === 'service').length,
+        identities: identities.rowCount ?? 0,
+      };
 
       return {
-        result: { revoked },
+        result: { revoked, ...signedOut },
         entries: [
           {
             ...base,
             decision: 'allow',
-            metadata: { principalType, principalId, revoked },
+            metadata: { principalType, principalId, revoked, ...signedOut },
           },
           ...affectedProjects.rows.map((project) => ({
             ...base,
@@ -1460,6 +1530,203 @@ export class AdminService {
           a.principalType.localeCompare(b.principalType) ||
           a.principalId.localeCompare(b.principalId),
       );
+    } finally {
+      await client.release();
+    }
+  }
+
+  /**
+   * Who someone is to this instance and what to rotate if they leave. Owners
+   * only, like the directory. Works for removed principals too: that is when
+   * it matters most.
+   */
+  async offboardingReport(
+    ctx: RequestContext,
+    principalType: 'user' | 'service',
+    principalId: string,
+  ): Promise<OffboardingReport> {
+    const client = await this.#deps.pool.connect();
+    try {
+      if (!(await this.#isInstanceOwner(client, ctx.principal))) {
+        throw new AccessDenied('only owners may see what someone has access to');
+      }
+      const principal = { type: principalType, id: principalId };
+      const isRootAdmin = this.#isRootAdmin(principal);
+
+      const row = await client.query<{ instance_role: 'user' | 'owner'; active: boolean }>(
+        `SELECT instance_role, active FROM principals
+          WHERE principal_type = $1 AND principal_id = $2`,
+        [principalType, principalId],
+      );
+      const found = row.rows[0];
+      if (found === undefined && !isRootAdmin) throw new NotFound('unknown principal');
+      const active = isRootAdmin || found?.active === true;
+
+      // The newest removal. Scanning back from the end stops at the first
+      // match, and removals are rare, so this reads little.
+      const removal = active
+        ? null
+        : (
+            await client.query<{ occurred_at: Date | string; actor_id: string }>(
+              `SELECT occurred_at, actor_id FROM audit_log
+                WHERE action = 'directory.remove' AND decision = 'allow' AND project_id IS NULL
+                  AND metadata::jsonb ->> 'principalType' = $1
+                  AND metadata::jsonb ->> 'principalId' = $2
+                ORDER BY seq DESC
+                LIMIT 1`,
+              [principalType, principalId],
+            )
+          ).rows[0];
+
+      const live = await client.query<{
+        grants: number;
+        sessions: number;
+        tokens: number;
+        identities: number;
+      }>(
+        `SELECT
+           (SELECT count(*)::int FROM grants
+             WHERE principal_type = $1 AND principal_id = $2
+               AND (expires_at IS NULL OR expires_at > now())) AS grants,
+           (SELECT count(*)::int FROM credentials
+             WHERE principal_type = $1 AND principal_id = $2 AND kind <> 'service'
+               AND revoked_at IS NULL AND expires_at > now()) AS sessions,
+           (SELECT count(*)::int FROM credentials
+             WHERE principal_type = $1 AND principal_id = $2 AND kind = 'service'
+               AND revoked_at IS NULL AND expires_at > now()) AS tokens,
+           (SELECT count(*)::int FROM identities
+             WHERE principal_type = $1 AND principal_id = $2 AND revoked_at IS NULL) AS identities`,
+        [principalType, principalId],
+      );
+
+      // Every version of every secret they read or wrote, then each live
+      // secret's current version matched against that.
+      const seen = await client.query<{
+        project: string;
+        environment: string;
+        key: string;
+        version: number;
+        wrote: boolean | null;
+        at: Date | string | null;
+      }>(
+        `WITH seen AS (
+           SELECT secret_id,
+                  (metadata::jsonb ->> 'version')::int AS version,
+                  bool_or(action <> 'secret.read') AS wrote,
+                  max(occurred_at) AS at
+             FROM audit_log
+            WHERE actor_type = $1 AND actor_id = $2 AND decision = 'allow'
+              AND action IN ('secret.read', 'secret.write', 'secret.import')
+              AND secret_id IS NOT NULL
+            GROUP BY 1, 2
+         )
+         SELECT p.slug AS project, e.slug AS environment, s.key, v.version,
+                current.wrote, current.at
+           FROM (SELECT DISTINCT secret_id FROM seen) touched
+           JOIN secrets s ON s.id = touched.secret_id AND s.archived_at IS NULL
+           JOIN environments e ON e.id = s.environment_id AND e.archived_at IS NULL
+           JOIN projects p ON p.id = s.project_id AND p.archived_at IS NULL
+           JOIN secret_versions v ON v.id = s.current_version_id
+           LEFT JOIN seen current ON current.secret_id = s.id AND current.version = v.version
+          ORDER BY p.slug, e.slug, s.key`,
+        [principalType, principalId],
+      );
+      const exposed = seen.rows.flatMap((secret): ExposedSecret[] =>
+        secret.at === null
+          ? []
+          : [
+              {
+                project: secret.project,
+                environment: secret.environment,
+                key: secret.key,
+                version: Number(secret.version),
+                how: secret.wrote ? 'wrote' : 'read',
+                at: toIsoTimestamp(secret.at),
+              },
+            ],
+      );
+
+      const issued = await client.query<{
+        id: string;
+        principal_id: string;
+        label: string | null;
+        token_hint: string;
+        expires_at: Date | string;
+        last_used_at: Date | string | null;
+      }>(
+        `SELECT c.id, c.principal_id, c.label, c.token_hint, c.expires_at, c.last_used_at
+           FROM credentials c
+           JOIN principals p
+             ON p.principal_type = c.principal_type AND p.principal_id = c.principal_id AND p.active
+          WHERE c.kind = 'service' AND c.created_by = $1
+            AND c.revoked_at IS NULL AND c.expires_at > now()
+          ORDER BY c.principal_id, c.created_at`,
+        [principalId],
+      );
+
+      return {
+        principalType,
+        principalId,
+        status: active ? 'active' : 'removed',
+        instanceRole: isRootAdmin ? 'root-admin' : (found?.instance_role ?? 'user'),
+        isRootAdmin,
+        removedAt: removal ? toIsoTimestamp(removal.occurred_at) : null,
+        removedBy: removal?.actor_id ?? null,
+        live: live.rows[0],
+        exposed,
+        rotated: seen.rows.length - exposed.length,
+        issuedTokens: issued.rows.map((token) => ({
+          id: token.id,
+          service: token.principal_id,
+          label: token.label,
+          hint: token.token_hint,
+          expiresAt: toIsoTimestamp(token.expires_at),
+          lastUsedAt: toNullableIsoTimestamp(token.last_used_at),
+        })),
+      };
+    } finally {
+      await client.release();
+    }
+  }
+
+  /**
+   * Everyone removed from the directory, so their reports stay reachable:
+   * removal ends access, not the work of rotating what they saw. Counts the
+   * same values `offboardingReport` lists, one actor-indexed scan each.
+   */
+  async listRemoved(ctx: RequestContext): Promise<RemovedPrincipal[]> {
+    const client = await this.#deps.pool.connect();
+    try {
+      if (!(await this.#isInstanceOwner(client, ctx.principal))) {
+        throw new AccessDenied('only owners may manage users');
+      }
+      const result = await client.query<{
+        principal_type: 'user' | 'service';
+        principal_id: string;
+        to_rotate: number;
+      }>(
+        `SELECT r.principal_type, r.principal_id,
+                (SELECT count(DISTINCT s.id)::int
+                   FROM audit_log a
+                   JOIN secrets s ON s.id = a.secret_id AND s.archived_at IS NULL
+                   JOIN environments e ON e.id = s.environment_id AND e.archived_at IS NULL
+                   JOIN projects p ON p.id = s.project_id AND p.archived_at IS NULL
+                   JOIN secret_versions v ON v.id = s.current_version_id
+                  WHERE a.actor_type = r.principal_type AND a.actor_id = r.principal_id
+                    AND a.decision = 'allow'
+                    AND a.action IN ('secret.read', 'secret.write', 'secret.import')
+                    AND (a.metadata::jsonb ->> 'version')::int = v.version) AS to_rotate
+           FROM principals r
+          WHERE NOT r.active
+          ORDER BY r.principal_type DESC, r.principal_id`,
+      );
+      return result.rows
+        .filter((row) => !this.#isRootAdmin({ type: row.principal_type, id: row.principal_id }))
+        .map((row) => ({
+          principalType: row.principal_type,
+          principalId: row.principal_id,
+          toRotate: row.to_rotate,
+        }));
     } finally {
       await client.release();
     }

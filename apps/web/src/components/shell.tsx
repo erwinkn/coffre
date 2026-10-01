@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
-import { Link, useNavigate, useRouterState } from '@tanstack/react-router';
+import { Link, useLoaderData, useNavigate, useRouterState } from '@tanstack/react-router';
 import { Dialog, DropdownMenu } from 'radix-ui';
 import { toast } from 'sonner';
 import type { ProjectSummary } from '../shared/models';
@@ -22,6 +22,7 @@ import {
   PanelLeft,
   Plus,
   Settings,
+  SignOut,
   UserCog,
   Users,
   X,
@@ -38,13 +39,13 @@ type ShellProps = {
   children: ReactNode;
 };
 
-const REPOSITORY = 'https://github.com/equisafe/coffre';
+const REPOSITORY = 'https://github.com/erwinkn/coffre';
 
 /**
  * The workspace this deployment serves. The server has no such notion yet --
  * one deployment is one workspace -- so the name lives here until it does.
  */
-const WORKSPACE = 'Equisafe';
+const WORKSPACE = 'Acme';
 
 const SIDEBAR_KEY = 'coffre-sidebar';
 
@@ -395,6 +396,20 @@ function WorkspaceMenu({ collapsed }: { collapsed: boolean }) {
   );
 }
 
+/**
+ * Sign out with a real form post, built on the spot: the menu item unmounts
+ * as the menu closes, so it cannot hold the form itself, and the response is
+ * a redirect the browser should follow (to Access's logout, in Cloudflare
+ * mode).
+ */
+function signOut() {
+  const form = document.createElement('form');
+  form.method = 'post';
+  form.action = '/auth/signout';
+  document.body.appendChild(form);
+  form.submit();
+}
+
 function AccountMenu({
   principal,
   instanceRole,
@@ -404,6 +419,7 @@ function AccountMenu({
   instanceRole: InstanceRole;
   collapsed: boolean;
 }) {
+  const { authMode } = useLoaderData({ from: '__root__' });
   return (
     <DropdownMenu.Root>
       <CollapsedTip collapsed={collapsed} label={principal.id}>
@@ -434,10 +450,20 @@ function AccountMenu({
           <ThemeMenuItems />
 
           <DropdownMenu.Separator className="menu-sep" />
-          <p className="menu-note">
-            <span className="dot" aria-hidden />
-            Demo instance. Do not store real secrets here.
-          </p>
+          <DropdownMenu.Item className="menu-item" onSelect={signOut}>
+            <SignOut size={14} />
+            Sign out
+          </DropdownMenu.Item>
+
+          {authMode === 'dev' && (
+            <>
+              <DropdownMenu.Separator className="menu-sep" />
+              <p className="menu-note">
+                <span className="dot" aria-hidden />
+                Demo instance. Do not store real secrets here.
+              </p>
+            </>
+          )}
         </DropdownMenu.Content>
       </DropdownMenu.Portal>
     </DropdownMenu.Root>

@@ -3,7 +3,7 @@ const LOCAL_SEED_CONFIG = Object.freeze({
     apiUrl: 'http://127.0.0.1:3000',
     idpUrl: 'http://127.0.0.1:8081',
     audience: 'coffre-local-dev-aud',
-    rootAdmin: 'erwin@equisafe.io',
+    rootAdmin: 'admin@acme.example',
 });
 
 /**
@@ -15,26 +15,26 @@ const LOCAL_SEED_CONFIG = Object.freeze({
  * not `/unregistered`.
  */
 export const LOCAL_SEED_DIRECTORY = Object.freeze([
-    Object.freeze({ principalType: 'user', principalId: 'lead@equisafe.io' }),
-    Object.freeze({ principalType: 'user', principalId: 'dev@equisafe.io' }),
-    Object.freeze({ principalType: 'user', principalId: 'auditor@equisafe.io' }),
-    Object.freeze({ principalType: 'user', principalId: 'accessmgr@equisafe.io' }),
-    Object.freeze({ principalType: 'user', principalId: 'outsider@equisafe.io' }),
+    Object.freeze({ principalType: 'user', principalId: 'lead@acme.example' }),
+    Object.freeze({ principalType: 'user', principalId: 'dev@acme.example' }),
+    Object.freeze({ principalType: 'user', principalId: 'auditor@acme.example' }),
+    Object.freeze({ principalType: 'user', principalId: 'accessmgr@acme.example' }),
+    Object.freeze({ principalType: 'user', principalId: 'outsider@acme.example' }),
     Object.freeze({ principalType: 'service', principalId: 'ci-deploy.access' }),
 ]);
 
 export const LOCAL_SEED_GRANTS = Object.freeze([
-    Object.freeze({ principalType: 'user', principalId: 'lead@equisafe.io', role: 'owner' }),
+    Object.freeze({ principalType: 'user', principalId: 'lead@acme.example', role: 'owner' }),
     Object.freeze({
         principalType: 'user',
-        principalId: 'dev@equisafe.io',
+        principalId: 'dev@acme.example',
         role: 'developer',
         environmentSlug: 'dev',
     }),
-    Object.freeze({ principalType: 'user', principalId: 'auditor@equisafe.io', role: 'auditor' }),
+    Object.freeze({ principalType: 'user', principalId: 'auditor@acme.example', role: 'auditor' }),
     Object.freeze({
         principalType: 'user',
-        principalId: 'accessmgr@equisafe.io',
+        principalId: 'accessmgr@acme.example',
         role: 'access-manager',
     }),
     Object.freeze({

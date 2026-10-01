@@ -2,6 +2,7 @@ import { createFileRoute } from '@tanstack/react-router';
 import { listDirectoryPrincipals } from '../server-functions/access';
 import { AddPrincipal, DirectoryTable } from '../components/directory';
 import { ClosedDoor, PageHeader } from '../components/page';
+import { RemovedList } from '../components/offboarding';
 import { Users } from '../components/icons';
 
 export const Route = createFileRoute('/users/')({
@@ -26,6 +27,7 @@ function UsersPage() {
     <>
       <PageHeader title="Users" actions={<AddPrincipal principalType="user" />} />
       <DirectoryTable principalType="user" principals={users} />
+      <RemovedList principalType="user" removed={result.removed} />
     </>
   );
 }

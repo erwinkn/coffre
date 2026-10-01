@@ -9,6 +9,11 @@ import { getRuntime, type CoffreRuntime } from './runtime.ts';
 
 export const DEV_TOKEN_COOKIE = 'coffre_dev_token';
 export const PUBLIC_HEALTH_PATHS = new Set(['/livez', '/readyz']);
+/**
+ * API endpoints a caller reaches before it has a credential: the CLI's
+ * device-login start and poll.
+ */
+export const PUBLIC_API_PATHS = new Set(['/api/auth/device', '/api/auth/device/token']);
 
 type AnonymousRequestContext = Omit<RequestContext, 'principal'> & {
   principal: null;
@@ -17,6 +22,8 @@ type AnonymousRequestContext = Omit<RequestContext, 'principal'> & {
 
 type AuthenticatedRequestContext = RequestContext & {
   registered: boolean;
+  /** The coffre credential that authenticated this request, in signin mode. */
+  credentialId: string | null;
 };
 
 export type RequestIdentityContext =
@@ -54,20 +61,47 @@ function cookieValue(request: Request, name: string): string | null {
   return null;
 }
 
+/**
+ * The browser session cookie in signin mode. Over HTTPS it carries the
+ * `__Host-` prefix, which makes the browser refuse it unless it is Secure,
+ * host-only and path-wide: no subdomain can plant or shadow it. Plain HTTP,
+ * which config allows on loopback only, cannot use the prefix.
+ */
+export function sessionCookieName(auth: AuthConfig): string {
+  return auth.mode === 'signin' && auth.signin.publicUrl.startsWith('https:')
+    ? '__Host-coffre_session'
+    : 'coffre_session';
+}
+
+export function readCookie(request: Request, name: string): string | null {
+  return cookieValue(request, name);
+}
+
+export function bearerToken(request: Request): string | null {
+  const match = /^Bearer\s+(\S+)$/i.exec(request.headers.get('authorization') ?? '');
+  return match === null ? null : match[1];
+}
+
 export function accessTokenForRequest(request: Request, auth: AuthConfig): string | null {
   if (auth.mode === 'cloudflare') {
     const token = request.headers.get(ACCESS_JWT_HEADER);
     return token === null || token.length === 0 ? null : token;
   }
+  if (auth.mode === 'signin') return cookieValue(request, sessionCookieName(auth));
   return cookieValue(request, DEV_TOKEN_COOKIE);
 }
 
-/** Direct local CLI calls use the Access-shaped assertion; the UI uses its cookie. */
+/**
+ * The API takes a header, the UI a cookie. In signin mode that header is a
+ * standard bearer token; in dev mode it is the Access-shaped assertion the
+ * dev IdP mints.
+ */
 export function accessTokenForBoundary(
   request: Request,
   auth: AuthConfig,
   pathname: string,
 ): string | null {
+  if (auth.mode === 'signin' && isApiPath(pathname)) return bearerToken(request);
   if (auth.mode === 'dev' && isApiPath(pathname)) {
     const token = request.headers.get(ACCESS_JWT_HEADER);
     return token === null || token.length === 0 ? null : token;
@@ -75,8 +109,13 @@ export function accessTokenForBoundary(
   return accessTokenForRequest(request, auth);
 }
 
-function trustedSourceIp(request: Request, auth: AuthConfig): string | null {
-  if (auth.mode !== 'cloudflare') return null;
+/**
+ * The caller's address, from Cloudflare's own header. The edge overwrites
+ * `cf-connecting-ip` on every request, so a client cannot choose it; in dev
+ * mode nothing sits in front to vouch for it.
+ */
+export function trustedSourceIp(request: Request, auth: AuthConfig): string | null {
+  if (auth.mode === 'dev') return null;
   const value = request.headers.get('cf-connecting-ip');
   if (value === null || value.length > 45) return null;
   if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(value)) {
@@ -127,9 +166,14 @@ export async function authenticateRequest(
 ): Promise<AuthenticatedRequestContext | Response> {
   if (token === null) return unauthenticated(runtime.auth);
 
+  const sourceIp = trustedSourceIp(request, runtime.auth);
   let principal: Principal;
+  let credentialId: string | null = null;
   try {
-    principal = await runtime.verifier.verify(token);
+    const verified = (await runtime.verifier.verify(token, { sourceIp })) as Principal & {
+      credentialId?: string;
+    };
+    ({ credentialId = null, ...principal } = verified);
   } catch {
     return jsonResponse({ error: 'unauthenticated' }, 401);
   }
@@ -140,7 +184,8 @@ export async function authenticateRequest(
       principal,
       registered,
       requestId,
-      sourceIp: trustedSourceIp(request, runtime.auth),
+      sourceIp,
+      credentialId,
     };
   } catch {
     return jsonResponse({ error: 'authentication_unavailable' }, 503);
@@ -166,6 +211,9 @@ export function allowsAnonymousTransport(
   pathname: string,
 ): boolean {
   if (handlerType === 'serverFn') return true;
+  // Sign-in, callback and sign-out routes check whatever session they need
+  // themselves; the device endpoints are how a CLI gets a credential at all.
+  if (pathname.startsWith('/auth/') || PUBLIC_API_PATHS.has(pathname)) return true;
   return (
     (request.method === 'GET' || request.method === 'HEAD') &&
     !isApiPath(pathname)
@@ -196,7 +244,16 @@ export const requestIdentityMiddleware = createMiddleware().server(
     }
 
     const result = await authenticateRequest(request, runtime, crypto.randomUUID(), token);
-    if (result instanceof Response) return result;
+    if (result instanceof Response) {
+      // An expired or revoked session on a page is someone to send to the
+      // sign-in page, not a JSON error to show them.
+      if (result.status === 401 && allowsAnonymousTransport(request, handlerType, pathname)) {
+        const context: RequestIdentityContext = anonymousContext();
+        remember(request, context);
+        return next({ context: { coffreRequest: context } });
+      }
+      return result;
+    }
     if (!result.registered && isApiPath(pathname)) {
       return jsonResponse({ error: 'registration_required' }, 403);
     }

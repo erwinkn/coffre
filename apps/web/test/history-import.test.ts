@@ -9,14 +9,14 @@ import {
   TEST_OWNER_DATABASE_URL,
   TEST_RUNTIME_DATABASE_URL,
 } from '../../../packages/db/test/connections.ts';
-import { parseDotenv } from '../src/server/services/dotenv.ts';
+import { parseDotenv } from '../../../packages/core/src/dotenv.ts';
 import { AccessDenied, NotFound } from '../src/server/services/secrets.ts';
 import { requestContext, serviceFixture } from './service-fixture.ts';
 
 const CHAIN_KEY = randomBytes(32);
-const ROOT = 'erwin@equisafe.io';
+const ROOT = 'admin@acme.example';
 const root = requestContext(ROOT);
-const viewer = requestContext('viewer@equisafe.io');
+const viewer = requestContext('viewer@acme.example');
 let pool: pg.Pool;
 let runtimePool: pg.Pool;
 let services: ReturnType<typeof serviceFixture>;
@@ -54,7 +54,7 @@ beforeEach(async () => {
      VALUES
        ('user', $1, 'user', $3, true),
        ('user', $2, 'user', $3, true)`,
-    [viewer.principal.id, 'leaver@equisafe.io', ROOT],
+    [viewer.principal.id, 'leaver@acme.example', ROOT],
   );
   await services.admin.createProject(root, 'market', 'Market');
   await services.admin.createEnvironment(root, 'market', 'dev', 'Dev');
@@ -293,11 +293,11 @@ test('structural project creation does not create an implicit secret grant', asy
 test('the principal view answers what a person still holds', async () => {
   await services.admin.createGrant(root, 'market', {
     principalType: 'user',
-    principalId: 'leaver@equisafe.io',
+    principalId: 'leaver@acme.example',
     role: 'auditor',
   });
   const principal = (await services.admin.listPrincipals(root)).find(
-    (entry) => entry.principalId === 'leaver@equisafe.io',
+    (entry) => entry.principalId === 'leaver@acme.example',
   );
   assert.equal(principal?.grants[0].project, 'market');
   assert.equal(principal?.grants[0].role, 'auditor');
@@ -306,14 +306,14 @@ test('the principal view answers what a person still holds', async () => {
 test('the principal directory is independent of project permissions', async () => {
   await services.admin.addDirectoryPrincipal(root, {
     principalType: 'user',
-    principalId: 'grantless@equisafe.io',
+    principalId: 'grantless@acme.example',
     instanceRole: 'user',
   });
   const directory = await services.admin.listDirectory(root);
-  assert.ok(directory.some((entry) => entry.principalId === 'grantless@equisafe.io'));
+  assert.ok(directory.some((entry) => entry.principalId === 'grantless@acme.example'));
   assert.equal(
     (await services.admin.listPrincipals(root)).some(
-      (entry) => entry.principalId === 'grantless@equisafe.io',
+      (entry) => entry.principalId === 'grantless@acme.example',
     ),
     false,
   );

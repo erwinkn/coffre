@@ -1,6 +1,15 @@
+import { loadSigninConfig, type SigninConfig } from './signin/config.ts';
 import type { AccessVerifierConfig } from './verifier.ts';
 
-export type AuthMode = 'dev' | 'cloudflare';
+/**
+ * Who vouches for the person at the other end of a request.
+ *
+ * - `signin`: coffre itself, after the person signs in with one of the
+ *   configured providers (GitHub, Google, Microsoft, any OIDC issuer).
+ * - `cloudflare`: Cloudflare Access, in front of coffre.
+ * - `dev`: the local dev IdP's persona picker. Never deployed.
+ */
+export type AuthMode = 'dev' | 'cloudflare' | 'signin';
 
 export type AuthConfig =
   | {
@@ -11,6 +20,10 @@ export type AuthConfig =
   | {
       mode: 'cloudflare';
       access: AccessVerifierConfig;
+    }
+  | {
+      mode: 'signin';
+      signin: SigninConfig;
     };
 
 type Environment = Readonly<Record<string, string | undefined>>;
@@ -72,8 +85,15 @@ function accessConfig(env: Environment): AccessVerifierConfig {
  */
 export function loadAuthConfig(env: Environment): AuthConfig {
   const mode = required(env, 'COFFRE_AUTH_MODE');
-  if (mode !== 'dev' && mode !== 'cloudflare') {
-    throw new Error('COFFRE_AUTH_MODE must be exactly "dev" or "cloudflare"');
+  if (mode !== 'dev' && mode !== 'cloudflare' && mode !== 'signin') {
+    throw new Error('COFFRE_AUTH_MODE must be exactly "signin", "cloudflare" or "dev"');
+  }
+
+  if (mode === 'signin') {
+    if (env.COFFRE_DEV_IDP_URL?.trim()) {
+      throw new Error('COFFRE_DEV_IDP_URL must not be set when COFFRE_AUTH_MODE=signin');
+    }
+    return { mode, signin: loadSigninConfig(env) };
   }
 
   const access = accessConfig(env);

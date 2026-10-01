@@ -13,7 +13,7 @@ const local = {
   COFFRE_API_URL: 'http://127.0.0.1:3000',
   COFFRE_DEV_IDP_URL: 'http://127.0.0.1:8081',
   COFFRE_ACCESS_AUD: 'coffre-local-dev-aud',
-  COFFRE_ROOT_ADMINS: 'erwin@equisafe.io',
+  COFFRE_ROOT_ADMINS: 'admin@acme.example',
 };
 
 test('seed accepts only the checked-in local development targets', () => {
@@ -23,7 +23,7 @@ test('seed accepts only the checked-in local development targets', () => {
     apiUrl: 'http://127.0.0.1:3000',
     idpUrl: 'http://127.0.0.1:8081',
     audience: 'coffre-local-dev-aud',
-    rootAdmin: 'erwin@equisafe.io',
+    rootAdmin: 'admin@acme.example',
   });
 });
 
@@ -69,11 +69,11 @@ test('every seeded grant principal is registered in the directory first', () => 
 test('the closed-door persona is in the directory with no grant', () => {
   assert.ok(
     LOCAL_SEED_DIRECTORY.some(
-      (entry) => entry.principalType === 'user' && entry.principalId === 'outsider@equisafe.io',
+      (entry) => entry.principalType === 'user' && entry.principalId === 'outsider@acme.example',
     ),
   );
   assert.equal(
-    LOCAL_SEED_GRANTS.some((grant) => grant.principalId === 'outsider@equisafe.io'),
+    LOCAL_SEED_GRANTS.some((grant) => grant.principalId === 'outsider@acme.example'),
     false,
   );
 });

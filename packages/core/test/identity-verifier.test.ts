@@ -28,13 +28,13 @@ after(async () => {
 // --- the happy paths, so the negative tests below mean something -------------
 
 test('a valid identity token yields a user principal', async () => {
-  const token = await idp.mintUserToken({ audience: AUD, email: 'erwin@equisafe.io' });
+  const token = await idp.mintUserToken({ audience: AUD, email: 'admin@acme.example' });
 
   const principal = await verifier.verify(token);
 
   assert.equal(principal.type, 'user');
-  assert.equal(principal.id, 'erwin@equisafe.io');
-  assert.equal(principal.type === 'user' && principal.email, 'erwin@equisafe.io');
+  assert.equal(principal.id, 'admin@acme.example');
+  assert.equal(principal.type === 'user' && principal.email, 'admin@acme.example');
 });
 
 test('a valid service token yields a service principal, never a null actor', async () => {
@@ -91,7 +91,7 @@ test('rejects a token from a different issuer', async () => {
 test('rejects an unsigned (alg=none) token', async () => {
   // The classic downgrade. jose refuses to produce this through SignJWT, so we
   // build it the way an attacker would.
-  const unsecured = new UnsecuredJWT({ email: 'erwin@equisafe.io', sub: 'x' })
+  const unsecured = new UnsecuredJWT({ email: 'admin@acme.example', sub: 'x' })
     .setIssuer(idp.issuer)
     .setAudience(AUD)
     .setExpirationTime('5m')

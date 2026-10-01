@@ -19,8 +19,8 @@ import { shouldValidateCsrf, startInstance } from '../src/start.ts';
 const cloudflare: AuthConfig = {
   mode: 'cloudflare',
   access: {
-    issuer: 'https://equisafe.cloudflareaccess.com',
-    jwksUrl: 'https://equisafe.cloudflareaccess.com/cdn-cgi/access/certs',
+    issuer: 'https://acme.cloudflareaccess.com',
+    jwksUrl: 'https://acme.cloudflareaccess.com/cdn-cgi/access/certs',
     audience: 'coffre-aud',
   },
 };
@@ -37,8 +37,8 @@ const dev: AuthConfig = {
 
 const root: Principal = {
   type: 'user',
-  id: 'erwin@equisafe.io',
-  email: 'erwin@equisafe.io',
+  id: 'admin@acme.example',
+  email: 'admin@acme.example',
   subject: 'root-subject',
 };
 
@@ -134,7 +134,7 @@ test('native API mutations require origin checks unless the request is non-simpl
   );
 });
 
-test('the specific user-directory route owns both role updates and deletion', () => {
+test('the specific user-directory route owns the report, role updates and deletion', () => {
   const route = readFileSync(
     fileURLToPath(
       new URL(
@@ -144,9 +144,10 @@ test('the specific user-directory route owns both role updates and deletion', ()
     ),
     'utf8',
   );
+  assert.match(route, /GET:\s*\(/);
   assert.match(route, /DELETE:\s*\(/);
   assert.match(route, /PATCH:\s*\(/);
-  assert.match(route, /methodNotAllowed\(\['DELETE', 'PATCH'\]\)/);
+  assert.match(route, /methodNotAllowed\(\['GET', 'DELETE', 'PATCH'\]\)/);
 });
 
 test('Cloudflare mode ignores the dev cookie and dev mode ignores the Access header', () => {
@@ -207,8 +208,8 @@ test('a configured root admin authenticates without a principals row lookup', as
 test('an unregistered non-root identity is marked for the closed-door boundary', async () => {
   const principal: Principal = {
     type: 'user',
-    id: 'new@equisafe.io',
-    email: 'new@equisafe.io',
+    id: 'new@acme.example',
+    email: 'new@acme.example',
     subject: 'new-subject',
   };
   const result = await authenticateRequest(
@@ -230,6 +231,7 @@ test('an unregistered non-root identity is marked for the closed-door boundary',
     registered: false,
     requestId: 'unregistered-request',
     sourceIp: null,
+    credentialId: null,
   });
 });
 
@@ -284,6 +286,7 @@ test('an active registered identity receives an auditable request context', asyn
       registered: true,
       requestId: 'registered-request',
       sourceIp: null,
+      credentialId: null,
     });
   }
 });

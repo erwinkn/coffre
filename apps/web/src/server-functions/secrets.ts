@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 import { getRuntime } from '../server/runtime.ts';
 import { registeredServerFn } from '../server/server-fn.ts';
-import { parseDotenv } from '../server/services/dotenv.ts';
+import { parseDotenv } from '../../../../packages/core/src/dotenv.ts';
 import { secretKey, slug } from '../shared/schemas.ts';
 import { currentRequestContext } from './session.ts';
 import { uiMutation, uiResult } from './result.ts';

@@ -1,0 +1,16 @@
+{
+  "name": "@coffre/ui-spike",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "files": [
+    "dist",
+    "index.d.ts"
+  ],
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./dist/server/index.js"
+    }
+  }
+}

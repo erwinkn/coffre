@@ -24,6 +24,11 @@ export function uiFailure(error: unknown): Failure {
       error: error instanceof Error ? error.message : 'That conflicts with existing data.',
     };
   }
+  // A 400 marked `expose` carries a sentence written for the person, such as
+  // which field of a sync's destination is wrong. Others stay generic.
+  if (status === 400 && error instanceof Error && (error as { expose?: unknown }).expose === true) {
+    return { ok: false, error: error.message };
+  }
   return { ok: false, error: 'Coffre is unavailable. Nothing was read or written.' };
 }
 

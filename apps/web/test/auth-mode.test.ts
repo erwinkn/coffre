@@ -8,8 +8,8 @@ import {
 } from '../src/lib/auth-mode.ts';
 
 const access = {
-  issuer: 'https://equisafe.cloudflareaccess.com',
-  jwksUrl: 'https://equisafe.cloudflareaccess.com/cdn-cgi/access/certs',
+  issuer: 'https://acme.cloudflareaccess.com',
+  jwksUrl: 'https://acme.cloudflareaccess.com/cdn-cgi/access/certs',
   audience: 'access-aud',
 };
 

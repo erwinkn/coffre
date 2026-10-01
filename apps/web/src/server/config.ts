@@ -70,21 +70,25 @@ export function parseRootAdmins(mode: AuthMode, raw: string | undefined): string
     ),
   ];
 
-  if (mode === 'cloudflare') {
+  if (mode === 'cloudflare' || mode === 'signin') {
     if (rootAdmins.length === 0) {
       throw new Error(
-        'COFFRE_ROOT_ADMINS must name at least one Cloudflare Access email in cloudflare mode',
+        mode === 'cloudflare'
+          ? 'COFFRE_ROOT_ADMINS must name at least one Cloudflare Access email in cloudflare mode'
+          : 'COFFRE_ROOT_ADMINS must name at least one email in signin mode, or nobody can sign in',
       );
     }
     const invalid = rootAdmins.find((entry) => !isHumanEmail(entry));
     if (invalid) {
       throw new Error(
-        `COFFRE_ROOT_ADMINS entries must be human email identities in cloudflare mode; invalid: ${invalid}`,
+        `COFFRE_ROOT_ADMINS entries must be human email identities in ${mode} mode; invalid: ${invalid}`,
       );
     }
   }
 
-  return rootAdmins;
+  // Sign-in matches provider emails case-insensitively, so root admins are
+  // stored the way they will be compared.
+  return mode === 'signin' ? rootAdmins.map((entry) => entry.toLowerCase()) : rootAdmins;
 }
 
 /**

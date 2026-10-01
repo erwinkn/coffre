@@ -9,3 +9,4 @@ export const instanceRole = z.enum(['user', 'owner']);
 export const grantId = z.string().uuid();
 export const emailAddress = z.string().email().max(320);
 export const isoDateTime = z.string().datetime();
+export const syncId = z.string().uuid();

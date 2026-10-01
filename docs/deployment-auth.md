@@ -1,7 +1,15 @@
-# Production authentication
+# Signing in behind Cloudflare Access
 
-Production authentication is Cloudflare Access. Coffre does not run an
-identity provider, a password flow, or a persona picker in production.
+A deployed coffre signs people in one of two ways, chosen by
+`COFFRE_AUTH_MODE` in its Worker configuration:
+
+- `signin`: coffre's own sign-in page, with GitHub, Google, Microsoft or any
+  OpenID Connect provider. [deploy.md](deploy.md) sets one up.
+- `cloudflare`: Cloudflare Access in front of the Worker, and coffre verifies
+  the token Access forwards. This is coffre's default and what this page
+  describes.
+
+Neither runs a password flow or a persona picker.
 
 ## Cloudflare Access inputs
 
@@ -36,23 +44,36 @@ Official references:
 - [Create an Access application](https://developers.cloudflare.com/learning-paths/clientless-access/access-application/create-access-app/)
 - [Connect through Access using a CLI](https://developers.cloudflare.com/cloudflare-one/tutorials/cli/)
 
-### CLI user tokens
+### The CLI
 
-For interactive CLI use, point `COFFRE_API_URL` at the explicit HTTPS origin
-of the Access-protected web service, set `COFFRE_AUTH_MODE=cloudflare`, and obtain a
-user application token:
+`coffre login` recognises an Access-protected instance by the redirect to
+Access's login page, and hands over to `cloudflared`:
 
 ```sh
-cloudflared access login https://<coffre-api-hostname>
-export COFFRE_TOKEN="$(cloudflared access token -app=https://<coffre-api-hostname>)"
+coffre login https://<coffre-api-hostname>
 ```
 
-Cloudflare mode refuses a missing, plaintext, credentialed, or path-bearing
-`COFFRE_API_URL` before sending the token. The CLI sends this client-side token
-as `cf-access-token`, which Cloudflare validates at the edge. Cloudflare then adds the separate
-`Cf-Access-Jwt-Assertion` header that the coffre API verifies at the origin.
-The CLI does not follow Access login redirects; a rejected or expired token is
-reported as unauthenticated instead of loading the browser login page.
+`cloudflared` opens the browser, keeps the resulting application token, and
+refreshes it; the CLI asks it for the current token on every command
+(`cloudflared access token -app=…`) and sends it as `cf-access-token`, which
+Cloudflare validates at the edge before adding the `Cf-Access-Jwt-Assertion`
+header the origin verifies. If the Access application answers non-browser
+clients with a 401 instead of a redirect, say which mode to use:
+`COFFRE_AUTH_MODE=cloudflare coffre login https://…`.
+
+CI and other machines use an Access service token instead, with nothing
+stored on disk:
+
+```sh
+COFFRE_API_URL=https://<coffre-api-hostname> \
+COFFRE_ACCESS_CLIENT_ID=<id>.access \
+COFFRE_ACCESS_CLIENT_SECRET=<secret> \
+  coffre run app/prod -- ./deploy.sh
+```
+
+The CLI refuses a plaintext, credentialed, or path-bearing address before
+sending anything, and never follows Access login redirects: a rejected or
+expired token is reported as such instead of loading the browser login page.
 
 ## Closed-door behavior
 

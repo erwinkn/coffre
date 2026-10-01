@@ -1,4 +1,5 @@
 import { createRouter as createTanStackRouter } from '@tanstack/react-router';
+import { getGlobalStartContext } from '@tanstack/react-start';
 import { routeTree } from './routeTree.gen';
 import { NotFound, RouteError } from './components/route-states';
 
@@ -20,11 +21,38 @@ export function getRouter() {
     scrollRestoration: true,
     defaultNotFoundComponent: NotFound,
     defaultErrorComponent: RouteError,
+    ssr: { nonce: cspNonce() },
   });
 }
 
+/**
+ * The nonce the Worker minted for this response's Content-Security-Policy,
+ * which the router puts on every script it renders. The client has none to
+ * give: hydration reads it back from the page. A router built only to
+ * resolve a redirect runs outside the request's context and renders nothing.
+ */
+function cspNonce(): string | undefined {
+  try {
+    return getGlobalStartContext()?.cspNonce;
+  } catch {
+    return undefined;
+  }
+}
+
+/** What worker.ts hands every request. */
+type RequestContext = { cspNonce: string };
+
+// Start's server entry reads this `Register`, and its context helpers the
+// one below: the two do not merge, so each hears of the request context.
 declare module '@tanstack/react-router' {
   interface Register {
     router: ReturnType<typeof getRouter>;
+    server: { requestContext: RequestContext };
+  }
+}
+
+declare module '@tanstack/react-start' {
+  interface Register {
+    server: { requestContext: RequestContext };
   }
 }

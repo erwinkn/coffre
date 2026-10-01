@@ -1,11 +1,14 @@
 # coffre
 
-A deliberately small in-house secrets manager. Cloudflare Access is the identity
-provider, Postgres is the backend of record, and the audit log is the point.
+A deliberately small in-house secrets manager. People sign in with GitHub,
+Google, Microsoft or any OpenID Connect provider, or through Cloudflare Access;
+Postgres is the backend of record, and the audit log is the point.
 
-**Status: demo software. Do not store real secrets.** The application deploys
-as a Cloudflare Worker; Terraform in the infrastructure repository owns the
-private Scaleway database, Workers VPC Service, connector, and Hyperdrive.
+**Status: ready for a first deployment, still hardening.** coffre runs as a
+Cloudflare Worker in front of Postgres, and [docs/deploy.md](docs/deploy.md)
+deploys one. [Phase 1 of the roadmap](docs/roadmap.md#phase-1-harden) is still
+open, so until it is done, keep the keys escrowed and a copy of anything you
+move in.
 
 ## Why this exists
 
@@ -33,7 +36,7 @@ Infisical's audit logging being paywalled is a fact about Infisical, not about
 the market. **OpenBao ships request/response audit logging in its open-source
 core**, unlicensed. The honest justification for building rather than adopting
 is that we want a secrets service small enough to read end to end, with
-Cloudflare Access as the only identity system. Not "nothing else does this."
+identity delegated to a provider we already trust. Not "nothing else does this."
 
 ## The finding that changed the design
 
@@ -148,8 +151,9 @@ published six days before we tried to install it.
 ```
 packages/core   envelope encryption, KEK providers, audit hash chain, identity
 packages/db     Drizzle schema/migrations, audit writer, privilege tests
-apps/dev-idp    local stand-in for Cloudflare Access (serves JWKS, mints tokens)
-apps/cli        login / list / get / set / run / audit / verify
+packages/sync   destinations syncs push to: GitHub Actions, Vercel, Railway, Cloudflare
+apps/dev-idp    local stand-in for Cloudflare Access, an OIDC provider and GitHub
+apps/cli        login, secrets, access, syncs, audit; no dependencies
 apps/web        TanStack Start UI, auth boundary, services, and native /api routes
 ```
 
@@ -160,13 +164,13 @@ pnpm install
 pnpm dev              # Postgres + dev IdP + one web/API service + seed data
 ```
 
-Then open http://127.0.0.1:3000 and sign in as `erwin@equisafe.io`.
+Then open http://127.0.0.1:3000 and sign in as `admin@acme.example`.
 
-Production uses an explicit `COFFRE_AUTH_MODE=cloudflare` contract; local
-persona minting exists only under `COFFRE_AUTH_MODE=dev`. The exact team-domain
-issuer, cert URL, application AUD, closed-origin behavior, and root-admin
-bootstrap requirements are in
-[docs/deployment-auth.md](docs/deployment-auth.md).
+`pnpm dev` picks a persona, which exists only under `COFFRE_AUTH_MODE=dev`.
+`pnpm dev:signin` runs the real sign-in page instead, with the dev IdP playing
+GitHub and an OIDC provider, on the data `pnpm dev` seeded. A deployment runs
+in `signin` mode ([docs/deploy.md](docs/deploy.md)) or behind Cloudflare
+Access ([docs/deployment-auth.md](docs/deployment-auth.md)).
 
 Individual pieces:
 
@@ -191,12 +195,13 @@ CLI:
 ```sh
 coffre() { node --env-file=.env.dev apps/cli/src/main.ts "$@"; }
 
-coffre login --email erwin@equisafe.io
+coffre login --email admin@acme.example          # local only: a dev IdP persona
 
 # secrets
 coffre list     market/dev
 coffre get      market/dev/DATABASE_URL
 coffre run      market/dev -- printenv
+coffre export   market/dev --format dotenv      # or json, shell
 coffre history  market/dev/DATABASE_URL
 coffre rollback market/dev/DATABASE_URL 2
 coffre import   market/dev --file .env          # previews; --apply to write
@@ -205,7 +210,14 @@ coffre import   market/dev --file .env          # previews; --apply to write
 coffre projects
 coffre roles
 coffre access                                   # who holds what, everywhere
-coffre grant market alice@equisafe.io --role developer --env dev
+coffre grant market alice@acme.example --role developer --env dev
+coffre offboard alice@acme.example               # previews; --apply to remove (docs/offboarding.md)
+
+# syncs (docs/syncs.md)
+coffre sync add  market/prod github-actions owner=acme repo=market \
+                 --credential ops/sync/GITHUB_TOKEN
+coffre sync list market/prod
+coffre sync run  market/prod github-actions
 
 # audit
 coffre audit --denied
@@ -213,13 +225,31 @@ coffre verify
 ```
 
 The local helper deliberately loads `.env.dev`, including the explicit dev
-authentication mode. In production, run the CLI directly with
-`COFFRE_AUTH_MODE=cloudflare` and the settings in
-[docs/deployment-auth.md](docs/deployment-auth.md).
+authentication mode. Against a deployed instance, no settings are needed:
+
+```sh
+coffre login https://coffre.example.com   # shows a code to approve in the browser
+coffre whoami
+coffre use                                # every instance you are signed in to
+coffre logout
+```
+
+`coffre login` works out how the instance signs people in. With coffre's own
+sign-in it runs a device login: the CLI prints a link and a code, you approve
+it in a browser where you are signed in, and the CLI gets a session token of
+its own (30 days by default), listed and revocable on the account page. Behind Cloudflare
+Access it hands over to `cloudflared` (see
+[docs/deployment-auth.md](docs/deployment-auth.md)). Sessions are kept per
+instance in `~/.coffre/credentials.json` (mode 0600), so a company instance
+and a personal one coexist.
+
+CI sets environment variables instead and stores nothing:
+`COFFRE_API_URL` plus `COFFRE_TOKEN` (a service token from the Tokens page),
+or `COFFRE_ACCESS_CLIENT_ID`/`COFFRE_ACCESS_CLIENT_SECRET` behind Access.
 
 ## Progress
 
-All five phases are implemented and working locally.
+All five milestones are implemented and working locally.
 
 - **M0.** Schema and migrations, envelope, local `KekProvider`, KEK registry
   with rotation, audit hash chain. Includes the cross-environment AAD test.
@@ -248,6 +278,25 @@ All five phases are implemented and working locally.
 - **Identity directory.** Users and service accounts are managed separately
   from project permissions. Owners can manage the directory and read the full
   audit log; root admins remain deployment configuration.
+- **Sign-in.** coffre's own sign-in page, with providers as configuration:
+  GitHub (including an organisation check and Enterprise Server), Google
+  (optionally one Workspace domain), Microsoft Entra, and any OpenID Connect
+  issuer, which covers Okta, Auth0, Keycloak and the like. An account binds to
+  the provider's stable user id, never to an email. The CLI signs in with a
+  device code, and machines use service tokens coffre issues. See
+  [phase 4 of the roadmap](docs/roadmap.md#phase-4-sign-in).
+- **Deployment.** Until the packages described in the architecture land,
+  configure and deploy `apps/web` directly with Wrangler. See
+  [docs/deploy.md](docs/deploy.md).
+- **Syncs.** An environment can be pushed to GitHub Actions, Vercel, Railway
+  or Cloudflare Workers and kept current there: on every change, and hourly
+  to repair drift. Only keys coffre pushed are ever removed, and every value
+  that leaves is audited first. See [docs/syncs.md](docs/syncs.md).
+- **Offboarding.** Removing someone revokes their grants, sessions, CLI
+  logins and linked sign-in accounts in one step. Their page then lists the
+  values they read or wrote that are still current, the syncs they set up and
+  the tokens they issued, until each is dealt with. See
+  [docs/offboarding.md](docs/offboarding.md).
 - **Access overview.** `coffre access` still reports every principal and grant
   across the projects the caller administers, including scope and expiry. It
   remains available to project access managers for operational offboarding.
@@ -438,8 +487,9 @@ UI, the underlying role and scope are presented as one permissions value:
 
 ### Things that are stubbed, not finished
 
-- `SyncTarget` (push to Scaleway Secret Manager) is designed but not
-  implemented — it is a non-goal for this phase.
+- Syncs cover four destinations. Scaleway Secret Manager, AWS and the rest
+  are not built in; `coffre run` or `coffre export` with a service token
+  covers them.
 - The `scaleway` `KekProvider` does not exist yet; only `local` does.
 - Audit checkpoints have a table but nothing exports them off-box, so tail
   truncation is currently detectable only in principle.
@@ -470,10 +520,10 @@ prototype; the real fix is a schema (or database) per test file.
 
 ## Deliberately out of scope
 
-No deployment, no Terraform, no real KMS. No rotation engine, no dynamic
-secrets, no PKI, no policy DSL (a grants table is enough), no HA. No Kubernetes
-operator — external-secrets has a generic `webhook` provider that can call this
-API later.
+No Terraform here (it lives in the infrastructure repository), and no real
+KMS yet. No rotation engine, no dynamic secrets, no PKI, no policy DSL (a
+grants table is enough), no HA. No Kubernetes operator — external-secrets has
+a generic `webhook` provider that can call this API later.
 
 ## Open question
 

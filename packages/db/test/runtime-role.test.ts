@@ -13,12 +13,25 @@ const EXPECTED_UPDATE_COLUMNS = [
   'audit_chain_head.updated_at',
   'audit_heartbeat.last_beat_at',
   'audit_heartbeat.last_seq',
+  'credentials.last_used_at',
+  'credentials.last_used_ip',
+  'credentials.revoked_at',
+  'credentials.revoked_by',
+  'device_authorizations.consumed_at',
+  'device_authorizations.decided_at',
+  'device_authorizations.decision',
+  'device_authorizations.principal_id',
+  'device_authorizations.principal_type',
   'environments.archived_at',
   'environments.name',
   'environments.slug',
   'grants.created_by',
   'grants.expires_at',
   'grants.role_id',
+  'identities.email',
+  'identities.last_sign_in_at',
+  'identities.revoked_at',
+  'identities.revoked_by',
   'principals.active',
   'principals.created_at',
   'principals.created_by',
@@ -30,6 +43,17 @@ const EXPECTED_UPDATE_COLUMNS = [
   'secrets.current_version_id',
   'secrets.key',
   'secrets.updated_at',
+  'sync_keys.pushed_at',
+  'sync_keys.removed_at',
+  'sync_keys.secret_version_id',
+  'syncs.archived_at',
+  'syncs.config',
+  'syncs.credential_secret_id',
+  'syncs.last_error',
+  'syncs.last_run_at',
+  'syncs.last_status',
+  'syncs.lease_until',
+  'syncs.paused_at',
 ];
 
 test('Drizzle migrations preserve the restricted runtime database identity', async () => {
@@ -39,7 +63,7 @@ test('Drizzle migrations preserve the restricted runtime database identity', asy
     const migrations = await owner.query<{ count: number }>(
       'SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations',
     );
-    assert.equal(migrations.rows[0].count, 2);
+    assert.equal(migrations.rows[0].count, 3);
 
     const identity = await runtime.query<{
       current_user: string;

@@ -1694,6 +1694,41 @@ a.crumb-link:hover {
   font-size: 0.75rem;
 }
 
+.cell-account {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  min-width: 0;
+}
+
+.cell-account > svg {
+  flex: none;
+  color: var(--ink-3);
+}
+
+.token-once {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.625rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--canvas);
+}
+
+.token-once code {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.8125rem;
+  overflow-wrap: anywhere;
+}
+
+.link-providers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+}
+
 .cell-link {
   color: var(--ink);
   font-weight: 550;
@@ -3302,6 +3337,70 @@ a.env-card-name:hover {
   padding: 0 1.5rem 1rem;
 }
 
+.providers {
+  display: grid;
+  gap: 0.5rem;
+  list-style: none;
+  margin: 0;
+  padding: 0 1.5rem 1.5rem;
+}
+
+.provider {
+  position: relative;
+  justify-content: center;
+  width: 100%;
+  height: 2.5rem;
+  font-weight: 550;
+}
+
+.provider-mark {
+  position: absolute;
+  left: 0.875rem;
+  display: inline-flex;
+}
+
+.signin-empty {
+  padding: 0 1.5rem 1.5rem;
+  color: var(--ink-3);
+  font-size: 0.8125rem;
+}
+
+.device-code {
+  margin: 0 1.5rem 1.25rem;
+  padding: 0.875rem;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  background: var(--canvas);
+  font-family: var(--font-mono);
+  font-size: 1.5rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-align: center;
+}
+
+.device-code-input {
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.device-facts {
+  border-top: 1px solid var(--border);
+}
+
+.device-facts .fact {
+  grid-template-columns: 8rem minmax(0, 1fr);
+  padding: 0.75rem 1.5rem;
+}
+
+.device-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  padding: 1rem 1.5rem;
+  border-top: 1px solid var(--border);
+  background: var(--canvas);
+}
+
 .personas-head {
   padding: 0.625rem 1.5rem;
   border-top: 1px solid var(--border);
@@ -3798,4 +3897,43 @@ a.env-card-name:hover {
   .spinner {
     animation: spin 1.6s linear infinite !important;
   }
+}
+
+/* ========================================================================== */
+/* Syncs                                                                      */
+/* ========================================================================== */
+
+/* Four destinations read best as a square than as a row of three and one. */
+.choice-grid.destinations {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+/* A sync's state tag sits above its counts at its own width, not the column's. */
+.syncs .cell-stack {
+  align-items: flex-start;
+  gap: 0.25rem;
+}
+
+/* ========================================================================== */
+/* Offboarding report                                                         */
+/* ========================================================================== */
+
+.report-notice {
+  margin-bottom: 1.25rem;
+}
+
+/* The report's cards follow the access table, whose hint may close it. */
+.section-foot + .card {
+  margin-top: 1.25rem;
+}
+
+.card-aside {
+  color: var(--ink-3);
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Where a value lives recedes; its name is what someone goes looking for. */
+.report-path {
+  color: var(--ink-3);
 }

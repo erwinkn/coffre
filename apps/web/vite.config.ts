@@ -21,6 +21,12 @@ export default defineConfig({
     },
   },
 
+  build: {
+    // Vite inlines files under 4 KiB as data: URLs, which caught one small
+    // font subset. The Content-Security-Policy takes fonts from coffre alone.
+    assetsInlineLimit: (file) => (/\.woff2?$/.test(file) ? false : undefined),
+  },
+
   plugins: [
     cloudflare({ viteEnvironment: { name: 'ssr' } }),
     // Generates src/routeTree.gen.ts from src/routes, and wires the SSR

@@ -1,4 +1,10 @@
-import { useEffect, useRef, useState, type InputHTMLAttributes } from 'react';
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ComponentProps,
+  type InputHTMLAttributes,
+} from 'react';
 import { createFileRoute, Link, useLoaderData, useRouter } from '@tanstack/react-router';
 import { DropdownMenu } from 'radix-ui';
 import { toast } from 'sonner';
@@ -12,6 +18,7 @@ import {
   saveSecret,
   setSecretArchived,
 } from '../server-functions/secrets';
+import { listSyncs } from '../server-functions/syncs';
 import { useAction } from '../lib/use-action';
 import type {
   ImportPlanEntry,
@@ -44,6 +51,7 @@ import {
 } from '../components/ui';
 import { Card, ClosedDoor, PageHeader } from '../components/page';
 import { SecretReadOnly } from '../components/affordances';
+import { Syncs } from '../components/syncs';
 import {
   AlertCircle,
   Archive,
@@ -77,13 +85,20 @@ const REVEAL_TTL_SECONDS = 45;
 const REVEAL_COST_ID = 'reveal-cost';
 
 export const Route = createFileRoute('/projects/$project/$environment')({
-  loader: ({ params }) =>
-    listKeys({ data: { project: params.project, environment: params.environment } }),
+  // `?filter=KEY` opens the ledger narrowed to matching keys, for links to one secret.
+  validateSearch: (search: Record<string, unknown>): { filter?: string } => ({
+    filter: typeof search.filter === 'string' && search.filter !== '' ? search.filter : undefined,
+  }),
+  loader: async ({ params }) => {
+    const data = { project: params.project, environment: params.environment };
+    const [keys, syncs] = await Promise.all([listKeys({ data }), listSyncs({ data })]);
+    return { keys, syncs };
+  },
   component: EnvironmentPage,
 });
 
 function EnvironmentPage() {
-  const result = Route.useLoaderData();
+  const { keys: result, syncs } = Route.useLoaderData();
   const { project, environment } = Route.useParams();
 
   if (!result.ok) {
@@ -117,6 +132,7 @@ function EnvironmentPage() {
       environment={environment}
       permissions={result.permissions}
       keys={result.keys}
+      syncs={syncs}
     />
   );
 }
@@ -128,11 +144,13 @@ function EnvironmentLedger({
   environment,
   permissions,
   keys,
+  syncs,
 }: {
   project: string;
   environment: string;
   permissions: Permission[];
   keys: SecretKey[];
+  syncs: ComponentProps<typeof Syncs>['result'];
 }) {
   const router = useRouter();
   const [drafts, setDrafts] = useState<SecretDraft[]>([]);
@@ -142,7 +160,7 @@ function EnvironmentLedger({
   const [editing, setEditing] = useState<ReadonlySet<string>>(() => new Set());
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
-  const [query, setQuery] = useState('');
+  const [query, setQuery] = useState(Route.useSearch().filter ?? '');
   const nextDraftId = useRef(0);
 
   const canWrite = permissions.includes('secret.write');
@@ -504,6 +522,13 @@ function EnvironmentLedger({
           </div>
         )}
       </section>
+
+      <Syncs
+        project={project}
+        environment={environment}
+        result={syncs}
+        canRun={canWrite || permissions.includes('environment.manage')}
+      />
 
       {archived.length > 0 && (
         <Card
