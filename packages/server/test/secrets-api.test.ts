@@ -366,3 +366,86 @@ test('an empty secret patch is refused before it can disclose another environmen
   await assert.rejects(root.secrets.update('market/prod/HIDDEN', {}), { status: 400 });
   assert.deepEqual(await root.secrets.update('market/prod/HIDDEN', { archived: false }), { key: 'HIDDEN', archived: false });
 });
+
+test('a competing first write discards the provisional ID and wraps the next version afresh', async (t) => {
+  const wrap = deps.vault.wrap;
+  const prepared: { secretId: string; version: number }[] = [];
+  let compete = true;
+  t.mock.method(deps.vault, 'wrap', async (input: Parameters<typeof wrap>[0]) => {
+    const result = await wrap(input);
+    prepared.push(...input.items.map(({ secret }) => ({ secretId: secret.secretId, version: secret.version })));
+    if (compete) {
+      compete = false;
+      assert.equal((await db.owner.select().from(secrets)).length, 0, 'the vault sees no uncommitted secret');
+      await root.secrets.set('market/dev', { RACE: 'first committed' });
+    }
+    return result;
+  });
+  const written = await root.secrets.set('market/dev', { RACE: 'retried' });
+  assert.deepEqual(written.keys, { RACE: { version: 2 } });
+  assert.equal(prepared.length, 3);
+  assert.notEqual(prepared[0].secretId, prepared[1].secretId);
+  assert.deepEqual(prepared[2], { secretId: prepared[1].secretId, version: 2 });
+  assert.equal(await versionCount(), 2);
+  assert.deepEqual((await root.secrets.reveal('market/dev')).values, { RACE: 'retried' });
+});
+
+test('a parent archived while wrapping cannot receive the prepared write', async (t) => {
+  const wrap = deps.vault.wrap;
+  t.mock.method(deps.vault, 'wrap', async (input: Parameters<typeof wrap>[0]) => {
+    const result = await wrap(input);
+    await root.environments.update('market/dev', { archived: true });
+    return result;
+  });
+  await assert.rejects(root.secrets.set('market/dev', { LATE: 'discarded' }), { status: 404 });
+  assert.equal(await versionCount(), 0);
+  assert.equal((await db.owner.select().from(secrets)).length, 0);
+});
+
+test('a restore retries after a competing write and preserves both committed versions', async (t) => {
+  await root.secrets.set('market/dev', { RACE: 'original' });
+  const rewrap = deps.vault.rewrap;
+  let compete = true;
+  let calls = 0;
+  t.mock.method(deps.vault, 'rewrap', async (input: Parameters<typeof rewrap>[0]) => {
+    const result = await rewrap(input);
+    calls++;
+    if (compete) {
+      compete = false;
+      await root.secrets.set('market/dev', { RACE: 'competing' });
+    }
+    return result;
+  });
+  assert.equal((await root.secrets.restore('market/dev/RACE', 1)).version, 3);
+  assert.equal(calls, 2);
+  assert.equal(await versionCount(), 3);
+  assert.deepEqual((await root.secrets.reveal('market/dev')).values, { RACE: 'original' });
+});
+
+test('a secret archived while rewrapping cannot be restored by the prepared write', async (t) => {
+  await root.secrets.set('market/dev', { RACE: 'original' });
+  const rewrap = deps.vault.rewrap;
+  t.mock.method(deps.vault, 'rewrap', async (input: Parameters<typeof rewrap>[0]) => {
+    const result = await rewrap(input);
+    await root.secrets.set('market/dev', { RACE: null });
+    return result;
+  });
+  await assert.rejects(root.secrets.restore('market/dev/RACE', 1), { status: 409 });
+  assert.equal(await versionCount(), 1);
+});
+
+for (const read of ['reveal', 'run', 'import preview'] as const) {
+  test(`${read} returns nothing when the app audit transaction fails after vault release`, async (t) => {
+    await root.secrets.set('market/dev', { VALUE: 'must stay inside the server' });
+    const transaction = db.runtime.transaction.bind(db.runtime);
+    t.mock.method(db.runtime, 'transaction', ((work, options) => transaction(async (tx) => {
+      await work(tx);
+      throw new Error('audit commit failed');
+    }, options)) as typeof db.runtime.transaction);
+    const operation = read === 'import preview'
+      ? root.secrets.dryRun('market/dev', { VALUE: 'must stay inside the server' })
+      : root.secrets.reveal(read === 'reveal' ? 'market/dev/VALUE' : 'market/dev');
+    await assert.rejects(operation, { status: 500, message: 'something went wrong; see the server log' });
+    assert.equal((await auditRows()).filter((row) => row.action === 'secret.read').length, 0);
+  });
+}

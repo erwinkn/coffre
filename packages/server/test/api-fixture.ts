@@ -13,6 +13,7 @@ import type { ApiContext } from '../src/api/context.ts';
 import { serveApi } from '../src/api/router.ts';
 import type { SigninService } from '../src/api/signin.ts';
 import { SyncRunner } from '../src/api/syncs.ts';
+import { assertOutsideTransaction } from './transaction-guard.ts';
 
 export type FixtureDeps = {
   db: Database;
@@ -60,8 +61,10 @@ export function testVault(rootAdmins: readonly string[], config: Pick<VaultConfi
       { now: () => Date.now() + offset },
     );
   };
-  const call = (name: keyof Vault) => async (...args: unknown[]) =>
-    ((await (current ??= open()))[name] as (...args: unknown[]) => Promise<unknown>)(...args);
+  const call = (name: keyof Vault) => async (...args: unknown[]) => {
+    assertOutsideTransaction(name);
+    return ((await (current ??= open()))[name] as (...args: unknown[]) => Promise<unknown>)(...args);
+  };
   const vault = {
     unwrap: call('unwrap'),
     wrap: call('wrap'),
