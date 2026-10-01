@@ -13,6 +13,9 @@ export const DEV = `${PROJECT}/dev`;
 export const PROD = `${PROJECT}/prod`;
 export const BULK = `${PROJECT}/bulk`;
 export const SERVICE = 'token:conformance-ci';
+/** Where the live checks' token reads, as an operator would set it up. */
+export const LIVE = `${PROJECT}/live`;
+export const LIVE_SERVICE = 'token:conformance-live';
 
 export type Person = { email: string; member: string; browser: Browser; api: CoffreClient };
 
@@ -96,6 +99,25 @@ export async function setUp(admin: Person) {
   };
   for (const path of [DEV, PROD]) await admin.api.secrets.set(path, valuesIn(canaries, path));
   return { detail: `${PROJECT}: dev and prod, ${Object.keys(canaries).length} values, and bulk`, value: canaries };
+}
+
+/**
+ * What `probe --token` asks an operator for: an environment holding one
+ * canary, and a service that reads it there and audits the project. Its
+ * value joins the others, for the scans that follow.
+ */
+export async function setUpLive(admin: Person, canaries: Canaries) {
+  await admin.api.environments.create(LIVE, { name: 'Live' });
+  const value = canary();
+  await admin.api.secrets.set(LIVE, { CANARY: value });
+  canaries[`${LIVE}/CANARY`] = value;
+  await admin.api.members.add(LIVE_SERVICE);
+  await admin.api.access.set(LIVE_SERVICE, { [LIVE]: 'viewer', [PROJECT]: 'auditor' });
+  const { token } = await admin.api.tokens.issue(LIVE_SERVICE, { label: 'conformance live', expiresInDays: 1 });
+  return {
+    detail: `${LIVE}/CANARY, and ${LIVE_SERVICE}: viewer there, auditor on ${PROJECT}`,
+    value: { token, canary: { project: PROJECT, environment: 'live', key: 'CANARY', value } },
+  };
 }
 
 /** The canaries in one environment, by key. */

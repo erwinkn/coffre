@@ -3,47 +3,23 @@
 // prints. Every value set is a random canary, so finding one is a leak.
 import { existsSync, readFileSync } from 'node:fs';
 
-import type { Params, RouteInput, RouteKey } from '@coffre/client';
-
 import { using } from '../database.ts';
 import type { Deployment } from '../harness.ts';
 import { expect } from '../report.ts';
+import { getCalls, getUrls } from '../routes.ts';
 import { BULK, DEV, PROD, PROJECT, SERVICE, type Canaries, type People } from './people.ts';
 
-type GetKey = Extract<RouteKey, `GET ${string}`>;
-
-/**
- * Each GET route, with what to ask it. Typed over every GET in the API, so
- * a route added to the server fails the typecheck here until it is scanned.
- */
-type Calls = { [K in GetKey]: { params: Params<K>; input?: RouteInput<K> }[] };
-
-function calls(people: People): Calls {
-  const members = [people.admin, people.reader, people.leaver, people.bulk].map((person) => person.member);
+function calls(people: People) {
   const places = [DEV, PROD, BULK].map((path) => {
     const [project, environment] = path.split('/') as [string, string];
     return { project, environment };
   });
-  return {
-    'GET /me': [{ params: {} }],
-    'GET /projects': [{ params: {} }],
-    'GET /secrets/:project/:environment': places.map((params) => ({ params })),
-    'GET /secrets/:project/:environment/:key/versions': [
-      { params: { ...places[0]!, key: 'API_KEY' } },
-      { params: { ...places[1]!, key: 'API_KEY' } },
-    ],
-    'GET /members': [{ params: {} }, { params: {}, input: { path: DEV } }],
-    'GET /members/:member': [...members, SERVICE].map((member) => ({ params: { member } })),
-    'GET /members/:member/tokens': [{ params: { member: SERVICE } }],
-    'GET /sessions': [{ params: {} }],
-    'GET /identities': [{ params: {} }],
-    'GET /device-logins/:code': [{ params: { code: 'BCDF-GHJK' } }],
-    'GET /syncs/providers': [{ params: {} }],
-    'GET /syncs/:project/:environment': places.map((params) => ({ params })),
-    'GET /audit': [{ params: {}, input: { limit: 500 } }],
-    'GET /audit/verification': [{ params: {} }],
-    'GET /audit/vault': [{ params: {}, input: { limit: 200 } }],
-  };
+  return getCalls({
+    places,
+    secrets: places.slice(0, 2).map((place) => ({ ...place, key: 'API_KEY' })),
+    members: [...[people.admin, people.reader, people.leaver, people.bulk].map((person) => person.member), SERVICE],
+    services: [SERVICE],
+  });
 }
 
 function pages(people: People): string[] {
@@ -91,14 +67,11 @@ export async function canaryScan(deployment: Deployment, people: People, canarie
   ];
 
   let answers = 0;
-  const routes = Object.entries(calls(people)) as [GetKey, { params: Record<string, string>; input?: object }[]][];
-  for (const [key, asks] of routes) {
-    for (const { params, input } of asks) {
-      const url = address(deployment.origin, key, params, input);
-      for (const [name, fetchAs] of callers) {
-        look(`${key} as ${name}`, await (await fetchAs(url)).text());
-        answers++;
-      }
+  const routes = calls(people);
+  for (const { key, url } of getUrls(deployment.origin, routes)) {
+    for (const [name, fetchAs] of callers) {
+      look(`${key} as ${name}`, await (await fetchAs(url)).text());
+      answers++;
     }
   }
   const paths = pages(people);
@@ -134,14 +107,7 @@ export async function canaryScan(deployment: Deployment, people: People, canarie
   stored.push("the processes' output");
 
   expect(leaks.length === 0, 'a value was found outside a reveal', leaks);
-  return `${answers} answers from ${routes.length} GET routes and ${paths.length} pages as ${callers.length} callers, and ${stored.join(', ')}: no value`;
-}
-
-function address(origin: string, key: GetKey, params: Record<string, string>, input: object | undefined): string {
-  const path = key.slice('GET '.length).replace(/:(\w+)/g, (_, name: string) => encodeURIComponent(params[name]!));
-  const url = new URL(`${origin}/api${path}`);
-  for (const [name, value] of Object.entries(input ?? {})) url.searchParams.set(name, String(value));
-  return url.href;
+  return `${answers} answers from ${Object.keys(routes).length} GET routes and ${paths.length} pages as ${callers.length} callers, and ${stored.join(', ')}: no value`;
 }
 
 /** A SQLite file and its write-ahead log, as bytes: what anyone with the disk would read. */

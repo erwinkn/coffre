@@ -39,8 +39,8 @@ run it on the examples, and `pnpm test:consumer` on what the packed CLI's
 `init` writes. Build first: the examples run the packages' `dist/`.
 
 `coffre-conformance probe https://secrets.example.com` checks an instance
-that is already running: health and headers only, since it cannot sign
-anyone in.
+that is already running, from outside and without changing it; see
+[Against a running instance](#against-a-running-instance).
 
 ## How it runs a deployment
 
@@ -75,13 +75,15 @@ In order, since each builds on the ones before:
 | Check | What must hold |
 |---|---|
 | health | `/livez` answers. On Workers, `/readyz` fails with the heartbeat an hour old, and passes once the Cron trigger has run |
-| headers | A CSP with a fresh nonce per page, which the page's scripts carry; frames refused; `nosniff`, `same-origin` resources, `no-store`; HSTS on https; no CORS for any origin; the page's script served |
+| headers, anonymous api, forged cross-site, sign-in info, anonymous answers | What `probe` checks as no one; see [below](#against-a-running-instance) |
 | sign-in | The root admin signs in through GitHub, and is the root admin |
 | setup, personas | The admin creates the project, its values and the people above |
 | members only | The stranger's sign-in is refused and leaves no session; no one gets 401 reading, revealing or writing, and a made-up token is refused |
 | grant scoping | The reader reads dev and nothing else, and changes nothing: no write, no grant, no member, no token, no vault log. So does the service, with its token. The bulk reader cannot read dev |
 | reveals audited | A reveal writes one `secret.read` per value, under the reveal's bundle and request, at the versions revealed |
 | cross-site | A write, a reveal and a sign-out with the admin's cookie, from another site or from no page at all: 403, no value in the answer, nothing changed |
+| live setup | The admin sets up what `probe --token` asks an operator for: `conformance/live/CANARY`, and `token:conformance-live`, a viewer there and auditor on the project |
+| token, token reveal, token scan, token scope, token verification | What `probe --token` checks, with that token; see [below](#against-a-running-instance) |
 | offboarding | Removing the leaver names the values they read, to rotate; their browser session, their CLI session and a new sign-in all stop at once. A removed service's token stops too |
 | bulk limit | One more value at once than the limit allows is refused; a single value still opens, so the refusal was the quantity, not the grant |
 | checkpoints | The Cron trigger checkpoints both logs, and both verify |
@@ -105,4 +107,138 @@ skipped, and the run ends with the processes' output.
   finds in its store until verification flags it. What stops it is who can
   write that store.
 - **A live instance's keys and settings.** The run uses its own keys and a
-  local database. `probe` sees only what anyone on the network can.
+  local database. `probe` sees what anyone on the network can, and what one
+  token of its own can.
+
+## Against a running instance
+
+`coffre-conformance probe <url>` checks an instance someone runs, from the
+outside. It never writes anything, with one exception: each run with a
+token adds a few entries to the instance's audit log, which is append-only,
+so they stay for good. It says so when it starts. They are the canary's
+read, and a refused read for each place it tries and must not reach: two a
+run with the setup below, a refused one more for each other environment in
+the canary's project. Besides, coffre notes when the token was last used, as
+it does for any token.
+
+It runs in two tiers. The local run above takes both too, against the
+deployment it booted, so they are tested in this repository's CI.
+
+**As no one**, the default:
+
+| Check | What must hold |
+|---|---|
+| health | `/livez` and `/readyz` answer: the instance is up and its scheduled job beats |
+| headers | As in the local run: a fresh CSP nonce per page, frames refused, `nosniff`, `no-store`, HSTS on https, no CORS for another origin |
+| anonymous api | Every route of the API, whatever its method, answers no one 401 with `{ error, message }` and nothing more. The routes come from the client's route map, so a route added to the server fails the typecheck until it is listed, and is checked from then on |
+| forged cross-site | Every change, and the sign-out, sent from another site with a session cookie gets 403. The cookie is made up: coffre refuses the request before it looks at the cookie, so a real one would get the same answer |
+| sign-in info | `GET /api/auth` names the sign-in providers, or Cloudflare Access, and nothing more |
+| anonymous answers | No page shows no one anything: every page but `/login` redirects to `/login` with an empty body, and `/login` carries no credential coffre issues. Without a value to look for, this is a best effort, and says so |
+
+**With `--token`**, a service token the operator set up for it:
+
+| Check | What must hold |
+|---|---|
+| token | The token is a service's, and reads the canary's environment, which holds its key |
+| token reveal | The canary is revealed once, its value is the one given, and the audit log holds exactly one allowed `secret.read` of it under the reveal's bundle and request |
+| token scan | The canary's value, as text, base64 or hex, is in no answer to any GET route, as the token or as no one, nor in any page: only in its reveal |
+| token scope | The token sees the canary's project and reads its environment, and nothing more: every other environment it is told of, a made-up place, the members and the vault's log refuse it, and the audit entries it reads are about its project only |
+| token verification | The whole audit chain verifies. Verifying is for owners and root admins, which a token cannot be, so this is skipped with a token, and says it was not checked |
+
+Each prints `ok`, `skip` or `FAIL` and a line, and the run exits 1 on any
+`FAIL`. The token tier needs coffre's own sign-in: behind Cloudflare Access,
+coffre issues no service tokens.
+
+### Setting up the canary and its token
+
+Once, as an owner. The CLI has no command yet to create a project, an
+environment or a token, so those three are made in the pages; the rest is
+the CLI.
+
+1. In **Projects**, create a project `conformance`, and in it an environment
+   `live`. Nothing else goes there.
+2. In **Tokens**, add a token `conformance-probe`, and issue it a credential.
+   It is shown once; keep it where the probe will run, as a secret.
+3. Write the canary, a random value nothing else uses, and give the token
+   read on it and the project's audit:
+
+   ```sh
+   CANARY="coffre-canary-$(openssl rand -hex 16)"
+   printf '%s' "$CANARY" | coffre set conformance/live/CANARY
+   coffre grant conformance conformance-probe --service --role viewer --env live
+   coffre grant conformance conformance-probe --service --role auditor
+   ```
+
+   Keep `$CANARY` beside the token: the probe looks for it.
+
+Then:
+
+```sh
+coffre-conformance probe https://secrets.example.com                     # as no one
+COFFRE_TOKEN=coffre_svc_… COFFRE_CONFORMANCE_CANARY="$CANARY" \
+  coffre-conformance probe https://secrets.example.com --canary conformance/live/CANARY
+```
+
+`--token` and `--canary <project>/<env>/<KEY>=<value>` work too, but leave
+both in the shell's history. Without `=<value>`, the value is read from
+`COFFRE_CONFORMANCE_CANARY`, or else from the first line of stdin.
+
+For example, with a project `payments` the token holds nothing on:
+
+```
+coffre-conformance: probing https://secrets.example.com, as no one and with a token
+  (the token's reads add a few entries to the instance's audit log, for good)
+  ok    health              /livez and /readyz
+  ok    headers             a fresh CSP nonce per page, frames refused, nosniff; no CORS; /_coffre/assets/index-BBkrf0VJ.js served
+  ok    anonymous api       35 routes, every method: 401, and nothing but the refusal
+  ok    forged cross-site   21 changes, sign-out included, from another site with a session cookie: 403
+  ok    sign-in info        coffre's sign-in through github, and nothing more
+  ok    anonymous answers   best effort, without a canary: 12 closed pages send no one to /login with nothing else; /login carries no credential
+  ok    token               token:conformance-probe, reading conformance/live
+  ok    token reveal        one secret.read of CANARY, entry 14, under request 93bed984-625a-4a70-a28d-3412981816d4
+  ok    token scan          70 answers from 15 GET routes and 13 pages, as the token and as no one: no value
+  ok    token scope         only conformance/live; 7 reads elsewhere refused: no other environment of conformance, a made-up place, the members, the vault's log
+  skip  token verification  verification is for owners and root admins, which this token is not: not checked
+conformant
+```
+
+### Every day, from CI
+
+A scheduled job, here on GitHub Actions, with the token and the canary as
+the repository's secrets. This repository runs none; it is an example:
+
+```yaml
+name: Conformance
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Probe the live instance
+        run: npx --yes @coffre/conformance probe https://secrets.example.com --canary conformance/live/CANARY
+        env:
+          COFFRE_TOKEN: ${{ secrets.COFFRE_PROBE_TOKEN }}
+          COFFRE_CONFORMANCE_CANARY: ${{ secrets.COFFRE_PROBE_CANARY }}
+```
+
+Each run adds its two entries to the audit log.
+
+### What it cannot check
+
+Everything that needs the deployment's insides, which only the local run
+has: offboarding (it would remove someone), the bulk limit, the two logs
+agreeing entry for entry, a value refused when the audit log is, the
+tables, the vault's store and the processes' output holding no value,
+append-only logins, and tampering with either log. Nor anything the
+token would have to write to show: that a viewer cannot write, grant or
+add members is checked locally, not here. And it sees only what one token
+reads: a leak to another member, in a place the token cannot reach, is
+not something it can see.
+
