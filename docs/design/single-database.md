@@ -124,6 +124,7 @@ more it answers on the way.
 | F5, medium | A KMS failure halfway through a batch leaves no vault record of the keys KMS did open | Question 2: the intent is logged before KMS, every call settles, and each key's outcome is logged. Plan step 4 |
 | F8, low | The database owner can cut the newest entries off a log and put its head back | Question 7: a window of at most five minutes, bounded by checkpoints, the vault's memory and witnesses. `architecture.md` stops overstating the chain. Plan step 10 |
 | A01, high | The vault commits an access change before the app's audit append; if that fails, the change stays live with no app entry, and a half-done removal revives old sessions on re-admission | Question 1, "Access changes across two transactions": intent and revocations first, then the vault, then a retried record keyed by the vault's entry. Plan step 1 |
+| A07, A08, medium, being fixed on #19 | An account binding survives a change of its provider's issuer; linking an account can race offboarding and survive re-admission | Their fixes change the schema this design moves: `identities` bound to their issuer, and a membership generation on credentials and identities. Question 5 says where the generation should end up. Plan steps 2 to 5 |
 | Closing note | The shared database needs separate logins, protected grant and log tables, and bulk and authorisation accounting that holds across instances | Questions 1, 2 and 4. Where logins do not exist, on PlanetScale MySQL and SQLite, member MACs and checkpoints stand in, and question 4 says what that leaves open |
 
 ## The decisions
@@ -184,9 +185,12 @@ C. app transaction    the outcome entries, each naming the vault entry it mirror
 - **Reductions come first.** A removal revokes Ada's credentials in A,
   before the vault removes her. If B fails she is signed out but still a
   member, which the admin sees as an error and retries. C revokes again,
-  for a token issued between A and B. The membership generation on
-  credentials, which a separate PR adds, makes a credential from before a
-  removal useless after a re-admission whatever else goes wrong.
+  for a token issued between A and B. A takes the principal's row lock,
+  the one sign-in and account linking take once app review A08 is fixed,
+  so no account is linked between A and C unseen, and C's sweep covers
+  linked accounts too. The membership generation on credentials (A08,
+  question 5) makes a credential from before a removal useless after a
+  re-admission whatever else goes wrong.
 - **The intent is durable before anything changes.** Every live access
   change has its entry in the vault's log, written in the transaction that
   made it, and an intent in the app's log written before it.
@@ -448,7 +452,7 @@ PlanetScale is a second bill.
 
 | Table | Change from the vault's SQLite | App's login | Vault's login |
 |---|---|---|---|
-| `vault_members` | adds `access_seq` and `mac` | nothing | SELECT, INSERT, UPDATE |
+| `vault_members` | adds `access_seq`, `generation` and `mac` | nothing | SELECT, INSERT, UPDATE |
 | `vault_grants` | adds `place_id`, the environment's id or, for a project grant, the project's; unique with `principal` | nothing | SELECT, INSERT, DELETE |
 | `vault_log` | adds an index on `subject, seq` | `seq`, `prev_hash`, `hash`: SELECT | SELECT, INSERT |
 | `vault_head` | new: the lock row, with `next_seq`, `head_hash`, `mac` | SELECT | SELECT, UPDATE on those columns |
@@ -462,6 +466,24 @@ subject, no detail. Postgres and MySQL both grant SELECT per column.
 today. That follows the rule `architecture.md` set for the app: remodel
 what one engine cannot say, rather than write it three ways. Times stay
 integers of milliseconds, which the vault's chain already hashes.
+
+Two changes to the app's tables are in flight on #19, from app review A07
+and A08, and the move carries them as they land. Its PR will give the
+exact columns. A07 binds each sign-in account to the authority that issued
+it: an OIDC issuer, or a GitHub server, beside the subject. That stays in
+the app's `identities` table, and the move into `@coffre/db` carries it
+unchanged. A08 adds a membership generation: credentials and linked
+accounts are stamped with the generation they were issued under, and one
+from an earlier generation is refused. Whether someone is a member is the
+vault's to say, so the generation should be the vault's too. I propose it
+be the `seq` of the vault log entry that last admitted or restored the
+member, kept in `vault_members.generation`. The member MAC then covers it,
+the replay of the log checks it, and `access()` returns it with the rest. It
+needs no counter of its own, and it changes on admission, restoration and
+removal only, so a grant does not sign anyone out. The app keeps the stamp
+on its rows and compares it with what `access()` returns. If #19 lands an
+app-side counter first, the stamp keeps working and only its source moves,
+in plan step 4.
 
 `@coffre/vault` owns the `vault_*` tables and is the only code that queries
 them. `@coffre/server` owns the rest. The lint rule that confines Drizzle to
@@ -865,11 +887,14 @@ it says otherwise. "The suite" means `pnpm test:all`, `pnpm typecheck`,
 2. **`@coffre/db`.** Move `packages/server/src/db` into a package: the
    schemas, migrations, `dialect.ts`, `portable.ts`, `connect.ts`, the
    Hyperdrive pool and the migrator. The server imports it by name, and
-   `coffre-server migrate` delegates to it. Nothing else changes. Verified
-   by the suite on all three engines, `db:check`, `check:pins` and
+   `coffre-server migrate` delegates to it. Nothing else changes; the
+   `identities` and `credentials` columns from #19 (A07, A08) move with the
+   rest, so this step lands after #19 or rebases onto it. Verified by the
+   suite on all three engines, `db:check`, `check:pins` and
    `test:consumer`.
 3. **The vault's tables in the baseline.** `vault_members`, `vault_grants`,
-   `vault_log`, `vault_head` and `vault_checkpoints` in all three schemas.
+   `vault_log`, `vault_head` and `vault_checkpoints` in all three schemas,
+   with `vault_members.generation`.
    On Postgres, the `coffre_vault` role, a check that `coffre_vault_runtime`
    exists, the GRANTs, including each side's SELECT on the other log's
    `seq`, `prev_hash` and `hash`, and append-only triggers on both logs and
@@ -883,6 +908,8 @@ it says otherwise. "The suite" means `pnpm test:all`, `pnpm typecheck`,
    against `@coffre/db`. Decisions take the head lock first: pre-check,
    intent when the KEK is in KMS, keys with every call settled, decide with
    each key's outcome logged. A decision refuses whenever its pre-check did.
+   `access()` returns the membership generation, and the app compares its
+   stamps against it.
    `#serial` goes; the vault remembers the last head it saw and refuses if
    it goes backwards. Delete `sqlite.ts`, `sqlite-node.ts`,
    `sqlite-durable-object.ts` and the vault's `schema.ts`. Verified by
@@ -892,12 +919,14 @@ it says otherwise. "The suite" means `pnpm test:all`, `pnpm typecheck`,
    after the removal commits, and the chain verifies after both; and the
    review's R4 (a partial KMS failure leaves a record) and R6 (a second
    instance shares the log and the limit), ported.
-5. **Row integrity.** The member MAC over the member's grants, `access_seq`
-   and its freshness check, the `vault_head` MAC and last-entry check, the
-   `tampered` refusal code in `@coffre/core`, worded on the pages and in the
-   CLI, and `verifyLog` reporting MAC faults. Verified by unit tests for a
-   grant forged, edited and deleted; an old member row and its grants put
-   back; the log's newest entries deleted without the head.
+5. **Row integrity.** The member MAC over the member's grants,
+   `access_seq` and `generation`; the freshness check; the replay checking
+   `generation`; the `vault_head` MAC and last-entry check; the `tampered`
+   refusal code in `@coffre/core`, worded on the pages and in the CLI; and
+   `verifyLog` reporting MAC faults. Verified by unit tests for a grant
+   forged, edited and deleted; an old member row and its grants put back;
+   a generation rolled back; the log's newest entries deleted without the
+   head.
 6. **Checkpoints that prove extension.** `checkpoint()` loses `previous`:
    the vault reads the audit log's hashes from its last signed head and
    signs only an extension. The heartbeat reads the vault log's hashes from
@@ -981,7 +1010,11 @@ it says otherwise. "The suite" means `pnpm test:all`, `pnpm typecheck`,
     app's record is retried until it lands? Recommended: yes. One
     transaction is what merging buys (A01); the KEK in the app's bundle is
     what it costs.
-14. Accept that the database owner can cut up to five minutes off the end
+14. Make the membership generation of A08 the vault's: the log entry that
+    last admitted or restored the member? Recommended: yes. Membership is
+    the vault's to say, and this needs no counter, since the MAC covers it
+    and replaying the log checks it.
+15. Accept that the database owner can cut up to five minutes off the end
     of either log, caught only by a witness or a vault instance that saw
     it? Recommended: yes, with readiness counting checkpoints (F3) so the
     five minutes hold. Closing it means anchoring every append outside the
