@@ -183,6 +183,9 @@ export async function verifyAudit(ctx: ApiContext): Promise<AuditVerification> {
       for (;;) {
         const batch = await auditRange(tx, nextSequence, VERIFY_BATCH);
         if (batch.length === 0) break;
+        if (batch[0].seq !== nextSequence) {
+          return audit(batch[0].seq, `sequence gap: expected seq ${nextSequence}, found ${batch[0].seq}`);
+        }
         const result = verifyChain(ctx.chainKey, batch, previousHash);
         if (!result.ok) return audit(result.failedAtSeq, result.reason);
         rows += result.rows;

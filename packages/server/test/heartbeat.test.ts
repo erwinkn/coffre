@@ -88,6 +88,38 @@ test('a vault emptied behind the checkpoint the app recorded is not signed over'
   assert.equal((await vault.latestCheckpoint()).checkpoint, null);
 });
 
+test('a refused checkpoint leaves readiness stale', async () => {
+  const chainKey = Buffer.alloc(32, 1);
+  await writeAuditHeartbeat(db.runtime, chainKey, vault, quiet);
+  await db.owner.update(auditLog).set({ hash: Buffer.alloc(32, 9) }).where(eq(auditLog.seq, 0n));
+  await beatAgo(HEARTBEAT_STALE_AFTER_SECONDS + 60);
+  const [before] = await db.owner.select().from(auditHeartbeat);
+  assert.equal((await auditReadiness(db.runtime)).ok, false);
+
+  assert.equal(await writeAuditHeartbeat(db.runtime, chainKey, vault, { warn() {} }), false);
+  assert.equal((await auditReadiness(db.runtime)).ok, false);
+  assert.deepEqual(await db.owner.select().from(auditHeartbeat), [before]);
+});
+
+test('a checkpoint whose audit entry rolls back leaves readiness stale', async (t) => {
+  await beatAgo(HEARTBEAT_STALE_AFTER_SECONDS + 60);
+  const [before] = await db.owner.select().from(auditHeartbeat);
+  const transaction = db.runtime.transaction.bind(db.runtime);
+  let calls = 0;
+  t.mock.method(db.runtime, 'transaction', ((work, options) => transaction(async (tx) => {
+    const call = ++calls;
+    const result = await work(tx);
+    if (call === 2) throw new Error('checkpoint commit failed');
+    return result;
+  }, options)) as typeof db.runtime.transaction);
+
+  assert.equal(await writeAuditHeartbeat(db.runtime, Buffer.alloc(32, 1), vault, { warn() {} }), false);
+  assert.notEqual((await vault.latestCheckpoint()).checkpoint, null);
+  assert.deepEqual((await db.owner.select().from(auditLog)).map((row) => row.action), ['audit.heartbeat']);
+  assert.equal((await auditReadiness(db.runtime)).ok, false);
+  assert.deepEqual(await db.owner.select().from(auditHeartbeat), [before]);
+});
+
 test('a vault checkpoint behind the one recorded means its store went back', () => {
   const checkpoint = (seq: number, signature = `s${seq}`) => ({
     seq,

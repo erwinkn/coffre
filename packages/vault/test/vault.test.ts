@@ -180,6 +180,55 @@ function watched() {
   return { keks: new KekRegistry(kek), seen };
 }
 
+for (const [operation, failure] of [
+  ['wrap', null], ['wrap', 'provider'], ['wrap', 'log'], ['unwrap', null], ['unwrap', 'log'],
+] as const) {
+  test(`${operation} clears the DEK buffer after ${failure === null ? 'success' : `${failure} failure`}`, async (t) => {
+    const inner = LocalKekProvider.generate('test-kek-1');
+    const held: Buffer[] = [];
+    let fail = false;
+    const kek: KekProvider = {
+      provider: inner.provider,
+      keyId: inner.keyId,
+      keyVersion: inner.keyVersion,
+      wrap: async (key, ctx) => {
+        held.push(key);
+        if (fail && failure === 'provider') throw new KekUnavailableError('test provider failure');
+        return inner.wrap(key, ctx);
+      },
+      unwrap: async (wrapped, ctx) => {
+        const key = await inner.unwrap(wrapped, ctx);
+        held.push(key);
+        return key;
+      },
+    };
+    const w = await world(t, { keks: new KekRegistry(kek) });
+    const secret = w.secret(w.dev);
+    const key = randomBytes(32).toString('base64');
+    const sealed = await w.vault.wrap({ principal: ROOT, items: [{ secret, key }] });
+    assert.ok(sealed.ok);
+    held.length = 0;
+    fail = true;
+    if (failure === 'log') {
+      const db = raw(w);
+      t.after(() => db.close());
+      db.exec("CREATE TRIGGER refuse_log BEFORE INSERT ON log BEGIN SELECT RAISE(ABORT, 'test log failure'); END");
+    }
+    const call = operation === 'wrap'
+      ? w.vault.wrap({ principal: ROOT, items: [{ secret, key }] })
+      : w.vault.unwrap({ principal: ROOT, purpose: 'reveal', items: [{ secret, wrapped: sealed.wrapped[0] }] });
+    if (failure !== null) {
+      await assert.rejects(call, /test (provider|log) failure/);
+    } else {
+      const result = await call;
+      assert.ok(result.ok);
+      if ('keys' in result) assert.deepEqual(result.keys, [key]);
+    }
+    assert.equal(held.length, 1);
+    assert.deepEqual(held[0], Buffer.alloc(32), 'no raw DEK remains in the buffer handed to or returned by the provider');
+  });
+}
+
 test('only a call the rules allow reaches the KEK', async (t) => {
   const { keks, seen } = watched();
   const w = await world(t, { keks, bulkLimit: { count: 2, windowMs: 60_000 } });

@@ -46,8 +46,9 @@ function pages(people: People): string[] {
 export async function canaryScan(deployment: Deployment, people: People, canaries: Canaries): Promise<string> {
   const values = Object.values(canaries);
   const leaks: string[] = [];
-  const look = (where: string, text: string) => {
-    const found = values.filter((value) => text.includes(value));
+  const look = (where: string, content: string | Uint8Array) => {
+    const bytes = Buffer.from(content);
+    const found = values.filter((value) => bytes.includes(value));
     if (found.length > 0) leaks.push(`${where}: ${found.length} value${found.length === 1 ? '' : 's'}`);
   };
 
@@ -89,8 +90,13 @@ export async function canaryScan(deployment: Deployment, people: People, canarie
         `SELECT table_name AS name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'`,
       );
       for (const { name } of tables) {
-        const rows = await sql.query<{ row: string }>(`SELECT t::text AS row FROM "${name}" t`);
-        look(`the database's ${name} table`, rows.map((row) => row.row).join('\n'));
+        // A record cast to text hex-encodes bytea, hiding a plaintext leak.
+        const rows = await sql.query(`SELECT * FROM "${name.replaceAll('"', '""')}"`);
+        for (const row of rows) {
+          for (const value of Object.values(row)) {
+            look(`the database's ${name} table`, value instanceof Uint8Array ? value : JSON.stringify(value) ?? '');
+          }
+        }
       }
       stored.push(`${tables.length} tables`);
     });
@@ -99,10 +105,9 @@ export async function canaryScan(deployment: Deployment, people: People, canarie
     stored.push('the database file');
   }
   const store = deployment.vaultStore();
-  if (store !== null) {
-    look("the vault's store", files(store));
-    stored.push("the vault's store");
-  }
+  expect(store !== null, "the vault's store could not be found; its canaries were not checked");
+  look("the vault's store", files(store));
+  stored.push("the vault's store");
   look("the processes' output", deployment.output());
   stored.push("the processes' output");
 
@@ -111,9 +116,9 @@ export async function canaryScan(deployment: Deployment, people: People, canarie
 }
 
 /** A SQLite file and its write-ahead log, as bytes: what anyone with the disk would read. */
-function files(path: string): string {
-  return [path, `${path}-wal`]
+function files(path: string): Buffer {
+  expect(existsSync(path), `the store file could not be found: ${path}`);
+  return Buffer.concat([path, `${path}-wal`]
     .filter((file) => existsSync(file))
-    .map((file) => readFileSync(file).toString('latin1'))
-    .join('\n');
+    .map((file) => readFileSync(file)));
 }

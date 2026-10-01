@@ -45,6 +45,8 @@
   "devDependencies": {
     "@cloudflare/workers-types": "5.20260920.1",
     "@types/node": "26.1.1",
+    "esbuild": "0.28.1",
+    "miniflare": "5.20260730.0-alpha",
     "tsdown": "0.23.0",
     "typescript": "5.9.3"
   }

@@ -138,6 +138,8 @@ class VaultService implements Vault {
 
   // --- keys ---------------------------------------------------------------
 
+  // Clear raw DEKs on every path. JSON/base64 transport leaves strings we
+  // cannot wipe, so this is best-effort memory hygiene.
   unwrap(input: UnwrapInput): Promise<Outcome<{ keys: string[] }>> {
     return this.#serial(async () => {
       const at = this.#now();
@@ -148,7 +150,12 @@ class VaultService implements Vault {
         ? await Promise.all(
             input.items.map(async ({ secret, wrapped }) => {
               const key = await this.#open(wrapped, secret);
-              return key && base64(key);
+              if (key === null) return null;
+              try {
+                return base64(key);
+              } finally {
+                key.fill(0);
+              }
             }),
           )
         : [];
@@ -183,9 +190,14 @@ class VaultService implements Vault {
       const at = this.#now();
       const wrapped = this.#mayAll(input.principal, 'secret.write', input.items, at)
         ? await Promise.all(
-            input.items.map(({ secret, key }) =>
-              this.#config.keks.wrap(Buffer.from(key, 'base64'), context(secret)).then(serialisable),
-            ),
+            input.items.map(async ({ secret, key }) => {
+              const dek = Buffer.from(key, 'base64');
+              try {
+                return serialisable(await this.#config.keks.wrap(dek, context(secret)));
+              } finally {
+                dek.fill(0);
+              }
+            }),
           )
         : [];
       return this.#decide(at, (log) => {
