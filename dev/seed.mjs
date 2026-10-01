@@ -6,6 +6,7 @@
 // and audit code path the CLI and UI use. It signs in as the root admin the
 // way a browser does, through the dev IdP's stand-in GitHub.
 
+import { browser } from './browser.mjs';
 import {
     loadLocalSeedConfig,
     LOCAL_SEED_DIRECTORY,
@@ -22,48 +23,7 @@ const pool = new pg.Pool({
     connectionString: local.databaseUrl,
 });
 
-/** The cookie a redirect sets, not one it clears, as a request sends it back. */
-function cookieFrom(response, what) {
-    const set = response.headers.getSetCookie().find((cookie) => !/=;|max-age=0/i.test(cookie));
-    if (response.status !== 302 || set === undefined) {
-        throw new Error(`${what}: expected a redirect with a cookie, got ${response.status}`);
-    }
-    return set.split(';')[0];
-}
-
-/**
- * Sign in as a browser would: leave for the stand-in GitHub, answer its
- * persona page with the email, and come back with a session cookie.
- */
-async function signIn(email) {
-    const leave = await fetch(`${API}/auth/signin/github`, { redirect: 'manual' });
-    const pending = cookieFrom(leave, 'leaving for GitHub');
-    const authorize = new URL(leave.headers.get('location'));
-    if (authorize.origin !== new URL(IDP).origin) throw new Error(`sign-in went to ${authorize.origin}, not the dev IdP`);
-    const form = new URLSearchParams(authorize.searchParams);
-    form.set('email', email);
-    const approve = await fetch(authorize.origin + authorize.pathname, { method: 'POST', body: form, redirect: 'manual' });
-    const back = await fetch(approve.headers.get('location') ?? `${API}/`, {
-        headers: { cookie: pending },
-        redirect: 'manual',
-    });
-    return cookieFrom(back, `signing in as ${email}`);
-}
-
-/** A call as one of coffre's own pages makes it, with the session cookie. */
-async function call(session, method, path, body) {
-    const response = await fetch(`${API}${path}`, {
-        method,
-        headers: { cookie: session, origin: API, 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' },
-        body: body === undefined ? undefined : JSON.stringify(body),
-        redirect: 'manual',
-    });
-    if (!response.ok) {
-        const detail = await response.text();
-        throw new Error(`${method} ${path} -> ${response.status} ${detail}`);
-    }
-    return response.status === 204 ? null : response.json();
-}
+const { signIn, call } = browser(API, IDP);
 
 const put = (session, path, body) => call(session, 'PUT', path, body);
 const patch = (session, path, body) => call(session, 'PATCH', path, body);

@@ -195,7 +195,8 @@ keys separately. A database backup alone contains no KEK. A KEK alone is
 not enough to restore verification: keep `SIGNING_KEY` and `AUDIT_CHAIN_KEY`
 from that deployment too, plus its OAuth credentials and configuration.
 
-For an intentional restore:
+For an intentional restore (the full runbook, for PlanetScale and plain
+Postgres, and the local drill: [restore.md](restore.md)):
 
 1. Stop traffic and both components. Restore the whole database to the same
    point in time, preferably into a new database or managed-service branch.
