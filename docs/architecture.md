@@ -82,7 +82,7 @@ Object).
 | `@coffre/cli` | `init`, `login`, secrets, syncs, audit; built on the client | a CLI session |
 
 A package imports another by name, never by a relative path (a lint rule
-holds every package to it), and all six are released together at one
+holds every package to it), and all seven are released together at one
 version. So each builds and ships on its own, and a deployment can take one
 in, as its own code, to change it. Everything ships as compiled JavaScript
 with declarations, since Node refuses to strip TypeScript types inside
