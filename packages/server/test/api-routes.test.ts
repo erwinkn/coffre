@@ -189,7 +189,7 @@ test('values leave only through POST /reveals, and each one is logged', async ()
   const revealed = await root.secrets.reveal('market/prod/DATABASE_URL');
   assert.deepEqual({ ...revealed.values }, { DATABASE_URL: 'postgres://secret-value' });
   const logged = await db.owner
-    .select({ bundleId: auditLog.bundleId })
+    .select({ bundleId: auditLog.operationId })
     .from(auditLog)
     .where(eq(auditLog.action, 'secret.read'));
   assert.equal(logged.length, before + 1);

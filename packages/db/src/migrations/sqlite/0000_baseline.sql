@@ -5,8 +5,8 @@ CREATE TABLE `audit_chain_head` (
 	`only_row` integer PRIMARY KEY DEFAULT true NOT NULL,
 	`next_seq` integer DEFAULT 0 NOT NULL,
 	`head_hash` blob NOT NULL,
-	`updated_at` integer DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER)) NOT NULL,
 	CONSTRAINT "audit_chain_head_only_row_check" CHECK("audit_chain_head"."only_row"),
+	CONSTRAINT "audit_chain_head_next_seq_check" CHECK("audit_chain_head"."next_seq" >= 0),
 	CONSTRAINT "audit_chain_head_head_hash_check" CHECK(octet_length("audit_chain_head"."head_hash") = 32)
 );
 --> statement-breakpoint
@@ -19,37 +19,46 @@ CREATE TABLE `audit_heartbeat` (
 --> statement-breakpoint
 CREATE TABLE `audit_log` (
 	`seq` integer PRIMARY KEY NOT NULL,
-	`id` text NOT NULL,
-	`occurred_at` text DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) NOT NULL,
-	`actor_type` text NOT NULL,
-	`actor_id` text NOT NULL,
+	`author` text NOT NULL,
+	`key_id` text NOT NULL,
+	`occurred_at` integer NOT NULL,
+	`actor` text NOT NULL,
 	`action` text NOT NULL,
 	`decision` text NOT NULL,
+	`code` text,
+	`subject_principal` text,
 	`project_id` text,
 	`environment_id` text,
 	`secret_id` text,
-	`bundle_id` text,
+	`secret_version_id` text,
+	`operation_id` text,
 	`request_id` text,
 	`source_ip` text,
+	`related_seq` integer,
 	`metadata` text DEFAULT '{}' NOT NULL,
 	`prev_hash` blob NOT NULL,
+	`mac` blob NOT NULL,
 	`hash` blob NOT NULL,
 	FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON UPDATE no action ON DELETE restrict,
 	FOREIGN KEY (`environment_id`) REFERENCES `environments`(`id`) ON UPDATE no action ON DELETE restrict,
 	FOREIGN KEY (`secret_id`) REFERENCES `secrets`(`id`) ON UPDATE no action ON DELETE restrict,
-	CONSTRAINT "audit_log_actor_type_check" CHECK("audit_log"."actor_type" IN ('user', 'service', 'system')),
+	FOREIGN KEY (`secret_version_id`) REFERENCES `secret_versions`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`related_seq`) REFERENCES `audit_log`(`seq`) ON UPDATE no action ON DELETE restrict,
+	CONSTRAINT "audit_log_author_check" CHECK("audit_log"."author" IN ('app', 'vault')),
+	CONSTRAINT "audit_log_actor_check" CHECK("audit_log"."actor" GLOB 'user:?*' OR "audit_log"."actor" GLOB 'token:?*' OR "audit_log"."actor" GLOB 'sync:?*' OR "audit_log"."actor" GLOB 'system:?*'),
 	CONSTRAINT "audit_log_decision_check" CHECK("audit_log"."decision" IN ('allow', 'deny')),
 	CONSTRAINT "audit_log_metadata_check" CHECK(json_valid("audit_log"."metadata")),
 	CONSTRAINT "audit_log_prev_hash_check" CHECK(octet_length("audit_log"."prev_hash") = 32),
+	CONSTRAINT "audit_log_mac_check" CHECK(octet_length("audit_log"."mac") = 32),
 	CONSTRAINT "audit_log_hash_check" CHECK(octet_length("audit_log"."hash") = 32)
 );
 --> statement-breakpoint
-CREATE INDEX `audit_log_occurred_idx` ON `audit_log` (`occurred_at`);--> statement-breakpoint
-CREATE INDEX `audit_log_actor_idx` ON `audit_log` (`actor_type`,`actor_id`,`occurred_at`);--> statement-breakpoint
-CREATE INDEX `audit_log_secret_idx` ON `audit_log` (`secret_id`,`occurred_at`);--> statement-breakpoint
-CREATE INDEX `audit_log_environment_idx` ON `audit_log` (`environment_id`,`occurred_at`);--> statement-breakpoint
-CREATE INDEX `audit_log_bundle_idx` ON `audit_log` (`bundle_id`);--> statement-breakpoint
-CREATE UNIQUE INDEX `audit_log_id_key` ON `audit_log` (`id`);--> statement-breakpoint
+CREATE INDEX `audit_log_project_idx` ON `audit_log` (`project_id`,`seq`);--> statement-breakpoint
+CREATE INDEX `audit_log_environment_idx` ON `audit_log` (`environment_id`,`seq`);--> statement-breakpoint
+CREATE INDEX `audit_log_secret_idx` ON `audit_log` (`secret_id`,`seq`);--> statement-breakpoint
+CREATE INDEX `audit_log_actor_idx` ON `audit_log` (`actor`,`seq`);--> statement-breakpoint
+CREATE INDEX `audit_log_operation_idx` ON `audit_log` (`operation_id`,`seq`);--> statement-breakpoint
+CREATE INDEX `audit_log_action_idx` ON `audit_log` (`author`,`action`,`seq`);--> statement-breakpoint
 CREATE TABLE `credentials` (
 	`id` text PRIMARY KEY NOT NULL,
 	`kind` text NOT NULL,
@@ -243,3 +252,16 @@ CREATE INDEX `syncs_environment_idx` ON `syncs` (`environment_id`);--> statement
 INSERT INTO `audit_chain_head` (`only_row`, `next_seq`, `head_hash`) VALUES (true, 0, zeroblob(32));
 --> statement-breakpoint
 INSERT INTO `audit_heartbeat` (`only_row`, `last_seq`) VALUES (true, 0);
+--> statement-breakpoint
+
+-- The audit log only grows: no statement may change or delete an entry.
+-- What gets past this anyway, the entries' MACs and chain show.
+CREATE TRIGGER `audit_log_no_update` BEFORE UPDATE ON `audit_log`
+BEGIN
+    SELECT RAISE(ABORT, 'audit_log is append-only');
+END;
+--> statement-breakpoint
+CREATE TRIGGER `audit_log_no_delete` BEFORE DELETE ON `audit_log`
+BEGIN
+    SELECT RAISE(ABORT, 'audit_log is append-only');
+END;

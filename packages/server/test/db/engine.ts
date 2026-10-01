@@ -1,6 +1,8 @@
-import { createDatabase, type Database } from '@coffre/db';
+import { createDatabase, tablesOf, type Database, type Queryable } from '@coffre/db';
 import { openDatabase } from '@coffre/db/connect';
 import type { Engine } from '@coffre/db/dialect';
+import { forgetLogHeads } from '@coffre/db/log';
+import { sql, type SQL } from 'drizzle-orm';
 
 import { TEST_OWNER_DATABASE_URL, TEST_RUNTIME_DATABASE_URL } from './connections.ts';
 import { guardTransactions } from '../transaction-guard.ts';
@@ -50,4 +52,42 @@ export async function openTestDatabase(): Promise<{ owner: Database; runtime: Da
 /** Test options that run a test on Postgres only, saying why it cannot run elsewhere. */
 export function postgresOnly(reason: string): { skip: string | false } {
   return { skip: TEST_ENGINE === 'postgres' ? false : `Postgres only: ${reason}` };
+}
+
+/**
+ * `work`, as the owner, with the audit log's append-only triggers lifted:
+ * what a test does to empty the log between cases, or to play someone who
+ * rewrites it. Postgres disables them for one transaction; SQLite has no such
+ * switch, so they are dropped and made again.
+ */
+export async function withLogUnlocked<T>(owner: Database, work: (db: Queryable) => Promise<T>): Promise<T> {
+  if (TEST_ENGINE === 'postgres') {
+    return owner.transaction(async (tx) => {
+      await tx.execute(sql`ALTER TABLE audit_log DISABLE TRIGGER USER`);
+      const result = await work(tx);
+      await tx.execute(sql`ALTER TABLE audit_log ENABLE TRIGGER USER`);
+      return result;
+    });
+  }
+  const sqlite = owner as unknown as { all<Row>(query: SQL): Promise<Row[]>; run(query: SQL): Promise<unknown> };
+  const triggers = await sqlite.all<{ name: string; sql: string }>(
+    sql`SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'audit_log'`,
+  );
+  for (const trigger of triggers) await sqlite.run(sql.raw(`DROP TRIGGER ${trigger.name}`));
+  try {
+    return await work(owner);
+  } finally {
+    for (const trigger of triggers) await sqlite.run(sql.raw(trigger.sql));
+  }
+}
+
+/**
+ * Empty the audit log and rewind its head, and forget the heads this process
+ * found in it, which would otherwise refuse the next append as a rollback.
+ */
+export async function emptyLog(owner: Database): Promise<void> {
+  const { auditLog, auditChainHead } = tablesOf(owner);
+  await withLogUnlocked(owner, (db) => db.delete(auditLog));
+  await owner.update(auditChainHead).set({ nextSeq: 0n, headHash: Buffer.alloc(32) });
+  forgetLogHeads();
 }

@@ -52,7 +52,7 @@ async function importText(content: string, dryRun: boolean, as = root) {
 
 async function auditRows(action: string, decision: 'allow' | 'deny') {
   const rows = await db.owner
-    .select({ metadata: auditLog.metadata, bundleId: auditLog.bundleId })
+    .select({ metadata: auditLog.metadata, bundleId: auditLog.operationId })
     .from(auditLog)
     .where(and(eq(auditLog.action, action), eq(auditLog.decision, decision)))
     .orderBy(asc(auditLog.seq));

@@ -13,6 +13,7 @@ import type { ApiContext } from '../src/api/context.ts';
 import { serveApi } from '../src/api/router.ts';
 import type { SigninService } from '../src/api/signin.ts';
 import { SyncRunner } from '../src/api/syncs.ts';
+import { emptyLog } from './db/engine.ts';
 import { assertOutsideTransaction } from './transaction-guard.ts';
 
 export type FixtureDeps = {
@@ -156,9 +157,7 @@ export function testDeps(db: Database, rootAdmins: readonly string[], extra: Par
 export async function resetDatabase(owner: Database): Promise<void> {
   for (const vault of vaults) await vault.reset();
   const {
-    auditChainHead,
     auditHeartbeat,
-    auditLog,
     credentials,
     deviceAuthorizations,
     environments,
@@ -175,8 +174,7 @@ export async function resetDatabase(owner: Database): Promise<void> {
   await owner.delete(credentials);
   await owner.delete(deviceAuthorizations);
   await owner.delete(identities);
-  await owner.delete(auditLog);
-  await owner.update(auditChainHead).set({ nextSeq: 0n, headHash: Buffer.alloc(32) });
+  await emptyLog(owner);
   await owner.update(auditHeartbeat).set({ lastSeq: 0n });
   await owner.update(secrets).set({ currentVersionId: null });
   await owner.delete(secretVersions);

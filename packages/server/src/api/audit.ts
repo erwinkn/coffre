@@ -1,8 +1,9 @@
 import { roleGrants } from '@coffre/core/access';
-import { GENESIS_HASH, verifyChain } from '@coffre/core/audit';
+import { GENESIS_HASH, verifyEntries } from '@coffre/core/audit';
 import { describeAccessFault, verifyCheckpoint, type Checkpoint, type LogEntry, type LogVerification } from '@coffre/core/vault';
 import { SNAPSHOT } from '@coffre/db/dialect';
 
+import { actorParts, appLogKey } from '../db/audit.ts';
 import {
   auditHead,
   auditPage,
@@ -117,13 +118,9 @@ export async function listAudit(
     }
   }
   if (query.actor !== undefined) {
-    if (/^(user|token):/.test(query.actor)) {
-      const member = parseMember(query.actor);
-      filter.actorType = member.type;
-      filter.actorId = member.id;
-    } else {
-      filter.actorId = query.actor;
-    }
+    filter.actors = /^(user|token):/.test(query.actor)
+      ? [formatMember(parseMember(query.actor))]
+      : ['user', 'token', 'sync', 'system'].map((prefix) => `${prefix}:${query.actor}`).concat(query.actor);
   }
   if (query.before !== undefined) filter.beforeSeq = BigInt(query.before);
 
@@ -132,13 +129,12 @@ export async function listAudit(
     entries: rows.map((row) => ({
       seq: Number(row.seq),
       occurredAt: row.occurredAt,
-      actorType: row.actorType,
-      actorId: row.actorId,
+      ...actorParts(row.actor),
       action: row.action,
       decision: row.decision as 'allow' | 'deny',
       project: row.project,
       environment: row.environment,
-      bundleId: row.bundleId,
+      bundleId: row.operationId,
       requestId: row.requestId,
       metadata: JSON.parse(row.metadata) as Record<string, unknown>,
     })),
@@ -183,12 +179,15 @@ export async function verifyAudit(ctx: ApiContext): Promise<AuditVerification> {
       for (;;) {
         const batch = await auditRange(tx, nextSequence, VERIFY_BATCH);
         if (batch.length === 0) break;
-        if (batch[0].seq !== nextSequence) {
-          return audit(batch[0].seq, `sequence gap: expected seq ${nextSequence}, found ${batch[0].seq}`);
-        }
-        const result = verifyChain(ctx.chainKey, batch, previousHash);
+        // From the first entry, each batch carrying on from the one before:
+        // the numbers, the links, the hashes, and the app's MACs.
+        const result = verifyEntries(batch, {
+          startSeq: nextSequence,
+          startPrevHash: previousHash,
+          keys: [appLogKey(ctx.chainKey)],
+        });
         if (!result.ok) return audit(result.failedAtSeq, result.reason);
-        rows += result.rows;
+        rows += result.entries;
         previousHash = result.head;
         for (const row of batch) {
           if (row.seq === signedSeq) signedHash = row.hash.toString('hex');

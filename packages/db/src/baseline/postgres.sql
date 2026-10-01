@@ -13,6 +13,24 @@ INSERT INTO audit_heartbeat (only_row, last_seq)
 VALUES (true, 0);
 --> statement-breakpoint
 
+-- The audit log only grows, for every login, its owner's included. The
+-- grants below already keep the runtime login from changing it; this stops
+-- a bug or a careless statement by the owner too, who can still lift it
+-- with ALTER TABLE ... DISABLE TRIGGER. What an owner changes anyway, the
+-- entries' MACs and chain show.
+CREATE FUNCTION audit_log_append_only() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'audit_log is append-only' USING ERRCODE = 'insufficient_privilege';
+END
+$$;
+--> statement-breakpoint
+CREATE TRIGGER audit_log_no_change BEFORE UPDATE OR DELETE ON audit_log
+    FOR EACH ROW EXECUTE FUNCTION audit_log_append_only();
+--> statement-breakpoint
+CREATE TRIGGER audit_log_no_truncate BEFORE TRUNCATE ON audit_log
+    FOR EACH STATEMENT EXECUTE FUNCTION audit_log_append_only();
+--> statement-breakpoint
+
 -- The server connects as coffre_runtime, a login provisioned outside
 -- coffre (its password is never ours), whose only rights come from
 -- coffre_app: read and insert, UPDATE on named columns only, and never
@@ -109,7 +127,7 @@ GRANT UPDATE (key, current_version_id, current_version, updated_at, archived_at)
 -- sign-in and removal lock the directory row while they ask the vault.
 GRANT UPDATE (created_by) ON principals TO coffre_app;
 --> statement-breakpoint
-GRANT UPDATE (next_seq, head_hash, updated_at) ON audit_chain_head TO coffre_app;
+GRANT UPDATE (next_seq, head_hash) ON audit_chain_head TO coffre_app;
 --> statement-breakpoint
 GRANT UPDATE (last_beat_at, last_seq) ON audit_heartbeat TO coffre_app;
 --> statement-breakpoint

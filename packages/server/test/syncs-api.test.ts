@@ -13,6 +13,7 @@ import {
 } from '../src/sync/index.ts';
 import { planSync, SyncRunner } from '../src/api/syncs.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { actorParts } from '../src/db/audit.ts';
 
 const ROOT = 'admin@acme.example';
 const DEV = 'dev@acme.example';
@@ -131,8 +132,7 @@ async function createSync(client = root) {
 async function auditActions(action: string) {
   const rows = await db.owner
     .select({
-      actorType: auditLog.actorType,
-      actorId: auditLog.actorId,
+      actor: auditLog.actor,
       decision: auditLog.decision,
       environmentId: auditLog.environmentId,
       secretId: auditLog.secretId,
@@ -141,7 +141,11 @@ async function auditActions(action: string) {
     .from(auditLog)
     .where(eq(auditLog.action, action))
     .orderBy(asc(auditLog.seq));
-  return rows.map((row) => ({ ...row, metadata: JSON.parse(row.metadata) as Record<string, unknown> }));
+  return rows.map(({ actor, ...row }) => ({
+    ...actorParts(actor),
+    ...row,
+    metadata: JSON.parse(row.metadata) as Record<string, unknown>,
+  }));
 }
 
 async function view(id: string) {

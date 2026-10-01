@@ -190,6 +190,9 @@ importers:
 
   packages/db:
     dependencies:
+      '@coffre/core':
+        specifier: workspace:*
+        version: link:../core
       '@libsql/client':
         specifier: 0.18.0
         version: 0.18.0

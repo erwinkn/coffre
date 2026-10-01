@@ -1,9 +1,9 @@
 import type { Permission } from '@coffre/core/access';
 import type { Refusal as VaultRefusal, Vault } from '@coffre/core/vault';
 import type { Database, Transaction } from '@coffre/db';
+import { lockLogHead } from '@coffre/db/log';
 
 import { appendAudit, type AuditEntry } from '../db/audit.ts';
-import { auditHead } from '../db/queries.ts';
 import { can, type Caller, type Place } from './caller.ts';
 import { forbidden, vaultRefused, type ApiError } from './errors.ts';
 import type { Asking } from './keys.ts';
@@ -100,7 +100,7 @@ export async function audited<T>(
     return await ctx.db.transaction(async (tx) => {
       const log: AuditEntry[] = [];
       // Take the head before any application rows.
-      if (await auditHead(tx, { lock: true }) === null) throw new Error('audit_chain_head is missing');
+      await lockLogHead(tx);
       const result = await work(tx, log);
       if (log.length > 0) await appendAudit(tx, ctx.chainKey, log);
       return result;

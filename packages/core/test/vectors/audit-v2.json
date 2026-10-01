@@ -1,0 +1,143 @@
+{
+  "format": "coffre.audit.v2",
+  "about": "Entries of coffre.audit.v2 with their MACs and hashes, under the two keys below. Every writer and verifier of the log checks its encoder against these. The first four form a chain from the genesis hash; the fifth stands alone, with a sequence number past 2^53. Sequence numbers are decimal strings.",
+  "keys": {
+    "app": {
+      "secret": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "keyId": "app:1122365e22cb880c",
+      "key": "c0f905a9a1b2051ce7d76a1fb845cb5bcf6c2a0c0f1732a4c8a381aea4afea37"
+    },
+    "vault": {
+      "secret": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "keyId": "vault:99c1baa28806f80b",
+      "key": "78b3118e6783f65a3fb6022ab2235c4831c841f2581183405e8ead25374ebc2e"
+    }
+  },
+  "entries": [
+    {
+      "fields": {
+        "seq": "0",
+        "author": "app",
+        "keyId": "app:1122365e22cb880c",
+        "occurredAt": 1790841600000,
+        "actor": "system:coffre-scheduler",
+        "action": "audit.heartbeat",
+        "decision": "allow",
+        "code": null,
+        "subjectPrincipal": null,
+        "projectId": null,
+        "environmentId": null,
+        "secretId": null,
+        "secretVersionId": null,
+        "operationId": null,
+        "requestId": null,
+        "sourceIp": null,
+        "relatedSeq": null,
+        "metadata": "{\"source\":\"scheduled\"}"
+      },
+      "prevHash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "mac": "bff01321e54ccc9d536cefeb8d3ca528975d694fe72dc5573334adfafbd0239d",
+      "hash": "8bdf8582da624bc0947cc0cfa6740f159dc59704b64f444970e5ae11f3855b46"
+    },
+    {
+      "fields": {
+        "seq": "1",
+        "author": "vault",
+        "keyId": "vault:99c1baa28806f80b",
+        "occurredAt": 1790841601000,
+        "actor": "user:ada@acme.example",
+        "action": "secret.read",
+        "decision": "allow",
+        "code": null,
+        "subjectPrincipal": null,
+        "projectId": "6f1e0c2a-0000-4000-8000-000000000001",
+        "environmentId": "6f1e0c2a-0000-4000-8000-000000000002",
+        "secretId": "6f1e0c2a-0000-4000-8000-000000000003",
+        "secretVersionId": "6f1e0c2a-0000-4000-8000-000000000004",
+        "operationId": "6f1e0c2a-0000-4000-8000-000000000005",
+        "requestId": "req-1",
+        "sourceIp": "192.0.2.10",
+        "relatedSeq": null,
+        "metadata": "{\"purpose\":\"reveal\"}"
+      },
+      "prevHash": "8bdf8582da624bc0947cc0cfa6740f159dc59704b64f444970e5ae11f3855b46",
+      "mac": "ea997cc9e3faa8c732fb373cc52cc38756bddc6a0e8fad40eb23e49188062f92",
+      "hash": "4f29fd06dae871f7903550573e153a717191e11e859c4bc1c7ab2bb55a14a042"
+    },
+    {
+      "fields": {
+        "seq": "2",
+        "author": "app",
+        "keyId": "app:1122365e22cb880c",
+        "occurredAt": 1790841602000,
+        "actor": "user:ada@acme.example",
+        "action": "secret.write",
+        "decision": "allow",
+        "code": "",
+        "subjectPrincipal": null,
+        "projectId": "6f1e0c2a-0000-4000-8000-000000000001",
+        "environmentId": "6f1e0c2a-0000-4000-8000-000000000002",
+        "secretId": "6f1e0c2a-0000-4000-8000-000000000003",
+        "secretVersionId": "6f1e0c2a-0000-4000-8000-000000000004",
+        "operationId": "6f1e0c2a-0000-4000-8000-000000000005",
+        "requestId": "",
+        "sourceIp": "192.0.2.10",
+        "relatedSeq": "1",
+        "metadata": "{\"key\":\"DATABASE_URL\",\"version\":5}"
+      },
+      "prevHash": "4f29fd06dae871f7903550573e153a717191e11e859c4bc1c7ab2bb55a14a042",
+      "mac": "5c9d6bcbc7e69063cb97ff9ad90b95c4fafe15fa41dffa3b9f04ece4b47d8aa9",
+      "hash": "f47d85aaf63ba7fcbe5495b46d212ee7cc7012d435a0c9c2598b1e177b80317e"
+    },
+    {
+      "fields": {
+        "seq": "3",
+        "author": "vault",
+        "keyId": "vault:99c1baa28806f80b",
+        "occurredAt": 1790841603000,
+        "actor": "token:ci-deploy",
+        "action": "secret.read",
+        "decision": "deny",
+        "code": "bulk_limit",
+        "subjectPrincipal": null,
+        "projectId": "6f1e0c2a-0000-4000-8000-000000000001",
+        "environmentId": "6f1e0c2a-0000-4000-8000-000000000002",
+        "secretId": "6f1e0c2a-0000-4000-8000-000000000003",
+        "secretVersionId": "6f1e0c2a-0000-4000-8000-000000000004",
+        "operationId": "6f1e0c2a-0000-4000-8000-000000000005",
+        "requestId": "req-1",
+        "sourceIp": "192.0.2.10",
+        "relatedSeq": null,
+        "metadata": "{\"note\":\"Grüße, 秘密 ✓\"}"
+      },
+      "prevHash": "f47d85aaf63ba7fcbe5495b46d212ee7cc7012d435a0c9c2598b1e177b80317e",
+      "mac": "2fb0fc0a6c0b507d85d63d1fea98857327fa118d65dbc534a46d07954fc26f2b",
+      "hash": "44ea6680dedab22231725a5aa561bc0b856e7a3f3ef08273dd6c620f6b8c5354"
+    },
+    {
+      "fields": {
+        "seq": "9007199254740993",
+        "author": "app",
+        "keyId": "app:1122365e22cb880c",
+        "occurredAt": 1790841600000,
+        "actor": "user:ada@acme.example",
+        "action": "secret.read",
+        "decision": "allow",
+        "code": null,
+        "subjectPrincipal": null,
+        "projectId": "6f1e0c2a-0000-4000-8000-000000000001",
+        "environmentId": "6f1e0c2a-0000-4000-8000-000000000002",
+        "secretId": "6f1e0c2a-0000-4000-8000-000000000003",
+        "secretVersionId": "6f1e0c2a-0000-4000-8000-000000000004",
+        "operationId": "6f1e0c2a-0000-4000-8000-000000000005",
+        "requestId": "req-1",
+        "sourceIp": "192.0.2.10",
+        "relatedSeq": "9007199254740992",
+        "metadata": "{}"
+      },
+      "prevHash": "abababababababababababababababababababababababababababababababab",
+      "mac": "d124dee393b725aca2c3f6e1f787e1c32d87eeca811403b3a4a8d522237e3e5f",
+      "hash": "1c37befa46a1df4b78ce625ad4a0887d5e3fea2c3e5ddbfbd61b5d59f6308bc8"
+    }
+  ]
+}

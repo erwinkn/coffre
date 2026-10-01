@@ -4,7 +4,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 
 import { createClient, type CoffreClient } from '@coffre/client';
-import { chainHash } from '@coffre/core/audit';
+import { sealEntry } from '@coffre/core/audit';
 import { github, signin, type Principal } from '@coffre/core/identity';
 import type { LogEntry } from '@coffre/core/vault';
 import { tablesOf } from '@coffre/db';
@@ -26,6 +26,8 @@ import {
   testVault,
   type FixtureDeps,
 } from './api-fixture.ts';
+import { appLogKey } from '../src/db/audit.ts';
+import { withLogUnlocked } from './db/engine.ts';
 
 /**
  * The vault as the last line: each test here gets past the app somehow (a
@@ -223,15 +225,17 @@ test('an app audit log rewritten and chained again fails against the signed chec
   // Someone holding the app, chain key and all, puts the read on someone else and re-chains.
   const rows = await auditRange(db.owner, 0n, 10_000);
   let previous = rows[0].prevHash;
-  for (const row of rows) {
-    const rewritten = { ...row, actorId: row.action === 'secret.read' ? ROOT : row.actorId };
-    const hash = chainHash(deps.chainKey, previous, rewritten);
-    await db.owner
-      .update(auditLog)
-      .set({ actorId: rewritten.actorId, prevHash: previous, hash })
-      .where(eq(auditLog.seq, row.seq));
-    previous = hash;
-  }
+  await withLogUnlocked(db.owner, async (owner) => {
+    for (const row of rows) {
+      const rewritten = { ...row, actor: row.action === 'secret.read' ? `user:${ROOT}` : row.actor };
+      const { mac, hash } = sealEntry(appLogKey(deps.chainKey), previous, rewritten);
+      await owner
+        .update(auditLog)
+        .set({ actor: rewritten.actor, prevHash: previous, mac, hash })
+        .where(eq(auditLog.seq, row.seq));
+      previous = hash;
+    }
+  });
   await db.owner.update(auditChainHead).set({ headHash: previous });
 
   const failed = await root.audit.verify();
