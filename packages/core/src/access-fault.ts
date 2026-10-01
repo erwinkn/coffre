@@ -15,7 +15,13 @@ export type AccessFault =
   /** The store holds a grant the log never gave. */
   | { kind: 'unlogged-grant'; grant: FaultGrant }
   /** The log gives a grant the store does not hold. */
-  | { kind: 'missing-grant'; grant: FaultGrant };
+  | { kind: 'missing-grant'; grant: FaultGrant }
+  /**
+   * The store's row for someone fails the vault's integrity check: changed
+   * outside the vault (`mac`), or put back from before the log's last change
+   * to them (`stale`).
+   */
+  | { kind: 'tampered-member'; principal: string; why: 'mac' | 'stale' };
 
 export type FaultGrant = { principal: string; projectId: string; environmentId: string | null; role: string };
 
@@ -47,5 +53,9 @@ export function describeAccessFault(fault: AccessFault, names: FaultNames = {}):
       return `the store holds a grant the log never gave: ${grant(fault.grant)}`;
     case 'missing-grant':
       return `the log gives a grant the store does not hold: ${grant(fault.grant)}`;
+    case 'tampered-member':
+      return fault.why === 'mac'
+        ? `the store's ${who(fault.principal)}, or their grants, were changed outside the vault`
+        : `the store's ${who(fault.principal)} is older than the log's last change to them: it was put back`;
   }
 }

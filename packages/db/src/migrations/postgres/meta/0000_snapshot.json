@@ -1,5 +1,5 @@
 {
-  "id": "e2e492be-450c-44cb-a614-537e39148cdf",
+  "id": "2e346045-a365-4bff-be0b-6d48c008cd68",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -1916,6 +1916,18 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
+        },
+        "access_seq": {
+          "name": "access_seq",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "mac": {
+          "name": "mac",
+          "type": "bytea",
+          "primaryKey": false,
+          "notNull": true
         }
       },
       "indexes": {},
@@ -1924,6 +1936,10 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {
+        "vault_members_mac_check": {
+          "name": "vault_members_mac_check",
+          "value": "octet_length(\"vault_members\".\"mac\") = 32"
+        },
         "vault_members_principal_check": {
           "name": "vault_members_principal_check",
           "value": "\"vault_members\".\"principal\" ~ '^(user|token|sync):[^[:space:]:][^[:space:]]*$'"

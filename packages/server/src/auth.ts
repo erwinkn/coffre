@@ -90,6 +90,12 @@ export function unauthenticated(auth: AuthConfig): Response {
 export const registrationRequired = () =>
   errorResponse(new ApiError('registration_required', 'you are signed in, but not a member here'));
 
+/** What a member whose record failed the vault's integrity check is told, wherever they ask. */
+export const TAMPERED_MESSAGE =
+  "your access record failed coffre's integrity check: it was changed outside coffre. An owner must remove you and add you again";
+
+export const accessTampered = () => errorResponse(new ApiError('vault_refused', TAMPERED_MESSAGE, 'tampered'));
+
 export async function authenticateRequest(
   request: Request,
   runtime: AuthenticationRuntime,

@@ -29,7 +29,7 @@ export async function loadDirectory(client: CoffreClient, canManage: boolean) {
   return uiResult(async () => {
     const { members, removed } = await client.members.list();
     const principals: DirectoryPrincipal[] = members.map(
-      ({ principalType, principalId, instanceRole, isRootAdmin }) => ({ principalType, principalId, instanceRole, isRootAdmin }),
+      ({ principalType, principalId, instanceRole, isRootAdmin, tampered }) => ({ principalType, principalId, instanceRole, isRootAdmin, tampered }),
     );
     return { principals, removed };
   });
@@ -136,6 +136,23 @@ export function DirectoryTable({
  * so on hover or tap instead of offering a menu that could not work.
  */
 export function InstanceRole({ principal }: { principal: DirectoryPrincipal }) {
+  if (principal.tampered === true) {
+    return (
+      <Toggletip
+        label={
+          <>
+            Their record was changed outside coffre, so the vault refuses them
+            everything. Remove them to start them over, then add them again.
+          </>
+        }
+      >
+        <button type="button" className="tag tag-red tag-button">
+          <Lock size={11} />
+          Integrity check failed
+        </button>
+      </Toggletip>
+    );
+  }
   if (principal.isRootAdmin) {
     return (
       <Toggletip

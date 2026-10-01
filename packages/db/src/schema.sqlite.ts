@@ -170,8 +170,11 @@ export const vaultMembers = sqliteTable(
     createdBy: text('created_by').notNull(),
     statusChangedAt: integer('status_changed_at', { mode: 'number' }).notNull(),
     statusChangedBy: text('status_changed_by').notNull(),
+    accessSeq: int64('access_seq').notNull(),
+    mac: bytes('mac').notNull(),
   },
   (table) => [
+    check('vault_members_mac_check', sql`octet_length(${table.mac}) = 32`),
     // `^(user|token|sync):[^[:space:]:][^[:space:]]*$`, without regular expressions.
     check(
       'vault_members_principal_check',

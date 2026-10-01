@@ -39,9 +39,17 @@ export type TestVault = Vault & {
 
 const vaults = new Set<TestVault>();
 
-export function testVault(rootAdmins: readonly string[], config: Pick<VaultConfig, 'bulkLimit'> = {}): TestVault {
-  const kek = randomBytes(32);
-  const signingKey = randomBytes(32);
+/**
+ * A test vault. Another over the same database, as a second instance would
+ * be, shares `keys`: one deployment has one KEK and one signing key, and
+ * rows sealed under another are refused as tampered.
+ */
+export function testVault(
+  rootAdmins: readonly string[],
+  config: Pick<VaultConfig, 'bulkLimit'> = {},
+  keys: { kek: Buffer; signingKey: Buffer } = { kek: randomBytes(32), signingKey: randomBytes(32) },
+): TestVault {
+  const { kek, signingKey } = keys;
   let offset = 0;
   let current: Promise<LocalVault> | null = null;
   const open = async () =>

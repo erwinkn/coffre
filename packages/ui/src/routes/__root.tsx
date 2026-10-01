@@ -97,6 +97,8 @@ async function loadShell(client: CoffreClient) {
     projects,
     capabilities: deriveUiCapabilities(member, projects),
     registrationRequired: me !== null && !me.registered,
+    /** A member the vault refuses: their record failed its integrity check. */
+    accessTampered: me?.tampered === true,
   };
 }
 

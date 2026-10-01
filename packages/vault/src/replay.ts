@@ -1,18 +1,10 @@
+import type { StoredEntry } from '@coffre/core/audit';
 import type { AccessFault, FaultGrant } from '@coffre/core/vault';
 import type { Queryable } from '@coffre/db';
 
-import { allMembers, grants, vaultEntriesOf, type GrantRow, type Member, type Place } from './store.ts';
+import { ACCESS_ACTIONS, allMembers, grants, vaultEntriesOf, type GrantRow, type Member, type Place } from './store.ts';
 
-/** Every entry that changes who is a member or what they hold. */
-export const ACCESS_ACTIONS = [
-  'principal.admit',
-  'principal.restore',
-  'principal.owner',
-  'principal.remove',
-  'grant.create',
-  'grant.update',
-  'grant.revoke',
-] as const;
+export { ACCESS_ACTIONS };
 
 const BATCH = 1000;
 
@@ -32,60 +24,17 @@ const BATCH = 1000;
  * lapsed changes nothing anyone holds, so it is not logged.
  */
 export async function replay(db: Queryable, at: number): Promise<AccessFault | null> {
-  const members = new Map<string, Member>();
-  const held = new Map<string, Map<string, GrantRow>>();
+  const state: Replayed = { members: new Map(), held: new Map() };
   for (let after = -1n; ; ) {
     const batch = await vaultEntriesOf(db, ACCESS_ACTIONS, after, BATCH);
     for (const row of batch) {
-      const principal = row.subjectPrincipal!;
-      const detail = JSON.parse(row.metadata) as Record<string, unknown>;
-      const place: Place = { projectId: row.projectId!, environmentId: row.environmentId };
-      const grantsOf = held.get(principal) ?? new Map<string, GrantRow>();
-      held.set(principal, grantsOf);
-      const before = members.get(principal);
-      const changed = { statusChangedAt: row.occurredAt, statusChangedBy: row.actor };
-      switch (row.action) {
-        case 'principal.admit':
-        case 'principal.restore':
-          members.set(principal, {
-            principal,
-            status: 'active',
-            owner: detail.owner === true,
-            generation: before?.generation ?? 0,
-            createdAt: before?.createdAt ?? row.occurredAt,
-            createdBy: before?.createdBy ?? row.actor,
-            ...changed,
-          });
-          break;
-        case 'principal.owner':
-          if (before === undefined) return { kind: 'unadmitted-change', seq: Number(row.seq), principal };
-          before.owner = detail.owner === true;
-          break;
-        case 'principal.remove':
-          if (before === undefined) return { kind: 'unadmitted-change', seq: Number(row.seq), principal };
-          members.set(principal, { ...before, status: 'removed', owner: false, generation: before.generation + 1, ...changed });
-          grantsOf.clear();
-          break;
-        case 'grant.create':
-        case 'grant.update':
-          grantsOf.set(placeKey(place), {
-            principal,
-            ...place,
-            role: detail.role as string,
-            expiresAt: detail.expiresAt === null ? null : Date.parse(detail.expiresAt as string),
-            grantedAt: row.occurredAt,
-            grantedBy: row.actor,
-          });
-          break;
-        case 'grant.revoke':
-          grantsOf.delete(placeKey(place));
-          break;
-      }
+      const fault = apply(state, row);
+      if (fault !== null) return fault;
     }
     if (batch.length < BATCH) break;
     after = batch[batch.length - 1].seq;
   }
-
+  const { members, held } = state;
   const stored = new Map((await allMembers(db)).map((member) => [member.principal, member]));
   for (const principal of [...new Set([...stored.keys(), ...members.keys()])].sort()) {
     const [inStore, inLog] = [stored.get(principal), members.get(principal)];
@@ -105,6 +54,68 @@ export async function replay(db: Queryable, at: number): Promise<AccessFault | n
   return null;
 }
 
+/** A member as the log says they are: their row, but for the MAC, which only the store has. */
+export type LoggedMember = Omit<Member, 'mac'>;
+
+/** Who the log says is a member, and what each holds, as far as it has been replayed. */
+export type Replayed = { members: Map<string, LoggedMember>; held: Map<string, Map<string, GrantRow>> };
+
+/** One access entry, authenticated, applied to `state`; a fault when it changes someone never admitted. */
+export function apply(state: Replayed, row: StoredEntry): AccessFault | null {
+  const principal = row.subjectPrincipal!;
+  const detail = JSON.parse(row.metadata) as Record<string, unknown>;
+  const place: Place = { projectId: row.projectId!, environmentId: row.environmentId };
+  const grantsOf = state.held.get(principal) ?? new Map<string, GrantRow>();
+  state.held.set(principal, grantsOf);
+  const before = state.members.get(principal);
+  const changed = { statusChangedAt: row.occurredAt, statusChangedBy: row.actor };
+  switch (row.action) {
+    case 'principal.admit':
+    case 'principal.restore':
+      state.members.set(principal, {
+        principal,
+        status: 'active',
+        owner: detail.owner === true,
+        generation: before?.generation ?? 0,
+        createdAt: before?.createdAt ?? row.occurredAt,
+        createdBy: before?.createdBy ?? row.actor,
+        accessSeq: row.seq,
+        ...changed,
+      });
+      return null;
+    case 'principal.owner':
+      if (before === undefined) return { kind: 'unadmitted-change', seq: Number(row.seq), principal };
+      state.members.set(principal, { ...before, owner: detail.owner === true, accessSeq: row.seq });
+      return null;
+    case 'principal.remove': {
+      if (before === undefined) return { kind: 'unadmitted-change', seq: Number(row.seq), principal };
+      // A removal names the generation it moved to; one before this format
+      // was always the next.
+      const generation = typeof detail.generation === 'number' ? detail.generation : before.generation + 1;
+      state.members.set(principal, { ...before, status: 'removed', owner: false, generation, accessSeq: row.seq, ...changed });
+      grantsOf.clear();
+      return null;
+    }
+    case 'grant.create':
+    case 'grant.update':
+      grantsOf.set(placeKey(place), {
+        principal,
+        ...place,
+        role: detail.role as string,
+        expiresAt: detail.expiresAt === null ? null : Date.parse(detail.expiresAt as string),
+        grantedAt: row.occurredAt,
+        grantedBy: row.actor,
+      });
+      if (before !== undefined) state.members.set(principal, { ...before, accessSeq: row.seq });
+      return null;
+    case 'grant.revoke':
+      grantsOf.delete(placeKey(place));
+      if (before !== undefined) state.members.set(principal, { ...before, accessSeq: row.seq });
+      return null;
+  }
+  return null;
+}
+
 /** A member's fields, and the columns a fault names them by. */
 const MEMBER_FIELDS = [
   ['status', 'status'],
@@ -114,7 +125,8 @@ const MEMBER_FIELDS = [
   ['createdBy', 'created_by'],
   ['statusChangedAt', 'status_changed_at'],
   ['statusChangedBy', 'status_changed_by'],
-] as const satisfies readonly (readonly [keyof Member, string])[];
+  ['accessSeq', 'access_seq'],
+] as const satisfies readonly (readonly [keyof LoggedMember, string])[];
 
 /** A grant's place: its environment, or its project when it has none. */
 function placeKey(place: Place): string {

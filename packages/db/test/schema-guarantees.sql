@@ -220,4 +220,28 @@ EXCEPTION
 END
 $$;
 
+-- 14. Nor delete or empty them, nor become the vault.
+DO $$
+DECLARE
+    statement text;
+BEGIN
+    FOREACH statement IN ARRAY ARRAY[
+        'DELETE FROM vault_members',
+        'TRUNCATE vault_members',
+        'DELETE FROM vault_grants',
+        'TRUNCATE vault_grants',
+        'UPDATE vault_grants SET role = role',
+        'SET ROLE coffre_vault'
+    ] LOOP
+        BEGIN
+            EXECUTE statement;
+            RAISE EXCEPTION 'FAIL: coffre_app was able to run: %', statement;
+        EXCEPTION
+            WHEN insufficient_privilege THEN NULL;
+        END;
+    END LOOP;
+    RAISE NOTICE 'PASS: coffre_app cannot delete, empty or update members and grants, nor act as the vault';
+END
+$$;
+
 \echo '--- all schema guarantees held ---'

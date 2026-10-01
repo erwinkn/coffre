@@ -23,7 +23,22 @@ export type Member = {
   createdBy: string;
   statusChangedAt: number;
   statusChangedBy: string;
+  /** The vault's last access entry about the member. */
+  accessSeq: bigint;
+  /** The vault's MAC over this row and the member's grants; rows.ts. */
+  mac: Buffer;
 };
+
+/** Every entry that changes who is a member or what they hold. */
+export const ACCESS_ACTIONS = [
+  'principal.admit',
+  'principal.restore',
+  'principal.owner',
+  'principal.remove',
+  'grant.create',
+  'grant.update',
+  'grant.revoke',
+] as const;
 
 /** Where a grant applies: a project (`environmentId` null), or one of its environments. */
 export type Place = { projectId: string; environmentId: string | null };
@@ -64,6 +79,8 @@ function memberColumns(db: Queryable) {
     createdBy: vaultMembers.createdBy,
     statusChangedAt: vaultMembers.statusChangedAt,
     statusChangedBy: vaultMembers.statusChangedBy,
+    accessSeq: vaultMembers.accessSeq,
+    mac: vaultMembers.mac,
   };
 }
 
@@ -110,7 +127,7 @@ export async function insertMember(tx: Transaction, row: Member): Promise<void> 
 export async function updateMember(
   tx: Transaction,
   principal: string,
-  change: Partial<Pick<Member, 'status' | 'owner' | 'generation' | 'statusChangedAt' | 'statusChangedBy'>>,
+  change: Partial<Omit<Member, 'principal'>>,
 ): Promise<void> {
   const { vaultMembers } = tablesOf(tx);
   await tx.update(vaultMembers).set(change).where(eq(vaultMembers.principal, principal));
@@ -280,6 +297,39 @@ export async function latestVaultEntry(db: Queryable, actions: readonly string[]
     .orderBy(desc(auditLog.seq))
     .limit(1);
   return row === undefined ? undefined : stored([row])[0];
+}
+
+/** Up to `limit` of the vault's allowed access entries about `principal`, newest first. */
+export async function accessEntriesAbout(db: Queryable, principal: string, limit: number): Promise<StoredEntry[]> {
+  const { auditLog } = tablesOf(db);
+  const rows = await db
+    .select(entryColumns(db))
+    .from(auditLog)
+    .where(
+      and(
+        eq(auditLog.author, 'vault'),
+        eq(auditLog.subjectPrincipal, principal),
+        inArray(auditLog.action, [...ACCESS_ACTIONS]),
+        eq(auditLog.decision, 'allow'),
+      ),
+    )
+    .orderBy(desc(auditLog.seq))
+    .limit(limit);
+  return stored(rows);
+}
+
+/** The vault's newest allowed access entry about each member who has one. */
+export async function newestAccessEntries(db: Queryable): Promise<Map<string, StoredEntry>> {
+  const { auditLog } = tablesOf(db);
+  const newest = db
+    .select({ seq: sql`max(${auditLog.seq})` })
+    .from(auditLog)
+    .where(
+      and(eq(auditLog.author, 'vault'), inArray(auditLog.action, [...ACCESS_ACTIONS]), eq(auditLog.decision, 'allow')),
+    )
+    .groupBy(auditLog.subjectPrincipal);
+  const rows = stored(await db.select(entryColumns(db)).from(auditLog).where(inArray(auditLog.seq, newest)));
+  return new Map(rows.flatMap((row) => (row.subjectPrincipal === null ? [] : [[row.subjectPrincipal, row]])));
 }
 
 /** Up to `limit` of the vault's allowed entries of these actions after `afterSeq`, oldest first. */

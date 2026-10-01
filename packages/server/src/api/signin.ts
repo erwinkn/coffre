@@ -63,7 +63,9 @@ export type SigninRefusal =
    */
   | 'account_mismatch'
   /** Linking: the account already belongs to someone else. */
-  | 'already_linked';
+  | 'already_linked'
+  /** The matching person's record failed the vault's integrity check. */
+  | 'tampered';
 
 class SigninRefused extends Error {
   readonly reason: SigninRefusal;
@@ -276,6 +278,7 @@ export class SigninService {
       const preparedId = previous === null ? match!.id : memberOf(previous.principal).id;
       const principal = { type: 'user' as const, id: preparedId };
       const standing = match?.access ?? await this.#standing(principal);
+      if (standing.status === 'tampered') throw refuse('tampered', preparedId);
       if (standing.status !== 'active') throw refuse('deactivated', preparedId);
       return audited(this.#deps, async (tx, log) => {
         if (!(await this.#stillMember(tx, principal, standing))) throw refuse('deactivated', preparedId);

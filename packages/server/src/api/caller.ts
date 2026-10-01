@@ -32,6 +32,8 @@ export type Caller = {
   principal: PrincipalRef;
   /** An active member, or a root admin. Everyone else only reaches sign-in. */
   registered: boolean;
+  /** A member the vault refuses because their record failed its integrity check. */
+  tampered: boolean;
   /** The membership this request authenticated, checked again before linking accounts. */
   generation: number;
   /** Named in the vault's COFFRE_ROOT_ADMINS: everything, everywhere. */
@@ -52,6 +54,7 @@ export function callerFrom(principal: PrincipalRef, access: Access): Caller {
   return {
     principal,
     registered: access.status === 'active',
+    tampered: access.status === 'tampered',
     generation: access.generation,
     isRootAdmin: access.isRootAdmin,
     isOwner: access.isOwner,

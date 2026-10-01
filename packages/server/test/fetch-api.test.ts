@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 
 import { CoffreError } from '@coffre/client';
 import { github, signin, type AuthConfig, type Principal } from '@coffre/core/identity';
+import { tablesOf } from '@coffre/db';
+import { eq } from 'drizzle-orm';
 
 import { SyncRunner } from '../src/api/syncs.ts';
 import { apiCredential, fetchApi as serveApi, pageClient as clientForPage, pageCredential } from '../src/fetch-api.ts';
@@ -179,6 +181,24 @@ test('someone signed in but not a member reaches /me and nothing else', async ()
   assert.equal(me.registered, false);
   assert.deepEqual(me.environments, []);
   await assert.rejects(client.projects.list(), { status: 403, code: 'registration_required' });
+});
+
+test('a member whose record fails the vault\'s check is told so, and listed so, until an owner starts them over', async () => {
+  const { vaultMembers } = tablesOf(db.owner);
+  // Someone who owns the database makes DEV an owner, around the vault.
+  await db.owner.update(vaultMembers).set({ owner: true }).where(eq(vaultMembers.principal, `user:${DEV}`));
+  const client = pageClient(new Request(`${ORIGIN}/projects`, { headers: { cookie: `${SESSION}=${DEV}` } }), runtimeFor(own));
+  const me = await client.me();
+  assert.deepEqual([me.registered, me.tampered], [false, true]);
+  await assert.rejects(client.projects.list(), (error: unknown) =>
+    error instanceof CoffreError && error.status === 403 && error.code === 'vault_refused' && /integrity check/.test(error.message));
+
+  const root = clientFor(deps, ROOT);
+  const listed = (await root.members.list()).members.find((member) => member.principalId === DEV);
+  assert.deepEqual([listed?.tampered, listed?.instanceRole], [true, 'user']);
+  await root.members.remove(`user:${DEV}`);
+  await root.members.add(`user:${DEV}`);
+  assert.deepEqual([(await client.me()).registered, (await client.me()).tampered], [true, false]);
 });
 
 test('how to sign in is public', async () => {

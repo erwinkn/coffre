@@ -227,6 +227,9 @@ CREATE TABLE "vault_members" (
 	"created_by" text NOT NULL,
 	"status_changed_at" bigint NOT NULL,
 	"status_changed_by" text NOT NULL,
+	"access_seq" bigint NOT NULL,
+	"mac" "bytea" NOT NULL,
+	CONSTRAINT "vault_members_mac_check" CHECK (octet_length("vault_members"."mac") = 32),
 	CONSTRAINT "vault_members_principal_check" CHECK ("vault_members"."principal" ~ '^(user|token|sync):[^[:space:]:][^[:space:]]*$'),
 	CONSTRAINT "vault_members_user_lowercase" CHECK ("vault_members"."principal" NOT LIKE 'user:%' OR "vault_members"."principal" = lower("vault_members"."principal")),
 	CONSTRAINT "vault_members_status_check" CHECK ("vault_members"."status" IN ('active', 'removed')),
@@ -442,7 +445,7 @@ TO coffre_vault;
 --> statement-breakpoint
 GRANT SELECT, INSERT ON audit_log TO coffre_vault;
 --> statement-breakpoint
-GRANT SELECT, INSERT, UPDATE (status, owner, generation, status_changed_at, status_changed_by)
+GRANT SELECT, INSERT, UPDATE (status, owner, generation, created_at, created_by, status_changed_at, status_changed_by, access_seq, mac)
     ON vault_members TO coffre_vault;
 --> statement-breakpoint
 GRANT SELECT, INSERT, DELETE ON vault_grants TO coffre_vault;

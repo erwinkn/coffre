@@ -165,8 +165,15 @@ export const vaultMembers = pgTable(
     createdBy: text('created_by').notNull(),
     statusChangedAt: bigint('status_changed_at', { mode: 'number' }).notNull(),
     statusChangedBy: text('status_changed_by').notNull(),
+    // The vault's last access entry about the member: a row put back from
+    // before a later change names an older one than the log has.
+    accessSeq: bigint('access_seq', { mode: 'bigint' }).notNull(),
+    // The vault's MAC over the row and the member's grants, lapsed ones too:
+    // a grant added, edited or deleted outside the vault fails it.
+    mac: bytea().notNull(),
   },
   (table) => [
+    check('vault_members_mac_check', sql`octet_length(${table.mac}) = 32`),
     check('vault_members_principal_check', sql`${table.principal} ~ '^(user|token|sync):[^[:space:]:][^[:space:]]*$'`),
     // A person is their email address, lowercased, as in sign-in.
     check('vault_members_user_lowercase', sql`${table.principal} NOT LIKE 'user:%' OR ${table.principal} = lower(${table.principal})`),

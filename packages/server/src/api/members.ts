@@ -36,6 +36,11 @@ export type Member = {
   principalId: string;
   instanceRole: 'user' | 'owner' | 'root-admin';
   isRootAdmin: boolean;
+  /**
+   * The vault refuses them: their record failed its integrity check. They
+   * hold nothing until an owner removes them, which starts them over.
+   */
+  tampered: boolean;
   grants: MemberGrant[];
 };
 
@@ -70,7 +75,7 @@ export type IssuedToken = {
 export type OffboardingReport = {
   principalType: 'user' | 'service';
   principalId: string;
-  status: 'active' | 'removed';
+  status: 'active' | 'removed' | 'tampered';
   instanceRole: Member['instanceRole'];
   isRootAdmin: boolean;
   removedAt: string | null;
@@ -160,7 +165,7 @@ export async function listMembers(
   const members: Member[] = [];
   for (const access of all) {
     const ref = memberOf(access);
-    if (ref === null || access.status !== 'active') continue;
+    if (ref === null || (access.status !== 'active' && access.status !== 'tampered')) continue;
     const visible = placed(access.grants, names)
       .filter((grant) => (caller.isOwner || manages(grant.projectId)) && inPath(grant))
       .sort(byPlace);
@@ -172,6 +177,7 @@ export async function listMembers(
       principalId: ref.id,
       instanceRole: instanceRole(access),
       isRootAdmin: access.isRootAdmin,
+      tampered: access.status === 'tampered',
       grants: visible.map((grant) => ({
         id: `${member}/${grant.project}${grant.environment === null ? '' : `/${grant.environment}`}`,
         project: grant.project,
@@ -308,7 +314,7 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
   return {
     principalType: member.type,
     principalId: member.id,
-    status: active ? 'active' : 'removed',
+    status: access.status === 'tampered' ? 'tampered' : active ? 'active' : 'removed',
     instanceRole: instanceRole(access),
     isRootAdmin: access.isRootAdmin,
     // The vault knows when and by whom: the removal is its decision.
@@ -405,7 +411,8 @@ export async function removeMember(
     requireOwner(ctx, 'directory.remove', { metadata: fields });
     const standing = await ctx.vault.access(principal);
     if (standing.isRootAdmin) throw rootAdminRefusal(ctx, 'directory.remove', member);
-    if (standing.status !== 'active') {
+    // A member whose record failed the vault's check is removed to start them over.
+    if (standing.status !== 'active' && standing.status !== 'tampered') {
       throw new Refusal(
         notFound('no such member'),
         denied(ctx, 'directory.remove', 'unknown_principal', { metadata: fields }),

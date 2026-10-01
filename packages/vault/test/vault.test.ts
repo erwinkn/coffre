@@ -9,12 +9,14 @@ import { entryHash, entryMac, type LogKey, type StoredEntry } from '@coffre/core
 import { awsKms, KekRegistry, KekUnavailableError, LocalKekProvider, type KekProvider, type KeyOperation } from '@coffre/core/kek';
 import { verifyCheckpoint, type SecretRef, type WrappedKey } from '@coffre/core/vault';
 import { tablesOf, type Database } from '@coffre/db';
-import { appendEntries, LogRewound } from '@coffre/db/log';
-import { asc, eq, gte, sql } from 'drizzle-orm';
+import { appendEntries, LogHeadMismatch, LogRewound } from '@coffre/db/log';
+import { asc, desc, eq, gte, sql } from 'drizzle-orm';
 
 import { checkRootAdmins, resolveVaultConfig, type ResolvedVaultConfig } from '../src/config.ts';
 import { openLocalVault, type LocalVault } from '../src/local.ts';
 import { vaultLogKey } from '../src/log.ts';
+import { memberMac, rowKey } from '../src/rows.ts';
+import * as store from '../src/store.ts';
 import type { VaultOptions } from '../src/vault.ts';
 import {
   emptyDatabase,
@@ -826,7 +828,7 @@ test('a full check covers the head the app verified up to, and refuses an entry 
   });
 });
 
-test('a full check replays who holds what from the log, and finds what was written around it', async () => {
+test('a full check replays who holds what from the log, and finds what a holder of the vault\'s key wrote around it', async () => {
   const w = await world();
   const { vaultGrants, vaultMembers } = tablesOf(db.owner);
   const change = async (principal: string, environmentId: string | null, role: string | null) =>
@@ -852,10 +854,13 @@ test('a full check replays who holds what from the log, and finds what was writt
   const whole = await w.vault.verifyLog({ through: null });
   assert.ok(whole.ok, JSON.stringify(whole));
 
-  // A grant written straight into the database: the chain holds, the replay does not.
+  // A grant written straight into the database, and BOB's row sealed again
+  // over it by someone holding the vault's key: the MAC holds, the replay
+  // does not.
   await db.owner.insert(vaultGrants).values({
     principal: BOB, projectId: w.project, environmentId: null, role: 'owner', expiresAt: null, grantedAt: Date.now(), grantedBy: ROOT,
   });
+  await reseal(BOB);
   const extra = {
     ok: false,
     failedAtSeq: null,
@@ -876,12 +881,178 @@ test('a full check replays who holds what from the log, and finds what was writt
   await db.owner.insert(vaultGrants).values({
     principal: ADA, projectId: null, environmentId: w.dev, role: 'viewer', expiresAt: null, grantedAt: 0, grantedBy: ROOT,
   });
+  await reseal(BOB);
+  await reseal(ADA);
   assert.deepEqual(await w.vault.verifyLog({ through: null }), {
     ok: false,
     failedAtSeq: null,
     reason: `the store's ${ADA} differs from the log's in status, owner`,
     fault: { kind: 'member-differs', principal: ADA, fields: ['status', 'owner'] },
   });
+});
+
+/** Seal `principal`'s row again over what the database now holds, as only the holder of the vault's key can. */
+async function reseal(principal: string) {
+  const { vaultMembers } = tablesOf(db.owner);
+  const row = (await store.member(db.owner, principal))!;
+  const mac = memberMac(rowKey(SIGNING_KEY), row, await store.grants(db.owner, principal));
+  await db.owner.update(vaultMembers).set({ mac }).where(eq(vaultMembers.principal, principal));
+}
+
+// --- member integrity -------------------------------------------------------------
+
+/** A member's row and grants as they are now, to put back later as the database's owner could. */
+async function snapshot(principal: string) {
+  const { vaultMembers, vaultGrants } = tablesOf(db.owner);
+  const [row] = await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, principal));
+  const held = await db.owner.select().from(vaultGrants).where(eq(vaultGrants.principal, principal));
+  return async () => {
+    await db.owner.delete(vaultGrants).where(eq(vaultGrants.principal, principal));
+    await db.owner.update(vaultMembers).set(row).where(eq(vaultMembers.principal, principal));
+    if (held.length > 0) await db.owner.insert(vaultGrants).values(held);
+  };
+}
+
+/** The `vault.tampered` entries, oldest first, as `[subject, code]`. */
+async function tamperings(w: World) {
+  return (await vaultLog(w)).filter((entry) => entry.action === 'vault.tampered').map((entry) => [entry.subject, entry.code]);
+}
+
+for (const edit of ['forged', 'edited', 'deleted'] as const) {
+  test(`a grant ${edit} in the database leaves its member refused as tampered, until an owner starts them over`, async () => {
+    const w = await world();
+    const { vaultGrants } = tablesOf(db.owner);
+    await member(w, ADA, [[w.dev, 'viewer']]);
+    const secret = await w.secret(w.dev);
+    const items = [{ secret, wrapped: await wrapped(w, secret) }];
+    assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items })).ok, true);
+
+    if (edit === 'forged') {
+      await db.owner.insert(vaultGrants).values({
+        principal: ADA, projectId: w.project, environmentId: null, role: 'owner', expiresAt: null, grantedAt: Date.now(), grantedBy: ROOT,
+      });
+    } else if (edit === 'edited') {
+      await db.owner.update(vaultGrants).set({ role: 'developer' }).where(eq(vaultGrants.principal, ADA));
+    } else {
+      await db.owner.delete(vaultGrants).where(eq(vaultGrants.principal, ADA));
+    }
+
+    const access = await w.vault.access(ADA);
+    assert.deepEqual([access.status, access.grants], ['tampered', []]);
+    const read = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items });
+    assert.equal(!read.ok && read.refusal.code, 'tampered');
+    const regrant = await w.vault.setAccess({
+      actor: ROOT, principal: ADA, changes: [{ projectId: w.project, environmentId: w.prod, role: 'viewer', expiresAt: null }],
+    });
+    assert.equal(!regrant.ok && regrant.refusal.code, 'tampered');
+    assert.deepEqual(await tamperings(w), [[ADA, 'mac']], 'found once, logged once');
+    assert.deepEqual(await w.vault.verifyLog({ through: null }), {
+      ok: false,
+      failedAtSeq: null,
+      reason: `the store's ${ADA}, or their grants, were changed outside the vault`,
+      fault: { kind: 'tampered-member', principal: ADA, why: 'mac' },
+    });
+
+    // An owner removes them, which starts over from the log, and adds them back.
+    const removed = await w.vault.remove({ actor: ROOT, principal: ADA });
+    assert.deepEqual(removed, { ok: true, revoked: [] });
+    assert.equal((await w.vault.access(ADA)).status, 'removed');
+    assert.equal((await w.vault.admit({ actor: ROOT, principal: ADA })).ok, true);
+    await member(w, ADA, [[w.dev, 'viewer']]);
+    assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items })).ok, true);
+    assert.equal((await w.vault.verifyLog({ through: null })).ok, true);
+  });
+}
+
+test('an old member row put back with its grants is refused: the log holds the later change', async () => {
+  const w = await world();
+  await member(w, ADA, [[null, 'maintainer']]);
+  const putBack = await snapshot(ADA);
+  const secret = await w.secret(w.dev);
+  const items = [{ secret, wrapped: await wrapped(w, secret) }];
+
+  assert.equal((await w.vault.remove({ actor: ROOT, principal: ADA })).ok, true);
+  // Every byte genuine, MAC and all: only its age gives it away.
+  await putBack();
+  const access = await w.vault.access(ADA);
+  assert.equal(access.status, 'tampered');
+  const read = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items });
+  assert.equal(!read.ok && read.refusal.code, 'tampered');
+  assert.deepEqual((await tamperings(w)).map(([, code]) => code), ['stale']);
+  const verdict = await w.vault.verifyLog({ through: null });
+  assert.deepEqual(!verdict.ok && verdict.fault, { kind: 'tampered-member', principal: ADA, why: 'stale' });
+
+  // Starting over moves the generation past the row's and the log's.
+  assert.equal((await w.vault.remove({ actor: ROOT, principal: ADA })).ok, true);
+  assert.deepEqual([(await w.vault.access(ADA)).status, (await w.vault.access(ADA)).generation], ['removed', 2]);
+  assert.equal((await w.vault.verifyLog({ through: null })).ok, true);
+});
+
+test('a generation edited back is refused, and so is a member row deleted outright', async () => {
+  const w = await world();
+  const { vaultMembers } = tablesOf(db.owner);
+  await member(w, ADA, []);
+  await member(w, BOB, []);
+  assert.equal((await w.vault.remove({ actor: ROOT, principal: ADA })).ok, true);
+  assert.equal((await w.vault.admit({ actor: ROOT, principal: ADA })).ok, true);
+
+  // Back to the generation an old session was issued under.
+  await db.owner.update(vaultMembers).set({ generation: 0 }).where(eq(vaultMembers.principal, ADA));
+  assert.deepEqual([(await w.vault.access(ADA)).status, (await w.vault.access(ADA)).generation], ['tampered', 0]);
+
+  // A row the log admitted, gone: not a stranger, but a member taken out.
+  await db.owner.delete(vaultMembers).where(eq(vaultMembers.principal, BOB));
+  assert.equal((await w.vault.access(BOB)).status, 'tampered');
+  const admitted = await w.vault.admit({ actor: ROOT, principal: BOB });
+  assert.equal(!admitted.ok && admitted.refusal.code, 'tampered');
+  assert.equal((await w.vault.remove({ actor: ROOT, principal: BOB })).ok, true, 'removal puts the row back, removed');
+  assert.deepEqual([(await w.vault.access(BOB)).status, (await w.vault.access(BOB)).generation], ['removed', 1]);
+
+  assert.equal((await w.vault.remove({ actor: ROOT, principal: ADA })).ok, true);
+  assert.equal((await w.vault.access(ADA)).generation, 2, 'past the log\'s 1, whatever the row said');
+  assert.equal((await w.vault.verifyLog({ through: null })).ok, true);
+});
+
+test('an entry forged in the vault\'s name about a member is passed over and reported, not obeyed', async () => {
+  const w = await world();
+  const { auditLog, auditChainHead } = tablesOf(db.owner);
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const secret = await w.secret(w.dev);
+  const items = [{ secret, wrapped: await wrapped(w, secret) }];
+
+  // A "removal" of Ada, linked to the chain, with a MAC made up: were it
+  // believed, her row would look stale and she would be locked out.
+  const [head] = await db.owner.select().from(auditChainHead);
+  const fields = {
+    seq: head.nextSeq, author: 'vault' as const, keyId: VAULT_KEY.keyId, occurredAt: Date.now(), actor: ROOT,
+    action: 'principal.remove', decision: 'allow', code: null, subjectPrincipal: ADA, projectId: null, environmentId: null,
+    secretId: null, secretVersionId: null, operationId: null, requestId: null, sourceIp: null, relatedSeq: null, metadata: '{}',
+  };
+  const mac = Buffer.alloc(32, 7);
+  const hash = entryHash(head.headHash, fields, mac);
+  await db.owner.insert(auditLog).values({ ...fields, prevHash: head.headHash, mac, hash });
+  await db.owner.update(auditChainHead).set({ nextSeq: head.nextSeq + 1n, headHash: hash });
+
+  assert.equal((await w.vault.access(ADA)).status, 'active');
+  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items })).ok, true);
+  assert.deepEqual(await tamperings(w), [[ADA, 'forged_entry']]);
+  const verdict = await w.vault.verifyLog({ through: null });
+  assert.deepEqual(verdict.ok ? null : [verdict.failedAtSeq, verdict.reason], [Number(fields.seq), 'not written by the vault: its MAC does not match']);
+});
+
+test('the newest entries cut from the log without its head stop the next decision', async () => {
+  const w = await world();
+  const { auditLog } = tablesOf(db.owner);
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const [last] = await db.owner.select({ seq: auditLog.seq }).from(auditLog).orderBy(desc(auditLog.seq)).limit(1);
+  await withLogUnlocked(db.owner, (owned) => owned.delete(auditLog).where(eq(auditLog.seq, last.seq)));
+
+  await assert.rejects(
+    w.vault.setAccess({ actor: ROOT, principal: ADA, changes: [{ projectId: w.project, environmentId: w.prod, role: 'viewer', expiresAt: null }] }),
+    (error) => error instanceof LogHeadMismatch,
+  );
+  const verdict = await w.vault.verifyLog({ through: null });
+  assert.equal(verdict.ok, false);
 });
 
 test('the database holds no key', async () => {

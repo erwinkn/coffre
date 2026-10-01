@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "b5cc473f-5ac7-4b99-946f-702d4ac5d1e9",
+  "id": "445a7ab9-ce9b-4671-a5ab-7fe1eb1f411d",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "audit_chain_head": {
@@ -1789,6 +1789,20 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
+        },
+        "access_seq": {
+          "name": "access_seq",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "mac": {
+          "name": "mac",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
         }
       },
       "indexes": {},
@@ -1796,6 +1810,10 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {
+        "vault_members_mac_check": {
+          "name": "vault_members_mac_check",
+          "value": "octet_length(\"vault_members\".\"mac\") = 32"
+        },
         "vault_members_principal_check": {
           "name": "vault_members_principal_check",
           "value": "(\"vault_members\".\"principal\" GLOB 'user:?*' OR \"vault_members\".\"principal\" GLOB 'token:?*' OR \"vault_members\".\"principal\" GLOB 'sync:?*')\n        AND substr(\"vault_members\".\"principal\", instr(\"vault_members\".\"principal\", ':') + 1, 1) <> ':'\n        AND instr(\"vault_members\".\"principal\", ' ') = 0 AND instr(\"vault_members\".\"principal\", char(9)) = 0\n        AND instr(\"vault_members\".\"principal\", char(10)) = 0 AND instr(\"vault_members\".\"principal\", char(13)) = 0"

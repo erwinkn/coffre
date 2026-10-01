@@ -13,7 +13,26 @@ export const Route = createFileRoute('/unregistered')({
  * an owner decision, not a self-service privilege escalation path.
  */
 function UnregisteredPage() {
-  const { principal } = useLoaderData({ from: '__root__' });
+  const { principal, accessTampered } = useLoaderData({ from: '__root__' });
+
+  if (accessTampered) {
+    return (
+      <ClosedDoor icon={<User size={18} />} label="Integrity check failed" title="Your access is on hold">
+        <p>
+          Your access record
+          {principal !== null && (
+            <>
+              {' '}
+              (<span className="mono">{principal.id}</span>)
+            </>
+          )}{' '}
+          was changed outside coffre, so its vault refuses it until someone looks. Nothing you
+          held is available meanwhile.
+        </p>
+        <p>Ask a coffre owner to remove you under Users and add you again, which starts your access over.</p>
+      </ClosedDoor>
+    );
+  }
 
   return (
     <ClosedDoor

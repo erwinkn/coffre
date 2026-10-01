@@ -16,6 +16,8 @@ export type Me = {
    * answers them, so the UI can say who they are and that the door is shut.
    */
   registered: boolean;
+  /** Refused by the vault: their record failed its integrity check. */
+  tampered: boolean;
   instanceRole: 'user' | 'owner' | 'root-admin';
   isRootAdmin: boolean;
   canReadAudit: boolean;
@@ -67,6 +69,7 @@ export async function me(ctx: ApiContext): Promise<Me> {
   return {
     principal: caller.principal,
     registered: caller.registered,
+    tampered: caller.tampered,
     instanceRole: caller.instanceRole,
     isRootAdmin: caller.isRootAdmin,
     canReadAudit: caller.isOwner || canAnywhere(caller, 'audit.read'),
