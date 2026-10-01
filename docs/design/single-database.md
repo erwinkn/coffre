@@ -1,13 +1,14 @@
 # One database
 
-A design for running coffre on a single Postgres or MySQL database: the
-vault's tables, one member directory and one audit log that both the app and
+A design for running coffre on a single Postgres database: the vault's
+tables, one member directory and one audit log that both the app and
 the vault write. It says what the second store buys today, how much of that
 one database can keep, what it costs, and what is left to decide. Written on
 2026-10-01. Nothing here is built yet apart from step 0 (#22).
 
-Already settled: two Workers, with server rendering kept; one database; one
-log; `@coffre/db`. This version folds in three reviews of that day. The
+Settled so far: two Workers, with server rendering kept; one Postgres
+database, with SQLite for tests and local development; one log; and most of
+the decisions at the end. This version folds in three reviews of that day. The
 security reviews of keys and integrity (F) and of the app (A) found problems
 the design has to answer. A storage review (S) looked for what one database
 lets coffre merge, and most of its proposals are taken; "What the reviews
@@ -17,42 +18,46 @@ rules.
 
 ## In short
 
-- **Two writers, one database.** The vault keeps its own Worker, its own
-  login and the KEK, and stays the only writer of members and grants. The
-  app writes everything else. Each reads what it needs of the other's rows.
-- **One member directory, owned by the vault.** The app's `principals` and
-  the vault's `principals` merge into `vault_members`. A removal bumps the
-  member's generation, and every session, token, linked account and device
-  approval issued under an older generation stops working, whether or not
-  the app ever touches its row.
-- **One audit log, two authors.** Every event, the app's and the vault's,
-  goes into `audit_log` under one lock. Each entry carries an HMAC under its
-  author's key, and a public SHA-256 chain commits to every entry and every
-  MAC. Neither author can rewrite an entry once the other has written after
-  it. Each event is recorded once, by whoever decided it: a read is the
-  vault's key release; a grant or removal is the vault's entry, committed
-  with the change.
-- **Checkpoints are signed vault entries, and readiness is a query.** The
+- **Two writers, one Postgres database.** The vault keeps its own Worker,
+  its own login and the KEK, and stays the only writer of members and
+  grants. The app writes everything else. SQLite remains for tests and local
+  development only.
+- **One member list, owned by the vault.** The app's and the vault's
+  `principals` merge into `vault_members`. A removal bumps the member's
+  generation, and every session, token, linked account and device approval
+  issued before it stops working, whether or not the app ever touches its
+  row.
+- **One audit log that reads like what people did.** One entry per human
+  action, named for it: `secret.read`, `secret.write`, `access.grant`,
+  `member.remove`. A column says which component wrote it. The vault writes
+  a read when it releases the key, before the key leaves; the app writes a
+  value's change in the transaction that stores it. Technical steps stay in
+  the log as detail the audit page hides by default.
+- **Each entry is authenticated by its author and chained in public.** An
+  HMAC under the author's key, and a SHA-256 chain over every entry and
+  every MAC, so neither component can rewrite an entry once the other has
+  written after it.
+- **Checkpoints are signed log entries, and readiness is a query.** The
   vault signs a prefix of the log every five minutes; `audit_heartbeat`, the
   vault's checkpoints table and review F1's caller-supplied claims go.
-- **No app transaction stays open across a vault call.** That one rule
-  keeps the two writers from waiting on each other, on Postgres, MySQL and
-  a shared SQLite file alike.
-- **The app can no longer mint a session from the database alone.** The
-  security fields of identities, credentials and device approvals carry a
-  MAC under a key derived from the app's.
+- **No app transaction stays open across a vault call.** Otherwise a write
+  and its log entry can wait on each other through an HTTP call, which
+  Postgres cannot see and so cannot break.
+- **With KMS, a read in flight holds its reader's member row.** A removal
+  then waits for the read instead of racing it, and nobody else waits. With
+  a local KEK there is no race.
+- **The database alone can no longer mint a session.** The security fields
+  of identities, credentials and device approvals carry a MAC under a key
+  derived from the app's.
 - **One data key per secret version, wrapped directly by the KEK, as
-  today.** Intermediate keys would save KMS calls that cost about a dollar a
-  month, and would cost CloudTrail its record of which secret was read.
+  today.**
 - **Rollback is caught by witnesses.** A member's old rows put back are
   refused, because the log holds the later change. A rewind of the whole
-  database, or its newest entries cut off with the head put back, is seen
-  only by a client or a process that saw past it.
-- **Host on PlanetScale Postgres.** SQL roles, row-level security,
-  triggers and two days of point-in-time recovery, from $5 a month.
-  PlanetScale MySQL has none of them, so coffre's guarantees there rest on
-  its keys alone.
-- **Seventeen tables and two migration ledgers become thirteen and one.**
+  database, or its newest entries cut off, is seen only by a client, a
+  running instance or CloudTrail that saw past it; question 7 walks through
+  both.
+- **Host on PlanetScale Postgres,** from $5 a month. Seventeen tables and
+  two migration ledgers become thirteen and one.
 
 ## What the second store buys today
 
@@ -175,120 +180,140 @@ itself, so (a) has it too.
 
 ### 2. Transactions, locks and serialised decisions
 
-The Durable Object runs one call at a time, and each decision is a
-synchronous SQLite transaction. Once several vault isolates or processes
-share one database, the serialising moves into the database: every
-transaction that appends to the log, the app's and the vault's, locks
-`audit_chain_head` first. A vault decision looks like this:
+**Why no app transaction may stay open across a vault call.** Say Ada
+saves a new secret, `market/prod/STRIPE_KEY`. Today the app opens a
+database transaction, inserts the secret's row, and then, still inside that
+transaction, asks the vault over HTTP to wrap the secret's key. With one
+database, the vault writes its log entry for that wrap into the same
+database, on its own connection, and the entry names the new secret. Two
+things go wrong:
 
-```
-unwrap(user:ada@acme.example, operation 7f3c…, 50 secret version ids)
+- The secret's row is not committed yet, so the vault's connection cannot
+  see it, and the entry's foreign key fails. Ada's save fails. The spike
+  got `23503` at once.
+- Worse, say the app's open transaction holds a lock the vault needs, such
+  as the log's head, which any app append takes. The vault waits for the
+  app's transaction to end, and the app waits for the vault's HTTP answer.
+  Each waits on the other. Postgres breaks the deadlocks it can see, but it
+  cannot see that the app is waiting on an HTTP call: it sees one waiter and
+  no cycle. Both hang until a timeout; Postgres has none by default, and in
+  the spike a 2-second `lock_timeout` ended it. On SQLite, in tests and
+  local dev, it is immediate: the app's open transaction holds the whole
+  file's write lock, and the vault's write fails with `database is locked`.
 
-1. pre-check   read Ada's member row and grants, her recent releases,   no lock, one round trip
-               and the 50 versions' wrapped keys; refused? skip to 4
-2. intent      with KMS only: BEGIN; lock the head; append one
-               key.intent entry naming the operation and its 50 keys; COMMIT
-3. keys        50 KMS Decrypts, or 50 local unwraps;                    no transaction open
-               every call settles before step 4
-4. decide      BEGIN
-               SELECT next_seq, head_hash FROM audit_chain_head
-                 WHERE only_row FOR UPDATE                              every append queues here
-               read the database clock; read Ada's rows again;
-               check the MAC, freshness, generation, bulk limit
-               INSERT 50 key.unwrap entries, each with its outcome; UPDATE the head
-               COMMIT, and only then hand back the keys                 about five round trips
-```
-
-The app now sends version ids rather than wrapped keys, and the vault reads
-the envelopes itself (review S3): the version it records is a row it
-checked, not a label the app supplied. Advisory locks are out: Hyperdrive
-does not support them on Postgres, and MySQL's `GET_LOCK` pins the session
-to a reserved connection under Vitess.
-
-**Four rules.** Each one comes from a spike or a review probe.
-
-1. **No app transaction stays open across a vault call.** Today `audited()`
-   opens a transaction, calls the vault inside it, then appends. With one
-   database that fails three ways. On a shared SQLite file, the app's
-   transaction holds the file's write lock, so the vault's own transaction
-   fails with `database is locked` (S12's probe). On Postgres or MySQL, an
-   app transaction holding the head makes the vault wait for it while it
-   waits for the vault, and Postgres reports no deadlock, since it sees one
-   waiter; in the spike the vault timed out after 2 s. And a vault entry
-   naming a row the app has not committed fails its foreign key at once on
-   Postgres, and waits until the lock times out on MySQL (spike B). So every
-   flow reads, calls the vault, and only then opens its short transaction.
-2. **The head is the first lock, and nothing reads before it.** Every
-   appending transaction, the app's included, locks the head before any row.
-   On MySQL at REPEATABLE READ, PlanetScale's default and what a Hyperdrive
-   connection falls back to, a plain read before the lock fixes the
-   snapshot, and reads after it miss what committed during the wait: the
-   spike saw 0 grants instead of 1.
-3. **Time is read after the lock.** Postgres's `CURRENT_TIMESTAMP` is the
-   transaction's start, so a transaction that waited on the head would date
-   its entry before an earlier one's (S9's probe). The append reads
-   `clock_timestamp()`, or the engine's equivalent, in a statement after the
-   lock.
-4. **Postgres runs at READ COMMITTED, its default.** At REPEATABLE READ a
-   transaction whose snapshot predates a concurrent commit fails its
-   `FOR UPDATE` with `40001 could not serialize access`.
-
-The flows that follow from rule 1:
+Today it works only because the vault keeps its own store. So every flow
+reads what it needs, calls the vault, and only then commits in a short
+transaction of its own:
 
 | Flow | Order |
 |---|---|
-| Reveal, `coffre run`, import preview | read committed versions; the vault decides and logs each key's release; the keys leave only after its commit; the app decrypts and answers |
-| Write, restore | prepare ids, context and the expected next versions; the vault wraps or rewraps; one short app transaction locks the head, then the secrets, checks the expected versions and archive state, and inserts the versions with their write entries. A conflict throws the wrapped keys away and retries as a new operation |
-| A new secret | its id is chosen before the wrap; the vault's wrap entry names it in its payload, since the row does not exist yet, and the app's write entry points back at it |
+| Reveal, `coffre run`, import preview | read the committed versions; the vault decides, logs and releases the keys; the app decrypts and answers |
+| Write, restore | prepare ids and the expected next versions; the vault wraps or rewraps; one short app transaction locks the head, then the secrets, checks the expected versions and archive state, and stores the versions with their entries. A conflict throws the wrapped keys away and retries as a new operation |
+| A new secret | its id is chosen before the wrap; the vault's entry names it in its payload, since the row does not exist yet |
 | Grant, admission, removal | one vault transaction: the rows, the generation, the entry |
 | Sign-in, linking an account, approving a device | `access()` gives the member's generation first; one app transaction locks the head, reads the member again, refuses if the generation moved, then issues or binds and logs |
-| Sync | the lease in one short transaction; the vault authorises and releases; the result in another. A new sync is committed disabled, its principal is granted, then it is enabled |
+| Sync | the lease in one short transaction; the vault authorises and releases; the result in another. A new sync is committed disabled, its principal granted, then enabled |
 | Heartbeat | the app's heartbeat entry commits; then the vault checkpoints |
 
-What this keeps:
+**Three more rules.**
 
-- **A refused call never reaches KMS.** The pre-check comes first, as
-  `#mayAll` does today.
-- **A decision sees every change committed before it.** In the spike, a
-  transaction that waited on the head row and then read the grants saw a
-  grant committed while it waited, on Postgres at READ COMMITTED and on
-  MySQL at both levels.
+1. **Locks in one order: a member row, then the log's head, then the app's
+   rows.** The vault locks the member a decision is about, then the head for
+   its final append. The app locks the head, then its own rows, and never
+   locks a member row. Nobody holding the head ever waits for a member row,
+   so no cycle can form. Advisory locks are out: Hyperdrive does not support
+   them.
+2. **Time is read after the lock.** Postgres's `CURRENT_TIMESTAMP` is the
+   transaction's start, so a transaction that waited would date its entry
+   before an earlier one's (S9's probe). The append reads
+   `clock_timestamp()` in a statement after the lock.
+3. **READ COMMITTED, Postgres's default.** At REPEATABLE READ, a transaction
+   whose snapshot predates a concurrent commit fails its `FOR UPDATE` with
+   `40001 could not serialize access`. At READ COMMITTED, the spike's
+   transaction that waited on the head then saw the grant committed while it
+   waited.
+
+#### Releasing a key, and the race with KMS
+
+With a local KEK there is no race. A read is one short transaction: lock
+Ada's member row, check her standing, grants and bulk count, unwrap the
+data keys in memory, lock the head, write the `secret.read` entries, commit,
+and only then hand the keys to the app. A removal waits for the few
+milliseconds that takes. Erwin's deployment is this case.
+
+With AWS KMS, each key is a network call of 20 to 40 ms, and 50 of them take
+a quarter of a second. Something has to give. Say Bob removes Ada while her
+`coffre run` is at KMS.
+
+- **(a) Lock nothing across KMS, as the previous draft had it.** Check, log
+  the intent, call KMS, then lock and check again. Bob's removal commits
+  during the KMS call; the final check sees it and refuses. Ada gets
+  nothing, but CloudTrail shows 50 Decrypts the vault then refused; the log
+  explains them with the intent and a "decrypted, withheld" outcome. It
+  costs nothing, and it reads oddly: KMS opened keys for someone who was
+  being removed.
+- **(b) Lock Ada's member row across KMS.** Log the intent in its own short
+  transaction, then: begin, lock Ada's member row (`FOR UPDATE`), check
+  again, call KMS, lock the head for the final append, write the entries,
+  commit, hand back the keys. Bob's removal asks for the same row and waits
+  for the read in flight; then Ada is out, and her next read is refused
+  before any KMS call. Nobody else waits: other members' reads lock other
+  rows, and the head is held only for the final append. The spike, with a
+  300 ms stand-in for KMS, ran exactly so: the removal waited 250 ms, a
+  read by Carol and an app write did not wait at all, and Ada's next read
+  saw her removed (appendix A).
+- **(c) Hold the global head across KMS.** One lock for everything, as the
+  Durable Object had. Every decision and every app append would queue behind
+  every KMS call: about four `coffre run`s a second for the whole instance,
+  and a KMS outage would stop every audited action, not just reads.
+
+| | (a) | (b) | (c) |
+|---|---|---|---|
+| A removal during a read | commits; the read is refused after KMS | waits for the read, then commits | waits for every read |
+| KMS opens keys for a refused read | yes, explained by the log | no | no |
+| Who else waits | nobody | Ada's own other reads and access changes | everyone |
+| Held across KMS | nothing | a transaction and one pooled connection per read in flight | the whole instance |
+| A KMS outage | reads fail; nothing waits | each read holds its member's row and a connection for the KMS budget, then fails as an outage | everything stops |
+
+**Recommendation: (b), with KMS.** It gives the order people expect, reads
+in flight finish and then the person is out, for the price of one
+connection per read in flight. At erwinkn.com's or a team's scale that is
+a handful of Hyperdrive's 20 (Free) or 100 (Paid) connections. Three
+details make it safe:
+
+- **A budget.** All of a read's KMS calls must finish within 5 seconds, or
+  the read fails as an outage, logs each key as "KMS unavailable", commits
+  and lets go of the row. A removal waits at most that long, and its own
+  `lock_timeout` sits above the budget.
+- **Ada's reads queue behind each other,** which keeps her bulk count exact
+  before any KMS call. A token running ten parallel `coffre run`s waits a
+  few hundred milliseconds; nobody else does.
+- **The intent survives a crash** (review F5). It commits before the locked
+  transaction begins, so a vault that dies mid-KMS leaves an intent with no
+  outcome, which verification reports and CloudTrail's Decrypts pair with.
+  Every started call settles before the decision (`Promise.allSettled`), and
+  each key's outcome is logged, so a partial outage is accounted for too.
+
+`wrap` and `rewrap` take the same path: an Encrypt is in CloudTrail too.
+
+**What this keeps.**
+
+- **A refused call never reaches KMS.** The check comes first, as `#mayAll`
+  does today, and with (b) it is made under the member's lock.
 - **The bulk limit is exact,** counted under the lock from the vault's own
-  `key.unwrap` entries: one per released key, syncs and import previews
-  included, intents and refusals not.
+  `secret.read` entries: one per released key, syncs and import previews
+  included, refusals not.
 - **Every instance shares one log and one set of limits.** Review F2 showed
   a second Durable Object loading the same KEK with an empty log and a fresh
   bulk counter. `#serial` orders the calls of one isolate, which only the
   Durable Object made the only one. Here every isolate and process decides
-  under the database's lock, and `#serial` goes. What an instance remembers,
-  such as the last head it saw, can only add a refusal.
-- **A removal that commits before the vault's final check stops the
-  release.** One that commits after cannot recall a key already handed to
-  the app; that is the honest point at which a release happened.
+  under the database's locks, and `#serial` goes. What an instance
+  remembers, such as the last head it saw, can only add a refusal.
+- **A refused pre-check stays refused,** even if a grant arrives before the
+  decision, rather than answer `ok` with no keys as today's code would.
 
-KMS stays outside the transaction. A lock held across 50 Decrypts, with a
-5-second timeout and three attempts each, would stall every append behind
-KMS, hold a pooled connection the whole time (Hyperdrive has about 20 per
-config on Free, 100 on Paid), and run into PlanetScale MySQL's 20-second
-limit on transactions. The price is a race the Durable Object prevented: if
-Bob removes Ada between steps 1 and 4, KMS has already opened her keys, and
-step 4 refuses, logs them as opened and withheld, and zeroes them.
-CloudTrail then shows Decrypts the vault refused, and the log pairs them.
-The reverse race needs a fix: if the pre-check refused, the decision refuses
-too, even if a grant arrived in between, rather than answer `ok` with no
-keys as today's code would.
-
-Review F5 showed a KMS outage halfway through a batch leaving no record of
-the Decrypts that succeeded. With KMS, the vault records its intent first
-(step 2), lets every started call settle (`Promise.allSettled`), and logs
-each key's outcome: released, refused, opened and withheld, or KMS
-unavailable. The call still fails as an outage and returns no key, but
-only after the log says what KMS opened. A local KEK skips step 2, since an
-unwrap in memory leaves nothing outside to reconcile; Erwin's deployment
-pays nothing. `wrap` and `rewrap` follow the same steps.
-
-**Throughput.** One head for both authors is one queue. The spike simulated
-5 ms per round trip, each append holding the lock for about four:
+**Throughput.** Every append takes the one head. The spike simulated 5 ms
+per round trip, each append holding the head for about four:
 
 | Writers at once | One head, both authors | Two heads, one per author |
 |---|---|---|
@@ -296,20 +321,16 @@ pays nothing. `wrap` and `rewrap` follow the same steps.
 | 8 | 52 a second, waiting 133 ms at the median | 108 a second, waiting 50 ms |
 | 32 | 59 a second, waiting 587 ms at the median | 113 a second, waiting 274 ms |
 
-So one log halves the ceiling, to about 50 appends a second, and taking the
-head first holds it a little longer in the app's transactions. Each event
-is now appended once, which gives some back: a `coffre run` of 50 keys is
-one append where today it is one in each log. erwinkn.com, or a team of
-fifty, is two orders of magnitude below. Folding the insert and the head
-update into one statement, which Postgres allows, would take a round trip
-off every append if it were ever needed.
+So one log halves the ceiling, to about 50 appends a second. Each event is
+now appended once, which gives some back. erwinkn.com, or a team of fifty,
+is two orders of magnitude below. Folding the insert and the head update
+into one statement would take a round trip off every append if it were ever
+needed.
 
-`access(principal)`, which the app asks once per request, takes no lock: one
-read of the member, the grants and the freshness check. On SQLite every
-transaction begins `IMMEDIATE` and holds the database's write lock, so the
-head lock does nothing there, as `forUpdate` already arranges; two Node
-processes on one file rely on SQLite's file lock, which the tests must
-exercise with two processes, not two clients of one.
+`access(principal)`, which the app asks once per request, takes no lock:
+one read of the member, the grants and the freshness check. On SQLite,
+every transaction holds the file's write lock, so the locks above do
+nothing there; the tests run two processes on one file to cover it.
 
 ### 3. The key hierarchy
 
@@ -351,10 +372,10 @@ needs migrating. The wrapped key stays in its version's row, beside the
 ciphertext: a separate table of wrapped keys would add a join and hide
 nothing from the app.
 
-### 4. Integrity on each engine
+### 4. Integrity in the database, and around it
 
-Seven guards, outermost first. The first three come from the database and
-depend on the engine. The other four come from keys and hold everywhere.
+Seven guards, outermost first. The first three come from Postgres; the
+other four come from keys, and hold on SQLite too.
 
 1. **Logins.** The app's login reads members and grants and never writes
    them. The vault's login writes members and grants, reads the projects,
@@ -363,16 +384,14 @@ depend on the engine. The other four come from keys and hold everywhere.
    change or delete an entry. The app no longer needs today's artificial
    `UPDATE (created_by)` on `principals`, kept only so it could lock a row:
    it serialises on the head instead. In the spikes every forbidden
-   statement failed with `42501` on Postgres and
-   `ER_TABLEACCESS_DENIED_ERROR` on MySQL.
+   statement failed with `42501`.
 2. **Row-level security** on `audit_log` lets each login insert only its
    own author's entries: `WITH CHECK (author = 'app')` for one, `'vault'`
    for the other. In the spike, each login's attempt to write the other's
    entry failed with `42501`. The table's owner bypasses it, as owners do.
 3. **Triggers** refuse UPDATE, DELETE and TRUNCATE on `audit_log`, for every
    login, the owner's too. They stop bugs and a careless owner, not a
-   determined one: on Postgres the owner can `DISABLE TRIGGER`, and on MySQL
-   `TRUNCATE` skips delete triggers. The spike did both.
+   determined one: the owner can `DISABLE TRIGGER`, as the spike did.
 4. **A MAC over each member's access.** Each `vault_members` row carries an
    HMAC, under `HKDF(signingKey, "coffre.vault.rows")`, over every field that
    bears on access, `generation` and `access_seq` included, and over that
@@ -396,31 +415,23 @@ depend on the engine. The other four come from keys and hold everywhere.
    append.
 7. **Signed checkpoints and witnesses** (questions 6 and 7).
 
-What each engine allows. Sources are in appendix B.
+| | PlanetScale Postgres | Postgres, self-hosted | SQLite, tests and local dev |
+|---|---|---|---|
+| Logins with table-level GRANTs | yes, `CREATE ROLE` in SQL | yes | no logins |
+| Each login writes only its author | yes, row-level security | yes | no |
+| Append-only triggers | yes | yes | yes |
+| Guards 4 to 7 | yes | yes | yes |
+| Point-in-time recovery | yes, 2 days by default | your own | not needed |
 
-| | PlanetScale Postgres | Postgres, self-hosted | MySQL, self-hosted | PlanetScale MySQL | SQLite |
-|---|---|---|---|---|---|
-| Logins with table-level GRANTs | yes, `CREATE ROLE` in SQL | yes | yes, `CREATE USER` | no: four fixed roles per password, each database-wide | no logins |
-| Each login writes only its author | yes, row-level security | yes | a trigger on `CURRENT_USER()`, in an optional script | no | no |
-| Append-only triggers | yes | yes | yes, except against `TRUNCATE` | no: "We do not support any form of stored routines" | yes |
-| `SELECT … FOR UPDATE` | yes | yes | yes | yes, in transactions of at most 20 s | not needed |
-| Guards 4 to 7 | yes | yes | yes | yes | yes |
-| Point-in-time recovery | yes, 2 days by default | your own | your own | no: a backup every 12 hours | copies of the file |
-
-Without guards 1 to 3, on PlanetScale MySQL and SQLite, the app's login can
-write the vault's rows and entries in the vault's name. Guards 4 to 7 still
-refuse a forged grant or session and expose a forged or edited entry. What
-they cannot stop there: deleting a member's grants, which the vault then
-refuses as `tampered`, a denial of service; deleting the vault's recent
-releases to reset a bulk count, which breaks the chain and shows at the
-next verification rather than at once; and rolling rows back (question 7).
+Every deployment runs on Postgres, so guards 1 to 3 always hold where it
+matters. SQLite has no logins; there the app's process could write the
+vault's rows, and guards 4 to 7 still refuse a forged grant or session and
+expose a forged entry, which is what the tests check.
 
 On PlanetScale Postgres, the default role is not a superuser but has
 `CREATEROLE`, `BYPASSRLS` and `pg_write_all_data`: treat it as the owner,
 for migrations only. A role made in SQL logs in as `<role>.<branch id>`, and
-a restore resets its password. On MySQL, coffre keeps one login and no
-triggers by default, since PlanetScale MySQL allows neither; self-hosted
-MySQL gets an optional script with the GRANTs and triggers.
+a restore resets its password.
 
 ### 5. The schema
 
@@ -456,7 +467,7 @@ granted_by)`, with a check that exactly one of the two is set, a unique key
 on each with the principal, and foreign keys to both. An environment grant
 finds its project through `environments`. That replaces the partial unique
 indexes of the vault's SQLite and the `place_id` of the earlier draft, and
-the review's probes found it behaves the same on all three engines. It
+the review's probes found it behaves the same on Postgres and SQLite. It
 belongs in the core change because the table is being created anyway.
 
 **The sign-in tables** keep the shape #23 merged: `issuer_hash` binds an
@@ -480,9 +491,9 @@ sync run, carried through the vault call (S9). `audit_log.id` goes; an entry
 is `seq` and `hash` within its instance.
 
 **Foreign keys stay.** The earlier draft dropped the log's foreign keys,
-because the vault wrote ids the app had not committed. With rule 1 of
-question 2 it never does, apart from a new secret's wrap, which names the
-id in its payload instead. So the log keeps its references to projects,
+because the vault wrote ids the app had not committed. Under the rule that
+opens question 2, it never does, apart from a new secret's wrap, which names
+the id in its payload instead. So the log keeps its references to projects,
 environments, secrets and versions, and "nothing audited can be deleted"
 keeps its footing.
 
@@ -506,23 +517,22 @@ shared with the code. Two indexes that duplicate a unique key go. The list
 gets checked against query plans on representative history before
 anything optional stays.
 
-**One package** (S10, settled). `@coffre/db` holds the three Drizzle
-schemas, the migrations, `dialect.ts`, `portable.ts`, `connect.ts`, the
-Hyperdrive pool, the event codec's storage half and the append, moved out of
+**One package** (S10, settled). `@coffre/db` holds the two Drizzle schemas,
+the migrations, `dialect.ts`, `portable.ts`, `connect.ts`, the Hyperdrive
+pool, the event codec's storage half and the append, moved out of
 `packages/server/src/db`. PR #8 folded `packages/db` into the server because
 the server was its one user; the vault is a second. Queries stay with their
 owners. The vault's SQLite interface, its two backends and its hand-written
 migrations go, and its store is rewritten with Drizzle, which undoes #9's
 "without Drizzle" for the reason the app uses it. `coffre-server migrate`
-stays the one command; runtime Workers never migrate. The three physical
-schemas stay, with the parity test made to compare CHECK predicates and
-index semantics, not only names.
+stays the one command; runtime Workers never migrate. The two physical
+schemas, Postgres and SQLite, stay, with the parity test made to compare
+CHECK predicates and index semantics, not only names.
 
 **Migrations.** No deployment exists yet, so every change here goes into
 the baselines, regenerated by `pnpm db:generate`, and no history is
 converted. PlanetScale Postgres takes plain DDL as the owner, on the direct
-port 5432. PlanetScale MySQL's deploy requests, and the journal and seed
-rows they would need to carry, wait until a MySQL deployment exists. Once
+port 5432, with no deploy requests to go through. Once
 deployments exist, the two Workers deploy one after the other after the
 migration, so a migration must work with the code before and after it.
 
@@ -585,21 +595,73 @@ The vault writes an entry with every key release, wrap and access change,
 so in use those windows are seconds long; the Cron's checkpoint closes them
 when nobody uses coffre.
 
-**Each event is recorded once, by whoever decided it.**
+**What the log says: one entry per human action.** Each entry is named for
+what a person, a token, a sync or the scheduler did or tried, and a column
+says which component wrote it. Technical steps stay in the log, so the chain
+and CloudTrail stay complete, but as detail entries the audit page hides by
+default.
 
-| Event | Recorded by | Instead of |
+| Someone… | Entry | Written by, and when |
 |---|---|---|
-| A value read: a reveal, a `coffre run`, an import preview, a sync | the vault's `key.unwrap`, one per version, with the operation, purpose, source address and path the app supplied, before the key leaves | the app's `secret.read` and the vault's `unwrap`, both |
-| A value written or restored | the vault's `key.wrap` or `key.rewrap`, and the app's `secret.write` or `secret.restore` in the transaction that stores the version, pointing at the wrap by `related_seq` | both, as today: a wrapped key does not prove a version was stored |
-| A grant, an admission, a removal | the vault's entry, committed with the change | the app's copy and the vault's entry |
-| A refusal by the vault | the vault's entry | the app's `vault_<code>` copy |
-| A refusal by the app, before any vault call | the app's entry | unchanged |
-| A sync's push | the vault's release to `sync:<id>`, and the app's `sync.push` naming the destination | unchanged |
+| reads a secret: a reveal, a `coffre run` or export, a sync, an import preview | `secret.read`, one per secret, with the purpose and the batch | the vault, in the transaction that releases the key, before it leaves |
+| is refused a read | `secret.read`, refused, with the reason | whoever refused: the app, when its own check fails; the vault, for no grant, removal or the bulk limit |
+| writes or restores a value | `secret.write` or `secret.restore`, one per version | the app, in the transaction that stores the version |
+| renames or archives a secret, a project, an environment | `secret.rename`, `project.archive`, … | the app |
+| changes someone's access | `access.grant` or `access.revoke`, one per place | the vault, in the transaction that changes it |
+| adds, removes or restores a member, or makes one an owner | `member.add`, `member.remove`, `member.restore`, `member.owner` | the vault, likewise |
+| signs in or out, issues or revokes a token, approves a `coffre login` | `sign_in`, `sign_out`, `token.create`, `token.revoke`, `device.approve` | the app; hidden by default |
+| sets up, changes or removes a sync | `sync.create`, `sync.update`, `sync.delete` | the app |
+| a sync pushes | `secret.read` for each value, with the sync as the reader, and `sync.push` for each key, naming the destination | the vault, then the app |
 
-A release means the app could decrypt, not that a person saw the answer: an
-error or a dropped connection may follow. That is the conservative account,
-and the fact the vault can prove. The context the app passes is its claim,
-recorded as such, as the vault records the principal today.
+Detail entries, hidden by default: `key.wrap`, `key.rewrap` and
+`key.intent` from the vault; `audit.heartbeat` and `audit.checkpoint`. One
+system entry is never hidden: `vault.tampered`, written when the vault finds
+a row or an entry that fails its MAC.
+
+A `coffre run` of 12 secrets is 12 `secret.read` rows that share one
+operation, and the page shows them as one line, "ada ran market/prod: 12
+secrets", which opens to the twelve. Rows stay per secret because the
+questions people ask are per secret: who read `DATABASE_URL`, what a leaver
+read and must be rotated, how many keys a token took in 15 minutes.
+
+**What `secret.read` proves.** That the vault checked the reader's standing
+and grant, released this version's key to the app for this purpose, and
+committed the entry before the key left. The vault releases a key only to
+serve a read, so each one is a read. It does not prove that a person saw the
+value: the app may fail to decrypt, or the connection drop, after the key is
+released. The reader it names is the app's claim, checked against the
+grants: a compromised app can read as anyone who holds a grant, and every
+such read still lands here, under that name, in the bulk limit, and with
+KMS in CloudTrail. And it cannot see a read that bypasses coffre, a copy of
+the database opened with a stolen KEK; with KMS, a Decrypt in CloudTrail
+with no entry here shows one.
+
+**Writes.** `secret.write` is the app's, written in the transaction that
+stores the version, which is what makes it true. The vault's wrap is a
+technical step, logged as a `key.wrap` detail entry and linked from the
+write by `related_seq`. It stays because with KMS each wrap is an Encrypt in
+CloudTrail, which pairs with its `key.wrap` by the secret's ids and the
+time, whether or not the app's transaction then committed; a wrap without a
+write is then visible as such. A refused write is a human action:
+`secret.write`, refused, written by the vault. A restore's rewrap is a
+Decrypt and an Encrypt in CloudTrail, and both pair with its `key.rewrap`.
+
+The audit page, by default, as a human would see it:
+
+```
+  seq  time   who                  what they did                                           decided by
+ 1188  10:01  ada@acme.example     ran market/prod: 12 secrets                             vault
+ 1201  10:02  ada@acme.example     changed market/prod/DATABASE_URL, now version 5         app
+ 1202  10:03  bob@acme.example     gave carol@acme.example developer on market/dev         vault
+ 1203  10:03  carol@acme.example   revealed market/dev/API_KEY                             vault
+ 1204  10:04  carol@acme.example   tried to reveal market/prod/API_KEY: no grant           vault, refused
+ 1205  10:05  sync to GitHub       pushed market/prod to acme/market: 3 secrets            vault, app
+ 1211  10:06  bob@acme.example     removed dave@acme.example, who held 2 grants            vault
+ 1212  10:07  token:ci-deploy      tried to run market/prod, 50 secrets: bulk limit        vault, refused
+ 1263  10:08  ada@acme.example     restored market/prod/DATABASE_URL to version 3, now 6   app
+ 1264  10:09  erwin@acme.example   created project billing                                 app
+             hidden: 2 key wraps (1200, 1262); sign-ins, heartbeats and checkpoints when there are any
+```
 
 **Access changes** (A01). The vault's entry is the record, in the
 transaction that changes the member or the grant, so nothing can commit
@@ -609,20 +671,30 @@ access. The intent entries, the `vault_seq` column and the recovery job of
 the first draft are gone. A lost response is ordinary uncertainty, and a
 retried grant is never replayed over a later change.
 
-**Listings become reads** (S3). The app may read members, grants and the
-log, so the vault calls that only fetched stored rows become queries:
+**Pages that become plain reads** (S3). The app may read members, grants
+and the log, so the vault calls that only fetched stored rows become
+queries:
 
-| Vault call today | After |
-|---|---|
-| `members()`, for the users and access pages | one query joining members, grants, identities and credentials; root admins' labels come from the vault's configuration |
-| `log()`, a page of the vault's log | the ordinary audit query, with an author filter |
-| `latestCheckpoint()` | the newest checkpoint entry, its signature checked against the vault's public key, which comes from the vault, not the database |
-| `access(principal)`, deciding a request | stays a vault call: the app cannot check the member MAC, and a plain row is fine to display, not to authorise |
-| `verify`, `checkpoint`, `admit`, `remove`, `setAccess`, `wrap`, `unwrap`, `rewrap` | stay: signing, mutation and key decisions; `unwrap` and `rewrap` now take version ids |
+| Page or command | Today | After |
+|---|---|---|
+| The Users page and `coffre access`: everyone, their status, owner flag and grants (`GET /api/members`) | `vault.members()`, then joined with the app's directory | one query over `vault_members`, `vault_grants`, identities and credentials |
+| A member's page: status, grants, sessions, what they read (`GET /api/members/user:ada@acme.example`) | `vault.access()` for status and grants, plus the app's queries | the same query, for one member |
+| A project's Access tab: who holds what on `market` | `vault.members()`, filtered to the project | `vault_grants` joined to members, for one project |
+| The audit page's "Vault log" panel (`GET /api/audit/vault`) | `vault.log()`, the vault's own pager and serialiser | gone: one audit page reads `audit_log` |
+| The audit page's checkpoint status | `vault.latestCheckpoint()` | the newest `audit.checkpoint` entry, its signature checked with the vault's public key, which comes from the vault |
 
-The audit page keeps today's rules for what each reader sees: project
-auditors see the reads and grants in their projects, now vault entries;
-membership events and diagnostic payloads stay with owners and root admins.
+What stays a vault call: `vault.access(principal)`, which the app asks on
+every request to decide what the caller may do; verification; and every
+decision that changes access or releases a key.
+
+A forged row looks like this. Say the database's owner inserts a grant
+giving herself `owner` on `market`. The Users page and `market`'s Access tab
+show it, as stored: the app cannot check the member MAC, so a listing is a
+display, not a decision. The first time it would matter, it does not: her
+next request's `access()` call fails the MAC over her grants, so the vault
+refuses her as `tampered`, and writes a `vault.tampered` entry that the
+audit page shows. Verification flags it too, and the pages show a failed
+verification as a banner. A forged row can be displayed; it cannot be used.
 
 **What checkpoints keep** (S4). A checkpoint becomes a vault entry,
 `audit.checkpoint`, with a signed payload: format, instance id, the `seq`
@@ -651,135 +723,148 @@ entries; it returns the `seq` and `hash` it reached. The app checks the
 same prefix with its key. The verdict says "verified through 5170" and
 names the entry where either check fails, and its author; entries appended
 meanwhile are not a failure. Replay authenticates every entry it uses, so
-an app entry that says `grant.create` never becomes a grant.
+an app entry that says `access.grant` never becomes a grant.
 
-**A forged vault entry,** written by the app's login where nothing stops it
-(PlanetScale MySQL, SQLite), fails its MAC. Verification reports it. The
-vault checks the MAC of every vault entry it decides on, such as a member's
-newest access entry, and ignores and reports one that fails, without
-stopping: otherwise the app's login would hold a switch that turns coffre
-off. A forged release can only raise a bulk count.
+**A forged vault entry,** written by the app's process on SQLite in tests or
+local development, where no login stops it, fails its MAC. Verification
+reports it. The vault checks the MAC of every vault entry it decides on,
+such as a member's newest access entry, and ignores and reports one that
+fails, without stopping: otherwise the app's login would hold a switch that
+turns coffre off. A forged release can only raise a bulk count.
 
 **The costs.** One lock for both writers, which halves the throughput
 ceiling (question 2). One entry format for two packages, so a change to it
 ships in both, under a new version. The app reads the vault's rows and
-entries, which it displays anyway. And rule 1 of question 2 restructures
-every flow that calls the vault today.
+entries, which it displays anyway. And the rule that opens question 2
+restructures every flow that calls the vault today.
 
 ### 7. Rollback detection
 
-Mallory has the owner's login and puts genuine old rows back. Three cases.
+Mallory has the owner's login, or the PlanetScale account, and puts genuine
+old rows back. Three cases.
 
 **One member's rows.** Ada was removed at entry 812. Mallory kept her
 member row and grants from before and writes them back; their MAC is
 genuine. The vault catches this at Ada's next decision, for free: her row
-says its last access change was entry 640, and the log's newest vault
-access entry about her, its MAC checked, is 812, so she is refused as
-`tampered`. That is one indexed lookup in the read the decision makes
-anyway. To get past it Mallory must take 812 out of the log, which breaks
-the chain, unless it is recent enough to cut off with everything after it.
+says its last access change was entry 640, and the log's newest vault entry
+about her, its MAC checked, is 812, so she is refused as `tampered`. That is
+one indexed lookup in the read the decision makes anyway. To get past it,
+Mallory must take 812 out of the log as well, which is one of the next two
+cases.
 
-**The newest entries, cut off** (F8). Mallory saves the head, lets coffre
-run, then deletes the entries since and puts the head back. She uses no
-key, and what remains is genuine. A chain proves that what is kept is
-authentic, not that nothing was cut from its end; #21 already says so in
-`architecture.md`. If a cut entry changed a member, that member's row now
-names an entry the log no longer has, and is refused, unless she rolls the
-row back too, which is the next case. Otherwise only two things catch the
-cut: an app or vault instance that wrote one of the cut entries and still
-remembers the head it left, at its next append; and a witness that saw one.
+**The whole database, rewound.** Mallory has the PlanetScale account and,
+from a phished laptop, Bob's browser session. At 10:06 she reveals
+`market/prod` with Bob's session, and the vault writes 12 `secret.read`
+entries in Bob's name, 1300 to 1311. At 10:20 she restores the database to
+10:04, to erase them. A restore makes a new branch, so she also needs the
+Cloudflare account to point Hyperdrive at it; with only the owner's login,
+she can delete the rows written since 10:04 and put back the ones they
+changed, which looks the same to everyone below. Everything left is genuine
+as of 10:04, checkpoints included, so verification passes. Who notices:
 
-**The whole database, rewound.** Every row, MAC and link is genuine as of
-the moment Mallory restores. Nothing inside the database can tell,
-checkpoints included, since they roll back with it. Today this takes the
-database and the Durable Object; with one database it is one restore. The
-Cron's five minutes are a cadence, not a bound on what an owner can
-rewind.
+| Who | When | How |
+|---|---|---|
+| Ada, who ran `coffre run` at 10:12 | at her next command | her CLI remembers entry 1340 and its hash; the restored log has no entry 1340, or a different one, and the CLI says "this instance's log was rewound: it no longer holds entry 1340, which you saw at 10:12" |
+| Bob, if he opened the audit page after 10:06 | at his next page load | the same check, in his browser |
+| An app or vault instance running since before 10:20 | at its next append | the head it last wrote is ahead of the one it finds: it refuses and writes an alarm |
+| CloudTrail, with KMS | when someone compares | 12 Decrypts at 10:06 with no `secret.read` |
+| Checkpoints copied off the box, later | at the next comparison | the copies from 10:05 and 10:10 no longer match the log |
+| Nobody else | | |
+
+With a local KEK and nobody using coffre between 10:06 and 10:20, nothing
+notices. That is the price of one store: today she would also need the
+Durable Object, which lives in the Cloudflare account. The Cron's five
+minutes are a cadence, not a limit on how far back an owner can rewind.
+
+**The newest entries, cut off** (F8). The same 10:06 reveal, but at 10:07,
+with the owner's login, Mallory deletes entries 1300 to 1311 and puts the
+head back to 1299. Nothing else was written in between. What is left is
+genuine and its chain verifies: a chain proves that what is kept is
+authentic, not that nothing was cut from its end, as #21 already says in
+`architecture.md`.
+
+| Who | How |
+|---|---|
+| The vault instance that wrote 1311 | at its next decision the head is behind the one it wrote: it refuses and writes an alarm. Isolates live for minutes under traffic, so this is likely, not certain |
+| Anyone whose client saw an entry from 1300 on | at their next command or page |
+| CloudTrail, with KMS | 12 Decrypts at 10:06, no entries |
+| The 10:10 checkpoint | nothing: it signs the cut log. Had she cut after 10:10, she would have had to cut that checkpoint too, which is the same case |
+| Verification | nothing |
+
+Had the cut entries changed a member, say a grant Mallory gave herself
+with Bob's session, that member's row would name an entry the log no longer
+has, and the vault would refuse the member at once, unless she rolled the
+row back too: the whole-database case.
+
+**What catches these, and what it costs.**
 
 | | What it catches | Cost | |
 |---|---|---|---|
-| Memory | a rewind while an app or vault instance is running: the head it last saw goes backwards | none | yes, plan steps 3 and 4 |
-| Witnesses | a rewind past anything a person has seen | about 150 lines in `@coffre/client`, one route | yes, plan step 10 |
+| Memory | a rewind or a cut while an app or vault instance is running: the head it last saw goes backwards | none | yes, plan steps 3 and 4 |
+| Witnesses | a rewind or a cut past anything a person has seen | about 150 lines in `@coffre/client`, one route | yes, plan step 10 |
 | Checkpoints off the box | a rewind past the last checkpoint copied out, with nobody looking | an R2 bucket with a retention lock, or S3 Object Lock on Node | later: roadmap item 5 |
 
 **Witnesses.** A client remembers, per instance, the instance id, the newest
 entry it has seen, as `seq` and `hash`, and the vault's public key, pinned
-at `coffre login`. Checking that the number grows is not enough, since after
-a rewind the log passes 812 again within minutes, so the client asks for the
-hash at the number it remembers: `GET /api/witness?seq=812` answers with the
-current entry's hash there and the newest checkpoint. A rewound log has a
-different entry 812, or none. The CLI checks before a command, at most once
-an hour, and keeps its anchor in `~/.coffre/credentials.json`; the browser
-checks once per page load and keeps it in `localStorage`. Access changes
-answer with the entry the vault wrote, so whoever removes Ada holds entry
-812 at once. A legitimate restore looks exactly like an attack to a witness,
-which is right; the restore drill ends with telling people, and
-`coffre verify --accept-rewind`.
-
-What stays invisible: a rewind to a moment after the last thing any witness
-saw, before anyone looks again.
+at `coffre login`. Checking that the number grows is not enough, since
+after a rewind the log passes 1340 again within minutes, so the client asks
+for the hash at the number it remembers: `GET /api/witness?seq=1340`
+answers with the current entry's hash there and the newest checkpoint. The
+CLI checks before a command, at most once an hour, and keeps its anchor in
+`~/.coffre/credentials.json`; the browser checks once per page load and
+keeps it in `localStorage`. Access changes answer with the entry the vault
+wrote, so whoever removes someone holds that entry at once. A legitimate
+restore looks exactly like an attack to a witness, which is right; the
+restore drill ends with telling people, and `coffre verify --accept-rewind`.
 
 ### 8. Node deployments
+
+Node deployments run on Postgres, like Workers, and the vault stays a
+process of its own with its own login.
 
 | | Today | After |
 |---|---|---|
 | The vault as its own process | `serveVault({ socket, store: 'vault.db', … })`, its own SQLite file | `serveVault({ socket, database: 'postgres://coffre_vault_runtime:…', … })` |
-| The vault in the server's process | `localVault({ store, … })` | `localVault({ database, … })`, for tests and small setups; the example keeps two processes |
-| The server | `serve({ database, vault: connectVault(socket), … })` | unchanged |
+| The vault in the server's process | `localVault({ store, … })` | `localVault({ database, … })`, for tests and local development |
+| The server | `serve({ database, vault: connectVault(socket), … })` | unchanged, on Postgres |
 | The socket | HTTP over a Unix socket, `0660` | unchanged |
 | Backups | the database and `vault.db`, taken at the same moment | the database |
 
-On SQLite both processes open one file, and SQLite's file lock serialises
-them, which is one more reason for rule 1 of question 2: an app transaction
-held open across a vault call locks the vault out of the file. There are no
-logins, so the separation between the tables rests on guards 4 to 7. The
-vault's own SQLite layer (`sqlite.ts`, `sqlite-node.ts`,
-`sqlite-durable-object.ts`) is deleted.
-
-**Recommendation: keep SQLite,** for the tests, `pnpm conformance:node` and
-a one-machine Node deployment. Its cost is already paid: a third schema and
-baseline, and dialect branches that exist today. The vault adds nothing
-SQLite-specific, since its lock is the existing no-op. Dropping SQLite would
-make every test run need Docker and would add nothing to what coffre
-guarantees.
+SQLite stays for the test suite, conformance's Node run and local
+development. There both processes open one file, and SQLite's file lock
+serialises them, which is one more reason no app transaction may stay open
+across a vault call. The vault's own SQLite layer (`sqlite.ts`,
+`sqlite-node.ts`, `sqlite-durable-object.ts`) is deleted.
 
 ### 9. PlanetScale and Hyperdrive
 
-| | PlanetScale Postgres | PlanetScale MySQL (Vitess) |
-|---|---|---|
-| Smallest | PS-5, $5 a month on one node, $15 with high availability | PS-10 with high availability, $39 a month |
-| Roles, GRANTs, triggers | yes | no |
-| Point-in-time recovery | yes, from the WAL, 2 days by default; restores to a new branch | no; a backup every 12 hours |
-| Schema changes | plain DDL | deploy requests |
-| Hyperdrive | yes, with `pg`, Cloudflare's recommended driver | yes, GA since 2026-08-07, with `mysql2` 3.13 or later and `disableEval: true`; no prepared statements, no multi-statement queries |
-| coffre's Worker | `postgres(env.HYPERDRIVE)`, today | not built: the Worker speaks only Postgres |
-| Drizzle | `node-postgres`, as today | `mysql2`; its `mode: 'planetscale'` only changes how relational queries compile. PlanetScale's HTTP driver 2.0 breaks Drizzle's adapter for it (drizzle-orm#6398) |
-
-**Recommendation: PlanetScale Postgres for erwinkn.com.** It keeps guards 1
-to 3, has point-in-time recovery, costs less, and coffre's Worker already
-speaks it. MySQL stays supported on Node, as today, with the integrity of
-its column in question 4's table. Running the Worker on MySQL, and
-PlanetScale MySQL's deploy requests, wait for a deployment that needs them.
+**PlanetScale Postgres for erwinkn.com.** The smallest cluster, PS-5, is
+$5 a month on one node, $15 with high availability. It is Postgres 17 or 18
+with SQL roles, table-level GRANTs, row-level security and triggers, so
+guards 1 to 3 hold; point-in-time recovery reaches back 2 days by default
+and restores to a new branch; schema changes are plain DDL, with no deploy
+requests; and coffre's Worker already speaks it through Hyperdrive with
+`pg`, Cloudflare's recommended driver. PlanetScale's MySQL product has none
+of the first three and no point-in-time recovery, and coffre no longer
+supports MySQL.
 
 Hyperdrive, for both Workers:
 
-- **Query caching off: `wrangler hyperdrive create … --caching-disabled`.**
-  Shipped in #22. Caching is on by default, serves a read for up to 60
-  seconds plus 15 stale, and a write does not clear it, so a revoked token
-  could keep working for about a minute. A `wrangler.jsonc` binding takes
-  only a name and an id, so it cannot pin this; the session lookup reads
-  the database clock, which Hyperdrive never caches, whatever the config
-  says. Once the vault reads through Hyperdrive, its reads on Postgres do
-  the same. Cloudflare's docs say nothing about reads inside a transaction.
+- **Query caching off,** shipped in #22: a cached read could keep a revoked
+  token working for about a minute, a `wrangler.jsonc` binding cannot pin
+  caching off, and the session lookup reads the database clock, which
+  Hyperdrive never caches. Once the vault reads through Hyperdrive, its
+  reads do the same.
 - **One config per login,** so two. The Free plan allows 10 per account,
   Paid 25.
 - **Port 5432, not 6432.** Hyperdrive pools, and PgBouncer behind it would
-  pool again. coffre keeps no session state on Postgres, so pooling per
-  transaction is fine.
+  pool again. coffre keeps no session state, so pooling per transaction is
+  fine.
 - **Connections.** Hyperdrive opens up to about 20 connections to the
-  database per config on Free, and 100 on Paid. PlanetScale does not
-  publish PS-5's `max_connections`; it is in the branch's Parameters tab.
-  Both configs must fit under it.
+  database per config on Free, and 100 on Paid; with KMS, each read in
+  flight holds one of the vault's (question 2). PlanetScale does not
+  publish PS-5's `max_connections`; it is in the branch's Parameters tab,
+  and both configs must fit under it.
 - **Placement.** Both Workers near the database's region, with Cloudflare's
   placement hint, since a decision makes several round trips.
 
@@ -801,7 +886,7 @@ failure breaks. It is replaced by these invariants:
    a removal and re-admission revive no session, token, linked account or
    device approval, late callbacks included.
 4. Two vault instances share the bulk limit and the generations exactly, on
-   Postgres and MySQL connections and on two SQLite processes.
+   Postgres connections and on two SQLite processes.
 5. On Postgres, the app's login cannot write members, grants or a vault
    entry, nor change either author's entries.
 6. Editing either author's entries, swapping an author, deleting an entry in
@@ -914,63 +999,69 @@ makes rotation cheap is the one that never rotates.
 ## Implementation plan
 
 Each step is one pull request for one agent, from `main`, in this order
-unless it says otherwise. "The suite" means `pnpm test:all`,
-`pnpm typecheck`, `pnpm lint` and `pnpm test:schema`. Steps 1 to 11 are the
-core change; step 12 lists what can follow without blocking it.
+unless it says otherwise. "The suite" means `pnpm test`, `pnpm test:sqlite`,
+`pnpm typecheck`, `pnpm lint` and `pnpm test:schema`, on Postgres and SQLite
+once `remove-mysql` has landed. Steps 1 to 11 are the core change; step 12
+lists what can follow without blocking it.
 
 0. **Hyperdrive's cache off.** Shipped as #22.
 1. **No app transaction across a vault call** (S12). On today's vault:
-   reveals read, then call the vault; writes and restores
-   prepare, wrap, then store in one short transaction that checks the
-   expected versions and retries as a new operation on conflict; a new
-   secret's id is chosen before its wrap; access and member changes call the
-   vault outside any transaction; a new sync is committed disabled, granted,
-   then enabled. Verified by the suite, a test that fails any vault call
-   made while an app transaction is open, and #23's A08 regressions.
-2. **`@coffre/db`** (S10). Move `packages/server/src/db` into a package; the
-   server imports it by name and `coffre-server migrate` delegates to it.
-   Nothing else changes. Verified by the suite on all three engines,
-   `db:check`, `check:pins` and `test:consumer`.
+   reveals read, then call the vault; writes and restores prepare, wrap,
+   then store in one short transaction that checks the expected versions
+   and retries as a new operation on conflict; a new secret's id is chosen
+   before its wrap; access and member changes call the vault outside any
+   transaction; a new sync is committed disabled, granted, then enabled.
+   Verified by the suite, a test that fails any vault call made while an
+   app transaction is open, and #23's A08 regressions.
+2. **`@coffre/db`** (S10). Move `packages/server/src/db`, now two schemas
+   and two migration trees, into a package; the server imports it by name
+   and `coffre-server migrate` delegates to it. Nothing else changes.
+   Verified by the suite, `db:check`, `check:pins` and `test:consumer`.
 3. **The log's v2 format, written by the app alone** (S1, S9, S11). The
    codec and its test vectors in `@coffre/core`; the append in `@coffre/db`,
-   which locks the head first, checks that it names the last entry and
-   reads the clock after the lock. New columns, integer milliseconds,
-   `operation_id` for `bundle_id`, `related_seq`, no `audit_log.id`, the
-   paging indexes; append-only triggers on Postgres and SQLite. The app
-   remembers the last head it saw. Verification checks every link, the
-   numbers from 0 and the app's MACs. Verified by the vectors, the suite and
-   #21's sequence tests.
+   which locks the head, checks that it names the last entry and reads the
+   clock after the lock. New columns, integer milliseconds, `operation_id`
+   for `bundle_id`, `related_seq`, no `audit_log.id`, the paging indexes;
+   append-only triggers. The app remembers the last head it saw.
+   Verification checks every link, the numbers from 0 and the app's MACs.
+   Verified by the vectors, the suite and #21's sequence tests.
 4. **The vault on the shared database, owning the directory** (S2, S3, S5,
    F2, F5). `vault_members`, which replaces both `principals` tables, and
    `vault_grants` with one foreign key per grant; canonical principals; the
    sign-in tables pointing at `vault_members`, with #23's columns made NOT
-   NULL. On Postgres, the `coffre_vault` role, the GRANTs and row-level
-   security per author. The vault's store rewritten with Drizzle, appending
-   v2 entries under its key; decisions take the head first, with KMS intent,
-   settled calls and per-key outcomes; removals bump the generation;
+   NULL. The `coffre_vault` role, the GRANTs and row-level security per
+   author. The vault's store rewritten with Drizzle, appending v2 entries
+   under its key. Decisions lock the member row, then the head; with a local
+   KEK, a read is one short transaction; with KMS, the intent commits first,
+   the member row is held across KMS within a 5-second budget, every call
+   settles and each key's outcome is logged. Removals bump the generation;
    root admins get member rows; sign-in, linking and device approval
    serialise on the head and compare generations; `unwrap` and `rewrap`
    take version ids; `#serial` goes, and the vault remembers the last head
    it saw. Delete the vault's SQLite layer and its migrations. Verified by
-   the vault's tests on three engines; two vault instances, and two SQLite
-   processes, sharing the bulk limit and generations exactly; the review's
-   R4 and R6; and #23's A08 regressions.
+   the vault's tests on Postgres and SQLite; two vault instances, and two
+   SQLite processes, sharing the bulk limit and generations exactly; a
+   removal during a slow KMS call waiting for the read in flight; the
+   review's R4 and R6; and #23's A08 regressions.
 5. **Member integrity.** The member MAC over the member's grants,
    `generation` and `access_seq`; the freshness check against the newest
-   authenticated access entry; the `tampered` refusal code, worded on the
-   pages and in the CLI; forged vault entries ignored and reported.
-   Verified by tests for a grant forged, edited and deleted; old member rows
-   put back; a generation edited back, or restored with its row; a vault
-   entry forged by the app's login.
-6. **One record per event, checkpoints and readiness** (S1, S3, S4). Reads
-   and access changes recorded by the vault alone; the app's duplicates go.
-   Checkpoints as signed vault entries over a prefix; `audit_heartbeat`, the
-   vault's checkpoints and `CheckpointInput.previous` go; readiness as a
-   query. Verification with both keys over one prefix, keeping every
-   checkpoint. `members()`, `log()` and `latestCheckpoint()` become queries;
-   the audit page becomes one list with today's visibility rules;
-   `coffre verify` reports how far it got. Verified by the review's R1, R1b
-   and R2, the app review's A01, and "no audit, no access change".
+   authenticated access entry; the `tampered` refusal and the
+   `vault.tampered` entry, worded on the pages and in the CLI; forged vault
+   entries ignored and reported. Verified by tests for a grant forged,
+   edited and deleted; old member rows put back; a generation edited back,
+   or restored with its row; a vault entry forged on SQLite.
+6. **One entry per human action, checkpoints and readiness** (S1, S3, S4).
+   The vocabulary of question 6: `secret.read` written by the vault at
+   release, `secret.write` by the app with the version, access and member
+   entries by the vault, sign-ins and technical steps as hidden detail; the
+   app's duplicates go. Checkpoints as signed vault entries over a prefix;
+   `audit_heartbeat`, the vault's checkpoints and `CheckpointInput.previous`
+   go; readiness as a query. Verification with both keys over one prefix,
+   keeping every checkpoint. The listings of question 6 become queries; the
+   audit page becomes one list, grouped by operation, with today's
+   visibility rules; `coffre verify` reports how far it got. Verified by
+   the review's R1, R1b and R2, the app review's A01, "no audit, no access
+   change", and the sample log rendered from a seeded instance.
 7. **Sign-in rows authenticated** (S6, S11). `auth_mac` on identities,
    credentials and device approvals, checked before use and recomputed on
    every change of state; the device-state check; the composite foreign key
@@ -979,12 +1070,12 @@ core change; step 12 lists what can follow without blocking it.
    and A08 regressions.
 8. **Transports and deployments.** Workers:
    `vault(env => ({ database: postgres(env.HYPERDRIVE), … }))`, no Durable
-   Object. Node: `serveVault({ database })`, `localVault({ database })`, one
-   SQLite file for both processes. The examples, `init`, `dev/deployment`,
-   `dev/start.sh` and the conformance harness (`--vault-runtime`, no
-   `vaultStore`). Verified by `pnpm conformance:workers`,
-   `pnpm conformance:node`, `test:consumer`, and a `pnpm dev` session that
-   signs in and reveals.
+   Object. Node: `serveVault({ database })` on Postgres, with the example's
+   `DATABASE_URL` a Postgres URL; `localVault({ database })` for tests.
+   The examples, `init`, `dev/deployment`, `dev/start.sh` and the
+   conformance harness (`--vault-runtime`, no `vaultStore`). Verified by
+   `pnpm conformance:workers`, `pnpm conformance:node`, `test:consumer`,
+   and a `pnpm dev` session that signs in and reveals.
 9. **Conformance around facts that commit** (S12). The nine invariants of
    "What it costs to get there". Verified by both conformance runs, and by
    each new check failing against a build with step 5, 6 or 7 reverted.
@@ -992,8 +1083,8 @@ core change; step 12 lists what can follow without blocking it.
     `GET /api/witness`; `@coffre/client` keeps and checks the anchor, the
     CLI with its credentials and the UI in `localStorage`;
     `coffre verify --accept-rewind`. Verified by unit tests, the review's R7
-    rewritten to expect a witness that saw a cut entry to report it, and a
-    conformance check that rewinds the database as its owner. Depends on
+    rewritten to expect a witness that saw a cut entry to report it, and the
+    two scenarios of question 7 run against a test instance. Depends on
     step 6 only, so it can run beside 7 to 9.
 11. **Docs and the restore drill.** The docs listed above, and a runbook for
     PlanetScale Postgres. Verified by running the drill on a PlanetScale
@@ -1003,83 +1094,58 @@ core change; step 12 lists what can follow without blocking it.
       a composite foreign key to its own version, drop
       `current_version_id`, `updated_at` and the parent `project_id` on
       `secrets` and `syncs`.
-    - Sync results as events (S8): a `sync.finished` entry, `last_run_seq`
+    - Sync results as entries (S8): a `sync.finished` entry, `last_run_seq`
       for the cached result, a lease token, and one unique destination per
       provider.
-    - The Worker on MySQL, the GRANT and trigger script for self-hosted
-      MySQL, PlanetScale MySQL's deploy requests, and checkpoints copied to
-      R2 behind a retention lock.
+    - Checkpoints copied to R2 behind a retention lock.
 
 ## For Erwin to decide
 
-Already settled: two Workers, with server rendering kept; one database; one
-log; `@coffre/db`; Hyperdrive's cache off, shipped in #22. Marks compare
-with the previous version of this list: unchanged, changed (★) or new (✚).
+Settled: two Workers, with server rendering kept; one database, Postgres
+only, with SQLite for tests and local development; one log; `@coffre/db`;
+one member list owned by the vault; checkpoints as signed log entries; one
+data key per version, wrapped directly by the KEK; the MAC on sign-in rows;
+one clock and one operation id; grant scope as one foreign key; Hyperdrive's
+cache off (#22).
 
-**The storage review's core, which Erwin backs** (S1, S2, S4, S12). Each
-line names the choice inside it that still wants his word.
+Still open:
 
-1. ★ The log's format: each author's MAC over the previous hash and the
+1. The log's format: each author's MAC over the previous hash and the
    fields, a public SHA-256 over the fields and the MAC, versioned, with
    shared test vectors? Recommended: yes; the public chain then pins every
-   byte a checkpoint signs. The choice: the review's formula over the
-   earlier draft's.
-2. ★ Record each event once, by whoever decided it: a read is the vault's
-   release, an access change the vault's entry? Recommended: yes. The
-   choice: an app read's only record is the vault's, which counts a key
-   handed to the app, not an answer delivered.
-3. ✚ One member directory owned by the vault, with generations as the
-   revocation and one MAC per member over its grants? Recommended: yes. The
-   choice: the app keeps no membership state of its own, so every request
-   still asks the vault.
-4. ✚ Checkpoints as signed vault entries over a prefix, and readiness as a
-   query, without `audit_heartbeat`? Recommended: yes. The choice: a
-   checkpoint stored in the database rolls back with it, so only witnesses
-   and off-box copies give freshness.
-5. ✚ No app transaction open across a vault call, the head locked first,
-   and the log keeping its foreign keys? Recommended: yes. The choice: every
-   flow that calls the vault today is restructured first, as plan step 1.
+   byte a checkpoint signs (question 6).
+2. ★ One entry per human action, named for what the person did, with the
+   author as a column: `secret.read` written by the vault at release,
+   `secret.write` by the app with the version, technical steps as hidden
+   detail? Recommended: yes; the sample log is in question 6.
+3. No app transaction open across a vault call? Recommended: yes; otherwise
+   a write and its log entry wait on each other through an HTTP call, which
+   Postgres cannot see (question 2 opens with the example).
+4. Pages that only list stored rows read them directly, while `access()`
+   and every decision stay vault calls? Recommended: yes; a forged row can
+   then be displayed but not used (question 6 names the pages).
+5. ★ With KMS, hold the reader's member row across the KMS call, so a
+   removal waits for a read in flight rather than racing it? Recommended:
+   yes, option (b) of question 2; with a local KEK there is no race.
+6. ★ Accept that a rewind of the whole database, or the newest entries cut
+   off, is seen only by a witness, a running instance or CloudTrail?
+   Recommended: yes, with off-box checkpoints later; question 7 walks through
+   both, minute by minute.
 
-**Still open.**
-
-6. Postgres first: PlanetScale Postgres for erwinkn.com, MySQL on Node only
-   until someone deploys it? Recommended: yes. Unchanged; merges two items.
-7. Keep SQLite for the tests and one-machine Node? Recommended: yes.
-   Unchanged.
-8. One data key per secret version, wrapped directly by the KEK?
-   Recommended: yes. Unchanged.
-9. ✚ Listings as plain reads, with `access`, verification and every
-   decision kept as vault calls, and `unwrap` taking version ids?
-   Recommended: yes.
-10. ✚ An app-key MAC on the security fields of identities, credentials and
-    device approvals, so the database alone cannot mint a session?
-    Recommended: yes.
-11. ✚ One clock, the database's read after the lock, in integer
-    milliseconds, and one operation id per batch? Recommended: yes.
-12. ✚ Grant scope as exactly one foreign key, in the core change, and the
-    current-version pointer and sync results after it? Recommended: yes.
-    Replaces `place_id`.
-13. With KMS, log the intent before calling it, and accept that a removal
-    during a KMS call shows as a Decrypt the vault then refused?
-    Recommended: yes. Unchanged; merges two items.
-14. Witnesses now, off-box checkpoints later, accepting that a
-    whole-database rewind or a cut-off tail is seen only by a witness or a
-    running process? Recommended: yes. Unchanged; merges two items.
-
-What the vault does with a forged vault entry became a detail of the
-design.
+★ marks what changed since the last list. Every other earlier item is now
+settled.
 
 ## Appendix A: spikes
 
-Run on 2026-10-01 against the repository's Postgres 16.14 (`:55432`) and
-MySQL 8.4.11 (`:53306`), each in a database and logins of its own, dropped
-after. The scripts are not committed. The storage review's own probes,
-cited in the text, add the shared SQLite file's write lock, the transaction
-clock, grant scope as one foreign key on all three engines, and the CHECK
-that passes on NULL. The first two spikes below predate the one log:
-their `vault_log` is the vault's own log, which now merges into
-`audit_log`, and their `vault_log_head` is the row every append now locks,
-`audit_chain_head`.
+Run on 2026-10-01 against the repository's Postgres 16.14 (`:55432`), each
+in a database and logins of its own, dropped after. MySQL runs from the
+two-engine drafts are left out, since coffre is Postgres only now. The
+scripts are not committed. The storage review's own probes, cited in the
+text, add the shared SQLite file's write lock, the transaction clock, grant
+scope as one foreign key, and the CHECK that passes on NULL. The first two
+spikes below predate the one log: their `vault_log` is the vault's own log,
+which now merges into `audit_log`, and their `vault_log_head` is the row
+every append now locks, `audit_chain_head`.
 
 Postgres. Two transactions; T2 queues on the head row while T1 inserts a
 grant and commits:
@@ -1107,33 +1173,11 @@ vault DISABLE TRIGGER:               42501 must be owner of table vault_log
 vault SET session_replication_role:  42501 permission denied to set parameter "session_replication_role"
 ```
 
-MySQL. The same two transactions; in the third run T2 reads the grants
-before taking the lock:
-
-```
-READ COMMITTED, plain read before the lock: lock acquired; plain read sees T1's grant: 1; locking read: 1
-REPEATABLE READ: lock acquired; plain read sees T1's grant: 1; locking read: 1
-REPEATABLE READ, plain read before the lock: lock acquired; plain read sees T1's grant: 0; locking read: 1
-
-app   SELECT vault_grants:   ER_TABLEACCESS_DENIED_ERROR SELECT command denied … for table 'vault_grants'
-app   INSERT vault_grants:   ER_TABLEACCESS_DENIED_ERROR INSERT command denied … for table 'vault_grants'
-vault INSERT vault_log:      ok
-vault UPDATE vault_log:      ER_TABLEACCESS_DENIED_ERROR UPDATE command denied … for table 'vault_log'
-vault DELETE vault_log:      ER_TABLEACCESS_DENIED_ERROR DELETE command denied … for table 'vault_log'
-vault TRUNCATE vault_log:    ER_TABLEACCESS_DENIED_ERROR DROP command denied … for table 'vault_log'
-vault lock head FOR UPDATE:  ok
-
-owner UPDATE vault_log:      ER_SIGNAL_EXCEPTION vault_log is append-only   (trigger)
-owner DELETE vault_log:      ER_SIGNAL_EXCEPTION vault_log is append-only
-owner TRUNCATE vault_log:    ok (rows left: 0)
-```
-
 One log, two authors. Each login inserting the other's entries, under
 row-level security; a vault entry referencing a project the app has not
 committed; the app holding the head while it waits for the vault; and one
 head against two, with the round trip simulated at 5 ms in the client and
-each append holding the lock for about four of them. The last two lines
-are MySQL's answer to the foreign-key case:
+each append holding the lock for about four of them:
 
 ```
 ## A. Each login writes only its own author (row-level security)
@@ -1156,8 +1200,22 @@ vault decision while the app holds the head and awaits it: 55P03 canceling state
 32 clients, 1 head :  59 appends/s, wait for the lock p50 587 ms, p99 908 ms
  8 clients, 2 heads: 108 appends/s, wait for the lock p50 50 ms, p99 75 ms
 32 clients, 2 heads: 113 appends/s, wait for the lock p50 274 ms, p99 348 ms
-MySQL READ COMMITTED: vault INSERT referencing the uncommitted project: ER_LOCK_WAIT_TIMEOUT after 2004 ms
-MySQL REPEATABLE READ: vault INSERT referencing the uncommitted project: ER_LOCK_WAIT_TIMEOUT after 2001 ms
+```
+
+A per-member lock across KMS, option (b) of question 2: Ada's read locks
+her member row and holds it across a 300 ms stand-in for KMS; Bob's removal
+of Ada, a read by Carol and an app write start meanwhile:
+
+```
+  30 ms  ada's read: locked her row (active), calling KMS
+  87 ms  ada's removal: asks for her row
+  90 ms  an app append: committed, not waiting
+  93 ms  carol's read: committed, not waiting
+ 335 ms  ada's read: logged and committed; keys released
+ 336 ms  ada's removal: got her row
+ 340 ms  ada's removal: committed
+ 365 ms  ada's next read: sees status removed, refused before any KMS call
+log: 0 secret.write by app | 1 secret.read carol | 2 secret.read ada | 3 member.remove ada
 ```
 
 ## Appendix B: sources
@@ -1174,21 +1232,10 @@ PlanetScale Postgres:
 [point-in-time recovery](https://planetscale.com/docs/postgres/backups/point-in-time-recovery),
 [pricing](https://planetscale.com/pricing).
 
-PlanetScale MySQL and Vitess:
-[MySQL compatibility](https://planetscale.com/docs/vitess/troubleshooting/mysql-compatibility),
-[password roles](https://planetscale.com/docs/vitess/security/password-roles),
-[foreign keys](https://planetscale.com/docs/vitess/foreign-key-constraints),
-[system limits](https://planetscale.com/docs/vitess/troubleshooting/planetscale-system-limits),
-[deploy requests](https://planetscale.com/docs/vitess/schema-changes/deploy-requests),
-[safe migrations](https://planetscale.com/docs/concepts/safe-migrations),
-[migration data](https://planetscale.com/blog/versioned-schema-migrations),
-[backups](https://planetscale.com/docs/vitess/backups),
-[restore points are Postgres only](https://planetscale.com/docs/api/reference/create_branch),
-[Vitess MySQL compatibility](https://vitess.io/docs/22.0/reference/compatibility/mysql-compatibility/).
+PlanetScale MySQL, for the comparison in question 9:
+[MySQL compatibility](https://planetscale.com/docs/vitess/troubleshooting/mysql-compatibility).
 
 Cloudflare:
-[Hyperdrive MySQL GA](https://developers.cloudflare.com/changelog/post/2026-08-07-hyperdrive-mysql-ga/),
-[PlanetScale MySQL through Hyperdrive](https://developers.cloudflare.com/hyperdrive/examples/connect-to-mysql/mysql-database-providers/planetscale/),
 [supported features](https://developers.cloudflare.com/hyperdrive/reference/supported-databases-and-features/),
 [how Hyperdrive pools](https://developers.cloudflare.com/hyperdrive/concepts/how-hyperdrive-works/),
 [query caching](https://developers.cloudflare.com/hyperdrive/concepts/query-caching/),
@@ -1197,10 +1244,7 @@ Cloudflare:
 [importing `env`](https://developers.cloudflare.com/workers/runtime-apis/bindings/),
 [service bindings](https://developers.cloudflare.com/workers/runtime-apis/bindings/service-bindings/).
 
-Drizzle:
-[PlanetScale](https://orm.drizzle.team/docs/connect-planetscale),
-[`mode: 'planetscale'`](https://orm.drizzle.team/docs/latest-releases/drizzle-orm-v0280),
-[drizzle-orm#6398](https://github.com/drizzle-team/drizzle-orm/issues/6398).
+Drizzle with PlanetScale Postgres: [connect-planetscale-postgres](https://orm.drizzle.team/docs/connect-planetscale-postgres).
 
 Infisical: [github.com/Infisical/infisical](https://github.com/Infisical/infisical)
 at `752845215bbfe62aa78313ee5d89fd54c4444986`.
