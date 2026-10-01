@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "d49a4b21-1c65-44c4-a000-c3c4305a0b5d",
+  "id": "a5bd685e-2bdc-47f0-97dd-2b0cf0b6a3ec",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "audit_chain_head": {
@@ -342,6 +342,13 @@
           "notNull": true,
           "autoincrement": false
         },
+        "auth_mac": {
+          "name": "auth_mac",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
         "token_hash": {
           "name": "token_hash",
           "type": "blob",
@@ -360,7 +367,7 @@
           "name": "generation",
           "type": "integer",
           "primaryKey": false,
-          "notNull": false,
+          "notNull": true,
           "autoincrement": false
         },
         "principal_type": {
@@ -480,10 +487,16 @@
           "tableFrom": "credentials",
           "tableTo": "identities",
           "columnsFrom": [
-            "identity_id"
+            "identity_id",
+            "principal_type",
+            "principal_id",
+            "generation"
           ],
           "columnsTo": [
-            "id"
+            "id",
+            "principal_type",
+            "principal_id",
+            "generation"
           ],
           "onDelete": "restrict",
           "onUpdate": "no action"
@@ -503,6 +516,10 @@
         "credentials_token_hash_check": {
           "name": "credentials_token_hash_check",
           "value": "octet_length(\"credentials\".\"token_hash\") = 32"
+        },
+        "credentials_auth_mac_check": {
+          "name": "credentials_auth_mac_check",
+          "value": "octet_length(\"credentials\".\"auth_mac\") = 32"
         }
       }
     },
@@ -518,6 +535,13 @@
         },
         "device_code_hash": {
           "name": "device_code_hash",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "auth_mac": {
+          "name": "auth_mac",
           "type": "blob",
           "primaryKey": false,
           "notNull": true,
@@ -577,8 +601,9 @@
           "name": "generation",
           "type": "integer",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
         },
         "principal_type": {
           "name": "principal_type",
@@ -638,13 +663,17 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {
+        "device_authorizations_auth_mac_check": {
+          "name": "device_authorizations_auth_mac_check",
+          "value": "octet_length(\"device_authorizations\".\"auth_mac\") = 32"
+        },
         "device_authorizations_decision_check": {
           "name": "device_authorizations_decision_check",
           "value": "\"device_authorizations\".\"decision\" IS NULL OR \"device_authorizations\".\"decision\" IN ('approved', 'denied')"
         },
         "device_authorizations_approval_names_principal": {
           "name": "device_authorizations_approval_names_principal",
-          "value": "(\"device_authorizations\".\"decision\" = 'approved') = (\"device_authorizations\".\"principal_id\" IS NOT NULL)"
+          "value": "(\"device_authorizations\".\"decision\" IS NULL AND \"device_authorizations\".\"decided_at\" IS NULL AND \"device_authorizations\".\"principal_type\" IS NULL AND \"device_authorizations\".\"principal_id\" IS NULL AND \"device_authorizations\".\"generation\" = 0 AND \"device_authorizations\".\"consumed_at\" IS NULL)\n        OR (\"device_authorizations\".\"decision\" IS NOT NULL AND \"device_authorizations\".\"decided_at\" IS NOT NULL AND (\n          (\"device_authorizations\".\"decision\" = 'denied' AND \"device_authorizations\".\"principal_type\" IS NULL AND \"device_authorizations\".\"principal_id\" IS NULL AND \"device_authorizations\".\"generation\" = 0 AND \"device_authorizations\".\"consumed_at\" IS NULL)\n          OR (\"device_authorizations\".\"decision\" = 'approved' AND \"device_authorizations\".\"principal_type\" IS NOT NULL AND \"device_authorizations\".\"principal_type\" = 'user' AND \"device_authorizations\".\"principal_id\" IS NOT NULL)\n        ))"
         }
       }
     },
@@ -754,6 +783,13 @@
           "notNull": true,
           "autoincrement": false
         },
+        "auth_mac": {
+          "name": "auth_mac",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
         "subject": {
           "name": "subject",
           "type": "text",
@@ -765,14 +801,14 @@
           "name": "issuer_hash",
           "type": "text",
           "primaryKey": false,
-          "notNull": false,
+          "notNull": true,
           "autoincrement": false
         },
         "generation": {
           "name": "generation",
           "type": "integer",
           "primaryKey": false,
-          "notNull": false,
+          "notNull": true,
           "autoincrement": false
         },
         "principal_type": {
@@ -861,6 +897,16 @@
             "principal_id"
           ],
           "isUnique": false
+        },
+        "identities_member_generation_key": {
+          "name": "identities_member_generation_key",
+          "columns": [
+            "id",
+            "principal_type",
+            "principal_id",
+            "generation"
+          ],
+          "isUnique": true
         }
       },
       "foreignKeys": {
@@ -890,6 +936,10 @@
         "identities_provider_check": {
           "name": "identities_provider_check",
           "value": "length(\"identities\".\"provider\") BETWEEN 1 AND 32 AND \"identities\".\"provider\" GLOB '[a-z0-9]*' AND \"identities\".\"provider\" NOT GLOB '*[^a-z0-9-]*'"
+        },
+        "identities_auth_mac_check": {
+          "name": "identities_auth_mac_check",
+          "value": "octet_length(\"identities\".\"auth_mac\") = 32"
         }
       }
     },

@@ -2,9 +2,9 @@ import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 
-import { defineSignin, github, google, oidc, hashToken, isCoffreToken } from '@coffre/core/identity';
+import { defineSignin, generateToken, github, google, oidc, hashToken, isCoffreToken } from '@coffre/core/identity';
 import type { Database } from '@coffre/db';
-import { count, eq, isNotNull, isNull, type SQL } from 'drizzle-orm';
+import { count, eq, isNotNull, isNull, sql, type SQL } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 
 import {
@@ -14,6 +14,7 @@ import {
   identities,
   principals,
 } from './db/tables.ts';
+import { authMac } from '../src/auth-rows.ts';
 import { verifyAudit } from '../src/api/audit.ts';
 import {
   normalizeUserCode,
@@ -146,6 +147,88 @@ async function credentialRow(id: string) {
 }
 
 const aSecondAgo = () => new Date(Date.now() - 1000);
+
+/** Set an authentic past expiry; tampering is tested separately. */
+async function expire(table: typeof credentials | typeof deviceAuthorizations, where?: SQL) {
+  const expiresAt = aSecondAgo();
+  const kind = table === credentials ? 'credentials' : 'device_authorizations';
+  for (const row of await db.owner.select().from(table).where(where)) {
+    await db.owner.update(table).set({
+      expiresAt, authMac: authMac(deps.chainKey, kind, { ...row, expiresAt }),
+    }).where(eq(table.id, row.id));
+  }
+}
+
+test('a credential inserted by the database owner cannot authenticate', async (t) => {
+  const report = t.mock.method(console, 'error', () => {});
+  const issued = await signin.issueServiceToken(root, SERVICE, { label: null, expiresInDays: 1 });
+  const row = await credentialRow(issued.id);
+  const token = generateToken('service');
+  const id = randomUUID();
+  await db.owner.insert(credentials).values({ ...row, id, tokenHash: hashToken(token) });
+  await assert.rejects(signin.verify(token), /authentic|tamper|unknown/i);
+  assert.deepEqual(report.mock.calls[0].arguments[0], { event: 'auth_row_tampered', table: 'credentials', id });
+});
+
+test('an identity binding edited by the database owner cannot sign in', async () => {
+  await signedIn(profile('github', 'legitimate-account', [DEV]));
+  await db.owner.update(identities).set({ subject: 'attacker-account' });
+  await assert.rejects(signin.completeSignin(profile('github', 'attacker-account', []), meta()), /authentic|tamper/i);
+});
+
+test('editing a credential generation cannot revive a removed membership', async () => {
+  const issued = await signin.issueServiceToken(root, SERVICE, { label: null, expiresInDays: 1 });
+  await deactivate(SERVICE);
+  await deactivate(SERVICE, true);
+  const { generation } = await deps.vault.access(member(SERVICE));
+  await db.owner.update(credentials).set({ generation }).where(eq(credentials.id, issued.id));
+  await assert.rejects(signin.verify(issued.token), /authentic|tamper|unknown/i);
+});
+
+test('a device approval forged by the database owner cannot mint a session', async () => {
+  const started = await signin.startDevice({ clientLabel: 'attacker', sourceIp: IP });
+  const { generation } = await deps.vault.access(member(DEV));
+  await db.owner.update(deviceAuthorizations).set({
+    decision: 'approved', decidedAt: new Date(), principalType: 'user', principalId: DEV, generation,
+  });
+  await assert.rejects(signin.pollDevice(started.deviceCode, meta()), /authentic|tamper/i);
+  assert.equal(await countRows(credentials), 0);
+});
+
+test('an undecided device row cannot name an approving principal', async () => {
+  await signin.startDevice({ clientLabel: null, sourceIp: IP });
+  await assert.rejects(db.owner.update(deviceAuthorizations).set({ principalType: 'user', principalId: DEV }));
+});
+
+test('the database owner cannot extend a credential or undo its revocation', async () => {
+  const issued = await signin.issueServiceToken(root, SERVICE, { label: null, expiresInDays: 1 });
+  const original = await credentialRow(issued.id);
+  await db.owner.update(credentials).set({ expiresAt: new Date(Date.now() + 7 * 86_400_000) });
+  await assert.rejects(signin.verify(issued.token), /authentication/);
+  await db.owner.update(credentials).set({ expiresAt: original.expiresAt });
+  await signin.revokeCredential(root, issued.id);
+  await db.owner.update(credentials).set({ revokedAt: null });
+  await assert.rejects(signin.verify(issued.token), /authentication/);
+});
+
+test('the database owner cannot move a short device code to another request', async () => {
+  const started = await signin.startDevice({ clientLabel: null, sourceIp: IP });
+  const moved = started.userCode === 'BCDF-GHJK' ? 'BCDF-GHJL' : 'BCDF-GHJK';
+  await db.owner.update(deviceAuthorizations).set({ userCode: moved });
+  await assert.rejects(signin.decideDevice(dev, moved, true), /authentication/);
+  assert.equal(await countRows(credentials), 0);
+});
+
+for (const mismatch of ['member', 'generation'] as const) {
+  test(`a credential cannot reference an identity with a different ${mismatch}`, async () => {
+    const { credential } = await signedIn(profile('github', '101', [DEV]));
+    const row = await credentialRow(credential.id);
+    await assert.rejects(db.owner.insert(credentials).values({
+      ...row, id: randomUUID(), tokenHash: randomBytes(32),
+      ...(mismatch === 'member' ? { principalId: LEAD } : { generation: row.generation + 1 }),
+    }));
+  });
+}
 
 /** Sign in, expecting success. */
 async function signedIn(p: SignedInAccount) {
@@ -389,7 +472,7 @@ test('verify refuses what is not a live coffre credential', async () => {
   await assert.rejects(signin.verify(`coffre_web_${'A'.repeat(43)}`), /unknown, expired or revoked/);
   await assert.rejects(signin.verify(credential.token.replace('coffre_web_', 'coffre_cli_')), /unknown/);
 
-  await db.owner.update(credentials).set({ expiresAt: aSecondAgo() });
+  await expire(credentials);
   await assert.rejects(signin.verify(credential.token), /unknown, expired or revoked/);
   assert.deepEqual(await signin.listSessions(dev, null), []);
 });
@@ -648,7 +731,7 @@ test('the session list shows live browser and CLI sessions only, and marks the c
   const ended = await signedIn(profile('github', '101', [DEV]));
   await signin.signOut(ended.credential.token, { requestId: randomUUID(), sourceIp: IP });
   const stale = await signedIn(profile('github', '101', [DEV]));
-  await db.owner.update(credentials).set({ expiresAt: aSecondAgo() }).where(eq(credentials.id, stale.credential.id));
+  await expire(credentials, eq(credentials.id, stale.credential.id));
   await signedIn(profile('github', '102', [LEAD]));
 
   await signin.verify(older.credential.token, { sourceIp: '198.51.100.9' });
@@ -760,7 +843,7 @@ test('a service token stops working when the service is deactivated, revoked or 
   await assert.rejects(signin.verify(deactivated.token), /unknown, expired or revoked/);
   assert.equal((await as(SERVICE, 'service')).caller.registered, true);
 
-  await db.owner.update(credentials).set({ expiresAt: aSecondAgo() });
+  await expire(credentials);
   await assert.rejects(signin.verify(deactivated.token), /unknown, expired or revoked/);
 });
 
@@ -894,7 +977,7 @@ test('device flow: a denied code polls as denied and never yields a token', asyn
 
 test('device flow: an expired code cannot be described, decided or polled', async () => {
   const started = await signin.startDevice({ clientLabel: null, sourceIp: IP });
-  await db.owner.update(deviceAuthorizations).set({ expiresAt: aSecondAgo() });
+  await expire(deviceAuthorizations);
 
   assert.equal(await signin.describeDevice(started.userCode), null);
   await assert.rejects(signin.decideDevice(dev, started.userCode, true), { status: 404 });
@@ -911,7 +994,7 @@ test('device flow: an expired code cannot be described, decided or polled', asyn
 test('device flow: an approved code left unpolled past its expiry yields nothing', async () => {
   const started = await signin.startDevice({ clientLabel: null, sourceIp: IP });
   await signin.decideDevice(dev, started.userCode, true);
-  await db.owner.update(deviceAuthorizations).set({ expiresAt: aSecondAgo() });
+  await expire(deviceAuthorizations);
   assert.deepEqual(await poll(started.deviceCode), { status: 'expired' });
   assert.equal(await countRows(credentials), 0);
 });
@@ -1071,11 +1154,9 @@ test('replacing an issuer requires an explicit re-link and invalidates its brows
   assert.equal((await signedIn(profile('company', 'same-subject', []))).principal.id, DEV);
 });
 
-test('a binding without an issuer cannot be reused or silently bound again by email', async () => {
-  await db.owner.insert(identities).values({
+test('a binding without an issuer is rejected by the baseline', async () => {
+  await assert.rejects(db.owner.insert(identities).values({
     id: randomUUID(), provider: 'github', subject: 'legacy', principalType: 'user', principalId: DEV,
-    email: DEV, createdBy: DEV,
-  });
-  assert.deepEqual(await signin.completeSignin(profile('github', 'legacy', [DEV]), meta()),
-    { ok: false, reason: 'account_mismatch' });
+    issuerHash: sql`NULL`, generation: 0, authMac: Buffer.alloc(32), email: DEV, createdBy: DEV,
+  }));
 });

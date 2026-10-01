@@ -10,7 +10,7 @@ import {
   memberActivity,
   members as loadMembers,
   places,
-  update,
+  updateAuth,
 } from '../db/queries.ts';
 import { can } from './caller.ts';
 import { allowed, audited, denied, Refusal, requireOwner, vaultRefusal, type ApiContext } from './context.ts';
@@ -289,7 +289,7 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
   if (!ctx.caller.isOwner) throw forbidden('only owners may see what someone has access to');
   const now = new Date();
   // Everyone, not just them: the service tokens they issued belong to others.
-  const [everyone, directory] = await Promise.all([ctx.vault.members(), loadMembers(ctx.db, {}, now)]);
+  const [everyone, directory] = await Promise.all([ctx.vault.members(), loadMembers(ctx.db, ctx.chainKey, {}, now)]);
   const standing = new Map(everyone.map((access) => [access.principal, access]));
   const access = standing.get(formatMember(member));
   if (access === undefined || access.status === 'unknown') throw notFound('no such member');
@@ -376,7 +376,7 @@ export async function putMember(
     });
     if (!result.ok) throw vaultRefusal(ctx, result.refusal, 'directory.create', { metadata: fields });
     const current = await ctx.vault.access(principal);
-    await revokePriorMembership(tx, member, current.generation, ctx.caller.principal.id);
+    await revokePriorMembership(tx, ctx.chainKey, member, current.generation, ctx.caller.principal.id);
     const role = result.owner ? 'owner' : 'user';
     await insertIfAbsent(tx, principals, {
       principalType: member.type,
@@ -426,16 +426,16 @@ export async function removeMember(
     if (!result.ok) throw vaultRefusal(ctx, result.refusal, 'directory.remove', { metadata: fields });
 
     const now = new Date();
-    const [held] = await loadMembers(tx, { member }, now);
+    const [held] = await loadMembers(tx, ctx.chainKey, { member }, now);
     const liveCredentials = held?.credentials ?? [];
     const liveIdentities = held?.identities ?? [];
     const revokedBy = ctx.caller.principal.id;
     const ids = (rows: { id: string }[]) => rows.map((row) => row.id);
     if (liveCredentials.length > 0) {
-      await update(tx, credentials, { id: ids(liveCredentials) }, { revokedAt: now, revokedBy });
+      await updateAuth(tx, ctx.chainKey, credentials, { id: ids(liveCredentials) }, { revokedAt: now, revokedBy });
     }
     if (liveIdentities.length > 0) {
-      await update(tx, identities, { id: ids(liveIdentities) }, { revokedAt: now, revokedBy });
+      await updateAuth(tx, ctx.chainKey, identities, { id: ids(liveIdentities) }, { revokedAt: now, revokedBy });
     }
 
     const counts = {

@@ -45,9 +45,10 @@ CREATE TABLE "audit_log" (
 CREATE TABLE "credentials" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"kind" text NOT NULL,
+	"auth_mac" "bytea" NOT NULL,
 	"token_hash" "bytea" NOT NULL,
 	"token_hint" text NOT NULL,
-	"generation" integer,
+	"generation" integer NOT NULL,
 	"principal_type" text NOT NULL,
 	"principal_id" text NOT NULL,
 	"identity_id" uuid,
@@ -62,12 +63,14 @@ CREATE TABLE "credentials" (
 	CONSTRAINT "credentials_token_hash_key" UNIQUE("token_hash"),
 	CONSTRAINT "credentials_kind_check" CHECK ("credentials"."kind" IN ('browser', 'cli', 'service')),
 	CONSTRAINT "credentials_kind_matches_principal" CHECK (("credentials"."kind" = 'service') = ("credentials"."principal_type" = 'service')),
-	CONSTRAINT "credentials_token_hash_check" CHECK (octet_length("credentials"."token_hash") = 32)
+	CONSTRAINT "credentials_token_hash_check" CHECK (octet_length("credentials"."token_hash") = 32),
+	CONSTRAINT "credentials_auth_mac_check" CHECK (octet_length("credentials"."auth_mac") = 32)
 );
 --> statement-breakpoint
 CREATE TABLE "device_authorizations" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"device_code_hash" "bytea" NOT NULL,
+	"auth_mac" "bytea" NOT NULL,
 	"user_code" text NOT NULL,
 	"client_label" text,
 	"client_ip" text,
@@ -75,14 +78,19 @@ CREATE TABLE "device_authorizations" (
 	"expires_at" timestamp with time zone NOT NULL,
 	"decided_at" timestamp with time zone,
 	"decision" text,
-	"generation" integer,
+	"generation" integer DEFAULT 0 NOT NULL,
 	"principal_type" text,
 	"principal_id" text,
 	"consumed_at" timestamp with time zone,
 	CONSTRAINT "device_authorizations_device_code_hash_key" UNIQUE("device_code_hash"),
 	CONSTRAINT "device_authorizations_user_code_key" UNIQUE("user_code"),
+	CONSTRAINT "device_authorizations_auth_mac_check" CHECK (octet_length("device_authorizations"."auth_mac") = 32),
 	CONSTRAINT "device_authorizations_decision_check" CHECK ("device_authorizations"."decision" IS NULL OR "device_authorizations"."decision" IN ('approved', 'denied')),
-	CONSTRAINT "device_authorizations_approval_names_principal" CHECK (("device_authorizations"."decision" = 'approved') = ("device_authorizations"."principal_id" IS NOT NULL))
+	CONSTRAINT "device_authorizations_approval_names_principal" CHECK (("device_authorizations"."decision" IS NULL AND "device_authorizations"."decided_at" IS NULL AND "device_authorizations"."principal_type" IS NULL AND "device_authorizations"."principal_id" IS NULL AND "device_authorizations"."generation" = 0 AND "device_authorizations"."consumed_at" IS NULL)
+        OR ("device_authorizations"."decision" IS NOT NULL AND "device_authorizations"."decided_at" IS NOT NULL AND (
+          ("device_authorizations"."decision" = 'denied' AND "device_authorizations"."principal_type" IS NULL AND "device_authorizations"."principal_id" IS NULL AND "device_authorizations"."generation" = 0 AND "device_authorizations"."consumed_at" IS NULL)
+          OR ("device_authorizations"."decision" = 'approved' AND "device_authorizations"."principal_type" IS NOT NULL AND "device_authorizations"."principal_type" = 'user' AND "device_authorizations"."principal_id" IS NOT NULL)
+        )))
 );
 --> statement-breakpoint
 CREATE TABLE "environments" (
@@ -100,9 +108,10 @@ CREATE TABLE "environments" (
 CREATE TABLE "identities" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"provider" text NOT NULL,
+	"auth_mac" "bytea" NOT NULL,
 	"subject" text NOT NULL,
-	"issuer_hash" text,
-	"generation" integer,
+	"issuer_hash" text NOT NULL,
+	"generation" integer NOT NULL,
 	"principal_type" text NOT NULL,
 	"principal_id" text NOT NULL,
 	"email" text,
@@ -112,8 +121,10 @@ CREATE TABLE "identities" (
 	"revoked_at" timestamp with time zone,
 	"revoked_by" text,
 	"active_subject" text GENERATED ALWAYS AS (CASE WHEN revoked_at IS NULL THEN subject END) STORED,
+	CONSTRAINT "identities_member_generation_key" UNIQUE("id","principal_type","principal_id","generation"),
 	CONSTRAINT "identities_principal_type_check" CHECK ("identities"."principal_type" = 'user'),
-	CONSTRAINT "identities_provider_check" CHECK ("identities"."provider" ~ '^[a-z0-9][a-z0-9-]{0,31}$')
+	CONSTRAINT "identities_provider_check" CHECK ("identities"."provider" ~ '^[a-z0-9][a-z0-9-]{0,31}$'),
+	CONSTRAINT "identities_auth_mac_check" CHECK (octet_length("identities"."auth_mac") = 32)
 );
 --> statement-breakpoint
 CREATE TABLE "principals" (
@@ -202,7 +213,7 @@ ALTER TABLE "audit_log" ADD CONSTRAINT "audit_log_project_id_fkey" FOREIGN KEY (
 ALTER TABLE "audit_log" ADD CONSTRAINT "audit_log_environment_id_fkey" FOREIGN KEY ("environment_id") REFERENCES "public"."environments"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "audit_log" ADD CONSTRAINT "audit_log_secret_id_fkey" FOREIGN KEY ("secret_id") REFERENCES "public"."secrets"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "credentials" ADD CONSTRAINT "credentials_principal_fkey" FOREIGN KEY ("principal_type","principal_id") REFERENCES "public"."principals"("principal_type","principal_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "credentials" ADD CONSTRAINT "credentials_identity_id_fkey" FOREIGN KEY ("identity_id") REFERENCES "public"."identities"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "credentials" ADD CONSTRAINT "credentials_identity_id_fkey" FOREIGN KEY ("identity_id","principal_type","principal_id","generation") REFERENCES "public"."identities"("id","principal_type","principal_id","generation") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "device_authorizations" ADD CONSTRAINT "device_authorizations_principal_fkey" FOREIGN KEY ("principal_type","principal_id") REFERENCES "public"."principals"("principal_type","principal_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "environments" ADD CONSTRAINT "environments_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "identities" ADD CONSTRAINT "identities_principal_fkey" FOREIGN KEY ("principal_type","principal_id") REFERENCES "public"."principals"("principal_type","principal_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
@@ -337,11 +348,11 @@ GRANT UPDATE (next_seq, head_hash, updated_at) ON audit_chain_head TO coffre_app
 --> statement-breakpoint
 GRANT UPDATE (last_beat_at, last_seq) ON audit_heartbeat TO coffre_app;
 --> statement-breakpoint
-GRANT UPDATE (email, last_sign_in_at, revoked_at, revoked_by) ON identities TO coffre_app;
+GRANT UPDATE (email, last_sign_in_at, revoked_at, revoked_by, auth_mac) ON identities TO coffre_app;
 --> statement-breakpoint
-GRANT UPDATE (last_used_at, last_used_ip, revoked_at, revoked_by) ON credentials TO coffre_app;
+GRANT UPDATE (last_used_at, last_used_ip, revoked_at, revoked_by, auth_mac) ON credentials TO coffre_app;
 --> statement-breakpoint
-GRANT UPDATE (decided_at, decision, generation, principal_type, principal_id, consumed_at)
+GRANT UPDATE (decided_at, decision, generation, principal_type, principal_id, consumed_at, auth_mac)
     ON device_authorizations TO coffre_app;
 --> statement-breakpoint
 GRANT UPDATE (config, credential_secret_id, paused_at, archived_at, lease_until,

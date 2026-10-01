@@ -19,6 +19,7 @@ import type { Database, Transaction } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
 import { credentials, deviceAuthorizations, identities, principals } from '@coffre/db/schema';
 
+import { authMac } from '../auth-rows.ts';
 import type { AuditEntry } from '../db/audit.ts';
 import {
   findCredential,
@@ -29,6 +30,7 @@ import {
   lock,
   members,
   update,
+  updateAuth,
 } from '../db/queries.ts';
 import type { PrincipalRef } from './caller.ts';
 import { allowed, audited, denied, Refusal, type ApiContext } from './context.ts';
@@ -268,7 +270,7 @@ export class SigninService {
       const now = new Date();
       const issuerHash = this.#issuerHash(profile.provider);
       if (issuerHash === null) throw new SigninRefused('not_registered');
-      const bound = await findIdentity(tx, { ...profile, issuerHash });
+      const bound = await findIdentity(tx, this.#deps.chainKey, { ...profile, issuerHash });
 
       let principalId: string;
       let identityId: string;
@@ -297,7 +299,7 @@ export class SigninService {
         generation = match.generation;
         await this.#ensureRow(tx, principalId);
 
-        const [person] = await members(tx, { member: { type: 'user', id: principalId } }, now);
+        const [person] = await members(tx, this.#deps.chainKey, { member: { type: 'user', id: principalId } }, now);
         const other = (person?.identities ?? []).some(
           // This very account, bound a moment ago by a racing sign-in, is
           // no mismatch: binding it again hits the unique index, and the
@@ -348,7 +350,7 @@ export class SigninService {
       }
       const issuerHash = this.#issuerHash(profile.provider);
       if (issuerHash === null) throw new SigninRefused('not_registered');
-      const bound = await findIdentity(tx, { ...profile, issuerHash });
+      const bound = await findIdentity(tx, this.#deps.chainKey, { ...profile, issuerHash });
       if (bound !== null) {
         if (bound.principalId === ctx.caller.principal.id && bound.generation === standing.generation) return { ok: true as const };
         throw new Refusal(
@@ -372,10 +374,10 @@ export class SigninService {
 
   async #bind(tx: Transaction, principalId: string, profile: SignedInAccount, createdBy: string, generation: number): Promise<string> {
     const id = randomUUID();
-    await insert(tx, identities, {
+    const row = {
       id,
       provider: profile.provider,
-      issuerHash: this.#issuerHash(profile.provider),
+      issuerHash: this.#issuerHash(profile.provider)!,
       generation,
       subject: profile.subject,
       principalType: 'user',
@@ -383,7 +385,9 @@ export class SigninService {
       email: profile.emails[0] ?? null,
       createdBy,
       lastSignInAt: new Date(),
-    });
+      revokedAt: null,
+    };
+    await insert(tx, identities, { ...row, authMac: authMac(this.#deps.chainKey, 'identities', row) });
     return id;
   }
 
@@ -419,7 +423,7 @@ export class SigninService {
     const standing = await this.#standing(tx, ctx.caller.principal);
     if (standing.status !== 'active' || standing.generation !== ctx.caller.generation) return null;
     if (ctx.credentialId !== null) {
-      const row = await findCredential(tx, { id: ctx.credentialId });
+      const row = await findCredential(tx, this.#deps.chainKey, { id: ctx.credentialId });
       if (!this.#liveCredential(row, standing, new Date()) || row?.principalType !== ctx.caller.principal.type
         || row.principalId !== ctx.caller.principal.id) return null;
     }
@@ -441,7 +445,7 @@ export class SigninService {
   ): Promise<IssuedCredential> {
     const token = generateToken(kind);
     const id = randomUUID();
-    await insert(tx, credentials, {
+    const row = {
       id,
       kind,
       tokenHash: hashToken(token),
@@ -453,7 +457,9 @@ export class SigninService {
       label: options.label?.slice(0, 120) ?? null,
       createdBy: options.createdBy,
       expiresAt: options.expiresAt,
-    });
+      revokedAt: null,
+    };
+    await insert(tx, credentials, { ...row, authMac: authMac(this.#deps.chainKey, 'credentials', row) });
     return { id, token, expiresAt: options.expiresAt.toISOString() };
   }
 
@@ -471,7 +477,7 @@ export class SigninService {
     const { db } = this.#deps;
     const now = new Date();
 
-    const row = await findCredential(db, { tokenHash: hashToken(token) });
+    const row = await findCredential(db, this.#deps.chainKey, { tokenHash: hashToken(token) });
     if (row === null) throw new Error('unknown, expired or revoked credential');
     const access = await this.#deps.vault.access(formatMember({ type: row.principalType as PrincipalRef['type'], id: row.principalId }));
     if (!this.#liveCredential(row, access, now)) throw new Error('unknown, expired or revoked credential');
@@ -501,10 +507,11 @@ export class SigninService {
   async signOut(token: string, meta: Omit<ClientMeta, 'label'>): Promise<void> {
     if (!isCoffreToken(token)) return;
     await audited(this.#deps, async (tx, log) => {
-      const row = await findCredential(tx, { tokenHash: hashToken(token) });
+      const row = await findCredential(tx, this.#deps.chainKey, { tokenHash: hashToken(token) });
       if (row === null) return;
-      const revoked = await update(
+      const revoked = await updateAuth(
         tx,
+        this.#deps.chainKey,
         credentials,
         { id: row.id, revokedAt: null },
         { revokedAt: new Date(), revokedBy: row.principalId },
@@ -525,7 +532,7 @@ export class SigninService {
   /** Revoke one credential: your own, or anyone's if you own the instance. */
   async revokeCredential(ctx: Asker, credentialId: string): Promise<{ revoked: true }> {
     return audited(this.#deps, async (tx, log) => {
-      const row = await findCredential(tx, { id: credentialId });
+      const row = await findCredential(tx, this.#deps.chainKey, { id: credentialId });
       const unknown = () =>
         new Refusal(
           notFound('unknown credential'),
@@ -540,8 +547,9 @@ export class SigninService {
           denied(ctx, 'credential.revoke', 'requires_instance_owner', { metadata: { credentialId } }),
         );
       }
-      const revoked = await update(
+      const revoked = await updateAuth(
         tx,
+        this.#deps.chainKey,
         credentials,
         { id: credentialId, revokedAt: null },
         { revokedAt: new Date(), revokedBy: principal.id },
@@ -561,20 +569,21 @@ export class SigninService {
     const { principal } = ctx.caller;
     return audited(this.#deps, async (tx, log) => {
       const now = new Date();
-      const [self] = await members(tx, { member: principal }, now);
+      const [self] = await members(tx, this.#deps.chainKey, { member: principal }, now);
       const identity = self?.identities.find((candidate) => candidate.id === identityId);
       const unbound =
         identity === undefined
           ? 0
-          : await update(tx, identities, { id: identityId, revokedAt: null }, { revokedAt: now, revokedBy: principal.id });
+          : await updateAuth(tx, this.#deps.chainKey, identities, { id: identityId, revokedAt: null }, { revokedAt: now, revokedBy: principal.id });
       if (identity === undefined || unbound === 0) {
         throw new Refusal(
           notFound('unknown sign-in account'),
           denied(ctx, 'identity.unbind', 'unknown_identity', { metadata: { identityId } }),
         );
       }
-      const sessionsEnded = await update(
+      const sessionsEnded = await updateAuth(
         tx,
+        this.#deps.chainKey,
         credentials,
         { identityId, revokedAt: null },
         { revokedAt: now, revokedBy: principal.id },
@@ -588,7 +597,7 @@ export class SigninService {
   // --- listing --------------------------------------------------------------
 
   async listSessions(ctx: Asker, currentCredentialId: string | null): Promise<SessionRow[]> {
-    const [self] = await members(this.#deps.db, { member: ctx.caller.principal }, new Date());
+    const [self] = await members(this.#deps.db, this.#deps.chainKey, { member: ctx.caller.principal }, new Date());
     const lastSeen = (row: { lastUsedAt: Date | null; createdAt: Date }) => (row.lastUsedAt ?? row.createdAt).getTime();
     return (self?.credentials ?? [])
       .filter((row) => row.kind === 'browser' || row.kind === 'cli')
@@ -608,7 +617,7 @@ export class SigninService {
   }
 
   async listIdentities(ctx: Asker): Promise<IdentityRow[]> {
-    const [self] = await members(this.#deps.db, { member: ctx.caller.principal }, new Date());
+    const [self] = await members(this.#deps.db, this.#deps.chainKey, { member: ctx.caller.principal }, new Date());
     return (self?.identities ?? [])
       .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
       .map((row) => ({
@@ -626,7 +635,7 @@ export class SigninService {
     const { principal } = ctx.caller;
     const self = principal.type === 'service' && principal.id === serviceId;
     if (!self && !ctx.caller.isOwner) throw forbidden('only owners may see service tokens');
-    const [service] = await members(this.#deps.db, { member: { type: 'service', id: serviceId } }, new Date());
+    const [service] = await members(this.#deps.db, this.#deps.chainKey, { member: { type: 'service', id: serviceId } }, new Date());
     return (service?.credentials ?? [])
       .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
       .map((row) => ({
@@ -697,7 +706,7 @@ export class SigninService {
   async startDevice(input: { clientLabel: string | null; sourceIp: string | null }): Promise<DeviceStart> {
     const { db } = this.#deps;
     const now = new Date();
-    const open = await findDeviceAuthorizations(db, { openAt: now });
+    const open = await findDeviceAuthorizations(db, this.#deps.chainKey, { openAt: now });
     const fromIp = open.filter((row) => row.clientIp === input.sourceIp).length;
     if (fromIp >= DEVICE_PENDING_PER_IP || open.length >= DEVICE_PENDING_TOTAL) {
       throw new ApiError('too_many_requests', 'too many sign-in requests are waiting; try again in a few minutes');
@@ -709,14 +718,21 @@ export class SigninService {
     for (let attempt = 0; ; attempt += 1) {
       const code = userCode();
       try {
-        await insert(db, deviceAuthorizations, {
+        const row = {
           id: randomUUID(),
           deviceCodeHash: hashToken(deviceCode),
           userCode: code,
           clientLabel: input.clientLabel?.slice(0, 120) ?? null,
           clientIp: input.sourceIp,
           expiresAt: new Date(now.getTime() + DEVICE_TTL_SECONDS * 1000),
-        });
+          decision: null,
+          decidedAt: null,
+          principalType: null,
+          principalId: null,
+          generation: 0,
+          consumedAt: null,
+        };
+        await insert(db, deviceAuthorizations, { ...row, authMac: authMac(this.#deps.chainKey, 'device_authorizations', row) });
       } catch (error) {
         if (isUniqueViolation(error) && attempt < 3) continue;
         throw error;
@@ -738,7 +754,7 @@ export class SigninService {
     const code = normalizeUserCode(userCodeInput);
     if (code === null) return null;
     const now = new Date();
-    const [row] = (await findDeviceAuthorizations(this.#deps.db, { userCode: code })).filter(isOpen(now));
+    const [row] = (await findDeviceAuthorizations(this.#deps.db, this.#deps.chainKey, { userCode: code })).filter(isOpen(now));
     if (row === undefined) return null;
     return {
       userCode: row.userCode,
@@ -759,13 +775,14 @@ export class SigninService {
         throw new Refusal(forbidden('that session has ended'), denied(ctx, action, 'session_ended'));
       }
       const now = new Date();
-      const [row] = code === null ? [] : (await findDeviceAuthorizations(tx, { userCode: code })).filter(isOpen(now));
+      const [row] = code === null ? [] : (await findDeviceAuthorizations(tx, this.#deps.chainKey, { userCode: code })).filter(isOpen(now));
       // Deciding only an undecided code makes two approvers racing agree on one answer.
       const decided =
         row === undefined
           ? 0
-          : await update(
+          : await updateAuth(
               tx,
+              this.#deps.chainKey,
               deviceAuthorizations,
               { id: row.id, decidedAt: null },
               approve
@@ -791,7 +808,7 @@ export class SigninService {
   async pollDevice(deviceCode: string, meta: Omit<ClientMeta, 'label'>): Promise<DevicePoll> {
     return audited(this.#deps, async (tx, log): Promise<DevicePoll> => {
       const now = new Date();
-      const [row] = await findDeviceAuthorizations(tx, { deviceCodeHash: hashToken(deviceCode) });
+      const [row] = await findDeviceAuthorizations(tx, this.#deps.chainKey, { deviceCodeHash: hashToken(deviceCode) });
       if (row === undefined || row.consumedAt !== null) return { status: 'expired' };
       if (row.decision === 'denied') return { status: 'denied' };
       // An approval is only good within the code's lifetime: one the CLI
@@ -800,7 +817,7 @@ export class SigninService {
       if (row.decision === null) return { status: 'pending' };
 
       // Consumed only if still unconsumed: of two polls racing, one gets the session.
-      const consumed = await update(tx, deviceAuthorizations, { id: row.id, consumedAt: null }, { consumedAt: now });
+      const consumed = await updateAuth(tx, this.#deps.chainKey, deviceAuthorizations, { id: row.id, consumedAt: null }, { consumedAt: now });
       if (consumed === 0) return { status: 'expired' };
       const principalId = row.principalId!;
       // An approval given before the person was last added is void: someone
