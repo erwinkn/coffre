@@ -1,9 +1,11 @@
 // Who holds what is the vault's record: an access change is its entry or
 // nothing, and a member row or grant written around it is refused at use.
+import { CoffreError } from '@coffre/client';
+
 import { Browser } from '../browser.ts';
 import { using } from '../database.ts';
 import type { Deployment } from '../harness.ts';
-import { expect } from '../report.ts';
+import { expect, Skip, until } from '../report.ts';
 import { DEV, PROD, signIn, type People, type Person } from './people.ts';
 import { insertRow, logRefuses, query, restoreRow } from './storage.ts';
 
@@ -110,4 +112,56 @@ export async function noAuditNoAccess(deployment: Deployment, people: People): P
   });
   expect((await person.api.secrets.reveal(DEV)).values.API_KEY !== undefined, 'legitimate reads did not recover');
   return 'grant, removal and admission commit nothing while the log refuses their entries';
+}
+
+/** Hold the head after the vault checked a member, then forge a grant before it seals them. */
+export async function sealingRace(deployment: Deployment, people: People): Promise<string> {
+  if (deployment.vaultRuntime === null) throw new Skip('SQLite prevents a write beside a decision; the vault suite covers review R2 on Postgres');
+  const [login] = await using(deployment.vaultRuntime(), (sql) => sql.query<{ name: string }>('SELECT current_user AS name'));
+  const person = await member(deployment, people, 'seal-race');
+  const { admin } = people;
+  try {
+    await using(deployment.database(), (holder) => using(deployment.database(), async (sql) => {
+      const [place] = await query<{ id: string }>(sql, `SELECT e.id FROM environments e JOIN projects p ON p.id = e.project_id
+        WHERE p.slug = 'conformance' AND e.slug = 'prod'`);
+      const [head] = await sql.query<{ next_seq: string | number }>('SELECT next_seq FROM audit_chain_head');
+      const [owner] = await holder.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+      expect(place !== undefined, 'no prod environment for the sealing race');
+      await holder.exec('BEGIN');
+      let pending;
+      try {
+        await holder.query('SELECT 1 FROM audit_chain_head FOR UPDATE');
+        pending = admin.api.access.set(person.member, { [DEV]: 'developer' }).then(
+          (value) => ({ value }), (error: unknown) => ({ error }),
+        );
+        // The blocking PID proves where the request stopped; no sleep guesses the window.
+        await until('the vault decision waiting on our head', async () => {
+          const waiting = await query(sql, `SELECT pid FROM pg_stat_activity WHERE datname = current_database()
+            AND usename = $1 AND $2 = ANY(pg_blocking_pids(pid))`, [login.name, owner.pid]);
+          return waiting.length > 0;
+        }, 10);
+        await query(sql, `INSERT INTO vault_grants (principal, environment_id, role, granted_at, granted_by)
+          VALUES ($1, $2, 'viewer', $3, $4)`, [person.member, place.id, Date.now(), person.member]);
+      } finally {
+        await holder.exec('ROLLBACK');
+        if (pending !== undefined) await pending;
+      }
+      expect(pending !== undefined, 'the access decision was not started');
+      const result = await pending;
+      expect('error' in result && result.error instanceof CoffreError && result.error.status === 403
+        && result.error.code === 'vault_refused' && result.error.reason === 'tampered',
+      'a grant inserted during the decision was not refused as tampered', result);
+      const reports = await query(sql, `SELECT seq FROM audit_log WHERE author = 'vault' AND action = 'vault.tampered'
+        AND subject_principal = $1 AND code = 'mac' AND seq >= $2`, [person.member, head.next_seq]);
+      expect(reports.length > 0, 'the grant inserted during the decision was not reported', reports);
+      const response = await person.browser.send('POST', '/api/reveals', { path: PROD });
+      const body = await response.json() as { error: string };
+      expect(response.status === 401 && body.error === 'unauthenticated', 'the forged grant let its member read', body);
+    }));
+  } finally {
+    // Removal recovers this disposable member even if a broken build sealed the forged grant.
+    await admin.api.members.remove(person.member);
+  }
+  expect((await admin.api.audit.verify()).ok, 'the log did not verify after recovering the sealing-race member');
+  return 'a grant inserted while the vault waited on the head was refused as tampered and logged; removal recovered the member';
 }

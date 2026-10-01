@@ -14,7 +14,7 @@ export async function earlierCheckpoint(deployment: Deployment, { admin }: Peopl
   expect((await admin.api.audit.verify()).ok, 'the log does not verify before checkpoint tampering');
   await using(deployment.database(), (sql) => appendOnlyLifted(sql, async () => {
     const rows = await sql.query('SELECT * FROM audit_log ORDER BY seq');
-    const signed = rows.filter((row) => row.author === 'vault' && row.action === 'audit.checkpoint');
+    const signed = rows.filter((row) => row.author === 'vault' && row.action === 'audit.checkpoint' && row.decision === 'allow');
     expect(signed.length >= 2, 'two checkpoints are needed');
     const [head] = await sql.query('SELECT * FROM audit_chain_head');
     const seed = Buffer.from(KEYS.SIGNING_KEY, 'base64');
@@ -29,7 +29,7 @@ export async function earlierCheckpoint(deployment: Deployment, { admin }: Peopl
       await transaction(sql, async () => {
         for (const original of rows) {
           const row = { ...original };
-          if (row.author === 'vault' && row.action === 'audit.checkpoint') {
+          if (row.author === 'vault' && row.action === 'audit.checkpoint' && row.decision === 'allow') {
             const checkpoint = JSON.parse(String(row.metadata)) as { seq: number; hash: string; signedAt: string; signature: string };
             if (row.seq === signed[0].seq) checkpoint.signature = Buffer.alloc(64).toString('base64');
             else {

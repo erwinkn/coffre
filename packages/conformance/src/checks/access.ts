@@ -123,6 +123,8 @@ export async function bulkLimit({ admin, bulk }: People, limit: number): Promise
   for (let i = 0; i <= limit; i++) values[`BULK_${i}`] = `bulk-${i}`;
   await admin.api.secrets.set(BULK, values);
   const refusal = await refused(`${limit + 1} values were revealed at once`, bulk.api.secrets.reveal(BULK));
+  expect(refusal.status === 403 && refusal.code === 'bulk_limit' && refusal.reason === 'bulk_limit',
+    'the bulk read was not refused as bulk_limit', refusal);
   // Refused for how many, not for where: one of them still opens.
   const one = await bulk.api.secrets.reveal(`${BULK}/BULK_0`);
   expect(one.values.BULK_0 === 'bulk-0', 'a viewer on bulk could not read one of its values', one.values);

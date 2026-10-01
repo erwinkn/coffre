@@ -7,8 +7,8 @@ import { bulkLimit, crossSite, grantScoping, membersOnly, offboarding } from './
 import { checkpoints, deletedTail, forgedVaultEntry, missingEntry, noAuditNoValue, revealAudited, rewrittenEntry, verification, writesAgree } from './checks/audit.ts';
 import { earlierCheckpoint } from './checks/checkpoints.ts';
 import { appLogin, vaultLogin } from './checks/logins.ts';
-import { accessAuthorship, memberTampering, noAuditNoAccess } from './checks/members.ts';
-import { refusedCheckpoint, missingCheckpoint } from './checks/readiness.ts';
+import { accessAuthorship, memberTampering, noAuditNoAccess, sealingRace } from './checks/members.ts';
+import { refusedCheckpoint, missingCheckpoint, middleCut } from './checks/readiness.ts';
 import { editedGeneration, forgedCredential, forgedIdentity, forgedApproval } from './checks/signin.ts';
 import { canaryScan } from './checks/canaries.ts';
 import { anonymousChecks, tokenChecks, type Canary } from './checks/live.ts';
@@ -52,6 +52,7 @@ export async function conform(deployment: Deployment, options: { bulkLimit: numb
   await report.check('forged grant', { people }, ({ people }) => memberTampering(deployment, people, 'grant'));
   await report.check('forged member', { people }, ({ people }) => memberTampering(deployment, people, 'member'));
   await report.check('stale member', { people }, ({ people }) => memberTampering(deployment, people, 'stale'));
+  await report.check('sealing race', { people }, ({ people }) => sealingRace(deployment, people));
   await report.check('forged credential', { people }, ({ people }) => forgedCredential(deployment, people));
   await report.check('forged identity', { people }, ({ people }) => forgedIdentity(deployment, people));
   await report.check('forged approval', { people }, ({ people }) => forgedApproval(deployment, people));
@@ -62,6 +63,7 @@ export async function conform(deployment: Deployment, options: { bulkLimit: numb
   }
   await report.check('vault forged', { people }, ({ people }) => forgedVaultEntry(deployment, people));
   await report.check('middle gap', { people }, ({ people }) => missingEntry(deployment, people, 'middle'));
+  await report.check('middle cut', { people }, ({ people }) => middleCut(deployment, people));
   await report.check('first gap', { people }, ({ people }) => missingEntry(deployment, people, 'first'));
   await report.check('batch gap', { people }, ({ people }) => missingEntry(deployment, people, 'batch'));
   await report.check('earlier checkpoint', { people }, ({ people }) => earlierCheckpoint(deployment, people));
