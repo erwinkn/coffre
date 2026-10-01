@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { and, eq, isNull } from 'drizzle-orm';
 
 import { defineSignin, github } from '../../../packages/core/src/identity/signin/config.ts';
-import { auditLog, credentials, secrets, syncs } from '../../../packages/db/src/schema.ts';
+import { auditLog, credentials, secrets, syncs } from '../../../packages/db/test/tables.ts';
 import { SigninService } from '../src/server/api/signin.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
@@ -15,15 +15,15 @@ const DEV = 'dev@acme.example';
 const SERVICE = 'ci-deploy';
 const IP = '203.0.113.7';
 
-let db: ReturnType<typeof openTestDatabase>;
+let db: Awaited<ReturnType<typeof openTestDatabase>>;
 let deps: FixtureDeps;
 let signin: SigninService;
 let root: ReturnType<typeof clientFor>;
 let lead: ReturnType<typeof clientFor>;
 let dev: ReturnType<typeof clientFor>;
 
-before(() => {
-  db = openTestDatabase();
+before(async () => {
+  db = await openTestDatabase();
   deps = testDeps(db.runtime, [ROOT]);
   signin = new SigninService({
     ...deps,
@@ -233,6 +233,7 @@ test('the syncs someone set up are listed with where they push', async () => {
   const place = { projectId: credential.projectId, environmentId: credential.environmentId };
   await db.owner.insert(syncs).values([
     {
+      id: randomUUID(),
       ...place,
       provider: 'github-actions',
       config: JSON.stringify({ owner: 'acme', repo: 'app' }),
@@ -240,6 +241,7 @@ test('the syncs someone set up are listed with where they push', async () => {
       createdBy: DEV,
     },
     {
+      id: randomUUID(),
       ...place,
       provider: 'github-actions',
       config: JSON.stringify({ owner: 'acme', repo: 'other' }),

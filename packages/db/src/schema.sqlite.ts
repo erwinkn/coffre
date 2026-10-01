@@ -1,59 +1,83 @@
 import { sql } from 'drizzle-orm';
 import {
-  bigint,
-  boolean,
+  blob,
   check,
   customType,
   foreignKey,
   index,
   integer,
-  pgTable,
   primaryKey,
+  sqliteTable,
   text,
-  timestamp,
   unique,
   uniqueIndex,
-  uuid,
-  type AnyPgColumn,
-} from 'drizzle-orm/pg-core';
+  type AnySQLiteColumn,
+} from 'drizzle-orm/sqlite-core';
 
+import { asPostgres } from './portable.ts';
 import { ACTIVE_SUBJECT, relationsOf } from './relations.ts';
 
-const bytea = customType<{ data: Buffer }>({
-  dataType: () => 'bytea',
+/**
+ * The schema in schema.ts, for SQLite (through libsql). Same tables,
+ * columns, keys and row types (portable.ts checks); only the storage
+ * differs:
+ *
+ * - Ids and strings are `text`, with no default for ids: the application
+ *   makes every id.
+ * - Bytes are `blob`.
+ * - Times are integer milliseconds since the epoch, except
+ *   audit_log.occurred_at, which is the canonical text of canonicalTimestamp
+ *   and so sorts in time order.
+ * - Patterns are checked with GLOB, which is case-sensitive and needs no
+ *   extension, rather than a regular expression.
+ */
+
+const bytes = (name: string) => blob(name, { mode: 'buffer' });
+
+/** A 64-bit integer read as a bigint, like Postgres's bigint in 'bigint' mode. */
+const int64 = customType<{ data: bigint; driverData: number | bigint }>({
+  dataType: () => 'integer',
+  fromDriver: (value) => BigInt(value),
 });
 
-const createdAt = () => timestamp('created_at', { withTimezone: true }).notNull().defaultNow();
+const time = (name: string) => integer(name, { mode: 'timestamp_ms' });
+const now = sql`(CAST(unixepoch('subsec') * 1000 AS INTEGER))`;
+const createdAt = () => time('created_at').notNull().default(now);
+const flag = (name: string) => integer(name, { mode: 'boolean' });
 
-export const projects = pgTable(
+/** `^[a-z0-9][a-z0-9-]{0,max-1}$`, in GLOB. */
+const isSlug = (column: AnySQLiteColumn, max: number) =>
+  sql`length(${column}) BETWEEN 1 AND ${sql.raw(String(max))} AND ${column} GLOB '[a-z0-9]*' AND ${column} NOT GLOB '*[^a-z0-9-]*'`;
+
+export const projects = sqliteTable(
   'projects',
   {
-    id: uuid().primaryKey().defaultRandom(),
+    id: text().primaryKey(),
     slug: text().notNull(),
     name: text().notNull(),
     createdAt: createdAt(),
-    archivedAt: timestamp('archived_at', { withTimezone: true }),
+    archivedAt: time('archived_at'),
   },
   (table) => [
     unique('projects_slug_key').on(table.slug),
-    check('projects_slug_check', sql`${table.slug} ~ '^[a-z0-9][a-z0-9-]{0,62}$'`),
+    check('projects_slug_check', isSlug(table.slug, 63)),
   ],
 );
 
-export const environments = pgTable(
+export const environments = sqliteTable(
   'environments',
   {
-    id: uuid().primaryKey().defaultRandom(),
-    projectId: uuid('project_id').notNull(),
+    id: text().primaryKey(),
+    projectId: text('project_id').notNull(),
     slug: text().notNull(),
     name: text().notNull(),
     createdAt: createdAt(),
-    archivedAt: timestamp('archived_at', { withTimezone: true }),
+    archivedAt: time('archived_at'),
   },
   (table) => [
     unique('environments_project_id_slug_key').on(table.projectId, table.slug),
     unique('environments_project_scoped').on(table.id, table.projectId),
-    check('environments_slug_check', sql`${table.slug} ~ '^[a-z0-9][a-z0-9-]{0,62}$'`),
+    check('environments_slug_check', isSlug(table.slug, 63)),
     foreignKey({
       name: 'environments_project_id_fkey',
       columns: [table.projectId],
@@ -62,31 +86,27 @@ export const environments = pgTable(
   ],
 );
 
-export const secrets = pgTable(
+export const secrets = sqliteTable(
   'secrets',
   {
-    id: uuid().primaryKey().defaultRandom(),
-    projectId: uuid('project_id').notNull(),
-    environmentId: uuid('environment_id').notNull(),
+    id: text().primaryKey(),
+    projectId: text('project_id').notNull(),
+    environmentId: text('environment_id').notNull(),
     key: text().notNull(),
     createdAt: createdAt(),
-    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-    currentVersionId: uuid('current_version_id').references(
-      (): AnyPgColumn => secretVersions.id,
-      { onDelete: 'no action' },
-    ),
-    // The number of the current version, 0 before the first. Versions only
-    // append, so it is also the highest: the next one is this plus one.
+    updatedAt: time('updated_at').notNull().default(now),
+    currentVersionId: text('current_version_id').references((): AnySQLiteColumn => secretVersions.id, {
+      onDelete: 'no action',
+    }),
     currentVersion: integer('current_version').notNull().default(0),
-    archivedAt: timestamp('archived_at', { withTimezone: true }),
+    archivedAt: time('archived_at'),
   },
   (table) => [
-    unique('secrets_project_id_environment_id_key_key').on(
-      table.projectId,
-      table.environmentId,
-      table.key,
+    unique('secrets_project_id_environment_id_key_key').on(table.projectId, table.environmentId, table.key),
+    check(
+      'secrets_key_check',
+      sql`length(${table.key}) BETWEEN 1 AND 128 AND ${table.key} GLOB '[A-Za-z_]*' AND ${table.key} NOT GLOB '*[^A-Za-z0-9_]*'`,
     ),
-    check('secrets_key_check', sql`${table.key} ~ '^[A-Za-z_][A-Za-z0-9_]{0,127}$'`),
     foreignKey({
       name: 'secrets_project_id_fkey',
       columns: [table.projectId],
@@ -106,17 +126,17 @@ export const secrets = pgTable(
   ],
 );
 
-export const secretVersions = pgTable(
+export const secretVersions = sqliteTable(
   'secret_versions',
   {
-    id: uuid().primaryKey().defaultRandom(),
-    secretId: uuid('secret_id').notNull(),
+    id: text().primaryKey(),
+    secretId: text('secret_id').notNull(),
     version: integer().notNull(),
     envelopeVersion: integer('envelope_version').notNull(),
-    ciphertext: bytea().notNull(),
-    iv: bytea().notNull(),
-    authTag: bytea('auth_tag').notNull(),
-    wrappedDek: bytea('wrapped_dek').notNull(),
+    ciphertext: bytes('ciphertext').notNull(),
+    iv: bytes('iv').notNull(),
+    authTag: bytes('auth_tag').notNull(),
+    wrappedDek: bytes('wrapped_dek').notNull(),
     kekProvider: text('kek_provider').notNull(),
     kekId: text('kek_id').notNull(),
     kekVersion: text('kek_version').notNull(),
@@ -133,11 +153,11 @@ export const secretVersions = pgTable(
       columns: [table.secretId],
       foreignColumns: [secrets.id],
     }).onDelete('restrict'),
-    index('secret_versions_secret_idx').on(table.secretId, table.version.desc()),
+    index('secret_versions_secret_idx').on(table.secretId, table.version),
   ],
 );
 
-export const principals = pgTable(
+export const principals = sqliteTable(
   'principals',
   {
     principalType: text('principal_type').notNull(),
@@ -145,24 +165,21 @@ export const principals = pgTable(
     instanceRole: text('instance_role').notNull().default('user'),
     createdAt: createdAt(),
     createdBy: text('created_by').notNull(),
-    active: boolean().notNull().default(true),
+    active: flag('active').notNull().default(true),
   },
   (table) => [
     primaryKey({
       name: 'principals_pkey',
       columns: [table.principalType, table.principalId],
     }),
-    check(
-      'principals_principal_type_check',
-      sql`${table.principalType} IN ('user', 'service')`,
-    ),
+    check('principals_principal_type_check', sql`${table.principalType} IN ('user', 'service')`),
     check('principals_instance_role_check', sql`${table.instanceRole} IN ('user', 'owner')`),
     check(
       'principals_service_role_check',
       sql`${table.principalType} = 'user' OR ${table.instanceRole} = 'user'`,
     ),
-    // A person is their email address, stored lowercased, so matching a
-    // provider's verified email is plain equality on every database.
+    // SQLite's lower() folds ASCII only; the server lowercases every email
+    // with toLowerCase() before it gets here.
     check(
       'principals_user_id_lowercase',
       sql`${table.principalType} <> 'user' OR ${table.principalId} = lower(${table.principalId})`,
@@ -170,25 +187,21 @@ export const principals = pgTable(
   ],
 );
 
-export const grants = pgTable(
+export const grants = sqliteTable(
   'grants',
   {
-    id: uuid().primaryKey().defaultRandom(),
+    id: text().primaryKey(),
     principalType: text('principal_type').notNull(),
     principalId: text('principal_id').notNull(),
-    environmentId: uuid('environment_id'),
+    environmentId: text('environment_id'),
     createdAt: createdAt(),
     createdBy: text('created_by').notNull(),
-    projectId: uuid('project_id'),
-    /** One of the built-in roles in packages/core/src/access.ts. */
+    projectId: text('project_id'),
     role: text().notNull(),
-    expiresAt: timestamp('expires_at', { withTimezone: true }),
+    expiresAt: time('expires_at'),
   },
   (table) => [
-    check(
-      'grants_principal_type_check',
-      sql`${table.principalType} IN ('user', 'service')`,
-    ),
+    check('grants_principal_type_check', sql`${table.principalType} IN ('user', 'service')`),
     check(
       'grants_exactly_one_scope',
       sql`(${table.projectId} IS NULL) <> (${table.environmentId} IS NULL)`,
@@ -213,45 +226,36 @@ export const grants = pgTable(
       sql`${table.role} IN ('viewer', 'developer', 'maintainer', 'access-manager', 'auditor', 'owner')`,
     ),
     index('grants_lookup_idx').on(table.principalType, table.principalId, table.environmentId),
-    // One grant per member per place. Revoking expires the row rather than
-    // deleting it, and granting again reuses it. The scope left empty is
-    // null, and nulls never collide, so each index only bites on its own
-    // kind of grant: a plain index does what a partial one on "scope is not
-    // null" would, and MySQL, which has no partial indexes, can say it too.
     uniqueIndex('grants_environment_unique').on(table.principalType, table.principalId, table.environmentId),
     uniqueIndex('grants_project_unique').on(table.principalType, table.principalId, table.projectId),
   ],
 );
 
-export const auditLog = pgTable(
+export const auditLog = sqliteTable(
   'audit_log',
   {
-    seq: bigint({ mode: 'bigint' }).primaryKey(),
-    id: uuid().notNull().defaultRandom(),
-    // A string, not a Date: the chain covers it to the microsecond, and a
-    // Date keeps milliseconds. See canonicalTimestamp in dialect.ts.
-    occurredAt: timestamp('occurred_at', { withTimezone: true, mode: 'string' })
-      .notNull()
-      .defaultNow(),
+    seq: int64('seq').primaryKey(),
+    id: text().notNull(),
+    occurredAt: text('occurred_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
     actorType: text('actor_type').notNull(),
     actorId: text('actor_id').notNull(),
     action: text().notNull(),
     decision: text().notNull(),
-    projectId: uuid('project_id'),
-    environmentId: uuid('environment_id'),
-    secretId: uuid('secret_id'),
-    bundleId: uuid('bundle_id'),
+    projectId: text('project_id'),
+    environmentId: text('environment_id'),
+    secretId: text('secret_id'),
+    bundleId: text('bundle_id'),
     requestId: text('request_id'),
     sourceIp: text('source_ip'),
     metadata: text().notNull().default('{}'),
-    prevHash: bytea('prev_hash').notNull(),
-    hash: bytea().notNull(),
+    prevHash: bytes('prev_hash').notNull(),
+    hash: bytes('hash').notNull(),
   },
   (table) => [
     unique('audit_log_id_key').on(table.id),
     check('audit_log_actor_type_check', sql`${table.actorType} IN ('user', 'service', 'system')`),
     check('audit_log_decision_check', sql`${table.decision} IN ('allow', 'deny')`),
-    check('audit_log_metadata_check', sql`${table.metadata}::jsonb IS NOT NULL`),
+    check('audit_log_metadata_check', sql`json_valid(${table.metadata})`),
     check('audit_log_prev_hash_check', sql`octet_length(${table.prevHash}) = 32`),
     check('audit_log_hash_check', sql`octet_length(${table.hash}) = 32`),
     foreignKey({
@@ -269,21 +273,21 @@ export const auditLog = pgTable(
       columns: [table.secretId],
       foreignColumns: [secrets.id],
     }).onDelete('restrict'),
-    index('audit_log_occurred_idx').on(table.occurredAt.desc()),
-    index('audit_log_actor_idx').on(table.actorType, table.actorId, table.occurredAt.desc()),
-    index('audit_log_secret_idx').on(table.secretId, table.occurredAt.desc()),
-    index('audit_log_environment_idx').on(table.environmentId, table.occurredAt.desc()),
+    index('audit_log_occurred_idx').on(table.occurredAt),
+    index('audit_log_actor_idx').on(table.actorType, table.actorId, table.occurredAt),
+    index('audit_log_secret_idx').on(table.secretId, table.occurredAt),
+    index('audit_log_environment_idx').on(table.environmentId, table.occurredAt),
     index('audit_log_bundle_idx').on(table.bundleId),
   ],
 );
 
-export const auditChainHead = pgTable(
+export const auditChainHead = sqliteTable(
   'audit_chain_head',
   {
-    onlyRow: boolean('only_row').primaryKey().default(true),
-    nextSeq: bigint('next_seq', { mode: 'bigint' }).notNull().default(sql`0`),
-    headHash: bytea('head_hash').notNull(),
-    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    onlyRow: flag('only_row').primaryKey().default(true),
+    nextSeq: int64('next_seq').notNull().default(sql`0`),
+    headHash: bytes('head_hash').notNull(),
+    updatedAt: time('updated_at').notNull().default(now),
   },
   (table) => [
     check('audit_chain_head_only_row_check', sql`${table.onlyRow}`),
@@ -291,14 +295,14 @@ export const auditChainHead = pgTable(
   ],
 );
 
-export const auditCheckpoints = pgTable(
+export const auditCheckpoints = sqliteTable(
   'audit_checkpoints',
   {
-    id: uuid().primaryKey().defaultRandom(),
-    seq: bigint({ mode: 'bigint' }).notNull(),
-    headHash: bytea('head_hash').notNull(),
+    id: text().primaryKey(),
+    seq: int64('seq').notNull(),
+    headHash: bytes('head_hash').notNull(),
     createdAt: createdAt(),
-    exportedAt: timestamp('exported_at', { withTimezone: true }),
+    exportedAt: time('exported_at'),
     exportTarget: text('export_target'),
   },
   (table) => [
@@ -306,28 +310,20 @@ export const auditCheckpoints = pgTable(
   ],
 );
 
-export const auditHeartbeat = pgTable(
+export const auditHeartbeat = sqliteTable(
   'audit_heartbeat',
   {
-    onlyRow: boolean('only_row').primaryKey().default(true),
-    lastBeatAt: timestamp('last_beat_at', { withTimezone: true }).notNull().defaultNow(),
-    lastSeq: bigint('last_seq', { mode: 'bigint' }).notNull().default(sql`0`),
+    onlyRow: flag('only_row').primaryKey().default(true),
+    lastBeatAt: time('last_beat_at').notNull().default(now),
+    lastSeq: int64('last_seq').notNull().default(sql`0`),
   },
   (table) => [check('audit_heartbeat_only_row_check', sql`${table.onlyRow}`)],
 );
 
-/**
- * An account at a sign-in provider, bound to one principal.
- *
- * Looked up by (provider, subject), never by email. An email address is
- * recycled when someone leaves; the provider's subject is not, so binding to
- * it is what stops a new holder of an old address from inheriting its access.
- * The email is kept for display only.
- */
-export const identities = pgTable(
+export const identities = sqliteTable(
   'identities',
   {
-    id: uuid().primaryKey().defaultRandom(),
+    id: text().primaryKey(),
     provider: text().notNull(),
     subject: text().notNull(),
     principalType: text('principal_type').notNull(),
@@ -335,51 +331,41 @@ export const identities = pgTable(
     email: text(),
     createdAt: createdAt(),
     createdBy: text('created_by').notNull(),
-    lastSignInAt: timestamp('last_sign_in_at', { withTimezone: true }),
-    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    lastSignInAt: time('last_sign_in_at'),
+    revokedAt: time('revoked_at'),
     revokedBy: text('revoked_by'),
-    activeSubject: text('active_subject').generatedAlwaysAs(ACTIVE_SUBJECT),
+    activeSubject: text('active_subject').generatedAlwaysAs(ACTIVE_SUBJECT, { mode: 'stored' }),
   },
   (table) => [
     check('identities_principal_type_check', sql`${table.principalType} = 'user'`),
-    check('identities_provider_check', sql`${table.provider} ~ '^[a-z0-9][a-z0-9-]{0,31}$'`),
+    check('identities_provider_check', isSlug(table.provider, 32)),
     foreignKey({
       name: 'identities_principal_fkey',
       columns: [table.principalType, table.principalId],
       foreignColumns: [principals.principalType, principals.principalId],
     }).onDelete('restrict'),
-    // An account is bound to one person at a time: the subject counts only
-    // while the identity is not revoked (see ACTIVE_SUBJECT).
     uniqueIndex('identities_active_subject').on(table.provider, table.activeSubject),
     index('identities_principal_idx').on(table.principalType, table.principalId),
   ],
 );
 
-/**
- * Bearer credentials coffre issues itself: browser sessions, CLI sessions and
- * service tokens.
- *
- * One table, so that revoking everything a principal holds is one statement.
- * Only a SHA-256 of each token is stored. Tokens carry 256 bits of entropy, so
- * a fast hash is enough; a database leak yields nothing that authenticates.
- */
-export const credentials = pgTable(
+export const credentials = sqliteTable(
   'credentials',
   {
-    id: uuid().primaryKey().defaultRandom(),
+    id: text().primaryKey(),
     kind: text().notNull(),
-    tokenHash: bytea('token_hash').notNull(),
+    tokenHash: bytes('token_hash').notNull(),
     tokenHint: text('token_hint').notNull(),
     principalType: text('principal_type').notNull(),
     principalId: text('principal_id').notNull(),
-    identityId: uuid('identity_id'),
+    identityId: text('identity_id'),
     label: text(),
     createdAt: createdAt(),
     createdBy: text('created_by').notNull(),
-    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
-    lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
+    expiresAt: time('expires_at').notNull(),
+    lastUsedAt: time('last_used_at'),
     lastUsedIp: text('last_used_ip'),
-    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    revokedAt: time('revoked_at'),
     revokedBy: text('revoked_by'),
   },
   (table) => [
@@ -404,28 +390,21 @@ export const credentials = pgTable(
   ],
 );
 
-/**
- * A CLI asking to be signed in from a browser (RFC 8628, device flow).
- *
- * The CLI holds the device code and polls with it; a signed-in person approves
- * the short user code in their browser. It works the same on a laptop and on
- * a server reached over SSH, which a localhost redirect does not.
- */
-export const deviceAuthorizations = pgTable(
+export const deviceAuthorizations = sqliteTable(
   'device_authorizations',
   {
-    id: uuid().primaryKey().defaultRandom(),
-    deviceCodeHash: bytea('device_code_hash').notNull(),
+    id: text().primaryKey(),
+    deviceCodeHash: bytes('device_code_hash').notNull(),
     userCode: text('user_code').notNull(),
     clientLabel: text('client_label'),
     clientIp: text('client_ip'),
     createdAt: createdAt(),
-    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
-    decidedAt: timestamp('decided_at', { withTimezone: true }),
+    expiresAt: time('expires_at').notNull(),
+    decidedAt: time('decided_at'),
     decision: text(),
     principalType: text('principal_type'),
     principalId: text('principal_id'),
-    consumedAt: timestamp('consumed_at', { withTimezone: true }),
+    consumedAt: time('consumed_at'),
   },
   (table) => [
     unique('device_authorizations_device_code_hash_key').on(table.deviceCodeHash),
@@ -446,34 +425,26 @@ export const deviceAuthorizations = pgTable(
   ],
 );
 
-/**
- * An environment kept in step with a third-party service: GitHub Actions
- * secrets, Vercel or Railway variables, Worker secrets.
- *
- * The destination's API token is itself a coffre secret, referenced by id, so
- * it is encrypted, versioned and audited like everything else and never sits
- * in this table.
- */
-export const syncs = pgTable(
+export const syncs = sqliteTable(
   'syncs',
   {
-    id: uuid().primaryKey().defaultRandom(),
-    projectId: uuid('project_id').notNull(),
-    environmentId: uuid('environment_id').notNull(),
+    id: text().primaryKey(),
+    projectId: text('project_id').notNull(),
+    environmentId: text('environment_id').notNull(),
     provider: text().notNull(),
     config: text().notNull(),
-    credentialSecretId: uuid('credential_secret_id').notNull(),
+    credentialSecretId: text('credential_secret_id').notNull(),
     createdAt: createdAt(),
     createdBy: text('created_by').notNull(),
-    pausedAt: timestamp('paused_at', { withTimezone: true }),
-    archivedAt: timestamp('archived_at', { withTimezone: true }),
-    leaseUntil: timestamp('lease_until', { withTimezone: true }),
-    lastRunAt: timestamp('last_run_at', { withTimezone: true }),
+    pausedAt: time('paused_at'),
+    archivedAt: time('archived_at'),
+    leaseUntil: time('lease_until'),
+    lastRunAt: time('last_run_at'),
     lastStatus: text('last_status'),
     lastError: text('last_error'),
   },
   (table) => [
-    check('syncs_config_check', sql`${table.config}::jsonb IS NOT NULL`),
+    check('syncs_config_check', sql`json_valid(${table.config})`),
     check(
       'syncs_last_status_check',
       sql`${table.lastStatus} IS NULL OR ${table.lastStatus} IN ('ok', 'partial', 'failed')`,
@@ -492,22 +463,14 @@ export const syncs = pgTable(
   ],
 );
 
-/**
- * What a sync last pushed, one row per key.
- *
- * Most destinations are write-only, so coffre cannot diff against them. It
- * diffs against this instead: a key is stale when its secret has moved past
- * the version recorded here. It is also the list of keys coffre may delete at
- * the destination; a key it never pushed is never removed.
- */
-export const syncKeys = pgTable(
+export const syncKeys = sqliteTable(
   'sync_keys',
   {
-    syncId: uuid('sync_id').notNull(),
+    syncId: text('sync_id').notNull(),
     key: text().notNull(),
-    secretVersionId: uuid('secret_version_id'),
-    pushedAt: timestamp('pushed_at', { withTimezone: true }).notNull().defaultNow(),
-    removedAt: timestamp('removed_at', { withTimezone: true }),
+    secretVersionId: text('secret_version_id'),
+    pushedAt: time('pushed_at').notNull().default(now),
+    removedAt: time('removed_at'),
   },
   (table) => [
     primaryKey({ name: 'sync_keys_pkey', columns: [table.syncId, table.key] }),
@@ -524,7 +487,6 @@ export const syncKeys = pgTable(
   ],
 );
 
-// For Drizzle's relational queries; see relations.ts.
 export const {
   principalsRelations,
   grantsRelations,
@@ -534,4 +496,6 @@ export const {
   secretsRelations,
   syncsRelations,
   syncKeysRelations,
-} = relationsOf({ projects, environments, secrets, secretVersions, principals, grants, identities, credentials, syncs, syncKeys });
+} = relationsOf(
+  asPostgres({ projects, environments, secrets, secretVersions, principals, grants, identities, credentials, syncs, syncKeys }),
+);

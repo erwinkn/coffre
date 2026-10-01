@@ -127,8 +127,9 @@ Grant revocation and removal use the existing expiry/archive columns.
 **Owner and runtime are separate identities.** The one-shot migration process
 receives the owner `DATABASE_URL`; the Worker receives only the `HYPERDRIVE`
 binding backed by the restricted runtime login. Terraform creates and
-password-manages the stable `coffre_runtime` login; the Drizzle bootstrap
-validates it and grants membership in the append-only `coffre_app` role:
+password-manages the stable `coffre_runtime` login; the Postgres baseline
+migration validates it and grants membership in the append-only `coffre_app`
+role:
 
 ```sh
 DATABASE_URL='<owner-database-url>' pnpm db:migrate
@@ -187,11 +188,14 @@ Individual pieces:
 ```sh
 pnpm db:up            # Postgres on :55432
 pnpm db:migrate
-pnpm db:generate       # generate SQL from packages/db/src/schema.ts
-pnpm db:check          # validate the Drizzle journal
+pnpm db:generate       # regenerate each engine's baseline from its schema (no deployment yet)
+pnpm db:check          # validate the three Drizzle journals
 pnpm seed             # directory + market/dev|prod + grants; loads .env.dev
-pnpm test             # lint + unit + integration tests (needs Postgres up)
-pnpm test:schema      # runtime-role guarantees in an isolated test database
+pnpm test             # lint + unit + integration tests on Postgres (needs it up)
+pnpm test:sqlite      # the same suite on SQLite, in a temporary file
+pnpm test:mysql       # the same suite on MySQL 8.4 on :53306, started if nothing answers there
+pnpm test:all         # all three, one after another
+pnpm test:schema      # runtime-role guarantees in an isolated test database (Postgres only)
 pnpm lint             # no server functions or Drizzle queries in the web app
 pnpm check:pins       # every dependency exactly pinned
 pnpm check:contrast   # every admin-UI colour pair meets WCAG AA
@@ -575,10 +579,15 @@ UI, the underlying role and scope are presented as one permissions value:
 
 ### Why `--test-concurrency=1`
 
-The integration tests share one Postgres database and reset it in `beforeEach`.
-Run in parallel they clobber each other. Serialising is the pragmatic fix for a
+The integration tests share one database and reset it in `beforeEach`. Run in
+parallel they clobber each other. Serialising is the pragmatic fix for a
 prototype; the real fix is a schema (or database) per test file. Meanwhile
-`COFFRE_TEST_DATABASE=<name>` points a run at another scratch database.
+`COFFRE_TEST_DATABASE=<name>` points a Postgres run at another scratch
+database.
+
+`COFFRE_TEST_ENGINE` (`postgres`, `mysql` or `sqlite`) picks the engine; the
+`test:*` scripts set it. A few tests are Postgres-only, the restricted runtime
+login and the session time zone among them, and each says why when skipped.
 
 ## Deliberately out of scope
 

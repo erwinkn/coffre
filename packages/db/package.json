@@ -4,14 +4,16 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "drizzle-kit check --config drizzle.config.ts",
-    "generate": "drizzle-kit generate --config drizzle.config.ts",
+    "check": "for engine in postgres mysql sqlite; do drizzle-kit check --config drizzle.$engine.config.ts || exit 1; done",
+    "generate": "node src/baseline.ts",
     "migrate": "node src/migrate.ts",
     "verify:runtime": "node src/verify-runtime.ts",
     "test": "node --test"
   },
   "dependencies": {
+    "@libsql/client": "0.18.0",
     "drizzle-orm": "0.45.2",
+    "mysql2": "3.24.4",
     "pg": "8.16.3"
   },
   "devDependencies": {

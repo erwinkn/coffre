@@ -10,7 +10,8 @@ import {
   environments,
   secrets,
   secretVersions,
-} from '../../../packages/db/src/schema.ts';
+} from '../../../packages/db/test/tables.ts';
+import { postgresOnly } from '../../../packages/db/test/engine.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 const ROOT = 'admin@acme.example';
@@ -18,7 +19,7 @@ const READER = 'reader@acme.example';
 const DEVELOPER = 'developer@acme.example';
 const CI = 'ci-deploy.access';
 
-let db: ReturnType<typeof openTestDatabase>;
+let db: Awaited<ReturnType<typeof openTestDatabase>>;
 let deps: FixtureDeps;
 let root: CoffreClient;
 let reader: CoffreClient;
@@ -28,8 +29,8 @@ let ci: CoffreClient;
 /** Audit entries from the seeding are not what these tests look at. */
 let firstSeq: bigint;
 
-before(() => {
-  db = openTestDatabase();
+before(async () => {
+  db = await openTestDatabase();
 });
 
 after(async () => {
@@ -84,7 +85,7 @@ async function versionCount(): Promise<number> {
   return row.n;
 }
 
-test('the API runs on the restricted runtime login', async () => {
+test('the API runs on the restricted runtime login', postgresOnly('the restricted runtime role exists only on Postgres'), async () => {
   const identity = await db.runtime.execute<{ current_user: string }>(sql`SELECT current_user`);
   assert.equal(identity.rows[0].current_user, 'coffre_runtime');
   assert.deepEqual((await root.secrets.set('market/dev', { RUNTIME_PROOF: 'works' })).keys, {
@@ -158,6 +159,28 @@ test('writing twice appends a version rather than mutating one', async () => {
   assert.deepEqual((await root.secrets.set('market/dev', { API_KEY: 'v2' })).keys.API_KEY, { version: 2 });
   assert.equal(await versionCount(), 2);
   assert.equal((await root.secrets.reveal('market/dev/API_KEY')).values.API_KEY, 'v2');
+});
+
+test('the longest value round-trips, however many bytes it takes', async () => {
+  // 64 Ki characters is the most a value holds: 64 KiB of ASCII, or three
+  // times that in euro signs. Either is past MySQL's `blob`, which is why
+  // ciphertext is a `longblob` there.
+  const ascii = 'x'.repeat(64 * 1024);
+  const euros = '€'.repeat(64 * 1024);
+  await root.secrets.set('market/dev', { ASCII: ascii, EUROS: euros });
+
+  const { values } = await root.secrets.reveal('market/dev');
+  assert.equal(values.ASCII, ascii);
+  assert.equal(values.EUROS, euros);
+  const stored = await db.owner.select({ ciphertext: secretVersions.ciphertext }).from(secretVersions);
+  assert.deepEqual(stored.map((row) => row.ciphertext.length).sort((a, b) => a - b), [64 * 1024, 3 * 64 * 1024]);
+});
+
+test('keys that differ only in case are different secrets', async () => {
+  await root.secrets.set('market/dev', { API_KEY: 'upper', api_key: 'lower' });
+  assert.deepEqual((await root.secrets.reveal('market/dev')).values, { API_KEY: 'upper', api_key: 'lower' });
+  await root.secrets.set('market/dev', { api_key: 'lower, again' });
+  assert.equal((await root.secrets.reveal('market/dev/API_KEY')).values.API_KEY, 'upper');
 });
 
 test('concurrent writes allocate one ordered version sequence', async () => {

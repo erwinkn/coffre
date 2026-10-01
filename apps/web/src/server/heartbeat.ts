@@ -2,7 +2,7 @@ import { appendAudit } from '../../../../packages/db/src/audit.ts';
 import type { Database } from '../../../../packages/db/src/database.ts';
 import { appliedMigrations, heartbeat, update } from '../../../../packages/db/src/queries.ts';
 import { auditHeartbeat } from '../../../../packages/db/src/schema.ts';
-import { REQUIRED_MIGRATION_COUNT } from '../../../../packages/db/src/schema-version.ts';
+import { requiredMigrations } from '../../../../packages/db/src/schema-version.ts';
 
 export type HeartbeatLogger = {
   warn: (obj: unknown, msg: string) => void;
@@ -86,7 +86,7 @@ export async function auditReadiness(
   db: Database,
 ): Promise<Readiness> {
   try {
-    if ((await appliedMigrations(db)) < REQUIRED_MIGRATION_COUNT) {
+    if ((await appliedMigrations(db)) < requiredMigrations(db)) {
       return { ok: false, auditHeartbeatAgeSeconds: null };
     }
     const age = await heartbeatAgeSeconds(db);

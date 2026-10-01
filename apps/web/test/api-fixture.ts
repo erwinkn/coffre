@@ -1,32 +1,9 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 
-import pg from 'pg';
-
 import { createClient, type CoffreClient } from '../../../packages/client/src/index.ts';
 import { LocalKekProvider } from '../../../packages/core/src/kek/local.ts';
 import { KekRegistry } from '../../../packages/core/src/kek/registry.ts';
-import { createDatabase, type Database } from '../../../packages/db/src/database.ts';
-import {
-  auditChainHead,
-  auditCheckpoints,
-  auditHeartbeat,
-  auditLog,
-  credentials,
-  deviceAuthorizations,
-  environments,
-  grants,
-  identities,
-  principals,
-  projects,
-  secrets,
-  secretVersions,
-  syncKeys,
-  syncs,
-} from '../../../packages/db/src/schema.ts';
-import {
-  TEST_OWNER_DATABASE_URL,
-  TEST_RUNTIME_DATABASE_URL,
-} from '../../../packages/db/test/connections.ts';
+import { tablesOf, type Database } from '../../../packages/db/src/database.ts';
 import { loadCaller } from '../src/server/api/caller.ts';
 import type { ApiContext } from '../src/server/api/context.ts';
 import { serveApi } from '../src/server/api/router.ts';
@@ -84,18 +61,7 @@ export function clientFor(
   });
 }
 
-/** The integration database, as its owner (to reset and inspect) and as the app's restricted role. */
-export function openTestDatabase(): { owner: Database; runtime: Database; close: () => Promise<void> } {
-  const ownerPool = new pg.Pool({ connectionString: TEST_OWNER_DATABASE_URL });
-  const runtimePool = new pg.Pool({ connectionString: TEST_RUNTIME_DATABASE_URL });
-  return {
-    owner: createDatabase(ownerPool),
-    runtime: createDatabase(runtimePool),
-    close: async () => {
-      await Promise.all([ownerPool.end(), runtimePool.end()]);
-    },
-  };
-}
+export { openTestDatabase } from '../../../packages/db/test/engine.ts';
 
 /** Deps for a fresh instance with one root admin, over the restricted role. */
 export function testDeps(db: Database, rootAdmins: readonly string[], extra: Partial<FixtureDeps> = {}): FixtureDeps {
@@ -110,6 +76,23 @@ export function testDeps(db: Database, rootAdmins: readonly string[], extra: Par
 
 /** Empty every table, children first, and rewind the audit chain. */
 export async function resetDatabase(owner: Database): Promise<void> {
+  const {
+    auditChainHead,
+    auditCheckpoints,
+    auditHeartbeat,
+    auditLog,
+    credentials,
+    deviceAuthorizations,
+    environments,
+    grants,
+    identities,
+    principals,
+    projects,
+    secrets,
+    secretVersions,
+    syncKeys,
+    syncs,
+  } = tablesOf(owner);
   await owner.delete(syncKeys);
   await owner.delete(syncs);
   await owner.delete(credentials);

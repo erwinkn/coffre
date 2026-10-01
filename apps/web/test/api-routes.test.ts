@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import { eq } from 'drizzle-orm';
 
-import { auditLog } from '../../../packages/db/src/schema.ts';
+import { auditLog } from '../../../packages/db/test/tables.ts';
 import { serveApi } from '../src/server/api/router.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps } from './api-fixture.ts';
 
@@ -11,7 +11,7 @@ const ROOT = 'admin@acme.example';
 const DEV = 'dev@acme.example';
 const LEAD = 'lead@acme.example';
 
-const db = openTestDatabase();
+const db = await openTestDatabase();
 const deps = testDeps(db.runtime, [ROOT]);
 const root = clientFor(deps, ROOT);
 const dev = clientFor(deps, DEV);

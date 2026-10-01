@@ -100,7 +100,14 @@ that holds the keys and decides who may decrypt. The design is in
    browser, and a cookie-authenticated change must be same-origin. The server
    functions are gone, and sessions, linked accounts and device approval
    joined the route table.
-4. **MySQL and SQLite**, with the integration suite on all three.
+4. ~~**MySQL and SQLite**~~ ([design](architecture.md#databases)): done.
+   The database comes from its URL; queries are written once against the
+   Postgres schema, with MySQL and SQLite cast to it in one module, and a
+   parity test keeps the three schemas and migration trees in step.
+   Postgres-only SQL (partial unique indexes, `lower()` matching) was
+   remodelled, the audit chain locks a head row, and SQLite queues its own
+   writes. The integration suite runs on all three (`pnpm test:all`); the
+   restricted runtime login stays Postgres-only.
 5. **The vault**: keys, grants, principal status and its log move behind it.
 6. **The packages**: configuration in code, compiled output, the Node
    adapter, `coffre init`, and example deployments the smoke suite runs.

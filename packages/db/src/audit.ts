@@ -71,7 +71,7 @@ export async function appendAudit(
     };
 
     const hash = chainHash(chainKey, prevHash, row);
-    rows.push({ ...row, prevHash, hash });
+    rows.push({ ...row, id: crypto.randomUUID(), prevHash, hash });
 
     prevHash = hash;
     seq += 1n;

@@ -249,32 +249,67 @@ still there": `{ id, revokedAt: null }` changes one row or none. Row locks are
 kept for real races (the audit head, offboarding against sign-in, sync
 leases, version counters), and each one says which race it guards.
 
+The database comes from its URL: `postgres://` opens node-postgres,
+`mysql://` mysql2 and `file:` or `libsql:` @libsql/client (SQLite), each
+loaded only when asked for (`packages/db/src/connect.ts`). The Worker does not
+come through there: it builds its Postgres database from the Hyperdrive pool
+with `createDatabase`, and stays on Postgres.
+
 Each query is written once, typed against the Postgres schema. Drizzle has no
 type shared by its dialects, so the MySQL and SQLite databases are cast to the
-Postgres one in a single small module; at run time each database always
-travels with its own dialect's tables. The cast is unsound by construction, so
-two things guard it: a parity test (the three schemas have the same tables,
-columns, nullability and keys, and the same row types) and the whole suite on
-every engine, on every Drizzle upgrade.
+Postgres one in a single small module, `portable.ts`; at run time each
+database always travels with its own dialect's tables. The cast is unsound by
+construction, so three things guard it: a compile-time check in the same
+module that every table's row type matches its Postgres twin, a parity test
+(the three schemas have the same tables, columns, nullability, keys, indexes
+and foreign keys), and the whole suite on every engine, on every Drizzle
+upgrade.
 
-What differs between them stays in the schemas and a small per-dialect module:
+What differs between them stays in the schemas and one module,
+`packages/db/src/dialect.ts`:
 
 - **Schemas and migrations.** Drizzle's table builders are per dialect
   (`pgTable`, `mysqlTable`, `sqliteTable`), so there are three schemas and
-  three migration trees, changed together. Types differ on purpose: bytes are
-  `bytea`, `longblob` (`blob` is too small for a 64 KiB secret) and `blob`.
+  three migration trees under `packages/db/migrations/`, each a single
+  baseline: the generated tables inside a hand-written template
+  (`packages/db/baseline/`) that adds the first audit rows, MySQL's
+  collation and the Postgres runtime role. Until the first deployment,
+  schema changes are regenerated into the baseline (`pnpm db:generate`)
+  rather than added as new migrations. Tests fail when a tree falls behind:
+  the parity test, and a check that each baseline is what its schema and
+  template generate. Types differ on purpose: bytes are `bytea`, `longblob`
+  (`blob` is too small for a 64 KiB secret) and `blob`.
 - **Ids come from the application**, never from the database: MySQL has no
-  `RETURNING`.
-- **Upserts and locks** are named operations of the dialect module, never
-  branches in the services. The audit chain locks a permanent head row
-  (`FOR UPDATE` on Postgres and MySQL) instead of a Postgres advisory lock.
-  SQLite has a single writer but its driver does not queue for us (24
-  concurrent appends failed with `SQLITE_BUSY`), so the SQLite module queues
-  writes itself, once per database.
-- **Postgres-only SQL in today's services** (partial unique indexes, regex
-  checks, `array_agg`, lateral joins, `jsonb ->>` filters, `lower()` matching)
-  is remodelled rather than written three ways: a JSON field used in a filter
-  becomes a column, a case-insensitive identity is stored normalised.
+  `RETURNING`, and no write reads one back.
+- **Named operations, never branches in the services.** Insert if absent,
+  upsert, row locks, rows changed, recognising a duplicate key, the clock and
+  reading a condition are each a function of `dialect.ts`, and its header
+  tables how each engine does them.
+- **Locks.** The audit chain locks a permanent head row (`FOR UPDATE` on
+  Postgres and MySQL) instead of a Postgres advisory lock. MySQL runs at READ
+  COMMITTED, set on every connection: at its default, REPEATABLE READ, two
+  transactions that lock the same missing row and then both insert it
+  deadlock. SQLite has a single writer but its driver does not queue for us
+  (24 concurrent appends failed with `SQLITE_BUSY`), so `connect.ts` queues
+  transactions itself, once per database file however many clients open it;
+  each takes the write lock with its first statement, so a row lock there is a
+  no-op.
+- **Postgres-only SQL is remodelled, not written three ways.** Partial unique
+  indexes became plain ones: a grant's scope columns are exactly one non-null
+  (a check), so plain unique indexes over them do the same job, and "one live
+  identity per subject" is a unique index on a generated column that holds the
+  subject only while the identity is not revoked. Emails are stored lowercase
+  and a check keeps them so, rather than matched with `lower()`. Checks stay
+  in the database on all three, each in its dialect's words (a regex is `~`,
+  `regexp_like` or `GLOB`; JSON is text that must parse, `::jsonb` or
+  `json_valid`). One is only partly the database's: SQLite's `lower()` folds
+  ASCII only, so non-ASCII case in an email is the server's to fold. No query
+  filters on a JSON field.
+
+Some things stay Postgres-only: the restricted runtime login
+(`coffre_runtime`, which cannot rewrite the audit log) and `pnpm test:schema`,
+which checks its privileges. On MySQL and SQLite the server connects with one
+login.
 
 D1 is not a fit for the app database: it has no interactive transactions, and
 the audit chain reads the previous hash, computes the next in JavaScript, then

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { asc, count, eq } from 'drizzle-orm';
 
 import type { CoffreClient } from '../../../packages/client/src/index.ts';
-import { auditLog, grants, projects } from '../../../packages/db/src/schema.ts';
+import { auditLog, grants, principals, projects } from '../../../packages/db/test/tables.ts';
 import {
   clientFor,
   openTestDatabase,
@@ -19,7 +19,7 @@ const READER = 'user:reader@acme.example';
 const OWNER = 'user:instance-owner@acme.example';
 const CI = 'token:ci-deploy';
 
-let db: ReturnType<typeof openTestDatabase>;
+let db: Awaited<ReturnType<typeof openTestDatabase>>;
 let deps: FixtureDeps;
 let root: CoffreClient;
 let lead: CoffreClient;
@@ -27,8 +27,8 @@ let reader: CoffreClient;
 let owner: CoffreClient;
 let outsider: CoffreClient;
 
-before(() => {
-  db = openTestDatabase();
+before(async () => {
+  db = await openTestDatabase();
   deps = testDeps(db.runtime, [ROOT]);
   root = clientFor(deps, ROOT);
   lead = clientFor(deps, 'lead@acme.example');
@@ -328,6 +328,18 @@ test('two owners adding the same member at once both succeed, and one of them cr
   const creates = (await auditActions()).filter((entry) => entry.action === 'directory.create');
   // LEAD, READER, CI, OWNER, then the new member once.
   assert.equal(creates.length, 5);
+});
+
+test('an email is one member however it is capitalised, accents included', async () => {
+  // SQLite's lower() folds ASCII only, so its lowercase check cannot catch an
+  // É; the server folds every email before it reaches the database.
+  assert.equal((await root.members.add('user:Émile@Acme.example')).created, true);
+  assert.equal((await root.members.add('user:ÉMILE@acme.EXAMPLE')).created, false);
+  const stored = await db.owner
+    .select({ id: principals.principalId })
+    .from(principals)
+    .where(eq(principals.principalType, 'user'));
+  assert.deepEqual(stored.map((row) => row.id).filter((id) => id.startsWith('é')), ['émile@acme.example']);
 });
 
 test('ordinary users cannot manage the instance directory', async () => {

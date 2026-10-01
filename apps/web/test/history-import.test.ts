@@ -5,7 +5,7 @@ import { and, asc, count, eq } from 'drizzle-orm';
 
 import { planImport, type CoffreClient } from '../../../packages/client/src/index.ts';
 import { parseDotenv } from '../../../packages/core/src/dotenv.ts';
-import { auditLog, grants, secrets, secretVersions } from '../../../packages/db/src/schema.ts';
+import { auditLog, grants, secrets, secretVersions } from '../../../packages/db/test/tables.ts';
 import { serveApi } from '../src/server/api/router.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
@@ -13,14 +13,14 @@ const ROOT = 'admin@acme.example';
 const VIEWER = 'viewer@acme.example';
 const READER = 'reader@acme.example';
 
-let db: ReturnType<typeof openTestDatabase>;
+let db: Awaited<ReturnType<typeof openTestDatabase>>;
 let deps: FixtureDeps;
 let root: CoffreClient;
 let viewer: CoffreClient;
 let reader: CoffreClient;
 
-before(() => {
-  db = openTestDatabase();
+before(async () => {
+  db = await openTestDatabase();
 });
 
 after(async () => {

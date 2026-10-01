@@ -28,7 +28,12 @@ DB-backed tests need it up. Export `COMPOSE_PROJECT_NAME=coffre` whenever you in
 **Tests / checks.**
 - `pnpm test` = lint + recreate `coffre_test` + `node --test --test-concurrency=1`
   (serial: the integration suite shares one DB and resets it per test). Needs Postgres.
-- `pnpm test:schema` verifies the restricted runtime role's privileges. Needs Postgres.
+- `pnpm test:sqlite` and `pnpm test:mysql` run the same suite on the other engines
+  (`COFFRE_TEST_ENGINE`); `pnpm test:all` runs all three. SQLite needs nothing.
+  MySQL uses whatever answers on **:53306**, else starts the compose `mysql`
+  service (profile `mysql`, data on tmpfs) via `scripts/ensure-mysql.sh`.
+- `pnpm test:schema` verifies the restricted runtime role's privileges. Postgres only,
+  as is the runtime role itself.
 - `pnpm --dir apps/web smoke:production` sets `COMPOSE_PROJECT_NAME=coffre`,
   builds the Worker if `apps/web/.wrangler/deploy/config.json` is missing, and
   writes production smoke secrets to `dist/server/.dev.vars` so a sourced

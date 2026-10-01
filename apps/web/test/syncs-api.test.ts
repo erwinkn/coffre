@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import { asc, eq } from 'drizzle-orm';
 
-import { auditLog, secrets, syncs } from '../../../packages/db/src/schema.ts';
+import { auditLog, secrets, syncs } from '../../../packages/db/test/tables.ts';
 import {
   SyncConfigError,
   SyncProviderError,
@@ -67,7 +67,7 @@ class FakeDestination {
   };
 }
 
-let db: ReturnType<typeof openTestDatabase>;
+let db: Awaited<ReturnType<typeof openTestDatabase>>;
 let deps: FixtureDeps;
 let runner: SyncRunner;
 let destination: FakeDestination;
@@ -81,8 +81,8 @@ async function settle() {
   while (background.length > 0) await Promise.all(background.splice(0));
 }
 
-before(() => {
-  db = openTestDatabase();
+before(async () => {
+  db = await openTestDatabase();
   deps = testDeps(db.runtime, [ROOT], { waitUntil: (promise) => void background.push(promise) });
   runner = new SyncRunner({
     ...deps,

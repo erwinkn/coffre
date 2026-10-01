@@ -10,7 +10,10 @@
   "scripts": {
     "dev": "./scripts/dev.sh",
     "dev:signin": "./scripts/dev.sh signin",
-    "test": "pnpm lint && ./scripts/setup-test-database.sh && node --test --test-concurrency=1 \"scripts/*.test.mjs\" \"packages/**/test/*.test.ts\" \"apps/**/test/*.test.ts\"",
+    "test": "pnpm lint && ./scripts/test-suite.sh",
+    "test:sqlite": "pnpm lint && COFFRE_TEST_ENGINE=sqlite ./scripts/test-suite.sh",
+    "test:mysql": "pnpm lint && COFFRE_TEST_ENGINE=mysql ./scripts/test-suite.sh",
+    "test:all": "pnpm test && pnpm test:sqlite && pnpm test:mysql",
     "test:schema": "./scripts/test-schema.sh",
     "lint": "eslint \"apps/web/src/**/*.{ts,tsx}\"",
     "check:pins": "node scripts/check-pins.mjs",

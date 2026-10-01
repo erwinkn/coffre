@@ -1,10 +1,9 @@
 import { after, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { sql } from 'drizzle-orm';
-
 import { createDatabase } from '../../../packages/db/src/database.ts';
-import { auditChainHead, auditHeartbeat, auditLog } from '../../../packages/db/src/schema.ts';
+import { heartbeat } from '../../../packages/db/src/queries.ts';
+import { auditChainHead, auditHeartbeat, auditLog } from '../../../packages/db/test/tables.ts';
 import {
   auditReadiness,
   HEARTBEAT_STALE_AFTER_SECONDS,
@@ -12,7 +11,7 @@ import {
 } from '../src/server/heartbeat.ts';
 import { openTestDatabase, resetDatabase } from './api-fixture.ts';
 
-const db = openTestDatabase();
+const db = await openTestDatabase();
 after(() => db.close());
 beforeEach(() => resetDatabase(db.owner));
 
@@ -20,9 +19,8 @@ const quiet = { warn: () => assert.fail('successful heartbeat must not warn') };
 
 /** Moves the last beat `seconds` into the past, by the database's clock. */
 async function beatAgo(seconds: number) {
-  await db.owner
-    .update(auditHeartbeat)
-    .set({ lastBeatAt: sql`CURRENT_TIMESTAMP - make_interval(secs => ${seconds})` });
+  const { now } = (await heartbeat(db.owner))!;
+  await db.owner.update(auditHeartbeat).set({ lastBeatAt: new Date(Date.parse(now) - seconds * 1000) });
 }
 
 test('the scheduled heartbeat updates the database-owned signal', async () => {
@@ -54,7 +52,7 @@ test('the scheduled heartbeat rejects a missing singleton row', async () => {
     assert.equal(warning, 'audit heartbeat singleton is missing');
     assert.deepEqual(await db.owner.select().from(auditLog), []);
   } finally {
-    await db.owner.insert(auditHeartbeat).values({}).onConflictDoNothing();
+    await db.owner.insert(auditHeartbeat).values({ onlyRow: true });
   }
 });
 
