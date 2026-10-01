@@ -85,18 +85,22 @@ const FIELD_ORDER = [
 /**
  * The fields as bytes, injectively: each is length-prefixed, a null is
  * length -1, distinct from the empty string, and numbers are decimal text.
+ * Strings contain Unicode scalar values: lone UTF-16 surrogates are refused,
+ * not replaced on conversion to UTF-8. Undefined is not a wire value.
  */
 export function encodeFields(fields: LogFields): Buffer {
   const parts: Buffer[] = [];
   for (const name of FIELD_ORDER) {
     const raw = fields[name];
     const header = Buffer.alloc(4);
-    if (raw === null || raw === undefined) {
+    if (raw === undefined) throw new Error(`${name} cannot be undefined`);
+    if (raw === null) {
       header.writeInt32BE(-1, 0);
       parts.push(header);
       continue;
     }
     if (typeof raw === 'number' && !Number.isSafeInteger(raw)) throw new Error(`${name} must be a whole number`);
+    if (typeof raw === 'string' && /[\uD800-\uDFFF]/u.test(raw)) throw new Error(`${name} must be well-formed Unicode`);
     const value = Buffer.from(typeof raw === 'string' ? raw : raw.toString(10), 'utf8');
     header.writeInt32BE(value.length, 0);
     parts.push(header, value);

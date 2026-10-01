@@ -22,6 +22,7 @@ type Vectors = {
   format: string;
   keys: Record<'app' | 'vault', { secret: string; keyId: string; key: string }>;
   entries: { fields: VectorFields; prevHash: string; mac: string; hash: string }[];
+  rejected?: { name: string; fields: VectorFields; error: string }[];
 };
 
 const vectors = JSON.parse(readFileSync(new URL('./vectors/audit-v2.json', import.meta.url), 'utf8')) as Vectors;
@@ -197,4 +198,23 @@ test('a run in the middle verifies from the entry before it', () => {
 
 test('sealing with a key that is not the entry\'s refuses', () => {
   assert.throws(() => sealEntry(vault, GENESIS_HASH, entry(0n, app)), /cannot be sealed/);
+});
+
+test('the vectors cover member binding, supplementary Unicode and rejected strings', () => {
+  assert.ok(vectors.entries.some(({ fields }) => fields.subjectPrincipal !== null));
+  assert.ok(vectors.entries.some(({ fields }) => /[\u{10000}-\u{10ffff}]/u.test(JSON.stringify(fields))));
+  assert.ok((vectors.rejected ?? []).some(({ fields }) => Object.values(fields).some((value) => typeof value === 'string' && /[\uD800-\uDFFF]/u.test(value))));
+});
+
+for (const vector of vectors.rejected ?? []) {
+  test(`the codec rejects the vector: ${vector.name}`, () => {
+    assert.throws(() => encodeFields(fieldsOf(vector.fields)), { message: vector.error });
+  });
+}
+
+test('undefined is not a wire value, even in nullable fields', () => {
+  const fields = entry(0n, app);
+  for (const name of Object.keys(fields)) {
+    assert.throws(() => encodeFields({ ...fields, [name]: undefined }), /undefined/, name);
+  }
 });

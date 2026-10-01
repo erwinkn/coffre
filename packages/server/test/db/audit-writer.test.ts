@@ -2,15 +2,15 @@ import test, { before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 
-import { verifyEntries } from '@coffre/core/audit';
+import { GENESIS_HASH, sealEntry, verifyEntries, type LogFields } from '@coffre/core/audit';
 import type { Database, Transaction } from '@coffre/db';
 import { canonicalTimestamp } from '@coffre/db/dialect';
 import { LogHeadMismatch, LogRewound } from '@coffre/db/log';
-import { eq, gte, sql } from 'drizzle-orm';
+import { eq, gte, sql, type SQL } from 'drizzle-orm';
 
 import { actorOf, actorParts, appendAudit, appLogKey } from '../../src/db/audit.ts';
-import { auditRange } from '../../src/db/queries.ts';
-import { emptyLog, openTestDatabase, postgresOnly, withLogUnlocked } from './engine.ts';
+import { auditHead, auditRange } from '../../src/db/queries.ts';
+import { emptyLog, openTestDatabase, postgresOnly, TEST_ENGINE, withLogUnlocked } from './engine.ts';
 import { auditChainHead, auditLog } from './tables.ts';
 
 const CHAIN_KEY = randomBytes(32);
@@ -248,4 +248,49 @@ test('concurrent appends queue on the chain head and form one linear chain', asy
   // Each entry's time was read after its append took the lock, so time
   // never runs backwards along the chain.
   assert.ok(rows.every((row, i) => i === 0 || row.occurredAt >= rows[i - 1].occurredAt));
+});
+
+test('64-bit sequences, related entries and the head round-trip above 2^53', async () => {
+  const key = appLogKey(CHAIN_KEY);
+  const seq = 9007199254740993n;
+  const fields: LogFields = {
+    seq, author: key.author, keyId: key.keyId, occurredAt: 1_790_841_600_000,
+    actor: 'system:test', action: 'test', decision: 'allow', code: null,
+    subjectPrincipal: null, projectId: null, environmentId: null, secretId: null,
+    secretVersionId: null, operationId: null, requestId: null, sourceIp: null,
+    relatedSeq: null, metadata: '{}',
+  };
+  const first = { ...fields, prevHash: GENESIS_HASH, ...sealEntry(key, GENESIS_HASH, fields) };
+  const following = { ...fields, seq: seq + 1n, relatedSeq: seq };
+  const second = { ...following, prevHash: first.hash, ...sealEntry(key, first.hash, following) };
+  try {
+    await inTransaction(async (tx) => {
+      await tx.insert(auditLog).values([first, second]);
+      await tx.update(auditChainHead).set({ nextSeq: seq + 2n, headHash: second.hash });
+      assert.deepEqual((await auditRange(tx, seq)).map((row) => [row.seq, row.relatedSeq]), [[seq, null], [seq + 1n, seq]]);
+      assert.equal((await auditHead(tx))?.nextSeq, seq + 2n);
+    });
+    const rows = await auditRange(db, seq);
+    assert.equal(verifyEntries(rows, { startSeq: seq, keys: [key] }).ok, true);
+    assert.deepEqual(rows.map((row) => [row.seq, row.relatedSeq]), [[seq, null], [seq + 1n, seq]]);
+    assert.equal((await auditHead(db))?.nextSeq, seq + 2n);
+  } finally {
+    // RESTRICT checks each deletion, so remove the referencing entry first.
+    await withLogUnlocked(owner, async (owned) => {
+      await owned.delete(auditLog).where(eq(auditLog.seq, seq + 1n));
+      await owned.delete(auditLog).where(eq(auditLog.seq, seq));
+    });
+  }
+});
+
+test('SQLite refuses replacing an audit entry through INSERT OR REPLACE', { skip: TEST_ENGINE !== 'sqlite' }, async () => {
+  await inTransaction((tx) => appendAudit(tx, CHAIN_KEY, [
+    { actorType: 'system', actorId: 'test', action: 'test', decision: 'allow' },
+  ]));
+  const sqlite = db as unknown as { run(query: SQL): Promise<unknown> };
+  await assert.rejects(sqlite.run(sql`INSERT OR REPLACE INTO audit_log
+    (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
+    SELECT seq, author, key_id, occurred_at, actor, 'rewritten', decision, prev_hash, mac, hash FROM audit_log`),
+  (error: unknown) => /append-only/.test(`${error} ${(error as { cause?: unknown }).cause}`));
+  assert.equal((await auditRange(db))[0].action, 'test');
 });
