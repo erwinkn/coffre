@@ -6,11 +6,23 @@ export function checkOperation(operation?: KeyOperation, uncertain = false): voi
   }
 }
 
-/** Enforce the deadline even when the caller's signal has not fired yet. */
+const signals = new WeakMap<KeyOperation, AbortSignal>();
+
+/**
+ * Enforce the deadline even when the caller's signal has not fired yet: one
+ * signal for every call of an operation, so its deadline cancels them all at
+ * once. With a timer per call, one call's could fire first, free its slot,
+ * and start a key queued behind it whose own timer had not fired yet.
+ */
 export function operationSignal(operation?: KeyOperation): AbortSignal | undefined {
   if (operation === undefined) return undefined;
   checkOperation(operation);
-  return AbortSignal.any([operation.signal, AbortSignal.timeout(Math.max(0, operation.deadline - Date.now()))]);
+  let signal = signals.get(operation);
+  if (signal === undefined) {
+    signal = AbortSignal.any([operation.signal, AbortSignal.timeout(Math.max(0, operation.deadline - Date.now()))]);
+    signals.set(operation, signal);
+  }
+  return signal;
 }
 
 /** Credentials can finish later, but must never send a request after cancellation. */

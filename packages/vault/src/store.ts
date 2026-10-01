@@ -172,6 +172,32 @@ export async function deleteGrants(tx: Transaction, principal: string): Promise<
   await tx.delete(vaultGrants).where(eq(vaultGrants.principal, principal));
 }
 
+/**
+ * Up to `limit` of the newest stored data keys wrapped under one KEK, each
+ * with the secret it opens for: what proves a KEK is the one the data was
+ * wrapped with, before the vault records a check value for it.
+ */
+export async function wrappedUnder(db: Queryable, provider: string, keyId: string, limit: number) {
+  const { secretVersions, secrets } = tablesOf(db);
+  const rows = await db
+    .select({
+      projectId: secrets.projectId,
+      environmentId: secrets.environmentId,
+      secretId: secretVersions.secretId,
+      version: secretVersions.version,
+      kekProvider: secretVersions.kekProvider,
+      kekId: secretVersions.kekId,
+      kekVersion: secretVersions.kekVersion,
+      bytes: secretVersions.wrappedDek,
+    })
+    .from(secretVersions)
+    .innerJoin(secrets, eq(secrets.id, secretVersions.secretId))
+    .where(and(eq(secretVersions.kekProvider, provider), eq(secretVersions.kekId, keyId)))
+    .orderBy(desc(secretVersions.createdAt))
+    .limit(limit);
+  return rows.map((row) => ({ ...row, bytes: Buffer.from(row.bytes) }));
+}
+
 /** Of these projects and environments, the ones that exist, each environment with its project. */
 export async function places(
   db: Queryable,

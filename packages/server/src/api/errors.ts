@@ -64,9 +64,12 @@ export const conflict = (message: string) => new ApiError('conflict', message);
 
 /** The vault's refusal, as the API answers it. */
 export function vaultRefused(refusal: { code: string; message: string }): ApiError {
-  return refusal.code === 'bulk_limit'
-    ? new ApiError('bulk_limit', 'too many secrets read in too short a time; try again later', refusal.code)
-    : new ApiError('vault_refused', `the vault refused: ${refusal.message}`, refusal.code);
+  if (refusal.code === 'bulk_limit') {
+    return new ApiError('bulk_limit', 'too many secrets read in too short a time; try again later', refusal.code);
+  }
+  // Not the caller's doing: the instance is misconfigured, and stays unable to open any value until restarted.
+  if (refusal.code === 'wrong_kek') return new ApiError('unavailable', refusal.message, refusal.code);
+  return new ApiError('vault_refused', `the vault refused: ${refusal.message}`, refusal.code);
 }
 
 /** The status and body for anything a handler throws. */

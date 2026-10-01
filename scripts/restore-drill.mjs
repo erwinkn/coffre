@@ -6,8 +6,8 @@
 //               session is kept, a token, and checkpoints. Prints what the
 //               checks after need, as JSON.
 //   check       after the restore, with the same keys: everything is back.
-//   wrong-kek   after the restore, with another KEK: values fail closed,
-//               and the log still verifies.
+//   wrong-kek   after the restore, with another KEK: reads and writes are
+//               refused, the log still verifies, and readiness goes red.
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -98,12 +98,19 @@ async function wrongKek(before) {
     const admin = await signIn(ADMIN);
     const response = await send(admin, 'POST', '/api/reveals', { path: CANARY });
     const answer = await response.text();
-    assert.ok(!response.ok && !answer.includes(before.canary), 'a value opened under the wrong KEK');
+    assert.equal(response.status, 503, answer);
+    assert.equal(JSON.parse(answer).reason, 'wrong_kek');
+    assert.ok(!answer.includes(before.canary), 'a value opened under the wrong KEK');
     say(`revealing ${CANARY} answers ${response.status}: ${answer}`);
+    const write = await send(admin, 'PATCH', '/api/secrets/market/dev', { DRILL_WRONG: 'never stored' });
+    assert.equal(write.status, 503, 'a value was written under the wrong KEK');
+    say(`writing answers ${write.status} too: nothing is wrapped under the wrong KEK`);
 
     const verification = await verified(admin);
-    await beat();
-    say(`the log still verifies through ${verification.through}, and checkpoints: it needs the signing and audit keys, not the KEK`);
+    await fetch(`${API}/cdn-cgi/handler/scheduled?cron=*/5+*+*+*+*`);
+    const ready = await (await fetch(`${API}/readyz`)).json();
+    assert.equal(ready.checkpointed, false, 'the vault checkpointed under the wrong KEK');
+    say(`the log still verifies through ${verification.through}, and /readyz turns red: ${JSON.stringify(ready)}`);
 }
 
 const [step, state] = process.argv.slice(2);

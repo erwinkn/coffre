@@ -56,6 +56,11 @@ CloudTrail   Decrypt        coffre-vault (IAM user)   encryptionContext { "coffr
 For a key KMS wrapped, one without the other means something read around
 coffre, or a log was edited. The vault asks KMS only for a call its rules
 allow, so a refused read appears in its log and never in CloudTrail.
+One more kind of call is the vault's own: each vault process opens its
+KEK's check value once, before its first key operation, to tell it has the
+right KEK ([restore.md](restore.md#if-the-kek-is-wrong)). It shows in
+CloudTrail as a Decrypt whose context is the nil UUID, for no secret, and
+opens no data.
 
 **Setting it up.**
 

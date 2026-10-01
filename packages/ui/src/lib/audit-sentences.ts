@@ -256,6 +256,11 @@ const TEMPLATES: Record<string, Template> = {
   'key.wrap': { did: 'sealed the key of', tried: 'seal the key of', what: (facts) => versioned(facts.entry) },
   'key.rewrap': { did: 'resealed the key of', tried: 'reseal the key of', what: (facts) => versioned(facts.entry) },
   'key.intent': { did: 'asked KMS about', tried: 'ask KMS about', what: (facts) => secrets(facts) },
+  'key.check': {
+    did: 'recorded the check value of',
+    tried: 'check',
+    what: ({ entry }) => [['the', text(entry.metadata.kekProvider), 'KEK', text(entry.metadata.kekId)].filter((word) => word !== null).join(' ')],
+  },
   'sync.run': {
     did: 'ran the sync of',
     tried: 'run the sync of',
@@ -308,6 +313,7 @@ const REASONS: Record<string, string> = {
   duplicate_destination: 'already synced from elsewhere',
   cannot_grant_sync: 'cannot grant the sync its reads',
   kms_unavailable: 'KMS did not answer',
+  wrong_kek: "the vault's KEK is not the one that wrapped the data",
 };
 
 /** What a missing permission meant, from the app's `missing_<permission>`. */

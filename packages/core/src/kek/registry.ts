@@ -33,6 +33,11 @@ export class KekRegistry {
     return this.#primary;
   }
 
+  /** Every KEK, the primary first. */
+  get all(): KekProvider[] {
+    return [...this.#byRef.values()];
+  }
+
   /** The KEK a wrapped key names, or undefined when none is configured. */
   providerOf(wrapped: Pick<WrappedDek, 'kekProvider' | 'kekId'>): KekProvider | undefined {
     return this.#byRef.get(refOf(wrapped.kekProvider, wrapped.kekId));

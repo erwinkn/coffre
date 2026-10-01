@@ -69,6 +69,7 @@ export const DETAIL_ACTIONS = [
   'key.wrap',
   'key.rewrap',
   'key.intent',
+  'key.check',
   'sync.run',
   'audit.heartbeat',
   'audit.checkpoint',

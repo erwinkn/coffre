@@ -109,6 +109,12 @@ export type RefusalCode =
   /** The vault's own log no longer carries the head the last checkpoint signed, or does not rehash since. */
   | 'log_broken'
   /**
+   * A KEK the vault is given does not open what it wrapped: a restore with
+   * the wrong key, or a key mistyped under the right id. Every key
+   * operation is refused until the vault restarts with the right one.
+   */
+  | 'wrong_kek'
+  /**
    * The member's row or grants were changed outside the vault, or put back
    * from before a later change: it refuses them until an owner removes them,
    * which starts their access over from the log.

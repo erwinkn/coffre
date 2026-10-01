@@ -77,6 +77,8 @@ test('a page says what it hides, as far as its reader may see', async () => {
   assert.deepEqual((await root.audit.list()).hidden, [
     { action: 'audit.checkpoint', count: 1 },
     { action: 'audit.heartbeat', count: 1 },
+    // The KEK's check value, recorded before the first key was wrapped.
+    { action: 'key.check', count: 1 },
     { action: 'key.wrap', count: 1 },
   ]);
 });

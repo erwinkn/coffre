@@ -4,6 +4,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 
 import type { SecretContext } from '../src/context.ts';
 import { awsKms, AwsKmsKekProvider, type AwsKmsOptions } from '../src/kek/aws-kms.ts';
+import { operationSignal } from '../src/kek/cancellation.ts';
 import { signV4 } from '../src/kek/sigv4.ts';
 import { KekUnavailableError } from '../src/kek/types.ts';
 
@@ -194,6 +195,30 @@ test('at most eight calls are in flight at once', async () => {
   await Promise.all(Array.from({ length: 30 }, () => kek.wrap(randomBytes(32), context())));
   assert.equal(fake.calls.length, 30);
   assert.equal(fake.mostInFlight(), 8);
+});
+
+test('every call of one operation shares its deadline, so the deadline cancels them all at once', async () => {
+  const operation = { deadline: Date.now() + 50, signal: new AbortController().signal };
+  const first = operationSignal(operation);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  // A call made later gets the same signal, not a timer of its own that fires a moment after the first's.
+  assert.equal(operationSignal(operation), first);
+});
+
+test('no key queued behind a batch at the deadline is ever sent', async () => {
+  let sent = 0;
+  const kek = awsKms({ keyArn: ARN, credentials: CREDENTIALS, fetch: async (_input, init) => {
+    sent++;
+    // KMS never answers in time: each call waits for the deadline to cancel it.
+    await new Promise((resolve) => init?.signal?.addEventListener('abort', resolve, { once: true }));
+    throw new Error('aborted');
+  } });
+  // Only the deadline cancels: nobody aborts the operation's own signal.
+  const operation = { deadline: Date.now() + 50, signal: new AbortController().signal };
+  const calls = Array.from({ length: 9 }, () => kek.wrap(randomBytes(32), context(), operation));
+  const outcomes = await Promise.allSettled(calls);
+  assert.ok(outcomes.every((outcome) => outcome.status === 'rejected' && outcome.reason instanceof KekUnavailableError));
+  assert.equal(sent, 8, 'the ninth key waited for a slot, and was cancelled, not sent');
 });
 
 test('the key is named by its ARN, whose region is where coffre calls', async () => {
