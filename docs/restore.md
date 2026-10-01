@@ -164,17 +164,37 @@ gone, and a complete older backup verifies as well as a recent one. See
 
 ## If the KEK is wrong
 
-With a KEK other than the one that wrapped the data keys, every value fails
-closed: a reveal answers `403 vault_refused` with the reason `bad_claim`,
-"the key does not belong to this secret", and the vault logs each refused
-read. Nothing is opened, and nothing is changed. Verification and checkpoints
-still pass: the log needs `SIGNING_KEY` and `AUDIT_CHAIN_KEY`, not the KEK.
+The vault checks its KEKs before its first key operation. Each KEK has a
+check value: a known value wrapped under it the first time the vault used
+it, kept in a `key.check` entry of the log. Opening it again opens no data.
+A KEK with no check value yet is first tried on a few of the newest keys it
+wrapped, if any; a backup from before check values existed is covered the
+same way.
 
-`bad_claim` reads as though the wrapped key had been tampered with, so the
-symptom to recognise is every value of every secret refused at once, while
-verification passes. Stop, and restart the vault with the escrowed KEK and
-its `KEK_ID`. Do not write values meanwhile: a write wraps its new data key
-under whatever KEK the vault has.
+With a KEK other than the one that wrapped the data, whether a mistyped key
+under the right `KEK_ID` or the wrong escrowed key, the vault refuses every
+key operation, reads and writes alike, and writes nothing under it:
+
+```
+HTTP 503  {"error":"unavailable","reason":"wrong_kek",
+           "message":"this vault's local KEK kek-1 does not open the data it holds: it is not the key that wrapped it"}
+```
+
+The message names the provider and the key id, never key material. Each
+refused key is logged with the code `wrong_kek`, and the scheduled
+checkpoint is refused too, so `/readyz` turns red after the next beat
+(`checkpointed: false`). Verification still passes: the log needs
+`SIGNING_KEY` and `AUDIT_CHAIN_KEY`, not the KEK.
+
+Restart the vault with the escrowed KEK and its `KEK_ID`: the vault decides
+once per process, so a restart is what clears it.
+
+A KEK the vault cannot reach (KMS down, or refusing the vault's
+credentials) is not a verdict: the call fails as any key operation does
+during an outage, the next one asks again, and checkpoints go on. A KEK
+under a new id is a rotation: its check value is recorded on first use,
+and values wrapped under an id the vault is no longer given fail with "no
+KEK configured for …". Keep earlier KEKs in `previousKeks`.
 
 ## The local drill
 
@@ -200,8 +220,9 @@ this machine, against the compose Postgres, after `pnpm build`:
    - a new value writes and reads back, and the next beat checkpoints;
    - `coffre-conformance probe` passes, as no one and with the restored
      token, which reads the canary.
-5. It restarts the example with a random KEK, and checks that the canary is
-   refused while verification and checkpoints still pass.
+5. It restarts the example with a random KEK under the same id, and checks
+   that the canary and a new write are both refused with `wrong_kek`, that
+   verification still passes, and that `/readyz` turns red.
 
 It drops both databases and stops what it started, however it ends. It
 does not drill a PlanetScale branch: there, the steps that differ are the

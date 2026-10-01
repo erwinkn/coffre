@@ -368,6 +368,9 @@ test('a key service failing for its own reasons fails the call, and is no verdic
     },
     unwrap: (wrapped, ctx) => inner.unwrap(wrapped, ctx),
   };
+  // Its check value, recorded while the key service still encrypted.
+  const before = await world({ keks: new KekRegistry(inner) });
+  await wrapped(before, await before.secret(before.dev));
   const w = await world({ keks: new KekRegistry(broken) });
   const secret = await w.secret(w.dev);
   await assert.rejects(
@@ -376,7 +379,7 @@ test('a key service failing for its own reasons fails the call, and is no verdic
   );
   assert.deepEqual(
     (await vaultLog(w)).filter((entry) => entry.action === 'key.wrap').map((entry) => entry.code),
-    ['key_error'],
+    [null, 'key_error'],
     'the unexpected fault is recorded before it is rethrown',
   );
 });
@@ -493,6 +496,93 @@ test('a removal waits for a read in flight at the key service, and the next read
   const next = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items });
   assert.equal(!next.ok && next.refusal.code, 'removed');
   assert.equal(seen.unwrap, asked, 'refused before the key service is asked');
+});
+
+// --- the KEK -------------------------------------------------------------------
+
+/** The vault's records of a KEK's check value. */
+async function keyChecks(w: World) {
+  return (await vaultLog(w)).filter((entry) => entry.action === 'key.check');
+}
+
+const aKey = () => randomBytes(32).toString('base64');
+
+test('a vault checks its KEK before its first key operation, against a check value recorded once', async () => {
+  const keks = new KekRegistry(LocalKekProvider.generate('test-kek-1'));
+  const w = await world({ keks });
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const secret = await w.secret(w.dev);
+  const items = [{ secret, wrapped: await wrapped(w, secret) }];
+  // A fresh database holds nothing to prove the KEK on: its check value is recorded.
+  const [check] = await keyChecks(w);
+  assert.deepEqual(
+    [check.actor, check.detail.kekProvider, check.detail.kekId, check.detail.proof],
+    ['system:vault', keks.primary.provider, 'test-kek-1', null],
+  );
+
+  // Another process with the same KEK opens the check value, and records nothing more.
+  const twin = await w.twin();
+  assert.equal((await twin.unwrap({ principal: ADA, purpose: 'reveal', items })).ok, true);
+  assert.equal((await keyChecks(w)).length, 1);
+
+  // A vault given another key under the same id refuses every key operation, saying why, naming the KEK and no key.
+  const misled = await fresh();
+  const read = await misled.unwrap({ principal: ADA, purpose: 'reveal', items });
+  assert.deepEqual(!read.ok && read.refusal, {
+    code: 'wrong_kek',
+    message: `this vault's ${keks.primary.provider} KEK test-kek-1 does not open the data it holds: it is not the key that wrapped it`,
+  });
+  const write = await misled.wrap({ principal: ROOT, items: [{ secret, key: aKey() }] });
+  assert.equal(!write.ok && write.refusal.code, 'wrong_kek');
+  assert.deepEqual(
+    (await vaultLog(w)).filter((entry) => entry.code === 'wrong_kek').map((entry) => entry.action),
+    ['secret.read', 'key.wrap'],
+  );
+  // Its scheduled checkpoint is refused too, which readiness shows.
+  const checkpoint = await misled.checkpoint();
+  assert.equal(!checkpoint.ok && checkpoint.refusal.code, 'wrong_kek');
+
+  // The right KEK goes on working.
+  assert.equal((await twin.unwrap({ principal: ADA, purpose: 'reveal', items })).ok, true);
+});
+
+test('a KEK with no check value yet is proved on the keys it wrapped before one is recorded', async () => {
+  const keks = new KekRegistry(LocalKekProvider.generate('test-kek-1'));
+  const w = await world({ keks });
+  const secret = await w.secret(w.dev);
+  const sealed = await wrapped(w, secret);
+  const { auditLog, secretVersions } = tablesOf(db.owner);
+  await db.owner.insert(secretVersions).values({
+    id: randomUUID(), secretId: secret.secretId, version: 1, envelopeVersion: 1, ciphertext: Buffer.alloc(8), iv: Buffer.alloc(12), authTag: Buffer.alloc(16),
+    wrappedDek: Buffer.from(sealed.bytes, 'base64'), kekProvider: sealed.kekProvider, kekId: sealed.kekId, kekVersion: sealed.kekVersion,
+    createdBy: ROOT,
+  });
+  // As data written before check values were.
+  await withLogUnlocked(db.owner, (owned) => owned.delete(auditLog).where(eq(auditLog.action, 'key.check')));
+
+  const write = await (await fresh()).wrap({ principal: ROOT, items: [{ secret, key: aKey() }] });
+  assert.equal(!write.ok && write.refusal.code, 'wrong_kek');
+  assert.deepEqual(await keyChecks(w), []);
+
+  assert.equal((await (await w.twin()).wrap({ principal: ROOT, items: [{ secret, key: aKey() }] })).ok, true);
+  const [check] = await keyChecks(w);
+  assert.deepEqual(check.detail.proof, { secretId: secret.secretId, version: 1 }, 'the key it opened to prove it is on the record');
+});
+
+test('a key service that cannot answer leaves the KEK unchecked, and the next call asks again', async () => {
+  const remote = service();
+  const w = await world({ keks: remote.keks });
+  await member(w, ADA, []);
+  const secret = await w.secret(w.dev);
+  remote.seen.down = true;
+  await assert.rejects(w.vault.wrap({ principal: ROOT, items: [{ secret, key: aKey() }] }), KekUnavailableError);
+  assert.deepEqual(await keyChecks(w), []);
+  // Unchecked is no verdict: the scheduled checkpoint goes on.
+  assert.equal((await w.vault.checkpoint()).ok, true);
+
+  remote.seen.down = false;
+  assert.equal((await w.vault.wrap({ principal: ROOT, items: [{ secret, key: aKey() }] })).ok, true);
+  assert.equal((await keyChecks(w)).length, 1);
 });
 
 test('a removed member is refused everything until admitted again, with no grants', async () => {
@@ -1140,6 +1230,10 @@ test('a deadline aborts KMS requests and drops queued keys before a removal can 
     keyArn: arn,
     credentials: { accessKeyId: 'test', secretAccessKey: 'test' },
     fetch: async (_url, init) => {
+      // The KEK's check value, wrapped once before the first key operation.
+      if (new Headers(init?.headers).get('x-amz-target') === 'TrentService.Encrypt') {
+        return Response.json({ KeyId: arn, CiphertextBlob: Buffer.alloc(48, 1).toString('base64') });
+      }
       started++;
       active++;
       try {
@@ -1207,14 +1301,15 @@ test('unexpected provider errors are rethrown after every known key outcome comm
   const kek: KekProvider = {
     provider: inner.provider, keyId: inner.keyId, keyVersion: inner.keyVersion,
     unwrap: (key, ctx) => inner.unwrap(key, ctx),
-    wrap: (key, ctx) => ++calls === 2 ? Promise.reject(fault) : inner.wrap(key, ctx),
+    // The first wraps the KEK's check value.
+    wrap: (key, ctx) => ++calls === 3 ? Promise.reject(fault) : inner.wrap(key, ctx),
   };
   const w = await world({ keks: new KekRegistry(kek) });
   await member(w, ADA, [[w.dev, 'developer']]);
   const items = [];
   for (let i = 0; i < 2; i++) items.push({ secret: await w.secret(w.dev), key: randomBytes(32).toString('base64') });
   await assert.rejects(w.vault.wrap({ principal: ADA, items }), (error) => error === fault);
-  assert.equal(calls, 2);
+  assert.equal(calls, 3);
   const outcomes = (await vaultLog(w)).filter((entry) => entry.action === 'key.wrap');
   assert.deepEqual(outcomes.map((entry) => entry.code), ['withheld', 'key_error']);
   assert.ok((await w.vault.verifyLog({})).ok);

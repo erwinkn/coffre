@@ -1,5 +1,6 @@
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { randomBytes } from 'node:crypto';
 
 import { createClient, type CoffreClient } from '@coffre/client';
 import { entryHash, sealEntry } from '@coffre/core/audit';
@@ -12,7 +13,7 @@ import { auditChainHead, auditLog } from './db/tables.ts';
 import { serveApi } from '../src/api/router.ts';
 import { SyncRunner } from '../src/api/syncs.ts';
 import { fetchApi } from '../src/fetch-api.ts';
-import { writeAuditHeartbeat } from '../src/heartbeat.ts';
+import { auditReadiness, writeAuditHeartbeat } from '../src/heartbeat.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import {
   clientFor,
@@ -150,6 +151,29 @@ test('the bulk limit counts one read per secret, trips with its own code, and is
   // A rolling window: a minute later the same read goes through.
   limited.vault.advance(61_000);
   assert.equal((await dev.secrets.reveal('market/dev')).values.API_KEY, 'sk_test');
+});
+
+test('a vault given the wrong KEK answers every value with 503, and readiness goes red', async () => {
+  // Restored with another key under the same id: the log's keys are right, the KEK is not.
+  const misled = testDeps(db.runtime, [ROOT], {
+    vault: testVault([ROOT], {}, { kek: randomBytes(32), signingKey: deps.vault.signingKey }),
+    chainKey: deps.chainKey,
+  });
+  const admin = clientFor(misled, ROOT);
+  await assert.rejects(admin.secrets.reveal('market/dev/API_KEY'), {
+    status: 503,
+    code: 'unavailable',
+    reason: 'wrong_kek',
+    message: "this vault's local KEK test-kek-1 does not open the data it holds: it is not the key that wrapped it",
+  });
+  await assert.rejects(admin.secrets.set('market/dev', { NEW: 'value' }), { status: 503, reason: 'wrong_kek' });
+  // The log still verifies: it needs the signing and audit keys, not the KEK.
+  assert.equal((await admin.audit.verify()).ok, true);
+  assert.equal(await writeAuditHeartbeat(db.runtime, deps.chainKey, misled.vault, { warn: () => {} }), false);
+  const ready = await auditReadiness(db.runtime, misled.vault);
+  assert.deepEqual([ready.ok, ready.checkpointed], [false, false]);
+  // The right one still reads.
+  assert.equal((await root.secrets.reveal('market/dev/API_KEY')).values.API_KEY, 'sk_test');
 });
 
 // --- members ------------------------------------------------------------------

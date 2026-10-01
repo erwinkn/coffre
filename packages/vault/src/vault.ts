@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 
 import {
   allows,
@@ -20,6 +20,7 @@ import {
   LocalKekProvider,
   type KeyOperation,
   type KekProvider,
+  type WrappedDek,
 } from '@coffre/core/kek';
 import {
   checkpointMessage,
@@ -89,6 +90,10 @@ export type PreparedVault = {
   rowKey: Buffer;
   /** Tampering this process has logged already, so that a forged row is one entry, not one per request. */
   reported: Set<string>;
+  /** Whether its KEKs open what they wrapped, once asked: `#kekMismatch`. */
+  kekCheck: Promise<string | null> | null;
+  /** Why not, once decided that they do not. */
+  wrongKek: string | null;
 };
 
 export async function prepareVault(config: ResolvedVaultConfig, options: VaultOptions = {}): Promise<PreparedVault> {
@@ -101,6 +106,8 @@ export async function prepareVault(config: ResolvedVaultConfig, options: VaultOp
     rooted: new Set(),
     rowKey: rowKey(config.signingKey),
     reported: new Set(),
+    kekCheck: null,
+    wrongKek: null,
   };
 }
 
@@ -119,6 +126,20 @@ const PRINCIPAL = /^(user|token|sync):[^\s:][^\s]*$/;
 
 /** Who acts for the vault itself, as when it gives a root admin a member row. */
 const VAULT_ACTOR = 'system:vault';
+
+/**
+ * A KEK's check: a known value, the size of a data key, wrapped under it in
+ * a context no secret has (the nil UUID), and kept in a `key.check` entry.
+ * Opening it again tells the vault its KEK is the one that wrapped the
+ * data, without opening any data.
+ */
+const KEY_CHECK = 'key.check';
+const KEY_CHECK_VALUE = createHash('sha256').update('coffre.kek.check.v1').digest();
+const NIL = '00000000-0000-0000-0000-000000000000';
+const KEY_CHECK_CONTEXT: SecretContext = { projectId: NIL, environmentId: NIL, secretId: NIL };
+
+/** How many stored keys a KEK with no check yet is tried on: one that opens proves it. */
+const KEY_CHECK_SAMPLE = 3;
 
 /** A new member row, before the decision seals it (`#seal`). */
 const UNSEALED = { accessSeq: 0n, mac: Buffer.alloc(32) };
@@ -175,6 +196,7 @@ const MESSAGES: Record<RefusalCode, string> = {
   root_admin: 'root admins are set in the vault configuration',
   invalid: 'not something the rules allow',
   log_broken: 'the vault log does not hold from the last checkpoint',
+  wrong_kek: "this vault's KEK does not open the data it holds",
   tampered: "this member's record failed the vault's integrity check",
 };
 
@@ -521,6 +543,12 @@ class VaultService implements Vault {
   ): Promise<Outcome<R>> {
     const { action, principal, secrets, entry } = call;
     for (const secret of secrets) entry(secret, 'allow', null);
+    const wrongKek = await this.#kekMismatch();
+    if (wrongKek !== null) {
+      return this.#decide([], async () => {
+        throw new Refused(refusal('wrong_kek', wrongKek), secrets.map((secret) => entry(secret, 'deny', 'wrong_kek')));
+      });
+    }
     if (this.#isRootAdmin(principal)) await this.#rootRow(principal);
     const check = async (d: Decision) => {
       const reader = await this.#standing(d.tx, principal, d.members.get(principal), d.at, d.reports);
@@ -1038,6 +1066,83 @@ class VaultService implements Vault {
     return state.members.get(principal);
   }
 
+  // --- the KEKs ----------------------------------------------------------------
+
+  /**
+   * Null when every KEK the vault is given opens what it wrapped; otherwise
+   * why not, naming the KEK, never its key. Decided once per process, before
+   * its first key operation or checkpoint. A key service that cannot answer
+   * leaves it undecided: the error is thrown, and the next call asks again.
+   */
+  #kekMismatch(): Promise<string | null> {
+    const prepared = this.#prepared;
+    if (prepared.kekCheck === null) {
+      const check = this.#checkKeks();
+      prepared.kekCheck = check;
+      check.then(
+        (wrong) => void (prepared.wrongKek = wrong),
+        () => {
+          if (prepared.kekCheck === check) prepared.kekCheck = null;
+        },
+      );
+    }
+    return prepared.kekCheck;
+  }
+
+  /**
+   * Each KEK opens its check value, or, with none recorded yet (a fresh
+   * database, a new KEK, data from before checks), opens one of the newest
+   * keys it wrapped, if there are any; then its check value is recorded.
+   * A KEK that opens neither is not the one that wrapped the data.
+   */
+  async #checkKeks(): Promise<string | null> {
+    const checks = new Map<string, WrappedDek>();
+    for (const entry of await store.vaultEntriesOf(this.#db, [KEY_CHECK], -1n, VERIFY_BATCH)) {
+      // A check in the vault's name that the vault did not write proves nothing either way.
+      if (!this.#authentic(entry)) continue;
+      const wrapped = JSON.parse(entry.metadata) as WrappedKey;
+      checks.set(`${wrapped.kekProvider}:${wrapped.kekId}`, unwrappable(wrapped));
+    }
+    const budget = this.#prepared.options.keyBudgetMs;
+    for (const kek of this.#config.keks.all) {
+      const operation = { deadline: Date.now() + budget, signal: AbortSignal.timeout(budget) };
+      const opens = async (wrapped: WrappedDek, context: SecretContext, expected?: Buffer) => {
+        try {
+          const key = await kek.unwrap(wrapped, context, operation);
+          const right = expected === undefined || (key.length === expected.length && timingSafeEqual(key, expected));
+          key.fill(0);
+          return right;
+        } catch (error) {
+          if (error instanceof KekBadClaimError) return false;
+          throw error;
+        }
+      };
+      const mismatch = `this vault's ${kek.provider} KEK ${kek.keyId} does not open the data it holds: it is not the key that wrapped it`;
+      const check = checks.get(`${kek.provider}:${kek.keyId}`);
+      if (check !== undefined) {
+        if (!(await opens(check, KEY_CHECK_CONTEXT, KEY_CHECK_VALUE))) return mismatch;
+        continue;
+      }
+      const samples = await store.wrappedUnder(this.#db, kek.provider, kek.keyId, KEY_CHECK_SAMPLE);
+      let proof: { secretId: string; version: number } | null = null;
+      for (const { projectId, environmentId, secretId, version, ...wrapped } of samples) {
+        if (await opens(wrapped, { projectId, environmentId, secretId })) {
+          proof = { secretId, version };
+          break;
+        }
+      }
+      if (samples.length > 0 && proof === null) return mismatch;
+      const wrapped = await kek.wrap(Buffer.from(KEY_CHECK_VALUE), KEY_CHECK_CONTEXT, operation);
+      // The key it opened, if any, is in the log, as every key the vault opens is.
+      await this.#db.transaction((tx) =>
+        appendEntries(tx, this.#prepared.logKey, [
+          { actor: VAULT_ACTOR, action: KEY_CHECK, decision: 'allow', metadata: JSON.stringify({ ...serialisable(wrapped), proof }) },
+        ]),
+      );
+    }
+    return null;
+  }
+
   // --- checkpoints and the log --------------------------------------------------
 
   /** The last checkpoint the vault signed, and the entry that holds it: its newest allowed `audit.checkpoint`. */
@@ -1047,16 +1152,20 @@ class VaultService implements Vault {
   }
 
   checkpoint(): Promise<Outcome<{ checkpoint: Checkpoint }>> {
+    // A KEK found wrong turns readiness red: the checkpoint is refused. It does no key work of its
+    // own, so it writes nothing more and never waits on a key service; a check under way, or none yet, is no verdict.
+    const { wrongKek } = this.#prepared;
     return this.#decide([], async (d) => {
       // Checkpoints one at a time, each against the one before.
       const head = await lockLogHead(d.tx);
       const latest = await this.#latest(d.tx);
-      const refused = (code: RefusalCode, detail: Record<string, unknown>) =>
-        new Refused(refusal(code, MESSAGES[code]), [
+      const refused = (code: RefusalCode, detail: Record<string, unknown>, message = MESSAGES[code]) =>
+        new Refused(refusal(code, message), [
           { actor: SCHEDULER, action: CHECKPOINT, decision: 'deny', code, metadata: JSON.stringify(detail) },
         ]);
       // Logging the refusal would give the next call something to sign.
       if (head.nextSeq === 0n) throw new Refused(refusal('invalid', 'the log is empty'), []);
+      if (wrongKek !== null) throw refused('wrong_kek', { reason: wrongKek }, wrongKek);
       // Rows changed around the vault write nothing to the log, so this runs even when nothing new needs signing.
       await this.#sweep(d.tx, d.reports);
       // Nothing since the last one: it is still the newest prefix.
