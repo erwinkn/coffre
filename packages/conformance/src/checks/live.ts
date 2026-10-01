@@ -279,8 +279,7 @@ async function tokenScope(api: CoffreClient, canary: Canary): Promise<string> {
   await refused(`the token read ${nowhere}'s audit`, api.audit.list({ path: nowhere, limit: 1 }));
   await refused('the token listed the members', api.members.list());
   await refused(`the token read ${NOBODY}`, api.members.get(NOBODY));
-  await refused("the token read the vault's log", api.audit.vault({ limit: 1 }));
-  refusals += 4;
+  refusals += 3;
   try {
     const { entries } = await api.audit.list({ limit: 500 });
     const outside = entries.filter((entry) => entry.project !== null && entry.project !== canary.project);
@@ -289,7 +288,7 @@ async function tokenScope(api: CoffreClient, canary: Canary): Promise<string> {
     if (!(error instanceof CoffreError && error.status === 403)) throw error;
   }
   const elsewhere = others.length === 0 ? 'no other environment' : `${others.length} other environment${others.length === 1 ? '' : 's'}`;
-  return `only ${own}; ${refusals} reads elsewhere refused: ${elsewhere} of ${canary.project}, a made-up place, the members, the vault's log`;
+  return `only ${own}; ${refusals} reads elsewhere refused: ${elsewhere} of ${canary.project}, a made-up place, the members`;
 }
 
 async function tokenVerification(api: CoffreClient): Promise<string> {

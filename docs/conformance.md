@@ -82,7 +82,7 @@ In order, since each builds on the ones before:
 | sign-in | The root admin signs in through GitHub, and is the root admin |
 | setup, personas | The admin creates the project, its values and the people above |
 | members only | The stranger's sign-in is refused and leaves no session; no one gets 401 reading, revealing or writing, and a made-up token is refused |
-| grant scoping | The reader reads dev and nothing else, and changes nothing: no write, no grant, no member, no token, no vault log. So does the service, with its token. The bulk reader cannot read dev |
+| grant scoping | The reader reads dev and nothing else, and changes nothing: no write, no grant, no member, no token. So does the service, with its token. The bulk reader cannot read dev |
 | reveals audited, runs audited | A single-secret reveal or an environment read writes one `secret.read` of the vault's per value, under the reveal's operation and request, at the versions revealed |
 | cross-site | A write, a reveal and a sign-out with the admin's cookie, from another site or from no page at all: 403, no value in the answer, nothing changed |
 | live setup | The admin sets up what `probe --token` asks an operator for: `conformance/live/CANARY`, and `token:conformance-live`, a viewer there and auditor on the project |
@@ -170,7 +170,7 @@ deployment it booted, so they are tested in this repository's CI.
 | token | The token is a service's, and reads the canary's environment, which holds its key |
 | token reveal | The canary is revealed once, its value is the one given, and the audit log holds exactly one allowed `secret.read` of it under the reveal's operation and request |
 | token scan | The canary's value, as text, base64 or hex, is in no answer to any GET route, as the token or as no one, nor in any page: only in its reveal |
-| token scope | The token sees the canary's project and reads its environment, and nothing more: every other environment it is told of, a made-up place, the members and the vault's log refuse it, and the audit entries it reads are about its project only |
+| token scope | The token sees the canary's project and reads its environment, and nothing more: every other environment it is told of, a made-up place and the members refuse it, and the audit entries it reads are about its project only |
 | token verification | The whole audit chain verifies. Verifying is for owners and root admins, which a token cannot be, so this is skipped with a token, and says it was not checked |
 
 Each prints `ok`, `skip` or `FAIL` and a line, and the run exits 1 on any
@@ -225,7 +225,7 @@ coffre-conformance: probing https://secrets.example.com, as no one and with a to
   ok    token               token:conformance-probe, reading conformance/live
   ok    token reveal        one secret.read of CANARY, entry 14, under request 93bed984-625a-4a70-a28d-3412981816d4
   ok    token scan          70 answers from 15 GET routes and 13 pages, as the token and as no one: no value
-  ok    token scope         only conformance/live; 7 reads elsewhere refused: no other environment of conformance, a made-up place, the members, the vault's log
+  ok    token scope         only conformance/live; 6 reads elsewhere refused: no other environment of conformance, a made-up place, the members
   skip  token verification  verification is for owners and root admins, which this token is not: not checked
 conformant
 ```

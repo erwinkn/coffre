@@ -2725,30 +2725,6 @@ a.env-card-name:hover {
   color: var(--amber);
 }
 
-.chain-head {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.25rem;
-  height: 2rem;
-  padding: 0 0.25rem 0 0.625rem;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--canvas);
-}
-
-.chain-head code {
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--ink-2);
-  font-size: 0.75rem;
-}
-
-.chain-head-label {
-  color: var(--ink-3);
-  font-size: 0.75rem;
-}
-
 /* A section title with its status on the same line. */
 .section-head {
   display: flex;
@@ -2773,22 +2749,11 @@ a.env-card-name:hover {
   font-size: 0.8125rem;
 }
 
-.vault-verdict {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  color: var(--ink-3);
-  font-size: 0.75rem;
-}
-
-.vault-verdict svg {
-  color: var(--green);
-  align-self: center;
-}
-
-.vault-verdict-bad,
-.vault-verdict-bad svg {
-  color: var(--red);
+/* A batch's number is its range, "36–39", on one line. */
+.audit .n {
+  width: 1%;
+  padding: 0 0.625rem;
+  white-space: nowrap;
 }
 
 .audit td {
@@ -2879,6 +2844,135 @@ a.env-card-name:hover {
   background: var(--panel);
   color: var(--red);
   box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--red) 35%, transparent);
+}
+
+/* What a line says, wrapping after its separators, with its batch's toggle. */
+.audit td.cell-sentence {
+  white-space: normal;
+}
+
+.sentence {
+  display: inline;
+  overflow-wrap: anywhere;
+}
+
+.sentence a {
+  color: var(--ink);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in oklab, var(--ink-3) 40%, transparent);
+  text-underline-offset: 0.2em;
+}
+
+.sentence a:hover {
+  color: var(--accent);
+}
+
+.sentence > svg {
+  margin-right: 0.375rem;
+  color: var(--red);
+  vertical-align: -0.125rem;
+}
+
+.batch-toggle {
+  display: inline-grid;
+  place-items: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  margin: 0 0.375rem 0 -0.25rem;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--ink-3);
+  vertical-align: -0.3rem;
+}
+
+.batch-toggle:hover {
+  background: var(--subtle);
+  color: var(--ink);
+}
+
+.batch-toggle svg {
+  transition: transform 120ms ease;
+}
+
+.batch-toggle[aria-expanded='true'] svg {
+  transform: rotate(90deg);
+}
+
+/* Each entry of an open batch, under it. */
+.audit tr.is-child td {
+  background: var(--subtle);
+  color: var(--ink-2);
+  font-size: 0.8125rem;
+}
+
+.audit tr.is-child td.cell-sentence {
+  padding-left: 2.25rem;
+}
+
+/* Detail shown on request: quieter than what people did. */
+.audit tr.is-detail td {
+  color: var(--ink-3);
+}
+
+/* Tampering is never hidden, and never quiet. */
+.audit tr.is-tampered td.cell-sentence {
+  color: var(--red);
+  font-weight: 600;
+}
+
+.decided {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  color: var(--ink-3);
+  font-size: 0.8125rem;
+}
+
+.decided-refused {
+  color: var(--red);
+  font-weight: 600;
+}
+
+/* The toggle for detail: a small switch that says what it does. */
+.detail-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-left: auto;
+  color: var(--ink-2);
+  font-size: 0.8125rem;
+}
+
+.detail-toggle .switch {
+  position: relative;
+  width: 1.75rem;
+  height: 1rem;
+  border-radius: 999px;
+  background: var(--border);
+  transition: background 120ms ease;
+}
+
+.detail-toggle .switch::after {
+  content: '';
+  position: absolute;
+  top: 0.125rem;
+  left: 0.125rem;
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: 50%;
+  background: var(--panel);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.2);
+  transition: transform 120ms ease;
+}
+
+.detail-toggle[aria-pressed='true'] .switch {
+  background: var(--accent);
+}
+
+.detail-toggle[aria-pressed='true'] .switch::after {
+  transform: translateX(0.75rem);
 }
 
 /* ========================================================================== */
@@ -3843,14 +3937,15 @@ a.env-card-name:hover {
     box-shadow: inset 3px 0 var(--amber);
   }
 
-  /* Audit: sequence number first, the entry as three lines. */
+  /* Audit: the number first, then when, who, what they did, which wraps,
+     and who decided it. */
   .dt.audit.stacks tr {
-    grid-template-columns: 2.5rem minmax(0, 1fr) auto;
+    grid-template-columns: 4.5rem minmax(0, 1fr);
     grid-template-areas:
-      'seq when decision'
-      'seq actor actor'
-      'seq action action'
-      'seq subject subject';
+      'seq when'
+      'seq who'
+      'seq what'
+      'seq decided';
     gap: 0.125rem 0.75rem;
   }
 
@@ -3862,8 +3957,11 @@ a.env-card-name:hover {
     display: block;
     grid-area: seq;
     width: auto;
+    min-width: 2.25rem;
+    padding: 0;
     text-align: left;
     box-shadow: none;
+    white-space: nowrap;
   }
 
   .dt.audit.stacks td:nth-child(2) {
@@ -3871,24 +3969,27 @@ a.env-card-name:hover {
   }
 
   .dt.audit.stacks td:nth-child(3) {
-    grid-area: actor;
+    grid-area: who;
   }
 
   .dt.audit.stacks td:nth-child(4) {
-    grid-area: action;
-    color: var(--ink-3);
+    grid-area: what;
   }
 
-  /* One line when wide, scrolling sideways if it must; stacked, the subject
-     has the row to itself and breaks after its separators. */
   .dt.audit.stacks td:nth-child(5) {
-    grid-area: subject;
-    white-space: normal;
-    overflow-wrap: anywhere;
+    grid-area: decided;
   }
 
-  .dt.audit.stacks td:nth-child(6) {
-    grid-area: decision;
+  /* An open batch's entries: indented under it, one band each. */
+  .dt.audit.stacks tr.is-child {
+    padding-left: 1.75rem;
+    background: var(--subtle);
+  }
+
+  .dt.audit.stacks tr.is-child td,
+  .dt.audit.stacks tr.is-child td.cell-sentence {
+    padding-left: 0;
+    background: transparent;
   }
 
   .dt.audit.stacks tr.is-denied {

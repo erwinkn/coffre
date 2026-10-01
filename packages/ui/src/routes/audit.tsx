@@ -1,23 +1,23 @@
 import type { AuditEntryView, CoffreClient } from '@coffre/client';
-import type { ReactNode } from 'react';
+import { Fragment, useState, type ReactNode } from 'react';
 import { createFileRoute, Link } from '@tanstack/react-router';
 import { statusOf, uiResult } from '../lib/coffre';
-import type { AuditRow } from '../shared/models';
 import {
-  breakAfterUnderscores,
-  EmptyState,
-  Notice,
-  Timestamp,
-  Toggletip,
-} from '../components/ui';
+  decidedBy,
+  describe,
+  hiddenInWords,
+  lines,
+  who,
+  type Part,
+} from '../lib/audit-sentences';
+import { breakAfterUnderscores, EmptyState, Notice, Timestamp, Toggletip } from '../components/ui';
 import { ClosedDoor, PageHeader } from '../components/page';
 import {
   Activity,
   AlertTriangle,
-  CheckCircle,
+  ChevronRight,
   Clock,
   Info,
-  Layers,
   Ledger,
   ShieldCheck,
   SlashCircle,
@@ -25,12 +25,10 @@ import {
   X,
 } from '../components/icons';
 
-type AuditSearch = { decision?: 'deny'; actorId?: string };
+type AuditSearch = { decision?: 'deny'; actorId?: string; detail?: '1' };
 
 const PAGE_SIZE = 200;
-const VAULT_PAGE_SIZE = 20;
 type ChainResult = Awaited<ReturnType<typeof verifyChain>>;
-type VaultResult = Awaited<ReturnType<typeof readVaultLog>>;
 
 export const Route = createFileRoute('/audit')({
   // Filters live in the URL so a finding can cite the exact view it came from.
@@ -38,52 +36,33 @@ export const Route = createFileRoute('/audit')({
     decision: search.decision === 'deny' ? 'deny' : undefined,
     actorId:
       typeof search.actorId === 'string' && search.actorId !== '' ? search.actorId : undefined,
+    detail: search.detail === '1' || search.detail === 1 ? '1' : undefined,
   }),
   loaderDeps: ({ search }) => search,
-  // Both logs are checked on every visit rather than on demand. At this
-  // volume it is one hash per row, of each, and costs less than the query
-  // that fetched them, and a status that is always current beats a button
-  // nobody presses.
-  loader: async ({ context: { client }, deps, parentMatchPromise }) => {
-    const rootAdmin = (await parentMatchPromise).loaderData?.instanceRole === 'root-admin';
-    const [entries, chain, vault] = await Promise.all([
-      listEntries(client, deps),
-      verifyChain(client),
-      rootAdmin ? readVaultLog(client) : null,
-    ]);
-    return { entries, chain, vault };
+  // The log is verified on every visit rather than on demand: a status that
+  // is always current beats a button nobody presses.
+  loader: async ({ context: { client }, deps }) => {
+    const [entries, chain] = await Promise.all([listEntries(client, deps), verifyChain(client)]);
+    return { entries, chain };
   },
   component: AuditPage,
 });
 
 function listEntries(client: CoffreClient, search: AuditSearch) {
   return uiResult(async () => {
-    // Sign-ins and key operations stay in the log and its chain; this page
-    // is about what was done with secrets and access, so the server leaves
-    // them out unless asked.
-    const { entries } = await client.audit.list({
+    // Detail is left out by the server unless asked for, and counted.
+    return client.audit.list({
       limit: PAGE_SIZE,
       decision: search.decision,
       actor: search.actorId,
+      detail: search.detail,
     });
-    const rows: AuditRow[] = entries.map((entry) => ({
-      seq: entry.seq,
-      occurredAt: entry.occurredAt,
-      actorType: entry.actorType,
-      actorId: entry.actorId,
-      action: entry.action,
-      decision: entry.decision,
-      project: entry.project,
-      environment: entry.environment,
-      subject: subjectOf(entry),
-    }));
-    return { entries: rows };
   });
 }
 
 /**
- * Whether both logs hold, or why that is not known. Verifying is for owners:
- * anyone else reads one project's slice of the log, and a slice cannot be
+ * Whether the log holds, or why that is not known. Verifying is for owners:
+ * anyone else reads their projects' part of the log, and a part cannot be
  * checked as a chain, so for them it is a fact about the page, not a fault.
  */
 async function verifyChain(client: CoffreClient) {
@@ -93,14 +72,15 @@ async function verifyChain(client: CoffreClient) {
       ? {
           integrity: 'intact' as const,
           through: result.through,
+          entries: result.entries,
           checkpoint: result.checkpoint,
           pending: result.pending ?? 0,
         }
       : {
           integrity: 'broken' as const,
-          // Whose check found it: the app's, of the chain, or the vault's, of its entries and its rows.
-          log: result.author === 'app' ? ('audit' as const) : ('vault' as const),
+          through: result.through,
           failedAtSeq: result.failedAtSeq,
+          author: result.author,
           reason: result.reason,
         };
   } catch (error) {
@@ -113,13 +93,11 @@ async function verifyChain(client: CoffreClient) {
   }
 }
 
-function readVaultLog(client: CoffreClient) {
-  return uiResult(() => client.audit.vault({ limit: VAULT_PAGE_SIZE }));
-}
-
 function AuditPage() {
-  const { entries: result, chain, vault } = Route.useLoaderData();
-  const { decision, actorId } = Route.useSearch();
+  const { entries: result, chain } = Route.useLoaderData();
+  const search = Route.useSearch();
+  const { decision, actorId } = search;
+  const detail = search.detail === '1';
   const deniedOnly = decision === 'deny';
 
   if (!result.ok) {
@@ -131,9 +109,10 @@ function AuditPage() {
   }
 
   const broken = chain.integrity === 'broken' ? chain : null;
-  const appBreak = broken?.log === 'audit' ? broken.failedAtSeq : null;
-  const vaultFault = broken?.log === 'vault' ? broken : null;
-  const vaultShown = vault !== null && vault.ok ? vault.entries.map((entry) => entry.seq) : [];
+  const breakAt = broken?.failedAtSeq ?? null;
+  const shown = lines(result.entries);
+  const hiddenText = detail ? null : hiddenInWords(result.hidden ?? []);
+  const filters = { decision, actorId };
 
   return (
     <>
@@ -142,27 +121,29 @@ function AuditPage() {
       {broken !== null && (
         <div style={{ marginBottom: '1.25rem' }}>
           <Notice tone="bad">
-            {broken.log === 'audit' ? (
+            <strong>Treat this as an incident.</strong>{' '}
+            {broken.failedAtSeq === null
+              ? `The log does not verify, found by the ${broken.author}'s check: ${broken.reason}.`
+              : `The log breaks at entry ${broken.failedAtSeq}, found by the ${broken.author}'s check: ${broken.reason}.`}{' '}
+            {broken.through !== null && `Every entry through ${broken.through} holds. `}
+            Something with direct access to the database has changed what it records
+            {broken.failedAtSeq === null ? '' : `, and nothing from entry ${broken.failedAtSeq} on can be relied on`} until
+            that is explained.
+            {breakAt !== null && !result.entries.some((entry) => entry.seq === breakAt) && (
               <>
-                <strong>Treat this as an incident.</strong> The chain breaks at entry{' '}
-                {broken.failedAtSeq}: {broken.reason}. Something with direct database access has
-                altered or removed entries, and nothing from entry {broken.failedAtSeq} on can
-                be relied on until that is explained.
-                {broken.failedAtSeq !== null &&
-                  !result.entries.some((entry) => entry.seq === broken.failedAtSeq) && (
-                    <> {notListed(broken.failedAtSeq, 'below, which leave out sign-ins')}</>
-                  )}
-              </>
-            ) : (
-              <>
-                <strong>Treat this as an incident.</strong>{' '}
-                {broken.failedAtSeq === null
-                  ? `The vault's store does not match its log. ${sentence(broken.reason)}.`
-                  : `The vault log does not hold at entry ${broken.failedAtSeq}: ${broken.reason}.`} Something with direct access to the vault's storage has
-                changed its record or who holds what, and no grant can be relied on until that
-                is explained.
-                {broken.failedAtSeq !== null && vault !== null && !vaultShown.includes(broken.failedAtSeq) && (
-                  <> {notListed(broken.failedAtSeq, `in the vault log below, which shows its latest ${VAULT_PAGE_SIZE}`)}</>
+                {' '}Entry {breakAt} is not among the entries below
+                {detail ? (
+                  <>
+                    ; <code>coffre audit</code> lists them all.
+                  </>
+                ) : (
+                  <>
+                    : it may be detail,{' '}
+                    <Link to="/audit" search={{ ...filters, detail: '1' }}>
+                      shown on request
+                    </Link>
+                    .
+                  </>
                 )}
               </>
             )}
@@ -170,297 +151,314 @@ function AuditPage() {
         </div>
       )}
 
-      <section aria-labelledby="app-log">
-        <div className="section-head section-head-first">
-          <h2 className="section-title" id="app-log">
-            App log
-          </h2>
-        </div>
-        <p className="section-desc">
-          Everything done through coffre, refusals included, except sign-ins.
-          {vault !== null && ' A revealed value appears here, and once in the vault log.'}
-        </p>
-
-        <div className="toolbar">
-          <nav className="segmented" aria-label="Filter by decision">
-            {/* `exact` compares the whole search, not a subset of it: otherwise
-                "All events" for one actor also counts as active while that
-                actor's denials are showing, and both halves light up. */}
-            <Link
-              to="/audit"
-              search={actorId === undefined ? {} : { actorId }}
-              activeOptions={{ exact: true }}
-            >
-              All events
-            </Link>
-            <Link
-              to="/audit"
-              search={{ decision: 'deny', ...(actorId === undefined ? {} : { actorId }) }}
-              activeOptions={{ exact: true }}
-            >
-              <SlashCircle size={13} />
-              Denials only
-            </Link>
-          </nav>
-
-          {actorId !== undefined && (
-            <Link
-              className="filter-chip"
-              to="/audit"
-              search={deniedOnly ? { decision: 'deny' } : {}}
-              aria-label={`Stop filtering by ${actorId}`}
-            >
-              Actor <span className="mono">{actorId}</span>
-              <X size={13} />
-            </Link>
-          )}
-        </div>
-
-        <div className="card">
-          {result.entries.length === 0 ? (
-            <EmptyState title={deniedOnly ? 'No denials recorded' : 'Nothing recorded yet'}>
-              {deniedOnly
-                ? 'Every authorisation decision reaches this log, refusals included. An empty page means nobody has been turned away.'
-                : 'The log fills as secrets are read and written. Listing keys does not appear here; revealing a value does.'}
-            </EmptyState>
-          ) : (
-            <div className="dt-wrap">
-              <table className="dt audit stacks">
-                <thead>
-                  <tr>
-                    <th className="n" title="Sequence number in the hash chain">
-                      #
-                    </th>
-                    <th className="col-shrink">
-                      <span className="th">
-                        <Clock size={14} />
-                        When (UTC)
-                      </span>
-                    </th>
-                    <th>
-                      <span className="th">
-                        <User size={14} />
-                        Actor
-                      </span>
-                    </th>
-                    <th className="col-shrink">
-                      <span className="th">
-                        <Activity size={14} />
-                        Action
-                      </span>
-                    </th>
-                    <th>
-                      <span className="th">
-                        <Layers size={14} />
-                        Subject
-                      </span>
-                    </th>
-                    <th className="col-shrink">
-                      <span className="th">
-                        <ShieldCheck size={14} />
-                        Decision
-                      </span>
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {result.entries.map((entry) => (
-                    <AuditTableRow
-                      key={entry.seq}
-                      entry={entry}
-                      deniedOnly={deniedOnly}
-                      breaks={entry.seq === appBreak}
-                    />
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      </section>
-
-      {vault !== null && <VaultLog vault={vault} fault={vaultFault} />}
-    </>
-  );
-}
-
-function sentence(text: string): string {
-  return text.charAt(0).toUpperCase() + text.slice(1);
-}
-
-/** Where to find an entry the notice names but the page does not show. */
-function notListed(seq: number, where: string): ReactNode {
-  return (
-    <>
-      Entry {seq} is not among the entries {where}; <code>coffre audit</code> lists them all.
-    </>
-  );
-}
-
-/**
- * The vault's own log, for root admins: the record the app cannot rewrite,
- * of every key it unwrapped or refused and every change of access. Only the
- * latest entries, and whether the whole chain holds; the API pages the rest.
- *
- * Its own verdict checks the chain up to the page; the page's verification
- * also replays who holds what, so a fault that finds is this log's verdict too.
- */
-function VaultLog({
-  vault,
-  fault,
-}: {
-  vault: VaultResult;
-  fault: { failedAtSeq: number | null; reason: string } | null;
-}) {
-  const failure = vault.ok && !vault.verification.ok ? vault.verification : fault;
-  const brokenAt = failure?.failedAtSeq ?? null;
-  return (
-    <section aria-labelledby="vault-log">
-      <div className="section-head">
-        <h2 className="section-title" id="vault-log">
-          Vault log
-        </h2>
-        {failure !== null ? (
-          <span className="vault-verdict vault-verdict-bad" role="status">
-            <AlertTriangle size={13} />
-            {failure.failedAtSeq === null ? 'Broken' : `Broken at ${failure.failedAtSeq}`}:{' '}
-            {failure.reason}
-          </span>
-        ) : (
-          vault.ok &&
-          vault.verification.ok && (
-            <span className="vault-verdict">
-              <ShieldCheck size={13} />
-              {vault.verification.entries} entries, chain intact
-            </span>
-          )
-        )}
-      </div>
       <p className="section-desc">
-        The vault's own record of every key it opened or sealed and every change of access. The
-        app cannot write to it.
+        Everything done in coffre, one line per action, refusals included, and who decided it: the
+        app, or the vault, which holds the keys and the access.
       </p>
-      <div className="card">
-        {!vault.ok ? (
-          <EmptyState title="The vault log could not be read">{vault.error}</EmptyState>
-        ) : vault.entries.length === 0 ? (
-          <EmptyState title="Nothing recorded yet">
-            The vault records every key it unwraps or refuses, and every change of access.
+
+      <div className="toolbar">
+        <nav className="segmented" aria-label="Filter by decision">
+          {/* `exact` compares the whole search, not a subset of it: otherwise
+              "All events" for one actor also counts as active while that
+              actor's denials are showing, and both halves light up. */}
+          <Link to="/audit" search={{ ...filters, decision: undefined, detail: search.detail }} activeOptions={{ exact: true }}>
+            All events
+          </Link>
+          <Link to="/audit" search={{ ...filters, decision: 'deny', detail: search.detail }} activeOptions={{ exact: true }}>
+            <SlashCircle size={13} />
+            Denials only
+          </Link>
+        </nav>
+
+        {actorId !== undefined && (
+          <Link
+            className="filter-chip"
+            to="/audit"
+            search={{ ...filters, actorId: undefined, detail: search.detail }}
+            aria-label={`Stop filtering by ${actorId}`}
+          >
+            Actor <span className="mono">{actorId}</span>
+            <X size={13} />
+          </Link>
+        )}
+
+        <Link
+          className="detail-toggle"
+          to="/audit"
+          search={{ ...filters, detail: detail ? undefined : '1' }}
+          aria-pressed={detail}
+        >
+          <span className="switch" aria-hidden="true" />
+          Show detail
+        </Link>
+      </div>
+
+      <section className="card" aria-label="Audit entries">
+        {shown.length === 0 ? (
+          <EmptyState title={deniedOnly ? 'No denials recorded' : 'Nothing recorded yet'}>
+            {deniedOnly
+              ? 'Every decision reaches this log, refusals included. An empty page means nobody has been turned away.'
+              : 'The log fills as people read and write secrets and change who has access.'}
           </EmptyState>
         ) : (
           <div className="dt-wrap">
-            <table className="dt audit stacks">
+            <table className="dt audit events stacks">
               <thead>
                 <tr>
-                  <th className="n">#</th>
-                  <th className="col-shrink">When (UTC)</th>
-                  <th>Actor</th>
-                  <th className="col-shrink">Action</th>
-                  <th>Subject</th>
-                  <th className="col-shrink">Outcome</th>
+                  <th className="n" title="Sequence number in the log">
+                    #
+                  </th>
+                  <th className="col-shrink">
+                    <span className="th">
+                      <Clock size={14} />
+                      When (UTC)
+                    </span>
+                  </th>
+                  <th className="col-shrink">
+                    <span className="th">
+                      <User size={14} />
+                      Who
+                    </span>
+                  </th>
+                  <th>
+                    <span className="th">
+                      <Activity size={14} />
+                      What they did
+                    </span>
+                  </th>
+                  <th className="col-shrink">
+                    <span className="th">
+                      <ShieldCheck size={14} />
+                      Decided by
+                    </span>
+                  </th>
                 </tr>
               </thead>
               <tbody>
-                {vault.entries.map((entry) => {
-                  const refused = entry.outcome === 'refuse';
-                  const breaks = entry.seq === brokenAt;
-                  return (
-                    <tr key={entry.seq} className={rowClass(refused, breaks)}>
-                      <td className="n" data-label="Sequence">
-                        {entry.seq}
-                      </td>
-                      <td className="nowrap cell-mono" data-label="When (UTC)">
-                        <Timestamp iso={entry.at} precise />
-                      </td>
-                      <td className="cell-mono" data-label="Actor">
-                        {entry.actor}
-                      </td>
-                      <td className="cell-mono nowrap" data-label="Action">
-                        {entry.action}
-                        {breaks && <BreakMark />}
-                      </td>
-                      <td className="cell-mono" data-label="Subject">
-                        {entry.subject ?? '—'}
-                      </td>
-                      <td className="nowrap" data-label="Outcome">
-                        <span className={`decision ${refused ? 'decision-deny' : 'decision-allow'}`}>
-                          {refused ? <SlashCircle size={13} /> : <CheckCircle size={13} />}
-                          {refused ? breakAfterUnderscores(entry.code ?? 'refused') : 'allowed'}
-                        </span>
-                      </td>
-                    </tr>
-                  );
-                })}
+                {shown.map((batch) => (
+                  <Line key={batch[0]!.seq} batch={batch} filters={filters} detail={search.detail} breakAt={breakAt} />
+                ))}
               </tbody>
             </table>
           </div>
         )}
-      </div>
-    </section>
+      </section>
+
+      {hiddenText !== null && (
+        <p className="hint section-foot">
+          Hidden: {hiddenText}.{' '}
+          <Link to="/audit" search={{ ...filters, detail: '1' }}>
+            Show detail
+          </Link>
+        </p>
+      )}
+    </>
   );
 }
 
-function AuditTableRow({
-  entry,
-  deniedOnly,
-  breaks,
+type Entry = AuditEntryView;
+type Filters = { decision?: 'deny'; actorId?: string };
+
+/** One action: an entry, or a batch of them under one operation, which opens to each. */
+function Line({
+  batch,
+  filters,
+  detail,
+  breakAt,
 }: {
-  entry: AuditRow;
-  deniedOnly: boolean;
-  breaks: boolean;
+  batch: Entry[];
+  filters: Filters;
+  detail: '1' | undefined;
+  breakAt: number | null;
 }) {
-  const denied = entry.decision === 'deny';
+  const breaksInside = breakAt !== null && batch.some((entry) => entry.seq === breakAt);
+  const [open, setOpen] = useState(breaksInside);
+  const lead = batch[0]!;
+  const sentence = describe(batch);
+  const seqs = batch.map((entry) => entry.seq);
+  const grouped = batch.length > 1;
 
   return (
-    <tr className={rowClass(denied, breaks)}>
+    <>
+      <Row
+        entry={lead}
+        seq={grouped ? `${Math.min(...seqs)}–${Math.max(...seqs)}` : String(lead.seq)}
+        parts={sentence.parts}
+        refused={sentence.refused}
+        decided={decidedBy(batch)}
+        filters={filters}
+        detail={detail}
+        breaks={breaksInside && !grouped}
+        marked={breaksInside}
+        batch={batch}
+        toggle={
+          grouped ? (
+            <button
+              type="button"
+              className="batch-toggle"
+              aria-expanded={open}
+              aria-label={open ? 'Hide each entry' : `Show each of ${batch.length} entries`}
+              onClick={() => setOpen(!open)}
+            >
+              <ChevronRight size={14} />
+            </button>
+          ) : undefined
+        }
+      />
+      {grouped &&
+        open &&
+        batch.map((entry) => {
+          const one = describe([entry]);
+          return (
+            <Row
+              key={entry.seq}
+              entry={entry}
+              seq={String(entry.seq)}
+              parts={one.parts}
+              refused={one.refused}
+              decided={decidedBy([entry])}
+              filters={filters}
+              detail={detail}
+              breaks={entry.seq === breakAt}
+              marked={false}
+              child
+            />
+          );
+        })}
+    </>
+  );
+}
+
+function Row({
+  entry,
+  seq,
+  parts,
+  refused,
+  decided,
+  filters,
+  detail,
+  breaks,
+  marked,
+  toggle,
+  child = false,
+  batch,
+}: {
+  entry: Entry;
+  seq: string;
+  parts: Part[];
+  refused: boolean;
+  decided: string;
+  filters: Filters;
+  detail: '1' | undefined;
+  /** The entry where verification stopped. */
+  breaks: boolean;
+  /** A batch holding it, closed or open. */
+  marked: boolean;
+  toggle?: ReactNode;
+  child?: boolean;
+  /** The batch a line stands for, to name a sync by any of its entries. */
+  batch?: Entry[];
+}) {
+  const actor = who(batch ?? [entry]);
+  const classes = [
+    refused && 'is-denied',
+    (breaks || marked) && 'is-break',
+    child && 'is-child',
+    entry.detail && 'is-detail',
+    entry.action === 'vault.tampered' && 'is-tampered',
+  ].filter(Boolean);
+  return (
+    <tr className={classes.length === 0 ? undefined : classes.join(' ')}>
       <td className="n" data-label="Sequence">
-        {entry.seq}
+        {seq}
       </td>
       <td className="nowrap cell-mono" data-label="When (UTC)">
         <Timestamp iso={entry.occurredAt} precise />
       </td>
-      <td data-label="Actor">
+      <td data-label="Who">
         {/* Filtering to one actor is the second question anyone asks after
-            "what happened", so the actor cell is the control. */}
+            "what happened", so the actor is the control. */}
         <span className="actor">
-          <Link
-            to="/audit"
-            search={{
-              ...(deniedOnly ? { decision: 'deny' as const } : {}),
-              actorId: entry.actorId,
-            }}
-          >
-            {entry.actorId}
-          </Link>
-          {entry.actorType === 'service' && <span className="tag">token</span>}
+          {typeof actor === 'string' ? (
+            <Link to="/audit" search={{ ...filters, actorId: entry.actorId, detail }}>
+              {actor}
+            </Link>
+          ) : (
+            <Link to="/audit" search={{ ...filters, actorId: entry.actorId, detail }}>
+              {memberName(actor.member)}
+            </Link>
+          )}
         </span>
       </td>
-      <td className="cell-mono nowrap" data-label="Action">
-        {entry.action}
-        {breaks && <BreakMark />}
+      <td className="cell-sentence" data-label="What they did">
+        <span className="sentence">
+          {toggle}
+          {entry.action === 'vault.tampered' && <AlertTriangle size={13} />}
+          <Sentence parts={parts} />
+          {breaks && <BreakMark />}
+        </span>
       </td>
-      {/* Wraps, after its separators: with a person and a role it can be the
-          widest cell, and the decision should not scroll out of sight. */}
-      <td className="cell-mono" data-label="Subject">
-        {breakAfterUnderscores(entry.subject)}
-      </td>
-      <td className="nowrap" data-label="Decision">
-        {/* Glyph first, then the word. The colour is the third signal, never
-            the only one -- allow/deny is exactly the pair deuteranopia loses. */}
-        <span className={`decision ${denied ? 'decision-deny' : 'decision-allow'}`}>
-          {denied ? <SlashCircle size={13} /> : <CheckCircle size={13} />}
-          {entry.decision}
+      <td className="nowrap" data-label="Decided by">
+        <span className={refused ? 'decided decided-refused' : 'decided'}>
+          {refused && <SlashCircle size={13} />}
+          {decided}
+          {refused && ', refused'}
         </span>
       </td>
     </tr>
   );
 }
 
-function rowClass(denied: boolean, breaks: boolean): string | undefined {
-  return [denied && 'is-denied', breaks && 'is-break'].filter(Boolean).join(' ') || undefined;
+/** A sentence, its people and places links to their pages. */
+function Sentence({ parts }: { parts: Part[] }) {
+  return (
+    <>
+      {parts.map((part, index) => (
+        <Fragment key={index}>
+          {typeof part === 'string' ? (
+            part
+          ) : 'place' in part ? (
+            <PlaceLink path={part.place} />
+          ) : (
+            <MemberLink member={part.member} />
+          )}
+        </Fragment>
+      ))}
+    </>
+  );
 }
 
-/** The entry a log breaks at, said in words as well as in red. */
+function PlaceLink({ path }: { path: string }) {
+  const [project, environment] = path.split('/') as [string, string | undefined];
+  const text = <span className="mono">{breakAfterUnderscores(path)}</span>;
+  return environment === undefined ? (
+    <Link to="/projects/$project" params={{ project }}>
+      {text}
+    </Link>
+  ) : (
+    <Link to="/projects/$project/$environment" params={{ project, environment }}>
+      {text}
+    </Link>
+  );
+}
+
+function MemberLink({ member }: { member: string }) {
+  return member.startsWith('token:') ? (
+    <Link to="/tokens/$token" params={{ token: member.slice('token:'.length) }}>
+      {member}
+    </Link>
+  ) : (
+    <Link to="/users/$user" params={{ user: memberName(member) }}>
+      {memberName(member)}
+    </Link>
+  );
+}
+
+function memberName(member: string): string {
+  return member.startsWith('user:') ? member.slice('user:'.length) : member;
+}
+
+/** The entry the log breaks at, said in words as well as in red. */
 function BreakMark() {
   return (
     <span className="break-mark">
@@ -471,16 +469,12 @@ function BreakMark() {
 }
 
 /**
- * Whether both logs still recompute from their first entry, beside the title.
+ * Whether the log still verifies, beside the title.
  *
  * This replaced a card with a "Verify chain" button on it. A green result you
  * have to ask for is reassurance rather than evidence: it is checked when
  * someone is already feeling confident, and not on the morning it would have
  * mattered. Recomputing on load makes the claim continuous.
- *
- * Recomputation only proves the log is consistent with itself; the vault's
- * signed checkpoints, entries of the log it checks against the prefix each
- * signed, are what prove it unchanged.
  */
 function ChainStatus({ chain }: { chain: ChainResult }) {
   if (chain.integrity === 'owners-only') {
@@ -501,11 +495,11 @@ function ChainStatus({ chain }: { chain: ChainResult }) {
     return (
       <Toggletip
         align="end"
-        label={`coffre could not check the chain: ${chain.problem}. The entries below loaded, but whether they are intact is unknown until it can. Reload to try again.`}
+        label={`coffre could not check the log: ${chain.problem}. The entries below loaded, but whether they are intact is unknown until it can. Reload to try again.`}
       >
         <button type="button" className="chain-flag chain-flag-warn">
           <AlertTriangle size={14} />
-          Chain not verified
+          Log not verified
         </button>
       </Toggletip>
     );
@@ -515,64 +509,37 @@ function ChainStatus({ chain }: { chain: ChainResult }) {
     return (
       <span className="chain-flag chain-flag-bad" role="status">
         <AlertTriangle size={14} />
-        {chain.log === 'audit'
-          ? `Chain broken at ${chain.failedAtSeq}`
-          : chain.failedAtSeq === null
-            ? "Vault store doesn't match its log"
-            : `Vault log broken at ${chain.failedAtSeq}`}
+        {chain.failedAtSeq === null ? 'Log does not verify' : `Log broken at ${chain.failedAtSeq}`}
       </span>
     );
   }
 
   return (
     <div className="chain">
+      {chain.pending > 0 && (
+        <Toggletip
+          align="end"
+          label="Keys released through KMS whose outcome the vault has not logged yet. Each settles within seconds, or is logged as failed."
+        >
+          <button type="button" className="chain-note" role="status">
+            {chain.pending} key operation{chain.pending === 1 ? '' : 's'} in flight
+          </button>
+        </Toggletip>
+      )}
       <Toggletip
         align="end"
         label={
+          `Every entry through ${chain.through ?? 0} holds, under the app's key and the vault's.` +
           (chain.checkpoint === null
-            ? 'Chain intact. The vault has not signed a checkpoint yet.'
-            : `Chain intact, and unchanged through entry ${chain.checkpoint.seq}, which the vault signed at ${chain.checkpoint.signedAt}.`) +
-          " The vault's entries hold by its key too, and every member and grant follows from them."
+            ? ' The vault has not signed the log yet.'
+            : ` The vault last signed it through entry ${chain.checkpoint.seq}, at ${chain.checkpoint.signedAt}.`)
         }
       >
         <button type="button" className="chain-seal">
           <ShieldCheck size={14} />
-          Verified
+          {chain.through === null ? 'Verified' : `Verified through ${chain.through}`}
         </button>
       </Toggletip>
-      {chain.pending > 0 && (
-        <span className="chain-head-label" role="status">
-          {chain.pending} key operation{chain.pending === 1 ? '' : 's'} in flight
-        </span>
-      )}
-      {chain.through !== null && (
-        <span className="chain-head">
-          <span className="chain-head-label">through entry {chain.through}</span>
-        </span>
-      )}
     </div>
   );
-}
-
-/**
- * What an entry is about, in one line: the place, the key or the reason for a
- * refusal, and whom it concerns when it changes someone's access, with the
- * role. `market/prod · dev@acme.example (developer)`.
- */
-function subjectOf(entry: AuditEntryView): string {
-  const { metadata } = entry;
-  const text = (value: unknown) => (typeof value === 'string' && value !== '' ? value : null);
-  const place = [entry.project, entry.environment, entry.key].filter(
-    (part): part is string => part !== null,
-  );
-  const parts = [place.join('/')];
-  const who = entry.subject ?? text(metadata.principalId);
-  if (who !== null) {
-    const role = text(metadata.role) ?? (metadata.owner === true ? 'owner' : null);
-    const from = text(metadata.previousRole);
-    parts.push(role === null ? who : `${who} (${from === null ? role : `${from} → ${role}`})`);
-  }
-  if (entry.key === null) parts.push(entry.reason ?? '');
-  const subject = parts.filter((part) => part !== '').join(' · ');
-  return subject === '' ? '—' : subject;
 }

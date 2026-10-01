@@ -1,6 +1,6 @@
 import { roleGrants } from '@coffre/core/access';
 import { GENESIS_HASH, verifyEntries } from '@coffre/core/audit';
-import { describeAccessFault, type LogEntry, type LogVerification } from '@coffre/core/vault';
+import { describeAccessFault, type LogVerification } from '@coffre/core/vault';
 import { SNAPSHOT } from '@coffre/db/dialect';
 
 import { actorParts, appLogKey } from '../db/audit.ts';
@@ -15,7 +15,7 @@ import {
   type AuditFilter,
 } from '../db/queries.ts';
 import type { ApiContext } from './context.ts';
-import { forbidden, notFound, vaultRefused } from './errors.ts';
+import { forbidden, notFound } from './errors.ts';
 import { formatMember, parseMember, type Path } from './paths.ts';
 
 const VERIFY_BATCH = 5_000;
@@ -294,20 +294,6 @@ export async function verifyAudit(ctx: ApiContext): Promise<AuditVerification> {
     checkpoint: checkpoint === null ? null : { seq: checkpoint.seq, signedAt: checkpoint.signedAt },
     ...(verified.pending === undefined ? {} : { pending: verified.pending }),
   };
-}
-
-/**
- * A page of the vault's own log, which the app can read but never write.
- * Root admins only, which the vault decides; the app only refuses early.
- */
-export async function vaultLog(
-  ctx: ApiContext,
-  query: { before?: number; limit: number; full?: boolean },
-): Promise<{ entries: LogEntry[]; verification: VaultVerification }> {
-  if (!ctx.caller.isRootAdmin) throw forbidden('only a root admin may read the vault log');
-  const page = await ctx.vault.log({ actor: formatMember(ctx.caller.principal), ...query });
-  if (!page.ok) throw vaultRefused(page.refusal);
-  return { entries: page.entries, verification: await named(ctx, page.verification) };
 }
 
 /**

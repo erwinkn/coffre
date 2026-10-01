@@ -38,9 +38,8 @@ export function getCalls({ places, secrets, members, services }: Subjects): GetC
     'GET /device-logins/:code': [{ params: { code: 'BCDF-GHJK' } }],
     'GET /syncs/providers': [{ params: {} }],
     'GET /syncs/:project/:environment': places.map((params) => ({ params })),
-    'GET /audit': [{ params: {}, input: { limit: 500 } }],
+    'GET /audit': [{ params: {}, input: { limit: 500 } }, { params: {}, input: { limit: 500, detail: '1' } }],
     'GET /audit/verification': [{ params: {} }],
-    'GET /audit/vault': [{ params: {}, input: { limit: 200 } }],
   };
 }
 
@@ -89,7 +88,6 @@ const EVERY_ROUTE: { [K in RouteKey]: true } = {
   'POST /syncs/by-id/:id/runs': true,
   'GET /audit': true,
   'GET /audit/verification': true,
-  'GET /audit/vault': true,
 };
 
 /**

@@ -39,7 +39,6 @@ export async function grantScoping({ reader, service, bulk }: People, canaries: 
   await refused('a viewer granted themselves more', reader.api.access.set(reader.member, { [PROD]: 'owner' }));
   await refused('a viewer added a member', reader.api.members.add('user:friend@conformance.example'));
   await refused('a viewer issued a service token', reader.api.tokens.issue(service.member, { expiresInDays: 1 }));
-  await refused("a viewer read the vault's log", reader.api.audit.vault());
   const me = await reader.api.me();
   const places = me.environments.map((place) => `${place.project}/${place.environment}`);
   expect(places.length === 1 && places[0] === DEV, 'a viewer on dev is told of other places', places);

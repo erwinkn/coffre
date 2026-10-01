@@ -67,8 +67,6 @@ export interface Vault {
    * its checkpoints verify under, and the root admins, as principals.
    */
   about(): Promise<{ publicKey: string; rootAdmins: string[] }>;
-  /** A page of the vault's own log, newest first, with its chain verified. Root admins only. */
-  log(input: LogInput): Promise<Outcome<LogPage>>;
   /**
    * Check the whole log: rehash it from the first entry, the vault's
    * entries by their MACs, every checkpoint against the prefix it signed,
@@ -245,37 +243,6 @@ export type Checkpoint = {
   keyId: string;
   /** Ed25519 over `checkpointMessage(...)`, base64. */
   signature: string;
-};
-
-export type LogInput = {
-  actor: string;
-  /** Entries before this sequence number; the newest when left out. */
-  before?: number;
-  limit?: number;
-  /**
-   * Check all of it, as `verifyLog` does. Otherwise a view rehashes this
-   * page and what is new since the last view; `verify` in log.ts says what
-   * that leaves out.
-   */
-  full?: boolean;
-};
-
-export type LogEntry = {
-  seq: number;
-  at: string;
-  actor: string;
-  action: string;
-  outcome: 'allow' | 'refuse';
-  code: string | null;
-  subject: string | null;
-  detail: Record<string, unknown>;
-  hash: string;
-};
-
-export type LogPage = {
-  entries: LogEntry[];
-  /** Whether the chain recomputes, this page and up to the head. */
-  verification: LogVerification;
 };
 
 /** An entry of the vault's log, and so the chain up to it. */

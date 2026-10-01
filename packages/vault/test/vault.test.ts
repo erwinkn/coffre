@@ -14,7 +14,7 @@ import { asc, desc, eq, gte, sql } from 'drizzle-orm';
 
 import { checkRootAdmins, resolveVaultConfig, type ResolvedVaultConfig } from '../src/config.ts';
 import { openLocalVault, type LocalVault } from '../src/local.ts';
-import { vaultLogKey } from '../src/log.ts';
+import { entryView, vaultLogKey } from '../src/log.ts';
 import { memberMac, rowKey } from '../src/rows.ts';
 import * as store from '../src/store.ts';
 import type { VaultOptions } from '../src/vault.ts';
@@ -100,10 +100,9 @@ async function wrapped(w: World, secret: SecretRef): Promise<WrappedKey> {
   return result.wrapped[0];
 }
 
-async function vaultLog(w: World) {
-  const page = await w.vault.log({ actor: ROOT, limit: 200 });
-  assert.ok(page.ok);
-  return page.entries.reverse();
+/** The vault's entries, oldest first, as stored in the log. */
+async function vaultLog(_w: World) {
+  return (await store.vaultPage(db.owner, undefined, 200)).map(entryView).reverse();
 }
 
 /** What an append-only refusal looks like through Drizzle, which wraps the database's error. */
@@ -624,21 +623,17 @@ test('the log is chained, append-only, and shows a rewritten entry', async () =>
   const secret = await w.secret(w.dev);
   await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: [{ secret, wrapped: await wrapped(w, secret) }] });
 
-  const before = await w.vault.log({ actor: ROOT });
-  assert.ok(before.ok);
-  assert.equal(before.verification.ok, true);
-  const refused = await w.vault.log({ actor: ADA });
-  assert.equal(!refused.ok && refused.refusal.code, 'not_allowed');
+  assert.equal((await w.vault.verifyLog({})).ok, true);
 
   await assert.rejects(db.owner.update(auditLog).set({ decision: 'deny' }).where(eq(auditLog.action, 'secret.read')), appendOnly);
   await assert.rejects(db.owner.delete(auditLog), appendOnly);
 
   // Whoever owns the database can lift the triggers; the chain still shows it.
   await withLogUnlocked(db.owner, (owned) => owned.update(auditLog).set({ actor: BOB }).where(eq(auditLog.action, 'secret.read')));
-  const after = await w.vault.log({ actor: ROOT });
-  assert.ok(after.ok);
-  const tampered = after.entries.find((entry) => entry.action === 'secret.read')!;
-  assert.deepEqual(after.verification, { ok: false, failedAtSeq: tampered.seq, reason: 'hash does not match the entry' });
+  const tampered = (await vaultLog(w)).find((entry) => entry.action === 'secret.read')!;
+  const after = await w.vault.verifyLog({});
+  assert.equal(!after.ok && after.failedAtSeq, tampered.seq);
+  assert.equal(!after.ok && after.reason, 'hash does not match the entry');
 });
 
 test('the vault appends only as itself, and writes none of the app\'s rows', postgresOnly('logins are Postgres\'s'), async () => {
@@ -691,39 +686,31 @@ async function rewrite(seq: bigint, how: 'in place' | 'chained' | LogKey) {
   });
 }
 
-test('an entry edited in place is found on its page, or by a full check', async () => {
+test('an entry edited in place is found by a full check', async () => {
   const w = await longLog(50);
-  assert.ok((await w.vault.log({ actor: ROOT })).ok);
-
-  // Off the page and edited in place: a view checks what is new since the
-  // last one, and the page, so only a full check rehashes it.
+  assert.equal((await w.vault.verifyLog({})).ok, true);
   await rewrite(3n, 'in place');
-  const view = await w.vault.log({ actor: ROOT, limit: 10 });
-  assert.ok(view.ok && view.verification.ok);
-  const onPage = await w.vault.log({ actor: ROOT, before: 10 });
-  assert.deepEqual(onPage.ok && onPage.verification, { ok: false, failedAtSeq: 3, reason: 'hash does not match the entry' });
-  const full = await w.vault.log({ actor: ROOT, limit: 10, full: true });
-  assert.deepEqual(full.ok && full.verification, { ok: false, failedAtSeq: 3, reason: 'hash does not match the entry' });
+  const check = await w.vault.verifyLog({});
+  assert.deepEqual(!check.ok && [check.failedAtSeq, check.reason], [3, 'hash does not match the entry']);
 });
 
 test('a rewrite chained again without the vault\'s key is found by any full check', async () => {
   await longLog(50);
   await rewrite(3n, 'chained');
-  const check = await (await fresh()).log({ actor: ROOT, full: true });
-  assert.deepEqual(check.ok && check.verification, { ok: false, failedAtSeq: 3, reason: 'not written by the vault: its MAC does not match' });
+  const check = await (await fresh()).verifyLog({});
+  assert.deepEqual(!check.ok && [check.failedAtSeq, check.reason], [3, 'not written by the vault: its MAC does not match']);
 });
 
 test('a rewrite sealed again with the vault\'s key is found against the head it last verified', async () => {
   const w = await longLog(50);
-  assert.ok((await w.vault.log({ actor: ROOT })).ok);
+  assert.equal((await w.vault.verifyLog({})).ok, true);
 
   await rewrite(3n, VAULT_KEY);
-  const view = await w.vault.log({ actor: ROOT, limit: 10 });
-  assert.deepEqual(view.ok && view.verification, { ok: false, failedAtSeq: 51, reason: 'changed since the vault last verified it' });
+  const check = await w.vault.verifyLog({});
+  assert.equal(!check.ok && check.reason, 'changed since the vault last verified it');
   // A vault that never saw the head before cannot tell: whoever holds the
   // key can seal anything. The heads checkpoints signed can; see below.
-  const unaware = await (await fresh()).log({ actor: ROOT, full: true });
-  assert.ok(unaware.ok && unaware.verification.ok);
+  assert.equal((await (await fresh()).verifyLog({})).ok, true);
 });
 
 test('a checkpoint signs the log up to its last entry, in an entry of its own', async () => {
@@ -857,11 +844,6 @@ test('a full check replays who holds what from the log, and finds what a holder 
     fault: { kind: 'unlogged-grant', grant: { principal: BOB, projectId: w.project, environmentId: null, role: 'owner' } },
   };
   assert.deepEqual(await w.vault.verifyLog({}), extra);
-  const full = await w.vault.log({ actor: ROOT, full: true });
-  assert.deepEqual(full.ok && full.verification, extra);
-  // A view that is not full does not replay.
-  const view = await w.vault.log({ actor: ROOT });
-  assert.deepEqual(view.ok && view.verification, { ok: true, entries: (whole as { entries: number }).entries });
 
   // Or a removal undone, grants and all.
   await db.owner.delete(vaultGrants).where(eq(vaultGrants.role, 'owner'));
@@ -1282,13 +1264,7 @@ for (const overdue of [false, true]) {
       assert.match(verification.reason, /overdue/);
     } else {
       assert.deepEqual(verification, { ok: true, entries: 1, pending: 1 });
-      const page = await w.vault.log({ actor: ROOT, full: true });
-      assert.ok(page.ok);
-      assert.deepEqual(page.verification, verification);
     }
-    const view = await w.vault.log({ actor: ROOT });
-    assert.ok(view.ok);
-    assert.deepEqual(view.verification, { ok: true, entries: 1 }, 'ordinary pages check the chain incrementally');
   });
 }
 
@@ -1350,7 +1326,5 @@ for (const duplicate of [false, true]) {
     const result = await w.vault.verifyLog({});
     assert.equal(result.ok, false);
     if (!result.ok) assert.match(result.reason, duplicate ? /does not identify one item/ : /1 of 2 outcomes missing/);
-    const page = await w.vault.log({ actor: ROOT, full: true });
-    assert.ok(page.ok && !page.verification.ok);
   });
 }

@@ -726,37 +726,6 @@ export type Api = {
       reason: string;
     };
   };
-  "GET /audit/vault": {
-    input: {
-      before?: unknown;
-      limit?: unknown;
-      full?: "1" | "true";
-    };
-    output: {
-      entries: {
-        seq: number;
-        at: string;
-        actor: string;
-        action: string;
-        outcome: "allow" | "refuse";
-        code: string | null;
-        subject: string | null;
-        detail: {
-          [key: string]: unknown;
-        };
-        hash: string;
-      }[];
-      verification: {
-        ok: true;
-        entries: number;
-        pending?: number;
-      } | {
-        ok: false;
-        failedAtSeq: number | null;
-        reason: string;
-      };
-    };
-  };
 };
 
 export type AccessValue = "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer" | null | {
