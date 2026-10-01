@@ -22,7 +22,7 @@ test('a new store is 0600, its -wal and -shm too, in WAL with full syncs', (t) =
   const db = nodeSqlite(path);
   t.after(() => db.close());
   migrate(db);
-  db.transaction(() => db.run(`INSERT INTO checkpoints VALUES (1, 'h', 0, 'k', 's')`));
+  db.transaction(() => db.run(`INSERT INTO checkpoints VALUES (1, 'h', 0, 'v', 0, 'k', 's')`));
   assert.deepEqual([path, `${path}-wal`, `${path}-shm`].map(mode), ['600', '600', '600']);
   assert.equal(db.get<{ journal_mode: string }>('PRAGMA journal_mode')?.journal_mode, 'wal');
   assert.equal(db.get<{ synchronous: number }>('PRAGMA synchronous')?.synchronous, 2);
@@ -70,7 +70,17 @@ test('migrating is idempotent, and a store from a newer vault is refused', (t) =
   const first = nodeSqlite(path);
   migrate(first);
   const created = tables(first);
-  assert.deepEqual(created, ['checkpoints', 'grants', 'log', 'log_no_delete', 'log_no_update', 'migrations', 'principals']);
+  assert.deepEqual(created, [
+    'checkpoints',
+    'checkpoints_no_delete',
+    'checkpoints_no_update',
+    'grants',
+    'log',
+    'log_no_delete',
+    'log_no_update',
+    'migrations',
+    'principals',
+  ]);
   first.close();
 
   const again = nodeSqlite(path);

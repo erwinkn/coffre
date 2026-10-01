@@ -17,6 +17,7 @@ export const METHODS = [
   'checkpoint',
   'latestCheckpoint',
   'log',
+  'verifyLog',
 ] as const satisfies readonly (keyof Vault)[];
 
 export type LocalVault = Vault & { close(): void };

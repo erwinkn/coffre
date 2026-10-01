@@ -807,11 +807,15 @@ async function verify(): Promise<void> {
   const result = await client().audit.verify();
 
   if (result.ok) {
-    process.stdout.write(`audit chain OK: ${result.rows} rows, head ${result.head}\n`);
+    process.stdout.write(
+      `audit chain OK: ${result.rows} rows, head ${result.head}\n` +
+        `vault log OK: ${result.vault.entries} entries, members and grants replayed\n`,
+    );
     return;
   }
+  const at = result.failedAtSeq === null ? '' : ` at seq ${result.failedAtSeq}`;
   process.stderr.write(
-    `audit chain BROKEN at seq ${result.failedAtSeq}: ${result.reason}\n`,
+    `${result.log === 'vault' ? 'vault log' : 'audit chain'} BROKEN${at}: ${result.reason}\n`,
   );
   process.exit(2);
 }

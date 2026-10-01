@@ -269,8 +269,9 @@ when the vault opens. The interface:
 | `members()` | everyone's, in one call, for the Users and project access pages |
 | `setAccess` | several places for one principal, all or nothing (`PATCH /api/access/<member>`) |
 | `admit`, `remove` | add or restore a member, or remove one and revoke every grant |
-| `checkpoint`, `latestCheckpoint` | sign the app log's head; read the latest signature |
+| `checkpoint`, `latestCheckpoint` | sign the heads of both logs; read the latest signature |
 | `log` | a page of the vault's own log, with its chain verified; root admins only |
+| `verifyLog` | check the whole of that log, and replay members and grants from it |
 
 Every argument and result is plain data, and a refusal is a value, not a
 thrown error, so the same interface works across a process boundary. The app
@@ -336,27 +337,64 @@ principal reads again as the window rolls on.
 
 ### Checkpoints
 
-The app's audit log is hash-chained with `auditChainKey`, which
-catches someone who can write the database but not read the app's config.
-Someone who holds the app could rewrite the log and chain it again. So after
-each heartbeat, the app asks the vault to sign the log's head:
+The app's audit log is hash-chained with `auditChainKey`, which catches
+someone who can write the database but not read the app's config. Someone
+who holds the app could rewrite the log and chain it again. The vault's log
+has the mirror gap: its chain is a plain SHA-256, so someone who can write
+the vault's store could rewrite it and hash it again. So after each
+heartbeat, the app has the vault sign both heads at once:
 
-```
-checkpoint({ seq: 812, headHash, previous: { seq: 640, hash } })
+```ts
+await vault.checkpoint({ seq: 812, headHash, previous: { seq: 640, hash } });
+// { ok: true, checkpoint: { seq: 812, headHash, vault: { seq: 5031, hash }, signedAt, keyId, signature } }
 ```
 
-The vault signs it with an Ed25519 key only it holds, and only if `previous`
-is the head it signed last and the log still holds that hash at that seq. A
-log rewritten behind a checkpoint no longer matches, so the vault refuses
-(`checkpoint_diverged`, logged) and `GET /api/audit/verification` fails:
-it recomputes the chain and checks the entry at the latest checkpoint's seq
-against the signed hash, with the vault's public key.
+The vault signs `coffre.checkpoint.v2|812|<headHash>|5031|<hash>|<signedAt>`
+with an Ed25519 key only it holds, and only if both logs hold since the last
+one: `previous` is the app head it signed last (else `checkpoint_diverged`),
+and its own log still carries the vault head it signed last and hashes
+forward from it (else `log_broken`). Either refusal is logged, and fails the
+heartbeat. Its checkpoints table is append-only, like its log.
+
+The app then writes the signed checkpoint into its own log, as an
+`audit.checkpoint` entry, so each log holds a signed record of the other's
+head:
+
+| Rewritten | Caught by |
+|---|---|
+| the app log, behind a checkpoint | the vault's latest checkpoint: the app's entry 812 no longer hashes to `headHash` |
+| the vault log, behind a checkpoint | the `audit.checkpoint` entry: the vault's entry 5031 no longer hashes to its `hash` |
+| the vault's store, put back to an older copy | the same entry: the vault's latest checkpoint is behind it |
+
+`GET /api/audit/verification` (owners only) checks all three. It recomputes
+the app log's chain and checks the head the vault signed last, with the
+vault's public key. It checks the signature on the last `audit.checkpoint`
+entry, and that the vault's latest checkpoint is not behind it. Then it has
+the vault check its own log whole (`verifyLog`): the chain from the first
+entry, the vault heads both checkpoints signed, and the members and grants
+in its store against a replay of the log. Every change to them is logged in
+the transaction that makes it, so a grant inserted into the vault's SQLite,
+or a removal undone, is a row the log does not explain. A failure names the
+log (`log: 'audit'` or `'vault'`) and, when the fault is at one, the entry.
 
 `auditChainKey` stays in the app. Signing covers someone who holds
 the app; the keyed chain still covers the entries written since the last
 checkpoint against someone who holds only the database. Moving the key would
 put a vault call on every audited write, and the sign-in state key is derived
 from it.
+
+What checkpoints do not catch:
+
+- **Entries appended to the vault log by someone who can write its store.**
+  The chain is unkeyed, so a forged `grant.create` entry, appended with the
+  grant it explains, hashes and replays cleanly. Keying the chain with a
+  secret from the vault's config would close it, at the cost of no one else
+  being able to recompute it.
+- **A rewrite of either log since the last checkpoint.** Heartbeats bound it
+  to minutes; for the app log the keyed chain covers it too.
+- **A new signing key.** Each checkpoint is checked with the vault's current
+  public key, so rotating `signingKey` fails the recorded ones until
+  rotation is designed.
 
 ### What the vault stops
 
@@ -367,8 +405,9 @@ the app (`GET /api/audit/vault`), and on the audit page. Each page view
 verifies the chain without rehashing all of it, which grows with every
 unwrap: the rows shown, the head the vault verified last (which a rewrite
 re-chained to hide would change), and what was appended since. The first
-view after the vault starts, or one asking for `full`, rehashes from the
-first entry, one row in memory at a time.
+view after the vault starts, or one asking for `full` (`?full=1`), rehashes
+from the first entry, one row in memory at a time, and replays members and
+grants as `verifyLog` does.
 
 A sync reads as a principal of its own (`sync:<id>`), with a grant made when
 the sync is added and revoked when it is removed. Revoking that grant stops
@@ -384,6 +423,10 @@ What the vault stops:
   alive; the vault refuses the principal, which only it can restore.
 - **A copy of either database.** Neither holds a key.
 - **A rewritten app log.** It no longer matches the signed checkpoint.
+- **A rewritten vault log, or its store put back.** It no longer carries the
+  head the app recorded from the last checkpoint.
+- **Access granted around the vault.** A grant or member written straight
+  into its store does not follow from its log.
 
 What it does not stop: an app fully taken over, or someone who can write to
 the app's database and forge a session, can act as anyone who already has

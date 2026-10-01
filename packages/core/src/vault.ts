@@ -41,12 +41,22 @@ export interface Vault {
   /** Remove a member: revoke every grant and refuse them until admitted again. */
   remove(input: RemoveInput): Promise<Outcome<{ revoked: Grant[] }>>;
 
-  /** Sign the head of the app's audit log, if it extends the last one signed. */
+  /**
+   * Sign the head of the app's audit log with the head of the vault's own,
+   * if the first extends the last checkpoint and the second still carries it.
+   */
   checkpoint(input: CheckpointInput): Promise<Outcome<{ checkpoint: Checkpoint }>>;
-  /** The last head signed, and the key to check signatures with. */
+  /** The last heads signed, and the key to check signatures with. */
   latestCheckpoint(): Promise<{ checkpoint: Checkpoint | null; publicKey: string }>;
   /** A page of the vault's own log, newest first, with its chain verified. Root admins only. */
   log(input: LogInput): Promise<Outcome<LogPage>>;
+  /**
+   * Check the whole of the vault's log: rehash it from the first entry,
+   * find `through` in it, and replay it to see that who is a member, and
+   * what they hold, follow from it. A verdict and nothing else, so anyone
+   * may ask; the app asks for owners.
+   */
+  verifyLog(input: VerifyLogInput): Promise<LogVerification>;
 }
 
 /** A refusal, already logged by the time the app sees it. */
@@ -72,7 +82,9 @@ export type RefusalCode =
   /** Well-formed, but not something the rules allow: a project role on an environment, an owner token. */
   | 'invalid'
   /** The head does not extend the last checkpoint: the app's log was rewritten, or two heartbeats raced. */
-  | 'checkpoint_diverged';
+  | 'checkpoint_diverged'
+  /** The vault's own log no longer carries the head the last checkpoint signed, or does not rehash since. */
+  | 'log_broken';
 
 export type Outcome<T> = ({ ok: true } & T) | { ok: false; refusal: Refusal };
 
@@ -192,6 +204,12 @@ export type CheckpointInput = {
 export type Checkpoint = {
   seq: number;
   headHash: string;
+  /**
+   * The vault log's head when signed: its last entry's `seq` and `hash`,
+   * or 0 and 64 zeros before the first. The app records each checkpoint in
+   * its own log, so the vault's is anchored outside the vault too.
+   */
+  vault: LogHead;
   signedAt: string;
   keyId: string;
   /** Ed25519 over `checkpointMessage(...)`, base64. */
@@ -204,7 +222,7 @@ export type LogInput = {
   before?: number;
   limit?: number;
   /**
-   * Rehash the chain from its first entry. Otherwise a view rehashes this
+   * Check all of it, as `verifyLog` does. Otherwise a view rehashes this
    * page and what is new since the last view; `verify` in log.ts says what
    * that leaves out.
    */
@@ -225,9 +243,23 @@ export type LogEntry = {
 
 export type LogPage = {
   entries: LogEntry[];
-  /**
-   * Whether the chain recomputes, this page and up to the head, with the
-   * number of entries in it.
-   */
-  verification: { ok: true; entries: number } | { ok: false; failedAtSeq: number; reason: string };
+  /** Whether the chain recomputes, this page and up to the head. */
+  verification: LogVerification;
 };
+
+/** An entry of the vault's log, and so the chain up to it. */
+export type LogHead = { seq: number; hash: string };
+
+export type VerifyLogInput = {
+  /** A head the log must still carry: the one the app last recorded, or null. */
+  through: LogHead | null;
+};
+
+/**
+ * Whether the vault's log holds, with the number of entries in it. On a
+ * failure, the entry where it breaks, or null when the chain holds but the
+ * members and grants do not follow from it.
+ */
+export type LogVerification =
+  | { ok: true; entries: number }
+  | { ok: false; failedAtSeq: number | null; reason: string };

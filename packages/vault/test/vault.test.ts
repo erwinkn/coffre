@@ -89,6 +89,18 @@ function raw(w: World) {
   return new DatabaseSync(w.path);
 }
 
+/** Another vault over the same file, as after a restart: it has verified nothing yet. */
+async function reopen(t: test.TestContext, path: string) {
+  const db = nodeSqlite(path);
+  t.after(() => db.close());
+  return openVault(db, {
+    keks: new KekRegistry(LocalKekProvider.generate('test-kek-1')),
+    rootAdmins: ['root@acme.example'],
+    signingKey: randomBytes(32),
+    bulkLimit: { count: 1000, windowMs: 15 * 60_000 },
+  });
+}
+
 test('a read needs a live grant on the environment, and unwraps the key it was wrapped with', async (t) => {
   const w = await world(t);
   await member(w, ADA, [[w.dev, 'developer']]);
@@ -436,16 +448,9 @@ test('a rewrite re-chained to the head is found against the head the vault last 
   rewrite(path, 3, true);
   const view = await vault.log({ actor: ROOT, limit: 10 });
   assert.deepEqual(view.ok && view.verification, { ok: false, failedAtSeq: 51, reason: 'changed since the vault last verified it' });
-  // A vault that never saw the head before cannot tell: the chain is unkeyed.
-  const second = nodeSqlite(path);
-  t.after(() => second.close());
-  const fresh = await openVault(second, {
-    keks: new KekRegistry(LocalKekProvider.generate('test-kek-1')),
-    rootAdmins: ['root@acme.example'],
-    signingKey: randomBytes(32),
-    bulkLimit: { count: 1000, windowMs: 15 * 60_000 },
-  });
-  const unaware = await fresh.log({ actor: ROOT, full: true });
+  // A vault that never saw the head before cannot tell: the chain is
+  // unkeyed. The heads checkpoints signed can; see below.
+  const unaware = await (await reopen(t, path)).log({ actor: ROOT, full: true });
   assert.ok(unaware.ok && unaware.verification.ok);
 });
 
@@ -471,6 +476,100 @@ test('checkpoints are signed only while they extend the last one', async (t) => 
   const log = await w.vault.log({ actor: ROOT });
   assert.ok(log.ok);
   assert.equal(log.entries.filter((entry) => entry.code === 'checkpoint_diverged').length, 2);
+
+  // Append-only, as the log is.
+  const db = raw(w);
+  t.after(() => db.close());
+  assert.throws(() => db.prepare('DELETE FROM checkpoints WHERE seq = 20').run(), /append-only/);
+  assert.throws(() => db.prepare(`UPDATE checkpoints SET head_hash = 'e'`).run(), /append-only/);
+});
+
+test('a checkpoint signs the vault log\'s head too, and none is signed over that log rewritten', async (t) => {
+  const w = await world(t);
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const page = await w.vault.log({ actor: ROOT, limit: 1 });
+  assert.ok(page.ok);
+  const head = { seq: page.entries[0].seq, hash: page.entries[0].hash };
+
+  const first = await w.vault.checkpoint({ seq: 10, headHash: 'a'.repeat(64), previous: null });
+  assert.ok(first.ok);
+  assert.deepEqual(first.checkpoint.vault, head);
+  const { publicKey } = await w.vault.latestCheckpoint();
+  assert.equal(await verifyCheckpoint({ ...first.checkpoint, vault: { ...head, seq: 1 } }, publicKey), false);
+
+  // Someone holding the file rewrites an entry the checkpoint covers, and chains again.
+  await member(w, BOB, [[w.dev, 'viewer']]);
+  rewrite(w.path, 1, true);
+  const next = await w.vault.checkpoint({ seq: 20, headHash: 'b'.repeat(64), previous: { seq: 10, hash: 'a'.repeat(64) } });
+  assert.equal(!next.ok && next.refusal.code, 'log_broken');
+
+  // A vault started afresh has no head of its own to go on, but the one
+  // the app recorded, and the last checkpoint's, are no longer there.
+  const fresh = await reopen(t, w.path);
+  const rewritten = 'the log was rewritten or cut back';
+  assert.deepEqual(await fresh.verifyLog({ through: head }), {
+    ok: false,
+    failedAtSeq: head.seq,
+    reason: `not the entry a checkpoint the app recorded signed: ${rewritten}`,
+  });
+  assert.deepEqual(await fresh.verifyLog({ through: null }), {
+    ok: false,
+    failedAtSeq: head.seq,
+    reason: `not the entry the last checkpoint signed: ${rewritten}`,
+  });
+});
+
+test('a full check replays who holds what from the log, and finds what was written around it', async (t) => {
+  const w = await world(t);
+  const change = async (principal: string, environmentId: string | null, role: string | null) =>
+    assert.ok(
+      (
+        await w.vault.setAccess({
+          actor: ROOT,
+          principal,
+          changes: [{ projectId: w.project, environmentId, role: role as 'viewer' | null, expiresAt: null }],
+        })
+      ).ok,
+    );
+  // Every kind of change: admit, grant, update, owner, remove, restore, and a
+  // lapsed grant cleared, which changes nothing and is not logged.
+  await member(w, ADA, [[w.dev, 'developer'], [w.prod, 'viewer', w.clock.now + 60_000]]);
+  await member(w, BOB, [[null, 'maintainer']]);
+  await change(ADA, w.dev, 'viewer');
+  assert.ok((await w.vault.admit({ actor: ROOT, principal: ADA, owner: true })).ok);
+  assert.ok((await w.vault.remove({ actor: ROOT, principal: BOB })).ok);
+  assert.ok((await w.vault.admit({ actor: ROOT, principal: BOB })).ok);
+  w.clock.now += 120_000;
+  await change(ADA, w.prod, null);
+  const whole = await w.vault.verifyLog({ through: null });
+  assert.ok(whole.ok);
+
+  // A grant written straight into the store: the chain holds, the replay does not.
+  const db = raw(w);
+  t.after(() => db.close());
+  db.prepare(`INSERT INTO grants VALUES (?, ?, NULL, 'owner', NULL, ?, ?)`).run(BOB, w.project, w.clock.now, ROOT);
+  const extra = {
+    ok: false,
+    failedAtSeq: null,
+    reason: `the store holds a grant the log never gave: ${BOB} as owner on ${w.project}`,
+  };
+  assert.deepEqual(await w.vault.verifyLog({ through: null }), extra);
+  const full = await w.vault.log({ actor: ROOT, full: true });
+  assert.deepEqual(full.ok && full.verification, extra);
+  // A view that is not full does not replay.
+  const view = await w.vault.log({ actor: ROOT });
+  assert.deepEqual(view.ok && view.verification, whole);
+
+  // Or a removal undone, grants and all.
+  db.prepare('DELETE FROM grants WHERE principal = ? AND role = ?').run(BOB, 'owner');
+  assert.ok((await w.vault.remove({ actor: ROOT, principal: ADA })).ok);
+  db.prepare(`UPDATE principals SET status = 'active', owner = 1 WHERE principal = ?`).run(ADA);
+  db.prepare(`INSERT INTO grants VALUES (?, ?, ?, 'viewer', NULL, 0, ?)`).run(ADA, w.project, w.dev, ROOT);
+  assert.deepEqual(await w.vault.verifyLog({ through: null }), {
+    ok: false,
+    failedAtSeq: null,
+    reason: `the store's ${ADA} differs from the log's in status, owner`,
+  });
 });
 
 test('the store holds no key', async (t) => {

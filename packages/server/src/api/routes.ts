@@ -291,8 +291,10 @@ export const routes = {
     input: z.object({
       before: z.coerce.number().int().positive().optional(),
       limit: z.coerce.number().int().min(1).max(200).default(50),
+      // `?full=1` checks all of the log, as `GET /audit/verification` does.
+      full: z.enum(['1', 'true']).optional(),
     }),
-    run: (ctx, { input }) => vaultLog(ctx, input),
+    run: (ctx, { input: { full, ...page } }) => vaultLog(ctx, { ...page, full: full !== undefined }),
   }),
 };
 

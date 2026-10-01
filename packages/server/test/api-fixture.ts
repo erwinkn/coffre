@@ -74,6 +74,7 @@ export function testVault(rootAdmins: readonly string[], config: Pick<VaultConfi
     checkpoint: call('checkpoint'),
     latestCheckpoint: call('latestCheckpoint'),
     log: call('log'),
+    verifyLog: call('verifyLog'),
     kek,
     signingKey,
     file: () => file,
