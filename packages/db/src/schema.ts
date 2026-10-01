@@ -254,10 +254,10 @@ export const identities = pgTable(
   {
     id: uuid().primaryKey().defaultRandom(),
     provider: text().notNull(),
+    authMac: bytea('auth_mac').notNull(),
     subject: text().notNull(),
-    // Null on a legacy binding: its authority must not be guessed.
-    issuerHash: text('issuer_hash'),
-    generation: integer(),
+    issuerHash: text('issuer_hash').notNull(),
+    generation: integer().notNull(),
     principalType: text('principal_type').notNull(),
     principalId: text('principal_id').notNull(),
     email: text(),
@@ -271,6 +271,8 @@ export const identities = pgTable(
   (table) => [
     check('identities_principal_type_check', sql`${table.principalType} = 'user'`),
     check('identities_provider_check', sql`${table.provider} ~ '^[a-z0-9][a-z0-9-]{0,31}$'`),
+    check('identities_auth_mac_check', sql`octet_length(${table.authMac}) = 32`),
+    unique('identities_member_generation_key').on(table.id, table.principalType, table.principalId, table.generation),
     foreignKey({
       name: 'identities_principal_fkey',
       columns: [table.principalType, table.principalId],
@@ -296,9 +298,10 @@ export const credentials = pgTable(
   {
     id: uuid().primaryKey().defaultRandom(),
     kind: text().notNull(),
+    authMac: bytea('auth_mac').notNull(),
     tokenHash: bytea('token_hash').notNull(),
     tokenHint: text('token_hint').notNull(),
-    generation: integer(),
+    generation: integer().notNull(),
     principalType: text('principal_type').notNull(),
     principalId: text('principal_id').notNull(),
     identityId: uuid('identity_id'),
@@ -319,6 +322,7 @@ export const credentials = pgTable(
       sql`(${table.kind} = 'service') = (${table.principalType} = 'service')`,
     ),
     check('credentials_token_hash_check', sql`octet_length(${table.tokenHash}) = 32`),
+    check('credentials_auth_mac_check', sql`octet_length(${table.authMac}) = 32`),
     foreignKey({
       name: 'credentials_principal_fkey',
       columns: [table.principalType, table.principalId],
@@ -326,8 +330,8 @@ export const credentials = pgTable(
     }).onDelete('restrict'),
     foreignKey({
       name: 'credentials_identity_id_fkey',
-      columns: [table.identityId],
-      foreignColumns: [identities.id],
+      columns: [table.identityId, table.principalType, table.principalId, table.generation],
+      foreignColumns: [identities.id, identities.principalType, identities.principalId, identities.generation],
     }).onDelete('restrict'),
     index('credentials_principal_idx').on(table.principalType, table.principalId),
   ],
@@ -345,6 +349,7 @@ export const deviceAuthorizations = pgTable(
   {
     id: uuid().primaryKey().defaultRandom(),
     deviceCodeHash: bytea('device_code_hash').notNull(),
+    authMac: bytea('auth_mac').notNull(),
     userCode: text('user_code').notNull(),
     clientLabel: text('client_label'),
     clientIp: text('client_ip'),
@@ -352,7 +357,7 @@ export const deviceAuthorizations = pgTable(
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
     decidedAt: timestamp('decided_at', { withTimezone: true }),
     decision: text(),
-    generation: integer(),
+    generation: integer().notNull().default(0),
     principalType: text('principal_type'),
     principalId: text('principal_id'),
     consumedAt: timestamp('consumed_at', { withTimezone: true }),
@@ -360,13 +365,18 @@ export const deviceAuthorizations = pgTable(
   (table) => [
     unique('device_authorizations_device_code_hash_key').on(table.deviceCodeHash),
     unique('device_authorizations_user_code_key').on(table.userCode),
+    check('device_authorizations_auth_mac_check', sql`octet_length(${table.authMac}) = 32`),
     check(
       'device_authorizations_decision_check',
       sql`${table.decision} IS NULL OR ${table.decision} IN ('approved', 'denied')`,
     ),
     check(
       'device_authorizations_approval_names_principal',
-      sql`(${table.decision} = 'approved') = (${table.principalId} IS NOT NULL)`,
+      sql`(${table.decision} IS NULL AND ${table.decidedAt} IS NULL AND ${table.principalType} IS NULL AND ${table.principalId} IS NULL AND ${table.generation} = 0 AND ${table.consumedAt} IS NULL)
+        OR (${table.decision} IS NOT NULL AND ${table.decidedAt} IS NOT NULL AND (
+          (${table.decision} = 'denied' AND ${table.principalType} IS NULL AND ${table.principalId} IS NULL AND ${table.generation} = 0 AND ${table.consumedAt} IS NULL)
+          OR (${table.decision} = 'approved' AND ${table.principalType} IS NOT NULL AND ${table.principalType} = 'user' AND ${table.principalId} IS NOT NULL)
+        ))`,
     ),
     foreignKey({
       name: 'device_authorizations_principal_fkey',

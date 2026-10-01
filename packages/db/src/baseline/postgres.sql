@@ -113,11 +113,11 @@ GRANT UPDATE (next_seq, head_hash, updated_at) ON audit_chain_head TO coffre_app
 --> statement-breakpoint
 GRANT UPDATE (last_beat_at, last_seq) ON audit_heartbeat TO coffre_app;
 --> statement-breakpoint
-GRANT UPDATE (email, last_sign_in_at, revoked_at, revoked_by) ON identities TO coffre_app;
+GRANT UPDATE (email, last_sign_in_at, revoked_at, revoked_by, auth_mac) ON identities TO coffre_app;
 --> statement-breakpoint
-GRANT UPDATE (last_used_at, last_used_ip, revoked_at, revoked_by) ON credentials TO coffre_app;
+GRANT UPDATE (last_used_at, last_used_ip, revoked_at, revoked_by, auth_mac) ON credentials TO coffre_app;
 --> statement-breakpoint
-GRANT UPDATE (decided_at, decision, generation, principal_type, principal_id, consumed_at)
+GRANT UPDATE (decided_at, decision, generation, principal_type, principal_id, consumed_at, auth_mac)
     ON device_authorizations TO coffre_app;
 --> statement-breakpoint
 GRANT UPDATE (config, credential_secret_id, paused_at, archived_at, lease_until,

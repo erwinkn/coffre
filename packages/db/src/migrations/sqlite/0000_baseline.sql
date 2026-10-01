@@ -53,9 +53,10 @@ CREATE UNIQUE INDEX `audit_log_id_key` ON `audit_log` (`id`);--> statement-break
 CREATE TABLE `credentials` (
 	`id` text PRIMARY KEY NOT NULL,
 	`kind` text NOT NULL,
+	`auth_mac` blob NOT NULL,
 	`token_hash` blob NOT NULL,
 	`token_hint` text NOT NULL,
-	`generation` integer,
+	`generation` integer NOT NULL,
 	`principal_type` text NOT NULL,
 	`principal_id` text NOT NULL,
 	`identity_id` text,
@@ -68,10 +69,11 @@ CREATE TABLE `credentials` (
 	`revoked_at` integer,
 	`revoked_by` text,
 	FOREIGN KEY (`principal_type`,`principal_id`) REFERENCES `principals`(`principal_type`,`principal_id`) ON UPDATE no action ON DELETE restrict,
-	FOREIGN KEY (`identity_id`) REFERENCES `identities`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`identity_id`,`principal_type`,`principal_id`,`generation`) REFERENCES `identities`(`id`,`principal_type`,`principal_id`,`generation`) ON UPDATE no action ON DELETE restrict,
 	CONSTRAINT "credentials_kind_check" CHECK("credentials"."kind" IN ('browser', 'cli', 'service')),
 	CONSTRAINT "credentials_kind_matches_principal" CHECK(("credentials"."kind" = 'service') = ("credentials"."principal_type" = 'service')),
-	CONSTRAINT "credentials_token_hash_check" CHECK(octet_length("credentials"."token_hash") = 32)
+	CONSTRAINT "credentials_token_hash_check" CHECK(octet_length("credentials"."token_hash") = 32),
+	CONSTRAINT "credentials_auth_mac_check" CHECK(octet_length("credentials"."auth_mac") = 32)
 );
 --> statement-breakpoint
 CREATE INDEX `credentials_principal_idx` ON `credentials` (`principal_type`,`principal_id`);--> statement-breakpoint
@@ -79,6 +81,7 @@ CREATE UNIQUE INDEX `credentials_token_hash_key` ON `credentials` (`token_hash`)
 CREATE TABLE `device_authorizations` (
 	`id` text PRIMARY KEY NOT NULL,
 	`device_code_hash` blob NOT NULL,
+	`auth_mac` blob NOT NULL,
 	`user_code` text NOT NULL,
 	`client_label` text,
 	`client_ip` text,
@@ -86,13 +89,18 @@ CREATE TABLE `device_authorizations` (
 	`expires_at` integer NOT NULL,
 	`decided_at` integer,
 	`decision` text,
-	`generation` integer,
+	`generation` integer DEFAULT 0 NOT NULL,
 	`principal_type` text,
 	`principal_id` text,
 	`consumed_at` integer,
 	FOREIGN KEY (`principal_type`,`principal_id`) REFERENCES `principals`(`principal_type`,`principal_id`) ON UPDATE no action ON DELETE restrict,
+	CONSTRAINT "device_authorizations_auth_mac_check" CHECK(octet_length("device_authorizations"."auth_mac") = 32),
 	CONSTRAINT "device_authorizations_decision_check" CHECK("device_authorizations"."decision" IS NULL OR "device_authorizations"."decision" IN ('approved', 'denied')),
-	CONSTRAINT "device_authorizations_approval_names_principal" CHECK(("device_authorizations"."decision" = 'approved') = ("device_authorizations"."principal_id" IS NOT NULL))
+	CONSTRAINT "device_authorizations_approval_names_principal" CHECK(("device_authorizations"."decision" IS NULL AND "device_authorizations"."decided_at" IS NULL AND "device_authorizations"."principal_type" IS NULL AND "device_authorizations"."principal_id" IS NULL AND "device_authorizations"."generation" = 0 AND "device_authorizations"."consumed_at" IS NULL)
+        OR ("device_authorizations"."decision" IS NOT NULL AND "device_authorizations"."decided_at" IS NOT NULL AND (
+          ("device_authorizations"."decision" = 'denied' AND "device_authorizations"."principal_type" IS NULL AND "device_authorizations"."principal_id" IS NULL AND "device_authorizations"."generation" = 0 AND "device_authorizations"."consumed_at" IS NULL)
+          OR ("device_authorizations"."decision" = 'approved' AND "device_authorizations"."principal_type" IS NOT NULL AND "device_authorizations"."principal_type" = 'user' AND "device_authorizations"."principal_id" IS NOT NULL)
+        )))
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `device_authorizations_device_code_hash_key` ON `device_authorizations` (`device_code_hash`);--> statement-breakpoint
@@ -113,9 +121,10 @@ CREATE UNIQUE INDEX `environments_project_scoped` ON `environments` (`id`,`proje
 CREATE TABLE `identities` (
 	`id` text PRIMARY KEY NOT NULL,
 	`provider` text NOT NULL,
+	`auth_mac` blob NOT NULL,
 	`subject` text NOT NULL,
-	`issuer_hash` text,
-	`generation` integer,
+	`issuer_hash` text NOT NULL,
+	`generation` integer NOT NULL,
 	`principal_type` text NOT NULL,
 	`principal_id` text NOT NULL,
 	`email` text,
@@ -127,11 +136,13 @@ CREATE TABLE `identities` (
 	`active_subject` text GENERATED ALWAYS AS (CASE WHEN revoked_at IS NULL THEN subject END) STORED,
 	FOREIGN KEY (`principal_type`,`principal_id`) REFERENCES `principals`(`principal_type`,`principal_id`) ON UPDATE no action ON DELETE restrict,
 	CONSTRAINT "identities_principal_type_check" CHECK("identities"."principal_type" = 'user'),
-	CONSTRAINT "identities_provider_check" CHECK(length("identities"."provider") BETWEEN 1 AND 32 AND "identities"."provider" GLOB '[a-z0-9]*' AND "identities"."provider" NOT GLOB '*[^a-z0-9-]*')
+	CONSTRAINT "identities_provider_check" CHECK(length("identities"."provider") BETWEEN 1 AND 32 AND "identities"."provider" GLOB '[a-z0-9]*' AND "identities"."provider" NOT GLOB '*[^a-z0-9-]*'),
+	CONSTRAINT "identities_auth_mac_check" CHECK(octet_length("identities"."auth_mac") = 32)
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `identities_active_subject` ON `identities` (`provider`,`issuer_hash`,`active_subject`);--> statement-breakpoint
 CREATE INDEX `identities_principal_idx` ON `identities` (`principal_type`,`principal_id`);--> statement-breakpoint
+CREATE UNIQUE INDEX `identities_member_generation_key` ON `identities` (`id`,`principal_type`,`principal_id`,`generation`);--> statement-breakpoint
 CREATE TABLE `principals` (
 	`principal_type` text NOT NULL,
 	`principal_id` text NOT NULL,

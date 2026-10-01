@@ -441,13 +441,49 @@ What the vault stops:
 - **Access granted around the vault.** A grant or member written straight
   into its store does not follow from its log.
 
-What it does not stop: an app fully taken over, or someone who can write to
-the app's database and forge a session, can act as anyone who already has
+What it does not stop: an app fully taken over can act as anyone who already has
 access. The vault makes that loud rather than impossible: the key never
 leaves it, every read lands in a log the app cannot edit, and bulk reads trip
 its limit. Closing it would take requests signed by keys the principals hold
 themselves, which fits this interface later without the vault learning about
 sign-in.
+
+### Sign-in rows
+
+The app authenticates each identity, credential and device authorization
+before using it. A database writer cannot mint a session or edit its
+authority without the app's key. Each row has a 32-byte `auth_mac`, an
+HMAC-SHA-256 under HKDF-SHA-256 of `auditChainKey`, with empty salt and the
+purpose `coffre/signin-rows/v1`. The message is a JSON tuple beginning with
+`coffre.auth.v1` and the table name, followed by these fields in order:
+
+| Table | Authenticated fields |
+|---|---|
+| `identities` | id, provider, issuer hash, subject, principal type and id, generation, revoked at |
+| `credentials` | id, token hash, kind, principal type and id, generation, identity id, expires at, revoked at |
+| `device_authorizations` | id, device code hash, user code, decision, decided at, principal type and id, generation, expires at, consumed at |
+
+Dates are integer milliseconds, bytes are hex, and null is distinct from
+any value. Row IDs and the device's short user code bind the MAC to the
+target an approval or revocation selects. `decided_at` is covered because
+clearing it would allow another decision. Display labels, email addresses
+and last-use telemetry do not grant access and are outside the MAC.
+
+Every state change checks the old MAC and writes the new one with the
+change, conditional on the old MAC still matching. Listings check the rows
+too, including revoked identities that could otherwise disappear from an
+account-binding check. A failed MAC refuses the operation and reports
+`auth_row_tampered` to the process log, with only the table and row ID.
+
+The baseline requires issuer hashes, generations and MACs. Pending and
+denied device requests have no principal and use generation zero; an
+approval carries its member's generation. A credential's linked identity
+must belong to the same member and generation, enforced by a foreign key.
+
+A MAC authenticates a row, not its freshness. Restoring a genuine old row
+can undo an individual sign-out or revocation until expiry; the vault's
+generation still rejects rows from a membership that was removed. Changing
+`auditChainKey` invalidates these rows too.
 
 ## Databases
 

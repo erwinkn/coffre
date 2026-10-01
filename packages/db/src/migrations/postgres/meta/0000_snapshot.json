@@ -1,5 +1,5 @@
 {
-  "id": "f9fa4345-a60d-4641-8d53-3abe850bd6b8",
+  "id": "92a33741-5feb-4d25-8150-eec4758e657a",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -390,6 +390,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "auth_mac": {
+          "name": "auth_mac",
+          "type": "bytea",
+          "primaryKey": false,
+          "notNull": true
+        },
         "token_hash": {
           "name": "token_hash",
           "type": "bytea",
@@ -406,7 +412,7 @@
           "name": "generation",
           "type": "integer",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true
         },
         "principal_type": {
           "name": "principal_type",
@@ -520,10 +526,16 @@
           "tableFrom": "credentials",
           "tableTo": "identities",
           "columnsFrom": [
-            "identity_id"
+            "identity_id",
+            "principal_type",
+            "principal_id",
+            "generation"
           ],
           "columnsTo": [
-            "id"
+            "id",
+            "principal_type",
+            "principal_id",
+            "generation"
           ],
           "onDelete": "restrict",
           "onUpdate": "no action"
@@ -552,6 +564,10 @@
         "credentials_token_hash_check": {
           "name": "credentials_token_hash_check",
           "value": "octet_length(\"credentials\".\"token_hash\") = 32"
+        },
+        "credentials_auth_mac_check": {
+          "name": "credentials_auth_mac_check",
+          "value": "octet_length(\"credentials\".\"auth_mac\") = 32"
         }
       },
       "isRLSEnabled": false
@@ -569,6 +585,12 @@
         },
         "device_code_hash": {
           "name": "device_code_hash",
+          "type": "bytea",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "auth_mac": {
+          "name": "auth_mac",
           "type": "bytea",
           "primaryKey": false,
           "notNull": true
@@ -620,7 +642,8 @@
           "name": "generation",
           "type": "integer",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true,
+          "default": 0
         },
         "principal_type": {
           "name": "principal_type",
@@ -678,13 +701,17 @@
       },
       "policies": {},
       "checkConstraints": {
+        "device_authorizations_auth_mac_check": {
+          "name": "device_authorizations_auth_mac_check",
+          "value": "octet_length(\"device_authorizations\".\"auth_mac\") = 32"
+        },
         "device_authorizations_decision_check": {
           "name": "device_authorizations_decision_check",
           "value": "\"device_authorizations\".\"decision\" IS NULL OR \"device_authorizations\".\"decision\" IN ('approved', 'denied')"
         },
         "device_authorizations_approval_names_principal": {
           "name": "device_authorizations_approval_names_principal",
-          "value": "(\"device_authorizations\".\"decision\" = 'approved') = (\"device_authorizations\".\"principal_id\" IS NOT NULL)"
+          "value": "(\"device_authorizations\".\"decision\" IS NULL AND \"device_authorizations\".\"decided_at\" IS NULL AND \"device_authorizations\".\"principal_type\" IS NULL AND \"device_authorizations\".\"principal_id\" IS NULL AND \"device_authorizations\".\"generation\" = 0 AND \"device_authorizations\".\"consumed_at\" IS NULL)\n        OR (\"device_authorizations\".\"decision\" IS NOT NULL AND \"device_authorizations\".\"decided_at\" IS NOT NULL AND (\n          (\"device_authorizations\".\"decision\" = 'denied' AND \"device_authorizations\".\"principal_type\" IS NULL AND \"device_authorizations\".\"principal_id\" IS NULL AND \"device_authorizations\".\"generation\" = 0 AND \"device_authorizations\".\"consumed_at\" IS NULL)\n          OR (\"device_authorizations\".\"decision\" = 'approved' AND \"device_authorizations\".\"principal_type\" IS NOT NULL AND \"device_authorizations\".\"principal_type\" = 'user' AND \"device_authorizations\".\"principal_id\" IS NOT NULL)\n        ))"
         }
       },
       "isRLSEnabled": false
@@ -793,6 +820,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "auth_mac": {
+          "name": "auth_mac",
+          "type": "bytea",
+          "primaryKey": false,
+          "notNull": true
+        },
         "subject": {
           "name": "subject",
           "type": "text",
@@ -803,13 +836,13 @@
           "name": "issuer_hash",
           "type": "text",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true
         },
         "generation": {
           "name": "generation",
           "type": "integer",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true
         },
         "principal_type": {
           "name": "principal_type",
@@ -939,7 +972,18 @@
         }
       },
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "identities_member_generation_key": {
+          "name": "identities_member_generation_key",
+          "nullsNotDistinct": false,
+          "columns": [
+            "id",
+            "principal_type",
+            "principal_id",
+            "generation"
+          ]
+        }
+      },
       "policies": {},
       "checkConstraints": {
         "identities_principal_type_check": {
@@ -949,6 +993,10 @@
         "identities_provider_check": {
           "name": "identities_provider_check",
           "value": "\"identities\".\"provider\" ~ '^[a-z0-9][a-z0-9-]{0,31}$'"
+        },
+        "identities_auth_mac_check": {
+          "name": "identities_auth_mac_check",
+          "value": "octet_length(\"identities\".\"auth_mac\") = 32"
         }
       },
       "isRLSEnabled": false

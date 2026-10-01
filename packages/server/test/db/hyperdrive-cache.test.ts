@@ -23,8 +23,8 @@ function recording() {
 
 test('the credential lookup calls a function Hyperdrive never caches', async () => {
   const { db, statements } = recording();
-  assert.equal(await findCredential(db, { tokenHash: Buffer.alloc(32) }), null);
-  assert.equal(await findCredential(db, { id: '00000000-0000-4000-8000-000000000000' }), null);
+  assert.equal(await findCredential(db, Buffer.alloc(32), { tokenHash: Buffer.alloc(32) }), null);
+  assert.equal(await findCredential(db, Buffer.alloc(32), { id: '00000000-0000-4000-8000-000000000000' }), null);
   assert.equal(statements.length, 2);
   for (const statement of statements) assert.match(statement, /CURRENT_TIMESTAMP/);
 });

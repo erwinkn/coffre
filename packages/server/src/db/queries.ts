@@ -3,11 +3,13 @@ import { own, tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import * as dialect from '@coffre/db/dialect';
 import { canonicalTimestamp, changedRows, clock, forUpdate, migrationLedger, truth, type Table } from '@coffre/db/dialect';
 import type * as schema from '@coffre/db/schema';
-import { and, asc, count, desc, eq, getTableColumns, gt, gte, inArray, isNull, lt, ne, notInArray, or, sql, type SQL } from 'drizzle-orm';
+import { and, asc, count, desc, eq, getTableColumns, getTableName, gt, gte, inArray, isNull, lt, ne, notInArray, or, sql, type SQL } from 'drizzle-orm';
+
+import { authMac, verifyAuthRow, type AuthRow, type AuthTable } from '../auth-rows.ts';
 
 /**
- * Every query coffre runs, and nowhere else: named reads, each returning all
- * that its callers need in one statement, four generic writes, and a lock.
+ * Every query coffre runs, and nowhere else: named reads returning all
+ * that their callers need, generic writes, and a lock.
  * The server works on what these return and never writes SQL; lint keeps
  * drizzle out of the server and the pages.
  *
@@ -16,9 +18,10 @@ import { and, asc, count, desc, eq, getTableColumns, gt, gte, inArray, isNull, l
  * server names a table for the generic writes by importing schema.ts, and
  * `own` swaps in the database's twin.
  *
- * Writes do not check first and do not read back. A unique constraint
+ * Ordinary writes do not check first and do not read back. A unique constraint
  * answers "is it taken", and a conditional update's row count answers "was
- * it still there"; the response is built from what was written.
+ * it still there"; the response is built from what was written. Signed rows
+ * authenticate their old contents before a state change is signed.
  */
 
 // --- generic writes -----------------------------------------------------------
@@ -87,6 +90,29 @@ export async function update<T extends Table>(
 ): Promise<number> {
   const mine = own(db, table);
   return changedRows(await db.update(mine).set(set as never).where(matching(mine, match)));
+}
+
+/** State changes authenticate the old row first and cannot overwrite a concurrent change. */
+export async function updateAuth<T extends Tables['identities'] | Tables['credentials'] | Tables['deviceAuthorizations']>(
+  db: Queryable,
+  chainKey: Buffer,
+  table: T,
+  match: Match<T>,
+  changes: Partial<NewRow<T>>,
+): Promise<number> {
+  const mine = own(db, table);
+  const kind = getTableName(table) as AuthTable;
+  const rows = await db.select().from(mine as Table).where(matching(mine, match));
+  let changed = 0;
+  for (const raw of rows) {
+    const row = raw as AuthRow;
+    verifyAuthRow(chainKey, kind, row);
+    const next = { ...row, ...changes } as AuthRow;
+    changed += await update(db, table, { ...match, id: row.id, authMac: row.authMac } as Match<T>, {
+      ...changes, authMac: authMac(chainKey, kind, next),
+    } as Partial<NewRow<T>>);
+  }
+  return changed;
 }
 
 /**
@@ -228,8 +254,8 @@ export type MemberRow = {
     id: string;
     provider: string;
     subject: string;
-    issuerHash: string | null;
-    generation: number | null;
+    issuerHash: string;
+    generation: number;
     email: string | null;
     createdAt: Date;
     lastSignInAt: Date | null;
@@ -243,32 +269,37 @@ export type MemberRow = {
  */
 export async function members(
   db: Queryable,
+  chainKey: Buffer,
   filter: { member?: { type: string; id: string } },
   now: Date,
 ): Promise<MemberRow[]> {
   const { principals, credentials, identities } = tablesOf(db);
   const { member } = filter;
-  const rows = await db.query.principals.findMany({
-    where: member === undefined ? undefined : and(eq(principals.principalType, member.type), eq(principals.principalId, member.id)),
-    orderBy: [asc(principals.principalType), asc(principals.principalId)],
-    with: {
-      credentials: {
-        columns: { tokenHash: false },
-        where: and(isNull(credentials.revokedAt), gt(credentials.expiresAt, now)),
-        with: { identity: { columns: { provider: true } } },
-      },
-      identities: { where: isNull(identities.revokedAt) },
-    },
-  });
+  const ofMember = (table: typeof principals | typeof credentials | typeof identities) => member === undefined
+    ? undefined
+    : and(eq(table.principalType, member.type), eq(table.principalId, member.id));
+  // Read binary columns directly. Relational JSON encodes bytea on Postgres
+  // and cannot hold blobs on SQLite, so it cannot carry these MACs unchanged.
+  const [rows, held, bound] = await Promise.all([
+    db.select().from(principals).where(ofMember(principals)).orderBy(asc(principals.principalType), asc(principals.principalId)),
+    db.select().from(credentials).where(ofMember(credentials)),
+    db.select().from(identities).where(ofMember(identities)),
+  ]);
+  for (const identity of bound) verifyAuthRow(chainKey, 'identities', identity);
+  for (const credential of held) verifyAuthRow(chainKey, 'credentials', credential);
+  const providers = new Map(bound.map((row) => [row.id, row.provider]));
   return rows.map((row) => ({
     type: row.principalType as MemberRow['type'],
     id: row.principalId,
     createdAt: row.createdAt,
-    credentials: row.credentials.map(({ identity, principalType: _type, principalId: _id, revokedAt: _at, revokedBy: _by, ...credential }) => ({
-      ...credential,
-      provider: identity?.provider ?? null,
-    })),
-    identities: row.identities.map((identity) => ({
+    credentials: held.filter((credential) => credential.principalType === row.principalType && credential.principalId === row.principalId
+      && credential.revokedAt === null && credential.expiresAt > now)
+      .map(({ tokenHash: _hash, authMac: _mac, principalType: _type, principalId: _id, revokedAt: _at, revokedBy: _by, ...credential }) => ({
+        ...credential,
+        provider: credential.identityId === null ? null : providers.get(credential.identityId) ?? null,
+      })),
+    identities: bound.filter((identity) => identity.principalType === row.principalType && identity.principalId === row.principalId
+      && identity.revokedAt === null).map((identity) => ({
       id: identity.id,
       provider: identity.provider,
       subject: identity.subject,
@@ -328,16 +359,18 @@ export async function memberActivity(db: Queryable, actorIds: string[]) {
 /** The person an account at a provider is bound to, if it is. */
 export async function findIdentity(
   db: Queryable,
+  chainKey: Buffer,
   account: { provider: string; issuerHash: string; subject: string },
-): Promise<{ id: string; principalId: string; generation: number | null } | null> {
+) {
   const { identities } = tablesOf(db);
-  const [row] = await db
-    .select({ id: identities.id, principalId: identities.principalId, generation: identities.generation })
+  const rows = await db
+    .select()
     .from(identities)
     .where(
-      and(eq(identities.provider, account.provider), eq(identities.issuerHash, account.issuerHash), eq(identities.subject, account.subject), isNull(identities.revokedAt)),
+      and(eq(identities.provider, account.provider), eq(identities.issuerHash, account.issuerHash), eq(identities.subject, account.subject)),
     );
-  return row ?? null;
+  for (const row of rows) verifyAuthRow(chainKey, 'identities', row);
+  return rows.find((row) => row.revokedAt === null) ?? null;
 }
 
 /**
@@ -352,33 +385,31 @@ export async function findIdentity(
  * without `--caching-disabled`, a token revoked or a session signed out
  * would otherwise keep working for up to a minute.
  */
-export async function findCredential(db: Queryable, by: { tokenHash: Buffer } | { id: string }) {
+export async function findCredential(db: Queryable, chainKey: Buffer, by: { tokenHash: Buffer } | { id: string }) {
   const { credentials, identities } = tablesOf(db);
   const [row] = await db
-    .select({
-      id: credentials.id,
-      kind: credentials.kind,
-      generation: credentials.generation,
-      principalType: credentials.principalType,
-      principalId: credentials.principalId,
-      expiresAt: credentials.expiresAt,
-      revokedAt: credentials.revokedAt,
-      lastUsedAt: credentials.lastUsedAt,
-      identityRevokedAt: identities.revokedAt,
-      identityProvider: identities.provider,
-      identityIssuerHash: identities.issuerHash,
-      subject: identities.subject,
-      now: clock(db),
-    })
+    .select({ credential: credentials, identity: identities, now: clock(db) })
     .from(credentials)
     .leftJoin(identities, eq(identities.id, credentials.identityId))
     .where('tokenHash' in by ? eq(credentials.tokenHash, by.tokenHash) : eq(credentials.id, by.id));
-  return row ?? null;
+  if (row === undefined) return null;
+  verifyAuthRow(chainKey, 'credentials', row.credential);
+  if (row.identity !== null) verifyAuthRow(chainKey, 'identities', row.identity);
+  if (row.credential.identityId !== null && row.identity === null) throw new Error('credential identity is missing');
+  return {
+    ...row.credential,
+    identityRevokedAt: row.identity?.revokedAt ?? null,
+    identityProvider: row.identity?.provider ?? null,
+    identityIssuerHash: row.identity?.issuerHash ?? null,
+    subject: row.identity?.subject ?? null,
+    now: row.now,
+  };
 }
 
 /** Retire directory records from older memberships, including a sweep that rolled back. */
 export async function revokePriorMembership(
   db: Queryable,
+  chainKey: Buffer,
   principal: { type: string; id: string },
   generation: number,
   revokedBy: string,
@@ -386,20 +417,25 @@ export async function revokePriorMembership(
   const { credentials, identities } = tablesOf(db);
   const revokedAt = new Date();
   for (const table of [credentials, identities]) {
-    await db.update(table).set({ revokedAt, revokedBy }).where(and(
-      eq(table.principalType, principal.type), eq(table.principalId, principal.id), isNull(table.revokedAt),
-      or(isNull(table.generation), ne(table.generation, generation)),
+    const rows = await db.select().from(table).where(and(
+      eq(table.principalType, principal.type), eq(table.principalId, principal.id),
+      ne(table.generation, generation),
     ));
+    for (const row of rows) {
+      verifyAuthRow(chainKey, getTableName(table) as AuthTable, row);
+      if (row.revokedAt === null) await updateAuth(db, chainKey, table, { id: row.id, authMac: row.authMac }, { revokedAt, revokedBy });
+    }
   }
 }
 
 /** Device authorizations: one by either of its codes, or every one still waiting for a decision. */
 export async function findDeviceAuthorizations(
   db: Queryable,
+  chainKey: Buffer,
   by: { userCode: string } | { deviceCodeHash: Buffer } | { openAt: Date },
 ) {
   const { deviceAuthorizations } = tablesOf(db);
-  return db
+  const rows = await db
     .select()
     .from(deviceAuthorizations)
     .where(
@@ -409,6 +445,8 @@ export async function findDeviceAuthorizations(
           ? eq(deviceAuthorizations.deviceCodeHash, by.deviceCodeHash)
           : and(isNull(deviceAuthorizations.decidedAt), gt(deviceAuthorizations.expiresAt, by.openAt)),
     );
+  for (const row of rows) verifyAuthRow(chainKey, 'device_authorizations', row);
+  return rows;
 }
 
 // --- secrets ------------------------------------------------------------------
