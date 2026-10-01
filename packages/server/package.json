@@ -44,7 +44,7 @@
     "test": "node --conditions=coffre:source --test",
     "db:generate": "node --conditions=coffre:source src/db/baseline.ts",
     "db:migrate": "node --conditions=coffre:source src/db/migrate-main.ts",
-    "db:check": "cd src/db && for engine in postgres mysql sqlite; do drizzle-kit check --config drizzle.$engine.config.ts || exit 1; done",
+    "db:check": "cd src/db && for engine in postgres sqlite; do drizzle-kit check --config drizzle.$engine.config.ts || exit 1; done",
     "db:verify:runtime": "node --conditions=coffre:source src/db/verify-runtime.ts"
   },
   "dependencies": {
@@ -54,7 +54,6 @@
     "@libsql/client": "0.18.0",
     "@noble/hashes": "2.4.0",
     "drizzle-orm": "0.45.2",
-    "mysql2": "3.24.4",
     "pg": "8.16.3",
     "tweetnacl": "1.0.3",
     "zod": "4.4.3"

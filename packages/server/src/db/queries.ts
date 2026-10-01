@@ -13,7 +13,7 @@ import type * as schema from './schema.ts';
  * drizzle out of the server and the pages.
  *
  * Each query builds on the tables of the database it is given (`tablesOf`),
- * so the one text runs on Postgres, MySQL and SQLite; see portable.ts. The
+ * so the one text runs on Postgres and SQLite; see portable.ts. The
  * server names a table for the generic writes by importing schema.ts, and
  * `own` swaps in the database's twin.
  *

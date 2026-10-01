@@ -218,12 +218,11 @@ Individual pieces:
 pnpm db:up            # Postgres on :55432
 pnpm db:migrate
 pnpm db:generate       # regenerate each engine's baseline from its schema (no deployment yet)
-pnpm db:check          # validate the three Drizzle journals
+pnpm db:check          # validate the Postgres and SQLite Drizzle journals
 pnpm seed             # directory + market/dev|prod + grants; loads .env.dev
 pnpm test             # lint + unit + integration tests on Postgres (needs it up)
 pnpm test:sqlite      # the same suite on SQLite, in a temporary file
-pnpm test:mysql       # the same suite on MySQL 8.4 on :53306, started if nothing answers there
-pnpm test:all         # all three, one after another
+pnpm test:all         # Postgres and SQLite, one after another
 pnpm test:schema      # runtime-role guarantees in an isolated test database (Postgres only)
 pnpm lint             # no server functions or Drizzle queries in the pages or the server
 pnpm check:pins       # every dependency exactly pinned
@@ -633,9 +632,9 @@ The integration tests share one database and reset it in `beforeEach`. Run in
 parallel they clobber each other. Serialising is the pragmatic fix for a
 prototype; the real fix is a schema (or database) per test file. Meanwhile
 `COFFRE_TEST_DATABASE=<name>` points a Postgres run at another scratch
-database.
+database. The deployed app uses Postgres; SQLite is for tests and local dev.
 
-`COFFRE_TEST_ENGINE` (`postgres`, `mysql` or `sqlite`) picks the engine; the
+`COFFRE_TEST_ENGINE` (`postgres` or `sqlite`) picks the engine; the
 `test:*` scripts set it. A few tests are Postgres-only, the restricted runtime
 login and the session time zone among them, and each says why when skipped.
 

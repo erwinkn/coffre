@@ -17,18 +17,6 @@ services:
     volumes:
       - coffre-pgdata-v16:/var/lib/postgresql/data
 
-  # For the suite on MySQL only (pnpm test:mysql), so it starts on its own
-  # profile and keeps its data in memory.
-  mysql:
-    image: mysql:8.4.11
-    profiles: ['mysql']
-    environment:
-      MYSQL_ROOT_PASSWORD: local-dev-only
-    ports:
-      - '53306:3306'
-    tmpfs:
-      - /var/lib/mysql
-
 volumes:
   # Versioned so adopting the PostgreSQL 16 production baseline never mounts
   # (or destroys) an incompatible PostgreSQL 17 development volume.

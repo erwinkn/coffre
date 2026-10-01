@@ -61,8 +61,8 @@ await serveVault({ socket: 'vault.sock', store: 'vault.db', kek, rootAdmins, sig
 ```
 
 or as one, with `vault: await localVault({ store, kek, rootAdmins, signingKey })`
-in the server. `database` is a URL there: `postgres://`, `mysql://` or
-`file:` for SQLite.
+in the server. `database` is a Postgres URL, or `file:` for SQLite in
+local development and tests.
 
 `coffre init --workers` or `coffre init --node` writes such a project:
 [examples/workers](../examples/workers) or [examples/node](../examples/node)
@@ -320,7 +320,7 @@ function over the grants that call returned.
 |---|---|---|
 | Config | `auditChainKey`, `auth` (sign-in or Access settings) | `kek`, `previousKeks`, `rootAdmins`, `signingKey`, `bulkLimit` |
 | Store | projects, environments, ciphertext and wrapped keys, the directory, sessions, syncs, the app's audit log | grants, principal status, unwrap counts, checkpoints, its own log |
-| Where | Postgres or MySQL through Hyperdrive; any of the three in Node | the Durable Object's SQLite; a SQLite file in Node |
+| Where | Postgres through Hyperdrive or Node; SQLite in Node for local dev and tests | the Durable Object's SQLite; a SQLite file in Node |
 
 Each Worker gets only the secrets its own `wrangler.jsonc` declares, and no
 config type has a field for the other side's keys. The separation comes from
@@ -449,10 +449,9 @@ sign-in.
 
 ## Databases
 
-The app database can be Postgres, MySQL or SQLite. Every query goes through
-Drizzle; none is written by hand. The integration suite runs against all
-three. [A spike](spikes/drizzle-dialects.md) ran the same queries,
-joins, a transaction, an upsert and 24 concurrent audit appends on all three.
+The deployed app database is Postgres. SQLite remains for tests, local Node
+development and conformance. The integration suite runs on both through
+Drizzle, using the same queries.
 
 Every query lives in one module, `packages/server/src/db/queries.ts`, and the
 rest of the server writes no SQL (lint keeps `drizzle-orm` inside
@@ -467,69 +466,50 @@ still there": `{ id, revokedAt: null }` changes one row or none. Row locks are
 kept for real races (the audit head, offboarding against sign-in, sync
 leases, version counters), and each one says which race it guards.
 
-The database comes from its URL: `postgres://` opens node-postgres,
-`mysql://` mysql2 and `file:` or `libsql:` @libsql/client (SQLite), each
-loaded only when asked for (`packages/server/src/db/connect.ts`). The
-Worker does not come through there: it builds its Postgres database from the Hyperdrive pool
-with `createDatabase`, and stays on Postgres.
+The database comes from its URL: `postgres://` or `postgresql://` opens
+node-postgres; `file:` or `libsql:` opens @libsql/client for SQLite
+(`packages/server/src/db/connect.ts`). The SQLite driver loads only when
+asked for. The Worker builds its Postgres database from the Hyperdrive pool
+with `createDatabase`.
 
 Each query is written once, typed against the Postgres schema. Drizzle has no
-type shared by its dialects, so the MySQL and SQLite databases are cast to the
-Postgres one in a single small module, `portable.ts`; at run time each
-database always travels with its own dialect's tables. The cast is unsound by
-construction, so three things guard it: a compile-time check in the same
-module that every table's row type matches its Postgres twin, a parity test
-(the three schemas have the same tables, columns, nullability, keys, indexes
-and foreign keys), and the whole suite on every engine, on every Drizzle
-upgrade.
+type shared by its dialects, so the SQLite database is cast to the Postgres
+one in `portable.ts`; at run time each database travels with its own tables.
+The cast is guarded by a compile-time check that every table's row type
+matches, a parity test for tables, columns, nullability, keys, indexes and
+foreign keys, and the whole suite on both engines on every Drizzle upgrade.
 
-What differs between them stays in the schemas and one module,
-`packages/server/src/db/dialect.ts`:
+What differs stays in the schemas and `packages/server/src/db/dialect.ts`:
 
-- **Schemas and migrations.** Drizzle's table builders are per dialect
-  (`pgTable`, `mysqlTable`, `sqliteTable`), so there are three schemas and
-  three migration trees under `packages/server/src/db/migrations/`, each a
-  single baseline: the generated tables inside a hand-written template
-  (`packages/server/src/db/baseline/`) that adds the first audit rows,
-  MySQL's collation and the Postgres runtime role. Until the first deployment,
-  schema changes are regenerated into the baseline (`pnpm db:generate`)
-  rather than added as new migrations. Tests fail when a tree falls behind:
-  the parity test, and a check that each baseline is what its schema and
-  template generate. Types differ on purpose: bytes are `bytea`, `longblob`
-  (`blob` is too small for a 64 KiB secret) and `blob`.
-- **Ids come from the application**, never from the database: MySQL has no
-  `RETURNING`, and no write reads one back.
-- **Named operations, never branches in the services.** Insert if absent,
-  upsert, row locks, rows changed, recognising a duplicate key, the clock and
-  reading a condition are each a function of `dialect.ts`, and its header
-  tables how each engine does them.
-- **Locks.** The audit chain locks a permanent head row (`FOR UPDATE` on
-  Postgres and MySQL) instead of a Postgres advisory lock. MySQL runs at READ
-  COMMITTED, set on every connection: at its default, REPEATABLE READ, two
-  transactions that lock the same missing row and then both insert it
-  deadlock. SQLite has a single writer but its driver does not queue for us
-  (24 concurrent appends failed with `SQLITE_BUSY`), so `connect.ts` queues
-  transactions itself, once per database file however many clients open it;
-  each takes the write lock with its first statement, so a row lock there is a
-  no-op.
-- **Postgres-only SQL is remodelled, not written three ways.** Partial unique
-  indexes became plain ones: a grant's scope columns are exactly one non-null
-  (a check), so plain unique indexes over them do the same job, and "one live
-  identity per subject" is a unique index on a generated column that holds the
-  subject only while the identity is not revoked. Emails are stored lowercase
-  and a check keeps them so, rather than matched with `lower()`. Checks stay
-  in the database on all three, each in its dialect's words (a regex is `~`,
-  `regexp_like` or `GLOB`; JSON is text that must parse, `::jsonb` or
-  `json_valid`). One is only partly the database's: SQLite's `lower()` folds
-  ASCII only, so non-ASCII case in an email is the server's to fold. No query
-  filters on a JSON field.
+- **Schemas and migrations.** `pgTable` and `sqliteTable` define two schemas
+  and migration trees under `packages/server/src/db/migrations/`, each a
+  single baseline. Generated tables sit inside a template in
+  `packages/server/src/db/baseline/` that adds the first audit rows and the
+  Postgres runtime role. Until the first deployment, `pnpm db:generate`
+  regenerates the baseline rather than adding migrations. Tests catch a
+  schema or template that no longer matches its migration. Encrypted bytes
+  use `bytea` in Postgres and `blob` in SQLite.
+- **Ids come from the application.** Writes know their keys before insertion
+  and do not read them back.
+- **Named operations.** Insert if absent, upsert, row locks, rows changed,
+  recognising a duplicate key, the clock and reading a condition stay in
+  `dialect.ts`. Services contain no database branches.
+- **Locks.** The audit chain locks a permanent head row with `FOR UPDATE`
+  on Postgres. SQLite has one writer, but its driver does not queue for us,
+  so `connect.ts` queues transactions once per database file however many
+  clients open it. Each takes the write lock with its first statement;
+  a row lock there is a no-op.
+- **Shared constraints.** Active identities use a unique index on a generated
+  column that holds the subject only while the identity is not revoked.
+  Emails are stored lowercase. Checks stay in both databases, with expressions
+  in each dialect. SQLite's `lower()` folds ASCII only, so the server folds
+  non-ASCII case. No query filters on a JSON field.
 
-Some things stay Postgres-only: the restricted runtime login
-(`coffre_runtime`, which cannot rewrite the audit log) and `pnpm test:schema`,
-which checks its privileges. On MySQL and SQLite the server connects with one
-login.
+The restricted runtime login (`coffre_runtime`, which cannot rewrite the
+app audit log) and `pnpm test:schema` stay Postgres-only. SQLite has no logins;
+its file permissions protect access to the database.
 
 D1 is not a fit for the app database: it has no interactive transactions, and
 the audit chain reads the previous hash, computes the next in JavaScript, then
 writes. Drizzle's D1 transactions send `BEGIN`, which D1 rejects. A Durable
-Object's SQLite has them, for an all-Cloudflare deployment without Postgres.
+Object's SQLite has them and stores the vault; the app stays on Postgres.

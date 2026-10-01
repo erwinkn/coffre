@@ -5,22 +5,20 @@ import { TEST_OWNER_DATABASE_URL, TEST_RUNTIME_DATABASE_URL } from './connection
 
 /**
  * Which database the integration suite runs on: `COFFRE_TEST_ENGINE` is
- * postgres (the default), mysql or sqlite. scripts/setup-test-database.sh
- * prepares it, and for MySQL and SQLite hands its URL over in
- * `COFFRE_TEST_DATABASE_URL`.
+ * postgres (the default) or sqlite. scripts/test-suite.sh prepares it,
+ * and for SQLite hands its URL over in `COFFRE_TEST_DATABASE_URL`.
  */
 export const TEST_ENGINE = testEngine(process.env.COFFRE_TEST_ENGINE ?? 'postgres');
 
 function testEngine(name: string): Engine {
-  if (name === 'postgres' || name === 'mysql' || name === 'sqlite') return name;
-  throw new Error(`COFFRE_TEST_ENGINE must be postgres, mysql or sqlite, not ${name}`);
+  if (name === 'postgres' || name === 'sqlite') return name;
+  throw new Error(`COFFRE_TEST_ENGINE must be postgres or sqlite, not ${name}`);
 }
 
 /**
  * The integration database twice: as its owner, to reset and inspect, and
- * as the app. On Postgres the app is the restricted runtime role. MySQL and
- * SQLite have no such role, so both are the same login, opened separately
- * all the same, as two servers would.
+ * as the app. On Postgres the app is the restricted runtime role. SQLite
+ * has no logins, but opens two clients all the same, as two servers would.
  */
 export async function openTestDatabase(): Promise<{ owner: Database; runtime: Database; close: () => Promise<void> }> {
   if (TEST_ENGINE === 'postgres') {

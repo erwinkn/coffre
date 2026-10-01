@@ -13,7 +13,7 @@ import { createRuntime } from './runtime.ts';
 import type { Ui } from './ui.ts';
 
 export type ServeOptions = CoffreConfig & {
-  /** `postgres://…`, `mysql://…`, or `file:coffre.db` for SQLite. */
+  /** `postgres://…`, or `file:coffre.db` for local SQLite. */
   database: string;
   /** 3000 unless set. */
   port?: number;
@@ -35,7 +35,7 @@ const SCHEDULE_MINUTES = 5;
 export async function serveWith(options: ServeOptions, ui: Ui, staticFiles: string | null): Promise<Server> {
   const config = resolveConfig(options);
   if (typeof options.database !== 'string' || options.database.length === 0) {
-    throw new Error('database must be a URL: postgres://…, mysql://… or file:…');
+    throw new Error('database must be a URL: postgres://… or file:…');
   }
   const database = await openDatabase(options.database);
   const runtime = createRuntime(config, database.db, options.vault);

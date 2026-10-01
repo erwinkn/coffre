@@ -2,20 +2,18 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { getTableName, is, Table } from 'drizzle-orm';
-import { getTableConfig as mysqlConfig } from 'drizzle-orm/mysql-core';
 import { getTableConfig as postgresConfig } from 'drizzle-orm/pg-core';
 import { getTableConfig as sqliteConfig } from 'drizzle-orm/sqlite-core';
 
 import { ENGINES, journal, staleness } from '../../src/db/baseline.ts';
 import { REQUIRED_MIGRATIONS } from '../../src/db/schema-version.ts';
 import * as postgres from '../../src/db/schema.ts';
-import * as mysql from '../../src/db/schema.mysql.ts';
 import * as sqlite from '../../src/db/schema.sqlite.ts';
 
 /**
- * The three schemas are one schema, and each migration tree ends where its
+ * Both schemas are one schema, and each migration tree ends where its
  * schema is. Together: the trees are in step. A schema change made on one
- * engine fails the first test until the other two schemas follow, and the
+ * engine fails the first test until the other schema follows, and the
  * second until `pnpm db:generate` has regenerated each baseline.
  *
  * Row types are checked at compile time, in portable.ts. Check constraints
@@ -66,17 +64,16 @@ function shapes(schema: Record<string, unknown>, config: (table: never) => unkno
   );
 }
 
-test('the MySQL and SQLite schemas have the Postgres tables, columns, nullability and keys', () => {
+test('the SQLite schema has the Postgres tables, columns, nullability and keys', () => {
   const expected = shapes(postgres, postgresConfig);
   assert.ok(Object.keys(expected).length >= 13);
-  assert.deepEqual(shapes(mysql, mysqlConfig), expected);
   assert.deepEqual(shapes(sqlite, sqliteConfig), expected);
 });
 
 test('each migration tree is its baseline, generated from its schema and template', async () => {
   const stale = Object.fromEntries(await Promise.all(ENGINES.map(async (engine) => [engine, await staleness(engine)])));
   // Anything listed here needs `pnpm db:generate`.
-  assert.deepEqual(stale, { postgres: [], mysql: [], sqlite: [] });
+  assert.deepEqual(stale, { postgres: [], sqlite: [] });
 });
 
 test('the app requires every migration of each tree', async () => {
