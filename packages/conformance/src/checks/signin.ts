@@ -53,6 +53,7 @@ export async function forgedIdentity(deployment: Deployment, people: People): Pr
       expect((await browser.fetch('/api/me')).status === 401, 'an owner-forged identity minted a session');
       expect(deployment.output().includes('auth_row_tampered') && deployment.output().includes(forged.id), 'the forged identity was not reported');
     } finally {
+      await query(sql, 'DELETE FROM credentials WHERE identity_id = $1', [forged.id]);
       await query(sql, 'DELETE FROM identities WHERE id = $1', [forged.id]);
     }
   });

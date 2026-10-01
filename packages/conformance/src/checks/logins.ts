@@ -78,13 +78,15 @@ export async function vaultLogin(deployment: Deployment): Promise<string> {
     !['vault_members', 'vault_grants', 'audit_log', 'audit_chain_head'].includes(name));
   return using(deployment.vaultRuntime(), async (sql) => {
     await noWrites(sql, appTables);
-    const [head] = await sql.query<{ insertable: boolean; deletable: boolean; identity_updatable: boolean }>(`SELECT
+    const [head] = await sql.query<{ insertable: boolean; deletable: boolean; identity_updatable: boolean; truncatable: boolean }>(`SELECT
       has_table_privilege(current_user, 'audit_chain_head', 'INSERT') AS insertable,
       has_table_privilege(current_user, 'audit_chain_head', 'DELETE') AS deletable,
+      has_table_privilege(current_user, 'audit_chain_head', 'TRUNCATE') AS truncatable,
       has_column_privilege(current_user, 'audit_chain_head', 'only_row', 'UPDATE') AS identity_updatable`);
-    expect(!head.insertable && !head.deletable && !head.identity_updatable, 'the vault can replace the head row', head);
+    expect(!head.insertable && !head.deletable && !head.truncatable && !head.identity_updatable, 'the vault can replace the head row', head);
     const statements = [...IMMUTABLE, appendAs('app'), 'SET ROLE coffre_app',
-      'UPDATE audit_chain_head SET only_row = only_row', 'DELETE FROM audit_chain_head'];
+      'UPDATE audit_chain_head SET only_row = only_row', 'DELETE FROM audit_chain_head', 'TRUNCATE audit_chain_head',
+      'UPDATE vault_members SET principal = principal', 'UPDATE vault_grants SET role = role'];
     for (const table of appTables.filter((name) => ['projects', 'environments', 'secrets', 'secret_versions', 'identities', 'credentials', 'device_authorizations', 'syncs', 'sync_keys'].includes(name))) statements.push(`UPDATE ${quoted(table)} SET ${table === 'sync_keys' ? 'key = key' : 'id = id'}`);
     const count = await refuses(sql, statements);
     return `${count} writes and bypasses refused; app tables have no write privileges`;
