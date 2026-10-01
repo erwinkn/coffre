@@ -1,5 +1,5 @@
 import { ROLES, type Permission, type Role } from '../../../core/src/access.ts';
-import type { Queryable } from '../../../db/src/database.ts';
+import type { Queryable } from '../db/database.ts';
 import {
   insertIfAbsent,
   lock,
@@ -7,8 +7,8 @@ import {
   members as loadMembers,
   places,
   update,
-} from '../../../db/src/queries.ts';
-import { credentials, identities, principals } from '../../../db/src/schema.ts';
+} from '../db/queries.ts';
+import { credentials, identities, principals } from '../db/schema.ts';
 import type { Access, Grant } from '../../../vault/src/types.ts';
 import { can } from './caller.ts';
 import { allowed, audited, denied, Refusal, requireOwner, vaultRefusal, type ApiContext } from './context.ts';

@@ -13,7 +13,7 @@ import {
   isAsked,
   type DestinationKind,
   type FormValues,
-} from '../../../sync/src/destinations.ts';
+} from '../../../client/src/index.ts';
 import type { RunOutcome, SyncView } from '../shared/models';
 import { Card } from './page';
 import { ConfirmDialog, EmptyState, ErrorLine, Modal, Notice, Spinner, Timestamp, Toggletip } from './ui';

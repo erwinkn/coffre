@@ -119,12 +119,12 @@ defined and tested.
 
 ## Local development is a separate mode
 
-Local development (`pnpm dev`, whose deployment is `packages/ui/dev/app.ts`)
+Local development (`pnpm dev`, whose deployment is `dev/deployment/app.ts`)
 uses `devIdp({ url: 'http://127.0.0.1:8081' })`: the dev IdP stands in for
 Access, minting Access-shaped tokens for a persona picker. `devIdp` refuses
 any URL that is not on loopback, so no deployment can end up trusting it.
 
-`apps/dev-idp`, `scripts/seed.mjs`, the seeded persona page, and CLI
+`dev/idp`, `dev/seed.mjs`, the seeded persona page, and CLI
 email/service persona minting are local tooling. The dev IdP is not deployed.
 Both the dev IdP and seed script refuse to run unless their shell has
 `COFFRE_AUTH_MODE=dev`. The seed additionally requires the exact checked-in

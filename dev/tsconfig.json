@@ -1,0 +1,11 @@
+// The dev loop's Node side: the dev IdP, and the Vite config that runs the
+// deployment. deployment/ has its own, for Workers.
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    // The IdP's tests import the seed's config, which is plain JavaScript.
+    "allowJs": true
+  },
+  "include": ["vite.config.ts", "idp/**/*.ts"]
+}

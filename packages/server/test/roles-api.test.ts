@@ -5,7 +5,7 @@ import { and, asc, eq } from 'drizzle-orm';
 
 import type { CoffreClient } from '../../client/src/index.ts';
 import { assignableToEnvironment, ROLES } from '../../core/src/access.ts';
-import { auditLog, principals } from '../../db/test/tables.ts';
+import { auditLog, principals } from './db/tables.ts';
 import {
   clientFor,
   openTestDatabase,

@@ -160,22 +160,23 @@ published six days before we tried to install it.
 ## Layout
 
 ```
-packages/server  @coffre/server: /api, sign-in, syncs, the heartbeat, migrations; /cloudflare and /node
+packages/server  @coffre/server: /api, sign-in, syncs, the heartbeat, the database; /cloudflare and /node
 packages/ui      @coffre/ui: the pages, a prebuilt TanStack Start handler and its static files
 packages/vault   @coffre/vault: the KEK, grants, members, root admins, its own log; /cloudflare and /node
-packages/client  @coffre/client: the API as typed calls, one fetch each
+packages/client  @coffre/client: the API as typed calls, one fetch each, and the sync destinations
 packages/cli     @coffre/cli: `coffre`, from init and login to secrets, syncs and audit
 packages/core    internal: envelope encryption, KEK providers, audit hash chain, identity
-packages/db      internal: Drizzle schema, migrations and every query, on three engines
-packages/sync    internal: destinations syncs push to: GitHub Actions, Vercel, Railway, Cloudflare
-apps/dev-idp     local stand-in for Cloudflare Access, an OIDC provider and GitHub
 examples/workers what `coffre init --workers` writes: two Workers
 examples/node    what `coffre init --node` writes: a server and its vault process
+dev/start.sh     `pnpm dev`: Postgres, the dev IdP, the dev deployment, then dev/seed.mjs
+dev/deployment   what `pnpm dev` runs: examples/workers, on the packages' sources
+dev/idp          local stand-in for Cloudflare Access, an OIDC provider and GitHub
+scripts          what dev, tests and CI share: databases, the smokes, the checks
 ```
 
 The five `@coffre/*` packages are the product, compiled with their
-declarations; the internal ones are bundled into them. A deployment is one of
-the examples: a small project that imports the packages and configures them
+declarations; the internal one, core, is bundled into them. A deployment is
+one of the examples: a small project that imports the packages and configures them
 in code ([docs/architecture.md](docs/architecture.md),
 [docs/deploy.md](docs/deploy.md)).
 
@@ -189,7 +190,7 @@ pnpm dev              # Postgres + dev IdP + coffre and its vault as two Workers
 Then open http://127.0.0.1:3000 and sign in as `admin@acme.example`.
 
 `pnpm dev` runs a deployment like `examples/workers` under `vite dev`
-(`packages/ui/dev/`), on the packages' sources, so an edit to a page, the
+(`dev/deployment/`), on the packages' sources, so an edit to a page, the
 server or the vault reloads in place. It signs in with the dev IdP's persona
 picker (`devIdp(…)`). `pnpm dev:signin` runs the real sign-in page instead,
 with the dev IdP playing GitHub and an OIDC provider, on the data `pnpm dev`
@@ -220,7 +221,7 @@ pnpm test:consumer    # pack the packages, init both examples from the packed CL
 ```
 
 `.env.dev` holds the local fixtures (keys, root admins) that
-`packages/ui/dev/` hands each Worker: the app its audit chain key and
+`dev/deployment/` hands each Worker: the app its audit chain key and
 sign-in settings, the vault its KEK, root admins and checkpoint signing key.
 `pnpm dev` empties the vault's local store each time it seeds, since the
 seed starts the database over.

@@ -5,7 +5,7 @@ import {
   loadLocalSeedConfig,
   LOCAL_SEED_DIRECTORY,
   LOCAL_SEED_GRANTS,
-} from '../../../scripts/seed-config.mjs';
+} from '../../../dev/seed-config.mjs';
 
 const local = {
   COFFRE_AUTH_MODE: 'dev',

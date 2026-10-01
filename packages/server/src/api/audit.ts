@@ -1,13 +1,13 @@
 import { roleGrants } from '../../../core/src/access.ts';
 import { GENESIS_HASH, verifyChain } from '../../../core/src/audit/chain.ts';
-import { SNAPSHOT } from '../../../db/src/dialect.ts';
+import { SNAPSHOT } from '../db/dialect.ts';
 import {
   auditHead,
   auditPage,
   auditRange,
   resolvePath,
   type AuditFilter,
-} from '../../../db/src/queries.ts';
+} from '../db/queries.ts';
 import { verifyCheckpoint } from '../../../vault/src/checkpoint.ts';
 import type { LogPage } from '../../../vault/src/types.ts';
 import type { ApiContext } from './context.ts';

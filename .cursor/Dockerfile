@@ -10,7 +10,7 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Base tooling. git + curl are required in fully custom images; lsof is used by
-# scripts/dev.sh, gnupg by the Docker apt repo, sudo by the start hook.
+# dev/start.sh, gnupg by the Docker apt repo, sudo by the start hook.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates curl git gnupg lsof sudo openssh-client xz-utils procps iproute2 \

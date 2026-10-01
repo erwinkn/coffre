@@ -24,10 +24,19 @@ test('ESLint keeps server functions out of the pages', async () => {
   );
 });
 
-test('ESLint keeps drizzle queries in packages/db', async () => {
-  assert.equal(
-    (await lintImport("import { eq } from 'drizzle-orm';", 'packages/ui/src/lib/example.ts'))[0]
-      ?.ruleId,
-    'no-restricted-imports',
-  );
+test('ESLint keeps drizzle queries in the server\'s database layer', async () => {
+  const source = "import { eq } from 'drizzle-orm';";
+  for (const filePath of [
+    'packages/ui/src/lib/example.ts',
+    'packages/server/src/api/example.ts',
+    'packages/server/src/sync/example.ts',
+    'packages/core/src/example.ts',
+    'packages/client/src/example.ts',
+    'packages/cli/src/example.ts',
+  ]) {
+    assert.equal((await lintImport(source, filePath))[0]?.ruleId, 'no-restricted-imports', filePath);
+  }
+  for (const filePath of ['packages/server/src/db/example.ts', 'packages/vault/src/example.ts']) {
+    assert.deepEqual(await lintImport(source, filePath), [], filePath);
+  }
 });

@@ -8,11 +8,11 @@ export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-coffre}"
 
 docker compose exec -T postgres \
     psql -v ON_ERROR_STOP=1 -U coffre_owner -d coffre_test \
-    < packages/db/test/schema-fixture.sql
+    < packages/server/test/db/schema-fixture.sql
 
 docker compose exec -T \
     -e PGPASSWORD=local-runtime-only \
     postgres \
     psql -v ON_ERROR_STOP=1 -h 127.0.0.1 \
         -U coffre_runtime -d coffre_test \
-    < packages/db/test/schema-guarantees.sql
+    < packages/server/test/db/schema-guarantees.sql

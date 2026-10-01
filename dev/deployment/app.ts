@@ -1,0 +1,39 @@
+// The app Worker `pnpm dev` runs: a deployment like examples/workers, signed
+// into through the dev IdP. `pnpm dev:signin` gives it coffre's own sign-in
+// page instead, with the dev IdP standing in for GitHub and for an OpenID
+// Connect provider, so both provider kinds run without a network.
+//
+// Every value is a local fixture; see wrangler.jsonc and .env.dev.
+import { coffre, devIdp, github, oidc, postgres, signin } from '@coffre/server/cloudflare';
+
+import type { Vault } from '@coffre/server/cloudflare';
+
+type Env = {
+  HYPERDRIVE: { connectionString: string };
+  VAULT: Vault;
+  COFFRE_AUTH_MODE: 'dev' | 'signin';
+  COFFRE_PUBLIC_URL: string;
+  COFFRE_DEV_IDP_URL: string;
+  COFFRE_AUDIT_CHAIN_KEY: string;
+};
+
+export default coffre((env: Env) => {
+  const idp = env.COFFRE_DEV_IDP_URL;
+  const local = { clientId: 'coffre-local', clientSecret: 'coffre-local-secret' };
+  return {
+    publicUrl: env.COFFRE_PUBLIC_URL,
+    database: postgres(env.HYPERDRIVE),
+    vault: env.VAULT,
+    auth:
+      env.COFFRE_AUTH_MODE === 'signin'
+        ? signin({
+            providers: [
+              github({ ...local, webUrl: `${idp}/github`, apiUrl: `${idp}/github/api` }),
+              oidc({ ...local, id: 'local', label: 'Dev IdP', issuer: idp }),
+            ],
+            note: 'Local development. Both buttons lead to the dev IdP.',
+          })
+        : devIdp({ url: idp }),
+    auditChainKey: env.COFFRE_AUDIT_CHAIN_KEY,
+  };
+});

@@ -69,4 +69,4 @@ docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U coffre_owner -d postg
     -c "ALTER ROLE coffre_runtime LOGIN PASSWORD 'local-runtime-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS" >/dev/null
 
 DATABASE_URL='postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/coffre' \
-    pnpm --dir packages/db run migrate >/dev/null
+    pnpm --dir packages/server run db:migrate >/dev/null

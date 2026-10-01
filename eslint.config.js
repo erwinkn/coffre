@@ -3,7 +3,7 @@ import tsParser from '@typescript-eslint/parser';
 
 const noDrizzle = {
   regex: '^drizzle-orm(/|$)',
-  message: 'Every query lives in packages/db/src/queries.ts; add or extend one there.',
+  message: 'Every query lives in packages/server/src/db/queries.ts; add or extend one there.',
 };
 
 const parsing = {
@@ -33,20 +33,23 @@ const uiBoundaries = {
 
 export default defineConfig([
   {
+    // Drizzle belongs to the server's database layer, and to the vault's own
+    // store, which is a database of its own.
+    name: 'coffre/query-boundary',
+    files: ['packages/*/src/**/*.{ts,tsx}'],
+    ignores: ['packages/server/src/db/**', 'packages/vault/src/**', 'packages/ui/src/routeTree.gen.ts'],
+    ...parsing,
+    rules: {
+      'no-restricted-imports': ['error', { patterns: [noDrizzle] }],
+    },
+  },
+  {
     name: 'coffre/ui-boundaries',
     files: ['packages/ui/src/**/*.{ts,tsx}'],
     ignores: ['packages/ui/src/routeTree.gen.ts'],
     ...parsing,
     rules: {
       'no-restricted-imports': ['error', uiBoundaries],
-    },
-  },
-  {
-    name: 'coffre/server-boundaries',
-    files: ['packages/server/src/**/*.ts'],
-    ...parsing,
-    rules: {
-      'no-restricted-imports': ['error', { patterns: [noDrizzle] }],
     },
   },
 ]);

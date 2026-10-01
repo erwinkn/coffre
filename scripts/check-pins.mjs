@@ -13,8 +13,8 @@ const root = new URL('..', import.meta.url).pathname;
 const EXACT = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const DEP_FIELDS = ['dependencies', 'devDependencies', 'optionalDependencies'];
 
-const manifests = ['package.json'];
-for (const dir of ['packages', 'apps', 'examples']) {
+const manifests = ['package.json', 'dev/package.json'];
+for (const dir of ['packages', 'examples']) {
     const base = join(root, dir);
     if (!existsSync(base)) continue;
     for (const entry of readdirSync(base)) {

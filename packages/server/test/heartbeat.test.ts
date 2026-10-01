@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 
 import { eq } from 'drizzle-orm';
 
-import { createDatabase } from '../../db/src/database.ts';
-import { heartbeat } from '../../db/src/queries.ts';
-import { auditChainHead, auditHeartbeat, auditLog } from '../../db/test/tables.ts';
+import { createDatabase } from '../src/db/database.ts';
+import { heartbeat } from '../src/db/queries.ts';
+import { auditChainHead, auditHeartbeat, auditLog } from './db/tables.ts';
 import {
   auditReadiness,
   checkpointAudit,

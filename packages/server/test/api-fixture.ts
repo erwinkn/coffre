@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { createClient, type CoffreClient } from '../../client/src/index.ts';
 import { LocalKekProvider } from '../../core/src/kek/local.ts';
 import { KekRegistry } from '../../core/src/kek/registry.ts';
-import { tablesOf, type Database } from '../../db/src/database.ts';
+import { tablesOf, type Database } from '../src/db/database.ts';
 import { DEFAULT_BULK_LIMIT, type ResolvedVaultConfig } from '../../vault/src/config.ts';
 import { openLocalVault, type LocalVault } from '../../vault/src/local.ts';
 import type { Vault } from '../../vault/src/types.ts';
@@ -131,7 +131,7 @@ export function clientFor(
   });
 }
 
-export { openTestDatabase } from '../../db/test/engine.ts';
+export { openTestDatabase } from './db/engine.ts';
 
 /** Deps for a fresh instance with these root admins, over the restricted role. */
 export function testDeps(db: Database, rootAdmins: readonly string[], extra: Partial<FixtureDeps> = {}): FixtureDeps {

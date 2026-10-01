@@ -18,7 +18,7 @@
  */
 import { fileURLToPath } from 'node:url';
 
-import { migrateDatabase } from '../../db/src/migrate.ts';
+import { migrateDatabase } from './db/migrate.ts';
 import { serveWith, type ServeOptions, type Server } from './node-server.ts';
 
 export * from './index.ts';

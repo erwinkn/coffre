@@ -23,9 +23,8 @@
     "./package.json": "./package.json"
   },
   "scripts": {
-    "dev": "vite dev",
     "build": "vite build && rm dist/server/wrangler.json && tsdown && node ../../scripts/check-client-bundle.mjs",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p dev",
+    "typecheck": "tsc --noEmit",
     "test": "node --test"
   },
   "devDependencies": {

@@ -1,16 +1,19 @@
 # AGENTS.md
 
 `coffre` is a pnpm monorepo secrets manager, shipped as packages a deployment imports
-and configures in code: `packages/server` (`@coffre/server`: `/api`, sign-in, syncs,
-migrations; `/cloudflare` and `/node` entry points), `packages/ui` (`@coffre/ui`: the
-TanStack Start pages, prebuilt), `packages/vault` (`@coffre/vault`: keys, grants,
-members, its own log), `packages/client` (the typed API client the CLI and UI call),
-`packages/cli` (`coffre`, including `coffre init`), and the internal `packages/core`,
-`packages/db`, `packages/sync`, bundled into them. `examples/workers` and
-`examples/node` are deployments, exactly what `coffre init` writes (a test diffs
-them). `apps/dev-idp` is the local stand-in for Cloudflare Access, GitHub and OIDC.
-The root `README.md` and the `package.json` scripts are the source of truth for
-commands; this file only adds what they leave implicit.
+and configures in code: `packages/server` (`@coffre/server`: `/api`, sign-in, syncs and
+their providers in `src/sync`, the Drizzle schema, queries and migrations in `src/db`;
+`/cloudflare` and `/node` entry points), `packages/ui` (`@coffre/ui`: the TanStack
+Start pages, prebuilt), `packages/vault` (`@coffre/vault`: keys, grants, members, its
+own log), `packages/client` (the typed API client the CLI and UI call), `packages/cli`
+(`coffre`, including `coffre init`), and the internal `packages/core`, bundled into
+them. `examples/workers` and `examples/node` are deployments, exactly what `coffre
+init` writes (a test diffs them). `dev/` holds what only the dev loop uses and nothing
+ships: `dev/start.sh` (`pnpm dev`), the deployment it runs, the dev IdP (`dev/idp`, the
+local stand-in for Cloudflare Access, GitHub and OIDC, which the smokes use too) and
+the seed. `scripts/` holds what dev, tests and CI share. The root `README.md` and the
+`package.json` scripts are the source of truth for commands; this file only adds what
+they leave implicit.
 
 ## Setup
 
@@ -26,14 +29,15 @@ DB-backed tests need it up. Export `COMPOSE_PROJECT_NAME=coffre` whenever you in
 `docker compose` directly.
 
 **Run the stack.** `pnpm dev` brings up Postgres + dev IdP (:8081) + coffre (:3000) +
-seed data. It runs the deployment in `packages/ui/dev/` (`app.ts`, `vault.ts`, their
+seed data. It runs the deployment in `dev/deployment/` (`app.ts`, `vault.ts`, their
 `wrangler.jsonc`) under `vite dev`, with the vault as an auxiliary Worker beside the
-app and no port of its own. Vite aliases `@coffre/server/cloudflare`,
+app and no port of its own. `dev/vite.config.ts` roots Vite in `packages/ui` (where
+TanStack Start finds the routes) and aliases `@coffre/server/cloudflare`,
 `@coffre/vault/cloudflare` and `@coffre/ui` to their sources, so edits to any of them
 hot-reload without a build. The vault keeps its Durable Object SQLite under
-`packages/ui/.wrangler/state` (or `$COFFRE_STATE_DIR`), which `pnpm dev` empties
-before it seeds. `COFFRE_DEV_PORT`, `COFFRE_DEV_IDP_PORT` and `COFFRE_DEV_DATABASE`
-run a second stack beside the first (see `scripts/dev.sh`). Sign in at
+`dev/.wrangler/state` (or `$COFFRE_STATE_DIR`), which `pnpm dev` empties before it
+seeds. `COFFRE_DEV_PORT`, `COFFRE_DEV_IDP_PORT` and `COFFRE_DEV_DATABASE` run a
+second stack beside the first (see `dev/start.sh`). Sign in at
 `http://127.0.0.1:3000/login` as `admin@acme.example` (root admin) or any of the
 seeded personas. CLI: `node --env-file=.env.dev packages/cli/src/main.ts <cmd>`.
 

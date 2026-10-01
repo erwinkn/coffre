@@ -12,7 +12,7 @@ and keeps it current there. coffre ships four destinations:
 
 Anything else reads secrets at run time with `coffre run` or `coffre export`
 and a service token (see the README). Each destination's exact fields, name
-rules and quirks are in [packages/sync/README.md](../packages/sync/README.md).
+rules and quirks are in [packages/server/src/sync/README.md](../packages/server/src/sync/README.md).
 
 ## Setting one up
 
