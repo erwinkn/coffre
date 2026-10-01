@@ -1,12 +1,13 @@
 import { roleGrants } from '@coffre/core/access';
 import { GENESIS_HASH, verifyChain } from '@coffre/core/audit';
-import { verifyCheckpoint, type Checkpoint, type LogPage } from '@coffre/core/vault';
+import { describeAccessFault, verifyCheckpoint, type Checkpoint, type LogEntry, type LogVerification } from '@coffre/core/vault';
 
 import { SNAPSHOT } from '../db/dialect.ts';
 import {
   auditHead,
   auditPage,
   auditRange,
+  places,
   resolvePath,
   type AuditFilter,
 } from '../db/queries.ts';
@@ -55,15 +56,29 @@ export type AuditVerification =
       reason: string;
     };
 
+/** The vault's verdict as the API gives it, its fault already in words. */
+export type VaultVerification =
+  | { ok: true; entries: number }
+  | { ok: false; failedAtSeq: number | null; reason: string };
+
 export type AuditQuery = {
   path?: Path;
   /** `user:ada@acme.example`, `token:ci-deploy`, or a raw actor id such as `sync:…`. */
   actor?: string;
   decision?: 'allow' | 'deny';
+  /**
+   * `sign-ins` leaves out `auth.signin` and `auth.signout`, for a view about
+   * what was done with secrets and access. They stay in the log and its
+   * chain, and are returned unless asked otherwise.
+   */
+  exclude?: 'sign-ins';
   /** Entries older than this seq, for paging backwards. */
   before?: number;
   limit: number;
 };
+
+/** What `exclude=sign-ins` leaves out. Binding an account and issuing a credential stay. */
+export const SIGN_IN_ACTIONS = ['auth.signin', 'auth.signout'] as const;
 
 /**
  * Newest first. Owners read everything; anyone else reads the projects and
@@ -73,7 +88,11 @@ export async function listAudit(
   ctx: ApiContext,
   query: AuditQuery,
 ): Promise<{ entries: AuditEntryView[] }> {
-  const filter: AuditFilter = { decision: query.decision, limit: query.limit };
+  const filter: AuditFilter = {
+    decision: query.decision,
+    excludeActions: query.exclude === 'sign-ins' ? SIGN_IN_ACTIONS : undefined,
+    limit: query.limit,
+  };
   const { caller } = ctx;
   if (!caller.isOwner) {
     const readable = caller.grants.filter((grant) => roleGrants(grant.role, 'audit.read'));
@@ -220,7 +239,7 @@ export async function verifyAudit(ctx: ApiContext): Promise<AuditVerification> {
     if (behind !== null) return vault(null, behind);
     through = recorded.checkpoint.vault;
   }
-  const verified = await ctx.vault.verifyLog({ through });
+  const verified = await named(ctx, await ctx.vault.verifyLog({ through }));
   if (!verified.ok) return vault(verified.failedAtSeq, verified.reason);
   return {
     ok: true,
@@ -238,9 +257,38 @@ export async function verifyAudit(ctx: ApiContext): Promise<AuditVerification> {
 export async function vaultLog(
   ctx: ApiContext,
   query: { before?: number; limit: number; full?: boolean },
-): Promise<LogPage> {
+): Promise<{ entries: LogEntry[]; verification: VaultVerification }> {
   if (!ctx.caller.isRootAdmin) throw forbidden('only a root admin may read the vault log');
   const page = await ctx.vault.log({ actor: formatMember(ctx.caller.principal), ...query });
   if (!page.ok) throw vaultRefused(page.refusal);
-  return { entries: page.entries, verification: page.verification };
+  return { entries: page.entries, verification: await named(ctx, page.verification) };
+}
+
+/**
+ * The vault's verdict with its fault worded by name: the vault knows people
+ * and places only by id, and `market/prod` is what an owner can act on.
+ */
+async function named(ctx: ApiContext, verification: LogVerification): Promise<VaultVerification> {
+  if (verification.ok) return verification;
+  const { fault, ...verdict } = verification;
+  if (fault === undefined) return verdict;
+  const known = await places(ctx.db);
+  const reason = describeAccessFault(fault, {
+    principal: principalName,
+    place: (projectId, environmentId) => {
+      const project = known.find((place) => place.id === projectId);
+      if (project === undefined) return environmentId === null ? projectId : `${projectId}/${environmentId}`;
+      if (environmentId === null) return project.slug;
+      const environment = project.environments.find((place) => place.id === environmentId);
+      return `${project.slug}/${environment?.slug ?? environmentId}`;
+    },
+  });
+  return { ...verdict, reason };
+}
+
+/** `user:ada@acme.example` as `ada@acme.example`, `token:ci-deploy` as `ci-deploy (token)`. */
+function principalName(principal: string): string {
+  if (principal.startsWith('user:')) return principal.slice('user:'.length);
+  if (principal.startsWith('token:')) return `${principal.slice('token:'.length)} (token)`;
+  return principal;
 }

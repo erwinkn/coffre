@@ -261,7 +261,9 @@ test('the audit verification checks the vault log too, and finds a grant written
   } finally {
     file.close();
   }
-  const reason = `the store holds a grant the log never gave: user:${DEV} as owner on ${projectId}`;
+  // Worded with the names the app knows; the vault has only ids.
+  assert.match(projectId, /^[0-9a-f-]{36}$/);
+  const reason = `the store holds a grant the log never gave: ${DEV} as owner on market`;
   assert.deepEqual(await root.audit.verify(), { ok: false, log: 'vault', failedAtSeq: null, reason });
   assert.deepEqual((await root.audit.vault({ full: '1' })).verification, { ok: false, failedAtSeq: null, reason });
 });

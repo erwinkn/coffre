@@ -589,7 +589,7 @@ function AccessPanel({
           lead={
             <span className="th">
               {people ? <User size={14} /> : <Key size={14} />}
-              {people ? 'Email' : 'Common name'}
+              {people ? 'Email' : 'Name'}
             </span>
           }
         >
@@ -599,7 +599,7 @@ function AccessPanel({
               number={index + 1}
               project={project}
               grant={grant}
-              leadLabel={people ? 'Email' : 'Common name'}
+              leadLabel={people ? 'Email' : 'Name'}
               lead={<PrincipalLink type={grant.principalType} id={grant.principalId} />}
             />
           ))}

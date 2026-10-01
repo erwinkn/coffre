@@ -75,7 +75,7 @@ export type SyncProvider<Config = unknown> = {
   };
   /** Validate untrusted JSON into Config, throwing SyncConfigError with a readable message. */
   parseConfig(input: unknown): Config;
-  /** One line naming the destination, e.g. "erwinkn/app · environment production". */
+  /** One line naming the destination, e.g. "acme/app · environment production". */
   describe(config: Config): string;
   /** Returns the key, or a reason it cannot exist at this target. */
   checkKey(key: string): { ok: true } | { ok: false; reason: string };

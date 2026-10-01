@@ -1,4 +1,5 @@
 import {
+  type CoffreClient,
   configFromForm,
   firstMissing,
   initialValues,
@@ -19,6 +20,8 @@ import { AlertTriangle, MoreHorizontal, Pause, Play, Plus, Sync, SyncMark, X } f
 
 /** How often the card refreshes while a run is in flight. */
 const RUNNING_POLL_MS = 2000;
+/** How long a new sync's toast waits for its first push to end. */
+const FIRST_RUN_WAIT_MS = 60_000;
 
 type SyncsResult = { ok: true; syncs: SyncView[]; canManage: boolean } | { ok: false; error: string };
 
@@ -70,7 +73,7 @@ export function Syncs({
         </EmptyState>
       ) : (
         <div className="dt-wrap">
-          <table className="dt syncs">
+          <table className="dt syncs stacks">
             <thead>
               <tr>
                 <th>Destination</th>
@@ -119,19 +122,27 @@ function SyncRow({ sync, canRun, canManage }: { sync: SyncView; canRun: boolean;
     );
   }
 
+  // A sync whose provider the deployment stopped listing cannot run, and
+  // its last error predates that: what it is now says it all.
+  const shownError = error ?? (sync.offered ? sync.lastError : null);
+
   return (
     <>
-      <tr>
-        <td>
+      <tr className={shownError !== null && !sync.running ? 'has-error' : undefined}>
+        <td className="col-destination">
           <span className="cell-account">
             <SyncMark brand={sync.brand} size={15} />
             <span className="cell-stack">
               <span>{sync.providerLabel}</span>
-              <small className="mono">{sync.destination}</small>
+              {sync.offered ? (
+                <small className="mono">{sync.destination}</small>
+              ) : (
+                <small>No longer offered by this deployment</small>
+              )}
             </span>
           </span>
         </td>
-        <td className="nowrap">
+        <td className="nowrap col-status">
           <span className="cell-stack">
             <SyncState sync={sync} />
             <small>
@@ -143,7 +154,12 @@ function SyncRow({ sync, canRun, canManage }: { sync: SyncView; canRun: boolean;
         <td className="col-actions">
           <div className="acts">
             {canRun && !sync.paused && (
-              <button className="act" onClick={runNow} disabled={pending || sync.running}>
+              <button
+                className="act"
+                onClick={runNow}
+                disabled={pending || sync.running || !sync.offered}
+                title={sync.offered ? undefined : 'This deployment no longer offers this provider'}
+              >
                 {pushing.pending ? <Spinner size={13} /> : <Sync size={13} />}
                 Run now
               </button>
@@ -197,10 +213,10 @@ function SyncRow({ sync, canRun, canManage }: { sync: SyncView; canRun: boolean;
           />
         </td>
       </tr>
-      {(sync.lastError !== null || error !== null) && !sync.running && (
+      {shownError !== null && !sync.running && (
         <tr className="row-error">
           <td colSpan={4}>
-            <ErrorLine error={error ?? sync.lastError} />
+            <ErrorLine error={shownError} />
           </td>
         </tr>
       )}
@@ -210,6 +226,7 @@ function SyncRow({ sync, canRun, canManage }: { sync: SyncView; canRun: boolean;
 
 /** One tag for the state that matters most right now. */
 function SyncState({ sync }: { sync: SyncView }) {
+  if (!sync.offered) return <span className="tag tag-outline">Unavailable</span>;
   if (sync.running) {
     return (
       <span className="tag tag-blue">
@@ -285,6 +302,41 @@ function announce(sync: SyncView, outcome: RunOutcome) {
     ].filter(Boolean);
     toast.success(`${capitalize(parts.join(', '))} to ${sync.destination}`);
   }
+}
+
+/**
+ * A new sync pushes in the background once it is made. Say so while it does,
+ * then say how it went: a green toast beside a row already marked Failed
+ * would be telling two stories.
+ */
+async function followFirstRun(
+  coffre: CoffreClient,
+  path: string,
+  sync: SyncView,
+  refresh: () => Promise<void>,
+) {
+  const id = toast.loading(`Pushing to ${sync.destination}`, { description: 'The first push is under way.' });
+  const deadline = Date.now() + FIRST_RUN_WAIT_MS;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, RUNNING_POLL_MS));
+    const listed = await uiResult(() => coffre.syncs.list(path));
+    const now = listed.ok ? listed.syncs.find((other) => other.id === sync.id) : undefined;
+    if (now === undefined || now.running || now.lastRunAt === null) continue;
+    await refresh();
+    if (now.lastStatus === 'failed') {
+      toast.error(`Could not sync to ${sync.destination}`, { id, description: now.lastError ?? undefined });
+    } else if (now.lastStatus === 'partial') {
+      toast.warning(`Synced to ${sync.destination}, but not every key`, { id, description: now.lastError ?? undefined });
+    } else {
+      toast.success(`Synced to ${sync.destination}`, {
+        id,
+        description: `${now.synced} ${now.synced === 1 ? 'key is' : 'keys are'} there now.`,
+      });
+    }
+    return;
+  }
+  await refresh();
+  toast(`Still pushing to ${sync.destination}`, { id, description: 'Its result appears in the list when it ends.' });
 }
 
 function capitalize(text: string): string {
@@ -385,6 +437,7 @@ function AddSyncForm({
   const [values, setValues] = useState<FormValues>(() => initialValues(providers[0]));
   const [credential, setCredential] = useState('');
   const coffre = useCoffre();
+  const router = useRouter();
   const { pending, error, setError, run } = useAction();
   const missing = firstMissing(provider, values);
 
@@ -412,10 +465,8 @@ function AddSyncForm({
               credential: credential.trim(),
             }),
           (sync) => {
-            toast.success(`Syncing to ${sync.destination}`, {
-              description: 'The first push has started.',
-            });
             onDone();
+            void followFirstRun(coffre, `${project}/${environment}`, sync, () => router.invalidate());
           },
         );
       }}

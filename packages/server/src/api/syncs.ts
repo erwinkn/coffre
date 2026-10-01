@@ -80,7 +80,12 @@ export type SyncView = {
   providerLabel: string;
   /** `other` for a provider the deployment no longer lists. */
   brand: SyncBrand;
-  /** One line naming the destination, e.g. "erwinkn/app · environment production". */
+  /**
+   * Whether the deployment still lists the provider. A sync made before it
+   * stopped still lists, so it can be removed, but can no longer run.
+   */
+  offered: boolean;
+  /** One line naming the destination, e.g. "acme/app · environment production". */
   destination: string;
   config: { [key: string]: Json };
   /** `project/environment/KEY` of the secret holding the destination's token. */
@@ -324,6 +329,7 @@ export class SyncRunner {
         provider: row.provider,
         providerLabel: provider?.label ?? row.provider,
         brand: provider?.brand ?? 'other',
+        offered: provider !== null,
         destination,
         // Stored as JSON text from an object the create call checked.
         config: config as SyncView['config'],
@@ -446,7 +452,11 @@ export class SyncRunner {
 
     try {
       const provider = this.provider(sync.provider);
-      if (provider === null) throw new SyncFailure(`this deployment no longer lists the sync provider "${sync.provider}"`);
+      if (provider === null) {
+        throw new SyncFailure(
+          `This deployment no longer offers the sync provider "${sync.provider}". Remove this sync, or ask whoever runs coffre to list the provider again.`,
+        );
+      }
       const config = provider.parseConfig(JSON.parse(sync.config));
       const destination = provider.describe(config);
       const signal = AbortSignal.timeout(RUN_TIMEOUT_MS);

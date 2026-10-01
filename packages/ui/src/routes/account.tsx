@@ -67,7 +67,7 @@ function AccountPage() {
       {principal !== null && (
         <Card labelledBy="identity" title="Identity">
           <dl className="facts">
-            <Fact label={principal.type === 'user' ? 'Email' : 'Common name'}>
+            <Fact label={principal.type === 'user' ? 'Email' : 'Name'}>
               <span className="mono">{principal.id}</span>
             </Fact>
             <Fact label="Kind">{principal.type === 'user' ? 'User' : 'Token'}</Fact>

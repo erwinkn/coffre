@@ -12,6 +12,7 @@ import type { SecretContext } from '@coffre/core/envelope';
 import { KekUnavailableError } from '@coffre/core/kek';
 import {
   checkpointMessage,
+  describeAccessFault,
   type Access,
   type AccessChange,
   type AdmitInput,
@@ -682,8 +683,8 @@ class VaultService implements Vault {
       if (kept === null || carries(this.#store, kept)) continue;
       return { ok: false, failedAtSeq: kept.seq, reason: `not the entry ${by} signed: the log was rewritten or cut back` };
     }
-    const reason = replay(this.#store, at);
-    return reason === null ? verification : { ok: false, failedAtSeq: null, reason };
+    const fault = replay(this.#store, at);
+    return fault === null ? verification : { ok: false, failedAtSeq: null, reason: describeAccessFault(fault), fault };
   }
 }
 

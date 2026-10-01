@@ -239,6 +239,7 @@ export type Api = {
         provider: string;
         providerLabel: string;
         brand: "cloudflare" | "github" | "other" | "railway" | "vercel";
+        offered: boolean;
         destination: string;
         config: {
           [key: string]: string | number | boolean | null | Json[] | {
@@ -319,6 +320,7 @@ export type Api = {
           provider: string;
           providerLabel: string;
           brand: "cloudflare" | "github" | "other" | "railway" | "vercel";
+          offered: boolean;
           destination: string;
           config: {
             [key: string]: string | number | boolean | null | Json[] | {
@@ -497,6 +499,7 @@ export type Api = {
         provider: string;
         providerLabel: string;
         brand: "cloudflare" | "github" | "other" | "railway" | "vercel";
+        offered: boolean;
         destination: string;
         config: {
           [key: string]: string | number | boolean | null | Json[] | {
@@ -534,6 +537,7 @@ export type Api = {
       provider: string;
       providerLabel: string;
       brand: "cloudflare" | "github" | "other" | "railway" | "vercel";
+      offered: boolean;
       destination: string;
       config: {
         [key: string]: string | number | boolean | null | Json[] | {
@@ -565,6 +569,7 @@ export type Api = {
       provider: string;
       providerLabel: string;
       brand: "cloudflare" | "github" | "other" | "railway" | "vercel";
+      offered: boolean;
       destination: string;
       config: {
         [key: string]: string | number | boolean | null | Json[] | {
@@ -594,6 +599,7 @@ export type Api = {
       provider: string;
       providerLabel: string;
       brand: "cloudflare" | "github" | "other" | "railway" | "vercel";
+      offered: boolean;
       destination: string;
       config: {
         [key: string]: string | number | boolean | null | Json[] | {
@@ -624,6 +630,7 @@ export type Api = {
         provider: string;
         providerLabel: string;
         brand: "cloudflare" | "github" | "other" | "railway" | "vercel";
+        offered: boolean;
         destination: string;
         config: {
           [key: string]: string | number | boolean | null | Json[] | {
@@ -665,6 +672,7 @@ export type Api = {
       path?: string;
       actor?: string;
       decision?: "allow" | "deny";
+      exclude?: "sign-ins";
       before?: unknown;
       limit?: unknown;
     };
@@ -860,6 +868,7 @@ export type OffboardingReport = {
     provider: string;
     providerLabel: string;
     brand: "cloudflare" | "github" | "other" | "railway" | "vercel";
+    offered: boolean;
     destination: string;
     config: {
       [key: string]: string | number | boolean | null | Json[] | {
@@ -1034,6 +1043,7 @@ export type SyncView = {
   provider: string;
   providerLabel: string;
   brand: "cloudflare" | "github" | "other" | "railway" | "vercel";
+  offered: boolean;
   destination: string;
   config: {
     [key: string]: string | number | boolean | null | Json[] | {

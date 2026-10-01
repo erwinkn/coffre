@@ -26,7 +26,11 @@ function UsersPage() {
   return (
     <>
       <PageHeader title="Users" actions={<AddPrincipal principalType="user" />} />
-      <DirectoryTable principalType="user" principals={users} />
+      <DirectoryTable
+        principalType="user"
+        principals={users}
+        hasRemoved={result.removed.some((principal) => principal.principalType === 'user')}
+      />
       <RemovedList principalType="user" removed={result.removed} />
     </>
   );
