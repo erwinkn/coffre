@@ -21,8 +21,9 @@ export function rowKey(signingKey: Uint8Array): Buffer {
   return Buffer.from(hkdfSync('sha256', signingKey, new Uint8Array(0), 'coffre.vault.rows.v1', 32));
 }
 
-export function memberMac(key: Buffer, member: Omit<Member, 'mac'>, grants: readonly GrantRow[]): Buffer {
-  const held = grants
+/** A member's grants as the MAC covers them: each one's place, role, end and grant, as a sorted set. */
+export function grantSet(grants: readonly GrantRow[]): string[] {
+  return grants
     .map((grant) => [
       grant.environmentId === null ? 'project' : 'environment',
       grant.environmentId ?? grant.projectId,
@@ -33,6 +34,16 @@ export function memberMac(key: Buffer, member: Omit<Member, 'mac'>, grants: read
     ])
     .map((tuple) => JSON.stringify(tuple))
     .sort();
+}
+
+/** Whether two reads of a member's grants are the same set, as the MAC sees them. */
+export function sameGrants(a: readonly GrantRow[], b: readonly GrantRow[]): boolean {
+  const [x, y] = [grantSet(a), grantSet(b)];
+  return x.length === y.length && x.every((tuple, i) => tuple === y[i]);
+}
+
+export function memberMac(key: Buffer, member: Omit<Member, 'mac'>, grants: readonly GrantRow[]): Buffer {
+  const held = grantSet(grants);
   const tuple = [
     'coffre.vault.member.v1',
     member.principal,

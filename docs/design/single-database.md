@@ -48,11 +48,13 @@ proposals are taken; "What the reviews change" says where each lands.
 - **One data key per secret version, wrapped directly by the KEK, as
   today.**
 - **Rollback by the database's owner is an accepted limit.** A member's old
-  rows put back are refused, because the log holds the later change. A
+  rows put back are refused while the log holds the later change; with that
+  change cut from the middle of the log as well, they are let in until the
+  next checkpoint, which recomputes the chain and turns readiness red. A
   rewind of the whole database, or its newest entries cut off, is seen only
   by an instance running across it, or by CloudTrail with KMS; question 7
-  walks through both. Witnesses and off-box checkpoints are parked for
-  later.
+  walks through all three. Witnesses, off-box checkpoints and members'
+  state under the checkpoint's signature are parked for later.
 - **Host on PlanetScale Postgres,** from $5 a month. Seventeen tables and
   two migration ledgers become thirteen and one.
 
@@ -137,7 +139,7 @@ With PlanetScale Postgres and the logins of question 4:
 | Mallory has | She can | She cannot | What catches her |
 |---|---|---|---|
 | The app's login, `coffre_runtime` | read ciphertext, members, grants and the log | open a value without the vault; write a member, a grant or a vault entry; change or delete any entry; mint a session, which needs the app's key for its MAC | nothing is left to catch. Putting back a genuine old row, say a session from before its user signed out, is the one thing her login allows; a removal's generation still kills it |
-| The owner login, PlanetScale's default role | anything in the database, row-level security and triggers included | open a value: no KEK. Forge a grant, a session or an entry: no key | a forged or edited row: refused at its next use. A member's old rows put back: refused, since the log holds the later change. The newest entries cut off with the head put back, or the whole database rewound: an accepted limit, seen only by an instance running across it, or CloudTrail with KMS |
+| The owner login, PlanetScale's default role | anything in the database, row-level security and triggers included | open a value: no KEK. Forge a grant, a session or an entry: no key | a forged or edited row: refused at its next use. A member's old rows put back: refused while the log holds the later change; with that change cut from the middle of the log too, let in until the next checkpoint, which recomputes the chain from its first entry, finds the cut and turns readiness red. The newest entries cut off with the head put back, or the whole database rewound: an accepted limit, seen only by an instance running across it, or CloudTrail with KMS |
 | `auditChainKey` and the owner's login | rewrite the app's entries since the vault's last entry; mint sessions | rewrite anything a vault entry follows; grant access | the vault's next entry anchors what it finds; in use that is seconds later. Every value opened is still a vault entry under the member she plays |
 | The PlanetScale account | the owner's powers, and restore a backup to a new branch | make coffre use that branch without the Cloudflare account | as for the owner |
 | The Cloudflare account | deploy code that reads the KEK | | nothing coffre can do, as today |
@@ -723,11 +725,18 @@ verification as a banner. A forged row can be displayed; it cannot be used.
 `audit.checkpoint`, with a signed payload: format, instance id, the `seq`
 and `hash` of the last entry before it, the time, the key id and an Ed25519
 signature. It signs a prefix that ends just before itself. Before writing
-one, the vault reads the log: the previous checkpoint's prefix must still
-end at the hash it signed, and every link since must hold, with its own
-entries' MACs. Because each hash commits to everything before it, the
-newest prefix still holding implies every older one does; full verification
-checks them all anyway. Three jobs remain: anchoring quiet periods, giving
+one, the vault recomputes the whole chain from its first entry, every hash
+from the entry's content and its own entries' MACs, in a snapshot and
+without the log's lock; then, under the lock, the previous checkpoint's
+prefix must still end at the hash it signed, and every link since the
+snapshot must hold. A hash commits to everything before it only when it is
+recomputed: comparing the stored hash at the previous checkpoint's seq
+proves nothing about the rows before it, which can change or go while that
+one stored value stays (the final review's R1). Recomputing from entry 0
+costs about 4 seconds per 100,000 entries on a small shared Postgres, so
+every checkpoint does it while the log is small; past 250,000 entries or
+so, ten seconds a pass, it should move to a slower cadence or a resumable
+pass. Full verification checks every checkpoint too. Three jobs remain: anchoring quiet periods, giving
 evidence anyone can check with the public key, and readiness. The
 `vault_checkpoints` table, the app's `audit.checkpoint` copies and
 `CheckpointInput.previous` go, and with them review F1's attack.
@@ -775,8 +784,19 @@ genuine. The vault catches this at Ada's next decision: her row says its
 last access change was entry 640, and the log's newest vault entry about
 her, its MAC checked, is 812, so she is refused as `tampered`. That is one
 indexed lookup in the read the decision makes anyway. To get past it,
-Mallory must take 812 out of the log as well, which is one of the next two
-cases.
+Mallory must take 812 out of the log as well: the next three cases.
+
+**An entry cut from the middle: seen at the next checkpoint.** Mallory
+deletes 812 itself, now well before the newest checkpoint, and writes Ada's
+old rows back. Ada's row and the newest entry about her left, 640, agree,
+so the vault lets her in: the check at use reads the entries that remain,
+each by its own MAC, not the chain around them. The next checkpoint
+recomputes the chain from entry 0, finds the gap at 812, refuses to sign,
+and `/readyz` turns red within five minutes; full verification says the
+same. Until then Ada reads, and each read is logged under her name. The
+same cut can erase `secret.read` entries, with the same signal. Catching it
+at use would need each member's state under the checkpoint's signature,
+parked under "Later".
 
 **The whole database, rewound: mostly unseen.** Mallory has the PlanetScale
 account and, from a phished laptop, Bob's browser session. At 10:06 she
@@ -820,10 +840,13 @@ row back too: the whole-database case.
 **What the design keeps, and what is parked.** The running instance's
 memory costs nothing and stays: each app and vault instance remembers the
 last head it wrote and refuses to append behind it (plan steps 3 and 4).
-Two defences are parked under "Later", should the threat model change:
+So does the checkpoint's recomputation of the whole chain, which turns a
+cut anywhere in the log into a red `/readyz` within one beat. Three
+defences are parked under "Later", should the threat model change:
 witnesses, where each CLI and browser remembers the newest entry it saw and
-checks the log still holds it, and checkpoints copied off the box to a
-bucket behind a retention lock.
+checks the log still holds it; checkpoints copied off the box to a bucket
+behind a retention lock; and each member's state under the checkpoint's
+signature, so that a cut the checkpoint covers is refused at use.
 
 ### 8. Node deployments
 
@@ -1101,6 +1124,12 @@ core change; step 11 lists what can follow without blocking it.
       CLI's credentials and in `localStorage`, access changes answering with
       the vault's entry), and checkpoints copied to R2 behind a retention
       lock.
+    - With them, each member's state under the checkpoint's signature (the
+      final review's fix 2a): every `audit.checkpoint` carries each member's
+      `access_seq` and generation, or a digest of them, and a decision
+      refuses a row older than what the newest checkpoint signed for that
+      member, its signature checked. A cut the checkpoint covers is then
+      refused at use rather than found at the next checkpoint.
 
 ## Decided
 
