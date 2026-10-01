@@ -532,11 +532,11 @@ export class SyncRunner {
             ...common,
             action: 'sync.push',
             secretId: entry.secretId,
-            metadata: { syncId, key: entry.key, version: row.version, destination, trigger },
+            metadata: { syncId, key: entry.key, version: row.version, provider: provider.id, destination, trigger },
           });
         }
         for (const key of ids.delete) {
-          log.push({ ...common, action: 'sync.remove', metadata: { syncId, key, destination, trigger } });
+          log.push({ ...common, action: 'sync.remove', metadata: { syncId, key, provider: provider.id, destination, trigger } });
         }
         return { upsert, delete: ids.delete, forget: ids.forget };
       });

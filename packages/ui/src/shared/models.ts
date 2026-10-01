@@ -1,5 +1,4 @@
 import type {
-  AuditEntryView,
   ImportAction,
   Me as ApiMe,
   Member,
@@ -43,11 +42,6 @@ export type RoleRow = {
   /** False when the role contains a project-only permission. */
   assignableToEnvironment: boolean;
 };
-
-export type AuditRow = Pick<
-  AuditEntryView,
-  'seq' | 'occurredAt' | 'actorType' | 'actorId' | 'action' | 'decision' | 'project' | 'environment'
-> & { subject: string };
 
 export type DirectoryPrincipal = Pick<Member, 'principalType' | 'principalId' | 'instanceRole' | 'isRootAdmin'> &
   Partial<Pick<Member, 'tampered'>>;

@@ -1,5 +1,5 @@
 import { deriveLogKey, GENESIS_HASH, verifyEntries, type LogKey, type StoredEntry } from '@coffre/core/audit';
-import type { LogEntry, LogHead, LogVerification } from '@coffre/core/vault';
+import type { LogHead, LogVerification } from '@coffre/core/vault';
 import type { Queryable } from '@coffre/db';
 
 import { entriesFrom, hashAt } from './store.ts';
@@ -97,6 +97,19 @@ export async function carries(db: Queryable, head: LogHead): Promise<boolean> {
   if (head.hash === GENESIS_HASH.toString('hex')) return true;
   return (await hashAt(db, BigInt(head.seq)))?.toString('hex') === head.hash;
 }
+
+/** One of the vault's entries, as its tests read them. */
+export type LogEntry = {
+  seq: number;
+  at: string;
+  actor: string;
+  action: string;
+  outcome: 'allow' | 'refuse';
+  code: string | null;
+  subject: string | null;
+  detail: Record<string, unknown>;
+  hash: string;
+};
 
 /**
  * An entry as the vault log's readers see it. `subject` is the member an

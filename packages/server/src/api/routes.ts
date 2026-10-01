@@ -3,7 +3,7 @@ import { displayName, secretKey, slug } from '@coffre/core/schemas';
 import { z } from 'zod';
 
 import { setAccess } from './access.ts';
-import { listAudit, vaultLog, verifyAudit } from './audit.ts';
+import { listAudit, verifyAudit } from './audit.ts';
 import type { ApiContext } from './context.ts';
 import { notFound } from './errors.ts';
 import { listMembers, memberReport, putMember, removeMember } from './members.ts';
@@ -293,16 +293,6 @@ export const routes = {
       }),
   }),
   ...route('GET /audit/verification', { run: (ctx) => verifyAudit(ctx) }),
-  // The vault's own log: every unwrap it allowed or refused, every change of access.
-  ...route('GET /audit/vault', {
-    input: z.object({
-      before: z.coerce.number().int().positive().optional(),
-      limit: z.coerce.number().int().min(1).max(200).default(50),
-      // `?full=1` checks all of the log, as `GET /audit/verification` does.
-      full: z.enum(['1', 'true']).optional(),
-    }),
-    run: (ctx, { input: { full, ...page } }) => vaultLog(ctx, { ...page, full: full !== undefined }),
-  }),
 };
 
 export type Routes = typeof routes;

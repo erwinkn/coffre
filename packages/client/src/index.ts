@@ -260,8 +260,6 @@ export function createClient(options: ClientOptions) {
     audit: {
       list: (query: RouteInput<'GET /audit'> = {}) => call('GET /audit', {}, query),
       verify: () => call('GET /audit/verification', {}),
-      /** The vault's own log, newest first, and whether its whole chain holds. Root admins only. */
-      vault: (query: RouteInput<'GET /audit/vault'> = {}) => call('GET /audit/vault', {}, query),
     },
   };
 }

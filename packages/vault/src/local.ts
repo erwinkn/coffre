@@ -15,7 +15,6 @@ export const METHODS = [
   'remove',
   'checkpoint',
   'about',
-  'log',
   'verifyLog',
 ] as const satisfies readonly (keyof Vault)[];
 

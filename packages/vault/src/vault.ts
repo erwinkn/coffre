@@ -33,8 +33,6 @@ import {
   type Grant,
   type GrantChange,
   type LogHead,
-  type LogInput,
-  type LogPage,
   type LogVerification,
   type Outcome,
   type Refusal,
@@ -56,7 +54,7 @@ import { appendEntries, lockLogHead, type NewEntry } from '@coffre/db/log';
 import { verifyAccounting } from './accounting.ts';
 import { signer, type Signer } from './checkpoint.ts';
 import type { ResolvedVaultConfig } from './config.ts';
-import { carries, entryView, further, UNVERIFIED, vaultLogKey, VERIFY_BATCH, verifyChain, type Anchor } from './log.ts';
+import { carries, further, UNVERIFIED, vaultLogKey, VERIFY_BATCH, verifyChain, type Anchor } from './log.ts';
 import { apply, replay, type LoggedMember, type Replayed } from './replay.ts';
 import { memberMac, rowKey, sealed } from './rows.ts';
 import * as store from './store.ts';
@@ -1087,33 +1085,11 @@ class VaultService implements Vault {
     return { publicKey: this.#prepared.signer.publicKey, rootAdmins: this.#config.rootAdmins.map((email) => `user:${email}`) };
   }
 
-  async log(input: LogInput): Promise<Outcome<LogPage>> {
-    if (!this.#isRootAdmin(input.actor)) {
-      const refused = await this.#decide([], async () => {
-        throw new Refused(refusal('not_allowed', 'only root admins may read the vault log'), [
-          {
-            actor: input.actor,
-            action: 'log.read',
-            decision: 'deny',
-            code: 'not_allowed',
-            metadata: JSON.stringify({ subject: 'vault' }),
-          },
-        ]);
-      });
-      return refused as Outcome<LogPage>;
-    }
-    const limit = Math.min(Math.max(Math.trunc(input.limit ?? 50), 1), 200);
-    const shown = await store.vaultPage(this.#db, input.before === undefined ? undefined : BigInt(input.before), limit);
-    const verification =
-      input.full === true ? await this.#verifyAll(shown, null) : await this.#verify(this.#db, shown, this.#prepared.verified);
-    return { ok: true, entries: shown.map(entryView), verification };
-  }
-
   verifyLog(input: VerifyLogInput): Promise<LogVerification> {
     return this.#verifyAll([], input.upTo ?? null);
   }
 
-  /** `shown`, and the chain from `anchor`; the furthest verified is kept for the next view. */
+  /** `shown`, and the chain from `anchor`; the furthest verified is kept for the next check. */
   async #verify(db: Queryable, shown: readonly StoredEntry[], anchor: Anchor): Promise<LogVerification> {
     const { verification, anchor: reached } = await verifyChain(db, this.#prepared.logKey, shown, anchor);
     if (verification.ok) this.#prepared.verified = further(this.#prepared.verified, reached);
@@ -1130,8 +1106,17 @@ class VaultService implements Vault {
    */
   #verifyAll(shown: readonly StoredEntry[], upTo: LogHead | null): Promise<LogVerification> {
     return this.#db.transaction(async (tx) => {
+      // What this vault last verified must still be there: whoever holds
+      // its key can seal a rewrite, but cannot put back the head it saw.
+      const remembered = this.#prepared.verified;
       const verification = await this.#verify(tx, shown, UNVERIFIED);
       if (!verification.ok) return verification;
+      if (remembered.nextSeq > 0n) {
+        const seq = remembered.nextSeq - 1n;
+        if (!(await carries(tx, { seq: Number(seq), hash: remembered.hash.toString('hex') }))) {
+          return { ok: false, failedAtSeq: Number(seq), reason: 'changed since the vault last verified it' };
+        }
+      }
       if (upTo !== null && !(await carries(tx, upTo))) {
         return { ok: false, failedAtSeq: upTo.seq, reason: 'not the entry the app verified up to: the log changed between the two checks' };
       }
