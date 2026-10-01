@@ -73,7 +73,8 @@ export function redact(message: string, secrets: readonly string[]): string {
   for (const needle of [...needles].sort((a, b) => b.length - a.length)) {
     message = message.split(needle).join('[redacted]');
   }
-  return message;
+  // Shorten only after replacement, so a cut cannot leave part of a secret.
+  return message.length > 1000 ? `${message.slice(0, 999)}…` : message;
 }
 
 function redactError(error: unknown, secrets: readonly string[]): Error {

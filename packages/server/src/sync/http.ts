@@ -27,7 +27,7 @@ export type JsonResponse = { status: number; headers: Headers; body: unknown };
  * One JSON request with a timeout, and up to two retries when the upstream is
  * rate limiting or failing. Always resolves with the final response, whatever
  * its status; callers decide what a status means for them. Only a network
- * failure or an abort throws.
+ * failure, an abort or a redirect throws.
  */
 export async function requestJson(ctx: SyncContext, request: JsonRequest): Promise<JsonResponse> {
   const doFetch = ctx.fetch ?? globalThis.fetch;
@@ -41,6 +41,7 @@ export async function requestJson(ctx: SyncContext, request: JsonRequest): Promi
     try {
       response = await doFetch(request.url, {
         method: request.method,
+        redirect: 'manual',
         headers: {
           ...request.headers,
           ...(request.body === undefined ? {} : { 'Content-Type': 'application/json' }),
@@ -65,6 +66,17 @@ export async function requestJson(ctx: SyncContext, request: JsonRequest): Promi
       throw new SyncProviderError(`Could not reach ${new URL(request.url).host}${detail}`, 'network');
     }
 
+    if (response.status >= 300 && response.status < 400) {
+      // A redirect can forward custom credential headers and the entire body.
+      const location = response.headers.get('location');
+      let target = 'an unknown host';
+      try {
+        if (location !== null) target = new URL(location, request.url).host || target;
+      } catch { /* A malformed Location is still a refused redirect. */ }
+      await response.body?.cancel();
+      throw new SyncProviderError(`Refused redirect to ${target} (HTTP ${response.status})`, 'upstream', response.status);
+    }
+
     const retryable = isRateLimited(response) || response.status >= 500;
     if (retryable && attempt < MAX_RETRIES) {
       const wait = retryWait(response.headers) ?? backoff(attempt);
@@ -85,7 +97,7 @@ async function readBody(response: Response): Promise<unknown> {
   try {
     return JSON.parse(text);
   } catch {
-    return text.slice(0, 500);
+    return text;
   }
 }
 
@@ -173,6 +185,6 @@ export function upstreamMessage(body: unknown, pick: (body: Record<string, unkno
     const picked = pick(body as Record<string, unknown>);
     if (typeof picked === 'string' && picked) return picked;
   }
-  if (typeof body === 'string' && body) return body.slice(0, 200);
+  if (typeof body === 'string' && body) return body;
   return 'no error message';
 }
