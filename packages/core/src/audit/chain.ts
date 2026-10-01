@@ -14,9 +14,11 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
  * management operations (CreateKey, RotateKey, ...) and no Decrypt at all.
  * So the chain below carries that load instead.
  *
- * Each row commits to the row before it. Mutating, deleting, reordering or
- * inserting a row breaks the chain from that point on, and repairing it
- * requires the chain key -- which lives outside the database.
+ * Each row commits to the row before it. Changing retained entries or their
+ * order breaks the chain, and repairing it requires the chain key, which
+ * lives outside the database. This authenticates what is retained, not its
+ * freshness: rolling back both the log and its head needs no key. A separate
+ * checkpoint can anchor a prefix; the tail since it remains open to rollback.
  */
 
 /** Length of a chain hash, in bytes (SHA-256). */

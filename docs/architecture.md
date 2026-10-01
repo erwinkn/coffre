@@ -339,9 +339,11 @@ principal reads again as the window rolls on.
 
 ### Checkpoints
 
-The app's audit log is hash-chained with `auditChainKey`, which catches
-someone who can write the database but not read the app's config. Someone
-who holds the app could rewrite the log and chain it again. The vault's log
+The app's audit log is hash-chained with `auditChainKey`, which authenticates
+the entries retained in the database against changes by someone without the
+key. It does not establish freshness: someone who can restore both the log
+and its head to an older copy needs no key to make that copy verify. Someone
+who holds the app could also rewrite the log and chain it again. The vault's log
 is the mirror: its chain is keyed from `signingKey`, and someone who holds
 the vault could rewrite it and chain it again. So after each heartbeat, the
 app has the vault sign both heads at once:
@@ -380,8 +382,8 @@ or a removal undone, is a row the log does not explain. A failure names the
 log (`log: 'audit'` or `'vault'`) and, when the fault is at one, the entry.
 
 `auditChainKey` stays in the app. Signing covers someone who holds
-the app; the keyed chain still covers the entries written since the last
-checkpoint against someone who holds only the database. Moving the key would
+the app; the keyed chain authenticates retained entries written since the
+last checkpoint against someone who holds only the database. Moving the key would
 put a vault call on every audited write, and the sign-in state key is derived
 from it.
 
@@ -394,8 +396,13 @@ What checkpoints do not catch:
   well can append one, with the grant it explains, and it replays cleanly.
   The cost of the key: no one without it can recompute the chain, only check
   the heads the vault signed.
-- **A rewrite of either log since the last checkpoint.** Heartbeats bound it
-  to minutes; for the app log the keyed chain covers it too.
+- **A rewrite of either log since the last checkpoint by someone holding
+  its chain key.** The keyed chain alone cannot distinguish the rewrite.
+- **A rollback of the app log and its head within the uncheckpointed tail.**
+  A database owner can remove those newest entries and restore the matching
+  head without either key. The exposure window runs from the last successful
+  checkpoint to the next: normally five minutes, longer if heartbeats fail
+  or stop. Before the first checkpoint, the entire log is unanchored.
 - **A new signing key.** Each checkpoint is checked with the vault's current
   public key, so rotating `signingKey` fails the recorded ones until
   rotation is designed.
