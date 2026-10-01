@@ -152,7 +152,8 @@ one of the app (A), found problems this design has to answer.
 | Cost of a vault call | a service binding: per Cloudflare, "zero overhead", both Workers on the same thread by default | none |
 | What `coffre init --workers` writes | `app/` and `vault/` as today, minus the Durable Object, plus a Hyperdrive binding | one Worker |
 
-**Recommendation: (a).** The row that decides it is the second: with (a), a
+**Settled: (a)**, two Workers, with server rendering kept. The row that
+decides it is the second: with (a), a
 compromised app gets reads, each logged where it cannot erase it. With (b),
 it gets the KEK, and every read after that is silent. Erwin's deployment
 uses a local KEK, which is the case where (b) does worst.
@@ -1018,7 +1019,8 @@ it says otherwise. "The suite" means `pnpm test:all`, `pnpm typecheck`,
 ## For Erwin to decide
 
 1. Keep the vault a separate Worker and process, with its own login?
-   Recommended: yes. A compromised app then gets logged reads, not the KEK.
+   Settled by Erwin: yes, two Workers, and server rendering stays. A
+   compromised app then gets logged reads, not the KEK.
 2. Host erwinkn.com on PlanetScale Postgres? Recommended: yes. Roles,
    row-level security, triggers and point-in-time recovery from $5 a month;
    PlanetScale MySQL has none of them.
