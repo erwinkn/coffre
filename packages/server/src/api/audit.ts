@@ -144,12 +144,16 @@ export async function listAudit(
 /**
  * Recompute the whole chain and compare it with the stored head, in one
  * read-only snapshot so appends made meanwhile cannot look like tampering.
+ * Each author authenticates its own entries: the app here, by its chain
+ * key, and the vault by its own, over the same entries, up to the last one
+ * the app verified. Anyone who can insert a row can link it to the chain,
+ * so an entry whose author did not write it fails one check or the other.
  * Then check the log against the vault's latest signed checkpoint: the chain
  * key catches a row changed by someone who holds only the database, and the
  * checkpoint one changed and chained again by someone who holds the app too.
- * Then the other way: the vault's log against the last checkpoint the app
- * recorded, which catches a vault store rewritten or put back to an older
- * copy. Owners only: a partial view of the chain cannot be verified.
+ * Then the other way: the vault's entries against the last checkpoint the
+ * app recorded, which catches them rewritten or cut back. Owners only: a
+ * partial view of the chain cannot be verified.
  */
 export async function verifyAudit(ctx: ApiContext): Promise<AuditVerification> {
   if (!ctx.caller.isOwner) {
@@ -180,11 +184,14 @@ export async function verifyAudit(ctx: ApiContext): Promise<AuditVerification> {
         const batch = await auditRange(tx, nextSequence, VERIFY_BATCH);
         if (batch.length === 0) break;
         // From the first entry, each batch carrying on from the one before:
-        // the numbers, the links, the hashes, and the app's MACs.
+        // the numbers, the links, the hashes, and the app's MACs. The
+        // vault's entries only by their place: the vault checks their MACs
+        // over the same entries, below, and its key never leaves it.
         const result = verifyEntries(batch, {
           startSeq: nextSequence,
           startPrevHash: previousHash,
           keys: [appLogKey(ctx.chainKey)],
+          chainOnly: ['vault'],
         });
         if (!result.ok) return audit(result.failedAtSeq, result.reason);
         rows += result.entries;
@@ -223,12 +230,13 @@ export async function verifyAudit(ctx: ApiContext): Promise<AuditVerification> {
           );
         }
       }
-      return { ok: true as const, rows, head: previousHash.toString('hex'), recorded };
+      const last = nextSequence === 0n ? null : { seq: Number(nextSequence - 1n), hash: previousHash.toString('hex') };
+      return { ok: true as const, rows, head: previousHash.toString('hex'), last, recorded };
     },
     SNAPSHOT,
   );
   if (!chain.ok) return chain;
-  const { rows, head, recorded } = chain;
+  const { rows, head, last, recorded } = chain;
 
   // The vault's side. Its latest checkpoint is read again: one signed and
   // recorded since the first read is in the snapshot, and is not behind.
@@ -241,7 +249,9 @@ export async function verifyAudit(ctx: ApiContext): Promise<AuditVerification> {
     if (behind !== null) return vault(null, behind);
     through = recorded.checkpoint.vault;
   }
-  const verified = await named(ctx, await ctx.vault.verifyLog({ through }));
+  // The vault's entries by its key, up to the entry the app verified to:
+  // only then is every entry of the prefix authenticated, by its author.
+  const verified = await named(ctx, await ctx.vault.verifyLog({ through, upTo: last }));
   if (!verified.ok) return vault(verified.failedAtSeq, verified.reason);
   return {
     ok: true,

@@ -2,7 +2,7 @@ import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import type { CoffreClient } from '@coffre/client';
-import { asc, count, eq } from 'drizzle-orm';
+import { and, asc, count, eq } from 'drizzle-orm';
 
 import { auditLog, principals, projects } from './db/tables.ts';
 import {
@@ -58,11 +58,12 @@ async function auditActions(): Promise<{ action: string; decision: string }[]> {
   return db.owner
     .select({ action: auditLog.action, decision: auditLog.decision })
     .from(auditLog)
+    .where(eq(auditLog.author, 'app'))
     .orderBy(asc(auditLog.seq));
 }
 
 async function auditCount(): Promise<number> {
-  const [row] = await db.owner.select({ n: count() }).from(auditLog);
+  const [row] = await db.owner.select({ n: count() }).from(auditLog).where(eq(auditLog.author, 'app'));
   return row.n;
 }
 
@@ -132,7 +133,7 @@ test('renaming projects and environments to existing slugs is a conflict and is 
   const denials = await db.owner
     .select({ action: auditLog.action, metadata: auditLog.metadata })
     .from(auditLog)
-    .where(eq(auditLog.decision, 'deny'))
+    .where(and(eq(auditLog.author, 'app'), eq(auditLog.decision, 'deny')))
     .orderBy(asc(auditLog.seq));
   assert.deepEqual(
     denials.map((row) => [row.action, JSON.parse(row.metadata).reason]),
@@ -160,6 +161,7 @@ test('project-only roles cannot be scoped to one environment', async () => {
   const [last] = await db.owner
     .select({ decision: auditLog.decision, metadata: auditLog.metadata })
     .from(auditLog)
+    .where(eq(auditLog.author, 'app'))
     .orderBy(asc(auditLog.seq))
     .then((rows) => rows.slice(-1));
   assert.equal(last.decision, 'deny');

@@ -1,6 +1,7 @@
 import type { AccessFault, FaultGrant } from '@coffre/core/vault';
+import type { Queryable } from '@coffre/db';
 
-import type { GrantRow, Member, Store } from './store.ts';
+import { allMembers, grants, vaultEntriesOf, type GrantRow, type Member, type Place } from './store.ts';
 
 /** Every entry that changes who is a member or what they hold. */
 export const ACCESS_ACTIONS = [
@@ -13,70 +14,90 @@ export const ACCESS_ACTIONS = [
   'grant.revoke',
 ] as const;
 
+const BATCH = 1000;
+
 /**
- * Why the members and grants in the store do not follow from the log, or
- * null when they do; `describeAccessFault` words it. Every change to either
- * is logged in the transaction that makes it, so replaying the allowed ones
- * from the first entry gives the tables back, and a row the log does not
- * explain was written around the vault: a grant inserted into its SQLite, a
- * removal undone.
+ * Why the members and grants in the database do not follow from the
+ * vault's entries, or null when they do; `describeAccessFault` words it.
+ * Every change to either is logged in the transaction that makes it, with
+ * the row's times taken from its entry, so replaying the allowed ones from
+ * the first gives the tables back, and a row the log does not explain was
+ * written around the vault: a grant inserted with the database's own login,
+ * a removal undone.
+ *
+ * Call it after the chain is verified, in the same snapshot, so every entry
+ * it replays carries the vault's MAC.
  *
  * Grants are compared as they are live at `at`. Clearing one that has
  * lapsed changes nothing anyone holds, so it is not logged.
  */
-export function replay(store: Store, at: number): AccessFault | null {
+export async function replay(db: Queryable, at: number): Promise<AccessFault | null> {
   const members = new Map<string, Member>();
-  const grants = new Map<string, Map<string, GrantRow>>();
-  for (const row of store.logOf(ACCESS_ACTIONS)) {
-    const principal = row.subject!;
-    const detail = JSON.parse(row.detail) as Record<string, unknown>;
-    const place = { projectId: detail.projectId as string, environmentId: detail.environmentId as string | null };
-    const held = grants.get(principal) ?? new Map<string, GrantRow>();
-    grants.set(principal, held);
-    switch (row.action) {
-      case 'principal.admit':
-      case 'principal.restore':
-        members.set(principal, { principal, status: 'active', owner: detail.owner === true, generation: members.get(principal)?.generation ?? 0, since: row.at, by: row.actor });
-        break;
-      case 'principal.owner': {
-        const member = members.get(principal);
-        if (member === undefined) return { kind: 'unadmitted-change', seq: row.seq, principal };
-        member.owner = detail.owner === true;
-        break;
+  const held = new Map<string, Map<string, GrantRow>>();
+  for (let after = -1n; ; ) {
+    const batch = await vaultEntriesOf(db, ACCESS_ACTIONS, after, BATCH);
+    for (const row of batch) {
+      const principal = row.subjectPrincipal!;
+      const detail = JSON.parse(row.metadata) as Record<string, unknown>;
+      const place: Place = { projectId: row.projectId!, environmentId: row.environmentId };
+      const grantsOf = held.get(principal) ?? new Map<string, GrantRow>();
+      held.set(principal, grantsOf);
+      const before = members.get(principal);
+      const changed = { statusChangedAt: row.occurredAt, statusChangedBy: row.actor };
+      switch (row.action) {
+        case 'principal.admit':
+        case 'principal.restore':
+          members.set(principal, {
+            principal,
+            status: 'active',
+            owner: detail.owner === true,
+            generation: before?.generation ?? 0,
+            createdAt: before?.createdAt ?? row.occurredAt,
+            createdBy: before?.createdBy ?? row.actor,
+            ...changed,
+          });
+          break;
+        case 'principal.owner':
+          if (before === undefined) return { kind: 'unadmitted-change', seq: Number(row.seq), principal };
+          before.owner = detail.owner === true;
+          break;
+        case 'principal.remove':
+          if (before === undefined) return { kind: 'unadmitted-change', seq: Number(row.seq), principal };
+          members.set(principal, { ...before, status: 'removed', owner: false, generation: before.generation + 1, ...changed });
+          grantsOf.clear();
+          break;
+        case 'grant.create':
+        case 'grant.update':
+          grantsOf.set(placeKey(place), {
+            principal,
+            ...place,
+            role: detail.role as string,
+            expiresAt: detail.expiresAt === null ? null : Date.parse(detail.expiresAt as string),
+            grantedAt: row.occurredAt,
+            grantedBy: row.actor,
+          });
+          break;
+        case 'grant.revoke':
+          grantsOf.delete(placeKey(place));
+          break;
       }
-      case 'principal.remove':
-        members.set(principal, { principal, status: 'removed', owner: false, generation: (members.get(principal)?.generation ?? 0) + 1, since: row.at, by: row.actor });
-        held.clear();
-        break;
-      case 'grant.create':
-      case 'grant.update':
-        held.set(placeKey(place), {
-          principal,
-          ...place,
-          role: detail.role as string,
-          expiresAt: detail.expiresAt === null ? null : Date.parse(detail.expiresAt as string),
-          grantedAt: row.at,
-          grantedBy: row.actor,
-        });
-        break;
-      case 'grant.revoke':
-        held.delete(placeKey(place));
-        break;
     }
+    if (batch.length < BATCH) break;
+    after = batch[batch.length - 1].seq;
   }
 
-  const stored = new Map(store.allMembers().map((member) => [member.principal, member]));
+  const stored = new Map((await allMembers(db)).map((member) => [member.principal, member]));
   for (const principal of [...new Set([...stored.keys(), ...members.keys()])].sort()) {
     const [inStore, inLog] = [stored.get(principal), members.get(principal)];
     if (inLog === undefined) return { kind: 'unlogged-member', principal };
     if (inStore === undefined) return { kind: 'missing-member', principal };
-    const fields = (['status', 'owner', 'generation', 'since', 'by'] as const).filter((field) => inStore[field] !== inLog[field]);
+    const fields = MEMBER_FIELDS.filter(([field]) => inStore[field] !== inLog[field]).map(([, column]) => column);
     if (fields.length > 0) return { kind: 'member-differs', principal, fields };
   }
 
   const live = (grant: GrantRow) => grant.expiresAt === null || grant.expiresAt > at;
-  const logged = new Set([...grants.values()].flatMap((held) => [...held.values()]).filter(live).map(grantKey));
-  const inStore = new Set(store.allGrants().filter(live).map(grantKey));
+  const logged = new Set([...held.values()].flatMap((grantsOf) => [...grantsOf.values()]).filter(live).map(grantKey));
+  const inStore = new Set((await grants(db)).filter(live).map(grantKey));
   const extra = [...inStore].sort().find((grant) => !logged.has(grant));
   if (extra !== undefined) return { kind: 'unlogged-grant', grant: faultGrant(extra) };
   const missing = [...logged].sort().find((grant) => !inStore.has(grant));
@@ -84,8 +105,20 @@ export function replay(store: Store, at: number): AccessFault | null {
   return null;
 }
 
-function placeKey(place: { projectId: string; environmentId: string | null }): string {
-  return JSON.stringify([place.projectId, place.environmentId]);
+/** A member's fields, and the columns a fault names them by. */
+const MEMBER_FIELDS = [
+  ['status', 'status'],
+  ['owner', 'owner'],
+  ['generation', 'generation'],
+  ['createdAt', 'created_at'],
+  ['createdBy', 'created_by'],
+  ['statusChangedAt', 'status_changed_at'],
+  ['statusChangedBy', 'status_changed_by'],
+] as const satisfies readonly (readonly [keyof Member, string])[];
+
+/** A grant's place: its environment, or its project when it has none. */
+function placeKey(place: Place): string {
+  return place.environmentId ?? place.projectId;
 }
 
 function grantKey(grant: GrantRow): string {

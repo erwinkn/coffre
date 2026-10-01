@@ -104,10 +104,6 @@ export async function canaryScan(deployment: Deployment, people: People, canarie
     look("the database's file", files(deployment.databaseFile));
     stored.push('the database file');
   }
-  const store = deployment.vaultStore();
-  expect(store !== null, "the vault's store could not be found; its canaries were not checked");
-  look("the vault's store", files(store));
-  stored.push("the vault's store");
   look("the processes' output", deployment.output());
   stored.push("the processes' output");
 

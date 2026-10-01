@@ -1,11 +1,12 @@
 import { after, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 
+import { entryHash } from '@coffre/core/audit';
 import { LogHeadMismatch } from '@coffre/db/log';
 import { eq } from 'drizzle-orm';
 
 import { appendAudit, type AuditEntry } from '../src/db/audit.ts';
-import { withLogUnlocked } from './db/engine.ts';
+import { postgresOnly, withLogUnlocked } from './db/engine.ts';
 import { auditChainHead, auditLog } from './db/tables.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps } from './api-fixture.ts';
 
@@ -46,6 +47,43 @@ for (const preceding of [0, 5_000]) {
     });
   });
 }
+
+/** An entry in the vault's name, with a MAC made up, linked after the log's last as anyone could: review of #28, R1. */
+async function forgeVaultEntry(writer: typeof db.owner): Promise<void> {
+  const [head] = await db.owner.select().from(auditChainHead);
+  const fields = {
+    seq: head.nextSeq, author: 'vault' as const, keyId: 'vault:0000000000000000', occurredAt: Date.now(),
+    actor: 'user:victim@acme.example', action: 'unwrap', decision: 'allow', code: null, subjectPrincipal: null,
+    projectId: null, environmentId: null, secretId: null, secretVersionId: null, operationId: null, requestId: null,
+    sourceIp: null, relatedSeq: null, metadata: '{}',
+  };
+  const mac = Buffer.alloc(32, 0x41);
+  const hash = entryHash(head.headHash, fields, mac);
+  await writer.transaction(async (tx) => {
+    await tx.insert(auditLog).values({ ...fields, prevHash: head.headHash, mac, hash });
+    await tx.update(auditChainHead).set({ nextSeq: fields.seq + 1n, headHash: hash });
+  });
+}
+
+test('an entry in the vault\'s name that the vault did not write fails verification', async () => {
+  await write(1);
+  // As the database's owner, whom row-level security does not stop: only
+  // the vault's MAC tells, and only the vault holds its key.
+  await forgeVaultEntry(db.owner);
+  // An honest append takes the forged head as its predecessor.
+  await write(1);
+  assert.deepEqual(await root.audit.verify(), {
+    ok: false,
+    log: 'vault',
+    failedAtSeq: 1,
+    reason: 'written under vault:0000000000000000, a key this verifier does not hold',
+  });
+});
+
+test('the app\'s login cannot write an entry in the vault\'s name at all', postgresOnly('logins are Postgres\'s'), async () => {
+  await write(1);
+  await assert.rejects(forgeVaultEntry(db.runtime), (error) => /row-level security/.test(`${error} ${(error as { cause?: unknown }).cause}`));
+});
 
 async function write(entries: number): Promise<void> {
   // Keep each insert below the database's parameter limit.

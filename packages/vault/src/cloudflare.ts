@@ -1,18 +1,20 @@
 /**
- * The vault as a Worker: one Durable Object, so one SQLite database and one
- * thread for every decision, behind an entrypoint the app's `VAULT` service
- * binding calls over RPC. It has no route and no HTTP surface.
+ * The vault as a Worker, behind an entrypoint the app's `VAULT` service
+ * binding calls over RPC. It has no route and no HTTP surface. It decides
+ * in the database the app uses, through a Hyperdrive binding of its own,
+ * whose login is the vault's:
  *
- *   import { vault } from '@coffre/vault/cloudflare';
- *   export { VaultObject } from '@coffre/vault/cloudflare';
+ *   import { postgres, vault } from '@coffre/vault/cloudflare';
  *
  *   export default vault((env: Env) => ({
+ *     database: postgres(env.HYPERDRIVE),
  *     kek: { id: 'kek-1', key: env.KEK }, // or awsKms({ keyArn, credentials })
  *     rootAdmins: ['admin@acme.example'],
  *     signingKey: env.SIGNING_KEY,
  *   }));
  *
- * The Worker's config binds the Durable Object as `VAULT_OBJECT`.
+ * Any number of isolates run it side by side: every decision locks what it
+ * is about in the database, so they share one log and one bulk limit.
  */
 import type {
   AdmitInput,
@@ -26,74 +28,57 @@ import type {
   VerifyLogInput,
   WrapInput,
 } from '@coffre/core/vault';
-import { DurableObject, WorkerEntrypoint } from 'cloudflare:workers';
+import { createDatabase } from '@coffre/db';
+import { HyperdrivePool, type PostgresDatabase } from '@coffre/db/hyperdrive';
+import { WorkerEntrypoint } from 'cloudflare:workers';
 
 import { resolveVaultConfig, type VaultConfig } from './config.ts';
-import { durableObjectSqlite } from './sqlite-durable-object.ts';
-import { openVault } from './vault.ts';
+import { openVault, prepareVault, type PreparedVault } from './vault.ts';
 
 export type { Vault, VaultConfig };
+export { postgres, type PostgresDatabase } from '@coffre/db/hyperdrive';
 export * from './index.ts';
 
-/** The bindings the vault needs of its Worker; the deployment's own come on top. */
-export type VaultBindings = { VAULT_OBJECT: DurableObjectNamespace<VaultObject> };
+/** What the vault Worker's `vault(env => …)` returns. */
+export type WorkersVaultConfig = VaultConfig & { database: PostgresDatabase };
 
-/** Set when the Worker's module runs `vault(…)`, before any request reaches the object. */
-let configure: ((env: never) => VaultConfig) | null = null;
+/** Set when the Worker's module runs `vault(…)`, before any call comes in. */
+let configure: ((env: never) => WorkersVaultConfig) | null = null;
 
-/**
- * The vault itself. Its SQLite is the vault's store, migrated before the
- * first call is let in.
- */
-export class VaultObject extends DurableObject<VaultBindings> implements Vault {
-  #vault!: Vault;
-
-  constructor(ctx: DurableObjectState, env: VaultBindings) {
-    super(ctx, env);
-    // Every decision must share the same log and bulk counter.
-    if (!ctx.id.equals(env.VAULT_OBJECT.idFromName('vault'))) throw new Error('only the canonical vault object may start');
-    if (configure === null) throw new Error('the vault Worker must export default vault(…)');
-    const config = resolveVaultConfig(configure(env as never));
-    void ctx.blockConcurrencyWhile(async () => {
-      this.#vault = await openVault(durableObjectSqlite(ctx.storage), config);
-    });
-  }
-
-  unwrap(input: UnwrapInput) { return this.#vault.unwrap(input); }
-  wrap(input: WrapInput) { return this.#vault.wrap(input); }
-  rewrap(input: RewrapInput) { return this.#vault.rewrap(input); }
-  access(principal: string) { return this.#vault.access(principal); }
-  members() { return this.#vault.members(); }
-  setAccess(input: SetAccessInput) { return this.#vault.setAccess(input); }
-  admit(input: AdmitInput) { return this.#vault.admit(input); }
-  remove(input: RemoveInput) { return this.#vault.remove(input); }
-  checkpoint(input: CheckpointInput) { return this.#vault.checkpoint(input); }
-  latestCheckpoint() { return this.#vault.latestCheckpoint(); }
-  log(input: LogInput) { return this.#vault.log(input); }
-  verifyLog(input: VerifyLogInput) { return this.#vault.verifyLog(input); }
-}
+/** The configuration, checked and made ready once per `env`, which the isolate keeps. */
+const ready = new WeakMap<object, Promise<{ database: PostgresDatabase; prepared: PreparedVault }>>();
 
 /**
- * What the app's `VAULT` service binding calls: each call passed to the one
- * Durable Object as it is.
+ * What the app's `VAULT` service binding calls. Each call gets a database of
+ * its own, since a Worker's connections belong to the call that made them.
  */
-export class VaultEntrypoint extends WorkerEntrypoint<VaultBindings> implements Vault {
-  get #object() {
-    return this.env.VAULT_OBJECT.get(this.env.VAULT_OBJECT.idFromName('vault'));
+export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
+  async #vault(): Promise<Vault> {
+    const env = this.env as object;
+    let entry = ready.get(env);
+    if (entry === undefined) {
+      if (configure === null) throw new Error('the vault Worker must export default vault(…)');
+      const config = configure(env as never);
+      entry = prepareVault(resolveVaultConfig(config)).then((prepared) => ({ database: config.database, prepared }));
+      ready.set(env, entry);
+      entry.catch(() => ready.delete(env));
+    }
+    const { database, prepared } = await entry;
+    return openVault(createDatabase(new HyperdrivePool(database.hyperdrive.connectionString)), prepared);
   }
 
-  unwrap(input: UnwrapInput) { return this.#object.unwrap(input); }
-  wrap(input: WrapInput) { return this.#object.wrap(input); }
-  rewrap(input: RewrapInput) { return this.#object.rewrap(input); }
-  access(principal: string) { return this.#object.access(principal); }
-  members() { return this.#object.members(); }
-  setAccess(input: SetAccessInput) { return this.#object.setAccess(input); }
-  admit(input: AdmitInput) { return this.#object.admit(input); }
-  remove(input: RemoveInput) { return this.#object.remove(input); }
-  checkpoint(input: CheckpointInput) { return this.#object.checkpoint(input); }
-  latestCheckpoint() { return this.#object.latestCheckpoint(); }
-  log(input: LogInput) { return this.#object.log(input); }
-  verifyLog(input: VerifyLogInput) { return this.#object.verifyLog(input); }
+  async unwrap(input: UnwrapInput) { return (await this.#vault()).unwrap(input); }
+  async wrap(input: WrapInput) { return (await this.#vault()).wrap(input); }
+  async rewrap(input: RewrapInput) { return (await this.#vault()).rewrap(input); }
+  async access(principal: string) { return (await this.#vault()).access(principal); }
+  async members() { return (await this.#vault()).members(); }
+  async setAccess(input: SetAccessInput) { return (await this.#vault()).setAccess(input); }
+  async admit(input: AdmitInput) { return (await this.#vault()).admit(input); }
+  async remove(input: RemoveInput) { return (await this.#vault()).remove(input); }
+  async checkpoint(input: CheckpointInput) { return (await this.#vault()).checkpoint(input); }
+  async latestCheckpoint() { return (await this.#vault()).latestCheckpoint(); }
+  async log(input: LogInput) { return (await this.#vault()).log(input); }
+  async verifyLog(input: VerifyLogInput) { return (await this.#vault()).verifyLog(input); }
 
   /** No HTTP surface: only the app's service binding reaches the vault. */
   fetch() {
@@ -101,12 +86,8 @@ export class VaultEntrypoint extends WorkerEntrypoint<VaultBindings> implements 
   }
 }
 
-/**
- * The vault Worker's default export, `VaultEntrypoint`. `configure` reads
- * the Worker's secrets into the vault's configuration when the Durable
- * Object starts.
- */
-export function vault<Env extends VaultBindings>(configure_: (env: Env) => VaultConfig): typeof VaultEntrypoint {
-  configure = configure_ as (env: never) => VaultConfig;
+/** The vault Worker's default export, `VaultEntrypoint`, configured from its `env`. */
+export function vault<Env>(configure_: (env: Env) => WorkersVaultConfig): typeof VaultEntrypoint {
+  configure = configure_ as (env: never) => WorkersVaultConfig;
   return VaultEntrypoint;
 }

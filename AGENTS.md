@@ -47,7 +47,8 @@ which relies on native type-stripping (default only in Node 23.6+/24). `pnpm ins
 itself is version-agnostic.
 
 **Database.** Postgres runs in Docker via `docker compose` on **:55432** (owner
-`coffre_owner`, restricted runtime login `coffre_runtime`). The running app and all the
+`coffre_owner`, restricted runtime logins `coffre_runtime` for the app and
+`coffre_vault_runtime` for the vault). The running app and all the
 DB-backed tests need it up. Export `COMPOSE_PROJECT_NAME=coffre` whenever you invoke
 `docker compose` directly.
 
@@ -57,9 +58,9 @@ seed data. It runs the deployment in `dev/deployment/` (`app.ts`, `vault.ts`, th
 app and no port of its own. `dev/vite.config.ts` roots Vite in `packages/ui` (where
 TanStack Start finds the routes) and resolves every `@coffre/*` import to its
 sources through `coffre:source`, so an edit to any package hot-reloads without a
-build. The vault keeps its Durable Object SQLite under
-`dev/.wrangler/state` (or `$COFFRE_STATE_DIR`), which `pnpm dev` empties before it
-seeds. `COFFRE_DEV_PORT`, `COFFRE_DEV_IDP_PORT` and `COFFRE_DEV_DATABASE` run a
+build. The vault keeps its members, grants and log entries in the same
+Postgres database, through its own login and Hyperdrive binding, and the
+seed starts them over with everything else. `COFFRE_DEV_PORT`, `COFFRE_DEV_IDP_PORT` and `COFFRE_DEV_DATABASE` run a
 second stack beside the first (see `dev/start.sh`). Sign in at
 `http://127.0.0.1:3000/login`, through either button (the dev IdP plays GitHub and
 an OIDC provider), as `admin@acme.example` (root admin) or any of the seeded

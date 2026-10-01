@@ -1,3 +1,4 @@
+import { assignableToEnvironment, ROLE_NAMES } from '@coffre/core/access';
 import { sql } from 'drizzle-orm';
 import {
   bigint,
@@ -163,6 +164,84 @@ export const principals = pgTable(
   ],
 );
 
+/** The role catalogue, as SQL: every role, and those an environment may be granted. */
+const ROLES = sql.raw(ROLE_NAMES.map((role) => `'${role}'`).join(', '));
+const ENVIRONMENT_ROLES = sql.raw(ROLE_NAMES.filter(assignableToEnvironment).map((role) => `'${role}'`).join(', '));
+
+/**
+ * The vault's member directory: everyone it has admitted, written by the
+ * vault alone, read by both. A principal with no row is no member.
+ * Principals are the strings coffre uses at its edges: `user:<email>`,
+ * `token:<id>`, `sync:<id>`. Times are milliseconds since the epoch, each
+ * the time of the vault's log entry that set it, so the log replays to
+ * these rows exactly.
+ */
+export const vaultMembers = pgTable(
+  'vault_members',
+  {
+    principal: text().primaryKey(),
+    status: text().notNull(),
+    // An instance owner, who manages every project and member. Root admins
+    // come from the vault's configuration, never from a row.
+    owner: boolean().notNull().default(false),
+    // Advanced by each removal. A session, token or linked account issued
+    // under an older generation is dead, whatever its own row says.
+    generation: integer().notNull().default(0),
+    createdAt: bigint('created_at', { mode: 'number' }).notNull(),
+    createdBy: text('created_by').notNull(),
+    statusChangedAt: bigint('status_changed_at', { mode: 'number' }).notNull(),
+    statusChangedBy: text('status_changed_by').notNull(),
+  },
+  (table) => [
+    check('vault_members_principal_check', sql`${table.principal} ~ '^(user|token|sync):[^[:space:]:][^[:space:]]*$'`),
+    // A person is their email address, lowercased, as in sign-in.
+    check('vault_members_user_lowercase', sql`${table.principal} NOT LIKE 'user:%' OR ${table.principal} = lower(${table.principal})`),
+    check('vault_members_status_check', sql`${table.status} IN ('active', 'removed')`),
+    check('vault_members_owner_check', sql`NOT ${table.owner} OR (${table.status} = 'active' AND ${table.principal} LIKE 'user:%')`),
+    check('vault_members_generation_check', sql`${table.generation} >= 0`),
+  ],
+);
+
+/**
+ * One role per member per place: a project, or one of its environments,
+ * never both. A revoked grant is deleted; an expired one stays until its
+ * place is granted again, so the members page can say it lapsed.
+ */
+export const vaultGrants = pgTable(
+  'vault_grants',
+  {
+    principal: text().notNull(),
+    projectId: uuid('project_id'),
+    environmentId: uuid('environment_id'),
+    role: text().notNull(),
+    expiresAt: bigint('expires_at', { mode: 'number' }),
+    grantedAt: bigint('granted_at', { mode: 'number' }).notNull(),
+    grantedBy: text('granted_by').notNull(),
+  },
+  (table) => [
+    check('vault_grants_one_place', sql`(${table.projectId} IS NULL) <> (${table.environmentId} IS NULL)`),
+    check('vault_grants_role_check', sql`${table.role} IN (${ROLES})`),
+    check('vault_grants_environment_role_check', sql`${table.environmentId} IS NULL OR ${table.role} IN (${ENVIRONMENT_ROLES})`),
+    unique('vault_grants_on_project').on(table.principal, table.projectId),
+    unique('vault_grants_on_environment').on(table.principal, table.environmentId),
+    foreignKey({
+      name: 'vault_grants_principal_fkey',
+      columns: [table.principal],
+      foreignColumns: [vaultMembers.principal],
+    }).onDelete('restrict'),
+    foreignKey({
+      name: 'vault_grants_project_id_fkey',
+      columns: [table.projectId],
+      foreignColumns: [projects.id],
+    }).onDelete('restrict'),
+    foreignKey({
+      name: 'vault_grants_environment_id_fkey',
+      columns: [table.environmentId],
+      foreignColumns: [environments.id],
+    }).onDelete('restrict'),
+  ],
+);
+
 export const auditLog = pgTable(
   'audit_log',
   {
@@ -236,6 +315,10 @@ export const auditLog = pgTable(
     index('audit_log_actor_idx').on(table.actor, table.seq),
     index('audit_log_operation_idx').on(table.operationId, table.seq),
     index('audit_log_action_idx').on(table.author, table.action, table.seq),
+    // The bulk limit: one reader's recent releases.
+    index('audit_log_releases_idx').on(table.author, table.actor, table.action, table.decision, table.occurredAt),
+    // What the vault logged about one member, in order.
+    index('audit_log_subject_idx').on(table.author, table.subjectPrincipal, table.seq),
   ],
 );
 

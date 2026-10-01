@@ -1,6 +1,7 @@
 import { GENESIS_HASH, sealEntry, type LogFields, type LogKey } from '@coffre/core/audit';
 import { desc, eq } from 'drizzle-orm';
 
+import { afterCommit } from './commits.ts';
 import { tablesOf, type Transaction } from './database.ts';
 import { clockMillis, forUpdate } from './dialect.ts';
 
@@ -57,9 +58,9 @@ export class LogHeadMismatch extends Error {
 }
 
 /**
- * The log's head is behind one this process found before: the database was
- * rolled back, or entries were cut off its end. That cannot be told from a
- * restore, so the append refuses and someone has to look.
+ * The log's head is behind one this process wrote: the database was rolled
+ * back, or entries were cut off its end. That cannot be told from a restore,
+ * so the append refuses and someone has to look.
  */
 export class LogRewound extends Error {
   constructor(message: string) {
@@ -69,15 +70,23 @@ export class LogRewound extends Error {
 }
 
 /**
- * The newest head each writer found, under each of its keys, while the
- * process lives. It is the head found under the lock, so already committed:
- * a transaction of ours that rolls back never puts it ahead of the database.
+ * The newest head each writer has written, under each of its keys, while
+ * the process lives. A head is remembered only once the transaction that
+ * wrote it has committed, all the way out (commits.ts): one that rolls back
+ * never puts it ahead of the database, and the last batch committed is
+ * covered too. When commits race, the furthest head stays.
  */
-const found = new WeakMap<LogKey, { epoch: number; nextSeq: bigint; headHash: Buffer }>();
+const remembered = new WeakMap<LogKey, { epoch: number; nextSeq: bigint; headHash: Buffer }>();
 let epoch = 0;
 
+function remember(key: LogKey, head: { nextSeq: bigint; headHash: Buffer }): void {
+  const before = remembered.get(key);
+  if (before !== undefined && before.epoch === epoch && before.nextSeq >= head.nextSeq) return;
+  remembered.set(key, { epoch, ...head });
+}
+
 /**
- * Forget every head found so far. For tests that empty the database
+ * Forget every head written so far. For tests that empty the database
  * between cases, which is exactly what the check above refuses.
  */
 export function forgetLogHeads(): void {
@@ -121,15 +130,14 @@ export async function appendEntries(tx: Transaction, key: LogKey, entries: reado
       `the log's head says entry ${head.nextSeq} comes next, but the log ends ${last === undefined ? 'empty' : `at entry ${last.seq}`}, or with another hash`,
     );
   }
-  const before = found.get(key);
+  const before = remembered.get(key);
   if (
     before !== undefined &&
     before.epoch === epoch &&
     (head.nextSeq < before.nextSeq || (head.nextSeq === before.nextSeq && !head.headHash.equals(before.headHash)))
   ) {
-    throw new LogRewound(`the log ends before entry ${before.nextSeq}, which this process found it holding: it was rolled back`);
+    throw new LogRewound(`the log ends before entry ${before.nextSeq}, which this process wrote: it was rolled back`);
   }
-  found.set(key, { epoch, nextSeq: head.nextSeq, headHash: head.headHash });
 
   let seq = head.nextSeq;
   let prevHash = head.headHash;
@@ -163,5 +171,7 @@ export async function appendEntries(tx: Transaction, key: LogKey, entries: reado
 
   await tx.insert(auditLog).values(rows);
   await tx.update(auditChainHead).set({ nextSeq: seq, headHash: prevHash }).where(eq(auditChainHead.onlyRow, true));
-  return { seqStart: head.nextSeq, nextSeq: seq, headHash: prevHash, occurredAt: now };
+  const written = { nextSeq: seq, headHash: prevHash };
+  afterCommit(tx, () => remember(key, written));
+  return { seqStart: head.nextSeq, ...written, occurredAt: now };
 }

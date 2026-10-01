@@ -20,14 +20,16 @@ From a deployment, a devDependency since `coffre init`:
 pnpm conformance                   # Node: the server and its vault process, on SQLite in a temp dir
 pnpm conformance \
   --postgres postgres://owner:…@127.0.0.1:5432 \
-  --runtime postgres://coffre_runtime:…@127.0.0.1:5432
+  --runtime postgres://coffre_runtime:…@127.0.0.1:5432 \
+  --vault-runtime postgres://coffre_vault_runtime:…@127.0.0.1:5432
                                    # Workers: both, under wrangler dev
 ```
 
 On Workers, `--postgres` is a login that may create databases: the run makes
 one of its own, `coffre_conformance_<random>`, migrates it and drops it
 after. `--runtime` is the same server as `coffre_runtime`, the login the app
-runs as. Both are local; nothing is deployed.
+runs as, and `--vault-runtime` as `coffre_vault_runtime`, the vault's. All
+are local; nothing is deployed.
 
 coffre takes `--port` (3082), the stand-in IdP the next port, and wrangler's
 inspector the one after. `--bulk-limit <n>` names the vault's `bulkLimit`
@@ -89,23 +91,22 @@ In order, since each builds on the ones before:
 | checkpoints | The Cron trigger checkpoints both logs, and both verify |
 | two logs agree | Every key the vault opened or sealed is in the audit log, once, for the same member, request and version, and every read and write in the audit log is in the vault's |
 | no audit, no value | With the audit log refusing writes (a trigger), a reveal fails and carries no value; it works again once the log does |
-| canary scan | No value in any answer to any GET route, or any page, as each of the people, signed in or removed; nor in the database, in any column of any table; nor the vault's store; nor the processes' output |
-| append-only | The app's own login cannot update, delete, truncate or drop the audit log, change or delete a value's versions, delete a secret or a principal, or create a table. Postgres only: SQLite has no logins |
-| tampering | Verification catches an audit entry rewritten in the database, a grant written into the vault's store, a vault log entry rewritten there, and the newest audit entries deleted; each put back verifies again, but for the last, which is why it is last |
+| canary scan | No value in any answer to any GET route, or any page, as each of the people, signed in or removed; nor in the database, in any column of any table; nor the processes' output |
+| append-only | Neither the app's login nor the vault's can update, delete, truncate or drop the audit log, append an entry as the other, change or delete a value's versions, delete a secret or a principal, or create a table; nor can the app's write a member or a grant. Postgres only: SQLite has no logins |
+| tampering | Verification catches a grant written into the database around the vault, an entry in the vault's name chained to the log without its key, an audit entry rewritten in the database, and the newest audit entries deleted; each put back verifies again, but for the last, which is why it is last |
 
 A check that fails prints what it saw. The ones that need its result are
 skipped, and the run ends with the processes' output.
 
 ## What it does not show
 
-- **What the tampering checks cannot reach.** They write to the vault's
-  store directly: `vault.db` on Node, the Durable Object's SQLite in
-  wrangler's local state on Workers. On Cloudflare, nobody but the object
-  itself can write there, so these show that verification works, not that
-  an attacker could get that far.
+- **What the tampering checks cannot reach.** They write to the database
+  as its owner, who can lift its triggers and pass its row-level security.
+  They show that verification works, not that an attacker could get that
+  far: the app's and the vault's logins cannot.
 - **A forged grant is caught, not stopped.** The vault honours the grant it
-  finds in its store until verification flags it. What stops it is who can
-  write that store.
+  finds in the database until verification flags it. What stops it is who
+  can write the vault's tables: its own login, and the database's owner.
 - **A live instance's keys and settings.** The run uses its own keys and a
   local database. `probe` sees what anyone on the network can, and what one
   token of its own can.

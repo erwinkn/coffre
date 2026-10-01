@@ -27,13 +27,15 @@ state_dir="${COFFRE_STATE_DIR:-$root/dev/.wrangler/state}"
 owner_url="postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/$database"
 
 # What deployment/app.ts, the dev IdP, the seed and the CLI read. The app's
-# Hyperdrive binding reaches Postgres as the restricted runtime login.
+# Hyperdrive binding reaches Postgres as the restricted runtime login, and
+# the vault's as its own.
 export COFFRE_PUBLIC_URL="http://127.0.0.1:$port"
 export COFFRE_API_URL="$COFFRE_PUBLIC_URL"
 export COFFRE_DEV_IDP_URL="http://127.0.0.1:$idp_port"
 export COFFRE_DEV_IDP_PORT="$idp_port"
 export COFFRE_STATE_DIR="$state_dir"
 export CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE="postgresql://coffre_runtime:local-runtime-only@127.0.0.1:55432/$database"
+export CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_VAULT_HYPERDRIVE="postgresql://coffre_vault_runtime:local-vault-only@127.0.0.1:55432/$database"
 
 log() { printf '\n==> %s\n' "$1"; }
 
@@ -79,10 +81,6 @@ mkdir -p "$logs"
 log "starting dev IdP on :$idp_port"
 node --conditions=coffre:source dev/idp/server.ts >"$logs/dev-idp.log" 2>&1 &
 sleep 1
-
-# The seed starts the app's database over, so the vault starts over with it:
-# its grants and audit checkpoints describe that database and no other.
-rm -rf "$state_dir/v3/do/coffre-dev-vault-VaultObject"
 
 log "starting coffre and its vault on :$port"
 ./dev/node_modules/.bin/vite dev --config dev/vite.config.ts --port "$port" --strictPort >"$logs/web.log" 2>&1 &

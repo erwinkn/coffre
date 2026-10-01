@@ -1,7 +1,7 @@
 {
   "name": "@coffre/vault",
   "version": "0.1.0",
-  "description": "coffre's vault: keys, grants and members, as a Cloudflare Worker or on Node.",
+  "description": "coffre's vault: keys, grants and members, in the database the app uses, as a Cloudflare Worker or on Node.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -36,17 +36,18 @@
   },
   "scripts": {
     "build": "tsdown",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.cloudflare.json",
+    "typecheck": "tsc --noEmit",
     "test": "node --conditions=coffre:source --test"
   },
   "dependencies": {
-    "@coffre/core": "workspace:*"
+    "@coffre/core": "workspace:*",
+    "@coffre/db": "workspace:*",
+    "drizzle-orm": "0.45.2"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "5.20260920.1",
     "@types/node": "26.1.1",
-    "esbuild": "0.28.1",
-    "miniflare": "5.20260730.0-alpha",
+    "@types/pg": "8.20.0",
+    "pg": "8.16.3",
     "tsdown": "0.23.0",
     "typescript": "5.9.3"
   }

@@ -11,7 +11,8 @@ import { Failure } from './report.ts';
 import { conform, probe } from './suite.ts';
 
 const USAGE = `usage:
-  coffre-conformance workers [<dir>] --postgres <owner URL> --runtime <coffre_runtime URL> [options]
+  coffre-conformance workers [<dir>] --postgres <owner URL> --runtime <coffre_runtime URL>
+                    --vault-runtime <coffre_vault_runtime URL> [options]
   coffre-conformance node [<dir>] [options]
   coffre-conformance probe <url> [--token <service token> --canary <project>/<env>/<KEY>[=<value>]]
 
@@ -20,6 +21,8 @@ const USAGE = `usage:
   --bulk-limit <n>  the vault's bulkLimit count, when not the default (1000)
   --postgres <url>  workers: a Postgres login that may create databases; one is made for the run
   --runtime <url>   workers: the same server as coffre_runtime, the login the app runs as
+  --vault-runtime <url>
+                    workers: the same server as coffre_vault_runtime, the login the vault runs as
 
 probe checks a running instance from outside, and writes nothing to it:
   as no one        health, headers, every route refusing no one, changes from
@@ -42,6 +45,7 @@ const { values, positionals } = parseArgs({
     'bulk-limit': { type: 'string', default: '1000' },
     postgres: { type: 'string' },
     runtime: { type: 'string' },
+    'vault-runtime': { type: 'string' },
     token: { type: 'string' },
     canary: { type: 'string' },
     help: { type: 'boolean', short: 'h' },
@@ -89,7 +93,12 @@ if (!Number.isInteger(port) || !Number.isInteger(bulkLimit) || bulkLimit < 1) ex
 console.log(`coffre-conformance: ${kind} from ${dir}`);
 let deployment;
 try {
-  deployment = await boot(kind, dir, { port, postgres: values.postgres, runtime: values.runtime });
+  deployment = await boot(kind, dir, {
+    port,
+    postgres: values.postgres,
+    runtime: values.runtime,
+    vaultRuntime: values['vault-runtime'],
+  });
 } catch (error) {
   const detail = error instanceof Failure && error.detail !== undefined ? `\n${String(error.detail)}` : '';
   exit(1, `the deployment did not start: ${error instanceof Error ? error.message : String(error)}${detail}`);

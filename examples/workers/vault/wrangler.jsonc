@@ -20,8 +20,10 @@
     // Each 32 random bytes, base64: `openssl rand -base64 32`.
     "required": ["KEK", "SIGNING_KEY"]
   },
-  "durable_objects": {
-    "bindings": [{ "name": "VAULT_OBJECT", "class_name": "VaultObject" }]
-  },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["VaultObject"] }]
+  // The app's database, as the vault's own login: `wrangler hyperdrive
+  // create coffre-vault --caching-disabled --connection-string=<vault login
+  // URL>` prints the id. Its own config, not the app's: the vault writes
+  // members and grants, which the app's login may only read. Locally,
+  // CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_VAULT_HYPERDRIVE stands in.
+  "hyperdrive": [{ "binding": "VAULT_HYPERDRIVE", "id": "replace-with-your-vault-hyperdrive-id" }]
 }

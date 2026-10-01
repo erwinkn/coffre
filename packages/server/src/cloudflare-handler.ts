@@ -1,5 +1,5 @@
 import { createDatabase } from '@coffre/db';
-import { HyperdrivePool } from '@coffre/db/hyperdrive';
+import { HyperdrivePool, type PostgresDatabase } from '@coffre/db/hyperdrive';
 
 import { handleRequest, runScheduled } from './app.ts';
 import { cloudflareSourceIp } from './auth.ts';
@@ -7,16 +7,7 @@ import { resolveConfig, type CoffreConfig, type ResolvedConfig } from './config.
 import { createRuntime } from './runtime.ts';
 import type { Ui } from './ui.ts';
 
-/** Postgres through a Hyperdrive binding: `postgres(env.HYPERDRIVE)`. */
-export type PostgresDatabase = { readonly engine: 'postgres'; readonly hyperdrive: { readonly connectionString: string } };
-
-/** Postgres through Hyperdrive, the one database the Worker runs on. */
-export function postgres(hyperdrive: { readonly connectionString: string }): PostgresDatabase {
-  if (typeof hyperdrive?.connectionString !== 'string') {
-    throw new Error('postgres() takes the Hyperdrive binding, e.g. postgres(env.HYPERDRIVE)');
-  }
-  return { engine: 'postgres', hyperdrive };
-}
+export { postgres, type PostgresDatabase } from '@coffre/db/hyperdrive';
 
 /** What the app Worker's `coffre(env => …)` returns. */
 export type WorkersConfig = CoffreConfig & { database: PostgresDatabase };

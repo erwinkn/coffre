@@ -1,3 +1,4 @@
+import { assignableToEnvironment, ROLE_NAMES } from '@coffre/core/access';
 import { sql } from 'drizzle-orm';
 import {
   blob,
@@ -178,6 +179,72 @@ export const principals = sqliteTable(
   ],
 );
 
+const ROLES = sql.raw(ROLE_NAMES.map((role) => `'${role}'`).join(', '));
+const ENVIRONMENT_ROLES = sql.raw(ROLE_NAMES.filter(assignableToEnvironment).map((role) => `'${role}'`).join(', '));
+
+export const vaultMembers = sqliteTable(
+  'vault_members',
+  {
+    principal: text().primaryKey(),
+    status: text().notNull(),
+    owner: flag('owner').notNull().default(false),
+    generation: integer().notNull().default(0),
+    createdAt: integer('created_at', { mode: 'number' }).notNull(),
+    createdBy: text('created_by').notNull(),
+    statusChangedAt: integer('status_changed_at', { mode: 'number' }).notNull(),
+    statusChangedBy: text('status_changed_by').notNull(),
+  },
+  (table) => [
+    // `^(user|token|sync):[^[:space:]:][^[:space:]]*$`, without regular expressions.
+    check(
+      'vault_members_principal_check',
+      sql`(${table.principal} GLOB 'user:?*' OR ${table.principal} GLOB 'token:?*' OR ${table.principal} GLOB 'sync:?*')
+        AND substr(${table.principal}, instr(${table.principal}, ':') + 1, 1) <> ':'
+        AND instr(${table.principal}, ' ') = 0 AND instr(${table.principal}, char(9)) = 0
+        AND instr(${table.principal}, char(10)) = 0 AND instr(${table.principal}, char(13)) = 0`,
+    ),
+    check('vault_members_user_lowercase', sql`${table.principal} NOT LIKE 'user:%' OR ${table.principal} = lower(${table.principal})`),
+    check('vault_members_status_check', sql`${table.status} IN ('active', 'removed')`),
+    check('vault_members_owner_check', sql`NOT ${table.owner} OR (${table.status} = 'active' AND ${table.principal} LIKE 'user:%')`),
+    check('vault_members_generation_check', sql`${table.generation} >= 0`),
+  ],
+);
+
+export const vaultGrants = sqliteTable(
+  'vault_grants',
+  {
+    principal: text().notNull(),
+    projectId: text('project_id'),
+    environmentId: text('environment_id'),
+    role: text().notNull(),
+    expiresAt: integer('expires_at', { mode: 'number' }),
+    grantedAt: integer('granted_at', { mode: 'number' }).notNull(),
+    grantedBy: text('granted_by').notNull(),
+  },
+  (table) => [
+    check('vault_grants_one_place', sql`(${table.projectId} IS NULL) <> (${table.environmentId} IS NULL)`),
+    check('vault_grants_role_check', sql`${table.role} IN (${ROLES})`),
+    check('vault_grants_environment_role_check', sql`${table.environmentId} IS NULL OR ${table.role} IN (${ENVIRONMENT_ROLES})`),
+    unique('vault_grants_on_project').on(table.principal, table.projectId),
+    unique('vault_grants_on_environment').on(table.principal, table.environmentId),
+    foreignKey({
+      name: 'vault_grants_principal_fkey',
+      columns: [table.principal],
+      foreignColumns: [vaultMembers.principal],
+    }).onDelete('restrict'),
+    foreignKey({
+      name: 'vault_grants_project_id_fkey',
+      columns: [table.projectId],
+      foreignColumns: [projects.id],
+    }).onDelete('restrict'),
+    foreignKey({
+      name: 'vault_grants_environment_id_fkey',
+      columns: [table.environmentId],
+      foreignColumns: [environments.id],
+    }).onDelete('restrict'),
+  ],
+);
+
 export const auditLog = sqliteTable(
   'audit_log',
   {
@@ -254,6 +321,8 @@ export const auditLog = sqliteTable(
     index('audit_log_actor_idx').on(table.actor, table.seq),
     index('audit_log_operation_idx').on(table.operationId, table.seq),
     index('audit_log_action_idx').on(table.author, table.action, table.seq),
+    index('audit_log_releases_idx').on(table.author, table.actor, table.action, table.decision, table.occurredAt),
+    index('audit_log_subject_idx').on(table.author, table.subjectPrincipal, table.seq),
   ],
 );
 

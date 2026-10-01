@@ -1,6 +1,4 @@
 {
   "extends": "../../tsconfig.base.json",
-  "include": ["src/**/*.ts", "test/**/*.ts"],
-  // The Worker's files have Workers' globals, not Node's; tsconfig.cloudflare.json.
-  "exclude": ["src/cloudflare.ts", "src/sqlite-durable-object.ts", "test/sqlite-durable-object.test.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts"]
 }

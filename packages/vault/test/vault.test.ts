@@ -1,69 +1,77 @@
-import test from 'node:test';
+import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import { setTimeout as sleep } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 
+import { entryHash, entryMac, type LogKey, type StoredEntry } from '@coffre/core/audit';
 import { awsKms, KekRegistry, KekUnavailableError, LocalKekProvider, type KekProvider } from '@coffre/core/kek';
 import { verifyCheckpoint, type SecretRef, type WrappedKey } from '@coffre/core/vault';
+import { tablesOf, type Database } from '@coffre/db';
+import { LogRewound } from '@coffre/db/log';
+import { asc, eq, gte, sql } from 'drizzle-orm';
 
 import { checkRootAdmins, resolveVaultConfig, type ResolvedVaultConfig } from '../src/config.ts';
 import { openLocalVault, type LocalVault } from '../src/local.ts';
-import { entryHash, logKey } from '../src/log.ts';
-import type { Sqlite, SqlValue } from '../src/sqlite.ts';
-import { nodeSqlite } from '../src/sqlite-node.ts';
-import type { LogRow } from '../src/store.ts';
-import { openVault } from '../src/vault.ts';
+import { vaultLogKey } from '../src/log.ts';
+import type { VaultOptions } from '../src/vault.ts';
+import {
+  emptyDatabase,
+  ENGINE,
+  newEnvironment,
+  newProject,
+  openTestDatabase,
+  places,
+  postgresOnly,
+  rows,
+  run,
+  withLogUnlocked,
+  type TestDatabase,
+} from './database.ts';
 
-/** Every vault here signs, and chains its log, with this; `reopen` needs the same to verify it. */
+/** Every vault here signs, and MACs its entries, with this; a vault started afresh needs it too. */
 const SIGNING_KEY = randomBytes(32);
+const VAULT_KEY = vaultLogKey(SIGNING_KEY);
 
 const ROOT = 'user:root@acme.example';
 const ADA = 'user:ada@acme.example';
 const BOB = 'user:bob@acme.example';
 
-type World = {
+let db: TestDatabase;
+before(async () => {
+  db = await openTestDatabase();
+});
+after(() => db.close());
+beforeEach(() => emptyDatabase(db.owner));
+
+type World = Awaited<ReturnType<typeof places>> & {
   vault: LocalVault;
-  path: string;
-  clock: { now: number };
-  project: string;
-  dev: string;
-  prod: string;
-  secret(environmentId: string, key?: string): SecretRef;
+  clock: { offset: number };
+  /** Another instance of the same vault, over connections of its own, as a second process or isolate. */
+  twin(): Promise<LocalVault>;
 };
 
-async function world(t: test.TestContext, config: Partial<ResolvedVaultConfig> = {}): Promise<World> {
-  const dir = mkdtempSync(join(tmpdir(), 'coffre-vault-'));
-  const path = join(dir, 'vault.db');
-  const clock = { now: Date.UTC(2026, 8, 1, 12) };
-  const vault = await openLocalVault(
-    path,
-    {
-      keks: new KekRegistry(LocalKekProvider.generate('test-kek-1')),
-      rootAdmins: ['root@acme.example'],
-      signingKey: SIGNING_KEY,
-      bulkLimit: { count: 1000, windowMs: 15 * 60_000 },
-      ...config,
-    },
-    { now: () => clock.now },
-  );
-  t.after(() => {
-    vault.close();
-    rmSync(dir, { recursive: true, force: true });
-  });
-  const project = randomUUID();
-  const dev = randomUUID();
-  const prod = randomUUID();
-  const secret = (environmentId: string, key = 'DATABASE_URL'): SecretRef => ({
-    projectId: project,
-    environmentId,
-    secretId: randomUUID(),
-    version: 1,
-    path: `market/${environmentId === dev ? 'dev' : 'prod'}/${key}`,
-  });
-  return { vault, path, clock, project, dev, prod, secret };
+function configure(overrides: Partial<ResolvedVaultConfig> = {}): ResolvedVaultConfig {
+  return {
+    keks: new KekRegistry(LocalKekProvider.generate('test-kek-1')),
+    rootAdmins: ['root@acme.example'],
+    signingKey: SIGNING_KEY,
+    bulkLimit: { count: 1000, windowMs: 15 * 60_000 },
+    ...overrides,
+  };
+}
+
+async function world(overrides: Partial<ResolvedVaultConfig> = {}, options: VaultOptions = {}): Promise<World> {
+  const config = configure(overrides);
+  const clock = { offset: 0 };
+  const open = async (database: Database) => openLocalVault(database, config, { clockOffset: () => clock.offset, ...options });
+  return { ...(await places(db.owner)), vault: await open(db.vault), clock, twin: async () => open(await db.connect()) };
+}
+
+/** A vault started afresh over the same database: it has verified nothing yet. */
+function fresh(): Promise<LocalVault> {
+  return openLocalVault(db.vault, configure());
 }
 
 /** Admit `principal` and grant `role` at each place. */
@@ -84,100 +92,120 @@ async function member(w: World, principal: string, grants: [string | null, strin
 
 async function wrapped(w: World, secret: SecretRef): Promise<WrappedKey> {
   const result = await w.vault.wrap({ principal: ROOT, items: [{ secret, key: randomBytes(32).toString('base64') }] });
-  assert.ok(result.ok);
+  assert.ok(result.ok, JSON.stringify(result));
   return result.wrapped[0];
 }
 
-function raw(w: World) {
-  return new DatabaseSync(w.path);
+async function vaultLog(w: World) {
+  const page = await w.vault.log({ actor: ROOT, limit: 200 });
+  assert.ok(page.ok);
+  return page.entries.reverse();
 }
 
-/** Another vault over the same file, as after a restart: it has verified nothing yet. */
-async function reopen(t: test.TestContext, path: string) {
-  const db = nodeSqlite(path);
-  t.after(() => db.close());
-  return openVault(db, {
-    keks: new KekRegistry(LocalKekProvider.generate('test-kek-1')),
-    rootAdmins: ['root@acme.example'],
-    signingKey: SIGNING_KEY,
-    bulkLimit: { count: 1000, windowMs: 15 * 60_000 },
-  });
-}
+/** What an append-only refusal looks like through Drizzle, which wraps the database's error. */
+const appendOnly = (error: unknown) => /append-only/.test(`${error} ${(error as { cause?: unknown }).cause}`);
 
-test('a read needs a live grant on the environment, and unwraps the key it was wrapped with', async (t) => {
-  const w = await world(t);
+test('a read needs a live grant on the environment, and unwraps the key it was wrapped with', async () => {
+  const w = await world();
   await member(w, ADA, [[w.dev, 'developer']]);
-  const devSecret = w.secret(w.dev);
+  const devSecret = await w.secret(w.dev);
   const key = randomBytes(32).toString('base64');
   const wrap = await w.vault.wrap({ principal: ADA, items: [{ secret: devSecret, key }] });
   assert.ok(wrap.ok);
   const read = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: [{ secret: devSecret, wrapped: wrap.wrapped[0] }] });
   assert.deepEqual(read, { ok: true, keys: [key] });
 
-  const prodSecret = w.secret(w.prod);
+  const prodSecret = await w.secret(w.prod);
   const refused = await w.vault.unwrap({
     principal: ADA,
     purpose: 'reveal',
     items: [{ secret: prodSecret, wrapped: await wrapped(w, prodSecret) }],
   });
-  assert.equal(refused.ok, false);
   assert.equal(!refused.ok && refused.refusal.code, 'no_grant');
   const write = await w.vault.wrap({ principal: ADA, items: [{ secret: prodSecret, key }] });
   assert.equal(!write.ok && write.refusal.code, 'no_grant');
 });
 
-test('a batch is all or nothing, and every item is logged either way', async (t) => {
-  const w = await world(t);
+test('a batch is all or nothing, and every item is logged either way', async () => {
+  const w = await world();
   await member(w, ADA, [[w.dev, 'viewer']]);
-  const devSecret = w.secret(w.dev);
-  const prodSecret = w.secret(w.prod);
+  const devSecret = await w.secret(w.dev);
+  const prodSecret = await w.secret(w.prod);
   const items = [
     { secret: devSecret, wrapped: await wrapped(w, devSecret) },
     { secret: prodSecret, wrapped: await wrapped(w, prodSecret) },
   ];
-  const result = await w.vault.unwrap({ principal: ADA, purpose: 'run', items });
+  const result = await w.vault.unwrap({ principal: ADA, purpose: 'run', items, requestId: 'req-1' });
   assert.equal(!result.ok && result.refusal.code, 'no_grant');
 
-  const log = await w.vault.log({ actor: ROOT });
-  assert.ok(log.ok);
-  const reads = log.entries.filter((entry) => entry.action === 'unwrap').reverse();
+  const reads = (await vaultLog(w)).filter((entry) => entry.action === 'unwrap');
   assert.deepEqual(
-    reads.map((entry) => [entry.subject, entry.outcome, entry.code, entry.detail.purpose]),
+    reads.map((entry) => [entry.subject, entry.outcome, entry.code, entry.detail.purpose, entry.detail.secretId, entry.detail.requestId]),
     [
-      ['market/dev/DATABASE_URL', 'refuse', 'no_grant', 'run'],
-      ['market/prod/DATABASE_URL', 'refuse', 'no_grant', 'run'],
+      ['market/dev/DATABASE_URL', 'refuse', 'no_grant', 'run', devSecret.secretId, 'req-1'],
+      ['market/prod/DATABASE_URL', 'refuse', 'no_grant', 'run', prodSecret.secretId, 'req-1'],
     ],
   );
 });
 
-test('a wrapped key presented as another secret is a bad claim', async (t) => {
-  const w = await world(t);
+test('a wrapped key presented as another secret is a bad claim', async () => {
+  const w = await world();
   await member(w, ADA, [[null, 'viewer']]);
-  const devSecret = w.secret(w.dev);
+  const devSecret = await w.secret(w.dev);
   const result = await w.vault.unwrap({
     principal: ADA,
     purpose: 'reveal',
-    items: [{ secret: w.secret(w.prod), wrapped: await wrapped(w, devSecret) }],
+    items: [{ secret: await w.secret(w.prod), wrapped: await wrapped(w, devSecret) }],
   });
   assert.equal(!result.ok && result.refusal.code, 'bad_claim');
 });
 
-/** A local KEK that counts what reaches it, and can be made to act as a key service that is down. */
-function watched() {
+/**
+ * A key service: a local KEK behind the interface, so the vault treats it
+ * as one, which counts what reaches it and can be made to fail, or to take
+ * its time, per secret.
+ */
+function service(options: { delayMs?: number } = {}) {
   const inner = LocalKekProvider.generate('test-kek-1');
-  const seen = { wrap: 0, unwrap: 0, down: false };
+  const seen = { wrap: 0, unwrap: 0, down: false, failing: new Set<string>(), hanging: new Set<string>(), opened: [] as Buffer[] };
+  const answer = async <T>(secretId: string, work: () => Promise<T>) => {
+    if (options.delayMs) await sleep(options.delayMs);
+    if (seen.hanging.has(secretId)) await sleep(500);
+    if (seen.down || seen.failing.has(secretId)) throw new KekUnavailableError('KMS Decrypt failed 3 times: KMSInternalException');
+    return work();
+  };
   const kek: KekProvider = {
     provider: inner.provider,
     keyId: inner.keyId,
     keyVersion: inner.keyVersion,
-    wrap: (dek, ctx) => (seen.wrap++, inner.wrap(dek, ctx)),
-    unwrap: async (wrapped, ctx) => {
-      seen.unwrap++;
-      if (seen.down) throw new KekUnavailableError('KMS Decrypt failed 3 times: KMSInternalException');
-      return inner.unwrap(wrapped, ctx);
-    },
+    wrap: (dek, ctx) => (seen.wrap++, answer(ctx.secretId, () => inner.wrap(dek, ctx))),
+    unwrap: (wrapped, ctx) => (
+      seen.unwrap++,
+      answer(ctx.secretId, async () => {
+        const key = await inner.unwrap(wrapped, ctx);
+        seen.opened.push(key);
+        return key;
+      })
+    ),
   };
   return { keks: new KekRegistry(kek), seen };
+}
+
+/** Make every append of these vault actions fail, as a database that refuses the write would. */
+async function failAppends(owner: Database, actions: string[]): Promise<() => Promise<void>> {
+  const list = actions.map((action) => `'${action}'`).join(', ');
+  if (ENGINE === 'postgres') {
+    await run(owner, sql.raw(`CREATE FUNCTION test_refuse_append() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN IF NEW.author = 'vault' AND NEW.action IN (${list}) THEN RAISE EXCEPTION 'test log failure'; END IF; RETURN NEW; END $$`));
+    await run(owner, sql`CREATE TRIGGER test_refuse_append BEFORE INSERT ON audit_log FOR EACH ROW EXECUTE FUNCTION test_refuse_append()`);
+    return async () => {
+      await run(owner, sql`DROP TRIGGER test_refuse_append ON audit_log`);
+      await run(owner, sql`DROP FUNCTION test_refuse_append()`);
+    };
+  }
+  await run(owner, sql.raw(`CREATE TRIGGER test_refuse_append BEFORE INSERT ON audit_log
+    WHEN NEW.author = 'vault' AND NEW.action IN (${list}) BEGIN SELECT RAISE(ABORT, 'test log failure'); END`));
+  return () => run(owner, sql`DROP TRIGGER test_refuse_append`);
 }
 
 for (const [operation, failure] of [
@@ -202,23 +230,21 @@ for (const [operation, failure] of [
         return key;
       },
     };
-    const w = await world(t, { keks: new KekRegistry(kek) });
-    const secret = w.secret(w.dev);
+    const w = await world({ keks: new KekRegistry(kek) });
+    const secret = await w.secret(w.dev);
     const key = randomBytes(32).toString('base64');
     const sealed = await w.vault.wrap({ principal: ROOT, items: [{ secret, key }] });
     assert.ok(sealed.ok);
     held.length = 0;
     fail = true;
-    if (failure === 'log') {
-      const db = raw(w);
-      t.after(() => db.close());
-      db.exec("CREATE TRIGGER refuse_log BEFORE INSERT ON log BEGIN SELECT RAISE(ABORT, 'test log failure'); END");
-    }
+    if (failure === 'log') t.after(await failAppends(db.owner, [operation]));
     const call = operation === 'wrap'
       ? w.vault.wrap({ principal: ROOT, items: [{ secret, key }] })
       : w.vault.unwrap({ principal: ROOT, purpose: 'reveal', items: [{ secret, wrapped: sealed.wrapped[0] }] });
-    if (failure !== null) {
-      await assert.rejects(call, /test (provider|log) failure/);
+    if (failure === 'log') {
+      await assert.rejects(call, (error) => /test log failure/.test(`${error} ${(error as { cause?: unknown }).cause}`));
+    } else if (failure === 'provider') {
+      await assert.rejects(call, KekUnavailableError);
     } else {
       const result = await call;
       assert.ok(result.ok);
@@ -229,11 +255,11 @@ for (const [operation, failure] of [
   });
 }
 
-test('only a call the rules allow reaches the KEK', async (t) => {
-  const { keks, seen } = watched();
-  const w = await world(t, { keks, bulkLimit: { count: 2, windowMs: 60_000 } });
+test('only a call the rules allow reaches the KEK', async () => {
+  const { keks, seen } = service();
+  const w = await world({ keks, bulkLimit: { count: 2, windowMs: 60_000 } });
   await member(w, ADA, [[w.dev, 'viewer']]);
-  const [dev, prod] = [w.secret(w.dev), w.secret(w.prod)];
+  const [dev, prod] = [await w.secret(w.dev), await w.secret(w.prod)];
   const items = [
     { secret: dev, wrapped: await wrapped(w, dev) },
     { secret: prod, wrapped: await wrapped(w, prod) },
@@ -244,49 +270,127 @@ test('only a call the rules allow reaches the KEK', async (t) => {
   assert.equal(code(await w.vault.unwrap({ principal: ADA, purpose: 'run', items })), 'no_grant');
   assert.equal(code(await w.vault.unwrap({ principal: BOB, purpose: 'run', items: items.slice(0, 1) })), 'not_a_member');
   assert.equal(code(await w.vault.wrap({ principal: ADA, items: [{ secret: dev, key: randomBytes(32).toString('base64') }] })), 'no_grant');
-  const again = { ...w.secret(w.dev), secretId: dev.secretId, version: 2 };
+  const again = { ...dev, version: 2 };
   assert.equal(code(await w.vault.rewrap({ principal: ADA, items: [{ secret: again, from: 1, wrapped: items[0]!.wrapped }] })), 'no_grant');
-  assert.deepEqual(seen, before, 'refused, so no key was wrapped or unwrapped');
+  assert.deepEqual({ wrap: seen.wrap, unwrap: seen.unwrap }, { wrap: before.wrap, unwrap: before.unwrap }, 'refused, so no key was wrapped or unwrapped');
 
   assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'run', items: items.slice(0, 1) })).ok, true);
   assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'run', items: items.slice(0, 1) })).ok, true);
   assert.equal(code(await w.vault.unwrap({ principal: ADA, purpose: 'run', items: items.slice(0, 1) })), 'bulk_limit');
   assert.equal(seen.unwrap, before.unwrap + 2, 'past the bulk limit, nothing reaches the KEK either');
+
+  // With a key service, each call that reaches it is announced first, and a
+  // refused one is not: its refusal is all there is.
+  const intents = (await vaultLog(w)).filter((entry) => entry.action === 'key.intent' && entry.actor === ADA);
+  assert.deepEqual(intents.map((entry) => entry.detail.operation), ['unwrap', 'unwrap']);
 });
 
-test('a key service that cannot answer fails the call, and refuses nothing', async (t) => {
-  const { keks, seen } = watched();
-  const w = await world(t, { keks });
+test('a key service that cannot answer fails the call, with each key it was asked for on the record', async () => {
+  const { keks, seen } = service();
+  const w = await world({ keks });
   await member(w, ADA, [[w.dev, 'viewer']]);
-  const secret = w.secret(w.dev);
+  const secret = await w.secret(w.dev);
   const items = [{ secret, wrapped: await wrapped(w, secret) }];
   seen.down = true;
-  await assert.rejects(w.vault.unwrap({ principal: ADA, purpose: 'run', items }), /KMS Decrypt failed 3 times/);
-  const log = await w.vault.log({ actor: ROOT });
-  assert.ok(log.ok);
-  assert.equal(log.entries.filter((entry) => entry.action === 'unwrap').length, 0, 'no refusal, and no read, to log');
+  await assert.rejects(w.vault.unwrap({ principal: ADA, purpose: 'run', items }), KekUnavailableError);
+  const entries = (await vaultLog(w)).filter((entry) => entry.actor === ADA);
+  assert.deepEqual(
+    entries.map((entry) => [entry.action, entry.outcome, entry.code]),
+    [['key.intent', 'allow', null], ['unwrap', 'refuse', 'kms_unavailable']],
+    'the intent, and the outcome: no key released, none to count against the bulk limit',
+  );
 
   seen.down = false;
   assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'run', items })).ok, true, 'and the next call goes through');
 });
 
-test('an expired grant refuses with its own code', async (t) => {
-  const w = await world(t);
-  await member(w, ADA, [[w.dev, 'viewer', w.clock.now + 60_000]]);
-  const secret = w.secret(w.dev);
+test('a key service failing part of a batch leaves each key\'s outcome, and the keys it opened are withheld', async () => {
+  // Review F5: a KMS failure halfway through a batch left no record of the keys KMS did open.
+  const { keks, seen } = service();
+  const w = await world({ keks });
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const secrets = [await w.secret(w.dev, 'A'), await w.secret(w.dev, 'B'), await w.secret(w.dev, 'C')];
+  const items = await Promise.all(secrets.map(async (secret) => ({ secret, wrapped: await wrapped(w, secret) })));
+  seen.failing.add(secrets[1].secretId);
+  seen.opened.length = 0;
+
+  await assert.rejects(w.vault.unwrap({ principal: ADA, purpose: 'run', items }), /did not answer for 1 of 3 keys/);
+  const entries = (await vaultLog(w)).filter((entry) => entry.actor === ADA);
+  assert.deepEqual(
+    entries.map((entry) => [entry.action, entry.subject, entry.code]),
+    [
+      ['key.intent', null, null],
+      ['unwrap', 'market/dev/A', 'withheld'],
+      ['unwrap', 'market/dev/B', 'kms_unavailable'],
+      ['unwrap', 'market/dev/C', 'withheld'],
+    ],
+  );
+  assert.deepEqual(
+    (entries[0].detail.keys as { subject: string }[]).map((key) => key.subject),
+    ['market/dev/A', 'market/dev/B', 'market/dev/C'],
+  );
+  assert.equal(seen.opened.length, 2);
+  assert.ok(seen.opened.every((key) => key.equals(Buffer.alloc(32))), 'the keys KMS opened are wiped, not released');
+});
+
+test('a key service past the budget fails the call, and what it answers later is wiped', async () => {
+  const { keks, seen } = service();
+  const w = await world({ keks }, { keyBudgetMs: 100 });
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const [fast, slow] = [await w.secret(w.dev, 'FAST'), await w.secret(w.dev, 'SLOW')];
+  const items = [{ secret: fast, wrapped: await wrapped(w, fast) }, { secret: slow, wrapped: await wrapped(w, slow) }];
+  seen.hanging.add(slow.secretId);
+  seen.opened.length = 0;
+
+  await assert.rejects(w.vault.unwrap({ principal: ADA, purpose: 'run', items }), KekUnavailableError);
+  const outcomes = (await vaultLog(w)).filter((entry) => entry.action === 'unwrap' && entry.actor === ADA);
+  assert.deepEqual(outcomes.map((entry) => entry.code), ['withheld', 'kms_unavailable']);
+  await sleep(600);
+  assert.equal(seen.opened.length, 2, 'the slow key opened after all');
+  assert.ok(seen.opened.every((key) => key.equals(Buffer.alloc(32))), 'and was wiped as it came');
+});
+
+test('a key service failing for its own reasons fails the call, and is no verdict on the claim', async () => {
+  const inner = LocalKekProvider.generate('test-kek-1');
+  const broken: KekProvider = {
+    provider: inner.provider,
+    keyId: inner.keyId,
+    keyVersion: inner.keyVersion,
+    wrap: async () => {
+      throw new Error('the key policy forbids Encrypt');
+    },
+    unwrap: (wrapped, ctx) => inner.unwrap(wrapped, ctx),
+  };
+  const w = await world({ keks: new KekRegistry(broken) });
+  const secret = await w.secret(w.dev);
+  await assert.rejects(
+    w.vault.wrap({ principal: ROOT, items: [{ secret, key: randomBytes(32).toString('base64') }] }),
+    /the key policy forbids Encrypt/,
+  );
+  assert.deepEqual(
+    (await vaultLog(w)).filter((entry) => entry.action === 'wrap'),
+    [],
+    'no refusal: nothing was refused',
+  );
+});
+
+test('an expired grant refuses with its own code', async () => {
+  const w = await world();
+  await member(w, ADA, [[w.dev, 'viewer', Date.now() + 60_000]]);
+  const secret = await w.secret(w.dev);
   const items = [{ secret, wrapped: await wrapped(w, secret) }];
   assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items })).ok, true);
-  w.clock.now += 61_000;
+  w.clock.offset += 61_000;
   const result = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items });
   assert.equal(!result.ok && result.refusal.code, 'expired');
   assert.deepEqual((await w.vault.access(ADA)).grants, []);
 });
 
-test('the bulk limit counts keys per principal over a rolling window', async (t) => {
-  const w = await world(t, { bulkLimit: { count: 5, windowMs: 60_000 } });
+test('the bulk limit counts keys per principal over a rolling window', async () => {
+  const w = await world({ bulkLimit: { count: 5, windowMs: 60_000 } });
   await member(w, ADA, [[w.dev, 'viewer']]);
   await member(w, BOB, [[w.dev, 'viewer']]);
-  const secrets = Array.from({ length: 3 }, () => w.secret(w.dev));
+  const secrets = [await w.secret(w.dev), await w.secret(w.dev), await w.secret(w.dev)];
   const items = await Promise.all(secrets.map(async (secret) => ({ secret, wrapped: await wrapped(w, secret) })));
 
   assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'run', items })).ok, true);
@@ -298,18 +402,96 @@ test('the bulk limit counts keys per principal over a rolling window', async (t)
   const stillOver = await w.vault.unwrap({ principal: ADA, purpose: 'run', items: items.slice(0, 1) });
   assert.equal(!stillOver.ok && stillOver.refusal.code, 'bulk_limit');
 
-  w.clock.now += 60_001;
+  w.clock.offset += 60_001;
   assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'run', items })).ok, true);
-
-  const log = await w.vault.log({ actor: ROOT, limit: 200 });
-  assert.ok(log.ok);
-  assert.equal(log.entries.filter((entry) => entry.code === 'bulk_limit').length, 4);
+  assert.equal((await vaultLog(w)).filter((entry) => entry.code === 'bulk_limit').length, 4);
 });
 
-test('a removed member is refused everything until admitted again, with no grants', async (t) => {
-  const w = await world(t);
+test('two instances share one log, one bulk limit and one set of generations', async () => {
+  // Review F2: a second Durable Object loaded the same KEK with an empty log
+  // and a fresh bulk counter. Every instance now decides in the database.
+  const w = await world({ bulkLimit: { count: 5, windowMs: 60_000 } });
+  const other = await w.twin();
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const secret = await w.secret(w.dev);
+  const items = [{ secret, wrapped: await wrapped(w, secret) }];
+
+  const reads = await Promise.all(
+    Array.from({ length: 12 }, (_, i) => (i % 2 === 0 ? w.vault : other).unwrap({ principal: ADA, purpose: 'run', items })),
+  );
+  assert.equal(reads.filter((read) => read.ok).length, 5, 'exactly the limit, across both');
+  assert.ok(reads.filter((read) => !read.ok).every((read) => !read.ok && read.refusal.code === 'bulk_limit'));
+
+  assert.equal((await other.remove({ actor: ROOT, principal: ADA })).ok, true);
+  assert.deepEqual(
+    [(await w.vault.access(ADA)).status, (await w.vault.access(ADA)).generation],
+    ['removed', 1],
+    'one instance removes, the other sees it at once',
+  );
+  assert.equal((await w.vault.verifyLog({ through: null })).ok, true);
+});
+
+test('two processes on one SQLite file share the bulk limit exactly', { skip: ENGINE !== 'sqlite' && 'two processes on one file is SQLite\'s case' }, async () => {
+  // Postgres serialises a member's reads on their row; SQLite on its file's
+  // write lock, which other processes wait for, as a second server would.
+  const kek = randomBytes(32);
+  const bulkLimit = { count: 6, windowMs: 60_000 };
+  const w = await world({ keks: new KekRegistry(new LocalKekProvider(kek, 'test-kek-1')), bulkLimit });
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const secret = await w.secret(w.dev);
+  const input = { principal: ADA, purpose: 'run' as const, items: [{ secret, wrapped: await wrapped(w, secret) }] };
+
+  const reader = spawn(
+    process.execPath,
+    [
+      '--conditions=coffre:source',
+      fileURLToPath(new URL('reader.ts', import.meta.url)),
+      JSON.stringify({ url: process.env.COFFRE_TEST_DATABASE_URL, kek: kek.toString('base64'), signingKey: SIGNING_KEY.toString('base64'), bulkLimit, input, reads: 6 }),
+    ],
+    { stdio: ['ignore', 'pipe', 'inherit'] },
+  );
+  const theirs = new Promise<string[]>((resolve, reject) => {
+    let out = '';
+    reader.stdout.on('data', (chunk: Buffer) => (out += chunk));
+    reader.once('exit', (code) => (code === 0 ? resolve(JSON.parse(out) as string[]) : reject(new Error(`the reader exited ${code}`))));
+  });
+  const ours = Promise.all(Array.from({ length: 6 }, () => w.vault.unwrap(input))).then((outcomes) =>
+    outcomes.map((outcome) => (outcome.ok ? 'ok' : outcome.refusal.code)),
+  );
+  const all = [...(await theirs), ...(await ours)];
+  assert.equal(all.filter((outcome) => outcome === 'ok').length, 6, JSON.stringify(all));
+  assert.equal(all.filter((outcome) => outcome === 'bulk_limit').length, 6);
+});
+
+test('a removal waits for a read in flight at the key service, and the next read is refused before it', async () => {
+  const { keks, seen } = service({ delayMs: 300 });
+  const w = await world({ keks });
+  const other = await w.twin();
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const secret = await w.secret(w.dev);
+  const items = [{ secret, wrapped: await wrapped(w, secret) }];
+
+  const read = w.vault.unwrap({ principal: ADA, purpose: 'reveal', items });
+  await sleep(150);
+  const asked = seen.unwrap;
+  const removal = other.remove({ actor: ROOT, principal: ADA });
+  const [released, removed] = await Promise.all([read, removal]);
+  assert.equal(released.ok, true, 'the read in flight finishes');
+  assert.equal(removed.ok, true);
+  const log = await vaultLog(w);
+  const release = log.findLast((entry) => entry.action === 'unwrap' && entry.outcome === 'allow')!;
+  const removal_ = log.find((entry) => entry.action === 'principal.remove')!;
+  assert.ok(release.seq < removal_.seq, 'and is logged before the removal, which waited for it');
+
+  const next = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items });
+  assert.equal(!next.ok && next.refusal.code, 'removed');
+  assert.equal(seen.unwrap, asked, 'refused before the key service is asked');
+});
+
+test('a removed member is refused everything until admitted again, with no grants', async () => {
+  const w = await world();
   await member(w, ADA, [[w.dev, 'viewer'], [null, 'access-manager']]);
-  const secret = w.secret(w.dev);
+  const secret = await w.secret(w.dev);
   const items = [{ secret, wrapped: await wrapped(w, secret) }];
 
   const removed = await w.vault.remove({ actor: ROOT, principal: ADA });
@@ -338,8 +520,8 @@ test('a removed member is refused everything until admitted again, with no grant
   assert.equal(!again.ok && again.refusal.code, 'no_grant');
 });
 
-test('access is managed with the same rules as the app, and root admins are fixed', async (t) => {
-  const w = await world(t);
+test('access is managed with the same rules as the app, and root admins are fixed', async () => {
+  const w = await world();
   await member(w, ADA, [[null, 'access-manager']]);
   await member(w, BOB, []);
   const change = (role: string | null, environmentId: string | null = w.dev) => ({
@@ -358,6 +540,10 @@ test('access is managed with the same rules as the app, and root admins are fixe
   const mixed = await w.vault.setAccess({ actor: ADA, principal: BOB, changes: [change(null), change('access-manager')] });
   assert.equal(!mixed.ok && mixed.refusal.code, 'invalid');
   assert.equal((await w.vault.access(BOB)).grants.length, 2);
+  // A place must be one: an environment of the project it is named with.
+  const elsewhere = await newProject(db.owner);
+  const misplaced = await w.vault.setAccess({ actor: ROOT, principal: BOB, changes: [{ ...change('viewer'), projectId: elsewhere }] });
+  assert.equal(!misplaced.ok && misplaced.refusal.code, 'invalid');
 
   const byBob = await w.vault.setAccess({ actor: BOB, principal: ADA, changes: [change(null, null)] });
   assert.equal(!byBob.ok && byBob.refusal.code, 'not_allowed');
@@ -387,8 +573,8 @@ test('access is managed with the same rules as the app, and root admins are fixe
   );
 });
 
-test('a sync is a member from its first grant, and whoever manages environments can stop it', async (t) => {
-  const w = await world(t);
+test('a sync is a member from its first grant, and whoever manages environments can stop it', async () => {
+  const w = await world();
   const MAINTAINER = 'user:mia@acme.example';
   await member(w, MAINTAINER, [[null, 'maintainer']]);
   const sync = `sync:${randomUUID()}`;
@@ -401,7 +587,7 @@ test('a sync is a member from its first grant, and whoever manages environments 
   assert.equal((await grant('developer')).ok, false);
   assert.equal((await grant('viewer', null)).ok, false);
 
-  const secret = w.secret(w.dev);
+  const secret = await w.secret(w.dev);
   const items = [{ secret, wrapped: await wrapped(w, secret) }];
   assert.equal((await w.vault.unwrap({ principal: sync, purpose: 'sync', items })).ok, true);
   assert.deepEqual(await grant(null), { ok: true, changes: ['revoked'] });
@@ -415,7 +601,13 @@ test('a sync is a member from its first grant, and whoever manages environments 
   // Its credential lives in a project the maintainer does not manage. Once
   // its source grant is gone, naming the source is what lets them stop it.
   const other = `sync:${randomUUID()}`;
-  const credential = { projectId: randomUUID(), environmentId: randomUUID(), role: 'viewer' as const, expiresAt: null };
+  const credentialProject = await newProject(db.owner);
+  const credential = {
+    projectId: credentialProject,
+    environmentId: await newEnvironment(db.owner, credentialProject),
+    role: 'viewer' as const,
+    expiresAt: null,
+  };
   assert.equal((await w.vault.setAccess({ actor: ROOT, principal: other, changes: [credential] })).ok, true);
   const source = { projectId: w.project, environmentId: w.dev };
   const refused = await w.vault.remove({ actor: MAINTAINER, principal: other });
@@ -424,10 +616,11 @@ test('a sync is a member from its first grant, and whoever manages environments 
   assert.equal((await w.vault.remove({ actor: MAINTAINER, principal: other, source })).ok, true);
 });
 
-test('the log is hash-chained, append-only, and shows a rewritten entry', async (t) => {
-  const w = await world(t);
+test('the log is chained, append-only, and shows a rewritten entry', async () => {
+  const w = await world();
+  const { auditLog } = tablesOf(db.owner);
   await member(w, ADA, [[w.dev, 'viewer']]);
-  const secret = w.secret(w.dev);
+  const secret = await w.secret(w.dev);
   await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: [{ secret, wrapped: await wrapped(w, secret) }] });
 
   const before = await w.vault.log({ actor: ROOT });
@@ -436,148 +629,105 @@ test('the log is hash-chained, append-only, and shows a rewritten entry', async 
   const refused = await w.vault.log({ actor: ADA });
   assert.equal(!refused.ok && refused.refusal.code, 'not_allowed');
 
-  const db = raw(w);
-  t.after(() => db.close());
-  assert.throws(() => db.prepare(`UPDATE log SET outcome = 'refuse' WHERE action = 'unwrap'`).run(), /append-only/);
-  assert.throws(() => db.prepare('DELETE FROM log').run(), /append-only/);
+  await assert.rejects(db.owner.update(auditLog).set({ decision: 'deny' }).where(eq(auditLog.action, 'unwrap')), appendOnly);
+  await assert.rejects(db.owner.delete(auditLog), appendOnly);
 
-  // Someone holding the file itself can drop the trigger; the chain still shows it.
-  db.exec('DROP TRIGGER log_no_update');
-  db.prepare(`UPDATE log SET actor = 'user:bob@acme.example' WHERE action = 'unwrap'`).run();
+  // Whoever owns the database can lift the triggers; the chain still shows it.
+  await withLogUnlocked(db.owner, (owned) => owned.update(auditLog).set({ actor: BOB }).where(eq(auditLog.action, 'unwrap')));
   const after = await w.vault.log({ actor: ROOT });
   assert.ok(after.ok);
   const tampered = after.entries.find((entry) => entry.action === 'unwrap')!;
   assert.deepEqual(after.verification, { ok: false, failedAtSeq: tampered.seq, reason: 'hash does not match the entry' });
 });
 
-/** `db`, counting the rows it hands back. */
-function counting(db: Sqlite): Sqlite & { rows: number } {
-  const counted = {
-    rows: 0,
-    run: (sql: string, ...params: SqlValue[]) => db.run(sql, ...params),
-    get<T>(sql: string, ...params: SqlValue[]) {
-      const row = db.get<T>(sql, ...params);
-      if (row !== undefined) counted.rows += 1;
-      return row;
-    },
-    all<T>(sql: string, ...params: SqlValue[]) {
-      const rows = db.all<T>(sql, ...params);
-      counted.rows += rows.length;
-      return rows;
-    },
-    *iterate<T>(sql: string, ...params: SqlValue[]) {
-      for (const row of db.iterate<T>(sql, ...params)) {
-        counted.rows += 1;
-        yield row;
-      }
-    },
-    transaction: <T>(fn: () => T) => db.transaction(fn),
+test('the vault appends only as itself, and writes none of the app\'s rows', postgresOnly('logins are Postgres\'s'), async () => {
+  const { auditLog, projects } = tablesOf(db.vault);
+  const w = await world();
+  await member(w, ADA, []);
+  const forged = {
+    seq: 1000n, author: 'app', keyId: 'app:0', occurredAt: 0, actor: 'user:ada@acme.example', action: 'secret.read',
+    decision: 'allow', prevHash: Buffer.alloc(32), mac: Buffer.alloc(32), hash: Buffer.alloc(32),
   };
-  return counted;
-}
+  const refusedBy = (pattern: RegExp) => (error: unknown) => pattern.test(`${error} ${(error as { cause?: unknown }).cause}`);
+  await assert.rejects(db.vault.insert(auditLog).values(forged), refusedBy(/row-level security/));
+  await assert.rejects(db.vault.update(projects).set({ name: 'renamed' }), refusedBy(/permission denied/));
+});
 
-/** A vault whose log holds `n` wraps and an admission, over a store that counts what it reads. */
-async function longLog(t: test.TestContext, n: number) {
-  const dir = mkdtempSync(join(tmpdir(), 'coffre-vault-'));
-  const path = join(dir, 'vault.db');
-  const file = nodeSqlite(path);
-  const db = counting(file);
-  const vault = await openVault(db, {
-    keks: new KekRegistry(LocalKekProvider.generate('test-kek-1')),
-    rootAdmins: ['root@acme.example'],
-    signingKey: SIGNING_KEY,
-    bulkLimit: { count: 1000, windowMs: 15 * 60_000 },
-  });
-  t.after(() => {
-    file.close();
-    rmSync(dir, { recursive: true, force: true });
-  });
-  const place = { projectId: randomUUID(), environmentId: randomUUID(), version: 1 };
-  const items = Array.from({ length: n }, (_, i) => ({
-    secret: { ...place, secretId: randomUUID(), path: `market/dev/KEY_${i}` },
-    key: randomBytes(32).toString('base64'),
-  }));
-  assert.ok((await vault.wrap({ principal: ROOT, items })).ok);
-  assert.ok((await vault.admit({ actor: ROOT, principal: ADA })).ok);
-  return { vault, db, path };
+/** A vault whose log holds `n` wraps and an admission, as the root admin made them. */
+async function longLog(n: number) {
+  const w = await world();
+  const items = await Promise.all(
+    Array.from({ length: n }, async (_, i) => ({ secret: await w.secret(w.dev, `KEY_${i}`), key: randomBytes(32).toString('base64') })),
+  );
+  assert.ok((await w.vault.wrap({ principal: ROOT, items })).ok);
+  assert.ok((await w.vault.admit({ actor: ROOT, principal: ADA })).ok);
+  return w;
 }
 
 /**
- * Rewrite entry `seq` in the file, as someone holding it could, and re-chain
- * what follows under `rechain`: the vault's log key for someone who also
- * holds its configuration, any other for someone who does not.
+ * Change entry `seq`'s actor, as whoever owns the database could: in place,
+ * leaving its hash as it was; or chained again from there, the hashes made
+ * anew and the MACs kept, which needs no key; or sealed again too, under
+ * `key`, which needs the vault's.
  */
-function rewrite(path: string, seq: number, rechain: Uint8Array | null) {
-  const file = new DatabaseSync(path);
-  try {
-    file.exec('DROP TRIGGER log_no_update');
-    const rows = file.prepare(`SELECT ${LOG_COLUMNS} FROM log WHERE seq >= ? ORDER BY seq`).all(seq) as LogRow[];
-    let prevHash = rows[0].prevHash;
-    for (const row of rechain ? rows : rows.slice(0, 1)) {
-      const actor = row.seq === seq ? BOB : row.actor;
-      const hash = rechain ? entryHash(rechain, prevHash, { ...row, actor }) : row.hash;
-      file.prepare('UPDATE log SET actor = ?, prev_hash = ?, hash = ? WHERE seq = ?').run(actor, prevHash, hash, row.seq);
+async function rewrite(seq: bigint, how: 'in place' | 'chained' | LogKey) {
+  const { auditLog, auditChainHead } = tablesOf(db.owner);
+  const entries = (await db.owner.select().from(auditLog).where(gte(auditLog.seq, seq)).orderBy(asc(auditLog.seq))) as StoredEntry[];
+  await withLogUnlocked(db.owner, async (owned) => {
+    if (how === 'in place') {
+      await owned.update(auditLog).set({ actor: BOB }).where(eq(auditLog.seq, seq));
+      return;
+    }
+    let prevHash = entries[0].prevHash;
+    for (const entry of entries) {
+      const changed = { ...entry, actor: entry.seq === seq ? BOB : entry.actor, prevHash };
+      const mac = typeof how === 'object' && entry.author === how.author ? entryMac(how.key, prevHash, changed) : entry.mac;
+      const hash = entryHash(prevHash, changed, mac);
+      await owned.update(auditLog).set({ actor: changed.actor, prevHash, mac, hash }).where(eq(auditLog.seq, entry.seq));
       prevHash = hash;
     }
-  } finally {
-    file.close();
-  }
+    await owned.update(auditChainHead).set({ headHash: prevHash });
+  });
 }
 
-const LOG_COLUMNS = 'seq, at, actor, action, outcome, code, subject, detail, prev_hash AS prevHash, hash';
+test('an entry edited in place is found on its page, or by a full check', async () => {
+  const w = await longLog(50);
+  assert.ok((await w.vault.log({ actor: ROOT })).ok);
 
-test('a log view rehashes the page and what is new, not the whole chain', async (t) => {
-  const { vault, db } = await longLog(t, 300);
-  const view = async (input: { before?: number; full?: boolean } = {}) => {
-    db.rows = 0;
-    const page = await vault.log({ actor: ROOT, limit: 10, ...input });
-    assert.ok(page.ok);
-    assert.deepEqual(page.verification, { ok: true, entries: 301 });
-    return db.rows;
-  };
-  // The first view after a start has nothing to go on: all of it.
-  assert.ok((await view()) > 300);
-  assert.ok((await view()) < 20);
-  assert.ok((await view({ before: 100 })) < 20);
-  assert.ok((await view({ full: true })) > 300);
-});
-
-test('an entry edited in place is found on its page, or by a full check', async (t) => {
-  const { vault, path } = await longLog(t, 50);
-  assert.ok((await vault.log({ actor: ROOT })).ok);
-
-  // Off the page and edited in place: only a full check rehashes it.
-  rewrite(path, 3, null);
-  const view = await vault.log({ actor: ROOT, limit: 10 });
+  // Off the page and edited in place: a view checks what is new since the
+  // last one, and the page, so only a full check rehashes it.
+  await rewrite(3n, 'in place');
+  const view = await w.vault.log({ actor: ROOT, limit: 10 });
   assert.ok(view.ok && view.verification.ok);
-  const onPage = await vault.log({ actor: ROOT, before: 10 });
+  const onPage = await w.vault.log({ actor: ROOT, before: 10 });
   assert.deepEqual(onPage.ok && onPage.verification, { ok: false, failedAtSeq: 3, reason: 'hash does not match the entry' });
-  const full = await vault.log({ actor: ROOT, limit: 10, full: true });
+  const full = await w.vault.log({ actor: ROOT, limit: 10, full: true });
   assert.deepEqual(full.ok && full.verification, { ok: false, failedAtSeq: 3, reason: 'hash does not match the entry' });
 });
 
-test('a rewrite re-chained without the vault\'s key is found by any full check', async (t) => {
-  const { path } = await longLog(t, 50);
-  rewrite(path, 3, randomBytes(32));
-  const fresh = await (await reopen(t, path)).log({ actor: ROOT, full: true });
-  assert.deepEqual(fresh.ok && fresh.verification, { ok: false, failedAtSeq: 3, reason: 'hash does not match the entry' });
+test('a rewrite chained again without the vault\'s key is found by any full check', async () => {
+  await longLog(50);
+  await rewrite(3n, 'chained');
+  const check = await (await fresh()).log({ actor: ROOT, full: true });
+  assert.deepEqual(check.ok && check.verification, { ok: false, failedAtSeq: 3, reason: 'not written by the vault: its MAC does not match' });
 });
 
-test('a rewrite re-chained with the vault\'s key is found against the head it last verified', async (t) => {
-  const { vault, path } = await longLog(t, 50);
-  assert.ok((await vault.log({ actor: ROOT })).ok);
+test('a rewrite sealed again with the vault\'s key is found against the head it last verified', async () => {
+  const w = await longLog(50);
+  assert.ok((await w.vault.log({ actor: ROOT })).ok);
 
-  rewrite(path, 3, logKey(SIGNING_KEY));
-  const view = await vault.log({ actor: ROOT, limit: 10 });
+  await rewrite(3n, VAULT_KEY);
+  const view = await w.vault.log({ actor: ROOT, limit: 10 });
   assert.deepEqual(view.ok && view.verification, { ok: false, failedAtSeq: 51, reason: 'changed since the vault last verified it' });
   // A vault that never saw the head before cannot tell: whoever holds the
-  // key can chain anything. The heads checkpoints signed can; see below.
-  const unaware = await (await reopen(t, path)).log({ actor: ROOT, full: true });
+  // key can seal anything. The heads checkpoints signed can; see below.
+  const unaware = await (await fresh()).log({ actor: ROOT, full: true });
   assert.ok(unaware.ok && unaware.verification.ok);
 });
 
-test('checkpoints are signed only while they extend the last one', async (t) => {
-  const w = await world(t);
+test('checkpoints are signed only while they extend the last one', async () => {
+  const w = await world();
+  const { auditLog } = tablesOf(db.owner);
   const { checkpoint: none, publicKey } = await w.vault.latestCheckpoint();
   assert.equal(none, null);
 
@@ -594,20 +744,14 @@ test('checkpoints are signed only while they extend the last one', async (t) => 
   const restart = await w.vault.checkpoint({ seq: 5, headHash: 'f'.repeat(64), previous: null });
   assert.equal(!restart.ok && restart.refusal.code, 'checkpoint_diverged');
   assert.deepEqual((await w.vault.latestCheckpoint()).checkpoint, next.checkpoint);
+  assert.equal((await vaultLog(w)).filter((entry) => entry.code === 'checkpoint_diverged').length, 2);
 
-  const log = await w.vault.log({ actor: ROOT });
-  assert.ok(log.ok);
-  assert.equal(log.entries.filter((entry) => entry.code === 'checkpoint_diverged').length, 2);
-
-  // Append-only, as the log is.
-  const db = raw(w);
-  t.after(() => db.close());
-  assert.throws(() => db.prepare('DELETE FROM checkpoints WHERE seq = 20').run(), /append-only/);
-  assert.throws(() => db.prepare(`UPDATE checkpoints SET head_hash = 'e'`).run(), /append-only/);
+  // Each is an entry of the log, and as append-only.
+  await assert.rejects(db.owner.delete(auditLog).where(eq(auditLog.action, 'checkpoint')), appendOnly);
 });
 
-test('a checkpoint signs the vault log\'s head too, and none is signed over that log rewritten', async (t) => {
-  const w = await world(t);
+test('a checkpoint signs the vault\'s head too, and none is signed over its entries rewritten', async () => {
+  const w = await world();
   await member(w, ADA, [[w.dev, 'viewer']]);
   const page = await w.vault.log({ actor: ROOT, limit: 1 });
   assert.ok(page.ok);
@@ -617,33 +761,70 @@ test('a checkpoint signs the vault log\'s head too, and none is signed over that
   assert.ok(first.ok);
   assert.deepEqual(first.checkpoint.vault, head);
   const { publicKey } = await w.vault.latestCheckpoint();
-  assert.equal(await verifyCheckpoint({ ...first.checkpoint, vault: { ...head, seq: 1 } }, publicKey), false);
+  assert.equal(await verifyCheckpoint({ ...first.checkpoint, vault: { ...head, seq: head.seq + 1 } }, publicKey), false);
 
-  // Someone holding the file and the vault's keys rewrites an entry the
-  // checkpoint covers, and chains again.
+  // Someone holding the database and the vault's keys rewrites an entry the
+  // checkpoint covers, and seals again. The instance that wrote the head
+  // they replaced refuses to write after it at all.
   await member(w, BOB, [[w.dev, 'viewer']]);
-  rewrite(w.path, 1, logKey(SIGNING_KEY));
-  const next = await w.vault.checkpoint({ seq: 20, headHash: 'b'.repeat(64), previous: { seq: 10, hash: 'a'.repeat(64) } });
+  await rewrite(1n, VAULT_KEY);
+  const input = { seq: 20, headHash: 'b'.repeat(64), previous: { seq: 10, hash: 'a'.repeat(64) } };
+  await assert.rejects(w.vault.checkpoint(input), LogRewound);
+  // Another refuses to sign over it.
+  const started = await fresh();
+  const next = await started.checkpoint(input);
   assert.equal(!next.ok && next.refusal.code, 'log_broken');
 
-  // A vault started afresh has no head of its own to go on, but the one
-  // the app recorded, and the last checkpoint's, are no longer there.
-  const fresh = await reopen(t, w.path);
-  const rewritten = 'the log was rewritten or cut back';
-  assert.deepEqual(await fresh.verifyLog({ through: head }), {
+  // And with no head of its own to go on, it finds that the one the app
+  // recorded, and the last checkpoint's, are no longer there.
+  const gone = 'the log was rewritten or cut back';
+  assert.deepEqual(await started.verifyLog({ through: head }), {
     ok: false,
     failedAtSeq: head.seq,
-    reason: `not the entry a checkpoint the app recorded signed: ${rewritten}`,
+    reason: `not the entry a checkpoint the app recorded signed: ${gone}`,
   });
-  assert.deepEqual(await fresh.verifyLog({ through: null }), {
+  assert.deepEqual(await started.verifyLog({ through: null }), {
     ok: false,
     failedAtSeq: head.seq,
-    reason: `not the entry the last checkpoint signed: ${rewritten}`,
+    reason: `not the entry the last checkpoint signed: ${gone}`,
   });
 });
 
-test('a full check replays who holds what from the log, and finds what was written around it', async (t) => {
-  const w = await world(t);
+test('a full check covers the head the app verified up to, and refuses an entry forged under no key', async () => {
+  const w = await world();
+  const { auditLog, auditChainHead } = tablesOf(db.owner);
+  await member(w, ADA, []);
+  const [last] = (await db.owner.select().from(auditLog).orderBy(asc(auditLog.seq))).slice(-1) as StoredEntry[];
+  const upTo = { seq: Number(last.seq), hash: last.hash.toString('hex') };
+  assert.deepEqual(await w.vault.verifyLog({ through: null, upTo }), { ok: true, entries: 1 });
+  assert.deepEqual(await w.vault.verifyLog({ through: null, upTo: { ...upTo, hash: 'f'.repeat(64) } }), {
+    ok: false,
+    failedAtSeq: upTo.seq,
+    reason: 'not the entry the app verified up to: the log changed between the two checks',
+  });
+
+  // Review of #28, F1: a vault entry anyone could link to the chain, with a
+  // MAC made up, is the vault's to refuse.
+  const fields = {
+    seq: last.seq + 1n, author: 'vault' as const, keyId: 'vault:0000000000000000', occurredAt: Date.now(),
+    actor: 'user:victim@acme.example', action: 'unwrap', decision: 'allow', code: null, subjectPrincipal: null,
+    projectId: null, environmentId: null, secretId: null, secretVersionId: null, operationId: null, requestId: null,
+    sourceIp: null, relatedSeq: null, metadata: '{}',
+  };
+  const mac = Buffer.alloc(32, 0x41);
+  const hash = entryHash(last.hash, fields, mac);
+  await db.owner.insert(auditLog).values({ ...fields, prevHash: last.hash, mac, hash });
+  await db.owner.update(auditChainHead).set({ nextSeq: fields.seq + 1n, headHash: hash });
+  assert.deepEqual(await w.vault.verifyLog({ through: null }), {
+    ok: false,
+    failedAtSeq: Number(fields.seq),
+    reason: 'written under vault:0000000000000000, a key this verifier does not hold',
+  });
+});
+
+test('a full check replays who holds what from the log, and finds what was written around it', async () => {
+  const w = await world();
+  const { vaultGrants, vaultMembers } = tablesOf(db.owner);
   const change = async (principal: string, environmentId: string | null, role: string | null) =>
     assert.ok(
       (
@@ -656,21 +837,21 @@ test('a full check replays who holds what from the log, and finds what was writt
     );
   // Every kind of change: admit, grant, update, owner, remove, restore, and a
   // lapsed grant cleared, which changes nothing and is not logged.
-  await member(w, ADA, [[w.dev, 'developer'], [w.prod, 'viewer', w.clock.now + 60_000]]);
+  await member(w, ADA, [[w.dev, 'developer'], [w.prod, 'viewer', Date.now() + 60_000]]);
   await member(w, BOB, [[null, 'maintainer']]);
   await change(ADA, w.dev, 'viewer');
   assert.ok((await w.vault.admit({ actor: ROOT, principal: ADA, owner: true })).ok);
   assert.ok((await w.vault.remove({ actor: ROOT, principal: BOB })).ok);
   assert.ok((await w.vault.admit({ actor: ROOT, principal: BOB })).ok);
-  w.clock.now += 120_000;
+  w.clock.offset += 120_000;
   await change(ADA, w.prod, null);
   const whole = await w.vault.verifyLog({ through: null });
-  assert.ok(whole.ok);
+  assert.ok(whole.ok, JSON.stringify(whole));
 
-  // A grant written straight into the store: the chain holds, the replay does not.
-  const db = raw(w);
-  t.after(() => db.close());
-  db.prepare(`INSERT INTO grants VALUES (?, ?, NULL, 'owner', NULL, ?, ?)`).run(BOB, w.project, w.clock.now, ROOT);
+  // A grant written straight into the database: the chain holds, the replay does not.
+  await db.owner.insert(vaultGrants).values({
+    principal: BOB, projectId: w.project, environmentId: null, role: 'owner', expiresAt: null, grantedAt: Date.now(), grantedBy: ROOT,
+  });
   const extra = {
     ok: false,
     failedAtSeq: null,
@@ -682,13 +863,15 @@ test('a full check replays who holds what from the log, and finds what was writt
   assert.deepEqual(full.ok && full.verification, extra);
   // A view that is not full does not replay.
   const view = await w.vault.log({ actor: ROOT });
-  assert.deepEqual(view.ok && view.verification, whole);
+  assert.deepEqual(view.ok && view.verification, { ok: true, entries: (whole as { entries: number }).entries });
 
   // Or a removal undone, grants and all.
-  db.prepare('DELETE FROM grants WHERE principal = ? AND role = ?').run(BOB, 'owner');
+  await db.owner.delete(vaultGrants).where(eq(vaultGrants.role, 'owner'));
   assert.ok((await w.vault.remove({ actor: ROOT, principal: ADA })).ok);
-  db.prepare(`UPDATE principals SET status = 'active', owner = 1 WHERE principal = ?`).run(ADA);
-  db.prepare(`INSERT INTO grants VALUES (?, ?, ?, 'viewer', NULL, 0, ?)`).run(ADA, w.project, w.dev, ROOT);
+  await db.owner.update(vaultMembers).set({ status: 'active', owner: true }).where(eq(vaultMembers.principal, ADA));
+  await db.owner.insert(vaultGrants).values({
+    principal: ADA, projectId: null, environmentId: w.dev, role: 'viewer', expiresAt: null, grantedAt: 0, grantedBy: ROOT,
+  });
   assert.deepEqual(await w.vault.verifyLog({ through: null }), {
     ok: false,
     failedAtSeq: null,
@@ -697,21 +880,26 @@ test('a full check replays who holds what from the log, and finds what was writt
   });
 });
 
-test('the store holds no key', async (t) => {
+test('the database holds no key', async () => {
   const kek = randomBytes(32);
-  const w = await world(t, { keks: new KekRegistry(new LocalKekProvider(kek, 'test-kek-1')) });
+  const w = await world({ keks: new KekRegistry(new LocalKekProvider(kek, 'test-kek-1')) });
   await member(w, ADA, [[w.dev, 'developer']]);
-  const secret = w.secret(w.dev);
+  const secret = await w.secret(w.dev);
   const key = randomBytes(32);
   const wrap = await w.vault.wrap({ principal: ADA, items: [{ secret, key: key.toString('base64') }] });
   assert.ok(wrap.ok);
   await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: [{ secret, wrapped: wrap.wrapped[0] }] });
-  // In WAL, the newest writes are in the -wal until a checkpoint moves them.
-  const file = Buffer.concat([w.path, `${w.path}-wal`].map((name) => readFileSync(name)));
-  assert.ok(file.includes(secret.path), 'the log entry is where this looks');
+  const everything = [];
+  for (const table of ['audit_log', 'audit_chain_head', 'vault_members', 'vault_grants']) {
+    everything.push(...(await rows<Record<string, unknown>>(db.owner, sql.raw(`SELECT * FROM ${table}`))));
+  }
+  const dump = Buffer.concat(
+    everything.flatMap((row) => Object.values(row).map((value) => (Buffer.isBuffer(value) ? value : Buffer.from(String(value))))),
+  );
+  assert.ok(dump.includes(secret.path), 'the log entry is where this looks');
   for (const needle of [kek, key]) {
-    assert.equal(file.includes(needle), false);
-    assert.equal(file.includes(Buffer.from(needle.toString('base64'))), false);
+    assert.equal(dump.includes(needle), false);
+    for (const encoding of ['base64', 'hex'] as const) assert.equal(dump.includes(needle.toString(encoding)), false);
   }
 });
 
@@ -765,8 +953,8 @@ test('configuration', () => {
   }
 });
 
-test('membership generations advance on removal even when time does not', async (t) => {
-  const w = await world(t);
+test('membership generations advance on removal even when time does not', async () => {
+  const w = await world();
   await member(w, ADA, []);
   assert.equal((await w.vault.access(ADA)).generation, 0);
   assert.equal((await w.vault.remove({ actor: ROOT, principal: ADA })).ok, true);

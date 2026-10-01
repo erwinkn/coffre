@@ -58,7 +58,8 @@ test('the vectors chain from the genesis hash, and each author verifies its own'
   }));
   for (const author of ['app', 'vault'] as const) {
     const key = { author, keyId: vectors.keys[author].keyId, key: Buffer.from(vectors.keys[author].key, 'hex') };
-    const result = verifyEntries(chained, { keys: [key] });
+    const other = author === 'app' ? 'vault' : 'app';
+    const result = verifyEntries(chained, { keys: [key], chainOnly: [other] });
     assert.deepEqual(result.ok && [result.entries, result.authenticated], [4, 2]);
   }
 });
@@ -123,45 +124,66 @@ function rewrite(log: StoredEntry[], i: number, key: LogKey, change: Partial<Log
 
 const app = deriveLogKey('app', randomBytes(32));
 const vault = deriveLogKey('vault', randomBytes(32));
+/** Each author's check of a shared log: its own entries by MAC, the other's by their place. */
+const asApp = { keys: [app], chainOnly: ['vault' as const] };
+const asVault = { keys: [vault], chainOnly: ['app' as const] };
+/** What anyone who reads the table can check: the chain alone. */
+const publicly = { keys: [], chainOnly: ['app' as const, 'vault' as const] };
 
 test('an untouched log verifies, for each author with its key', () => {
   const log = buildLog([app, vault, app, app, vault]);
-  assert.deepEqual(verifyEntries(log, { keys: [app] }), { ok: true, entries: 5, head: log[4].hash, nextSeq: 5n, authenticated: 3 });
-  assert.equal(verifyEntries(log, { keys: [vault] }).ok, true);
+  assert.deepEqual(verifyEntries(log, asApp), { ok: true, entries: 5, head: log[4].hash, nextSeq: 5n, authenticated: 3 });
+  assert.equal(verifyEntries(log, asVault).ok, true);
+  assert.deepEqual(verifyEntries(log, { keys: [app, vault] }), { ok: true, entries: 5, head: log[4].hash, nextSeq: 5n, authenticated: 5 });
+});
+
+test("an author whose keys the verifier lacks fails, unless it is named as checked elsewhere", () => {
+  // Anyone who can insert a row can link it to the chain: a forged vault
+  // entry with any MAC passes every public check. Only its author's key
+  // tells, so a verifier without it says so rather than pass it.
+  const log = buildLog([app, app]);
+  const forged = { ...entry(2n, vault), keyId: 'vault:0000000000000000' };
+  const mac = Buffer.alloc(32, 0x41);
+  log.push({ ...forged, prevHash: log[1].hash, mac, hash: entryHash(log[1].hash, forged, mac) });
+  const result = verifyEntries(log, { keys: [app] });
+  assert.deepEqual(result.ok ? null : [result.failedAtSeq, result.reason], [2n, 'written as the vault, whose keys this verifier does not hold']);
+  assert.deepEqual(verifyEntries(log, asApp), { ok: true, entries: 3, head: log[2].hash, nextSeq: 3n, authenticated: 2 });
+  const byVault = verifyEntries(log, asVault);
+  assert.deepEqual(byVault.ok ? null : [byVault.failedAtSeq, byVault.reason], [2n, 'written under vault:0000000000000000, a key this verifier does not hold']);
 });
 
 test('a field edited in place breaks the entry, for anyone who reads the table', () => {
   const log = buildLog([app, app, app]);
   log[1].actor = 'user:someone-else@acme.example';
-  const result = verifyEntries(log, { keys: [] });
+  const result = verifyEntries(log, publicly);
   assert.deepEqual(result.ok ? null : [result.failedAtSeq, result.reason], [1n, 'hash does not match the entry']);
 });
 
 test('a MAC swapped for another breaks the public chain too', () => {
   const log = buildLog([app, app]);
   log[0].mac = Buffer.alloc(32, 7);
-  assert.equal(verifyEntries(log, { keys: [] }).ok, false);
+  assert.equal(verifyEntries(log, publicly).ok, false);
 });
 
 test('an entry rewritten by the app is caught at the next vault entry, which the app cannot seal again', () => {
   const log = rewrite(buildLog([app, vault, app]), 0, app, { decision: 'deny' });
   // The app's own check passes: it can make its MACs, and the chain re-links.
-  assert.equal(verifyEntries(log, { keys: [app] }).ok, true);
-  const result = verifyEntries(log, { keys: [vault] });
+  assert.equal(verifyEntries(log, asApp).ok, true);
+  const result = verifyEntries(log, asVault);
   assert.deepEqual(result.ok ? null : [result.failedAtSeq, result.reason], [1n, 'not written by the vault: its MAC does not match']);
 });
 
 test('an entry rewritten by the vault is caught at the next app entry', () => {
   const log = rewrite(buildLog([vault, app, vault]), 0, vault, { actor: 'user:mallory@acme.example' });
-  assert.equal(verifyEntries(log, { keys: [vault] }).ok, true);
-  const result = verifyEntries(log, { keys: [app] });
+  assert.equal(verifyEntries(log, asVault).ok, true);
+  const result = verifyEntries(log, asApp);
   assert.equal(result.ok ? null : result.failedAtSeq, 1n);
 });
 
 test("each author can rewrite its own entries since the other's last one: the accepted window", () => {
   const log = rewrite(buildLog([vault, app, app]), 1, app, { actor: 'user:mallory@acme.example' });
-  assert.equal(verifyEntries(log, { keys: [app] }).ok, true);
-  assert.equal(verifyEntries(log, { keys: [vault] }).ok, true);
+  assert.equal(verifyEntries(log, asApp).ok, true);
+  assert.equal(verifyEntries(log, asVault).ok, true);
 });
 
 test('an entry claiming the other author is refused by that author', () => {
@@ -169,7 +191,7 @@ test('an entry claiming the other author is refused by that author', () => {
   const forged = { ...entry(2n, app), author: 'vault' as const };
   const mac = entryMac(app.key, log[1].hash, forged);
   log.push({ ...forged, prevHash: log[1].hash, mac, hash: entryHash(log[1].hash, forged, mac) });
-  const result = verifyEntries(log, { keys: [vault] });
+  const result = verifyEntries(log, asVault);
   assert.deepEqual(result.ok ? null : [result.failedAtSeq, result.reason], [2n, `written under ${app.keyId}, a key this verifier does not hold`]);
 });
 
@@ -192,7 +214,7 @@ test('a gap, a removed entry and a reordering are all caught', () => {
 
 test('a run in the middle verifies from the entry before it', () => {
   const log = buildLog([app, vault, app, app]);
-  const result = verifyEntries(log.slice(2), { keys: [app], startSeq: 2n, startPrevHash: log[1].hash });
+  const result = verifyEntries(log.slice(2), { ...asApp, startSeq: 2n, startPrevHash: log[1].hash });
   assert.equal(result.ok && result.nextSeq, 4n);
 });
 

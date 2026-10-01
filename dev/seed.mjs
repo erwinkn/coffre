@@ -81,18 +81,18 @@ const member = ({ principalType, principalId }) =>
 // delete. This only ever appeared to work because the log happened to be empty.
 //
 // This wholesale delete is possible only because the seed connects as the
-// owner. The application role cannot do any of it: coffre_app has no DELETE on
-// audit_log at all.
+// owner, and lifts the log's append-only triggers for it. Neither runtime
+// login can do any of it: they have no DELETE on audit_log at all.
 //
-// Syncs hold references to secrets, versions and environments, and sign-in
+// The vault's members and grants go with the log that records them. Syncs
+// hold references to secrets, versions and environments, and sign-in
 // sessions, device logins and linked accounts to principals, so they go next.
-//
-// Grants, who is still a member, and the checkpoints of this log live in the
-// vault, not here. dev/start.sh starts the vault empty before it seeds;
-// seeding against a vault that remembers an older log would leave its
-// checkpoints behind a log that no longer exists.
 console.log('==> resetting local data');
+await pool.query('ALTER TABLE audit_log DISABLE TRIGGER USER');
 await pool.query('DELETE FROM audit_log');
+await pool.query('ALTER TABLE audit_log ENABLE TRIGGER USER');
+await pool.query('DELETE FROM vault_grants');
+await pool.query('DELETE FROM vault_members');
 await pool.query('DELETE FROM sync_keys');
 await pool.query('DELETE FROM syncs');
 await pool.query('DELETE FROM credentials');

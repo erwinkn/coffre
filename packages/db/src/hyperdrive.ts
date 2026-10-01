@@ -2,6 +2,17 @@ import pg from 'pg';
 
 import type { PoolLike } from './database.ts';
 
+/** Postgres through a Hyperdrive binding: `postgres(env.HYPERDRIVE)`. */
+export type PostgresDatabase = { readonly engine: 'postgres'; readonly hyperdrive: { readonly connectionString: string } };
+
+/** Postgres through Hyperdrive, the one database a Worker runs on, the app's and the vault's. */
+export function postgres(hyperdrive: { readonly connectionString: string }): PostgresDatabase {
+  if (typeof hyperdrive?.connectionString !== 'string') {
+    throw new Error('postgres() takes the Hyperdrive binding, e.g. postgres(env.HYPERDRIVE)');
+  }
+  return { engine: 'postgres', hyperdrive };
+}
+
 /**
  * Request-scoped node-postgres adapter for Hyperdrive.
  *

@@ -8,7 +8,6 @@ import { createClient } from '@coffre/client';
 
 import { Browser } from '../src/browser.ts';
 import { tamperVault } from '../src/checks/audit.ts';
-import { canaryScan } from '../src/checks/canaries.ts';
 import type { People } from '../src/checks/people.ts';
 import { sqlite, using } from '../src/database.ts';
 import type { Deployment } from '../src/harness.ts';
@@ -40,18 +39,9 @@ async function fixture(t: test.TestContext) {
   };
   const deployment = {
     origin: 'http://conformance.test', databaseFile: file, database: async () => sqlite(file),
-    vaultStore: () => null, output: () => '',
+    runtime: null, vaultRuntime: null, output: () => '',
   } as Deployment;
-  return { deployment, people, missing: join(dir, 'missing.db') };
-}
-
-for (const unavailable of ['not located', 'file missing']) {
-  test(`the canary scan fails when the vault store is ${unavailable}`, async (t) => {
-    const { deployment, people, missing } = await fixture(t);
-    t.mock.method(globalThis, 'fetch', async () => new Response('{}'));
-    if (unavailable === 'file missing') deployment.vaultStore = () => missing;
-    await assert.rejects(canaryScan(deployment, people, { KEY: 'coffre-canary-test' }), /store.*could not be found/);
-  });
+  return { deployment, people };
 }
 
 test('unavailable vault tampering is a failed conformance result', async (t) => {

@@ -1,9 +1,10 @@
 /**
- * The vault on Node, one of two ways:
+ * The vault on Node, one of two ways, each over the database the server
+ * uses, through the vault's own login:
  *
- * - in the server's own process: `vault: await localVault({ store, ...keys })`;
+ * - in the server's own process: `vault: await localVault({ database, ...keys })`;
  * - as a process of its own, which the server reaches over a Unix socket:
- *   `serveVault({ socket, store, ...keys })` there, and
+ *   `serveVault({ socket, database, ...keys })` there, and
  *   `vault: connectVault(socket)` in the server.
  *
  * The second keeps every key out of the process that faces the network. The
@@ -17,6 +18,8 @@ import { chmodSync, existsSync, lstatSync, rmSync } from 'node:fs';
 import { Agent, createServer, request as httpRequest, type IncomingMessage } from 'node:http';
 
 import type { Vault } from '@coffre/core/vault';
+import type { Database } from '@coffre/db';
+import { openDatabase } from '@coffre/db/connect';
 
 import { resolveVaultConfig, type VaultConfig } from './config.ts';
 import { METHODS, openLocalVault, type LocalVault } from './local.ts';
@@ -27,13 +30,23 @@ export * from './index.ts';
 export type { LocalVault, VaultOptions };
 
 export type NodeVaultConfig = VaultConfig & {
-  /** The vault's own SQLite file, e.g. `./vault.db`. Nothing else may open it. */
-  store: string;
+  /**
+   * The database the server uses, as the vault's own login:
+   * `postgres://coffre_vault_runtime:…@…/coffre`, or a `file:` URL for local
+   * development. Or one already open, which the vault leaves open.
+   */
+  database: string | Database;
 };
 
 /** The vault in this process. */
 export async function localVault(config: NodeVaultConfig, options: VaultOptions = {}): Promise<LocalVault> {
-  return openLocalVault(config.store, resolveVaultConfig(config), options);
+  const resolved = resolveVaultConfig(config);
+  if (typeof config.database !== 'string') return openLocalVault(config.database, resolved, options);
+  const { db, close } = await openDatabase(config.database);
+  return openLocalVault(db, resolved, options, close).catch(async (error: unknown) => {
+    await close();
+    throw error;
+  });
 }
 
 const METHOD_NAMES = new Set<string>(METHODS);
@@ -82,10 +95,7 @@ export async function serveVault(config: NodeVaultConfig & { socket: string }): 
     socket: config.socket,
     close: () =>
       new Promise<void>((resolve) => {
-        server.close(() => {
-          vault.close();
-          resolve();
-        });
+        server.close(() => void vault.close().then(resolve));
         server.closeAllConnections();
       }),
   };

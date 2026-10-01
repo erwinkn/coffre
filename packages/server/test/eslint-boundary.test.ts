@@ -24,7 +24,7 @@ test('ESLint keeps server functions out of the pages', async () => {
   );
 });
 
-test('ESLint keeps drizzle queries in the server\'s database layer', async () => {
+test('ESLint keeps drizzle queries in the server\'s and the vault\'s database layers', async () => {
   const source = "import { eq } from 'drizzle-orm';";
   for (const filePath of [
     'packages/ui/src/lib/example.ts',
@@ -33,20 +33,25 @@ test('ESLint keeps drizzle queries in the server\'s database layer', async () =>
     'packages/core/src/example.ts',
     'packages/client/src/example.ts',
     'packages/cli/src/example.ts',
-    'packages/vault/src/store.ts',
-    'packages/vault/src/sqlite-node.ts',
+    'packages/vault/src/vault.ts',
+    'packages/vault/src/cloudflare.ts',
   ]) {
     assert.equal((await lintImport(source, filePath))[0]?.ruleId, 'no-restricted-imports', filePath);
   }
   assert.deepEqual(await lintImport(source, 'packages/server/src/db/example.ts'), []);
+  assert.deepEqual(await lintImport(source, 'packages/vault/src/store.ts'), []);
 });
 
-test('ESLint keeps node:sqlite in the vault\'s Node adapter, out of the Worker', async () => {
-  const source = "import { DatabaseSync } from 'node:sqlite';";
+test('ESLint keeps opening a database from a URL in the vault\'s Node entry, out of the Worker', async () => {
+  const source = "import { openDatabase } from '@coffre/db/connect';";
   for (const filePath of ['packages/vault/src/store.ts', 'packages/vault/src/cloudflare.ts']) {
     assert.equal((await lintImport(source, filePath))[0]?.ruleId, 'no-restricted-imports', filePath);
   }
-  assert.deepEqual(await lintImport(source, 'packages/vault/src/sqlite-node.ts'), []);
+  assert.deepEqual(await lintImport(source, 'packages/vault/src/node.ts'), []);
+  const sqlite = "import { DatabaseSync } from 'node:sqlite';";
+  for (const filePath of ['packages/vault/src/node.ts', 'packages/vault/src/cloudflare.ts']) {
+    assert.equal((await lintImport(sqlite, filePath))[0]?.ruleId, 'no-restricted-imports', filePath);
+  }
 });
 
 test('ESLint has a package import another by name, never by path', async () => {

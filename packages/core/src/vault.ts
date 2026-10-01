@@ -257,6 +257,12 @@ export type LogHead = { seq: number; hash: string };
 export type VerifyLogInput = {
   /** A head the log must still carry: the one the app last recorded, or null. */
   through: LogHead | null;
+  /**
+   * The last entry the app verified, its own entries by its key: the vault
+   * checks the log still holds it, so between them both authors' entries
+   * are authenticated over the same prefix.
+   */
+  upTo?: LogHead | null;
 };
 
 /**

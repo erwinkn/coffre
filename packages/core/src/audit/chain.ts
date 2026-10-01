@@ -148,19 +148,30 @@ export function sealEntry(key: LogKey, prevHash: Buffer, fields: LogFields): { m
 export type StoredEntry = LogFields & { prevHash: Buffer; mac: Buffer; hash: Buffer };
 
 export type ChainVerification =
+  /** `authenticated` is below `entries` only for a `chainOnly` author's entries. */
   | { ok: true; entries: number; head: Buffer; nextSeq: bigint; authenticated: number }
   | { ok: false; failedAtSeq: bigint; reason: string };
 
 /**
  * Check a run of entries, oldest first: that the numbers run on from
  * `startSeq` without a gap, that each links to the hash before it, that each
- * hash is its entry's, and that each entry by an author whose keys are in
- * `keys` carries a MAC from one of them. Entries by the other author are
- * checked for their place in the chain only; that author checks its own.
+ * hash is its entry's, and that each entry carries a MAC from one of `keys`.
+ *
+ * An author whose key the verifier does not hold fails every entry it wrote,
+ * unless it is named in `chainOnly`: then its entries are checked for their
+ * place in the chain only, and `authenticated` counts the rest. That is a
+ * partial verdict, for a caller that has the other author check its own
+ * entries over the same prefix; the public chain alone proves nothing about
+ * who wrote an entry, since anyone who can insert a row can link it.
  */
 export function verifyEntries(
   entries: readonly StoredEntry[],
-  { startSeq = 0n, startPrevHash = GENESIS_HASH, keys }: { startSeq?: bigint; startPrevHash?: Buffer; keys: readonly LogKey[] },
+  {
+    startSeq = 0n,
+    startPrevHash = GENESIS_HASH,
+    keys,
+    chainOnly = [],
+  }: { startSeq?: bigint; startPrevHash?: Buffer; keys: readonly LogKey[]; chainOnly?: readonly Author[] },
 ): ChainVerification {
   const authors = new Set(keys.map((key) => key.author));
   let expectedSeq = startSeq;
@@ -178,6 +189,8 @@ export function verifyEntries(
       if (key === undefined) return fail(`written under ${entry.keyId}, a key this verifier does not hold`);
       if (!equal(entryMac(key.key, entry.prevHash, entry), entry.mac)) return fail(`not written by the ${entry.author}: its MAC does not match`);
       authenticated += 1;
+    } else if (!chainOnly.includes(entry.author)) {
+      return fail(`written as the ${entry.author}, whose keys this verifier does not hold`);
     }
     previous = entry.hash;
     expectedSeq = entry.seq + 1n;

@@ -59,6 +59,8 @@ CREATE INDEX `audit_log_secret_idx` ON `audit_log` (`secret_id`,`seq`);--> state
 CREATE INDEX `audit_log_actor_idx` ON `audit_log` (`actor`,`seq`);--> statement-breakpoint
 CREATE INDEX `audit_log_operation_idx` ON `audit_log` (`operation_id`,`seq`);--> statement-breakpoint
 CREATE INDEX `audit_log_action_idx` ON `audit_log` (`author`,`action`,`seq`);--> statement-breakpoint
+CREATE INDEX `audit_log_releases_idx` ON `audit_log` (`author`,`actor`,`action`,`decision`,`occurred_at`);--> statement-breakpoint
+CREATE INDEX `audit_log_subject_idx` ON `audit_log` (`author`,`subject_principal`,`seq`);--> statement-breakpoint
 CREATE TABLE `credentials` (
 	`id` text PRIMARY KEY NOT NULL,
 	`kind` text NOT NULL,
@@ -246,6 +248,42 @@ CREATE TABLE `syncs` (
 );
 --> statement-breakpoint
 CREATE INDEX `syncs_environment_idx` ON `syncs` (`environment_id`);--> statement-breakpoint
+CREATE TABLE `vault_grants` (
+	`principal` text NOT NULL,
+	`project_id` text,
+	`environment_id` text,
+	`role` text NOT NULL,
+	`expires_at` integer,
+	`granted_at` integer NOT NULL,
+	`granted_by` text NOT NULL,
+	FOREIGN KEY (`principal`) REFERENCES `vault_members`(`principal`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`environment_id`) REFERENCES `environments`(`id`) ON UPDATE no action ON DELETE restrict,
+	CONSTRAINT "vault_grants_one_place" CHECK(("vault_grants"."project_id" IS NULL) <> ("vault_grants"."environment_id" IS NULL)),
+	CONSTRAINT "vault_grants_role_check" CHECK("vault_grants"."role" IN ('viewer', 'developer', 'maintainer', 'access-manager', 'auditor', 'owner')),
+	CONSTRAINT "vault_grants_environment_role_check" CHECK("vault_grants"."environment_id" IS NULL OR "vault_grants"."role" IN ('viewer', 'developer', 'auditor'))
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `vault_grants_on_project` ON `vault_grants` (`principal`,`project_id`);--> statement-breakpoint
+CREATE UNIQUE INDEX `vault_grants_on_environment` ON `vault_grants` (`principal`,`environment_id`);--> statement-breakpoint
+CREATE TABLE `vault_members` (
+	`principal` text PRIMARY KEY NOT NULL,
+	`status` text NOT NULL,
+	`owner` integer DEFAULT false NOT NULL,
+	`generation` integer DEFAULT 0 NOT NULL,
+	`created_at` integer NOT NULL,
+	`created_by` text NOT NULL,
+	`status_changed_at` integer NOT NULL,
+	`status_changed_by` text NOT NULL,
+	CONSTRAINT "vault_members_principal_check" CHECK(("vault_members"."principal" GLOB 'user:?*' OR "vault_members"."principal" GLOB 'token:?*' OR "vault_members"."principal" GLOB 'sync:?*')
+        AND substr("vault_members"."principal", instr("vault_members"."principal", ':') + 1, 1) <> ':'
+        AND instr("vault_members"."principal", ' ') = 0 AND instr("vault_members"."principal", char(9)) = 0
+        AND instr("vault_members"."principal", char(10)) = 0 AND instr("vault_members"."principal", char(13)) = 0),
+	CONSTRAINT "vault_members_user_lowercase" CHECK("vault_members"."principal" NOT LIKE 'user:%' OR "vault_members"."principal" = lower("vault_members"."principal")),
+	CONSTRAINT "vault_members_status_check" CHECK("vault_members"."status" IN ('active', 'removed')),
+	CONSTRAINT "vault_members_owner_check" CHECK(NOT "vault_members"."owner" OR ("vault_members"."status" = 'active' AND "vault_members"."principal" LIKE 'user:%')),
+	CONSTRAINT "vault_members_generation_check" CHECK("vault_members"."generation" >= 0)
+);--> statement-breakpoint
 
 -- The chain starts at sequence 0 from 32 zero bytes, and the heartbeat row
 -- is always there to update.

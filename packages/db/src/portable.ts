@@ -1,5 +1,6 @@
 import type { LibSQLDatabase } from 'drizzle-orm/libsql';
 
+import { trackCommits } from './commits.ts';
 import type { Database } from './database.ts';
 import type * as postgres from './schema.ts';
 import type * as sqlite from './schema.sqlite.ts';
@@ -30,7 +31,7 @@ export function asPostgres<Tables extends Partial<Record<keyof PostgresSchema, u
 export function asPostgresDatabase(
   db: LibSQLDatabase<typeof sqlite>,
 ): Database {
-  return db as unknown as Database;
+  return trackCommits(db as unknown as Database);
 }
 
 // --- the row types match ---------------------------------------------------------

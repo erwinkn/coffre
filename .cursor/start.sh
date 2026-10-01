@@ -62,13 +62,17 @@ if ! postgres_ready; then
     exit 1
 fi
 
-if ! docker compose exec -T postgres psql -U coffre_owner -d postgres -tAc \
-    "SELECT 1 FROM pg_roles WHERE rolname = 'coffre_runtime'" | grep -q 1; then
+# The app's login and the vault's.
+for login in coffre_runtime:local-runtime-only coffre_vault_runtime:local-vault-only; do
+    name="${login%%:*}" password="${login#*:}"
+    if ! docker compose exec -T postgres psql -U coffre_owner -d postgres -tAc \
+        "SELECT 1 FROM pg_roles WHERE rolname = '$name'" | grep -q 1; then
+        docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U coffre_owner -d postgres \
+            -c "CREATE ROLE $name LOGIN PASSWORD '$password'" >/dev/null
+    fi
     docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U coffre_owner -d postgres \
-        -c "CREATE ROLE coffre_runtime LOGIN PASSWORD 'local-runtime-only'" >/dev/null
-fi
-docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U coffre_owner -d postgres \
-    -c "ALTER ROLE coffre_runtime LOGIN PASSWORD 'local-runtime-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS" >/dev/null
+        -c "ALTER ROLE $name LOGIN PASSWORD '$password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS" >/dev/null
+done
 
 DATABASE_URL='postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/coffre' \
-    pnpm --dir packages/server run db:migrate >/dev/null
+    pnpm --filter @coffre/db run db:migrate >/dev/null

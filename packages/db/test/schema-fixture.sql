@@ -7,6 +7,8 @@ ALTER TABLE audit_log ENABLE TRIGGER USER;
 UPDATE audit_chain_head
    SET next_seq = 0,
        head_hash = decode(repeat('00', 32), 'hex');
+DELETE FROM vault_grants;
+DELETE FROM vault_members;
 UPDATE secrets SET current_version_id = NULL;
 DELETE FROM secret_versions;
 DELETE FROM secrets;

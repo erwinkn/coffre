@@ -4,7 +4,7 @@ import type { Engine } from '@coffre/db/dialect';
 import { forgetLogHeads } from '@coffre/db/log';
 import { sql, type SQL } from 'drizzle-orm';
 
-import { TEST_OWNER_DATABASE_URL, TEST_RUNTIME_DATABASE_URL } from './connections.ts';
+import { TEST_OWNER_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './connections.ts';
 import { guardTransactions } from '../transaction-guard.ts';
 
 /**
@@ -47,6 +47,26 @@ export async function openTestDatabase(): Promise<{ owner: Database; runtime: Da
       await Promise.all([owner.close(), runtime.close()]);
     },
   };
+}
+
+let vaultDatabase: Promise<Database> | null = null;
+
+/**
+ * The integration database as the vault: on Postgres, the vault's own
+ * login; on SQLite, the same file. Opened once, on first use, and left to
+ * the end of the process: its pool lets the process exit when idle.
+ */
+export function openVaultDatabase(): Promise<Database> {
+  vaultDatabase ??= (async () => {
+    if (TEST_ENGINE === 'postgres') {
+      const pg = (await import('pg')).default;
+      return createDatabase(new pg.Pool({ connectionString: TEST_VAULT_DATABASE_URL, allowExitOnIdle: true }));
+    }
+    const url = process.env.COFFRE_TEST_DATABASE_URL;
+    if (!url) throw new Error(`COFFRE_TEST_DATABASE_URL is required on ${TEST_ENGINE}; see scripts/setup-test-database.sh`);
+    return (await openDatabase(url)).db;
+  })();
+  return vaultDatabase;
 }
 
 /** Test options that run a test on Postgres only, saying why it cannot run elsewhere. */

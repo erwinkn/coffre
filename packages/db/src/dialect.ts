@@ -35,13 +35,17 @@ export function engineOf(db: Queryable): Engine {
  * Lock the rows a select reads until the transaction ends. SQLite has no row
  * locks and needs none: connect.ts runs one transaction at a time, and each
  * holds the database's write lock from its first statement.
+ *
+ * `no key update` is for rows others reference by foreign key: it keeps out
+ * every other writer of the row, but not an insert that points at it.
  */
-export function forUpdate<Query extends { for: (strength: 'update') => unknown }>(
+export function forUpdate<Query extends { for: (strength: 'update' | 'no key update') => unknown }>(
   db: Queryable,
   query: Query,
+  strength: 'update' | 'no key update' = 'update',
 ): ReturnType<Query['for']> {
   if (engineOf(db) === 'sqlite') return query as ReturnType<Query['for']>;
-  return query.for('update') as ReturnType<Query['for']>;
+  return query.for(strength) as ReturnType<Query['for']>;
 }
 
 /** Insert the rows whose unique keys are free; returns how many that was. */

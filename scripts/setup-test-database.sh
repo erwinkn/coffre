@@ -14,17 +14,22 @@ docker compose exec -T postgres \
 DROP DATABASE IF EXISTS :"database" WITH (FORCE);
 CREATE DATABASE :"database";
 
+-- The app's login and the vault's, as a deployment provisions them.
 DO $$
+DECLARE
+    login record;
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'coffre_runtime') THEN
-        CREATE ROLE coffre_runtime
-            LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS
-            PASSWORD 'local-runtime-only';
-    ELSE
-        ALTER ROLE coffre_runtime
-            LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS
-            PASSWORD 'local-runtime-only';
-    END IF;
+    FOR login IN
+        SELECT * FROM (VALUES ('coffre_runtime', 'local-runtime-only'), ('coffre_vault_runtime', 'local-vault-only'))
+            AS logins (name, password)
+    LOOP
+        EXECUTE format(
+            '%s ROLE %I LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L',
+            CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = login.name) THEN 'ALTER' ELSE 'CREATE' END,
+            login.name,
+            login.password
+        );
+    END LOOP;
 END
 $$;
 SQL

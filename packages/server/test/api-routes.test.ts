@@ -28,7 +28,10 @@ async function raw(method: string, path: string, body?: unknown): Promise<Respon
 }
 
 async function actions(): Promise<string[]> {
-  const rows = await db.owner.select({ action: auditLog.action, decision: auditLog.decision }).from(auditLog);
+  const rows = await db.owner
+    .select({ action: auditLog.action, decision: auditLog.decision })
+    .from(auditLog)
+    .where(eq(auditLog.author, 'app'));
   return rows.map((row) => `${row.decision} ${row.action}`);
 }
 

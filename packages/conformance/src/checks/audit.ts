@@ -1,8 +1,10 @@
 // What is written down: every value opened, in both logs, which agree; no
 // value without its entry; and a log changed behind coffre's back is caught.
+import { createHash } from 'node:crypto';
+
 import type { AuditEntryView, CoffreClient, RouteOutput } from '@coffre/client';
 
-import { sqlite, using, type Sql } from '../database.ts';
+import { using, type Sql } from '../database.ts';
 import type { Deployment } from '../harness.ts';
 import { expect, Skip } from '../report.ts';
 import { DEV, valuesIn, type Canaries, type People } from './people.ts';
@@ -120,12 +122,15 @@ export async function noAuditNoValue(deployment: Deployment, { admin }: People, 
 }
 
 /**
- * The login the app runs as may add to the log, and never change or remove
- * what is there, nor any version of a secret.
+ * The logins the app and the vault run as may add to the log, each only as
+ * itself, and never change or remove what is there, nor any version of a
+ * secret. Only the vault's writes members and grants.
  */
 export async function appendOnly(deployment: Deployment): Promise<string> {
-  if (deployment.runtime === null) throw new Skip('SQLite has no logins; the file is as safe as its permissions');
-  const statements = [
+  if (deployment.runtime === null || deployment.vaultRuntime === null) {
+    throw new Skip('SQLite has no logins; the file is as safe as its permissions');
+  }
+  const changes = [
     "UPDATE audit_log SET action = 'rewritten'",
     'DELETE FROM audit_log',
     'TRUNCATE audit_log',
@@ -136,63 +141,119 @@ export async function appendOnly(deployment: Deployment): Promise<string> {
     'DELETE FROM principals',
     'CREATE TABLE conformance_probe (id integer)',
   ];
-  await using(deployment.runtime(), async (sql) => {
-    for (const statement of statements) {
-      await sql.exec('BEGIN');
-      const error = await sql.exec(statement).then(
-        () => null,
-        (failure: unknown) => failure,
-      );
-      await sql.exec('ROLLBACK');
-      expect(error !== null, `the app's login could: ${statement}`);
-      expect((error as { code?: string }).code === '42501', `${statement} failed, but not for want of privilege`, error);
-    }
-  });
-  return `the app's login is refused ${statements.length} ways to change or remove what is written`;
+  const zeros = "decode(repeat('00', 32), 'hex')";
+  const as = (author: string) =>
+    `INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
+      VALUES (9000000000, '${author}', '${author}:0', 0, 'system:conformance', 'probe', 'allow', ${zeros}, ${zeros}, ${zeros})`;
+  const logins = [
+    ["the app's login", deployment.runtime, [...changes, as('vault'), "UPDATE vault_members SET owner = true", 'DELETE FROM vault_grants']],
+    ["the vault's login", deployment.vaultRuntime, [...changes, as('app'), "UPDATE projects SET name = 'renamed'"]],
+  ] as const;
+  let refused = 0;
+  for (const [login, open, statements] of logins) {
+    await using(open(), async (sql) => {
+      for (const statement of statements) {
+        await sql.exec('BEGIN');
+        const error = await sql.exec(statement).then(
+          () => null,
+          (failure: unknown) => failure,
+        );
+        await sql.exec('ROLLBACK');
+        expect(error !== null, `${login} could: ${statement}`);
+        expect((error as { code?: string }).code === '42501', `${statement} failed, but not for want of privilege`, error);
+        refused++;
+      }
+    });
+  }
+  return `the app's and the vault's logins are refused ${refused} ways to change what is written, or to write as the other`;
 }
 
-/** A grant and an entry written around the vault must both fail verification. */
+/**
+ * A grant and a vault entry written around the vault must both fail
+ * verification: the grant by the vault's replay of its entries, the entry,
+ * linked to the chain so every public check passes, by the vault's MAC,
+ * which nobody without its key can make.
+ */
 export async function tamperVault(deployment: Deployment, { admin }: People): Promise<string> {
-  const store = deployment.vaultStore();
-  expect(store !== null, "the vault's store could not be found; vault tampering was not checked");
   const caught: string[] = [];
   const verify = () => admin.api.audit.verify();
   const intact = await verify();
-  expect(intact.ok, 'the logs do not verify before any vault tampering', intact);
-  await using(sqlite(store), async (vault) => {
-    // A grant written straight into the store, which its log never gave.
-    const [place] = await vault.query<{ project_id: string }>('SELECT project_id FROM grants LIMIT 1');
-    expect(place !== undefined, "the vault's store holds no grant");
-    const forged = ['user:forger@conformance.example', place.project_id, 'owner', Date.now(), 'user:forger@conformance.example'];
-    await vault.query(
-      'INSERT INTO grants (principal, project_id, environment_id, role, expires_at, granted_at, granted_by) VALUES (?, ?, NULL, ?, NULL, ?, ?)',
-      forged,
+  expect(intact.ok, 'the log does not verify before any vault tampering', intact);
+  await using(deployment.database(), async (sql) => {
+    // A grant written straight into the database, which the vault never gave.
+    const [place] = await sql.query<{ principal: string; project_id: string }>(
+      `SELECT m.principal, p.id AS project_id FROM vault_members m CROSS JOIN projects p
+        WHERE m.status = 'active' AND NOT EXISTS (
+          SELECT 1 FROM vault_grants g WHERE g.principal = m.principal AND g.project_id = p.id)
+        LIMIT 1`,
+    );
+    expect(place !== undefined, 'no member is without a grant on some project');
+    await update(
+      sql,
+      'INSERT INTO vault_grants (principal, project_id, role, granted_at, granted_by) VALUES ($1, $2, $3, $4, $5)',
+      [place.principal, place.project_id, 'owner', Date.now(), place.principal],
     );
     const granted = await verify();
-    await vault.query('DELETE FROM grants WHERE principal = ?', [forged[0]]);
-    expect(!granted.ok && granted.log === 'vault', "a grant written into the vault's store verifies", granted);
+    await update(sql, 'DELETE FROM vault_grants WHERE principal = $1 AND project_id = $2', [place.principal, place.project_id]);
+    expect(!granted.ok && granted.log === 'vault', 'a grant written into the database verifies', granted);
     const revoked = await verify();
-    expect(revoked.ok, "the vault's log did not verify once the grant was gone", revoked);
+    expect(revoked.ok, 'the log did not verify once the grant was gone', revoked);
     caught.push('a grant the vault never gave');
 
-    // An entry of its log rewritten, its trigger dropped for the time.
-    const [trigger] = await vault.query<{ sql: string }>(`SELECT sql FROM sqlite_master WHERE name = 'log_no_update'`);
-    const [entry] = await vault.query<{ seq: number; actor: string }>(`SELECT seq, actor FROM log WHERE action = 'unwrap' ORDER BY seq LIMIT 1`);
-    expect(trigger !== undefined && entry !== undefined, "the vault's store has no log_no_update trigger, or no unwrap");
-    await vault.exec('DROP TRIGGER log_no_update');
-    try {
-      await vault.query('UPDATE log SET actor = ? WHERE seq = ?', ['user:nobody@conformance.example', entry.seq]);
-      const rewritten = await verify();
-      await vault.query('UPDATE log SET actor = ? WHERE seq = ?', [entry.actor, entry.seq]);
-      expect(!rewritten.ok && rewritten.log === 'vault', "an entry rewritten in the vault's log verifies", rewritten);
-    } finally {
-      await vault.exec(trigger.sql);
-    }
-    const restored = await verify();
-    expect(restored.ok, "the vault's log did not verify once put back", restored);
-    caught.push(`a vault entry rewritten (at ${entry.seq})`);
+    // An entry in the vault's name, chained after the last, with a MAC made up.
+    const [head] = await sql.query<{ next_seq: number | string; head_hash: Uint8Array }>(
+      'SELECT next_seq, head_hash FROM audit_chain_head',
+    );
+    const seq = BigInt(head.next_seq);
+    const forged = {
+      seq, author: 'vault', keyId: 'vault:0000000000000000', occurredAt: Date.now(), actor: 'user:forger@conformance.example',
+      action: 'unwrap', decision: 'allow', metadata: '{}',
+    };
+    const prevHash = Buffer.from(head.head_hash);
+    const mac = Buffer.alloc(32, 0x41);
+    const hash = chainHash(prevHash, forged, mac);
+    await update(
+      sql,
+      `INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, metadata, prev_hash, mac, hash)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+      [seq, forged.author, forged.keyId, forged.occurredAt, forged.actor, forged.action, forged.decision, forged.metadata, prevHash, mac, hash],
+    );
+    await update(sql, 'UPDATE audit_chain_head SET next_seq = $1, head_hash = $2', [seq + 1n, hash]);
+    const inserted = await verify();
+    await appendOnlyLifted(sql, () => update(sql, 'DELETE FROM audit_log WHERE seq = $1', [seq]));
+    await update(sql, 'UPDATE audit_chain_head SET next_seq = $1, head_hash = $2', [seq, prevHash]);
+    expect(!inserted.ok && inserted.log === 'vault', "an entry in the vault's name, chained but not by the vault, verifies", inserted);
+    const removed = await verify();
+    expect(removed.ok, 'the log did not verify once the entry was gone', removed);
+    caught.push(`an entry forged in the vault's name (at ${seq})`);
   });
   return `caught: ${caught.join('; ')}`;
+}
+
+/**
+ * An entry's public chain hash, as the log's format defines it
+ * (@coffre/core/audit): SHA-256 over a domain, the previous hash, each
+ * field length-prefixed in order, a null as length -1, and the MAC. Only
+ * the fields given are set; the rest are null.
+ */
+function chainHash(prevHash: Buffer, fields: Record<string, string | number | bigint>, mac: Buffer): Buffer {
+  const order = [
+    'seq', 'author', 'keyId', 'occurredAt', 'actor', 'action', 'decision', 'code', 'subjectPrincipal', 'projectId',
+    'environmentId', 'secretId', 'secretVersionId', 'operationId', 'requestId', 'sourceIp', 'relatedSeq', 'metadata',
+  ];
+  const hash = createHash('sha256').update('coffre.audit.chain.v2').update(prevHash);
+  for (const name of order) {
+    const length = Buffer.alloc(4);
+    const value = fields[name];
+    if (value === undefined) {
+      hash.update(length.fill(0xff));
+      continue;
+    }
+    const bytes = Buffer.from(String(value), 'utf8');
+    length.writeInt32BE(bytes.length);
+    hash.update(length).update(bytes);
+  }
+  return hash.update(mac).digest();
 }
 
 /**

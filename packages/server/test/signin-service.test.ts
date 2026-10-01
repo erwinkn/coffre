@@ -111,6 +111,7 @@ async function auditRows() {
       metadata: auditLog.metadata,
     })
     .from(auditLog)
+    .where(eq(auditLog.author, 'app'))
     .orderBy(auditLog.seq);
   return rows.map(({ actor, ...row }) => ({
     ...row,
@@ -1107,7 +1108,10 @@ test('everything the sign-in service writes keeps the audit chain intact', async
 
   const verified = await verifyAudit(await contextFor(deps, ROOT));
   assert.equal(verified.ok, true);
-  if (verified.ok) assert.equal(verified.rows, 10);
+  // Every entry, the vault's for the members set up here included; ten of them the app's.
+  const [{ n }] = await db.owner.select({ n: count() }).from(auditLog);
+  if (verified.ok) assert.equal(verified.rows, n);
+  assert.equal((await auditRows()).length, 10);
 });
 
 // --- through the API --------------------------------------------------------------

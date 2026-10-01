@@ -56,9 +56,7 @@ export default defineConfig({
       viteEnvironment: { name: 'ssr' },
       configPath: here('deployment/wrangler.jsonc'),
       auxiliaryWorkers: [{ configPath: here('deployment/vault.wrangler.jsonc') }],
-      // Where local Durable Objects keep their SQLite, the vault's. Its
-      // grants and checkpoints belong with one database, so start.sh empties
-      // it before it seeds.
+      // Where wrangler keeps its local state.
       persistState: { path: process.env.COFFRE_STATE_DIR ?? here('.wrangler/state') },
     }),
     // Generates src/routeTree.gen.ts from src/routes, and wires the SSR

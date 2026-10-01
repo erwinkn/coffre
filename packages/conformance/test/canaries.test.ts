@@ -1,9 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-
 import { Browser } from '../src/browser.ts';
 import { canaryScan } from '../src/checks/canaries.ts';
 import { canary, type People } from '../src/checks/people.ts';
@@ -14,10 +10,6 @@ test('the canary scan detects plaintext in a Postgres bytea column', {
   skip: (process.env.COFFRE_TEST_ENGINE ?? 'postgres') !== 'postgres' && 'Postgres bytea reader',
 }, async (t) => {
   const url = `postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/${process.env.COFFRE_TEST_DATABASE ?? 'coffre_test'}`;
-  const dir = mkdtempSync(join(tmpdir(), 'coffre-canary-test-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const store = join(dir, 'vault.db');
-  writeFileSync(store, 'no canaries');
   // Only storage is under test; every HTTP surface answers without a value.
   const clean = async () => new Response('{}');
   t.mock.method(globalThis, 'fetch', clean);
@@ -29,7 +21,7 @@ test('the canary scan detects plaintext in a Postgres bytea column', {
   };
   const deployment = {
     origin: 'http://conformance.test', database: () => postgres(url), databaseFile: null,
-    vaultStore: () => store, output: () => '',
+    output: () => '',
   } as Deployment;
   const value = canary();
   await using(postgres(url), async (sql) => {
