@@ -50,7 +50,7 @@ import {
   type WrappedKey,
 } from '@coffre/core/vault';
 import type { Database, Queryable, Transaction } from '@coffre/db';
-import { SNAPSHOT } from '@coffre/db/dialect';
+import { isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
 import { appendEntries, lockLogHead, type NewEntry } from '@coffre/db/log';
 
 import { verifyAccounting } from './accounting.ts';
@@ -141,6 +141,12 @@ class Refused {
     this.entries = entries;
   }
 }
+
+/** A decision that read a member as absent who has been admitted since: it is made again. */
+class Retry {}
+
+/** What each `vault.tampered` entry reports, to mark it logged once committed. */
+const REPORTED = new WeakMap<NewEntry, string>();
 
 /** A key service that did not answer, and the entries that record what it did do. */
 class Outage {
@@ -243,6 +249,19 @@ class VaultService implements Vault {
    */
   async #decide<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>): Promise<Outcome<T>> {
     const reports: NewEntry[] = [];
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await this.#decideOnce(principals, decide, reports);
+      } catch (error) {
+        // A member who had no row when this decision locked theirs, and has
+        // one now: another decision admitted them meanwhile. Again, with it.
+        if (attempt < 3 && (error instanceof Retry || isUniqueViolation(error))) continue;
+        throw error;
+      }
+    }
+  }
+
+  async #decideOnce<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>, reports: NewEntry[]): Promise<Outcome<T>> {
     try {
       const result = await this.#db.transaction(async (tx) => {
         await store.boundLockWaits(tx, LOCK_TIMEOUT_MS);
@@ -266,6 +285,7 @@ class VaultService implements Vault {
         }
         return result;
       });
+      this.#reported(reports);
       return { ok: true, ...result };
     } catch (error) {
       if (!(error instanceof Refused || error instanceof Outage)) throw error;
@@ -273,6 +293,7 @@ class VaultService implements Vault {
         await store.boundLockWaits(tx, LOCK_TIMEOUT_MS);
         await appendEntries(tx, this.#prepared.logKey, [...reports, ...error.entries]);
       });
+      this.#reported(reports);
       if (error instanceof Outage) throw error.error;
       return { ok: false, refusal: error.refusal };
     }
@@ -303,8 +324,10 @@ class VaultService implements Vault {
       return 'mac';
     }
     const newest = await this.#newestAccessSeq(db, principal, reports);
-    // No row, and no entry: someone never admitted. No row, but entries: one deleted.
+    // No row, and no entry: someone never admitted. No row, but entries: one
+    // deleted, unless it was admitted since the row was read.
     if (row === undefined ? newest === null : newest === row.accessSeq) return null;
+    if (row === undefined && (await store.member(db, principal)) !== undefined) throw new Retry();
     this.#report(reports, principal, 'stale', `${row?.accessSeq ?? 'none'}<${newest}`);
     return 'stale';
   }
@@ -322,12 +345,11 @@ class VaultService implements Vault {
     return verifyEntries([entry], { startSeq: entry.seq, startPrevHash: entry.prevHash, keys: [this.#prepared.logKey] }).ok;
   }
 
-  /** A `vault.tampered` entry, once per process for each thing found. */
+  /** A `vault.tampered` entry, once per process for each thing found: `#reported` marks it once committed. */
   #report(reports: NewEntry[], principal: string, code: Fault | 'forged_entry', detail: string, relatedSeq: bigint | null = null): void {
     const key = `${principal}|${code}|${detail}`;
-    if (this.#prepared.reported.has(key)) return;
-    this.#prepared.reported.add(key);
-    reports.push({
+    if (this.#prepared.reported.has(key) || reports.some((entry) => REPORTED.get(entry) === key)) return;
+    const entry: NewEntry = {
       actor: VAULT_ACTOR,
       action: 'vault.tampered',
       decision: 'deny',
@@ -335,12 +357,24 @@ class VaultService implements Vault {
       subjectPrincipal: principal,
       relatedSeq,
       metadata: '{}',
-    });
+    };
+    REPORTED.set(entry, key);
+    reports.push(entry);
+  }
+
+  /** Mark these reports as logged, once their transaction has committed. */
+  #reported(reports: readonly NewEntry[]): void {
+    for (const entry of reports) {
+      const key = REPORTED.get(entry);
+      if (key !== undefined) this.#prepared.reported.add(key);
+    }
   }
 
   /** Reports found outside a decision, committed on their own. */
   async #record(reports: NewEntry[]): Promise<void> {
-    if (reports.length > 0) await this.#db.transaction((tx) => appendEntries(tx, this.#prepared.logKey, reports));
+    if (reports.length === 0) return;
+    await this.#db.transaction((tx) => appendEntries(tx, this.#prepared.logKey, reports));
+    this.#reported(reports);
   }
 
   // --- keys -------------------------------------------------------------------
@@ -659,17 +693,32 @@ class VaultService implements Vault {
     };
   }
 
+  /**
+   * What `principal` holds now. Read without locks, the fast way; a row that
+   * seems to fail its check is read again in one snapshot before anyone is
+   * called tampered, since a change committed between two of the reads
+   * looks like one.
+   */
   async access(principal: string): Promise<Access> {
     if (this.#isRootAdmin(principal)) await this.#rootRow(principal);
-    const [row, held, at] = await Promise.all([
-      store.member(this.#db, principal),
-      store.grants(this.#db, principal),
-      this.#now(this.#db),
-    ]);
+    const read = async (db: Queryable, reports: NewEntry[]) => {
+      const [row, held, at] = await Promise.all([store.member(db, principal), store.grants(db, principal), this.#now(db)]);
+      const fault = this.#isRootAdmin(principal) ? null : await this.#integrity(db, principal, row, held, reports);
+      return this.#access(principal, row, held, at, fault !== null);
+    };
+    const found: NewEntry[] = [];
+    const quick = await read(this.#db, found).catch((error: unknown) => {
+      if (error instanceof Retry) return null;
+      throw error;
+    });
+    if (quick !== null && quick.status !== 'tampered') {
+      await this.#record(found);
+      return quick;
+    }
     const reports: NewEntry[] = [];
-    const fault = this.#isRootAdmin(principal) ? null : await this.#integrity(this.#db, principal, row, held, reports);
+    const access = await this.#db.transaction((tx) => read(tx, reports), SNAPSHOT);
     await this.#record(reports);
-    return this.#access(principal, row, held, at, fault !== null);
+    return access;
   }
 
   /**
@@ -678,15 +727,19 @@ class VaultService implements Vault {
    * newest fails its MAC.
    */
   async members(): Promise<Access[]> {
-    const [rows, held, newest, at] = await Promise.all([
-      store.allMembers(this.#db),
-      store.grants(this.#db),
-      store.newestAccessEntries(this.#db),
-      this.#now(this.#db),
-    ]);
+    const reports: NewEntry[] = [];
+    const all = await this.#db.transaction((tx) => this.#everyone(tx, reports), SNAPSHOT);
+    await this.#record(reports);
+    return all;
+  }
+
+  async #everyone(db: Queryable, reports: NewEntry[]): Promise<Access[]> {
+    const rows = await store.allMembers(db);
+    const held = await store.grants(db);
+    const newest = await store.newestAccessEntries(db);
+    const at = await this.#now(db);
     const byPrincipal = new Map(rows.map((row) => [row.principal, row]));
     const everyone = new Set([...this.#config.rootAdmins.map((email) => `user:${email}`), ...byPrincipal.keys()]);
-    const reports: NewEntry[] = [];
     const all: Access[] = [];
     for (const principal of [...everyone].sort()) {
       const row = byPrincipal.get(principal);
@@ -697,11 +750,10 @@ class VaultService implements Vault {
         tampered =
           entry !== undefined && this.#authentic(entry)
             ? !sealed(this.#prepared.rowKey, row, grants) || entry.seq !== row.accessSeq
-            : (await this.#integrity(this.#db, principal, row, grants, reports)) !== null;
+            : (await this.#integrity(db, principal, row, grants, reports)) !== null;
       }
       all.push(this.#access(principal, row, grants, at, tampered));
     }
-    await this.#record(reports);
     return all;
   }
 
