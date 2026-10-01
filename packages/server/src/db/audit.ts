@@ -1,8 +1,8 @@
 import { chainHash, type ChainedAuditRow } from '@coffre/core/audit';
+import type { Transaction } from '@coffre/db';
+import { auditChainHead, auditLog } from '@coffre/db/schema';
 
-import type { Transaction } from './database.ts';
 import { auditHead, insert, update } from './queries.ts';
-import { auditChainHead, auditLog } from './schema.ts';
 
 export type AuditEntry = {
   actorType: 'user' | 'service' | 'system';

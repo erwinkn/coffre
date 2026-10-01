@@ -33,7 +33,7 @@ export const ENGINES: readonly Engine[] = ['postgres', 'sqlite'];
 const TAG = '0000_baseline';
 const MARKER = '-- @schema\n';
 const here = fileURLToPath(new URL('.', import.meta.url));
-const packageRoot = fileURLToPath(new URL('../..', import.meta.url));
+const packageRoot = fileURLToPath(new URL('..', import.meta.url));
 
 async function template(engine: Engine): Promise<{ head: string; tail: string }> {
   const text = await readFile(`${here}baseline/${engine}.sql`, 'utf8');

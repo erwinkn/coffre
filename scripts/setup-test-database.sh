@@ -30,4 +30,4 @@ $$;
 SQL
 
 DATABASE_URL="postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/$database" \
-    pnpm --filter @coffre/server run db:migrate >/dev/null
+    pnpm --filter @coffre/db run db:migrate >/dev/null

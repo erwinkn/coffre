@@ -1,7 +1,8 @@
 import { ROLES, type Permission, type Role } from '@coffre/core/access';
 import type { Access, Grant } from '@coffre/core/vault';
+import type { Queryable } from '@coffre/db';
+import { credentials, identities, principals } from '@coffre/db/schema';
 
-import type { Queryable } from '../db/database.ts';
 import {
   insertIfAbsent,
   revokePriorMembership,
@@ -11,7 +12,6 @@ import {
   places,
   update,
 } from '../db/queries.ts';
-import { credentials, identities, principals } from '../db/schema.ts';
 import { can } from './caller.ts';
 import { allowed, audited, denied, Refusal, requireOwner, vaultRefusal, type ApiContext } from './context.ts';
 import { conflict, forbidden, notFound } from './errors.ts';

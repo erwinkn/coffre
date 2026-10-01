@@ -1,10 +1,10 @@
 import type { Checkpoint, Vault } from '@coffre/core/vault';
+import type { Database } from '@coffre/db';
+import { auditHeartbeat } from '@coffre/db/schema';
+import { requiredMigrations } from '@coffre/db/schema-version';
 
 import { appendAudit } from './db/audit.ts';
-import type { Database } from './db/database.ts';
 import { appliedMigrations, auditHead, auditRange, heartbeat, latestAudit, update } from './db/queries.ts';
-import { auditHeartbeat } from './db/schema.ts';
-import { requiredMigrations } from './db/schema-version.ts';
 
 export type HeartbeatLogger = {
   warn: (obj: unknown, msg: string) => void;

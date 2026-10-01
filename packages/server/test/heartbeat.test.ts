@@ -1,9 +1,9 @@
 import { after, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 
+import { createDatabase } from '@coffre/db';
 import { asc, eq } from 'drizzle-orm';
 
-import { createDatabase } from '../src/db/database.ts';
 import { heartbeat } from '../src/db/queries.ts';
 import { auditChainHead, auditHeartbeat, auditLog } from './db/tables.ts';
 import {

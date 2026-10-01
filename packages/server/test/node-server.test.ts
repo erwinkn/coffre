@@ -6,8 +6,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { github, signin } from '@coffre/core/identity';
+import { migrateDatabase } from '@coffre/db/migrate';
 
-import { migrateDatabase } from '../src/db/migrate.ts';
 import { serveWith, type Server } from '../src/node-server.ts';
 import { testVault } from './api-fixture.ts';
 

@@ -5,7 +5,7 @@
 // argument, or DATABASE_URL: a direct Postgres URL for a Workers deployment
 // (not Hyperdrive's), or whatever `serve` is given on Node.
 
-import { migrateDatabase } from './db/migrate.ts';
+import { migrateDatabase } from '@coffre/db/migrate';
 
 const USAGE = 'usage: coffre-server migrate [database-url]   (or set DATABASE_URL)';
 

@@ -1,0 +1,88 @@
+{
+  "name": "@coffre/db",
+  "version": "0.1.0",
+  "description": "coffre's database: the schema, its migrations and the connections, on Postgres or SQLite.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/erwinkn/coffre.git",
+    "directory": "packages/db"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "exports": {
+    ".": {
+      "coffre:source": "./src/database.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./schema": {
+      "coffre:source": "./src/schema.ts",
+      "types": "./dist/schema.d.ts",
+      "default": "./dist/schema.js"
+    },
+    "./schema-sqlite": {
+      "coffre:source": "./src/schema.sqlite.ts",
+      "types": "./dist/schema-sqlite.d.ts",
+      "default": "./dist/schema-sqlite.js"
+    },
+    "./dialect": {
+      "coffre:source": "./src/dialect.ts",
+      "types": "./dist/dialect.d.ts",
+      "default": "./dist/dialect.js"
+    },
+    "./portable": {
+      "coffre:source": "./src/portable.ts",
+      "types": "./dist/portable.d.ts",
+      "default": "./dist/portable.js"
+    },
+    "./schema-version": {
+      "coffre:source": "./src/schema-version.ts",
+      "types": "./dist/schema-version.d.ts",
+      "default": "./dist/schema-version.js"
+    },
+    "./hyperdrive": {
+      "coffre:source": "./src/hyperdrive.ts",
+      "types": "./dist/hyperdrive.d.ts",
+      "default": "./dist/hyperdrive.js"
+    },
+    "./connect": {
+      "coffre:source": "./src/connect.ts",
+      "types": "./dist/connect.d.ts",
+      "default": "./dist/connect.js"
+    },
+    "./migrate": {
+      "coffre:source": "./src/migrate.ts",
+      "types": "./dist/migrate.d.ts",
+      "default": "./dist/migrate.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "tsdown && cp -r src/migrations dist/migrations",
+    "typecheck": "tsc --noEmit",
+    "test": "node --conditions=coffre:source --test",
+    "db:generate": "node --conditions=coffre:source src/baseline.ts",
+    "db:migrate": "node --conditions=coffre:source src/migrate-main.ts",
+    "db:check": "cd src && for engine in postgres sqlite; do drizzle-kit check --config drizzle.$engine.config.ts || exit 1; done",
+    "db:verify:runtime": "node --conditions=coffre:source src/verify-runtime.ts"
+  },
+  "dependencies": {
+    "@libsql/client": "0.18.0",
+    "drizzle-orm": "0.45.2",
+    "pg": "8.16.3"
+  },
+  "devDependencies": {
+    "@types/node": "26.1.1",
+    "@types/pg": "8.20.0",
+    "drizzle-kit": "0.31.10",
+    "tsdown": "0.23.0",
+    "typescript": "5.9.3"
+  }
+}

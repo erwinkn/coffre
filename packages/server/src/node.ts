@@ -18,7 +18,8 @@
  */
 import { fileURLToPath } from 'node:url';
 
-import { migrateDatabase } from './db/migrate.ts';
+import { migrateDatabase } from '@coffre/db/migrate';
+
 import { serveWith, type ServeOptions, type Server } from './node-server.ts';
 
 export * from './index.ts';

@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 
 import { defineSignin, github, google, oidc, hashToken, isCoffreToken } from '@coffre/core/identity';
+import type { Database } from '@coffre/db';
 import { count, eq, isNotNull, isNull, type SQL } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 
-import type { Database } from '../src/db/database.ts';
 import {
   auditLog,
   credentials,

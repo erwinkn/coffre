@@ -3,9 +3,10 @@ import { randomUUID } from 'node:crypto';
 import type { Permission } from '@coffre/core/access';
 import type { Envelope } from '@coffre/core/envelope';
 import type { SecretRef } from '@coffre/core/vault';
+import type { Queryable, Transaction } from '@coffre/db';
+import { isUniqueViolation } from '@coffre/db/dialect';
+import { secrets, secretVersions } from '@coffre/db/schema';
 
-import type { Queryable, Transaction } from '../db/database.ts';
-import { isUniqueViolation } from '../db/dialect.ts';
 import {
   environmentSecrets,
   insert,
@@ -16,7 +17,6 @@ import {
   update,
   type ResolvedPath,
 } from '../db/queries.ts';
-import { secrets, secretVersions } from '../db/schema.ts';
 import { permissionsAt } from './caller.ts';
 import { allowed, asking, audited, denied, need, Refusal, vaultRefusal, type ApiContext } from './context.ts';
 import { conflict, notFound } from './errors.ts';

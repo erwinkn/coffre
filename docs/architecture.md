@@ -75,14 +75,15 @@ Object).
 | Package | What | Holds |
 |---|---|---|
 | `@coffre/ui` | the web UI, server-rendered, and its static files | nothing sensitive |
-| `@coffre/server` | `/api`, sign-in, syncs and their providers, the heartbeat, the database layer and its migrations; hands pages to the UI | sessions, the app database |
+| `@coffre/server` | `/api`, sign-in, syncs and their providers, the heartbeat, the queries; hands pages to the UI | sessions, the app database |
+| `@coffre/db` | the Drizzle schemas for Postgres and SQLite, their migrations and migrator, the dialect helpers, the connections, Hyperdrive's included | |
 | `@coffre/vault` | wraps and unwraps data keys, decides who may, logs every use | the keys, the vault's store |
 | `@coffre/client` | the typed API client, the API's types printed from the server's routes, and the helpers that turn a sync provider's fields into its config | |
 | `@coffre/core` | what the others share: access rules, envelope encryption, KEK providers, the audit chain, identity and sign-in, and `Vault`, the contract between server and vault | |
 | `@coffre/cli` | `init`, `login`, secrets, syncs, audit; built on the client | a CLI session |
 
 A package imports another by name, never by a relative path (a lint rule
-holds every package to it), and all seven are released together at one
+holds every package to it), and all eight are released together at one
 version. So each builds and ships on its own, and a deployment can take one
 in, as its own code, to change it. Everything ships as compiled JavaScript
 with declarations, since Node refuses to strip TypeScript types inside
@@ -111,9 +112,10 @@ Each is checked when the deployment starts, and a bad value (a 31-byte key,
 a public URL with a path, no root admin) fails it with a message naming the
 setting.
 
-Migrations ship with `@coffre/server`, not the CLI, because the schema must
-match the server's version exactly and the CLI's may differ:
-`pnpm exec coffre-server migrate`.
+Migrations live in `@coffre/db` and run through `@coffre/server`'s command,
+`pnpm exec coffre-server migrate`, not the CLI: the schema must match the
+server's version exactly, which the lockstep version guarantees, and the
+CLI's may differ.
 
 ## The UI
 
@@ -454,8 +456,8 @@ development and conformance. The integration suite runs on both through
 Drizzle, using the same queries.
 
 Every query lives in one module, `packages/server/src/db/queries.ts`, and the
-rest of the server writes no SQL (lint keeps `drizzle-orm` inside
-`packages/server/src/db/`, and the vault's own store). There are named
+rest of the server writes no SQL (lint keeps `drizzle-orm` inside it and
+`packages/db/src/`, and the vault's own store). There are named
 reads, one per shape of data the server needs (the caller, a path, an
 environment's secrets, the members, the syncs, a page of the log), each
 returning everything its callers use in one statement. There are also four
@@ -468,7 +470,7 @@ leases, version counters), and each one says which race it guards.
 
 The database comes from its URL: `postgres://` or `postgresql://` opens
 node-postgres; `file:` or `libsql:` opens @libsql/client for SQLite
-(`packages/server/src/db/connect.ts`). The SQLite driver loads only when
+(`packages/db/src/connect.ts`). The SQLite driver loads only when
 asked for. The Worker builds its Postgres database from the Hyperdrive pool
 with `createDatabase`.
 
@@ -479,12 +481,12 @@ The cast is guarded by a compile-time check that every table's row type
 matches, a parity test for tables, columns, nullability, keys, indexes and
 foreign keys, and the whole suite on both engines on every Drizzle upgrade.
 
-What differs stays in the schemas and `packages/server/src/db/dialect.ts`:
+What differs stays in the schemas and `packages/db/src/dialect.ts`:
 
 - **Schemas and migrations.** `pgTable` and `sqliteTable` define two schemas
-  and migration trees under `packages/server/src/db/migrations/`, each a
+  and migration trees under `packages/db/src/migrations/`, each a
   single baseline. Generated tables sit inside a template in
-  `packages/server/src/db/baseline/` that adds the first audit rows and the
+  `packages/db/src/baseline/` that adds the first audit rows and the
   Postgres runtime role. Until the first deployment, `pnpm db:generate`
   regenerates the baseline rather than adding migrations. Tests catch a
   schema or template that no longer matches its migration. Encrypted bytes

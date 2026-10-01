@@ -30,12 +30,12 @@ for (const half of ['client', 'server']) {
     }
 }
 
-const schema = readFileSync(join(root, 'packages/server/src/db/schema.ts'), 'utf8');
+const schema = readFileSync(join(root, 'packages/db/src/schema.ts'), 'utf8');
 const tables = [...schema.matchAll(/pgTable\(\s*'([a-z_]+)'/g)]
     .map((match) => match[1])
     .filter((name) => name.includes('_'));
 if (tables.length === 0) {
-    console.error('Read no table names from packages/server/src/db/schema.ts; the check would pass vacuously.');
+    console.error('Read no table names from packages/db/src/schema.ts; the check would pass vacuously.');
     process.exit(1);
 }
 const markers = [

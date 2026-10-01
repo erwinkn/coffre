@@ -56,9 +56,9 @@ for about a minute. The setting belongs to the Hyperdrive config, and
 `wrangler hyperdrive update <id> --caching-disabled`.
 
 The id Hyperdrive prints goes in `app/wrangler.jsonc`. `pnpm migrate` is
-`coffre-server migrate`, which ships with `@coffre/server` so the schema
-always matches the server's version: run it after every upgrade, before
-deploying.
+`coffre-server migrate`, which ships with `@coffre/server` and applies
+`@coffre/db`'s migrations at the same version, so the schema always matches
+the server's: run it after every upgrade, before deploying.
 
 **3. Secrets.** Each Worker declares the secrets it needs
 (`secrets.required`), and gets no others:

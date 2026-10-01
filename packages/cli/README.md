@@ -11,5 +11,5 @@ coffre run market/prod -- node server.js
 It bundles everything it runs, so it installs with no dependencies.
 
 Part of [coffre](https://github.com/erwinkn/coffre), a secrets manager you
-deploy as a small project of your own. Its seven `@coffre/*` packages are
+deploy as a small project of your own. Its eight `@coffre/*` packages are
 released together, at one version. MIT licensed.

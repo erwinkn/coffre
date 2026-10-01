@@ -2,8 +2,10 @@
 
 `coffre` is a pnpm monorepo secrets manager, shipped as packages a deployment imports
 and configures in code: `packages/server` (`@coffre/server`: `/api`, sign-in, syncs and
-their providers in `src/sync`, the Drizzle schema, queries and migrations in `src/db`;
-`/cloudflare` and `/node` entry points), `packages/ui` (`@coffre/ui`: the TanStack
+their providers in `src/sync`, its queries in `src/db`; `/cloudflare` and `/node` entry
+points), `packages/db` (`@coffre/db`: the Drizzle schemas for Postgres and SQLite, their
+migrations and migrator, the dialect helpers, and the connections, Hyperdrive's
+included), `packages/ui` (`@coffre/ui`: the TanStack
 Start pages, prebuilt), `packages/vault` (`@coffre/vault`: keys, grants, members, its
 own log), `packages/client` (the typed API client the CLI and UI call), `packages/cli`
 (`coffre`, including `coffre init`), `packages/conformance` (`@coffre/conformance`:
@@ -89,7 +91,7 @@ tooling's (`COFFRE_DEV_*`, `COFFRE_STATE_DIR`, `COFFRE_TEST_ENGINE`,
   for another three. Workers needs Postgres and makes its own
   `coffre_conformance_<hex>` database, dropped after; Node runs on SQLite in a temp
   dir. A check that fails prints what it saw, then the processes' output.
-- `pnpm test:consumer [<dir>]` packs the seven packages, runs the packed CLI's
+- `pnpm test:consumer [<dir>]` packs the eight packages, runs the packed CLI's
   `init` for both kinds outside the workspace, diffs them against the examples,
   installs the tarballs (pnpm overrides, no workspace links), then typechecks,
   builds and runs conformance on each. It needs network for third-party packages.

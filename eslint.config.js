@@ -101,10 +101,10 @@ export default defineConfig([
     },
   },
   {
-    // Drizzle belongs to the server's database layer, and nowhere else.
+    // Drizzle belongs to @coffre/db and the server's queries, and nowhere else.
     name: 'coffre/query-boundary',
     files: ['packages/*/src/**/*.{ts,tsx}'],
-    ignores: ['packages/server/src/db/**', 'packages/ui/src/routeTree.gen.ts'],
+    ignores: ['packages/db/src/**', 'packages/server/src/db/**', 'packages/ui/src/routeTree.gen.ts'],
     ...parsing,
     rules: {
       'no-restricted-imports': ['error', { patterns: [noDrizzle] }],

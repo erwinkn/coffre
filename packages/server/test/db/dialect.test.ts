@@ -2,12 +2,12 @@ import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 
+import type { Database } from '@coffre/db';
+import { isUniqueViolation } from '@coffre/db/dialect';
+import * as server from '@coffre/db/schema';
 import { asc, like } from 'drizzle-orm';
 
-import type { Database } from '../../src/db/database.ts';
-import { isUniqueViolation } from '../../src/db/dialect.ts';
 import { insert, insertIfAbsent, update, upsert } from '../../src/db/queries.ts';
-import * as server from '../../src/db/schema.ts';
 import { openTestDatabase } from './engine.ts';
 import { projects } from './tables.ts';
 

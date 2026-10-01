@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createDatabase } from '../../src/db/database.ts';
+import { createDatabase } from '@coffre/db';
+
 import { findCredential } from '../../src/db/queries.ts';
 
 // Hyperdrive caches a read for up to a minute unless its config was created

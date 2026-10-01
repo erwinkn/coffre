@@ -162,7 +162,7 @@ Two traps found the hard way, both documented in `pnpm-workspace.yaml`:
 published six days before we tried to install it.
 
 **Releasing.** `pnpm bump 0.2.0`, merged, then a pushed tag, `v0.2.0`, has
-`.github/workflows/release.yml` publish the seven packages
+`.github/workflows/release.yml` publish the eight packages
 (`scripts/publish.sh`). npm takes the workflow's GitHub OIDC token rather
 than a stored one (trusted publishing), and attaches provenance: each
 version on npm names the commit and workflow run that built it. npm sets up
@@ -172,7 +172,8 @@ version was published by hand, with the same script.
 ## Layout
 
 ```
-packages/server       @coffre/server: /api, sign-in, syncs, the heartbeat, the database; /cloudflare and /node
+packages/server       @coffre/server: /api, sign-in, syncs, the heartbeat, the queries; /cloudflare and /node
+packages/db           @coffre/db: the schema, its migrations and migrator, the connections
 packages/ui           @coffre/ui: the pages, a prebuilt TanStack Start handler and its static files
 packages/vault        @coffre/vault: the KEK, grants, members, root admins, its own log; /cloudflare and /node
 packages/client       @coffre/client: the API as typed calls, one fetch each, and the sync destinations
@@ -187,7 +188,7 @@ dev/idp               runs the dev IdP, the local stand-in for Cloudflare Access
 scripts               what dev, tests and CI share: databases, the checks
 ```
 
-The seven `@coffre/*` packages are the product, compiled with their
+The eight `@coffre/*` packages are the product, compiled with their
 declarations and released together at one version; each imports the others
 by name only. A deployment is
 one of the examples: a small project that imports the packages and configures them

@@ -7,9 +7,9 @@ import { createClient, type CoffreClient } from '@coffre/client';
 import { chainHash } from '@coffre/core/audit';
 import { github, signin, type Principal } from '@coffre/core/identity';
 import type { LogEntry } from '@coffre/core/vault';
+import { tablesOf } from '@coffre/db';
 import { and, asc, eq, is, Table } from 'drizzle-orm';
 
-import { tablesOf } from '../src/db/database.ts';
 import { auditRange } from '../src/db/queries.ts';
 import { auditChainHead, auditLog } from './db/tables.ts';
 import { serveApi } from '../src/api/router.ts';

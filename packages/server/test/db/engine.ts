@@ -1,6 +1,7 @@
-import { openDatabase } from '../../src/db/connect.ts';
-import { createDatabase, type Database } from '../../src/db/database.ts';
-import type { Engine } from '../../src/db/dialect.ts';
+import { createDatabase, type Database } from '@coffre/db';
+import { openDatabase } from '@coffre/db/connect';
+import type { Engine } from '@coffre/db/dialect';
+
 import { TEST_OWNER_DATABASE_URL, TEST_RUNTIME_DATABASE_URL } from './connections.ts';
 
 /**

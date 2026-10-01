@@ -1,8 +1,8 @@
 import { roleGrants } from '@coffre/core/access';
 import { GENESIS_HASH, verifyChain } from '@coffre/core/audit';
 import { describeAccessFault, verifyCheckpoint, type Checkpoint, type LogEntry, type LogVerification } from '@coffre/core/vault';
+import { SNAPSHOT } from '@coffre/db/dialect';
 
-import { SNAPSHOT } from '../db/dialect.ts';
 import {
   auditHead,
   auditPage,
