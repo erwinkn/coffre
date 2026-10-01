@@ -10,13 +10,6 @@ CREATE TABLE "audit_chain_head" (
 	CONSTRAINT "audit_chain_head_head_hash_check" CHECK (octet_length("audit_chain_head"."head_hash") = 32)
 );
 --> statement-breakpoint
-CREATE TABLE "audit_heartbeat" (
-	"only_row" boolean PRIMARY KEY DEFAULT true NOT NULL,
-	"last_beat_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"last_seq" bigint DEFAULT 0 NOT NULL,
-	CONSTRAINT "audit_heartbeat_only_row_check" CHECK ("audit_heartbeat"."only_row")
-);
---> statement-breakpoint
 CREATE TABLE "audit_log" (
 	"seq" bigint PRIMARY KEY NOT NULL,
 	"author" text NOT NULL,
@@ -274,14 +267,9 @@ CREATE INDEX "secret_versions_secret_idx" ON "secret_versions" USING btree ("sec
 CREATE INDEX "secrets_lookup_idx" ON "secrets" USING btree ("project_id","environment_id","key");--> statement-breakpoint
 CREATE INDEX "syncs_environment_idx" ON "syncs" USING btree ("environment_id");--> statement-breakpoint
 
--- The chain starts at sequence 0 from 32 zero bytes, and the heartbeat row
--- is always there to update.
+-- The chain starts at sequence 0 from 32 zero bytes.
 INSERT INTO audit_chain_head (only_row, next_seq, head_hash)
 VALUES (true, 0, decode(repeat('00', 32), 'hex'));
---> statement-breakpoint
-
-INSERT INTO audit_heartbeat (only_row, last_seq)
-VALUES (true, 0);
 --> statement-breakpoint
 
 -- The audit log only grows, for every login, its owner's included. The
@@ -403,7 +391,6 @@ TO coffre_app;
 
 GRANT SELECT ON
     audit_chain_head,
-    audit_heartbeat,
     vault_members,
     vault_grants
 TO coffre_app;
@@ -416,8 +403,6 @@ GRANT UPDATE (slug, name, archived_at) ON environments TO coffre_app;
 GRANT UPDATE (key, current_version_id, current_version, updated_at, archived_at) ON secrets TO coffre_app;
 --> statement-breakpoint
 GRANT UPDATE (next_seq, head_hash) ON audit_chain_head TO coffre_app;
---> statement-breakpoint
-GRANT UPDATE (last_beat_at, last_seq) ON audit_heartbeat TO coffre_app;
 --> statement-breakpoint
 GRANT UPDATE (email, last_sign_in_at, revoked_at, revoked_by, auth_mac) ON identities TO coffre_app;
 --> statement-breakpoint

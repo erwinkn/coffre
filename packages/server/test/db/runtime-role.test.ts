@@ -11,8 +11,6 @@ import { postgresOnly } from './engine.ts';
 const EXPECTED_UPDATE_COLUMNS = [
   'audit_chain_head.head_hash',
   'audit_chain_head.next_seq',
-  'audit_heartbeat.last_beat_at',
-  'audit_heartbeat.last_seq',
   'credentials.auth_mac',
   'credentials.last_used_at',
   'credentials.last_used_ip',

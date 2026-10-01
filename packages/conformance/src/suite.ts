@@ -4,7 +4,7 @@
 import type { Deployment } from './harness.ts';
 import { Report } from './report.ts';
 import { bulkLimit, crossSite, grantScoping, membersOnly, offboarding } from './checks/access.ts';
-import { appendOnly, checkpoints, logsAgree, noAuditNoValue, revealAudited, tamperApp, tamperVault } from './checks/audit.ts';
+import { appendOnly, checkpoints, noAuditNoValue, revealAudited, tamperApp, tamperVault, writesAgree } from './checks/audit.ts';
 import { canaryScan } from './checks/canaries.ts';
 import { anonymousChecks, tokenChecks, type Canary } from './checks/live.ts';
 import { personas, setUp, setUpLive, signInAdmin } from './checks/people.ts';
@@ -32,10 +32,8 @@ export async function conform(deployment: Deployment, options: { bulkLimit: numb
   await report.check('offboarding', all, ({ people, canaries }) => offboarding(deployment, people, canaries));
   await report.check('bulk limit', { people }, ({ people }) => bulkLimit(people, options.bulkLimit));
 
-  // The two logs agree only until the check after: the vault logs the keys
-  // it opens for a reveal that the audit log then refuses.
   await report.check('checkpoints', { people }, ({ people }) => checkpoints(deployment, people));
-  await report.check('two logs agree', { people }, ({ people }) => logsAgree(people));
+  await report.check('keys behind writes', { people }, ({ people }) => writesAgree(people));
   await report.check('no audit, no value', all, ({ people, canaries }) => noAuditNoValue(deployment, people, canaries));
 
   await report.check('canary scan', all, ({ people, canaries }) => canaryScan(deployment, people, canaries));

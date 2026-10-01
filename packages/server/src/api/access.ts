@@ -1,9 +1,11 @@
-import { assignableToEnvironment, ROLES, type Role } from '@coffre/core/access';
+import { randomUUID } from 'node:crypto';
+
+import { assignableToEnvironment, type Role } from '@coffre/core/access';
 import type { AccessChange } from '@coffre/core/vault';
 
 import { places } from '../db/queries.ts';
-import { allowed, recorded, denied, need, Refusal, vaultRefusal, type ApiContext } from './context.ts';
-import { badRequest, conflict, notFound } from './errors.ts';
+import { denied, need, Refusal, withRefusals, type ApiContext } from './context.ts';
+import { badRequest, conflict, notFound, vaultRefused } from './errors.ts';
 import { formatGrantee, formatMember, formatPath, parsePath, type GranteeRef } from './paths.ts';
 
 /** A role, a role until a date, or `null` to take access away. */
@@ -40,6 +42,8 @@ function parseUntil(until: string, now: Date): Date {
  *
  * The app checks first, to answer in its own words; the vault holds the
  * grants and checks again, so a bug here cannot grant what the rules forbid.
+ * The vault logs each change it makes, as `access.grant` or `access.revoke`,
+ * and what it refuses; the app logs only what it refused itself.
  */
 export async function setAccess(
   ctx: ApiContext,
@@ -65,7 +69,7 @@ export async function setAccess(
   if (wanted.length === 0) return { changes: {} };
 
   const principal = formatGrantee(grantee);
-  return recorded(ctx, async (log) => {
+  return withRefusals(ctx, async () => {
     const known = await places(ctx.db);
     const located = wanted.map((want) => {
       const project = known.find((place) => place.slug === want.project);
@@ -82,7 +86,7 @@ export async function setAccess(
       environmentId: want.environmentId,
     });
     for (const want of located) {
-      need(ctx, 'grant.manage', { projectId: want.projectId }, want.role === null ? 'grant.revoke' : 'grant.create', {
+      need(ctx, 'grant.manage', { projectId: want.projectId }, want.role === null ? 'access.revoke' : 'access.grant', {
         ...scoped(want),
         metadata: { ...subject, role: want.role },
       });
@@ -92,7 +96,7 @@ export async function setAccess(
     const refuse = (want: (typeof located)[number], message: string, reason: string) =>
       new Refusal(
         conflict(message),
-        denied(ctx, 'grant.create', reason, { ...scoped(want), metadata: { ...subject, role: want.role } }),
+        denied(ctx, 'access.grant', reason, { ...scoped(want), metadata: { ...subject, role: want.role } }),
       );
     for (const want of located) {
       if (want.role === null) continue;
@@ -116,35 +120,16 @@ export async function setAccess(
       actor: formatMember(ctx.caller.principal),
       principal,
       requestId: ctx.requestId,
+      operationId: randomUUID(),
       changes: located.map((want) => ({
         ...scoped(want),
         role: want.role,
         expiresAt: want.expiresAt?.toISOString() ?? null,
       })),
     });
-    if (!result.ok) {
-      const granting = located.some((want) => want.role !== null);
-      throw vaultRefusal(ctx, result.refusal, granting ? 'grant.create' : 'grant.revoke', { metadata: subject });
-    }
-
+    if (!result.ok) throw vaultRefused(result.refusal);
     const changes: Record<string, AccessChange> = {};
-    for (const [i, want] of located.entries()) {
-      const change = result.changes[i];
-      changes[want.path] = change;
-      if (change === 'unchanged') continue;
-      const before = standing.grants.find(
-        (grant) => grant.projectId === want.projectId && grant.environmentId === want.environmentId,
-      );
-      const action = { created: 'grant.create', updated: 'grant.update', revoked: 'grant.revoke' }[change];
-      const grant =
-        want.role === null
-          ? { role: before?.role ?? null }
-          : { role: want.role, roleName: ROLES[want.role].name, expiresAt: want.expiresAt?.toISOString() ?? null };
-      log.push(allowed(ctx, action, {
-        ...scoped(want),
-        metadata: { ...subject, ...(change === 'updated' ? { from: before?.role ?? null } : {}), ...grant },
-      }));
-    }
+    for (const [i, want] of located.entries()) changes[want.path] = result.changes[i];
     return { changes };
   });
 }

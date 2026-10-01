@@ -176,7 +176,7 @@ $$;
 DO $$
 BEGIN
     INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
-    VALUES (4, 'vault', 'vault:fixture', 0, 'user:x@acme.example', 'unwrap', 'allow',
+    VALUES (4, 'vault', 'vault:fixture', 0, 'user:x@acme.example', 'secret.read', 'allow',
             decode(repeat('aa', 32), 'hex'), decode(repeat('99', 32), 'hex'), decode(repeat('ee', 32), 'hex'));
     RAISE EXCEPTION 'FAIL: coffre_app appended an entry as the vault';
 EXCEPTION

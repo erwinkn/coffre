@@ -47,7 +47,7 @@ records them with every call. A read in coffre then shows up twice, in
 places run by different people:
 
 ```
-vault log    unwrap  allow  user:ada@acme.example  market/prod/DATABASE_URL  secretId 5c0e…
+audit log    secret.read  allow  user:ada@acme.example  market/prod/DATABASE_URL  secretId 5c0e…
 CloudTrail   Decrypt        coffre-vault (IAM user)   encryptionContext { "coffre:project": "8f2a…",
                                                         "coffre:environment": "d41b…",
                                                         "coffre:secret": "5c0e…" }

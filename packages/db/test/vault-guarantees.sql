@@ -11,7 +11,7 @@
 
 -- 1. The vault may append to the audit log, as itself.
 INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
-VALUES (1, 'vault', 'vault:fixture', 0, 'user:admin@acme.example', 'unwrap', 'allow',
+VALUES (1, 'vault', 'vault:fixture', 0, 'user:admin@acme.example', 'secret.read', 'allow',
         decode(repeat('aa', 32), 'hex'), decode(repeat('99', 32), 'hex'), decode(repeat('bb', 32), 'hex'));
 \echo 'PASS: coffre_vault can append to audit_log'
 
@@ -164,8 +164,7 @@ BEGIN
         'SELECT * FROM device_authorizations',
         'SELECT * FROM syncs',
         'SELECT * FROM sync_keys',
-        'SELECT * FROM audit_heartbeat',
-        'DELETE FROM identities',
+            'DELETE FROM identities',
         'DELETE FROM device_authorizations',
         'DELETE FROM syncs',
         'DELETE FROM sync_keys',

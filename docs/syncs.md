@@ -184,11 +184,13 @@ the log shows more going out than did, never less.
 | `sync.run`    | a run opened the destination's token                   | the person, or `sync:<id>`      |
 | `sync.push`   | one key's value was sent, with its version             | the person, or `sync:<id>`      |
 | `sync.remove` | one key was deleted at the destination                 | the person, or `sync:<id>`      |
-| `sync.pause`, `sync.resume`, `sync.archive` | as named                 | the person                      |
+| `sync.update` | paused or resumed, `paused` in the metadata            | the person                      |
+| `sync.delete` | a sync was removed, and its principal with it          | the person                      |
 
 Runs that nobody pressed a button for (after a change, or from the scheduler)
 are logged under the system actor `sync:<id>`, with `trigger` in the metadata
-saying which. Every row of one run shares a bundle id.
+saying which. Every row of one run shares an operation id, and so do the
+vault's `secret.read` entries for the values it opened, for the purpose `sync`.
 
 ## Operating notes
 

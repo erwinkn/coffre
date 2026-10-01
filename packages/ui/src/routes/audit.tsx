@@ -5,11 +5,9 @@ import { statusOf, uiResult } from '../lib/coffre';
 import type { AuditRow } from '../shared/models';
 import {
   breakAfterUnderscores,
-  CopyButton,
   EmptyState,
   Notice,
   Timestamp,
-  Tip,
   Toggletip,
 } from '../components/ui';
 import { ClosedDoor, PageHeader } from '../components/page';
@@ -60,13 +58,13 @@ export const Route = createFileRoute('/audit')({
 
 function listEntries(client: CoffreClient, search: AuditSearch) {
   return uiResult(async () => {
-    // Sign-ins stay in the log and its chain; this page is about what was
-    // done with secrets and access, so the server leaves them out of the page.
+    // Sign-ins and key operations stay in the log and its chain; this page
+    // is about what was done with secrets and access, so the server leaves
+    // them out unless asked.
     const { entries } = await client.audit.list({
       limit: PAGE_SIZE,
       decision: search.decision,
       actor: search.actorId,
-      exclude: 'sign-ins',
     });
     const rows: AuditRow[] = entries.map((entry) => ({
       seq: entry.seq,
@@ -94,13 +92,17 @@ async function verifyChain(client: CoffreClient) {
     return result.ok
       ? {
           integrity: 'intact' as const,
-          rows: result.rows,
-          head: result.head,
+          through: result.through,
           checkpoint: result.checkpoint,
-          vaultEntries: result.vault.entries,
-          pending: result.vault.pending ?? 0,
+          pending: result.pending ?? 0,
         }
-      : { integrity: 'broken' as const, log: result.log, failedAtSeq: result.failedAtSeq, reason: result.reason };
+      : {
+          integrity: 'broken' as const,
+          // Whose check found it: the app's, of the chain, or the vault's, of its entries and its rows.
+          log: result.author === 'app' ? ('audit' as const) : ('vault' as const),
+          failedAtSeq: result.failedAtSeq,
+          reason: result.reason,
+        };
   } catch (error) {
     const status = statusOf(error);
     if (status === 403) return { integrity: 'owners-only' as const };
@@ -476,9 +478,9 @@ function BreakMark() {
  * someone is already feeling confident, and not on the morning it would have
  * mattered. Recomputing on load makes the claim continuous.
  *
- * The head hash is the part worth carrying away. Recomputation only proves the
- * log is consistent with itself; comparing this value against one recorded
- * earlier, somewhere coffre cannot write, is what proves it is unchanged.
+ * Recomputation only proves the log is consistent with itself; the vault's
+ * signed checkpoints, entries of the log it checks against the prefix each
+ * signed, are what prove it unchanged.
  */
 function ChainStatus({ chain }: { chain: ChainResult }) {
   if (chain.integrity === 'owners-only') {
@@ -530,7 +532,7 @@ function ChainStatus({ chain }: { chain: ChainResult }) {
           (chain.checkpoint === null
             ? 'Chain intact. The vault has not signed a checkpoint yet.'
             : `Chain intact, and unchanged through entry ${chain.checkpoint.seq}, which the vault signed at ${chain.checkpoint.signedAt}.`) +
-          ` The vault's log holds too: ${chain.vaultEntries} entries, and every member and grant follows from them.`
+          " The vault's entries hold by its key too, and every member and grant follows from them."
         }
       >
         <button type="button" className="chain-seal">
@@ -543,13 +545,11 @@ function ChainStatus({ chain }: { chain: ChainResult }) {
           {chain.pending} key operation{chain.pending === 1 ? '' : 's'} in flight
         </span>
       )}
-      <span className="chain-head">
-        <span className="chain-head-label">head</span>
-        <Tip label={chain.head}>
-          <code tabIndex={0}>{chain.head.slice(0, 16)}…</code>
-        </Tip>
-        <CopyButton value={chain.head} label="Copy the full chain head" />
-      </span>
+      {chain.through !== null && (
+        <span className="chain-head">
+          <span className="chain-head-label">through entry {chain.through}</span>
+        </span>
+      )}
     </div>
   );
 }
@@ -562,17 +562,17 @@ function ChainStatus({ chain }: { chain: ChainResult }) {
 function subjectOf(entry: AuditEntryView): string {
   const { metadata } = entry;
   const text = (value: unknown) => (typeof value === 'string' && value !== '' ? value : null);
-  const place = [entry.project, entry.environment, text(metadata.key)].filter(
+  const place = [entry.project, entry.environment, entry.key].filter(
     (part): part is string => part !== null,
   );
   const parts = [place.join('/')];
-  const who = text(metadata.principalId);
+  const who = entry.subject ?? text(metadata.principalId);
   if (who !== null) {
-    const role = text(metadata.role) ?? (metadata.instanceRole === 'owner' ? 'owner' : null);
-    const from = text(metadata.from);
+    const role = text(metadata.role) ?? (metadata.owner === true ? 'owner' : null);
+    const from = text(metadata.previousRole);
     parts.push(role === null ? who : `${who} (${from === null ? role : `${from} → ${role}`})`);
   }
-  if (text(metadata.key) === null) parts.push(text(metadata.reason) ?? '');
+  if (entry.key === null) parts.push(entry.reason ?? '');
   const subject = parts.filter((part) => part !== '').join(' · ');
   return subject === '' ? '—' : subject;
 }

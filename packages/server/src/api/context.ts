@@ -165,14 +165,16 @@ export function need(
 }
 
 /** The caller, as the vault knows them, for this request. */
-export function asking(ctx: Pick<ApiContext, 'caller' | 'requestId'>): Asking {
-  return { principal: formatMember(ctx.caller.principal), requestId: ctx.requestId };
+export function asking(ctx: Pick<ApiContext, 'caller' | 'requestId'>, operationId: string | null = null): Asking {
+  return { principal: formatMember(ctx.caller.principal), requestId: ctx.requestId, operationId };
 }
 
 /**
- * The vault said no. The app logs it too, as `vault_<code>`: the app's log
- * then tells the whole story, and the vault's own log is the one the app
- * cannot rewrite.
+ * The vault said no to part of something larger the app was doing, such as
+ * the grant behind a new sync: the app logs what the person tried, refused
+ * as `vault_<code>`, beside the vault's own entry for the part it refused.
+ * Where the vault's refusal is the whole of the action, a read, a write, an
+ * access change, its entry is the record: throw `vaultRefused` instead.
  */
 export function vaultRefusal(
   ctx: Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp'>,

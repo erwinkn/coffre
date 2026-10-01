@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 
 import { defineSignin, github } from '@coffre/core/identity';
-import { and, eq, isNull } from 'drizzle-orm';
+import { eq, isNull } from 'drizzle-orm';
 
 import { auditLog, credentials, secrets, syncs } from './db/tables.ts';
 import { SigninService } from '../src/api/signin.ts';
@@ -94,17 +94,15 @@ test('removing someone revokes every way in, so re-adding them starts from nothi
   const again = await browserSession(DEV, 'gh-101');
   assert.equal((await signin.verify(again.token)).id, DEV);
 
+  // The vault's record: the grant it took, and the generation that ends every session and token from before.
   const [removal] = await db.owner
-    .select({ metadata: auditLog.metadata })
+    .select({ author: auditLog.author, subject: auditLog.subjectPrincipal, metadata: auditLog.metadata })
     .from(auditLog)
-    .where(and(eq(auditLog.action, 'directory.remove'), isNull(auditLog.projectId)));
-  assert.deepEqual(JSON.parse(removal.metadata), {
-    principalType: 'user',
-    principalId: DEV,
-    revoked: 1,
-    sessions: 2,
-    tokens: 0,
-    identities: 1,
+    .where(eq(auditLog.action, 'member.remove'));
+  assert.deepEqual({ ...removal, metadata: JSON.parse(removal.metadata) }, {
+    author: 'vault',
+    subject: `user:${DEV}`,
+    metadata: { revoked: 1, generation: 1 },
   });
 });
 

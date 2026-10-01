@@ -84,16 +84,17 @@ relocation. `packages/core/test/envelope-aad-isolation.test.ts` exists because
 the obvious test passes at the wrap layer and would not notice the envelope
 layer regressing.
 
-**The audit write is in-transaction and fail-closed.** Not a queue. If the
-audit row cannot be written, the read does not happen.
+**The audit write is in-transaction and fail-closed.** Not a queue. The vault
+logs a read in the transaction that decides it, before any key leaves; if the
+entry cannot be written, the read does not happen.
 
 **`seq` comes from a locked head row, not a bigserial.** A rolled-back
 transaction burns a sequence value, and the resulting gap is indistinguishable
 from a deleted row. Gaps must mean tampering.
 
-**One audit row per secret, sharing a `bundle_id`.** A bulk fetch that writes a
-single row degrades the answer to "they read the whole environment", which is
-true and useless.
+**One `secret.read` per secret, sharing an operation id.** A bulk fetch that
+writes a single row degrades the answer to "they read the whole environment",
+which is true and useless.
 
 **Principals are a tagged union.** Cloudflare Access service tokens carry
 `common_name` with an empty `sub` and **no `email` claim**. Code that reads
@@ -617,8 +618,8 @@ UI, the underlying role and scope are presented as one permissions value:
 - The KEK is a local key or AWS KMS (`awsKms`). No Scaleway provider (its
   Audit Trail does not log Decrypt), and no command yet to rewrap existing
   data keys under a new KEK.
-- The vault signs checkpoints and both authors record them in the shared
-  log, but nothing exports them off-box yet. A complete database rollback
+- The vault signs checkpoints, as entries of the shared log, but nothing
+  exports them off-box yet. A complete database rollback
   remains an accepted limit.
 - `.env` import does not support literal multi-line values (use `\n` inside
   double quotes) or variable interpolation. Both are reported as parse problems

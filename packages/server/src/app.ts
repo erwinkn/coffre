@@ -24,7 +24,7 @@ const ROUTES: Record<string, { method: 'GET' | 'POST'; handler: Handler; browser
   '/readyz': {
     method: 'GET',
     handler: async (_request, runtime) => {
-      const readiness = await auditReadiness(runtime.db);
+      const readiness = await auditReadiness(runtime.db, runtime.vault);
       return jsonResponse(readiness, readiness.ok ? 200 : 503);
     },
   },

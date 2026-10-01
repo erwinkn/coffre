@@ -77,20 +77,20 @@ In order, since each builds on the ones before:
 
 | Check | What must hold |
 |---|---|
-| health | `/livez` answers. On Workers, `/readyz` fails with the heartbeat an hour old, and passes once the Cron trigger has run |
+| health | `/livez` answers. On Workers, `/readyz` fails before any heartbeat, and passes once the Cron trigger has run and the vault has checkpointed it |
 | headers, anonymous api, forged cross-site, sign-in info, anonymous answers | What `probe` checks as no one; see [below](#against-a-running-instance) |
 | sign-in | The root admin signs in through GitHub, and is the root admin |
 | setup, personas | The admin creates the project, its values and the people above |
 | members only | The stranger's sign-in is refused and leaves no session; no one gets 401 reading, revealing or writing, and a made-up token is refused |
 | grant scoping | The reader reads dev and nothing else, and changes nothing: no write, no grant, no member, no token, no vault log. So does the service, with its token. The bulk reader cannot read dev |
-| reveals audited | A reveal writes one `secret.read` per value, under the reveal's bundle and request, at the versions revealed |
+| reveals audited | A reveal writes one `secret.read` of the vault's per value, under the reveal's operation and request, at the versions revealed |
 | cross-site | A write, a reveal and a sign-out with the admin's cookie, from another site or from no page at all: 403, no value in the answer, nothing changed |
 | live setup | The admin sets up what `probe --token` asks an operator for: `conformance/live/CANARY`, and `token:conformance-live`, a viewer there and auditor on the project |
 | token, token reveal, token scan, token scope, token verification | What `probe --token` checks, with that token; see [below](#against-a-running-instance) |
 | offboarding | Removing the leaver names the values they read, to rotate; their browser session, their CLI session and a new sign-in all stop at once. A removed service's token stops too |
 | bulk limit | One more value at once than the limit allows is refused; a single value still opens, so the refusal was the quantity, not the grant |
-| checkpoints | The Cron trigger writes a signed checkpoint to the shared log, and both authors verify |
-| two logs agree (the check's current name) | In the successful flows exercised here, every key the vault opened or sealed is in the audit log, once, for the same member, request and version, and every app read and write has a vault entry in the same table |
+| checkpoints | Each Cron run has the vault sign the log up to its last entry, in an `audit.checkpoint` entry of its own that covers the one before, and the log verifies through it |
+| keys behind writes | Every `secret.write` and `secret.restore` names, by `related_seq`, the vault's `key.wrap` or `key.rewrap` for the same member, request, operation, secret and version; and no value read is logged by the app, only by the vault |
 | no audit, no value | With the audit log refusing writes (a trigger), a reveal fails and carries no value; it works again once the log does |
 | canary scan | No value in any answer to any GET route, or any page, as each of the people, signed in or removed; nor in the database, in any column of any table; nor the processes' output |
 | append-only | Neither the app's login nor the vault's can update, delete, truncate or drop the audit log, append an entry as the other, change or delete a value's versions, delete a secret or a member, or create a table; nor can the app's write a member or a grant. Postgres only: SQLite has no logins |
@@ -103,11 +103,12 @@ A regression test plants a canary in a `bytea` column to check the scanner.
 On SQLite it scans the database file and its write-ahead log; a missing
 file fails. Workers also tests both restricted logins and the author policies.
 
-The “two logs agree” check compares app and vault entries in that table.
-It covers successful operations, not arbitrary partial failures: a vault
-release can commit before the app fails to record or return a value. The
-unit and integration suites also test two vault instances sharing the bulk
-limit and generations, removal during a KMS call, and partial KMS failure.
+A read has one entry, the vault's, committed before any key leaves, so there
+is no second record of it to disagree. A write the app prepares again leaves
+the vault's `key.wrap` for a version never stored, under an operation id no
+`secret.write` shares. The unit and integration suites also test two vault
+instances sharing the bulk limit and generations, removal during a KMS
+call, and partial KMS failure.
 The design's broader operation-by-operation conformance checks and unified
 audit view are later steps; this harness does not claim to test them yet.
 
@@ -157,7 +158,7 @@ deployment it booted, so they are tested in this repository's CI.
 | Check | What must hold |
 |---|---|
 | token | The token is a service's, and reads the canary's environment, which holds its key |
-| token reveal | The canary is revealed once, its value is the one given, and the audit log holds exactly one allowed `secret.read` of it under the reveal's bundle and request |
+| token reveal | The canary is revealed once, its value is the one given, and the audit log holds exactly one allowed `secret.read` of it under the reveal's operation and request |
 | token scan | The canary's value, as text, base64 or hex, is in no answer to any GET route, as the token or as no one, nor in any page: only in its reveal |
 | token scope | The token sees the canary's project and reads its environment, and nothing more: every other environment it is told of, a made-up place, the members and the vault's log refuse it, and the audit entries it reads are about its project only |
 | token verification | The whole audit chain verifies. Verifying is for owners and root admins, which a token cannot be, so this is skipped with a token, and says it was not checked |

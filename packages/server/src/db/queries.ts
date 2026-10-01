@@ -1,8 +1,9 @@
 import type { Author } from '@coffre/core/audit';
+import type { Checkpoint } from '@coffre/core/vault';
 import type { Envelope } from '@coffre/core/envelope';
 import { own, tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import * as dialect from '@coffre/db/dialect';
-import { canonicalTimestamp, changedRows, clock, forUpdate, migrationLedger, truth, type Table } from '@coffre/db/dialect';
+import { canonicalTimestamp, changedRows, clock, clockMillis, forUpdate, migrationLedger, truth, type Table } from '@coffre/db/dialect';
 import type * as schema from '@coffre/db/schema';
 import { and, asc, count, desc, eq, getTableColumns, getTableName, gt, gte, inArray, isNull, lt, notInArray, or, sql, type SQL } from 'drizzle-orm';
 
@@ -361,7 +362,7 @@ export async function memberActivity(db: Queryable, actorIds: string[]) {
   const seen = and(
     allowed,
     inArray(auditLog.actor, actorIds.flatMap((id) => [`user:${id}`, `token:${id}`])),
-    inArray(auditLog.action, ['secret.read', 'secret.write', 'secret.import']),
+    inArray(auditLog.action, ['secret.read', 'secret.write']),
   );
   const touched = db.select({ id: auditLog.secretId }).from(auditLog).where(seen);
   const rows = await db
@@ -384,8 +385,7 @@ export async function memberActivity(db: Queryable, actorIds: string[]) {
     .where(
       or(
         seen,
-        and(allowed, eq(auditLog.action, 'secret.rollback'), inArray(auditLog.secretId, touched)),
-        and(allowed, eq(auditLog.action, 'directory.remove'), isNull(auditLog.projectId)),
+        and(allowed, eq(auditLog.action, 'secret.restore'), inArray(auditLog.secretId, touched)),
       ),
     )
     .orderBy(asc(auditLog.seq));
@@ -723,18 +723,6 @@ export async function auditRange(db: Queryable, fromSeq = 0n, limit = 1000) {
   return rows.map((row) => ({ ...row, author: row.author as Author, decision: row.decision as 'allow' | 'deny' }));
 }
 
-/** The app's newest entry of this action, or null. */
-export async function latestAudit(db: Queryable, action: string) {
-  const { auditLog } = tablesOf(db);
-  const [row] = await db
-    .select(auditColumns(auditLog))
-    .from(auditLog)
-    .where(and(eq(auditLog.author, 'app'), eq(auditLog.action, action)))
-    .orderBy(desc(auditLog.seq))
-    .limit(1);
-  return row === undefined ? null : shown(row);
-}
-
 export type AuditFilter = {
   /** Entries in any of these projects or environments, for a caller who reads only those. */
   within?: { projectIds: string[]; environmentIds: string[] };
@@ -752,21 +740,20 @@ export type AuditFilter = {
 };
 
 /**
- * A page of the app's entries, newest first, with the slugs of the places
- * each entry names. The vault's entries share the table; its own page shows
- * them, until the two become one list.
+ * A page of the log, both authors, newest first, with the slugs of the
+ * places each entry names and the key of its secret.
  */
 export async function auditPage(db: Queryable, filter: AuditFilter) {
-  const { auditLog, projects, environments } = tablesOf(db);
+  const { auditLog, projects, environments, secrets } = tablesOf(db);
   const { within } = filter;
   const rows = await db
-    .select({ ...auditColumns(auditLog), project: projects.slug, environment: environments.slug })
+    .select({ ...auditColumns(auditLog), project: projects.slug, environment: environments.slug, key: secrets.key })
     .from(auditLog)
     .leftJoin(projects, eq(projects.id, auditLog.projectId))
     .leftJoin(environments, eq(environments.id, auditLog.environmentId))
+    .leftJoin(secrets, eq(secrets.id, auditLog.secretId))
     .where(
       and(
-        eq(auditLog.author, 'app'),
         within === undefined
           ? undefined
           : or(inArray(auditLog.projectId, within.projectIds), inArray(auditLog.environmentId, within.environmentIds)),
@@ -786,13 +773,28 @@ export async function auditPage(db: Queryable, filter: AuditFilter) {
   return rows.map(shown);
 }
 
-/** When the scheduler last wrote to the log, and the database clock now. */
-export async function heartbeat(db: Queryable): Promise<{ lastBeatAt: Date; now: string } | null> {
-  const { auditHeartbeat } = tablesOf(db);
-  const [row] = await db
-    .select({ lastBeatAt: auditHeartbeat.lastBeatAt, now: clock(db) })
-    .from(auditHeartbeat);
-  return row === undefined ? null : { lastBeatAt: row.lastBeatAt, now: canonicalTimestamp(row.now) };
+/**
+ * What readiness reads: the newest heartbeat, with its age by the
+ * database's clock, so a skewed application server cannot hide a stale
+ * one; and the newest checkpoint the vault signed.
+ */
+export async function readiness(db: Queryable): Promise<{
+  beat: { seq: bigint; ageSeconds: number } | null;
+  checkpoint: Checkpoint | null;
+}> {
+  const { auditLog } = tablesOf(db);
+  const newest = (author: 'app' | 'vault', action: string) =>
+    db
+      .select({ seq: auditLog.seq, occurredAt: auditLog.occurredAt, metadata: auditLog.metadata, now: clockMillis(db) })
+      .from(auditLog)
+      .where(and(eq(auditLog.author, author), eq(auditLog.action, action), eq(auditLog.decision, 'allow')))
+      .orderBy(desc(auditLog.seq))
+      .limit(1);
+  const [[beat], [checkpoint]] = await Promise.all([newest('app', 'audit.heartbeat'), newest('vault', 'audit.checkpoint')]);
+  return {
+    beat: beat === undefined ? null : { seq: beat.seq, ageSeconds: (beat.now - beat.occurredAt) / 1000 },
+    checkpoint: checkpoint === undefined ? null : (JSON.parse(checkpoint.metadata) as Checkpoint),
+  };
 }
 
 /** How many migrations the database has applied. */

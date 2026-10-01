@@ -1,7 +1,7 @@
 import test, { after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { eq } from 'drizzle-orm';
+import { asc, eq } from 'drizzle-orm';
 
 import { auditLog } from './db/tables.ts';
 import { serveApi } from '../src/api/router.ts';
@@ -27,11 +27,12 @@ async function raw(method: string, path: string, body?: unknown): Promise<Respon
   return serveApi(request, await contextFor(deps, ROOT));
 }
 
+/** The log's actions, the app's and the vault's. */
 async function actions(): Promise<string[]> {
   const rows = await db.owner
     .select({ action: auditLog.action, decision: auditLog.decision })
     .from(auditLog)
-    .where(eq(auditLog.author, 'app'));
+    .orderBy(asc(auditLog.seq));
   return rows.map((row) => `${row.decision} ${row.action}`);
 }
 
@@ -157,7 +158,11 @@ test('someone holds at most one role per place; a new role replaces the old', as
 
   const held = await grantsAt(member, 'market/prod');
   assert.deepEqual(held.map((grant) => grant.role), ['developer']);
-  assert.ok((await actions()).includes('allow grant.update'));
+  // The vault's: the viewer grant, then the developer one in its place.
+  assert.deepEqual((await actions()).filter((action) => action.includes('access.')).slice(-2), [
+    'allow access.grant',
+    'allow access.grant',
+  ]);
 
   // A project grant and an environment grant are two places, not two roles at one.
   await root.access.set(member, { market: 'viewer' });
@@ -192,11 +197,11 @@ test('values leave only through POST /reveals, and each one is logged', async ()
   const revealed = await root.secrets.reveal('market/prod/DATABASE_URL');
   assert.deepEqual({ ...revealed.values }, { DATABASE_URL: 'postgres://secret-value' });
   const logged = await db.owner
-    .select({ bundleId: auditLog.operationId })
+    .select({ operationId: auditLog.operationId })
     .from(auditLog)
     .where(eq(auditLog.action, 'secret.read'));
   assert.equal(logged.length, before + 1);
-  assert.equal(logged.at(-1)?.bundleId, revealed.bundleId);
+  assert.equal(logged.at(-1)?.operationId, revealed.operationId);
 });
 
 test('a reveal names an environment or a secret, nothing wider', async () => {

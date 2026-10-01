@@ -152,7 +152,6 @@ export function testDeps(db: Database, rootAdmins: readonly string[], extra: Par
 export async function resetDatabase(owner: Database): Promise<void> {
   for (const vault of vaults) await vault.reset();
   const {
-    auditHeartbeat,
     credentials,
     deviceAuthorizations,
     environments,
@@ -173,7 +172,6 @@ export async function resetDatabase(owner: Database): Promise<void> {
   await emptyLog(owner);
   await owner.delete(vaultGrants);
   await owner.delete(vaultMembers);
-  await owner.update(auditHeartbeat).set({ lastSeq: 0n });
   await owner.update(secrets).set({ currentVersionId: null });
   await owner.delete(secretVersions);
   await owner.delete(secrets);

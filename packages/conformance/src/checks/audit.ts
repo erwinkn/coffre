@@ -1,92 +1,98 @@
-// What is written down: every value opened, in both logs, which agree; no
-// value without its entry; and a log changed behind coffre's back is caught.
+// What is written down: every value opened, by the vault that opened it;
+// every version stored, naming the vault's wrap of its key; no value without
+// its entry; and a log changed behind coffre's back is caught.
 import { createHash } from 'node:crypto';
 
-import type { AuditEntryView, CoffreClient, RouteOutput } from '@coffre/client';
+import type { AuditEntryView, CoffreClient } from '@coffre/client';
 
 import { using, type Sql } from '../database.ts';
 import type { Deployment } from '../harness.ts';
 import { expect, Skip } from '../report.ts';
 import { DEV, valuesIn, type Canaries, type People } from './people.ts';
 
-/** One reveal, one `secret.read` per value, all under the reveal's bundle. */
+/** One reveal, one `secret.read` per value, the vault's, all under the reveal's operation. */
 export async function revealAudited({ admin, reader }: People, canaries: Canaries): Promise<string> {
-  const { bundleId } = await reader.api.secrets.reveal(DEV);
+  const { operationId } = await reader.api.secrets.reveal(DEV);
   const { entries } = await admin.api.audit.list({ path: DEV, actor: reader.member, limit: 100 });
-  const bundle = entries.filter((entry) => entry.bundleId === bundleId);
-  const keys = bundle.map((entry) => entry.metadata.key).sort();
+  const bundle = entries.filter((entry) => entry.operationId === operationId);
+  const keys = bundle.map((entry) => entry.key).sort();
   const expected = Object.keys(valuesIn(canaries, DEV)).sort();
   expect(JSON.stringify(keys) === JSON.stringify(expected), 'the reveal is not logged once per value', bundle);
   expect(
-    bundle.every((entry) => entry.action === 'secret.read' && entry.decision === 'allow' && entry.requestId === bundle[0]!.requestId),
-    "the reveal's entries are not one request's reads",
+    bundle.every((entry) =>
+      entry.author === 'vault' && entry.action === 'secret.read' && entry.decision === 'allow'
+      && entry.metadata.purpose === 'run' && entry.requestId === bundle[0]!.requestId),
+    "the reveal's entries are not the vault's reads for one request",
     bundle,
   );
   const { keys: listed } = await admin.api.secrets.list(DEV);
   for (const entry of bundle) {
-    const current = listed.find((key) => key.key === entry.metadata.key);
-    expect(entry.metadata.version === current?.version, `the entry for ${String(entry.metadata.key)} names another version`, entry);
+    const current = listed.find((key) => key.key === entry.key);
+    expect(entry.version === current?.version, `the entry for ${String(entry.key)} names another version`, entry);
   }
-  return `${bundle.length} values revealed, ${bundle.length} secret.read entries under the reveal's bundle`;
+  return `${bundle.length} values revealed, ${bundle.length} secret.read entries of the vault's under the reveal's operation`;
 }
 
 /**
- * Each heartbeat has the vault sign the audit log's head, which must extend
- * the last head it signed, with its own log's. Two, so the second extends
- * the first; then both logs are verified from their first entry.
+ * Each heartbeat has the vault sign the log up to its last entry, in an
+ * entry of its own, after checking that the prefix it signed last is still
+ * there. Two, so the second covers the first; then the log is verified from
+ * its first entry, every checkpoint with it.
  */
 export async function checkpoints(deployment: Deployment, { admin }: People): Promise<string> {
   const before = await admin.api.audit.verify();
-  expect(before.ok, 'the logs do not verify', before);
+  expect(before.ok, 'the log does not verify', before);
   await deployment.scheduled();
   await deployment.scheduled();
   const after = await admin.api.audit.verify();
   expect(after.ok && after.checkpoint !== null, 'the audit log is not verified and checkpointed', after);
-  expect(after.checkpoint.seq >= before.rows, 'the checkpoint does not cover what was written before it', { before, after });
-  expect(after.vault.entries > 0, "the verification did not check the vault's log", after);
-  const vault = await admin.api.audit.vault({ full: '1' });
-  expect(vault.verification.ok, "the vault's log does not verify", vault.verification);
-  return `${after.rows} audit entries and ${after.vault.entries} vault entries verified, checkpointed at ${after.checkpoint.seq}`;
+  expect(after.checkpoint.seq > (before.through ?? -1), 'the checkpoint does not cover what was written before it', { before, after });
+  const { entries } = await admin.api.audit.list({ detail: '1', limit: 20 });
+  const signed = entries.filter((entry) => entry.action === 'audit.checkpoint' && entry.decision === 'allow');
+  expect(
+    signed.length >= 2 && signed.every((entry) => entry.author === 'vault' && entry.detail),
+    "the checkpoints are not the vault's entries, hidden as detail",
+    signed,
+  );
+  const [newest, previous] = signed as [AuditEntryView, AuditEntryView];
+  expect(newest.metadata.seq === after.checkpoint.seq, 'the newest checkpoint entry is not the one verified', { signed, after });
+  expect(previous.seq <= after.checkpoint.seq, 'the newest checkpoint does not cover the one before it', signed);
+  return `${after.entries} entries verified through ${after.through}, checkpointed at ${after.checkpoint.seq}`;
 }
 
 /**
- * Every key the vault opened or sealed has the app's entry for it, and every
- * value the app says it read or wrote went through the vault: matched by who,
- * which request, which secret and which version, both ways.
+ * Every version the app says it stored names the vault's entry for the key
+ * it was sealed with, `key.wrap` for a write and `key.rewrap` for a restore:
+ * the same member, request and operation, the same secret and version. And
+ * every value read is the vault's to log: the app keeps no reads of its own.
  */
-export async function logsAgree({ admin }: People): Promise<string> {
-  const app = new Map<string, number>();
-  for (const entry of await everyAuditEntry(admin.api)) {
-    if (entry.decision !== 'allow' || typeof entry.metadata.key !== 'string') continue;
-    const kind = entry.action === 'secret.read' ? 'read' : entry.action === 'secret.write' ? 'wrote' : null;
-    if (kind === null) continue;
-    const actor = `${entry.actorType === 'user' ? 'user' : 'token'}:${entry.actorId}`;
-    const path = `${entry.project}/${entry.environment}/${entry.metadata.key}`;
-    count(app, key(actor, kind, path, entry.metadata.version, entry.requestId));
+export async function writesAgree({ admin }: People): Promise<string> {
+  const entries = await everyAuditEntry(admin.api);
+  const bySeq = new Map(entries.map((entry) => [entry.seq, entry]));
+  let stored = 0;
+  for (const entry of entries) {
+    if (entry.author !== 'app' || entry.decision !== 'allow') continue;
+    expect(entry.action !== 'secret.read' || entry.key === null, 'the app logged a read of a value, which only the vault opens', entry);
+    const sealed = { 'secret.write': 'key.wrap', 'secret.restore': 'key.rewrap' }[entry.action];
+    if (sealed === undefined) continue;
+    const key = entry.relatedSeq === null ? undefined : bySeq.get(entry.relatedSeq);
+    expect(
+      key !== undefined && key.author === 'vault' && key.action === sealed && key.decision === 'allow',
+      `a ${entry.action} names no ${sealed} of the vault's`,
+      { entry, key },
+    );
+    const same = (fields: (keyof AuditEntryView)[]) => fields.every((field) => key[field] === entry[field]);
+    expect(same(['actorType', 'actorId', 'requestId', 'operationId']), `a ${entry.action} names a key sealed for another call`, { entry, key });
+    expect(same(['project', 'environment', 'key', 'version']), `a ${entry.action} names a key sealed for another version`, { entry, key });
+    stored++;
   }
-  const vault = new Map<string, number>();
-  for (const entry of await everyVaultEntry(admin.api)) {
-    if (entry.outcome !== 'allow') continue;
-    const kind = entry.action === 'unwrap' ? 'read' : entry.action === 'wrap' ? 'wrote' : null;
-    if (kind === null) continue;
-    count(vault, key(entry.actor, kind, entry.subject, entry.detail.version, entry.detail.requestId));
-  }
-  for (const [one, other, missing] of [
-    [vault, app, 'the vault opened or sealed a key the audit log does not account for'],
-    [app, vault, 'the audit log records a value the vault never opened or sealed'],
-  ] as const) {
-    for (const [entry, n] of one) {
-      expect((other.get(entry) ?? 0) === n, missing, JSON.parse(entry));
-    }
-  }
-  const total = [...vault.values()].reduce((sum, n) => sum + n, 0);
-  return `${total} keys opened or sealed, each once in each log, by the same member in the same request`;
+  return `${stored} versions stored, each naming the vault's seal of its key, by the same member in the same operation`;
 }
 
 /**
- * The app may not hand out a value it could not log: with the audit log
- * refusing writes (a trigger, as a full disk or a lost connection would), a
- * reveal fails and carries nothing.
+ * No value leaves without its entry: with the audit log refusing writes (a
+ * trigger, as a full disk or a lost connection would), the vault cannot log
+ * the read, so a reveal fails and carries nothing.
  */
 export async function noAuditNoValue(deployment: Deployment, { admin }: People, canaries: Canaries): Promise<string> {
   const [refuse, allow] =
@@ -195,7 +201,7 @@ export async function tamperVault(deployment: Deployment, { admin }: People): Pr
     );
     const granted = await verify();
     await update(sql, 'DELETE FROM vault_grants WHERE principal = $1 AND project_id = $2', [place.principal, place.project_id]);
-    expect(!granted.ok && granted.log === 'vault', 'a grant written into the database verifies', granted);
+    expect(!granted.ok && granted.author === 'vault', 'a grant written into the database verifies', granted);
     const revoked = await verify();
     expect(revoked.ok, 'the log did not verify once the grant was gone', revoked);
     caught.push('a grant the vault never gave');
@@ -207,7 +213,7 @@ export async function tamperVault(deployment: Deployment, { admin }: People): Pr
     const seq = BigInt(head.next_seq);
     const forged = {
       seq, author: 'vault', keyId: 'vault:0000000000000000', occurredAt: Date.now(), actor: 'user:forger@conformance.example',
-      action: 'unwrap', decision: 'allow', metadata: '{}',
+      action: 'secret.read', decision: 'allow', metadata: '{}',
     };
     const prevHash = Buffer.from(head.head_hash);
     const mac = Buffer.alloc(32, 0x41);
@@ -222,7 +228,7 @@ export async function tamperVault(deployment: Deployment, { admin }: People): Pr
     const inserted = await verify();
     await appendOnlyLifted(sql, () => update(sql, 'DELETE FROM audit_log WHERE seq = $1', [seq]));
     await update(sql, 'UPDATE audit_chain_head SET next_seq = $1, head_hash = $2', [seq, prevHash]);
-    expect(!inserted.ok && inserted.log === 'vault', "an entry in the vault's name, chained but not by the vault, verifies", inserted);
+    expect(!inserted.ok && inserted.author === 'vault', "an entry in the vault's name, chained but not by the vault, verifies", inserted);
     const removed = await verify();
     expect(removed.ok, 'the log did not verify once the entry was gone', removed);
     caught.push(`an entry forged in the vault's name (at ${seq})`);
@@ -257,14 +263,14 @@ function chainHash(prevHash: Buffer, fields: Record<string, string | number | bi
 }
 
 /**
- * Rewrite an app log entry and then remove its tail. The latter stays
- * broken, so this runs after every check that needs intact logs.
+ * Rewrite an entry and then remove the log's tail. The latter stays
+ * broken, so this runs after every check that needs an intact log.
  */
 export async function tamperApp(deployment: Deployment, { admin }: People): Promise<string> {
   const caught: string[] = [];
   const verify = () => admin.api.audit.verify();
   const intact = await verify();
-  expect(intact.ok && intact.checkpoint !== null, 'the logs do not verify before any tampering', intact);
+  expect(intact.ok && intact.checkpoint !== null, 'the log does not verify before any tampering', intact);
   const signed = intact.checkpoint.seq;
 
   await using(deployment.database(), (sql) =>
@@ -276,7 +282,7 @@ export async function tamperApp(deployment: Deployment, { admin }: People): Prom
       const seq = Number(row.seq);
       await update(sql, 'UPDATE audit_log SET actor = $1 WHERE seq = $2', ['user:nobody@conformance.example', seq]);
       const rewritten = await verify();
-      expect(!rewritten.ok && rewritten.log === 'audit', 'an audit entry rewritten in the database verifies', rewritten);
+      expect(!rewritten.ok && rewritten.failedAtSeq === seq, 'an audit entry rewritten in the database verifies', rewritten);
       await update(sql, 'UPDATE audit_log SET actor = $1 WHERE seq = $2', [row.actor, seq]);
       const restored = await verify();
       expect(restored.ok, 'the audit log did not verify once put back', restored);
@@ -286,10 +292,14 @@ export async function tamperApp(deployment: Deployment, { admin }: People): Prom
 
   // Last, since nothing puts them back: the entries the vault last signed for.
   await using(deployment.database(), (sql) =>
-    appendOnlyLifted(sql, () => update(sql, 'DELETE FROM audit_log WHERE seq >= $1', [signed])),
+    appendOnlyLifted(sql, async () => {
+      // SQLite checks the link from a write to its key.wrap row by row: unlink the tail first.
+      await update(sql, 'UPDATE audit_log SET related_seq = NULL WHERE seq >= $1', [signed]);
+      await update(sql, 'DELETE FROM audit_log WHERE seq >= $1', [signed]);
+    }),
   );
   const truncated = await verify();
-  expect(!truncated.ok && truncated.log === 'audit', 'the audit log verifies with its newest entries deleted', truncated);
+  expect(!truncated.ok && truncated.author === 'app', 'the audit log verifies with its newest entries deleted', truncated);
   caught.push('the newest audit entries deleted');
   return `caught: ${caught.join('; ')}`;
 }
@@ -324,30 +334,13 @@ function update(sql: Sql, statement: string, params: unknown[]): Promise<unknown
   return sql.query(sql.engine === 'sqlite' ? statement.replace(/\$\d+/g, '?') : statement, params);
 }
 
+/** The whole log, detail included, newest first. */
 async function everyAuditEntry(api: CoffreClient): Promise<AuditEntryView[]> {
   const all: AuditEntryView[] = [];
   for (let before: number | undefined; ; ) {
-    const { entries } = await api.audit.list({ before, limit: 500 });
+    const { entries } = await api.audit.list({ before, limit: 500, detail: '1' });
     all.push(...entries);
     if (entries.length < 500) return all;
     before = entries.at(-1)!.seq;
   }
-}
-
-async function everyVaultEntry(api: CoffreClient): Promise<RouteOutput<'GET /audit/vault'>['entries']> {
-  const all: RouteOutput<'GET /audit/vault'>['entries'] = [];
-  for (let before: number | undefined; ; ) {
-    const { entries } = await api.audit.vault({ before, limit: 200 });
-    all.push(...entries);
-    if (entries.length < 200) return all;
-    before = entries.at(-1)!.seq;
-  }
-}
-
-function key(actor: string, kind: 'read' | 'wrote', path: string | null, version: unknown, requestId: unknown): string {
-  return JSON.stringify({ actor, kind, path, version, requestId });
-}
-
-function count(counts: Map<string, number>, entry: string): void {
-  counts.set(entry, (counts.get(entry) ?? 0) + 1);
 }

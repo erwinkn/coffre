@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import { ROLES, type Permission, type Role } from '@coffre/core/access';
 import type { Access, Grant } from '@coffre/core/vault';
 import type { Queryable } from '@coffre/db';
@@ -12,8 +14,8 @@ import {
   updateAuth,
 } from '../db/queries.ts';
 import { can } from './caller.ts';
-import { allowed, audited, denied, Refusal, requireOwner, vaultRefusal, withRefusals, type ApiContext } from './context.ts';
-import { conflict, forbidden, notFound } from './errors.ts';
+import { audited, denied, Refusal, requireOwner, withRefusals, type ApiContext } from './context.ts';
+import { conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { formatMember, parseGrantee, type MemberRef, type Path } from './paths.ts';
 import { syncsCreatedBy, type PlacedSyncView } from './syncs.ts';
 
@@ -229,16 +231,16 @@ function exposure(
   const current = new Map<string, Activity>();
   for (const row of activity) {
     if (row.secretId === null) continue;
-    const metadata = JSON.parse(row.metadata) as { version?: unknown; toVersion?: unknown };
-    if (row.action === 'secret.rollback') {
-      if (typeof metadata.version === 'number' && typeof metadata.toVersion === 'number') {
-        restoredFrom.set(`${row.secretId}:${metadata.version}`, metadata.toVersion);
+    const metadata = JSON.parse(row.metadata) as { version?: unknown; from?: unknown };
+    if (row.action === 'secret.restore') {
+      if (typeof metadata.version === 'number' && typeof metadata.from === 'number') {
+        restoredFrom.set(`${row.secretId}:${metadata.version}`, metadata.from);
       }
       continue;
     }
     const { actorType, actorId } = actorParts(row.actor);
     const key = formatMember({ type: actorType as 'user' | 'service', id: actorId });
-    if (row.action === 'directory.remove' || !result.has(key)) continue;
+    if (!result.has(key)) continue;
     const version = metadata.version;
     if (typeof version !== 'number') continue;
     if (row.key !== null && !row.archived && row.currentVersion! > 0) current.set(row.secretId, row);
@@ -363,35 +365,29 @@ export async function putMember(
   const principal = formatMember(member);
   const fields = { principalType: member.type, principalId: member.id, instanceRole: input.owner === true ? 'owner' : 'user' };
   return withRefusals(ctx, async () => {
-    requireOwner(ctx, 'directory.create', { metadata: fields });
+    requireOwner(ctx, 'member.add', { metadata: fields });
     const standing = await ctx.vault.access(principal);
-    if (standing.isRootAdmin) throw rootAdminRefusal(ctx, 'directory.create', member);
+    if (standing.isRootAdmin) throw rootAdminRefusal(ctx, 'member.add', member);
     if (member.type === 'service' && input.owner === true) {
       throw new Refusal(
         conflict('service accounts cannot be instance owners'),
-        denied(ctx, 'directory.create', 'service_cannot_be_owner', { metadata: fields }),
+        denied(ctx, 'member.add', 'service_cannot_be_owner', { metadata: fields }),
       );
     }
 
+    // The vault logs the change, as `member.add`, `member.restore` or `member.owner`.
     const result = await ctx.vault.admit({
       actor: formatMember(ctx.caller.principal),
       principal,
       owner: input.owner,
       requestId: ctx.requestId,
+      operationId: randomUUID(),
     });
-    if (!result.ok) throw vaultRefusal(ctx, result.refusal, 'directory.create', { metadata: fields });
+    if (!result.ok) throw vaultRefused(result.refusal);
     const current = await ctx.vault.access(principal);
-    return audited(ctx, async (tx, log) => {
-      // Housekeeping: rows of an earlier membership are dead already, by their generation.
-      await revokePriorMembership(tx, ctx.chainKey, member, current.generation, ctx.caller.principal.id);
-      const role = result.owner ? 'owner' : 'user';
-      if (result.created) {
-        log.push(allowed(ctx, 'directory.create', { metadata: { ...fields, instanceRole: role } }));
-      } else if (result.owner !== standing.isOwner) {
-        log.push(allowed(ctx, 'directory.update', { metadata: { ...fields, instanceRole: role } }));
-      }
-      return { member: principal, instanceRole: role, created: result.created };
-    });
+    // Housekeeping: rows of an earlier membership are dead already, by their generation.
+    await audited(ctx, (tx) => revokePriorMembership(tx, ctx.chainKey, member, current.generation, ctx.caller.principal.id));
+    return { member: principal, instanceRole: result.owner ? 'owner' : 'user', created: result.created };
   });
 }
 
@@ -408,25 +404,27 @@ export async function removeMember(
   const principal = formatMember(member);
   const fields = { principalType: member.type, principalId: member.id };
   const revoked = await withRefusals(ctx, async () => {
-    requireOwner(ctx, 'directory.remove', { metadata: fields });
+    requireOwner(ctx, 'member.remove', { metadata: fields });
     const standing = await ctx.vault.access(principal);
-    if (standing.isRootAdmin) throw rootAdminRefusal(ctx, 'directory.remove', member);
+    if (standing.isRootAdmin) throw rootAdminRefusal(ctx, 'member.remove', member);
     // A member whose record failed the vault's check is removed to start them over.
     if (standing.status !== 'active' && standing.status !== 'tampered') {
       throw new Refusal(
         notFound('no such member'),
-        denied(ctx, 'directory.remove', 'unknown_principal', { metadata: fields }),
+        denied(ctx, 'member.remove', 'unknown_principal', { metadata: fields }),
       );
     }
 
+    // The vault logs the removal, and one `access.revoke` per grant it took, so each project's log shows it.
     const result = await ctx.vault.remove({
       actor: formatMember(ctx.caller.principal),
       principal,
       requestId: ctx.requestId,
+      operationId: randomUUID(),
     });
-    if (!result.ok) throw vaultRefusal(ctx, result.refusal, 'directory.remove', { metadata: fields });
+    if (!result.ok) throw vaultRefused(result.refusal);
     const current = await ctx.vault.access(principal);
-    return audited(ctx, async (tx, log) => {
+    return audited(ctx, async (tx) => {
       const now = new Date();
       const [held] = await loadMembers(tx, ctx.chainKey, { member }, now);
       const liveCredentials = (held?.credentials ?? []).filter((row) => row.generation < current.generation);
@@ -440,23 +438,12 @@ export async function removeMember(
         await updateAuth(tx, ctx.chainKey, identities, { id: ids(liveIdentities) }, { revokedAt: now, revokedBy });
       }
 
-      const counts = {
+      return {
         grants: result.revoked.length,
         sessions: liveCredentials.filter((row) => row.kind !== 'service').length,
         tokens: liveCredentials.filter((row) => row.kind === 'service').length,
         identities: liveIdentities.length,
       };
-      const perProject = new Map<string, number>();
-      for (const grant of result.revoked) {
-        perProject.set(grant.projectId, (perProject.get(grant.projectId) ?? 0) + 1);
-      }
-      const { grants: revokedGrants, ...signedOut } = counts;
-      log.push(allowed(ctx, 'directory.remove', { metadata: { ...fields, revoked: revokedGrants, ...signedOut } }));
-      // One row per project too, so each project's own log shows who lost access to it.
-      for (const [projectId, n] of [...perProject].sort(([a], [b]) => a.localeCompare(b))) {
-        log.push(allowed(ctx, 'directory.remove', { projectId, metadata: { ...fields, revoked: n } }));
-      }
-      return counts;
     });
   });
   return { revoked, report: await memberReport(ctx, member) };

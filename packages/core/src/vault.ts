@@ -23,14 +23,18 @@ export { describeAccessFault, type AccessFault, type FaultGrant, type FaultNames
 export interface Vault {
   /** Unwrap data keys for `principal`: all of them, or none. */
   unwrap(input: UnwrapInput): Promise<Outcome<{ keys: string[] }>>;
-  /** Wrap fresh data keys for new versions `principal` writes: all, or none. */
-  wrap(input: WrapInput): Promise<Outcome<{ wrapped: WrappedKey[] }>>;
+  /**
+   * Wrap fresh data keys for new versions `principal` writes: all, or none.
+   * `seqs` are the `key.wrap` entries, one per key, which the app's
+   * `secret.write` entries name as related.
+   */
+  wrap(input: WrapInput): Promise<Outcome<{ wrapped: WrappedKey[]; seqs: number[] }>>;
   /**
    * Wrap existing data keys again for new versions of the same secrets,
    * under the current key: restoring an old value. It needs a write grant,
    * not a read one, since the key never leaves the vault.
    */
-  rewrap(input: RewrapInput): Promise<Outcome<{ wrapped: WrappedKey[] }>>;
+  rewrap(input: RewrapInput): Promise<Outcome<{ wrapped: WrappedKey[]; seqs: number[] }>>;
 
   /** What one principal holds right now: the app asks once per request. */
   access(principal: string): Promise<Access>;
@@ -44,19 +48,22 @@ export interface Vault {
   remove(input: RemoveInput): Promise<Outcome<{ revoked: Grant[] }>>;
 
   /**
-   * Sign the head of the app's audit log with the head of the vault's own,
-   * if the first extends the last checkpoint and the second still carries it.
+   * Sign the log up to its last entry, in an `audit.checkpoint` entry of
+   * the vault's, if the prefix the last checkpoint signed is still there and
+   * every entry since holds, the vault's by their MACs. The vault reads the
+   * log itself: it takes nobody's word for where it ends.
    */
-  checkpoint(input: CheckpointInput): Promise<Outcome<{ checkpoint: Checkpoint }>>;
-  /** The last heads signed, and the key to check signatures with. */
+  checkpoint(): Promise<Outcome<{ checkpoint: Checkpoint }>>;
+  /** The last prefix signed, and the key to check signatures with. */
   latestCheckpoint(): Promise<{ checkpoint: Checkpoint | null; publicKey: string }>;
   /** A page of the vault's own log, newest first, with its chain verified. Root admins only. */
   log(input: LogInput): Promise<Outcome<LogPage>>;
   /**
-   * Check the whole of the vault's log: rehash it from the first entry,
-   * find `through` in it, and replay it to see that who is a member, and
-   * what they hold, follow from it. A verdict and nothing else, so anyone
-   * may ask; the app asks for owners.
+   * Check the whole log: rehash it from the first entry, the vault's
+   * entries by their MACs, every checkpoint against the prefix it signed,
+   * and replay it to see that who is a member, and what they hold, follow
+   * from it. A verdict and nothing else, so anyone may ask; the app asks
+   * for owners.
    */
   verifyLog(input: VerifyLogInput): Promise<LogVerification>;
 }
@@ -83,8 +90,6 @@ export type RefusalCode =
   | 'root_admin'
   /** Well-formed, but not something the rules allow: a project role on an environment, an owner token. */
   | 'invalid'
-  /** The head does not extend the last checkpoint: the app's log was rewritten, or two heartbeats raced. */
-  | 'checkpoint_diverged'
   /** The vault's own log no longer carries the head the last checkpoint signed, or does not rehash since. */
   | 'log_broken'
   /**
@@ -117,7 +122,14 @@ export type WrappedKey = { kekProvider: string; kekId: string; kekVersion: strin
 export type Purpose = 'reveal' | 'run' | 'compare' | 'sync';
 
 /** Ties the vault's entries to the app's request and audit rows. */
-type Correlation = { requestId?: string | null };
+type Correlation = {
+  requestId?: string | null;
+  /**
+   * The one action the call is part of, the app's id for it: a reveal's
+   * reads, a write's versions, an access change. Its entries share it.
+   */
+  operationId?: string | null;
+};
 
 export type UnwrapInput = Correlation & {
   principal: string;
@@ -202,28 +214,15 @@ export type RemoveInput = Correlation & {
   source?: { projectId: string; environmentId: string };
 };
 
-export type CheckpointInput = {
-  /** The app log's last sequence number, and that row's hash, hex. */
-  seq: number;
-  headHash: string;
-  /**
-   * The app log's hash, now, at the last checkpoint's sequence number; null
-   * only when the vault has signed nothing yet. The vault signs only a head
-   * that still carries the one it signed before, so a log rewritten and
-   * re-chained behind the last checkpoint is never signed again.
-   */
-  previous: { seq: number; hash: string } | null;
-};
-
+/**
+ * A prefix of the log the vault signed: every entry up to `seq`, the last
+ * of which has `hash`, which pins every byte before it. Kept as the vault's
+ * `audit.checkpoint` entry, just after the prefix it signs.
+ */
 export type Checkpoint = {
   seq: number;
-  headHash: string;
-  /**
-   * The vault log's head when signed: its last entry's `seq` and `hash`,
-   * or 0 and 64 zeros before the first. The app records each checkpoint in
-   * its own log, so the vault's is anchored outside the vault too.
-   */
-  vault: LogHead;
+  /** The hash of entry `seq`, hex. */
+  hash: string;
   signedAt: string;
   keyId: string;
   /** Ed25519 over `checkpointMessage(...)`, base64. */
@@ -265,8 +264,6 @@ export type LogPage = {
 export type LogHead = { seq: number; hash: string };
 
 export type VerifyLogInput = {
-  /** A head the log must still carry: the one the app last recorded, or null. */
-  through: LogHead | null;
   /**
    * The last entry the app verified, its own entries by its key: the vault
    * checks the log still holds it, so between them both authors' entries

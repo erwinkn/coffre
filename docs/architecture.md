@@ -274,7 +274,7 @@ and membership generations. The interface:
 | `members()` | everyone's, in one call, for the Users and project access pages |
 | `setAccess` | several places for one principal, all or nothing (`PATCH /api/access/<member>`) |
 | `admit`, `remove` | add or restore a member, or remove one and revoke every grant |
-| `checkpoint`, `latestCheckpoint` | sign a checkpoint of the shared log; read the latest signature |
+| `checkpoint`, `latestCheckpoint` | sign the shared log up to its last entry, in an entry of the vault's; read the latest |
 | `log` | the shared log filtered to vault entries, with its chain verified; root admins only |
 | `verifyLog` | check the shared chain and the vault's MACs, and replay members and grants |
 
@@ -370,20 +370,32 @@ from changing or deleting entries and permits each to append only as its
 own author. The owner can lift the triggers and bypass row-level security;
 the MACs still expose changes made without the keys.
 
-After each heartbeat the app asks the vault for an Ed25519-signed checkpoint.
-The vault records it as an allowed `checkpoint` entry. The app records the
-signature as `audit.checkpoint`. These are entries in the same table, not
-separate stores. The checkpoint still contains the app-observed head and
-the latest vault entry's head; replacing that format is a later design step.
-A refused checkpoint fails the heartbeat.
+Every five minutes the Cron trigger appends an `audit.heartbeat` entry, then
+asks the vault to checkpoint the log. The vault reads the log itself: it
+checks that the prefix its last checkpoint signed is still there and that
+every entry since holds, its own by their MACs, then signs the log up to its
+last entry with Ed25519, in an `audit.checkpoint` entry of its own. It signs
+nothing over a rewrite, and a call with nothing new returns the last one.
+`/readyz` is a query: ready while the newest heartbeat is under eleven
+minutes old and a checkpoint after it carries the vault's signature. There
+is no heartbeat table.
 
 `GET /api/audit/verification` (owners only), also called by `coffre verify`,
 checks the chain from its first entry and authenticates the app's MACs.
-It asks the vault to check its MACs over the same prefix, verifies the signed
-checkpoint anchors, and has the vault replay member and grant changes.
+It asks the vault to check its MACs over the same prefix, every checkpoint
+against the prefix it signed, and to replay member and grant changes.
 A grant inserted by the owner without a matching vault entry is detected
-by replay. A failure identifies the entry when one can be named.
-The audit page still has separate app and vault views of the shared table.
+by replay. The answer is the entry verified through, or the entry where it
+breaks and whose check found it.
+
+**One entry per human action.** A read is the vault's `secret.read`, one
+per secret, with its purpose (`reveal`, `run`, `compare`, `sync`); a
+write is the app's `secret.write`, naming the vault's `key.wrap` by
+`related_seq`; access and membership changes are the vault's
+(`access.grant`, `access.revoke`, `member.*`), and the app keeps no copy.
+One operation id ties together everything one action did. Sign-ins, tokens,
+the vault's key operations and the heartbeat are detail: in the log and its
+chain, but left out of `GET /api/audit` unless `detail=1`.
 
 The limits:
 

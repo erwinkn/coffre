@@ -30,15 +30,7 @@ export type Member = {
 };
 
 /** Every entry that changes who is a member or what they hold. */
-export const ACCESS_ACTIONS = [
-  'principal.admit',
-  'principal.restore',
-  'principal.owner',
-  'principal.remove',
-  'grant.create',
-  'grant.update',
-  'grant.revoke',
-] as const;
+export const ACCESS_ACTIONS = ['member.add', 'member.restore', 'member.owner', 'member.remove', 'access.grant', 'access.revoke'] as const;
 
 /** Where a grant applies: a project (`environmentId` null), or one of its environments. */
 export type Place = { projectId: string; environmentId: string | null };
@@ -204,7 +196,7 @@ export async function places(
 // --- the log --------------------------------------------------------------------
 
 /** The action of an entry that releases a key, which the bulk limit counts. */
-export const RELEASE = 'unwrap';
+export const RELEASE = 'secret.read';
 
 /** How many keys the vault has released to `principal` since `after`. */
 export async function releasesSince(db: Queryable, principal: string, after: number): Promise<number> {

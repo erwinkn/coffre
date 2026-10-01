@@ -42,8 +42,10 @@ for (const preceding of [0, 5_000]) {
 
     assert.deepEqual(await root.audit.verify(), {
       ok: false,
-      log: 'audit',
+      // Up to the entry before the one missing, which with none before is nothing.
+      through: preceding === 0 ? null : preceding - 1,
       failedAtSeq: preceding + 1,
+      author: 'app',
       reason: `sequence gap: expected seq ${preceding}, found ${preceding + 1}`,
     });
   });
@@ -54,7 +56,7 @@ async function forgeVaultEntry(writer: typeof db.owner): Promise<void> {
   const [head] = await db.owner.select().from(auditChainHead);
   const fields = {
     seq: head.nextSeq, author: 'vault' as const, keyId: 'vault:0000000000000000', occurredAt: Date.now(),
-    actor: 'user:victim@acme.example', action: 'unwrap', decision: 'allow', code: null, subjectPrincipal: null,
+    actor: 'user:victim@acme.example', action: 'secret.read', decision: 'allow', code: null, subjectPrincipal: null,
     projectId: null, environmentId: null, secretId: null, secretVersionId: null, operationId: null, requestId: null,
     sourceIp: null, relatedSeq: null, metadata: '{}',
   };
@@ -75,8 +77,9 @@ test('an entry in the vault\'s name that the vault did not write fails verificat
   await write(1);
   assert.deepEqual(await root.audit.verify(), {
     ok: false,
-    log: 'vault',
+    through: 0,
     failedAtSeq: 1,
+    author: 'vault',
     reason: 'written under vault:0000000000000000, a key this verifier does not hold',
   });
 });
@@ -97,20 +100,17 @@ async function write(entries: number): Promise<void> {
 test('audit verification reports live key operations without calling the log broken', async () => {
   await db.owner.transaction((tx) => appendEntries(tx, deriveLogKey('vault', deps.vault.signingKey), [{
     actor: 'user:root@acme.example', action: 'key.intent', decision: 'allow', operationId: randomUUID(),
-    metadata: JSON.stringify({ operation: 'wrap', expiresAt: Date.now() + 60_000, keys: [{
+    metadata: JSON.stringify({ intent: randomUUID(), operation: 'key.wrap', expiresAt: Date.now() + 60_000, keys: [{
       item: 0, secretId: randomUUID(), subject: 'market/dev/KEY', version: 1,
     }] }),
   }]));
   const verified = await root.audit.verify();
   assert.ok(verified.ok);
-  assert.equal(verified.vault.pending, 1);
-  const page = await root.audit.vault({ full: 'true' });
-  assert.ok(page.verification.ok);
-  assert.equal(page.verification.pending, 1);
+  assert.equal(verified.pending, 1);
 
   deps.vault.advance(120_000);
   const overdue = await root.audit.verify();
   assert.ok(!overdue.ok);
-  assert.equal(overdue.log, 'vault');
+  assert.equal(overdue.author, 'vault');
   assert.match(overdue.reason, /overdue/);
 });

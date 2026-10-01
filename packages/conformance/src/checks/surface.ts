@@ -8,15 +8,17 @@ export async function health(deployment: Deployment): Promise<string> {
   const { origin } = deployment;
   const live = await fetch(`${origin}/livez`);
   expect(live.ok, `/livez answered ${live.status}`);
-  // Readiness follows the audit heartbeat, which only the scheduled job
-  // writes: not ready until it has run.
-  if (deployment.staleHeartbeat) {
-    const stale = await fetch(`${origin}/readyz`);
-    expect(stale.status === 503, `/readyz answered ${stale.status} with the heartbeat an hour old`, await stale.text());
+  // Readiness follows the audit heartbeat and the vault's checkpoint of it,
+  // which only the scheduled job writes: not ready until it has run.
+  if (deployment.beforeFirstBeat) {
+    const early = await fetch(`${origin}/readyz`);
+    expect(early.status === 503, `/readyz answered ${early.status} before any heartbeat`, await early.text());
     await deployment.scheduled();
   }
   await until('/readyz', async () => (await fetch(`${origin}/readyz`)).ok, 20);
-  return deployment.staleHeartbeat ? '/livez, and /readyz only once the heartbeat ran' : '/livez and /readyz';
+  const ready = (await (await fetch(`${origin}/readyz`)).json()) as { checkpointed?: unknown };
+  expect(ready.checkpointed === true, '/readyz passed without a checkpoint covering the heartbeat', ready);
+  return deployment.beforeFirstBeat ? '/livez, and /readyz only once the heartbeat ran and was checkpointed' : '/livez and /readyz';
 }
 
 /** An instance someone else runs: up, and its scheduled job beating. */

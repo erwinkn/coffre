@@ -1,5 +1,5 @@
 {
-  "id": "2e346045-a365-4bff-be0b-6d48c008cd68",
+  "id": "b2cb2e5d-c648-458d-97bb-34bb07156047",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -46,45 +46,6 @@
         "audit_chain_head_head_hash_check": {
           "name": "audit_chain_head_head_hash_check",
           "value": "octet_length(\"audit_chain_head\".\"head_hash\") = 32"
-        }
-      },
-      "isRLSEnabled": false
-    },
-    "public.audit_heartbeat": {
-      "name": "audit_heartbeat",
-      "schema": "",
-      "columns": {
-        "only_row": {
-          "name": "only_row",
-          "type": "boolean",
-          "primaryKey": true,
-          "notNull": true,
-          "default": true
-        },
-        "last_beat_at": {
-          "name": "last_beat_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "last_seq": {
-          "name": "last_seq",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "0"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "audit_heartbeat_only_row_check": {
-          "name": "audit_heartbeat_only_row_check",
-          "value": "\"audit_heartbeat\".\"only_row\""
         }
       },
       "isRLSEnabled": false

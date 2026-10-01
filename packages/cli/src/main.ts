@@ -767,6 +767,8 @@ async function audit(args: string[]): Promise<void> {
       limit: { type: 'string', default: '20' },
       actor: { type: 'string' },
       denied: { type: 'boolean', default: false },
+      // Sign-ins, tokens and the vault's key operations, which are left out unless asked for.
+      detail: { type: 'boolean', default: false },
     },
     allowPositionals: false,
   });
@@ -777,12 +779,13 @@ async function audit(args: string[]): Promise<void> {
     limit,
     actor: values.actor,
     decision: values.denied ? 'deny' : undefined,
+    detail: values.detail ? '1' : undefined,
   });
 
   for (const entry of result.entries.reverse()) {
-    const key = typeof entry.metadata.key === 'string' ? entry.metadata.key : '-';
+    const place = [entry.project, entry.environment, entry.key].filter((part) => part !== null).join('/') || '-';
     process.stdout.write(
-      `${entry.occurredAt}  ${entry.decision.padEnd(5)}  ${entry.actorId.padEnd(28)}  ${entry.action.padEnd(13)}  ${key}\n`,
+      `${entry.occurredAt}  ${entry.decision.padEnd(5)}  ${entry.actorId.padEnd(28)}  ${entry.action.padEnd(16)}  ${place}\n`,
     );
   }
 }
@@ -791,16 +794,17 @@ async function verify(): Promise<void> {
   const result = await client().audit.verify();
 
   if (result.ok) {
-    process.stdout.write(
-      `audit chain OK: ${result.rows} rows, head ${result.head}\n` +
-        `vault log OK: ${result.vault.entries} entries, members and grants replayed\n`,
-    );
+    const through = result.through === null ? 'empty' : `verified through entry ${result.through}`;
+    const signed = result.checkpoint === null
+      ? 'no checkpoint signed yet'
+      : `last checkpoint: entry ${result.checkpoint.seq}, signed ${result.checkpoint.signedAt}`;
+    const pending = result.pending === undefined ? '' : `${result.pending} key operations still under way\n`;
+    process.stdout.write(`audit log OK: ${through}, ${result.entries} entries; members and grants replayed\n${signed}\n${pending}`);
     return;
   }
-  const at = result.failedAtSeq === null ? '' : ` at seq ${result.failedAtSeq}`;
-  process.stderr.write(
-    `${result.log === 'vault' ? 'vault log' : 'audit chain'} BROKEN${at}: ${result.reason}\n`,
-  );
+  const at = result.failedAtSeq === null ? '' : ` at entry ${result.failedAtSeq}`;
+  const through = result.through === null ? 'nothing verified' : `verified through entry ${result.through}`;
+  process.stderr.write(`audit log BROKEN${at}, found by the ${result.author}'s check (${through}): ${result.reason}\n`);
   process.exit(2);
 }
 
@@ -1048,7 +1052,7 @@ const USAGE = `coffre - secrets, with an audit log
     coffre sync run|pause|resume|remove <project>/<environment> <sync>
 
   Audit
-    coffre audit [--limit N] [--actor <id>] [--denied]
+    coffre audit [--limit N] [--actor <id>] [--denied] [--detail]
     coffre verify
 
   Environment (each overrides the saved session for one command)
