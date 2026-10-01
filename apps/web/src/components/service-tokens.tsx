@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { toast } from 'sonner';
 import { issueServiceToken, revokeServiceToken } from '../server-functions/signin';
 import { useAction } from '../lib/use-action';
-import type { ServiceTokenRow } from '../server/services/signin';
+import type { ServiceTokenRow } from '../server/api/signin';
 import { Card } from './page';
 import { ConfirmButton, CopyButton, EmptyState, ErrorLine, Modal, Notice, Spinner, Timestamp } from './ui';
 import { Key, Plus, X } from './icons';

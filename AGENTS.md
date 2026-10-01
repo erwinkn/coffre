@@ -2,7 +2,8 @@
 
 `coffre` is a pnpm monorepo secrets manager: `apps/web` (TanStack Start UI + native
 `/api`, deploys as a Cloudflare Worker), `apps/cli`, `apps/dev-idp` (local Cloudflare
-Access stand-in), `packages/core`, `packages/db`. The root `README.md` and the
+Access stand-in), `packages/core`, `packages/db`, `packages/client` (the typed API
+client the CLI and UI call). The root `README.md` and the
 `package.json` scripts are the source of truth for commands; this file only adds what
 they leave implicit.
 

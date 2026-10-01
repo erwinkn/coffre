@@ -112,7 +112,7 @@ curl --fail --silent --show-error "$smoke_base/readyz" >/dev/null
 status="$(curl --silent --output "$smoke_tmp/unauthenticated.json" \
     --dump-header "$smoke_tmp/unauthenticated.headers" --write-out '%{http_code}' "$smoke_base/api/me")"
 if [[ "$status" != 401 ]] ||
-    ! grep -Fq '"error":"cloudflare_access_required"' "$smoke_tmp/unauthenticated.json"; then
+    ! grep -Fq '"error":"unauthenticated"' "$smoke_tmp/unauthenticated.json"; then
     echo 'The production /api boundary did not fail closed without Access:' >&2
     cat "$smoke_tmp/unauthenticated.json" >&2
     exit 1

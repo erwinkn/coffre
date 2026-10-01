@@ -3,8 +3,9 @@ import { createMiddleware } from '@tanstack/react-start';
 import type { Principal } from '../../../../packages/core/src/identity/types.ts';
 import { ACCESS_JWT_HEADER } from '../../../../packages/core/src/identity/types.ts';
 import type { AuthConfig } from '../../../../packages/core/src/identity/auth-mode.ts';
-import type { RequestContext } from './services/secrets.ts';
-import { jsonResponse } from './http.ts';
+import { loadCaller, type Caller } from './api/caller.ts';
+import { ApiError, badRequest } from './api/errors.ts';
+import { errorResponse } from './http.ts';
 import { getRuntime, type CoffreRuntime } from './runtime.ts';
 
 export const DEV_TOKEN_COOKIE = 'coffre_dev_token';
@@ -15,24 +16,32 @@ export const PUBLIC_HEALTH_PATHS = new Set(['/livez', '/readyz']);
  */
 export const PUBLIC_API_PATHS = new Set(['/api/auth/device', '/api/auth/device/token']);
 
-type AnonymousRequestContext = Omit<RequestContext, 'principal'> & {
+type AnonymousRequestContext = {
   principal: null;
   registered: false;
+  caller: null;
+  requestId: string;
+  sourceIp: string | null;
 };
 
-type AuthenticatedRequestContext = RequestContext & {
+/** A verified caller, loaded once with everything they hold. */
+export type AuthenticatedIdentity = {
+  principal: Principal;
   registered: boolean;
+  caller: Caller;
+  requestId: string;
+  sourceIp: string | null;
   /** The coffre credential that authenticated this request, in signin mode. */
   credentialId: string | null;
 };
 
 export type RequestIdentityContext =
-  | AuthenticatedRequestContext
+  | AuthenticatedIdentity
   | AnonymousRequestContext;
 
 type AuthenticationRuntime = Pick<
   CoffreRuntime,
-  'auth' | 'verifier' | 'pool' | 'rootAdmins'
+  'auth' | 'verifier' | 'db' | 'rootAdmins'
 >;
 
 const requestContexts = new WeakMap<Request, RequestIdentityContext>();
@@ -124,38 +133,20 @@ export function trustedSourceIp(request: Request, auth: AuthConfig): string | nu
   return /^[0-9a-f]+(?::[0-9a-f]*)+$/i.test(value) ? value : null;
 }
 
-function isRootAdmin(principal: Principal, rootAdmins: readonly string[]): boolean {
-  return principal.type === 'user' && rootAdmins.includes(principal.id);
-}
-
-async function isRegistered(
-  runtime: AuthenticationRuntime,
-  principal: Principal,
-): Promise<boolean> {
-  if (isRootAdmin(principal, runtime.rootAdmins)) return true;
-  const result = await runtime.pool.query<{ active: boolean }>(
-    `SELECT active
-       FROM principals
-      WHERE principal_type = $1
-        AND principal_id = $2
-      LIMIT 1`,
-    [principal.type, principal.id],
-  );
-  return result.rows[0]?.active === true;
-}
-
 function unauthenticated(auth: AuthConfig): Response {
-  return jsonResponse(
-    {
-      error:
-        auth.mode === 'cloudflare' ? 'cloudflare_access_required' : 'unauthenticated',
-    },
-    401,
+  return errorResponse(
+    new ApiError(
+      'unauthenticated',
+      auth.mode === 'cloudflare' ? 'sign in through Cloudflare Access first' : 'sign in first',
+    ),
   );
 }
+
+const registrationRequired = () =>
+  errorResponse(new ApiError('registration_required', 'you are signed in, but not a member here'));
 
 function anonymousContext(requestId = crypto.randomUUID()): AnonymousRequestContext {
-  return { principal: null, registered: false, requestId, sourceIp: null };
+  return { principal: null, registered: false, caller: null, requestId, sourceIp: null };
 }
 
 export async function authenticateRequest(
@@ -163,7 +154,7 @@ export async function authenticateRequest(
   runtime: AuthenticationRuntime,
   requestId = crypto.randomUUID(),
   token = accessTokenForRequest(request, runtime.auth),
-): Promise<AuthenticatedRequestContext | Response> {
+): Promise<AuthenticatedIdentity | Response> {
   if (token === null) return unauthenticated(runtime.auth);
 
   const sourceIp = trustedSourceIp(request, runtime.auth);
@@ -175,20 +166,21 @@ export async function authenticateRequest(
     };
     ({ credentialId = null, ...principal } = verified);
   } catch {
-    return jsonResponse({ error: 'unauthenticated' }, 401);
+    return errorResponse(new ApiError('unauthenticated', 'that credential is unknown, expired or revoked'));
   }
 
   try {
-    const registered = await isRegistered(runtime, principal);
+    const caller = await loadCaller(runtime.db, principal, runtime.rootAdmins);
     return {
       principal,
-      registered,
+      registered: caller.registered,
+      caller,
       requestId,
       sourceIp,
       credentialId,
     };
   } catch {
-    return jsonResponse({ error: 'authentication_unavailable' }, 503);
+    return errorResponse(new ApiError('unavailable', 'coffre cannot check who you are right now'));
   }
 }
 
@@ -223,7 +215,7 @@ export function allowsAnonymousTransport(
 export const requestIdentityMiddleware = createMiddleware().server(
   async ({ request, pathname, handlerType, next }) => {
     if (request.headers.has('x-middleware-subrequest')) {
-      return jsonResponse({ error: 'bad_request' }, 400);
+      return errorResponse(badRequest('x-middleware-subrequest is not accepted'));
     }
 
     if (isPublicHealthPath(pathname)) {
@@ -255,7 +247,7 @@ export const requestIdentityMiddleware = createMiddleware().server(
       return result;
     }
     if (!result.registered && isApiPath(pathname)) {
-      return jsonResponse({ error: 'registration_required' }, 403);
+      return registrationRequired();
     }
     remember(request, result);
     return next({
@@ -279,5 +271,5 @@ export const registeredIdentityMiddleware = createMiddleware({
   }
   throw identity?.principal === null || identity?.principal === undefined
     ? unauthenticated(runtime.auth)
-    : jsonResponse({ error: 'registration_required' }, 403);
+    : registrationRequired();
 });

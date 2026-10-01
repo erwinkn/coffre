@@ -1,10 +1,9 @@
 import { missingIdentityMessage } from '../lib/auth-mode.ts';
 import { deriveUiCapabilities } from '../lib/capabilities.ts';
-import { getMe } from '../server/queries/me.ts';
 import { getRuntime } from '../server/runtime.ts';
 import { sessionServerFn } from '../server/server-fn.ts';
 import type { ProjectSummary } from '../shared/models.ts';
-import { currentIdentity, currentRequestContext } from './session.ts';
+import { api, currentIdentity } from './session.ts';
 import { uiResult } from './result.ts';
 
 /** Identity and project tree used by the application shell. */
@@ -35,11 +34,10 @@ export const getShell = sessionServerFn({ method: 'GET' }).handler(async () => {
     };
   }
 
-  const runtime = getRuntime();
-  const ctx = currentRequestContext();
+  const coffre = api();
   const [meResult, projectsResult] = await Promise.all([
-    uiResult(async () => ({ me: await getMe(runtime, ctx) })),
-    uiResult(async () => ({ projects: await runtime.admin.listProjects(ctx) })),
+    uiResult(async () => ({ me: await coffre.me() })),
+    uiResult(() => coffre.projects.list()),
   ]);
   const me = meResult.ok ? meResult.me : null;
   const projects = projectsResult.ok ? projectsResult.projects : [];

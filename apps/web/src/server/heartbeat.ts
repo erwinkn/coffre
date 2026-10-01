@@ -1,10 +1,14 @@
-import { REQUIRED_MIGRATION_COUNT } from '../../../../packages/db/src/schema-version.ts';
 import { appendAudit } from '../../../../packages/db/src/audit.ts';
-import type { Database, DatabaseClient } from './database.ts';
+import type { Database } from '../../../../packages/db/src/database.ts';
+import { appliedMigrations, heartbeat, update } from '../../../../packages/db/src/queries.ts';
+import { auditHeartbeat } from '../../../../packages/db/src/schema.ts';
+import { REQUIRED_MIGRATION_COUNT } from '../../../../packages/db/src/schema-version.ts';
 
 export type HeartbeatLogger = {
   warn: (obj: unknown, msg: string) => void;
 };
+
+class MissingSingleton extends Error {}
 
 /**
  * Logging-failure detection.
@@ -20,56 +24,46 @@ export type HeartbeatLogger = {
  * `/readyz` surfaces it too.
  */
 export async function writeAuditHeartbeat(
-  pool: Database,
+  db: Database,
   chainKey: Buffer,
   log: HeartbeatLogger,
 ): Promise<boolean> {
-  let client: DatabaseClient | undefined;
   try {
-    client = await pool.connect();
-    await client.query('BEGIN');
-    await appendAudit(client, chainKey, [
-      {
-        actorType: 'system',
-        actorId: 'coffre-scheduler',
-        action: 'audit.heartbeat',
-        decision: 'allow',
-        metadata: { source: 'scheduled' },
-      },
-    ]);
-    const result = await client.query(
-      `UPDATE audit_heartbeat
-          SET last_beat_at = now(),
-              last_seq = (SELECT next_seq FROM audit_chain_head WHERE only_row)
-        WHERE only_row`,
-    );
-    if (result.rowCount !== 1) {
-      log.warn(
-        { rowCount: result.rowCount },
-        'audit heartbeat singleton is missing',
-      );
-      await client.query('ROLLBACK');
+    return await db.transaction(async (tx) => {
+      const { nextSeq, occurredAt } = await appendAudit(tx, chainKey, [
+        {
+          actorType: 'system',
+          actorId: 'coffre-scheduler',
+          action: 'audit.heartbeat',
+          decision: 'allow',
+          metadata: { source: 'scheduled' },
+        },
+      ]);
+      // The entry's own timestamp, which is the database clock.
+      const beat = { lastBeatAt: new Date(occurredAt), lastSeq: nextSeq };
+      if ((await update(tx, auditHeartbeat, { onlyRow: true }, beat)) === 0) throw new MissingSingleton();
+      return true;
+    });
+  } catch (error) {
+    if (error instanceof MissingSingleton) {
+      // Rolled back, entry and all: a beat nobody can see is not a beat.
+      log.warn({}, 'audit heartbeat singleton is missing');
       return false;
     }
-    await client.query('COMMIT');
-    return true;
-  } catch (error) {
-    await client?.query('ROLLBACK').catch(() => {});
     // A heartbeat that cannot write is itself the signal.
     log.warn({ err: (error as Error).message }, 'audit heartbeat failed to write');
     return false;
-  } finally {
-    await client?.release();
   }
 }
 
-/** How stale the heartbeat is, in seconds. Used by /readyz. */
-export async function heartbeatAgeSeconds(pool: Database): Promise<number | null> {
-  const result = await pool.query<{ age: string }>(
-    `SELECT EXTRACT(EPOCH FROM (now() - last_beat_at)) AS age
-       FROM audit_heartbeat WHERE only_row`,
-  );
-  return result.rowCount === 1 ? Number(result.rows[0].age) : null;
+/**
+ * How stale the heartbeat is, in seconds. Used by /readyz. Both ends are the
+ * database's clock, so a skewed application server cannot hide a stale beat.
+ */
+export async function heartbeatAgeSeconds(db: Database): Promise<number | null> {
+  const row = await heartbeat(db);
+  if (row === null) return null;
+  return (Date.parse(row.now) - row.lastBeatAt.getTime()) / 1000;
 }
 
 /**
@@ -89,24 +83,13 @@ export type Readiness =
  * the service unavailable, not trigger a runtime restart loop.
  */
 export async function auditReadiness(
-  pool: Database,
+  db: Database,
 ): Promise<Readiness> {
   try {
-    const schema = await pool.query<{ ready: boolean }>(
-      `SELECT
-         to_regclass('public.projects') IS NOT NULL
-         AND to_regclass('public.audit_log') IS NOT NULL
-         AND to_regclass('drizzle.__drizzle_migrations') IS NOT NULL
-         AND (
-           SELECT count(*) >= $1
-             FROM drizzle.__drizzle_migrations
-         ) AS ready`,
-      [REQUIRED_MIGRATION_COUNT],
-    );
-    if (schema.rows[0]?.ready !== true) {
+    if ((await appliedMigrations(db)) < REQUIRED_MIGRATION_COUNT) {
       return { ok: false, auditHeartbeatAgeSeconds: null };
     }
-    const age = await heartbeatAgeSeconds(pool);
+    const age = await heartbeatAgeSeconds(db);
     if (age === null || !Number.isFinite(age) || age > HEARTBEAT_STALE_AFTER_SECONDS) {
       return { ok: false, auditHeartbeatAgeSeconds: age };
     }

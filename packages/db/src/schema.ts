@@ -1,4 +1,4 @@
-import { sql } from 'drizzle-orm';
+import { relations, sql } from 'drizzle-orm';
 import {
   bigint,
   boolean,
@@ -77,6 +77,9 @@ export const secrets = pgTable(
       (): AnyPgColumn => secretVersions.id,
       { onDelete: 'no action' },
     ),
+    // The number of the current version, 0 before the first. Versions only
+    // append, so it is also the highest: the next one is this plus one.
+    currentVersion: integer('current_version').notNull().default(0),
     archivedAt: timestamp('archived_at', { withTimezone: true }),
   },
   (table) => [
@@ -139,61 +142,6 @@ export const secretVersions = pgTable(
   ],
 );
 
-export const permissions = pgTable(
-  'permissions',
-  {
-    slug: text().primaryKey(),
-    description: text().notNull(),
-    minScope: text('min_scope').notNull(),
-  },
-  (table) => [
-    check(
-      'permissions_min_scope_check',
-      sql`${table.minScope} IN ('environment', 'project')`,
-    ),
-  ],
-);
-
-export const roles = pgTable(
-  'roles',
-  {
-    id: uuid().primaryKey().defaultRandom(),
-    slug: text().notNull(),
-    name: text().notNull(),
-    description: text().notNull().default(''),
-    isBuiltin: boolean('is_builtin').notNull().default(false),
-    createdAt: createdAt(),
-  },
-  (table) => [
-    unique('roles_slug_key').on(table.slug),
-    check('roles_slug_check', sql`${table.slug} ~ '^[a-z0-9][a-z0-9-]{0,62}$'`),
-  ],
-);
-
-export const rolePermissions = pgTable(
-  'role_permissions',
-  {
-    roleId: uuid('role_id').notNull(),
-    permission: text().notNull(),
-  },
-  (table) => [
-    primaryKey({
-      name: 'role_permissions_pkey',
-      columns: [table.roleId, table.permission],
-    }),
-    foreignKey({
-      name: 'role_permissions_role_id_fkey',
-      columns: [table.roleId],
-      foreignColumns: [roles.id],
-    }).onDelete('cascade'),
-    foreignKey({
-      name: 'role_permissions_permission_fkey',
-      columns: [table.permission],
-      foreignColumns: [permissions.slug],
-    }).onDelete('restrict'),
-  ],
-);
-
 export const principals = pgTable(
   'principals',
   {
@@ -218,6 +166,12 @@ export const principals = pgTable(
       'principals_service_role_check',
       sql`${table.principalType} = 'user' OR ${table.instanceRole} = 'user'`,
     ),
+    // A person is their email address, stored lowercased, so matching a
+    // provider's verified email is plain equality on every database.
+    check(
+      'principals_user_id_lowercase',
+      sql`${table.principalType} <> 'user' OR ${table.principalId} = lower(${table.principalId})`,
+    ),
   ],
 );
 
@@ -231,7 +185,8 @@ export const grants = pgTable(
     createdAt: createdAt(),
     createdBy: text('created_by').notNull(),
     projectId: uuid('project_id'),
-    roleId: uuid('role_id').notNull(),
+    /** One of the built-in roles in packages/core/src/access.ts. */
+    role: text().notNull(),
     expiresAt: timestamp('expires_at', { withTimezone: true }),
   },
   (table) => [
@@ -258,17 +213,18 @@ export const grants = pgTable(
       columns: [table.projectId],
       foreignColumns: [projects.id],
     }).onDelete('restrict'),
-    foreignKey({
-      name: 'grants_role_id_fkey',
-      columns: [table.roleId],
-      foreignColumns: [roles.id],
-    }).onDelete('restrict'),
+    check(
+      'grants_role_check',
+      sql`${table.role} IN ('viewer', 'developer', 'maintainer', 'access-manager', 'auditor', 'owner')`,
+    ),
     index('grants_lookup_idx').on(table.principalType, table.principalId, table.environmentId),
+    // One grant per member per place. Revoking expires the row rather than
+    // deleting it, and granting again reuses it.
     uniqueIndex('grants_environment_unique')
-      .on(table.principalType, table.principalId, table.environmentId, table.roleId)
+      .on(table.principalType, table.principalId, table.environmentId)
       .where(sql`${table.environmentId} IS NOT NULL`),
     uniqueIndex('grants_project_unique')
-      .on(table.principalType, table.principalId, table.projectId, table.roleId)
+      .on(table.principalType, table.principalId, table.projectId)
       .where(sql`${table.projectId} IS NOT NULL`),
     index('grants_project_lookup_idx')
       .on(table.principalType, table.principalId, table.projectId)
@@ -281,7 +237,11 @@ export const auditLog = pgTable(
   {
     seq: bigint({ mode: 'bigint' }).primaryKey(),
     id: uuid().notNull().defaultRandom(),
-    occurredAt: timestamp('occurred_at', { withTimezone: true }).notNull().defaultNow(),
+    // A string, not a Date: the chain covers it to the microsecond, and a
+    // Date keeps milliseconds. See canonicalTimestamp in dialect.ts.
+    occurredAt: timestamp('occurred_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
     actorType: text('actor_type').notNull(),
     actorId: text('actor_id').notNull(),
     action: text().notNull(),
@@ -575,3 +535,59 @@ export const syncKeys = pgTable(
     }).onDelete('restrict'),
   ],
 );
+
+// --- relations ----------------------------------------------------------------
+//
+// For Drizzle's relational queries (`db.query.principals.findMany({ with })`),
+// which read a row and what hangs off it in one statement on every dialect.
+// They add no constraints; the foreign keys above do that.
+
+export const principalsRelations = relations(principals, ({ many }) => ({
+  grants: many(grants),
+  credentials: many(credentials),
+  identities: many(identities),
+}));
+
+export const grantsRelations = relations(grants, ({ one }) => ({
+  principal: one(principals, {
+    fields: [grants.principalType, grants.principalId],
+    references: [principals.principalType, principals.principalId],
+  }),
+  project: one(projects, { fields: [grants.projectId], references: [projects.id] }),
+  environment: one(environments, { fields: [grants.environmentId], references: [environments.id] }),
+}));
+
+export const credentialsRelations = relations(credentials, ({ one }) => ({
+  principal: one(principals, {
+    fields: [credentials.principalType, credentials.principalId],
+    references: [principals.principalType, principals.principalId],
+  }),
+  identity: one(identities, { fields: [credentials.identityId], references: [identities.id] }),
+}));
+
+export const identitiesRelations = relations(identities, ({ one }) => ({
+  principal: one(principals, {
+    fields: [identities.principalType, identities.principalId],
+    references: [principals.principalType, principals.principalId],
+  }),
+}));
+
+export const environmentsRelations = relations(environments, ({ one }) => ({
+  project: one(projects, { fields: [environments.projectId], references: [projects.id] }),
+}));
+
+export const secretsRelations = relations(secrets, ({ one }) => ({
+  project: one(projects, { fields: [secrets.projectId], references: [projects.id] }),
+  environment: one(environments, { fields: [secrets.environmentId], references: [environments.id] }),
+}));
+
+export const syncsRelations = relations(syncs, ({ one, many }) => ({
+  project: one(projects, { fields: [syncs.projectId], references: [projects.id] }),
+  environment: one(environments, { fields: [syncs.environmentId], references: [environments.id] }),
+  credential: one(secrets, { fields: [syncs.credentialSecretId], references: [secrets.id] }),
+  keys: many(syncKeys),
+}));
+
+export const syncKeysRelations = relations(syncKeys, ({ one }) => ({
+  sync: one(syncs, { fields: [syncKeys.syncId], references: [syncs.id] }),
+}));

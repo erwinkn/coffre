@@ -1,5 +1,6 @@
 import handler from '@tanstack/react-start/server-entry';
 
+import { writeAuditHeartbeat } from './server/heartbeat.ts';
 import {
   getRuntime,
   runWithWorkerRuntime,
@@ -36,7 +37,7 @@ export default {
         // Independent: a destination that is down must not stop the heartbeat,
         // and a failed heartbeat must not hold back pending syncs.
         const [heartbeat, syncs] = await Promise.allSettled([
-          runtime.audit.writeHeartbeat(runtimeLogger()),
+          writeAuditHeartbeat(runtime.db, runtime.chainKey, runtimeLogger()),
           runtime.syncs.reconcile(),
         ]);
         if (syncs.status === 'rejected') console.error('scheduled syncs failed', syncs.reason);

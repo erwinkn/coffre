@@ -1,8 +1,13 @@
-import test from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { getMe } from '../src/server/queries/me.ts';
+import { loadCaller } from '../src/server/api/caller.ts';
+import { me } from '../src/server/api/projects.ts';
 import { displayName, principalId } from '../src/shared/schemas.ts';
+import { contextFor, openTestDatabase, resetDatabase, testDeps } from './api-fixture.ts';
+
+const db = openTestDatabase();
+after(() => db.close());
 
 test('shared nonblank schemas reject whitespace and canonicalize valid input', () => {
   for (const schema of [displayName, principalId]) {
@@ -18,19 +23,16 @@ test('/me projects only browser-safe principal fields', async () => {
     email: 'person@example.com',
     subject: 'private-provider-subject',
   };
-  const me = await getMe(
-    {
-      rootAdmins: [],
-      secrets: { listAccessible: async () => [] },
-      admin: { instanceRole: async () => 'user' as const },
-      audit: { canRead: async () => false },
-    } as never,
-    { principal, requestId: 'request-id', sourceIp: null },
-  );
+  await resetDatabase(db.owner);
+  // The verified identity, with everything its provider said, loaded as a request loads it.
+  const deps = testDeps(db.runtime, [principal.id]);
+  const ctx = await contextFor(deps, principal.id);
+  ctx.caller = await loadCaller(db.runtime, principal, deps.rootAdmins);
+  const result = await me(ctx);
 
-  assert.deepEqual(me.principal, {
+  assert.deepEqual(result.principal, {
     type: 'user',
     id: 'person@example.com',
   });
-  assert.deepEqual(Object.keys(me.principal).sort(), ['id', 'type']);
+  assert.deepEqual(Object.keys(result.principal).sort(), ['id', 'type']);
 });

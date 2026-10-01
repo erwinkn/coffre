@@ -2,7 +2,8 @@ import { createFileRoute } from '@tanstack/react-router';
 import { z } from 'zod';
 
 import { trustedSourceIp } from '../server/auth.ts';
-import { apiErrorResponse, jsonResponse, methodNotAllowed, parseOptionalJson } from '../server/http.ts';
+import { ApiError, notFound } from '../server/api/errors.ts';
+import { errorResponse, jsonResponse, methodNotAllowed, readJson } from '../server/http.ts';
 import { getRuntime } from '../server/runtime.ts';
 
 const body = z.object({ client_label: z.string().trim().max(120).optional() });
@@ -16,9 +17,9 @@ export const Route = createFileRoute('/api/auth/device')({
     handlers: {
       POST: async ({ request }) => {
         const runtime = getRuntime();
-        if (runtime.signin === null) return jsonResponse({ error: 'not_found' }, 404);
+        if (runtime.signin === null) return errorResponse(notFound('device login needs signin mode'));
         try {
-          const input = await parseOptionalJson(request, (value) => body.parse(value));
+          const input = body.parse(await readJson(request, {}));
           const started = await runtime.signin.startDevice({
             clientLabel: input.client_label ?? null,
             sourceIp: trustedSourceIp(request, runtime.auth),
@@ -32,9 +33,10 @@ export const Route = createFileRoute('/api/auth/device')({
             interval: started.interval,
           });
         } catch (error) {
-          const status = (error as { statusCode?: number }).statusCode;
-          if (status === 429) return jsonResponse({ error: 'slow_down' }, 429);
-          return apiErrorResponse(error);
+          if (error instanceof ApiError && error.code === 'too_many_requests') {
+            return jsonResponse({ error: 'slow_down', message: error.message }, 429);
+          }
+          return errorResponse(error);
         }
       },
       ANY: () => methodNotAllowed(['POST']),

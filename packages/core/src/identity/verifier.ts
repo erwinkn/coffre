@@ -84,7 +84,9 @@ export function toPrincipal(claims: AccessClaims): Principal {
   const email = asNonEmptyString(claims.email);
   const subject = asNonEmptyString(claims.sub);
   if (email !== null && subject !== null) {
-    return { type: 'user', id: email, email, subject };
+    // People are stored by lowercased email; see principals_user_id_lowercase.
+    const id = email.toLowerCase();
+    return { type: 'user', id, email: id, subject };
   }
 
   throw new Error(

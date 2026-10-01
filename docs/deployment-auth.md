@@ -79,7 +79,7 @@ expired token is reported as such instead of loading the browser login page.
 
 The production hostname must be protected by an Access Allow policy. Coffre
 still fails closed at the origin boundary: every path except exact `/livez`
-and `/readyz` returns `401 cloudflare_access_required` without the forwarded
+and `/readyz` returns `401 unauthenticated` without the forwarded
 assertion. There is no production persona picker or local login route.
 
 Do not treat this application check as a substitute for protecting the data

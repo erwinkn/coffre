@@ -1,2 +1,2 @@
 /** Minimum migration prefix required by this application image. */
-export const REQUIRED_MIGRATION_COUNT = 3;
+export const REQUIRED_MIGRATION_COUNT = 5;

@@ -86,9 +86,9 @@ export function parseRootAdmins(mode: AuthMode, raw: string | undefined): string
     }
   }
 
-  // Sign-in matches provider emails case-insensitively, so root admins are
-  // stored the way they will be compared.
-  return mode === 'signin' ? rootAdmins.map((entry) => entry.toLowerCase()) : rootAdmins;
+  // People are their lowercased email in every mode, so root admins are kept
+  // the way they will be compared.
+  return rootAdmins.map((entry) => entry.toLowerCase());
 }
 
 /**

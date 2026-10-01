@@ -1,10 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 
 import type { AuthConfig } from '../../../packages/core/src/identity/auth-mode.ts';
 import type { Principal } from '../../../packages/core/src/identity/types.ts';
+import { createDatabase } from '../../../packages/db/src/database.ts';
 import {
   accessTokenForRequest,
   accessTokenForBoundary,
@@ -34,6 +33,18 @@ const dev: AuthConfig = {
   },
   devIdpUrl: 'http://127.0.0.1:8081',
 };
+
+/**
+ * A database whose principal lookup answers `rows`, in Drizzle's array row
+ * mode: active, instance role, then the joined grant columns.
+ */
+function principalsDatabase(rows: unknown[][], onQuery = () => {}) {
+  const query = async () => {
+    onQuery();
+    return { rows, fields: [] };
+  };
+  return createDatabase({ query, connect: async () => ({ query, release: () => {} }) } as never);
+}
 
 const root: Principal = {
   type: 'user',
@@ -134,22 +145,6 @@ test('native API mutations require origin checks unless the request is non-simpl
   );
 });
 
-test('the specific user-directory route owns the report, role updates and deletion', () => {
-  const route = readFileSync(
-    fileURLToPath(
-      new URL(
-        '../src/routes/api.admin.directory.user.$principalId.ts',
-        import.meta.url,
-      ),
-    ),
-    'utf8',
-  );
-  assert.match(route, /GET:\s*\(/);
-  assert.match(route, /DELETE:\s*\(/);
-  assert.match(route, /PATCH:\s*\(/);
-  assert.match(route, /methodNotAllowed\(\['GET', 'DELETE', 'PATCH'\]\)/);
-});
-
 test('Cloudflare mode ignores the dev cookie and dev mode ignores the Access header', () => {
   const request = new Request('https://coffre.example.test', {
     headers: {
@@ -184,12 +179,9 @@ test('a configured root admin authenticates without a principals row lookup', as
     {
       auth: cloudflare,
       verifier: { verify: async () => root },
-      pool: {
-        query: async () => {
-          queried = true;
-          return { rows: [] };
-        },
-      },
+      db: principalsDatabase([], () => {
+        queried = true;
+      }),
       rootAdmins: [root.id],
     } as never,
     'request-id',
@@ -219,7 +211,7 @@ test('an unregistered non-root identity is marked for the closed-door boundary',
     {
       auth: cloudflare,
       verifier: { verify: async () => principal },
-      pool: { query: async () => ({ rows: [] }) },
+      db: principalsDatabase([]),
       rootAdmins: [root.id],
     } as never,
     'unregistered-request',
@@ -229,6 +221,14 @@ test('an unregistered non-root identity is marked for the closed-door boundary',
   assert.deepEqual(result, {
     principal,
     registered: false,
+    caller: {
+      principal: { type: 'user', id: 'new@acme.example' },
+      registered: false,
+      isRootAdmin: false,
+      isOwner: false,
+      instanceRole: 'user',
+      grants: [],
+    },
     requestId: 'unregistered-request',
     sourceIp: null,
     credentialId: null,
@@ -247,7 +247,7 @@ test('production fails closed when the Access assertion is missing', async () =>
           return root;
         },
       },
-      pool: { query: async () => ({ rows: [] }) },
+      db: principalsDatabase([]),
       rootAdmins: [root.id],
     } as never,
   );
@@ -255,9 +255,7 @@ test('production fails closed when the Access assertion is missing', async () =>
   assert.equal(verified, false);
   assert.equal(result instanceof Response, true);
   assert.equal((result as Response).status, 401);
-  assert.deepEqual(await (result as Response).json(), {
-    error: 'cloudflare_access_required',
-  });
+  assert.equal(((await (result as Response).json()) as { error: string }).error, 'unauthenticated');
 });
 
 test('an active registered identity receives an auditable request context', async () => {
@@ -273,7 +271,7 @@ test('an active registered identity receives an auditable request context', asyn
     {
       auth: dev,
       verifier: { verify: async () => principal },
-      pool: { query: async () => ({ rows: [{ active: true }] }) },
+      db: principalsDatabase([[true, 'user', null, null, null, null, null, null]]),
       rootAdmins: [],
     } as never,
     'registered-request',
@@ -284,9 +282,43 @@ test('an active registered identity receives an auditable request context', asyn
     assert.deepEqual(result, {
       principal,
       registered: true,
+      caller: {
+        principal: { type: 'service', id: 'reporting.access' },
+        registered: true,
+        isRootAdmin: false,
+        isOwner: false,
+        instanceRole: 'user',
+        grants: [],
+      },
       requestId: 'registered-request',
       sourceIp: null,
       credentialId: null,
     });
   }
+});
+
+test('a principal lookup that fails answers unavailable, not unauthenticated', async () => {
+  const principal: Principal = {
+    type: 'user',
+    id: 'person@acme.example',
+    email: 'person@acme.example',
+    subject: 'person-subject',
+  };
+  const result = await authenticateRequest(
+    new Request('https://coffre.example.test/api/me', {
+      headers: { 'cf-access-jwt-assertion': 'valid' },
+    }),
+    {
+      auth: cloudflare,
+      verifier: { verify: async () => principal },
+      db: principalsDatabase([], () => {
+        throw new Error('connection refused');
+      }),
+      rootAdmins: [root.id],
+    } as never,
+  );
+
+  assert.equal(result instanceof Response, true);
+  assert.equal((result as Response).status, 503);
+  assert.equal(((await (result as Response).json()) as { error: string }).error, 'unavailable');
 });

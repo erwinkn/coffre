@@ -25,7 +25,9 @@ import {
   type Store,
   type Target,
 } from './instance.ts';
-import { formatDotenv, formatShellExports } from '../../../packages/core/src/dotenv.ts';
+import { createClient, planImport, type CoffreClient } from '../../../packages/client/src/index.ts';
+import { assignableToEnvironment, isRole, ROLES, type Role } from '../../../packages/core/src/access.ts';
+import { formatDotenv, formatShellExports, parseDotenv } from '../../../packages/core/src/dotenv.ts';
 import {
   DESTINATIONS,
   configFromArguments,
@@ -87,21 +89,23 @@ async function headersFor(to: Target): Promise<Record<string, string>> {
   return credentialHeaders(to.mode, to.credential, access);
 }
 
-async function api(path: string, init: RequestInit = {}, to: Target = target()): Promise<unknown> {
+/** The API, for one instance. */
+function client(to: Target = target()): CoffreClient {
+  return createClient({
+    url: to.origin,
+    headers: () => headersFor(to),
+    transport: (request) => send(request, to),
+  });
+}
+
+/** One request; every way it can fail is explained in terms of what to do next. */
+async function send(request: Request, to: Target): Promise<Response> {
   let response: Response;
   try {
-    response = await fetch(`${to.origin}${path}`, {
-      ...init,
-      // Cloudflare Access redirects rejected non-browser clients to its login
-      // page. Following that redirect would turn an auth failure into HTML that
-      // later explodes in JSON parsing.
-      redirect: 'manual',
-      headers: {
-        ...(await headersFor(to)),
-        'content-type': 'application/json',
-        ...(init.headers ?? {}),
-      },
-    });
+    // Cloudflare Access redirects rejected non-browser clients to its login
+    // page. Following that redirect would turn an auth failure into HTML that
+    // later explodes in JSON parsing.
+    response = await fetch(request, { redirect: 'manual' });
   } catch (error) {
     fail(`could not reach ${to.origin}: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -112,26 +116,19 @@ async function api(path: string, init: RequestInit = {}, to: Target = target()):
     fail(`${to.origin} redirected to ${response.headers.get('location') ?? 'elsewhere'}; is that the right address?`);
   }
   if (response.status === 401) fail(`your session on ${to.origin} is missing, expired or revoked: ${relogin}`);
-  if (response.status === 403) fail('forbidden: you do not have a grant for that environment');
-  if (response.status === 404) fail('not found');
+  const json = isJsonContentType(response.headers.get('content-type'));
   if (!response.ok) {
-    let detail = `request failed with status ${response.status}`;
-    if (isJsonContentType(response.headers.get('content-type'))) {
-      const body = (await response.json()) as { error?: unknown; message?: unknown };
-      if (typeof body.message === 'string' && body.message.length > 0) {
-        fail(`${detail}: ${body.message}`);
-      }
-      if (typeof body.error === 'string' && body.error.length > 0) {
-        fail(`${detail}: ${body.error}`);
-      }
-    }
-    fail(detail);
+    const body = json ? ((await response.json().catch(() => ({}))) as { error?: unknown; message?: unknown }) : {};
+    const detail = typeof body.message === 'string' && body.message.length > 0 ? body.message : null;
+    if (response.status === 403) fail(`forbidden: ${detail ?? 'you do not have a grant for that environment'}`);
+    if (response.status === 404) fail(detail === null ? 'not found' : `not found: ${detail}`);
+    const status = `request failed with status ${response.status}`;
+    if (detail !== null) fail(`${status}: ${detail}`);
+    if (typeof body.error === 'string' && body.error.length > 0) fail(`${status}: ${body.error}`);
+    fail(status);
   }
-  if (!isJsonContentType(response.headers.get('content-type'))) {
-    fail('request returned a non-JSON response');
-  }
-
-  return response.json();
+  if (!json) fail('request returned a non-JSON response');
+  return response;
 }
 
 /** Parse `project/environment/KEY` or `project/environment`. */
@@ -145,10 +142,7 @@ function parsePath(raw: string): { project: string; environment: string; key?: s
 
 // --- commands ---------------------------------------------------------------
 
-type Me = {
-  principal: { type: string; id: string };
-  environments: { project: string; environment: string; permissions: string[] }[];
-};
+type Me = Awaited<ReturnType<CoffreClient['me']>>;
 
 function printMe(me: Me): void {
   if (me.environments.length === 0) {
@@ -235,11 +229,11 @@ async function login(args: string[]): Promise<void> {
   process.stderr.write('Waiting for you to approve it…\n');
 
   const session = await pollDevice(origin, device.device_code, device.interval, device.expires_in);
-  const me = (await api('/api/me', {}, {
+  const me = await client({
     origin,
     mode: 'signin',
     credential: { kind: 'token', token: session.access_token },
-  })) as Me;
+  }).me();
 
   writeStore(
     withSession(readStore(), origin, {
@@ -326,7 +320,7 @@ async function accessLogin(origin: string): Promise<void> {
   if (code !== 0) fail('cloudflared could not sign you in');
 
   const to: Target = { origin, mode: 'cloudflare', credential: { kind: 'cloudflared' } };
-  const me = (await api('/api/me', {}, to)) as Me;
+  const me = await client(to).me();
   writeStore(
     withSession(readStore(), origin, {
       mode: 'cloudflare',
@@ -356,11 +350,7 @@ async function devLogin(origin: string, email?: string, serviceToken?: string): 
   if (!response.ok) fail(`dev IdP returned ${response.status}`);
   const { token } = (await response.json()) as { token: string };
 
-  const me = (await api('/api/me', {}, {
-    origin,
-    mode: 'dev',
-    credential: { kind: 'token', token },
-  })) as Me;
+  const me = await client({ origin, mode: 'dev', credential: { kind: 'token', token } }).me();
   writeStore(
     withSession(readStore(), origin, {
       mode: 'dev',
@@ -406,7 +396,7 @@ async function logout(args: string[]): Promise<void> {
 
 async function whoami(): Promise<void> {
   const to = target();
-  const me = (await api('/api/me', {}, to)) as Me;
+  const me = await client(to).me();
   const session = readStore().instances[to.origin];
   const via =
     to.credential.kind === 'access-service-token'
@@ -448,12 +438,10 @@ async function get(args: string[]): Promise<void> {
   const { project, environment, key } = parsePath(target);
   if (!key) fail('usage: coffre get <project>/<environment>/<KEY>');
 
-  const result = (await api(
-    `/api/projects/${project}/environments/${environment}/secrets/${key}`,
-  )) as { value: string };
+  const { values } = await client().secrets.reveal(`${project}/${environment}/${key}`);
 
   // Bare value on stdout so it composes: coffre get x/y/Z | pbcopy
-  process.stdout.write(`${result.value}\n`);
+  process.stdout.write(`${values[key]}\n`);
 }
 
 async function list(args: string[]): Promise<void> {
@@ -461,17 +449,12 @@ async function list(args: string[]): Promise<void> {
   if (!target) fail('usage: coffre list <project>/<environment>');
 
   const { project, environment } = parsePath(target);
-  const result = (await api(
-    `/api/projects/${project}/environments/${environment}/keys`,
-  )) as {
-    permissions: string[];
-    keys: { key: string; archived: boolean; version: number; updatedBy: string }[];
-  };
+  const result = await client().secrets.list(`${project}/${environment}`);
 
   // Listing keys is not a read of any value, and is not logged as one.
   for (const entry of result.keys) {
     const archived = entry.archived ? '  (archived)' : '';
-    process.stdout.write(`${entry.key}\tv${entry.version}\t${entry.updatedBy}${archived}\n`);
+    process.stdout.write(`${entry.key}\tv${entry.version ?? '-'}\t${entry.updatedBy ?? '-'}${archived}\n`);
   }
 }
 
@@ -485,12 +468,10 @@ async function set(args: string[]): Promise<void> {
   // Prefer stdin so the value never lands in shell history.
   const resolved = value ?? readFileSync(0, 'utf8').replace(/\n$/, '');
 
-  const result = (await api(
-    `/api/projects/${project}/environments/${environment}/secrets/${key}`,
-    { method: 'PUT', body: JSON.stringify({ value: resolved }) },
-  )) as { version: number };
+  const result = await client().secrets.set(`${project}/${environment}`, { [key]: resolved });
+  const outcome = result.keys[key];
 
-  process.stdout.write(`${key} written as version ${result.version}\n`);
+  process.stdout.write(`${key} written as version ${'version' in outcome ? outcome.version : '?'}\n`);
 }
 
 /**
@@ -509,15 +490,13 @@ async function run(args: string[]): Promise<void> {
   const { project, environment } = parsePath(target);
   const command = args.slice(separator + 1);
 
-  const result = (await api(
-    `/api/projects/${project}/environments/${environment}/secrets`,
-  )) as { secrets: Record<string, string> };
+  const { values } = await client().secrets.reveal(`${project}/${environment}`);
 
   const child = spawn(command[0], command.slice(1), {
     // Secrets are passed through the environment of the child only. They are
     // never written to disk and never appear in argv, which is world-readable
     // via ps.
-    env: { ...process.env, ...result.secrets },
+    env: { ...process.env, ...values },
     stdio: 'inherit',
   });
 
@@ -545,11 +524,9 @@ async function exportEnv(args: string[]): Promise<void> {
   if (format !== 'dotenv' && format !== 'json' && format !== 'shell') fail(usage);
 
   const { project, environment } = parsePath(positionals[0]);
-  const result = (await api(
-    `/api/projects/${project}/environments/${environment}/secrets`,
-  )) as { secrets: Record<string, string> };
+  const revealed = await client().secrets.reveal(`${project}/${environment}`);
 
-  const entries = Object.entries(result.secrets).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  const entries = Object.entries(revealed.values).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
   process.stdout.write(
     format === 'json'
       ? `${JSON.stringify(Object.fromEntries(entries), null, 2)}\n`
@@ -570,11 +547,7 @@ async function history(args: string[]): Promise<void> {
   const { project, environment, key } = parsePath(target);
   if (!key) fail('usage: coffre history <project>/<environment>/<KEY>');
 
-  const result = (await api(
-    `/api/projects/${project}/environments/${environment}/secrets/${key}/versions`,
-  )) as {
-    versions: { version: number; createdAt: string; createdBy: string; current: boolean }[];
-  };
+  const result = await client().secrets.history(`${project}/${environment}/${key}`);
 
   for (const version of result.versions) {
     process.stdout.write(
@@ -592,10 +565,9 @@ async function rollback(args: string[]): Promise<void> {
   const { project, environment, key } = parsePath(target);
   if (!key) fail('usage: coffre rollback <project>/<environment>/<KEY> <version>');
 
-  await api(
-    `/api/projects/${project}/environments/${environment}/secrets/${key}/rollback`,
-    { method: 'POST', body: JSON.stringify({ version: Number(version) }) },
-  );
+  const wanted = Number(version);
+  if (!Number.isInteger(wanted) || wanted < 1) fail(`"${version}" is not a version number`);
+  await client().secrets.restore(`${project}/${environment}/${key}`, wanted);
 
   process.stdout.write(`${key} rolled back to version ${version}\n`);
 }
@@ -603,8 +575,9 @@ async function rollback(args: string[]): Promise<void> {
 /**
  * Import a .env file. Previews by default; --apply writes.
  *
- * The file is sent verbatim and parsed by the API, so the CLI and the UI
- * cannot disagree about what a .env file means.
+ * The preview compares against the current values, so it is a read of every
+ * existing secret and is logged as one. --apply then writes the keys that
+ * differ in one transaction, a new version each.
  */
 async function importEnv(args: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
@@ -618,68 +591,57 @@ async function importEnv(args: string[]): Promise<void> {
 
   const { project, environment } = parsePath(target);
   const content = values.file ? readFileSync(values.file, 'utf8') : readFileSync(0, 'utf8');
+  const parsed = parseDotenv(content);
 
-  const result = (await api(
-    `/api/projects/${project}/environments/${environment}/import`,
-    { method: 'POST', body: JSON.stringify({ content, dryRun: !values.apply }) },
-  )) as {
-    plan: { key: string; action: string; version: number | null }[];
-    problems: { line: number; reason: string; text: string }[];
-  };
-
-  for (const problem of result.problems ?? []) {
+  for (const problem of parsed.problems) {
     process.stderr.write(`  line ${problem.line}: ${problem.reason} (${problem.text})\n`);
   }
-  for (const entry of result.plan) {
+  if (parsed.entries.length === 0) return;
+
+  const coffre = client();
+  const path = `${project}/${environment}`;
+  const { plan, changes } = await planImport(coffre, path, parsed.entries);
+  if (values.apply && Object.keys(changes).length > 0) await coffre.secrets.set(path, changes);
+
+  for (const entry of plan) {
     process.stdout.write(`${entry.action.padEnd(10)} ${entry.key}\n`);
   }
 
   if (!values.apply) {
-    const changes = result.plan.filter((entry) => entry.action !== 'unchanged').length;
+    const pending = Object.keys(changes).length;
     process.stdout.write(
-      `\n${changes} change${changes === 1 ? '' : 's'} pending. Re-run with --apply to write.\n`,
+      `\n${pending} change${pending === 1 ? '' : 's'} pending. Re-run with --apply to write.\n`,
     );
   }
 }
 
 async function projects(): Promise<void> {
-  const result = (await api('/api/admin/projects')) as {
-    projects: {
-      slug: string;
-      name: string;
-      archivedAt: string | null;
-      permissions: string[];
-      environments: { slug: string; archivedAt: string | null; secretCount: number }[];
-    }[];
-  };
+  const result = await client().projects.list();
 
   for (const project of result.projects) {
     const archived = project.archivedAt === null ? '' : ' (archived)';
     process.stdout.write(`${project.slug}${archived}  ${project.name}\n`);
-    for (const environment of project.environments.filter((e) => e.archivedAt === null)) {
+    for (const environment of project.environments) {
+      // Environments the caller may only know by name come without details.
+      if (environment.details?.archivedAt) continue;
+      const count = environment.details?.secretCount;
       process.stdout.write(
-        `  ${environment.slug.padEnd(16)} ${environment.secretCount} secrets\n`,
+        `  ${environment.slug.padEnd(16)} ${count === null || count === undefined ? '' : `${count} secrets`}\n`,
       );
     }
   }
 }
 
 async function whoHasAccess(): Promise<void> {
-  const result = (await api('/api/admin/principals')) as {
-    principals: {
-      principalId: string;
-      principalType: string;
-      isRootAdmin: boolean;
-      grants: { project: string; scope: string; role: string; expiresAt: string | null }[];
-    }[];
-  };
+  const result = await client().members.list();
 
-  for (const principal of result.principals) {
-    const root = principal.isRootAdmin ? '  [root admin]' : '';
-    process.stdout.write(`${principal.principalId} (${principal.principalType})${root}\n`);
-    for (const g of principal.grants) {
+  for (const member of result.members) {
+    const root = member.isRootAdmin ? '  [root admin]' : '';
+    process.stdout.write(`${member.principalId} (${member.principalType})${root}\n`);
+    for (const g of member.grants) {
+      const place = g.environment === null ? g.project : `${g.project}/${g.environment}`;
       const until = g.expiresAt === null ? '' : ` until ${g.expiresAt.slice(0, 10)}`;
-      process.stdout.write(`  ${g.project}/${g.scope.padEnd(16)} ${g.role}${until}\n`);
+      process.stdout.write(`  ${place.padEnd(24)} ${g.role}${until}\n`);
     }
   }
 }
@@ -701,39 +663,16 @@ async function grantAccess(args: string[]): Promise<void> {
     fail('usage: coffre grant <project> <principal> --role <role> [--env <env>] [--service] [--expires YYYY-MM-DD]');
   }
 
-  await api(`/api/admin/projects/${project}/grants`, {
-    method: 'POST',
-    body: JSON.stringify({
-      principalType: values.service ? 'service' : 'user',
-      principalId,
-      role: values.role,
-      environmentSlug: values.env ?? null,
-      expiresAt: values.expires ? new Date(`${values.expires}T23:59:59Z`).toISOString() : null,
-    }),
+  const role = values.role;
+  if (!isRole(role)) fail(`no role "${role}": \`coffre roles\` lists them`);
+  const scope = values.env ? `${project}/${values.env}` : project;
+  // Declarative: this place gets this role, replacing any other role there.
+  await client().access.set(`${values.service ? 'token' : 'user'}:${principalId}`, {
+    [scope]: values.expires ? { role, until: values.expires } : role,
   });
 
-  const scope = values.env ? `${project}/${values.env}` : project;
   process.stdout.write(`granted ${values.role} on ${scope} to ${principalId}\n`);
 }
-
-type PrincipalReport = {
-  principalType: 'user' | 'service';
-  status: 'active' | 'removed';
-  removedAt: string | null;
-  removedBy: string | null;
-  live: { grants: number; sessions: number; tokens: number; identities: number };
-  exposed: {
-    project: string;
-    environment: string;
-    key: string;
-    version: number;
-    how: 'read' | 'wrote';
-    at: string;
-  }[];
-  rotated: number;
-  issuedTokens: { service: string; label: string | null; hint: string; expiresAt: string }[];
-  syncs: (SyncView & { project: string; environment: string })[];
-};
 
 function plural(count: number, word: string): string {
   return `${count} ${word}${count === 1 ? '' : 's'}`;
@@ -768,22 +707,16 @@ async function offboard(args: string[]): Promise<void> {
 
   const principalId = positionals[0];
   if (!principalId) fail('usage: coffre offboard <principal> [--service] [--apply]');
-  const path = `/api/admin/directory/${values.service ? 'service' : 'user'}/${encodeURIComponent(principalId)}`;
+  const member = `${values.service ? 'token' : 'user'}:${principalId}`;
+  const coffre = client();
 
-  let report = (await api(path)) as PrincipalReport;
+  let report = await coffre.members.get(member);
   const they = report.principalType === 'user' ? 'they' : 'it';
 
   if (report.status === 'active' && values.apply) {
-    const removed = (await api(path, { method: 'DELETE' })) as {
-      revoked: number;
-      sessions: number;
-      tokens: number;
-      identities: number;
-    };
-    process.stdout.write(
-      `removed ${principalId}: revoked ${waysIn(report.principalType, { ...removed, grants: removed.revoked })}\n`,
-    );
-    report = (await api(path)) as PrincipalReport;
+    const removed = await coffre.members.remove(member);
+    process.stdout.write(`removed ${principalId}: revoked ${waysIn(report.principalType, removed.revoked)}\n`);
+    report = removed.report;
   } else if (report.status === 'active') {
     process.stdout.write(
       `${principalId} is active; removing would revoke ${waysIn(report.principalType, report.live)}\n`,
@@ -832,19 +765,10 @@ async function offboard(args: string[]): Promise<void> {
   }
 }
 
-async function roles(): Promise<void> {
-  const result = (await api('/api/admin/roles')) as {
-    roles: {
-      slug: string;
-      description: string;
-      permissions: string[];
-      assignableToEnvironment: boolean;
-    }[];
-  };
-
-  for (const role of result.roles) {
-    const scope = role.assignableToEnvironment ? 'project or env' : 'project only';
-    process.stdout.write(`${role.slug.padEnd(16)} [${scope}]  ${role.permissions.join(', ')}\n`);
+function roles(): void {
+  for (const [slug, role] of Object.entries(ROLES)) {
+    const scope = assignableToEnvironment(slug as Role) ? 'project or env' : 'project only';
+    process.stdout.write(`${slug.padEnd(16)} [${scope}]  ${role.permissions.join(', ')}\n`);
   }
 }
 
@@ -859,22 +783,16 @@ async function audit(args: string[]): Promise<void> {
     allowPositionals: false,
   });
 
-  const query = new URLSearchParams({ limit: values.limit ?? '20' });
-  if (values.actor) query.set('actorId', values.actor);
-  if (values.denied) query.set('decision', 'deny');
-
-  const result = (await api(`/api/audit?${query}`)) as {
-    entries: {
-      occurredAt: string;
-      actorId: string;
-      action: string;
-      decision: string;
-      metadata: { key?: string };
-    }[];
-  };
+  const limit = Number(values.limit);
+  if (!Number.isInteger(limit) || limit < 1) fail(`--limit takes a positive number, not "${values.limit}"`);
+  const result = await client().audit.list({
+    limit,
+    actor: values.actor,
+    decision: values.denied ? 'deny' : undefined,
+  });
 
   for (const entry of result.entries.reverse()) {
-    const key = entry.metadata.key ?? '-';
+    const key = typeof entry.metadata.key === 'string' ? entry.metadata.key : '-';
     process.stdout.write(
       `${entry.occurredAt}  ${entry.decision.padEnd(5)}  ${entry.actorId.padEnd(28)}  ${entry.action.padEnd(13)}  ${key}\n`,
     );
@@ -882,9 +800,7 @@ async function audit(args: string[]): Promise<void> {
 }
 
 async function verify(): Promise<void> {
-  const result = (await api('/api/audit/verify')) as
-    | { ok: true; rows: number; head: string }
-    | { ok: false; failedAtSeq: number; reason: string };
+  const result = await client().audit.verify();
 
   if (result.ok) {
     process.stdout.write(`audit chain OK: ${result.rows} rows, head ${result.head}\n`);
@@ -896,31 +812,7 @@ async function verify(): Promise<void> {
   process.exit(2);
 }
 
-type SyncView = {
-  id: string;
-  provider: string;
-  providerLabel: string;
-  destination: string;
-  credential: string;
-  paused: boolean;
-  running: boolean;
-  lastRunAt: string | null;
-  lastStatus: 'succeeded' | 'partial' | 'failed' | null;
-  lastError: string | null;
-  synced: number;
-  pending: number;
-  skipped: { key: string; reason: string }[];
-};
-
-type RunOutcome =
-  | { status: 'busy' }
-  | {
-      status: 'succeeded' | 'partial' | 'failed';
-      upserted: string[];
-      deleted: string[];
-      failed: { key: string; operation: 'upsert' | 'delete'; message: string }[];
-      error: string | null;
-    };
+type SyncView = Awaited<ReturnType<CoffreClient['syncs']['list']>>['syncs'][number];
 
 const SYNC_USAGE = `usage:
   coffre sync list   <project>/<environment>
@@ -956,10 +848,11 @@ async function sync(args: string[]): Promise<void> {
   }
   const { project, environment, key } = parsePath(path);
   if (key !== undefined) fail(`syncs belong to an environment: use ${project}/${environment}`);
-  const base = `/api/projects/${project}/environments/${environment}/syncs`;
+  const place = `${project}/${environment}`;
+  const coffre = client();
 
   if (verb === 'list') {
-    const { syncs } = (await api(base)) as { syncs: SyncView[] };
+    const { syncs } = await coffre.syncs.list(place);
     if (syncs.length === 0) process.stdout.write(`${project}/${environment} is not synced anywhere\n`);
     for (const entry of syncs) printSync(entry);
     return;
@@ -978,10 +871,7 @@ async function sync(args: string[]): Promise<void> {
       fail(`--credential names the secret holding the ${entry.label} token, such as ${entry.credentialExample}`);
     }
     const config = attempt(() => configFromArguments(entry, assignments));
-    const created = (await api(base, {
-      method: 'POST',
-      body: JSON.stringify({ provider: entry.kind, config, credential: values.credential }),
-    })) as SyncView;
+    const created = await coffre.syncs.add(place, { provider: entry.kind, config, credential: values.credential });
     process.stdout.write(
       `Syncing ${project}/${environment} to ${created.destination} (${created.providerLabel}), id ${created.id.slice(0, 8)}.\n` +
         `The first push has started; \`coffre sync list ${project}/${environment}\` shows how it went.\n`,
@@ -992,16 +882,13 @@ async function sync(args: string[]): Promise<void> {
   if (!['run', 'pause', 'resume', 'remove'].includes(verb)) fail(`unknown sync command "${verb}"; see \`coffre sync --help\``);
   const reference = rest[0];
   if (reference === undefined) fail(`usage: coffre sync ${verb} ${project}/${environment} <sync>`);
-  const { syncs } = (await api(base)) as { syncs: SyncView[] };
+  const { syncs } = await coffre.syncs.list(place);
   const chosen = attempt(() => pickSync(syncs, reference));
 
   if (verb === 'run') {
     // The server would only answer that it is busy.
     if (chosen.paused) fail(`syncing to ${chosen.destination} is paused; resume it first`);
-    const { sync: after, outcome } = (await api(`/api/syncs/${chosen.id}/run`, { method: 'POST' })) as {
-      sync: SyncView;
-      outcome: RunOutcome;
-    };
+    const { sync: after, outcome } = await coffre.syncs.run(chosen.id);
     if (outcome.status === 'busy') fail(`a run to ${chosen.destination} is already under way`);
     for (const failure of outcome.failed) {
       process.stderr.write(`  could not ${failure.operation === 'upsert' ? 'push' : 'remove'} ${failure.key}: ${failure.message}\n`);
@@ -1018,7 +905,7 @@ async function sync(args: string[]): Promise<void> {
   }
 
   if (verb === 'remove') {
-    await api(`/api/syncs/${chosen.id}`, { method: 'DELETE' });
+    await coffre.syncs.remove(chosen.id);
     process.stdout.write(
       `No longer syncing to ${chosen.destination}. Keys coffre pushed there stay; remove them at ${chosen.providerLabel} if they should go too.\n`,
     );
@@ -1026,7 +913,7 @@ async function sync(args: string[]): Promise<void> {
   }
 
   const paused = verb === 'pause';
-  await api(`/api/syncs/${chosen.id}`, { method: 'PATCH', body: JSON.stringify({ paused }) });
+  await coffre.syncs.update(chosen.id, { paused });
   process.stdout.write(
     paused
       ? `Paused syncing to ${chosen.destination}\n`
@@ -1158,7 +1045,7 @@ switch (command) {
     await projects();
     break;
   case 'roles':
-    await roles();
+    roles();
     break;
   case 'access':
     await whoHasAccess();

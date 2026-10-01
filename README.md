@@ -99,10 +99,16 @@ true and useless.
 **One TanStack request boundary protects both transports.** Global request
 middleware authenticates direct `/api` calls and UI server functions, rejects
 `x-middleware-subrequest`, and requires an active principal row. Configured root
-admins are the sole empty-database bootstrap exception. Native API routes and UI
-server functions invoke the same in-process services directly, so there is no
-loopback request, custom router, or second server that could drift around
-authorization and audit behavior.
+admins are the sole empty-database bootstrap exception.
+
+**One route table is the whole API.** `apps/web/src/server/api/routes.ts` maps
+each `METHOD /route` to its input schema, the permission it needs and its
+handler, and one catch-all route serves it under `/api`. The client in
+`packages/client` is typed from that table, and both the CLI and the UI's
+server functions call through it; the UI hands its requests to the router
+in-process, so there is no loopback request and no second path around
+validation, permission checks or the audit log. See
+[The API](#the-api) below.
 
 **The `.env` parser refuses ambiguity rather than guessing.** It is the one
 place where free text becomes credential material. Unrecognised escapes are
@@ -153,8 +159,9 @@ packages/core   envelope encryption, KEK providers, audit hash chain, identity
 packages/db     Drizzle schema/migrations, audit writer, privilege tests
 packages/sync   destinations syncs push to: GitHub Actions, Vercel, Railway, Cloudflare
 apps/dev-idp    local stand-in for Cloudflare Access, an OIDC provider and GitHub
-apps/cli        login, secrets, access, syncs, audit; no dependencies
-apps/web        TanStack Start UI, auth boundary, services, and native /api routes
+packages/client @coffre/client: the API as typed calls, one fetch each
+apps/cli        login, secrets, access, syncs, audit; on the client, no npm dependencies
+apps/web        TanStack Start UI, auth boundary, and the API's route table and handlers
 ```
 
 ## Running it
@@ -247,6 +254,53 @@ CI sets environment variables instead and stores nothing:
 `COFFRE_API_URL` plus `COFFRE_TOKEN` (a service token from the Tokens page),
 or `COFFRE_ACCESS_CLIENT_ID`/`COFFRE_ACCESS_CLIENT_SECRET` behind Access.
 
+## The API
+
+Addressed by path: `market` is a project, `market/prod` an environment,
+`market/prod/DATABASE_URL` a secret, `user:ada@acme.example` or
+`token:ci-deploy` a member. The URL names the thing and the method is the
+verb; the full table is in [architecture.md](docs/architecture.md#the-api).
+
+```sh
+curl -X PATCH $COFFRE/api/secrets/market/prod \
+  -H 'content-type: application/json' \
+  -d '{"DATABASE_URL": "postgres://…", "OLD_KEY": null}'
+# {"keys":{"DATABASE_URL":{"version":4},"OLD_KEY":{"archived":true}}}
+```
+
+Or, typed, from TypeScript:
+
+```ts
+import { createClient } from '@coffre/client';
+
+const coffre = createClient({ url: 'https://coffre.acme.example', headers: () => ({ authorization: `Bearer ${token}` }) });
+await coffre.secrets.set('market/prod', { DATABASE_URL: 'postgres://…', OLD_KEY: null });
+const { values } = await coffre.secrets.reveal('market/prod');   // logged, one row per key
+await coffre.access.set('user:ada@acme.example', { market: 'developer', 'market/prod': null });
+```
+
+- `PATCH` bodies are JSON merge patches: a field you send is set, `null`
+  archives or revokes it, a field you leave out stays. A secrets patch is one
+  transaction with a version and an audit row per key; archiving needs
+  `secret.archive`. An access patch is declarative: it says which role someone
+  should hold at each place it names, one role per place, and applies all of
+  it or none.
+- Values leave only through `POST /api/reveals`, which is audited. No `GET`
+  returns a value.
+- Creating a project or an environment is a `PUT`: sending it twice is
+  harmless, and the second answers `created: false`.
+- Every error is `{ "error": "<code>", "message": "<sentence>" }` with its
+  HTTP status: `bad_request` 400, `unauthenticated` 401, `forbidden` and
+  `registration_required` 403, `not_found` 404, `method_not_allowed` 405,
+  `conflict` 409, `too_many_requests` 429, `internal_error` 500 (details in
+  the server log only), `unavailable` 503. A refusal on a place that exists
+  is logged; a place that does not exist is a 404 and is not.
+- `DELETE /api/members/user:ada@acme.example` offboards and answers with
+  what to rotate ([docs/offboarding.md](docs/offboarding.md)).
+
+Sign-in (`/auth/*`, `/api/auth/device*`, logout) is a protocol, not part of
+the table, and keeps its own routes.
+
 ## Progress
 
 All five milestones are implemented and working locally.
@@ -268,13 +322,15 @@ All five milestones are implemented and working locally.
 - **Management.** Projects, environments, secrets and grants are created,
   renamed and archived through the UI and the API. Every structural change is
   audited.
-- **Version history and rollback.** Every version records who wrote it and
-  when. Rollback repoints the current pointer -- nothing is copied or deleted,
-  and a later write continues the numbering forward.
+- **Version history and restore.** Every version records who wrote it and
+  when. Restoring an old version writes it again as a new version, so nothing
+  is overwritten and the history reads in order.
 - **Bulk `.env` import.** Previews as a diff (create / update / unchanged)
-  before writing. Parsing happens server-side so the CLI and UI cannot disagree
-  about what a `.env` file means; malformed lines are reported, never silently
-  mangled.
+  before writing. The CLI and the UI parse with the same parser
+  (`packages/core/src/dotenv.ts`) and plan with the same client function, so
+  they cannot disagree about what a `.env` file means; malformed lines are
+  reported, never silently mangled. Writing is one `PATCH` of the changed
+  keys, and the preview's comparison with current values is logged as a read.
 - **Identity directory.** Users and service accounts are managed separately
   from project permissions. Owners can manage the directory and read the full
   audit log; root admins remain deployment configuration.
@@ -375,10 +431,10 @@ Things worth knowing about it:
 Vite 8 plus TanStack Router, replacing Next.js. Notes for anyone reading the
 code expecting the old shape:
 
-- **Every UI read is a server function**, not a server component. Server
-  functions and native `/api` routes call the same internal services directly;
-  there is no API base URL in the web runtime, self-fetch, or application
-  façade above those services.
+- **Every UI read is a server function**, not a server component. Each one is
+  a thin shim that calls `@coffre/client` with a transport that hands the
+  request straight to the API router, in the same Worker invocation: no API
+  base URL, no self-fetch, and the same checks and audit as the CLI.
 - **`router.invalidate()` replaces `revalidatePath`.** The old version had to
   name the routes a mutation affected, and renaming a project meant remembering
   to revalidate both `/` and `/:project`. Invalidating refetches every mounted
@@ -497,7 +553,7 @@ UI, the underlying role and scope are presented as one permissions value:
   double quotes) or variable interpolation. Both are reported as parse problems
   rather than guessed at.
 - The project-only-permission rule (a role containing `grant.manage` cannot be
-  scoped to one environment) is enforced in the service layer with tests, not by
+  scoped to one environment) is enforced in the API with tests, not by
   a database constraint — unlike the append-only guarantee, which is.
 - The domain/API logic behind every screen and the TanStack auth/health boundary
   are automated. `check:contrast` mechanically verifies the palette; the React
@@ -516,7 +572,8 @@ UI, the underlying role and scope are presented as one permissions value:
 
 The integration tests share one Postgres database and reset it in `beforeEach`.
 Run in parallel they clobber each other. Serialising is the pragmatic fix for a
-prototype; the real fix is a schema (or database) per test file.
+prototype; the real fix is a schema (or database) per test file. Meanwhile
+`COFFRE_TEST_DATABASE=<name>` points a run at another scratch database.
 
 ## Deliberately out of scope
 

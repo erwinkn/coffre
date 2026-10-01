@@ -45,7 +45,9 @@ async function call(token, method, path, body) {
 }
 
 const put = (token, path, body) => call(token, 'PUT', path, body);
-const post = (token, path, body) => call(token, 'POST', path, body);
+const patch = (token, path, body) => call(token, 'PATCH', path, body);
+const member = ({ principalType, principalId }) =>
+    encodeURIComponent(`${principalType === 'user' ? 'user' : 'token'}:${principalId}`);
 
 // Everything goes through the API, including the structural setup. That way the
 // seed exercises the same authorisation and audit paths the UI and CLI use, and
@@ -82,19 +84,19 @@ await pool.query(
 
 const adminToken = await mint({ email: ADMIN });
 
-await post(adminToken, '/api/admin/projects', { slug: 'market', name: 'Acme Market' });
+await put(adminToken, '/api/projects/market', { name: 'Acme Market' });
 for (const [slug, name] of [
     ['dev', 'Development'],
     ['prod', 'Production'],
 ]) {
-    await post(adminToken, '/api/admin/projects/market/environments', { slug, name });
+    await put(adminToken, `/api/projects/market/${slug}`, { name });
 }
 console.log('==> created project market with environments dev, prod');
 
-// Directory first. createGrant refuses unknown principals (HTTP 409): the
-// instance directory is a separate write from project access.
+// Members first. Access refuses anyone who is not a member (HTTP 409):
+// membership is a separate write from project access.
 for (const principal of LOCAL_SEED_DIRECTORY) {
-    await post(adminToken, '/api/admin/directory', principal);
+    await put(adminToken, `/api/members/${member(principal)}`, {});
 }
 console.log('==> registered directory principals (lead, dev, auditor, accessmgr, outsider, ci-deploy.access)');
 
@@ -105,7 +107,8 @@ console.log('==> registered directory principals (lead, dev, auditor, accessmgr,
 //   ci       -- a machine principal, matched on its service-token common name
 // outsider is in the directory with no grants — the login page's closed door.
 for (const grant of LOCAL_SEED_GRANTS) {
-    await post(adminToken, '/api/admin/projects/market/grants', grant);
+    const place = grant.environmentSlug === undefined ? 'market' : `market/${grant.environmentSlug}`;
+    await patch(adminToken, `/api/access/${member(grant)}`, { [place]: grant.role });
 }
 console.log('==> granted access to lead, dev, auditor, accessmgr and ci-deploy.access');
 
@@ -125,11 +128,7 @@ const values = {
 };
 
 for (const [environment, secrets] of Object.entries(values)) {
-    for (const [key, value] of Object.entries(secrets)) {
-        await put(adminToken, `/api/projects/market/environments/${environment}/secrets/${key}`, {
-            value,
-        });
-    }
+    await patch(adminToken, `/api/secrets/market/${environment}`, secrets);
     console.log(`==> wrote ${Object.keys(secrets).length} secrets to market/${environment}`);
 }
 
