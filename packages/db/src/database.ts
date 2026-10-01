@@ -2,6 +2,7 @@ import { getTableName, is, Table } from 'drizzle-orm';
 import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres';
 import type pg from 'pg';
 
+import { trackCommits } from './commits.ts';
 import * as schema from './schema.ts';
 
 export { schema };
@@ -27,7 +28,7 @@ export type PoolLike = pg.Pool | {
 };
 
 export function createDatabase(pool: PoolLike): Database {
-  return drizzle(pool as pg.Pool, { schema });
+  return trackCommits(drizzle(pool as pg.Pool, { schema }));
 }
 
 /**

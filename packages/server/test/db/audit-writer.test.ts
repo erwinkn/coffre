@@ -190,6 +190,33 @@ test('an append refuses a log rolled back behind a head this process found', asy
   );
 });
 
+test('an append refuses a log that lost the last batch this process committed', async () => {
+  const entry = { actorType: 'user' as const, actorId: 'a@acme.example', action: 'secret.read', decision: 'allow' as const };
+  await inTransaction((tx) => appendAudit(tx, CHAIN_KEY, [entry]));
+  const [first] = await inTransaction((tx) => auditRange(tx));
+  await inTransaction((tx) => appendAudit(tx, CHAIN_KEY, Array.from({ length: 12 }, () => entry)));
+  // The whole of the newest batch cut, and the head put back on the entry before it.
+  await withLogUnlocked(owner, (owned) => owned.delete(auditLog).where(gte(auditLog.seq, 1n)));
+  await owner.update(auditChainHead).set({ nextSeq: 1n, headHash: first.hash });
+
+  await assert.rejects(inTransaction((tx) => appendAudit(tx, CHAIN_KEY, [entry])), (error) => error instanceof LogRewound);
+});
+
+test('a transaction that rolls back leaves nothing for the process to remember', async () => {
+  const entry = { actorType: 'user' as const, actorId: 'a@acme.example', action: 'secret.read', decision: 'allow' as const };
+  // The second append sees the first's head, which never commits.
+  await assert.rejects(
+    inTransaction(async (tx) => {
+      await appendAudit(tx, CHAIN_KEY, [entry]);
+      await appendAudit(tx, CHAIN_KEY, [entry]);
+      throw new Error('rolled back');
+    }),
+    /rolled back/,
+  );
+  await inTransaction((tx) => appendAudit(tx, CHAIN_KEY, [entry]));
+  assert.deepEqual((await inTransaction((tx) => auditRange(tx))).map((row) => row.seq), [0n]);
+});
+
 test('appendAudit refuses to write nothing', async () => {
   await assert.rejects(() => inTransaction((tx) => appendAudit(tx, CHAIN_KEY, [])), /no entries/);
 });
