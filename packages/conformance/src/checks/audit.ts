@@ -181,9 +181,11 @@ export async function forgedVaultEntry(deployment: Deployment, { admin }: People
     const [head] = await sql.query<{ next_seq: number | string; head_hash: Uint8Array }>(
       'SELECT next_seq, head_hash FROM audit_chain_head',
     );
+    const [writer] = await sql.query<{ key_id: string }>("SELECT key_id FROM audit_log WHERE author = 'vault' ORDER BY seq DESC LIMIT 1");
+    expect(writer !== undefined, 'no vault key id to copy');
     const seq = BigInt(head.next_seq);
     const forged = {
-      seq, author: 'vault', keyId: 'vault:0000000000000000', occurredAt: Date.now(), actor: 'user:forger@conformance.example',
+      seq, author: 'vault', keyId: writer.key_id, occurredAt: Date.now(), actor: 'user:forger@conformance.example',
       action: 'secret.read', decision: 'allow', metadata: '{}',
     };
     const prevHash = Buffer.from(head.head_hash);

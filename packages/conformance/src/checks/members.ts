@@ -1,7 +1,7 @@
 import { Browser } from '../browser.ts';
 import { using } from '../database.ts';
 import type { Deployment } from '../harness.ts';
-import { expect, refused } from '../report.ts';
+import { expect } from '../report.ts';
 import { DEV, PROD, signIn, type People, type Person } from './people.ts';
 import { logRefuses } from './readiness.ts';
 import { query, restoreRow } from './storage.ts';
@@ -20,6 +20,8 @@ export async function member(deployment: Deployment, { admin }: People, name: st
 export async function memberTampering(deployment: Deployment, people: People, kind: 'grant' | 'member' | 'old'): Promise<string> {
   const person = await member(deployment, people, `tamper-${kind}`);
   const { admin } = people;
+  const path = kind === 'grant' ? PROD : DEV;
+  const protectedValues = Object.values((await admin.api.secrets.reveal(path)).values);
   await using(deployment.database(), async (sql) => {
     const [before] = await query(sql, 'SELECT * FROM vault_members WHERE principal = $1', [person.member]);
     const grants = await query(sql, 'SELECT * FROM vault_grants WHERE principal = $1', [person.member]);
@@ -43,8 +45,10 @@ export async function memberTampering(deployment: Deployment, people: People, ki
         [person.member, place.id, Date.now(), person.member]);
     }
     try {
-      const failure = await refused('a tampered member revealed a value', person.api.secrets.reveal(kind === 'grant' ? PROD : DEV));
-      expect(failure.status === 401 && failure.code === 'unauthenticated', 'the tampered credential was not refused', failure);
+      const response = await person.browser.send('POST', '/api/reveals', { path });
+      const text = await response.text();
+      expect(response.status === 401 && (JSON.parse(text) as { error: string }).error === 'unauthenticated', 'the tampered credential was not refused', text);
+      expect(!protectedValues.some((value) => text.includes(value)), 'the tampered refusal carried a value', text);
       expect((await admin.api.members.get(person.member)).status === 'tampered', 'the refused member is not marked tampered');
       const reports = await query(sql, `SELECT seq FROM audit_log WHERE author = 'vault' AND action = 'vault.tampered'
         AND subject_principal = $1 AND code = $2`, [person.member, kind === 'old' ? 'stale' : 'mac']);
