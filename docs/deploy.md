@@ -7,7 +7,7 @@ through the same steps as this page.
 
 ```sh
 coffre init --workers acme-secrets   # two Workers, Postgres through Hyperdrive
-coffre init --node acme-secrets      # two Node processes, on SQLite, Postgres or MySQL
+coffre init --node acme-secrets      # two Node processes, Postgres or local SQLite
 ```
 
 What you get is [examples/workers](../examples/workers) or
@@ -106,7 +106,7 @@ acme-secrets/
 ```sh
 pnpm install
 cp server.env.example server.env && cp vault.env.example vault.env   # then fill them in
-pnpm migrate file:coffre.db     # or postgres://…, mysql://…, as the owner
+pnpm migrate file:coffre.db     # local dev; use postgres://… as the owner for deployment
 pnpm vault                      # first: the server connects to its socket
 pnpm start
 ```

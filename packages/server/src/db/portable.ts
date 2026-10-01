@@ -1,21 +1,19 @@
 import type { LibSQLDatabase } from 'drizzle-orm/libsql';
-import type { MySql2Database } from 'drizzle-orm/mysql2';
 
 import type { Database } from './database.ts';
 import type * as postgres from './schema.ts';
-import type * as mysql from './schema.mysql.ts';
 import type * as sqlite from './schema.sqlite.ts';
 
 /**
- * The one place a MySQL or SQLite database becomes a Postgres one.
+ * The one place a SQLite database becomes a Postgres one.
  *
  * Drizzle has no type that spans dialects, so the queries are written once,
- * against the Postgres schema, and a MySQL or SQLite database is handed to
- * them under the Postgres type. That holds because the three schemas have the
+ * against the Postgres schema, and a SQLite database is handed to
+ * them under the Postgres type. That holds because both schemas have the
  * same tables with the same row types (checked below, at compile time, and
  * in schema-parity.test.ts, at run time), and because every query runs on
  * the database's own tables: queries.ts reads them from the database it is
- * given (`tablesOf`), never from an import. A Postgres column on a MySQL
+ * given (`tablesOf`), never from an import. A Postgres column on a SQLite
  * database would encode its values the Postgres way.
  */
 
@@ -28,9 +26,9 @@ export function asPostgres<Tables extends Partial<Record<keyof PostgresSchema, u
   return tables as never;
 }
 
-/** A MySQL or SQLite database, read as a Postgres one. */
+/** A SQLite database, read as a Postgres one. */
 export function asPostgresDatabase(
-  db: MySql2Database<typeof mysql> | LibSQLDatabase<typeof sqlite>,
+  db: LibSQLDatabase<typeof sqlite>,
 ): Database {
   return db as unknown as Database;
 }
@@ -52,5 +50,4 @@ type None<T extends never> = T;
 
 // A column that differs in type, nullability or name breaks the typecheck
 // here, naming its table.
-export type MySqlRowsMatch = None<Mismatched<typeof mysql>>;
 export type SqliteRowsMatch = None<Mismatched<typeof sqlite>>;

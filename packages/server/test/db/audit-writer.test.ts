@@ -174,7 +174,7 @@ test('timestamps render as UTC with microseconds, whatever shape the database re
 
 test(
   'a session in another time zone reads back the same chain',
-  postgresOnly('the session time zone is Postgres rendering a timestamptz; MySQL and SQLite store no zone'),
+  postgresOnly('the session time zone is Postgres rendering a timestamptz; SQLite stores UTC text'),
   async () => {
     await inTransaction((tx) =>
       appendAudit(tx, CHAIN_KEY, [

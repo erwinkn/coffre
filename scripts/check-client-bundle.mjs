@@ -42,7 +42,6 @@ const markers = [
     { label: 'drizzle-orm', pattern: /drizzle:[A-Z]/ },
     ...tables.map((name) => ({ label: `table ${name}`, pattern: new RegExp(`\\b${name}\\b`) })),
     { label: 'pg', pattern: /cloudflare:sockets|pg-protocol|pgpass/ },
-    { label: 'mysql2', pattern: /mysql2|mysql_native_password/ },
     { label: 'libsql', pattern: /@libsql|libsql/ },
     { label: 'a COFFRE_ variable read', pattern: /env\s*(\.|\[\s*['"`])COFFRE_/ },
     { label: 'agentation', pattern: /agentation-(theme|root|color)/ },

@@ -27,8 +27,9 @@ without it, no secret stored in coffre can be read again.
 
 ## 2. The database
 
-`DATABASE_URL` is a SQLite file, or a Postgres or MySQL database. Bring it
-up to date now and after every upgrade of `@coffre/server`:
+`DATABASE_URL` is a Postgres database for deployment. The example defaults
+to a SQLite file for local development and tests. Bring the database up to
+date now and after every upgrade of `@coffre/server`:
 
 ```sh
 pnpm migrate file:coffre.db

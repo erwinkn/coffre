@@ -5,8 +5,6 @@ import { fileURLToPath } from 'node:url';
 import {
   generateDrizzleJson,
   generateMigration,
-  generateMySQLDrizzleJson,
-  generateMySQLMigration,
   generateSQLiteDrizzleJson,
   generateSQLiteMigration,
 } from 'drizzle-kit/api';
@@ -14,7 +12,6 @@ import {
 import type { Engine } from './dialect.ts';
 import { migrationsFolder } from './migrate.ts';
 import * as postgres from './schema.ts';
-import * as mysql from './schema.mysql.ts';
 import * as sqlite from './schema.sqlite.ts';
 
 /**
@@ -25,13 +22,13 @@ import * as sqlite from './schema.sqlite.ts';
  *
  * A baseline is baseline/<engine>.sql with its `-- @schema` line replaced by
  * the tables drizzle-kit generates from that engine's schema. The template
- * holds what a schema cannot say: the MySQL collation, the audit chain's
- * first rows, and the Postgres runtime role and its grants.
+ * holds what a schema cannot say: the audit chain's first rows, and the
+ * Postgres runtime role and its grants.
  *
  * `pnpm db:generate` runs this file and rewrites the baselines that are stale.
  */
 
-export const ENGINES: readonly Engine[] = ['postgres', 'mysql', 'sqlite'];
+export const ENGINES: readonly Engine[] = ['postgres', 'sqlite'];
 
 const TAG = '0000_baseline';
 const MARKER = '-- @schema\n';
@@ -61,8 +58,6 @@ async function pending(engine: Engine): Promise<string[]> {
   switch (engine) {
     case 'postgres':
       return generateMigration(snapshot, generateDrizzleJson(postgres) as never);
-    case 'mysql':
-      return generateMySQLMigration(snapshot, (await generateMySQLDrizzleJson(mysql)) as never);
     case 'sqlite':
       return generateSQLiteMigration(snapshot, (await generateSQLiteDrizzleJson(sqlite)) as never);
   }

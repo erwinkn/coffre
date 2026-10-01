@@ -7,11 +7,9 @@ import { TEST_ENGINE } from './engine.ts';
  * that what they read and write is encoded the way their database expects.
  */
 const schema: PostgresSchema =
-  TEST_ENGINE === 'mysql'
-    ? asPostgres(await import('../../src/db/schema.mysql.ts'))
-    : TEST_ENGINE === 'sqlite'
-      ? asPostgres(await import('../../src/db/schema.sqlite.ts'))
-      : await import('../../src/db/schema.ts');
+  TEST_ENGINE === 'sqlite'
+    ? asPostgres(await import('../../src/db/schema.sqlite.ts'))
+    : await import('../../src/db/schema.ts');
 
 export const {
   projects,

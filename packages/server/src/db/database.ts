@@ -32,7 +32,7 @@ export function createDatabase(pool: PoolLike): Database {
 
 /**
  * The tables of the database's own dialect: the Postgres ones on Postgres,
- * the MySQL ones on MySQL. Every query builds on these.
+ * the SQLite ones on SQLite. Every query builds on these.
  */
 export function tablesOf(db: Queryable): typeof schema {
   return db._.fullSchema;

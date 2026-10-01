@@ -21,7 +21,7 @@ product that deployments import and configure in their own repositories.
 | Phase | Goal | Done when |
 |---|---|---|
 | 1. Harden | Safe to hold real secrets | Every item below shipped; restore and rotation drills pass |
-| ~~2. Package~~ | The product apart from its instances; Cloudflare and Node adapters; a vault; three databases | A deployment is a small project importing `@coffre/server` and `@coffre/vault`; the suite passes on Postgres, MySQL and SQLite, and a smoke run on both adapters, now [conformance](conformance.md) |
+| ~~2. Package~~ | The product apart from its instances; Cloudflare and Node adapters; a vault; Postgres with SQLite for local use | A deployment is a small project importing `@coffre/server` and `@coffre/vault`; the suite passes on Postgres and SQLite, and a smoke run on both adapters, now [conformance](conformance.md) |
 | 3. erwinkn.com | Dogfood | Your secrets live in it, the CLI and sync are in daily use, a few weeks pass with no open bugs |
 | 4. Sign-in | Deployable without a proxy in front | A Node deployment signs in with Google, GitHub and an arbitrary OIDC issuer, and the CLI logs in through it |
 
@@ -83,14 +83,14 @@ Then drop "still hardening" from the README's status line.
 
 Done. coffre became packages a deployment imports and configures in code:
 `@coffre/ui`, `@coffre/server`, `@coffre/vault`, `@coffre/client` and
-`@coffre/cli`, on Postgres, MySQL or SQLite through Drizzle, with a vault
+`@coffre/cli`, on Postgres through Drizzle, with SQLite for local dev and a vault
 that holds the keys and decides who may decrypt. The design is in
 [architecture.md](architecture.md). In order:
 
 1. ~~**Two spikes**~~: done, both positive. A prebuilt server-rendered UI
    imported by another Worker ([report](spikes/ssr-ui.md)), and one
-   set of Drizzle queries across three dialects
-   ([report](spikes/drizzle-dialects.md)).
+   set of Drizzle queries shared across dialects
+   ([current design](architecture.md#databases)).
 2. ~~**The API**~~ ([design](architecture.md#the-api)): done. One route
    table under `/api`, on Drizzle against Postgres, with roles in code and
    one role per member per place; every query in one module
@@ -105,13 +105,13 @@ that holds the keys and decides who may decrypt. The design is in
    browser, and a cookie-authenticated change must be same-origin. The server
    functions are gone, and sessions, linked accounts and device approval
    joined the route table.
-4. ~~**MySQL and SQLite**~~ ([design](architecture.md#databases)): done.
+4. ~~**SQLite for local use**~~ ([design](architecture.md#databases)): done.
    The database comes from its URL; queries are written once against the
-   Postgres schema, with MySQL and SQLite cast to it in one module, and a
-   parity test keeps the three schemas and migration trees in step.
+   Postgres schema, with SQLite cast to it in one module, and a
+   parity test keeps both schemas and migration trees in step.
    Postgres-only SQL (partial unique indexes, `lower()` matching) was
    remodelled, the audit chain locks a head row, and SQLite queues its own
-   writes. The integration suite runs on all three (`pnpm test:all`); the
+   writes. The integration suite runs on both (`pnpm test:all`); the
    restricted runtime login stays Postgres-only.
 5. ~~**The vault**~~ ([design](architecture.md#the-vault)): done.
    `packages/vault` holds the KEK, grants, principal status, root admins and

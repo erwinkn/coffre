@@ -7,12 +7,12 @@ import type { Engine } from './dialect.ts';
 
 /**
  * Bring a database up to date with its engine's migration tree:
- * migrations/postgres, migrations/mysql or migrations/sqlite. The three trees
+ * migrations/postgres or migrations/sqlite. Both trees
  * describe one schema; see schema-parity.test.ts.
  *
  * Applied history must be a prefix of the local journal, byte for byte,
  * before and after. Only one migrator runs at a time: Postgres takes an
- * advisory lock, MySQL a named lock, and SQLite's own write lock covers the
+ * advisory lock, and SQLite's own write lock covers the
  * whole run. The restricted runtime role is Postgres-only (baseline/postgres.sql).
  */
 
@@ -144,36 +144,6 @@ async function postgresMigrator(url: string): Promise<Migrator> {
   };
 }
 
-async function mysqlMigrator(url: string): Promise<Migrator> {
-  const [{ createConnection }, { drizzle }, { migrate }] = await Promise.all([
-    import('mysql2/promise'),
-    import('drizzle-orm/mysql2'),
-    import('drizzle-orm/mysql2/migrator'),
-  ]);
-  const connection = await createConnection({ uri: url, supportBigNumbers: true, bigNumberStrings: true, timezone: 'Z' });
-  return {
-    async applied() {
-      const [tables] = await connection.query(
-        "SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = '__drizzle_migrations'",
-      );
-      if ((tables as unknown[]).length === 0) return null;
-      const [rows] = await connection.query(
-        'SELECT hash, CAST(created_at AS CHAR) AS created_at FROM __drizzle_migrations ORDER BY created_at, id',
-      );
-      return rows as AppliedMigration[];
-    },
-    async lock() {
-      const [[{ locked }]] = (await connection.query("SELECT GET_LOCK('coffre-migrations', 300) AS locked")) as unknown as [[{ locked: string | null }]];
-      if (Number(locked) !== 1) throw new Error('another migrator held the lock for five minutes');
-    },
-    async unlock() {
-      await connection.query("SELECT RELEASE_LOCK('coffre-migrations')");
-    },
-    migrate: (migrationsFolder) => migrate(drizzle({ client: connection }), { migrationsFolder }),
-    close: () => connection.end(),
-  };
-}
-
 async function sqliteMigrator(url: string): Promise<Migrator> {
   const [{ openDatabase }, { migrate }] = await Promise.all([
     import('./connect.ts'),
@@ -203,7 +173,7 @@ async function sqliteMigrator(url: string): Promise<Migrator> {
 export async function migrateDatabase(url: string): Promise<void> {
   const engine = engineOfUrl(url);
   const expected = await expectedMigrations(engine);
-  const migrator = await { postgres: postgresMigrator, mysql: mysqlMigrator, sqlite: sqliteMigrator }[engine](url);
+  const migrator = await { postgres: postgresMigrator, sqlite: sqliteMigrator }[engine](url);
   let locked = false;
 
   try {

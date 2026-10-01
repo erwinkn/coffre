@@ -75,11 +75,10 @@ tooling's (`COFFRE_DEV_*`, `COFFRE_STATE_DIR`, `COFFRE_TEST_ENGINE`,
 - `pnpm test` = lint + recreate `coffre_test` + `node --test --test-concurrency=1`
   (serial: the integration suite shares one DB and resets it per test). Needs Postgres.
   `COFFRE_TEST_DATABASE` names another database, for a second checkout sharing the
-  compose Postgres (and `pnpm test:schema` and MySQL follow it).
-- `pnpm test:sqlite` and `pnpm test:mysql` run the same suite on the other engines
-  (`COFFRE_TEST_ENGINE`); `pnpm test:all` runs all three. SQLite needs nothing.
-  MySQL uses whatever answers on **:53306**, else starts the compose `mysql`
-  service (profile `mysql`, data on tmpfs) via `scripts/ensure-mysql.sh`.
+  compose Postgres (`pnpm test:schema` follows it too).
+- `pnpm test:sqlite` runs the same suite on SQLite (`COFFRE_TEST_ENGINE`);
+  `pnpm test:all` runs Postgres and SQLite. SQLite needs nothing and is kept
+  for tests and local development; deployed app databases use Postgres.
 - `pnpm test:schema` verifies the restricted runtime role's privileges. Postgres only,
   as is the runtime role itself.
 - `pnpm build` builds every package in dependency order (core and client first, the

@@ -163,8 +163,7 @@ test('writing twice appends a version rather than mutating one', async () => {
 
 test('the longest value round-trips, however many bytes it takes', async () => {
   // 64 Ki characters is the most a value holds: 64 KiB of ASCII, or three
-  // times that in euro signs. Either is past MySQL's `blob`, which is why
-  // ciphertext is a `longblob` there.
+  // times that in euro signs. Both must fit after encryption.
   const ascii = 'x'.repeat(64 * 1024);
   const euros = '€'.repeat(64 * 1024);
   await root.secrets.set('market/dev', { ASCII: ascii, EUROS: euros });
