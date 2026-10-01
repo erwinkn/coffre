@@ -1,5 +1,5 @@
 import type { Envelope } from '@coffre/core/envelope';
-import { and, asc, count, desc, eq, getTableColumns, gt, gte, inArray, isNull, lt, notInArray, or, sql, type SQL } from 'drizzle-orm';
+import { and, asc, count, desc, eq, getTableColumns, gt, gte, inArray, isNull, lt, ne, notInArray, or, sql, type SQL } from 'drizzle-orm';
 
 import { own, tablesOf, type Queryable, type Transaction } from './database.ts';
 import * as dialect from './dialect.ts';
@@ -229,6 +229,8 @@ export type MemberRow = {
     id: string;
     provider: string;
     subject: string;
+    issuerHash: string | null;
+    generation: number | null;
     email: string | null;
     createdAt: Date;
     lastSignInAt: Date | null;
@@ -271,6 +273,8 @@ export async function members(
       id: identity.id,
       provider: identity.provider,
       subject: identity.subject,
+      issuerHash: identity.issuerHash,
+      generation: identity.generation,
       email: identity.email,
       createdAt: identity.createdAt,
       lastSignInAt: identity.lastSignInAt,
@@ -325,14 +329,14 @@ export async function memberActivity(db: Queryable, actorIds: string[]) {
 /** The person an account at a provider is bound to, if it is. */
 export async function findIdentity(
   db: Queryable,
-  account: { provider: string; subject: string },
-): Promise<{ id: string; principalId: string } | null> {
+  account: { provider: string; issuerHash: string; subject: string },
+): Promise<{ id: string; principalId: string; generation: number | null } | null> {
   const { identities } = tablesOf(db);
   const [row] = await db
-    .select({ id: identities.id, principalId: identities.principalId })
+    .select({ id: identities.id, principalId: identities.principalId, generation: identities.generation })
     .from(identities)
     .where(
-      and(eq(identities.provider, account.provider), eq(identities.subject, account.subject), isNull(identities.revokedAt)),
+      and(eq(identities.provider, account.provider), eq(identities.issuerHash, account.issuerHash), eq(identities.subject, account.subject), isNull(identities.revokedAt)),
     );
   return row ?? null;
 }
@@ -355,12 +359,15 @@ export async function findCredential(db: Queryable, by: { tokenHash: Buffer } | 
     .select({
       id: credentials.id,
       kind: credentials.kind,
+      generation: credentials.generation,
       principalType: credentials.principalType,
       principalId: credentials.principalId,
       expiresAt: credentials.expiresAt,
       revokedAt: credentials.revokedAt,
       lastUsedAt: credentials.lastUsedAt,
       identityRevokedAt: identities.revokedAt,
+      identityProvider: identities.provider,
+      identityIssuerHash: identities.issuerHash,
       subject: identities.subject,
       now: clock(db),
     })
@@ -368,6 +375,23 @@ export async function findCredential(db: Queryable, by: { tokenHash: Buffer } | 
     .leftJoin(identities, eq(identities.id, credentials.identityId))
     .where('tokenHash' in by ? eq(credentials.tokenHash, by.tokenHash) : eq(credentials.id, by.id));
   return row ?? null;
+}
+
+/** Retire directory records from older memberships, including a sweep that rolled back. */
+export async function revokePriorMembership(
+  db: Queryable,
+  principal: { type: string; id: string },
+  generation: number,
+  revokedBy: string,
+): Promise<void> {
+  const { credentials, identities } = tablesOf(db);
+  const revokedAt = new Date();
+  for (const table of [credentials, identities]) {
+    await db.update(table).set({ revokedAt, revokedBy }).where(and(
+      eq(table.principalType, principal.type), eq(table.principalId, principal.id), isNull(table.revokedAt),
+      or(isNull(table.generation), ne(table.generation, generation)),
+    ));
+  }
 }
 
 /** Device authorizations: one by either of its codes, or every one still waiting for a decision. */
@@ -438,7 +462,7 @@ export async function environmentSecrets(
   environmentId: string,
   secretId?: string,
 ): Promise<SecretRow[]> {
-  const { secrets, secretVersions } = tablesOf(db);
+  const { secrets, secretVersions, projects, environments } = tablesOf(db);
   const rows = await db
     .select({
       id: secrets.id,
@@ -451,8 +475,15 @@ export async function environmentSecrets(
       ...envelopeColumns(secretVersions),
     })
     .from(secrets)
+    .innerJoin(projects, eq(projects.id, secrets.projectId))
+    .innerJoin(environments, eq(environments.id, secrets.environmentId))
     .leftJoin(secretVersions, eq(secretVersions.id, secrets.currentVersionId))
-    .where(and(eq(secrets.environmentId, environmentId), secretId === undefined ? undefined : eq(secrets.id, secretId)))
+    .where(and(
+      eq(secrets.environmentId, environmentId),
+      isNull(projects.archivedAt),
+      isNull(environments.archivedAt),
+      secretId === undefined ? undefined : eq(secrets.id, secretId),
+    ))
     .orderBy(asc(secrets.key));
   return rows.map((row) => ({
     id: row.id,

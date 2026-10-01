@@ -36,7 +36,7 @@ export function replay(store: Store, at: number): AccessFault | null {
     switch (row.action) {
       case 'principal.admit':
       case 'principal.restore':
-        members.set(principal, { principal, status: 'active', owner: detail.owner === true, since: row.at, by: row.actor });
+        members.set(principal, { principal, status: 'active', owner: detail.owner === true, generation: members.get(principal)?.generation ?? 0, since: row.at, by: row.actor });
         break;
       case 'principal.owner': {
         const member = members.get(principal);
@@ -45,7 +45,7 @@ export function replay(store: Store, at: number): AccessFault | null {
         break;
       }
       case 'principal.remove':
-        members.set(principal, { principal, status: 'removed', owner: false, since: row.at, by: row.actor });
+        members.set(principal, { principal, status: 'removed', owner: false, generation: (members.get(principal)?.generation ?? 0) + 1, since: row.at, by: row.actor });
         held.clear();
         break;
       case 'grant.create':
@@ -70,7 +70,7 @@ export function replay(store: Store, at: number): AccessFault | null {
     const [inStore, inLog] = [stored.get(principal), members.get(principal)];
     if (inLog === undefined) return { kind: 'unlogged-member', principal };
     if (inStore === undefined) return { kind: 'missing-member', principal };
-    const fields = (['status', 'owner', 'since', 'by'] as const).filter((field) => inStore[field] !== inLog[field]);
+    const fields = (['status', 'owner', 'generation', 'since', 'by'] as const).filter((field) => inStore[field] !== inLog[field]);
     if (fields.length > 0) return { kind: 'member-differs', principal, fields };
   }
 

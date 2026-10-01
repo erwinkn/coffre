@@ -54,10 +54,10 @@ const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
  * `Origin` on a POST. A request with neither is not from a page we can
  * vouch for.
  */
-export function isSameOrigin(request: Request): boolean {
+export function isSameOrigin(request: Request, publicUrl: string): boolean {
   const site = request.headers.get('sec-fetch-site');
   if (site !== null) return site === 'same-origin';
-  return request.headers.get('origin') === new URL(request.url).origin;
+  return request.headers.get('origin') === publicUrl;
 }
 
 /**
@@ -73,7 +73,7 @@ export async function apiCaller(
 ): Promise<AuthenticatedIdentity | Response> {
   const credential = apiCredential(request, runtime.auth);
   if (credential === null) return unauthenticated(runtime.auth);
-  if (credential.ambient && !SAFE_METHODS.has(request.method) && !isSameOrigin(request)) {
+  if (credential.ambient && !SAFE_METHODS.has(request.method) && !isSameOrigin(request, runtime.publicUrl)) {
     return errorResponse(
       new ApiError('cross_origin', 'a change sent with a browser session must come from coffre itself'),
     );

@@ -472,7 +472,7 @@ test('a sync reads as sync:<id>, and revoking its grant stops it', async () => {
   await settle();
   assert.equal(destination.values.get('API_KEY'), 'api-1');
   const { outcome } = await root.syncs.run(created.id);
-  assert.equal(outcome.status === 'failed' ? outcome.error : null, 'the vault refused: no grant covers this');
+  assert.equal(outcome.status === 'failed' ? outcome.error : null, 'the vault refused: the sync no longer has read access to its source');
   // Refused twice: the run the write started, and the one asked for by hand.
   const denials = (await auditActions('sync.run')).filter((row) => row.decision === 'deny');
   assert.deepEqual(denials.map((row) => [row.actorId, row.metadata.reason]), [
@@ -501,3 +501,42 @@ test('people with no access to the environment cannot see its syncs', async () =
   await createSync();
   await assert.rejects(clientFor(deps, 'stranger@acme.example').syncs.list('market/prod'), { status: 403 });
 });
+
+test('revoking the source grant stops a delete-only run before using its credential', async () => {
+  const created = await createSync();
+  assert.deepEqual(Object.fromEntries(destination.values), { API_KEY: 'api-1', DB_URL: 'postgres://db' });
+  await root.syncs.update(created.id, { paused: true });
+  await root.secrets.set('market/prod', { API_KEY: null, DB_URL: null });
+  await settle();
+  await root.access.set(`sync:${created.id}`, { 'market/prod': null });
+  destination.tokens = [];
+  destination.applied = [];
+  await root.syncs.update(created.id, { paused: false });
+  await settle();
+  assert.equal((await view(created.id)).lastStatus, 'failed');
+  assert.deepEqual(Object.fromEntries(destination.values), { API_KEY: 'api-1', DB_URL: 'postgres://db' });
+  assert.deepEqual(destination.tokens, []);
+  assert.deepEqual(destination.applied, []);
+  // Restoring the grant lets the same pending deletions complete.
+  await root.access.set(`sync:${created.id}`, { 'market/prod': 'viewer' });
+  const { outcome } = await root.syncs.run(created.id);
+  assert.equal(outcome.status, 'ok');
+  assert.deepEqual(outcome.status === 'ok' ? outcome.deleted.sort() : [], ['API_KEY', 'DB_URL']);
+  assert.equal(destination.values.size, 0);
+});
+
+for (const parent of ['environment', 'project']) {
+  test(`a credential in an archived ${parent} is not used by a sync`, async () => {
+    const created = await createSync();
+    assert.equal((await view(created.id)).lastStatus, 'ok');
+    if (parent === 'environment') await root.environments.update('ops/sync', { archived: true });
+    else await root.projects.update('ops', { archived: true });
+    destination.tokens = [];
+    await assert.rejects(root.secrets.reveal(CREDENTIAL), { status: 404 });
+    const { outcome } = await root.syncs.run(created.id);
+    assert.equal(outcome.status, 'failed');
+    assert.equal(outcome.status === 'failed' ? outcome.error : null,
+      'ops/sync/DEST_TOKEN is archived; restore it or point this sync at another secret');
+    assert.deepEqual(destination.tokens, []);
+  });
+}

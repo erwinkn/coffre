@@ -359,3 +359,11 @@ test('me shows only the environments and audit capability held', async () => {
   assert.equal(me.canReadAudit, false);
   assert.deepEqual(me.environments, [{ project: 'market', environment: 'dev', permissions: ['secret.read'] }]);
 });
+
+test('an empty secret patch is refused before it can disclose another environment', async () => {
+  await root.secrets.set('market/prod', { HIDDEN: 'value' });
+  await root.secrets.update('market/prod/HIDDEN', { archived: true });
+  await assert.rejects(reader.secrets.update('market/prod/HIDDEN', {}), { status: 400 });
+  await assert.rejects(root.secrets.update('market/prod/HIDDEN', {}), { status: 400 });
+  assert.deepEqual(await root.secrets.update('market/prod/HIDDEN', { archived: false }), { key: 'HIDDEN', archived: false });
+});

@@ -210,7 +210,7 @@ test('OIDC: an email the provider marks unverified is dropped', async () => {
   assert.equal(profile.subject, idp.subjectFor('dev@acme.example'));
 });
 
-test('OIDC: a token without email yields no email; one without email_verified is trusted', async () => {
+test('OIDC: a token without email or boolean verification cannot bind by email', async () => {
   const missing = new OidcSigninProvider(oidcConfig(), {
     fetch: editIdToken((claims) => {
       delete claims.email;
@@ -218,14 +218,48 @@ test('OIDC: a token without email yields no email; one without email_verified is
   });
   assert.deepEqual((await signIn(missing, 'dev@acme.example')).emails, []);
 
-  // Entra sends no email_verified at all.
-  const silent = new OidcSigninProvider(oidcConfig(), {
+  for (const verification of [undefined, null, 'true', 1]) {
+    const silent = new OidcSigninProvider(oidcConfig(), {
+      fetch: editIdToken((claims) => {
+        claims.email_verified = verification;
+        claims.email = '  Dev@Acme.EXAMPLE ';
+      }),
+    });
+    const profile = await signIn(silent, 'dev@acme.example');
+    assert.equal(profile.subject, idp.subjectFor('dev@acme.example'));
+    assert.deepEqual(profile.emails, [], `email_verified=${String(verification)}`);
+  }
+});
+
+test('Google: only verified Gmail and Workspace addresses can bind by email', async () => {
+  for (const [email, hd, accepted] of [
+    ['dev@gmail.com', undefined, true],
+    ['dev@acme.example', 'acme.example', true],
+    ['dev@recycled.example', undefined, false],
+  ] as const) {
+    const provider = new OidcSigninProvider(oidcConfig({ brand: 'google' }), {
+      fetch: editIdToken((claims) => {
+        claims.email = email;
+        claims.hd = hd;
+      }),
+    });
+    const profile = await signIn(provider, 'dev@acme.example');
+    assert.equal(profile.subject, idp.subjectFor('dev@acme.example'));
+    assert.deepEqual(profile.emails, accepted ? [email] : []);
+  }
+});
+
+test('Microsoft: an email claim cannot admit an account, but its subject can be linked', async () => {
+  const provider = new OidcSigninProvider(oidcConfig({ brand: 'microsoft' }), {
     fetch: editIdToken((claims) => {
       delete claims.email_verified;
-      claims.email = '  Dev@Acme.EXAMPLE ';
+      claims.xms_edov = true;
+      claims.preferred_username = claims.email;
     }),
   });
-  assert.deepEqual((await signIn(silent, 'dev@acme.example')).emails, ['dev@acme.example']);
+  const profile = await signIn(provider, 'dev@acme.example');
+  assert.equal(profile.subject, idp.subjectFor('dev@acme.example'));
+  assert.deepEqual(profile.emails, []);
 });
 
 test('OIDC: a hosted domain is checked on the hd claim, not the request', async () => {

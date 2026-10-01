@@ -187,7 +187,7 @@ function errorText(response: JsonResponse): string {
   if (body && typeof body === 'object' && body.errors?.length) {
     return body.errors.map((error) => error.message ?? 'unknown error').join('; ');
   }
-  if (typeof body === 'string' && body) return `${body.slice(0, 200)} (HTTP ${response.status})`;
+  if (typeof body === 'string' && body) return `${body} (HTTP ${response.status})`;
   return `HTTP ${response.status}`;
 }
 

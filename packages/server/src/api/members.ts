@@ -4,6 +4,7 @@ import type { Access, Grant } from '@coffre/core/vault';
 import type { Queryable } from '../db/database.ts';
 import {
   insertIfAbsent,
+  revokePriorMembership,
   lock,
   memberActivity,
   members as loadMembers,
@@ -357,6 +358,7 @@ export async function putMember(
   const fields = { principalType: member.type, principalId: member.id, instanceRole: input.owner === true ? 'owner' : 'user' };
   return audited(ctx, async (tx, log) => {
     requireOwner(ctx, 'directory.create', { metadata: fields });
+    await lock(tx, principals, { principalType: member.type, principalId: member.id });
     const standing = await ctx.vault.access(principal);
     if (standing.isRootAdmin) throw rootAdminRefusal(ctx, 'directory.create', member);
     if (member.type === 'service' && input.owner === true) {
@@ -373,6 +375,8 @@ export async function putMember(
       requestId: ctx.requestId,
     });
     if (!result.ok) throw vaultRefusal(ctx, result.refusal, 'directory.create', { metadata: fields });
+    const current = await ctx.vault.access(principal);
+    await revokePriorMembership(tx, member, current.generation, ctx.caller.principal.id);
     const role = result.owner ? 'owner' : 'user';
     await insertIfAbsent(tx, principals, {
       principalType: member.type,

@@ -44,7 +44,7 @@ export type SigninServiceDeps = {
 };
 
 /** Who is asking, for the calls a signed-in person makes about their own sign-in. */
-export type Asker = Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp'>;
+export type Asker = Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp' | 'credentialId'>;
 
 /** Why a provider-verified person was still not let in. */
 export type SigninRefusal =
@@ -91,7 +91,7 @@ export type SigninResult =
   | { ok: false; reason: SigninRefusal };
 
 /** A caller authenticated by a coffre-issued credential. */
-export type CredentialPrincipal = Principal & { credentialId: string };
+export type CredentialPrincipal = Principal & { credentialId: string; credentialGeneration: number };
 
 export type ClientMeta = {
   requestId: string;
@@ -201,7 +201,7 @@ export function normalizeUserCode(input: string): string | null {
  * Every credential is a random bearer token stored only as its SHA-256.
  *
  * Two first sign-ins of one account race on the unique index over
- * `(provider, subject)`: the loser's transaction fails, and it retries once,
+ * `(provider, issuerHash, subject)`: the loser's transaction fails, and it retries once,
  * now finding the account bound.
  */
 export class SigninService {
@@ -226,6 +226,12 @@ export class SigninService {
 
   openPending(value: string | null): PendingState | null {
     return unseal<PendingState>(this.#stateKey, value);
+  }
+
+  #issuerHash(providerId: string): string | null {
+    const provider = this.config.providers.find((candidate) => candidate.id === providerId);
+    // Fixed width keeps the identity index exact on every database engine.
+    return provider === undefined ? null : hashToken(provider.issuer).toString('hex');
   }
 
   // --- signing in ---------------------------------------------------------
@@ -260,15 +266,19 @@ export class SigninService {
 
     return audited(this.#deps, async (tx, log) => {
       const now = new Date();
-      const bound = await findIdentity(tx, profile);
+      const issuerHash = this.#issuerHash(profile.provider);
+      if (issuerHash === null) throw new SigninRefused('not_registered');
+      const bound = await findIdentity(tx, { ...profile, issuerHash });
 
       let principalId: string;
       let identityId: string;
+      let generation: number;
       if (bound !== null) {
         principalId = bound.principalId;
         identityId = bound.id;
         const standing = await this.#standing(tx, { type: 'user', id: principalId });
-        if (standing.status !== 'active') throw refuse('deactivated', principalId);
+        if (standing.status !== 'active' || bound.generation !== standing.generation) throw refuse('deactivated', principalId);
+        generation = standing.generation;
         await update(
           tx,
           identities,
@@ -284,6 +294,7 @@ export class SigninService {
         if (match === null) throw refuse('not_registered');
         principalId = match.id;
         if (match.status !== 'active') throw refuse('deactivated', principalId);
+        generation = match.generation;
         await this.#ensureRow(tx, principalId);
 
         const [person] = await members(tx, { member: { type: 'user', id: principalId } }, now);
@@ -291,11 +302,11 @@ export class SigninService {
           // This very account, bound a moment ago by a racing sign-in, is
           // no mismatch: binding it again hits the unique index, and the
           // retry finds it bound.
-          (identity) => identity.provider !== profile.provider || identity.subject !== profile.subject,
+          (identity) => identity.provider !== profile.provider || identity.issuerHash !== issuerHash || identity.subject !== profile.subject,
         );
         if (other) throw refuse('account_mismatch', principalId);
 
-        identityId = await this.#bind(tx, principalId, profile, principalId);
+        identityId = await this.#bind(tx, principalId, profile, principalId, generation);
         log.push({
           ...base,
           actorId: principalId,
@@ -307,6 +318,7 @@ export class SigninService {
 
       const principal: PrincipalRef = { type: 'user', id: principalId };
       const credential = await this.#issue(tx, 'browser', principal, {
+        generation,
         identityId,
         label: meta.label,
         createdBy: principalId,
@@ -330,15 +342,21 @@ export class SigninService {
     const account = { provider: profile.provider, subject: profile.subject, emails: profile.emails };
     if (ctx.caller.principal.type !== 'user') throw forbidden('only people link sign-in accounts');
     return audited(this.#deps, async (tx, log) => {
-      const bound = await findIdentity(tx, profile);
+      const standing = await this.#currentCaller(tx, ctx);
+      if (standing === null) {
+        throw new Refusal(new SigninRefused('deactivated'), denied(ctx, 'identity.bind', 'session_ended', { metadata: account }));
+      }
+      const issuerHash = this.#issuerHash(profile.provider);
+      if (issuerHash === null) throw new SigninRefused('not_registered');
+      const bound = await findIdentity(tx, { ...profile, issuerHash });
       if (bound !== null) {
-        if (bound.principalId === ctx.caller.principal.id) return { ok: true as const };
+        if (bound.principalId === ctx.caller.principal.id && bound.generation === standing.generation) return { ok: true as const };
         throw new Refusal(
           new SigninRefused('already_linked'),
           denied(ctx, 'identity.bind', 'already_linked', { metadata: account }),
         );
       }
-      const identityId = await this.#bind(tx, ctx.caller.principal.id, profile, ctx.caller.principal.id);
+      const identityId = await this.#bind(tx, ctx.caller.principal.id, profile, ctx.caller.principal.id, standing.generation);
       log.push(allowed(ctx, 'identity.bind', { metadata: { ...account, identityId } }));
       return { ok: true as const };
     }).catch(refusalOrThrow);
@@ -352,11 +370,13 @@ export class SigninService {
     await insertIfAbsent(tx, principals, { principalType: 'user', principalId, createdBy: 'system:signin' });
   }
 
-  async #bind(tx: Transaction, principalId: string, profile: SignedInAccount, createdBy: string): Promise<string> {
+  async #bind(tx: Transaction, principalId: string, profile: SignedInAccount, createdBy: string, generation: number): Promise<string> {
     const id = randomUUID();
     await insert(tx, identities, {
       id,
       provider: profile.provider,
+      issuerHash: this.#issuerHash(profile.provider),
+      generation,
       subject: profile.subject,
       principalType: 'user',
       principalId,
@@ -375,10 +395,10 @@ export class SigninService {
    */
   async #principalForEmails(
     emails: readonly string[],
-  ): Promise<{ id: string; status: Access['status']; email: string } | null> {
+  ): Promise<{ id: string; status: Access['status']; generation: number; email: string } | null> {
     for (const email of emails) {
-      const { status } = await this.#deps.vault.access(formatMember({ type: 'user', id: email }));
-      if (status !== 'unknown') return { id: email, status, email };
+      const { status, generation } = await this.#deps.vault.access(formatMember({ type: 'user', id: email }));
+      if (status !== 'unknown') return { id: email, status, generation, email };
     }
     return null;
   }
@@ -394,11 +414,30 @@ export class SigninService {
     return this.#deps.vault.access(formatMember(principal));
   }
 
+  /** Revalidate an in-flight browser action while holding the removal lock. */
+  async #currentCaller(tx: Transaction, ctx: Asker): Promise<Access | null> {
+    const standing = await this.#standing(tx, ctx.caller.principal);
+    if (standing.status !== 'active' || standing.generation !== ctx.caller.generation) return null;
+    if (ctx.credentialId !== null) {
+      const row = await findCredential(tx, { id: ctx.credentialId });
+      if (!this.#liveCredential(row, standing, new Date()) || row?.principalType !== ctx.caller.principal.type
+        || row.principalId !== ctx.caller.principal.id) return null;
+    }
+    return standing;
+  }
+
+  #liveCredential(row: Awaited<ReturnType<typeof findCredential>>, access: Access, now: Date): boolean {
+    return row !== null && row.revokedAt === null && row.expiresAt > now && row.identityRevokedAt === null
+      && access.status === 'active' && row.generation === access.generation
+      && (row.kind !== 'browser' || (row.identityIssuerHash !== null
+        && row.identityIssuerHash === this.#issuerHash(row.identityProvider ?? '')));
+  }
+
   async #issue(
     tx: Transaction,
     kind: CredentialKind,
     principal: PrincipalRef,
-    options: { identityId: string | null; label: string | null; createdBy: string; expiresAt: Date },
+    options: { generation: number; identityId: string | null; label: string | null; createdBy: string; expiresAt: Date },
   ): Promise<IssuedCredential> {
     const token = generateToken(kind);
     const id = randomUUID();
@@ -406,6 +445,7 @@ export class SigninService {
       id,
       kind,
       tokenHash: hashToken(token),
+      generation: options.generation,
       tokenHint: tokenHint(token),
       principalType: principal.type,
       principalId: principal.id,
@@ -432,8 +472,9 @@ export class SigninService {
     const now = new Date();
 
     const row = await findCredential(db, { tokenHash: hashToken(token) });
-    const live = row !== null && row.revokedAt === null && row.expiresAt > now && row.identityRevokedAt === null;
-    if (!live) throw new Error('unknown, expired or revoked credential');
+    if (row === null) throw new Error('unknown, expired or revoked credential');
+    const access = await this.#deps.vault.access(formatMember({ type: row.principalType as PrincipalRef['type'], id: row.principalId }));
+    if (!this.#liveCredential(row, access, now)) throw new Error('unknown, expired or revoked credential');
 
     const lastUsed = row.lastUsedAt?.getTime() ?? 0;
     if (now.getTime() - lastUsed > TOUCH_INTERVAL_MS) {
@@ -443,13 +484,14 @@ export class SigninService {
     }
 
     return row.principalType === 'service'
-      ? { type: 'service', id: row.principalId, commonName: row.principalId, credentialId: row.id }
+      ? { type: 'service', id: row.principalId, commonName: row.principalId, credentialId: row.id, credentialGeneration: row.generation! }
       : {
           type: 'user',
           id: row.principalId,
           email: row.principalId,
           subject: row.subject ?? row.principalId,
           credentialId: row.id,
+          credentialGeneration: row.generation!,
         };
   }
 
@@ -620,13 +662,15 @@ export class SigninService {
         );
       }
       const service = { type: 'service' as const, id: serviceId };
-      if ((await this.#standing(tx, service)).status !== 'active') {
+      const standing = await this.#standing(tx, service);
+      if (standing.status !== 'active') {
         throw new Refusal(
           notFound('unknown service'),
           denied(ctx, 'credential.issue', 'unknown_principal', { metadata: details }),
         );
       }
       const credential = await this.#issue(tx, 'service', service, {
+        generation: standing.generation,
         identityId: null,
         label: input.label,
         createdBy: ctx.caller.principal.id,
@@ -710,6 +754,10 @@ export class SigninService {
     const code = normalizeUserCode(userCodeInput);
     if (ctx.caller.principal.type !== 'user') throw forbidden('only people approve sign-ins');
     return audited(this.#deps, async (tx, log) => {
+      const standing = await this.#currentCaller(tx, ctx);
+      if (standing === null) {
+        throw new Refusal(forbidden('that session has ended'), denied(ctx, action, 'session_ended'));
+      }
       const now = new Date();
       const [row] = code === null ? [] : (await findDeviceAuthorizations(tx, { userCode: code })).filter(isOpen(now));
       // Deciding only an undecided code makes two approvers racing agree on one answer.
@@ -721,7 +769,7 @@ export class SigninService {
               deviceAuthorizations,
               { id: row.id, decidedAt: null },
               approve
-                ? { decidedAt: now, decision: 'approved', principalType: 'user', principalId: ctx.caller.principal.id }
+                ? { decidedAt: now, decision: 'approved', principalType: 'user', principalId: ctx.caller.principal.id, generation: standing.generation }
                 : { decidedAt: now, decision: 'denied' },
             );
       if (row === undefined || decided === 0) {
@@ -758,11 +806,11 @@ export class SigninService {
       // An approval given before the person was last added is void: someone
       // removed and re-added in between starts with nothing from before.
       const standing = await this.#standing(tx, { type: 'user', id: principalId });
-      const since = standing.since === null ? null : new Date(standing.since);
-      if (standing.status !== 'active' || (since !== null && since > row.decidedAt!)) return { status: 'denied' };
+      if (standing.status !== 'active' || standing.generation !== row.generation) return { status: 'denied' };
 
       const principal: PrincipalRef = { type: 'user', id: principalId };
       const credential = await this.#issue(tx, 'cli', principal, {
+        generation: standing.generation,
         identityId: null,
         label: row.clientLabel,
         createdBy: principalId,

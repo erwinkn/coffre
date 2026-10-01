@@ -55,6 +55,7 @@ CREATE TABLE `credentials` (
 	`kind` text NOT NULL,
 	`token_hash` varbinary(32) NOT NULL,
 	`token_hint` text NOT NULL,
+	`generation` int,
 	`principal_type` varchar(16) NOT NULL,
 	`principal_id` varchar(330) NOT NULL,
 	`identity_id` varchar(36),
@@ -83,6 +84,7 @@ CREATE TABLE `device_authorizations` (
 	`expires_at` datetime(3) NOT NULL,
 	`decided_at` datetime(3),
 	`decision` text,
+	`generation` int,
 	`principal_type` varchar(16),
 	`principal_id` varchar(330),
 	`consumed_at` datetime(3),
@@ -110,6 +112,8 @@ CREATE TABLE `identities` (
 	`id` varchar(36) NOT NULL,
 	`provider` varchar(32) NOT NULL,
 	`subject` varchar(255) NOT NULL,
+	`issuer_hash` varchar(64),
+	`generation` int,
 	`principal_type` varchar(16) NOT NULL,
 	`principal_id` varchar(330) NOT NULL,
 	`email` text,
@@ -120,7 +124,7 @@ CREATE TABLE `identities` (
 	`revoked_by` text,
 	`active_subject` varchar(255) GENERATED ALWAYS AS (CASE WHEN revoked_at IS NULL THEN subject END) STORED,
 	CONSTRAINT `identities_id` PRIMARY KEY(`id`),
-	CONSTRAINT `identities_active_subject` UNIQUE(`provider`,`active_subject`),
+	CONSTRAINT `identities_active_subject` UNIQUE(`provider`,`issuer_hash`,`active_subject`),
 	CONSTRAINT `identities_principal_type_check` CHECK(`identities`.`principal_type` = 'user'),
 	CONSTRAINT `identities_provider_check` CHECK(regexp_like(`identities`.`provider`, '^[a-z0-9][a-z0-9-]{0,31}$', 'c'))
 );

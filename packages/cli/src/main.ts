@@ -8,7 +8,7 @@
  */
 import { parseArgs } from 'node:util';
 import { execFile, spawn } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { chmodSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, existsSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -52,10 +52,28 @@ function readStore(): Store {
 }
 
 function writeStore(store: Store): void {
-  mkdirSync(dirname(CREDENTIALS_PATH), { recursive: true, mode: 0o700 });
-  // 0600: a token that grants access to production secrets should not be
-  // world-readable on a shared machine.
-  writeFileSync(CREDENTIALS_PATH, `${JSON.stringify(store, null, 2)}\n`, { mode: 0o600 });
+  const directory = dirname(CREDENTIALS_PATH);
+  try {
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    if (lstatSync(directory).isSymbolicLink() || (existsSync(CREDENTIALS_PATH) && lstatSync(CREDENTIALS_PATH).isSymbolicLink())) {
+      throw new Error('a symbolic link is not a credentials path');
+    }
+    chmodSync(directory, 0o700);
+    if ((statSync(directory).mode & 0o777) !== 0o700) throw new Error('directory permissions must be 0700');
+    // Creation modes do not tighten an existing file. Replace it privately,
+    // so a shared inode or a failed write never receives a new session.
+    const temporary = join(directory, `.credentials-${crypto.randomUUID()}`);
+    try {
+      writeFileSync(temporary, `${JSON.stringify(store, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
+      chmodSync(temporary, 0o600);
+      if ((statSync(temporary).mode & 0o777) !== 0o600) throw new Error('file permissions must be 0600');
+      renameSync(temporary, CREDENTIALS_PATH);
+    } finally {
+      rmSync(temporary, { force: true });
+    }
+  } catch (error) {
+    fail(`cannot secure credentials at ${CREDENTIALS_PATH}: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 function fail(message: string): never {

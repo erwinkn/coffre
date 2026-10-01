@@ -96,6 +96,14 @@ const MIGRATIONS: readonly (readonly string[])[] = [
       SELECT RAISE(ABORT, 'checkpoints are append-only');
     END`,
   ],
+  [
+    'ALTER TABLE principals ADD COLUMN generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0)',
+    // Existing removals already belong to the log. Preserve their generations.
+    `UPDATE principals SET generation = (
+      SELECT count(*) FROM log WHERE action = 'principal.remove'
+      AND outcome = 'allow' AND subject = principals.principal
+    )`,
+  ],
 ];
 
 /**

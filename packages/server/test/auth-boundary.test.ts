@@ -28,7 +28,7 @@ function vaultKnowing(known: Record<string, Partial<Access>>, onAsk = (_principa
   return {
     access: async (principal: string): Promise<Access> => {
       onAsk(principal);
-      return { principal, status: 'unknown', isRootAdmin: false, isOwner: false, grants: [], since: null, by: null, ...known[principal] };
+      return { principal, status: 'unknown', generation: 0, isRootAdmin: false, isOwner: false, grants: [], since: null, by: null, ...known[principal] };
     },
   };
 }
@@ -214,6 +214,7 @@ test('an unregistered non-root identity is marked for the closed-door boundary',
     caller: {
       principal: { type: 'user', id: 'new@acme.example' },
       registered: false,
+      generation: 0,
       isRootAdmin: false,
       isOwner: false,
       instanceRole: 'user',
@@ -273,6 +274,7 @@ test('an active registered identity receives an auditable request context', asyn
       caller: {
         principal: { type: 'service', id: 'reporting.access' },
         registered: true,
+        generation: 0,
         isRootAdmin: false,
         isOwner: false,
         instanceRole: 'user',
@@ -308,4 +310,17 @@ test('a principal lookup that fails answers unavailable, not unauthenticated', a
   assert.equal(result instanceof Response, true);
   assert.equal((result as Response).status, 503);
   assert.equal(((await (result as Response).json()) as { error: string }).error, 'unavailable');
+});
+
+test('removal between credential verification and caller loading cannot use the new membership', async () => {
+  const runtime = {
+    auth: own,
+    verifier: { verify: async () => ({ ...root, credentialId: 'old-session', credentialGeneration: 0 }) },
+    vault: vaultKnowing({ [`user:${root.id}`]: { status: 'active', generation: 1 } }),
+  };
+  const result = await authenticateRequest(new Request('https://coffre.test/api/me'), runtime as never,
+    'request', 'coffre_web_old');
+  assert.ok(result instanceof Response);
+  assert.equal(result.status, 401);
+  assert.equal((await result.json() as { error: string }).error, 'unauthenticated');
 });

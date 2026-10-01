@@ -48,7 +48,7 @@ async function route(request: Request, runtime: CoffreRuntime, sourceIp: string 
   const exact = ROUTES[pathname];
   if (exact !== undefined) {
     if (request.method !== exact.method) return methodNotAllowed([exact.method]);
-    if (exact.browserForm && !isSameOrigin(request)) {
+    if (exact.browserForm && !isSameOrigin(request, runtime.publicUrl)) {
       return errorResponse(new ApiError('cross_origin', 'this must be sent from coffre itself'));
     }
     return exact.handler(request, runtime, sourceIp);

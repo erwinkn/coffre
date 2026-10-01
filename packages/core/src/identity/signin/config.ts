@@ -155,6 +155,9 @@ const TENANT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
  * `organizations`) publish an issuer template rather than an issuer, which
  * standard OIDC validation rejects, and "any work account in the world" is not
  * an audience a secrets manager wants anyway.
+ *
+ * Entra email claims do not prove address ownership. Sign in through another
+ * provider and link the Microsoft account first; later sign-ins use its subject.
  */
 export function microsoft(
   options: Credentials & { id?: string; label?: string; tenant: string },
@@ -275,6 +278,9 @@ export function defineSignin(options: {
 /** A deployment's own provider is checked like coffre's: it is only typed, not trusted. */
 function checkProvider(provider: SigninProvider): void {
   checkId(provider?.id);
+  if (typeof provider.issuer !== 'string' || provider.issuer.trim() === '') {
+    throw new Error(`sign-in provider ${provider.id} needs a stable issuer`);
+  }
   if (typeof provider.label !== 'string' || provider.label.trim() === '') {
     throw new Error(`sign-in provider ${provider.id} needs a label`);
   }

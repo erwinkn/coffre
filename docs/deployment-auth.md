@@ -42,7 +42,8 @@ provider that speaks neither protocol, and list it beside the others:
 import type { SigninProvider } from '@coffre/server/cloudflare';
 
 const acme: SigninProvider = {
-  id: 'acme',                  // stable: in the callback URL and every account bound through it
+  id: 'acme',
+  issuer: 'https://sso.acme.example',                  // stable: in the callback URL and every account bound through it
   label: 'Acme SSO',           // "Continue with Acme SSO"
   brand: 'oidc',               // the button's mark: github, google, microsoft, or oidc (a key)
   async start(redirectUri) {
@@ -211,3 +212,27 @@ up trusting it. The seed signs in the same way, as the root admin, and
 conformance does too, with the dev IdP in its own process for the run.
 Nothing local stands in for Access: its verifier is covered by unit tests
 against Access-shaped tokens.
+
+### Email admission
+
+Generic OIDC providers must send `email_verified: true` before an address can
+match an invitation or bootstrap a root administrator. Google also requires a
+Gmail address or a Workspace `hd` claim. A third-party Google account may still
+carry an address whose ownership has changed.
+
+Microsoft Entra's email and username claims do not prove address ownership.
+Sign in through another provider and link the Microsoft account in Settings.
+Later sign-ins use its stable subject, without relying on an email claim. An
+Entra-only deployment needs another sign-in provider for initial admission.
+
+### Changing an identity issuer
+
+An account binding includes the configured provider ID, a fingerprint of its
+issuer, and its subject. OIDC uses the issuer URL; GitHub uses the API base URL
+that supplies the account ID. Custom providers must name their stable `issuer`.
+
+Changing the issuer under an existing provider ID refuses the old bindings and
+browser sessions. Before changing it, link another provider so that members can
+sign in there and explicitly link their accounts at the new issuer. Matching an
+email does not transfer an existing binding. Legacy bindings without an issuer
+fingerprint are refused too; they cannot be upgraded by guessing their issuer.

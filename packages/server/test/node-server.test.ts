@@ -61,7 +61,7 @@ test.after(async () => {
 function raw(path: string, headers: Record<string, string> = {}, method = 'GET') {
   return new Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: string }>(
     (resolve, reject) => {
-      const req = request(`${server.url}${path}`, { method, headers }, (res) => {
+      const req = request(server.url, { path, method, headers }, (res) => {
         let body = '';
         res.setEncoding('utf8');
         res.on('data', (chunk) => (body += chunk));
@@ -111,4 +111,17 @@ test('the API answers as the API, and refuses without a credential', async () =>
   const response = await raw('/api/me');
   assert.equal(response.status, 401);
   assert.equal(JSON.parse(response.body).error, 'unauthenticated');
+});
+
+
+test('a request target cannot replace the public origin or satisfy its Origin check', async () => {
+  for (const path of ['//evil.example/auth/signout', '/\\evil.example/auth/signout', 'https://evil.example/auth/signout']) {
+    const response = await raw(path, { origin: 'https://evil.example' }, 'POST');
+    assert.equal(response.status, 400, path);
+    assert.equal(response.body, 'Invalid request target', path);
+  }
+  const crossOrigin = await raw('/auth/signout', { origin: 'https://evil.example' }, 'POST');
+  assert.equal(crossOrigin.status, 403);
+  const sameOrigin = await raw('/auth/signout', { origin: 'http://127.0.0.1:3089' }, 'POST');
+  assert.equal(sameOrigin.status, 303);
 });

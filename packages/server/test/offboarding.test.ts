@@ -279,3 +279,71 @@ test('only owners see reports, and only about someone who exists', async () => {
   assert.equal(rootReport.status, 'active');
   assert.equal(rootReport.instanceRole, 'root-admin');
 });
+
+for (const readmitFirst of [false, true]) {
+  test(`a linking callback authenticated before removal is refused${readmitFirst ? ' after re-admission too' : ''}`, async () => {
+    const browser = await browserSession(DEV, 'original');
+    const stale = { ...await contextFor(deps, DEV), credentialId: browser.id };
+    await root.members.remove(`user:${DEV}`);
+    if (readmitFirst) await root.members.add(`user:${DEV}`);
+    assert.deepEqual(await signin.linkIdentity(stale, {
+      provider: 'github', subject: 'personal', emails: ['personal@example.com'], name: null,
+    }), { ok: false, reason: 'deactivated' });
+    if (!readmitFirst) await root.members.add(`user:${DEV}`);
+    assert.deepEqual(await signin.completeSignin({
+      provider: 'github', subject: 'personal', emails: ['personal@example.com'], name: null,
+    }, meta()), { ok: false, reason: 'not_registered' });
+  });
+}
+
+test('a linking callback rechecks the session that authenticated it', async () => {
+  const browser = await browserSession(DEV, 'original');
+  const stale = { ...await contextFor(deps, DEV), credentialId: browser.id };
+  await signin.signOut(browser.token, meta());
+  assert.deepEqual(await signin.linkIdentity(stale, {
+    provider: 'github', subject: 'personal', emails: [], name: null,
+  }), { ok: false, reason: 'deactivated' });
+});
+
+test('a failed app transaction cannot revive credentials when the vault re-admits a member', async () => {
+  const browser = await browserSession(DEV, 'original');
+  const cli = await cliSession(DEV);
+  const service = await lead.tokens.issue(`token:${SERVICE}`, { label: 'ci', expiresInDays: 30 });
+  // The vault has committed, but none of the app transaction survives.
+  const failed = new Proxy(deps.db, {
+    get(target, property) {
+      if (property !== 'transaction') return Reflect.get(target, property);
+      return (work: Parameters<typeof target.transaction>[0]) => target.transaction(async (tx) => {
+        await work(tx);
+        throw new Error('simulated app commit failure');
+      });
+    },
+  });
+  const failingRoot = clientFor({ ...deps, db: failed }, ROOT);
+  for (const principal of [`user:${DEV}`, `token:${SERVICE}`]) {
+    await assert.rejects(failingRoot.members.remove(principal), { status: 500 });
+    assert.equal((await deps.vault.access(principal)).status, 'removed');
+    assert.equal((await deps.vault.admit({ actor: `user:${ROOT}`, principal })).ok, true);
+  }
+  assert.equal((await db.owner.select().from(credentials).where(isNull(credentials.revokedAt))).length, 3,
+    'the directory sweep rolled back, so generation must enforce removal');
+  for (const token of [browser.token, cli.token, service.token]) {
+    await assert.rejects(signin.verify(token), /unknown, expired or revoked/);
+  }
+  assert.deepEqual(await signin.completeSignin({
+    provider: 'github', subject: 'original', emails: [], name: null,
+  }, meta()), { ok: false, reason: 'deactivated' });
+  // Retrying admission cleans up stale directory records and allows a fresh binding.
+  await root.members.add(`user:${DEV}`);
+  const fresh = await browserSession(DEV, 'replacement');
+  assert.equal((await signin.verify(fresh.token)).id, DEV);
+});
+
+test('device approval cannot survive removal when the vault clock moves backwards', async () => {
+  const started = await signin.startDevice({ clientLabel: 'laptop', sourceIp: IP });
+  await signin.decideDevice(await contextFor(deps, DEV), started.userCode, true);
+  deps.vault.advance(-60_000);
+  await root.members.remove(`user:${DEV}`);
+  await root.members.add(`user:${DEV}`);
+  assert.deepEqual(await signin.pollDevice(started.deviceCode, meta()), { status: 'denied' });
+});

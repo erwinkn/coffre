@@ -2,7 +2,7 @@ import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 
-import { defineSignin, github, google, hashToken, isCoffreToken } from '@coffre/core/identity';
+import { defineSignin, github, google, oidc, hashToken, isCoffreToken } from '@coffre/core/identity';
 import { count, eq, isNotNull, isNull, type SQL } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 
@@ -247,6 +247,7 @@ test('a first sign-in with an invited email binds the account and opens a browse
     email: DEV,
     subject: '101',
     credentialId: result.credential.id,
+    credentialGeneration: 0,
   });
 });
 
@@ -349,9 +350,8 @@ test('deactivated people are refused, bound or not, and their sessions stop', as
     await signin.completeSignin(profile('github', '101', [DEV]), meta()),
     { ok: false, reason: 'deactivated' },
   );
-  // The session still verifies, but every request asks the vault who its
-  // caller is, and a removed member is nobody.
-  assert.equal((await signin.verify(session.credential.token)).id, DEV);
+  // The credential belongs to the membership that just ended.
+  await assert.rejects(signin.verify(session.credential.token), /unknown, expired or revoked/);
   assert.equal((await as(DEV)).caller.registered, false);
 
   const rows = await auditRows();
@@ -679,6 +679,7 @@ test('owners issue service tokens that verify as the service', async () => {
     id: SERVICE,
     commonName: SERVICE,
     credentialId: issued.id,
+    credentialGeneration: 0,
   });
 
   const byRoot = await signin.issueServiceToken(root, SERVICE, { label: null, expiresInDays: 366 });
@@ -756,7 +757,7 @@ test('a service token stops working when the service is deactivated, revoked or 
   await deactivate(SERVICE);
   assert.equal((await as(SERVICE, 'service')).caller.registered, false);
   await deactivate(SERVICE, true);
-  assert.equal((await signin.verify(deactivated.token)).id, SERVICE);
+  await assert.rejects(signin.verify(deactivated.token), /unknown, expired or revoked/);
   assert.equal((await as(SERVICE, 'service')).caller.registered, true);
 
   await db.owner.update(credentials).set({ expiresAt: aSecondAgo() });
@@ -839,6 +840,7 @@ test('device flow: start, describe, approve, then one poll gets a CLI session', 
     email: DEV,
     subject: DEV,
     credentialId: approved.credential.id,
+    credentialGeneration: 0,
   });
 
   // Exactly once.
@@ -1045,4 +1047,35 @@ test('service tokens are issued, listed and revoked through the API, in signin m
   const access = clientFor({ ...deps, signin: undefined }, ROOT);
   await assert.rejects(access.tokens.list(member), { status: 404 });
   await assert.rejects(access.tokens.issue(member, { label: null, expiresInDays: 30 }), { status: 404 });
+});
+
+
+test('replacing an issuer requires an explicit re-link and invalidates its browser sessions', async () => {
+  const atIssuer = (issuer: string) => new SigninService({
+    ...deps,
+    signin: defineSignin({ publicUrl: CONFIG.publicUrl, providers: [
+      ...CONFIG.providers,
+      oidc({ id: 'company', label: 'Company', issuer, clientId: 'client', clientSecret: 'secret' }),
+    ] }),
+  });
+  signin = atIssuer('https://old-idp.example');
+  const old = await signedIn(profile('company', 'same-subject', [DEV]));
+  await signin.linkIdentity(dev, profile('github', 'backup', [DEV]));
+  const backup = await signedIn(profile('github', 'backup', [DEV]));
+  signin = atIssuer('https://new-idp.example');
+  assert.deepEqual(await signin.completeSignin(profile('company', 'same-subject', [DEV]), meta()),
+    { ok: false, reason: 'account_mismatch' });
+  await assert.rejects(signin.verify(old.credential.token), /unknown, expired or revoked/);
+  assert.equal((await signin.verify(backup.credential.token)).id, DEV);
+  assert.deepEqual(await signin.linkIdentity(dev, profile('company', 'same-subject', [])), { ok: true });
+  assert.equal((await signedIn(profile('company', 'same-subject', []))).principal.id, DEV);
+});
+
+test('a binding without an issuer cannot be reused or silently bound again by email', async () => {
+  await db.owner.insert(identities).values({
+    id: randomUUID(), provider: 'github', subject: 'legacy', principalType: 'user', principalId: DEV,
+    email: DEV, createdBy: DEV,
+  });
+  assert.deepEqual(await signin.completeSignin(profile('github', 'legacy', [DEV]), meta()),
+    { ok: false, reason: 'account_mismatch' });
 });

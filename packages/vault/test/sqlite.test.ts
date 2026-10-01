@@ -88,8 +88,8 @@ test('migrating is idempotent, and a store from a newer vault is refused', (t) =
   migrate(again);
   migrate(again);
   assert.deepEqual(tables(again), created);
-  assert.deepEqual(again.all('SELECT version FROM migrations').map((row) => ({ ...(row as object) })), [{ version: 1 }]);
+  assert.deepEqual(again.all('SELECT version FROM migrations').map((row) => ({ ...(row as object) })), [{ version: 1 }, { version: 2 }]);
 
-  again.run('INSERT INTO migrations (version) VALUES (2)');
-  assert.throws(() => migrate(again), /at version 2; this vault knows 1/);
+  again.run('INSERT INTO migrations (version) VALUES (3)');
+  assert.throws(() => migrate(again), /at version 3; this vault knows 2/);
 });

@@ -280,3 +280,16 @@ test('retries a 5xx, then reports upstream', async () => {
   assert.equal((error as SyncProviderError).code, 'upstream');
   assert.equal(down.requests.length, 3);
 });
+
+test('redacts credentials across the text-error cut before shortening the message', async () => {
+  const token = 'sensitive-token-' + 'x'.repeat(80);
+  for (const offset of [190, 490]) {
+    const upstream = fakeFetch({
+      [`GET ${PROJECT}?${TEAM}`]: { status: 403, body: `${'.'.repeat(offset)}${token} rejected` },
+    });
+    const error = await rejection(vercel.listKeys({ token, fetch: upstream.fetch }, vercel.parseConfig(productionOnly)));
+    assert.equal(error.code, 'forbidden');
+    assertNoLeak(error.message, ['sensitive-', token]);
+    assert.match(error.message, /\[redacted\]/);
+  }
+});

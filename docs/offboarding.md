@@ -89,3 +89,14 @@ Services are `token:<name>`. From the client, `coffre.members.get(member)` and
 `coffre.members.remove(member)`.
 
 Both need the instance owner role (root admins have it).
+
+Removal advances a membership generation in the vault's own transaction. Browser
+and CLI sessions, service tokens, linked identities and device approvals carry
+the generation they were issued under. Re-admission cannot revive them, even if
+the app's revocation transaction failed after the vault committed. Retrying
+admission retires any stale directory records. Account linking and device
+approval recheck the initiating membership while holding the removal lock.
+
+This does not make vault access changes atomic with the app audit log. A failed
+app transaction can still leave a committed vault change; the shared-database
+redesign must join those writes into one transaction.
