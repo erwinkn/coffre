@@ -1,6 +1,6 @@
 {
   "name": "@coffre/client",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "The coffre API as typed function calls.",
   "license": "MIT",
   "repository": {
