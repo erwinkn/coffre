@@ -1,6 +1,6 @@
 {
   "name": "@coffre/cli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "The coffre command line: secrets in your shell, and `coffre init` for a new deployment.",
   "license": "MIT",
   "repository": {
