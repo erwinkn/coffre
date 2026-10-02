@@ -92,9 +92,9 @@ acme-secrets/
 ### 1. Settings
 
 Set `PUBLIC_URL` and `GITHUB_CLIENT_ID` in `app/wrangler.jsonc`. The GitHub
-OAuth app's callback is `<PUBLIC_URL>/auth/callback/github`. Set `KEK_ID`
-and `ROOT_ADMINS` in `vault/wrangler.jsonc`. The latter names the first
-people in, whom nobody can remove through the API.
+OAuth app's callback is `<PUBLIC_URL>/auth/callback/github`. Set
+`ROOT_ADMINS` in `vault/wrangler.jsonc`: the first people in, whom nobody can
+remove through the API. `KEK_ID` comes with the keys, in step 3.
 
 For Cloudflare Access instead, replace `signin(…)` with `cloudflareAccess(…)`
 ([deployment-auth.md](deployment-auth.md)).
@@ -123,10 +123,28 @@ with `wrangler hyperdrive update <id> --caching-disabled`.
 
 ### 3. Keys and secrets
 
-Generate three separate 32-byte keys with `openssl rand -base64 32`.
-Save them in a password manager **before** uploading them. Escrow the KEK
-with its `KEK_ID`, `SIGNING_KEY`, `AUDIT_CHAIN_KEY`, and the GitHub client
-secret. Each command below prompts for the saved value:
+coffre needs three keys, split between its two components so that the app,
+which faces the network, never holds what decrypts a value:
+
+| Key | Held by | What it does | If it is lost |
+|---|---|---|---|
+| `KEK`, named by `KEK_ID` | the vault | decrypts every value | every value is lost for good |
+| `SIGNING_KEY` | the vault | signs the vault's log entries, checkpoints and member rows | the log stops verifying, and every member is refused |
+| `AUDIT_CHAIN_KEY` | the app | signs the app's log entries, sessions and tokens | the log stops verifying, and everyone is signed out |
+
+The KEK matters most: with it and a copy of the database, anyone has every
+value, so it never sits beside the backups. Make all three, and the KEK's
+id, at once:
+
+```sh
+coffre keys
+```
+
+It prints them once, as `NAME=value` lines, with a note on each, and keeps
+no copy; it uploads nothing and writes no file. Save the output in your
+password manager, with the GitHub client secret, **before** setting
+anything. Then put `KEK_ID` under `vars` in `vault/wrangler.jsonc`, and set
+the secrets; each command prompts for the saved value:
 
 ```sh
 pnpm exec wrangler secret put KEK -c vault/wrangler.jsonc
@@ -135,12 +153,9 @@ pnpm exec wrangler secret put AUDIT_CHAIN_KEY -c app/wrangler.jsonc
 pnpm exec wrangler secret put GITHUB_CLIENT_SECRET -c app/wrangler.jsonc
 ```
 
-Only the vault gets the KEK and signing key; only the app gets the audit
-key and OAuth secret. Without the KEK, stored values cannot be read.
-Without the signing and audit keys, the existing log cannot be verified.
-Keep old KEKs too: a new KEK does not rewrap existing data keys. Configure
-older ones as `previousKeks`. For AWS KMS, see [keys.md](keys.md); recovery
-needs access to every KMS key that still wraps stored data keys.
+Keep old KEKs too: a new KEK wraps new values only, so every older one stays
+in `previousKeks`, and escrowed, while anything it wrapped remains. For AWS
+KMS instead of a key of your own, see [keys.md](keys.md).
 
 ### 4. Deploy
 
@@ -170,9 +185,11 @@ cp vault.env.example vault.env
 chmod 600 server.env vault.env
 ```
 
-Fill in `PUBLIC_URL`, the GitHub OAuth settings, `ROOT_ADMINS` and the
-three separately generated, escrowed keys. Set the two `DATABASE_URL`s to
-one database, using different logins:
+Fill in `PUBLIC_URL`, the GitHub OAuth settings and `ROOT_ADMINS`, and the
+keys from `coffre keys`, saved in your password manager first
+([step 3 above](#3-keys-and-secrets) says what each is for): `KEK_ID`, `KEK`
+and `SIGNING_KEY` in `vault.env`, `AUDIT_CHAIN_KEY` in `server.env`. Set the
+two `DATABASE_URL`s to one database, using different logins:
 
 ```dotenv
 # server.env

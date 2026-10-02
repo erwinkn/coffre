@@ -22,10 +22,25 @@ cp vault.env.example vault.env
 ```
 
 Fill both in: `PUBLIC_URL`, a GitHub OAuth app whose callback is
-`<PUBLIC_URL>/auth/callback/github`, `ROOT_ADMINS`, and three keys from
-`openssl rand -base64 32`. Escrow `KEK` and its `KEK_ID`, `SIGNING_KEY`, `AUDIT_CHAIN_KEY` and the OAuth
-client secret in a password manager. Without the KEK, stored values cannot
-be read; without the other keys, the existing log cannot be verified.
+`<PUBLIC_URL>/auth/callback/github`, `ROOT_ADMINS`, and the keys from
+
+```sh
+coffre keys
+```
+
+Run it with the CLI you ran `coffre init` with, or as
+`npx @coffre/cli keys`. It prints three keys and the KEK's id, once, and
+keeps no copy. Save its output in your password manager, with the OAuth
+client secret, before anything else. `KEK_ID`, `KEK` and `SIGNING_KEY` go in
+`vault.env`, and `AUDIT_CHAIN_KEY` in `server.env`, so that the server,
+which faces the network, never holds what decrypts a value:
+
+- `KEK` decrypts every value. Lose it, and every value is lost.
+- `SIGNING_KEY` signs the vault's log entries and member rows.
+- `AUDIT_CHAIN_KEY` signs the server's log entries, sessions and tokens.
+
+Lose either of the last two, and the log stops verifying and everyone is
+locked out.
 
 ## 2. The database
 

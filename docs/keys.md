@@ -18,10 +18,15 @@ The default, and what `coffre init` sets up:
 kek: { id: env.KEK_ID, key: env.KEK },
 ```
 
-It costs nothing and adds no latency. But whoever holds the Worker secret
-and a copy of the database holds every value, and nothing outside coffre
-records the use of either. Keep an offline copy
-([deploy.md](deploy.md#on-workers)): without it, nothing can be read again.
+`coffre keys` makes it, with its id, beside the deployment's other two keys
+([deploy.md](deploy.md#3-keys-and-secrets)). It costs nothing and adds no
+latency. But whoever holds it and a copy of the database holds every value,
+and nothing outside coffre records the use of either. Keep a copy in your
+password manager: without it, nothing can be read again.
+
+To rotate it, run `coffre keys` again and take only `KEK_ID` and `KEK`; the
+old pair moves to `previousKeks`. Leave `SIGNING_KEY` and `AUDIT_CHAIN_KEY`
+as they are: changing either stops the log verifying and refuses everyone.
 
 ## AWS KMS
 

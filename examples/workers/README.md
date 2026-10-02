@@ -17,7 +17,7 @@ Worker secrets. Everything below runs from this directory.
 - `app/wrangler.jsonc`: `PUBLIC_URL`, and `GITHUB_CLIENT_ID` from a GitHub
   OAuth app whose callback is `<PUBLIC_URL>/auth/callback/github`.
 - `vault/wrangler.jsonc`: `ROOT_ADMINS`, the emails of the first people in,
-  and `KEK_ID`, a name for the key-encryption key below.
+  and `KEK_ID`, which `coffre keys` gives you below.
 
 ## 2. The database
 
@@ -58,11 +58,26 @@ Put the ids they print under `hyperdrive`, the first in
 `pnpm migrate` again after every upgrade of `@coffre/server`, before
 deploying it.
 
-## 3. Secrets
+## 3. Keys
 
-Generate three separate keys with `openssl rand -base64 32` and save them
-in your password manager first. The commands below prompt for the saved
-values; save the GitHub client secret there too.
+```sh
+coffre keys
+```
+
+Run it with the CLI you ran `coffre init` with, or as
+`npx @coffre/cli keys`. It prints three keys and the KEK's id, once, and
+keeps no copy. Save its output in your password manager, with the GitHub
+client secret, before anything else. The vault gets `KEK` and `SIGNING_KEY`,
+and the app `AUDIT_CHAIN_KEY`, so that the app, which faces the network,
+never holds what decrypts a value:
+
+- `KEK` decrypts every value. Lose it, and every value is lost.
+- `SIGNING_KEY` signs the vault's log entries and member rows.
+- `AUDIT_CHAIN_KEY` signs the app's log entries, sessions and tokens.
+
+Lose either of the last two, and the log stops verifying and everyone is
+locked out. Put `KEK_ID` in `vault/wrangler.jsonc`, then set the secrets;
+each command prompts for the saved value:
 
 ```sh
 pnpm exec wrangler secret put KEK -c vault/wrangler.jsonc
@@ -71,9 +86,7 @@ pnpm exec wrangler secret put AUDIT_CHAIN_KEY -c app/wrangler.jsonc
 pnpm exec wrangler secret put GITHUB_CLIENT_SECRET -c app/wrangler.jsonc
 ```
 
-Escrow `KEK` with its `KEK_ID`, `SIGNING_KEY` and `AUDIT_CHAIN_KEY`.
-Without the KEK, stored values cannot be read; without the other keys, the
-existing log cannot be verified. Keep older KEKs after rotation too.
+Keep older KEKs after a rotation too: what they wrapped still needs them.
 
 ## 4. Deploy
 

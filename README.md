@@ -106,6 +106,7 @@ other's sources.
 stack. A deployed instance needs only its address:
 
 ```sh
+coffre keys                                 # a new deployment's keys, shown once (docs/deploy.md)
 coffre login https://secrets.acme.example   # a device login: approve it in the browser
 coffre whoami
 coffre use                                  # the instances you are signed in to

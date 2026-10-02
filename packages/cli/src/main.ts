@@ -13,6 +13,7 @@ import { homedir, hostname } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { init, KINDS, type Kind } from './init.ts';
+import { keys } from './keys.ts';
 import {
   credentialHeaders,
   emptyStore,
@@ -1019,6 +1020,7 @@ const USAGE = `coffre - secrets, with an audit log
   New deployment
     coffre init --workers [<dir>]           two Cloudflare Workers: the app and its vault
     coffre init --node [<dir>]              a Node server, and its vault beside it
+    coffre keys [--json]                    its three keys and the KEK's id, made here and shown once
 
   Session
     coffre login [<url>] [--no-browser]     sign in, and make <url> the current instance
@@ -1068,6 +1070,9 @@ const [command, ...rest] = process.argv.slice(2);
 switch (command) {
   case 'init':
     initProject(rest);
+    break;
+  case 'keys':
+    keys(rest);
     break;
   case 'login':
     await login(rest);

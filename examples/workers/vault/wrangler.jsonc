@@ -11,13 +11,13 @@
   "workers_dev": false,
   "observability": { "enabled": true },
   "vars": {
-    // Names the KEK below; a rotation gives the new one a new id.
+    // Names the KEK below: from `coffre keys`. A rotation gives the new one a new id.
     "KEK_ID": "kek-1",
     // Comma-separated emails: the first people in, whom nobody can remove.
     "ROOT_ADMINS": "you@example.com"
   },
   "secrets": {
-    // Each 32 random bytes, base64: `openssl rand -base64 32`.
+    // From `coffre keys`: wrangler secret put KEK, then SIGNING_KEY.
     "required": ["KEK", "SIGNING_KEY"]
   },
   // The app's database, as the vault's own login: `wrangler hyperdrive
