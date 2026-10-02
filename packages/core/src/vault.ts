@@ -64,10 +64,12 @@ export interface Vault {
    */
   checkpoint(): Promise<Outcome<{ checkpoint: Checkpoint }>>;
   /**
-   * What only the vault's configuration says, which the app shows: the key
-   * its checkpoints verify under, and the root admins, as principals.
+   * What only the vault's configuration says, which the app shows: the
+   * public keys its checkpoints verify under, by the key id each checkpoint
+   * names (the one it signs with now, and those of earlier KEKs it still
+   * holds), and the root admins, as principals.
    */
-  about(): Promise<{ publicKey: string; rootAdmins: string[] }>;
+  about(): Promise<{ publicKeys: Record<string, string>; rootAdmins: string[] }>;
   /**
    * Check the whole log: rehash it from the first entry, the vault's
    * entries by their MACs, every checkpoint against the prefix it signed,

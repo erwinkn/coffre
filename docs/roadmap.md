@@ -142,7 +142,8 @@ ends. Passkeys would make a good recent sign-in for revealing.
   covers is refused at use rather than found at the next one.
 - **A slower or resumable full recomputation**, once the log passes about
   250,000 entries ([the limits](architecture.md#limits)).
-- **Signing-key rotation.**
+- **Changing the app's key**, and with KMS the vault's signing key: neither
+  can change today, since what each signed verifies only under it.
 - **The current-version pointer, and sync results as log entries**, two
   schema tidy-ups from the storage review
   ([design, plan step 11](design/single-database.md#implementation-plan)).

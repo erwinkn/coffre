@@ -57,15 +57,15 @@ type Verified = { verification: LogVerification; anchor: Anchor };
  */
 export async function verifyChain(
   db: Queryable,
-  key: LogKey,
+  logKeys: readonly LogKey[],
   shown: readonly StoredEntry[],
   anchor: Anchor,
 ): Promise<Verified> {
   const broken = (failedAtSeq: bigint, reason: string): Verified => ({
-    verification: { ok: false, failedAtSeq: Number(failedAtSeq), reason },
+    verification: { ok: false, failedAtSeq: Number(failedAtSeq), reason: withCause(reason) },
     anchor,
   });
-  const keys = { keys: [key], chainOnly: ['app' as const] };
+  const keys = { keys: logKeys, chainOnly: ['app' as const] };
 
   for (const row of [...shown].sort((a, b) => (a.seq < b.seq ? -1 : 1))) {
     const result = verifyEntries([row], { ...keys, startSeq: row.seq, startPrevHash: row.prevHash });
@@ -86,6 +86,17 @@ export async function verifyChain(
     if (batch.length < VERIFY_BATCH) break;
   }
   return { verification: { ok: true, entries: verified.vaultEntries }, anchor: verified };
+}
+
+/**
+ * A vault entry under a key the vault does not hold is a forgery, or one
+ * written under a key it was configured with then: its keys come from its
+ * signing key, or from its KEK when it has none. The second is the one an
+ * operator can fix.
+ */
+function withCause(reason: string): string {
+  if (!/^written under vault:\S+, a key this verifier does not hold$/.test(reason)) return reason;
+  return `${reason}: either it is forged, or the vault wrote it under another KEK or signing key, which must stay configured: a KEK that was replaced stays in previousKeks`;
 }
 
 /**

@@ -17,8 +17,9 @@
     "ROOT_ADMINS": "you@example.com"
   },
   "secrets": {
-    // From `coffre keys`: wrangler secret put KEK, then SIGNING_KEY.
-    "required": ["KEK", "SIGNING_KEY"]
+    // From `coffre keys`: wrangler secret put KEK. The vault derives the key
+    // it signs its records with from it.
+    "required": ["KEK"]
   },
   // The app's database, as the vault's own login: `wrangler hyperdrive
   // create coffre-vault --caching-disabled --connection-string=<vault login

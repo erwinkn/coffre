@@ -2,7 +2,7 @@
 
 Everything coffre knows is in one Postgres database: values (encrypted),
 wrapped data keys, members and grants, sessions and tokens, and the audit
-log with its head. A backup of that database and three keys bring all of it
+log with its head. A backup of that database and two keys bring all of it
 back, including a log that verifies. This page says what to keep, how to
 restore on PlanetScale Postgres or plain Postgres, how to check the result,
 and what the local drill (`scripts/restore-drill.sh`) shows.
@@ -12,14 +12,14 @@ and what the local drill (`scripts/restore-drill.sh`) shows.
 | What | Where | Without it |
 |---|---|---|
 | The database | PlanetScale's backups, or `pg_dump` files you keep off the server | nothing to restore |
-| The KEK, with its `KEK_ID`, and every earlier KEK still in `previousKeks` | your password manager, never beside the backups | no value can be read, ever: the backup holds only wrapped data keys |
-| `SIGNING_KEY` (the vault) | your password manager | every member's row fails the vault's MAC, so the vault refuses everyone; its entries and checkpoints fail verification |
-| `AUDIT_CHAIN_KEY` (the app) | your password manager | the app's entries, sessions and tokens fail their MACs: verification fails, and every session and token is refused |
+| The KEK, with its `KEK_ID`, and every earlier KEK in `previousKeks` (the vault's key) | your password manager, never beside the backups | no value can be read, ever: the backup holds only wrapped data keys. The vault's own key comes from the KEK too, so every member's row fails its MAC, and the vault's entries and checkpoints fail verification |
+| `AUDIT_CHAIN_KEY` (the app's key) | your password manager | the app's entries, sessions and tokens fail their MACs: verification fails, and every session and token is refused |
 | The OAuth client secret and the deployment's settings | your password manager and the deployment's repository | nobody can sign in |
 
 With AWS KMS, the KEK is the key in KMS, not a value to escrow: keep the key
 (and its alias) from being deleted, and the vault's IAM credentials in your
-password manager. See [keys.md](keys.md).
+password manager, with its `SIGNING_KEY`, which a KMS deployment has instead
+of deriving one from the KEK. See [keys.md](keys.md).
 
 Keep the keys apart from the backups. A backup alone opens nothing, and the
 keys alone hold nothing; whoever has both has every value.
@@ -182,8 +182,18 @@ HTTP 503  {"error":"unavailable","reason":"wrong_kek",
 The message names the provider and the key id, never key material. Each
 refused key is logged with the code `wrong_kek`, and the scheduled
 checkpoint is refused too, so `/readyz` turns red after the next beat
-(`checkpointed: false`). Verification still passes: the log needs
-`SIGNING_KEY` and `AUDIT_CHAIN_KEY`, not the KEK.
+(`checkpointed: false`). With a local KEK, verification fails as well, at
+the first entry the vault wrote: the vault's own key comes from its KEK, so
+a wrong KEK is a wrong key for its records too, and `coffre verify` says so:
+
+```
+written under vault:3f1c…, a key this verifier does not hold: either it is forged,
+or the vault wrote it under another KEK or signing key, which must stay configured:
+a KEK that was replaced stays in previousKeks
+```
+
+The same answer, with every value readable, means a KEK replaced and then
+dropped from `previousKeks`.
 
 Restart the vault with the escrowed KEK and its `KEK_ID`: the vault decides
 once per process, so a restart is what clears it.
@@ -221,7 +231,8 @@ this machine, against the compose Postgres, after `pnpm build`:
      token, which reads the canary.
 5. It restarts the example with a random KEK under the same id, and checks
    that the canary and a new write are both refused with `wrong_kek`, that
-   verification still passes, and that `/readyz` turns red.
+   verification fails at the vault's first entry and says why, and that
+   `/readyz` turns red.
 
 It drops both databases and stops what it started, however it ends. It
 does not drill a PlanetScale branch: there, the steps that differ are the

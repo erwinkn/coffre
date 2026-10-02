@@ -4,3 +4,5 @@ export type { SecretContext } from '@coffre/core/envelope';
 export { awsKms, KekBadClaimError, KekUnavailableError } from '@coffre/core/kek';
 export type { AwsCredentials, AwsKmsOptions, KekProvider, WrappedDek } from '@coffre/core/kek';
 export type { Kek, VaultConfig } from './config.ts';
+/** The signing key a local KEK stands for, for tools that check the vault's records from outside. */
+export { derivedSigningKey } from './config.ts';

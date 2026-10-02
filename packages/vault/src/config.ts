@@ -1,3 +1,5 @@
+import { hkdfSync } from 'node:crypto';
+
 import { KekRegistry, LocalKekProvider, type KekProvider } from '@coffre/core/kek';
 
 /** At most `count` data keys unwrapped per principal in any `windowMs`. */
@@ -15,8 +17,12 @@ export type ResolvedVaultConfig = {
   keks: KekRegistry;
   /** Emails, lowercased: always active, always owners, never changed through the API. */
   rootAdmins: readonly string[];
-  /** The Ed25519 seed checkpoints are signed with. */
-  signingKey: Uint8Array;
+  /**
+   * The seeds of the vault's own keys, which MAC its log entries, seal member
+   * rows and sign checkpoints: the first signs; every one verifies what it
+   * signed, so a rotation leaves earlier records verifying.
+   */
+  signingKeys: readonly Uint8Array[];
   bulkLimit: BulkLimit;
 };
 
@@ -34,7 +40,7 @@ export type Kek = { id: string; key: string } | KekProvider;
  *     kek: awsKms({ keyArn: env.KMS_KEY_ARN, credentials: { … } }),
  *     previousKeks: [{ id: 'kek-2025-01', key: env.KEK_2025_01 }],
  *     rootAdmins: ['admin@acme.example'],
- *     signingKey: env.SIGNING_KEY,
+ *     signingKey: env.SIGNING_KEY, // required with a key service; derived from a local KEK otherwise
  *   }
  */
 export type VaultConfig = {
@@ -44,8 +50,13 @@ export type VaultConfig = {
   previousKeks?: readonly Kek[];
   /** At least one email: the only way into a fresh instance, and the only members nobody can remove. */
   rootAdmins: readonly string[];
-  /** 32 random bytes, base64: the Ed25519 seed audit checkpoints are signed with. */
-  signingKey: string;
+  /**
+   * 32 random bytes, base64: the seed of the vault's own keys, which MAC its
+   * log entries, seal member rows and sign checkpoints. Leave it out with a
+   * local KEK, and the vault derives it from the KEK. Required when a key
+   * service holds the KEK, as AWS KMS does: the vault never sees that key.
+   */
+  signingKey?: string;
   /** At most `count` data keys unwrapped per principal in any `windowMinutes`; 1000 in 15 unless set. */
   bulkLimit?: { count: number; windowMinutes: number };
 };
@@ -61,11 +72,21 @@ const KEK_PROVIDER = /^[a-z0-9][a-z0-9-]{0,31}$/;
 /** Every row records it, and `provider:keyId` finds the KEK again: visible ASCII, bounded. */
 const KEK_NAME = /^[\x21-\x7e]{1,255}$/;
 
-function kek(entry: Kek): KekProvider {
+/** The label no other use of a KEK shares: a local KEK is otherwise only ever an AES-256-GCM key. */
+const SIGNING_KEY_LABEL = 'coffre.vault.signing-key.v1';
+
+/** The signing key a local KEK stands for, when the vault is given none: HKDF-SHA-256 of the KEK. */
+export function derivedSigningKey(kek: Uint8Array): Buffer {
+  return Buffer.from(hkdfSync('sha256', kek, new Uint8Array(0), SIGNING_KEY_LABEL, 32));
+}
+
+/** A KEK as the registry takes it, and the signing key it stands for when it is one the vault holds. */
+function kek(entry: Kek): { provider: KekProvider; signingKey: Buffer | null } {
   if (!('wrap' in entry)) {
     const { id, key } = entry;
     if (!KEK_ID.test(id)) throw new Error(`KEK id "${id}" must be 1-64 letters, digits, dots, dashes or underscores`);
-    return new LocalKekProvider(key32(key, `KEK ${id}`), id);
+    const raw = key32(key, `KEK ${id}`);
+    return { provider: new LocalKekProvider(raw, id), signingKey: derivedSigningKey(raw) };
   }
   const { provider, keyId, keyVersion } = entry;
   if (typeof provider !== 'string' || !KEK_PROVIDER.test(provider)) {
@@ -77,21 +98,45 @@ function kek(entry: Kek): KekProvider {
   if (typeof entry.wrap !== 'function' || typeof entry.unwrap !== 'function') {
     throw new Error(`KEK ${provider}:${keyId} needs wrap() and unwrap()`);
   }
-  return entry;
+  return { provider: entry, signingKey: null };
 }
 
 /** Check a deployment's vault configuration, failing on the first problem. */
 export function resolveVaultConfig(config: VaultConfig): ResolvedVaultConfig {
-  const [current, ...previous] = [config.kek, ...(config.previousKeks ?? [])].map(kek);
+  const keks = [config.kek, ...(config.previousKeks ?? [])].map(kek);
+  const [current, ...previous] = keks.map((entry) => entry.provider);
   const refs = [current, ...previous].map(({ provider, keyId }) => `${provider}:${keyId}`);
   const twice = refs.find((ref, i) => refs.indexOf(ref) !== i);
   if (twice !== undefined) throw new Error(`two KEKs share an id: ${twice}`);
   return {
     keks: new KekRegistry(current, previous),
     rootAdmins: checkRootAdmins(config.rootAdmins),
-    signingKey: key32(config.signingKey, 'the signing key'),
+    signingKeys: signingKeys(config.signingKey, keks),
     bulkLimit: config.bulkLimit === undefined ? DEFAULT_BULK_LIMIT : checkBulkLimit(config.bulkLimit),
   };
+}
+
+/**
+ * The key the vault signs with, then every other it verifies with. It signs
+ * with `signingKey` when it is given one, and otherwise with the key the
+ * primary KEK stands for. It verifies with the keys every local KEK stands
+ * for too, the previous ones included: a KEK rotation changes the derived
+ * signing key, and what the old one signed must still verify, for as long
+ * as the old KEK stays configured.
+ */
+function signingKeys(given: string | undefined, keks: { provider: KekProvider; signingKey: Buffer | null }[]): Buffer[] {
+  const derived = keks.flatMap((entry) => (entry.signingKey === null ? [] : [entry.signingKey]));
+  let signing: Buffer;
+  if (given !== undefined) signing = key32(given, 'the signing key');
+  else if (keks[0].signingKey !== null) signing = keks[0].signingKey;
+  else {
+    const { provider, keyId } = keks[0].provider;
+    throw new Error(
+      `signingKey is required with the ${provider} KEK ${keyId}: the vault derives its signing key only from a KEK it holds, ` +
+        'and a key service never hands its key over. Set signingKey to 32 random bytes, base64 (openssl rand -base64 32), and keep it with the KEK.',
+    );
+  }
+  return [signing, ...derived].filter((key, i, all) => all.findIndex((other) => other.equals(key)) === i);
 }
 
 function checkBulkLimit({ count, windowMinutes }: { count: number; windowMinutes: number }): BulkLimit {

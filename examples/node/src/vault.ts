@@ -15,10 +15,12 @@ const vault = await serveVault({
   socket: env('VAULT_SOCKET'),
   database: env('DATABASE_URL'),
   kek: { id: env('KEK_ID'), key: env('KEK') },
-  // After a rotation, the KEKs before it, so the data keys they wrapped
-  // still open: previousKeks: [{ id: 'kek-1', key: env('KEK_1') }],
+  // After a rotation, the KEKs before it, so the data keys they wrapped still
+  // open and the records they signed still verify:
+  // previousKeks: [{ id: 'kek-1', key: env('KEK_1') }],
   rootAdmins: env('ROOT_ADMINS').split(',').map((email) => email.trim()),
-  signingKey: env('SIGNING_KEY'),
+  // The vault derives its signing key from the KEK. With a KEK a key service
+  // holds, such as awsKms(…), it needs one of its own: signingKey: env('SIGNING_KEY').
 });
 console.log(`the vault is listening on ${vault.socket}`);
 

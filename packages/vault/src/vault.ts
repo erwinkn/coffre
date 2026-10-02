@@ -79,15 +79,23 @@ export type VaultOptions = {
  */
 export type PreparedVault = {
   config: ResolvedVaultConfig;
+  /** What signs checkpoints now: the first of `signers`. */
   signer: Signer;
+  /** A signer for each of the configured signing keys, by which checkpoints signed under any of them verify. */
+  signers: Signer[];
+  /** What the vault's entries are MACed with now: the first of `logKeys`. */
   logKey: LogKey;
+  /** Each signing key's log key, by which the vault's entries under any of them verify. */
+  logKeys: LogKey[];
   options: Required<VaultOptions>;
   /** How far the log is verified; `verifyChain` in log.ts. The furthest any call got to. */
   verified: Anchor;
   /** Root admins known to have a member row; rows are never deleted. */
   rooted: Set<string>;
-  /** What member rows are sealed under; rows.ts. */
+  /** What member rows are sealed under now; rows.ts. */
   rowKey: Buffer;
+  /** Each signing key's row key: a row sealed under any holds until a decision seals it again under `rowKey`. */
+  rowKeys: Buffer[];
   /** Tampering this process has logged already, so that a forged row is one entry, not one per request. */
   reported: Set<string>;
   /** Whether its KEKs open what they wrapped, once asked: `#kekMismatch`. */
@@ -99,16 +107,22 @@ export type PreparedVault = {
 export async function prepareVault(config: ResolvedVaultConfig, options: VaultOptions = {}): Promise<PreparedVault> {
   return {
     config,
-    signer: await signer(config.signingKey),
-    logKey: vaultLogKey(config.signingKey),
+    ...(await keysOf(config.signingKeys)),
     options: { keyBudgetMs: options.keyBudgetMs ?? KEY_BUDGET_MS, clockOffset: options.clockOffset ?? (() => 0) },
     verified: UNVERIFIED,
     rooted: new Set(),
-    rowKey: rowKey(config.signingKey),
     reported: new Set(),
     kekCheck: null,
     wrongKek: null,
   };
+}
+
+/** The vault's own keys, from each of its signing keys, the one it signs with first. */
+async function keysOf(seeds: readonly Uint8Array[]) {
+  const signers = await Promise.all(seeds.map((seed) => signer(seed)));
+  const logKeys = seeds.map((seed) => vaultLogKey(seed));
+  const rowKeys = seeds.map((seed) => rowKey(seed));
+  return { signer: signers[0], signers, logKey: logKeys[0], logKeys, rowKey: rowKeys[0], rowKeys };
 }
 
 /** The vault over `db`. Cheap: on Workers, one per call, over that call's connections. */
@@ -376,7 +390,7 @@ class VaultService implements Vault {
    * could lock any member out.
    */
   async #integrity(db: Queryable, principal: string, row: Member | undefined, grants: readonly GrantRow[], reports: NewEntry[]): Promise<Fault | null> {
-    if (row !== undefined && !sealed(this.#prepared.rowKey, row, grants)) {
+    if (row !== undefined && !this.#sealed(row, grants)) {
       this.#report(reports, principal, 'mac', row.mac.toString('hex'));
       return 'mac';
     }
@@ -399,7 +413,12 @@ class VaultService implements Vault {
   }
 
   #authentic(entry: StoredEntry): boolean {
-    return verifyEntries([entry], { startSeq: entry.seq, startPrevHash: entry.prevHash, keys: [this.#prepared.logKey] }).ok;
+    return verifyEntries([entry], { startSeq: entry.seq, startPrevHash: entry.prevHash, keys: this.#prepared.logKeys }).ok;
+  }
+
+  /** Whether `row`, with these grants, carries the MAC of one of the vault's row keys. */
+  #sealed(row: Member, grants: readonly GrantRow[]): boolean {
+    return this.#prepared.rowKeys.some((key) => sealed(key, row, grants));
   }
 
   /** A `vault.tampered` entry, once per process for each thing found: `#reported` marks it once committed. */
@@ -859,7 +878,7 @@ class VaultService implements Vault {
       if (this.#isRootAdmin(row.principal)) continue;
       const grants = held.filter((grant) => grant.principal === row.principal);
       const entry = newest.get(row.principal);
-      const holds = entry !== undefined && this.#authentic(entry) && sealed(this.#prepared.rowKey, row, grants) && entry.seq === row.accessSeq;
+      const holds = entry !== undefined && this.#authentic(entry) && this.#sealed(row, grants) && entry.seq === row.accessSeq;
       if (!holds) await this.#integrity(db, row.principal, row, grants, reports);
     }
   }
@@ -1250,7 +1269,7 @@ class VaultService implements Vault {
     const found: NewEntry[] = [];
     const whole = await this.#db.transaction(async (tx) => {
       await this.#sweep(tx, found);
-      return verifyChain(tx, this.#prepared.logKey, [], UNVERIFIED);
+      return verifyChain(tx, this.#prepared.logKeys, [], UNVERIFIED);
     }, SNAPSHOT);
     return this.#decide([], async (d) => {
       for (const entry of found) if (!d.reports.includes(entry)) d.reports.push(entry);
@@ -1274,7 +1293,7 @@ class VaultService implements Vault {
       if (latest !== null && !(await carries(d.tx, latest.checkpoint))) {
         throw refused('log_broken', { reason: `the log up to entry ${latest.checkpoint.seq} is not the prefix the last checkpoint signed` });
       }
-      const { verification: held, anchor: verified } = await verifyChain(d.tx, this.#prepared.logKey, [], whole.anchor);
+      const { verification: held, anchor: verified } = await verifyChain(d.tx, this.#prepared.logKeys, [], whole.anchor);
       if (!held.ok) throw refused('log_broken', { failedAtSeq: held.failedAtSeq, reason: held.reason });
       // It signs the entry it verified to, which the head, locked, must name.
       if (verified.nextSeq !== head.nextSeq || !verified.hash.equals(head.headHash)) {
@@ -1291,8 +1310,11 @@ class VaultService implements Vault {
     });
   }
 
-  async about(): Promise<{ publicKey: string; rootAdmins: string[] }> {
-    return { publicKey: this.#prepared.signer.publicKey, rootAdmins: this.#config.rootAdmins.map((email) => `user:${email}`) };
+  async about(): Promise<{ publicKeys: Record<string, string>; rootAdmins: string[] }> {
+    return {
+      publicKeys: Object.fromEntries(this.#prepared.signers.map(({ keyId, publicKey }) => [keyId, publicKey])),
+      rootAdmins: this.#config.rootAdmins.map((email) => `user:${email}`),
+    };
   }
 
   verifyLog(input: VerifyLogInput): Promise<LogVerification> {
@@ -1301,7 +1323,7 @@ class VaultService implements Vault {
 
   /** `shown`, and the chain from `anchor`; the furthest verified is kept for the next check. */
   async #verify(db: Queryable, shown: readonly StoredEntry[], anchor: Anchor): Promise<LogVerification> {
-    const { verification, anchor: reached } = await verifyChain(db, this.#prepared.logKey, shown, anchor);
+    const { verification, anchor: reached } = await verifyChain(db, this.#prepared.logKeys, shown, anchor);
     if (verification.ok) this.#prepared.verified = further(this.#prepared.verified, reached);
     return verification;
   }
@@ -1353,7 +1375,9 @@ class VaultService implements Vault {
       for (const entry of batch) {
         const checkpoint = JSON.parse(entry.metadata) as Checkpoint;
         const broken = (reason: string) => ({ ok: false as const, failedAtSeq: Number(entry.seq), reason });
-        if (!(await verifyCheckpoint(checkpoint, this.#prepared.signer.publicKey))) return broken('a checkpoint the vault did not sign');
+        const by = this.#prepared.signers.find((candidate) => candidate.keyId === checkpoint.keyId);
+        if (by === undefined) return broken(`a checkpoint signed under ${checkpoint.keyId}, a key this vault does not hold: a KEK that was replaced must stay in previousKeks`);
+        if (!(await verifyCheckpoint(checkpoint, by.publicKey))) return broken('a checkpoint the vault did not sign');
         if (BigInt(checkpoint.seq) >= entry.seq || !(await carries(db, checkpoint))) {
           return broken(`the log up to entry ${checkpoint.seq} is not the prefix this checkpoint signed: it was rewritten`);
         }
@@ -1372,7 +1396,7 @@ class VaultService implements Vault {
     const [rows, held, newest] = await Promise.all([store.allMembers(db), store.grants(db), store.newestAccessEntries(db)]);
     for (const row of rows) {
       const grants = held.filter((grant) => grant.principal === row.principal);
-      if (!sealed(this.#prepared.rowKey, row, grants)) return { kind: 'tampered-member', principal: row.principal, why: 'mac' };
+      if (!this.#sealed(row, grants)) return { kind: 'tampered-member', principal: row.principal, why: 'mac' };
       if (newest.get(row.principal)?.seq !== row.accessSeq) return { kind: 'tampered-member', principal: row.principal, why: 'stale' };
     }
     return null;

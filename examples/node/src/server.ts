@@ -16,7 +16,7 @@ const server = await serve({
   database: env('DATABASE_URL'),
   vault: connectVault(env('VAULT_SOCKET')),
   // For tests or local SQLite development only, the vault in this process:
-  // vault: await localVault({ database: env('DATABASE_URL'), kek: …, rootAdmins: […], signingKey: … }),
+  // vault: await localVault({ database: env('DATABASE_URL'), kek: …, rootAdmins: […] }),
   auth: signin({
     providers: [
       github({

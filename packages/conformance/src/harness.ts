@@ -194,7 +194,6 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       AUDIT_CHAIN_KEY: KEYS.AUDIT_CHAIN_KEY,
       KEK_ID: KEYS.KEK_ID,
       KEK: KEYS.KEK,
-      SIGNING_KEY: KEYS.SIGNING_KEY,
       ROOT_ADMINS: ROOT_ADMIN,
       CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE: runtime,
       CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_VAULT_HYPERDRIVE: vaultRuntime,
@@ -228,7 +227,6 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       DATABASE_URL: `file:${database}`,
       KEK_ID: KEYS.KEK_ID,
       KEK: KEYS.KEK,
-      SIGNING_KEY: KEYS.SIGNING_KEY,
       ROOT_ADMINS: ROOT_ADMIN,
     });
     await until('the vault socket', async () => existsSync(socket), 30, alive);

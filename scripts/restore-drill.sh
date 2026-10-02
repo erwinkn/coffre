@@ -53,7 +53,7 @@ start_coffre() {
         cd examples/workers
         export PUBLIC_URL="$COFFRE_API_URL" ROOT_ADMINS="$COFFRE_ROOT_ADMINS" WRANGLER_SEND_METRICS=false
         export GITHUB_CLIENT_ID=coffre-local GITHUB_CLIENT_SECRET=coffre-local-secret
-        export AUDIT_CHAIN_KEY="$COFFRE_AUDIT_CHAIN_KEY" KEK_ID="$COFFRE_KEK_ID" KEK="$2" SIGNING_KEY="$COFFRE_VAULT_SIGNING_KEY"
+        export AUDIT_CHAIN_KEY="$COFFRE_AUDIT_CHAIN_KEY" KEK_ID="$COFFRE_KEK_ID" KEK="$2"
         export CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE="postgresql://coffre_runtime:local-runtime-only@127.0.0.1:55432/$1"
         export CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_VAULT_HYPERDRIVE="postgresql://coffre_vault_runtime:local-vault-only@127.0.0.1:55432/$1"
         exec ./node_modules/.bin/wrangler dev -c app/wrangler.jsonc -c vault/wrangler.jsonc \

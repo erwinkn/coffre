@@ -46,7 +46,8 @@ test('a beat is an app entry, and the vault checkpoints it in an entry of its ow
     ['vault', 'system:coffre-scheduler', 'audit.checkpoint'],
   ]);
   // The checkpoint signs everything before it: here, the beat.
-  const [checkpoint, { publicKey }] = await Promise.all([latestCheckpoint(db.owner), vault.about()]);
+  const [checkpoint, { publicKeys }] = await Promise.all([latestCheckpoint(db.owner), vault.about()]);
+  const publicKey = publicKeys[checkpoint!.keyId]!;
   assert.equal(checkpoint?.seq, 0);
   assert.equal(checkpoint?.hash, logged[0].hash.toString('hex'));
   assert.deepEqual(JSON.parse(logged[1].metadata), checkpoint);

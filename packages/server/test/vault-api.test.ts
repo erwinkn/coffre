@@ -153,10 +153,10 @@ test('the bulk limit counts one read per secret, trips with its own code, and is
   assert.equal((await dev.secrets.reveal('market/dev')).values.API_KEY, 'sk_test');
 });
 
-test('a vault given the wrong KEK answers every value with 503, and readiness goes red', async () => {
-  // Restored with another key under the same id: the log's keys are right, the KEK is not.
+test('a vault given the wrong KEK answers every value with 503, its entries stop verifying, and readiness goes red', async () => {
+  // Restored with another key under the same id: the app's key is right, the vault's KEK is not.
   const misled = testDeps(db.runtime, [ROOT], {
-    vault: testVault([ROOT], {}, { kek: randomBytes(32), signingKey: deps.vault.signingKey }),
+    vault: testVault([ROOT], {}, { kek: randomBytes(32) }),
     chainKey: deps.chainKey,
   });
   const admin = clientFor(misled, ROOT);
@@ -167,8 +167,10 @@ test('a vault given the wrong KEK answers every value with 503, and readiness go
     message: "this vault's local KEK test-kek-1 does not open the data it holds: it is not the key that wrapped it",
   });
   await assert.rejects(admin.secrets.set('market/dev', { NEW: 'value' }), { status: 503, reason: 'wrong_kek' });
-  // The log still verifies: it needs the signing and audit keys, not the KEK.
-  assert.equal((await admin.audit.verify()).ok, true);
+  // The vault's keys come from its KEK, so its entries no longer verify either, and the answer says why.
+  const verdict = await admin.audit.verify();
+  assert.ok(!verdict.ok && verdict.author === 'vault');
+  assert.match(verdict.reason, /a key this verifier does not hold: either it is forged, or the vault wrote it under another KEK or signing key/);
   assert.equal(await writeAuditHeartbeat(db.runtime, deps.chainKey, misled.vault, { warn: () => {} }), false);
   const ready = await auditReadiness(db.runtime, misled.vault);
   assert.deepEqual([ready.ok, ready.checkpointed], [false, false]);

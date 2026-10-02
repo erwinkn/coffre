@@ -12,7 +12,7 @@ import { tablesOf, type Database } from '@coffre/db';
 import { appendEntries, LogHeadMismatch, LogRewound } from '@coffre/db/log';
 import { and, asc, desc, eq, gt, gte, sql } from 'drizzle-orm';
 
-import { checkRootAdmins, resolveVaultConfig, type ResolvedVaultConfig } from '../src/config.ts';
+import { checkRootAdmins, resolveVaultConfig, type ResolvedVaultConfig, type VaultConfig } from '../src/config.ts';
 import { openLocalVault, type LocalVault } from '../src/local.ts';
 import { entryView, vaultLogKey } from '../src/log.ts';
 import { memberMac, rowKey } from '../src/rows.ts';
@@ -62,7 +62,7 @@ function configure(overrides: Partial<ResolvedVaultConfig> = {}): ResolvedVaultC
   return {
     keks: new KekRegistry(LocalKekProvider.generate('test-kek-1')),
     rootAdmins: ['root@acme.example'],
-    signingKey: SIGNING_KEY,
+    signingKeys: [SIGNING_KEY],
     bulkLimit: { count: 1000, windowMs: 15 * 60_000 },
     ...overrides,
   };
@@ -924,7 +924,7 @@ test('a rewrite sealed again with the vault\'s key is found against the head it 
 test('a checkpoint signs the log up to its last entry, in an entry of its own', async () => {
   const w = await world();
   const { auditLog } = tablesOf(db.owner);
-  const { publicKey } = await w.vault.about();
+  const { publicKeys } = await w.vault.about();
   const signed = async () => (await vaultLog(w)).filter((entry) => entry.action === 'audit.checkpoint' && entry.outcome === 'allow');
   assert.deepEqual(await signed(), []);
   // An empty log has nothing to sign, and the refusal writes nothing to sign next.
@@ -937,6 +937,7 @@ test('a checkpoint signs the log up to its last entry, in an entry of its own', 
   const first = await w.vault.checkpoint();
   assert.ok(first.ok);
   assert.deepEqual([first.checkpoint.seq, first.checkpoint.hash], [last.seq, last.hash]);
+  const publicKey = publicKeys[first.checkpoint.keyId]!;
   assert.equal(await verifyCheckpoint(first.checkpoint, publicKey), true);
   assert.equal(await verifyCheckpoint({ ...first.checkpoint, hash: 'b'.repeat(64) }, publicKey), false);
   const entries = await vaultLog(w);
@@ -1008,7 +1009,7 @@ test('a full check covers the head the app verified up to, and refuses an entry 
   assert.deepEqual(await w.vault.verifyLog({}), {
     ok: false,
     failedAtSeq: Number(fields.seq),
-    reason: 'written under vault:0000000000000000, a key this verifier does not hold',
+    reason: `written under vault:0000000000000000, a key this verifier does not hold: either it is forged, or the vault wrote it under another KEK or signing key, which must stay configured: a KEK that was replaced stays in previousKeks`,
   });
 });
 
@@ -1377,6 +1378,98 @@ test('the database holds no key', async () => {
     assert.equal(dump.includes(needle), false);
     for (const encoding of ['base64', 'hex'] as const) assert.equal(dump.includes(needle.toString(encoding)), false);
   }
+});
+
+// --- the vault's own keys, from its KEK ---------------------------------------------
+
+const localKek = (id: string) => ({ id, key: randomBytes(32).toString('base64') });
+const hex = (key: Uint8Array) => Buffer.from(key).toString('hex');
+
+/** A vault from a deployment's own configuration, over places already made: several can follow one another. */
+async function configured(placed: Awaited<ReturnType<typeof places>>, keys: Pick<VaultConfig, 'kek' | 'previousKeks' | 'signingKey'>): Promise<World> {
+  const resolved = resolveVaultConfig({ rootAdmins: ['root@acme.example'], ...keys });
+  const vault = await openLocalVault(db.vault, resolved);
+  return { ...placed, vault, clock: { offset: 0 }, twin: async () => openLocalVault(await db.connect(), resolved) };
+}
+
+test('a local KEK stands for one signing key: the same for the same KEK, another for another, never the KEK', () => {
+  const kek = localKek('kek-1');
+  const one = resolveVaultConfig({ kek, rootAdmins: ['root@acme.example'] });
+  assert.equal(one.signingKeys.length, 1);
+  assert.deepEqual(resolveVaultConfig({ kek, rootAdmins: ['root@acme.example'] }).signingKeys.map(hex), one.signingKeys.map(hex));
+  const other = resolveVaultConfig({ kek: localKek('kek-1'), rootAdmins: ['root@acme.example'] });
+  assert.notEqual(hex(other.signingKeys[0]!), hex(one.signingKeys[0]!));
+  assert.notEqual(hex(one.signingKeys[0]!), Buffer.from(kek.key, 'base64').toString('hex'));
+  // A signing key given is the one it signs with; the KEK's own only verifies, as after a move to KMS.
+  const given = resolveVaultConfig({ kek, rootAdmins: ['root@acme.example'], signingKey: SIGNING_KEY.toString('base64') });
+  assert.deepEqual(given.signingKeys.map(hex), [hex(SIGNING_KEY), hex(one.signingKeys[0]!)]);
+});
+
+test('a vault given only a KEK signs and verifies its checkpoints, and the member rows it seals hold', async () => {
+  const placed = await places(db.owner);
+  const kek = localKek('kek-1');
+  const w = await configured(placed, { kek });
+  await member(w, ADA, [[w.dev, 'developer']]);
+  const secret = await w.secret(w.dev);
+  const items = await versionItems([{ secret, wrapped: await wrapped(w, secret) }]);
+  const signed = await w.vault.checkpoint();
+  assert.ok(signed.ok);
+  const { publicKeys } = await w.vault.about();
+  assert.deepEqual(Object.keys(publicKeys), [signed.checkpoint.keyId]);
+  assert.equal(await verifyCheckpoint(signed.checkpoint, publicKeys[signed.checkpoint.keyId]!), true);
+
+  // Another process, started from the same KEK, holds the same keys.
+  const again = await configured(placed, { kek });
+  assert.equal((await again.vault.access(ADA)).status, 'active');
+  assert.equal((await again.vault.unwrap({ principal: ADA, purpose: 'reveal', items })).ok, true);
+  assert.equal((await again.vault.verifyLog({})).ok, true);
+  assert.ok((await again.vault.checkpoint()).ok);
+});
+
+test('a KEK rotation keeps earlier entries, checkpoints and member rows verifying while the old KEK stays configured', async () => {
+  const placed = await places(db.owner);
+  const [old, next] = [localKek('kek-1'), localKek('kek-2')];
+  const before = await configured(placed, { kek: old });
+  await member(before, ADA, [[before.dev, 'developer']]);
+  const secret = await before.secret(before.dev);
+  const items = await versionItems([{ secret, wrapped: await wrapped(before, secret) }]);
+  const first = await before.vault.checkpoint();
+  assert.ok(first.ok);
+
+  const after = await configured(placed, { kek: next, previousKeks: [old] });
+  // Ada's row, sealed under the old KEK's key, holds; her data key, wrapped under the old KEK, opens.
+  assert.equal((await after.vault.access(ADA)).status, 'active');
+  assert.equal((await after.vault.unwrap({ principal: ADA, purpose: 'reveal', items })).ok, true);
+  await wrapped(after, await after.secret(after.prod));
+  const second = await after.vault.checkpoint();
+  assert.ok(second.ok);
+  assert.notEqual(second.checkpoint.keyId, first.checkpoint.keyId, 'the new KEK signs under a key of its own');
+  assert.deepEqual(Object.keys((await after.vault.about()).publicKeys), [second.checkpoint.keyId, first.checkpoint.keyId]);
+  assert.equal((await after.vault.verifyLog({})).ok, true, 'every entry, both checkpoints, and the rows replayed');
+  // A change to Ada seals her row again, under the new key.
+  const change = { projectId: after.project, environmentId: after.prod, role: 'viewer' as const, expiresAt: null };
+  assert.ok((await after.vault.setAccess({ actor: ROOT, principal: ADA, changes: [change] })).ok);
+  assert.equal((await after.vault.access(ADA)).grants.length, 2);
+
+  // Without the old KEK, what its key signed no longer verifies: it must stay configured.
+  const forgot = await configured(placed, { kek: next });
+  const verdict = await forgot.vault.verifyLog({});
+  assert.ok(!verdict.ok);
+  assert.match(verdict.reason, /a key this verifier does not hold: either it is forged, or the vault wrote it under another KEK or signing key/);
+  const refused = await forgot.vault.checkpoint();
+  assert.equal(!refused.ok && refused.refusal.code, 'log_broken');
+});
+
+test('a KEK a key service holds needs a signing key, and the error says why', () => {
+  const kms = awsKms({ keyArn: 'arn:aws:kms:eu-west-3:123456789012:key/kms', credentials: { accessKeyId: 'a', secretAccessKey: 'b' } });
+  assert.throws(
+    () => resolveVaultConfig({ kek: kms, rootAdmins: ['root@acme.example'] }),
+    /^Error: signingKey is required with the aws-kms KEK arn:aws:kms:eu-west-3:123456789012:key\/kms: the vault derives its signing key only from a KEK it holds/,
+  );
+  const moved = resolveVaultConfig({
+    kek: kms, previousKeks: [localKek('kek-1')], rootAdmins: ['root@acme.example'], signingKey: SIGNING_KEY.toString('base64'),
+  });
+  assert.equal(moved.signingKeys.length, 2, 'the signing key, and the key of the local KEK it replaced, for what that signed');
 });
 
 test('configuration', () => {
