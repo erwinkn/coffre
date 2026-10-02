@@ -16,51 +16,55 @@ These are [examples/workers](../examples/workers) and
 package version. Until the packages are published, install from tarballs;
 `pnpm test:consumer` exercises that path.
 
-## The database, for either deployment
+## The database and its keys, for either deployment
 
-Provision a Postgres database, e.g. `coffre`, owned by a migration login.
-The migration login owns the database and has `CREATEROLE` and `CREATEDB`.
-It does not need `SUPERUSER`. Use the same login to provision the runtime
-roles and run migrations. Postgres 16 and later give a role creator
-`ADMIN OPTION` on its new roles. If the group roles already exist, the
-migration login needs `ADMIN OPTION` on them. Runtime processes never get
-this login. On a managed service, use its administrative connection.
-
-Connect to that database as its administrator with `psql`:
+Provision a Postgres database, e.g. `coffre`, and have its administrator's
+connection string at hand: the login that owns it, with `CREATEROLE` and
+`CREATEDB`, and not necessarily `SUPERUSER`. On a managed service, that is
+its administrative connection, such as PlanetScale's default role. Give the
+database's direct endpoint (normally port 5432), not a connection pool: the
+logins' connection strings are made from it. Then, from the deployment's
+directory:
 
 ```sh
-psql "postgres://owner@db.example.com:5432/coffre?sslmode=verify-full"
+npx @coffre/cli setup
 ```
 
-Create two plain logins. `\password` prompts for passwords without putting
-them in SQL statements or shell history. Use different generated passwords
-and keep them in your password manager. On PlanetScale Postgres, these logins
-connect as `coffre_runtime.<branch id>` and `coffre_vault_runtime.<branch id>`;
-use those names in the connection strings below.
+Run it with the CLI you ran `coffre init` with: it migrates with the
+migrations it was built with, which are those of the `@coffre/server` of the
+same version. It asks for the connection string at a hidden prompt; a script
+can pipe it in, or set `COFFRE_SETUP_DATABASE_URL`. It never takes it as an
+argument, where the shell's history and other users could read it. Then:
 
-```sql
-CREATE ROLE coffre_runtime LOGIN INHERIT NOCREATEDB NOCREATEROLE;
-CREATE ROLE coffre_vault_runtime LOGIN INHERIT NOCREATEDB NOCREATEROLE;
-\password coffre_runtime
-\password coffre_vault_runtime
-\q
-```
+1. It makes the two runtime logins, `coffre_runtime` for the app and
+   `coffre_vault_runtime` for the vault, each with a fresh password that
+   reaches the database only as a SCRAM verifier. On PlanetScale Postgres
+   they log in as `coffre_runtime.<branch id>` and
+   `coffre_vault_runtime.<branch id>`, the branch taken from the
+   administrator's own login.
+2. It migrates the database as the administrator, as `pnpm migrate` does.
+3. It connects as each login and checks the boundary, in transactions it
+   rolls back: the app's login cannot write members, neither can delete log
+   entries or create tables, and the vault's login can write members.
+4. It prints every value at once: the two keys, the KEK's id, and each
+   login's connection string, as one dotenv block per component, followed by
+   where each goes, on Workers and on Node.
 
-New roles default to no superuser, replication or RLS-bypass rights. The
-migration checks those rights and refuses unsafe roles. It hardens existing
-groups without trying to alter their superuser-only attributes.
+**Save the output in your password manager before anything else.** It is
+shown once: coffre keeps no copy, and it writes no file. Run again, setup
+changes nothing it need not. Logins that exist keep their passwords, unless
+you agree to new ones at its prompt or pass `--reset-passwords`. A migrated
+database stays as it is. Keys come only with new passwords, and only for a
+database that holds no data yet; one that does has its keys already.
+`--json` prints the same values for a script.
 
-Then migrate as the owner. Read the URL from your password manager into
-`DATABASE_URL`, including the password and the TLS settings your host requires:
+`coffre keys` makes the keys alone, for a KEK rotation, or for a database
+set up by hand ([appendix](#appendix-the-database-by-hand)).
 
-```sh
-pnpm migrate
-```
-
-`pnpm migrate` runs `coffre-server migrate`. It accepts the owner URL as an
-argument too. URL-encode special characters in passwords. Run it again
-after every package upgrade, before starting either component. Clear the
-owner's `DATABASE_URL` from the shell afterwards (`unset DATABASE_URL`).
+Run `pnpm migrate` after every upgrade of coffre's packages, before starting
+either component. It runs `coffre-server migrate` with the administrator's
+URL from `DATABASE_URL`, or as an argument; clear it from the shell
+afterwards (`unset DATABASE_URL`).
 
 PlanetScale URLs include `sslrootcert=system`. The Node connections and
 migrator use Node's default trusted CAs for that value. They require
@@ -101,16 +105,18 @@ For Cloudflare Access instead, replace `signin(…)` with `cloudflareAccess(…)
 
 ### 2. Two Hyperdrive configs
 
-Create one config per runtime login, both pointing to the same database.
-Substitute their passwords below, URL-encoded. Use the database's direct
-Postgres endpoint (normally port 5432), rather than another connection pool.
+One config per runtime login, both pointing to the same database. `coffre
+setup` printed both commands, each with its login's connection string:
 
 ```sh
 pnpm exec wrangler hyperdrive create coffre --caching-disabled \
-  --connection-string="postgres://coffre_runtime:…@db.example.com:5432/coffre"
+  --connection-string='postgresql://coffre_runtime:…@db.example.com:5432/coffre'
 pnpm exec wrangler hyperdrive create coffre-vault --caching-disabled \
-  --connection-string="postgres://coffre_vault_runtime:…@db.example.com:5432/coffre"
+  --connection-string='postgresql://coffre_vault_runtime:…@db.example.com:5432/coffre'
 ```
+
+These URLs leave out the TLS parameters: Hyperdrive always connects over
+TLS, and checks the certificate against public CAs.
 
 Put the first id in `app/wrangler.jsonc`, under the `HYPERDRIVE` binding,
 and the second in `vault/wrangler.jsonc`, under `VAULT_HYPERDRIVE`. The app's
@@ -132,18 +138,10 @@ the network, never holds what decrypts a value:
 | `AUDIT_CHAIN_KEY` | the app | signs the app's log entries, sessions and tokens | everyone is signed out, and the log stops verifying |
 
 The KEK matters most: with it and a copy of the database, anyone has every
-value, so it never sits beside the backups. Make both, and the KEK's id, at
-once:
-
-```sh
-coffre keys
-```
-
-It prints them once, as `NAME=value` lines, with a note on each, and keeps
-no copy; it uploads nothing and writes no file. Save the output in your
-password manager, with the GitHub client secret, **before** setting
-anything. Then put `KEK_ID` under `vars` in `vault/wrangler.jsonc`, and set
-the secrets; each command prompts for the saved value:
+value, so it never sits beside the backups. `coffre setup` made both, and
+the KEK's id, and you saved them with the GitHub client secret. Put
+`KEK_ID` under `vars` in `vault/wrangler.jsonc`, and set the secrets; each
+command prompts for the saved value:
 
 ```sh
 pnpm exec wrangler secret put KEK -c vault/wrangler.jsonc
@@ -180,7 +178,7 @@ acme-secrets/
   vault.env.example      vault settings
 ```
 
-Use Node 24 or later. Set up the database above, then:
+Use Node 24 or later. Run `coffre setup` as above, then:
 
 ```sh
 cp server.env.example server.env
@@ -188,20 +186,21 @@ cp vault.env.example vault.env
 chmod 600 server.env vault.env
 ```
 
-Fill in `PUBLIC_URL`, the GitHub OAuth settings and `ROOT_ADMINS`, and the
-keys from `coffre keys`, saved in your password manager first
-([step 3 above](#3-keys-and-secrets) says what each is for): `KEK_ID` and
-`KEK` in `vault.env`, `AUDIT_CHAIN_KEY` in `server.env`. Set the
-two `DATABASE_URL`s to one database, using different logins:
+Fill in `PUBLIC_URL`, the GitHub OAuth settings and `ROOT_ADMINS`, then
+the blocks `coffre setup` printed ([step 3 above](#3-keys-and-secrets) says
+what each key is for): the app's in `server.env`, `AUDIT_CHAIN_KEY` and its
+`DATABASE_URL`; the vault's in `vault.env`, `KEK_ID`, `KEK` and its own
+`DATABASE_URL`. Both name one database, through different logins, with the
+TLS settings the administrator's connection string had:
 
 ```dotenv
 # server.env
-DATABASE_URL=postgres://coffre_runtime:…@db.example.com:5432/coffre
+DATABASE_URL=postgresql://coffre_runtime:…@db.example.com:5432/coffre?sslmode=verify-full
 # vault.env
-DATABASE_URL=postgres://coffre_vault_runtime:…@db.example.com:5432/coffre
+DATABASE_URL=postgresql://coffre_vault_runtime:…@db.example.com:5432/coffre?sslmode=verify-full
 ```
 
-Include the TLS settings your database host requires. Run the processes as
+Run the processes as
 two users sharing a group. Each env file belongs to its own process's user;
 the app's user must not read `vault.env`. Set `VAULT_SOCKET` in both files
 to the same absolute path in a directory they can access. The vault makes
@@ -243,9 +242,51 @@ file shared by both processes. Both use test keys and a stand-in GitHub,
 not your live credentials. [conformance.md](conformance.md) lists the checks
 and the separate `probe` command for a live instance.
 
+## Appendix: the database by hand
+
+What `coffre setup` does, step by step, for a host or a policy it does not
+fit. Connect to the database as its administrator with `psql`:
+
+```sh
+psql "postgres://owner@db.example.com:5432/coffre?sslmode=verify-full"
+```
+
+Create two plain logins. `\password` prompts for passwords without putting
+them in SQL statements or shell history. Use different generated passwords
+and keep them in your password manager. On PlanetScale Postgres, these logins
+connect as `coffre_runtime.<branch id>` and `coffre_vault_runtime.<branch id>`;
+use those names in their connection strings.
+
+```sql
+CREATE ROLE coffre_runtime LOGIN INHERIT NOCREATEDB NOCREATEROLE;
+CREATE ROLE coffre_vault_runtime LOGIN INHERIT NOCREATEDB NOCREATEROLE;
+\password coffre_runtime
+\password coffre_vault_runtime
+\q
+```
+
+New roles default to no superuser, replication or RLS-bypass rights. The
+migration checks those rights and refuses unsafe roles. It hardens existing
+groups without trying to alter their superuser-only attributes. Postgres 16
+and later give a role creator `ADMIN OPTION` on its new roles; if the group
+roles already exist, the migration login needs `ADMIN OPTION` on them.
+
+Then migrate as the owner, with its URL in `DATABASE_URL`, including the
+password and the TLS settings your host requires, and URL-encode special
+characters in passwords:
+
+```sh
+pnpm migrate
+```
+
+Make the keys with `coffre keys`, which prints them once, with a note on
+each, and writes no file. Each login's connection string is the owner's,
+with the login's name and password.
+
 ## Not configured by coffre
 
 The environment variable names above belong to the examples. Packages take
 typed configuration and read no deployment environment variables themselves.
-The exceptions are the CLI's user settings and the `DATABASE_URL` fallback
-for `coffre-server migrate` when no URL is given.
+The exceptions are the CLI's user settings, `COFFRE_SETUP_DATABASE_URL`
+among them, and the `DATABASE_URL` fallback for `coffre-server migrate` when
+no URL is given.

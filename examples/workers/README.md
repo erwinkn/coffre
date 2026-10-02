@@ -17,56 +17,24 @@ Worker secrets. Everything below runs from this directory.
 - `app/wrangler.jsonc`: `PUBLIC_URL`, and `GITHUB_CLIENT_ID` from a GitHub
   OAuth app whose callback is `<PUBLIC_URL>/auth/callback/github`.
 - `vault/wrangler.jsonc`: `ROOT_ADMINS`, the emails of the first people in,
-  and `KEK_ID`, which `coffre keys` gives you below.
+  and `KEK_ID`, which `coffre setup` gives you below.
 
-## 2. The database
+## 2. The database and keys
 
-coffre wants a Postgres database with three logins: its owner, for
-migrations; `coffre_runtime`, which the app runs as; and
-`coffre_vault_runtime`, which the vault runs as. Create the two as plain
-logins. As the database's administrator, connect with `psql` and run:
-
-```sql
-CREATE ROLE coffre_runtime LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-CREATE ROLE coffre_vault_runtime LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-\password coffre_runtime
-\password coffre_vault_runtime
-```
-
-Each `\password` prompts for a different generated password. The owner
-must be able to create and grant roles: the migration creates `coffre_app`
-and `coffre_vault`, and grants each login its own group. Only the vault may
-write members and grants, and each appends to the log only as itself.
-URL-encode special characters in the passwords in these URLs:
+Make a Postgres database, then, from this directory:
 
 ```sh
-pnpm install
-pnpm migrate "postgres://owner:…@db.example.com:5432/coffre"
-pnpm exec wrangler hyperdrive create coffre --caching-disabled \
-  --connection-string="postgres://coffre_runtime:…@db.example.com:5432/coffre"
-pnpm exec wrangler hyperdrive create coffre-vault --caching-disabled \
-  --connection-string="postgres://coffre_vault_runtime:…@db.example.com:5432/coffre"
+npx @coffre/cli setup
 ```
 
-Keep `--caching-disabled`: Hyperdrive otherwise caches reads for up to a
-minute, and a revoked token or a signed-out session could keep working that
-long. `wrangler.jsonc` cannot set it, so for a config made another way,
-check `caching` in `wrangler hyperdrive get <id>`.
-
-Put the ids they print under `hyperdrive`, the first in
-`app/wrangler.jsonc` and the second in `vault/wrangler.jsonc`. Run
-`pnpm migrate` again after every upgrade of `@coffre/server`, before
-deploying it.
-
-## 3. Keys
-
-```sh
-coffre keys
-```
-
-Run it with the CLI you ran `coffre init` with, or as
-`npx @coffre/cli keys`. It prints two keys and the KEK's id, once, and
-keeps no copy. Save its output in your password manager, with the GitHub
+Run it with the CLI you ran `coffre init` with. It asks for the database
+administrator's connection string at a hidden prompt (a script can pipe it
+in, or set `COFFRE_SETUP_DATABASE_URL`; never pass it as an argument). It
+makes the two logins coffre runs as, `coffre_runtime` for the app and
+`coffre_vault_runtime` for the vault, migrates the database, checks that
+each login holds only its rights, and prints every value at once: the two
+keys, the KEK's id, and each login's connection string. It keeps no copy and
+writes no file. Save its output in your password manager, with the GitHub
 client secret, before anything else. There is one key for each Worker, so
 that the app, which faces the network, never holds what decrypts a value:
 
@@ -75,8 +43,21 @@ that the app, which faces the network, never holds what decrypts a value:
 - `AUDIT_CHAIN_KEY`, the app's, signs the app's log entries, sessions and
   tokens. Lose it, and everyone is signed out and the log stops verifying.
 
-Put `KEK_ID` in `vault/wrangler.jsonc`, then set the secrets; each command
-prompts for the saved value:
+To do the same by hand, see
+[deploy.md](https://github.com/erwinkn/coffre/blob/main/docs/deploy.md#appendix-the-database-by-hand).
+
+## 3. Hyperdrive and secrets
+
+Run the two `wrangler hyperdrive create` commands setup printed: one config
+per login, each `--caching-disabled`. Hyperdrive otherwise caches reads for
+up to a minute, and a revoked token or a signed-out session could keep
+working that long. `wrangler.jsonc` cannot set it, so for a config made
+another way, check `caching` in `wrangler hyperdrive get <id>`.
+
+Put the ids they print under `hyperdrive`, the first in
+`app/wrangler.jsonc` and the second in `vault/wrangler.jsonc`, and `KEK_ID`
+in `vault/wrangler.jsonc`. Then set the secrets; each command prompts for
+the saved value:
 
 ```sh
 pnpm exec wrangler secret put KEK -c vault/wrangler.jsonc
@@ -84,9 +65,12 @@ pnpm exec wrangler secret put AUDIT_CHAIN_KEY -c app/wrangler.jsonc
 pnpm exec wrangler secret put GITHUB_CLIENT_SECRET -c app/wrangler.jsonc
 ```
 
+Run `pnpm migrate`, with the administrator's URL in `DATABASE_URL`, after
+every upgrade of `@coffre/server`, before deploying it.
+
 Keep older KEKs after a rotation, for good: what they wrapped still needs
-them, and so does what the vault signed under them before it. With AWS KMS instead of
-a key of your own, the vault also needs a `SIGNING_KEY`
+them, and so does what the vault signed under them before it. With AWS KMS
+instead of a key of your own, the vault also needs a `SIGNING_KEY`
 ([keys](https://github.com/erwinkn/coffre/blob/main/docs/keys.md#aws-kms)).
 
 ## 4. Deploy

@@ -68,6 +68,21 @@ mkdir -p "$work/cli"
 tar -xzf "$work"/tarballs/coffre-cli-*.tgz -C "$work/cli"
 export HOME="$work/home"
 
+# `coffre setup` is a chunk of its own, with the Postgres driver and the
+# migrations beside it: it loads, and refuses a database it cannot reach
+# without quoting the connection string.
+echo "==> coffre setup, packed"
+test -f "$work/cli/package/dist/migrations/postgres/meta/_journal.json"
+unreachable="postgresql://smoke:smoke-only-password@127.0.0.1:9/coffre"
+if said="$(echo "$unreachable" | node "$work/cli/package/dist/main.js" setup 2>&1)"; then
+    echo "consumer-test: coffre setup accepted a database it cannot reach" >&2
+    exit 1
+fi
+if [[ "$said" != *ECONNREFUSED* || "$said" == *smoke-only-password* ]]; then
+    echo "consumer-test: coffre setup answered: $said" >&2
+    exit 1
+fi
+
 for kind in workers node; do
     project="$work/coffre-$kind"
     echo "==> coffre init --$kind"

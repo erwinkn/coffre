@@ -32,3 +32,6 @@ docker compose exec -T \
 
 # Managed hosts give the owner CREATEROLE, not superuser.
 ./scripts/test-schema-owner.sh
+
+# And `coffre setup`, which makes the logins and migrates, on one of its own.
+./scripts/test-setup.sh

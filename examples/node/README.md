@@ -19,65 +19,53 @@ from this directory, on Node 24 or later.
 pnpm install
 cp server.env.example server.env
 cp vault.env.example vault.env
+chmod 600 server.env vault.env
 ```
 
-Fill both in: `PUBLIC_URL`, a GitHub OAuth app whose callback is
-`<PUBLIC_URL>/auth/callback/github`, `ROOT_ADMINS`, and the keys from
+Fill in `PUBLIC_URL`, a GitHub OAuth app whose callback is
+`<PUBLIC_URL>/auth/callback/github`, and `ROOT_ADMINS`. Keep each env file
+readable only by its process's user.
+
+## 2. The database and keys
+
+Make a Postgres database, then:
 
 ```sh
-coffre keys
+npx @coffre/cli setup
 ```
 
-Run it with the CLI you ran `coffre init` with, or as
-`npx @coffre/cli keys`. It prints two keys and the KEK's id, once, and
-keeps no copy. Save its output in your password manager, with the OAuth
-client secret, before anything else. `KEK_ID` and `KEK` go in `vault.env`,
-and `AUDIT_CHAIN_KEY` in `server.env`: one key for each process, so that the
-server, which faces the network, never holds what decrypts a value.
+Run it with the CLI you ran `coffre init` with. It asks for the database
+administrator's connection string at a hidden prompt (a script can pipe it
+in, or set `COFFRE_SETUP_DATABASE_URL`; never pass it as an argument). It
+makes the two logins coffre runs as, `coffre_runtime` for the server and
+`coffre_vault_runtime` for the vault, migrates the database, checks that
+each login holds only its rights, and prints every value at once, as one
+block for each process. It keeps no copy and writes no file. Save its
+output in your password manager, with the OAuth client secret, before
+anything else. Then the app's block goes in `server.env` and the vault's in
+`vault.env`: one key for each process, so that the server, which faces the
+network, never holds what decrypts a value.
 
 - `KEK`, the vault's, decrypts every value, and the vault derives from it the
   key it signs its records with. Lose it, and every value is lost.
 - `AUDIT_CHAIN_KEY`, the server's, signs the server's log entries, sessions
   and tokens. Lose it, and everyone is signed out and the log stops
   verifying.
+- Each `DATABASE_URL` is the same database through that process's own login.
+  Neither process gets the administrator's URL.
 
 With AWS KMS instead of a key of your own, the vault also needs a
 `SIGNING_KEY` ([keys](https://github.com/erwinkn/coffre/blob/main/docs/keys.md#aws-kms)).
+To do the same by hand, see
+[deploy.md](https://github.com/erwinkn/coffre/blob/main/docs/deploy.md#appendix-the-database-by-hand).
 
-## 2. The database
-
-Use one Postgres database with three logins: its owner for migrations,
-`coffre_runtime` for the server, and `coffre_vault_runtime` for the vault.
-As an administrator, connect to the database with `psql` and create the
-runtime logins. `\password` prompts for each password without putting it
-in a SQL statement or shell history:
-
-```sql
-CREATE ROLE coffre_runtime LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-CREATE ROLE coffre_vault_runtime LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-\password coffre_runtime
-\password coffre_vault_runtime
-```
-
-Migrate as the owner, who must also be able to create and grant roles:
-
-```sh
-pnpm migrate "postgres://owner:…@db.example.com:5432/coffre"
-```
-
-The migration creates the `coffre_app` and `coffre_vault` group roles and
-grants each login only its group's rights. Only the vault writes members
-and grants; each login appends to the audit log only as itself. Run the
-migration again after every package upgrade, before starting either process.
-
-Fill `DATABASE_URL` in each env file with the same host and database, using
-`coffre_runtime` in `server.env` and `coffre_vault_runtime` in `vault.env`.
-URL-encode special characters in passwords. Neither process gets the owner's
-URL. Keep each env file readable only by its process's user (`chmod 600`).
+Run `pnpm migrate`, with the administrator's URL in `DATABASE_URL`, after
+every package upgrade, before starting either process.
 
 For tests and local development only, both URLs may instead name the same
-absolute SQLite file, e.g. `file:/tmp/coffre-local.db`; migrate that URL once.
-SQLite has no database logins or separation of privileges.
+absolute SQLite file, e.g. `file:/tmp/coffre-local.db`; migrate that URL once
+with `pnpm migrate`, and make the keys with `npx @coffre/cli keys`. SQLite
+has no database logins or separation of privileges.
 
 ## 3. Run
 

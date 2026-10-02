@@ -49,32 +49,34 @@ role logs in to the new branch as `<role>.<new branch id>`.
 2. Restore. In the database's **Backups** page, either choose a backup and
    **Restore to new branch**, or use **Point-in-time recovery** with the
    source branch and the moment. Name the branch, e.g. `restore-2026-10-01`.
-3. Set both runtime logins' passwords again, as the owner on the new branch,
-   with new generated values from your password manager:
-
-   ```sql
-   \password coffre_runtime
-   \password coffre_vault_runtime
-   ```
-
-4. Point both Hyperdrive configs at the new branch, each with its own login
-   and the new branch id. Keep caching disabled:
+3. Set the logins up again on the new branch, with the owner's connection
+   string for it, as when the deployment was made:
 
    ```sh
-   pnpm exec wrangler hyperdrive update <app config id> \
-     --connection-string="postgres://coffre_runtime.<branch id>:…@<host>:5432/<database>"
-   pnpm exec wrangler hyperdrive update <vault config id> \
-     --connection-string="postgres://coffre_vault_runtime.<branch id>:…@<host>:5432/<database>"
+   npx @coffre/cli setup --reset-passwords
+   ```
+
+   It sets both runtime logins' passwords again, which the restore reset,
+   and prints each login's new connection string, under the new branch id.
+   It migrates: missing migrations are applied, and the database-level
+   privileges reasserted, on every run, even when the schema is current; a
+   database a newer release migrated is refused. It checks the boundary as
+   each login. It makes no keys: the restored database has its own.
+4. Point both Hyperdrive configs at the new branch, with the
+   `wrangler hyperdrive update` commands it printed, and check that caching
+   stays disabled:
+
+   ```sh
    pnpm exec wrangler hyperdrive get <app config id>   # caching: disabled
    ```
 
-5. Run `pnpm migrate` with the owner's URL for the new branch. It applies
-   missing migrations and reasserts the database-level privileges on every
-   run, even when the schema is current. It refuses a database a newer
-   release migrated.
-6. Redeploy both Workers with `pnpm run deploy`, the same keys and settings:
+   By hand, steps 3 and 4 are `\password` for both logins as the owner, the
+   two updates with `coffre_runtime.<branch id>` and
+   `coffre_vault_runtime.<branch id>`, and `pnpm migrate` with the owner's
+   URL for the new branch.
+5. Redeploy both Workers with `pnpm run deploy`, the same keys and settings:
    a fresh deployment remembers no log head.
-7. Check the result, below, then reopen traffic. Promote the branch, or
+6. Check the result, below, then reopen traffic. Promote the branch, or
    point production at it, as PlanetScale's branching docs describe.
 
 ## On plain Postgres
@@ -95,7 +97,7 @@ Restore:
 
 1. Stop both components (or both Workers).
 2. Create the runtime logins if this server lacks them, and set their
-   passwords, as in [deploy.md](deploy.md#the-database-for-either-deployment):
+   passwords, as in [deploy.md](deploy.md#appendix-the-database-by-hand):
 
    ```sql
    CREATE ROLE coffre_runtime LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;

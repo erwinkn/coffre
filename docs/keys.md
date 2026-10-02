@@ -18,12 +18,13 @@ The default, and what `coffre init` sets up:
 kek: { id: env.KEK_ID, key: env.KEK },
 ```
 
-`coffre keys` makes it, with its id, beside the app's key
-([deploy.md](deploy.md#3-keys-and-secrets)). It costs nothing and adds no
-latency. It is also where the vault's signing key comes from: the vault
-derives it from the KEK, with HKDF-SHA-256 under a label no other use of the
-KEK shares, and that key MACs the vault's log entries, seals member rows and
-signs checkpoints. So the vault has one key to keep, not two.
+`coffre setup` makes it, with its id, beside the app's key and the
+database's logins, and `coffre keys` makes the keys alone
+([deploy.md](deploy.md#the-database-and-its-keys-for-either-deployment)).
+It costs nothing and adds no latency. It is also where the vault's signing
+key comes from: the vault derives it from the KEK, with HKDF-SHA-256 under a
+label no other use of the KEK shares, and that key MACs the vault's log
+entries, seals member rows and signs checkpoints. So the vault has one key to keep, not two.
 
 Whoever holds the KEK and a copy of the database holds every value, and
 nothing outside coffre records the use of either. Whoever holds it and can
