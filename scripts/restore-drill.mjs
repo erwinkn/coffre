@@ -110,7 +110,7 @@ async function wrongKek(before) {
     // The vault's own keys come from its KEK, so its entries stop verifying too, and the answer says why.
     const verification = await call(admin, 'GET', '/api/audit/verification');
     assert.ok(!verification.ok && verification.author === 'vault', `the log verified under the wrong KEK: ${JSON.stringify(verification)}`);
-    assert.match(verification.reason, /another KEK or signing key/);
+    assert.match(verification.reason, /another vault key or signing key/);
     await fetch(`${API}/cdn-cgi/handler/scheduled?cron=*/5+*+*+*+*`);
     const ready = await (await fetch(`${API}/readyz`)).json();
     assert.equal(ready.checkpointed, false, 'the vault checkpointed under the wrong KEK');

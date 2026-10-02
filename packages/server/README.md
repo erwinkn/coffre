@@ -12,7 +12,7 @@ export default coffre((env) => ({
   database: postgres(env.HYPERDRIVE),
   vault: env.VAULT,
   auth: signin({ providers: [github({ clientId: env.GITHUB_CLIENT_ID, clientSecret: env.GITHUB_CLIENT_SECRET })] }),
-  auditChainKey: env.AUDIT_CHAIN_KEY,
+  auditChainKey: env.APP_KEY,
 }));
 ```
 

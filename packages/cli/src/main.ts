@@ -1021,9 +1021,9 @@ const USAGE = `coffre - secrets, with an audit log
     coffre init --workers [<dir>]           two Cloudflare Workers: the app and its vault
     coffre init --node [<dir>]              a Node server, and its vault beside it
     coffre setup [--reset-passwords] [--json]
-                                            its database logins, migrations and keys, in one go,
-                                            shown once (the connection string is asked for)
-    coffre keys [--json]                    its keys and the KEK's id alone, made here and shown once
+                                            its database logins, migrations and keys in one go,
+                                            shown once on a screen of their own
+    coffre keys [--json]                    the app key, vault key and vault ID alone, shown the same way
 
   Session
     coffre login [<url>] [--no-browser]     sign in, and make <url> the current instance
@@ -1075,7 +1075,7 @@ switch (command) {
     initProject(rest);
     break;
   case 'keys':
-    keys(rest);
+    await keys(rest);
     break;
   case 'setup':
     // Its own chunk: the database driver and the migrations load only for it.

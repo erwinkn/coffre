@@ -17,11 +17,11 @@
     "GITHUB_CLIENT_ID": "replace-with-your-client-id"
   },
   "secrets": {
-    // AUDIT_CHAIN_KEY is from `coffre setup`; the app never gets the vault's keys.
-    "required": ["GITHUB_CLIENT_SECRET", "AUDIT_CHAIN_KEY"]
+    // APP_KEY is from `coffre setup`; the app never gets the vault's keys.
+    "required": ["GITHUB_CLIENT_SECRET", "APP_KEY"]
   },
-  // `wrangler hyperdrive create coffre --caching-disabled --connection-string=<runtime login URL>`
-  // prints the id. Caching must stay off, or a revoked session keeps working
+  // `wrangler hyperdrive create coffre --caching-disabled`, as `coffre setup`
+  // shows it, prints the id. Caching must stay off, or a revoked session keeps working
   // for about a minute, and this file cannot set it: see README.md. Locally,
   // CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE stands in for
   // the config.

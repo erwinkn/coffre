@@ -223,7 +223,7 @@ const MESSAGES: Record<RefusalCode, string> = {
   root_admin: 'root admins are set in the vault configuration',
   invalid: 'not something the rules allow',
   log_broken: 'the vault log does not hold from the last checkpoint',
-  wrong_kek: "this vault's KEK does not open the data it holds",
+  wrong_kek: "this vault's key does not open the data it holds",
   tampered: "this member's record failed the vault's integrity check",
 };
 
@@ -531,8 +531,8 @@ class VaultService implements Vault {
       }
       prepared.superseded =
         first === undefined
-          ? `the vault's entries are under ${newest.keyId}, a key this vault does not hold: it was given the wrong KEK or signing key, or a KEK it replaced is missing from previousKeks`
-          : `the log moved on from this vault's key, ${current}, to ${newest.keyId}: a vault given a newer KEK replaced it, and a replaced key writes nothing more`;
+          ? `the vault's entries are under ${newest.keyId}, a key this vault does not hold: it was given the wrong vault key or signing key, or a vault key it replaced is missing from previousKeks in its config`
+          : `the log moved on from this vault's key, ${current}, to ${newest.keyId}: a vault given a newer vault key replaced it, and a replaced key writes nothing more`;
       return;
     }
   }
@@ -581,7 +581,7 @@ class VaultService implements Vault {
     return appendEntries(tx, prepared.logKey, entries, async (locked) => {
       const rotation = await store.latestVaultEntry(locked, [KEY_ROTATE]);
       if (rotation === undefined || prepared.logKeys.some((key) => key.keyId === rotation.keyId)) return;
-      prepared.superseded = `the log moved on to ${rotation.keyId}, a key this vault does not hold: a vault given a newer KEK replaced it, and a replaced key writes nothing more`;
+      prepared.superseded = `the log moved on to ${rotation.keyId}, a key this vault does not hold: a vault given a newer vault key replaced it, and a replaced key writes nothing more`;
       throw new Error(prepared.superseded);
     });
   }
@@ -1359,7 +1359,7 @@ class VaultService implements Vault {
           throw error;
         }
       };
-      const mismatch = `this vault's ${kek.provider} KEK ${kek.keyId} does not open the data it holds: it is not the key that wrapped it`;
+      const mismatch = `the vault key ${kek.keyId}${kek.provider === 'local' ? '' : ` (${kek.provider})`}, kek or previousKeks in the vault's config, is not the one that wrapped these values`;
       const check = checks.get(`${kek.provider}:${kek.keyId}`);
       if (check !== undefined) {
         if (!(await opens(check, KEY_CHECK_CONTEXT, KEY_CHECK_VALUE))) return mismatch;

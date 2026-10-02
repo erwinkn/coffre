@@ -1,5 +1,5 @@
 // coffre's server: the API, sign-in, pages and scheduled job, in one
-// process. It holds no KEK: it asks the vault, a process of its own
+// process. It holds no vault key: it asks the vault, a process of its own
 // (src/vault.ts), over a Unix socket. Settings come from server.env.
 import { github, serve, signin } from '@coffre/server/node';
 import { connectVault } from '@coffre/vault/node';
@@ -28,7 +28,7 @@ const server = await serve({
       }),
     ],
   }),
-  auditChainKey: env('AUDIT_CHAIN_KEY'),
+  auditChainKey: env('APP_KEY'),
 });
 console.log(`coffre is listening on ${server.url}`);
 

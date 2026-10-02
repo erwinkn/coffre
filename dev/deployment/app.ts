@@ -12,7 +12,7 @@ type Env = {
   VAULT: Vault;
   COFFRE_PUBLIC_URL: string;
   COFFRE_DEV_IDP_URL: string;
-  COFFRE_AUDIT_CHAIN_KEY: string;
+  COFFRE_APP_KEY: string;
 };
 
 export default coffre((env: Env) => {
@@ -29,6 +29,6 @@ export default coffre((env: Env) => {
       ],
       note: 'Local development. Both buttons lead to the dev IdP.',
     }),
-    auditChainKey: env.COFFRE_AUDIT_CHAIN_KEY,
+    auditChainKey: env.COFFRE_APP_KEY,
   };
 });

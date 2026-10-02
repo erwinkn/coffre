@@ -3,13 +3,13 @@ import { postgres, vault } from '@coffre/vault/cloudflare';
 
 type Env = {
   VAULT_HYPERDRIVE: { connectionString: string };
-  COFFRE_KEK_ID: string;
-  COFFRE_KEK_LOCAL: string;
+  COFFRE_VAULT_KEY_ID: string;
+  COFFRE_VAULT_KEY: string;
   COFFRE_ROOT_ADMINS: string;
 };
 
 export default vault((env: Env) => ({
   database: postgres(env.VAULT_HYPERDRIVE),
-  kek: { id: env.COFFRE_KEK_ID, key: env.COFFRE_KEK_LOCAL },
+  kek: { id: env.COFFRE_VAULT_KEY_ID, key: env.COFFRE_VAULT_KEY },
   rootAdmins: env.COFFRE_ROOT_ADMINS.split(','),
 }));

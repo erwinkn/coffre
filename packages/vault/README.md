@@ -10,7 +10,7 @@ import { postgres, vault } from '@coffre/vault/cloudflare';
 
 export default vault((env) => ({
   database: postgres(env.VAULT_HYPERDRIVE), // coffre_vault_runtime, caching disabled
-  kek: { id: env.KEK_ID, key: env.KEK }, // or awsKms({ keyArn, credentials }), with a signingKey
+  kek: { id: env.VAULT_KEY_ID, key: env.VAULT_KEY }, // or awsKms({ keyArn, credentials }), with a signingKey
   rootAdmins: env.ROOT_ADMINS.split(','),
 }));
 ```

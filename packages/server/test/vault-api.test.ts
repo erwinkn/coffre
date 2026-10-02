@@ -165,13 +165,13 @@ test('a vault given the wrong KEK answers every value with 503, its entries stop
     status: 503,
     code: 'unavailable',
     reason: 'wrong_kek',
-    message: /^the vault's entries are under vault:\S+, a key this vault does not hold: it was given the wrong KEK or signing key, or a KEK it replaced is missing from previousKeks$/,
+    message: /^the vault's entries are under vault:\S+, a key this vault does not hold: it was given the wrong vault key or signing key, or a vault key it replaced is missing from previousKeks in its config$/,
   });
   await assert.rejects(admin.secrets.set('market/dev', { NEW: 'value' }), { status: 503, reason: 'wrong_kek' });
   // The vault's keys come from its KEK, so its entries no longer verify either, and the answer says why.
   const verdict = await admin.audit.verify();
   assert.ok(!verdict.ok && verdict.author === 'vault');
-  assert.match(verdict.reason, /a key this verifier does not hold: either it is forged, or the vault wrote it under another KEK or signing key/);
+  assert.match(verdict.reason, /a key this verifier does not hold: either it is forged, or the vault wrote it under another vault key or signing key/);
   assert.equal(await writeAuditHeartbeat(db.runtime, deps.chainKey, misled.vault, { warn: () => {} }), false);
   const ready = await auditReadiness(db.runtime, misled.vault);
   assert.deepEqual([ready.ok, ready.checkpointed], [false, false]);

@@ -51,8 +51,9 @@ Workers or two Node processes:
 
 - **the app**: the API, sign-in, the pages, syncs, and a job every five
   minutes;
-- **the vault**: the key-encryption key (KEK), who is a member, and who holds
-  what. It decides every read and write of a key, and nothing else can.
+- **the vault**: the vault key, which wraps every value's own key, who is a
+  member, and who holds what. It decides every read and write of a key, and
+  nothing else can.
 
 Both use one Postgres database, each through its own login, and both write
 to one audit log. Say Ada runs `coffre run market/prod -- ./deploy`. The app
@@ -284,9 +285,9 @@ read and write only through `@coffre/client`.
 
 ```
 packages/server       @coffre/server: /api, sign-in, syncs, the scheduled job; /cloudflare and /node
-packages/vault        @coffre/vault: the KEK, members and grants, its entries in the log; /cloudflare and /node
+packages/vault        @coffre/vault: the vault key, members and grants, its entries in the log; /cloudflare and /node
 packages/db           @coffre/db: the schemas, migrations and migrator, the connections
-packages/core         @coffre/core: access rules, encryption, KEKs, the log's format, sign-in, the vault's contract
+packages/core         @coffre/core: access rules, encryption, vault keys, the log's format, sign-in, the vault's contract
 packages/client       @coffre/client: the API as typed calls
 packages/ui           @coffre/ui: the pages, prebuilt
 packages/cli          @coffre/cli: `coffre`, from init and login to secrets, syncs and the log

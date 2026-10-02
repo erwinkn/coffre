@@ -10,6 +10,6 @@
   "compatibility_flags": ["nodejs_compat"],
   "hyperdrive": [{ "binding": "VAULT_HYPERDRIVE", "id": "local" }],
   "secrets": {
-    "required": ["COFFRE_KEK_ID", "COFFRE_KEK_LOCAL", "COFFRE_ROOT_ADMINS"]
+    "required": ["COFFRE_VAULT_KEY_ID", "COFFRE_VAULT_KEY", "COFFRE_ROOT_ADMINS"]
   }
 }

@@ -187,13 +187,13 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       ...['--var', `GITHUB_URL:${github.GITHUB_URL}`, '--var', `GITHUB_API_URL:${github.GITHUB_API_URL}`],
     ], {
       // Wrangler hands each Worker the vars and secrets its own
-      // wrangler.jsonc declares, from here: the app never sees a KEK.
+      // wrangler.jsonc declares, from here: the app never sees the vault key.
       PUBLIC_URL: origin,
       GITHUB_CLIENT_ID: github.GITHUB_CLIENT_ID,
       GITHUB_CLIENT_SECRET: github.GITHUB_CLIENT_SECRET,
-      AUDIT_CHAIN_KEY: KEYS.AUDIT_CHAIN_KEY,
-      KEK_ID: KEYS.KEK_ID,
-      KEK: KEYS.KEK,
+      APP_KEY: KEYS.APP_KEY,
+      VAULT_KEY_ID: KEYS.VAULT_KEY_ID,
+      VAULT_KEY: KEYS.VAULT_KEY,
       ROOT_ADMINS: ROOT_ADMIN,
       CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE: runtime,
       CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_VAULT_HYPERDRIVE: vaultRuntime,
@@ -225,8 +225,8 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
     start('vault', process.execPath, ['src/vault.ts'], {
       VAULT_SOCKET: socket,
       DATABASE_URL: `file:${database}`,
-      KEK_ID: KEYS.KEK_ID,
-      KEK: KEYS.KEK,
+      VAULT_KEY_ID: KEYS.VAULT_KEY_ID,
+      VAULT_KEY: KEYS.VAULT_KEY,
       ROOT_ADMINS: ROOT_ADMIN,
     });
     await until('the vault socket', async () => existsSync(socket), 30, alive);
@@ -236,7 +236,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
         PUBLIC_URL: origin,
         DATABASE_URL: `file:${database}`,
         VAULT_SOCKET: socket,
-        AUDIT_CHAIN_KEY: KEYS.AUDIT_CHAIN_KEY,
+        APP_KEY: KEYS.APP_KEY,
         ...github,
       });
     let server = startServer();

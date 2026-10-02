@@ -46,20 +46,31 @@ argument, where the shell's history and other users could read it. Then:
 3. It connects as each login and checks the boundary, in transactions it
    rolls back: the app's login cannot write members, neither can delete log
    entries or create tables, and the vault's login can write members.
-4. It prints every value at once: the two keys, the KEK's id, and each
-   login's connection string, as one dotenv block per component, followed by
-   where each goes, on Workers and on Node.
+4. It shows five values on a screen of their own, the terminal's alternate
+   screen, which leaves nothing in the scrollback. For the app, the app key
+   and its database URL. For the vault, the vault ID, the vault key and its
+   database URL. Each is masked until you reveal it with `r`, and `c` copies
+   it; `w` shows where each goes, on Workers and on Node, with the commands
+   to copy.
 
-**Save the output in your password manager before anything else.** It is
-shown once: coffre keeps no copy, and it writes no file. Run again, setup
-changes nothing it need not. Logins that exist keep their passwords, unless
-you agree to new ones at its prompt or pass `--reset-passwords`. A migrated
-database stays as it is. Keys come only with new passwords, and only for a
-database that holds no data yet; one that does has its keys already.
-`--json` prints the same values for a script.
+**Copy each value into your password manager before leaving the screen.**
+They are shown once: coffre keeps no copy, and writes no file. A copy goes
+through the system's clipboard, which setup clears again after 30 seconds,
+or when you leave, if it still holds the value. Leaving asks first. The
+main screen then shows only what was done, and the vault ID, which is not
+secret.
 
-`coffre keys` makes the keys alone, for a KEK rotation, or for a database
-set up by hand ([appendix](#appendix-the-database-by-hand)).
+Run again, setup changes nothing it need not. Logins that exist keep their
+passwords, unless you agree to new ones at its prompt or pass
+`--reset-passwords`. A migrated database stays as it is. Keys come only with
+new passwords, and only for a database that holds no data yet; one that does
+has its keys already. Without a terminal, setup refuses rather than print
+the values; `--json` prints them to stdout for a script, with a warning on
+stderr.
+
+`coffre keys` makes the keys alone, on the same screen, for a rotation of
+the vault key, or for a database set up by hand
+([appendix](#appendix-the-database-by-hand)).
 
 Run `pnpm migrate` after every upgrade of coffre's packages, before starting
 either component. It runs `coffre-server migrate` with the administrator's
@@ -98,25 +109,28 @@ acme-secrets/
 Set `PUBLIC_URL` and `GITHUB_CLIENT_ID` in `app/wrangler.jsonc`. The GitHub
 OAuth app's callback is `<PUBLIC_URL>/auth/callback/github`. Set
 `ROOT_ADMINS` in `vault/wrangler.jsonc`: the first people in, whom nobody can
-remove through the API. `KEK_ID` comes with the keys, in step 3.
+remove through the API. `VAULT_KEY_ID` comes with the keys, in step 3.
 
 For Cloudflare Access instead, replace `signin(…)` with `cloudflareAccess(…)`
 ([deployment-auth.md](deployment-auth.md)).
 
 ### 2. Two Hyperdrive configs
 
-One config per runtime login, both pointing to the same database. `coffre
-setup` printed both commands, each with its login's connection string:
+One config per runtime login, both pointing to the same database. Each
+command reads its login's database URL at a silent prompt, so that the
+password stays out of your shell's history: run it, paste the URL from
+`coffre setup`'s screen, then press Enter. `coffre setup` shows both
+commands, ready to copy.
 
 ```sh
-pnpm exec wrangler hyperdrive create coffre --caching-disabled \
-  --connection-string='postgresql://coffre_runtime:…@db.example.com:5432/coffre'
-pnpm exec wrangler hyperdrive create coffre-vault --caching-disabled \
-  --connection-string='postgresql://coffre_vault_runtime:…@db.example.com:5432/coffre'
+read -rs COFFRE_DB_URL && pnpm exec wrangler hyperdrive create coffre --caching-disabled --connection-string="${COFFRE_DB_URL%%[?]*}"; unset COFFRE_DB_URL
+read -rs COFFRE_DB_URL && pnpm exec wrangler hyperdrive create coffre-vault --caching-disabled --connection-string="${COFFRE_DB_URL%%[?]*}"; unset COFFRE_DB_URL
 ```
 
-These URLs leave out the TLS parameters: Hyperdrive always connects over
-TLS, and checks the certificate against public CAs.
+The first takes the app's database URL, the second the vault's. They drop
+the URL's TLS parameters: Hyperdrive always connects over TLS, and checks
+the certificate against public CAs. The Cloudflare dashboard's Hyperdrive
+page makes the same configs, without a shell.
 
 Put the first id in `app/wrangler.jsonc`, under the `HYPERDRIVE` binding,
 and the second in `vault/wrangler.jsonc`, under `VAULT_HYPERDRIVE`. The app's
@@ -134,27 +148,27 @@ the network, never holds what decrypts a value:
 
 | Key | Held by | What it does | If it is lost |
 |---|---|---|---|
-| `KEK`, named by `KEK_ID` | the vault | decrypts every value; the vault also derives from it the key it signs its log entries, member rows and checkpoints with | every value is lost for good |
-| `AUDIT_CHAIN_KEY` | the app | signs the app's log entries, sessions and tokens | everyone is signed out, and the log stops verifying |
+| The vault key, `VAULT_KEY`, named by the vault ID, `VAULT_KEY_ID` | the vault | decrypts every value; the vault also derives from it the key it signs its log entries, member rows and checkpoints with | every value is lost for good |
+| The app key, `APP_KEY` | the app | signs the app's log entries, sessions and tokens | everyone is signed out, and the log stops verifying |
 
-The KEK matters most: with it and a copy of the database, anyone has every
-value, so it never sits beside the backups. `coffre setup` made both, and
-the KEK's id, and you saved them with the GitHub client secret. Put
-`KEK_ID` under `vars` in `vault/wrangler.jsonc`, and set the secrets; each
-command prompts for the saved value:
+The vault key matters most: with it and a copy of the database, anyone has
+every value, so it never sits beside the backups. `coffre setup` made both,
+and the vault ID, and you saved them with the GitHub client secret. Put
+`VAULT_KEY_ID` under `vars` in `vault/wrangler.jsonc`, and set the secrets;
+each command prompts for the saved value:
 
 ```sh
-pnpm exec wrangler secret put KEK -c vault/wrangler.jsonc
-pnpm exec wrangler secret put AUDIT_CHAIN_KEY -c app/wrangler.jsonc
+pnpm exec wrangler secret put VAULT_KEY -c vault/wrangler.jsonc
+pnpm exec wrangler secret put APP_KEY -c app/wrangler.jsonc
 pnpm exec wrangler secret put GITHUB_CLIENT_SECRET -c app/wrangler.jsonc
 ```
 
-Keep old KEKs too: after a rotation, the old one stays in `previousKeks`,
+Keep old vault keys too: after a rotation, the old one stays in `previousKeks`,
 and escrowed, for good. It still opens what it wrapped, and what the vault
 signed under it before the rotation verifies only while it is configured;
 it vouches for nothing after ([keys.md](keys.md#a-local-key)).
 
-With AWS KMS instead of a key of your own, the vault never sees the KEK, so
+With AWS KMS instead of a key of your own, the vault never sees its key, so
 it cannot derive its signing key from it, and needs a third key,
 `SIGNING_KEY` ([keys.md](keys.md#aws-kms)).
 
@@ -187,11 +201,12 @@ chmod 600 server.env vault.env
 ```
 
 Fill in `PUBLIC_URL`, the GitHub OAuth settings and `ROOT_ADMINS`, then
-the blocks `coffre setup` printed ([step 3 above](#3-keys-and-secrets) says
-what each key is for): the app's in `server.env`, `AUDIT_CHAIN_KEY` and its
-`DATABASE_URL`; the vault's in `vault.env`, `KEK_ID`, `KEK` and its own
-`DATABASE_URL`. Both name one database, through different logins, with the
-TLS settings the administrator's connection string had:
+the values from `coffre setup`'s screen ([step 3 above](#3-keys-and-secrets)
+says what each key is for). `server.env` takes the app key, `APP_KEY`, and
+the app's database URL, as `DATABASE_URL`. `vault.env` takes the vault ID,
+`VAULT_KEY_ID`, the vault key, `VAULT_KEY`, and the vault's database URL.
+Both URLs name one database, through different logins, with the TLS
+settings the administrator's connection string had:
 
 ```dotenv
 # server.env
@@ -230,7 +245,7 @@ run before reopening traffic.
 Point an external monitor at `/readyz`, so that someone is paged when it
 turns red: it does when the log stops taking writes, the vault stops
 signing checkpoints, a checkpoint finds the log cut or rewritten, or the
-vault finds its KEK wrong. `/livez` only says the process answers.
+vault finds its key wrong. `/livez` only says the process answers.
 
 ## Conformance
 
@@ -279,9 +294,9 @@ characters in passwords:
 pnpm migrate
 ```
 
-Make the keys with `coffre keys`, which prints them once, with a note on
-each, and writes no file. Each login's connection string is the owner's,
-with the login's name and password.
+Make the keys with `coffre keys`, which shows them once, on a screen of
+their own, and writes no file. Each login's connection string is the
+owner's, with the login's name and password.
 
 ## Not configured by coffre
 

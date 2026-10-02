@@ -14,7 +14,7 @@
     "COFFRE_DEV_IDP_URL": "http://127.0.0.1:8081"
   },
   "secrets": {
-    "required": ["COFFRE_AUDIT_CHAIN_KEY"]
+    "required": ["COFFRE_APP_KEY"]
   },
   "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "local" }],
   "services": [{ "binding": "VAULT", "service": "coffre-dev-vault" }],

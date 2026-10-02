@@ -9,7 +9,7 @@ Two processes, configured in code:
   only the server, on a Unix socket.
 
 Run them as two users that share a group, and the process facing the network
-never holds the KEK. For local development, `server.ts` can run the vault
+never holds the vault key. For local development, `server.ts` can run the vault
 in its own process instead; see the comment there. Everything below runs
 from this directory, on Node 24 or later.
 
@@ -35,23 +35,26 @@ npx @coffre/cli setup
 ```
 
 Run it with the CLI you ran `coffre init` with. It asks for the database
-administrator's connection string at a hidden prompt (a script can pipe it
-in, or set `COFFRE_SETUP_DATABASE_URL`; never pass it as an argument). It
+administrator's connection string at a hidden prompt. A script can pipe it
+in, or set `COFFRE_SETUP_DATABASE_URL`; never pass it as an argument. It
 makes the two logins coffre runs as, `coffre_runtime` for the server and
-`coffre_vault_runtime` for the vault, migrates the database, checks that
-each login holds only its rights, and prints every value at once, as one
-block for each process. It keeps no copy and writes no file. Save its
-output in your password manager, with the OAuth client secret, before
-anything else. Then the app's block goes in `server.env` and the vault's in
-`vault.env`: one key for each process, so that the server, which faces the
-network, never holds what decrypts a value.
+`coffre_vault_runtime` for the vault, migrates the database, and checks that
+each login holds only its rights.
 
-- `KEK`, the vault's, decrypts every value, and the vault derives from it the
-  key it signs its records with. Lose it, and every value is lost.
-- `AUDIT_CHAIN_KEY`, the server's, signs the server's log entries, sessions
-  and tokens. Lose it, and everyone is signed out and the log stops
-  verifying.
-- Each `DATABASE_URL` is the same database through that process's own login.
+Then it shows five values on a screen of their own, which leaves nothing
+behind in your scrollback. Copy each with `c` into your password manager,
+beside the OAuth client secret, then into its file; `w` shows where each
+goes. Nothing keeps a copy. There is one key for each process, so that the
+server, which faces the network, never holds what decrypts a value.
+
+- `server.env` takes the app key, `APP_KEY`, and the app's database URL, as
+  `DATABASE_URL`. The app key signs the server's log entries, sessions and
+  tokens. Lose it, and everyone is signed out and the log stops verifying.
+- `vault.env` takes the vault ID, `VAULT_KEY_ID`, the vault key, `VAULT_KEY`,
+  and the vault's database URL, as `DATABASE_URL`. The vault key decrypts
+  every value, and the vault derives from it the key it signs its records
+  with. Lose it, and every value is lost. The vault ID only names it.
+- Both URLs are the same database, each through its process's own login.
   Neither process gets the administrator's URL.
 
 With AWS KMS instead of a key of your own, the vault also needs a

@@ -12,7 +12,7 @@ entries in the shared log), `packages/client` (the typed API client the CLI and 
 `coffre-conformance`, which boots a deployment and holds it to what it must never do,
 and the dev IdP, `@coffre/conformance/idp`, the local stand-in for Cloudflare Access,
 GitHub and OIDC), and `packages/core` (`@coffre/core`: access rules, the audit chain,
-envelope encryption, KEKs, identity and sign-in, and the contract between server and
+envelope encryption, vault keys, identity and sign-in, and the contract between server and
 vault in `src/vault.ts`). `examples/workers` and `examples/node` are deployments,
 exactly what `coffre init` writes (a test diffs them). `dev/` holds what only the dev
 loop uses and nothing ships: `dev/start.sh` (`pnpm dev`), the deployment it runs, the
@@ -110,7 +110,7 @@ calls made inside them, including errors swallowed by handlers or background job
   (every path, script and link the docs name exists) do not need Postgres.
 - `scripts/restore-drill.sh` (after `pnpm build`) backs up a seeded Workers
   stack with `pg_dump`, restores it, and checks it came back, then the
-  wrong-KEK case, on ports 3400 to 3402 and 8481 (`docs/restore.md`). It
+  wrong-key case, on ports 3400 to 3402 and 8481 (`docs/restore.md`). It
   drops its databases and stops its processes however it ends.
 - `pnpm typecheck` covers every package, `dev/deployment` and both examples. It does
   not need Postgres, but on a fresh checkout it fails until `pnpm build` has run:
