@@ -31,9 +31,8 @@ import { postgres, vault } from '@coffre/vault/cloudflare';
 export default vault((env: Env) => ({
   database: postgres(env.VAULT_HYPERDRIVE),
   kek: { id: env.KEK_ID, key: env.KEK },
-  previousKeks: [], // older KEKs, still unwrapping what they wrapped
+  previousKeks: [], // older KEKs: what they wrapped still opens, and what the vault signed under them verifies
   rootAdmins: ['erwin@example.com'],
-  signingKey: env.SIGNING_KEY,
 }));
 ```
 
@@ -57,11 +56,11 @@ await serve({ port: 3000, publicUrl, database: 'postgres://coffre_runtime:…@db
 // src/vault.ts
 import { serveVault } from '@coffre/vault/node';
 
-await serveVault({ socket: 'vault.sock', database: 'postgres://coffre_vault_runtime:…@db:5432/coffre', kek, rootAdmins, signingKey });
+await serveVault({ socket: 'vault.sock', database: 'postgres://coffre_vault_runtime:…@db:5432/coffre', kek, rootAdmins });
 ```
 
 For local development or tests, run one process with
-`vault: await localVault({ database, kek, rootAdmins, signingKey })` in the
+`vault: await localVault({ database, kek, rootAdmins })` in the
 server. `database` is a Postgres URL, or `file:` for SQLite in
 local development and tests.
 
@@ -108,8 +107,10 @@ one package is seen by the others without a build. Builds leave it off.
 | `@coffre/client` | `createClient({ url, headers?, transport? })` |
 
 Where `config` is, for the server, `{ publicUrl, vault, auth, auditChainKey,
-syncs? }` and, for the vault, `{ database, kek, previousKeks?, rootAdmins, signingKey,
-bulkLimit? }`, a KEK being a local key or `awsKms(…)` ([keys.md](keys.md)).
+syncs? }` and, for the vault, `{ database, kek, previousKeks?, rootAdmins,
+signingKey?, bulkLimit? }`, a KEK being a local key or `awsKms(…)`
+([keys.md](keys.md)). The vault derives its signing key from a local KEK;
+`signingKey` is required only with a KEK a key service holds.
 Each is checked when the deployment starts, and a bad value (a 31-byte key,
 a public URL with a path, no root admin) fails it with a message naming the
 setting.
@@ -299,8 +300,10 @@ few stored keys it wrapped. A KEK that opens neither is not the one that
 wrapped the data: every read and write is refused as `wrong_kek` (a 503),
 naming the provider and key id, and the next checkpoint is refused, so
 `/readyz` turns red. A key service that cannot answer is not a verdict; the
-next call asks again. [restore.md](restore.md#if-the-kek-is-wrong) shows
-what an operator sees.
+next call asks again. With a local KEK, the vault knows sooner: its keys
+come from the KEK, so a wrong one holds none of those its entries were
+written under, and the vault writes nothing at all.
+[restore.md](restore.md#if-the-kek-is-wrong) shows what an operator sees.
 
 The vault owns everything that decides access: the key encryption key (KEK),
 grants (`(principal, place) → role`, one per member per place, with an
@@ -346,7 +349,7 @@ them, which starts them over.
 
 | | App (Worker `coffre`) | Vault (Worker `coffre-vault`) |
 |---|---|---|
-| Config | `auditChainKey`, `auth` (sign-in or Access settings) | `kek`, `previousKeks`, `rootAdmins`, `signingKey`, `bulkLimit` |
+| Config | `auditChainKey`, `auth` (sign-in or Access settings) | `kek`, `previousKeks`, `rootAdmins`, `bulkLimit`; `signingKey` with a KMS key |
 | Tables it writes | projects, environments, ciphertext and wrapped keys, the directory, sessions, syncs; app entries in `audit_log` | `vault_members`, `vault_grants`; vault entries in `audit_log` |
 | Connection | `coffre_runtime`, through `HYPERDRIVE` or a Node Postgres URL | `coffre_vault_runtime`, through `VAULT_HYPERDRIVE` or a Node Postgres URL |
 
@@ -391,8 +394,16 @@ Both authors append `coffre.audit.v2` entries to `audit_log`, sharing one
 `audit_chain_head`. Each entry has an `author` (`app` or `vault`), a MAC
 under a key derived from that author's configuration key, and a public
 SHA-256 hash over its fields and MAC. The app derives its MAC key from
-`auditChainKey`; the vault derives its own from `signingKey`. Neither can
-authenticate the other's entries alone.
+`auditChainKey`; the vault derives its own from its signing key, which
+comes from its KEK unless it is given one. Neither can authenticate the
+other's entries alone. An entry names the key it was MACed under. A vault
+whose KEK was rotated verifies its earlier entries by the key of the KEK it
+keeps in `previousKeks`, but only those before the rotation: at its first
+call under the new KEK, the vault seals every member row again under the new
+key and writes a `key.rotate` entry, and from there its keys only move
+forward. A key it replaced counts for no entry, row or checkpoint after
+that, and a vault still running with it writes nothing more
+([keys.md](keys.md#a-local-key)).
 
 An append locks the head, reads the database clock, and refuses a head that
 does not name the last entry or is behind one the process remembers. A new
@@ -605,10 +616,17 @@ Each limit is stated here once; the other documents link to it.
   older version still needs the KEK that wrapped it, configured in
   `previousKeks` and escrowed, until a rewrap command exists.
 - **A holder of an author's key can forge that author's entries.** A copied
-  database alone cannot.
-- **Signing-key rotation is not implemented.** Checkpoints and the vault's
-  entries are checked with the current signing key, and member rows are
-  sealed under a key derived from it. Keep it with the backups.
+  database alone cannot. With a local KEK, the vault's key comes from the
+  KEK: whoever holds it, and can write the database, can forge the vault's
+  entries and member rows, grants included, besides reading every value.
+- **A replaced KEK stays configured to verify the past, and can't vouch for
+  anything after the rotation.** What the vault wrote under the key an old
+  KEK stands for verifies only while that KEK is in `previousKeks`, and the
+  log is checked from its first entry at every checkpoint. After the
+  rotation, nothing under its keys counts, so a KEK replaced because it
+  leaked forges nothing new; what was forged with it before verifies like
+  the rest. The app's `AUDIT_CHAIN_KEY`, and with KMS the vault's
+  `signingKey`, cannot be changed at all.
 - **A MAC proves a row is genuine, not current.** Putting back a genuine old
   sign-in row can undo one sign-out until the session's own expiry; a
   member's removal still ends it, through the generation.

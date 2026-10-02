@@ -111,12 +111,24 @@ export async function lockLogHead(tx: Transaction): Promise<{ nextSeq: bigint; h
   return head;
 }
 
-export async function appendEntries(tx: Transaction, key: LogKey, entries: readonly NewEntry[]): Promise<Appended> {
+/**
+ * Append `entries` under `key`. `check`, when given, runs once the head is
+ * locked and before anything is written: a writer's own condition on the
+ * log as it stands, which no other append can change until this one
+ * commits. It throws to refuse.
+ */
+export async function appendEntries(
+  tx: Transaction,
+  key: LogKey,
+  entries: readonly NewEntry[],
+  check?: (tx: Transaction) => Promise<void>,
+): Promise<Appended> {
   if (entries.length === 0) throw new Error('appendEntries called with no entries');
   const { auditChainHead, auditLog } = tablesOf(tx);
 
   // Every append queues here, if its transaction has not already.
   const head = await lockLogHead(tx);
+  await check?.(tx);
   const [{ now }] = await tx.select({ now: clockMillis(tx) }).from(auditChainHead);
   const [last] = await tx
     .select({ seq: auditLog.seq, hash: auditLog.hash })

@@ -65,28 +65,29 @@ coffre keys
 ```
 
 Run it with the CLI you ran `coffre init` with, or as
-`npx @coffre/cli keys`. It prints three keys and the KEK's id, once, and
+`npx @coffre/cli keys`. It prints two keys and the KEK's id, once, and
 keeps no copy. Save its output in your password manager, with the GitHub
-client secret, before anything else. The vault gets `KEK` and `SIGNING_KEY`,
-and the app `AUDIT_CHAIN_KEY`, so that the app, which faces the network,
-never holds what decrypts a value:
+client secret, before anything else. There is one key for each Worker, so
+that the app, which faces the network, never holds what decrypts a value:
 
-- `KEK` decrypts every value. Lose it, and every value is lost.
-- `SIGNING_KEY` signs the vault's log entries and member rows.
-- `AUDIT_CHAIN_KEY` signs the app's log entries, sessions and tokens.
+- `KEK`, the vault's, decrypts every value, and the vault derives from it the
+  key it signs its records with. Lose it, and every value is lost.
+- `AUDIT_CHAIN_KEY`, the app's, signs the app's log entries, sessions and
+  tokens. Lose it, and everyone is signed out and the log stops verifying.
 
-Lose either of the last two, and the log stops verifying and everyone is
-locked out. Put `KEK_ID` in `vault/wrangler.jsonc`, then set the secrets;
-each command prompts for the saved value:
+Put `KEK_ID` in `vault/wrangler.jsonc`, then set the secrets; each command
+prompts for the saved value:
 
 ```sh
 pnpm exec wrangler secret put KEK -c vault/wrangler.jsonc
-pnpm exec wrangler secret put SIGNING_KEY -c vault/wrangler.jsonc
 pnpm exec wrangler secret put AUDIT_CHAIN_KEY -c app/wrangler.jsonc
 pnpm exec wrangler secret put GITHUB_CLIENT_SECRET -c app/wrangler.jsonc
 ```
 
-Keep older KEKs after a rotation too: what they wrapped still needs them.
+Keep older KEKs after a rotation, for good: what they wrapped still needs
+them, and so does what the vault signed under them before it. With AWS KMS instead of
+a key of your own, the vault also needs a `SIGNING_KEY`
+([keys](https://github.com/erwinkn/coffre/blob/main/docs/keys.md#aws-kms)).
 
 ## 4. Deploy
 

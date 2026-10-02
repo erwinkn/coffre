@@ -85,7 +85,7 @@ component as the owner or give the runtime logins additional roles.
 acme-secrets/
   app/src/worker.ts      coffre(env => ({ publicUrl, database, vault, auth, auditChainKey }))
   app/wrangler.jsonc     HYPERDRIVE, VAULT service binding, Cron, UI assets
-  vault/src/worker.ts    vault(env => ({ database, kek, rootAdmins, signingKey }))
+  vault/src/worker.ts    vault(env => ({ database, kek, rootAdmins }))
   vault/wrangler.jsonc   VAULT_HYPERDRIVE; no public route
 ```
 
@@ -123,18 +123,17 @@ with `wrangler hyperdrive update <id> --caching-disabled`.
 
 ### 3. Keys and secrets
 
-coffre needs three keys, split between its two components so that the app,
-which faces the network, never holds what decrypts a value:
+coffre needs two keys, one for each component, so that the app, which faces
+the network, never holds what decrypts a value:
 
 | Key | Held by | What it does | If it is lost |
 |---|---|---|---|
-| `KEK`, named by `KEK_ID` | the vault | decrypts every value | every value is lost for good |
-| `SIGNING_KEY` | the vault | signs the vault's log entries, checkpoints and member rows | the log stops verifying, and every member is refused |
-| `AUDIT_CHAIN_KEY` | the app | signs the app's log entries, sessions and tokens | the log stops verifying, and everyone is signed out |
+| `KEK`, named by `KEK_ID` | the vault | decrypts every value; the vault also derives from it the key it signs its log entries, member rows and checkpoints with | every value is lost for good |
+| `AUDIT_CHAIN_KEY` | the app | signs the app's log entries, sessions and tokens | everyone is signed out, and the log stops verifying |
 
 The KEK matters most: with it and a copy of the database, anyone has every
-value, so it never sits beside the backups. Make all three, and the KEK's
-id, at once:
+value, so it never sits beside the backups. Make both, and the KEK's id, at
+once:
 
 ```sh
 coffre keys
@@ -148,14 +147,18 @@ the secrets; each command prompts for the saved value:
 
 ```sh
 pnpm exec wrangler secret put KEK -c vault/wrangler.jsonc
-pnpm exec wrangler secret put SIGNING_KEY -c vault/wrangler.jsonc
 pnpm exec wrangler secret put AUDIT_CHAIN_KEY -c app/wrangler.jsonc
 pnpm exec wrangler secret put GITHUB_CLIENT_SECRET -c app/wrangler.jsonc
 ```
 
-Keep old KEKs too: a new KEK wraps new values only, so every older one stays
-in `previousKeks`, and escrowed, while anything it wrapped remains. For AWS
-KMS instead of a key of your own, see [keys.md](keys.md).
+Keep old KEKs too: after a rotation, the old one stays in `previousKeks`,
+and escrowed, for good. It still opens what it wrapped, and what the vault
+signed under it before the rotation verifies only while it is configured;
+it vouches for nothing after ([keys.md](keys.md#a-local-key)).
+
+With AWS KMS instead of a key of your own, the vault never sees the KEK, so
+it cannot derive its signing key from it, and needs a third key,
+`SIGNING_KEY` ([keys.md](keys.md#aws-kms)).
 
 ### 4. Deploy
 
@@ -172,7 +175,7 @@ coffre login https://secrets.example.com
 ```
 acme-secrets/
   src/server.ts          serve({ database, vault: connectVault(socket), … })
-  src/vault.ts           serveVault({ socket, database, kek, rootAdmins, signingKey })
+  src/vault.ts           serveVault({ socket, database, kek, rootAdmins })
   server.env.example     app settings
   vault.env.example      vault settings
 ```
@@ -187,8 +190,8 @@ chmod 600 server.env vault.env
 
 Fill in `PUBLIC_URL`, the GitHub OAuth settings and `ROOT_ADMINS`, and the
 keys from `coffre keys`, saved in your password manager first
-([step 3 above](#3-keys-and-secrets) says what each is for): `KEK_ID`, `KEK`
-and `SIGNING_KEY` in `vault.env`, `AUDIT_CHAIN_KEY` in `server.env`. Set the
+([step 3 above](#3-keys-and-secrets) says what each is for): `KEK_ID` and
+`KEK` in `vault.env`, `AUDIT_CHAIN_KEY` in `server.env`. Set the
 two `DATABASE_URL`s to one database, using different logins:
 
 ```dotenv

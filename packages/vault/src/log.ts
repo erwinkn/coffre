@@ -24,12 +24,14 @@ export function vaultLogKey(signingKey: Uint8Array): LogKey {
 /**
  * How far this process has verified the chain: every entry before
  * `nextSeq`, the last of which has `hash`, with `vaultEntries` of the
- * vault's among them. In memory only: the database cannot vouch for itself.
+ * vault's among them, written under `vaultKeys`, in the order the log moved
+ * through them (`forward`). In memory only: the database cannot vouch for
+ * itself.
  */
-export type Anchor = { nextSeq: bigint; hash: Buffer; vaultEntries: number };
+export type Anchor = { nextSeq: bigint; hash: Buffer; vaultEntries: number; vaultKeys: readonly string[] };
 
 /** Before the first entry: nothing verified yet. */
-export const UNVERIFIED: Anchor = { nextSeq: 0n, hash: GENESIS_HASH, vaultEntries: 0 };
+export const UNVERIFIED: Anchor = { nextSeq: 0n, hash: GENESIS_HASH, vaultEntries: 0, vaultKeys: [] };
 
 /** The further of two anchors, when two calls verified at once. */
 export function further(a: Anchor, b: Anchor): Anchor {
@@ -57,15 +59,15 @@ type Verified = { verification: LogVerification; anchor: Anchor };
  */
 export async function verifyChain(
   db: Queryable,
-  key: LogKey,
+  logKeys: readonly LogKey[],
   shown: readonly StoredEntry[],
   anchor: Anchor,
 ): Promise<Verified> {
   const broken = (failedAtSeq: bigint, reason: string): Verified => ({
-    verification: { ok: false, failedAtSeq: Number(failedAtSeq), reason },
+    verification: { ok: false, failedAtSeq: Number(failedAtSeq), reason: withCause(reason) },
     anchor,
   });
-  const keys = { keys: [key], chainOnly: ['app' as const] };
+  const keys = { keys: logKeys, chainOnly: ['app' as const] };
 
   for (const row of [...shown].sort((a, b) => (a.seq < b.seq ? -1 : 1))) {
     const result = verifyEntries([row], { ...keys, startSeq: row.seq, startPrevHash: row.prevHash });
@@ -82,10 +84,55 @@ export async function verifyChain(
     if (batch.length === 0) break;
     const result = verifyEntries(batch, { ...keys, startSeq: verified.nextSeq, startPrevHash: verified.hash });
     if (!result.ok) return broken(result.failedAtSeq, result.reason);
-    verified = { nextSeq: result.nextSeq, hash: result.head, vaultEntries: verified.vaultEntries + result.authenticated };
+    const moved = forward(batch, verified.vaultKeys, logKeys[0].keyId);
+    if ('failedAtSeq' in moved) return broken(moved.failedAtSeq, moved.reason);
+    verified = {
+      nextSeq: result.nextSeq,
+      hash: result.head,
+      vaultEntries: verified.vaultEntries + result.authenticated,
+      vaultKeys: moved.keys,
+    };
     if (batch.length < VERIFY_BATCH) break;
   }
   return { verification: { ok: true, entries: verified.vaultEntries }, anchor: verified };
+}
+
+/**
+ * The vault's keys only move forward. Once its entries move from one key to
+ * the next, the one before writes no more; once they reach `current`, the
+ * key it writes with now, no other key writes again. So a key it replaced,
+ * even one that leaked, verifies what came before the rotation, and nothing
+ * after it.
+ */
+function forward(
+  entries: readonly StoredEntry[],
+  keys: readonly string[],
+  current: string,
+): { keys: readonly string[] } | { failedAtSeq: bigint; reason: string } {
+  let moved = keys;
+  for (const entry of entries) {
+    const last = moved.at(-1);
+    if (entry.author !== 'vault' || entry.keyId === last) continue;
+    if (last === current || moved.includes(entry.keyId)) {
+      return {
+        failedAtSeq: entry.seq,
+        reason: `written under ${entry.keyId} after the vault moved to ${last}: a key it replaced verifies only what came before`,
+      };
+    }
+    moved = [...moved, entry.keyId];
+  }
+  return { keys: moved };
+}
+
+/**
+ * A vault entry under a key the vault does not hold is a forgery, or one
+ * written under a key it was configured with then: its keys come from its
+ * signing key, or from its KEK when it has none. The second is the one an
+ * operator can fix.
+ */
+function withCause(reason: string): string {
+  if (!/^written under vault:\S+, a key this verifier does not hold$/.test(reason)) return reason;
+  return `${reason}: either it is forged, or the vault wrote it under another KEK or signing key, which must stay configured: a KEK that was replaced stays in previousKeks`;
 }
 
 /**

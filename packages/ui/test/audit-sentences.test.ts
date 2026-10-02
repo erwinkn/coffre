@@ -167,6 +167,7 @@ test('every other action has a sentence', () => {
     [{ action: 'sync.delete', ...prod, metadata: { destination: 'acme/market' } }, 'removed the sync of market/prod to acme/market'],
     [{ action: 'sync.remove', ...prod, key: 'OLD', metadata: { destination: 'acme/market' } }, 'removed market/prod/OLD from acme/market'],
     [{ action: 'vault.tampered', subject: 'user:eve@acme.example', reason: 'mac' }, "found eve@acme.example's record tampered with: it does not carry the vault's seal"],
+    [{ action: 'key.rotate', metadata: { from: 'vault:1a2b3c4d' } }, 'rotated its key'],
     [{ action: 'sign_in', metadata: { kind: 'cli' } }, 'signed in to the CLI'],
     [{ action: 'sign_out' }, 'signed out'],
     [{ action: 'token.create', metadata: { principalType: 'service', principalId: 'ci-deploy' } }, 'issued a token to token:ci-deploy'],

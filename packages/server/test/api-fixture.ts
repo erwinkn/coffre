@@ -3,6 +3,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { createClient, type CoffreClient } from '@coffre/client';
 import type { Vault } from '@coffre/core/vault';
 import { tablesOf, type Database } from '@coffre/db';
+import { derivedSigningKey } from '@coffre/vault';
 import { localVault, type LocalVault, type VaultConfig } from '@coffre/vault/node';
 
 import { loadCaller } from '../src/api/caller.ts';
@@ -29,7 +30,7 @@ export type FixtureDeps = {
  * a suite's tests do not share them, checkpoints or bulk-limit counts.
  */
 export type TestVault = Vault & {
-  /** The raw KEK and signing key, which no database may hold. */
+  /** The raw KEK, and the signing key the vault derives from it, which no database may hold. */
   kek: Buffer;
   signingKey: Buffer;
   /** Move the vault's clock, for expiry and the bulk limit. */
@@ -40,16 +41,18 @@ export type TestVault = Vault & {
 const vaults = new Set<TestVault>();
 
 /**
- * A test vault. Another over the same database, as a second instance would
- * be, shares `keys`: one deployment has one KEK and one signing key, and
- * rows sealed under another are refused as tampered.
+ * A test vault, configured as a deployment with a local KEK is: the vault
+ * derives its signing key from the KEK. Another over the same database, as
+ * a second instance would be, shares `keys`: rows sealed under another
+ * deployment's keys are refused as tampered.
  */
 export function testVault(
   rootAdmins: readonly string[],
   config: Pick<VaultConfig, 'bulkLimit'> = {},
-  keys: { kek: Buffer; signingKey: Buffer } = { kek: randomBytes(32), signingKey: randomBytes(32) },
+  keys: { kek: Buffer } = { kek: randomBytes(32) },
 ): TestVault {
-  const { kek, signingKey } = keys;
+  const { kek } = keys;
+  const signingKey = derivedSigningKey(kek);
   let offset = 0;
   let current: Promise<LocalVault> | null = null;
   const open = async () =>
@@ -58,7 +61,6 @@ export function testVault(
         database: await openVaultDatabase(),
         kek: { id: 'test-kek-1', key: kek.toString('base64') },
         rootAdmins,
-        signingKey: signingKey.toString('base64'),
         ...config,
       },
       { clockOffset: () => offset },

@@ -18,15 +18,45 @@ The default, and what `coffre init` sets up:
 kek: { id: env.KEK_ID, key: env.KEK },
 ```
 
-`coffre keys` makes it, with its id, beside the deployment's other two keys
+`coffre keys` makes it, with its id, beside the app's key
 ([deploy.md](deploy.md#3-keys-and-secrets)). It costs nothing and adds no
-latency. But whoever holds it and a copy of the database holds every value,
-and nothing outside coffre records the use of either. Keep a copy in your
-password manager: without it, nothing can be read again.
+latency. It is also where the vault's signing key comes from: the vault
+derives it from the KEK, with HKDF-SHA-256 under a label no other use of the
+KEK shares, and that key MACs the vault's log entries, seals member rows and
+signs checkpoints. So the vault has one key to keep, not two.
 
-To rotate it, run `coffre keys` again and take only `KEK_ID` and `KEK`; the
-old pair moves to `previousKeks`. Leave `SIGNING_KEY` and `AUDIT_CHAIN_KEY`
-as they are: changing either stops the log verifying and refuses everyone.
+Whoever holds the KEK and a copy of the database holds every value, and
+nothing outside coffre records the use of either. Whoever holds it and can
+write the database can forge the vault's records too, grants included.
+Keep a copy in your password manager: without it, nothing can be read
+again, and nothing the vault signed verifies.
+
+**Rotating it.** Run `coffre keys` again and take only `KEK_ID` and `KEK`;
+leave `AUDIT_CHAIN_KEY` as it is. The new KEK becomes `kek`, and the old one
+moves to `previousKeks`:
+
+```ts
+kek: { id: env.KEK_ID, key: env.KEK },                      // kek-2026-10-02
+previousKeks: [{ id: env.OLD_KEK_ID, key: env.OLD_KEK }],   // kek-2026-04-01
+```
+
+New values are wrapped under the new KEK. At its first call, the vault
+moves to the key it derives from the new KEK: it seals every member row
+again under it, and writes a `key.rotate` entry, its first under that key.
+Entries and checkpoints name the key they were signed under. The old KEK
+still opens what it wrapped, and still verifies what the vault wrote before
+the rotation, so it stays configured for good: the log is checked from its
+first entry at every checkpoint, and without the old KEK, the old entries no
+longer verify and `/readyz` turns red.
+
+A replaced KEK stays configured to verify the past, and can't vouch for
+anything after the rotation. An entry, a member row or a checkpoint under
+its keys after that point fails verification, so a KEK replaced because it
+leaked forges nothing from then on. What was forged with it before the
+rotation verifies like the rest; that is the leak's window. A vault still
+running with the old KEK, as for the seconds a deploy takes, writes nothing
+after the rotation: its calls fail until it is replaced. And a KEK, once
+replaced, cannot come back as `kek`: the vault refuses to write under it.
 
 ## AWS KMS
 
@@ -40,9 +70,16 @@ export default vault((env: Env) => ({
     credentials: { accessKeyId: env.AWS_ACCESS_KEY_ID, secretAccessKey: env.AWS_SECRET_ACCESS_KEY },
   }),
   rootAdmins: env.ROOT_ADMINS.split(','),
-  signingKey: env.SIGNING_KEY,
+  signingKey: env.SIGNING_KEY, // required: see below
 }));
 ```
+
+**A signing key of its own.** The vault never sees a KMS key, so it cannot
+derive its signing key from it, as it does from a local KEK. With KMS,
+`signingKey` is required, 32 random bytes in base64
+(`openssl rand -base64 32`), held by the vault and escrowed with everything
+else; a vault without it refuses to start, and says why. It cannot be
+changed later: what it signed verifies only while it is configured.
 
 The vault sends each fresh data key to KMS to be encrypted, and each wrapped
 one to be decrypted when someone may read it. Each call carries the secret's
@@ -87,10 +124,12 @@ opens no data.
      }]
    }
    ```
-3. Give the vault Worker the ARN as a var, and the access key as secrets:
+3. Give the vault Worker the ARN as a var, and the access key and its
+   signing key as secrets:
    ```sh
    pnpm exec wrangler secret put AWS_ACCESS_KEY_ID -c vault/wrangler.jsonc
    pnpm exec wrangler secret put AWS_SECRET_ACCESS_KEY -c vault/wrangler.jsonc
+   pnpm exec wrangler secret put SIGNING_KEY -c vault/wrangler.jsonc
    ```
 
 The ARN is required: a bare key id does not say which region to call, and
@@ -135,7 +174,12 @@ To move to another key, make it `kek` and put the old one in `previousKeks`.
 ```ts
 kek: awsKms({ keyArn: env.KMS_KEY_ARN, credentials }),
 previousKeks: [{ id: env.KEK_ID, key: env.KEK }],
+signingKey: env.SIGNING_KEY, // new: KMS needs one
 ```
+
+The vault signs under the new `signingKey` from then on. Its first call is
+a rotation, as with a new local KEK: the local KEK's key verifies what came
+before it, and nothing after.
 
 New versions are wrapped by KMS from then on. Versions written before still
 open with the local key, which must stay configured and escrowed until a

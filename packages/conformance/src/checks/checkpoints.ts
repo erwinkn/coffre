@@ -17,7 +17,8 @@ export async function earlierCheckpoint(deployment: Deployment, { admin }: Peopl
     const signed = rows.filter((row) => row.author === 'vault' && row.action === 'audit.checkpoint' && row.decision === 'allow');
     expect(signed.length >= 2, 'two checkpoints are needed');
     const [head] = await sql.query('SELECT * FROM audit_chain_head');
-    const seed = Buffer.from(KEYS.SIGNING_KEY, 'base64');
+    // The vault's signing key, which it derives from its KEK: HKDF-SHA-256 under the vault's label.
+    const seed = Buffer.from(hkdfSync('sha256', Buffer.from(KEYS.KEK, 'base64'), Buffer.alloc(0), 'coffre.vault.signing-key.v1', 32));
     const signingKey = createPrivateKey({ key: Buffer.concat([Buffer.from('302e020100300506032b657004220420', 'hex'), seed]), format: 'der', type: 'pkcs8' });
     const keys = {
       app: Buffer.from(hkdfSync('sha256', Buffer.from(KEYS.AUDIT_CHAIN_KEY, 'base64'), Buffer.alloc(0), 'coffre.audit.app.v2', 32)),

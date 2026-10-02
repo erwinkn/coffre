@@ -7,15 +7,16 @@ type Env = {
   VAULT_HYPERDRIVE: Hyperdrive;
   KEK_ID: string;
   KEK: string;
-  SIGNING_KEY: string;
   ROOT_ADMINS: string;
 };
 
 export default vault((env: Env) => ({
   database: postgres(env.VAULT_HYPERDRIVE),
   kek: { id: env.KEK_ID, key: env.KEK },
-  // After a rotation, the KEKs before it, so the data keys they wrapped
-  // still open: previousKeks: [{ id: 'kek-2026-09', key: env.KEK_2026_09 }],
+  // After a rotation, the KEKs before it, so the data keys they wrapped still
+  // open and the records signed under them before it still verify:
+  // previousKeks: [{ id: 'kek-2026-09', key: env.KEK_2026_09 }],
   rootAdmins: env.ROOT_ADMINS.split(',').map((email) => email.trim()),
-  signingKey: env.SIGNING_KEY,
+  // The vault derives its signing key from the KEK. With a KEK a key service
+  // holds, such as awsKms(…), it needs one of its own: signingKey: env.SIGNING_KEY.
 }));

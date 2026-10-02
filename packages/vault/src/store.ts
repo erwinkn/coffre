@@ -306,6 +306,22 @@ export async function vaultPage(db: Queryable, before: bigint | undefined, limit
   return stored(rows);
 }
 
+/**
+ * The seq of the vault's first entry under `keyId`, or undefined. No index
+ * serves it: it reads the log from its start up to that entry, which for
+ * the key a log began under is among its first.
+ */
+export async function firstVaultEntryUnder(db: Queryable, keyId: string): Promise<bigint | undefined> {
+  const { auditLog } = tablesOf(db);
+  const [row] = await db
+    .select({ seq: auditLog.seq })
+    .from(auditLog)
+    .where(and(eq(auditLog.author, 'vault' satisfies Author), eq(auditLog.keyId, keyId)))
+    .orderBy(asc(auditLog.seq))
+    .limit(1);
+  return row?.seq;
+}
+
 /** The vault's newest entry of any of these actions, allowed, or undefined. */
 export async function latestVaultEntry(db: Queryable, actions: readonly string[]): Promise<StoredEntry | undefined> {
   const { auditLog } = tablesOf(db);

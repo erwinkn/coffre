@@ -29,18 +29,20 @@ coffre keys
 ```
 
 Run it with the CLI you ran `coffre init` with, or as
-`npx @coffre/cli keys`. It prints three keys and the KEK's id, once, and
+`npx @coffre/cli keys`. It prints two keys and the KEK's id, once, and
 keeps no copy. Save its output in your password manager, with the OAuth
-client secret, before anything else. `KEK_ID`, `KEK` and `SIGNING_KEY` go in
-`vault.env`, and `AUDIT_CHAIN_KEY` in `server.env`, so that the server,
-which faces the network, never holds what decrypts a value:
+client secret, before anything else. `KEK_ID` and `KEK` go in `vault.env`,
+and `AUDIT_CHAIN_KEY` in `server.env`: one key for each process, so that the
+server, which faces the network, never holds what decrypts a value.
 
-- `KEK` decrypts every value. Lose it, and every value is lost.
-- `SIGNING_KEY` signs the vault's log entries and member rows.
-- `AUDIT_CHAIN_KEY` signs the server's log entries, sessions and tokens.
+- `KEK`, the vault's, decrypts every value, and the vault derives from it the
+  key it signs its records with. Lose it, and every value is lost.
+- `AUDIT_CHAIN_KEY`, the server's, signs the server's log entries, sessions
+  and tokens. Lose it, and everyone is signed out and the log stops
+  verifying.
 
-Lose either of the last two, and the log stops verifying and everyone is
-locked out.
+With AWS KMS instead of a key of your own, the vault also needs a
+`SIGNING_KEY` ([keys](https://github.com/erwinkn/coffre/blob/main/docs/keys.md#aws-kms)).
 
 ## 2. The database
 

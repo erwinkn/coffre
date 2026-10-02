@@ -73,19 +73,6 @@ export type Readiness = {
   checkpointed: boolean;
 };
 
-/** The vault's public key, asked once per vault: it signs every checkpoint with the same one. */
-const publicKeys = new WeakMap<Vault, Promise<string>>();
-
-function publicKeyOf(vault: Vault): Promise<string> {
-  let key = publicKeys.get(vault);
-  if (key === undefined) {
-    key = vault.about().then(({ publicKey }) => publicKey);
-    key.catch(() => publicKeys.delete(vault));
-    publicKeys.set(vault, key);
-  }
-  return key;
-}
-
 /**
  * Readiness: the database migrated, the newest heartbeat under
  * `HEARTBEAT_STALE_AFTER_SECONDS` old, and a checkpoint after it whose
@@ -101,8 +88,14 @@ export async function auditReadiness(db: Database, vault: Vault): Promise<Readin
     if ((await appliedMigrations(db)) < requiredMigrations(db)) return unready;
     const { beat, checkpoint } = await readiness(db);
     if (beat === null) return unready;
+    // Asked each time: after a rotation, the key the vault signed with until then counts only for what came before.
+    const key = checkpoint === null ? undefined : (await vault.about()).checkpointKeys[checkpoint.keyId];
     const checkpointed =
-      checkpoint !== null && BigInt(checkpoint.seq) >= beat.seq && (await verifyCheckpoint(checkpoint, await publicKeyOf(vault)));
+      checkpoint !== null &&
+      key !== undefined &&
+      (key.until === null || checkpoint.seq < key.until) &&
+      BigInt(checkpoint.seq) >= beat.seq &&
+      (await verifyCheckpoint(checkpoint, key.publicKey));
     const fresh = Number.isFinite(beat.ageSeconds) && beat.ageSeconds <= HEARTBEAT_STALE_AFTER_SECONDS;
     return { ok: fresh && checkpointed, heartbeatAgeSeconds: beat.ageSeconds, checkpointed };
   } catch {

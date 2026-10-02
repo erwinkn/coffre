@@ -1039,7 +1039,11 @@ Each step was one pull request, or a few, from `main`. "The suite" means
 Built after the plan: the final independent review's fixes, #44 (recovery by
 removal, and one bad sign-in row no longer taking down a list) and #46 (a
 decision seals only the grants it decided; every checkpoint recomputes the
-whole chain; the member sweep reads one snapshot).
+whole chain; the member sweep reads one snapshot). Decided after it: two keys per
+deployment, one for each component. With a local KEK, the vault derives its
+signing key from the KEK (HKDF-SHA-256 under a label of its own), and still
+verifies what it signed under an earlier KEK's key while that KEK stays in
+`previousKeks`; a KEK a key service holds still needs a `signingKey`.
 
 0. **Hyperdrive's cache off.** Shipped as #22.
 1. **No app transaction across a vault call** (S12), built in #27. On the vault of the time:
