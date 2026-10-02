@@ -10,7 +10,7 @@
  *     database: process.env.DATABASE_URL,
  *     vault: connectVault('/run/coffre/vault.sock'),
  *     auth: signin({ providers: [github({ clientId: …, clientSecret: … })] }),
- *     auditChainKey: process.env.AUDIT_CHAIN_KEY,
+ *     auditChainKey: process.env.APP_KEY,
  *   });
  *
  * One process serves the API, the pages and their static files, and runs

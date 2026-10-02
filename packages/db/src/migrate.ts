@@ -182,8 +182,15 @@ async function sqliteMigrator(url: string): Promise<Migrator> {
   };
 }
 
-/** Apply missing migrations, check their history and reassert database privileges. */
-export async function migrateDatabase(url: string): Promise<void> {
+/** A migration run's plan: `applied` of the `total` migrations there before it, the rest applied by it. */
+export type MigrationPlan = { applied: number; total: number };
+
+/**
+ * Apply missing migrations, check their history and reassert database
+ * privileges. `onPlan` hears how many there are to apply before they are:
+ * all of them go in one call, with no word of each.
+ */
+export async function migrateDatabase(url: string, onPlan?: (plan: MigrationPlan) => void): Promise<void> {
   const engine = engineOfUrl(url);
   const expected = await expectedMigrations(engine);
   const migrator = await { postgres: postgresMigrator, sqlite: sqliteMigrator }[engine](url);
@@ -193,7 +200,9 @@ export async function migrateDatabase(url: string): Promise<void> {
     await migrator.lock();
     locked = true;
 
-    verifyHistory(expected, await migrator.applied(), false);
+    const applied = await migrator.applied();
+    verifyHistory(expected, applied, false);
+    onPlan?.({ applied: applied?.length ?? 0, total: expected.length });
     await migrator.migrate(migrationsFolder(engine));
     verifyHistory(expected, await migrator.applied(), true);
     await migrator.restrict();

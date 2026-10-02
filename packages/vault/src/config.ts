@@ -38,7 +38,7 @@ export type Kek = { id: string; key: string } | KekProvider;
  *
  *   {
  *     kek: awsKms({ keyArn: env.KMS_KEY_ARN, credentials: { … } }),
- *     previousKeks: [{ id: 'kek-2025-01', key: env.KEK_2025_01 }],
+ *     previousKeks: [{ id: 'vault-2025-01-10-k7q2xm', key: env.OLD_VAULT_KEY }],
  *     rootAdmins: ['admin@acme.example'],
  *     signingKey: env.SIGNING_KEY, // required with a key service; derived from a local KEK otherwise
  *   }

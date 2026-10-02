@@ -12,7 +12,7 @@ type Env = {
   /** Set for GitHub Enterprise Server; github.com otherwise. */
   GITHUB_URL?: string;
   GITHUB_API_URL?: string;
-  AUDIT_CHAIN_KEY: string;
+  APP_KEY: string;
 };
 
 export default coffre((env: Env) => ({
@@ -29,5 +29,5 @@ export default coffre((env: Env) => ({
       }),
     ],
   }),
-  auditChainKey: env.AUDIT_CHAIN_KEY,
+  auditChainKey: env.APP_KEY,
 }));

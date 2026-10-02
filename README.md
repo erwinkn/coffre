@@ -51,8 +51,9 @@ Workers or two Node processes:
 
 - **the app**: the API, sign-in, the pages, syncs, and a job every five
   minutes;
-- **the vault**: the key-encryption key (KEK), who is a member, and who holds
-  what. It decides every read and write of a key, and nothing else can.
+- **the vault**: the vault key, which wraps every value's own key, who is a
+  member, and who holds what. It decides every read and write of a key, and
+  nothing else can.
 
 Both use one Postgres database, each through its own login, and both write
 to one audit log. Say Ada runs `coffre run market/prod -- ./deploy`. The app

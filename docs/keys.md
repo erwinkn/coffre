@@ -1,7 +1,8 @@
 # Keys
 
 Every value coffre stores is encrypted under a data key of its own, and the
-vault wraps each data key with a key-encryption key, the KEK. The database
+vault wraps each data key with the vault key, a key-encryption key (KEK);
+the configuration calls it `kek`, and the examples `VAULT_KEY`. The database
 holds the ciphertext and the wrapped data key, never a key that opens them.
 The KEK is one of two things:
 
@@ -15,7 +16,7 @@ The KEK is one of two things:
 The default, and what `coffre init` sets up:
 
 ```ts
-kek: { id: env.KEK_ID, key: env.KEK },
+kek: { id: env.VAULT_KEY_ID, key: env.VAULT_KEY },
 ```
 
 `coffre setup` makes it, with its id, beside the app's key and the
@@ -32,13 +33,13 @@ write the database can forge the vault's records too, grants included.
 Keep a copy in your password manager: without it, nothing can be read
 again, and nothing the vault signed verifies.
 
-**Rotating it.** Run `coffre keys` again and take only `KEK_ID` and `KEK`;
-leave `AUDIT_CHAIN_KEY` as it is. The new KEK becomes `kek`, and the old one
-moves to `previousKeks`:
+**Rotating it.** Run `coffre keys` again and take only the vault ID and the
+vault key; leave the app key as it is. The new vault key becomes `kek`, and
+the old one moves to `previousKeks`:
 
 ```ts
-kek: { id: env.KEK_ID, key: env.KEK },                      // kek-2026-10-02
-previousKeks: [{ id: env.OLD_KEK_ID, key: env.OLD_KEK }],   // kek-2026-04-01
+kek: { id: env.VAULT_KEY_ID, key: env.VAULT_KEY },                    // vault-2026-10-02-k7q2xm
+previousKeks: [{ id: env.OLD_VAULT_KEY_ID, key: env.OLD_VAULT_KEY }], // vault-2026-04-01-3m4n5p
 ```
 
 New values are wrapped under the new KEK. At its first call, the vault
@@ -101,7 +102,7 @@ coffre, or a log was edited. The vault asks KMS only for a call its rules
 allow, so a refused read appears in its log and never in CloudTrail.
 One more kind of call is the vault's own: each vault process opens its
 KEK's check value once, before its first key operation, to tell it has the
-right KEK ([restore.md](restore.md#if-the-kek-is-wrong)). It shows in
+right KEK ([restore.md](restore.md#if-the-vault-key-is-wrong)). It shows in
 CloudTrail as a Decrypt whose context is the nil UUID, for no secret, and
 opens no data.
 
@@ -174,7 +175,7 @@ To move to another key, make it `kek` and put the old one in `previousKeks`.
 
 ```ts
 kek: awsKms({ keyArn: env.KMS_KEY_ARN, credentials }),
-previousKeks: [{ id: env.KEK_ID, key: env.KEK }],
+previousKeks: [{ id: env.VAULT_KEY_ID, key: env.VAULT_KEY }],
 signingKey: env.SIGNING_KEY, // new: KMS needs one
 ```
 

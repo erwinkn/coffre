@@ -53,7 +53,7 @@ start_coffre() {
         cd examples/workers
         export PUBLIC_URL="$COFFRE_API_URL" ROOT_ADMINS="$COFFRE_ROOT_ADMINS" WRANGLER_SEND_METRICS=false
         export GITHUB_CLIENT_ID=coffre-local GITHUB_CLIENT_SECRET=coffre-local-secret
-        export AUDIT_CHAIN_KEY="$COFFRE_AUDIT_CHAIN_KEY" KEK_ID="$COFFRE_KEK_ID" KEK="$2"
+        export APP_KEY="$COFFRE_APP_KEY" VAULT_KEY_ID="$COFFRE_VAULT_KEY_ID" VAULT_KEY="$2"
         export CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE="postgresql://coffre_runtime:local-runtime-only@127.0.0.1:55432/$1"
         export CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_VAULT_HYPERDRIVE="postgresql://coffre_vault_runtime:local-vault-only@127.0.0.1:55432/$1"
         exec ./node_modules/.bin/wrangler dev -c app/wrangler.jsonc -c vault/wrangler.jsonc \
@@ -77,7 +77,7 @@ idp=$!
 log "a seeded instance over $source_db"
 node scripts/ensure-database.mjs "$source_db"
 DATABASE_URL="$(owner_url "$source_db")" pnpm --dir packages/db run db:migrate >/dev/null
-start_coffre "$source_db" "$COFFRE_KEK_LOCAL"
+start_coffre "$source_db" "$COFFRE_VAULT_KEY"
 DATABASE_URL="$(owner_url "$source_db")" node dev/seed.mjs >/dev/null
 node scripts/restore-drill.mjs prepare >"$scratch/state.json"
 stop_coffre
@@ -95,7 +95,7 @@ COFFRE_RUNTIME_ROLE=coffre_runtime DATABASE_URL="postgresql://coffre_runtime:loc
     pnpm --dir packages/db run db:verify:runtime >/dev/null
 
 log 'checking the restored instance, with the same keys'
-start_coffre "$restored_db" "$COFFRE_KEK_LOCAL"
+start_coffre "$restored_db" "$COFFRE_VAULT_KEY"
 node scripts/restore-drill.mjs check "$scratch/state.json"
 COFFRE_TOKEN="$(node -p "JSON.parse(require('fs').readFileSync('$scratch/state.json')).token")" \
 COFFRE_CONFORMANCE_CANARY="$(node -p "JSON.parse(require('fs').readFileSync('$scratch/state.json')).canary")" \

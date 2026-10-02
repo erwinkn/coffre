@@ -12,14 +12,14 @@ and what the local drill (`scripts/restore-drill.sh`) shows.
 | What | Where | Without it |
 |---|---|---|
 | The database | PlanetScale's backups, or `pg_dump` files you keep off the server | nothing to restore |
-| The KEK, with its `KEK_ID`, and every earlier KEK in `previousKeks` (the vault's key) | your password manager, never beside the backups | no value can be read, ever: the backup holds only wrapped data keys. The vault's own key comes from the KEK too, so every member's row fails its MAC, and the vault's entries and checkpoints fail verification |
-| `AUDIT_CHAIN_KEY` (the app's key) | your password manager | the app's entries, sessions and tokens fail their MACs: verification fails, and every session and token is refused |
+| The vault key, `VAULT_KEY`, with its vault ID, `VAULT_KEY_ID`, and every earlier vault key in `previousKeks` | your password manager, never beside the backups | no value can be read, ever: the backup holds only wrapped data keys. The vault's signing key comes from the vault key too, so every member's row fails its MAC, and the vault's entries and checkpoints fail verification |
+| The app key, `APP_KEY` | your password manager | the app's entries, sessions and tokens fail their MACs: verification fails, and every session and token is refused |
 | The OAuth client secret and the deployment's settings | your password manager and the deployment's repository | nobody can sign in |
 
-With AWS KMS, the KEK is the key in KMS, not a value to escrow: keep the key
-(and its alias) from being deleted, and the vault's IAM credentials in your
-password manager, with its `SIGNING_KEY`, which a KMS deployment has instead
-of deriving one from the KEK. See [keys.md](keys.md).
+With AWS KMS, the vault key is the key in KMS, not a value to escrow: keep
+the key, and its alias, from being deleted, and the vault's IAM credentials
+in your password manager, with its `SIGNING_KEY`, which a KMS deployment has
+instead of deriving one from the vault key. See [keys.md](keys.md).
 
 Keep the keys apart from the backups. A backup alone opens nothing, and the
 keys alone hold nothing; whoever has both has every value.
@@ -163,12 +163,15 @@ Verification proves the restored history is the one coffre wrote, up to the
 backup's moment. It cannot show what was written after it: a complete older
 backup verifies as well as a recent one ([Limits](architecture.md#limits)).
 
-## If the KEK is wrong
+## If the vault key is wrong
 
-With a local KEK, the vault's own keys come from the KEK
-([keys.md](keys.md#a-local-key)). A KEK other than the one that wrapped the
-data, whether a mistyped key under the right `KEK_ID` or the wrong escrowed
-key, holds none of the keys the vault's entries were written under, which
+The messages below call the vault key by its technical name, the KEK
+(key-encryption key), as its configuration does (`kek`, `previousKeks`).
+
+With a local vault key, the vault's own keys come from it
+([keys.md](keys.md#a-local-key)). A vault key other than the one that
+wrapped the data, whether a mistyped key under the right `VAULT_KEY_ID` or
+the wrong escrowed key, holds none of the keys the vault's entries were written under, which
 the vault sees at its first call. It then writes nothing at all, and refuses
 every key operation, reads and writes alike, and every change of access:
 
@@ -187,17 +190,17 @@ or the vault wrote it under another KEK or signing key, which must stay configur
 a KEK that was replaced stays in previousKeks
 ```
 
-The same verdict, with the values under the new KEK readable, means a KEK
-replaced and then dropped from `previousKeks`.
+The same verdict, with the values under the new vault key readable, means a
+vault key replaced and then dropped from `previousKeks`.
 
-A KEK the vault's keys do not come from, an earlier one in `previousKeks`
-or a KMS key beside a `signingKey`, is checked before the vault's first key
-operation instead. Each KEK has a check value: a known value wrapped under
-it the first time the vault used it, kept in a `key.check` entry of the
-log. Opening it again opens no data. A KEK with no check value yet is first
-tried on a few of the newest keys it wrapped, if any; a backup from before
-check values existed is covered the same way. A KEK that opens neither
-gets every key operation refused, each refused key logged with the code
+A vault key the vault's own keys do not come from, an earlier one in
+`previousKeks` or a KMS key beside a `signingKey`, is checked before the
+vault's first key operation instead. Each has a check value: a known value
+wrapped under it the first time the vault used it, kept in a `key.check`
+entry of the log. Opening it again opens no data. A key with no check value
+yet is first tried on a few of the newest keys it wrapped, if any; a backup
+from before check values existed is covered the same way. A vault key that
+opens neither gets every key operation refused, each refused key logged with the code
 `wrong_kek`, and the checkpoint with them:
 
 ```
@@ -206,15 +209,15 @@ HTTP 503  {"error":"unavailable","reason":"wrong_kek",
 ```
 
 Either message names keys by id, never key material. Restart the vault with
-the escrowed KEK and its `KEK_ID`: the vault decides once per process, so a
-restart is what clears it.
+the escrowed vault key and its `VAULT_KEY_ID`: the vault decides once per
+process, so a restart is what clears it.
 
-A KEK the vault cannot reach (KMS down, or refusing the vault's
+A vault key the vault cannot reach (KMS down, or refusing the vault's
 credentials) is not a verdict: the call fails as any key operation does
-during an outage, the next one asks again, and checkpoints go on. A KEK
-under a new id is a rotation: its check value is recorded on first use,
+during an outage, the next one asks again, and checkpoints go on. A vault
+key under a new id is a rotation: its check value is recorded on first use,
 and values wrapped under an id the vault is no longer given fail with "no
-KEK configured for …". Keep earlier KEKs in `previousKeks`.
+KEK configured for …". Keep earlier vault keys in `previousKeks`.
 
 ## The local drill
 
@@ -240,7 +243,7 @@ this machine, against the compose Postgres, after `pnpm build`:
    - a new value writes and reads back, and the next beat checkpoints;
    - `coffre-conformance probe` passes, as no one and with the restored
      token, which reads the canary.
-5. It restarts the example with a random KEK under the same id, and checks
+5. It restarts the example with a random vault key under the same id, and checks
    that the canary and a new write are both refused with `wrong_kek`, that
    verification fails at the vault's first entry and says why, and that
    `/readyz` turns red.

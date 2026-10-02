@@ -20,7 +20,7 @@ export default coffre((env: Env) => ({
   auth: signin({
     providers: [github({ clientId: env.GITHUB_CLIENT_ID, clientSecret: env.GITHUB_CLIENT_SECRET })],
   }),
-  auditChainKey: env.AUDIT_CHAIN_KEY,
+  auditChainKey: env.APP_KEY,
 }));
 ```
 
@@ -30,7 +30,7 @@ import { postgres, vault } from '@coffre/vault/cloudflare';
 
 export default vault((env: Env) => ({
   database: postgres(env.VAULT_HYPERDRIVE),
-  kek: { id: env.KEK_ID, key: env.KEK },
+  kek: { id: env.VAULT_KEY_ID, key: env.VAULT_KEY },
   previousKeks: [], // older KEKs: what they wrapped still opens, and what the vault signed under them verifies
   rootAdmins: ['erwin@example.com'],
 }));
@@ -303,7 +303,7 @@ naming the provider and key id, and the next checkpoint is refused, so
 next call asks again. With a local KEK, the vault knows sooner: its keys
 come from the KEK, so a wrong one holds none of those its entries were
 written under, and the vault writes nothing at all.
-[restore.md](restore.md#if-the-kek-is-wrong) shows what an operator sees.
+[restore.md](restore.md#if-the-vault-key-is-wrong) shows what an operator sees.
 
 The vault owns everything that decides access: the key encryption key (KEK),
 grants (`(principal, place) → role`, one per member per place, with an
@@ -625,7 +625,7 @@ Each limit is stated here once; the other documents link to it.
   log is checked from its first entry at every checkpoint. After the
   rotation, nothing under its keys counts, so a KEK replaced because it
   leaked forges nothing new; what was forged with it before verifies like
-  the rest. The app's `AUDIT_CHAIN_KEY`, and with KMS the vault's
+  the rest. The app key, `APP_KEY`, and with KMS the vault's
   `signingKey`, cannot be changed at all.
 - **A MAC proves a row is genuine, not current.** Putting back a genuine old
   sign-in row can undo one sign-out until the session's own expiry; a

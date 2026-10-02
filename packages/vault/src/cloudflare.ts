@@ -8,7 +8,7 @@
  *
  *   export default vault((env: Env) => ({
  *     database: postgres(env.HYPERDRIVE),
- *     kek: { id: 'kek-1', key: env.KEK }, // or awsKms({ keyArn, credentials }), with a signingKey
+ *     kek: { id: env.VAULT_KEY_ID, key: env.VAULT_KEY }, // or awsKms({ keyArn, credentials }), with a signingKey
  *     rootAdmins: ['admin@acme.example'],
  *   }));
  *
