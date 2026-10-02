@@ -11,13 +11,13 @@
   "workers_dev": false,
   "observability": { "enabled": true },
   "vars": {
-    // Names the KEK below: from `coffre keys`. A rotation gives the new one a new id.
+    // Names the KEK below: from `coffre setup`. A rotation gives the new one a new id.
     "KEK_ID": "kek-1",
     // Comma-separated emails: the first people in, whom nobody can remove.
     "ROOT_ADMINS": "you@example.com"
   },
   "secrets": {
-    // From `coffre keys`: wrangler secret put KEK. The vault derives the key
+    // From `coffre setup`: wrangler secret put KEK. The vault derives the key
     // it signs its records with from it.
     "required": ["KEK"]
   },

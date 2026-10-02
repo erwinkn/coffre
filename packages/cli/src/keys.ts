@@ -24,16 +24,8 @@ export function generateKeys(now = new Date()): Keys {
   return { KEK_ID: `kek-${now.toISOString().slice(0, 10)}`, KEK: key(), AUDIT_CHAIN_KEY: key() };
 }
 
-/** The keys as a dotenv block, then, as comments, what each is for and where it goes. */
-export function formatKeys(keys: Keys): string {
-  return `KEK_ID=${keys.KEK_ID}
-KEK=${keys.KEK}
-AUDIT_CHAIN_KEY=${keys.AUDIT_CHAIN_KEY}
-
-# Save all three in your password manager now. They are shown once, and
-# coffre keeps no copy.
-#
-# Two keys, one for each component, so that the app, which faces the
+/** What each key is for, as comments: `coffre keys` and `coffre setup` both say it. */
+export const KEYS_EXPLAINED = `# Two keys, one for each component, so that the app, which faces the
 # network, never holds what decrypts a value:
 #
 #   KEK              the vault's. Decrypts every value, and signs the vault's
@@ -46,7 +38,18 @@ AUDIT_CHAIN_KEY=${keys.AUDIT_CHAIN_KEY}
 #
 # Whoever has the KEK and a copy of the database has every value: keep it
 # apart from the backups.
+`;
+
+/** The keys as a dotenv block, then, as comments, what each is for and where it goes. */
+export function formatKeys(keys: Keys): string {
+  return `KEK_ID=${keys.KEK_ID}
+KEK=${keys.KEK}
+AUDIT_CHAIN_KEY=${keys.AUDIT_CHAIN_KEY}
+
+# Save all three in your password manager now. They are shown once, and
+# coffre keeps no copy.
 #
+${KEYS_EXPLAINED}#
 # On Workers, KEK_ID is a var in vault/wrangler.jsonc, and KEK and
 # AUDIT_CHAIN_KEY are Worker secrets (wrangler secret put). On Node, KEK_ID
 # and KEK go in vault.env, and AUDIT_CHAIN_KEY in server.env.

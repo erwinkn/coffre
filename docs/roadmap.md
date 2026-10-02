@@ -9,8 +9,9 @@ first live instance.
 - **The product works end to end:** the API, the CLI, the web UI, coffre's own
   sign-in, syncs, offboarding, and conformance for every deployment.
 - **It is packages** (phase 2): `coffre init --workers` or `--node` writes a
-  deployment ([deploy.md](deploy.md)). The `@coffre` names are reserved on npm
-  with `0.0.0` placeholders; the first release is published from a tag.
+  deployment, and `coffre setup` prepares its database and keys in one go
+  ([deploy.md](deploy.md)). The `@coffre` names are reserved on npm with
+  `0.0.0` placeholders; the first release is published from a tag.
 - **One database** (#22 to #46, designed in
   [design/single-database.md](design/single-database.md)): one Postgres
   database, two components each with its own login, one audit log, the

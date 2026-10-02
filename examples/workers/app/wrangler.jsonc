@@ -17,7 +17,7 @@
     "GITHUB_CLIENT_ID": "replace-with-your-client-id"
   },
   "secrets": {
-    // AUDIT_CHAIN_KEY is from `coffre keys`; the app never gets the vault's keys.
+    // AUDIT_CHAIN_KEY is from `coffre setup`; the app never gets the vault's keys.
     "required": ["GITHUB_CLIENT_SECRET", "AUDIT_CHAIN_KEY"]
   },
   // `wrangler hyperdrive create coffre --caching-disabled --connection-string=<runtime login URL>`
