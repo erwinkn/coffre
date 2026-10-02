@@ -7,7 +7,7 @@ export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-coffre}"
 scratch="$(mktemp -d "${TMPDIR:-/tmp}/coffre-schema-owner.XXXXXX")"
 container="coffre-schema-owner-${scratch##*.}"
 cleanup() {
-    docker rm -f "$container" >/dev/null 2>&1 || true
+    docker rm -fv "$container" >/dev/null 2>&1 || true
     rm -rf "$scratch"
 }
 trap cleanup EXIT
@@ -89,16 +89,20 @@ for attribute in SUPERUSER REPLICATION BYPASSRLS; do
     psql_owner -d postgres -c "CREATE DATABASE $database"
     docker exec "$container" psql -X -v ON_ERROR_STOP=1 -U postgres \
         -c "ALTER ROLE coffre_app $attribute"
-    if migrate "$database" >"$scratch/unsafe.log" 2>&1; then
+    accepted=false
+    if migrate "$database" >"$scratch/unsafe.log" 2>&1; then accepted=true; fi
+    # Restore before checking the result, even if the migrator or assertion fails.
+    # The exit trap removes this cluster if the process is interrupted.
+    docker exec "$container" psql -X -v ON_ERROR_STOP=1 -U postgres \
+        -c "ALTER ROLE coffre_app NO$attribute"
+    if [[ "$accepted" == true ]]; then
         echo "migration accepted a group with $attribute" >&2
         exit 1
     fi
-    if ! rg -q 'coffre_app has unsafe role attributes' "$scratch/unsafe.log"; then
+    if ! grep -Fq 'coffre_app has unsafe role attributes' "$scratch/unsafe.log"; then
         cat "$scratch/unsafe.log" >&2
         exit 1
     fi
-    docker exec "$container" psql -X -v ON_ERROR_STOP=1 -U postgres \
-        -c "ALTER ROLE coffre_app NO$attribute"
 done
 
 # Node's default CA set must verify both trust and the hostname. Add the local
@@ -119,7 +123,7 @@ SQL
 for attempt in $(seq 60); do
     if docker exec -e PGPASSWORD=local-owner-only "$container" \
         psql -X -At 'postgresql://migration_owner@127.0.0.1/existing?sslmode=require' \
-        -c 'SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()' 2>/dev/null | rg -q '^t$'; then break; fi
+        -c 'SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()' 2>/dev/null | grep -qx t; then break; fi
     if ((attempt == 60)); then docker logs "$container"; exit 1; fi
     sleep 1
 done
