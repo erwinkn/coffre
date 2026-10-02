@@ -31,6 +31,7 @@ import {
   type AccessFault,
   type AdmitInput,
   type Checkpoint,
+  type CheckpointKey,
   type Grant,
   type GrantChange,
   type LogHead,
@@ -50,7 +51,7 @@ import {
 } from '@coffre/core/vault';
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
-import { appendEntries, lockLogHead, type NewEntry } from '@coffre/db/log';
+import { appendEntries, lockLogHead, type Appended, type NewEntry } from '@coffre/db/log';
 
 import { verifyAccounting } from './accounting.ts';
 import { signer, type Signer } from './checkpoint.ts';
@@ -81,11 +82,11 @@ export type PreparedVault = {
   config: ResolvedVaultConfig;
   /** What signs checkpoints now: the first of `signers`. */
   signer: Signer;
-  /** A signer for each of the configured signing keys, by which checkpoints signed under any of them verify. */
+  /** A signer for each of its signing keys: a checkpoint is signed by the one whose log key wrote its entry. */
   signers: Signer[];
   /** What the vault's entries are MACed with now: the first of `logKeys`. */
   logKey: LogKey;
-  /** Each signing key's log key, by which the vault's entries under any of them verify. */
+  /** Each signing key's log key: those after the first verify only entries before `since`. */
   logKeys: LogKey[];
   options: Required<VaultOptions>;
   /** How far the log is verified; `verifyChain` in log.ts. The furthest any call got to. */
@@ -94,8 +95,14 @@ export type PreparedVault = {
   rooted: Set<string>;
   /** What member rows are sealed under now; rows.ts. */
   rowKey: Buffer;
-  /** Each signing key's row key: a row sealed under any holds until a decision seals it again under `rowKey`. */
+  /** Each signing key's row key: those after the first vouch for rows only until `since`, when the rows are sealed again. */
   rowKeys: Buffer[];
+  /** Its first entry under its current key, where the keys it replaced stop counting, once settled (`#settle`). */
+  since: bigint | null;
+  /** Why it writes nothing, once settled that it may not. */
+  superseded: string | null;
+  /** The settling under way. */
+  settling: Promise<void> | null;
   /** Tampering this process has logged already, so that a forged row is one entry, not one per request. */
   reported: Set<string>;
   /** Whether its KEKs open what they wrapped, once asked: `#kekMismatch`. */
@@ -112,6 +119,9 @@ export async function prepareVault(config: ResolvedVaultConfig, options: VaultOp
     verified: UNVERIFIED,
     rooted: new Set(),
     reported: new Set(),
+    since: null,
+    superseded: null,
+    settling: null,
     kekCheck: null,
     wrongKek: null,
   };
@@ -154,6 +164,9 @@ const KEY_CHECK_CONTEXT: SecretContext = { projectId: NIL, environmentId: NIL, s
 
 /** How many stored keys a KEK with no check yet is tried on: one that opens proves it. */
 const KEY_CHECK_SAMPLE = 3;
+
+/** The vault's first entry under a new key, which the keys it replaced count only before (`#settle`). */
+const KEY_ROTATE = 'key.rotate';
 
 /** A new member row, before the decision seals it (`#seal`). */
 const UNSEALED = { accessSeq: 0n, mac: Buffer.alloc(32) };
@@ -303,6 +316,8 @@ class VaultService implements Vault {
    * fails the call.
    */
   async #decide<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>): Promise<Outcome<T>> {
+    const superseded = await this.#settled();
+    if (superseded !== null) return { ok: false, refusal: refusal('wrong_kek', superseded) };
     const reports: NewEntry[] = [];
     for (let attempt = 1; ; attempt += 1) {
       try {
@@ -330,7 +345,7 @@ class VaultService implements Vault {
         // Each member's newest access entry, which their row names (rows.ts).
         const accessSeq = new Map<string, bigint>();
         if (entries.length > 0) {
-          const appended = await appendEntries(tx, this.#prepared.logKey, entries);
+          const appended = await this.#append(tx, entries);
           at = appended.occurredAt;
           entries.forEach((entry, i) => {
             if (isAccessEntry(entry)) accessSeq.set(entry.subjectPrincipal!, appended.seqStart + BigInt(i));
@@ -352,7 +367,7 @@ class VaultService implements Vault {
       if (entries.length > 0) {
         await this.#db.transaction(async (tx) => {
           await store.boundLockWaits(tx, LOCK_TIMEOUT_MS);
-          await appendEntries(tx, this.#prepared.logKey, entries);
+          await this.#append(tx, entries);
         });
       }
       this.#reported(reports);
@@ -412,13 +427,21 @@ class VaultService implements Vault {
     return null;
   }
 
+  /** Whether `entry` carries the vault's MAC: under any of its keys before `since`, and only its current one from there. */
   #authentic(entry: StoredEntry): boolean {
-    return verifyEntries([entry], { startSeq: entry.seq, startPrevHash: entry.prevHash, keys: this.#prepared.logKeys }).ok;
+    const { logKeys, since } = this.#prepared;
+    const keys = since !== null && entry.seq >= since ? logKeys.slice(0, 1) : logKeys;
+    return verifyEntries([entry], { startSeq: entry.seq, startPrevHash: entry.prevHash, keys }).ok;
   }
 
-  /** Whether `row`, with these grants, carries the MAC of one of the vault's row keys. */
+  /**
+   * Whether `row`, with these grants, carries the MAC of the vault's row
+   * key, or of one it replaced before the rotation sealed every row again
+   * (`#rotate`).
+   */
   #sealed(row: Member, grants: readonly GrantRow[]): boolean {
-    return this.#prepared.rowKeys.some((key) => sealed(key, row, grants));
+    const { rowKeys, since } = this.#prepared;
+    return (since === null ? rowKeys : rowKeys.slice(0, 1)).some((key) => sealed(key, row, grants));
   }
 
   /** A `vault.tampered` entry, once per process for each thing found: `#reported` marks it once committed. */
@@ -448,9 +471,119 @@ class VaultService implements Vault {
 
   /** Reports found outside a decision, committed on their own. */
   async #record(reports: NewEntry[]): Promise<void> {
-    if (reports.length === 0) return;
-    await this.#db.transaction((tx) => appendEntries(tx, this.#prepared.logKey, reports));
+    if (reports.length === 0 || (await this.#settled()) !== null) return;
+    await this.#db.transaction((tx) => this.#append(tx, reports));
     this.#reported(reports);
+  }
+
+  // --- its keys over time -------------------------------------------------------
+
+  /**
+   * Null when the vault may write, once its keys are settled (`#settle`);
+   * otherwise why not. Settled by the first call of a process; one that
+   * fails leaves it to the next.
+   */
+  async #settled(): Promise<string | null> {
+    const prepared = this.#prepared;
+    if (prepared.since === null && prepared.superseded === null) {
+      prepared.settling ??= this.#settle().finally(() => {
+        prepared.settling = null;
+      });
+      await prepared.settling;
+    }
+    return prepared.superseded;
+  }
+
+  /**
+   * Which of its keys count where. Those it replaced, from the KEKs in
+   * previousKeks, verify only what came before its first entry under its
+   * current key, `since`, and vouch for no member row after it. The first
+   * call finds that entry, or makes it when every entry of the vault's is
+   * still under a key it replaced (`#rotate`). A vault whose key the log has
+   * moved on from, or that holds no key its newest entries are under,
+   * writes nothing: `superseded` says why.
+   */
+  async #settle(): Promise<void> {
+    const prepared = this.#prepared;
+    const current = prepared.logKey.keyId;
+    for (let attempt = 1; ; attempt += 1) {
+      const rotation = await store.latestVaultEntry(this.#db, [KEY_ROTATE]);
+      if (rotation?.keyId === current && this.#authentic(rotation)) {
+        prepared.since = rotation.seq;
+        return;
+      }
+      const [newest] = await store.vaultPage(this.#db, undefined, 1);
+      // A log the vault has not written to: nothing to settle until it does.
+      if (newest === undefined) return;
+      const first = await store.firstVaultEntryUnder(this.#db, current);
+      if (first !== undefined && newest.keyId === current) {
+        prepared.since = first;
+        return;
+      }
+      if (first === undefined && prepared.logKeys.some((key) => key.keyId === newest.keyId)) {
+        try {
+          prepared.since = await this.#rotate(newest.keyId);
+          return;
+        } catch (error) {
+          if (attempt < 3 && error instanceof Retry) continue;
+          throw error;
+        }
+      }
+      prepared.superseded =
+        first === undefined
+          ? `the vault's entries are under ${newest.keyId}, a key this vault does not hold: it was given the wrong KEK or signing key, or a KEK it replaced is missing from previousKeks`
+          : `the log moved on from this vault's key, ${current}, to ${newest.keyId}: a vault given a newer KEK replaced it, and a replaced key writes nothing more`;
+      return;
+    }
+  }
+
+  /**
+   * Move the vault to its current key: every member row it can vouch for
+   * sealed again under the current row key, then a `key.rotate` entry, its
+   * first under the key, after which the keys it replaced count for
+   * nothing. One transaction, which locks every row as a decision does,
+   * then the log's head. Another instance that rotated first, or a member
+   * admitted since the rows were read, sends it back to `#settle`.
+   */
+  async #rotate(from: string): Promise<bigint> {
+    const reports: NewEntry[] = [];
+    const since = await this.#db.transaction(async (tx) => {
+      await store.boundLockWaits(tx, LOCK_TIMEOUT_MS);
+      const principals = (await store.allMembers(tx)).map((row) => row.principal);
+      const rows = principals.length === 0 ? new Map<string, Member>() : await store.lockMembers(tx, principals);
+      await lockLogHead(tx);
+      const [newest] = await store.vaultPage(tx, undefined, 1);
+      if (newest?.keyId !== from || (await store.allMembers(tx)).length !== rows.size) throw new Retry();
+      const held = await store.grants(tx);
+      for (const row of rows.values()) {
+        const grants = held.filter((grant) => grant.principal === row.principal);
+        // A row that fails is reported, and left under the key it was sealed with, which fails it from now on.
+        if ((await this.#integrity(tx, row.principal, row, grants, reports)) === null) {
+          await store.updateMember(tx, row.principal, { mac: memberMac(this.#prepared.rowKey, row, grants) });
+        }
+      }
+      const rotated = { actor: VAULT_ACTOR, action: KEY_ROTATE, decision: 'allow' as const, metadata: JSON.stringify({ from }) };
+      return (await this.#append(tx, [rotated, ...reports])).seqStart;
+    });
+    this.#reported(reports);
+    return since;
+  }
+
+  /**
+   * Append under the vault's current key, unless the log's newest rotation
+   * is to a key it does not hold: a vault given a newer KEK has replaced
+   * this one, which writes nothing more. Checked under the head's lock, so
+   * that an instance still running with the replaced KEK, as during a
+   * deploy, cannot write after the rotation.
+   */
+  #append(tx: Transaction, entries: readonly NewEntry[]): Promise<Appended> {
+    const prepared = this.#prepared;
+    return appendEntries(tx, prepared.logKey, entries, async (locked) => {
+      const rotation = await store.latestVaultEntry(locked, [KEY_ROTATE]);
+      if (rotation === undefined || prepared.logKeys.some((key) => key.keyId === rotation.keyId)) return;
+      prepared.superseded = `the log moved on to ${rotation.keyId}, a key this vault does not hold: a vault given a newer KEK replaced it, and a replaced key writes nothing more`;
+      throw new Error(prepared.superseded);
+    });
   }
 
   // --- keys -------------------------------------------------------------------
@@ -675,7 +808,7 @@ class VaultService implements Vault {
         await check(d);
         await lockLogHead(d.tx);
         const at = await this.#now(d.tx);
-        const appended = await appendEntries(d.tx, this.#prepared.logKey, [{
+        const appended = await this.#append(d.tx, [{
           actor: principal,
           action: 'key.intent',
           decision: 'allow',
@@ -758,11 +891,11 @@ class VaultService implements Vault {
    * anyone a root admin; the configuration does.
    */
   async #rootRow(principal: string): Promise<void> {
-    if (this.#prepared.rooted.has(principal)) return;
+    if (this.#prepared.rooted.has(principal) || (await this.#settled()) !== null) return;
     await this.#db.transaction(async (tx) => {
       await lockLogHead(tx);
       if ((await store.member(tx, principal)) !== undefined) return;
-      const appended = await appendEntries(tx, this.#prepared.logKey, [
+      const appended = await this.#append(tx, [
         {
           actor: VAULT_ACTOR,
           action: 'member.add',
@@ -839,6 +972,7 @@ class VaultService implements Vault {
    * looks like one.
    */
   async access(principal: string): Promise<Access> {
+    await this.#settled();
     if (this.#isRootAdmin(principal)) await this.#rootRow(principal);
     const read = async (db: Queryable, reports: NewEntry[]) => {
       const [row, held, at] = await Promise.all([store.member(db, principal), store.grants(db, principal), this.#now(db)]);
@@ -1201,6 +1335,9 @@ class VaultService implements Vault {
    * A KEK that opens neither is not the one that wrapped the data.
    */
   async #checkKeks(): Promise<string | null> {
+    // A vault that may not write cannot record a check either; why it may not is the answer.
+    const superseded = await this.#settled();
+    if (superseded !== null) return superseded;
     const checks = new Map<string, WrappedDek>();
     for (const entry of await store.vaultEntriesOf(this.#db, [KEY_CHECK], -1n, VERIFY_BATCH)) {
       // A check in the vault's name that the vault did not write proves nothing either way.
@@ -1240,7 +1377,7 @@ class VaultService implements Vault {
       const wrapped = await kek.wrap(Buffer.from(KEY_CHECK_VALUE), KEY_CHECK_CONTEXT, operation);
       // The key it opened, if any, is in the log, as every key the vault opens is.
       await this.#db.transaction((tx) =>
-        appendEntries(tx, this.#prepared.logKey, [
+        this.#append(tx, [
           { actor: VAULT_ACTOR, action: KEY_CHECK, decision: 'allow', metadata: JSON.stringify({ ...serialisable(wrapped), proof }) },
         ]),
       );
@@ -1257,6 +1394,7 @@ class VaultService implements Vault {
   }
 
   async checkpoint(): Promise<Outcome<{ checkpoint: Checkpoint }>> {
+    await this.#settled();
     // A KEK found wrong turns readiness red: the checkpoint is refused. It does no key work of its
     // own, so it writes nothing more and never waits on a key service; a check under way, or none yet, is no verdict.
     const { wrongKek } = this.#prepared;
@@ -1310,9 +1448,13 @@ class VaultService implements Vault {
     });
   }
 
-  async about(): Promise<{ publicKeys: Record<string, string>; rootAdmins: string[] }> {
+  async about(): Promise<{ checkpointKeys: Record<string, CheckpointKey>; rootAdmins: string[] }> {
+    await this.#settled();
+    const { signers, since } = this.#prepared;
+    // A key it replaced vouches only for prefixes before its first entry under the current one: none, before it has one.
+    const until = Number(since ?? 0n);
     return {
-      publicKeys: Object.fromEntries(this.#prepared.signers.map(({ keyId, publicKey }) => [keyId, publicKey])),
+      checkpointKeys: Object.fromEntries(signers.map(({ keyId, publicKey }, i) => [keyId, { publicKey, until: i === 0 ? null : until }])),
       rootAdmins: this.#config.rootAdmins.map((email) => `user:${email}`),
     };
   }
@@ -1336,7 +1478,8 @@ class VaultService implements Vault {
    * checkpoint (`through`), and the last checkpoint's; and the members and
    * grants replayed from it.
    */
-  #verifyAll(shown: readonly StoredEntry[], upTo: LogHead | null): Promise<LogVerification> {
+  async #verifyAll(shown: readonly StoredEntry[], upTo: LogHead | null): Promise<LogVerification> {
+    await this.#settled();
     return this.#db.transaction(async (tx) => {
       const remembered = this.#prepared.verified;
       const verification = await this.#verify(tx, shown, UNVERIFIED);
@@ -1365,9 +1508,10 @@ class VaultService implements Vault {
   }
 
   /**
-   * Every checkpoint, not only the newest: each signed by the vault's key,
-   * over a prefix the log still holds, entry for entry. The chain is
-   * verified by now, so each checkpoint entry is the vault's.
+   * Every checkpoint, not only the newest: each signed by the key whose log
+   * key wrote its entry, over a prefix the log still holds, entry for entry.
+   * The chain is verified by now, so each checkpoint entry is the vault's,
+   * and one under a key it replaced comes before the rotation.
    */
   async #checkpointFault(db: Queryable): Promise<Extract<LogVerification, { ok: false }> | null> {
     for (let after = -1n; ; ) {
@@ -1375,8 +1519,9 @@ class VaultService implements Vault {
       for (const entry of batch) {
         const checkpoint = JSON.parse(entry.metadata) as Checkpoint;
         const broken = (reason: string) => ({ ok: false as const, failedAtSeq: Number(entry.seq), reason });
-        const by = this.#prepared.signers.find((candidate) => candidate.keyId === checkpoint.keyId);
-        if (by === undefined) return broken(`a checkpoint signed under ${checkpoint.keyId}, a key this vault does not hold: a KEK that was replaced must stay in previousKeks`);
+        const { logKeys, signers } = this.#prepared;
+        const by = signers[logKeys.findIndex((key) => key.keyId === entry.keyId)];
+        if (by?.keyId !== checkpoint.keyId) return broken(`a checkpoint signed under ${checkpoint.keyId}, in an entry written under ${entry.keyId}: each key signs only its own`);
         if (!(await verifyCheckpoint(checkpoint, by.publicKey))) return broken('a checkpoint the vault did not sign');
         if (BigInt(checkpoint.seq) >= entry.seq || !(await carries(db, checkpoint))) {
           return broken(`the log up to entry ${checkpoint.seq} is not the prefix this checkpoint signed: it was rewritten`);

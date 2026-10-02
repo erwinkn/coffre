@@ -1,7 +1,7 @@
 import { after, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { verifyCheckpoint } from '@coffre/core/vault';
+import { verifyCheckpoint, type Vault } from '@coffre/core/vault';
 import { createDatabase } from '@coffre/db';
 import { asc, desc, eq } from 'drizzle-orm';
 
@@ -46,8 +46,8 @@ test('a beat is an app entry, and the vault checkpoints it in an entry of its ow
     ['vault', 'system:coffre-scheduler', 'audit.checkpoint'],
   ]);
   // The checkpoint signs everything before it: here, the beat.
-  const [checkpoint, { publicKeys }] = await Promise.all([latestCheckpoint(db.owner), vault.about()]);
-  const publicKey = publicKeys[checkpoint!.keyId]!;
+  const [checkpoint, { checkpointKeys }] = await Promise.all([latestCheckpoint(db.owner), vault.about()]);
+  const { publicKey } = checkpointKeys[checkpoint!.keyId]!;
   assert.equal(checkpoint?.seq, 0);
   assert.equal(checkpoint?.hash, logged[0].hash.toString('hex'));
   assert.deepEqual(JSON.parse(logged[1].metadata), checkpoint);
@@ -126,6 +126,17 @@ test('readiness trusts only a checkpoint the vault signed', async () => {
   const ready = await auditReadiness(db.runtime, vault);
   assert.equal(ready.ok, false);
   assert.equal(ready.checkpointed, false);
+});
+
+test('readiness counts a checkpoint under a key the vault replaced only over a prefix before the rotation', async () => {
+  await writeAuditHeartbeat(db.runtime, chainKey, vault, quiet);
+  const checkpoint = (await latestCheckpoint(db.owner))!;
+  const { publicKey } = (await vault.about()).checkpointKeys[checkpoint.keyId]!;
+  // The vault as after a rotation at entry `until`: the key that signed this checkpoint is one it replaced.
+  const rotatedAt = (until: number) =>
+    ({ about: async () => ({ checkpointKeys: { [checkpoint.keyId]: { publicKey, until } }, rootAdmins: [] }) }) as unknown as Vault;
+  assert.equal((await auditReadiness(db.runtime, rotatedAt(checkpoint.seq + 1))).ok, true);
+  assert.equal((await auditReadiness(db.runtime, rotatedAt(checkpoint.seq))).checkpointed, false);
 });
 
 test('an empty log has nothing to checkpoint, and logs nothing for it', async () => {

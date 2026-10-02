@@ -24,12 +24,14 @@ export function vaultLogKey(signingKey: Uint8Array): LogKey {
 /**
  * How far this process has verified the chain: every entry before
  * `nextSeq`, the last of which has `hash`, with `vaultEntries` of the
- * vault's among them. In memory only: the database cannot vouch for itself.
+ * vault's among them, written under `vaultKeys`, in the order the log moved
+ * through them (`forward`). In memory only: the database cannot vouch for
+ * itself.
  */
-export type Anchor = { nextSeq: bigint; hash: Buffer; vaultEntries: number };
+export type Anchor = { nextSeq: bigint; hash: Buffer; vaultEntries: number; vaultKeys: readonly string[] };
 
 /** Before the first entry: nothing verified yet. */
-export const UNVERIFIED: Anchor = { nextSeq: 0n, hash: GENESIS_HASH, vaultEntries: 0 };
+export const UNVERIFIED: Anchor = { nextSeq: 0n, hash: GENESIS_HASH, vaultEntries: 0, vaultKeys: [] };
 
 /** The further of two anchors, when two calls verified at once. */
 export function further(a: Anchor, b: Anchor): Anchor {
@@ -82,10 +84,44 @@ export async function verifyChain(
     if (batch.length === 0) break;
     const result = verifyEntries(batch, { ...keys, startSeq: verified.nextSeq, startPrevHash: verified.hash });
     if (!result.ok) return broken(result.failedAtSeq, result.reason);
-    verified = { nextSeq: result.nextSeq, hash: result.head, vaultEntries: verified.vaultEntries + result.authenticated };
+    const moved = forward(batch, verified.vaultKeys, logKeys[0].keyId);
+    if ('failedAtSeq' in moved) return broken(moved.failedAtSeq, moved.reason);
+    verified = {
+      nextSeq: result.nextSeq,
+      hash: result.head,
+      vaultEntries: verified.vaultEntries + result.authenticated,
+      vaultKeys: moved.keys,
+    };
     if (batch.length < VERIFY_BATCH) break;
   }
   return { verification: { ok: true, entries: verified.vaultEntries }, anchor: verified };
+}
+
+/**
+ * The vault's keys only move forward. Once its entries move from one key to
+ * the next, the one before writes no more; once they reach `current`, the
+ * key it writes with now, no other key writes again. So a key it replaced,
+ * even one that leaked, verifies what came before the rotation, and nothing
+ * after it.
+ */
+function forward(
+  entries: readonly StoredEntry[],
+  keys: readonly string[],
+  current: string,
+): { keys: readonly string[] } | { failedAtSeq: bigint; reason: string } {
+  let moved = keys;
+  for (const entry of entries) {
+    const last = moved.at(-1);
+    if (entry.author !== 'vault' || entry.keyId === last) continue;
+    if (last === current || moved.includes(entry.keyId)) {
+      return {
+        failedAtSeq: entry.seq,
+        reason: `written under ${entry.keyId} after the vault moved to ${last}: a key it replaced verifies only what came before`,
+      };
+    }
+    moved = [...moved, entry.keyId];
+  }
+  return { keys: moved };
 }
 
 /**

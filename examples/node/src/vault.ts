@@ -16,7 +16,7 @@ const vault = await serveVault({
   database: env('DATABASE_URL'),
   kek: { id: env('KEK_ID'), key: env('KEK') },
   // After a rotation, the KEKs before it, so the data keys they wrapped still
-  // open and the records they signed still verify:
+  // open and the records signed under them before it still verify:
   // previousKeks: [{ id: 'kek-1', key: env('KEK_1') }],
   rootAdmins: env('ROOT_ADMINS').split(',').map((email) => email.trim()),
   // The vault derives its signing key from the KEK. With a KEK a key service

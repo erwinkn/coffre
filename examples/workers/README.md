@@ -85,7 +85,7 @@ pnpm exec wrangler secret put GITHUB_CLIENT_SECRET -c app/wrangler.jsonc
 ```
 
 Keep older KEKs after a rotation, for good: what they wrapped still needs
-them, and so does what the vault signed under them. With AWS KMS instead of
+them, and so does what the vault signed under them before it. With AWS KMS instead of
 a key of your own, the vault also needs a `SIGNING_KEY`
 ([keys](https://github.com/erwinkn/coffre/blob/main/docs/keys.md#aws-kms)).
 

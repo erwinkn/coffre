@@ -46,7 +46,10 @@ export type Kek = { id: string; key: string } | KekProvider;
 export type VaultConfig = {
   /** Wraps every new data key. */
   kek: Kek;
-  /** Older KEKs, still unwrapping what they wrapped until a rewrap moves it on. */
+  /**
+   * Older KEKs, still unwrapping what they wrapped until a rewrap moves it
+   * on, and verifying what the vault wrote under them before the rotation.
+   */
   previousKeks?: readonly Kek[];
   /** At least one email: the only way into a fresh instance, and the only members nobody can remove. */
   rootAdmins: readonly string[];
@@ -121,8 +124,9 @@ export function resolveVaultConfig(config: VaultConfig): ResolvedVaultConfig {
  * with `signingKey` when it is given one, and otherwise with the key the
  * primary KEK stands for. It verifies with the keys every local KEK stands
  * for too, the previous ones included: a KEK rotation changes the derived
- * signing key, and what the old one signed must still verify, for as long
- * as the old KEK stays configured.
+ * signing key, and what the old one signed before the rotation must still
+ * verify, for as long as the old KEK stays configured. Nothing after it does
+ * (`#settle` in vault.ts).
  */
 function signingKeys(given: string | undefined, keks: { provider: KekProvider; signingKey: Buffer | null }[]): Buffer[] {
   const derived = keks.flatMap((entry) => (entry.signingKey === null ? [] : [entry.signingKey]));

@@ -163,28 +163,21 @@ backup verifies as well as a recent one ([Limits](architecture.md#limits)).
 
 ## If the KEK is wrong
 
-The vault checks its KEKs before its first key operation. Each KEK has a
-check value: a known value wrapped under it the first time the vault used
-it, kept in a `key.check` entry of the log. Opening it again opens no data.
-A KEK with no check value yet is first tried on a few of the newest keys it
-wrapped, if any; a backup from before check values existed is covered the
-same way.
-
-With a KEK other than the one that wrapped the data, whether a mistyped key
-under the right `KEK_ID` or the wrong escrowed key, the vault refuses every
-key operation, reads and writes alike, and writes nothing under it:
+With a local KEK, the vault's own keys come from the KEK
+([keys.md](keys.md#a-local-key)). A KEK other than the one that wrapped the
+data, whether a mistyped key under the right `KEK_ID` or the wrong escrowed
+key, holds none of the keys the vault's entries were written under, which
+the vault sees at its first call. It then writes nothing at all, and refuses
+every key operation, reads and writes alike, and every change of access:
 
 ```
 HTTP 503  {"error":"unavailable","reason":"wrong_kek",
-           "message":"this vault's local KEK kek-1 does not open the data it holds: it is not the key that wrapped it"}
+           "message":"the vault's entries are under vault:3f1c…, a key this vault does not hold: it was given the wrong KEK or signing key, or a KEK it replaced is missing from previousKeks"}
 ```
 
-The message names the provider and the key id, never key material. Each
-refused key is logged with the code `wrong_kek`, and the scheduled
-checkpoint is refused too, so `/readyz` turns red after the next beat
-(`checkpointed: false`). With a local KEK, verification fails as well, at
-the first entry the vault wrote: the vault's own key comes from its KEK, so
-a wrong KEK is a wrong key for its records too, and `coffre verify` says so:
+The scheduled checkpoint is refused too, so `/readyz` turns red after the
+next beat (`checkpointed: false`), and verification fails at the first
+entry the vault wrote, which `coffre verify` explains:
 
 ```
 written under vault:3f1c…, a key this verifier does not hold: either it is forged,
@@ -192,11 +185,27 @@ or the vault wrote it under another KEK or signing key, which must stay configur
 a KEK that was replaced stays in previousKeks
 ```
 
-The same answer, with every value readable, means a KEK replaced and then
-dropped from `previousKeks`.
+The same verdict, with the values under the new KEK readable, means a KEK
+replaced and then dropped from `previousKeks`.
 
-Restart the vault with the escrowed KEK and its `KEK_ID`: the vault decides
-once per process, so a restart is what clears it.
+A KEK the vault's keys do not come from, an earlier one in `previousKeks`
+or a KMS key beside a `signingKey`, is checked before the vault's first key
+operation instead. Each KEK has a check value: a known value wrapped under
+it the first time the vault used it, kept in a `key.check` entry of the
+log. Opening it again opens no data. A KEK with no check value yet is first
+tried on a few of the newest keys it wrapped, if any; a backup from before
+check values existed is covered the same way. A KEK that opens neither
+gets every key operation refused, each refused key logged with the code
+`wrong_kek`, and the checkpoint with them:
+
+```
+HTTP 503  {"error":"unavailable","reason":"wrong_kek",
+           "message":"this vault's aws-kms KEK arn:aws:kms:… does not open the data it holds: it is not the key that wrapped it"}
+```
+
+Either message names keys by id, never key material. Restart the vault with
+the escrowed KEK and its `KEK_ID`: the vault decides once per process, so a
+restart is what clears it.
 
 A KEK the vault cannot reach (KMS down, or refusing the vault's
 credentials) is not a verdict: the call fails as any key operation does

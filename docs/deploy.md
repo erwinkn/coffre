@@ -153,8 +153,8 @@ pnpm exec wrangler secret put GITHUB_CLIENT_SECRET -c app/wrangler.jsonc
 
 Keep old KEKs too: after a rotation, the old one stays in `previousKeks`,
 and escrowed, for good. It still opens what it wrapped, and what the vault
-signed under it verifies only while it is configured
-([keys.md](keys.md#a-local-key)).
+signed under it before the rotation verifies only while it is configured;
+it vouches for nothing after ([keys.md](keys.md#a-local-key)).
 
 With AWS KMS instead of a key of your own, the vault never sees the KEK, so
 it cannot derive its signing key from it, and needs a third key,

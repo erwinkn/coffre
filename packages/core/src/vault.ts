@@ -64,12 +64,12 @@ export interface Vault {
    */
   checkpoint(): Promise<Outcome<{ checkpoint: Checkpoint }>>;
   /**
-   * What only the vault's configuration says, which the app shows: the
-   * public keys its checkpoints verify under, by the key id each checkpoint
-   * names (the one it signs with now, and those of earlier KEKs it still
-   * holds), and the root admins, as principals.
+   * What the vault's configuration says, which the app shows: the keys its
+   * checkpoints verify under, by the key id each checkpoint names (the one
+   * it signs with now, and those of the KEKs it replaced), and the root
+   * admins, as principals.
    */
-  about(): Promise<{ publicKeys: Record<string, string>; rootAdmins: string[] }>;
+  about(): Promise<{ checkpointKeys: Record<string, CheckpointKey>; rootAdmins: string[] }>;
   /**
    * Check the whole log: rehash it from the first entry, the vault's
    * entries by their MACs, every checkpoint against the prefix it signed,
@@ -253,6 +253,14 @@ export type Checkpoint = {
   /** Ed25519 over `checkpointMessage(...)`, base64. */
   signature: string;
 };
+
+/**
+ * A public key the vault's checkpoints verify under, base64. One it
+ * replaced vouches only for checkpoints whose prefix ends before `until`,
+ * its first entry under the key that replaced it; the one it signs with now
+ * has none.
+ */
+export type CheckpointKey = { publicKey: string; until: number | null };
 
 /** An entry of the vault's log, and so the chain up to it. */
 export type LogHead = { seq: number; hash: string };

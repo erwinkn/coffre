@@ -154,7 +154,8 @@ test('the bulk limit counts one read per secret, trips with its own code, and is
 });
 
 test('a vault given the wrong KEK answers every value with 503, its entries stop verifying, and readiness goes red', async () => {
-  // Restored with another key under the same id: the app's key is right, the vault's KEK is not.
+  // Restored with another key under the same id: the app's key is right, the vault's KEK is not. Its
+  // keys come from its KEK, so it holds none the log's entries are under: it writes nothing, and says why.
   const misled = testDeps(db.runtime, [ROOT], {
     vault: testVault([ROOT], {}, { kek: randomBytes(32) }),
     chainKey: deps.chainKey,
@@ -164,7 +165,7 @@ test('a vault given the wrong KEK answers every value with 503, its entries stop
     status: 503,
     code: 'unavailable',
     reason: 'wrong_kek',
-    message: "this vault's local KEK test-kek-1 does not open the data it holds: it is not the key that wrapped it",
+    message: /^the vault's entries are under vault:\S+, a key this vault does not hold: it was given the wrong KEK or signing key, or a KEK it replaced is missing from previousKeks$/,
   });
   await assert.rejects(admin.secrets.set('market/dev', { NEW: 'value' }), { status: 503, reason: 'wrong_kek' });
   // The vault's keys come from its KEK, so its entries no longer verify either, and the answer says why.

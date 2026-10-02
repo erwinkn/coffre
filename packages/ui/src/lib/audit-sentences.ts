@@ -231,6 +231,7 @@ const TEMPLATES: Record<string, Template> = {
       ` tampered with: ${TAMPERING[entry.reason ?? ''] ?? 'it fails its seal'}`,
     ],
   },
+  'key.rotate': { did: 'rotated its key', tried: 'rotate its key', what: () => [] },
 
   // Detail, hidden unless asked for.
   sign_in: {

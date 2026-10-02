@@ -40,13 +40,23 @@ kek: { id: env.KEK_ID, key: env.KEK },                      // kek-2026-10-02
 previousKeks: [{ id: env.OLD_KEK_ID, key: env.OLD_KEK }],   // kek-2026-04-01
 ```
 
-New values are wrapped under the new KEK, and the vault signs under the key
-it derives from it; checkpoints and entries name the key they were signed
-under. The old KEK still opens what it wrapped, and the vault still verifies
-what it signed with the old KEK's key, by that key's id. So the old KEK
-stays configured for good: the log is checked from its first entry at every
-checkpoint, and without it, the old entries no longer verify and `/readyz`
-turns red.
+New values are wrapped under the new KEK. At its first call, the vault
+moves to the key it derives from the new KEK: it seals every member row
+again under it, and writes a `key.rotate` entry, its first under that key.
+Entries and checkpoints name the key they were signed under. The old KEK
+still opens what it wrapped, and still verifies what the vault wrote before
+the rotation, so it stays configured for good: the log is checked from its
+first entry at every checkpoint, and without the old KEK, the old entries no
+longer verify and `/readyz` turns red.
+
+A replaced KEK stays configured to verify the past, and can't vouch for
+anything after the rotation. An entry, a member row or a checkpoint under
+its keys after that point fails verification, so a KEK replaced because it
+leaked forges nothing from then on. What was forged with it before the
+rotation verifies like the rest; that is the leak's window. A vault still
+running with the old KEK, as for the seconds a deploy takes, writes nothing
+after the rotation: its calls fail until it is replaced. And a KEK, once
+replaced, cannot come back as `kek`: the vault refuses to write under it.
 
 ## AWS KMS
 
@@ -167,8 +177,9 @@ previousKeks: [{ id: env.KEK_ID, key: env.KEK }],
 signingKey: env.SIGNING_KEY, // new: KMS needs one
 ```
 
-The vault signs under the new `signingKey` from then on, and still verifies
-what it signed before under the key it derived from the local KEK.
+The vault signs under the new `signingKey` from then on. Its first call is
+a rotation, as with a new local KEK: the local KEK's key verifies what came
+before it, and nothing after.
 
 New versions are wrapped by KMS from then on. Versions written before still
 open with the local key, which must stay configured and escrowed until a

@@ -300,8 +300,10 @@ few stored keys it wrapped. A KEK that opens neither is not the one that
 wrapped the data: every read and write is refused as `wrong_kek` (a 503),
 naming the provider and key id, and the next checkpoint is refused, so
 `/readyz` turns red. A key service that cannot answer is not a verdict; the
-next call asks again. [restore.md](restore.md#if-the-kek-is-wrong) shows
-what an operator sees.
+next call asks again. With a local KEK, the vault knows sooner: its keys
+come from the KEK, so a wrong one holds none of those its entries were
+written under, and the vault writes nothing at all.
+[restore.md](restore.md#if-the-kek-is-wrong) shows what an operator sees.
 
 The vault owns everything that decides access: the key encryption key (KEK),
 grants (`(principal, place) → role`, one per member per place, with an
@@ -394,9 +396,14 @@ under a key derived from that author's configuration key, and a public
 SHA-256 hash over its fields and MAC. The app derives its MAC key from
 `auditChainKey`; the vault derives its own from its signing key, which
 comes from its KEK unless it is given one. Neither can authenticate the
-other's entries alone. An entry names the key it was MACed under, so a
-vault whose KEK was rotated still verifies its earlier entries, by the key
-of the KEK it keeps in `previousKeks`.
+other's entries alone. An entry names the key it was MACed under. A vault
+whose KEK was rotated verifies its earlier entries by the key of the KEK it
+keeps in `previousKeks`, but only those before the rotation: at its first
+call under the new KEK, the vault seals every member row again under the new
+key and writes a `key.rotate` entry, and from there its keys only move
+forward. A key it replaced counts for no entry, row or checkpoint after
+that, and a vault still running with it writes nothing more
+([keys.md](keys.md#a-local-key)).
 
 An append locks the head, reads the database clock, and refuses a head that
 does not name the last entry or is behind one the process remembers. A new
@@ -612,10 +619,13 @@ Each limit is stated here once; the other documents link to it.
   database alone cannot. With a local KEK, the vault's key comes from the
   KEK: whoever holds it, and can write the database, can forge the vault's
   entries and member rows, grants included, besides reading every value.
-- **A replaced KEK stays configured for good.** What the vault signed under
-  the key an old KEK stands for verifies only while that KEK is in
-  `previousKeks`, and the log is checked from its first entry at every
-  checkpoint. The app's `AUDIT_CHAIN_KEY`, and with KMS the vault's
+- **A replaced KEK stays configured to verify the past, and can't vouch for
+  anything after the rotation.** What the vault wrote under the key an old
+  KEK stands for verifies only while that KEK is in `previousKeks`, and the
+  log is checked from its first entry at every checkpoint. After the
+  rotation, nothing under its keys counts, so a KEK replaced because it
+  leaked forges nothing new; what was forged with it before verifies like
+  the rest. The app's `AUDIT_CHAIN_KEY`, and with KMS the vault's
   `signingKey`, cannot be changed at all.
 - **A MAC proves a row is genuine, not current.** Putting back a genuine old
   sign-in row can undo one sign-out until the session's own expiry; a

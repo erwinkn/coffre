@@ -14,7 +14,7 @@ export default vault((env: Env) => ({
   database: postgres(env.VAULT_HYPERDRIVE),
   kek: { id: env.KEK_ID, key: env.KEK },
   // After a rotation, the KEKs before it, so the data keys they wrapped still
-  // open and the records they signed still verify:
+  // open and the records signed under them before it still verify:
   // previousKeks: [{ id: 'kek-2026-09', key: env.KEK_2026_09 }],
   rootAdmins: env.ROOT_ADMINS.split(',').map((email) => email.trim()),
   // The vault derives its signing key from the KEK. With a KEK a key service

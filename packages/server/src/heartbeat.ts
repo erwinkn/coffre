@@ -73,29 +73,6 @@ export type Readiness = {
   checkpointed: boolean;
 };
 
-/** The vault's public keys, by key id, asked once per vault and again when a checkpoint names a key not among them. */
-const publicKeys = new WeakMap<Vault, Promise<Record<string, string>>>();
-
-/**
- * The public key a checkpoint names, or undefined for one the vault does not
- * hold. A vault restarted with a new KEK signs under a new key, which this
- * process has not seen: one more ask finds it.
- */
-async function publicKeyFor(vault: Vault, keyId: string): Promise<string | undefined> {
-  for (const again of [false, true]) {
-    if (again) publicKeys.delete(vault);
-    let keys = publicKeys.get(vault);
-    if (keys === undefined) {
-      keys = vault.about().then(({ publicKeys }) => publicKeys);
-      keys.catch(() => publicKeys.delete(vault));
-      publicKeys.set(vault, keys);
-    }
-    const key = (await keys)[keyId];
-    if (key !== undefined) return key;
-  }
-  return undefined;
-}
-
 /**
  * Readiness: the database migrated, the newest heartbeat under
  * `HEARTBEAT_STALE_AFTER_SECONDS` old, and a checkpoint after it whose
@@ -111,9 +88,14 @@ export async function auditReadiness(db: Database, vault: Vault): Promise<Readin
     if ((await appliedMigrations(db)) < requiredMigrations(db)) return unready;
     const { beat, checkpoint } = await readiness(db);
     if (beat === null) return unready;
-    const key = checkpoint === null ? undefined : await publicKeyFor(vault, checkpoint.keyId);
+    // Asked each time: after a rotation, the key the vault signed with until then counts only for what came before.
+    const key = checkpoint === null ? undefined : (await vault.about()).checkpointKeys[checkpoint.keyId];
     const checkpointed =
-      checkpoint !== null && key !== undefined && BigInt(checkpoint.seq) >= beat.seq && (await verifyCheckpoint(checkpoint, key));
+      checkpoint !== null &&
+      key !== undefined &&
+      (key.until === null || checkpoint.seq < key.until) &&
+      BigInt(checkpoint.seq) >= beat.seq &&
+      (await verifyCheckpoint(checkpoint, key.publicKey));
     const fresh = Number.isFinite(beat.ageSeconds) && beat.ageSeconds <= HEARTBEAT_STALE_AFTER_SECONDS;
     return { ok: fresh && checkpointed, heartbeatAgeSeconds: beat.ageSeconds, checkpointed };
   } catch {
