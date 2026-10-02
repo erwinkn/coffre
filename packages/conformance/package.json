@@ -34,6 +34,7 @@
     "test": "node --conditions=coffre:source --test"
   },
   "dependencies": {
+    "@coffre/db": "workspace:*",
     "jose": "6.2.3",
     "pg": "8.16.3"
   },

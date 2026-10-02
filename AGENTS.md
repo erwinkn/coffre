@@ -88,8 +88,9 @@ calls made inside them, including errors swallowed by handlers or background job
 - `pnpm test:sqlite` runs the same suite on SQLite (`COFFRE_TEST_ENGINE`);
   `pnpm test:all` runs Postgres and SQLite. SQLite needs nothing and is kept
   for tests and local development; deployed app databases use Postgres.
-- `pnpm test:schema` verifies the restricted runtime role's privileges. Postgres only,
-  as is the runtime role itself.
+- `pnpm test:schema` verifies both runtime logins' privileges. It also runs the
+  full migration as a non-superuser owner in a disposable Postgres cluster and
+  checks TLS trust and hostname verification. Postgres only.
 - `pnpm build` builds every package in dependency order (core and client first, the
   UI before the server, whose build reads their `dist/`). Conformance, the
   examples' typecheck and `test:consumer` want it first.

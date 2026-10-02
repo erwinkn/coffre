@@ -6,6 +6,9 @@ import pg from 'pg';
 import { createDatabase, type Database } from './database.ts';
 import type { Engine } from './dialect.ts';
 import { asPostgresDatabase } from './portable.ts';
+import { postgresConnection } from './postgres.ts';
+
+export { postgresConnection } from './postgres.ts';
 
 /**
  * Open a database from its URL, on a Node server:
@@ -20,7 +23,7 @@ import { asPostgresDatabase } from './portable.ts';
 export async function openDatabase(url: string): Promise<OpenDatabase> {
   switch (engineOfUrl(url)) {
     case 'postgres': {
-      const pool = new pg.Pool({ connectionString: url });
+      const pool = new pg.Pool(postgresConnection(url));
       return { engine: 'postgres', db: createDatabase(pool), close: () => pool.end() };
     }
     case 'sqlite': {

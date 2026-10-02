@@ -137,6 +137,9 @@ importers:
 
   packages/conformance:
     dependencies:
+      '@coffre/db':
+        specifier: workspace:*
+        version: link:../db
       jose:
         specifier: 6.2.3
         version: 6.2.3
@@ -202,6 +205,9 @@ importers:
       pg:
         specifier: 8.16.3
         version: 8.16.3
+      pg-connection-string:
+        specifier: 2.14.0
+        version: 2.14.0
     devDependencies:
       '@types/node':
         specifier: 26.1.1

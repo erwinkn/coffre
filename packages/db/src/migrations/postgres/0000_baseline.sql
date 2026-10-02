@@ -308,19 +308,22 @@ DECLARE
 BEGIN
     FOREACH name IN ARRAY ARRAY['coffre_app', 'coffre_vault'] LOOP
         IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = name) THEN
-            EXECUTE format('CREATE ROLE %I', name);
+            EXECUTE format('CREATE ROLE %I NOLOGIN INHERIT NOCREATEDB NOCREATEROLE', name);
+        ELSE
+            -- Managed owners cannot ALTER the superuser-only attributes, even to turn them off.
+            IF EXISTS (
+                SELECT 1 FROM pg_roles WHERE rolname = name
+                AND (rolsuper OR rolreplication OR rolbypassrls)
+            ) THEN
+                RAISE EXCEPTION '% has unsafe role attributes: SUPERUSER, REPLICATION and BYPASSRLS must be off', name;
+            END IF;
+            EXECUTE format('ALTER ROLE %I NOLOGIN INHERIT NOCREATEDB NOCREATEROLE', name);
         END IF;
     END LOOP;
 END
 $$;
 --> statement-breakpoint
 
-ALTER ROLE coffre_app
-    NOLOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
---> statement-breakpoint
-ALTER ROLE coffre_vault
-    NOLOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
---> statement-breakpoint
 
 DO $$
 DECLARE
