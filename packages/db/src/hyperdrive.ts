@@ -1,6 +1,7 @@
 import pg from 'pg';
 
 import type { PoolLike } from './database.ts';
+import { postgresConnection } from './postgres.ts';
 
 /** Postgres through a Hyperdrive binding: `postgres(env.HYPERDRIVE)`. */
 export type PostgresDatabase = { readonly engine: 'postgres'; readonly hyperdrive: { readonly connectionString: string } };
@@ -55,7 +56,7 @@ export class HyperdrivePool implements Exclude<PoolLike, pg.Pool> {
   }
 
   async #connectClient(): Promise<pg.Client> {
-    const client = new pg.Client({ connectionString: this.#connectionString });
+    const client = new pg.Client(postgresConnection(this.#connectionString));
     await client.connect();
     return client;
   }

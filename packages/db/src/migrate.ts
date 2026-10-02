@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 import { engineOfUrl } from './connect.ts';
 import type { Engine } from './dialect.ts';
+import { postgresConnection } from './postgres.ts';
 
 /**
  * Bring a database up to date with its engine's migration tree:
@@ -118,7 +119,7 @@ async function postgresMigrator(url: string): Promise<Migrator> {
     import('drizzle-orm/node-postgres'),
     import('drizzle-orm/node-postgres/migrator'),
   ]);
-  const pool = new pg.Pool({ application_name: 'coffre-migrations', connectionString: url, max: 1 });
+  const pool = new pg.Pool({ ...postgresConnection(url), application_name: 'coffre-migrations', max: 1 });
   const client = await pool.connect();
   return {
     async applied() {

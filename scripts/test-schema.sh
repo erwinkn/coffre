@@ -29,3 +29,6 @@ docker compose exec -T \
     psql -v ON_ERROR_STOP=1 -h 127.0.0.1 \
         -U coffre_vault_runtime -d "$database" \
     < packages/db/test/vault-guarantees.sql
+
+# Managed hosts give the owner CREATEROLE, not superuser.
+./scripts/test-schema-owner.sh

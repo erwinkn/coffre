@@ -4,6 +4,7 @@
 import { DatabaseSync } from 'node:sqlite';
 
 import pg from 'pg';
+import { postgresConnection } from '@coffre/db/connect';
 
 export type Sql = {
   readonly engine: 'postgres' | 'sqlite';
@@ -15,7 +16,7 @@ export type Sql = {
 };
 
 export async function postgres(url: string): Promise<Sql> {
-  const client = new pg.Client(url);
+  const client = new pg.Client(postgresConnection(url));
   await client.connect();
   return {
     engine: 'postgres',

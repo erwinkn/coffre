@@ -19,15 +19,17 @@ package version. Until the packages are published, install from tarballs;
 ## The database, for either deployment
 
 Provision a Postgres database, e.g. `coffre`, owned by a migration login.
-The owner must be able to create roles and grant their membership as well
-as create the schema. Runtime processes never get this login. On a managed
-service, use its administrative connection for this setup and check that it
-allows those operations.
+The migration login owns the database and has `CREATEROLE` and `CREATEDB`.
+It does not need `SUPERUSER`. Use the same login to provision the runtime
+roles and run migrations. Postgres 16 and later give a role creator
+`ADMIN OPTION` on its new roles. If the group roles already exist, the
+migration login needs `ADMIN OPTION` on them. Runtime processes never get
+this login. On a managed service, use its administrative connection.
 
 Connect to that database as its administrator with `psql`:
 
 ```sh
-psql "postgres://owner@db.example.com:5432/coffre?sslmode=require"
+psql "postgres://owner@db.example.com:5432/coffre?sslmode=verify-full"
 ```
 
 Create two plain logins. `\password` prompts for passwords without putting
@@ -37,12 +39,16 @@ connect as `coffre_runtime.<branch id>` and `coffre_vault_runtime.<branch id>`;
 use those names in the connection strings below.
 
 ```sql
-CREATE ROLE coffre_runtime LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-CREATE ROLE coffre_vault_runtime LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+CREATE ROLE coffre_runtime LOGIN INHERIT NOCREATEDB NOCREATEROLE;
+CREATE ROLE coffre_vault_runtime LOGIN INHERIT NOCREATEDB NOCREATEROLE;
 \password coffre_runtime
 \password coffre_vault_runtime
 \q
 ```
+
+New roles default to no superuser, replication or RLS-bypass rights. The
+migration checks those rights and refuses unsafe roles. It hardens existing
+groups without trying to alter their superuser-only attributes.
 
 Then migrate as the owner. Read the URL from your password manager into
 `DATABASE_URL`, including the password and the TLS settings your host requires:
@@ -55,6 +61,12 @@ pnpm migrate
 argument too. URL-encode special characters in passwords. Run it again
 after every package upgrade, before starting either component. Clear the
 owner's `DATABASE_URL` from the shell afterwards (`unset DATABASE_URL`).
+
+PlanetScale URLs include `sslrootcert=system`. The Node connections and
+migrator use Node's default trusted CAs for that value. They require
+`sslmode=verify-full`, or default to it when no mode is given. The connection
+refuses an untrusted certificate or a hostname mismatch. Other
+`sslrootcert` values remain certificate file paths.
 
 The migration creates two group roles and grants their membership:
 

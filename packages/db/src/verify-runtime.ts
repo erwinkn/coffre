@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import pg from 'pg';
 
+import { postgresConnection } from './postgres.ts';
+
 function requiredEnvironment(name: string): string {
   const value = process.env[name]?.trim();
   if (!value) throw new Error(`${name} is required`);
@@ -10,7 +12,7 @@ function requiredEnvironment(name: string): string {
 const expectedRole = requiredEnvironment('COFFRE_RUNTIME_ROLE');
 const pool = new pg.Pool({
   application_name: 'coffre-runtime-verification',
-  connectionString: requiredEnvironment('DATABASE_URL'),
+  ...postgresConnection(requiredEnvironment('DATABASE_URL')),
   max: 1,
 });
 
