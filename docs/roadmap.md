@@ -16,7 +16,7 @@ first live instance.
   [design/single-database.md](design/single-database.md)): one Postgres
   database, two components each with its own login, one audit log, the
   vault's member list, checkpoints as log entries, `/readyz` as a query, a
-  KEK check, and a restore runbook drilled locally
+  vault key check, and a restore runbook drilled locally
   ([restore.md](restore.md)). A final independent review's findings are
   fixed or parked.
 - **erwinkn.com is next** (phase 3).
@@ -41,13 +41,13 @@ first live instance.
 2. ~~**Escrow the keys, then prove recovery.**~~ Done locally:
    `scripts/restore-drill.sh` restores one database backup with the escrowed
    keys and checks values, members, grants, the log and verification, then
-   the wrong-KEK case ([restore.md](restore.md)). The same drill on a
+   the wrong-key case ([restore.md](restore.md)). The same drill on a
    PlanetScale branch is part of phase 3's exit.
 3. **Rotation that can retire a key.** Parked under [Later](#later): the
    rewrap command.
 4. **A heartbeat someone hears.** Readiness tolerates one late or missed Cron
    run (11 minutes), and turns red on a stopped log, an unsigned checkpoint,
-   a cut in the log or a wrong KEK. Attaching an external monitor to
+   a cut in the log or a wrong vault key. Attaching an external monitor to
    `/readyz` is part of phase 3's setup.
 5. **Checkpoints off the box.** Parked under [Later](#later), with the other
    defences against the database's owner.
@@ -71,7 +71,7 @@ Done. coffre is eight packages a deployment imports and configures in code
   only through the client;
 - Postgres through Drizzle, with SQLite for tests and local development, and
   one set of queries for both;
-- the vault, `@coffre/vault`, which holds the KEK and decides access, as a
+- the vault, `@coffre/vault`, which holds the vault key and decides access, as a
   Worker behind a service binding or a Node process behind a Unix socket;
 - `coffre init`, whose output is `examples/workers` and `examples/node`, a
   test diffing the two, and `coffre-conformance`, which holds every
@@ -91,7 +91,7 @@ repository holds no instance's configuration.
 - **Conformance:** `pnpm conformance` in the deployment's repository before
   each deploy, and `coffre-conformance probe` against the live address after.
 - **Exit:** a few weeks of daily use with no open bugs, a restore drill on a
-  PlanetScale branch, and a rotation drill (a new KEK, the old one in
+  PlanetScale branch, and a rotation drill (a new vault key, the old one in
   `previousKeks`).
 
 ### Syncs
@@ -132,8 +132,8 @@ ends. Passkeys would make a good recent sign-in for revealing.
 ## Later
 
 - **Rewrap**, a maintenance command that wraps every stored data key again
-  under the current KEK, leaving the ciphertext alone, so an old or leaked
-  KEK can be retired, and data written under a local key can move to KMS
+  under the current vault key, leaving the ciphertext alone, so an old or leaked
+  vault key can be retired, and data written under a local key can move to KMS
   ([keys.md](keys.md#moving-from-a-local-key)).
 - **Defences against the database's owner**, should the threat model need
   them ([the limits](architecture.md#limits)): witnesses, where each CLI and

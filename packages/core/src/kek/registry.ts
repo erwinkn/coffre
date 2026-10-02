@@ -23,7 +23,7 @@ export class KekRegistry {
     for (const provider of [primary, ...additional]) {
       const ref = refOf(provider.provider, provider.keyId);
       if (this.#byRef.has(ref)) {
-        throw new Error(`duplicate KEK in registry: ${ref}`);
+        throw new Error(`duplicate vault key in registry: ${ref}`);
       }
       this.#byRef.set(ref, provider);
     }
@@ -56,7 +56,7 @@ export class KekRegistry {
       // Operationally this means a KEK was removed from configuration while
       // rows still reference it. Fail loudly rather than returning a decrypt
       // error that looks like corruption.
-      throw new Error(`no KEK configured for ${ref}; cannot unwrap`);
+      throw new Error(`no vault key configured for ${ref} (kek or previousKeks in the vault's config); cannot unwrap`);
     }
     return provider.unwrap(wrapped, ctx, operation);
   }

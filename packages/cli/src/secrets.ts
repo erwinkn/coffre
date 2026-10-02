@@ -11,8 +11,8 @@ export type Value = { label: string; value: string; mask: 'all' | 'password' | '
 
 export type Section = { title: string; values: Value[] };
 
-/** A command to copy, in the guide: the URL's password in it hidden until revealed. */
-export type Command = { command: string; secret: boolean };
+/** A command to copy, in the guide. It holds no secret: one it needs, it asks for. */
+export type Command = { command: string };
 
 export type GuideBlock = { title: string; lines: (string | Command)[] };
 
@@ -60,14 +60,14 @@ export function items(screen: Screen, view: View): Item[] {
     );
   }
   return screen.guide.flatMap(({ lines }) =>
-    lines.flatMap((line) => (typeof line === 'string' ? [] : [{ id: line.command, text: line.command, secret: line.secret, name: 'the command' }])),
+    lines.flatMap((line) => (typeof line === 'string' ? [] : [{ id: line.command, text: line.command, secret: false, name: 'the command' }])),
   );
 }
 
 const DOTS = '•'.repeat(32);
 const URL_PASSWORD = /(:\/\/[^:@/\s']*:)([^@\s']+)(@)/g;
 
-function masked(value: string, mask: Value['mask'] | 'password'): string {
+function masked(value: string, mask: Value['mask']): string {
   if (mask === 'all') return DOTS;
   if (mask === 'password') return value.replace(URL_PASSWORD, '$1••••••••$3');
   return value;
@@ -141,11 +141,11 @@ export function render(screen: Screen, state: ScreenState, columns: number, rows
         const on = index === selected;
         const item = list[index]!;
         const start = body.length;
-        const text = shown(item) || !line.secret ? line.command : masked(line.command, 'password');
+        const text = line.command;
         const copied = state.copied.has(item.id) ? ` ${s.green('✓')}` : '';
         wrap(text, inner - 2).forEach((part, i) => {
           const prompt = i === 0 ? s.dim('$ ') : '  ';
-          body.push(`${bar(on)}${prompt}${on ? s.accent(dimDots(part, s)) : dimDots(part, s)}${i === 0 ? copied : ''}`);
+          body.push(`${bar(on)}${prompt}${on ? s.accent(part) : part}${i === 0 ? copied : ''}`);
         });
         spans.push([start, body.length]);
         index += 1;
@@ -180,8 +180,7 @@ export function render(screen: Screen, state: ScreenState, columns: number, rows
         ...keys([
           ['↑↓', 'move'],
           ['c', 'copy'],
-          ['r', 'reveal'],
-          ...(state.view === 'values' ? ([['R', 'reveal all']] as [string, string][]) : []),
+          ...(state.view === 'values' ? ([['r', 'reveal'], ['R', 'reveal all']] as [string, string][]) : []),
           ['w', state.view === 'values' ? 'where these go' : 'back to the values'],
           ['q', 'done'],
         ]),

@@ -80,7 +80,7 @@ test('an entry in the vault\'s name that the vault did not write fails verificat
     through: 0,
     failedAtSeq: 1,
     author: 'vault',
-    reason: `written under vault:0000000000000000, a key this verifier does not hold: either it is forged, or the vault wrote it under another KEK or signing key, which must stay configured: a KEK that was replaced stays in previousKeks`,
+    reason: `written under vault:0000000000000000, a key this verifier does not hold: either it is forged, or the vault wrote it under another vault key or signing key, which must stay configured: a vault key that was replaced stays in the vault's config, in previousKeks`,
   });
 });
 

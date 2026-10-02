@@ -132,7 +132,7 @@ function forward(
  */
 function withCause(reason: string): string {
   if (!/^written under vault:\S+, a key this verifier does not hold$/.test(reason)) return reason;
-  return `${reason}: either it is forged, or the vault wrote it under another KEK or signing key, which must stay configured: a KEK that was replaced stays in previousKeks`;
+  return `${reason}: either it is forged, or the vault wrote it under another vault key or signing key, which must stay configured: a vault key that was replaced stays in the vault's config, in previousKeks`;
 }
 
 /**

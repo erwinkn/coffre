@@ -57,18 +57,23 @@ role logs in to the new branch as `<role>.<new branch id>`.
    ```
 
    It sets both runtime logins' passwords again, which the restore reset,
-   and prints each login's new connection string, under the new branch id.
+   and shows each login's new connection string, under the new branch id.
    It migrates: missing migrations are applied, and the database-level
    privileges reasserted, on every run, even when the schema is current; a
    database a newer release migrated is refused. It checks the boundary as
    each login. It makes no keys: the restored database has its own.
 4. Point both Hyperdrive configs at the new branch, with the
-   `wrangler hyperdrive update` commands it printed, and check that caching
+   `wrangler hyperdrive update` commands it shows, and check that caching
    stays disabled:
 
    ```sh
    pnpm exec wrangler hyperdrive get <app config id>   # caching: disabled
    ```
+
+   Each update reads its database URL at a silent prompt, as in
+   [deploy.md](deploy.md#2-two-hyperdrive-configs), so the password stays
+   out of your shell's history; the Cloudflare dashboard's Hyperdrive page
+   does the same.
 
    By hand, steps 3 and 4 are `\password` for both logins as the owner, the
    two updates with `coffre_runtime.<branch id>` and
@@ -165,8 +170,8 @@ backup verifies as well as a recent one ([Limits](architecture.md#limits)).
 
 ## If the vault key is wrong
 
-The messages below call the vault key by its technical name, the KEK
-(key-encryption key), as its configuration does (`kek`, `previousKeks`).
+The vault's configuration names the vault key `kek`, and the keys it
+replaced `previousKeks`; the messages below name them in passing.
 
 With a local vault key, the vault's own keys come from it
 ([keys.md](keys.md#a-local-key)). A vault key other than the one that
@@ -177,7 +182,7 @@ every key operation, reads and writes alike, and every change of access:
 
 ```
 HTTP 503  {"error":"unavailable","reason":"wrong_kek",
-           "message":"the vault's entries are under vault:3f1c…, a key this vault does not hold: it was given the wrong KEK or signing key, or a KEK it replaced is missing from previousKeks"}
+           "message":"the vault's entries are under vault:3f1c…, a key this vault does not hold: it was given the wrong vault key or signing key, or a vault key it replaced is missing from previousKeks in its config"}
 ```
 
 The scheduled checkpoint is refused too, so `/readyz` turns red after the
@@ -186,8 +191,8 @@ entry the vault wrote, which `coffre verify` explains:
 
 ```
 written under vault:3f1c…, a key this verifier does not hold: either it is forged,
-or the vault wrote it under another KEK or signing key, which must stay configured:
-a KEK that was replaced stays in previousKeks
+or the vault wrote it under another vault key or signing key, which must stay configured:
+a vault key that was replaced stays in the vault's config, in previousKeks
 ```
 
 The same verdict, with the values under the new vault key readable, means a
@@ -205,7 +210,7 @@ opens neither gets every key operation refused, each refused key logged with the
 
 ```
 HTTP 503  {"error":"unavailable","reason":"wrong_kek",
-           "message":"this vault's aws-kms KEK arn:aws:kms:… does not open the data it holds: it is not the key that wrapped it"}
+           "message":"the vault key arn:aws:kms:… (aws-kms), kek or previousKeks in the vault's config, is not the one that wrapped these values"}
 ```
 
 Either message names keys by id, never key material. Restart the vault with
@@ -217,7 +222,7 @@ credentials) is not a verdict: the call fails as any key operation does
 during an outage, the next one asks again, and checkpoints go on. A vault
 key under a new id is a rotation: its check value is recorded on first use,
 and values wrapped under an id the vault is no longer given fail with "no
-KEK configured for …". Keep earlier vault keys in `previousKeks`.
+vault key configured for …". Keep earlier vault keys in `previousKeks`.
 
 ## The local drill
 

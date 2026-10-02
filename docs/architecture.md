@@ -31,7 +31,7 @@ import { postgres, vault } from '@coffre/vault/cloudflare';
 export default vault((env: Env) => ({
   database: postgres(env.VAULT_HYPERDRIVE),
   kek: { id: env.VAULT_KEY_ID, key: env.VAULT_KEY },
-  previousKeks: [], // older KEKs: what they wrapped still opens, and what the vault signed under them verifies
+  previousKeks: [], // older vault keys: what they wrapped still opens, and what the vault signed under them verifies
   rootAdmins: ['erwin@example.com'],
 }));
 ```
@@ -80,7 +80,7 @@ use one Postgres database: `HYPERDRIVE` connects as `coffre_runtime`,
 | `@coffre/db` | the Drizzle schemas for Postgres and SQLite, their migrations and migrator, the dialect helpers, the connections, Hyperdrive's included | |
 | `@coffre/vault` | wraps and unwraps data keys, decides who may, logs every use | the keys, the vault login |
 | `@coffre/client` | the typed API client, the API's types printed from the server's routes, and the helpers that turn a sync provider's fields into its config | |
-| `@coffre/core` | what the others share: access rules, envelope encryption, KEK providers, the audit chain, identity and sign-in, and `Vault`, the contract between server and vault | |
+| `@coffre/core` | what the others share: access rules, envelope encryption, vault key providers, the audit chain, identity and sign-in, and `Vault`, the contract between server and vault | |
 | `@coffre/cli` | `init`, `login`, secrets, syncs, audit; built on the client | a CLI session |
 
 A package imports another by name, never by a relative path (a lint rule
@@ -108,9 +108,9 @@ one package is seen by the others without a build. Builds leave it off.
 
 Where `config` is, for the server, `{ publicUrl, vault, auth, auditChainKey,
 syncs? }` and, for the vault, `{ database, kek, previousKeks?, rootAdmins,
-signingKey?, bulkLimit? }`, a KEK being a local key or `awsKms(…)`
-([keys.md](keys.md)). The vault derives its signing key from a local KEK;
-`signingKey` is required only with a KEK a key service holds.
+signingKey?, bulkLimit? }`, a vault key being a local key or `awsKms(…)`
+([keys.md](keys.md)). The vault derives its signing key from a local vault key;
+`signingKey` is required only with a vault key a key service holds.
 Each is checked when the deployment starts, and a bad value (a 31-byte key,
 a public URL with a path, no root admin) fails it with a message naming the
 setting.
@@ -292,20 +292,20 @@ logs what it refuses; the app adds its own entry, with code `vault_<code>`,
 only where the refusal is part of something larger it was doing, a write
 or a new sync's grants.
 
-**The KEK is checked before it is used.** Each KEK gets a check value, a
+**The vault key is checked before it is used.** Each vault key gets a check value, a
 known value wrapped under it the first time the vault uses it, kept in a
 `key.check` entry of the log. Before its first key operation, each vault
-process opens it again; a KEK with no check value yet is first tried on a
-few stored keys it wrapped. A KEK that opens neither is not the one that
+process opens it again; a vault key with no check value yet is first tried on a
+few stored keys it wrapped. A vault key that opens neither is not the one that
 wrapped the data: every read and write is refused as `wrong_kek` (a 503),
 naming the provider and key id, and the next checkpoint is refused, so
 `/readyz` turns red. A key service that cannot answer is not a verdict; the
-next call asks again. With a local KEK, the vault knows sooner: its keys
-come from the KEK, so a wrong one holds none of those its entries were
+next call asks again. With a local vault key, the vault knows sooner: its keys
+come from the vault key, so a wrong one holds none of those its entries were
 written under, and the vault writes nothing at all.
 [restore.md](restore.md#if-the-vault-key-is-wrong) shows what an operator sees.
 
-The vault owns everything that decides access: the key encryption key (KEK),
+The vault owns everything that decides access: the vault key,
 grants (`(principal, place) → role`, one per member per place, with an
 optional expiry), principal status (active or removed), the root admins (from
 its configuration, so no row anywhere makes someone one), and its log entries.
@@ -336,7 +336,7 @@ them, which starts them over.
   answers on a Unix socket. The socket is its authentication: a file made
   `0660`, which only the vault's user and a group it shares with the server
   may open. Each call is one HTTP POST over the socket, `/<method>` with
-  the arguments as a JSON array. The process facing the network holds no KEK.
+  the arguments as a JSON array. The process facing the network holds no vault key.
 - **Node, in process** (`localVault`): for tests and local development.
   Both components use one SQLite file. Each call's arguments and results
   go through JSON as over RPC, so nothing that only works in-process gets in.
@@ -354,7 +354,7 @@ them, which starts them over.
 | Connection | `coffre_runtime`, through `HYPERDRIVE` or a Node Postgres URL | `coffre_vault_runtime`, through `VAULT_HYPERDRIVE` or a Node Postgres URL |
 
 Both connections reach the same database. Each Worker gets only its own
-configuration secrets. Neither stores a KEK or audit key in the database.
+configuration secrets. Neither stores the vault key or the app key in the database.
 The database's grants protect members and grants from the app's login;
 row-level security protects each author's entries from the other's login.
 The owner can bypass those restrictions, but cannot forge an entry's MAC
@@ -373,7 +373,7 @@ whose write then failed stays in the log, under an operation no
 `secret.write` shares; it records the attempt, not a value stored.
 
 The vault locks affected members before the shared audit head. Its member
-and grant changes commit with their audit entries. With a local KEK, a read
+and grant changes commit with their audit entries. With a local vault key, a read
 is one short transaction. With AWS KMS, the intent commits first; the member
 row stays locked across the KMS calls, which settle within five seconds,
 and each key's outcome is logged. Removal waits for a read already in
@@ -395,11 +395,11 @@ Both authors append `coffre.audit.v2` entries to `audit_log`, sharing one
 under a key derived from that author's configuration key, and a public
 SHA-256 hash over its fields and MAC. The app derives its MAC key from
 `auditChainKey`; the vault derives its own from its signing key, which
-comes from its KEK unless it is given one. Neither can authenticate the
+comes from its vault key unless it is given one. Neither can authenticate the
 other's entries alone. An entry names the key it was MACed under. A vault
-whose KEK was rotated verifies its earlier entries by the key of the KEK it
+whose vault key was rotated verifies its earlier entries by the key of the vault key it
 keeps in `previousKeks`, but only those before the rotation: at its first
-call under the new KEK, the vault seals every member row again under the new
+call under the new vault key, the vault seals every member row again under the new
 key and writes a `key.rotate` entry, and from there its keys only move
 forward. A key it replaced counts for no entry, row or checkpoint after
 that, and a vault still running with it writes nothing more
@@ -427,7 +427,7 @@ changed around the vault.
 `/readyz` is a query: ready while the newest heartbeat is under eleven
 minutes old and a checkpoint after it carries the vault's signature. A log
 that stops taking writes, a vault that stops signing, a cut in the log or a
-wrong KEK all turn it red within one beat. There is no heartbeat table.
+wrong vault key all turn it red within one beat. There is no heartbeat table.
 
 `GET /api/audit/verification` (owners only), also called by `coffre verify`,
 checks the chain from its first entry and authenticates the app's MACs.
@@ -458,7 +458,7 @@ the sync: its next run is refused.
   the grant covers `dev`.
 - **Someone removed getting back in.** An offboarding bug leaves a session
   alive; the vault refuses the principal, which only it can restore.
-- **A copy of the database.** It holds no KEK.
+- **A copy of the database.** It holds no vault key.
 - **Rewritten log entries without the author's key.** Their MACs fail, even
   if the owner rebuilds the public chain.
 - **Access granted around the vault.** Each member's row carries the vault's
@@ -605,25 +605,25 @@ Each limit is stated here once; the other documents link to it.
   heartbeats and checkpoints alone, plus its own work. Past about 250,000
   entries, ten seconds a pass, the recomputation should move to a slower
   cadence or a pass that resumes where the last stopped; neither is built.
-- **What only KMS gives.** With a local KEK, whoever holds the vault's
+- **What only KMS gives.** With a local vault key, whoever holds the vault's
   configuration and a copy of the database holds every value, and nothing
   outside coffre records either being used. AWS KMS adds a second record
   (CloudTrail), lets the vault's access be revoked in IAM at once, and keeps
   the key material from ever being copied out ([keys.md](keys.md)). It also
   costs a round trip per key, and on the Workers Free plan an environment of
   more than 50 secrets cannot be read in one call.
-- **A KEK cannot be retired yet.** A new KEK wraps new versions only; every
-  older version still needs the KEK that wrapped it, configured in
+- **A vault key cannot be retired yet.** A new vault key wraps new versions only; every
+  older version still needs the vault key that wrapped it, configured in
   `previousKeks` and escrowed, until a rewrap command exists.
 - **A holder of an author's key can forge that author's entries.** A copied
-  database alone cannot. With a local KEK, the vault's key comes from the
-  KEK: whoever holds it, and can write the database, can forge the vault's
+  database alone cannot. With a local vault key, the vault's key comes from the
+  vault key: whoever holds it, and can write the database, can forge the vault's
   entries and member rows, grants included, besides reading every value.
-- **A replaced KEK stays configured to verify the past, and can't vouch for
+- **A replaced vault key stays configured to verify the past, and can't vouch for
   anything after the rotation.** What the vault wrote under the key an old
-  KEK stands for verifies only while that KEK is in `previousKeks`, and the
+  vault key stands for verifies only while that vault key is in `previousKeks`, and the
   log is checked from its first entry at every checkpoint. After the
-  rotation, nothing under its keys counts, so a KEK replaced because it
+  rotation, nothing under its keys counts, so a vault key replaced because it
   leaked forges nothing new; what was forged with it before verifies like
   the rest. The app key, `APP_KEY`, and with KMS the vault's
   `signingKey`, cannot be changed at all.

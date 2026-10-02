@@ -24,7 +24,7 @@ const screen: Screen = {
   guide: [
     {
       title: 'On Cloudflare Workers',
-      lines: ['A Hyperdrive config:', { command: `wrangler hyperdrive create coffre --connection-string='${URL}'`, secret: true }],
+      lines: ['A Hyperdrive config:', { command: 'read -rs COFFRE_DB_URL && wrangler hyperdrive create coffre' }],
     },
   ],
 };
@@ -57,13 +57,13 @@ test('on a small terminal the screen scrolls to keep the selection in sight, and
   assert.match(render(screen, state, 50, 16, plain).join('\n'), /Have you saved all three values\?[\s\S]*\(y\/N\)/);
 });
 
-test('the guide shows commands to copy, the password in them hidden too', () => {
+test('the guide shows commands to copy, and the keys it takes', () => {
   const state = initialState();
   state.view = 'guide';
   const text = render(screen, state, 200, 30, plain).join('\n');
   assert.match(text, /Where these go/);
-  assert.match(text, /\$ wrangler hyperdrive create coffre --connection-string='postgresql:\/\/coffre_runtime:•+@/);
-  assert.ok(!text.includes('s3cret-password'));
+  assert.match(text, /\$ read -rs COFFRE_DB_URL && wrangler hyperdrive create coffre/);
+  assert.match(text, /c copy {3}w back to the values {3}q done/);
 });
 
 /** A terminal in memory: keys in, what is drawn out. */
@@ -94,7 +94,7 @@ test('the keys: move, copy, the guide, and leaving only once the values are said
     }
   };
   await press('\x1b[B', 'c', '\t', 'c', 'w', '\r', 'w');
-  assert.deepEqual(copies, [URL, 'vault-2026-10-02-abcdef', `wrangler hyperdrive create coffre --connection-string='${URL}'`]);
+  assert.deepEqual(copies, [URL, 'vault-2026-10-02-abcdef', 'read -rs COFFRE_DB_URL && wrangler hyperdrive create coffre']);
   assert.match(drawn(), /Copied the command/);
   await press('q');
   assert.match(drawn(), /Have you saved all three values\? They won't be shown again/);

@@ -260,7 +260,7 @@ const TEMPLATES: Record<string, Template> = {
   'key.check': {
     did: 'recorded the check value of',
     tried: 'check',
-    what: ({ entry }) => [['the', text(entry.metadata.kekProvider), 'KEK', text(entry.metadata.kekId)].filter((word) => word !== null).join(' ')],
+    what: ({ entry }) => [['the', text(entry.metadata.kekProvider) === 'local' ? null : text(entry.metadata.kekProvider), 'vault key', text(entry.metadata.kekId)].filter((word) => word !== null).join(' ')],
   },
   'sync.run': {
     did: 'ran the sync of',
@@ -314,7 +314,7 @@ const REASONS: Record<string, string> = {
   duplicate_destination: 'already synced from elsewhere',
   cannot_grant_sync: 'cannot grant the sync its reads',
   kms_unavailable: 'KMS did not answer',
-  wrong_kek: "the vault's KEK is not the one that wrapped the data",
+  wrong_kek: "the vault's key is not the one that wrapped the data",
 };
 
 /** What a missing permission meant, from the app's `missing_<permission>`. */

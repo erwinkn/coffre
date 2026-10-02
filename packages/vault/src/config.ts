@@ -87,19 +87,19 @@ export function derivedSigningKey(kek: Uint8Array): Buffer {
 function kek(entry: Kek): { provider: KekProvider; signingKey: Buffer | null } {
   if (!('wrap' in entry)) {
     const { id, key } = entry;
-    if (!KEK_ID.test(id)) throw new Error(`KEK id "${id}" must be 1-64 letters, digits, dots, dashes or underscores`);
-    const raw = key32(key, `KEK ${id}`);
+    if (!KEK_ID.test(id)) throw new Error(`the vault key's ID "${id}" (kek.id) must be 1-64 letters, digits, dots, dashes or underscores`);
+    const raw = key32(key, `the vault key ${id}`);
     return { provider: new LocalKekProvider(raw, id), signingKey: derivedSigningKey(raw) };
   }
   const { provider, keyId, keyVersion } = entry;
   if (typeof provider !== 'string' || !KEK_PROVIDER.test(provider)) {
-    throw new Error(`a KEK provider's name must be 1-32 lowercase letters, digits or dashes; got "${String(provider)}"`);
+    throw new Error(`a key service's name (kek.provider) must be 1-32 lowercase letters, digits or dashes; got "${String(provider)}"`);
   }
   if (typeof keyId !== 'string' || !KEK_NAME.test(keyId) || typeof keyVersion !== 'string' || !KEK_NAME.test(keyVersion)) {
-    throw new Error(`KEK ${provider}: keyId and keyVersion must be 1-255 visible ASCII characters`);
+    throw new Error(`vault key ${provider}: keyId and keyVersion must be 1-255 visible ASCII characters`);
   }
   if (typeof entry.wrap !== 'function' || typeof entry.unwrap !== 'function') {
-    throw new Error(`KEK ${provider}:${keyId} needs wrap() and unwrap()`);
+    throw new Error(`vault key ${provider}:${keyId} needs wrap() and unwrap()`);
   }
   return { provider: entry, signingKey: null };
 }
@@ -110,7 +110,7 @@ export function resolveVaultConfig(config: VaultConfig): ResolvedVaultConfig {
   const [current, ...previous] = keks.map((entry) => entry.provider);
   const refs = [current, ...previous].map(({ provider, keyId }) => `${provider}:${keyId}`);
   const twice = refs.find((ref, i) => refs.indexOf(ref) !== i);
-  if (twice !== undefined) throw new Error(`two KEKs share an id: ${twice}`);
+  if (twice !== undefined) throw new Error(`two vault keys share an id: ${twice}`);
   return {
     keks: new KekRegistry(current, previous),
     rootAdmins: checkRootAdmins(config.rootAdmins),
@@ -136,8 +136,8 @@ function signingKeys(given: string | undefined, keks: { provider: KekProvider; s
   else {
     const { provider, keyId } = keks[0].provider;
     throw new Error(
-      `signingKey is required with the ${provider} KEK ${keyId}: the vault derives its signing key only from a KEK it holds, ` +
-        'and a key service never hands its key over. Set signingKey to 32 random bytes, base64 (openssl rand -base64 32), and keep it with the KEK.',
+      `signingKey is required with the ${provider} vault key ${keyId}: the vault derives its signing key only from a vault key it holds, ` +
+        'and a key service never hands its key over. Set signingKey to 32 random bytes, base64 (openssl rand -base64 32), and keep it with the vault key.',
     );
   }
   return [signing, ...derived].filter((key, i, all) => all.findIndex((other) => other.equals(key)) === i);

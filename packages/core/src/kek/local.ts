@@ -25,7 +25,7 @@ export class LocalKekProvider implements KekProvider {
 
   constructor(kek: Buffer, keyId: string, keyVersion: string = '1') {
     if (kek.length !== KEK_BYTES) {
-      throw new Error(`local KEK must be ${KEK_BYTES} bytes, got ${kek.length}`);
+      throw new Error(`a local vault key must be ${KEK_BYTES} bytes, got ${kek.length}`);
     }
     this.#kek = kek;
     this.keyId = keyId;

@@ -55,8 +55,8 @@ export function keyGuide(): { workers: GuideBlock['lines']; node: GuideBlock['li
   return {
     workers: [
       'The vault ID goes under vars in vault/wrangler.jsonc, as VAULT_KEY_ID. The keys are secrets; each command asks for its value:',
-      { command: 'pnpm exec wrangler secret put APP_KEY -c app/wrangler.jsonc', secret: false },
-      { command: 'pnpm exec wrangler secret put VAULT_KEY -c vault/wrangler.jsonc', secret: false },
+      { command: 'pnpm exec wrangler secret put APP_KEY -c app/wrangler.jsonc' },
+      { command: 'pnpm exec wrangler secret put VAULT_KEY -c vault/wrangler.jsonc' },
     ],
     node: ['server.env takes APP_KEY; vault.env takes VAULT_KEY_ID and VAULT_KEY.'],
   };

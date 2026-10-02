@@ -1,12 +1,12 @@
 # Keys
 
 Every value coffre stores is encrypted under a data key of its own, and the
-vault wraps each data key with the vault key, a key-encryption key (KEK);
+vault wraps each data key with the vault key, a key-encryption key;
 the configuration calls it `kek`, and the examples `VAULT_KEY`. The database
 holds the ciphertext and the wrapped data key, never a key that opens them.
-The KEK is one of two things:
+The vault key is one of two things:
 
-| | Where the KEK lives | Who can see a key being used |
+| | Where the vault key lives | Who can see a key being used |
 | --- | --- | --- |
 | A local key | 32 bytes in the vault's configuration (a Worker secret) | the vault's entries in the shared audit log |
 | AWS KMS | inside KMS, which it never leaves | vault entries in the shared log, and CloudTrail |
@@ -23,11 +23,11 @@ kek: { id: env.VAULT_KEY_ID, key: env.VAULT_KEY },
 database's logins, and `coffre keys` makes the keys alone
 ([deploy.md](deploy.md#the-database-and-its-keys-for-either-deployment)).
 It costs nothing and adds no latency. It is also where the vault's signing
-key comes from: the vault derives it from the KEK, with HKDF-SHA-256 under a
-label no other use of the KEK shares, and that key MACs the vault's log
+key comes from: the vault derives it from the vault key, with HKDF-SHA-256 under a
+label no other use of the vault key shares, and that key MACs the vault's log
 entries, seals member rows and signs checkpoints. So the vault has one key to keep, not two.
 
-Whoever holds the KEK and a copy of the database holds every value, and
+Whoever holds the vault key and a copy of the database holds every value, and
 nothing outside coffre records the use of either. Whoever holds it and can
 write the database can forge the vault's records too, grants included.
 Keep a copy in your password manager: without it, nothing can be read
@@ -42,22 +42,22 @@ kek: { id: env.VAULT_KEY_ID, key: env.VAULT_KEY },                    // vault-2
 previousKeks: [{ id: env.OLD_VAULT_KEY_ID, key: env.OLD_VAULT_KEY }], // vault-2026-04-01-3m4n5p
 ```
 
-New values are wrapped under the new KEK. At its first call, the vault
-moves to the key it derives from the new KEK: it seals every member row
+New values are wrapped under the new vault key. At its first call, the vault
+moves to the key it derives from the new vault key: it seals every member row
 again under it, and writes a `key.rotate` entry, its first under that key.
-Entries and checkpoints name the key they were signed under. The old KEK
+Entries and checkpoints name the key they were signed under. The old vault key
 still opens what it wrapped, and still verifies what the vault wrote before
 the rotation, so it stays configured for good: the log is checked from its
-first entry at every checkpoint, and without the old KEK, the old entries no
+first entry at every checkpoint, and without the old vault key, the old entries no
 longer verify and `/readyz` turns red.
 
-A replaced KEK stays configured to verify the past, and can't vouch for
+A replaced vault key stays configured to verify the past, and can't vouch for
 anything after the rotation. An entry, a member row or a checkpoint under
-its keys after that point fails verification, so a KEK replaced because it
+its keys after that point fails verification, so a vault key replaced because it
 leaked forges nothing from then on. What was forged with it before the
 rotation verifies like the rest; that is the leak's window. A vault still
-running with the old KEK, as for the seconds a deploy takes, writes nothing
-after the rotation: its calls fail until it is replaced. And a KEK, once
+running with the old vault key, as for the seconds a deploy takes, writes nothing
+after the rotation: its calls fail until it is replaced. And a vault key, once
 replaced, cannot come back as `kek`: the vault refuses to write under it.
 
 ## AWS KMS
@@ -77,7 +77,7 @@ export default vault((env: Env) => ({
 ```
 
 **A signing key of its own.** The vault never sees a KMS key, so it cannot
-derive its signing key from it, as it does from a local KEK. With KMS,
+derive its signing key from it, as it does from a local vault key. With KMS,
 `signingKey` is required, 32 random bytes in base64
 (`openssl rand -base64 32`), held by the vault and escrowed with everything
 else; a vault without it refuses to start, and says why. It cannot be
@@ -101,8 +101,8 @@ For a key KMS wrapped, one without the other means something read around
 coffre, or a log was edited. The vault asks KMS only for a call its rules
 allow, so a refused read appears in its log and never in CloudTrail.
 One more kind of call is the vault's own: each vault process opens its
-KEK's check value once, before its first key operation, to tell it has the
-right KEK ([restore.md](restore.md#if-the-vault-key-is-wrong)). It shows in
+vault key's check value once, before its first key operation, to tell it has the
+right vault key ([restore.md](restore.md#if-the-vault-key-is-wrong)). It shows in
 CloudTrail as a Decrypt whose context is the nil UUID, for no secret, and
 opens no data.
 
@@ -180,7 +180,7 @@ signingKey: env.SIGNING_KEY, // new: KMS needs one
 ```
 
 The vault signs under the new `signingKey` from then on. Its first call is
-a rotation, as with a new local KEK: the local KEK's key verifies what came
+a rotation, as with a new local vault key: the local vault key's key verifies what came
 before it, and nothing after.
 
 New versions are wrapped by KMS from then on. Versions written before still
@@ -189,7 +189,7 @@ rewrap moves them to KMS. That command does not exist yet
 ([roadmap](roadmap.md)). Until then, the local key keeps opening everything
 written before the switch, without CloudTrail.
 
-## A KEK service of your own
+## A key service of your own
 
 `kek` takes any `KekProvider`, so another KMS (Google Cloud's, Vault
 Transit's) takes about as much code as `aws-kms.ts` in `@coffre/core`:

@@ -61,15 +61,14 @@ export function loginUrl(administrator: URL, login: string, password: string): s
 }
 
 /**
- * A login's URL for Hyperdrive, without its parameters: Hyperdrive always
- * connects over TLS, checking the certificate against public CAs, and takes
- * no `sslrootcert`.
+ * A wrangler hyperdrive command that reads the URL at a silent prompt, so
+ * that no password reaches the shell's history, and drops its parameters:
+ * Hyperdrive connects over TLS itself, checking the certificate against
+ * public CAs, and takes no `sslrootcert`. `${v%%[?]*}` holds in bash and
+ * zsh alike.
  */
-export function hyperdriveUrl(url: string): string {
-  const bare = new URL(url);
-  bare.search = '';
-  bare.hash = '';
-  return bare.href;
+export function hyperdriveCommand(target: string): string {
+  return `read -rs COFFRE_DB_URL && pnpm exec wrangler hyperdrive ${target} --connection-string="\${COFFRE_DB_URL%%[?]*}"; unset COFFRE_DB_URL`;
 }
 
 /**
@@ -440,14 +439,15 @@ export function setupScreen(result: SetupResult): Screen {
   const hyperdrive = set.map((component) => {
     const login = result[component];
     const target = login.password === 'created' ? `create ${HYPERDRIVE[component]} --caching-disabled` : `update <the ${component}'s config id>`;
-    return { command: `pnpm exec wrangler hyperdrive ${target} --connection-string='${hyperdriveUrl(login.url!)}'`, secret: true };
+    return { command: hyperdriveCommand(target) };
   });
   const workers = [
     ...(set.length === 0
       ? []
       : [
-          `${created ? 'A Hyperdrive config for each database URL, with caching off' : 'Each Hyperdrive config, pointed at its new database URL'}. Hyperdrive connects over TLS itself, so these leave out the URL's parameters:`,
-          ...hyperdrive,
+          `${created ? 'A Hyperdrive config for each database URL, with caching off' : 'Each Hyperdrive config, pointed at its new database URL'}. Run each command, then paste its URL at the silent prompt: it stays out of your shell's history, and the command drops the URL's parameters, since Hyperdrive connects over TLS itself.`,
+          ...hyperdrive.flatMap((command, i) => [`The ${set[i]} database URL:`, command]),
+          'Or make them in the Cloudflare dashboard, under Hyperdrive.',
           ...(created ? ['Their ids go under hyperdrive, in app/wrangler.jsonc and vault/wrangler.jsonc.'] : []),
         ]),
     ...(result.keys === null ? [] : keys.workers),

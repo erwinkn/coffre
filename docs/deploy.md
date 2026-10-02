@@ -116,18 +116,21 @@ For Cloudflare Access instead, replace `signin(…)` with `cloudflareAccess(…)
 
 ### 2. Two Hyperdrive configs
 
-One config per runtime login, both pointing to the same database. `coffre
-setup` printed both commands, each with its login's connection string:
+One config per runtime login, both pointing to the same database. Each
+command reads its login's database URL at a silent prompt, so that the
+password stays out of your shell's history: run it, paste the URL from
+`coffre setup`'s screen, then press Enter. `coffre setup` shows both
+commands, ready to copy.
 
 ```sh
-pnpm exec wrangler hyperdrive create coffre --caching-disabled \
-  --connection-string='postgresql://coffre_runtime:…@db.example.com:5432/coffre'
-pnpm exec wrangler hyperdrive create coffre-vault --caching-disabled \
-  --connection-string='postgresql://coffre_vault_runtime:…@db.example.com:5432/coffre'
+read -rs COFFRE_DB_URL && pnpm exec wrangler hyperdrive create coffre --caching-disabled --connection-string="${COFFRE_DB_URL%%[?]*}"; unset COFFRE_DB_URL
+read -rs COFFRE_DB_URL && pnpm exec wrangler hyperdrive create coffre-vault --caching-disabled --connection-string="${COFFRE_DB_URL%%[?]*}"; unset COFFRE_DB_URL
 ```
 
-These URLs leave out the TLS parameters: Hyperdrive always connects over
-TLS, and checks the certificate against public CAs.
+The first takes the app's database URL, the second the vault's. They drop
+the URL's TLS parameters: Hyperdrive always connects over TLS, and checks
+the certificate against public CAs. The Cloudflare dashboard's Hyperdrive
+page makes the same configs, without a shell.
 
 Put the first id in `app/wrangler.jsonc`, under the `HYPERDRIVE` binding,
 and the second in `vault/wrangler.jsonc`, under `VAULT_HYPERDRIVE`. The app's

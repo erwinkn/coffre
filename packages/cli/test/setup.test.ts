@@ -2,14 +2,14 @@ import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash, createHmac } from 'node:crypto';
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import pg from 'pg';
 
-import { asJson, hyperdriveUrl, loginFor, loginUrl, scramVerifier, setupScreen, setupValues, type SetupResult } from '../src/setup.ts';
+import { asJson, hyperdriveCommand, loginFor, loginUrl, scramVerifier, setupScreen, setupValues, type SetupResult } from '../src/setup.ts';
 import { inTerminal, ptySkip, screens, visible } from './pty.ts';
 
 const main = fileURLToPath(new URL('../src/main.ts', import.meta.url));
@@ -68,8 +68,6 @@ test('a login on PlanetScale names its branch, as the administrator does; elsewh
   const administrator = new URL('postgresql://postgres.x7k2m9q4w1:s3cret@eu.pg.psdb.cloud:5432/coffre?sslmode=verify-full&sslrootcert=system');
   const url = loginUrl(administrator, loginFor('coffre_runtime', 'postgres.x7k2m9q4w1'), 'fresh-password');
   assert.equal(url, 'postgresql://coffre_runtime.x7k2m9q4w1:fresh-password@eu.pg.psdb.cloud:5432/coffre?sslmode=verify-full&sslrootcert=system');
-  // Hyperdrive makes its own TLS connection, and takes no sslrootcert.
-  assert.equal(hyperdriveUrl(url), 'postgresql://coffre_runtime.x7k2m9q4w1:fresh-password@eu.pg.psdb.cloud:5432/coffre');
 });
 
 test('a SCRAM verifier is what Postgres stores, never the password: it checks RFC 7677\'s exchange', () => {
@@ -143,19 +141,38 @@ test('--json carries the same values as the screen, under the names the examples
   ]);
 });
 
-test('where the values go: new Hyperdrive configs, or after a reset, the ones to update', () => {
+test('where the values go: new Hyperdrive configs, or after a reset, the ones to update, never with a password in the command', () => {
   const commands = (result: SetupResult) =>
     setupScreen(result).guide.flatMap(({ lines }) => lines.flatMap((line) => (typeof line === 'string' ? [] : [line.command])));
   assert.deepEqual(commands(made).slice(0, 2), [
-    "pnpm exec wrangler hyperdrive create coffre --caching-disabled --connection-string='postgresql://coffre_runtime:p1@db.example.com:5432/coffre'",
-    "pnpm exec wrangler hyperdrive create coffre-vault --caching-disabled --connection-string='postgresql://coffre_vault_runtime:p2@db.example.com:5432/coffre'",
+    hyperdriveCommand('create coffre --caching-disabled'),
+    hyperdriveCommand('create coffre-vault --caching-disabled'),
   ]);
   const reset = { ...made, keys: null, app: { ...made.app, password: 'reset' as const }, vault: { ...made.vault, password: 'reset' as const } };
-  assert.deepEqual(commands(reset), [
-    "pnpm exec wrangler hyperdrive update <the app's config id> --connection-string='postgresql://coffre_runtime:p1@db.example.com:5432/coffre'",
-    "pnpm exec wrangler hyperdrive update <the vault's config id> --connection-string='postgresql://coffre_vault_runtime:p2@db.example.com:5432/coffre'",
-  ]);
+  assert.deepEqual(commands(reset), [hyperdriveCommand("update <the app's config id>"), hyperdriveCommand("update <the vault's config id>")]);
+  for (const command of [...commands(made), ...commands(reset)]) assert.ok(!/p1|p2|postgresql:/.test(command), command);
   assert.deepEqual(setupScreen(reset).sections.flatMap(({ values }) => values.map(({ label }) => label)), ['App database URL', 'Vault database URL']);
+});
+
+test('a Hyperdrive command reads the URL without echo, and hands wrangler it without its parameters', { skip: spawnSync('bash', ['-c', 'true']).status !== 0 && 'needs bash' }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'coffre-hyperdrive-'));
+  try {
+    writeFileSync(join(dir, 'pnpm'), `#!/bin/sh\nprintf '%s\\n' "$@" > "${dir}/argv"\n`);
+    chmodSync(join(dir, 'pnpm'), 0o755);
+    const url = 'postgresql://coffre_runtime.x7k2:s3cret@eu.pg.psdb.cloud:5432/coffre?sslmode=verify-full&sslrootcert=system';
+    const run = spawnSync('bash', ['-c', `${hyperdriveCommand('create coffre --caching-disabled')}; echo "left:[$COFFRE_DB_URL]"`], {
+      input: `${url}\n`,
+      env: { PATH: `${dir}:${process.env.PATH}` },
+      encoding: 'utf8',
+    });
+    assert.equal(run.stdout, 'left:[]\n', 'nothing echoed, and the variable gone');
+    assert.deepEqual(readFileSync(join(dir, 'argv'), 'utf8').trim().split('\n'), [
+      'exec', 'wrangler', 'hyperdrive', 'create', 'coffre', '--caching-disabled',
+      '--connection-string=postgresql://coffre_runtime.x7k2:s3cret@eu.pg.psdb.cloud:5432/coffre',
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // --- against a disposable cluster -------------------------------------------------------

@@ -648,7 +648,7 @@ test('a vault checks its KEK before its first key operation, against a check val
   const read = await misled.unwrap({ principal: ADA, purpose: 'reveal', items });
   assert.deepEqual(!read.ok && read.refusal, {
     code: 'wrong_kek',
-    message: `this vault's ${keks.primary.provider} KEK test-kek-1 does not open the data it holds: it is not the key that wrapped it`,
+    message: "the vault key test-kek-1, kek or previousKeks in the vault's config, is not the one that wrapped these values",
   });
   const write = await misled.wrap({ principal: ROOT, items: [{ secret, key: aKey() }] });
   assert.equal(!write.ok && write.refusal.code, 'wrong_kek');
@@ -1009,7 +1009,7 @@ test('a full check covers the head the app verified up to, and refuses an entry 
   assert.deepEqual(await w.vault.verifyLog({}), {
     ok: false,
     failedAtSeq: Number(fields.seq),
-    reason: `written under vault:0000000000000000, a key this verifier does not hold: either it is forged, or the vault wrote it under another KEK or signing key, which must stay configured: a KEK that was replaced stays in previousKeks`,
+    reason: `written under vault:0000000000000000, a key this verifier does not hold: either it is forged, or the vault wrote it under another vault key or signing key, which must stay configured: a vault key that was replaced stays in the vault's config, in previousKeks`,
   });
 });
 
@@ -1474,7 +1474,7 @@ test('a KEK rotation moves the log and every member row to the new key at the fi
   const forgot = await configured(placed, { kek: next });
   const verdict = await forgot.vault.verifyLog({});
   assert.ok(!verdict.ok);
-  assert.match(verdict.reason, /a key this verifier does not hold: either it is forged, or the vault wrote it under another KEK or signing key/);
+  assert.match(verdict.reason, /a key this verifier does not hold: either it is forged, or the vault wrote it under another vault key or signing key/);
   const refused = await forgot.vault.checkpoint();
   assert.equal(!refused.ok && refused.refusal.code, 'log_broken');
 });
@@ -1528,7 +1528,7 @@ test('a vault still running with the replaced KEK, as during a deploy, writes no
   const change = { projectId: before.project, environmentId: before.prod, role: 'viewer' as const, expiresAt: null };
   await assert.rejects(
     before.vault.setAccess({ actor: ROOT, principal: ADA, changes: [change] }),
-    /^Error: the log moved on to vault:\S+, a key this vault does not hold: a vault given a newer KEK replaced it/,
+    /^Error: the log moved on to vault:\S+, a key this vault does not hold: a vault given a newer vault key replaced it/,
   );
   // From then on it refuses, as does one started afresh with the old KEK.
   const late = await configured(placed, { kek: old });
@@ -1539,7 +1539,7 @@ test('a vault still running with the replaced KEK, as during a deploy, writes no
     assert.equal(!unsigned.ok && unsigned.refusal.code, 'wrong_kek');
   }
   const refused = await late.vault.setAccess({ actor: ROOT, principal: ADA, changes: [change] });
-  assert.match(!refused.ok ? refused.refusal.message : '', /^the log moved on from this vault's key, vault:\S+, to vault:\S+: a vault given a newer KEK replaced it/);
+  assert.match(!refused.ok ? refused.refusal.message : '', /^the log moved on from this vault's key, vault:\S+, to vault:\S+: a vault given a newer vault key replaced it/);
   assert.equal((await vaultLog(after)).length, logged, 'neither wrote anything');
   assert.equal((await after.vault.verifyLog({})).ok, true);
 });
@@ -1548,7 +1548,7 @@ test('a KEK a key service holds needs a signing key, and the error says why', ()
   const kms = awsKms({ keyArn: 'arn:aws:kms:eu-west-3:123456789012:key/kms', credentials: { accessKeyId: 'a', secretAccessKey: 'b' } });
   assert.throws(
     () => resolveVaultConfig({ kek: kms, rootAdmins: ['root@acme.example'] }),
-    /^Error: signingKey is required with the aws-kms KEK arn:aws:kms:eu-west-3:123456789012:key\/kms: the vault derives its signing key only from a KEK it holds/,
+    /^Error: signingKey is required with the aws-kms vault key arn:aws:kms:eu-west-3:123456789012:key\/kms: the vault derives its signing key only from a vault key it holds/,
   );
   const moved = resolveVaultConfig({
     kek: kms, previousKeks: [localKek('kek-1')], rootAdmins: ['root@acme.example'], signingKey: SIGNING_KEY.toString('base64'),
@@ -1571,7 +1571,7 @@ test('configuration', () => {
   assert.throws(() => resolveVaultConfig({ ...base, kek: { id: 'kek-1', key: 'c2hvcnQ=' } }), /32 bytes/);
   assert.throws(() => resolveVaultConfig({ ...base, signingKey: '' }), /signing key/);
   assert.throws(() => resolveVaultConfig({ ...base, previousKeks: [{ id: 'kek-1', key }] }), /share an id/);
-  assert.throws(() => resolveVaultConfig({ ...base, kek: { id: 'kek 1', key } }), /KEK id/);
+  assert.throws(() => resolveVaultConfig({ ...base, kek: { id: 'kek 1', key } }), /the vault key's ID/);
 
   // A key service's KEK, with the local one before it still opening what it wrapped.
   const keyArn = 'arn:aws:kms:eu-west-3:123456789012:key/1234abcd-12ab-34cd-56ef-1234567890ab';
@@ -1580,11 +1580,11 @@ test('configuration', () => {
   assert.deepEqual([kms.keks.primary.provider, kms.keks.primary.keyId], ['aws-kms', keyArn]);
   assert.throws(
     () => resolveVaultConfig({ ...base, kek: awsKms({ keyArn, credentials }), previousKeks: [awsKms({ keyArn, credentials })] }),
-    /two KEKs share an id: aws-kms:arn:aws:kms:eu-west-3/,
+    /two vault keys share an id: aws-kms:arn:aws:kms:eu-west-3/,
   );
   const own = LocalKekProvider.generate('own-1');
   for (const [kek, message] of [
-    [Object.assign(Object.create(own) as KekProvider, { provider: 'Vault Transit' }), /name must be 1-32 lowercase letters/],
+    [Object.assign(Object.create(own) as KekProvider, { provider: 'Vault Transit' }), /name \(kek\.provider\) must be 1-32 lowercase letters/],
     [Object.assign(Object.create(own) as KekProvider, { keyId: 'has space' }), /keyId and keyVersion must be 1-255 visible ASCII/],
     [{ provider: 'transit', keyId: 'k', keyVersion: '1', wrap: own.wrap } as unknown as KekProvider, /transit:k needs wrap\(\) and unwrap\(\)/],
   ] as const) {

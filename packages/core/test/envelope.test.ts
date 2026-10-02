@@ -164,6 +164,6 @@ test('removing a KEK that rows still reference fails loudly', async () => {
 
   await assert.rejects(
     () => open(sealed, dev, withoutIt),
-    /no KEK configured for local:kek-retired/,
+    /no vault key configured for local:kek-retired/,
   );
 });

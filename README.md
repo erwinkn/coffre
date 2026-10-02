@@ -285,9 +285,9 @@ read and write only through `@coffre/client`.
 
 ```
 packages/server       @coffre/server: /api, sign-in, syncs, the scheduled job; /cloudflare and /node
-packages/vault        @coffre/vault: the KEK, members and grants, its entries in the log; /cloudflare and /node
+packages/vault        @coffre/vault: the vault key, members and grants, its entries in the log; /cloudflare and /node
 packages/db           @coffre/db: the schemas, migrations and migrator, the connections
-packages/core         @coffre/core: access rules, encryption, KEKs, the log's format, sign-in, the vault's contract
+packages/core         @coffre/core: access rules, encryption, vault keys, the log's format, sign-in, the vault's contract
 packages/client       @coffre/client: the API as typed calls
 packages/ui           @coffre/ui: the pages, prebuilt
 packages/cli          @coffre/cli: `coffre`, from init and login to secrets, syncs and the log

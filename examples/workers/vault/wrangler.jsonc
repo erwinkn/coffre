@@ -23,8 +23,8 @@
     "required": ["VAULT_KEY"]
   },
   // The app's database, as the vault's own login: `wrangler hyperdrive
-  // create coffre-vault --caching-disabled --connection-string=<vault login
-  // URL>` prints the id. Its own config, not the app's: the vault writes
+  // create coffre-vault --caching-disabled`, as `coffre setup` shows it,
+  // prints the id. Its own config, not the app's: the vault writes
   // members and grants, which the app's login may only read. Locally,
   // CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_VAULT_HYPERDRIVE stands in.
   "hyperdrive": [{ "binding": "VAULT_HYPERDRIVE", "id": "replace-with-your-vault-hyperdrive-id" }]
