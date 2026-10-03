@@ -687,3 +687,125 @@ This re-review changes only this document. Platform scenarios are grounded
 in the linked documentation, not live runs on CI accounts. Implementation
 sign-off remains withheld until R1 to R6 are resolved or the supported
 scope is narrowed accordingly.
+
+## Final pass
+
+Reviewed on 2026-10-03 against
+[`d2499d2dd61ac70a329734c5ebcb3cde415926da`](https://github.com/erwinkn/coffre/blob/d2499d2dd61ac70a329734c5ebcb3cde415926da/docs/design/oidc.md),
+including the complete design and its changes since `f045790`. Section and
+line references below name this final revision. Earlier assessments above
+remain as the record of the versions they reviewed.
+
+**I sign off on implementation of this design.** R1 to R6 are closed for
+the stated v1 scope. I found no new blocking design issue. This approves
+implementing the protocol; the resulting code still needs verification
+against these requirements before release.
+
+### Closure of the six findings
+
+| Finding | Status | What closes it |
+| --- | --- | --- |
+| R1, CircleCI fork origin | Closed by scope reduction | There is no CircleCI profile or automatic acquisition in v1. Section 7, lines 336 to 338, records the origin requirement and a fork-negative case for its return. |
+| R2, Buildkite fork builds | Closed by scope reduction | There is no Buildkite profile or automatic acquisition in v1. Section 7, lines 339 to 340, preserves the unresolved fork distinction instead of presenting the former minimum as safe. |
+| R3, reusable caller refs | Closed | Section 1, lines 44 and 65 to 71, requires the caller's exact `ref`, retains the callee SHA and event restrictions, and explicitly trusts all caller workflows at that ref unless `workflow_ref` narrows them. |
+| R4, GitLab namespace transfers | Closed | Section 1, lines 45 and 72 to 79, requires both `namespace_id` and `project_id`. The UI obtains both. A namespace-only change now fails the binding. |
+| R5, denied unbinds | Closed | Section 6, lines 275 to 288, specifies app author, `token.unbind`, `decision=allow` and the exact binding ID. It checks existence across retained history. A denied attempt cannot revoke anything. |
+| R6, aggregate admission and work bounds | Closed with an explicit availability tradeoff | Sections 1 and 2, lines 81 to 86 and 103 to 119, cap candidates and claims, require one JWKS URL per service/issuer, require both limiter scopes, and reject configuration without the limiter. They state locality, bursts and multiplication across the deployment. |
+
+### Checks of the new contracts
+
+**Revocation.** The same uncached credential query now checks the binding
+MAC, revocation and tombstone. This fits the existing
+[`findCredential`](../../packages/server/src/db/queries.ts) query and its
+Hyperdrive cache avoidance without another database connection or vault
+call. Restoring a removed binding together with its old credential no
+longer revives that credential while the successful unbind remains. The
+credential MAC and composite foreign key still prevent substituting a
+different binding, principal or generation. The vault's current member
+generation remains authoritative.
+
+The denial-only MAC argument remains acceptable. Skipping verification
+of a tombstone cannot grant access. A failed revocation lookup must still
+follow the existing `CredentialUncheckable` outage path rather than become
+"no tombstone". An indexed existence check needs no log scan
+or full chain verification during authentication.
+
+The rollback conclusion is specifically about a removed or replaced
+binding. Revoking only one credential under a still-live binding produces
+`token.revoke`, not `token.unbind`. Restoring that credential's genuine
+older row remains subject to the existing
+[authentication rollback limit](../architecture.md#limits), bounded here
+by its five-minute lifetime. Similarly, the new check does not cancel work
+that already passed authentication before an unbind committed. Neither
+case requires changing this design's binding-revocation mechanism.
+
+**Profiles.** The reusable-workflow rule now checks both sides of the call.
+The caller contributes its repository/owner and ref; the called workflow
+contributes its path and immutable SHA. This agrees with
+[GitHub's caller-versus-callee claim definitions](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-with-reusable-workflows).
+Organization-wide trust remains an explicit choice, and does not remove
+the caller-ref requirement. The event allowlist and exact release-tag
+handling remain acceptable.
+
+GitLab's required namespace and project claims form a consistent pair for
+the documented `push` case. Its
+[claim reference](https://docs.gitlab.com/ci/secrets/id_token_authentication/#token-payload)
+distinguishes them from the newer `job_*` claims and identifies the
+merge-request exception. Keep the stated exclusion of merge-request
+pipelines in server validation, including direct API-created bindings.
+Missing required claims must fail, without substituting another claim
+family. A custom subject remains an owner-vouched identity policy, not a
+promise of the platform-specific protections of a GitHub or GitLab profile.
+
+**Admission and caps.** The revised description agrees with
+[Cloudflare's locality and accuracy contract](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/#locality).
+The location/process multiplier is a sizing consideration, not a strict
+maximum during bursts. This design accepts that availability exposure;
+it does not promise that a distributed flood cannot exhaust shared
+Postgres capacity. The per-source and aggregate limiters must both run,
+with no fail-open fallback when configuration or the limiter fails.
+
+For a selected issuer, the 16-binding cap and shared JWKS URL let the
+server verify the assertion once and then compare the bounded candidate
+policies. The 16-claim and 256-byte value limits are reasonable explicit
+v1 constraints. Enforce the cap and shared-URL invariant when bindings are
+created or replaced under the existing audit-head transaction. A read
+`LIMIT 16` alone would hide excess rows instead of enforcing the invariant.
+A JWKS-URL replacement must tombstone every displaced binding, as the
+immutability rule requires; ordinary key rotation at the same URL does
+not replace bindings.
+
+The initial candidate query is not the entire exchange's database cost.
+A verified matching assertion also needs the consumption lookup, vault
+access and commit checks listed in section 2. The 60-per-minute issuance
+cap applies per binding, not per service, and does not replace admission.
+Both distinctions matter when sizing a deployment, but the specified work
+is now finite per request and the aggregate limit is honestly approximate.
+
+### Implementation verification to retain
+
+These are checks of the approved contract, not additional design blockers:
+
+- On both database engines, an audited denied unbind leaves access intact;
+  a successful unbind rejects exchange and subsequent credential checks,
+  including after restoring the old rows. Credential and consumption
+  cleanup must leave the tombstone intact.
+- Race exchange against unbind and member-generation changes. Race two
+  binding creations when a service already has 15, and race a JWKS-URL
+  replacement against exchange. Commit must preserve the cap, immutable
+  binding identity, current generation and successful-unbind predicate.
+- Reject the same pinned GitHub callee when only the caller ref changes;
+  reject a GitLab token when only its namespace changes. Keep fork,
+  pull-request-event and direct-API profile rejection cases.
+- Reject absent limiter configuration, check both admission scopes, and
+  measure the candidate, signature and fetch bounds. Cold Workers calls
+  must remain independent and keep only settled cache values.
+- Preserve the earlier replay-twin, concurrent consumption, commit-time
+  expiry, actual Node resolver and fetch-limit checks. Verify that both
+  vault transports carry the verified credential ID and that audit joins
+  survive credential cleanup.
+
+Only this review document changes. The final pass rechecked the relevant
+public documentation and existing authentication code; it did not run
+live CI jobs or claim to validate an implementation that does not yet
+exist. There are no remaining design blockers from this review.
