@@ -145,7 +145,8 @@ export async function signedInChecks(report: Report, origin: string, approve: Ap
   let live: { token: string; made: string[] } | undefined;
   try {
     live = await report.check(`${prefix}probe setup`, {}, () => setUp(session.api, issued));
-    await tokenChecks(report, origin, live ?? {}, prefix);
+    // Without its verification, which a token can only skip: the owner verifies the whole chain next.
+    await tokenChecks(report, origin, live ?? {}, { prefix, verification: false });
     await report.check(`${prefix}owner verification`, {}, () => verification(session.api));
   } finally {
     process.off('SIGINT', onInt);
@@ -229,9 +230,11 @@ export async function probeRun(origin: string, admin: Person): Promise<{ detail:
   expect(run !== undefined && failed.length === 0, `the probe failed: ${failed.map(({ name }) => name).join(', ')}`, quiet.results);
   const said = JSON.stringify(quiet.results);
   expect(!said.includes(run.credential) && !said.includes(run.session) && !/coffre-canary-/.test(said), "the probe's lines show its credential, its session or its canary");
+  // Signed in, nothing is out of reach: a check skipped, such as the token's verification, would only be noise.
   const skipped = quiet.results.filter(({ status }) => status === 'skip').map(({ name }) => name);
+  expect(skipped.length === 0, `a signed-in run skipped ${skipped.join(', ')}`, quiet.results);
   return {
-    detail: `${quiet.results.length - skipped.length} checks ok${skipped.length === 0 ? '' : `, ${skipped.join(', ')} skipped`}; ${run.made.length === 0 ? 'all found' : `made ${run.made.join(', ')}`}`,
+    detail: `${quiet.results.length} checks ok; ${run.made.length === 0 ? 'all found' : `made ${run.made.join(', ')}`}`,
     value: run,
   };
 }
