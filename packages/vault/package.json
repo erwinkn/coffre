@@ -1,6 +1,6 @@
 {
   "name": "@coffre/vault",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "description": "coffre's vault: keys, grants and members, in the database the app uses, as a Cloudflare Worker or on Node.",
   "license": "MIT",
   "repository": {
