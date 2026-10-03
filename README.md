@@ -66,6 +66,9 @@ back. If the log cannot be written, she gets nothing.
 its [limits](docs/architecture.md#limits). [docs/deploy.md](docs/deploy.md)
 walks through a deployment.
 
+[Secrets in CI and deploys](docs/ci.md) covers the GitHub Action and pulling
+values into Cloudflare, Vercel and other deploy pipelines.
+
 ## Running it locally
 
 ```sh
@@ -313,7 +316,7 @@ scripts/              what dev, tests and CI share
 ```
 
 The eight packages are released together at one version, and each imports
-the others by name only.
+the others by name only. The GitHub Action's CLI pin moves with them.
 
 ## Supply chain and releases
 
