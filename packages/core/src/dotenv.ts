@@ -199,13 +199,14 @@ const PLAIN_VALUE = /^[A-Za-z0-9_./:@+,=%?-]*$/;
 export function formatDotenv(entries: Iterable<readonly [key: string, value: string]>): string {
   let out = '';
   for (const [key, value] of entries) {
-    assertWritable(key, value);
+    assertEnvironmentEntry(key, value);
     out += `${key}=${quoteDotenv(value)}\n`;
   }
   return out;
 }
 
-function assertWritable(key: string, value: string): void {
+/** Reject names and values that cannot be passed intact in an environment. */
+export function assertEnvironmentEntry(key: string, value: string): void {
   if (!KEY_RE.test(key)) throw new Error(`${JSON.stringify(key)} is not a valid variable name`);
   if (value.includes('\u0000')) throw new Error(`${key} contains a NUL byte`);
 }
@@ -235,7 +236,7 @@ function quoteDotenv(value: string): string {
 export function formatShellExports(entries: Iterable<readonly [key: string, value: string]>): string {
   let out = '';
   for (const [key, value] of entries) {
-    assertWritable(key, value);
+    assertEnvironmentEntry(key, value);
     out += `export ${key}='${value.replaceAll("'", "'\\''")}'\n`;
   }
   return out;
