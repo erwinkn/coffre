@@ -188,3 +188,16 @@ test('each call opens one connection at most: on Cloudflare, a call that opened 
     await database.close();
   }
 });
+
+test('in workerd too, a query on the database inside its own transaction is refused at once, not left to hang', { skip, timeout: 120_000 }, async () => {
+  const database = await slowPostgres(5);
+  const vault = await freshVault(database.url);
+  try {
+    const refused = (await vault.call('queryOutsideTransaction')) as { ok: boolean; result?: string; error?: string };
+    assert.ok(refused.ok, refused.error ?? "refused");
+    assert.match(refused.result!, /^QueryOutsideTransaction: query outside its transaction: use tx/);
+  } finally {
+    await vault.stop();
+    await database.close();
+  }
+});

@@ -1,6 +1,10 @@
 // The vault's entrypoint in workerd, called over a service binding to
 // itself as the app calls it: each fetch is a request of its own, so a
 // burst of them is a page load's worth of concurrent calls.
+import { createDatabase } from '@coffre/db';
+import { HyperdrivePool } from '@coffre/db/hyperdrive';
+import { sql } from 'drizzle-orm';
+
 import { postgres, vault } from '../../src/cloudflare.ts';
 
 type Env = { VAULT_HYPERDRIVE: { connectionString: string }; VAULT_KEY: string; VAULT: Record<string, (...args: unknown[]) => Promise<unknown>> };
@@ -14,6 +18,19 @@ export const Vault = vault((env: Env) => ({
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const { method, args } = (await request.json()) as { method: string; args: unknown[] };
+    // A query on the database inside its own transaction, as no code may make: refused at once, here in workerd too.
+    if (method === 'queryOutsideTransaction') {
+      const pool = new HyperdrivePool(env.VAULT_HYPERDRIVE.connectionString);
+      const db = createDatabase(pool);
+      try {
+        await db.transaction(async () => db.execute(sql`select 1`));
+        return Response.json({ ok: false, error: 'the query ran' });
+      } catch (error) {
+        return Response.json({ ok: true, result: error instanceof Error ? `${error.name}: ${error.message}` : String(error) });
+      } finally {
+        await pool.end();
+      }
+    }
     try {
       return Response.json({ ok: true, result: await env.VAULT[method]!(...args) });
     } catch (error) {
