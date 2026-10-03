@@ -21,6 +21,42 @@ export type Wrangler = (
   options?: { input?: string; env?: NodeJS.ProcessEnv; onOutput?: (text: string) => void; signal?: AbortSignal },
 ) => Promise<Run>;
 
+/** Each wrangler running, by its process group: none outlives setup, nor holds on to a port after it. */
+const running = new Set<number>();
+let watching = false;
+
+/** Stop a wrangler, and all it started: its group, sh, cat and wrangler alike. */
+function stopGroup(pid: number): void {
+  try {
+    process.kill(-pid, 'SIGTERM');
+  } catch {
+    // Gone already.
+  }
+}
+
+/** Stop every wrangler still running: on any way out of setup, its exit included. */
+export function stopWranglers(): void {
+  for (const pid of running) stopGroup(pid);
+  running.clear();
+}
+
+/**
+ * From the first wrangler on, setup's ends stop them all: its exit, and the
+ * signals that end it without one. A closed terminal or a SIGTERM reaches
+ * setup alone, wrangler being in a session of its own.
+ */
+function watch(): void {
+  if (watching) return;
+  watching = true;
+  process.once('exit', stopWranglers);
+  for (const [signal, code] of [['SIGHUP', 129], ['SIGTERM', 143]] as const) {
+    process.once(signal, () => {
+      stopWranglers();
+      process.exit(code);
+    });
+  }
+}
+
 export function deploymentWrangler(dir: string): Wrangler {
   const bin = join(dir, 'node_modules', '.bin', process.platform === 'win32' ? 'wrangler.cmd' : 'wrangler');
   return (args, { input, env, onOutput, signal } = {}) =>
@@ -28,12 +64,27 @@ export function deploymentWrangler(dir: string): Wrangler {
       // A child's stdin is a socket, which Linux cannot open again as /dev/stdin, as `--secrets-file /dev/stdin`
       // does: with input, it goes through cat, so that wrangler's stdin is a pipe. Neither command line holds it.
       const [command, argv] = input === undefined ? [bin, args] : ['/bin/sh', ['-c', 'cat | "$0" "$@"', bin, ...args]];
+      // A process group of its own, stopped whole, and only by setup: on a signal, when cancelled, at its exit.
       const child = spawn(command, argv, {
         cwd: dir,
         env: { ...process.env, ...env, WRANGLER_SEND_METRICS: 'false', NO_COLOR: '1' },
         stdio: ['pipe', 'pipe', 'pipe'],
-        signal,
+        detached: process.platform !== 'win32',
       });
+      const pid = child.pid;
+      if (pid !== undefined && process.platform !== 'win32') {
+        watch();
+        running.add(pid);
+        const stop = () => (running.delete(pid) ? stopGroup(pid) : undefined);
+        if (signal?.aborted) stop();
+        else signal?.addEventListener('abort', stop, { once: true });
+        child.on('close', () => {
+          running.delete(pid);
+          signal?.removeEventListener('abort', stop);
+        });
+      } else if (signal !== undefined) {
+        signal.addEventListener('abort', () => child.kill(), { once: true });
+      }
       let stdout = '';
       let stderr = '';
       child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
@@ -111,9 +162,13 @@ async function login(wrangler: Wrangler, step: Step, link: Link): Promise<void> 
   step.note('Cloudflare: approve the sign-in in your browser');
   let callback: URL | null = null;
   let output = '';
+  let ended = false;
+  // Where wrangler listens, once its link says so, or never, when it ends first.
+  let linked!: () => void;
+  const linkPrinted = new Promise<void>((resolve) => (linked = resolve));
   const done = new AbortController();
   const stop = new AbortController();
-  const running = wrangler(['login', '--browser=false'], {
+  const login = wrangler(['login', '--browser=false'], {
     signal: stop.signal,
     onOutput: (text) => {
       // A whole line: the link may come in more than one piece.
@@ -121,38 +176,60 @@ async function login(wrangler: Wrangler, step: Step, link: Link): Promise<void> 
       const address = /Visit this link to authenticate: (\S+)\r?\n/.exec(output)?.[1];
       if (address === undefined || callback !== null) return;
       callback = callbackOf(address);
+      linked();
       link('If no browser opened, sign in to Cloudflare at', address);
       openBrowser(address);
     },
-  }).finally(() => done.abort());
-  const pasted = step.paste(
-    'If your browser shows an error at a localhost address, paste that address here:',
-    async (text) => {
-      const listening = callback ?? new URL(WRANGLER_CALLBACK);
-      const url = localCallback(text, Number(listening.port), listening.pathname, ['code', 'state']);
-      if (typeof url === 'string') return url;
-      // To wrangler's listener, as its link names it: the browser's spelling of localhost does not matter.
-      url.host = listening.host;
-      try {
-        // A connection that closes after it, so that wrangler, done, exits at once.
-        await new Promise((resolve, reject) => get(url, { agent: false }, (response) => response.resume().on('end', resolve)).on('error', reject));
-        return null;
-      } catch {
-        return "wrangler's sign-in is no longer waiting for that address: run setup again";
-      }
-    },
-    done.signal,
-  );
+  }).finally(() => {
+    ended = true;
+    linked();
+    done.abort();
+  });
   try {
-    await pasted;
-  } catch (error) {
-    // Cancelled at the prompt: wrangler, still listening, goes too.
-    stop.abort();
-    await running.catch(() => {});
-    throw error;
+    await step.paste(
+      'If your browser shows an error at a localhost address, paste that address here:',
+      async (text) => {
+        // An address pasted before wrangler printed its link is held to the one it prints, not to a guess.
+        await linkPrinted;
+        const listening = callback ?? new URL(WRANGLER_CALLBACK);
+        const url = localCallback(text, Number(listening.port), listening.pathname, ['code', 'state']);
+        if (typeof url === 'string') return url;
+        // To wrangler's listener, as its link names it: the browser's spelling of localhost does not matter.
+        url.host = listening.host;
+        return replay(url, () => ended);
+      },
+      done.signal,
+    );
+    const run = await login;
+    if (run.code !== 0) throw new Error(`Cloudflare sign-in failed: ${said(run)}`);
+  } finally {
+    // However this ends, Ctrl-C at the prompt included, wrangler does not stay behind, listening.
+    if (!ended) {
+      stop.abort();
+      await login.catch(() => {});
+    }
   }
-  const run = await running;
-  if (run.code !== 0) throw new Error(`Cloudflare sign-in failed: ${said(run)}`);
+}
+
+/** How long a pasted address is tried again while wrangler, still running, does not answer at it: it prints its link before it listens. */
+const REPLAY_FOR_MS = 2_000;
+
+/**
+ * Request `url` here, for wrangler's listener, on a connection that closes
+ * after it, so that wrangler, done, exits at once. Null once it answered;
+ * else why not, for the person pasting to read, and paste again.
+ */
+async function replay(url: URL, ended: () => boolean): Promise<string | null> {
+  for (const start = Date.now(); ; ) {
+    try {
+      await new Promise((resolve, reject) => get(url, { agent: false }, (response) => response.resume().on('end', resolve)).on('error', reject));
+      return null;
+    } catch {
+      if (ended()) return "wrangler's sign-in has ended, and nothing waits at that address: run setup again";
+      if (Date.now() - start >= REPLAY_FOR_MS) return 'wrangler is not answering at that address yet: paste it again in a moment';
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
 }
 
 export type Account = { id: string; name: string };

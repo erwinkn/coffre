@@ -3,18 +3,27 @@
 // listener, and a deploy's secrets on stdin and custom-domain route, in a
 // dry run. Nothing reaches Cloudflare: the login is answered with the wrong
 // state, which wrangler refuses before it asks Cloudflare for a token.
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { createServer } from 'node:net';
+import { connect, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { cloudflareToken, deploymentWrangler, said } from '../src/cloudflare.ts';
+import { cloudflareToken, deploymentWrangler, said, stopWranglers } from '../src/cloudflare.ts';
 import { editWorker } from '../src/deployment.ts';
 import { templateDir } from '../src/init.ts';
 import { Steps } from '../src/steps.ts';
-import { fakeTerminal, realWrangler } from './fakes.ts';
+import { cancelTerminals, fakeTerminal, realWrangler } from './fakes.ts';
+
+// Whatever a failed test leaves waiting, a prompt, a wrangler on its port, goes: this file's process always ends.
+after(() => {
+  cancelTerminals();
+  stopWranglers();
+});
+
+/** The real wrangler starts in a second or two, and bundles in a few more: a test that takes a minute has failed. */
+const LIMIT = { timeout: 60_000 };
 
 /** A Workers deployment whose wrangler is the real one, with a home of its own, so that no login of yours is read or written. */
 function deployment(t: { after: (fn: () => void) => void }): string {
@@ -40,7 +49,7 @@ function isolated(dir: string, extra: NodeJS.ProcessEnv = {}): () => void {
   };
 }
 
-test('with CLOUDFLARE_API_TOKEN, the token is wrangler\'s answer, and no login runs', async (t) => {
+test('with CLOUDFLARE_API_TOKEN, the token is wrangler\'s answer, and no login runs', LIMIT, async (t) => {
   const dir = deployment(t);
   const restore = isolated(dir, { CLOUDFLARE_API_TOKEN: 'cf-api-token-for-a-machine-without-a-browser' });
   try {
@@ -63,15 +72,26 @@ function free(port: number): Promise<boolean> {
   });
 }
 
-test("wrangler's login prints the link setup reads, and its listener takes the address pasted back", async (t) => {
+/** Whether something accepts connections on localhost at `port`. */
+function listening(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = connect(port, 'localhost', () => {
+      socket.destroy();
+      resolve(true);
+    }).on('error', () => resolve(false));
+  });
+}
+
+test("wrangler's login prints the link setup reads, and its listener takes the address pasted back", LIMIT, async (t) => {
   if (!(await free(8976))) return t.skip('something listens on localhost:8976, where wrangler logs in');
   const dir = deployment(t);
   const restore = isolated(dir);
+  const terminal = fakeTerminal();
+  const steps = new Steps(terminal.out, ['Sign in to Cloudflare'], () => terminal.keys, String);
   try {
-    const terminal = fakeTerminal();
-    const steps = new Steps(terminal.out, ['Sign in to Cloudflare'], () => terminal.keys, String);
     const links: string[] = [];
     const signing = steps.run(0, async (step) => (await cloudflareToken(deploymentWrangler(dir), step, (_label, address) => links.push(address)), 'Signed in'));
+    signing.catch(() => {});
     const refused = assert.rejects(signing);
     for (let tries = 0; links.length === 0; tries += 1) {
       assert.ok(tries < 600, 'no link from wrangler login');
@@ -80,6 +100,11 @@ test("wrangler's login prints the link setup reads, and its listener takes the a
     const link = new URL(links[0]!);
     assert.equal(link.origin, 'https://dash.cloudflare.com');
     assert.equal(link.searchParams.get('redirect_uri'), 'http://localhost:8976/oauth/callback');
+    // wrangler prints its link before it listens: the test pastes once it does (setup itself would try again for a while).
+    for (let tries = 0; !(await listening(8976)); tries += 1) {
+      assert.ok(tries < 200, 'wrangler never listened on localhost:8976');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
     // The browser's way back, but for another login: wrangler hears it, refuses it, and stops, asking Cloudflare nothing.
     terminal.keys.write('http://127.0.0.1:8976/oauth/callback?code=not-a-code&state=another-login\r');
     await refused;
@@ -88,13 +113,13 @@ test("wrangler's login prints the link setup reads, and its listener takes the a
       assert.ok(!error.message.includes('\x1b'), 'no colour codes in what setup shows');
       return true;
     });
-    steps.end();
   } finally {
+    steps.end();
     restore();
   }
 });
 
-test('a dry run of the real wrangler reads the secrets on stdin, shows only their names, and holds the route to a custom domain\'s rules', async (t) => {
+test('a dry run of the real wrangler reads the secrets on stdin, shows only their names, and holds the route to a custom domain\'s rules', LIMIT, async (t) => {
   const dir = deployment(t);
   const restore = isolated(dir);
   try {
