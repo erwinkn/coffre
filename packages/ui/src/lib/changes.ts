@@ -200,6 +200,22 @@ export function revokeCredential(client: CoffreClient, serviceId: string): Chang
   };
 }
 
+type Binding = { id: string; label: string | null };
+type Bindings = ({ ok: true; bindings: Binding[] } | Failure) | null;
+
+/** Removing a trust binding: its tombstone, as far as the page goes, is the row leaving. */
+export function removeBinding(client: CoffreClient, serviceId: string): Change<Bindings, Binding, Binding, unknown> {
+  const member = memberRef('service', serviceId);
+  return {
+    list: listOf<Binding, Bindings>([...keys.bindings(member), { allowed: true }], 'bindings', (binding) => binding.id),
+    label: (binding) => (binding.label === null ? 'the binding' : `binding ${binding.label}`),
+    targets: (binding) => [removing(binding.id)],
+    removing: { pending: 'Removing…', done: 'removed', failed: 'Not removed.' },
+    affects: () => affects.bindings(member),
+    run: (binding) => client.bindings.remove(member, binding.id),
+  };
+}
+
 type Sessions = ({ ok: true; sessions: SessionRow[] } | Failure);
 
 export function endSession(client: CoffreClient): Change<Sessions, SessionRow, SessionRow, unknown> {

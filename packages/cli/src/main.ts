@@ -18,6 +18,7 @@ import type { Instance } from './migrate.ts';
 import { dailyNotice, type Checked } from './notice.ts';
 import { style } from './tty.ts';
 import { githubEnvironment, githubMasks } from './github-env.ts';
+import { bindingFrom, describeBindings, describePlan, serviceMember, TRUST_USAGE, type TrustFlags } from './trust.ts';
 import { pickCheck, verifyInstance, verifyKeys, VERIFY_USAGE } from './verify/index.ts';
 import {
   credentialHeaders,
@@ -741,6 +742,63 @@ function waysIn(
  * Removal takes every way in away at once. What it cannot take back is what
  * they saw, so the report after it is the list of values to rotate.
  */
+async function trust(args: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({
+    args,
+    options: {
+      github: { type: 'string' },
+      workflow: { type: 'string' },
+      reusable: { type: 'string' },
+      sha: { type: 'string' },
+      'any-repository': { type: 'boolean' },
+      gitlab: { type: 'string' },
+      'gitlab-url': { type: 'string' },
+      source: { type: 'string' },
+      issuer: { type: 'string' },
+      claim: { type: 'string', multiple: true },
+      branch: { type: 'string' },
+      tag: { type: 'string' },
+      event: { type: 'string' },
+      'repository-id': { type: 'string' },
+      'owner-id': { type: 'string' },
+      'project-id': { type: 'string' },
+      'namespace-id': { type: 'string' },
+      label: { type: 'string' },
+      replace: { type: 'string', multiple: true },
+      apply: { type: 'boolean', default: false },
+    },
+    allowPositionals: true,
+  });
+  const [service] = positionals;
+  if (!service || positionals.length > 1) fail(TRUST_USAGE);
+  const member = serviceMember(service);
+  const coffre = client();
+  const { label, replace, apply, ...flags } = values;
+  if (Object.keys(flags).length === 0) {
+    process.stdout.write(describeBindings(member, (await coffre.bindings.list(member)).bindings));
+    return;
+  }
+  const binding = await bindingFrom(flags as TrustFlags, (input) => coffre.bindings.lookup(input)).catch((error: unknown) =>
+    fail(error instanceof Error ? error.message : String(error)),
+  );
+  const input = { ...binding, label: label ?? null, replaces: replace ?? [] };
+  const plan = await coffre.bindings.preview(member, input);
+  if (!apply) {
+    process.stdout.write(describePlan(member, plan, null));
+    return;
+  }
+  const saved = await coffre.bindings.create(member, input);
+  process.stdout.write(describePlan(member, plan, saved.binding));
+}
+
+async function untrust(args: string[]): Promise<void> {
+  const { positionals } = parseArgs({ args, options: {}, allowPositionals: true });
+  const [service, id] = positionals;
+  if (!service || !id || positionals.length > 2) fail('usage: coffre untrust <service> <binding-id>');
+  await client().bindings.remove(serviceMember(service), id);
+  process.stdout.write(`removed binding ${id}: ${serviceMember(service)} no longer trusts the CI runs it named\n`);
+}
+
 async function offboard(args: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args,
@@ -979,6 +1037,10 @@ const USAGE = `coffre - secrets, with an audit log
                  [--expires YYYY-MM-DD]
     coffre offboard <principal> [--service] [--apply]
                                             what removing them revokes, and what to rotate
+    coffre trust <service> [--github … | --gitlab … | --issuer …] [--apply]
+                                            the CI runs that may sign in as a service, by their
+                                            platform's ID token; \`coffre trust\` alone says how
+    coffre untrust <service> <binding-id>
 
 
   Audit
@@ -1067,6 +1129,12 @@ switch (command) {
     break;
   case 'offboard':
     await offboard(rest);
+    break;
+  case 'trust':
+    await trust(rest);
+    break;
+  case 'untrust':
+    await untrust(rest);
     break;
   case 'audit':
     await audit(rest);

@@ -259,3 +259,21 @@ async function run(query: SQL): Promise<void> {
   if (TEST_ENGINE === 'sqlite') await (db.owner as unknown as { run: (q: SQL) => Promise<unknown> }).run(query);
   else await (db.owner as unknown as { execute: (q: SQL) => Promise<unknown> }).execute(query);
 }
+
+test("an owner looks up a public repository's or project's IDs; a private one is not found, and its IDs are typed in", async () => {
+  documents.set('https://api.github.com/repos/acme/api', { id: 41532, owner: { id: 9919 } });
+  documents.set('https://gitlab.com/api/v4/projects/acme%2Fapi', { id: 345, namespace: { id: 12 } });
+  documents.set('https://gitlab.acme.example/api/v4/projects/infra%2Fdeploy', { id: 7, namespace: { id: 3 } });
+  const lead = as(LEAD);
+  assert.deepEqual(await lead.bindings.lookup({ github: 'acme/api' }), { github: 'acme/api', repositoryId: '41532', ownerId: '9919' });
+  assert.deepEqual(await lead.bindings.lookup({ gitlab: 'acme/api' }), { gitlab: 'acme/api', projectId: '345', namespaceId: '12' });
+  assert.deepEqual(
+    await lead.bindings.lookup({ gitlab: 'infra/deploy', gitlabUrl: 'https://gitlab.acme.example' }),
+    { gitlab: 'infra/deploy', projectId: '7', namespaceId: '3' },
+  );
+  await assert.rejects(lead.bindings.lookup({ github: 'acme/private' }), /api.github.com did not find it: a private one's IDs are typed in/);
+  await assert.rejects(lead.bindings.lookup({ github: '../../users' }), /a GitHub repository is <owner>\/<name>/);
+  await assert.rejects(lead.bindings.lookup({ gitlab: 'acme/api', gitlabUrl: 'http://10.0.0.1' }), /must use https/);
+  await assert.rejects(lead.bindings.lookup({}), /look up a GitHub repository or a GitLab project/);
+  await assert.rejects(as(DEV).bindings.lookup({ github: 'acme/api' }), /only owners may trust workloads/);
+});

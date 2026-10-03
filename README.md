@@ -132,6 +132,10 @@ coffre roles
 coffre access                               # who holds what, where you manage access
 coffre grant market alice@acme.example --role developer --env dev
 coffre offboard alice@acme.example          # previews; --apply removes (docs/offboarding.md)
+coffre trust api-deploy --github acme/api --workflow deploy.yml --branch main
+                                            # the CI runs trusted to sign in as token:api-deploy;
+                                            # previews the claims, --apply saves (docs/design/oidc.md)
+coffre untrust api-deploy <binding-id>
 
 coffre audit --denied
 coffre verify                               # asks which: instance, keys or log; owners only

@@ -219,3 +219,86 @@ export function checkFetchUrl(
   }
   return url;
 }
+
+// --- presets -----------------------------------------------------------------
+//
+// What the UI's forms and the CLI's flags ask for, and the claims they fill
+// in. They decide nothing: `checkBinding`, on the server, holds the result
+// to its profile, whoever built it.
+
+/** `refs/heads/main`, or `refs/tags/v1`, as GitHub names a ref. */
+export function fullRef(kind: 'branch' | 'tag', name: string): string {
+  return `refs/${kind === 'branch' ? 'heads' : 'tags'}/${name}`;
+}
+
+/** A workflow file at a ref, as GitHub's tokens name it: `acme/api/.github/workflows/deploy.yml@refs/heads/main`. */
+export function workflowRef(repository: string, file: string, ref: string): string {
+  return `${repository}/.github/workflows/${file.replace(/^\.github\/workflows\//, '')}@${ref}`;
+}
+
+/** A workflow of the repository, run by `event` at `ref`. */
+export function githubWorkflow(input: {
+  repository: string;
+  repositoryId: string;
+  ownerId: string;
+  workflow: string;
+  ref: string;
+  event: string;
+}): Omit<BindingPolicy, 'issuer'> {
+  return {
+    profile: 'github',
+    claims: {
+      repository_owner_id: input.ownerId,
+      repository_id: input.repositoryId,
+      workflow_ref: workflowRef(input.repository, input.workflow, input.ref),
+      ref: input.ref,
+      event_name: input.event,
+    },
+  };
+}
+
+/**
+ * A reusable workflow at one commit, called at `ref`: from one repository,
+ * or, with `repositoryId` null, from any repository of the organization. A
+ * `caller` workflow narrows it to one calling workflow.
+ */
+export function githubReusable(input: {
+  repositoryId: string | null;
+  ownerId: string;
+  ref: string;
+  event: string;
+  called: string;
+  sha: string;
+  caller?: { repository: string; workflow: string };
+}): Omit<BindingPolicy, 'issuer'> {
+  const claims: BindingClaims = {
+    repository_owner_id: input.ownerId,
+    ...(input.repositoryId === null ? {} : { repository_id: input.repositoryId }),
+    ref: input.ref,
+    event_name: input.event,
+    job_workflow_ref: input.called,
+    job_workflow_sha: input.sha,
+  };
+  if (input.caller !== undefined) claims.workflow_ref = workflowRef(input.caller.repository, input.caller.workflow, input.ref);
+  return { profile: input.repositoryId === null ? 'github-reusable-organization' : 'github-reusable', claims };
+}
+
+/** A GitLab project's pipelines from `source`, at a branch or tag. */
+export function gitlabProject(input: {
+  namespaceId: string;
+  projectId: string;
+  refType: 'branch' | 'tag';
+  ref: string;
+  source: string;
+}): Omit<BindingPolicy, 'issuer'> {
+  return {
+    profile: 'gitlab',
+    claims: {
+      namespace_id: input.namespaceId,
+      project_id: input.projectId,
+      ref_type: input.refType,
+      ref: input.ref,
+      pipeline_source: input.source,
+    },
+  };
+}

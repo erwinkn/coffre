@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { BindingInvalid, canonicalClaims, checkBinding, MAX_BINDINGS, type BindingClaims, type WorkloadProfile, type WorkloadsConfig } from '@coffre/core/identity';
+import { BindingInvalid, canonicalClaims, checkBinding, checkFetchUrl, GITLAB_ISSUER, MAX_BINDINGS, type BindingClaims, type WorkloadProfile, type WorkloadsConfig } from '@coffre/core/identity';
 import type { Access, Vault } from '@coffre/core/vault';
 import type { Database, Transaction } from '@coffre/db';
 import { knownMigrations } from '@coffre/db/schema-version';
@@ -8,7 +8,7 @@ import { serviceBindings } from '@coffre/db/schema';
 
 import { appliedMigrations, findBinding, insertBinding, liveBindings, memberStanding, updateAuth, type BindingRow } from '../db/queries.ts';
 import { discoverKeys, DiscoveryFailed } from '../workloads/discovery.ts';
-import type { WorkloadTransport } from '../workloads/transport.ts';
+import { FetchRefused, type WorkloadTransport } from '../workloads/transport.ts';
 import type { Asker } from './signin.ts';
 import { allowed, audited, denied, Refusal, withRefusals } from './context.ts';
 import { ApiError, badRequest, conflict, forbidden, notFound } from './errors.ts';
@@ -52,6 +52,14 @@ export type BindingInput = {
   /** Bindings this one takes the place of, as a change to them: they are removed in the same step. */
   replaces: string[];
 };
+
+/** The IDs a binding names, as an owner would otherwise look them up. */
+export type WorkloadIds =
+  | { github: string; repositoryId: string; ownerId: string }
+  | { gitlab: string; projectId: string; namespaceId: string };
+
+const GITHUB_REPOSITORY = /^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/;
+const GITLAB_PROJECT = /^[A-Za-z0-9_.-]+(\/[A-Za-z0-9_.-]+){1,20}$/;
 
 /** The migration that adds bindings: until it runs, this release works without them. */
 const BINDINGS_MIGRATION = '0002_service_bindings';
@@ -188,6 +196,48 @@ export class WorkloadService {
         return { unbound: true as const };
       });
     });
+  }
+
+  /**
+   * A public repository's or project's IDs, which bindings name rather than
+   * names: GitHub's API, or a GitLab's. The pages cannot ask those hosts
+   * themselves, since they may connect only to coffre; the CLI asks itself.
+   * A private one is not found, and its IDs are typed in.
+   */
+  async lookup(ctx: Asker, input: { github?: string; gitlab?: string; gitlabUrl?: string }): Promise<WorkloadIds> {
+    if (!ctx.caller.isOwner) throw forbidden('only owners may trust workloads');
+    const ask = async (url: URL): Promise<Record<string, unknown>> => {
+      try {
+        const answer = await this.#deps.transport.json(url);
+        return typeof answer === 'object' && answer !== null ? (answer as Record<string, unknown>) : {};
+      } catch (error) {
+        if (error instanceof FetchRefused) throw notFound(`${url.hostname} did not find it: a private one's IDs are typed in`);
+        throw error;
+      }
+    };
+    const id = (value: unknown) => (typeof value === 'number' && Number.isSafeInteger(value) ? String(value) : null);
+    if (input.github !== undefined) {
+      if (!GITHUB_REPOSITORY.test(input.github)) throw badRequest('a GitHub repository is <owner>/<name>');
+      const repository = await ask(new URL(`https://api.github.com/repos/${input.github}`));
+      const [repositoryId, ownerId] = [id(repository.id), id((repository.owner as Record<string, unknown> | undefined)?.id)];
+      if (repositoryId === null || ownerId === null) throw notFound(`GitHub does not know ${input.github}`);
+      return { github: input.github, repositoryId, ownerId };
+    }
+    if (input.gitlab !== undefined) {
+      if (!GITLAB_PROJECT.test(input.gitlab)) throw badRequest('a GitLab project is <group>/<name>');
+      const base = input.gitlabUrl ?? GITLAB_ISSUER;
+      try {
+        checkFetchUrl(base, 'the GitLab URL', { allowLoopback: this.#deps.config.allowLoopback, path: true, query: false });
+      } catch (error) {
+        if (error instanceof BindingInvalid) throw badRequest(error.message);
+        throw error;
+      }
+      const project = await ask(new URL(`${base.replace(/\/$/, '')}/api/v4/projects/${encodeURIComponent(input.gitlab)}`));
+      const [projectId, namespaceId] = [id(project.id), id((project.namespace as Record<string, unknown> | undefined)?.id)];
+      if (projectId === null || namespaceId === null) throw notFound(`GitLab does not know ${input.gitlab}`);
+      return { gitlab: input.gitlab, projectId, namespaceId };
+    }
+    throw badRequest('look up a GitHub repository or a GitLab project');
   }
 
   #revoke(tx: Transaction, id: string, by: string, at: Date): Promise<number> {

@@ -4,7 +4,7 @@ import { request as httpsRequest } from 'node:https';
 import type { LookupFunction } from 'node:net';
 
 import { isPublicAddress } from './addresses.ts';
-import { FETCH_DEADLINE_MS, FetchRefused, MAX_BODY_BYTES, parsed, type WorkloadTransport } from './transport.ts';
+import { FETCH_DEADLINE_MS, FetchRefused, MAX_BODY_BYTES, parsed, USER_AGENT, type WorkloadTransport } from './transport.ts';
 
 /**
  * The transport on Node, where a fetch could reach the server's own network.
@@ -29,7 +29,7 @@ export function nodeTransport(): WorkloadTransport {
           {
             method: 'GET',
             agent: false,
-            headers: { accept: 'application/json', 'accept-encoding': 'identity' },
+            headers: { accept: 'application/json', 'accept-encoding': 'identity', 'user-agent': USER_AGENT },
             signal: AbortSignal.timeout(FETCH_DEADLINE_MS),
             ...(loopback ? {} : { lookup: publicLookup }),
           },

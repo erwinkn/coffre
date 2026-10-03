@@ -199,6 +199,7 @@ the verb:
 | what a member holds and has seen, before offboarding | `GET /api/members/user:ada@acme.example` |
 | list, issue or revoke a token's credentials | `GET` / `POST /api/members/token:ci-deploy/tokens`, `DELETE …/tokens/:id` |
 | list, make (`?dryRun=1` to preview) or remove a token's trust bindings | `GET` / `POST /api/members/token:ci-deploy/bindings`, `DELETE …/bindings/:id` |
+| a public GitHub repository's or GitLab project's IDs, for a binding | `GET /api/workloads/lookup?github=acme/api` |
 | change someone's access, in one transaction | `PATCH /api/access/user:ada@acme.example {"market": "developer", "market/prod": null}` |
 | my sessions and linked sign-in accounts, and ending them | `GET` / `DELETE /api/sessions/:id`, `GET` / `DELETE /api/identities/:id` |
 | approve or deny a `coffre login` device code | `GET` / `POST /api/device-logins/:code {"approve": true}` |
@@ -531,9 +532,11 @@ genuine, not current: see [Limits](#limits).
 A service can be trusted to sign in with the ID token its CI platform signs
 for a run. A trust binding names an issuer and the claims a token must
 carry; the [design](design/oidc.md) has the reasons. A deployment turns
-bindings on with `signin({ …, workloads: {} })`, and owners make and remove
-them through `/api/members/token:…/bindings`. The exchange that uses them is
-not built yet.
+bindings on with `signin({ …, workloads: {} })`. Owners make and remove
+them on a service's page, under "Trusted workloads", with `coffre trust` and
+`coffre untrust`, or through `/api/members/token:…/bindings`. The page and
+the CLI show every claim, the issuer and its keys' URL before anything is
+saved. The exchange that uses them is not built yet.
 
 - **Profiles.** The server checks each binding against its profile, which
   sets the claims it must name:

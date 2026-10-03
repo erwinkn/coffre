@@ -50,6 +50,7 @@ export const keys = {
   directory: ['directory'],
   report: (member: string) => ['report', member],
   credentials: (member: string) => ['credentials', member],
+  bindings: (member: string) => ['bindings', member],
   identities: ['identities'],
   sessions: ['sessions'],
   audit: ['audit'],
@@ -177,6 +178,17 @@ export const queries = {
     queryOptions({
       queryKey: [...keys.credentials(member), { allowed }],
       queryFn: () => (allowed ? uiResult(() => client.tokens.list(member)) : Promise.resolve(null)),
+    }),
+
+  /**
+   * A token's trust bindings: the CI runs that may sign in as it. Null for
+   * anyone but an owner; a failure where the deployment trusts no workloads,
+   * which the page reads as nothing to show. Whether it does is not public.
+   */
+  bindings: (client: CoffreClient, member: string, allowed: boolean) =>
+    queryOptions({
+      queryKey: [...keys.bindings(member), { allowed }],
+      queryFn: () => (allowed ? uiResult(() => client.bindings.list(member)) : Promise.resolve(null)),
     }),
 
   /** The accounts you sign in with, under coffre's own sign-in. */
@@ -335,6 +347,9 @@ export async function loadPrincipal(
     principalType === 'service'
       ? queryClient.fetchQuery(queries.credentials(client, member, owner && shell.auth.signin !== null))
       : null,
+    principalType === 'service'
+      ? queryClient.fetchQuery(queries.bindings(client, member, owner && shell.auth.signin !== null))
+      : null,
     ...managedProjects(shell.projects).map((project) => queryClient.fetchQuery(queries.grants(client, project.slug))),
   ]);
 }
@@ -372,6 +387,7 @@ export const affects = {
   /** Someone removed: the directory, their report, and every project's grants, which removal ends. */
   removal: (member: string): QueryKey[] => [keys.directory, keys.report(member), ['grants']],
   credentials: (member: string): QueryKey[] => [keys.credentials(member)],
+  bindings: (member: string): QueryKey[] => [keys.bindings(member)],
   /** Unlinking an account also ends the sessions it signed in. */
   identities: (): QueryKey[] => [keys.identities, keys.sessions],
   sessions: (): QueryKey[] => [keys.sessions],
