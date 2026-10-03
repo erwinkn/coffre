@@ -1,7 +1,7 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { spawn } from 'node:child_process';
+import { type ChildProcess, spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,7 +16,7 @@ import { templateDir } from '../src/init.ts';
 import { Steps } from '../src/steps.ts';
 import { Cancelled } from '../src/tty.ts';
 import { addressOf, addressProblem, adminsProblem, isOurs, nameFrom, nameProblem, ourConfig, recordsOf } from '../src/workers.ts';
-import { cancelTerminals, fakeCloudflare, fakeGitHub, fakeOpener, fakeTerminal, fakeWrangler, manifestForm, submitManifest } from './fakes.ts';
+import { cancelTerminals, fakeCloudflare, fakeGitHub, fakeOpener, fakeTerminal, fakeWrangler, manifestForm, settle, submitManifest } from './fakes.ts';
 
 // Whatever a failed test leaves waiting, a prompt, a wrangler, a listener, goes: this file's process always ends.
 after(() => {
@@ -268,26 +268,35 @@ test("wrangler deploys with the secrets on its stdin, as its secrets file: never
 });
 
 /** A Workers deployment with the fake wrangler, and an opener that only notes what it opens; all gone after the test. */
-function signInSetup(t: { after: (fn: () => void) => void }) {
+function signInSetup(t: { after: (fn: () => Promise<void>) => void }) {
   const dir = scratch();
   const state = join(dir, '.state');
   const opener = join(dir, '.bin');
   const path = process.env.PATH;
-  t.after(() => {
+  const remove = () => {
     process.env.PATH = path;
     rmSync(dir, { recursive: true, force: true });
-  });
-  cpSync(templateDir('workers'), dir, { recursive: true, filter: (each) => !each.includes('node_modules') });
-  fakeWrangler(dir, state, TOKEN);
-  fakeOpener(opener);
-  process.env.PATH = `${opener}:${path}`;
+  };
+  try {
+    cpSync(templateDir('workers'), dir, { recursive: true, filter: (each) => !each.includes('node_modules') });
+    fakeWrangler(dir, state, TOKEN);
+    fakeOpener(opener);
+    process.env.PATH = `${opener}:${path}`;
+  } catch (error) {
+    remove();
+    throw error;
+  }
   const terminal = fakeTerminal();
   const steps = new Steps(terminal.out, ['Sign in to Cloudflare'], () => terminal.keys, String);
-  t.after(() => steps.end());
   const printed: [string, string][] = [];
   const signing = steps.run(0, async (step) => (await cloudflareToken(deploymentWrangler(dir), step, (label, address) => printed.push([label, address])), 'Signed in'));
   // Settled one way or another by the end, by the test or by the Ctrl-C after it: never an unhandled rejection.
   signing.catch(() => {});
+  // However the test ends: the sign-in cancelled and its wrangler stopped, and only then the directory gone.
+  t.after(async () => {
+    await settle(terminal.keys, signing, steps);
+    remove();
+  });
   const login = () =>
     until(() => (existsSync(join(state, 'login')) ? (JSON.parse(readFileSync(join(state, 'login'), 'utf8')) as { port: number; state: string }) : undefined));
   return { dir, state, opener, terminal, printed, signing, login };
@@ -368,36 +377,45 @@ test('wrangler stopped from outside, as at setup\'s exit: its login, still liste
 
 test('setup ended by a signal, as when its terminal closes: wrangler, in a session of its own, goes with it', LIMIT, async () => {
   const dir = scratch();
+  let standIn: ChildProcess | undefined;
   try {
     cpSync(templateDir('workers'), dir, { recursive: true, filter: (each) => !each.includes('node_modules') });
     fakeWrangler(dir, join(dir, '.state'), TOKEN);
     // A process standing for setup: it starts wrangler's login, then waits, until a SIGHUP ends it.
     const cli = fileURLToPath(new URL('../src/cloudflare.ts', import.meta.url));
-    const standIn = spawn(
+    standIn = spawn(
       process.execPath,
       ['--conditions=coffre:source', '--input-type=module', '-e', `import { deploymentWrangler } from ${JSON.stringify(cli)}; deploymentWrangler(${JSON.stringify(dir)})(['login', '--browser=false']); setInterval(() => {}, 1000);`],
       { stdio: 'ignore' },
     );
     const pid = await until(() => (existsSync(join(dir, '.state', 'pid-login')) ? Number(readFileSync(join(dir, '.state', 'pid-login'), 'utf8')) : undefined));
     await until(() => (existsSync(join(dir, '.state', 'login')) ? true : undefined));
+    const exited = new Promise((resolve) => standIn!.on('exit', (exitCode) => resolve(exitCode)));
     standIn.kill('SIGHUP');
-    const code = await new Promise((resolve) => standIn.on('exit', (exitCode) => resolve(exitCode)));
-    assert.equal(code, 129);
+    assert.equal(await exited, 129);
     await until(() => (alive(pid) ? undefined : true));
   } finally {
+    // A stand-in still up after a failure ends as setup would, its wrangler with it; then the directory.
+    if (standIn !== undefined && standIn.exitCode === null && standIn.signalCode === null) {
+      const gone = new Promise((resolve) => standIn!.once('exit', resolve));
+      standIn.kill('SIGHUP');
+      await Promise.race([gone, new Promise((resolve) => setTimeout(resolve, 5_000).unref())]);
+      standIn.kill('SIGKILL');
+    }
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test('a deploy cancelled stops all of it: sh, cat and wrangler, its secrets with them', LIMIT, async () => {
   const dir = scratch();
+  const stop = new AbortController();
+  let deploying: Promise<unknown> = Promise.resolve();
   try {
     cpSync(templateDir('workers'), dir, { recursive: true, filter: (each) => !each.includes('node_modules') });
     fakeWrangler(dir, join(dir, '.state'), TOKEN);
     writeFileSync(join(dir, '.state', 'token'), TOKEN);
     writeFileSync(join(dir, '.state', 'slow'), '');
-    const stop = new AbortController();
-    const deploying = deploymentWrangler(dir)(['deploy', '-c', 'vault/wrangler.jsonc', '--secrets-file', '/dev/stdin'], {
+    deploying = deploymentWrangler(dir)(['deploy', '-c', 'vault/wrangler.jsonc', '--secrets-file', '/dev/stdin'], {
       input: JSON.stringify({ VAULT_KEY: 'K'.repeat(43) + '=' }),
       signal: stop.signal,
     });
@@ -406,6 +424,9 @@ test('a deploy cancelled stops all of it: sh, cat and wrangler, its secrets with
     await deploying;
     await until(() => (alive(pid) ? undefined : true));
   } finally {
+    // Cancelled, and awaited, before its directory goes, whatever happened above.
+    stop.abort();
+    await Promise.race([deploying.catch(() => {}), new Promise((resolve) => setTimeout(resolve, 5_000).unref())]);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -462,16 +483,16 @@ for (const road of ['the browser here', 'the address pasted back'] as const) {
     const fake = await fakeGitHub();
     const dir = scratch();
     const path = process.env.PATH;
+    const terminal = fakeTerminal();
+    const steps = new Steps(terminal.out, ["Make coffre's GitHub App"], () => terminal.keys, String);
+    let making: Promise<void> = Promise.resolve();
     try {
-      const { fakeOpener } = await import('./fakes.ts');
       fakeOpener(dir);
       process.env.PATH = `${dir}:${path}`;
-      const terminal = fakeTerminal();
-      const steps = new Steps(terminal.out, ["Make coffre's GitHub App"], () => terminal.keys, String);
       const printed: [string, string][] = [];
       const asides: string[] = [];
       let app: { clientId: string; clientSecret: string } | null = null;
-      const making = steps.run(0, async (step) => {
+      making = steps.run(0, async (step) => {
         const say = { aside: (text: string) => asides.push(text), link: (label: string, address: string) => printed.push([label, address]) };
         app = await createGitHubApp(step, say, fake.github, 'https://secrets.acme.test');
         return 'Made';
@@ -499,13 +520,14 @@ for (const road of ['the browser here', 'the address pasted back'] as const) {
         await type(terminal.keys, `${back.href}\r`);
       }
       await making;
-      steps.end();
       assert.equal(fake.state.manifests.length, 1);
       assert.match(app!.clientId, /^Iv23li/);
       assert.ok(!terminal.drawn().includes(app!.clientSecret), 'the secret is never drawn');
       assert.ok(!terminal.drawn().includes('code='), 'nor the code');
       await assert.rejects(fetch(here), 'the page is gone once the app is made');
     } finally {
+      // Cancelled first, its page closed with it; then the rest.
+      await settle(terminal.keys, making, steps);
       process.env.PATH = path;
       fake.close();
       rmSync(dir, { recursive: true, force: true });
