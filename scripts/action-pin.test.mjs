@@ -52,3 +52,18 @@ test('a malformed or missing Action fails before bump edits any manifests', (t) 
     rmSync(path);
     assert.equal(run(dir, 'check-pins.mjs').status, 1);
 });
+
+test('the Action refuses an unsupported Node before npx runs, with a clear minimum', (t) => {
+    const dir = checkout(t);
+    const bin = join(dir, 'bin');
+    mkdirSync(bin);
+    writeFileSync(join(bin, 'node'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    writeFileSync(join(bin, 'npx'), '#!/bin/sh\necho npx-must-not-run\nexit 0\n', { mode: 0o755 });
+    const text = readFileSync(join(dir, 'action/action.yml'), 'utf8');
+    const block = text.match(/      run: \|\n((?:        [^\n]*\n?)+)/)[1];
+    const shell = block.replace(/^        /gm, '');
+    const ran = spawnSync('/bin/bash', ['-e', '-c', shell], { encoding: 'utf8', env: { PATH: bin }, timeout: 10_000 });
+    assert.equal(ran.status, 1);
+    assert.match(ran.stderr, /requires Node.js 20 or newer/);
+    assert.doesNotMatch(ran.stdout, /npx-must-not-run/);
+});

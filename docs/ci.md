@@ -30,9 +30,10 @@ steps:
   - run: ./deploy
 ```
 
-The Action installs Node 24 and runs `@coffre/cli` at the same exact version
-as the tag. It passes the token through the environment, never command
-arguments. The secrets become environment variables in subsequent steps
+The Action uses your job's existing Node, which must be version 20 or newer,
+and runs `@coffre/cli` at the same exact version as the tag. It leaves your
+toolchain and `PATH` unchanged. It passes the token through the environment,
+never command arguments. The secrets become environment variables in subsequent steps
 of the same job. Their values, and each line of multiline values, are
 masked before being written to `GITHUB_ENV`. Newlines, quotes, `=` and `%`
 are kept intact. Empty values are exported too.

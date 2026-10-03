@@ -16,14 +16,19 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Install Node.js
-      uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-      with:
-        node-version: 24
     - name: Read and mask secrets
       shell: bash
       env:
         COFFRE_API_URL: ${{ inputs.url }}
         COFFRE_TOKEN: ${{ inputs.token }}
         INPUT_ENVIRONMENT: ${{ inputs.environment }}
-      run: npx -y @coffre/cli@0.1.14 export --format github "$INPUT_ENVIRONMENT"
+      run: |
+        if ! command -v node >/dev/null || ! command -v npx >/dev/null; then
+          echo '::error::coffre requires Node.js 20 or newer and npx. Set up your job toolchain before this Action.' >&2
+          exit 1
+        fi
+        if ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 20 ? 0 : 1)'; then
+          echo '::error::coffre requires Node.js 20 or newer. Set up your job toolchain before this Action.' >&2
+          exit 1
+        fi
+        npx -y @coffre/cli@0.1.14 export --format github "$INPUT_ENVIRONMENT"
