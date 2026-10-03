@@ -162,7 +162,12 @@ export function realWrangler(): string {
  * secrets it got, unless `<state>/fail-<name>` says to fail. With `real`,
  * the real wrangler first deploys the same files with the same stdin, in a
  * dry run, with a stub for the Worker's code and no assets: what it says
- * is in `<state>/dry-<name>`, and a refusal fails the deploy.
+ * is in `<state>/dry-<name>`, and a refusal fails the deploy. Each call
+ * says its pid in `<state>/pid-<command>`. With `<state>/listen-late`,
+ * `login` answers nothing for a while after printing its link, as the real
+ * one, which prints it before it listens, may not: the file says how long,
+ * in milliseconds (700 when empty). With `<state>/slow`, `deploy` takes a
+ * minute.
  */
 export function fakeWrangler(dir: string, state: string, token: string, real?: string): void {
   mkdirSync(join(dir, 'node_modules', '.bin'), { recursive: true });
@@ -177,6 +182,7 @@ import jsonc from ${JSON.stringify(jsonc)};
 const STATE = ${JSON.stringify(state)};
 const REAL = ${JSON.stringify(real ?? null)};
 const args = process.argv.slice(2);
+writeFileSync(STATE + '/pid-' + args[0], String(process.pid));
 // The secrets file by its path, as wrangler reads it: /dev/stdin must open as a file.
 const stdin = args.includes('--secrets-file') ? readFileSync(args[args.indexOf('--secrets-file') + 1], 'utf8') : '';
 appendFileSync(STATE + '/calls.jsonl', JSON.stringify({ args, stdin, account: process.env.CLOUDFLARE_ACCOUNT_ID ?? null }) + '\\n');
@@ -193,13 +199,23 @@ if (args[0] === 'auth') {
     server.close();
     console.log('Successfully logged in.');
   });
-  server.listen(0, 'localhost', () => {
-    const port = server.address().port;
+  const announce = (port) => {
     writeFileSync(STATE + '/login', JSON.stringify({ port, state }));
     console.log('Attempting to login via OAuth...');
-    console.log('Visit this link to authenticate: https://dash.cloudflare.com/oauth2/auth?response_type=code&client_id=54d11594&redirect_uri=' + encodeURIComponent('http://localhost:' + port + '/oauth/callback') + '&scope=account%3Aread&state=' + state);
-  });
+    console.log('Visit this link to authenticate: https://dash.cloudflare.com/oauth2/auth?response_type=code&client_id=54d11594&redirect_uri=' + encodeURIComponent('http://127.0.0.1:' + port + '/oauth/callback') + '&scope=account%3Aread&state=' + state);
+  };
+  if (existsSync(STATE + '/listen-late')) {
+    // Not answering yet, as a port nobody listens on: every connection dropped until the delay is over. The port
+    // stays this process's all along, so that no other process, here, can take it in between.
+    const until = Date.now() + (Number(readFileSync(STATE + '/listen-late', 'utf8')) || 700);
+    server.on('connection', (socket) => {
+      if (Date.now() < until) socket.destroy();
+    });
+  }
+  // 127.0.0.1, not localhost: ::1 and 127.0.0.1 each have their own ports, and another process here may hold this one on the other.
+  server.listen(0, '127.0.0.1', () => announce(server.address().port));
 } else if (args[0] === 'deploy') {
+  if (existsSync(STATE + '/slow')) await new Promise((resolve) => setTimeout(resolve, 60_000));
   const config = jsonc.parse(readFileSync(args[args.indexOf('-c') + 1], 'utf8'));
   const name = config.name;
   if (existsSync(STATE + '/fail-' + name)) { console.error('✘ [ERROR] A request to the Cloudflare API failed.'); process.exit(1); }
@@ -241,9 +257,17 @@ export function fakeOpener(dir: string): void {
   }
 }
 
+const terminals: PassThrough[] = [];
+
+/** Ctrl-C at every terminal in memory: whatever still waits at a prompt is cancelled, and lets go of what it holds. */
+export function cancelTerminals(): void {
+  for (const keys of terminals.splice(0)) keys.write('\x03');
+}
+
 /** A terminal in memory: keys in, what is drawn out. */
 export function fakeTerminal(columns = 120) {
   const keys = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => {} });
+  terminals.push(keys);
   let drawn = '';
   const out = Object.assign(
     new Writable({
