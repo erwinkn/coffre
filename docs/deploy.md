@@ -14,7 +14,8 @@ pnpm install
 These are [examples/workers](../examples/workers) and
 [examples/node](../examples/node), with the project's name and the CLI's
 package version. `coffre setup`, run in an empty directory, offers to make
-one there too, and installs its packages. Until the packages are published, install from tarballs;
+one there too, and installs its packages. A clone of a new repository,
+holding only `.git`, counts as empty, for both. Until the packages are published, install from tarballs;
 `pnpm test:consumer` exercises that path.
 
 ## The database and its keys, for either deployment
@@ -139,14 +140,26 @@ GitHub, open the `data:` address setup prints in that browser instead of
 its local page. With no browser at all, set `CLOUDFLARE_API_TOKEN` to a
 token that may edit Workers and Hyperdrive and read the account's zones.
 
+**One account, several deployments.** A Worker or a Hyperdrive config is
+this deployment's only when this directory says so: the Worker binds a
+Hyperdrive config whose id is in this directory's `wrangler.jsonc`, or, the
+vault, the vault ID setup wrote there; a config found by name points at
+this run's database, the same host and database. Setup never deploys over
+another deployment's Worker, nor touches its config. When one already holds
+this deployment's names, setup says which, and asks for a name of its own,
+offering the address's first label: `coffre-try` for
+`coffre-try.example.com`. Both Workers, `<name>` and `<name>-vault`, both
+Hyperdrive configs and the app's binding to its vault take it, and both
+`wrangler.jsonc` record it.
+
 **Run again**, setup finds what it made and keeps it: the Hyperdrive configs,
-by the ids in `wrangler.jsonc` or the Workers' names; the GitHub App, by its
-client ID and the app Worker's secret; each Worker's key. It never makes a
-key for a Worker that has one, and when a Worker lacks its key but the
-database holds data, it stops before changing anything. A run that failed
-partway carries on from where it stopped. Keys shown by a run whose deploy
-failed never reached Cloudflare: the next run makes new ones, and its screen
-says they replace them.
+by the ids in `wrangler.jsonc`, or by the Workers' names on this run's
+database; the GitHub App, by its client ID and the app Worker's secret;
+each Worker's key. It never makes a key for a Worker that has one, and when
+a Worker lacks its key but the database holds data, it stops before
+changing anything. A run that failed partway carries on from where it
+stopped. Keys shown by a run whose deploy failed never reached Cloudflare:
+the next run makes new ones, and its screen says they replace them.
 
 Native Windows keeps the steps below, since wrangler cannot read secrets
 from `/dev/stdin` there; WSL works. So does saying no, for a deployment

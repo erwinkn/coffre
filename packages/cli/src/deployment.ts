@@ -7,11 +7,11 @@ import { join } from 'node:path';
 
 import { applyEdits, type JSONPath, modify, parse, type ParseError, printParseErrorCode } from 'jsonc-parser';
 
-import type { Kind } from './init.ts';
+import { isEmpty, type Kind } from './init.ts';
 
-/** What a directory holds: a deployment of either kind, nothing at all, or something else. */
+/** What a directory holds: a deployment of either kind, nothing yet (`isEmpty`), or something else. */
 export function deploymentKind(dir: string): Kind | 'empty' | 'other' {
-  if (!existsSync(dir) || readdirSync(dir).length === 0) return 'empty';
+  if (isEmpty(dir)) return 'empty';
   if (existsSync(join(dir, 'app', 'wrangler.jsonc')) && existsSync(join(dir, 'vault', 'wrangler.jsonc'))) return 'workers';
   if (existsSync(join(dir, 'src', 'vault.ts')) && existsSync(join(dir, 'vault.env.example'))) return 'node';
   return 'other';

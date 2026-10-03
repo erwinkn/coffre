@@ -149,7 +149,11 @@ export function release(keys: Keyboard): void {
   if (keys !== process.stdin) keys.destroy?.();
 }
 
-/** Every key pressed, in raw mode, until `until` returns true, or `signal` aborts the reading. */
+/**
+ * Every key pressed, in raw mode, until `until` returns true, or `signal`
+ * aborts the reading. Raw mode is on when this returns: a prompt shown after
+ * it gets every key, none echoed or edited by the terminal first.
+ */
 export function readKeys(
   keys: Keyboard,
   until: (key: Key, sequence: string) => boolean | Promise<boolean>,
@@ -190,9 +194,9 @@ export function edit(text: string, key: Key, sequence: string): string | 'submit
 
 /**
  * A question answered by typing, shown as typed, `initial` to start from;
- * `check` says why an answer will not do, under it. Once given, the
- * question becomes one line: what was asked, and the answer. Ctrl-C
- * cancels.
+ * `note`, dim under it while it is asked; `check` says why an answer will
+ * not do, under it. Once given, the question becomes one line: what was
+ * asked, and the answer. Ctrl-C cancels.
  */
 export async function textLine(
   keys: Keyboard,
@@ -200,25 +204,26 @@ export async function textLine(
   s: Style,
   question: string,
   hint: string,
-  options: { initial?: string; check?: (answer: string) => string | null } = {},
+  options: { initial?: string; note?: string; check?: (answer: string) => string | null | Promise<string | null> } = {},
 ): Promise<string> {
   const columns = Math.max(20, (out.columns || 80) - 1);
-  out.write(`${truncate(`  ${s.accent('?')} ${s.bold(question)} ${s.dim(hint)}`, columns)}\n`);
   let typed = options.initial ?? '';
   let error: string | null = null;
-  // The input, then its error below it, the cursor back at the end of the input.
-  const draw = () =>
-    out.write(
-      `\r\x1b[J${error === null ? '' : `\n${truncate(`    ${s.red(error)}`, columns)}\x1b[1A`}\r${truncate(`    ${s.accent('›')} ${typed}`, columns)}`,
-    );
-  draw();
+  // The input, then its error and the note below it, the cursor back at the end of the input.
+  const draw = () => {
+    const below = [
+      ...(error === null ? [] : [s.red(error)]),
+      ...(options.note === undefined ? [] : wrap(options.note, columns - 4).map(s.dim)),
+    ].map((line) => `\n${truncate(`    ${line}`, columns)}`);
+    out.write(`\r\x1b[J${below.join('')}${below.length > 0 ? `\x1b[${below.length}A` : ''}\r${truncate(`    ${s.accent('›')} ${typed}`, columns)}`);
+  };
   let cancelled = false;
-  await readKeys(keys, (key, sequence) => {
+  const answered = readKeys(keys, async (key, sequence) => {
     const next = edit(typed, key, sequence);
     if (next === 'cancel') cancelled = true;
     else if (next === 'submit') {
       if (typed.trim() === '') return false;
-      error = options.check?.(typed.trim()) ?? null;
+      error = (await options.check?.(typed.trim())) ?? null;
       if (error === null) return true;
     } else {
       typed = next;
@@ -228,6 +233,9 @@ export async function textLine(
     draw();
     return false;
   });
+  out.write(`${truncate(`  ${s.accent('?')} ${s.bold(question)} ${s.dim(hint)}`, columns)}\n`);
+  draw();
+  await answered;
   out.write('\r\x1b[J\x1b[1A\x1b[2K');
   if (cancelled) throw new Cancelled();
   out.write(`${truncate(`  ${s.green('✓')} ${s.dim(question)}  ${typed.trim()}`, columns)}\n`);
@@ -247,9 +255,8 @@ export async function select(keys: Keyboard, out: Output, s: Style, question: st
     out.write(`${drawn > 0 ? `\x1b[${drawn}F` : ''}${lines.map((line) => `${truncate(line, columns)}\x1b[K\n`).join('')}`);
     drawn = lines.length;
   };
-  draw();
   let cancelled = false;
-  await readKeys(keys, (key) => {
+  const chosen = readKeys(keys, (key) => {
     if (key.ctrl && key.name === 'c') cancelled = true;
     else if (key.name === 'return' || key.name === 'enter') return true;
     else if (key.name === 'up' || key.name === 'k') at = (at - 1 + options.length) % options.length;
@@ -258,6 +265,8 @@ export async function select(keys: Keyboard, out: Output, s: Style, question: st
     draw();
     return false;
   });
+  draw();
+  await chosen;
   out.write(`\x1b[${drawn}F\x1b[J`);
   if (cancelled) throw new Cancelled();
   out.write(`${truncate(`  ${s.green('✓')} ${s.dim(question)}  ${options[at]}`, columns)}\n`);
@@ -277,15 +286,14 @@ export class Cancelled extends Error {
  */
 export async function hiddenLine(keys: Keyboard, out: Output, s: Style, question: string, hint: string): Promise<string> {
   const columns = Math.max(20, (out.columns || 80) - 1);
-  out.write(`${truncate(`  ${s.accent('?')} ${s.bold(question)}`, columns)}\n${truncate(`    ${s.dim(hint)}`, columns)}\n`);
   let typed = '';
   const draw = () => {
     const count = typed.length > 0 ? s.dim(`  ${typed.length} characters`) : '';
     out.write(`\r\x1b[2K${truncate(`    ${s.accent('›')} ${'•'.repeat(typed.length)}`, columns - width(count))}${count}`);
   };
-  draw();
   let cancelled = false;
-  await readKeys(keys, (key, sequence) => {
+  // The terminal out of its own line editing before the question shows: a paste the moment it does is never echoed.
+  const typedIn = readKeys(keys, (key, sequence) => {
     const next = edit(typed, key, sequence);
     if (next === 'cancel') cancelled = true;
     else if (next === 'submit') return true;
@@ -294,6 +302,9 @@ export async function hiddenLine(keys: Keyboard, out: Output, s: Style, question
     draw();
     return false;
   });
+  out.write(`${truncate(`  ${s.accent('?')} ${s.bold(question)}`, columns)}\n${truncate(`    ${s.dim(hint)}`, columns)}\n`);
+  draw();
+  await typedIn;
   out.write('\r\x1b[2K\x1b[1A\x1b[2K\x1b[1A\x1b[2K');
   if (cancelled) throw new Cancelled();
   return typed.trim();

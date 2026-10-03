@@ -1,14 +1,16 @@
-// A disposable Postgres cluster, for the tests of `coffre setup`: roles are
+// Disposable Postgres clusters, for the tests of `coffre setup`: roles are
 // cluster-wide, so these make and drop coffre's own. scripts/test-setup.sh
-// starts one, from `pnpm test:schema`.
+// starts them, from `pnpm test:schema`: one, and another, for a second
+// deployment on a server of its own.
 import pg from 'pg';
 
-/** The cluster's superuser URL, without a database. */
+/** The cluster's superuser URL, without a database; and the other's. */
 export const CLUSTER = process.env.COFFRE_TEST_SETUP_CLUSTER;
+export const OTHER_CLUSTER = process.env.COFFRE_TEST_SETUP_OTHER_CLUSTER;
 export const needsCluster = { skip: CLUSTER === undefined && 'needs a disposable cluster: scripts/test-setup.sh' };
 
-export async function asSuperuser<T>(database: string, work: (client: pg.Client) => Promise<T>): Promise<T> {
-  const client = new pg.Client({ connectionString: `${CLUSTER}/${database}` });
+export async function asSuperuser<T>(database: string, work: (client: pg.Client) => Promise<T>, cluster = CLUSTER): Promise<T> {
+  const client = new pg.Client({ connectionString: `${cluster}/${database}` });
   await client.connect();
   try {
     return await work(client);
@@ -32,13 +34,13 @@ export async function connects(url: string): Promise<boolean> {
 }
 
 /** The cluster as a fresh managed service's: no coffre roles, no databases of ours. */
-export async function emptyCluster(): Promise<void> {
+export async function emptyCluster(cluster = CLUSTER): Promise<void> {
   await asSuperuser('postgres', async (client) => {
     for (const { datname } of (await client.query<{ datname: string }>("SELECT datname FROM pg_database WHERE datname LIKE 'setup\\_%'")).rows) {
       await client.query(`DROP DATABASE ${client.escapeIdentifier(datname)} WITH (FORCE)`);
     }
     await client.query('DROP ROLE IF EXISTS coffre_runtime, coffre_vault_runtime, coffre_app, coffre_vault, setup_owner');
-  });
+  }, cluster);
 }
 
 /**

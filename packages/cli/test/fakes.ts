@@ -4,8 +4,11 @@
 import { randomBytes } from 'node:crypto';
 import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
-import { join } from 'node:path';
+import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
 import { PassThrough, Writable } from 'node:stream';
+
+import { templateDir } from '../src/init.ts';
 
 async function body(request: IncomingMessage): Promise<string> {
   let text = '';
@@ -29,8 +32,8 @@ export async function fakeCloudflare(token: string) {
     ],
     zones: { 'acc-acme': [{ id: 'zone-1', name: 'acme.test' }], 'acc-home': [] } as Record<string, { id: string; name: string }[]>,
     configs: new Map<string, FakeConfig[]>(),
-    /** Each Worker deployed, `<account>/<name>`, and the names of its secrets. */
-    scripts: new Map<string, Set<string>>(),
+    /** Each Worker deployed, `<account>/<name>`: the names of its secrets, and its bindings. */
+    scripts: new Map<string, { secrets: Set<string>; bindings: unknown[] }>(),
     requests: [] as { method: string; path: string; body: string }[],
     email: 'ops@acme.test' as string | null,
   };
@@ -69,19 +72,21 @@ export async function fakeCloudflare(token: string) {
       else if (request.method === 'PATCH') Object.assign(config, JSON.parse(text));
       return send(200, visible(config));
     }
-    if ((match = /^\/accounts\/([^/]+)\/workers\/scripts\/([^/]+)(\/secrets)?$/.exec(path)) !== null) {
-      const [, account, name, secrets] = match;
+    if ((match = /^\/accounts\/([^/]+)\/workers\/scripts\/([^/]+)(\/secrets|\/settings)?$/.exec(path)) !== null) {
+      const [, account, name, part] = match;
       const key = `${account}/${name}`;
-      if (secrets !== undefined && request.method === 'GET') {
-        const names = state.scripts.get(key);
-        if (names === undefined) return send(404, null, [{ code: 10007, message: 'This Worker does not exist on your account.' }]);
-        return send(200, [...names].map((each) => ({ name: each, type: 'secret_text' })));
+      const script = state.scripts.get(key);
+      if (part !== undefined && request.method === 'GET') {
+        if (script === undefined) return send(404, null, [{ code: 10007, message: 'This Worker does not exist on your account.' }]);
+        if (part === '/settings') return send(200, { bindings: script.bindings, compatibility_date: '2026-08-06' });
+        return send(200, [...script.secrets].map((each) => ({ name: each, type: 'secret_text' })));
       }
-      // Only the fake wrangler's deploy: the Worker, and the secrets it was given.
-      if (secrets === undefined && request.method === 'PUT') {
-        const names = state.scripts.get(key) ?? new Set();
-        for (const each of JSON.parse(text).secrets as string[]) names.add(each);
-        state.scripts.set(key, names);
+      // Only the fake wrangler's deploy: the Worker, its bindings, and the secrets it was given, which stay.
+      if (part === undefined && request.method === 'PUT') {
+        const deployed = JSON.parse(text) as { secrets: string[]; bindings: unknown[] };
+        const secrets = script?.secrets ?? new Set<string>();
+        for (const each of deployed.secrets) secrets.add(each);
+        state.scripts.set(key, { secrets, bindings: deployed.bindings });
         return send(200, { id: name });
       }
     }
@@ -143,22 +148,37 @@ export async function submitManifest(html: string): Promise<string> {
   return created.headers.get('location')!;
 }
 
+/** The real wrangler, the version the Workers template pins, as the repository installed it for the example. */
+export function realWrangler(): string {
+  const require = createRequire(join(templateDir('workers'), 'package.json'));
+  return join(dirname(require.resolve('wrangler/package.json')), 'bin', 'wrangler.js');
+}
+
 /**
  * wrangler, in a deployment's node_modules/.bin, as setup runs it: each call
  * in `<state>/calls.jsonl`, with what came on its stdin. `login` listens
  * for its callback as wrangler does, and says where in `<state>/login`;
- * `deploy` tells the fake API the Worker exists, with the secrets it got,
- * unless `<state>/fail-<name>` says to fail.
+ * `deploy` tells the fake API the Worker exists, with its bindings and the
+ * secrets it got, unless `<state>/fail-<name>` says to fail. With `real`,
+ * the real wrangler first deploys the same files with the same stdin, in a
+ * dry run, with a stub for the Worker's code and no assets: what it says
+ * is in `<state>/dry-<name>`, and a refusal fails the deploy.
  */
-export function fakeWrangler(dir: string, state: string, token: string): void {
+export function fakeWrangler(dir: string, state: string, token: string, real?: string): void {
   mkdirSync(join(dir, 'node_modules', '.bin'), { recursive: true });
-  mkdirSync(state, { recursive: true });
+  mkdirSync(join(state, 'assets'), { recursive: true });
+  writeFileSync(join(state, 'stub.js'), 'export default { fetch: () => new Response("ok") };\n');
+  const jsonc = createRequire(import.meta.url).resolve('jsonc-parser');
   const script = `#!${process.execPath}
+import { spawnSync } from 'node:child_process';
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
+import jsonc from ${JSON.stringify(jsonc)};
 const STATE = ${JSON.stringify(state)};
+const REAL = ${JSON.stringify(real ?? null)};
 const args = process.argv.slice(2);
-const stdin = args.includes('--secrets-file') ? readFileSync(0, 'utf8') : '';
+// The secrets file by its path, as wrangler reads it: /dev/stdin must open as a file.
+const stdin = args.includes('--secrets-file') ? readFileSync(args[args.indexOf('--secrets-file') + 1], 'utf8') : '';
 appendFileSync(STATE + '/calls.jsonl', JSON.stringify({ args, stdin, account: process.env.CLOUDFLARE_ACCOUNT_ID ?? null }) + '\\n');
 if (args[0] === 'auth') {
   if (!existsSync(STATE + '/token')) { console.error('You are not authenticated. Please run \`wrangler login\`.'); process.exit(1); }
@@ -180,13 +200,28 @@ if (args[0] === 'auth') {
     console.log('Visit this link to authenticate: https://dash.cloudflare.com/oauth2/auth?response_type=code&client_id=54d11594&redirect_uri=' + encodeURIComponent('http://localhost:' + port + '/oauth/callback') + '&scope=account%3Aread&state=' + state);
   });
 } else if (args[0] === 'deploy') {
-  const config = readFileSync(args[args.indexOf('-c') + 1], 'utf8');
-  const name = /"name":\\s*"([^"]+)"/.exec(config)[1];
+  const config = jsonc.parse(readFileSync(args[args.indexOf('-c') + 1], 'utf8'));
+  const name = config.name;
   if (existsSync(STATE + '/fail-' + name)) { console.error('✘ [ERROR] A request to the Cloudflare API failed.'); process.exit(1); }
-  const account = process.env.CLOUDFLARE_ACCOUNT_ID ?? /"account_id":\\s*"([^"]+)"/.exec(config)[1];
+  if (REAL !== null) {
+    // Its stdin a pipe, as setup gives it: see deploymentWrangler.
+    const dry = spawnSync('/bin/sh', ['-c', 'cat | "$0" "$@"', process.execPath, REAL, 'deploy', STATE + '/stub.js', '--assets', STATE + '/assets', '--dry-run', ...args.slice(1)], {
+      input: stdin,
+      encoding: 'utf8',
+      env: { ...process.env, FORCE_COLOR: '0', WRANGLER_SEND_METRICS: 'false' },
+    });
+    writeFileSync(STATE + '/dry-' + name, dry.stdout + dry.stderr);
+    if (dry.status !== 0) { console.error(dry.stdout + dry.stderr); process.exit(1); }
+  }
+  const account = process.env.CLOUDFLARE_ACCOUNT_ID ?? config.account_id;
   const secrets = stdin === '' ? [] : Object.keys(JSON.parse(stdin));
+  const bindings = [
+    ...(config.hyperdrive ?? []).map(({ binding, id }) => ({ type: 'hyperdrive', name: binding, id })),
+    ...Object.entries(config.vars ?? {}).map(([key, text]) => ({ type: 'plain_text', name: key, text })),
+    ...(config.services ?? []).map(({ binding, service }) => ({ type: 'service', name: binding, service })),
+  ];
   const token = readFileSync(STATE + '/token', 'utf8');
-  await fetch(process.env.CLOUDFLARE_API_BASE_URL + '/accounts/' + account + '/workers/scripts/' + name, { method: 'PUT', headers: { authorization: 'Bearer ' + token }, body: JSON.stringify({ secrets }) });
+  await fetch(process.env.CLOUDFLARE_API_BASE_URL + '/accounts/' + account + '/workers/scripts/' + name, { method: 'PUT', headers: { authorization: 'Bearer ' + token }, body: JSON.stringify({ secrets, bindings }) });
   console.log('Deployed ' + name);
 } else {
   console.error('fake wrangler: ' + args.join(' '));

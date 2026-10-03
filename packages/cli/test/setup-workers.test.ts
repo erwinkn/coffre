@@ -1,8 +1,11 @@
 // `coffre setup` doing Cloudflare too, end to end, in a terminal: against a
 // disposable cluster, and stand-ins for Cloudflare's API, GitHub, wrangler
 // and a browser. A first run whose app deploy fails, the run that resumes
-// it, one that finds everything done, and one that stops before changing a
-// database in use.
+// it, one that finds everything done, a second deployment beside the first
+// on one account, a third on the first's database server, and one that
+// stops before changing a database in use.
+// Every deploy is also the real wrangler's, in a dry run, on the same files
+// and the same stdin.
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
@@ -14,8 +17,8 @@ import pg from 'pg';
 
 import { editWorker, readWorker } from '../src/deployment.ts';
 import { templateDir } from '../src/init.ts';
-import { connects, database, emptyCluster, needsCluster } from './cluster.ts';
-import { fakeCloudflare, fakeGitHub, fakeOpener, fakeWrangler, submitManifest } from './fakes.ts';
+import { asSuperuser, CLUSTER, connects, database, emptyCluster, needsCluster, OTHER_CLUSTER } from './cluster.ts';
+import { fakeCloudflare, fakeGitHub, fakeOpener, fakeWrangler, realWrangler, submitManifest } from './fakes.ts';
 import { ENTER_ALT, inTerminal, ptySkip, screens, type Session, visible } from './pty.ts';
 
 const skip = needsCluster.skip || ptySkip;
@@ -31,6 +34,7 @@ let env: NodeJS.ProcessEnv;
 before(async () => {
   if (skip) return;
   await emptyCluster();
+  if (OTHER_CLUSTER !== undefined) await emptyCluster(OTHER_CLUSTER);
   dir = mkdtempSync(join(tmpdir(), 'coffre-workers-'));
   cloudflare = await fakeCloudflare(TOKEN);
   github = await fakeGitHub();
@@ -38,13 +42,13 @@ before(async () => {
   live = createServer((request, response) => response.writeHead(request.url === '/livez' ? 200 : 404).end('{"ok":true}'));
   await new Promise<void>((resolve) => live.listen(0, '127.0.0.1', resolve));
   const at = `http://127.0.0.1:${(live.address() as { port: number }).port}`;
-  // Its address, which no resolver knows, reaches it through a fetch that knows.
+  // Its addresses, which no resolver knows, reach it through a fetch that knows.
   writeFileSync(
     join(dir, 'network.mjs'),
     `const real = globalThis.fetch;
 globalThis.fetch = (input, init) => {
   const url = new URL(input instanceof Request ? input.url : String(input));
-  return real(url.hostname === ${JSON.stringify(ADDRESS)} ? ${JSON.stringify(at)} + url.pathname : input, init);
+  return real(url.hostname.endsWith('.acme.test') ? ${JSON.stringify(at)} + url.pathname : input, init);
 };\n`,
   );
   const deployment = join(dir, 'deployment');
@@ -54,7 +58,7 @@ globalThis.fetch = (input, init) => {
     { path: ['vars', 'GITHUB_URL'], value: github.github.web },
     { path: ['vars', 'GITHUB_API_URL'], value: github.github.api },
   ]);
-  fakeWrangler(deployment, join(dir, 'wrangler'), TOKEN);
+  fakeWrangler(deployment, join(dir, 'wrangler'), TOKEN, realWrangler());
   fakeOpener(join(dir, 'bin'));
   env = {
     PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
@@ -72,13 +76,35 @@ after(async () => {
   live.close();
   rmSync(dir, { recursive: true, force: true });
   await emptyCluster();
+  if (OTHER_CLUSTER !== undefined) await emptyCluster(OTHER_CLUSTER);
 });
+
+/** Whether each of the first deployment's Hyperdrive configs still logs in. */
+async function firstConnects(): Promise<boolean[]> {
+  const configs = cloudflare.state.configs.get('acc-acme')!.filter(({ name }) => name === 'coffre' || name === 'coffre-vault');
+  return Promise.all(configs.map(({ origin }) => connects(`postgresql://${origin.user}:${origin.password}@${origin.host}:${origin.port}/${origin.database}`)));
+}
+
+/** A copy of the template beside the first deployment, its GitHub the fake one, its wrangler the fake one. */
+function another(name: string): string {
+  const where = join(dir, name);
+  cpSync(templateDir('workers'), where, { recursive: true, filter: (path) => !path.includes('node_modules') });
+  editWorker(where, 'app/wrangler.jsonc', [
+    { path: ['vars', 'GITHUB_URL'], value: github.github.web },
+    { path: ['vars', 'GITHUB_API_URL'], value: github.github.api },
+  ]);
+  fakeWrangler(where, join(dir, 'wrangler'), TOKEN, realWrangler());
+  return where;
+}
 
 const deployment = () => join(dir, 'deployment');
 
-function setup(play: (terminal: Session) => Promise<void>) {
-  return inTerminal(['setup'], env, play, { columns: 160, rows: 48 }, deployment());
+function setup(play: (terminal: Session) => Promise<void>, where = deployment(), more: NodeJS.ProcessEnv = {}) {
+  return inTerminal(['setup'], { ...env, ...more }, play, { columns: 160, rows: 48 }, where);
 }
+
+/** What the real wrangler said, in its dry run of a Worker's last deploy. */
+const dryRun = (name: string) => readFileSync(join(dir, 'wrangler', `dry-${name}`), 'utf8');
 
 type Call = { args: string[]; stdin: string; account: string | null };
 function calls(): Call[] {
@@ -88,11 +114,16 @@ function calls(): Call[] {
   return all;
 }
 
-/** The address the browser was last asked to open that starts with `prefix`, once it has been. */
-async function opened(prefix: string): Promise<string> {
+/** The addresses starting with `prefix` the browser was asked to open. */
+function openedAll(prefix: string): string[] {
+  const path = join(dir, 'bin', 'opened');
+  return existsSync(path) ? readFileSync(path, 'utf8').split('\n').filter((line) => line.startsWith(prefix)) : [];
+}
+
+/** The address the browser was asked to open after the first `seen` starting with `prefix`, once it has been. */
+async function opened(prefix: string, seen = 0): Promise<string> {
   for (let tries = 0; ; tries += 1) {
-    const path = join(dir, 'bin', 'opened');
-    const found = existsSync(path) ? readFileSync(path, 'utf8').split('\n').findLast((line) => line.startsWith(prefix)) : undefined;
+    const found = openedAll(prefix)[seen];
     if (found !== undefined) return found;
     if (tries === 200) throw new Error(`never opened ${prefix}…`);
     await new Promise((resolve) => setTimeout(resolve, 25));
@@ -194,6 +225,10 @@ test('a first run: signed in, Hyperdrive, the GitHub App and the files done; the
     ['deploy', '-c', 'app/wrangler.jsonc', '--secrets-file', '/dev/stdin'],
   ]);
   assert.deepEqual(JSON.parse(deploys[0]!.stdin), { VAULT_KEY: vaultKey });
+  // The real wrangler read the same files, and the key from its stdin, which it named and never showed.
+  assert.match(dryRun('coffre-vault'), /env\.VAULT_KEY \("\(hidden\)"\)/);
+  assert.match(dryRun('coffre-vault'), new RegExp(`env\\.VAULT_HYPERDRIVE \\(${configs[1]!.id}\\)`));
+  assert.ok(!dryRun('coffre-vault').includes(vaultKey!));
   const sent = JSON.parse(deploys[1]!.stdin) as { APP_KEY: string; GITHUB_CLIENT_SECRET: string };
   assert.equal(sent.APP_KEY, appKey);
   secrets.add(sent.GITHUB_CLIENT_SECRET);
@@ -244,6 +279,9 @@ test('the run after: the vault keeps its key; the app gets a new one, and a new 
   const deploys = wrangler.filter(({ args }) => args[0] === 'deploy');
   assert.deepEqual(deploys.map(({ args }) => args.length), [3, 5]);
   assert.deepEqual(JSON.parse(deploys[1]!.stdin), { APP_KEY: appKey, GITHUB_CLIENT_SECRET: clientSecret });
+  assert.match(dryRun('coffre'), /env\.APP_KEY \("\(hidden\)"\)[\s\S]*env\.GITHUB_CLIENT_SECRET \("\(hidden\)"\)/);
+  assert.match(dryRun('coffre'), /env\.VAULT \(coffre-vault\)/);
+  for (const value of [appKey!, clientSecret]) assert.ok(!dryRun('coffre').includes(value));
   assert.equal(cloudflare.state.configs.get('acc-acme')!.length, 2);
   assert.equal(github.state.manifests.length, 1, 'no second app');
   assertKept(output, wrangler);
@@ -267,6 +305,107 @@ test('a run with everything done: nothing made, nothing shown, both deployed aga
   assertKept(output, wrangler);
 });
 
+test("a second deployment on the same account: it takes names of its own, and the first's Workers and Hyperdrive configs stay as they were, byte for byte", { skip: skip || (OTHER_CLUSTER === undefined && 'needs a second cluster') }, async () => {
+  const first = () =>
+    JSON.stringify({
+      configs: cloudflare.state.configs.get('acc-acme')!.filter(({ name }) => name === 'coffre' || name === 'coffre-vault'),
+      workers: ['coffre', 'coffre-vault'].map((name) => {
+        const { secrets: names, bindings } = cloudflare.state.scripts.get(`acc-acme/${name}`)!;
+        return [name, [...names], bindings];
+      }),
+      files: ['app', 'vault'].map((component) => readFileSync(join(deployment(), component, 'wrangler.jsonc'), 'utf8')),
+    });
+  const before = first();
+  assert.deepEqual(await firstConnects(), [true, true]);
+  // Its database on a server of its own, as two deployments' must be: a login is the server's.
+  await asSuperuser('postgres', (client) => client.query('CREATE DATABASE setup_workers_two'), OTHER_CLUSTER);
+  const second = another('second');
+  const pages = openedAll('http://127.0.0.1:').length;
+  const { output, code } = await setup(
+    async (terminal) => {
+      await terminal.waitFor('Set Cloudflare up too?');
+      terminal.send('\r');
+      await terminal.waitFor('Which Cloudflare account?');
+      terminal.send('\r');
+      await terminal.waitFor("coffre's address");
+      terminal.send('coffre-try.acme.test\r');
+      await terminal.waitFor("This deployment's name");
+      // The first's name, refused; then the one offered, from the address.
+      terminal.send('\x15coffre\r');
+      await terminal.waitFor("another deployment's too");
+      terminal.send('\x15coffre-try\r');
+      await terminal.waitFor('Root admins');
+      terminal.send('\r');
+      await terminal.waitFor("GitHub: create coffre's app");
+      await fetch(await submitManifest(await (await fetch(await opened('http://127.0.0.1:', pages))).text()));
+      await terminal.waitFor('reveal all');
+      terminal.send('q');
+      await terminal.waitFor('Have you saved all three values?');
+      terminal.send('y');
+      await terminal.waitFor('coffre is at');
+    },
+    second,
+    { COFFRE_SETUP_DATABASE_URL: `${OTHER_CLUSTER}/setup_workers_two` },
+  );
+  const text = mainText(output);
+  assert.equal(code, 0, text);
+  assert.match(
+    text,
+    /On this account, the Worker coffre, the Hyperdrive config coffre, the Worker coffre-vault and the Hyperdrive config coffre-vault\s+are\s+another\s+deployment's\.\s+Setup leaves them as they are\./,
+  );
+  assert.match(text, /✓ This deployment's name {2}coffre-try/);
+  assert.match(text, /✓ Hyperdrive configs coffre-try and coffre-try-vault, caching off/);
+  assert.match(text, /✓ Deployed the app, coffre-try, with its key and GitHub's secret/);
+  assert.match(text, /✓ coffre answers at https:\/\/coffre-try\.acme\.test/);
+
+  assert.equal(first(), before, "the first deployment's Workers, Hyperdrive configs and files");
+  assert.deepEqual(await firstConnects(), [true, true], "the first deployment's logins");
+  const configs = cloudflare.state.configs.get('acc-acme')!.filter(({ name }) => name.startsWith('coffre-try'));
+  assert.deepEqual(configs.map(({ name, origin }) => [name, origin.database]), [
+    ['coffre-try', 'setup_workers_two'],
+    ['coffre-try-vault', 'setup_workers_two'],
+  ]);
+  const app = readWorker(second, 'app/wrangler.jsonc');
+  const vault = readWorker(second, 'vault/wrangler.jsonc');
+  assert.deepEqual([app.name, app.hyperdrive, vault.name, vault.hyperdrive], ['coffre-try', configs[0]!.id, 'coffre-try-vault', configs[1]!.id]);
+  assert.match(readFileSync(join(second, 'app', 'wrangler.jsonc'), 'utf8'), /"services": \[\{ "binding": "VAULT", "service": "coffre-try-vault" \}\]/);
+  assert.deepEqual(cloudflare.state.scripts.get('acc-acme/coffre-try')!.bindings, [
+    { type: 'hyperdrive', name: 'HYPERDRIVE', id: configs[0]!.id },
+    ...Object.entries(app.vars).map(([name, value]) => ({ type: 'plain_text', name, text: value })),
+    { type: 'service', name: 'VAULT', service: 'coffre-try-vault' },
+  ]);
+  assert.match(dryRun('coffre-try'), /env\.VAULT \(coffre-try-vault\)/);
+  calls();
+});
+
+test("a deployment on another's database server: setup stops before giving their shared login a new password", { skip }, async () => {
+  const before = cloudflare.state.configs.get('acc-acme')!.length;
+  const third = another('third');
+  await asSuperuser('postgres', (client) => client.query('CREATE DATABASE setup_workers_three'));
+  const { output, code } = await setup(
+    async (terminal) => {
+      await terminal.waitFor('Set Cloudflare up too?');
+      terminal.send('\r');
+      await terminal.waitFor('Which Cloudflare account?');
+      terminal.send('\r');
+      await terminal.waitFor("coffre's address");
+      terminal.send('coffre-three.acme.test\r');
+      await terminal.waitFor("This deployment's name");
+      terminal.send('\r');
+      await terminal.waitFor('Root admins');
+      terminal.send('\r');
+    },
+    third,
+    { COFFRE_SETUP_DATABASE_URL: `${CLUSTER}/setup_workers_three` },
+  );
+  const text = mainText(output);
+  assert.equal(code, 1, text);
+  assert.match(text, /✗ Make the two logins\n\s+coffre_runtime is also the login of the Hyperdrive config coffre, another deployment's, on this database server/);
+  assert.deepEqual(await firstConnects(), [true, true], "the first deployment's logins keep their passwords");
+  assert.equal(cloudflare.state.configs.get('acc-acme')!.length, before);
+  assert.deepEqual(calls().filter(({ args }) => args[0] === 'deploy'), []);
+});
+
 test('a Worker without its key over a database in use: setup stops before changing anything', { skip }, async () => {
   const url = env.COFFRE_SETUP_DATABASE_URL!;
   const client = new pg.Client({ connectionString: url });
@@ -277,7 +416,7 @@ test('a Worker without its key over a database in use: setup stops before changi
   } finally {
     await client.end();
   }
-  cloudflare.state.scripts.get('acc-acme/coffre-vault')!.delete('VAULT_KEY');
+  cloudflare.state.scripts.get('acc-acme/coffre-vault')!.secrets.delete('VAULT_KEY');
   const files = ['app', 'vault'].map((component) => readFileSync(join(deployment(), component, 'wrangler.jsonc'), 'utf8'));
   const { output, code } = await setup((terminal) => answer(terminal));
   const text = mainText(output);

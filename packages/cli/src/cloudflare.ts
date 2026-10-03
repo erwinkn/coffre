@@ -25,7 +25,10 @@ export function deploymentWrangler(dir: string): Wrangler {
   const bin = join(dir, 'node_modules', '.bin', process.platform === 'win32' ? 'wrangler.cmd' : 'wrangler');
   return (args, { input, env, onOutput, signal } = {}) =>
     new Promise((resolve, reject) => {
-      const child = spawn(bin, args, {
+      // A child's stdin is a socket, which Linux cannot open again as /dev/stdin, as `--secrets-file /dev/stdin`
+      // does: with input, it goes through cat, so that wrangler's stdin is a pipe. Neither command line holds it.
+      const [command, argv] = input === undefined ? [bin, args] : ['/bin/sh', ['-c', 'cat | "$0" "$@"', bin, ...args]];
+      const child = spawn(command, argv, {
         cwd: dir,
         env: { ...process.env, ...env, WRANGLER_SEND_METRICS: 'false', NO_COLOR: '1' },
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -48,9 +51,19 @@ export function deploymentWrangler(dir: string): Wrangler {
     });
 }
 
-/** The tail of what a command said, for an error, without its banner. */
-function said(run: Run): string {
-  return `${run.stderr}\n${run.stdout}`.trim().split('\n').filter((line) => line.trim() !== '').slice(-3).join(' ');
+/**
+ * The tail of what a command said, for an error: its errors, which wrangler
+ * writes to stderr, else what it printed; without its banner or log line,
+ * nor the colours wrangler gives them even in a pipe.
+ */
+export function said(run: Run): string {
+  return (run.stderr.trim() === '' ? run.stdout : run.stderr)
+    .replace(/\x1b\[[0-9;]*m/g, '')
+    .split('\n')
+    .filter((line) => line.trim() !== '' && !line.startsWith('🪵'))
+    .slice(-3)
+    .map((line) => line.trim())
+    .join(' ');
 }
 
 /** Show an address to open, after what it is for. */
@@ -97,12 +110,15 @@ export function callbackOf(link: string): URL {
 async function login(wrangler: Wrangler, step: Step, link: Link): Promise<void> {
   step.note('Cloudflare: approve the sign-in in your browser');
   let callback: URL | null = null;
+  let output = '';
   const done = new AbortController();
   const stop = new AbortController();
   const running = wrangler(['login', '--browser=false'], {
     signal: stop.signal,
     onOutput: (text) => {
-      const address = /Visit this link to authenticate: (\S+)/.exec(text)?.[1];
+      // A whole line: the link may come in more than one piece.
+      output += text;
+      const address = /Visit this link to authenticate: (\S+)\r?\n/.exec(output)?.[1];
       if (address === undefined || callback !== null) return;
       callback = callbackOf(address);
       link('If no browser opened, sign in to Cloudflare at', address);
@@ -149,7 +165,16 @@ export type HyperdriveConfig = {
   caching?: { disabled?: boolean };
 };
 
-export class CloudflareError extends Error {}
+export class CloudflareError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.status = status;
+  }
+}
+
+/** One of a Worker's bindings, as Cloudflare lists them: a Hyperdrive config's id, a var's text. */
+export type Binding = { type: string; name: string; id?: string; text?: string };
 
 /** Cloudflare's API, under a token it never logs nor shows. */
 export class CloudflareApi {
@@ -176,7 +201,7 @@ export class CloudflareApi {
     };
     if (!response.ok || answer.success === false) {
       const why = (answer.errors ?? []).map((error) => `${error.message ?? 'error'}${error.code === undefined ? '' : ` (${error.code})`}`).join('; ');
-      throw new CloudflareError(`Cloudflare answered ${response.status} to ${method} ${path.replace(/\?.*$/, '')}${why === '' ? '' : `: ${why}`}`);
+      throw new CloudflareError(`Cloudflare answered ${response.status} to ${method} ${path.replace(/\?.*$/, '')}${why === '' ? '' : `: ${why}`}`, response.status);
     }
     return { result: answer.result as T, pages: answer.result_info?.total_pages ?? 1 };
   }
@@ -238,15 +263,26 @@ export class CloudflareApi {
     await this.#call('PATCH', `/accounts/${account}/hyperdrive/configs/${id}`, { caching: { disabled: true } });
   }
 
-  /** The names of a Worker's secrets, never their values; null when the Worker does not exist yet. */
-  async secretNames(account: string, script: string): Promise<string[] | null> {
+  /** What a call answers, or null when what it names does not exist. */
+  async #found<T>(path: string): Promise<T | null> {
     try {
-      const listed = await this.#call<{ name: string }[]>('GET', `/accounts/${account}/workers/scripts/${script}/secrets`);
-      return listed.map(({ name }) => name);
+      return await this.#call<T>('GET', path);
     } catch (error) {
-      if (error instanceof CloudflareError && /answered 404/.test(error.message)) return null;
+      if (error instanceof CloudflareError && error.status === 404) return null;
       throw error;
     }
+  }
+
+  /** The names of a Worker's secrets, never their values; null when the Worker does not exist yet. */
+  async secretNames(account: string, script: string): Promise<string[] | null> {
+    const listed = await this.#found<{ name: string }[]>(`/accounts/${account}/workers/scripts/${script}/secrets`);
+    return listed === null ? null : listed.map(({ name }) => name);
+  }
+
+  /** A Worker's bindings, which say whose it is; null when there is no such Worker. */
+  async bindings(account: string, script: string): Promise<Binding[] | null> {
+    const settings = await this.#found<{ bindings?: Binding[] }>(`/accounts/${account}/workers/scripts/${script}/settings`);
+    return settings === null ? null : (settings.bindings ?? []);
   }
 }
 
