@@ -5,7 +5,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
-import { entryHash, entryMac, type LogKey, type StoredEntry } from '@coffre/core/audit';
+import { deriveLogKey, entryHash, entryMac, type LogKey, type StoredEntry } from '@coffre/core/audit';
 import {
   awsKms,
   KEY_CHECK,
@@ -947,6 +947,37 @@ test('no checkpoint is signed over a rewritten entry, and a full check finds the
     failedAtSeq: signed.seq,
     reason: `the log up to entry ${first.checkpoint.seq} is not the prefix this checkpoint signed: it was rewritten`,
   });
+});
+
+test("given the app's head, the vault checks its own entries and leaves the chain's links to the app, which recomputed them", async () => {
+  const w = await world();
+  const { auditLog } = tablesOf(db.owner);
+  await member(w, ADA, []);
+  // One of the app's entries, as the app appends one, between two of the vault's.
+  await db.owner.transaction((tx) =>
+    appendEntries(tx, deriveLogKey('app', randomBytes(32)), [{ actor: 'system:coffre-scheduler', action: 'audit.heartbeat', decision: 'allow', metadata: '{}' }]),
+  );
+  await member(w, BOB, []);
+  const rows = (await db.owner.select().from(auditLog).orderBy(asc(auditLog.seq))) as StoredEntry[];
+  const last = rows.at(-1)!;
+  const upTo = { seq: Number(last.seq), hash: last.hash.toString('hex') };
+  const own = rows.filter((row) => row.author === 'vault').length;
+  assert.deepEqual(await w.vault.verifyLog({ upTo }), { ok: true, entries: own });
+
+  // The app's entry edited in place, its hash left as it was: the chain no longer recomputes. Given the app's head,
+  // which the app only reports once it has recomputed every link through it, that is the app's to find, and the
+  // vault's own entries still hold. Without one, nobody else rehashed the chain, and the vault does.
+  const app = rows.find((row) => row.author === 'app')!;
+  await withLogUnlocked(db.owner, (owned) => owned.update(auditLog).set({ actor: 'system:edited' }).where(eq(auditLog.seq, app.seq)));
+  assert.deepEqual(await w.vault.verifyLog({ upTo }), { ok: true, entries: own });
+  const alone = await w.vault.verifyLog({});
+  assert.deepEqual(!alone.ok && [alone.failedAtSeq, alone.reason], [Number(app.seq), 'hash does not match the entry']);
+
+  // One of the vault's own, edited the same way, is refused either way.
+  const vaultEntry = rows.find((row) => row.author === 'vault' && row.seq > app.seq)!;
+  await withLogUnlocked(db.owner, (owned) => owned.update(auditLog).set({ actor: 'user:mallory@acme.example' }).where(eq(auditLog.seq, vaultEntry.seq)));
+  const withHead = await w.vault.verifyLog({ upTo });
+  assert.deepEqual(!withHead.ok && [withHead.failedAtSeq, withHead.reason], [Number(vaultEntry.seq), 'hash does not match the entry']);
 });
 
 test('a full check covers the head the app verified up to, and refuses an entry forged under no key', async () => {

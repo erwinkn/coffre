@@ -8,6 +8,15 @@ export function checkpointMessage(checkpoint: Omit<Checkpoint, 'signature' | 'ke
 
 /** Whether `checkpoint` was signed by the key whose raw public half is `publicKey`. */
 export async function verifyCheckpoint(checkpoint: Checkpoint, publicKey: string): Promise<boolean> {
+  return (await checkpointVerifier(publicKey))(checkpoint);
+}
+
+/**
+ * `verifyCheckpoint` for many checkpoints signed by one key, the key
+ * imported once: a full verification checks every checkpoint, one every
+ * five minutes.
+ */
+export async function checkpointVerifier(publicKey: string): Promise<(checkpoint: Checkpoint) => Promise<boolean>> {
   const key = await crypto.subtle.importKey('raw', new Uint8Array(Buffer.from(publicKey, 'base64')), { name: 'Ed25519' }, false, ['verify']);
-  return crypto.subtle.verify('Ed25519', key, new Uint8Array(Buffer.from(checkpoint.signature, 'base64')), checkpointMessage(checkpoint));
+  return (checkpoint) => crypto.subtle.verify('Ed25519', key, new Uint8Array(Buffer.from(checkpoint.signature, 'base64')), checkpointMessage(checkpoint));
 }

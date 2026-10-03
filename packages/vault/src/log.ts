@@ -38,7 +38,8 @@ export function further(a: Anchor, b: Anchor): Anchor {
   return b.nextSeq > a.nextSeq ? b : a;
 }
 
-export const VERIFY_BATCH = 1000;
+/** Entries read at once: a few megabytes, well within a Worker's memory, and a fifth of the round trips of 1000. */
+export const VERIFY_BATCH = 5000;
 
 type Verified = { verification: LogVerification; anchor: Anchor };
 
@@ -55,13 +56,15 @@ type Verified = { verification: LogVerification; anchor: Anchor };
  * So a view rehashes only what is new since the last one. What it leaves
  * out is an entry before the anchor edited in place, not chained again, and
  * not on the page: a full check, which starts from `UNVERIFIED`, finds that,
- * as does the first view after a start, which has no anchor.
+ * as does the first view after a start, which has no anchor. `onBatch` sees
+ * each batch once it has verified, for checks that read the same entries.
  */
 export async function verifyChain(
   db: Queryable,
   logKeys: readonly LogKey[],
   shown: readonly StoredEntry[],
   anchor: Anchor,
+  onBatch: (batch: readonly StoredEntry[]) => void = () => {},
 ): Promise<Verified> {
   const broken = (failedAtSeq: bigint, reason: string): Verified => ({
     verification: { ok: false, failedAtSeq: Number(failedAtSeq), reason: withCause(reason) },
@@ -86,6 +89,7 @@ export async function verifyChain(
     if (!result.ok) return broken(result.failedAtSeq, result.reason);
     const moved = forward(batch, verified.vaultKeys, logKeys[0].keyId);
     if ('failedAtSeq' in moved) return broken(moved.failedAtSeq, moved.reason);
+    onBatch(batch);
     verified = {
       nextSeq: result.nextSeq,
       hash: result.head,
@@ -104,7 +108,7 @@ export async function verifyChain(
  * even one that leaked, verifies what came before the rotation, and nothing
  * after it.
  */
-function forward(
+export function forward(
   entries: readonly StoredEntry[],
   keys: readonly string[],
   current: string,
@@ -130,7 +134,7 @@ function forward(
  * signing key, or from its KEK when it has none. The second is the one an
  * operator can fix.
  */
-function withCause(reason: string): string {
+export function withCause(reason: string): string {
   if (!/^written under vault:\S+, a key this verifier does not hold$/.test(reason)) return reason;
   return `${reason}: either it is forged, or the vault wrote it under another vault key or signing key, which must stay configured: a vault key that was replaced stays in the vault's config, in previousKeks`;
 }

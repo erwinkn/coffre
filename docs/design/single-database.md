@@ -753,11 +753,12 @@ covers it, its MAC and signature checked. A heartbeat alone, a checkpoint
 without a heartbeat, or a refused checkpoint all leave it red. A fresh
 database is unready until the first pair.
 
-**Verification** checks one prefix with both keys. The vault takes a
-consistent snapshot, checks every link from 0, its own MACs, every
-checkpoint, and replays members, grants and generations from its access
-entries; it returns the `seq` and `hash` it reached. The app checks the
-same prefix with its key. The verdict says "verified through 5170" and
+**Verification** checks one prefix with both keys. The app checks every
+link from 0 and its own MACs, and hands the vault the `seq` and `hash` it
+reached. The vault takes a consistent snapshot that must still hold that
+head, and checks its own MACs and every checkpoint, and replays members,
+grants and generations from its access entries, in one pass over its own
+entries. The verdict says "verified through 5170" and
 names the entry where either check fails, and its author; entries appended
 meanwhile are not a failure. Replay authenticates every entry it uses, so
 an app entry that says `access.grant` never becomes a grant.

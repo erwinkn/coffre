@@ -280,7 +280,7 @@ and membership generations. The interface:
 | `admit`, `remove` | add or restore a member, or remove one and revoke every grant; both answer the member's generation |
 | `checkpoint` | sign the shared log up to its last entry, in an entry of the vault's, and check every member's row |
 | `about` | the public key checkpoints verify under, and the root admins: what only its configuration says |
-| `verifyLog` | check the shared chain and the vault's MACs, every checkpoint, and replay members and grants |
+| `verifyLog` | check the vault's MACs over the prefix the app verified (asked with no head, the whole chain too), every checkpoint, and replay members and grants |
 
 Every argument and result is plain data, and a refusal is a value, not a
 thrown error, so the same interface works across a process boundary. The app
@@ -429,9 +429,13 @@ that stops taking writes, a vault that stops signing, a cut in the log or a
 wrong vault key all turn it red within one beat. There is no heartbeat table.
 
 `GET /api/audit/verification` (owners only), also called by `coffre verify log`,
-checks the chain from its first entry and authenticates the app's MACs.
-It asks the vault to check its MACs over the same prefix, every checkpoint
-against the prefix it signed, and to replay member and grant changes.
+checks the chain from its first entry, every link and hash, and authenticates
+the app's MACs. It hands the vault the head it reached, and the vault reads
+its own entries in one pass: each by its MAC, every checkpoint against the
+prefix it signed, the key batches accounted for, and member and grant
+changes replayed. The links are the app's to recompute, as it just has
+through that head; the vault confirms its snapshot still holds the head, and
+asked with no head, it recomputes the chain itself.
 A grant inserted by the owner without a matching vault entry is detected
 by replay. The answer is the entry verified through, or the entry where it
 breaks and whose check found it.

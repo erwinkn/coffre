@@ -18,7 +18,8 @@ import type { ApiContext } from './context.ts';
 import { forbidden, notFound } from './errors.ts';
 import { formatMember, parseMember, type Path } from './paths.ts';
 
-const VERIFY_BATCH = 5_000;
+/** Entries the full check reads at once: some ten megabytes, within a Worker's memory, and few round trips. */
+const VERIFY_BATCH = 10_000;
 
 export type AuditEntryView = {
   seq: number;

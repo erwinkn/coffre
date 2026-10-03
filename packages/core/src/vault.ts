@@ -1,7 +1,7 @@
 import type { AccessFault } from './access-fault.ts';
 import type { Role } from './access.ts';
 
-export { checkpointMessage, verifyCheckpoint } from './checkpoint.ts';
+export { checkpointMessage, checkpointVerifier, verifyCheckpoint } from './checkpoint.ts';
 export { describeAccessFault, type AccessFault, type FaultGrant, type FaultNames } from './access-fault.ts';
 
 /**
@@ -77,11 +77,13 @@ export interface Vault {
    */
   keyChecks(): Promise<KeyChecks>;
   /**
-   * Check the whole log: rehash it from the first entry, the vault's
-   * entries by their MACs, every checkpoint against the prefix it signed,
+   * Check the whole log: the vault's entries by their MACs, every
+   * checkpoint against the prefix it signed, the key batches accounted for,
    * and replay it to see that who is a member, and what they hold, follow
-   * from it. A verdict and nothing else, so anyone may ask; the app asks
-   * for owners.
+   * from it. The links and hashes of the chain are the caller's to
+   * recompute through `upTo`, as the app does first; with none, the vault
+   * recomputes them all itself. A verdict and nothing else, so anyone may
+   * ask; the app asks for owners.
    */
   verifyLog(input: VerifyLogInput): Promise<LogVerification>;
 }
@@ -276,9 +278,11 @@ export type LogHead = { seq: number; hash: string };
 
 export type VerifyLogInput = {
   /**
-   * The last entry the app verified, its own entries by its key: the vault
-   * checks the log still holds it, so between them both authors' entries
-   * are authenticated over the same prefix.
+   * The last entry the app verified, every link and hash up to it
+   * recomputed and its own entries checked by its key: the vault checks the
+   * log still holds it, so between them both authors' entries are
+   * authenticated over the same prefix, and the vault leaves the links to
+   * the app.
    */
   upTo?: LogHead | null;
 };
