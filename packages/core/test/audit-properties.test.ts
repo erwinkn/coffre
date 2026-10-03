@@ -48,7 +48,7 @@ function edit(value: StoredEntry[keyof StoredEntry], byte: number, mask: number)
   return changed.toString('utf8');
 }
 
-test(`audit chain mutations fail at the first broken entry, seed ${settings.seed}`, () => hegel.testAsync(async (tc) => {
+test(`audit mutations and truncation before a retained checkpoint are detected at the first broken entry, seed ${settings.seed}`, () => hegel.testAsync(async (tc) => {
   const secret = tc.draw(gs.binary({ minSize: 32, maxSize: 32 }));
   const keys = [deriveLogKey('app', secret), deriveLogKey('vault', secret)];
   const drafts = tc.draw(gs.arrays(fields, { minSize: 2, maxSize: 12 }));
@@ -94,8 +94,9 @@ test(`audit chain mutations fail at the first broken entry, seed ${settings.seed
     assert.ok(prefix.ok);
     if (prefix.ok) assert.equal(prefix.head.toString('hex'), checkpoint.hash);
     const cut = tc.draw(gs.integers({ minValue: 0, maxValue: checkpoint.seq }));
-    // Retain the signed checkpoint after cutting its prefix. No invented
-    // verifier: the real chain detects the gap at the checkpoint itself.
+    // Retain the signed checkpoint after cutting its prefix: the real chain
+    // detects the gap. Rolling back the checkpoints too is an accepted limit:
+    // https://github.com/erwinkn/coffre/blob/main/docs/architecture.md#limits
     broken([...log.slice(0, cut), ...log.slice(entry)], keys, log[entry].seq, 'truncated before checkpoint');
   }
   const index = tc.draw(gs.integers({ minValue: 0, maxValue: log.length - 1 }));
