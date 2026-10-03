@@ -3,7 +3,7 @@ import type { PrincipalReport, RemovedPrincipal } from '../shared/models';
 import { Card } from './page';
 import { EmptyState, Notice, Timestamp } from './ui';
 import { PrincipalLink } from './principal';
-import { ChevronRight, Key, SyncMark, User } from './icons';
+import { ChevronRight, Key, User } from './icons';
 
 /**
  * The part of a user's or token's page that answers "if they left, what would
@@ -16,7 +16,6 @@ export function PrincipalReportCards({ report }: { report: PrincipalReport }) {
   return (
     <>
       <SeenValues report={report} removed={removed} person={person} />
-      {report.syncs.length > 0 && <CreatedSyncs report={report} person={person} />}
       {report.issuedTokens.length > 0 && <IssuedTokens report={report} />}
     </>
   );
@@ -183,56 +182,6 @@ function SeenValues({
           </table>
         </div>
       )}
-    </Card>
-  );
-}
-
-function CreatedSyncs({ report, person }: { report: PrincipalReport; person: boolean }) {
-  return (
-    <Card
-      labelledBy="created-syncs"
-      title={person ? 'Syncs they set up' : 'Syncs it set up'}
-      description="A sync keeps pushing every change to the destination it names, whoever set it up. Check each one still points somewhere you control."
-    >
-      <div className="dt-wrap">
-        <table className="dt syncs">
-          <thead>
-            <tr>
-              <th>Destination</th>
-              <th className="col-shrink">From</th>
-              <th className="col-shrink col-hide-narrow">Token</th>
-            </tr>
-          </thead>
-          <tbody>
-            {report.syncs.map((sync) => (
-              <tr key={sync.id}>
-                <td>
-                  <span className="cell-account">
-                    <SyncMark brand={sync.brand} size={15} />
-                    <span className="cell-stack">
-                      <span>
-                        {sync.providerLabel}
-                        {sync.paused && <span className="tag">Paused</span>}
-                      </span>
-                      <small className="mono">{sync.destination}</small>
-                    </span>
-                  </span>
-                </td>
-                <td className="col-shrink">
-                  <Link
-                    className="cell-link mono"
-                    to="/projects/$project/$environment"
-                    params={{ project: sync.project, environment: sync.environment }}
-                  >
-                    {sync.project}/{sync.environment}
-                  </Link>
-                </td>
-                <td className="col-shrink col-hide-narrow cell-mono cell-muted">{sync.credential}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
     </Card>
   );
 }

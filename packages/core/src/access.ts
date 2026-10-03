@@ -126,27 +126,7 @@ export function allows(holder: Holdings, permission: Permission, place: Place): 
   );
 }
 
-/** A sync reads as a principal of its own, `sync:<id>`. */
-export function isSyncPrincipal(principal: string): boolean {
-  return principal.startsWith('sync:');
-}
-
-/**
- * Whether `actor` may set `subject`'s role at `place`, or take it away
- * (`role` null). `grant.manage` on the project decides, with one addition:
- * whoever may manage a project's environments may let a sync read an
- * environment they can read themselves, and take that away again, since
- * adding and removing syncs is theirs to do.
- */
-export function mayManageAccess(
-  actor: Holdings,
-  subject: string,
-  change: Place & { role: Role | null },
-): boolean {
-  if (allows(actor, 'grant.manage', { projectId: change.projectId })) return true;
-  if (!isSyncPrincipal(subject) || !allows(actor, 'environment.manage', { projectId: change.projectId })) {
-    return false;
-  }
-  if (change.role === null) return true;
-  return change.role === 'viewer' && (change.environmentId ?? null) !== null && allows(actor, 'secret.read', change);
+/** Whether the actor may manage grants on this project. */
+export function mayManageAccess(actor: Holdings, place: Place): boolean {
+  return allows(actor, 'grant.manage', { projectId: place.projectId });
 }

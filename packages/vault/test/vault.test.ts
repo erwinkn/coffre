@@ -792,49 +792,6 @@ test('access is managed with the same rules as the app, and root admins are fixe
   assert.deepEqual((await w.vault.about()).rootAdmins, [ROOT]);
 });
 
-test('a sync is a member from its first grant, and whoever manages environments can stop it', async () => {
-  const w = await world();
-  const MAINTAINER = 'user:mia@acme.example';
-  await member(w, MAINTAINER, [[null, 'maintainer']]);
-  const sync = `sync:${randomUUID()}`;
-  const grant = (role: 'viewer' | 'developer' | null, environmentId: string | null = w.dev) =>
-    w.vault.setAccess({ actor: MAINTAINER, principal: sync, changes: [{ projectId: w.project, environmentId, role, expiresAt: null }] });
-
-  assert.deepEqual(await grant('viewer'), { ok: true, changes: ['created'] });
-  assert.equal((await w.vault.access(sync)).status, 'active');
-  // Only reading, and only on an environment.
-  assert.equal((await grant('developer')).ok, false);
-  assert.equal((await grant('viewer', null)).ok, false);
-
-  const secret = await w.secret(w.dev);
-  const items = [{ secret, wrapped: await wrapped(w, secret) }];
-  assert.equal((await w.vault.unwrap({ principal: sync, purpose: 'sync', items: await versionItems(items) })).ok, true);
-  assert.deepEqual(await grant(null), { ok: true, changes: ['revoked'] });
-  const stopped = await w.vault.unwrap({ principal: sync, purpose: 'sync', items: await versionItems(items) });
-  assert.equal(!stopped.ok && stopped.refusal.code, 'no_grant');
-
-  assert.equal((await grant('viewer')).ok, true);
-  assert.equal((await w.vault.remove({ actor: MAINTAINER, principal: sync })).ok, true);
-  assert.equal((await w.vault.access(sync)).status, 'removed');
-
-  // Its credential lives in a project the maintainer does not manage. Once
-  // its source grant is gone, naming the source is what lets them stop it.
-  const other = `sync:${randomUUID()}`;
-  const credentialProject = await newProject(db.owner);
-  const credential = {
-    projectId: credentialProject,
-    environmentId: await newEnvironment(db.owner, credentialProject),
-    role: 'viewer' as const,
-    expiresAt: null,
-  };
-  assert.equal((await w.vault.setAccess({ actor: ROOT, principal: other, changes: [credential] })).ok, true);
-  const source = { projectId: w.project, environmentId: w.dev };
-  const refused = await w.vault.remove({ actor: MAINTAINER, principal: other });
-  assert.equal(!refused.ok && refused.refusal.code, 'not_allowed');
-  assert.equal((await w.vault.remove({ actor: BOB, principal: other, source })).ok, false);
-  assert.equal((await w.vault.remove({ actor: MAINTAINER, principal: other, source })).ok, true);
-});
-
 test('the log is chained, append-only, and shows a rewritten entry', async () => {
   const w = await world();
   const { auditLog } = tablesOf(db.owner);

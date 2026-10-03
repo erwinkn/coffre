@@ -86,19 +86,21 @@ test('the HTTP scan waits for every reply and finds a leak in its final answer',
   const value = canary();
   let calls = 0;
   let active = 0;
+  // 22 GET calls as eight callers, and 20 pages as six browser callers.
+  const answers = 22 * 8 + 20 * 6;
   t.mock.method(globalThis, 'fetch', async () => {
     const call = ++calls;
     active++;
     await new Promise<void>((resolve) => setImmediate(resolve));
     active--;
-    return new Response(call === 328 ? value : '{}');
+    return new Response(call === answers ? value : '{}');
   });
   const database = deployment.database;
   t.mock.method(deployment, 'database', async () => {
     assert.equal(active, 0, 'HTTP replies must finish before storage inspection');
-    assert.equal(calls, 328, 'every GET route and page must be read as every caller');
+    assert.equal(calls, answers, 'every GET route and page must be read as every caller');
     return database();
   });
   await assert.rejects(canaryScan(deployment, people, { KEY: value }), /a value was found outside a reveal/);
-  assert.equal(calls, 328);
+  assert.equal(calls, answers);
 });

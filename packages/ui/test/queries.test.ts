@@ -53,7 +53,6 @@ function fakeClient() {
       },
     },
     secrets: { list: answer('GET /secrets/market/dev', { keys: [], permissions: [] }) },
-    syncs: { list: answer('GET /syncs/market/dev', { syncs: [], canManage: false }) },
   } as unknown as CoffreClient;
   return { client, calls };
 }
@@ -121,18 +120,16 @@ test('every change marks the audit log and its verification stale', async () => 
   assert.equal(queryClient.getQueryState([...keys.audit, 'entries', {}])?.isInvalidated, true);
 });
 
-test('a secret change refetches the environment, its syncs and the counts, and nothing else', async () => {
+test('a secret change refetches the environment and the counts, and nothing else', async () => {
   const { client, calls } = fakeClient();
   const queryClient = createQueryClient();
   const place = { project: 'market', environment: 'dev' };
   await navigate.project(queryClient, client);
   await Promise.all([
     queryClient.fetchQuery(queries.secrets(client, place)),
-    queryClient.fetchQuery(queries.syncs(client, place)),
   ]);
   const stops = [
     onScreen(queryClient, queries.secrets(client, place)),
-    onScreen(queryClient, queries.syncs(client, place)),
     onScreen(queryClient, queries.projects(client)),
     onScreen(queryClient, queries.me(client)),
     onScreen(queryClient, queries.grants(client, 'market')),
@@ -140,7 +137,7 @@ test('a secret change refetches the environment, its syncs and the counts, and n
   calls.length = 0;
 
   await refresh(queryClient, affects.secrets(place));
-  assert.deepEqual(calls.sort(), ['GET /projects', 'GET /secrets/market/dev', 'GET /syncs/market/dev']);
+  assert.deepEqual(calls.sort(), ['GET /projects', 'GET /secrets/market/dev']);
   for (const stop of stops) stop();
 });
 

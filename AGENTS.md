@@ -1,8 +1,8 @@
 # AGENTS.md
 
 `coffre` is a pnpm monorepo secrets manager, shipped as packages a deployment imports
-and configures in code: `packages/server` (`@coffre/server`: `/api`, sign-in, syncs and
-their providers in `src/sync`, its queries in `src/db`; `/cloudflare` and `/node` entry
+and configures in code: `packages/server` (`@coffre/server`: `/api`, sign-in,
+its queries in `src/db`; `/cloudflare` and `/node` entry
 points), `packages/db` (`@coffre/db`: the Drizzle schemas for Postgres and SQLite, their
 migrations and migrator, the dialect helpers, and the connections, Hyperdrive's
 included), `packages/ui` (`@coffre/ui`: the TanStack

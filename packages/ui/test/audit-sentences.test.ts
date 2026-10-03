@@ -213,3 +213,19 @@ test('lines group a batch at its newest entry', () => {
   assert.deepEqual(lines(entries).map((line) => line.length), [1, 3, 1]);
 });
 
+
+// These templates remain part of the stored log's vocabulary after sync removal.
+test('every historical sync action still renders as a human sentence', () => {
+  const cases = {
+    'sync.create': 'set up a sync of market/prod to acme/market',
+    'sync.update': 'paused the sync of market/prod to acme/market',
+    'sync.delete': 'removed the sync of market/prod to acme/market',
+    'sync.push': 'pushed market/prod to acme/market',
+    'sync.remove': 'removed market/prod from acme/market',
+    'sync.run': 'ran the sync of market/prod to acme/market',
+    'sync.list': 'listed the syncs of market/prod',
+  };
+  for (const [action, sentence] of Object.entries(cases)) {
+    assert.equal(said(entry({ action, ...prod, metadata: { destination: 'acme/market', paused: true } })), sentence, action);
+  }
+});

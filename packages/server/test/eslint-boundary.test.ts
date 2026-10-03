@@ -29,7 +29,7 @@ test('ESLint keeps drizzle queries in the server\'s and the vault\'s database la
   for (const filePath of [
     'packages/ui/src/lib/example.ts',
     'packages/server/src/api/example.ts',
-    'packages/server/src/sync/example.ts',
+    'packages/server/src/handlers/example.ts',
     'packages/core/src/example.ts',
     'packages/client/src/example.ts',
     'packages/cli/src/example.ts',

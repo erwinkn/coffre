@@ -24,6 +24,4 @@ export const {
   identities,
   credentials,
   deviceAuthorizations,
-  syncs,
-  syncKeys,
 } = schema;

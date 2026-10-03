@@ -40,17 +40,6 @@ const EXPECTED_UPDATE_COLUMNS = [
   'secrets.current_version_id',
   'secrets.key',
   'secrets.updated_at',
-  'sync_keys.pushed_at',
-  'sync_keys.removed_at',
-  'sync_keys.secret_version_id',
-  'syncs.archived_at',
-  'syncs.config',
-  'syncs.credential_secret_id',
-  'syncs.last_error',
-  'syncs.last_run_at',
-  'syncs.last_status',
-  'syncs.lease_until',
-  'syncs.paused_at',
 ];
 
 test(
@@ -63,7 +52,7 @@ test(
       const migrations = await owner.query<{ count: number }>(
         'SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations',
       );
-      assert.equal(migrations.rows[0].count, 1);
+      assert.equal(migrations.rows[0].count, 2);
 
       const identity = await runtime.query<{
         current_user: string;

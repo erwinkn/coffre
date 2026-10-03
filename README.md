@@ -49,7 +49,7 @@ A deployment is a small project of your own that imports coffre's packages
 and configures them in code. It runs two components, as two Cloudflare
 Workers or two Node processes:
 
-- **the app**: the API, sign-in, the pages, syncs, and a job every five
+- **the app**: the API, sign-in, the pages, and a job every five
   minutes;
 - **the vault**: the vault key, which wraps every value's own key, who is a
   member, and who holds what. It decides every read and write of a key, and
@@ -129,9 +129,6 @@ coffre roles
 coffre access                               # who holds what, where you manage access
 coffre grant market alice@acme.example --role developer --env dev
 coffre offboard alice@acme.example          # previews; --apply removes (docs/offboarding.md)
-
-coffre sync add market/prod github-actions owner=acme repo=market \
-                --credential ops/sync/GITHUB_TOKEN   # docs/syncs.md
 
 coffre audit --denied
 coffre verify                               # asks which: instance, keys or log; owners only
@@ -256,7 +253,7 @@ corrupt values silently (`packages/core/test/dotenv.test.ts`).
 **Machines are not people.** A Cloudflare Access service token carries no
 email and an empty `sub`, so code that reads `claims.email` gets `undefined`
 for every machine caller, and machines are most of the traffic. Members are
-`user:<email>`, `token:<name>` or, for syncs, `sync:<id>`, never a bare email.
+`user:<email>` or `token:<name>`, never a bare email.
 
 ## The web UI
 
@@ -290,13 +287,13 @@ read and write only through `@coffre/client`.
 ## Layout
 
 ```
-packages/server       @coffre/server: /api, sign-in, syncs, the scheduled job; /cloudflare and /node
+packages/server       @coffre/server: /api, sign-in, the scheduled job; /cloudflare and /node
 packages/vault        @coffre/vault: the vault key, members and grants, its entries in the log; /cloudflare and /node
 packages/db           @coffre/db: the schemas, migrations and migrator, the connections
 packages/core         @coffre/core: access rules, encryption, vault keys, the log's format, sign-in, the vault's contract
 packages/client       @coffre/client: the API as typed calls
 packages/ui           @coffre/ui: the pages, prebuilt
-packages/cli          @coffre/cli: `coffre`, from init and login to secrets, syncs and the log
+packages/cli          @coffre/cli: `coffre`, from init and login to secrets and the log
 packages/conformance  @coffre/conformance: `coffre-conformance`, and the dev IdP it signs in through
 examples/workers      what `coffre init --workers` writes: two Workers
 examples/node         what `coffre init --node` writes: a server and its vault process
@@ -308,6 +305,8 @@ The eight packages are released together at one version, and each imports
 the others by name only.
 
 ## Supply chain and releases
+
+See the [release notes](CHANGELOG.md) before upgrading.
 
 Install scripts are off, every dependency is pinned exactly, and a version
 must be seven days old before it can be installed. That last rule blocked

@@ -25,7 +25,7 @@ const IMMUTABLE = [
 /** A column of each app table, for an update that would change nothing, if it were allowed. */
 const APP_COLUMNS: Record<string, string> = {
   projects: 'id', environments: 'id', secrets: 'id', secret_versions: 'id', identities: 'id',
-  credentials: 'id', device_authorizations: 'id', syncs: 'id', sync_keys: 'key',
+  credentials: 'id', device_authorizations: 'id',
 };
 
 async function refuses(sql: Sql, statements: string[]): Promise<number> {

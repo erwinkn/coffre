@@ -38,16 +38,7 @@ export function formatMember(member: MemberRef): string {
   return `${member.type === 'user' ? 'user' : 'token'}:${member.id}`;
 }
 
-/** Whoever can hold a grant: a member, or a sync, which reads as `sync:<id>`. */
-export type GranteeRef = MemberRef | { type: 'sync'; id: string };
-
-export function parseGrantee(grantee: string): GranteeRef {
-  if (grantee.startsWith('sync:') && grantee.length > 'sync:'.length) {
-    return { type: 'sync', id: grantee.slice('sync:'.length) };
-  }
-  return parseMember(grantee);
-}
-
-export function formatGrantee(grantee: GranteeRef): string {
-  return grantee.type === 'sync' ? `sync:${grantee.id}` : formatMember(grantee);
-}
+/** Grants name the same people and services as membership. */
+export type GranteeRef = MemberRef;
+export const parseGrantee = parseMember;
+export const formatGrantee = formatMember;

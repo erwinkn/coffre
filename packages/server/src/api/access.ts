@@ -37,8 +37,7 @@ function parseUntil(until: string, now: Date): Date {
  *   { "api": "developer", "api/prod": { "role": "viewer", "until": "2026-12-31" }, "web": null }
  *
  * Each place needs `grant.manage` on its project. A member holds at most one
- * role per place, so naming a new role replaces the old one. A sync, as
- * `sync:<id>`, holds grants the same way; taking its grant away stops it.
+ * role per place, so naming a new role replaces the old one.
  *
  * The app checks first, to answer in its own words; the vault holds the
  * grants and checks again, so a bug here cannot grant what the rules forbid.
@@ -101,8 +100,8 @@ export async function setAccess(
       );
     for (const want of located) {
       if (want.role === null) continue;
-      // A sync becomes a member with its first grant; anyone else is added first.
-      if (standing === null && grantee.type !== 'sync') {
+      // Members are admitted before they can be granted access.
+      if (standing === null) {
         throw refuse(want, 'add them as a member before granting access', 'principal_not_registered');
       }
       if (standing?.status === 'removed') {

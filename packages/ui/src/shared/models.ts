@@ -5,10 +5,8 @@ import type {
   OffboardingReport,
   ProjectSummary as ApiProjectSummary,
   RemovedMember,
-  RunOutcome as ApiRunOutcome,
   SecretKey as ApiSecretKey,
   SecretVersion as ApiSecretVersion,
-  SyncView as ApiSyncView,
 } from '@coffre/client';
 import type { Permission as CorePermission } from '@coffre/core/access';
 
@@ -18,8 +16,6 @@ export type Me = ApiMe;
 export type SecretKey = ApiSecretKey;
 export type ProjectSummary = ApiProjectSummary;
 export type SecretVersion = ApiSecretVersion;
-export type SyncView = ApiSyncView;
-export type RunOutcome = ApiRunOutcome;
 
 /** One member's role at one place in a project, as the project page lists them. */
 export type GrantRow = {
@@ -48,7 +44,7 @@ export type DirectoryPrincipal = Pick<Member, 'principalType' | 'principalId' | 
 
 export type ImportPlanEntry = { key: string; action: ImportAction; version: number | null };
 
-/** What someone can still reach and what they have seen, with the syncs they set up. */
+/** What someone can still reach and what they have seen. */
 export type PrincipalReport = OffboardingReport;
 export type RemovedPrincipal = RemovedMember;
 

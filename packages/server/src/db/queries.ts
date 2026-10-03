@@ -661,8 +661,8 @@ export type SecretRow = {
 
 /**
  * An environment's secrets, archived ones included, each with its current
- * version and ciphertext; or just one of them. Listing, revealing and
- * syncing all read this.
+ * version and ciphertext; or just one of them. Listing, revealing, running
+ * and exporting all read this.
  */
 export async function environmentSecrets(
   db: Queryable,
@@ -735,58 +735,6 @@ export async function secretHistory(
   }));
 }
 
-// --- syncs --------------------------------------------------------------------
-
-export type SyncRow = Tables['syncs']['$inferSelect'] & {
-  project: string;
-  environment: string;
-  projectArchivedAt: Date | null;
-  environmentArchivedAt: Date | null;
-  credential: { projectId: string; environmentId: string; project: string; environment: string; key: string };
-  /** What the sync last pushed and has not since removed, per key. */
-  recorded: { key: string; versionId: string | null }[];
-};
-
-/** Syncs, archived ones included, with their place, their credential's path and what they pushed; oldest first. */
-export async function findSyncs(
-  db: Queryable,
-  filter: { id?: string; environmentId?: string; createdBy?: string; provider?: string },
-): Promise<SyncRow[]> {
-  const { syncs } = tablesOf(db);
-  const rows = await db.query.syncs.findMany({
-    where: and(
-      filter.id === undefined ? undefined : eq(syncs.id, filter.id),
-      filter.environmentId === undefined ? undefined : eq(syncs.environmentId, filter.environmentId),
-      filter.createdBy === undefined ? undefined : eq(syncs.createdBy, filter.createdBy),
-      filter.provider === undefined ? undefined : eq(syncs.provider, filter.provider),
-    ),
-    orderBy: [asc(syncs.createdAt)],
-    with: {
-      project: { columns: { slug: true, archivedAt: true } },
-      environment: { columns: { slug: true, archivedAt: true } },
-      credential: {
-        columns: { key: true, projectId: true, environmentId: true },
-        with: { project: { columns: { slug: true } }, environment: { columns: { slug: true } } },
-      },
-      keys: { columns: { key: true, secretVersionId: true }, where: (keys, { isNull }) => isNull(keys.removedAt) },
-    },
-  });
-  return rows.map(({ project, environment, credential, keys, ...sync }) => ({
-    ...sync,
-    project: project.slug,
-    environment: environment.slug,
-    projectArchivedAt: project.archivedAt,
-    environmentArchivedAt: environment.archivedAt,
-    credential: {
-      projectId: credential.projectId,
-      environmentId: credential.environmentId,
-      project: credential.project.slug,
-      environment: credential.environment.slug,
-      key: credential.key,
-    },
-    recorded: keys.map((key) => ({ key: key.key, versionId: key.secretVersionId })),
-  }));
-}
 
 // --- the audit log ------------------------------------------------------------
 

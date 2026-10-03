@@ -461,88 +461,8 @@ export const deviceAuthorizations = pgTable(
   ],
 );
 
-/**
- * An environment kept in step with a third-party service: GitHub Actions
- * secrets, Vercel or Railway variables, Worker secrets.
- *
- * The destination's API token is itself a coffre secret, referenced by id, so
- * it is encrypted, versioned and audited like everything else and never sits
- * in this table.
- */
-export const syncs = pgTable(
-  'syncs',
-  {
-    id: uuid().primaryKey().defaultRandom(),
-    projectId: uuid('project_id').notNull(),
-    environmentId: uuid('environment_id').notNull(),
-    provider: text().notNull(),
-    config: text().notNull(),
-    credentialSecretId: uuid('credential_secret_id').notNull(),
-    createdAt: createdAt(),
-    createdBy: text('created_by').notNull(),
-    pausedAt: timestamp('paused_at', { withTimezone: true }),
-    archivedAt: timestamp('archived_at', { withTimezone: true }),
-    leaseUntil: timestamp('lease_until', { withTimezone: true }),
-    lastRunAt: timestamp('last_run_at', { withTimezone: true }),
-    lastStatus: text('last_status'),
-    lastError: text('last_error'),
-  },
-  (table) => [
-    check('syncs_config_check', sql`${table.config}::jsonb IS NOT NULL`),
-    check(
-      'syncs_last_status_check',
-      sql`${table.lastStatus} IS NULL OR ${table.lastStatus} IN ('ok', 'partial', 'failed')`,
-    ),
-    foreignKey({
-      name: 'syncs_environment_in_project',
-      columns: [table.environmentId, table.projectId],
-      foreignColumns: [environments.id, environments.projectId],
-    }).onDelete('restrict'),
-    foreignKey({
-      name: 'syncs_credential_secret_id_fkey',
-      columns: [table.credentialSecretId],
-      foreignColumns: [secrets.id],
-    }).onDelete('restrict'),
-    index('syncs_environment_idx').on(table.environmentId),
-  ],
-);
-
-/**
- * What a sync last pushed, one row per key.
- *
- * Most destinations are write-only, so coffre cannot diff against them. It
- * diffs against this instead: a key is stale when its secret has moved past
- * the version recorded here. It is also the list of keys coffre may delete at
- * the destination; a key it never pushed is never removed.
- */
-export const syncKeys = pgTable(
-  'sync_keys',
-  {
-    syncId: uuid('sync_id').notNull(),
-    key: text().notNull(),
-    secretVersionId: uuid('secret_version_id'),
-    pushedAt: timestamp('pushed_at', { withTimezone: true }).notNull().defaultNow(),
-    removedAt: timestamp('removed_at', { withTimezone: true }),
-  },
-  (table) => [
-    primaryKey({ name: 'sync_keys_pkey', columns: [table.syncId, table.key] }),
-    foreignKey({
-      name: 'sync_keys_sync_id_fkey',
-      columns: [table.syncId],
-      foreignColumns: [syncs.id],
-    }).onDelete('restrict'),
-    foreignKey({
-      name: 'sync_keys_secret_version_id_fkey',
-      columns: [table.secretVersionId],
-      foreignColumns: [secretVersions.id],
-    }).onDelete('restrict'),
-  ],
-);
-
 // For Drizzle's relational queries; see relations.ts.
 export const {
   environmentsRelations,
   secretsRelations,
-  syncsRelations,
-  syncKeysRelations,
-} = relationsOf({ projects, environments, secrets, secretVersions, syncs, syncKeys });
+} = relationsOf({ projects, environments, secrets, secretVersions });

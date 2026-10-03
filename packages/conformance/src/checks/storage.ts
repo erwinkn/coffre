@@ -5,7 +5,7 @@ import { expect } from '../report.ts';
 
 export const TABLES = [
   'projects', 'environments', 'secrets', 'secret_versions', 'vault_members', 'vault_grants',
-  'audit_log', 'audit_chain_head', 'identities', 'credentials', 'device_authorizations', 'syncs', 'sync_keys',
+  'audit_log', 'audit_chain_head', 'identities', 'credentials', 'device_authorizations',
 ] as const;
 
 /** Inspect every table, including any a deployment added. Missing shared tables fail. */

@@ -16,11 +16,8 @@ alice@acme.example is active; removing would revoke 3 grants, 2 sessions, 1 link
 Values they saw that nobody has changed since, to rotate once they leave (4)
   market/prod/DATABASE_URL       v4    read 2026-09-12
   market/prod/STRIPE_SECRET_KEY  v3    wrote 2026-08-30
-  ops/sync/GITHUB_TOKEN          v1    read 2026-09-01
+  ops/deploy/GITHUB_TOKEN          v1    read 2026-09-01
   market/dev/REDIS_URL           v3    read 2026-09-25
-
-Syncs they set up, which keep pushing
-  market/prod -> GitHub Actions acme/market
 
 Nothing changed. Re-run with --apply to remove alice@acme.example.
 
@@ -67,8 +64,6 @@ drop out of sight once they can no longer sign in.
   password), save the new value in coffre, and it leaves the list. Rolling
   back to a version they saw puts it back; archiving the secret, its
   environment or its project takes it off, since coffre no longer serves it.
-- **Syncs they set up.** A sync keeps pushing after its creator is gone. Check
-  each one still points somewhere you control.
 - **Service tokens they issued.** Each was shown once, to them, when it was
   made. Revoke any they may have kept a copy of.
 
@@ -85,7 +80,7 @@ access to `market/prod` who never opened it has nothing listed there. That is
 the point of the list, but if you doubt the log (someone copied a database
 dump, say), rotate by their grants instead.
 
-Values that reached them some other way, such as a GitHub secret a sync
+Values that reached them some other way, such as a GitHub secret a deploy pipeline
 pushed to a repository they administer, are outside what coffre can know.
 
 ## API

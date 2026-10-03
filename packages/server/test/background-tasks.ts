@@ -1,5 +1,5 @@
 // Every test file has its own process. Tasks belong to the current case,
-// including work handed to a custom waitUntil observer by the sync tests.
+// including work explicitly handed to a fixture waitUntil observer.
 const background = new Set<Promise<unknown>>();
 
 export function trackBackgroundTask(promise: Promise<unknown>): void {

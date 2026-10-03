@@ -69,7 +69,7 @@ export async function canaryScan(deployment: Deployment, people: People, canarie
   ];
 
   // These GETs are independent. Keep every route/caller pair, with a small
-  // number in flight so latency does not add up across all 320 answers.
+  // number in flight so latency does not add up across all answers.
   const reads: { where: string; url: string; fetchAs: (url: string) => Promise<Response> }[] = [];
   const routes = calls(people);
   for (const { key, url } of getUrls(deployment.origin, routes)) {

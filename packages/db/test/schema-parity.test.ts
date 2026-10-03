@@ -14,7 +14,7 @@ import * as sqlite from '../src/schema.sqlite.ts';
  * Both schemas are one schema, and each migration tree ends where its
  * schema is. Together: the trees are in step. A schema change made on one
  * engine fails the first test until the other schema follows, and the
- * second until `pnpm db:generate` has regenerated each baseline.
+ * second until `pnpm db:generate` has appended the migrations.
  *
  * Row types are checked at compile time, in portable.ts. Check constraints
  * are compared by name only: their bodies are each dialect's own.
@@ -66,18 +66,20 @@ function shapes(schema: Record<string, unknown>, config: (table: never) => unkno
 
 test('the SQLite schema has the Postgres tables, columns, nullability and keys', () => {
   const expected = shapes(postgres, postgresConfig);
-  assert.ok(Object.keys(expected).length >= 13);
+  assert.deepEqual(Object.keys(expected), ['audit_chain_head', 'audit_log', 'credentials', 'device_authorizations', 'environments', 'identities', 'projects', 'secret_versions', 'secrets', 'vault_grants', 'vault_members']);
   assert.deepEqual(shapes(sqlite, sqliteConfig), expected);
 });
 
-test('each migration tree is its baseline, generated from its schema and template', async () => {
+test('each migration tree ends at its schema and preserves its original baseline', async () => {
   const stale = Object.fromEntries(await Promise.all(ENGINES.map(async (engine) => [engine, await staleness(engine)])));
   // Anything listed here needs `pnpm db:generate`.
   assert.deepEqual(stale, { postgres: [], sqlite: [] });
 });
 
-test('the app requires every migration of each tree', async () => {
+test('the runtime requires a nonempty prefix that exists in each migration tree', async () => {
   for (const engine of ENGINES) {
-    assert.equal(REQUIRED_MIGRATIONS[engine], (await journal(engine)).length, engine);
+    const required = REQUIRED_MIGRATIONS[engine];
+    assert.ok(Number.isSafeInteger(required) && required > 0, engine);
+    assert.ok(required <= (await journal(engine)).length, engine);
   }
 });

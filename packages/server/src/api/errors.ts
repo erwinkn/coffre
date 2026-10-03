@@ -13,7 +13,7 @@ import { logged } from '../logged.ts';
  *   403 cross_origin       a change sent with a browser cookie, from another site
  *   403 vault_refused      the vault said no; `reason` is its code (`no_grant`, `removed`, ...)
  *   403 bulk_limit         the vault said no: too many secrets read in too short a time
- *   404 not_found          no such project, environment, secret, member or sync
+ *   404 not_found          no such project, environment, secret or member
  *   405 method_not_allowed
  *   409 conflict           the request is valid but the current state refuses it
  *   429 too_many_requests  too many sign-ins waiting; try again later

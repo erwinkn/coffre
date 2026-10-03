@@ -23,8 +23,7 @@ when the log and all its checkpoints are rolled back together.
 
 The access target compares every permission across project and environment
 scopes with an independent table transcribed from the README's role rules.
-It also compares role assignment and the special rules for managing a sync's
-grants. Its boundary is core's `Holdings`: the vault has already checked
+It also compares role assignment and project grant management. Its boundary is core's `Holdings`: the vault has already checked
 membership and filtered expired grants. Service tokens have the same grant
 permissions as people, and cannot be root admins or instance owners.
 Credential validity is checked before that boundary, not by core's `allows`.

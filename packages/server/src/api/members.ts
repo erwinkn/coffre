@@ -19,7 +19,6 @@ import { can } from './caller.ts';
 import { audited, denied, Refusal, requireOwner, withRefusals, type ApiContext } from './context.ts';
 import { conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { formatMember, parseGrantee, type MemberRef, type Path } from './paths.ts';
-import { syncsCreatedBy, type PlacedSyncView } from './syncs.ts';
 
 export type MemberGrant = {
   /** Its member and place, `user:ada@acme.example/market/prod`: one grant per member per place. */
@@ -94,8 +93,6 @@ export type OffboardingReport = {
   rotated: number;
   /** Service tokens they issued that still work. */
   issuedTokens: IssuedToken[];
-  /** Syncs they set up, which keep pushing after they leave. */
-  syncs: PlacedSyncView[];
 };
 
 /** Someone no longer a member, and how many of their report's values are left. */
@@ -373,7 +370,6 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
       expiresAt: token.expiresAt.toISOString(),
       lastUsedAt: token.lastUsedAt?.toISOString() ?? null,
     })),
-    syncs: await syncsCreatedBy(ctx, member.id),
   };
 }
 

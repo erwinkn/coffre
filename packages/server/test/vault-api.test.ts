@@ -11,7 +11,6 @@ import { and, asc, eq, is, Table } from 'drizzle-orm';
 import { auditRange } from '../src/db/queries.ts';
 import { auditChainHead, auditLog } from './db/tables.ts';
 import { serveApi } from '../src/api/router.ts';
-import { SyncRunner } from '../src/api/syncs.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import { auditReadiness, writeAuditHeartbeat } from '../src/heartbeat.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
@@ -187,7 +186,7 @@ test('a removed member stays out despite a live session, until the vault admits 
     db: deps.db,
     vault: deps.vault,
     chainKey: deps.chainKey,
-    syncs: new SyncRunner({ db: deps.db, vault: deps.vault, chainKey: deps.chainKey }),
+
     signin: null,
     auth: signin({ providers: [github({ clientId: 'id', clientSecret: 'secret' })] }).resolve('https://coffre.test'),
     publicUrl: 'https://coffre.test',

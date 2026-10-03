@@ -439,73 +439,9 @@ export const deviceAuthorizations = sqliteTable(
   ],
 );
 
-export const syncs = sqliteTable(
-  'syncs',
-  {
-    id: text().primaryKey(),
-    projectId: text('project_id').notNull(),
-    environmentId: text('environment_id').notNull(),
-    provider: text().notNull(),
-    config: text().notNull(),
-    credentialSecretId: text('credential_secret_id').notNull(),
-    createdAt: createdAt(),
-    createdBy: text('created_by').notNull(),
-    pausedAt: time('paused_at'),
-    archivedAt: time('archived_at'),
-    leaseUntil: time('lease_until'),
-    lastRunAt: time('last_run_at'),
-    lastStatus: text('last_status'),
-    lastError: text('last_error'),
-  },
-  (table) => [
-    check('syncs_config_check', sql`json_valid(${table.config})`),
-    check(
-      'syncs_last_status_check',
-      sql`${table.lastStatus} IS NULL OR ${table.lastStatus} IN ('ok', 'partial', 'failed')`,
-    ),
-    foreignKey({
-      name: 'syncs_environment_in_project',
-      columns: [table.environmentId, table.projectId],
-      foreignColumns: [environments.id, environments.projectId],
-    }).onDelete('restrict'),
-    foreignKey({
-      name: 'syncs_credential_secret_id_fkey',
-      columns: [table.credentialSecretId],
-      foreignColumns: [secrets.id],
-    }).onDelete('restrict'),
-    index('syncs_environment_idx').on(table.environmentId),
-  ],
-);
-
-export const syncKeys = sqliteTable(
-  'sync_keys',
-  {
-    syncId: text('sync_id').notNull(),
-    key: text().notNull(),
-    secretVersionId: text('secret_version_id'),
-    pushedAt: time('pushed_at').notNull().default(now),
-    removedAt: time('removed_at'),
-  },
-  (table) => [
-    primaryKey({ name: 'sync_keys_pkey', columns: [table.syncId, table.key] }),
-    foreignKey({
-      name: 'sync_keys_sync_id_fkey',
-      columns: [table.syncId],
-      foreignColumns: [syncs.id],
-    }).onDelete('restrict'),
-    foreignKey({
-      name: 'sync_keys_secret_version_id_fkey',
-      columns: [table.secretVersionId],
-      foreignColumns: [secretVersions.id],
-    }).onDelete('restrict'),
-  ],
-);
-
 export const {
   environmentsRelations,
   secretsRelations,
-  syncsRelations,
-  syncKeysRelations,
 } = relationsOf(
-  asPostgres({ projects, environments, secrets, secretVersions, syncs, syncKeys }),
+  asPostgres({ projects, environments, secrets, secretVersions }),
 );

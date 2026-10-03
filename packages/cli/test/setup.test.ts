@@ -181,7 +181,7 @@ for (const as of ['superuser', 'owner'] as const) {
     const shown = json(first);
     assertNoAdministrator(first, url);
     assert.match(first.stderr, /✓ Created coffre_runtime and coffre_vault_runtime\n/);
-    assert.match(first.stderr, /✓ Migrated the database to coffre \S+'s schema: 1 migration applied\n/);
+    assert.match(first.stderr, /✓ Migrated the database to coffre \S+'s schema: 2 migrations applied\n/);
     assert.match(first.stderr, /coffre_runtime\s+cannot write members, delete log entries or create tables\n\s+coffre_vault_runtime\s+can write members; cannot delete log entries or create tables\n/);
     assert.deepEqual(shown.logins, {
       coffre_runtime: { login: 'coffre_runtime', password: 'created' },

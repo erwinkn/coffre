@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { defineSignin, generateToken, github, hashToken } from '@coffre/core/identity';
 import { eq, isNull } from 'drizzle-orm';
 
-import { auditLog, credentials, identities, secrets, syncs } from './db/tables.ts';
+import { auditLog, credentials, identities, secrets } from './db/tables.ts';
 import { CredentialUncheckable, SigninService } from '../src/api/signin.ts';
 import { authenticateRequest } from '../src/auth.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
@@ -301,53 +301,6 @@ test('the report lists service tokens someone issued, while they still work', as
 
   await root.members.remove(`token:${SERVICE}`);
   assert.deepEqual((await root.members.get(`user:${LEAD}`)).issuedTokens, []);
-});
-
-test('the syncs someone set up are listed with where they push', async () => {
-  await root.secrets.set('market/prod', { GITHUB_TOKEN_FOR_SYNC: 'ghp_fake' });
-  const [credential] = await db.owner
-    .select({ projectId: secrets.projectId, environmentId: secrets.environmentId, id: secrets.id })
-    .from(secrets)
-    .where(eq(secrets.key, 'GITHUB_TOKEN_FOR_SYNC'));
-  const place = { projectId: credential.projectId, environmentId: credential.environmentId };
-  await db.owner.insert(syncs).values([
-    {
-      id: randomUUID(),
-      ...place,
-      provider: 'github-actions',
-      config: JSON.stringify({ owner: 'acme', repo: 'app' }),
-      credentialSecretId: credential.id,
-      createdBy: DEV,
-    },
-    {
-      id: randomUUID(),
-      ...place,
-      provider: 'github-actions',
-      config: JSON.stringify({ owner: 'acme', repo: 'other' }),
-      credentialSecretId: credential.id,
-      createdBy: ROOT,
-    },
-  ]);
-
-  const listed = (await root.members.get(`user:${DEV}`)).syncs;
-  assert.deepEqual(
-    listed.map(({ project, environment, providerLabel, destination, credential }) => ({
-      project,
-      environment,
-      providerLabel,
-      destination,
-      credential,
-    })),
-    [
-      {
-        project: 'market',
-        environment: 'prod',
-        providerLabel: 'GitHub Actions',
-        destination: 'acme/app',
-        credential: 'market/prod/GITHUB_TOKEN_FOR_SYNC',
-      },
-    ],
-  );
 });
 
 test('only owners see reports, and only about someone who exists', async () => {

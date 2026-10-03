@@ -6,7 +6,6 @@ import { github, signin, type AuthConfig, type Principal } from '@coffre/core/id
 import { tablesOf } from '@coffre/db';
 import { eq } from 'drizzle-orm';
 
-import { SyncRunner } from '../src/api/syncs.ts';
 import { apiCredential, fetchApi as serveApi, pageClient as clientForPage, pageCredential } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
@@ -39,7 +38,7 @@ function runtimeFor(auth: AuthConfig): CoffreRuntime {
     db: deps.db,
     vault: deps.vault,
     chainKey: deps.chainKey,
-    syncs: new SyncRunner({ db: deps.db, vault: deps.vault, chainKey: deps.chainKey }),
+
     signin: null,
     auth,
     publicUrl: ORIGIN,

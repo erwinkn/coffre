@@ -7,7 +7,7 @@ first live instance.
 ## Where we are
 
 - **The product works end to end:** the API, the CLI, the web UI, coffre's own
-  sign-in, syncs, offboarding, and conformance for every deployment.
+  sign-in, offboarding, and conformance for every deployment.
 - **It is packages** (phase 2): `coffre init --workers` or `--node` writes a
   deployment, and `coffre setup` prepares its database and keys in one go
   ([deploy.md](deploy.md)). Releases are on npm, published from a version
@@ -94,15 +94,12 @@ repository holds no instance's configuration.
   PlanetScale branch, and a rotation drill (a new vault key, the old one in
   `previousKeks`).
 
-### Syncs
+### Secrets in deploy pipelines
 
-Built as a server-side engine: an environment is pushed to GitHub Actions,
-Vercel, Railway or Cloudflare Workers on every change, and checked hourly for
-drift ([syncs.md](syncs.md)). A CLI push happens only when someone remembers
-to run it, and the point is that nobody has to. The cost is that coffre holds
-deploy tokens; they are ordinary secrets, so they get the same encryption,
-grants and log as everything else. Still open: plain `.env` files as a
-destination.
+Machines read with a service token and `coffre run` or `coffre export` at deploy
+or CI time. A pipeline may push values into its platform's secret store using
+its own deploy credentials. coffre no longer stores third-party write
+credentials or runs server-side syncs.
 
 ## Phase 4: sign-in
 
@@ -145,8 +142,8 @@ ends. Passkeys would make a good recent sign-in for revealing.
   250,000 entries ([the limits](architecture.md#limits)).
 - **Changing the app's key**, and with KMS the vault's signing key: neither
   can change today, since what each signed verifies only under it.
-- **The current-version pointer, and sync results as log entries**, two
-  schema tidy-ups from the storage review
+- **The current-version pointer**, a
+  schema tidy-up from the storage review
   ([design, plan step 11](design/single-database.md#implementation-plan)).
 - A retention policy: the only sanctioned way to destroy data.
 - Import from other secret managers such as Infisical, after settling how
@@ -159,5 +156,6 @@ ends. Passkeys would make a good recent sign-in for revealing.
 - **Where it is published:** publicly, at
   [erwinkn/coffre](https://github.com/erwinkn/coffre), under MIT, and on npm
   under the `@coffre` scope.
-- **Sync model:** a server-side engine (phase 3).
+- **Secrets in deploys:** service tokens with `coffre run` or `coffre export`;
+  the deploy pipeline holds its platform's write credentials.
 - **Postgres for erwinkn.com:** PlanetScale Postgres (phase 3).

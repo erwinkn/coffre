@@ -111,23 +111,10 @@ export async function handleRequest(
   });
 }
 
-/**
- * The scheduled job, every few minutes: the audit heartbeat and checkpoint,
- * and syncs that are due. They are independent: a destination that is down
- * must not stop the heartbeat, and a failed heartbeat must not hold back
- * pending syncs. Throws when the heartbeat failed, so the scheduler reports it.
- */
+/** The scheduled audit heartbeat and checkpoint. Throws so the scheduler reports failures. */
 export async function runScheduled(runtime: CoffreRuntime): Promise<void> {
-  const [heartbeat, syncs] = await Promise.allSettled([
-    writeAuditHeartbeat(runtime.db, runtime.chainKey, runtime.vault, {
-      warn: (value, message) => console.warn(message, value),
-    }),
-    runtime.syncs.reconcile(),
-  ]);
-  if (syncs.status === 'rejected') console.error('scheduled syncs failed', logged(syncs.reason));
-  if (heartbeat.status === 'rejected' || !heartbeat.value) {
-    throw new Error('scheduled audit heartbeat failed', {
-      cause: heartbeat.status === 'rejected' ? heartbeat.reason : undefined,
-    });
-  }
+  const ok = await writeAuditHeartbeat(runtime.db, runtime.chainKey, runtime.vault, {
+    warn: (value, message) => console.warn(message, value),
+  });
+  if (!ok) throw new Error('scheduled audit heartbeat failed');
 }

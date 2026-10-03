@@ -6,8 +6,7 @@ import type * as schema from './schema.ts';
  * What both schemas share beyond their columns: the relations and the
  * one generated column.
  *
- * Relations are for Drizzle's relational queries (`db.query.syncs
- * .findMany({ with })`), which read a row and what hangs off it in one
+ * Relations are for Drizzle's relational queries (`db.query.secrets.findMany({ with })`), which read a row and what hangs off it in one
  * statement on every dialect. They add no constraints; the foreign keys in
  * each schema do that. Each schema calls this with its own tables, so a
  * relational query on SQLite joins SQLite tables.
@@ -18,8 +17,6 @@ export function relationsOf(t: Pick<
   | 'environments'
   | 'secrets'
   | 'secretVersions'
-  | 'syncs'
-  | 'syncKeys'
 >) {
   return {
     environmentsRelations: relations(t.environments, ({ one }) => ({
@@ -31,16 +28,6 @@ export function relationsOf(t: Pick<
       environment: one(t.environments, { fields: [t.secrets.environmentId], references: [t.environments.id] }),
     })),
 
-    syncsRelations: relations(t.syncs, ({ one, many }) => ({
-      project: one(t.projects, { fields: [t.syncs.projectId], references: [t.projects.id] }),
-      environment: one(t.environments, { fields: [t.syncs.environmentId], references: [t.environments.id] }),
-      credential: one(t.secrets, { fields: [t.syncs.credentialSecretId], references: [t.secrets.id] }),
-      keys: many(t.syncKeys),
-    })),
-
-    syncKeysRelations: relations(t.syncKeys, ({ one }) => ({
-      sync: one(t.syncs, { fields: [t.syncKeys.syncId], references: [t.syncs.id] }),
-    })),
   };
 }
 

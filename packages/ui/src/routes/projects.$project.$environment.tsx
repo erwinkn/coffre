@@ -48,7 +48,6 @@ import {
 } from '../components/ui';
 import { Card, ClosedDoor, PageHeader } from '../components/page';
 import { SecretReadOnly } from '../components/affordances';
-import { Syncs } from '../components/syncs';
 import {
   AlertCircle,
   Archive,
@@ -84,10 +83,7 @@ export const Route = createFileRoute('/projects/$project/$environment')({
     filter: typeof search.filter === 'string' && search.filter !== '' ? search.filter : undefined,
   }),
   loader: ({ context: { client, queryClient }, params }) =>
-    Promise.all([
-      queryClient.fetchQuery(queries.secrets(client, params)),
-      queryClient.fetchQuery(queries.syncs(client, params)),
-    ]),
+    queryClient.fetchQuery(queries.secrets(client, params)),
   component: EnvironmentPage,
 });
 
@@ -497,12 +493,6 @@ function EnvironmentLedger({
           </div>
         )}
       </section>
-
-      <Syncs
-        project={project}
-        environment={environment}
-        canRun={canWrite || permissions.includes('environment.manage')}
-      />
 
       {archived.length > 0 && (
         <Card

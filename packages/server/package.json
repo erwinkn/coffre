@@ -1,7 +1,7 @@
 {
   "name": "@coffre/server",
   "version": "0.1.11",
-  "description": "coffre's API, sign-in, syncs and scheduled job, on Cloudflare Workers or Node.",
+  "description": "coffre's API, sign-in and scheduled audit job, on Cloudflare Workers or Node.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -48,9 +48,7 @@
     "@coffre/core": "workspace:*",
     "@coffre/db": "workspace:*",
     "@coffre/ui": "workspace:*",
-    "@noble/hashes": "2.4.0",
     "drizzle-orm": "0.45.2",
-    "tweetnacl": "1.0.3",
     "zod": "4.4.3"
   },
   "devDependencies": {

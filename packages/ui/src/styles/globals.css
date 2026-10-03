@@ -3911,38 +3911,6 @@ a.env-card-name:hover {
     grid-template-areas: none;
   }
 
-  /* Syncs: the destination and its actions on one line, the state beneath,
-     and an error, when there is one, under both. */
-  .dt.syncs.stacks tr {
-    grid-template-areas:
-      'destination actions'
-      'status status';
-    align-items: center;
-  }
-
-  .dt.syncs.stacks td.col-destination {
-    grid-area: destination;
-  }
-
-  .dt.syncs.stacks td.col-status {
-    grid-area: status;
-    padding-left: 1.5rem;
-  }
-
-  .dt.syncs.stacks td.col-actions {
-    grid-area: actions;
-  }
-
-  .dt.syncs.stacks tr.has-error {
-    padding-bottom: 0.25rem;
-    border-bottom: 0;
-  }
-
-  .dt.syncs.stacks tr.row-error {
-    grid-template-areas: none;
-    padding-top: 0;
-  }
-
   /* Secrets: key, version and actions on one line, the value beneath. */
   .dt.secrets.stacks tr.secret-row {
     grid-template-columns: minmax(0, 1fr) auto auto;
@@ -4126,15 +4094,10 @@ a.env-card-name:hover {
 }
 
 /* ========================================================================== */
-/* Syncs                                                                      */
+/* Form options                                                               */
 /* ========================================================================== */
 
-/* Four providers read best as a square than as a row of three and one. */
-.choice-grid.sync-providers {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-/* A provider's options keep their width, taking a line of their own rather
+/* A field's options keep their width, taking a line of their own rather
    than being squeezed, and wrap only when a line cannot hold them. */
 .form-row > .field-options {
   flex: 0 1 auto;
@@ -4142,16 +4105,6 @@ a.env-card-name:hover {
 
 .field-options .segmented {
   flex-wrap: wrap;
-}
-
-.sync-providers-state {
-  margin-top: 1.25rem;
-}
-
-/* A sync's state tag sits above its counts at its own width, not the column's. */
-.syncs .cell-stack {
-  align-items: flex-start;
-  gap: 0.25rem;
 }
 
 /* ========================================================================== */

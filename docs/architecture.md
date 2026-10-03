@@ -76,12 +76,12 @@ use one Postgres database: `HYPERDRIVE` connects as `coffre_runtime`,
 | Package | What | Holds |
 |---|---|---|
 | `@coffre/ui` | the web UI, server-rendered, and its static files | nothing sensitive |
-| `@coffre/server` | `/api`, sign-in, syncs and their providers, the heartbeat, the queries; hands pages to the UI | sessions, the app login |
+| `@coffre/server` | `/api`, sign-in, the heartbeat, the queries; hands pages to the UI | sessions, the app login |
 | `@coffre/db` | the Drizzle schemas for Postgres and SQLite, their migrations and migrator, the dialect helpers, the connections, Hyperdrive's included | |
 | `@coffre/vault` | wraps and unwraps data keys, decides who may, logs every use | the keys, the vault login |
-| `@coffre/client` | the typed API client, the API's types printed from the server's routes, and the helpers that turn a sync provider's fields into its config | |
+| `@coffre/client` | the typed API client, the API's types printed from the server's routes | |
 | `@coffre/core` | what the others share: access rules, envelope encryption, vault key providers, the audit chain, identity and sign-in, and `Vault`, the contract between server and vault | |
-| `@coffre/cli` | `init`, `login`, secrets, syncs, audit; built on the client | a CLI session |
+| `@coffre/cli` | `init`, `login`, secrets, audit; built on the client | a CLI session |
 
 A package imports another by name, never by a relative path (a lint rule
 holds every package to it), and all eight are released together at one
@@ -106,8 +106,8 @@ one package is seen by the others without a build. Builds leave it off.
 | `@coffre/ui` | `createUi()` → `{ fetch(request, { context: { cspNonce, client } }) }`; files in `dist/client` |
 | `@coffre/client` | `createClient({ url, headers?, transport? })` |
 
-Where `config` is, for the server, `{ publicUrl, vault, auth, auditChainKey,
-syncs? }` and, for the vault, `{ database, kek, previousKeks?, rootAdmins,
+Where `config` is, for the server, `{ publicUrl, vault, auth, auditChainKey }`
+and, for the vault, `{ database, kek, previousKeks?, rootAdmins,
 signingKey?, bulkLimit? }`, a vault key being a local key or `awsKms(…)`
 ([keys.md](keys.md)). The vault derives its signing key from a local vault key;
 `signingKey` is required only with a vault key a key service holds.
@@ -194,7 +194,6 @@ the verb:
 | what a member holds and has seen, before offboarding | `GET /api/members/user:ada@acme.example` |
 | list, issue or revoke a token's credentials | `GET` / `POST /api/members/token:ci-deploy/tokens`, `DELETE …/tokens/:id` |
 | change someone's access, in one transaction | `PATCH /api/access/user:ada@acme.example {"market": "developer", "market/prod": null}` |
-| syncs, and where this instance can sync to | `GET` / `POST /api/syncs/market/prod`, `PATCH` / `DELETE /api/syncs/by-id/:id`, `POST …/:id/runs`, `GET /api/syncs/providers` |
 | my sessions and linked sign-in accounts, and ending them | `GET` / `DELETE /api/sessions/:id`, `GET` / `DELETE /api/identities/:id` |
 | approve or deny a `coffre login` device code | `GET` / `POST /api/device-logins/:code {"approve": true}` |
 | the audit log, and verifying it | `GET /api/audit?path=market/prod`, `GET /api/audit/verification` |
@@ -230,8 +229,7 @@ so the two cannot drift, and the UI calls it like any other client.
 Each segment names one level, so `/api/secrets/market/prod/versions` is a
 secret named `versions`, and its history is one level further down. Where a
 literal and a name could both fit a path, the literal wins among the routes
-that take the request's method: `DELETE /api/syncs/by-id/…` names a sync,
-while `GET /api/syncs/by-id/prod` is still a project named `by-id`.
+that take the request's method.
 
 Behind it, a request asks the vault once who the caller is to this instance:
 whether they are still a member, and the grants they hold
@@ -248,7 +246,7 @@ passes it a claim:
 ```ts
 await vault.unwrap({
   principal: 'user:dev@acme.example',
-  purpose: 'reveal', // or 'run', 'compare', 'sync'
+  purpose: 'reveal', // or 'run', 'compare'
   requestId,
   operationId,
   items: [{ secretVersionId }],
@@ -290,7 +288,7 @@ turns a refusal into a 403 `vault_refused` carrying the vault's code
 (`removed`, `no_grant`, `expired`, ...), or a 403 `bulk_limit`. The vault
 logs what it refuses; the app adds its own entry, with code `vault_<code>`,
 only where the refusal is part of something larger it was doing, a write
-or a new sync's grants.
+or requested grants.
 
 **The vault key is checked before it is used.** Each vault key gets a check value, a
 known value wrapped under it the first time the vault uses it, kept in a
@@ -351,7 +349,7 @@ them, which starts them over.
 | | App (Worker `coffre`) | Vault (Worker `coffre-vault`) |
 |---|---|---|
 | Config | `auditChainKey`, `auth` (sign-in or Access settings) | `kek`, `previousKeks`, `rootAdmins`, `bulkLimit`; `signingKey` with a KMS key |
-| Tables it writes | projects, environments, ciphertext and wrapped keys, the directory, sessions, syncs; app entries in `audit_log` | `vault_members`, `vault_grants`; vault entries in `audit_log` |
+| Tables it writes | projects, environments, ciphertext and wrapped keys, the directory, sessions; app entries in `audit_log` | `vault_members`, `vault_grants`; vault entries in `audit_log` |
 | Connection | `coffre_runtime`, through `HYPERDRIVE` or a Node Postgres URL | `coffre_vault_runtime`, through `VAULT_HYPERDRIVE` or a Node Postgres URL |
 
 Both connections reach the same database. Each Worker gets only its own
@@ -439,7 +437,7 @@ by replay. The answer is the entry verified through, or the entry where it
 breaks and whose check found it.
 
 **One entry per human action.** A read is the vault's `secret.read`, one
-per secret, with its purpose (`reveal`, `run`, `compare`, `sync`); a
+per secret, with its purpose (`reveal`, `run`, `compare`); a
 write is the app's `secret.write`, naming the vault's `key.wrap` by
 `related_seq`; access and membership changes are the vault's
 (`access.grant`, `access.revoke`, `member.*`), and the app keeps no copy.
@@ -448,10 +446,6 @@ the vault's key operations and the heartbeat are detail: in the log and its
 chain, but left out of `GET /api/audit` unless `detail=1`.
 
 ### What the vault stops
-
-A sync reads as a principal of its own (`sync:<id>`), with a grant made when
-the sync is added and revoked when it is removed. Revoking that grant stops
-the sync: its next run is refused.
 
 - **A permission bug in the app.** An endpoint checks the project but forgets
   the environment; someone with `market/dev` asks for
@@ -523,14 +517,13 @@ Every query lives in one module, `packages/server/src/db/queries.ts`, and the
 rest of the server writes no SQL (lint keeps `drizzle-orm` inside it and
 `packages/db/src/`, and the vault's own store). There are named
 reads, one per shape of data the server needs (the caller, a path, an
-environment's secrets, the members, the syncs, a page of the log), each
+environment's secrets, the members, a page of the log), each
 returning everything its callers use in one statement. There are also four
 generic writes (insert, insert if absent, upsert, update) and a row lock.
 Writes do not check first and do not read back. A unique constraint answers
 "is this slug taken". An update that matches the old value answers "was it
 still there": `{ id, revokedAt: null }` changes one row or none. Row locks are
-kept for real races (the audit head, offboarding against sign-in, sync
-leases, version counters), and each one says which race it guards.
+kept for real races (the audit head, offboarding against sign-in, version counters), and each one says which race it guards.
 
 The database comes from its URL: `postgres://` or `postgresql://` opens
 node-postgres; `file:` or `libsql:` opens @libsql/client for SQLite

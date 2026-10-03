@@ -12,7 +12,6 @@ import { github, signin } from '@coffre/core/identity';
 import type { Vault } from '@coffre/core/vault';
 
 import { SigninService } from '../src/api/signin.ts';
-import { SyncRunner } from '../src/api/syncs.ts';
 import { fetchApi, pageClient } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
@@ -44,7 +43,7 @@ before(async () => {
     db: deps.db,
     vault,
     chainKey: deps.chainKey,
-    syncs: new SyncRunner({ db: deps.db, vault, chainKey: deps.chainKey }),
+
     signin: service,
     auth,
     publicUrl: ORIGIN,

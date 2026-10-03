@@ -18,20 +18,4 @@ export {
   type SigninProvider,
 } from '@coffre/core/identity';
 export type { Vault } from '@coffre/core/vault';
-export type { CoffreConfig, SyncSettings } from './config.ts';
-export {
-  cloudflareWorkers,
-  githubActions,
-  railway,
-  SyncConfigError,
-  SyncProviderError,
-  vercel,
-  type SyncApplyResult,
-  type SyncBrand,
-  type SyncContext,
-  type SyncField,
-  type SyncPlan,
-  type SyncProvider,
-  type SyncProviderErrorCode,
-  type SyncVariable,
-} from './sync/index.ts';
+export type { CoffreConfig } from './config.ts';

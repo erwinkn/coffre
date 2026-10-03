@@ -44,16 +44,14 @@ const member = ({ principalType, principalId }) =>
 // owner, and lifts the log's append-only triggers for it. Neither runtime
 // login can do any of it: they have no DELETE on audit_log at all.
 //
-// Syncs hold references to secrets, versions and environments, and sign-in
-// sessions, device logins and linked accounts to the vault's members, so
+// Sign-in sessions, device logins and linked accounts refer to the vault's
+// members, so
 // they go next; then the members and grants, which go with the log that
 // records them.
 console.log('==> resetting local data');
 await pool.query('ALTER TABLE audit_log DISABLE TRIGGER USER');
 await pool.query('DELETE FROM audit_log');
 await pool.query('ALTER TABLE audit_log ENABLE TRIGGER USER');
-await pool.query('DELETE FROM sync_keys');
-await pool.query('DELETE FROM syncs');
 await pool.query('DELETE FROM credentials');
 await pool.query('DELETE FROM device_authorizations');
 await pool.query('DELETE FROM identities');

@@ -4,7 +4,6 @@ import {
   allows,
   assignableToEnvironment,
   isRole,
-  isSyncPrincipal,
   mayManageAccess,
   type Holdings,
   type Permission,
@@ -149,7 +148,9 @@ const KEY_BUDGET_MS = 5_000;
 /** How long a decision waits for a lock: above the key budget, so a removal outwaits a read in flight. */
 const LOCK_TIMEOUT_MS = 15_000;
 
+// Historical principals remain valid audit subjects and sealed rows.
 const PRINCIPAL = /^(user|token|sync):[^\s:][^\s]*$/;
+const LIVE_PRINCIPAL = /^(user|token):[^\s:][^\s]*$/;
 
 /** Who acts for the vault itself, as when it gives a root admin a member row. */
 const VAULT_ACTOR = 'system:vault';
@@ -937,6 +938,7 @@ class VaultService implements Vault {
     const grants = row === undefined ? [] : await store.grants(db, principal);
     const fault = await this.#integrity(db, principal, row, grants, reports);
     if (fault !== null) return { principal, status: 'tampered', live: none, all: none, fault, stored: grants };
+    if (!LIVE_PRINCIPAL.test(principal)) return { principal, status: 'unknown', live: none, all: none, fault, stored: grants };
     if (row?.status !== 'active') return { principal, status: row?.status ?? 'unknown', live: none, all: none, fault, stored: grants };
     const held = grants.map((grant) => ({ ...grant, role: grant.role as Role }));
     const isOwner = row.owner && principal.startsWith('user:');
@@ -954,10 +956,10 @@ class VaultService implements Vault {
     if (this.#isRootAdmin(principal)) {
       return { principal, status: 'active', generation: row?.generation ?? 0, isRootAdmin: true, isOwner: true, grants: [], since: null, by: null };
     }
-    const active = !tampered && row?.status === 'active';
+    const active = LIVE_PRINCIPAL.test(principal) && !tampered && row?.status === 'active';
     return {
       principal,
-      status: tampered ? 'tampered' : (row?.status ?? 'unknown'),
+      status: tampered ? 'tampered' : !LIVE_PRINCIPAL.test(principal) ? 'unknown' : (row?.status ?? 'unknown'),
       generation: row?.generation ?? 0,
       isRootAdmin: false,
       isOwner: active && row.owner && principal.startsWith('user:'),
@@ -1033,7 +1035,7 @@ class VaultService implements Vault {
       }]);
     return this.#decide([actor, principal], async (d) => {
       validateCorrelation(input);
-      if (!PRINCIPAL.test(principal)) throw refused('invalid', `not a principal: ${principal}`);
+      if (!LIVE_PRINCIPAL.test(principal)) throw refused('invalid', `not a principal: ${principal}`);
       if (this.#isRootAdmin(principal)) throw refused('root_admin');
       const places = new Set<string>();
       for (const change of input.changes) {
@@ -1061,32 +1063,13 @@ class VaultService implements Vault {
       }
       const acting = await this.#standing(d.tx, actor, d.members.get(actor), d.at, d.reports);
       if (acting.status === 'tampered') throw refused('tampered');
-      if (!input.changes.every((change) => mayManageAccess(acting.live, principal, change))) throw refused('not_allowed');
+      if (!input.changes.every((change) => mayManageAccess(acting.live, change))) throw refused('not_allowed');
 
       const row = d.members.get(principal);
       const subject = await this.#standing(d.tx, principal, row, d.at, d.reports);
       if (subject.status === 'tampered') throw refused('tampered', TAMPERED_SUBJECT);
       if (row?.status === 'removed') throw refused('removed');
-      if (row === undefined) {
-        // A sync is a member from its first grant; anyone else is admitted first.
-        if (!isSyncPrincipal(principal) || input.changes.every((change) => change.role === null)) {
-          throw refused('not_a_member');
-        }
-        d.log.push(accessEntry(actor, 'member.add', principal, 'allow', input, { owner: false }));
-        d.writes.push(async (at) => {
-          await store.insertMember(d.tx, {
-            principal,
-            status: 'active',
-            owner: false,
-            generation: 0,
-            createdAt: at,
-            createdBy: actor,
-            statusChangedAt: at,
-            statusChangedBy: actor,
-            ...UNSEALED,
-          });
-        });
-      }
+      if (row === undefined) throw refused('not_a_member');
       // The grants the check verified, not a second read: what the decision changes, and seals.
       const held = subject.stored;
       d.grants.set(principal, [...held]);
@@ -1156,7 +1139,7 @@ class VaultService implements Vault {
       const acting = await this.#standing(d.tx, actor, d.members.get(actor), d.at, d.reports);
       if (acting.status === 'tampered') throw refused('tampered');
       if (!acting.live.isOwner) throw refused('not_allowed', 'only owners may add or restore members');
-      if (!PRINCIPAL.test(principal) || isSyncPrincipal(principal)) throw refused('invalid', `not a member: ${principal}`);
+      if (!LIVE_PRINCIPAL.test(principal)) throw refused('invalid', `not a member: ${principal}`);
       if (this.#isRootAdmin(principal)) throw refused('root_admin');
       if (input.owner === true && !principal.startsWith('user:')) {
         throw refused('invalid', 'service accounts cannot be owners');
@@ -1208,6 +1191,7 @@ class VaultService implements Vault {
       new Refused(refusal(code, message), [accessEntry(actor, 'member.remove', principal, 'deny', input, {}, code)]);
     return this.#decide([actor, principal], async (d) => {
       validateCorrelation(input);
+      if (!LIVE_PRINCIPAL.test(principal)) throw refused('invalid', `not a member: ${principal}`);
       if (this.#isRootAdmin(principal)) throw refused('root_admin');
       const row = d.members.get(principal);
       const acting = await this.#standing(d.tx, actor, d.members.get(actor), d.at, d.reports);
@@ -1219,15 +1203,7 @@ class VaultService implements Vault {
         if (!holder.isOwner) throw refused('not_allowed', 'only owners may remove a member whose record failed its check');
         return this.#startOver(d, actor, principal, row, subject.fault!, input, refused);
       }
-      // Owners remove anyone. Removing a sync only takes access away, so
-      // whoever may take away one of its grants, or manage it at its
-      // source, may remove it, and anyone may remove one that holds nothing.
-      const places = input.source === undefined ? held : [...held, input.source];
-      const may =
-        holder.isOwner ||
-        (isSyncPrincipal(principal) &&
-          (held.length === 0 || places.some((place) => mayManageAccess(holder, principal, { ...place, role: null }))));
-      if (!may) throw refused('not_allowed', 'only owners may remove members');
+      if (!holder.isOwner) throw refused('not_allowed', 'only owners may remove members');
       if (row?.status !== 'active') throw refused(row === undefined ? 'not_a_member' : 'removed');
 
       const revoked = held.filter((grant) => live(grant, d.at));

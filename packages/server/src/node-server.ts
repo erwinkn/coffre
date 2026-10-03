@@ -21,7 +21,7 @@ export type ServeOptions = CoffreConfig & {
   port?: number;
   /** Where to listen; 127.0.0.1 unless set, for a proxy in front to terminate TLS. */
   host?: string;
-  /** How often the heartbeat and due syncs run; every 5 minutes unless set, `false` for never (tests). */
+  /** How often the heartbeat run; every 5 minutes unless set, `false` for never (tests). */
   schedule?: { everyMinutes: number } | false;
 };
 
