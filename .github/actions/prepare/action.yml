@@ -1,0 +1,21 @@
+name: Prepare validation
+description: Install frozen dependencies and build the packages on Node 24
+runs:
+  using: composite
+  steps:
+    - name: Install pnpm
+      uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+    - name: Install Node.js
+      uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      with:
+        node-version: 24
+        cache: pnpm
+        cache-dependency-path: pnpm-lock.yaml
+    - name: Install frozen dependencies
+      shell: bash
+      run: pnpm install --frozen-lockfile
+    # Typecheck needs the generated route tree and declarations; conformance
+    # runs the built packages. Each lane builds its own revision.
+    - name: Build the packages
+      shell: bash
+      run: pnpm build
