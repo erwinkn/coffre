@@ -617,6 +617,18 @@ Each limit is stated here once; the other documents link to it.
   log as it now is verifies no better. The hour's first checkpoint
   recomputes the chain from entry 0 and refuses; full verification finds it
   at once. Until then, her reads are logged under her name.
+
+  That one case is what moved from five minutes to an hour, when
+  checkpoints began resuming: an entry before the last signed checkpoint,
+  edited in place, with its stored hash left as it was. Everything else is
+  still found at the next checkpoint, within five minutes:
+  - an entry cut from the middle;
+  - a rewrite chained again, whether resealed or not;
+  - the prefix the last checkpoint signed gone;
+  - anything after the last checkpoint.
+
+  `GET /api/audit/verification` and `coffre verify log` still recompute
+  everything when asked.
 - **The full recomputation grows with the log,** once an hour: about 4
   seconds per 100,000 entries on a small shared Postgres. A team's instance
   writes some 600 entries a day of heartbeats and checkpoints alone, plus
