@@ -13,11 +13,11 @@
     "conformance": "coffre-conformance node"
   },
   "dependencies": {
-    "@coffre/server": "0.1.11",
-    "@coffre/vault": "0.1.11"
+    "@coffre/server": "0.1.12",
+    "@coffre/vault": "0.1.12"
   },
   "devDependencies": {
-    "@coffre/conformance": "0.1.11",
+    "@coffre/conformance": "0.1.12",
     "@types/node": "26.1.1",
     "typescript": "5.9.3"
   }
