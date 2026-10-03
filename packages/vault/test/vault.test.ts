@@ -939,6 +939,7 @@ test('no checkpoint is signed over a rewritten entry, and a full check finds the
   const started = await fresh();
   const next = await started.checkpoint();
   assert.equal(!next.ok && next.refusal.code, 'log_broken');
+  assert.equal((await vaultLog(w)).at(-1)!.detail.reason, `the log up to entry ${first.checkpoint.seq} is not the prefix the last checkpoint signed`);
 
   // Every entry carries a good MAC, but the checkpoint's prefix is not there.
   const signed = (await vaultLog(w)).find((entry) => entry.action === 'audit.checkpoint' && entry.outcome === 'allow')!;
@@ -1224,8 +1225,16 @@ test('a grant written around the vault while it removes a member goes with the r
   assert.deepEqual(await tamperings(w), []);
 });
 
+const HOUR = 60 * 60 * 1000;
+
+/** A clock offset that puts the vault in the middle of the hour, so that a test's checkpoints all fall in one. */
+function midHour(): number {
+  return HOUR / 2 - (Date.now() % HOUR);
+}
+
 test('a checkpoint refuses to sign over entries cut from the middle of the log (review R1b)', async () => {
   const w = await world();
+  w.clock.offset = midHour();
   const { auditLog, vaultGrants, vaultMembers } = tablesOf(db.owner);
   await member(w, ADA, [[w.dev, 'developer']]);
   // Mallory keeps Ada's row and grants from before her removal.
@@ -1242,8 +1251,33 @@ test('a checkpoint refuses to sign over entries cut from the middle of the log (
     await owned.insert(vaultGrants).values(keptGrants);
   });
   await wrapped(w, await w.secret(w.prod));
+  // Within the hour too: the prefix the last checkpoint signed is short of entries, so this one recomputes from entry 0.
   const checkpoint = await w.vault.checkpoint();
   assert.equal(!checkpoint.ok && checkpoint.refusal.code, 'log_broken', 'a checkpoint signed over a log with entries cut from its middle');
+  assert.match(String((await vaultLog(w)).at(-1)!.detail.reason), /^sequence gap: expected seq \d+/, 'it names the gap');
+});
+
+test('an entry edited in place before the last checkpoint is refused by the hour\'s full recomputation', async () => {
+  const w = await world();
+  w.clock.offset = midHour();
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  assert.ok((await w.vault.checkpoint()).ok);
+  await rewrite(1n, 'in place');
+  await member(w, BOB, [[w.dev, 'viewer']]);
+
+  // Within the hour, a checkpoint resumes from the prefix the last one signed: its hash and every entry are there.
+  // It extends the chain the vault recomputed before the edit, so the log as it now is verifies no better.
+  assert.ok((await w.vault.checkpoint()).ok);
+  const check = await w.vault.verifyLog({});
+  assert.deepEqual(!check.ok && [check.failedAtSeq, check.reason], [1, 'hash does not match the entry'], 'a full check finds it at once');
+
+  // The hour's first checkpoint recomputes from entry 0 and refuses, as every one after it does.
+  w.clock.offset += HOUR;
+  for (const attempt of ['first', 'next']) {
+    await member(w, attempt === 'first' ? 'user:cy@acme.example' : 'user:di@acme.example', []);
+    const refused = await w.vault.checkpoint();
+    assert.equal(!refused.ok && refused.refusal.code, 'log_broken', `the ${attempt} checkpoint of the hour signed over an entry edited in place`);
+  }
 });
 
 test('a checkpoint finds a row changed around the vault before its member asks for anything', async () => {
@@ -1387,8 +1421,9 @@ const hex = (key: Uint8Array) => Buffer.from(key).toString('hex');
 /** A vault from a deployment's own configuration, over places already made: several can follow one another. */
 async function configured(placed: Awaited<ReturnType<typeof places>>, keys: Pick<VaultConfig, 'kek' | 'previousKeks' | 'signingKey'>): Promise<World> {
   const resolved = resolveVaultConfig({ rootAdmins: ['root@acme.example'], ...keys });
-  const vault = await openLocalVault(db.vault, resolved);
-  return { ...placed, vault, clock: { offset: 0 }, twin: async () => openLocalVault(await db.connect(), resolved) };
+  const clock = { offset: 0 };
+  const vault = await openLocalVault(db.vault, resolved, { clockOffset: () => clock.offset });
+  return { ...placed, vault, clock, twin: async () => openLocalVault(await db.connect(), resolved) };
 }
 
 test('a local KEK stands for one signing key: the same for the same KEK, another for another, never the KEK', () => {
@@ -1474,6 +1509,8 @@ test('a KEK rotation moves the log and every member row to the new key at the fi
   const verdict = await forgot.vault.verifyLog({});
   assert.ok(!verdict.ok);
   assert.match(verdict.reason, /a key this verifier does not hold: either it is forged, or the vault wrote it under another vault key or signing key/);
+  // Within the hour, its checkpoints resume past the rotation, under the key it holds; the hour's full recomputation refuses.
+  forgot.clock.offset = HOUR;
   const refused = await forgot.vault.checkpoint();
   assert.equal(!refused.ok && refused.refusal.code, 'log_broken');
 });

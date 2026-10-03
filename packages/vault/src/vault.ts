@@ -179,6 +179,13 @@ const CHECKPOINT = 'audit.checkpoint';
 /** Who asks for checkpoints: the app's scheduled job. */
 const SCHEDULER = 'system:coffre-scheduler';
 
+/**
+ * How often a checkpoint recomputes the chain from its first entry: the
+ * first of each hour, by the vault's clock. The others resume from the
+ * prefix the last one signed (`#recompute`).
+ */
+const FULL_RECOMPUTE_MS = 60 * 60 * 1000;
+
 /** A refusal and the entries that record it. */
 class Refused {
   readonly refusal: Refusal;
@@ -1374,9 +1381,49 @@ class VaultService implements Vault {
   // --- checkpoints and the log --------------------------------------------------
 
   /** The last checkpoint the vault signed, and the entry that holds it: its newest allowed `audit.checkpoint`. */
-  async #latest(db: Queryable): Promise<{ checkpoint: Checkpoint; seq: bigint } | null> {
+  async #latest(db: Queryable): Promise<{ checkpoint: Checkpoint; seq: bigint; keyId: string } | null> {
     const row = await store.latestVaultEntry(db, [CHECKPOINT]);
-    return row === undefined ? null : { checkpoint: JSON.parse(row.metadata) as Checkpoint, seq: row.seq };
+    return row === undefined ? null : { checkpoint: JSON.parse(row.metadata) as Checkpoint, seq: row.seq, keyId: row.keyId };
+  }
+
+  /**
+   * The chain recomputed to its last entry, for a checkpoint to sign: from
+   * its first entry at the first checkpoint of each hour, and otherwise from
+   * the prefix the last checkpoint signed, if that one was signed this hour.
+   *
+   * Resuming never signs what the vault did not recompute. The vault
+   * recomputed the last checkpoint's prefix itself, from entry 0 at the
+   * hour's first checkpoint and onward at each one since, and the entry
+   * that holds it is the first one checked again, by its MAC. The next
+   * signature extends that same chain.
+   *
+   * What resuming does not do is recompute the rows of that prefix again.
+   * They can change while the hash stored at its end stays, so it first
+   * checks the two things that are cheap: that hash is still there, which a
+   * prefix rewritten and chained again changes, and every entry of the
+   * prefix is, which a cut changes. Either failing, it recomputes from entry
+   * 0, which names what broke. An entry edited in place, its hash left as
+   * it was, is the one change left to the next full pass, within the hour.
+   *
+   * It resumes only from a checkpoint under the key the vault writes with
+   * now: once the log reaches that key, no other writes again (`forward`).
+   * After a rotation, the next pass is full.
+   */
+  async #recompute(tx: Queryable): Promise<{ verification: LogVerification; anchor: Anchor }> {
+    const { logKeys } = this.#prepared;
+    const latest = await this.#latest(tx);
+    const hour = (ms: number) => Math.floor(ms / FULL_RECOMPUTE_MS);
+    const resumable =
+      latest !== null &&
+      latest.keyId === logKeys[0].keyId &&
+      latest.seq === BigInt(latest.checkpoint.seq) + 1n &&
+      hour(Date.parse(latest.checkpoint.signedAt)) === hour(await this.#now(tx)) &&
+      (await carries(tx, latest.checkpoint)) &&
+      (await store.complete(tx, BigInt(latest.checkpoint.seq)));
+    if (!resumable) return verifyChain(tx, logKeys, [], UNVERIFIED);
+    const { seq, hash } = latest.checkpoint;
+    const signed: Anchor = { nextSeq: BigInt(seq) + 1n, hash: Buffer.from(hash, 'hex'), vaultEntries: 0, vaultKeys: [logKeys[0].keyId] };
+    return verifyChain(tx, logKeys, [], signed);
   }
 
   async checkpoint(): Promise<Outcome<{ checkpoint: Checkpoint }>> {
@@ -1386,14 +1433,14 @@ class VaultService implements Vault {
     const { wrongKek } = this.#prepared;
     // Then, in one snapshot and without the log's lock, so that no append
     // waits on it: every member's row checked, since rows changed around the
-    // vault write nothing to the log; and the whole chain recomputed from its
-    // first entry, every hash from content and every vault entry by its MAC,
-    // since an entry cut from the middle leaves the hashes around a later
-    // checkpoint as they were.
+    // vault write nothing to the log; and the chain recomputed, every hash
+    // from content and every vault entry by its MAC, from the first entry
+    // once an hour, since an entry cut from the middle leaves the hashes
+    // around a later checkpoint as they were (`#recompute`).
     const found: NewEntry[] = [];
     const whole = await this.#db.transaction(async (tx) => {
       await this.#sweep(tx, found);
-      return verifyChain(tx, this.#prepared.logKeys, [], UNVERIFIED);
+      return this.#recompute(tx);
     }, SNAPSHOT);
     return this.#decide([], async (d) => {
       for (const entry of found) if (!d.reports.includes(entry)) d.reports.push(entry);

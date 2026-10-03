@@ -55,9 +55,12 @@ export interface Vault {
 
   /**
    * Sign the log up to its last entry, in an `audit.checkpoint` entry of
-   * the vault's, if the whole chain recomputes from its first entry, the
-   * vault's entries by their MACs, and the prefix the last checkpoint signed
-   * is still there. The vault reads the log itself: it takes nobody's word
+   * the vault's, if the chain recomputes, the vault's entries by their MACs,
+   * and the prefix the last checkpoint signed is still there. The first
+   * checkpoint of each hour recomputes from the first entry; the others
+   * resume from the prefix the last one signed, which the vault recomputed
+   * itself, while it still has every entry and ends at the hash it signed.
+   * The vault reads the log itself: it takes nobody's word
    * for where it ends, or for what came before. It checks every
    * member's row too, as `access` would, and logs a `vault.tampered` for
    * each one changed around it: lists read rows without asking the vault.
