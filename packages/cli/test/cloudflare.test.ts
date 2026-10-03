@@ -174,7 +174,10 @@ test("a Hyperdrive config is this deployment's by the id it records, or by name 
 
 test("a deployment's name: from its address, as a Worker's name can be", () => {
   assert.equal(nameFrom('coffre-try.erwinkn.com'), 'coffre-try');
-  assert.equal(nameFrom('secrets.acme.com'), 'secrets');
+  assert.equal(nameFrom('try.erwinkn.com'), 'coffre-try');
+  assert.equal(nameFrom('secrets.acme.com'), 'coffre-secrets');
+  assert.equal(nameFrom(`${'x'.repeat(70)}.acme.com`).length, 57);
+  assert.equal(nameProblem(nameFrom(`${'x'.repeat(49)}-y.acme.com`)), null, 'never ends on a dash once cut');
   assert.equal(nameProblem('coffre-try'), null);
   for (const bad of ['Coffre', '-x', 'x-', 'a_b', 'x'.repeat(58)]) assert.match(nameProblem(bad)!, /lower-case letters, digits and dashes/, bad);
 });
