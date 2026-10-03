@@ -149,7 +149,13 @@ export const queries = {
     queryOptions({
       queryKey: [...keys.directory, { owner }],
       queryFn: () =>
-        owner ? listDirectory(client) : Promise.resolve({ ok: false as const, error: 'Only owners can manage users and service accounts.' }),
+        owner
+          ? listDirectory(client)
+          : Promise.resolve({
+              ok: false as const,
+              error: 'Only owners can manage users and service accounts.',
+              signedOut: false,
+            }),
     }),
 
   /** What one member can reach and has seen; null for anyone but owners, who alone may ask. */
@@ -205,7 +211,11 @@ export const queries = {
         ),
     }),
 
-  /** Whether the log holds: verified on every visit. */
+  /**
+   * Whether the log holds: verified on every visit, and never waited for.
+   * It re-reads the whole log, so it takes as long as the log is long; the
+   * page shows the entries first and the verdict when it comes.
+   */
   auditChain: (client: CoffreClient) =>
     queryOptions({ queryKey: [...keys.audit, 'chain'], staleTime: 0, queryFn: () => verifyChain(client) }),
 };
@@ -373,7 +383,11 @@ export const affects = {
   sessions: (): QueryKey[] => [keys.sessions],
 };
 
-/** Refetch what a change touched: at once where it is on screen, on next use elsewhere. */
+/**
+ * Refetch what a change touched: at once where it is on screen, on next use
+ * elsewhere. Every change lands in the audit log, so the log and its
+ * verification are always among them.
+ */
 export async function refresh(queryClient: QueryClient, touched: QueryKey[]): Promise<void> {
-  await Promise.all(touched.map((queryKey) => queryClient.invalidateQueries({ queryKey })));
+  await Promise.all([...touched, keys.audit].map((queryKey) => queryClient.invalidateQueries({ queryKey })));
 }

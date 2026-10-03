@@ -112,6 +112,15 @@ test('the audit log and its verification are read on every visit', () => {
   assert.equal(queries.auditChain(client).staleTime, 0);
 });
 
+test('every change marks the audit log and its verification stale', async () => {
+  const queryClient = createQueryClient();
+  queryClient.setQueryData([...keys.audit, 'chain'], { integrity: 'intact' });
+  queryClient.setQueryData([...keys.audit, 'entries', {}], { ok: true, entries: [] });
+  await refresh(queryClient, affects.sessions());
+  assert.equal(queryClient.getQueryState([...keys.audit, 'chain'])?.isInvalidated, true);
+  assert.equal(queryClient.getQueryState([...keys.audit, 'entries', {}])?.isInvalidated, true);
+});
+
 test('a secret change refetches the environment, its syncs and the counts, and nothing else', async () => {
   const { client, calls } = fakeClient();
   const queryClient = createQueryClient();

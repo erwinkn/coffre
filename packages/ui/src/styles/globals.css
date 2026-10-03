@@ -2716,6 +2716,12 @@ a.env-card-name:hover {
 /* Audit                                                                      */
 /* ========================================================================== */
 
+/* The badge's live region, which stays while the badge changes. */
+.chain-live {
+  display: flex;
+  align-items: center;
+}
+
 .chain {
   display: flex;
   align-items: center;
