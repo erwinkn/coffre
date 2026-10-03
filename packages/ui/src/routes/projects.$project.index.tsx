@@ -1,8 +1,21 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { createFileRoute, Link, useLoaderData, useRouter } from '@tanstack/react-router';
+import { useSuspenseQuery } from '@tanstack/react-query';
+import { createFileRoute, Link, useRouter } from '@tanstack/react-router';
+import { useShell } from '../lib/use-shell';
 import { DropdownMenu } from 'radix-ui';
 import { toast } from 'sonner';
-import { Refusal, useCoffre } from '../lib/coffre';
+import { useCoffre } from '../lib/coffre';
+import {
+  archiveEnvironment,
+  createEnvironment,
+  environmentId,
+  grantAccess,
+  grantId,
+  renameEnvironment,
+} from '../lib/changes';
+import { affects, keys, loadProject, projectOf, queries } from '../lib/queries';
+import { useChange, useChangeStatus } from '../lib/use-change';
+import { ItemFailure, RowPending, rowClass } from '../components/row-state';
 import { useAction } from '../lib/use-action';
 import type { GrantRow, ProjectSummary } from '../shared/models';
 import {
@@ -19,7 +32,7 @@ import {
   Spinner,
 } from '../components/ui';
 import { Card, ClosedDoor, PageHeader } from '../components/page';
-import { ensureGrant, GrantRowView, GrantsTable, loadProject } from '../components/grants';
+import { GrantRowView, GrantsTable, RefusedGrants, useRefusedGrants } from '../components/grants';
 import { PrincipalLink } from '../components/principal';
 import { PrincipalPicker } from '../components/principal-picker';
 import {
@@ -51,7 +64,7 @@ export const Route = createFileRoute('/projects/$project/')({
         ? search.tab
         : undefined,
   }),
-  loader: ({ context: { client }, params }) => loadProject(client, params.project),
+  loader: ({ context: { client, queryClient }, params }) => loadProject(queryClient, client, params.project),
   component: ProjectPage,
 });
 
@@ -63,9 +76,9 @@ const TABS: { key: ProjectTab; label: string; icon: ReactNode }[] = [
 ];
 
 function ProjectPage() {
-  const result = Route.useLoaderData();
   const { project: projectSlug } = Route.useParams();
-  const search = Route.useSearch();
+  const { data: projects } = useSuspenseQuery(queries.projects(useCoffre()));
+  const result = projectOf(projects, projectSlug);
 
   if (!result.ok) {
     return (
@@ -85,7 +98,33 @@ function ProjectPage() {
     );
   }
 
-  const { project, grants, grantsError } = result;
+  return result.managesAccess ? (
+    <ManagedProject project={result.project} />
+  ) : (
+    <ProjectView project={result.project} grants={[]} grantsError={null} />
+  );
+}
+
+/** A project whose access you manage, with its grants. */
+function ManagedProject({ project }: { project: ProjectSummary }) {
+  const { data: result } = useSuspenseQuery(queries.grants(useCoffre(), project.slug));
+  return result.ok ? (
+    <ProjectView project={project} grants={result.grants} grantsError={null} />
+  ) : (
+    <ProjectView project={project} grants={[]} grantsError={result.error} />
+  );
+}
+
+function ProjectView({
+  project,
+  grants,
+  grantsError,
+}: {
+  project: ProjectSummary;
+  grants: GrantRow[];
+  grantsError: string | null;
+}) {
+  const search = Route.useSearch();
 
   // Each tab is gated on its own permission, not on one blanket "admin".
   // That is what lets an access manager administer grants without being able
@@ -194,10 +233,14 @@ function EnvironmentsPanel({
   const current = project.environments.filter(
     (environment) => environment.details === null || environment.details.archivedAt === null,
   );
+  const { failedAdds, dismiss } = useChangeStatus(keys.projects);
+  const refused = failedAdds<{ slug: string; name: string }>(
+    project.environments.map((environment) => environmentId(project.slug, environment.slug)),
+  ).filter(({ ids }) => ids.every((id) => id.startsWith(`${project.slug}/`)));
 
   return (
     <>
-      {current.length === 0 ? (
+      {current.length === 0 && refused.length === 0 ? (
         <div className="card">
           <EmptyState title="No environments yet">
             {canManage
@@ -214,6 +257,21 @@ function EnvironmentsPanel({
                 environment={environment}
                 isAdmin={canManage}
               />
+            </li>
+          ))}
+          {refused.map(({ mutationId, vars, status }) => (
+            <li key={mutationId}>
+              <div className="env-card is-muted is-failed">
+                <div className="env-card-text">
+                  <span className="env-card-name">{vars.name}</span>
+                  <span className="env-card-meta">
+                    <span className="mono">{vars.slug}</span>
+                  </span>
+                </div>
+                <ItemFailure status={status} onDismiss={() => dismiss(mutationId)}>
+                  Not added.
+                </ItemFailure>
+              </div>
             </li>
           ))}
         </ul>
@@ -259,20 +317,20 @@ function EnvironmentCard({
   const [slug, setSlug] = useState(environment.slug);
   const [name, setName] = useState(environment.name);
   const coffre = useCoffre();
-  const { pending, error, setError, run } = useAction();
+  const rename = useChange(renameEnvironment(coffre, project));
+  const archive = useChange(archiveEnvironment(coffre, project));
+  const { status, dismiss } = useChangeStatus(keys.projects);
+  const state = status(environmentId(project, environment.slug));
+  const pending = state.state === 'pending';
   const details = environment.details;
   const isArchived = details !== null && details.archivedAt !== null;
   const secretCount = details?.secretCount ?? null;
-  const opens = details !== null && !isArchived && environment.accessible;
+  const opens = details !== null && !isArchived && environment.accessible && !pending;
   const manageable = isAdmin && details !== null;
   const slugError = slug === '' ? null : slugProblem(slug);
 
-  useEffect(() => {
-    if (error !== null && !renaming) toast.error(error);
-  }, [error, renaming]);
-
   return (
-    <div className={`env-card${opens ? ' is-link' : ' is-muted'}`}>
+    <div className={`env-card${opens ? ' is-link' : ' is-muted'} ${rowClass(state)}`}>
       <div className="env-card-text">
         {opens ? (
           <Link
@@ -289,7 +347,7 @@ function EnvironmentCard({
           <span className="mono">{environment.slug}</span>
           {isArchived ? (
             <span className="tag tag-red">archived</span>
-          ) : !environment.accessible ? (
+          ) : !environment.accessible && !pending ? (
             <span className="tag tag-outline">no secret access</span>
           ) : (
             secretCount !== null && (
@@ -301,15 +359,16 @@ function EnvironmentCard({
         </span>
       </div>
 
-      {manageable && (
+      {pending && <RowPending status={state} />}
+
+      {manageable && !pending && (
         <DropdownMenu.Root>
           <DropdownMenu.Trigger asChild>
             <button
               className="act act-quiet env-card-menu"
               aria-label={`Actions for ${environment.slug}`}
-              disabled={pending}
             >
-              {pending ? <Spinner size={14} /> : <MoreHorizontal size={16} />}
+              <MoreHorizontal size={16} />
             </button>
           </DropdownMenu.Trigger>
           <DropdownMenu.Portal>
@@ -342,10 +401,7 @@ function EnvironmentCard({
         <>
           <Modal
             open={renaming}
-            onOpenChange={(open) => {
-              setRenaming(open);
-              if (!open) setError(null);
-            }}
+            onOpenChange={setRenaming}
             title={
               <>
                 Rename{' '}
@@ -359,14 +415,9 @@ function EnvironmentCard({
               className="form"
               onSubmit={(event) => {
                 event.preventDefault();
-                run(
-                  () =>
-                    coffre.environments.update(`${project}/${environment.slug}`, { slug, name }),
-                  () => {
-                    setRenaming(false);
-                    toast.success('Environment renamed');
-                  },
-                );
+                // Shown on the card at once; the card says if the server refuses.
+                rename({ from: environment.slug, slug, name: name.trim() });
+                setRenaming(false);
               }}
             >
               <label className="field">
@@ -393,8 +444,6 @@ function EnvironmentCard({
                 />
               </label>
 
-              <ErrorLine error={error} />
-
               <div className="dialog-actions">
                 <button className="btn" type="button" onClick={() => setRenaming(false)}>
                   Cancel
@@ -402,9 +451,8 @@ function EnvironmentCard({
                 <button
                   className="btn btn-primary"
                   type="submit"
-                  disabled={pending || slug === '' || slugError !== null || name.trim() === ''}
+                  disabled={slug === '' || slugError !== null || name.trim() === ''}
                 >
-                  {pending && <Spinner />}
                   Save
                 </button>
               </div>
@@ -448,19 +496,15 @@ function EnvironmentCard({
             }
             confirmLabel={isArchived ? 'Restore environment' : 'Archive environment'}
             destructive={!isArchived}
-            onConfirm={() =>
-              run(
-                () =>
-                  coffre.environments.update(`${project}/${environment.slug}`, { archived: !isArchived }),
-                () =>
-                  toast.success(
-                    isArchived ? `${environment.slug} restored` : `${environment.slug} archived`,
-                  ),
-              )
-            }
+            onConfirm={() => archive({ slug: environment.slug, archived: !isArchived })}
           />
         </>
       )}
+
+      <ItemFailure
+        status={state}
+        onDismiss={() => state.state === 'failed' && dismiss(state.mutationId)}
+      />
     </div>
   );
 }
@@ -469,13 +513,11 @@ function NewEnvironment({ project }: { project: string }) {
   const [open, setOpen] = useState(false);
   const [slug, setSlug] = useState('');
   const [name, setName] = useState('');
-  const coffre = useCoffre();
-  const { pending, error, setError, run } = useAction();
+  const create = useChange(createEnvironment(useCoffre(), project));
   const slugError = slug === '' ? null : slugProblem(slug);
 
   function close() {
     setOpen(false);
-    setError(null);
   }
 
   return (
@@ -498,18 +540,11 @@ function NewEnvironment({ project }: { project: string }) {
           className="form"
           onSubmit={(event) => {
             event.preventDefault();
-            run(
-              async () => {
-                const { created } = await coffre.environments.create(`${project}/${slug}`, { name });
-                if (!created) throw new Refusal(`An environment named "${slug}" already exists.`);
-              },
-              () => {
-                toast.success(`Environment ${slug} added`);
-                setSlug('');
-                setName('');
-                close();
-              },
-            );
+            // Listed at once, as saving; the list says if the server refuses.
+            create({ slug, name: name.trim() });
+            setSlug('');
+            setName('');
+            close();
           }}
         >
           <label className="field">
@@ -546,8 +581,6 @@ function NewEnvironment({ project }: { project: string }) {
             />
           </label>
 
-          <ErrorLine error={error} />
-
           <div className="dialog-actions">
             <button className="btn" type="button" onClick={close}>
               Cancel
@@ -555,9 +588,8 @@ function NewEnvironment({ project }: { project: string }) {
             <button
               className="btn btn-primary"
               type="submit"
-              disabled={pending || slug === '' || slugError !== null || name.trim() === ''}
+              disabled={slug === '' || slugError !== null || name.trim() === ''}
             >
-              {pending && <Spinner />}
               Add environment
             </button>
           </div>
@@ -577,9 +609,10 @@ function AccessPanel({
   grants: GrantRow[];
 }) {
   const people = principalType === 'user';
+  const refused = useRefusedGrants(project, grants, principalType);
   return (
     <section className="card" aria-label={people ? 'Users with access' : 'Tokens with access'}>
-      {grants.length === 0 ? (
+      {grants.length === 0 && refused.length === 0 ? (
         <EmptyState title={people ? 'No user has access' : 'No token has access'}>
           Add {people ? 'a user' : 'a token'} with permissions on the whole project or on one
           environment.
@@ -595,7 +628,7 @@ function AccessPanel({
         >
           {grants.map((grant, index) => (
             <GrantRowView
-              key={grant.id}
+              key={grantId(grant)}
               number={index + 1}
               project={project}
               grant={grant}
@@ -603,6 +636,7 @@ function AccessPanel({
               lead={<PrincipalLink type={grant.principalType} id={grant.principalId} />}
             />
           ))}
+          <RefusedGrants refused={refused} />
         </GrantsTable>
       )}
     </section>
@@ -620,19 +654,17 @@ function NewGrant({
   environments: ProjectSummary['environments'];
   grants: GrantRow[];
 }) {
-  const { capabilities } = useLoaderData({ from: '__root__' });
+  const { capabilities } = useShell();
   const [open, setOpen] = useState(false);
   const [principalId, setPrincipalId] = useState('');
   const [permission, setPermission] = useState('viewer:');
   const [expiresAt, setExpiresAt] = useState('');
-  const coffre = useCoffre();
-  const { pending, error, setError, run } = useAction();
+  const grant = useChange(grantAccess(useCoffre(), project));
   const permissionOptions = projectAccessOptions(environments);
   const kind = principalType === 'user' ? 'user' : 'token';
 
   function close() {
     setOpen(false);
-    setError(null);
   }
 
   return (
@@ -658,32 +690,19 @@ function NewGrant({
           onSubmit={(event) => {
             event.preventDefault();
             const access = parseProjectAccess(permission);
-            run(
-              () =>
-                ensureGrant(coffre, {
-                  project,
-                  principalType,
-                  principalId: principalId.trim(),
-                  role: access.role,
-                  environmentSlug: access.environmentSlug,
-                  expiresAt:
-                    expiresAt === '' ? null : new Date(`${expiresAt}T23:59:59Z`).toISOString(),
-                }),
-              ({ existed }) => {
-                const label =
-                  permissionOptions.find((option) => option.value === permission)?.label ??
-                  'access';
-                toast.success(
-                  existed
-                    ? `${principalId} already has ${label}`
-                    : `${principalId} granted ${label.toLowerCase()}`,
-                );
-                setPrincipalId('');
-                setExpiresAt('');
-                setPermission('viewer:');
-                close();
-              },
-            );
+            // Shown in the list at once, marked as saving; the list says if the server refuses.
+            grant({
+              principalType,
+              principalId: principalId.trim(),
+              role: access.role,
+              roleName: permissionOptions.find((option) => option.value === permission)?.label ?? access.role,
+              environmentSlug: access.environmentSlug,
+              expiresAt: expiresAt === '' ? null : new Date(`${expiresAt}T23:59:59Z`).toISOString(),
+            });
+            setPrincipalId('');
+            setExpiresAt('');
+            setPermission('viewer:');
+            close();
           }}
         >
           <PrincipalPicker
@@ -723,18 +742,11 @@ function NewGrant({
             </label>
           </div>
 
-          <ErrorLine error={error} />
-
           <div className="dialog-actions">
             <button className="btn" type="button" onClick={close}>
               Cancel
             </button>
-            <button
-              className="btn btn-primary"
-              type="submit"
-              disabled={pending || principalId.trim() === ''}
-            >
-              {pending && <Spinner />}
+            <button className="btn btn-primary" type="submit" disabled={principalId.trim() === ''}>
               Grant access
             </button>
           </div>
@@ -781,16 +793,19 @@ function GeneralSettings({ project }: { project: ProjectSummary }) {
           event.preventDefault();
           run(
             () => coffre.projects.update(project.slug, { slug, name }),
-            async () => {
-              toast.success('Project renamed');
-              // The slug is part of the URL, so a rename has to navigate.
-              if (slug !== project.slug) {
-                await router.navigate({
-                  to: '/projects/$project',
-                  params: { project: slug },
-                  search: { tab: 'settings' },
-                });
-              }
+            {
+              affects: affects.places(),
+              onSuccess: async () => {
+                toast.success('Project renamed');
+                // The slug is part of the URL, so a rename has to navigate.
+                if (slug !== project.slug) {
+                  await router.navigate({
+                    to: '/projects/$project',
+                    params: { project: slug },
+                    search: { tab: 'settings' },
+                  });
+                }
+              },
             },
           );
         }}
@@ -905,10 +920,13 @@ function DangerZone({ project }: { project: ProjectSummary }) {
           run(
             () =>
               coffre.projects.update(project.slug, { archived: !isArchived }),
-            () =>
-              toast.success(
-                isArchived ? `${project.slug} restored` : `${project.slug} archived`,
-              ),
+            {
+              affects: affects.places(),
+              onSuccess: () =>
+                toast.success(
+                  isArchived ? `${project.slug} restored` : `${project.slug} archived`,
+                ),
+            },
           )
         }
       />

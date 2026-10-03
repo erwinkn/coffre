@@ -1,14 +1,19 @@
 import type { IdentityRow, SessionRow } from '@coffre/client';
-import { createFileRoute, useLoaderData } from '@tanstack/react-router';
-import { toast } from 'sonner';
+import { useSuspenseQueries } from '@tanstack/react-query';
+import { createFileRoute } from '@tanstack/react-router';
+import { Fragment } from 'react';
+import { useShell } from '../lib/use-shell';
 import { Card, Fact, PageHeader } from '../components/page';
 import { ThemeCards } from '../components/theme';
 import { InstanceRole } from '../components/directory';
 import { ConfirmButton, EmptyState, ErrorLine, Notice, Timestamp } from '../components/ui';
 import { Monitor, ProviderMark, SignOut, Terminal, X } from '../components/icons';
 import { signinErrorMessage } from '../lib/signin-errors';
-import { uiResult, useCoffre } from '../lib/coffre';
-import { useAction } from '../lib/use-action';
+import { useCoffre } from '../lib/coffre';
+import { endSession, unlinkIdentity } from '../lib/changes';
+import { loadShell, queries } from '../lib/queries';
+import { useChange, useChangeStatus } from '../lib/use-change';
+import { RowFailure, RowPending, rowClass } from '../components/row-state';
 
 type Search = { linked?: string; error?: string };
 
@@ -27,32 +32,21 @@ export const Route = createFileRoute('/account')({
     }
     return out;
   },
-  // The sign-in half: which accounts you sign in with, where you are signed
-  // in, and which providers you could link. Absent behind Cloudflare Access,
-  // which owns sessions there.
-  loader: async ({ context: { client }, parentMatchPromise }) => {
-    const auth = (await parentMatchPromise).loaderData?.auth;
-    if (auth === undefined || auth.signin === null) {
-      return {
-        ok: true as const,
-        signin: false,
-        providers: [] as { id: string; label: string; brand: string }[],
-        identities: [] as IdentityRow[],
-        sessions: [] as SessionRow[],
-      };
-    }
-    const { providers } = auth.signin;
-    return uiResult(async () => {
-      const [{ identities }, { sessions }] = await Promise.all([client.identities.list(), client.sessions.list()]);
-      return { signin: true, providers, identities, sessions };
-    });
+  // The sign-in half: which accounts you sign in with and where you are
+  // signed in. Absent behind Cloudflare Access, which owns sessions there.
+  loader: async ({ context: { client, queryClient } }) => {
+    const shell = await loadShell(queryClient, client);
+    if (shell.auth.signin === null || shell.principal?.type !== 'user') return;
+    await Promise.all([
+      queryClient.fetchQuery(queries.identities(client)),
+      queryClient.fetchQuery(queries.sessions(client)),
+    ]);
   },
   component: AccountPage,
 });
 
 function AccountPage() {
-  const { principal, instanceRole } = useLoaderData({ from: '__root__' });
-  const signin = Route.useLoaderData();
+  const { principal, instanceRole, auth } = useShell();
 
   return (
     <>
@@ -87,17 +81,25 @@ function AccountPage() {
         </Card>
       )}
 
-      {!signin.ok ? (
-        <ErrorLine error={signin.error} />
-      ) : (
-        signin.signin &&
-        principal?.type === 'user' && (
-          <>
-            <SigninAccounts email={principal.id} {...signin} />
-            <Sessions sessions={signin.sessions} providers={signin.providers} />
-          </>
-        )
+      {auth.signin !== null && principal?.type === 'user' && (
+        <SignIn email={principal.id} providers={auth.signin.providers} />
       )}
+    </>
+  );
+}
+
+/** Which accounts you sign in with, and where you are signed in. */
+function SignIn({ email, providers }: { email: string; providers: Provider[] }) {
+  const client = useCoffre();
+  const [{ data: identities }, { data: sessions }] = useSuspenseQueries({
+    queries: [queries.identities(client), queries.sessions(client)],
+  });
+  if (!identities.ok) return <ErrorLine error={identities.error} />;
+  if (!sessions.ok) return <ErrorLine error={sessions.error} />;
+  return (
+    <>
+      <SigninAccounts email={email} providers={providers} identities={identities.identities} />
+      <Sessions sessions={sessions.sessions} providers={providers} />
     </>
   );
 }
@@ -134,8 +136,9 @@ function SigninAccounts({
 }) {
   const { linked, error } = Route.useSearch();
   const message = signinErrorMessage(error);
-  const coffre = useCoffre();
-  const { pending, error: actionError, run } = useAction();
+  const change = unlinkIdentity(useCoffre());
+  const unlink = useChange(change);
+  const { status, dismiss } = useChangeStatus(change.list.queryKey);
 
   return (
     <Card
@@ -143,12 +146,12 @@ function SigninAccounts({
       title="Sign-in accounts"
       description="coffre recognises you by these accounts, never by an email address alone. A new account is linked here, while you are signed in."
     >
-      {(linked !== undefined || message !== null || actionError !== null) && (
+      {(linked !== undefined || message !== null) && (
         <div className="card-body">
           {linked !== undefined && (
             <Notice tone="good">{providerLabel(providers, linked)} account linked.</Notice>
           )}
-          <ErrorLine error={message ?? actionError} />
+          <ErrorLine error={message} />
         </div>
       )}
 
@@ -174,61 +177,68 @@ function SigninAccounts({
               {identities.map((identity) => {
                 const label = providerLabel(providers, identity.provider);
                 const brand = providers.find((p) => p.id === identity.provider)?.brand ?? 'oidc';
+                const state = status(identity.id);
                 return (
-                  <tr key={identity.id}>
-                    <td>
-                      <span className="cell-account">
-                        <ProviderMark brand={brand} />
-                        <span className="cell-stack">
-                          <span>{label}</span>
-                          {identity.email !== null && <small className="mono">{identity.email}</small>}
+                  <Fragment key={identity.id}>
+                    <tr className={rowClass(state)}>
+                      <td>
+                        <span className="cell-account">
+                          <ProviderMark brand={brand} />
+                          <span className="cell-stack">
+                            <span>{label}</span>
+                            {identity.email !== null && <small className="mono">{identity.email}</small>}
+                          </span>
                         </span>
-                      </span>
-                    </td>
-                    <td className="nowrap">
-                      <Timestamp iso={identity.createdAt} />
-                    </td>
-                    <td className="nowrap cell-muted">
-                      {identity.lastSignInAt === null ? (
-                        'Never'
-                      ) : (
-                        <Timestamp iso={identity.lastSignInAt} display="relative" />
-                      )}
-                    </td>
-                    <td className="col-actions">
-                      <ConfirmButton
-                        trigger={
-                          <button className="act" disabled={pending}>
-                            <X size={13} />
-                            Unlink
-                          </button>
-                        }
-                        title={`Unlink this ${label} account?`}
-                        body={
-                          identities.length === 1 ? (
-                            <>
-                              It stops signing you in, and every session it opened ends now,
-                              this one included if you signed in with it. Your next sign-in
-                              with any account whose verified email is{' '}
-                              <span className="mono">{email}</span> links that account instead.
-                            </>
-                          ) : (
-                            <>
-                              It stops signing you in, and every session it opened ends now,
-                              this one included if you signed in with it.
-                            </>
-                          )
-                        }
-                        confirmLabel="Unlink"
-                        onConfirm={() =>
-                          run(
-                            () => coffre.identities.unlink(identity.id),
-                            () => toast.success(`${label} account unlinked`),
-                          )
-                        }
-                      />
-                    </td>
-                  </tr>
+                      </td>
+                      <td className="nowrap">
+                        <Timestamp iso={identity.createdAt} />
+                      </td>
+                      <td className="nowrap cell-muted">
+                        {identity.lastSignInAt === null ? (
+                          'Never'
+                        ) : (
+                          <Timestamp iso={identity.lastSignInAt} display="relative" />
+                        )}
+                      </td>
+                      <td className="col-actions">
+                        {state.state === 'pending' ? (
+                          <RowPending status={state} />
+                        ) : (
+                          <ConfirmButton
+                            trigger={
+                              <button className="act">
+                                <X size={13} />
+                                Unlink
+                              </button>
+                            }
+                            title={`Unlink this ${label} account?`}
+                            body={
+                              identities.length === 1 ? (
+                                <>
+                                  It stops signing you in, and every session it opened ends now,
+                                  this one included if you signed in with it. Your next sign-in
+                                  with any account whose verified email is{' '}
+                                  <span className="mono">{email}</span> links that account instead.
+                                </>
+                              ) : (
+                                <>
+                                  It stops signing you in, and every session it opened ends now,
+                                  this one included if you signed in with it.
+                                </>
+                              )
+                            }
+                            confirmLabel="Unlink"
+                            onConfirm={() => unlink({ ...identity, label })}
+                          />
+                        )}
+                      </td>
+                    </tr>
+                    <RowFailure
+                      status={state}
+                      columns={4}
+                      onDismiss={() => state.state === 'failed' && dismiss(state.mutationId)}
+                    />
+                  </Fragment>
                 );
               })}
             </tbody>
@@ -264,8 +274,9 @@ function Sessions({
   sessions: SessionRow[];
   providers: Provider[];
 }) {
-  const coffre = useCoffre();
-  const { pending, error, run } = useAction();
+  const change = endSession(useCoffre());
+  const end = useChange(change);
+  const { status, dismiss } = useChangeStatus(change.list.queryKey);
 
   return (
     <Card
@@ -273,11 +284,6 @@ function Sessions({
       title="Sessions"
       description="Browsers and command lines signed in as you. Ending one signs it out at its next request."
     >
-      {error !== null && (
-        <div className="card-body">
-          <ErrorLine error={error} />
-        </div>
-      )}
       {sessions.length === 0 ? (
         <EmptyState title="No sessions">Nothing is signed in as you right now.</EmptyState>
       ) : (
@@ -294,62 +300,65 @@ function Sessions({
               </tr>
             </thead>
             <tbody>
-              {sessions.map((session) => (
-                <tr key={session.id}>
-                  <td>
-                    <span className="cell-account">
-                      {session.kind === 'cli' ? <Terminal size={15} /> : <Monitor size={15} />}
-                      <span className="cell-stack">
-                        <span>
-                          {session.label ?? (session.kind === 'cli' ? 'Command line' : 'Browser')}{' '}
-                          {session.current && <span className="tag tag-blue">this browser</span>}
+              {sessions.map((session) => {
+                const state = status(session.id);
+                return (
+                  <Fragment key={session.id}>
+                    <tr className={rowClass(state)}>
+                      <td>
+                        <span className="cell-account">
+                          {session.kind === 'cli' ? <Terminal size={15} /> : <Monitor size={15} />}
+                          <span className="cell-stack">
+                            <span>
+                              {session.label ?? (session.kind === 'cli' ? 'Command line' : 'Browser')}{' '}
+                              {session.current && <span className="tag tag-blue">this browser</span>}
+                            </span>
+                            <small>
+                              {session.kind === 'cli'
+                                ? 'coffre login'
+                                : `via ${providerLabel(providers, session.provider)}`}
+                              {session.lastUsedIp !== null && (
+                                <>
+                                  {' · '}
+                                  <span className="mono">{session.lastUsedIp}</span>
+                                </>
+                              )}
+                            </small>
+                          </span>
                         </span>
-                        <small>
-                          {session.kind === 'cli'
-                            ? 'coffre login'
-                            : `via ${providerLabel(providers, session.provider)}`}
-                          {session.lastUsedIp !== null && (
-                            <>
-                              {' · '}
-                              <span className="mono">{session.lastUsedIp}</span>
-                            </>
-                          )}
-                        </small>
-                      </span>
-                    </span>
-                  </td>
-                  <td className="nowrap cell-muted">
-                    <Timestamp iso={session.lastUsedAt ?? session.createdAt} display="relative" />
-                  </td>
-                  <td className="nowrap cell-muted">
-                    <Timestamp iso={session.expiresAt} display="relative" />
-                  </td>
-                  <td className="col-actions">
-                    {session.current ? (
-                      <form method="post" action="/auth/signout">
-                        <button className="act" type="submit">
-                          <SignOut size={13} />
-                          Sign out
-                        </button>
-                      </form>
-                    ) : (
-                      <button
-                        className="act"
-                        disabled={pending}
-                        onClick={() =>
-                          run(
-                            () => coffre.sessions.revoke(session.id),
-                            () => toast.success('Session ended'),
-                          )
-                        }
-                      >
-                        <X size={13} />
-                        End
-                      </button>
-                    )}
-                  </td>
-                </tr>
-              ))}
+                      </td>
+                      <td className="nowrap cell-muted">
+                        <Timestamp iso={session.lastUsedAt ?? session.createdAt} display="relative" />
+                      </td>
+                      <td className="nowrap cell-muted">
+                        <Timestamp iso={session.expiresAt} display="relative" />
+                      </td>
+                      <td className="col-actions">
+                        {session.current ? (
+                          <form method="post" action="/auth/signout">
+                            <button className="act" type="submit">
+                              <SignOut size={13} />
+                              Sign out
+                            </button>
+                          </form>
+                        ) : state.state === 'pending' ? (
+                          <RowPending status={state} />
+                        ) : (
+                          <button className="act" onClick={() => end(session)}>
+                            <X size={13} />
+                            End
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                    <RowFailure
+                      status={state}
+                      columns={4}
+                      onDismiss={() => state.state === 'failed' && dismiss(state.mutationId)}
+                    />
+                  </Fragment>
+                );
+              })}
             </tbody>
           </table>
         </div>

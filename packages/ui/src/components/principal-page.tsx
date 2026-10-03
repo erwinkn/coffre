@@ -1,10 +1,14 @@
-import type { CoffreClient } from '@coffre/client';
 import { useState } from 'react';
-import { Link, useLoaderData, useRouter } from '@tanstack/react-router';
+import { useSuspenseQueries, useSuspenseQuery } from '@tanstack/react-query';
+import { Link } from '@tanstack/react-router';
+import { useShell } from '../lib/use-shell';
 import { toast } from 'sonner';
-import { memberRef, statusOf, uiResult, useCoffre } from '../lib/coffre';
+import { memberRef, useCoffre } from '../lib/coffre';
+import { directoryList } from '../lib/changes';
+import { affects, managedProjects, queries } from '../lib/queries';
+import { useChangeStatus } from '../lib/use-change';
+import { ItemFailure } from './row-state';
 import { useAction } from '../lib/use-action';
-import type { UiCapabilities } from '../lib/capabilities';
 import { projectAccessLabel } from '../lib/project-access';
 import {
   accessChanges,
@@ -21,7 +25,7 @@ import {
 import type { DirectoryPrincipal, GrantRow, ProjectSummary } from '../shared/models';
 import { ClosedDoor, PageHeader } from './page';
 import { EmptyState, ErrorLine, Modal, Notice, Spinner } from './ui';
-import { GrantRowView, GrantsTable, loadProject } from './grants';
+import { GrantRowView, GrantsTable } from './grants';
 import { InstanceRole, KIND, PrincipalActions } from './directory';
 import { PrincipalReportCards, RemovedNotice } from './offboarding';
 import { PrincipalAvatar } from './principal';
@@ -33,70 +37,47 @@ type PrincipalType = DirectoryPrincipal['principalType'];
 type ProjectAccess = { project: ProjectSummary; grants: GrantRow[]; grantsError: string | null };
 
 /**
- * Everything one user's or token's page shows: who it is to the instance and
- * what it has seen (owners only), and its grants on every project where you
- * manage access.
- *
- * There is no "grants of this principal" call, so this asks each project you
- * manage for its grants and keeps this principal's. Projects where you do not
- * hold grant.manage are skipped rather than asked: the refusal would land in
- * the audit log as a denial in your name. The report is only asked for
- * instance owners, for the same reason.
+ * Everything one user's or token's page shows, from what `loadPrincipal`
+ * read: who it is to the instance and what it has seen (owners only), and its
+ * grants on every project where you manage access.
  */
-export async function loadPrincipalPage(
-  client: CoffreClient,
-  principalType: PrincipalType,
-  principalId: string,
-  root: { projects: ProjectSummary[]; capabilities: UiCapabilities } | undefined,
-) {
-  const managed = (root?.projects ?? []).filter((project) =>
-    project.permissions.includes('grant.manage'),
+function usePrincipalPage(principalType: PrincipalType, principalId: string) {
+  const client = useCoffre();
+  const { projects, capabilities } = useShell();
+  const managed = managedProjects(projects);
+  const { data: report } = useSuspenseQuery(
+    queries.report(client, memberRef(principalType, principalId), capabilities.canManageGrants),
   );
-  const [report, details] = await Promise.all([
-    root?.capabilities.canManageGrants
-      ? uiResult(async () => {
-          try {
-            return { report: await client.members.get(memberRef(principalType, principalId)) };
-          } catch (error) {
-            // No such principal is an answer, not a failure.
-            if (statusOf(error) === 404) return { report: null };
-            throw error;
-          }
-        })
-      : Promise.resolve(null),
-    Promise.all(managed.map((project) => loadProject(client, project.slug))),
-  ]);
-
-  const access: ProjectAccess[] = details.flatMap((result) =>
-    result.ok
-      ? [
-          {
-            project: result.project,
-            grants: result.grants.filter(
-              (grant) =>
-                grant.principalType === principalType && grant.principalId === principalId,
-            ),
-            grantsError: result.grantsError,
-          },
-        ]
-      : [],
-  );
-
+  const grants = useSuspenseQueries({
+    queries: managed.map((project) => queries.grants(client, project.slug)),
+  });
+  const access: ProjectAccess[] = managed.map((project, index) => {
+    const result = grants[index]!.data;
+    return {
+      project,
+      grants: result.ok
+        ? result.grants.filter(
+            (grant) => grant.principalType === principalType && grant.principalId === principalId,
+          )
+        : [],
+      grantsError: result.ok ? null : result.error,
+    };
+  });
   return { report, access };
 }
 
 export function PrincipalPage({
   principalType,
   principalId,
-  data,
 }: {
   principalType: PrincipalType;
   principalId: string;
-  data: Awaited<ReturnType<typeof loadPrincipalPage>>;
 }) {
-  const router = useRouter();
-  const { instanceRole } = useLoaderData({ from: '__root__' });
-  const { report, access } = data;
+  const { instanceRole } = useShell();
+  const { report, access } = usePrincipalPage(principalType, principalId);
+  // A role change or removal made from this page's menu, refused.
+  const { status, dismiss } = useChangeStatus(directoryList.queryKey);
+  const change = status(memberRef(principalType, principalId));
   const kind = KIND[principalType];
   const people = principalType === 'user';
   const list = people ? '/users' : '/tokens';
@@ -170,17 +151,18 @@ export function PrincipalPage({
                 />
               )}
               {entry !== undefined && (
-                <PrincipalActions
-                  principal={entry}
-                  trigger="btn btn-icon"
-                  onRemoved={() => router.invalidate()}
-                />
+                <PrincipalActions principal={entry} trigger="btn btn-icon" />
               )}
             </>
           )
         }
       />
 
+      {change.state === 'failed' && (
+        <div className="report-notice">
+          <ItemFailure status={change} onDismiss={() => dismiss(change.mutationId)} />
+        </div>
+      )}
       {report?.ok === false && (
         <div className="report-notice">
           <Notice tone="bad">{report.error}</Notice>
@@ -327,11 +309,16 @@ function EditAccess({
                   memberRef(principalType, principalId),
                   Object.assign({}, ...changed.map(({ project, changes }) => accessPatch(project.slug, changes))),
                 ),
-              () => {
-                toast.success(
-                  `Updated ${principalId}’s access on ${changed.length} project${changed.length === 1 ? '' : 's'}`,
-                );
-                close();
+              {
+                affects: changed.flatMap(({ project }) =>
+                  affects.access(project.slug, memberRef(principalType, principalId)),
+                ),
+                onSuccess: () => {
+                  toast.success(
+                    `Updated ${principalId}’s access on ${changed.length} project${changed.length === 1 ? '' : 's'}`,
+                  );
+                  close();
+                },
               },
             );
           }}

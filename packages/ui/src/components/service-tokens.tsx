@@ -1,8 +1,11 @@
 import type { ServiceTokenRow } from '@coffre/client';
-import { useState } from 'react';
-import { toast } from 'sonner';
+import { Fragment, useState } from 'react';
+import { revokeCredential } from '../lib/changes';
 import { memberRef, useCoffre } from '../lib/coffre';
+import { affects } from '../lib/queries';
 import { useAction } from '../lib/use-action';
+import { useChange, useChangeStatus } from '../lib/use-change';
+import { RowFailure, RowPending, rowClass } from './row-state';
 import { Card } from './page';
 import { ConfirmButton, CopyButton, EmptyState, ErrorLine, Modal, Notice, Spinner, Timestamp } from './ui';
 import { Key, Plus, X } from './icons';
@@ -14,8 +17,9 @@ const LIFETIMES = [30, 90, 180, 365] as const;
  * one place, this dialog, for as long as it stays open: coffre keeps a hash.
  */
 export function ServiceTokens({ serviceId, tokens }: { serviceId: string; tokens: ServiceTokenRow[] }) {
-  const coffre = useCoffre();
-  const { pending, error, run } = useAction();
+  const change = revokeCredential(useCoffre(), serviceId);
+  const revoke = useChange(change);
+  const { status, dismiss } = useChangeStatus(change.list.queryKey);
 
   return (
     <Card
@@ -24,11 +28,6 @@ export function ServiceTokens({ serviceId, tokens }: { serviceId: string; tokens
       description="Bearer tokens this service presents to the API. Each is shown once, when it is issued; coffre keeps only a hash."
       actions={<IssueToken serviceId={serviceId} />}
     >
-      {error !== null && (
-        <div className="card-body">
-          <ErrorLine error={error} />
-        </div>
-      )}
       {tokens.length === 0 ? (
         <EmptyState title="No live credentials">
           Nothing can act as this service until a token is issued.
@@ -48,61 +47,70 @@ export function ServiceTokens({ serviceId, tokens }: { serviceId: string; tokens
               </tr>
             </thead>
             <tbody>
-              {tokens.map((token) => (
-                <tr key={token.id}>
-                  <td>
-                    <span className="cell-account">
-                      <Key size={15} />
-                      <span className="cell-stack">
-                        <span>{token.label ?? 'Unlabelled'}</span>
-                        <small className="mono">{token.hint}</small>
-                      </span>
-                    </span>
-                  </td>
-                  <td className="nowrap">
-                    <span className="cell-stack">
-                      <Timestamp iso={token.createdAt} />
-                      <small>by {token.createdBy}</small>
-                    </span>
-                  </td>
-                  <td className="nowrap cell-muted">
-                    {token.lastUsedAt === null ? (
-                      'Never'
-                    ) : (
-                      <span className="cell-stack">
-                        <Timestamp iso={token.lastUsedAt} display="relative" />
-                        {token.lastUsedIp !== null && <small className="mono">{token.lastUsedIp}</small>}
-                      </span>
-                    )}
-                  </td>
-                  <td className="nowrap cell-muted">
-                    <Timestamp iso={token.expiresAt} display="relative" />
-                  </td>
-                  <td className="col-actions">
-                    <ConfirmButton
-                      trigger={
-                        <button className="act" disabled={pending}>
-                          <X size={13} />
-                          Revoke
-                        </button>
-                      }
-                      title={
-                        <>
-                          Revoke <span className="mono">{token.hint}</span>?
-                        </>
-                      }
-                      body="Whatever uses it is refused from its next request. Issue a new token first if the service should keep working."
-                      confirmLabel="Revoke token"
-                      onConfirm={() =>
-                        run(
-                          () => coffre.tokens.revoke(memberRef('service', serviceId), token.id),
-                          () => toast.success('Token revoked'),
-                        )
-                      }
+              {tokens.map((token) => {
+                const state = status(token.id);
+                return (
+                  <Fragment key={token.id}>
+                    <tr className={rowClass(state)}>
+                      <td>
+                        <span className="cell-account">
+                          <Key size={15} />
+                          <span className="cell-stack">
+                            <span>{token.label ?? 'Unlabelled'}</span>
+                            <small className="mono">{token.hint}</small>
+                          </span>
+                        </span>
+                      </td>
+                      <td className="nowrap">
+                        <span className="cell-stack">
+                          <Timestamp iso={token.createdAt} />
+                          <small>by {token.createdBy}</small>
+                        </span>
+                      </td>
+                      <td className="nowrap cell-muted">
+                        {token.lastUsedAt === null ? (
+                          'Never'
+                        ) : (
+                          <span className="cell-stack">
+                            <Timestamp iso={token.lastUsedAt} display="relative" />
+                            {token.lastUsedIp !== null && <small className="mono">{token.lastUsedIp}</small>}
+                          </span>
+                        )}
+                      </td>
+                      <td className="nowrap cell-muted">
+                        <Timestamp iso={token.expiresAt} display="relative" />
+                      </td>
+                      <td className="col-actions">
+                        {state.state === 'pending' ? (
+                          <RowPending status={state} />
+                        ) : (
+                          <ConfirmButton
+                            trigger={
+                              <button className="act">
+                                <X size={13} />
+                                Revoke
+                              </button>
+                            }
+                            title={
+                              <>
+                                Revoke <span className="mono">{token.hint}</span>?
+                              </>
+                            }
+                            body="Whatever uses it is refused from its next request. Issue a new token first if the service should keep working."
+                            confirmLabel="Revoke token"
+                            onConfirm={() => revoke(token)}
+                          />
+                        )}
+                      </td>
+                    </tr>
+                    <RowFailure
+                      status={state}
+                      columns={5}
+                      onDismiss={() => state.state === 'failed' && dismiss(state.mutationId)}
                     />
-                  </td>
-                </tr>
-              ))}
+                  </Fragment>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -148,7 +156,10 @@ function IssueToken({ serviceId }: { serviceId: string }) {
                     label: label.trim() === '' ? null : label.trim(),
                     expiresInDays: days,
                   }),
-                (credential) => setIssued(credential),
+                {
+                  affects: affects.credentials(memberRef('service', serviceId)),
+                  onSuccess: (credential) => setIssued(credential),
+                },
               );
             }}
           >

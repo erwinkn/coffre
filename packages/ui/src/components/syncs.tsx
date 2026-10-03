@@ -7,11 +7,12 @@ import {
   type FormValues,
   type SyncProviderInfo,
 } from '@coffre/client';
+import { useQueryClient, useSuspenseQuery } from '@tanstack/react-query';
 import { Fragment, useEffect, useState, type ReactNode } from 'react';
-import { useRouter } from '@tanstack/react-router';
 import { DropdownMenu } from 'radix-ui';
 import { toast } from 'sonner';
 import { uiResult, useCoffre } from '../lib/coffre';
+import { affects, queries, refresh } from '../lib/queries';
 import { useAction } from '../lib/use-action';
 import type { RunOutcome, SyncView } from '../shared/models';
 import { Card } from './page';
@@ -23,8 +24,6 @@ const RUNNING_POLL_MS = 2000;
 /** How long a new sync's toast waits for its first push to end. */
 const FIRST_RUN_WAIT_MS = 60_000;
 
-type SyncsResult = { ok: true; syncs: SyncView[]; canManage: boolean } | { ok: false; error: string };
-
 /**
  * Where this environment's secrets are pushed.
  *
@@ -34,23 +33,19 @@ type SyncsResult = { ok: true; syncs: SyncView[]; canManage: boolean } | { ok: f
 export function Syncs({
   project,
   environment,
-  result,
   canRun,
 }: {
   project: string;
   environment: string;
-  result: SyncsResult;
   canRun: boolean;
 }) {
-  const router = useRouter();
-  const running = result.ok && result.syncs.some((sync) => sync.running);
-
-  // A save starts a run in the background; watch it land.
-  useEffect(() => {
-    if (!running) return;
-    const timer = setInterval(() => void router.invalidate(), RUNNING_POLL_MS);
-    return () => clearInterval(timer);
-  }, [running, router]);
+  const place = { project, environment };
+  const { data: result } = useSuspenseQuery({
+    ...queries.syncs(useCoffre(), place),
+    // A save starts a run in the background; watch it land.
+    refetchInterval: (query) =>
+      query.state.data?.ok === true && query.state.data.syncs.some((sync) => sync.running) ? RUNNING_POLL_MS : false,
+  });
 
   if (result.ok && result.syncs.length === 0 && !result.canManage) return null;
   const canManage = result.ok && result.canManage;
@@ -86,7 +81,7 @@ export function Syncs({
             </thead>
             <tbody>
               {result.syncs.map((sync) => (
-                <SyncRow key={sync.id} sync={sync} canRun={canRun} canManage={canManage} />
+                <SyncRow key={sync.id} place={place} sync={sync} canRun={canRun} canManage={canManage} />
               ))}
             </tbody>
           </table>
@@ -96,7 +91,17 @@ export function Syncs({
   );
 }
 
-function SyncRow({ sync, canRun, canManage }: { sync: SyncView; canRun: boolean; canManage: boolean }) {
+function SyncRow({
+  place,
+  sync,
+  canRun,
+  canManage,
+}: {
+  place: { project: string; environment: string };
+  sync: SyncView;
+  canRun: boolean;
+  canManage: boolean;
+}) {
   const [removing, setRemoving] = useState(false);
   const coffre = useCoffre();
   // Apart, so pausing does not spin the Run now button.
@@ -108,17 +113,20 @@ function SyncRow({ sync, canRun, canManage }: { sync: SyncView; canRun: boolean;
   function runNow() {
     pushing.run(
       () => coffre.syncs.run(sync.id),
-      (result) => announce(sync, result.outcome),
+      { affects: affects.syncs(place), onSuccess: (result) => announce(sync, result.outcome) },
     );
   }
 
   function setPaused(paused: boolean) {
     managing.run(
       () => coffre.syncs.update(sync.id, { paused }),
-      () =>
-        toast.success(paused ? `Paused ${sync.destination}` : `Resumed ${sync.destination}`, {
-          action: { label: 'Undo', onClick: () => setPaused(!paused) },
-        }),
+      {
+        affects: affects.syncs(place),
+        onSuccess: () =>
+          toast.success(paused ? `Paused ${sync.destination}` : `Resumed ${sync.destination}`, {
+            action: { label: 'Undo', onClick: () => setPaused(!paused) },
+          }),
+      },
     );
   }
 
@@ -207,7 +215,10 @@ function SyncRow({ sync, canRun, canManage }: { sync: SyncView; canRun: boolean;
             onConfirm={() =>
               managing.run(
                 () => coffre.syncs.remove(sync.id),
-                () => toast.success(`No longer syncing to ${sync.destination}`),
+                {
+                  affects: affects.syncs(place),
+                  onSuccess: () => toast.success(`No longer syncing to ${sync.destination}`),
+                },
               )
             }
           />
@@ -437,7 +448,7 @@ function AddSyncForm({
   const [values, setValues] = useState<FormValues>(() => initialValues(providers[0]));
   const [credential, setCredential] = useState('');
   const coffre = useCoffre();
-  const router = useRouter();
+  const queryClient = useQueryClient();
   const { pending, error, setError, run } = useAction();
   const missing = firstMissing(provider, values);
 
@@ -464,9 +475,14 @@ function AddSyncForm({
               config: configFromForm(provider, values),
               credential: credential.trim(),
             }),
-          (sync) => {
-            onDone();
-            void followFirstRun(coffre, `${project}/${environment}`, sync, () => router.invalidate());
+          {
+            affects: affects.syncs({ project, environment }),
+            onSuccess: (sync) => {
+              onDone();
+              void followFirstRun(coffre, `${project}/${environment}`, sync, () =>
+                refresh(queryClient, affects.syncs({ project, environment })),
+              );
+            },
           },
         );
       }}

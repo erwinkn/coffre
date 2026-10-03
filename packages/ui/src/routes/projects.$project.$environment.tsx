@@ -4,13 +4,19 @@ import {
   useEffect,
   useRef,
   useState,
-  type ComponentProps,
   type InputHTMLAttributes,
 } from 'react';
-import { createFileRoute, Link, useLoaderData, useRouter } from '@tanstack/react-router';
+import { useSuspenseQuery } from '@tanstack/react-query';
+import { createFileRoute, Link } from '@tanstack/react-router';
+import { useShell } from '../lib/use-shell';
 import { DropdownMenu } from 'radix-ui';
 import { toast } from 'sonner';
-import { failureMessage, Refusal, uiResult, useCoffre } from '../lib/coffre';
+import { failureMessage, useCoffre } from '../lib/coffre';
+import { archiveSecret, restoreSecret, saveSecrets, UnsavedEdits } from '../lib/changes';
+import type { ItemStatus } from '../lib/optimistic';
+import { affects, keys as queryKeys, queries } from '../lib/queries';
+import { useChange, useChangeStatus } from '../lib/use-change';
+import { RowFailure, RowPending, rowClass } from '../components/row-state';
 import { useAction } from '../lib/use-action';
 import type {
   ImportPlanEntry,
@@ -21,7 +27,6 @@ import type {
 } from '../shared/models';
 import { canRevealSecrets } from '../lib/capabilities';
 import {
-  applySecretEditBatch,
   hasSecretEditConflict,
   secretChangeFor,
   type SecretChange,
@@ -78,20 +83,17 @@ export const Route = createFileRoute('/projects/$project/$environment')({
   validateSearch: (search: Record<string, unknown>): { filter?: string } => ({
     filter: typeof search.filter === 'string' && search.filter !== '' ? search.filter : undefined,
   }),
-  loader: async ({ context: { client }, params }) => {
-    const path = `${params.project}/${params.environment}`;
-    const [keys, syncs] = await Promise.all([
-      uiResult(() => client.secrets.list(path)),
-      uiResult(() => client.syncs.list(path)),
-    ]);
-    return { keys, syncs };
-  },
+  loader: ({ context: { client, queryClient }, params }) =>
+    Promise.all([
+      queryClient.fetchQuery(queries.secrets(client, params)),
+      queryClient.fetchQuery(queries.syncs(client, params)),
+    ]),
   component: EnvironmentPage,
 });
 
 function EnvironmentPage() {
-  const { keys: result, syncs } = Route.useLoaderData();
   const { project, environment } = Route.useParams();
+  const { data: result } = useSuspenseQuery(queries.secrets(useCoffre(), { project, environment }));
 
   if (!result.ok) {
     return (
@@ -124,7 +126,6 @@ function EnvironmentPage() {
       environment={environment}
       permissions={result.permissions}
       keys={result.keys}
-      syncs={syncs}
     />
   );
 }
@@ -136,23 +137,23 @@ function EnvironmentLedger({
   environment,
   permissions,
   keys,
-  syncs,
 }: {
   project: string;
   environment: string;
   permissions: Permission[];
   keys: SecretKey[];
-  syncs: ComponentProps<typeof Syncs>['result'];
 }) {
-  const router = useRouter();
   const coffre = useCoffre();
-  const place = `${project}/${environment}`;
+  const { principal } = useShell();
+  const save = useChange(saveSecrets(coffre, { project, environment }, principal?.id ?? null));
+  const restore = useChange(restoreSecret(coffre, { project, environment }));
+  const archive = useChange(archiveSecret(coffre, { project, environment }));
+  const { status, dismiss } = useChangeStatus(queryKeys.secrets({ project, environment }));
   const [drafts, setDrafts] = useState<SecretDraft[]>([]);
   const [changes, setChanges] = useState<Record<string, SecretChange>>({});
   // Rows opened for editing that may not have changed yet. A row with a
   // pending change is in edit mode whether or not it is listed here.
   const [editing, setEditing] = useState<ReadonlySet<string>>(() => new Set());
-  const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [query, setQuery] = useState(Route.useSearch().filter ?? '');
   const nextDraftId = useRef(0);
@@ -223,68 +224,53 @@ function EnvironmentLedger({
     setChanges({});
     setEditing(new Set());
     setSaveError(null);
+    // A refused save, given up: its rows stop saying so.
+    for (const entry of keys) {
+      const state = status(entry.key);
+      if (state.state === 'failed') dismiss(state.mutationId);
+    }
   }
 
   /**
-   * Write every pending edit: renames one by one, then the rest as one patch
-   * that lands whole or not at all (see `applySecretEditBatch`). Whatever did
-   * not land stays pending, so pressing save again retries exactly that.
+   * Write every pending edit (`saveSecrets`): renames one by one, then the
+   * rest as one patch that lands whole or not at all. The edits show in the
+   * list at once, each row marked as saving; whatever did not land comes
+   * back as pending, so pressing save again retries exactly that, and the
+   * save bar says why.
    */
-  async function saveChanges() {
-    if (!ready || saving) return;
-    setSaving(true);
+  function saveChanges() {
+    if (!ready) return;
+    const batch = { active, drafts, changes };
+    setDrafts([]);
+    setChanges({});
+    setEditing(new Set());
     setSaveError(null);
-    const outcome = await applySecretEditBatch({
-      active,
-      drafts,
-      changes,
-      operations: {
-        rename: async (key, nextKey) => {
-          try {
-            await coffre.secrets.rename(`${place}/${key}`, nextKey);
-          } catch (error) {
-            // A refused rename names the key it stopped at.
-            throw new Refusal(`${key}: ${failureMessage(error)}`);
-          }
-        },
-        write: async (patch) => {
-          try {
-            await coffre.secrets.set(place, patch);
-          } catch (error) {
-            throw new Refusal(failureMessage(error));
-          }
-        },
+    save(batch, {
+      onError: (error) => {
+        const left = error instanceof UnsavedEdits ? error.outcome : batch;
+        setDrafts(left.drafts);
+        setChanges(left.changes);
+        setSaveError(failureMessage(error));
       },
     });
+  }
 
-    setDrafts(outcome.drafts);
-    setChanges(outcome.changes);
-    setEditing(new Set());
-
-    if (outcome.applied > 0) {
-      try {
-        await router.invalidate();
-      } catch {
-        setSaveError('Saved, but the page could not refresh. Reload before you retry.');
-        setSaving(false);
-        return;
-      }
-    }
-
-    if (outcome.error === null) {
-      // Counted as the save button counted them: a rename with a new value is one change.
-      toast.success(`Saved ${pendingCount} change${pendingCount === 1 ? '' : 's'}`);
-    } else {
-      const message =
-        outcome.error instanceof Error ? outcome.error.message : 'The request could not be sent.';
-      // Only renames can have landed before a failure: the patch is all or nothing.
-      setSaveError(
-        outcome.applied === 0
-          ? message
-          : `${message} The renames before it were saved; nothing else was, and the rest is ready to retry.`,
-      );
-    }
-    setSaving(false);
+  /**
+   * Bring an archived secret back: in the list at once, as saving. Restoring
+   * is fully reversible, so it gets an undo rather than a confirmation
+   * dialog in front of it. Asked here, not by its row, which leaves the
+   * Archived list as soon as it is restored.
+   */
+  function restoreSecretKey(key: string) {
+    restore(
+      { key },
+      {
+        onSuccess: () =>
+          toast.success(`${key} restored`, {
+            action: { label: 'Undo', onClick: () => archive({ key }) },
+          }),
+      },
+    );
   }
 
   // Cmd/Ctrl+Enter saves from anywhere on the page while edits are pending.
@@ -295,7 +281,7 @@ function EnvironmentLedger({
     function onKeyDown(event: KeyboardEvent) {
       if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
         event.preventDefault();
-        void saveRef.current();
+        saveRef.current();
       }
     }
     document.addEventListener('keydown', onKeyDown);
@@ -346,7 +332,7 @@ function EnvironmentLedger({
           <>
             {canWrite && canReveal && <ImportEnv project={project} environment={environment} />}
             {canWrite && (
-              <button className="btn btn-primary" onClick={addDraft} disabled={saving}>
+              <button className="btn btn-primary" onClick={addDraft}>
                 <Plus size={14} />
                 New secret
               </button>
@@ -449,7 +435,7 @@ function EnvironmentLedger({
                     existingVersion={
                       keys.find((entry) => entry.key === draft.key.trim())?.version ?? null
                     }
-                    disabled={saving}
+                    disabled={false}
                     onChange={(patch) =>
                       setDrafts((rows) =>
                         rows.map((row) => (row.id === draft.id ? { ...row, ...patch } : row)),
@@ -461,6 +447,7 @@ function EnvironmentLedger({
 
                 {listed.map((entry) => {
                   const change = secretChangeFor(changes, entry.key);
+                  const state = status(entry.key);
                   return (
                     <SecretRow
                       key={entry.key}
@@ -476,7 +463,9 @@ function EnvironmentLedger({
                       canWrite={canWrite}
                       canArchive={canArchive}
                       canReveal={canReveal}
-                      disabled={saving}
+                      status={state}
+                      // Not while its save is on its way.
+                      disabled={state.state === 'pending'}
                       columns={columns}
                       onEdit={() => setEditing((current) => new Set(current).add(entry.key))}
                       onPatch={(patch) => patchChange(entry, patch)}
@@ -512,7 +501,6 @@ function EnvironmentLedger({
       <Syncs
         project={project}
         environment={environment}
-        result={syncs}
         canRun={canWrite || permissions.includes('environment.manage')}
       />
 
@@ -565,6 +553,9 @@ function EnvironmentLedger({
                     entry={entry}
                     canArchive={canArchive}
                     canReveal={canReveal}
+                    status={status(entry.key)}
+                    onRestore={() => restoreSecretKey(entry.key)}
+                    onDismiss={dismiss}
                   />
                 ))}
               </tbody>
@@ -590,17 +581,16 @@ function EnvironmentLedger({
               {pending.length > 3 && ` · and ${pending.length - 3} more`}
             </span>
             <div className="savebar-actions">
-              <button className="btn btn-sm" onClick={discardAll} disabled={saving}>
+              <button className="btn btn-sm" onClick={discardAll}>
                 Discard
               </button>
               <button
                 className="btn btn-sm btn-primary"
-                onClick={() => void saveChanges()}
-                disabled={saving || !ready}
+                onClick={saveChanges}
+                disabled={!ready}
                 title="Save (⌘ Enter or Ctrl Enter)"
                 aria-keyshortcuts="Meta+Enter Control+Enter"
               >
-                {saving && <Spinner size={13} />}
                 Save {pendingCount === 1 ? 'change' : `${pendingCount} changes`}
               </button>
             </div>
@@ -619,7 +609,7 @@ function EnvironmentLedger({
 
 /** The display name sits beside the slug; it comes from the shell's project tree. */
 function EnvironmentName({ project, environment }: { project: string; environment: string }) {
-  const { projects } = useLoaderData({ from: '__root__' });
+  const { projects } = useShell();
   const name = projects
     .find((entry) => entry.slug === project)
     ?.environments.find((entry) => entry.slug === environment)?.name;
@@ -729,6 +719,7 @@ function SecretRow({
   canWrite,
   canArchive,
   canReveal,
+  status,
   disabled,
   columns,
   onEdit,
@@ -745,6 +736,8 @@ function SecretRow({
   canWrite: boolean;
   canArchive: boolean;
   canReveal: boolean;
+  /** A save of this row on its way, or refused. */
+  status: ItemStatus;
   disabled: boolean;
   columns: number;
   onEdit: () => void;
@@ -825,7 +818,7 @@ function SecretRow({
 
   return (
     <>
-      <tr className={`secret-row${state}`}>
+      <tr className={`secret-row${state} ${rowClass(status)}`}>
         <td className="n">{number}</td>
         <td className="cell-key" data-label="Key">
           {editing && canWrite ? (
@@ -934,117 +927,121 @@ function SecretRow({
         </td>
 
         <td className="col-actions">
-          <div className="acts">
-            {leaving ? (
-              <Tip label="Keep">
-                <button
-                  className="act act-icon act-quiet"
-                  onClick={onUndo}
-                  disabled={disabled}
-                  aria-label={`Keep ${entry.key}`}
-                >
-                  <RotateBack size={14} />
-                </button>
-              </Tip>
-            ) : editing ? (
-              <Tip label={renamed || valueChanged ? 'Undo changes' : 'Cancel'}>
-                <button
-                  className="act act-icon act-quiet"
-                  onClick={onUndo}
-                  disabled={disabled}
-                  aria-label={`${renamed || valueChanged ? 'Undo changes to' : 'Stop editing'} ${entry.key}`}
-                >
-                  {renamed || valueChanged ? <RotateBack size={14} /> : <X size={15} />}
-                </button>
-              </Tip>
-            ) : (
-              <>
-                {/* Copy comes in to the left, so Hide stays where Reveal was clicked. */}
-                {shown !== null && (
-                  <CopyButton variant="act" value={shown.value} label={`Copy ${entry.key}`} />
-                )}
-                <SecretReadOnly canReveal={canReveal}>
-                  <Tip label={shown === null ? 'Reveal' : 'Hide'}>
-                    <button
-                      className="act act-icon act-accent"
-                      onClick={toggleReveal}
-                      disabled={revealing}
-                      aria-label={`${shown === null ? 'Reveal' : 'Hide'} ${entry.key}`}
-                    >
-                      {revealing ? (
-                        <Spinner size={13} />
-                      ) : shown === null ? (
-                        <Eye size={15} />
-                      ) : (
-                        <EyeOff size={15} />
-                      )}
-                    </button>
-                  </Tip>
-                </SecretReadOnly>
-                {canWrite && (
-                  <Tip label="Edit">
-                    <button
-                      className="act act-icon"
-                      onClick={() => {
-                        // A value already revealed is already on the record, so
-                        // it becomes the starting point instead of being thrown
-                        // away and read again.
-                        if (shown !== null) setBase(shown);
-                        setReveal(null);
-                        onEdit();
-                      }}
-                      disabled={disabled}
-                      aria-label={`Edit ${entry.key}`}
-                    >
-                      <Pencil size={14} />
-                    </button>
-                  </Tip>
-                )}
-                {(canReveal || canArchive) && (
-                  <DropdownMenu.Root>
-                    <DropdownMenu.Trigger asChild>
+          {status.state === 'pending' ? (
+            <RowPending status={status} />
+          ) : (
+            <div className="acts">
+              {leaving ? (
+                <Tip label="Keep">
+                  <button
+                    className="act act-icon act-quiet"
+                    onClick={onUndo}
+                    disabled={disabled}
+                    aria-label={`Keep ${entry.key}`}
+                  >
+                    <RotateBack size={14} />
+                  </button>
+                </Tip>
+              ) : editing ? (
+                <Tip label={renamed || valueChanged ? 'Undo changes' : 'Cancel'}>
+                  <button
+                    className="act act-icon act-quiet"
+                    onClick={onUndo}
+                    disabled={disabled}
+                    aria-label={`${renamed || valueChanged ? 'Undo changes to' : 'Stop editing'} ${entry.key}`}
+                  >
+                    {renamed || valueChanged ? <RotateBack size={14} /> : <X size={15} />}
+                  </button>
+                </Tip>
+              ) : (
+                <>
+                  {/* Copy comes in to the left, so Hide stays where Reveal was clicked. */}
+                  {shown !== null && (
+                    <CopyButton variant="act" value={shown.value} label={`Copy ${entry.key}`} />
+                  )}
+                  <SecretReadOnly canReveal={canReveal}>
+                    <Tip label={shown === null ? 'Reveal' : 'Hide'}>
                       <button
-                        className="act act-icon act-quiet"
-                        aria-label={`More for ${entry.key}`}
-                        disabled={disabled}
+                        className="act act-icon act-accent"
+                        onClick={toggleReveal}
+                        disabled={revealing}
+                        aria-label={`${shown === null ? 'Reveal' : 'Hide'} ${entry.key}`}
                       >
-                        <MoreHorizontal size={16} />
-                      </button>
-                    </DropdownMenu.Trigger>
-                    <DropdownMenu.Portal>
-                      <DropdownMenu.Content className="menu" sideOffset={6} align="end">
-                        <SecretReadOnly canReveal={canReveal}>
-                          <DropdownMenu.Item
-                            className="menu-item"
-                            onSelect={() => setHistoryOpen((open) => !open)}
-                          >
-                            <History size={14} />
-                            {historyOpen ? 'Hide history' : 'Version history'}
-                          </DropdownMenu.Item>
-                        </SecretReadOnly>
-                        {canArchive && (
-                          <>
-                            {canReveal && <DropdownMenu.Separator className="menu-sep" />}
-                            <DropdownMenu.Item
-                              className="menu-item menu-item-danger"
-                              onSelect={() => {
-                                setReveal(null);
-                                onMarkArchive();
-                              }}
-                            >
-                              <Archive size={14} />
-                              Archive
-                              <span className="menu-hint">on save</span>
-                            </DropdownMenu.Item>
-                          </>
+                        {revealing ? (
+                          <Spinner size={13} />
+                        ) : shown === null ? (
+                          <Eye size={15} />
+                        ) : (
+                          <EyeOff size={15} />
                         )}
-                      </DropdownMenu.Content>
-                    </DropdownMenu.Portal>
-                  </DropdownMenu.Root>
-                )}
-              </>
-            )}
-          </div>
+                      </button>
+                    </Tip>
+                  </SecretReadOnly>
+                  {canWrite && (
+                    <Tip label="Edit">
+                      <button
+                        className="act act-icon"
+                        onClick={() => {
+                          // A value already revealed is already on the record, so
+                          // it becomes the starting point instead of being thrown
+                          // away and read again.
+                          if (shown !== null) setBase(shown);
+                          setReveal(null);
+                          onEdit();
+                        }}
+                        disabled={disabled}
+                        aria-label={`Edit ${entry.key}`}
+                      >
+                        <Pencil size={14} />
+                      </button>
+                    </Tip>
+                  )}
+                  {(canReveal || canArchive) && (
+                    <DropdownMenu.Root>
+                      <DropdownMenu.Trigger asChild>
+                        <button
+                          className="act act-icon act-quiet"
+                          aria-label={`More for ${entry.key}`}
+                          disabled={disabled}
+                        >
+                          <MoreHorizontal size={16} />
+                        </button>
+                      </DropdownMenu.Trigger>
+                      <DropdownMenu.Portal>
+                        <DropdownMenu.Content className="menu" sideOffset={6} align="end">
+                          <SecretReadOnly canReveal={canReveal}>
+                            <DropdownMenu.Item
+                              className="menu-item"
+                              onSelect={() => setHistoryOpen((open) => !open)}
+                            >
+                              <History size={14} />
+                              {historyOpen ? 'Hide history' : 'Version history'}
+                            </DropdownMenu.Item>
+                          </SecretReadOnly>
+                          {canArchive && (
+                            <>
+                              {canReveal && <DropdownMenu.Separator className="menu-sep" />}
+                              <DropdownMenu.Item
+                                className="menu-item menu-item-danger"
+                                onSelect={() => {
+                                  setReveal(null);
+                                  onMarkArchive();
+                                }}
+                              >
+                                <Archive size={14} />
+                                Archive
+                                <span className="menu-hint">on save</span>
+                              </DropdownMenu.Item>
+                            </>
+                          )}
+                        </DropdownMenu.Content>
+                      </DropdownMenu.Portal>
+                    </DropdownMenu.Root>
+                  )}
+                </>
+              )}
+            </div>
+          )}
         </td>
       </tr>
 
@@ -1213,6 +1210,9 @@ function ArchivedRow({
   entry,
   canArchive,
   canReveal,
+  status: state,
+  onRestore,
+  onDismiss,
 }: {
   number: number;
   project: string;
@@ -1220,26 +1220,15 @@ function ArchivedRow({
   entry: SecretKey;
   canArchive: boolean;
   canReveal: boolean;
+  status: ItemStatus;
+  onRestore: () => void;
+  onDismiss: (mutationId: number) => void;
 }) {
   const [historyOpen, setHistoryOpen] = useState(false);
-  const coffre = useCoffre();
-  const { pending, error, run } = useAction();
-
-  function setArchived(archived: boolean) {
-    run(
-      () => coffre.secrets.update(`${project}/${environment}/${entry.key}`, { archived }),
-      () =>
-        // Restoring is fully reversible, so it gets an undo rather than a
-        // confirmation dialog in front of it.
-        toast.success(archived ? `${entry.key} archived` : `${entry.key} restored`, {
-          action: { label: 'Undo', onClick: () => setArchived(!archived) },
-        }),
-    );
-  }
 
   return (
     <>
-      <tr className="secret-row is-archived">
+      <tr className={`secret-row is-archived ${rowClass(state)}`}>
         <td className="n">{number}</td>
         <td className="cell-key" data-label="Key">
           {breakAfterUnderscores(entry.key)}
@@ -1264,18 +1253,16 @@ function ArchivedRow({
                 </button>
               </Tip>
             </SecretReadOnly>
-            {canArchive && (
-              <Tip label="Restore">
-                <button
-                  className="act act-icon"
-                  onClick={() => setArchived(false)}
-                  disabled={pending}
-                  aria-label={`Restore ${entry.key}`}
-                >
-                  {pending ? <Spinner size={13} /> : <RotateBack size={14} />}
-                </button>
-              </Tip>
-            )}
+            {canArchive &&
+              (state.state === 'pending' ? (
+                <RowPending status={state} />
+              ) : (
+                <Tip label="Restore">
+                  <button className="act act-icon" onClick={onRestore} aria-label={`Restore ${entry.key}`}>
+                    <RotateBack size={14} />
+                  </button>
+                </Tip>
+              ))}
           </div>
         </td>
       </tr>
@@ -1294,13 +1281,11 @@ function ArchivedRow({
           </td>
         </tr>
       )}
-      {error !== null && (
-        <tr className="row-error">
-          <td colSpan={5}>
-            <ErrorLine error={error} />
-          </td>
-        </tr>
-      )}
+      <RowFailure
+        status={state}
+        columns={5}
+        onDismiss={() => state.state === 'failed' && onDismiss(state.mutationId)}
+      />
     </>
   );
 }
@@ -1436,9 +1421,12 @@ function VersionHistory({
                                 `${project}/${environment}/${secretKey}`,
                                 version.version,
                               ),
-                            () => {
-                              onRolledBack();
-                              toast.success(`${secretKey} rolled back to v${version.version}`);
+                            {
+                              affects: affects.secrets({ project, environment }),
+                              onSuccess: () => {
+                                onRolledBack();
+                                toast.success(`${secretKey} rolled back to v${version.version}`);
+                              },
                             },
                           )
                         }
@@ -1504,9 +1492,13 @@ function ImportEnv({ project, environment }: { project: string; environment: str
   function preview() {
     run(
       () => planEnv(coffre, path, content),
-      (result) => {
-        setProblems(result.problems);
-        setPlan({ entries: result.plan, changes: result.changes });
+      {
+        // A dry run: nothing changes.
+        affects: [],
+        onSuccess: (result) => {
+          setProblems(result.problems);
+          setPlan({ entries: result.plan, changes: result.changes });
+        },
       },
     );
   }
@@ -1516,9 +1508,12 @@ function ImportEnv({ project, environment }: { project: string; environment: str
     const written = Object.keys(plan.changes).length;
     run(
       () => coffre.secrets.set(path, plan.changes),
-      () => {
-        toast.success(`Imported ${written} change${written === 1 ? '' : 's'}`);
-        close();
+      {
+        affects: affects.secrets({ project, environment }),
+        onSuccess: () => {
+          toast.success(`Imported ${written} change${written === 1 ? '' : 's'}`);
+          close();
+        },
       },
     );
   }

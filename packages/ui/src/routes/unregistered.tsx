@@ -1,4 +1,5 @@
-import { createFileRoute, useLoaderData } from '@tanstack/react-router';
+import { createFileRoute } from '@tanstack/react-router';
+import { useShell } from '../lib/use-shell';
 
 import { ClosedDoor } from '../components/page';
 import { User } from '../components/icons';
@@ -13,7 +14,7 @@ export const Route = createFileRoute('/unregistered')({
  * an owner decision, not a self-service privilege escalation path.
  */
 function UnregisteredPage() {
-  const { principal, accessTampered } = useLoaderData({ from: '__root__' });
+  const { principal, accessTampered } = useShell();
 
   if (accessTampered) {
     return (

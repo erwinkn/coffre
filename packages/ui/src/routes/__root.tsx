@@ -1,4 +1,3 @@
-import { CoffreError, type CoffreClient } from '@coffre/client';
 import type { ReactNode } from 'react';
 import {
   createRootRouteWithContext,
@@ -11,13 +10,14 @@ import {
 } from '@tanstack/react-router';
 import { Toaster } from 'sonner';
 import globalsCss from '../styles/globals.css?url';
-import { deriveUiCapabilities } from '../lib/capabilities';
+import { loadShell } from '../lib/queries';
+import { useShell } from '../lib/use-shell';
 import type { RouterContext } from '../router';
-import type { Me } from '../shared/models';
 import { Brand, Shell, sidebarBootScript } from '../components/shell';
 import { TooltipProvider } from '../components/ui';
 import { ThemeToggle, themeBootScript } from '../components/theme';
 import { Agentation } from '../components/agentation';
+import { LiveRegion } from '../components/row-state';
 import { markSvg } from '../components/mark';
 import faviconPng from '../assets/favicon-32.png?url';
 import appleTouchIcon from '../assets/apple-touch-icon.png?url';
@@ -43,8 +43,8 @@ export const Route = createRootRouteWithContext<RouterContext>()({
   }),
 
   // Identity and the project tree, which the shell needs on every screen.
-  loader: async ({ context: { client }, location }) => {
-    const shell = await loadShell(client);
+  loader: async ({ context: { client, queryClient }, location }) => {
+    const shell = await loadShell(queryClient, client);
 
     if (shell.registrationRequired && location.pathname !== '/unregistered') {
       throw redirect({ to: '/unregistered' });
@@ -70,43 +70,11 @@ export const Route = createRootRouteWithContext<RouterContext>()({
     ) {
       throw redirect({ to: '/projects' });
     }
-
-    return shell;
   },
 
   shellComponent: RootDocument,
   component: RootComponent,
 });
-
-/**
- * Who is looking, how this instance signs people in, and the projects they
- * can see. Three calls at once: for someone signed out or not yet a member,
- * the project list is refused, and they get the sign-in or closed-door page.
- */
-async function loadShell(client: CoffreClient) {
-  const [auth, me, projects] = await Promise.all([
-    client.auth(),
-    client.me().catch((error: unknown) => {
-      if (error instanceof CoffreError && error.status === 401) return null;
-      throw error;
-    }),
-    client.projects.list().then(
-      ({ projects }) => projects,
-      () => [],
-    ),
-  ]);
-  const member: Me | null = me?.registered === true ? me : null;
-  return {
-    auth,
-    principal: me === null ? null : me.principal,
-    instanceRole: member?.instanceRole ?? null,
-    projects,
-    capabilities: deriveUiCapabilities(member, projects),
-    registrationRequired: me !== null && !me.registered,
-    /** A member the vault refuses: their record failed its integrity check. */
-    accessTampered: me?.tampered === true,
-  };
-}
 
 function RootDocument({ children }: { children: ReactNode }) {
   return (
@@ -150,7 +118,7 @@ function Toasts() {
 }
 
 function RootComponent() {
-  const { principal, instanceRole, projects, capabilities } = Route.useLoaderData();
+  const { principal, instanceRole, projects, capabilities } = useShell();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
 
   // Sign-in gets no navigation. Every destination in the sidebar and the
@@ -171,6 +139,7 @@ function RootComponent() {
           </main>
         </div>
         <Toasts />
+        <LiveRegion />
         <Agentation />
       </TooltipProvider>
     );
@@ -192,6 +161,7 @@ function RootComponent() {
       </Shell>
 
       <Toasts />
+      <LiveRegion />
       <Agentation />
     </TooltipProvider>
   );

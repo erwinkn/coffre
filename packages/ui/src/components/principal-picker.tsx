@@ -1,15 +1,16 @@
-import { useEffect, useId, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { useId, useState } from 'react';
 import { Link } from '@tanstack/react-router';
 import { useCoffre } from '../lib/coffre';
+import { queries } from '../lib/queries';
 import { projectAccessLabel } from '../lib/project-access';
 import type { DirectoryPrincipal, GrantRow } from '../shared/models';
-import { KIND, loadDirectory } from './directory';
+import { KIND } from './directory';
 import { PrincipalAvatar } from './principal';
 import { Spinner } from './ui';
 import { Check, Search } from './icons';
 
 type PrincipalType = DirectoryPrincipal['principalType'];
-type Directory = Awaited<ReturnType<typeof loadDirectory>>;
 
 /**
  * Who a grant is for: picked from the registered users or tokens, each shown
@@ -19,7 +20,8 @@ type Directory = Awaited<ReturnType<typeof loadDirectory>>;
  * Only instance owners may list the directory. Asking on anyone else's behalf
  * would write a refusal to the audit log in their name, so they get a text
  * field and the server's answer instead. The list is asked for when the
- * dialog opens rather than with the page, since most visits never open it.
+ * dialog opens rather than with the page, since most visits never open it,
+ * and shared with the Users and Tokens pages through the cache.
  */
 export function PrincipalPicker({
   principalType,
@@ -37,22 +39,11 @@ export function PrincipalPicker({
   onChange: (principalId: string) => void;
 }) {
   const coffre = useCoffre();
-  const [directory, setDirectory] = useState<Directory | null>(null);
+  const directory = useQuery(queries.directory(coffre, canList)).data ?? null;
   const [query, setQuery] = useState('');
   const name = useId();
   const kind = KIND[principalType];
   const label = principalType === 'user' ? 'User' : 'Token';
-
-  useEffect(() => {
-    if (!canList) return;
-    let live = true;
-    void loadDirectory(coffre, true).then((result) => {
-      if (live) setDirectory(result);
-    });
-    return () => {
-      live = false;
-    };
-  }, [canList, coffre]);
 
   if (!canList || directory?.ok === false) {
     return (

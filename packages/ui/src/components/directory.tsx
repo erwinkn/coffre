@@ -1,11 +1,11 @@
-import type { CoffreClient } from '@coffre/client';
-import { useEffect, useState } from 'react';
+import { Fragment, useState } from 'react';
 import { DropdownMenu } from 'radix-ui';
-import { toast } from 'sonner';
-import { memberRef, Refusal, uiResult, useCoffre } from '../lib/coffre';
-import { useAction } from '../lib/use-action';
+import { changeRole, directoryList, invite, removeMember, type InviteVars } from '../lib/changes';
+import { memberRef, useCoffre } from '../lib/coffre';
+import { useChange, useChangeStatus } from '../lib/use-change';
 import type { DirectoryPrincipal } from '../shared/models';
-import { ConfirmDialog, EmptyState, ErrorLine, Modal, Spinner, Toggletip } from './ui';
+import { RowFailure, RowPending, rowClass } from './row-state';
+import { ConfirmDialog, EmptyState, Modal, Spinner, Toggletip } from './ui';
 import { PrincipalLink } from './principal';
 import { Key, Lock, MoreHorizontal, Pencil, Plus, ShieldCheck, User, X } from './icons';
 
@@ -19,21 +19,9 @@ import { Key, Lock, MoreHorizontal, Pencil, Plus, ShieldCheck, User, X } from '.
 
 type PrincipalType = DirectoryPrincipal['principalType'];
 
-/**
- * Everyone in the directory, and who was removed. The API shows grant
- * managers the members of their projects; the directory pages stay the
- * owners' own, and asking for anyone else would only log a refusal.
- */
-export async function loadDirectory(client: CoffreClient, canManage: boolean) {
-  if (!canManage) return { ok: false as const, error: 'Only owners can manage users and service accounts.' };
-  return uiResult(async () => {
-    const { members, removed } = await client.members.list();
-    const principals: DirectoryPrincipal[] = members.map(
-      ({ principalType, principalId, instanceRole, isRootAdmin, tampered }) => ({ principalType, principalId, instanceRole, isRootAdmin, tampered }),
-    );
-    return { principals, removed };
-  });
-}
+/** How the directory, and its changes, name someone: `user:…`, `token:…`. */
+export const memberOf = (principal: Pick<DirectoryPrincipal, 'principalType' | 'principalId'>) =>
+  memberRef(principal.principalType, principal.principalId);
 
 export const ROLE_LABEL: Record<DirectoryPrincipal['instanceRole'], string> = {
   'root-admin': 'Root admin',
@@ -58,9 +46,14 @@ export function DirectoryTable({
   hasRemoved?: boolean;
 }) {
   const users = principalType === 'user';
+  const columns = users ? 4 : 3;
+  const { status, failedAdds, dismiss } = useChangeStatus(directoryList.queryKey);
+  const refused = failedAdds<InviteVars>(principals.map(memberOf)).filter(
+    ({ vars }) => vars.principalType === principalType,
+  );
   return (
     <section className="card" aria-label={users ? 'Users' : 'Tokens'}>
-      {principals.length === 0 ? (
+      {principals.length === 0 && refused.length === 0 ? (
         <EmptyState
           title={
             hasRemoved
@@ -99,28 +92,52 @@ export function DirectoryTable({
               </tr>
             </thead>
             <tbody>
-              {principals.map((principal, index) => (
-                <tr key={principal.principalId} className="row-link">
-                  <td className="n">{index + 1}</td>
-                  <td
-                    className="col-lead"
-                    data-label={principal.principalType === 'user' ? 'Email' : 'Name'}
-                  >
-                    <PrincipalLink
-                      type={principal.principalType}
-                      id={principal.principalId}
-                      stretch
+              {principals.map((principal, index) => {
+                const state = status(memberOf(principal));
+                return (
+                  <Fragment key={principal.principalId}>
+                    <tr className={`row-link ${rowClass(state)}`}>
+                      <td className="n">{index + 1}</td>
+                      <td
+                        className="col-lead"
+                        data-label={principal.principalType === 'user' ? 'Email' : 'Name'}
+                      >
+                        <PrincipalLink
+                          type={principal.principalType}
+                          id={principal.principalId}
+                          stretch
+                        />
+                      </td>
+                      {users && (
+                        <td className="col-role" data-label="Instance role">
+                          <InstanceRole principal={principal} />
+                        </td>
+                      )}
+                      <td className="col-actions">
+                        {state.state === 'pending' ? (
+                          <RowPending status={state} />
+                        ) : (
+                          <PrincipalActions principal={principal} />
+                        )}
+                      </td>
+                    </tr>
+                    <RowFailure
+                      status={state}
+                      columns={columns}
+                      onDismiss={() => state.state === 'failed' && dismiss(state.mutationId)}
                     />
-                  </td>
-                  {users && (
-                    <td className="col-role" data-label="Instance role">
-                      <InstanceRole principal={principal} />
-                    </td>
-                  )}
-                  <td className="col-actions">
-                    <PrincipalActions principal={principal} />
-                  </td>
-                </tr>
+                  </Fragment>
+                );
+              })}
+              {refused.map(({ mutationId, vars, status: failed }) => (
+                <RowFailure
+                  key={mutationId}
+                  status={failed}
+                  columns={columns}
+                  onDismiss={() => dismiss(mutationId)}
+                >
+                  {vars.principalId} was not added.
+                </RowFailure>
               ))}
             </tbody>
           </table>
@@ -184,12 +201,10 @@ export function InstanceRole({ principal }: { principal: DirectoryPrincipal }) {
 export function PrincipalActions({
   principal,
   trigger = 'act act-quiet act-menu',
-  onRemoved,
 }: {
   principal: DirectoryPrincipal;
   /** The menu button's classes: a row action in tables, a button in a page head. */
   trigger?: string;
-  onRemoved?: () => unknown;
 }) {
   const [editing, setEditing] = useState(false);
   const [confirming, setConfirming] = useState(false);
@@ -197,12 +212,11 @@ export function PrincipalActions({
     principal.instanceRole === 'owner' ? 'owner' : 'user',
   );
   const coffre = useCoffre();
-  const { pending, error, setError, run } = useAction();
+  const setRole = useChange(changeRole(coffre));
+  const remove = useChange(removeMember(coffre));
+  const { status } = useChangeStatus(directoryList.queryKey);
+  const pending = status(memberOf(principal)).state === 'pending';
   const kind = KIND[principal.principalType];
-
-  useEffect(() => {
-    if (error !== null && !editing) toast.error(error);
-  }, [editing, error]);
 
   if (principal.isRootAdmin) return null;
 
@@ -249,10 +263,7 @@ export function PrincipalActions({
       {principal.principalType === 'user' && (
         <Modal
           open={editing}
-          onOpenChange={(open) => {
-            setEditing(open);
-            if (!open) setError(null);
-          }}
+          onOpenChange={setEditing}
           title={
             <>
               Role of <span className="mono">{principal.principalId}</span>
@@ -263,28 +274,17 @@ export function PrincipalActions({
             className="form"
             onSubmit={(event) => {
               event.preventDefault();
-              void run(
-                () =>
-                  coffre.members.add(memberRef('user', principal.principalId), {
-                    owner: instanceRole === 'owner',
-                  }),
-                () => {
-                  toast.success(
-                    `${principal.principalId} is now ${ROLE_LABEL[instanceRole].toLowerCase()}`,
-                  );
-                  setEditing(false);
-                },
-              );
+              // Shown in the list at once; the row says if the server refuses.
+              setRole({ principalId: principal.principalId, owner: instanceRole === 'owner' });
+              setEditing(false);
             }}
           >
             <RoleField value={instanceRole} onChange={setInstanceRole} />
-            <ErrorLine error={error} />
             <div className="dialog-actions">
               <button className="btn" type="button" onClick={() => setEditing(false)}>
                 Cancel
               </button>
-              <button className="btn btn-primary" type="submit" disabled={pending}>
-                {pending && <Spinner />}
+              <button className="btn btn-primary" type="submit">
                 Save
               </button>
             </div>
@@ -316,15 +316,7 @@ export function PrincipalActions({
           )
         }
         confirmLabel={`Remove ${kind}`}
-        onConfirm={() =>
-          void run(
-            () => coffre.members.remove(memberRef(principal.principalType, principal.principalId)),
-            async () => {
-              toast.success(`${principal.principalId} removed`);
-              await onRemoved?.();
-            },
-          )
-        }
+        onConfirm={() => remove(principal)}
       />
     </>
   );
@@ -334,15 +326,13 @@ export function AddPrincipal({ principalType }: { principalType: PrincipalType }
   const [open, setOpen] = useState(false);
   const [principalId, setPrincipalId] = useState('');
   const [instanceRole, setInstanceRole] = useState<'user' | 'owner'>('user');
-  const coffre = useCoffre();
-  const { pending, error, setError, run } = useAction();
+  const add = useChange(invite(useCoffre()));
   const kind = KIND[principalType];
 
   function close() {
     setOpen(false);
     setPrincipalId('');
     setInstanceRole('user');
-    setError(null);
   }
 
   return (
@@ -362,22 +352,9 @@ export function AddPrincipal({ principalType }: { principalType: PrincipalType }
           className="form"
           onSubmit={(event) => {
             event.preventDefault();
-            void run(
-              async () => {
-                // Adding is an idempotent PUT that would also set the role of
-                // someone already here; this form is only for someone new.
-                const member = memberRef(principalType, principalId.trim());
-                const { members } = await coffre.members.list();
-                if (members.some((entry) => entry.member === member)) {
-                  throw new Refusal('That principal already exists.');
-                }
-                await coffre.members.add(member, { owner: principalType === 'user' && instanceRole === 'owner' });
-              },
-              () => {
-                toast.success(`${principalId.trim()} added`);
-                close();
-              },
-            );
+            // Shown in the list at once; the list says if the server refuses.
+            add({ principalType, principalId: principalId.trim(), owner: instanceRole === 'owner' });
+            close();
           }}
         >
           <label className="field">
@@ -401,17 +378,11 @@ export function AddPrincipal({ principalType }: { principalType: PrincipalType }
             <RoleField value={instanceRole} onChange={setInstanceRole} />
           )}
 
-          <ErrorLine error={error} />
           <div className="dialog-actions">
             <button className="btn" type="button" onClick={close}>
               Cancel
             </button>
-            <button
-              className="btn btn-primary"
-              type="submit"
-              disabled={pending || principalId.trim() === ''}
-            >
-              {pending && <Spinner />}
+            <button className="btn btn-primary" type="submit" disabled={principalId.trim() === ''}>
               Add {kind}
             </button>
           </div>

@@ -1,7 +1,9 @@
-import type { AuditEntryView, CoffreClient } from '@coffre/client';
+import type { AuditEntryView } from '@coffre/client';
 import { Fragment, useState, type ReactNode } from 'react';
+import { useQuery, useSuspenseQuery } from '@tanstack/react-query';
 import { createFileRoute, Link } from '@tanstack/react-router';
-import { statusOf, uiResult } from '../lib/coffre';
+import { useCoffre } from '../lib/coffre';
+import { queries, type AuditSearch, type ChainResult } from '../lib/queries';
 import {
   decidedBy,
   describe,
@@ -9,7 +11,7 @@ import {
   who,
   type Part,
 } from '../lib/audit-sentences';
-import { breakAfterUnderscores, EmptyState, Notice, Timestamp, Toggletip } from '../components/ui';
+import { breakAfterUnderscores, EmptyState, Notice, Spinner, Timestamp, Toggletip } from '../components/ui';
 import { ClosedDoor, PageHeader } from '../components/page';
 import {
   Activity,
@@ -24,11 +26,6 @@ import {
   X,
 } from '../components/icons';
 
-type AuditSearch = { decision?: 'deny'; actorId?: string; detail?: '1' };
-
-const PAGE_SIZE = 200;
-type ChainResult = Awaited<ReturnType<typeof verifyChain>>;
-
 export const Route = createFileRoute('/audit')({
   // Filters live in the URL so a finding can cite the exact view it came from.
   validateSearch: (search: Record<string, unknown>): AuditSearch => ({
@@ -38,63 +35,19 @@ export const Route = createFileRoute('/audit')({
     detail: search.detail === '1' || search.detail === 1 ? '1' : undefined,
   }),
   loaderDeps: ({ search }) => search,
-  // The log is verified on every visit rather than on demand: a status that
-  // is always current beats a button nobody presses.
-  loader: async ({ context: { client }, deps }) => {
-    const [entries, chain] = await Promise.all([listEntries(client, deps), verifyChain(client)]);
-    return { entries, chain };
-  },
+  // The entries only: the verification is asked for once the page is up
+  // (`ChainStatus`), so the table never waits on it.
+  loader: ({ context: { client, queryClient }, deps }) => queryClient.fetchQuery(queries.auditEntries(client, deps)),
   component: AuditPage,
 });
 
-function listEntries(client: CoffreClient, search: AuditSearch) {
-  return uiResult(async () => {
-    // Detail is left out by the server unless asked for, and counted.
-    return client.audit.list({
-      limit: PAGE_SIZE,
-      decision: search.decision,
-      actor: search.actorId,
-      detail: search.detail,
-    });
-  });
-}
-
-/**
- * Whether the log holds, or why that is not known. Verifying is for owners:
- * anyone else reads their projects' part of the log, and a part cannot be
- * checked as a chain, so for them it is a fact about the page, not a fault.
- */
-async function verifyChain(client: CoffreClient) {
-  try {
-    const result = await client.audit.verify();
-    return result.ok
-      ? {
-          integrity: 'intact' as const,
-          through: result.through,
-          entries: result.entries,
-          checkpoint: result.checkpoint,
-          pending: result.pending ?? 0,
-        }
-      : {
-          integrity: 'broken' as const,
-          through: result.through,
-          failedAtSeq: result.failedAtSeq,
-          author: result.author,
-          reason: result.reason,
-        };
-  } catch (error) {
-    const status = statusOf(error);
-    if (status === 403) return { integrity: 'owners-only' as const };
-    return {
-      integrity: 'unknown' as const,
-      problem: status === undefined ? 'the request never got an answer' : `the request failed with HTTP ${status}`,
-    };
-  }
-}
-
 function AuditPage() {
-  const { entries: result, chain } = Route.useLoaderData();
   const search = Route.useSearch();
+  const client = useCoffre();
+  const { data: result } = useSuspenseQuery(queries.auditEntries(client, search));
+  // Not suspended: the table shows while the log is verified.
+  const verification = useQuery(queries.auditChain(client));
+  const chain = verification.data;
   const { decision, actorId } = search;
   const detail = search.detail === '1';
   const deniedOnly = decision === 'deny';
@@ -107,14 +60,22 @@ function AuditPage() {
     );
   }
 
-  const broken = chain.integrity === 'broken' ? chain : null;
+  const broken = chain?.integrity === 'broken' ? chain : null;
   const breakAt = broken?.failedAtSeq ?? null;
   const shown = lines(result.entries);
   const filters = { decision, actorId };
 
   return (
     <>
-      <PageHeader title="Audit" actions={<ChainStatus chain={chain} />} />
+      <PageHeader
+        title="Audit"
+        actions={
+          // One region for every state, so each change of it is announced.
+          <div className="chain-live" aria-live="polite" aria-atomic="true">
+            <ChainStatus chain={chain} onRetry={() => void verification.refetch()} />
+          </div>
+        }
+      />
 
       {broken !== null && (
         <div style={{ marginBottom: '1.25rem' }}>
@@ -454,8 +415,21 @@ function BreakMark() {
  * have to ask for is reassurance rather than evidence: it is checked when
  * someone is already feeling confident, and not on the morning it would have
  * mattered. Recomputing on load makes the claim continuous.
+ *
+ * It is not waited for, though: verifying re-reads the whole log, so until
+ * it answers the badge says it is verifying, and a check that could not run
+ * says so and offers to run again, rather than passing for a broken log.
  */
-function ChainStatus({ chain }: { chain: ChainResult }) {
+function ChainStatus({ chain, onRetry }: { chain: ChainResult | undefined; onRetry: () => void }) {
+  if (chain === undefined) {
+    return (
+      <span className="chain-note">
+        <Spinner size={14} />
+        Verifying…
+      </span>
+    );
+  }
+
   if (chain.integrity === 'owners-only') {
     return (
       <Toggletip
@@ -472,21 +446,26 @@ function ChainStatus({ chain }: { chain: ChainResult }) {
 
   if (chain.integrity === 'unknown') {
     return (
-      <Toggletip
-        align="end"
-        label={`coffre could not check the log: ${chain.problem}. The entries below loaded, but whether they are intact is unknown until it can. Reload to try again.`}
-      >
-        <button type="button" className="chain-flag chain-flag-warn">
-          <AlertTriangle size={14} />
-          Log not verified
+      <div className="chain">
+        <Toggletip
+          align="end"
+          label={`coffre could not check the log: ${chain.problem}. The entries below loaded, but whether they are intact is unknown until it can.`}
+        >
+          <button type="button" className="chain-flag chain-flag-warn">
+            <AlertTriangle size={14} />
+            Couldn’t verify
+          </button>
+        </Toggletip>
+        <button type="button" className="btn btn-sm" onClick={onRetry}>
+          Retry
         </button>
-      </Toggletip>
+      </div>
     );
   }
 
   if (chain.integrity === 'broken') {
     return (
-      <span className="chain-flag chain-flag-bad" role="status">
+      <span className="chain-flag chain-flag-bad">
         <AlertTriangle size={14} />
         {chain.failedAtSeq === null ? 'Log does not verify' : `Log broken at ${chain.failedAtSeq}`}
       </span>

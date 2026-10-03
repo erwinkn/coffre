@@ -4,7 +4,7 @@ import type { Permission } from '@coffre/core/access';
 import { isUniqueViolation } from '@coffre/db/dialect';
 import { environments, projects } from '@coffre/db/schema';
 
-import { insert, places, update, type ResolvedPath } from '../db/queries.ts';
+import { distinctSecretCounts, insert, places, update, type ResolvedPath } from '../db/queries.ts';
 import { can, canAnywhere, permissionsAt, seesProject } from './caller.ts';
 import { allowed, audited, denied, Refusal, requireOwner, type ApiContext } from './context.ts';
 import { conflict, notFound } from './errors.ts';
@@ -41,6 +41,12 @@ export type ProjectSummary = {
   /** What the caller may do at project scope. */
   permissions: Permission[];
   environments: ProjectEnvironmentSummary[];
+  /**
+   * Distinct live secret names across the live environments the caller can
+   * open: the same key in dev and prod is one secret. Null when they can open
+   * none, or the project is archived.
+   */
+  secretCount: number | null;
 };
 
 const iso = (value: Date | null) => value?.toISOString() ?? null;
@@ -87,6 +93,8 @@ export async function me(ctx: ApiContext): Promise<Me> {
 export async function listProjects(ctx: ApiContext): Promise<{ projects: ProjectSummary[] }> {
   const { caller } = ctx;
   const summaries: ProjectSummary[] = [];
+  // The projects whose secrets the caller may count, and where they may.
+  const counted: { summary: ProjectSummary; projectId: string; environmentIds: string[] }[] = [];
   for (const project of await places(ctx.db)) {
     if (!seesProject(caller, project.id)) continue;
     const scope = { projectId: project.id };
@@ -96,7 +104,7 @@ export async function listProjects(ctx: ApiContext): Promise<{ projects: Project
     const manages =
       can(caller, 'environment.manage', scope) || can(caller, 'grant.manage', scope);
 
-    summaries.push({
+    const summary: ProjectSummary = {
       slug: project.slug,
       name: project.name,
       archivedAt: iso(project.archivedAt),
@@ -120,8 +128,25 @@ export async function listProjects(ctx: ApiContext): Promise<{ projects: Project
           },
         };
       }),
-    });
+      secretCount: null,
+    };
+    summaries.push(summary);
+
+    const environmentIds = project.environments
+      .filter(
+        (environment) =>
+          environment.archivedAt === null &&
+          can(caller, 'secret.read', { projectId: project.id, environmentId: environment.id }),
+      )
+      .map((environment) => environment.id);
+    if (project.archivedAt === null && environmentIds.length > 0) {
+      counted.push({ summary, projectId: project.id, environmentIds });
+    }
   }
+
+  // One query counts every project, rather than one list per environment.
+  const counts = await distinctSecretCounts(ctx.db, counted.flatMap((entry) => entry.environmentIds));
+  for (const { summary, projectId } of counted) summary.secretCount = counts.get(projectId) ?? 0;
   return { projects: summaries };
 }
 

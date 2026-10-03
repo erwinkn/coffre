@@ -1,30 +1,38 @@
 import { createClient, type CoffreClient } from '@coffre/client';
+import type { QueryClient } from '@tanstack/react-query';
 import { createRouter as createTanStackRouter } from '@tanstack/react-router';
+import { setupRouterSsrQueryIntegration } from '@tanstack/react-router-ssr-query';
 import { getGlobalStartContext } from '@tanstack/react-start';
 import { routeTree } from './routeTree.gen';
 import { NotFound, RouteError } from './components/route-states';
+import { createQueryClient } from './lib/queries';
 
 /**
  * The router factory. TanStack Start calls this once per request on the server
- * and once on the client.
+ * and once on the client, so each gets a query cache of its own: a request's
+ * reads are never another visitor's. The server's reads travel with the page,
+ * so the browser starts from them rather than asking again.
  *
- * Note what is deliberately absent: any caching of loader data. Every screen in
- * this app reports authorisation state that another person can change from
- * another tab, so a stale project list or grant table is not a cosmetic
- * problem. `staleTime: 0` means a navigation back to a screen refetches it,
- * which is the behaviour the Next.js version got from `force-dynamic`.
+ * Loaders read through the query cache (`lib/queries.ts`, which says how
+ * fresh it keeps a page), so the router keeps no copy of its own: it runs a
+ * route's loader on every navigation and every hover, and the cache answers
+ * whatever it already holds. A hover is then a read the click reuses.
  */
 export function getRouter() {
-  return createTanStackRouter({
+  const queryClient = createQueryClient();
+  const router = createTanStackRouter({
     routeTree,
     defaultPreload: 'intent',
     defaultStaleTime: 0,
+    defaultPreloadStaleTime: 0,
     scrollRestoration: true,
     defaultNotFoundComponent: NotFound,
     defaultErrorComponent: RouteError,
     ssr: { nonce: cspNonce() },
-    context: { client: requestClient() },
+    context: { client: requestClient(), queryClient },
   });
+  setupRouterSsrQueryIntegration({ router, queryClient });
+  return router;
 }
 
 /**
@@ -66,7 +74,7 @@ function cspNonce(): string | undefined {
 type RequestContext = { cspNonce: string; client: CoffreClient };
 
 /** What every loader and component can reach through the router. */
-export type RouterContext = { client: CoffreClient };
+export type RouterContext = { client: CoffreClient; queryClient: QueryClient };
 
 // Start's server entry reads this `Register`, and its context helpers the
 // one below: the two do not merge, so each hears of the request context.

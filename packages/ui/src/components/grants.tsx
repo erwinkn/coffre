@@ -1,78 +1,14 @@
-import type { CoffreClient } from '@coffre/client';
-import type { Role } from '@coffre/core/access';
 import type { ReactNode } from 'react';
-import { toast } from 'sonner';
-import { failureMessage, memberRef, uiFailure, useCoffre } from '../lib/coffre';
-import { useAction } from '../lib/use-action';
+import { grantId, revokeGrant, type GrantVars } from '../lib/changes';
+import type { FailedAdd } from '../lib/optimistic';
+import { useCoffre } from '../lib/coffre';
 import { projectAccessLabel } from '../lib/project-access';
-import type { GrantRow, ProjectSummary } from '../shared/models';
-import { ConfirmButton, ErrorLine, Spinner } from './ui';
+import { keys } from '../lib/queries';
+import { useChange, useChangeStatus } from '../lib/use-change';
+import type { GrantRow } from '../shared/models';
+import { RowFailure, RowPending, rowClass } from './row-state';
+import { ConfirmButton } from './ui';
 import { Clock, ShieldCheck } from './icons';
-
-/**
- * One project and, when you manage its access, its grants. A project that is
- * not there for you fails with no message: the page words that itself.
- */
-export async function loadProject(client: CoffreClient, slug: string) {
-  let project: ProjectSummary | undefined;
-  try {
-    project = (await client.projects.list()).projects.find((entry) => entry.slug === slug);
-  } catch (error) {
-    return uiFailure(error);
-  }
-  if (project === undefined) return { ok: false as const, error: null };
-  if (!project.permissions.includes('grant.manage')) {
-    return { ok: true as const, project, grants: [] as GrantRow[], grantsError: null };
-  }
-
-  try {
-    const { members } = await client.members.list(slug);
-    const grants: GrantRow[] = members.flatMap((member) =>
-      member.grants.map((grant) => ({
-        id: grant.id,
-        principalType: member.principalType,
-        principalId: member.principalId,
-        role: grant.role,
-        roleName: grant.roleName,
-        permissions: grant.permissions,
-        scope: grant.environment === null ? ('project' as const) : ('environment' as const),
-        environmentSlug: grant.environment,
-        expiresAt: grant.expiresAt,
-      })),
-    );
-    return { ok: true as const, project, grants, grantsError: null };
-  } catch (error) {
-    return { ok: true as const, project, grants: [] as GrantRow[], grantsError: failureMessage(error) };
-  }
-}
-
-/** Where a grant applies, as the API names it: `market`, or `market/prod`. */
-export function grantPlace(project: string, environmentSlug: string | null): string {
-  return environmentSlug === null ? project : `${project}/${environmentSlug}`;
-}
-
-/**
- * Give someone a role at one place. Access is declarative, so asking for what
- * they already hold is not an error, whoever asked first: `existed` says so.
- */
-export async function ensureGrant(
-  coffre: CoffreClient,
-  data: {
-    project: string;
-    principalType: GrantRow['principalType'];
-    principalId: string;
-    role: string;
-    environmentSlug: string | null;
-    expiresAt: string | null;
-  },
-): Promise<{ existed: boolean }> {
-  const place = grantPlace(data.project, data.environmentSlug);
-  const role = data.role as Role;
-  const { changes } = await coffre.access.set(memberRef(data.principalType, data.principalId), {
-    [place]: data.expiresAt === null ? role : { role, until: data.expiresAt },
-  });
-  return { existed: changes[place] === 'unchanged' };
-}
 
 /**
  * Grants as a table: who or where in the first column, then the access, when
@@ -125,14 +61,15 @@ export function GrantRowView({
   lead: ReactNode;
   leadLabel: string;
 }) {
-  const coffre = useCoffre();
-  const { pending, error, run } = useAction();
+  const revoke = useChange(revokeGrant(useCoffre(), project));
+  const { status, dismiss } = useChangeStatus(keys.grants(project));
+  const state = status(grantId(grant));
   const label = projectAccessLabel(grant);
   const expired = grant.expiresAt !== null && new Date(grant.expiresAt).getTime() < Date.now();
 
   return (
     <>
-      <tr>
+      <tr className={rowClass(state)}>
         <td className="n">{number}</td>
         <td className="col-lead" data-label={leadLabel}>
           {lead}
@@ -160,45 +97,56 @@ export function GrantRowView({
           )}
         </td>
         <td className="col-actions">
-          <ConfirmButton
-            trigger={
-              <button className="act act-danger" disabled={pending}>
-                {pending && <Spinner size={13} />}
-                Revoke
-              </button>
-            }
-            title={
-              <>
-                Revoke {label} from <span className="mono">{grant.principalId}</span>?
-              </>
-            }
-            body={
-              <>
-                They lose <strong>{label}</strong> on <span className="mono">{project}</span>{' '}
-                immediately, including any process using it right now. Other grants they hold
-                still apply.
-              </>
-            }
-            confirmLabel="Revoke access"
-            onConfirm={() =>
-              run(
-                () =>
-                  coffre.access.set(memberRef(grant.principalType, grant.principalId), {
-                    [grantPlace(project, grant.environmentSlug)]: null,
-                  }),
-                () => toast.success(`Revoked ${label} on ${project} from ${grant.principalId}`),
-              )
-            }
-          />
+          {state.state === 'pending' ? (
+            <RowPending status={state} />
+          ) : (
+            <ConfirmButton
+              trigger={<button className="act act-danger">Revoke</button>}
+              title={
+                <>
+                  Revoke {label} from <span className="mono">{grant.principalId}</span>?
+                </>
+              }
+              body={
+                <>
+                  They lose <strong>{label}</strong> on <span className="mono">{project}</span>{' '}
+                  immediately, including any process using it right now. Other grants they hold
+                  still apply.
+                </>
+              }
+              confirmLabel="Revoke access"
+              onConfirm={() => revoke(grant)}
+            />
+          )}
         </td>
       </tr>
-      {error !== null && (
-        <tr className="row-error">
-          <td colSpan={5}>
-            <ErrorLine error={error} />
-          </td>
-        </tr>
-      )}
+      <RowFailure
+        status={state}
+        columns={5}
+        onDismiss={() => state.state === 'failed' && dismiss(state.mutationId)}
+      />
     </>
   );
+}
+
+/**
+ * Grants the server refused to give: rolled back, so no row of theirs is
+ * left, and listed here, after the table's rows, saying why.
+ */
+export function RefusedGrants({ refused }: { refused: RefusedGrant[] }) {
+  return refused.map(({ mutationId, vars, status, dismiss }) => (
+    <RowFailure key={mutationId} status={status} columns={5} onDismiss={dismiss}>
+      {vars.principalId} was not given {vars.roleName.toLowerCase()}.
+    </RowFailure>
+  ));
+}
+
+type RefusedGrant = FailedAdd<GrantVars> & { dismiss: () => void };
+
+/** The grants of one kind the server refused to give in a project, still to be said. */
+export function useRefusedGrants(project: string, grants: GrantRow[], principalType?: GrantRow['principalType']): RefusedGrant[] {
+  const { failedAdds, dismiss } = useChangeStatus(keys.grants(project));
+  return failedAdds<GrantVars>(grants.map(grantId))
+    .filter(({ vars }) => principalType === undefined || vars.principalType === principalType)
+    .map((refused) => ({ ...refused, dismiss: () => dismiss(refused.mutationId) }));
 }

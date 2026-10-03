@@ -5,7 +5,7 @@ import { own, tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import * as dialect from '@coffre/db/dialect';
 import { canonicalTimestamp, changedRows, clock, clockMillis, forUpdate, migrationLedger, truth, type Table } from '@coffre/db/dialect';
 import type * as schema from '@coffre/db/schema';
-import { and, asc, count, desc, eq, getTableColumns, getTableName, gt, gte, inArray, isNull, lt, notInArray, or, sql, type SQL } from 'drizzle-orm';
+import { and, asc, count, countDistinct, desc, eq, getTableColumns, getTableName, gt, gte, inArray, isNull, lt, notInArray, or, sql, type SQL } from 'drizzle-orm';
 
 import { authMac, checkAuthRow, verifyAuthRow, type AuthRow, type AuthTable } from '../auth-rows.ts';
 
@@ -229,6 +229,21 @@ export async function places(db: Queryable): Promise<PlaceRow[]> {
     });
   }
   return found;
+}
+
+/**
+ * How many distinct live secret names each project holds across the given
+ * environments: the same key in dev and prod is one secret.
+ */
+export async function distinctSecretCounts(db: Queryable, environmentIds: string[]): Promise<Map<string, number>> {
+  if (environmentIds.length === 0) return new Map();
+  const { secrets } = tablesOf(db);
+  const rows = await db
+    .select({ projectId: secrets.projectId, count: countDistinct(secrets.key) })
+    .from(secrets)
+    .where(and(inArray(secrets.environmentId, environmentIds), isNull(secrets.archivedAt)))
+    .groupBy(secrets.projectId);
+  return new Map(rows.map((row) => [row.projectId, Number(row.count)]));
 }
 
 // --- members and sign-in ------------------------------------------------------

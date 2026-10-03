@@ -1,5 +1,8 @@
+import { useSuspenseQuery } from '@tanstack/react-query';
 import { createFileRoute, Link } from '@tanstack/react-router';
-import { loadDirectory } from '../components/directory';
+import { useCoffre } from '../lib/coffre';
+import { loadDirectory, queries } from '../lib/queries';
+import { useShell } from '../lib/use-shell';
 import { Card, Fact, PageHeader } from '../components/page';
 
 /** The instance's settings. Your own are under Account, at the sidebar's foot. */
@@ -7,18 +10,15 @@ export const Route = createFileRoute('/settings')({
   // Instance facts come from the directory, which only owners may list.
   // Asking on everyone's behalf would write a refusal to the audit log for
   // every user who opens the page, so it is only asked for them.
-  loader: async ({ context: { client }, parentMatchPromise }) => {
-    const root = (await parentMatchPromise).loaderData;
-    const canManage = root?.capabilities.canManageGrants ?? false;
-    return { auth: root?.auth, directory: canManage ? await loadDirectory(client, true) : null };
-  },
+  loader: ({ context: { client, queryClient } }) => loadDirectory(queryClient, client),
   component: SettingsPage,
 });
 
 const listFormat = new Intl.ListFormat('en', { type: 'disjunction' });
 
 function SettingsPage() {
-  const { auth, directory } = Route.useLoaderData();
+  const { auth, capabilities } = useShell();
+  const { data: directory } = useSuspenseQuery(queries.directory(useCoffre(), capabilities.canManageGrants));
   const providers = auth?.signin?.providers.map((provider) => provider.label) ?? [];
 
   const principals = directory?.ok === true ? directory.principals : null;
