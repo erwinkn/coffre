@@ -90,9 +90,14 @@ export function ourConfig(configs: readonly HyperdriveConfig[], name: string, re
   return configs.find(({ id }) => id === recorded) ?? configs.find((config) => config.name === name && sameDatabase(config.origin, administrator));
 }
 
-/** A name for this deployment, from its address: `coffre-try` for coffre-try.example.com. */
+/**
+ * A name for this deployment, from its address: `coffre-` and its first
+ * label, `coffre-secrets` for secrets.example.com, the prefix not doubled:
+ * `coffre-try` for coffre-try.example.com.
+ */
 export function nameFrom(address: string): string {
-  return address.split('.')[0]!.replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 57) || 'coffre';
+  const label = address.split('.')[0]!.replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
+  return (label === 'coffre' || label.startsWith('coffre-') ? label : `coffre-${label}`.replace(/-$/, '')).slice(0, 57).replace(/-+$/, '');
 }
 
 /** Why a deployment's name will not do as a Worker's, with `-vault` after it for the vault's. Null when it will. */

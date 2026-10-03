@@ -147,8 +147,8 @@ vault, the vault ID setup wrote there; a config found by name points at
 this run's database, the same host and database. Setup never deploys over
 another deployment's Worker, nor touches its config. When one already holds
 this deployment's names, setup says which, and asks for a name of its own,
-offering the address's first label: `coffre-try` for
-`coffre-try.example.com`. Both Workers, `<name>` and `<name>-vault`, both
+offering `coffre-` and the address's first label: `coffre-secrets` for
+`secrets.example.com`, and `coffre-try` for `coffre-try.example.com`. Both Workers, `<name>` and `<name>-vault`, both
 Hyperdrive configs and the app's binding to its vault take it, and both
 `wrangler.jsonc` record it.
 
