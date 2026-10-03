@@ -140,8 +140,8 @@ coffre verify instance                      # checks the instance from outside (
 `coffre export market/prod --format github` appends values to `GITHUB_ENV`
 for subsequent GitHub Actions steps and emits mask commands for the values
 and their individual lines before writing the file. It refuses outside an
-Actions step without `GITHUB_ENV`, and refuses names GitHub cannot set there:
-`GITHUB_*`, `RUNNER_*`, and `NODE_OPTIONS`.
+Actions step without `GITHUB_ENV`, and refuses `NODE_OPTIONS`, which the
+runner blocks there. GitHub's default metadata variables cannot be overridden.
 
 The default `dotenv` format is data for `.env` parsers, including coffre's
 import, with escaped line breaks. Do not source it as shell code. For a shell,

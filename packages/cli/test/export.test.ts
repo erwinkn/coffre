@@ -68,10 +68,11 @@ test('GitHub masks escape percent, CR and LF, and mask each nonempty line as wel
 });
 
 test('GitHub refuses invalid entries and keys the runner cannot set', () => {
-  for (const key of ['NOT-A-NAME', 'GITHUB_TOKEN', 'RUNNER_TEMP', 'NODE_OPTIONS']) {
+  for (const key of ['NOT-A-NAME', 'NODE_OPTIONS']) {
     assert.throws(() => githubEnvironment([[key, 'private']]), /valid variable name|cannot be set/);
   }
   assert.throws(() => githubEnvironment([['K', 'a\0b']]), /NUL/);
+  assert.deepEqual(readEnvironment(githubEnvironment([['GITHUB_TOKEN', 'a literal bearer']])), { GITHUB_TOKEN: 'a literal bearer' });
 });
 
 test('existing dotenv round-trips multiline and command-shaped values; shell export executes none of them', (t) => {

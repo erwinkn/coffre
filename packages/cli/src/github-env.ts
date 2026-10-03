@@ -34,8 +34,7 @@ export function githubEnvironment(
   let out = '';
   for (const [key, value] of entries) {
     assertEnvironmentEntry(key, value);
-    const upper = key.toUpperCase();
-    if (upper.startsWith('GITHUB_') || upper.startsWith('RUNNER_') || upper === 'NODE_OPTIONS') {
+    if (key.toUpperCase() === 'NODE_OPTIONS') {
       throw new Error(`${key} cannot be set through GITHUB_ENV`);
     }
     let delimiter: string;
