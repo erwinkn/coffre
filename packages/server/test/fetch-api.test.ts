@@ -9,7 +9,7 @@ import { eq } from 'drizzle-orm';
 import { SyncRunner } from '../src/api/syncs.ts';
 import { apiCredential, fetchApi as serveApi, pageClient as clientForPage, pageCredential } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
-import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://coffre.test';
 const ROOT = 'admin@acme.example';
@@ -44,7 +44,7 @@ function runtimeFor(auth: AuthConfig): CoffreRuntime {
     auth,
     publicUrl: ORIGIN,
     verifier: { verify: async (token: string): Promise<Principal> => ({ type: 'user', id: token, email: token, subject: token }) },
-    waitUntil: () => {},
+    waitUntil,
   };
 }
 

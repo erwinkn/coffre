@@ -6,6 +6,8 @@ import { sql, type SQL } from 'drizzle-orm';
 
 import { TEST_OWNER_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './connections.ts';
 import { guardTransactions } from '../transaction-guard.ts';
+import { drainBackgroundTasks } from '../background-tasks.ts';
+import { testPostgresPool } from './postgres-pool.ts';
 
 /**
  * Which database the integration suite runs on: `COFFRE_TEST_ENGINE` is
@@ -26,13 +28,13 @@ function testEngine(name: string): Engine {
  */
 export async function openTestDatabase(): Promise<{ owner: Database; runtime: Database; close: () => Promise<void> }> {
   if (TEST_ENGINE === 'postgres') {
-    const pg = (await import('pg')).default;
-    const ownerPool = new pg.Pool({ connectionString: TEST_OWNER_DATABASE_URL });
-    const runtimePool = new pg.Pool({ connectionString: TEST_RUNTIME_DATABASE_URL });
+    const ownerPool = testPostgresPool(TEST_OWNER_DATABASE_URL);
+    const runtimePool = testPostgresPool(TEST_RUNTIME_DATABASE_URL);
     return {
       owner: guardTransactions(createDatabase(ownerPool)),
       runtime: guardTransactions(createDatabase(runtimePool)),
       close: async () => {
+        await drainBackgroundTasks();
         await Promise.all([ownerPool.end(), runtimePool.end()]);
       },
     };
@@ -44,6 +46,7 @@ export async function openTestDatabase(): Promise<{ owner: Database; runtime: Da
     owner: guardTransactions(owner.db),
     runtime: guardTransactions(runtime.db),
     close: async () => {
+      await drainBackgroundTasks();
       await Promise.all([owner.close(), runtime.close()]);
     },
   };
@@ -59,8 +62,7 @@ let vaultDatabase: Promise<Database> | null = null;
 export function openVaultDatabase(): Promise<Database> {
   vaultDatabase ??= (async () => {
     if (TEST_ENGINE === 'postgres') {
-      const pg = (await import('pg')).default;
-      return createDatabase(new pg.Pool({ connectionString: TEST_VAULT_DATABASE_URL, allowExitOnIdle: true }));
+      return createDatabase(testPostgresPool(TEST_VAULT_DATABASE_URL, true));
     }
     const url = process.env.COFFRE_TEST_DATABASE_URL;
     if (!url) throw new Error(`COFFRE_TEST_DATABASE_URL is required on ${TEST_ENGINE}; see scripts/setup-test-database.sh`);

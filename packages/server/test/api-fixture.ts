@@ -13,6 +13,7 @@ import type { SigninService } from '../src/api/signin.ts';
 import { SyncRunner } from '../src/api/syncs.ts';
 import { emptyLog, openVaultDatabase } from './db/engine.ts';
 import { assertOutsideTransaction } from './transaction-guard.ts';
+import { drainBackgroundTasks, trackBackgroundTask } from './background-tasks.ts';
 
 export type FixtureDeps = {
   db: Database;
@@ -39,6 +40,12 @@ export type TestVault = Vault & {
 };
 
 const vaults = new Set<TestVault>();
+
+/** A test runtime's waitUntil: retain the task until the case is finished. */
+export function waitUntil(promise: Promise<unknown>): void {
+  trackBackgroundTask(promise);
+  promise.catch((error: unknown) => console.error('background task failed', error));
+}
 
 /**
  * A test vault, configured as a deployment with a local KEK is: the vault
@@ -102,11 +109,15 @@ export async function contextFor(
     db: deps.db,
     vault: deps.vault,
     chainKey: deps.chainKey,
-    waitUntil:
-      deps.waitUntil ??
-      ((promise) => {
-        promise.catch((error: unknown) => console.error('background task failed', error));
-      }),
+    waitUntil: (promise) => {
+      // A custom observer must not bypass the fixture's lifetime tracking.
+      if (deps.waitUntil) {
+        trackBackgroundTask(promise);
+        deps.waitUntil(promise);
+      } else {
+        waitUntil(promise);
+      }
+    },
     syncs: deps.syncs ?? new SyncRunner({ db: deps.db, vault: deps.vault, chainKey: deps.chainKey }),
     signin: deps.signin ?? null,
     caller: await loadCaller(deps.vault, { type, id }),
@@ -150,6 +161,7 @@ export function testDeps(db: Database, rootAdmins: readonly string[], extra: Par
  * about this data.
  */
 export async function resetDatabase(owner: Database): Promise<void> {
+  await drainBackgroundTasks();
   for (const vault of vaults) await vault.reset();
   const {
     credentials,
