@@ -5,6 +5,11 @@
 // migrations this CLI was built with; checks the boundary by connecting as
 // each login; then shows every value once, on a screen of their own, and
 // writes no file.
+//
+// In an empty directory, it first makes a deployment there. In a Workers
+// deployment, on a terminal, it offers to do Cloudflare too (workers.ts):
+// then the database URLs go straight to Hyperdrive, and the keys, once
+// shown, to the Workers it deploys.
 import { createHash, createHmac, pbkdf2Sync, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
@@ -13,10 +18,13 @@ import { postgresConnection } from '@coffre/db/connect';
 import { migrateDatabase, type MigrationPlan } from '@coffre/db/migrate';
 import pg from 'pg';
 
+import { deploymentKind, install } from './deployment.ts';
+import { init, KINDS, type Kind } from './init.ts';
 import { generateKeys, jsonWarning, keyGuide, keyValues, needsTerminal, type Keys } from './keys.ts';
 import { type Screen, showSecrets, type Value } from './secrets.ts';
-import { Steps } from './steps.ts';
-import { Cancelled, hiddenLine, type Keyboard, openTerminal, type Output, paragraph, release, row, style, type Style } from './tty.ts';
+import { StepFailed, Steps } from './steps.ts';
+import { Cancelled, hiddenLine, type Keyboard, listed, openTerminal, type Output, paragraph, release, row, select, style, type Style } from './tty.ts';
+import { Cloudflare, deployedSummary } from './workers.ts';
 
 /** Where the administrator's connection string comes from, when not from a hidden prompt. */
 const URL_VARIABLE = 'COFFRE_SETUP_DATABASE_URL';
@@ -106,14 +114,32 @@ export async function setup(args: string[]): Promise<void> {
   const s = style(out);
   // Questions take the screen's keyboard, or, with --json, stdin when it is a terminal.
   const questions = (): Keyboard | null => terminal?.keys ?? (process.stdin.isTTY ? process.stdin : null);
+  const dir = process.cwd();
+  let kind = deploymentKind(dir);
+  // Cloudflare, on a terminal only, and not on Windows, where wrangler cannot read its secrets from /dev/stdin.
+  const offers = terminal !== null && process.platform !== 'win32';
   try {
-    if (s.ansi) out.write(`\n  ${s.bold('coffre setup')}  ${s.dim("a deployment's database logins, migrations and keys")}\n\n`);
+    const about = offers && (kind === 'workers' || kind === 'empty') ? "a deployment's database, keys and Cloudflare" : "a deployment's database logins, migrations and keys";
+    if (s.ansi) out.write(`\n  ${s.bold('coffre setup')}  ${s.dim(about)}\n\n`);
+    if (kind === 'empty' && terminal !== null) kind = await scaffold(dir, terminal.keys, out, clean);
     const text = await readAdministrator(out, s);
     secrets.push(text);
     const administrator = administratorUrl(text);
     if (administrator.password !== '') secrets.push(administrator.password, decodeURIComponent(administrator.password));
-    const result = await run(administrator, out, questions, { resetPasswords: options.resetPasswords }, secrets, clean);
-    if (options.json) {
+    let cloudflare: Cloudflare | null = null;
+    if (offers && kind === 'workers') {
+      const choice = await select(terminal.keys, out, s, 'Set Cloudflare up too?', [
+        'Yes: Hyperdrive, GitHub sign-in, the keys as secrets, and the deploy',
+        "No, I'll do Cloudflare myself",
+      ]);
+      if (choice === 0) cloudflare = await Cloudflare.connect(dir, out, terminal.keys, clean, secrets);
+    }
+    const result = await run(administrator, out, questions, { resetPasswords: options.resetPasswords, cloudflare }, secrets, clean);
+    if (cloudflare !== null) {
+      if (cloudflare.keys !== null) await showSecrets(terminal!, cloudflare.screen());
+      await cloudflare.deploy(out, clean);
+      out.write(deployedSummary(cloudflare, out));
+    } else if (options.json) {
       jsonWarning(process.stderr, listed(shownNames(result), 'and'));
       process.stdout.write(`${JSON.stringify(asJson(result))}\n`);
     } else if (result.keys === null && result.app.url === null && result.vault.url === null) {
@@ -124,7 +150,7 @@ export async function setup(args: string[]): Promise<void> {
     }
   } catch (error) {
     if (error instanceof Cancelled) return fail(out, 'cancelled; nothing after the last step done was changed', 130);
-    // A step shows its own failure; an error before the steps is shown here.
+    // A step shows its own failure; an error outside the steps is shown here.
     if (!(error instanceof StepFailed)) return fail(out, clean(error));
     process.exit(1);
   } finally {
@@ -195,39 +221,71 @@ function administratorUrl(text: string): URL {
   return url;
 }
 
-/** A step failed, and said so on its own line. */
-class StepFailed extends Error {}
+/** This CLI's version: the schema it migrates to, and the version of coffre a deployment it makes runs. */
+function cliVersion(): string {
+  return (JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }).version;
+}
+
+/**
+ * In an empty directory, a deployment of the kind chosen, its files written
+ * as `coffre init` writes them and its packages installed; or none.
+ */
+async function scaffold(dir: string, keys: Keyboard, out: Output, clean: (error: unknown) => string): Promise<Kind | 'empty'> {
+  const s = style(out);
+  const names = { workers: 'Cloudflare Workers', node: 'Node' } as const;
+  const choice = await select(keys, out, s, 'This directory is empty. Make a deployment of coffre here?', [
+    ...KINDS.map((kind) => names[kind]),
+    'No, only the database',
+  ]);
+  const kind = KINDS[choice];
+  if (kind === undefined) return 'empty';
+  const steps = new Steps(out, [`Write a ${names[kind]} deployment`, 'Install its packages'], () => null, clean);
+  try {
+    await steps.run(0, async () => `Wrote a ${names[kind]} deployment: ${init(kind, dir, cliVersion()).length} files`);
+    await steps.run(1, async () => {
+      await install(dir);
+      return 'Installed its packages, with pnpm';
+    });
+  } finally {
+    steps.end();
+  }
+  out.write('\n');
+  return kind;
+}
 
 async function run(
   administrator: URL,
   out: Output,
   questions: () => Keyboard | null,
-  options: { resetPasswords: boolean },
+  options: { resetPasswords: boolean; cloudflare: Cloudflare | null },
   secrets: string[],
   clean: (error: unknown) => string,
 ): Promise<SetupResult> {
+  const { cloudflare } = options;
   const user = decodeURIComponent(administrator.username);
   const where = `${administrator.hostname}${decodeURIComponent(administrator.pathname)}`;
-  const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
+  const version = cliVersion();
   const steps = new Steps(
     out,
-    [`Connect to ${where}`, `Check ${user} can create roles`, 'Make the two logins', 'Migrate the database', "Check each login's rights"],
+    [
+      `Connect to ${where}`,
+      `Check ${user} can create roles`,
+      'Make the two logins',
+      'Migrate the database',
+      "Check each login's rights",
+      ...(cloudflare === null ? [] : Cloudflare.TITLES),
+    ],
     questions,
     clean,
   );
-  const step = async (i: number, work: Parameters<Steps['run']>[1]) => {
-    try {
-      await steps.run(i, work);
-    } catch (error) {
-      if (error instanceof Cancelled) throw error;
-      throw new StepFailed(clean(error));
-    }
-  };
+  const step = (i: number, work: Parameters<Steps['run']>[1]) => steps.run(i, work);
 
   const client = new pg.Client({ ...postgresConnection(administrator.href), application_name: 'coffre-setup' });
   try {
     await step(0, async () => {
       await client.connect();
+      // Before anything changes: a Worker without its key, over a database that holds data, stops setup here.
+      cloudflare?.checkKeys(await holdsData(client));
       return `Connected to ${where} as ${user}`;
     });
     await step(1, async () => {
@@ -241,7 +299,19 @@ async function run(
     });
     let logins!: Record<Component, Login>;
     await step(2, async (progress) => {
-      logins = await provision(client, administrator, user, options.resetPasswords, progress.ask, secrets);
+      // On Cloudflare, a login gets a new password when its Hyperdrive config needs one: the database keeps only its verifier.
+      const reset =
+        cloudflare === null
+          ? async (existing: ReadonlySet<string>) => {
+              const all =
+                options.resetPasswords ||
+                (existing.size > 0 &&
+                  (await progress.ask(existing.size === 1 ? `${[...existing][0]} exists already. Set new passwords?` : 'Both logins exist already. Set new passwords?')));
+              return () => all;
+            }
+          : async () => (component: Component) =>
+              options.resetPasswords || cloudflare.needsPassword(component, administrator, loginFor(ROLES[component], user));
+      logins = await provision(client, administrator, user, reset, secrets);
       return described(logins);
     });
     await step(3, async (progress) => {
@@ -266,9 +336,15 @@ async function run(
       }
       const kept = [logins.app, logins.vault].filter((login) => login.url === null);
       if (kept.length > 0) details.push(`${listed(kept.map(({ role }) => role), 'and')}: from the catalog, with no new password to log in with`);
-      used = (await client.query<{ used: boolean }>('SELECT EXISTS (SELECT 1 FROM audit_log) AS used')).rows[0]!.used;
+      used = await holdsData(client);
       return { text: 'Each login holds only its rights', details };
     });
+    if (cloudflare !== null) {
+      await step(5, () => cloudflare.hyperdrive(logins));
+      await step(6, (progress) => cloudflare.github(progress, { aside: (text) => steps.aside(text), link: (label, address) => steps.link(label, address) }));
+      await step(7, async () => cloudflare.write());
+      return { keys: null, ...logins, version };
+    }
     // Keys come with new passwords, for a database that holds no data yet: one that does has its keys already.
     const fresh = !used && (logins.app.url !== null || logins.vault.url !== null);
     return { keys: fresh ? generateKeys() : null, ...logins, version };
@@ -278,16 +354,23 @@ async function run(
   }
 }
 
+/** Whether the database holds data: coffre's log has an entry. Before the first migration, it holds none. */
+async function holdsData(client: pg.Client): Promise<boolean> {
+  const [migrated] = (await client.query<{ migrated: boolean }>("SELECT to_regclass('public.audit_log') IS NOT NULL AS migrated")).rows;
+  if (!migrated!.migrated) return false;
+  return (await client.query<{ used: boolean }>('SELECT EXISTS (SELECT 1 FROM audit_log) AS used')).rows[0]!.used;
+}
+
 /**
  * Each runtime login, created with a fresh password, or, if it exists, its
- * password set again when asked to; otherwise left as it is.
+ * password set again when `reset`, given the logins that exist, says so;
+ * otherwise left as it is.
  */
 async function provision(
   client: pg.Client,
   administrator: URL,
   user: string,
-  resetPasswords: boolean,
-  ask: (question: string) => Promise<boolean>,
+  reset: (existing: ReadonlySet<string>) => Promise<(component: Component) => boolean>,
   secrets: string[],
 ): Promise<Record<Component, Login>> {
   const existing = new Set(
@@ -295,16 +378,13 @@ async function provision(
       (row) => row.rolname,
     ),
   );
-  const reset =
-    resetPasswords ||
-    (existing.size > 0 &&
-      (await ask(existing.size === 1 ? `${[...existing][0]} exists already. Set new passwords?` : 'Both logins exist already. Set new passwords?')));
+  const resets = await reset(existing);
   const logins = {} as Record<Component, Login>;
   for (const component of ['app', 'vault'] as const) {
     const role = ROLES[component];
     const login = loginFor(role, user);
     const create = !existing.has(role);
-    if (!create && !reset) {
+    if (!create && !resets(component)) {
       logins[component] = { role, login, password: 'kept', url: null };
       continue;
     }
@@ -539,10 +619,5 @@ function redact(text: string, secrets: readonly string[]): string {
 
 function count(n: number, noun: string): string {
   return `${n} ${noun}${n === 1 ? '' : 's'}`;
-}
-
-/** "a, b or c". */
-function listed(items: readonly string[], last: 'and' | 'or'): string {
-  return items.length < 2 ? items.join('') : `${items.slice(0, -1).join(', ')} ${last} ${items.at(-1)}`;
 }
 
