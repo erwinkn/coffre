@@ -4,7 +4,10 @@ import { Link } from '@tanstack/react-router';
 import { useShell } from '../lib/use-shell';
 import { toast } from 'sonner';
 import { memberRef, useCoffre } from '../lib/coffre';
+import { directoryList } from '../lib/changes';
 import { affects, managedProjects, queries } from '../lib/queries';
+import { useChangeStatus } from '../lib/use-change';
+import { ItemFailure } from './row-state';
 import { useAction } from '../lib/use-action';
 import { projectAccessLabel } from '../lib/project-access';
 import {
@@ -72,6 +75,9 @@ export function PrincipalPage({
 }) {
   const { instanceRole } = useShell();
   const { report, access } = usePrincipalPage(principalType, principalId);
+  // A role change or removal made from this page's menu, refused.
+  const { status, dismiss } = useChangeStatus(directoryList.queryKey);
+  const change = status(memberRef(principalType, principalId));
   const kind = KIND[principalType];
   const people = principalType === 'user';
   const list = people ? '/users' : '/tokens';
@@ -152,6 +158,11 @@ export function PrincipalPage({
         }
       />
 
+      {change.state === 'failed' && (
+        <div className="report-notice">
+          <ItemFailure status={change} onDismiss={() => dismiss(change.mutationId)} />
+        </div>
+      )}
       {report?.ok === false && (
         <div className="report-notice">
           <Notice tone="bad">{report.error}</Notice>

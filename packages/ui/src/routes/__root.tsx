@@ -17,6 +17,7 @@ import { Brand, Shell, sidebarBootScript } from '../components/shell';
 import { TooltipProvider } from '../components/ui';
 import { ThemeToggle, themeBootScript } from '../components/theme';
 import { Agentation } from '../components/agentation';
+import { LiveRegion } from '../components/row-state';
 import { markSvg } from '../components/mark';
 import faviconPng from '../assets/favicon-32.png?url';
 import appleTouchIcon from '../assets/apple-touch-icon.png?url';
@@ -138,6 +139,7 @@ function RootComponent() {
           </main>
         </div>
         <Toasts />
+        <LiveRegion />
         <Agentation />
       </TooltipProvider>
     );
@@ -159,6 +161,7 @@ function RootComponent() {
       </Shell>
 
       <Toasts />
+      <LiveRegion />
       <Agentation />
     </TooltipProvider>
   );

@@ -132,6 +132,8 @@ const PAIRS = [
     ['ink2', 'subtle', 4.5, 'column heads'],
     ['ink3', 'canvas', 4.5, 'descriptions and meta on the page'],
     ['ink3', 'panel', 4.5, 'placeholders, hints, row numbers'],
+    ['ink3', 'panel', 4.5, 'a row whose change is on its way: dimmed, not faded'],
+    ['ink3', 'subtle', 4.5, 'the same row, hovered'],
     ['ink3', 'subtle', 4.5, 'meta on a hovered row, neutral tag'],
     ['ink3', 'amberWash', 4.5, 'meta on a revealed row'],
     ['ink3', 'accentWash', 4.5, 'meta on an edited row'],

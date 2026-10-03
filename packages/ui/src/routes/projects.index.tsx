@@ -1,15 +1,17 @@
 import { useState } from 'react';
 import { useSuspenseQuery } from '@tanstack/react-query';
 import { createFileRoute, Link } from '@tanstack/react-router';
-import { toast } from 'sonner';
-import { Refusal, useCoffre } from '../lib/coffre';
-import { affects, queries } from '../lib/queries';
-import { useAction } from '../lib/use-action';
+import { createProject, projectsList } from '../lib/changes';
+import { useCoffre } from '../lib/coffre';
+import type { ItemStatus } from '../lib/optimistic';
+import { queries } from '../lib/queries';
+import { useChange, useChangeStatus } from '../lib/use-change';
 import { useShell } from '../lib/use-shell';
 import type { ProjectSummary } from '../shared/models';
 import { isActiveAccessibleEnvironment } from '../lib/project-environments';
 import { slugProblem } from '../lib/validation';
-import { EmptyState, ErrorLine, Modal, Spinner } from '../components/ui';
+import { RowFailure, RowPending, rowClass } from '../components/row-state';
+import { EmptyState, Modal } from '../components/ui';
 import { ClosedDoor, PageHeader } from '../components/page';
 import { Tile } from '../components/tile';
 import { AlertTriangle, Folder, Hash, Layers, Plus } from '../components/icons';
@@ -26,6 +28,8 @@ export const Route = createFileRoute('/projects/')({
 function ProjectsPage() {
   const { data: result, refetch } = useSuspenseQuery(queries.projects(useCoffre()));
   const { capabilities } = useShell();
+  const { failedAdds } = useChangeStatus(projectsList.queryKey);
+  const refusedProjects = result.ok ? failedAdds(result.projects.map((project) => project.slug)) : [];
 
   if (!result.ok) {
     return (
@@ -64,7 +68,7 @@ function ProjectsPage() {
         }
       />
 
-      {active.length === 0 ? (
+      {active.length === 0 && refusedProjects.length === 0 ? (
         <div className="card">
           <EmptyState title="Nothing here for you yet">
             <ProjectEmptyStateCopy
@@ -75,7 +79,7 @@ function ProjectsPage() {
         </div>
       ) : (
         <section className="card" aria-label="Projects">
-          <ProjectTable projects={active} />
+          <ProjectTable projects={active} refused />
         </section>
       )}
 
@@ -93,7 +97,8 @@ function ProjectsPage() {
   );
 }
 
-function ProjectTable({ projects }: { projects: ProjectSummary[] }) {
+function ProjectTable({ projects, refused = false }: { projects: ProjectSummary[]; refused?: boolean }) {
+  const { status, failedAdds, dismiss } = useChangeStatus(projectsList.queryKey);
   return (
     <div className="dt-wrap">
       <table className="dt projects stacks">
@@ -122,8 +127,22 @@ function ProjectTable({ projects }: { projects: ProjectSummary[] }) {
         </thead>
         <tbody>
           {projects.map((project, index) => (
-            <ProjectRow key={project.slug} number={index + 1} project={project} />
+            <ProjectRow
+              key={project.slug}
+              number={index + 1}
+              project={project}
+              status={status(project.slug)}
+              onDismiss={dismiss}
+            />
           ))}
+          {refused &&
+            failedAdds<{ slug: string }>(projects.map((project) => project.slug)).map(
+              ({ mutationId, vars, status: failed }) => (
+                <RowFailure key={mutationId} status={failed} columns={4} onDismiss={() => dismiss(mutationId)}>
+                  Project {vars.slug} was not created.
+                </RowFailure>
+              ),
+            )}
         </tbody>
       </table>
     </div>
@@ -134,8 +153,20 @@ function ProjectTable({ projects }: { projects: ProjectSummary[] }) {
  * One project. The whole row opens it; the environment links inside it sit
  * above that and go straight to the environment.
  */
-function ProjectRow({ number, project }: { number: number; project: ProjectSummary }) {
+function ProjectRow({
+  number,
+  project,
+  status,
+  onDismiss,
+}: {
+  number: number;
+  project: ProjectSummary;
+  status: ItemStatus;
+  onDismiss: (mutationId: number) => void;
+}) {
   const secrets = project.secretCount;
+  // A project on its way has no page yet.
+  const pending = status.state === 'pending';
   const isArchived = project.archivedAt !== null;
   const listedEnvironments = project.environments.filter(
     (environment) =>
@@ -143,67 +174,80 @@ function ProjectRow({ number, project }: { number: number; project: ProjectSumma
   );
 
   return (
-    <tr className="row-link">
-      <td className="n">{number}</td>
-      <td className="col-project">
-        <span className="cell-project">
-          <Tile name={project.slug} />
-          <span className="cell-stack">
-            <Link
-              className="cell-link stretch"
-              to="/projects/$project"
-              params={{ project: project.slug }}
-            >
-              {project.name}
-            </Link>
-            <small className="mono">{project.slug}</small>
-          </span>
-        </span>
-      </td>
-      <td className="col-envs" data-label="Environments">
-        {isArchived || listedEnvironments.length === 0 ? (
-          <span className="cell-muted">
-            {listedEnvironments.length === 0
-              ? 'No environments yet'
-              : `${listedEnvironments.length} environment${listedEnvironments.length === 1 ? '' : 's'}`}
-          </span>
-        ) : (
-          <span className="env-links" aria-label={`Environments in ${project.slug}`}>
-            {listedEnvironments.map((environment) =>
-              isActiveAccessibleEnvironment(environment) ? (
-                <Link
-                  key={environment.slug}
-                  className="env-link"
-                  to="/projects/$project/$environment"
-                  params={{ project: project.slug, environment: environment.slug }}
-                >
-                  {environment.slug}
-                  <span className="count">{environment.details.secretCount}</span>
-                </Link>
+    <>
+      <tr className={`row-link ${rowClass(status)}`}>
+        <td className="n">{number}</td>
+        <td className="col-project">
+          <span className="cell-project">
+            <Tile name={project.slug} />
+            <span className="cell-stack">
+              {pending ? (
+                <span>{project.name}</span>
               ) : (
-                <span
-                  key={environment.slug}
-                  className="env-link"
-                  title="You can see this environment exists, but not open it"
+                <Link
+                  className="cell-link stretch"
+                  to="/projects/$project"
+                  params={{ project: project.slug }}
                 >
-                  {environment.slug}
-                </span>
-              ),
-            )}
+                  {project.name}
+                </Link>
+              )}
+              <small className="mono">{project.slug}</small>
+            </span>
           </span>
-        )}
-      </td>
-      <td className="col-secrets num nowrap">
-        {secrets !== null && !isArchived ? (
-          <>
-            {secrets}
-            <span className="narrow-only"> secret{secrets === 1 ? '' : 's'}</span>
-          </>
-        ) : (
-          <span className="cell-muted wide-only">—</span>
-        )}
-      </td>
-    </tr>
+        </td>
+        <td className="col-envs" data-label="Environments">
+          {isArchived || listedEnvironments.length === 0 ? (
+            <span className="cell-muted">
+              {listedEnvironments.length === 0
+                ? 'No environments yet'
+                : `${listedEnvironments.length} environment${listedEnvironments.length === 1 ? '' : 's'}`}
+            </span>
+          ) : (
+            <span className="env-links" aria-label={`Environments in ${project.slug}`}>
+              {listedEnvironments.map((environment) =>
+                isActiveAccessibleEnvironment(environment) ? (
+                  <Link
+                    key={environment.slug}
+                    className="env-link"
+                    to="/projects/$project/$environment"
+                    params={{ project: project.slug, environment: environment.slug }}
+                  >
+                    {environment.slug}
+                    <span className="count">{environment.details.secretCount}</span>
+                  </Link>
+                ) : (
+                  <span
+                    key={environment.slug}
+                    className="env-link"
+                    title="You can see this environment exists, but not open it"
+                  >
+                    {environment.slug}
+                  </span>
+                ),
+              )}
+            </span>
+          )}
+        </td>
+        <td className="col-secrets num nowrap">
+          {pending ? (
+            <RowPending status={status} />
+          ) : secrets !== null && !isArchived ? (
+            <>
+              {secrets}
+              <span className="narrow-only"> secret{secrets === 1 ? '' : 's'}</span>
+            </>
+          ) : (
+            <span className="cell-muted wide-only">—</span>
+          )}
+        </td>
+      </tr>
+      <RowFailure
+        status={status}
+        columns={4}
+        onDismiss={() => status.state === 'failed' && onDismiss(status.mutationId)}
+      />
+    </>
   );
 }
 
@@ -211,13 +255,11 @@ function NewProject() {
   const [slug, setSlug] = useState('');
   const [name, setName] = useState('');
   const [open, setOpen] = useState(false);
-  const coffre = useCoffre();
-  const { pending, error, setError, run } = useAction();
+  const create = useChange(createProject(useCoffre()));
   const slugError = slug === '' ? null : slugProblem(slug);
 
   function close() {
     setOpen(false);
-    setError(null);
   }
 
   return (
@@ -237,22 +279,11 @@ function NewProject() {
           className="form"
           onSubmit={(event) => {
             event.preventDefault();
-            run(
-              async () => {
-                // Creating is an idempotent PUT; the form reports a slug that is taken.
-                const { created } = await coffre.projects.create(slug, { name });
-                if (!created) throw new Refusal(`A project named "${slug}" already exists.`);
-              },
-              {
-                affects: affects.places(),
-                onSuccess: () => {
-                  toast.success(`Project ${slug} created`);
-                  setSlug('');
-                  setName('');
-                  setOpen(false);
-                },
-              },
-            );
+            // Listed at once, as saving; the list says if the server refuses.
+            create({ slug, name: name.trim() });
+            setSlug('');
+            setName('');
+            close();
           }}
         >
           <label className="field">
@@ -283,8 +314,6 @@ function NewProject() {
             />
           </label>
 
-          <ErrorLine error={error} />
-
           <div className="dialog-actions">
             <button className="btn" type="button" onClick={close}>
               Cancel
@@ -292,9 +321,8 @@ function NewProject() {
             <button
               className="btn btn-primary"
               type="submit"
-              disabled={pending || slug === '' || slugError !== null || name.trim() === ''}
+              disabled={slug === '' || slugError !== null || name.trim() === ''}
             >
-              {pending && <Spinner />}
               Create project
             </button>
           </div>
