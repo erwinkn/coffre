@@ -9,9 +9,12 @@ export const DAY_MS = 24 * 60 * 60 * 1000;
 /** When each instance was last asked, by origin. */
 export type Checked = Record<string, number>;
 
-/** The line to show, or null: nothing pending, or nothing told. */
-export function noticeFor(origin: string, instance: InstanceState | null): string | null {
-  if (instance === null) return null;
+/**
+ * The line to show, or null: nothing pending, or nothing told. An instance
+ * older than this notice has no `instance` on `/me` at all.
+ */
+export function noticeFor(origin: string, instance: InstanceState | null | undefined): string | null {
+  if (instance === null || instance === undefined || !Array.isArray(instance.migrations?.known)) return null;
   const pending = instance.migrations.known.slice(instance.migrations.applied);
   if (pending.length === 0) return null;
   const what = pending.length === 1 ? '1 migration' : `${pending.length} migrations`;
@@ -27,11 +30,11 @@ export async function dailyNotice(
   origin: string,
   now: number,
   checked: { read(): Checked; write(checked: Checked): void },
-  me: () => Promise<{ instance: InstanceState | null }>,
+  me: () => Promise<{ instance?: InstanceState | null }>,
 ): Promise<string | null> {
   const last = checked.read()[origin];
   if (last !== undefined && now - last < DAY_MS) return null;
-  let instance: InstanceState | null;
+  let instance: InstanceState | null | undefined;
   try {
     ({ instance } = await me());
   } catch {

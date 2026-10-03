@@ -95,3 +95,8 @@ test('a command run by an owner says so on stderr, once a day; and nothing once 
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test('an instance from before this notice, with no instance on /me, is told nothing and breaks nothing', async () => {
+  assert.equal(noticeFor(ORIGIN, undefined), null);
+  assert.equal(await dailyNotice(ORIGIN, 0, memory(), async () => ({})), null);
+});

@@ -124,20 +124,23 @@ function client(to: Target = target()): CoffreClient {
 /** Whether this run has asked about pending migrations yet: once, before its first request. */
 let noticed = false;
 
+/** The commands that say nothing of pending migrations: migrate says as much itself; login has no session yet; verify sends only what it checks. */
+const QUIET = new Set(['migrate', 'login', 'verify']);
+
 /**
  * A line on stderr, at most once a day per instance, when its database is
- * behind the code it runs (`notice.ts`). Not for `coffre migrate`, which
- * says as much itself, nor for a machine's credential: only owners are told.
+ * behind the code it runs (`notice.ts`). Not for a machine's credential:
+ * only owners are told. Whatever goes wrong here, the command goes on.
  */
 async function noticePending(to: Target): Promise<void> {
   if (noticed) return;
   noticed = true;
-  if (command === 'migrate' || process.env.COFFRE_TOKEN?.trim() || to.credential.kind === 'access-service-token') return;
+  if (QUIET.has(command ?? '') || process.env.COFFRE_TOKEN?.trim() || to.credential.kind === 'access-service-token') return;
   const line = await dailyNotice(to.origin, Date.now(), checkedFile, async () => {
     const response = await fetch(`${to.origin}/api/me`, { headers: await headersFor(to), redirect: 'manual' });
     if (!response.ok || !isJsonContentType(response.headers.get('content-type'))) throw new Error('no answer');
     return (await response.json()) as Me;
-  });
+  }).catch(() => null);
   if (line !== null) {
     const s = style(process.stderr);
     process.stderr.write(`${s.dim(`coffre: ${line}`)}\n`);
