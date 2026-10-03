@@ -10,7 +10,8 @@ import { connect, createServer, type Socket } from 'node:net';
 
 import { sql } from 'drizzle-orm';
 
-import { createDatabase } from '../src/database.ts';
+import { openDatabase } from '../src/connect.ts';
+import { createDatabase, QueryOutsideTransaction } from '../src/database.ts';
 import { HyperdrivePool } from '../src/hyperdrive.ts';
 
 const skip = process.env.COFFRE_TEST_ENGINE === 'sqlite' ? 'Postgres only: Hyperdrive' : false;
@@ -139,4 +140,49 @@ test('closing waits for what is under way; a connection lost or closed is opened
   assert.equal(n(await db.execute(sql`select 10 as n`)), 10);
   assert.equal(proxy.opened, 3);
   await pool.end();
+});
+
+test('a query on the database from inside its own transaction is refused at once, not left to wait for itself', { skip, timeout: 10_000 }, async () => {
+  const proxy = await counted();
+  const pool = new HyperdrivePool(proxy.url);
+  const db = createDatabase(pool);
+  await db.execute(sql`create temporary table turns (v text)`);
+  // On the database, not on tx: refused, and the transaction rolls back.
+  await assert.rejects(
+    db.transaction(async (tx) => {
+      await tx.execute(sql`insert into turns values ('rolled back')`);
+      await db.execute(sql`select 1`);
+    }),
+    (error: Error) => error instanceof QueryOutsideTransaction && /^query outside its transaction: use tx/.test(error.message),
+  );
+  // A transaction opened inside one would wait for it just the same.
+  await assert.rejects(db.transaction(async () => db.transaction(async (inner) => inner.execute(sql`select 1`))), QueryOutsideTransaction);
+
+  // Another flow's query waits its turn, as before; and what a transaction left running after it ended queries freely.
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  let left: Promise<unknown> = Promise.resolve();
+  const transaction = db.transaction(async (tx) => {
+    await tx.execute(sql`insert into turns values ('committed')`);
+    left = held.then(() => new Promise((resolve) => setTimeout(resolve, 20))).then(() => db.execute(sql`select count(*)::int as n from turns`));
+    await held;
+  });
+  const elsewhere = db.execute(sql`select 1 as n`).then(n);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  release();
+  await transaction;
+  assert.equal(await elsewhere, 1);
+  assert.equal(n((await left) as { rows: Record<string, unknown>[] }), 1);
+  assert.equal(proxy.opened, 1);
+  await pool.end();
+});
+
+test("Node's pool refuses the same query, so that the suites catch it before a Worker would hang on it", { skip, timeout: 10_000 }, async () => {
+  const { db, close } = await openDatabase(DATABASE);
+  try {
+    await assert.rejects(db.transaction(async () => db.execute(sql`select 1`)), QueryOutsideTransaction);
+    assert.equal(n(await db.transaction((tx) => tx.execute(sql`select 2 as n`))), 2);
+  } finally {
+    await close();
+  }
 });

@@ -216,7 +216,10 @@ test('no key queued behind a batch at the deadline is ever sent', async () => {
   // Only the deadline cancels: nobody aborts the operation's own signal.
   const operation = { deadline: Date.now() + 50, signal: new AbortController().signal };
   const calls = Array.from({ length: 9 }, () => kek.wrap(randomBytes(32), context(), operation));
-  const outcomes = await Promise.allSettled(calls);
+  // The deadline's timer is AbortSignal.timeout's, which does not keep Node running: this one does,
+  // or a loaded runner can find nothing left to wait for and cancel the file.
+  const alive = setInterval(() => {}, 1000);
+  const outcomes = await Promise.allSettled(calls).finally(() => clearInterval(alive));
   assert.ok(outcomes.every((outcome) => outcome.status === 'rejected' && outcome.reason instanceof KekUnavailableError));
   assert.equal(sent, 8, 'the ninth key waited for a slot, and was cancelled, not sent');
 });

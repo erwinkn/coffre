@@ -93,7 +93,10 @@ call has one Postgres client through Hyperdrive (`HyperdrivePool` in
 `@coffre/db`), connected on its first query. Its queries take turns on it,
 and a transaction holds it from BEGIN to COMMIT. So code inside a
 transaction queries through its `tx`, never the database: a query on the
-database would wait for the transaction, which waits for it. A call that
+database would wait for the transaction, which waits for it. `createDatabase`
+refuses one at once, on Node too, so the suites catch it: each transaction's
+work runs in an `AsyncLocalStorage` naming it, and a query or a transaction
+asked of its pool from there throws `QueryOutsideTransaction`. A call that
 opened several Hyperdrive connections at once was now and then cancelled
 as hung on Cloudflare (`packages/vault/test/workers.test.ts` counts them).
 A request asks the vault about its caller once: a page's render checks its
