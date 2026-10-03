@@ -14,13 +14,13 @@
     "conformance": "coffre-conformance workers"
   },
   "dependencies": {
-    "@coffre/server": "0.1.5",
-    "@coffre/ui": "0.1.5",
-    "@coffre/vault": "0.1.5"
+    "@coffre/server": "0.1.6",
+    "@coffre/ui": "0.1.6",
+    "@coffre/vault": "0.1.6"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20260920.1",
-    "@coffre/conformance": "0.1.5",
+    "@coffre/conformance": "0.1.6",
     "typescript": "5.9.3",
     "wrangler": "4.118.0"
   }
