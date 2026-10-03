@@ -4,7 +4,6 @@ import assert from 'node:assert/strict';
 import {
   decidedBy,
   describe,
-  hiddenInWords,
   lines,
   plain,
   who,
@@ -214,16 +213,3 @@ test('lines group a batch at its newest entry', () => {
   assert.deepEqual(lines(entries).map((line) => line.length), [1, 3, 1]);
 });
 
-test('the hidden line counts what the server left out, by kind', () => {
-  assert.equal(
-    hiddenInWords([
-      { action: 'key.wrap', count: 1 },
-      { action: 'key.rewrap', count: 1 },
-      { action: 'sign_in', count: 3 },
-      { action: 'audit.heartbeat', count: 12 },
-    ]),
-    '2 key operations, 3 sign-ins and 12 heartbeats',
-  );
-  assert.equal(hiddenInWords([{ action: 'audit.checkpoint', count: 1 }]), '1 checkpoint');
-  assert.equal(hiddenInWords([]), null);
-});
