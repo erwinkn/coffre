@@ -79,3 +79,26 @@ async function sqliteFixture(t: test.TestContext) {
   } as Deployment;
   return { deployment, people, sql };
 }
+
+
+test('the HTTP scan waits for every reply and finds a leak in its final answer', async (t) => {
+  const { deployment, people } = await sqliteFixture(t);
+  const value = canary();
+  let calls = 0;
+  let active = 0;
+  t.mock.method(globalThis, 'fetch', async () => {
+    const call = ++calls;
+    active++;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    active--;
+    return new Response(call === 320 ? value : '{}');
+  });
+  const database = deployment.database;
+  t.mock.method(deployment, 'database', async () => {
+    assert.equal(active, 0, 'HTTP replies must finish before storage inspection');
+    assert.equal(calls, 320, 'every GET route and page must be read as every caller');
+    return database();
+  });
+  await assert.rejects(canaryScan(deployment, people, { KEY: value }), /a value was found outside a reveal/);
+  assert.equal(calls, 320);
+});

@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@coffre/db':
+        specifier: workspace:*
+        version: link:packages/db
       pg:
         specifier: 8.16.3
         version: 8.16.3

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Recreate the isolated local database used by the serial integration suite:
+# Recreate and migrate a local test database, or the parallel suite's template:
 # coffre_test, or the one COFFRE_TEST_DATABASE names.
 set -euo pipefail
 
@@ -19,6 +19,9 @@ DO $$
 DECLARE
     login record;
 BEGIN
+    -- Other checkouts provision these cluster-wide roles too. Match the
+    -- lock in ensure-database.mjs rather than racing ALTER ROLE.
+    PERFORM pg_advisory_xact_lock(hashtextextended('coffre:local-roles', 0));
     FOR login IN
         SELECT * FROM (VALUES ('coffre_runtime', 'local-runtime-only'), ('coffre_vault_runtime', 'local-vault-only'))
             AS logins (name, password)

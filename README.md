@@ -91,6 +91,7 @@ pnpm typecheck         # every package, the examples and dev/ (after pnpm build)
 pnpm conformance:workers   # examples/workers, held to docs/conformance.md (after pnpm build)
 pnpm conformance:node      # examples/node, its two processes, on SQLite
 pnpm test:consumer     # pack the packages, init both examples outside the repo, run them
+                       # --kind workers or --kind node selects one deployment
 pnpm check:pins        # every dependency pinned exactly
 pnpm check:contrast    # every colour pair in the UI meets WCAG AA
 pnpm check:docs        # every path and script the docs name exists

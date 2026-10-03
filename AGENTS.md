@@ -89,10 +89,12 @@ does not reproduce. Concurrent first calls each do their own reads
 (`packages/vault/test/isolate.test.ts`).
 
 **Tests / checks.**
-- `pnpm test` = lint + recreate `coffre_test` + `node --test --test-concurrency=1`
-  (serial: the integration suite shares one DB and resets it per test). Needs Postgres.
-  `COFFRE_TEST_DATABASE` names another database, for a second checkout sharing the
-  compose Postgres (`pnpm test:schema` follows it too).
+- `pnpm test` = lint + migrate a scratch template + `node --test --test-concurrency=4`.
+  Each file gets a private Postgres clone or SQLite copy; cases within a file remain
+  sequential and reset per test. Templates and clones are removed after the run.
+  `COFFRE_TEST_DATABASE` sets the scratch name prefix; a random suffix isolates
+  simultaneous runs and other checkouts sharing compose Postgres. `pnpm test:schema`
+  still recreates the exact database it names. Needs Postgres.
 - `pnpm test:sqlite` runs the same suite on SQLite (`COFFRE_TEST_ENGINE`);
   `pnpm test:all` runs Postgres and SQLite. SQLite needs nothing and is kept
   for tests and local development; deployed app databases use Postgres.

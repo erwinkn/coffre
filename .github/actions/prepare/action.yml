@@ -1,5 +1,9 @@
 name: Prepare validation
-description: Install frozen dependencies and build the packages on Node 24
+description: Install frozen dependencies and optionally build the packages on Node 24
+inputs:
+  build:
+    description: Build packages before running the checks
+    default: 'true'
 runs:
   using: composite
   steps:
@@ -17,5 +21,6 @@ runs:
     # Typecheck needs the generated route tree and declarations; conformance
     # runs the built packages. Each lane builds its own revision.
     - name: Build the packages
+      if: inputs.build == 'true'
       shell: bash
       run: pnpm build

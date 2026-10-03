@@ -68,21 +68,29 @@ export async function canaryScan(deployment: Deployment, people: People, canarie
     ['the service, removed', token(people.service.token)],
   ];
 
-  let answers = 0;
+  // These GETs are independent. Keep every route/caller pair, with a small
+  // number in flight so latency does not add up across all 320 answers.
+  const reads: { where: string; url: string; fetchAs: (url: string) => Promise<Response> }[] = [];
   const routes = calls(people);
   for (const { key, url } of getUrls(deployment.origin, routes)) {
-    for (const [name, fetchAs] of callers) {
-      look(`${key} as ${name}`, await (await fetchAs(url)).text());
-      answers++;
-    }
+    for (const [name, fetchAs] of callers) reads.push({ where: `${key} as ${name}`, url, fetchAs });
   }
   const paths = pages(people);
   for (const path of paths) {
     for (const [name, fetchAs] of callers.slice(0, 1 + Object.keys(browsers).length)) {
-      look(`the page ${path} as ${name}`, await (await fetchAs(`${deployment.origin}${path}`)).text());
-      answers++;
+      reads.push({ where: `the page ${path} as ${name}`, url: `${deployment.origin}${path}`, fetchAs });
     }
   }
+  let next = 0;
+  const workers = await Promise.allSettled(Array.from({ length: 4 }, async () => {
+    while (next < reads.length) {
+      const { where, url, fetchAs } = reads[next++]!;
+      look(where, await (await fetchAs(url)).text());
+    }
+  }));
+  // Drain in-flight reads even on an error: none may overlap the next check.
+  for (const worker of workers) if (worker.status === 'rejected') throw worker.reason;
+  const answers = reads.length;
 
   const stored: string[] = [];
   await using(deployment.database(), async (sql) => {
