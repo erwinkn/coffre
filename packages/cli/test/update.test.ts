@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -13,11 +14,15 @@ import {
   heldBack,
   installFailure,
   minimumReleaseAge,
+  HeldBack,
+  install,
   pinPackageManager,
   removeCleared,
+  resolveAgain,
 } from '../src/deployment.ts';
+import { registry } from './registry.ts';
 import { inTerminal, ptySkip } from './pty.ts';
-import { deploymentMigrations, installOf, migrationsAdded } from '../src/update.ts';
+import { deploymentMigrations, installOf, migrationsAdded, movedLines } from '../src/update.ts';
 
 const examples = fileURLToPath(new URL('../../../examples/', import.meta.url));
 
@@ -192,6 +197,17 @@ exit 1
 
 const main = fileURLToPath(new URL('../src/main.ts', import.meta.url));
 
+test('resolved again, every version that moved is said, the held packages first, up to a screenful', () => {
+  const held = [{ spec: 'pg-protocol@1.16.1', publishedAt: new Date() }];
+  const others = Array.from({ length: 9 }, (_, i) => ({ name: `dep-${i}`, from: ['1.0.0'], to: ['1.0.1'] }));
+  assert.deepEqual(movedLines([...others, { name: 'pg-protocol', from: ['1.16.1'], to: ['1.16.0'] }], held), [
+    '  pg-protocol 1.16.1 → 1.16.0',
+    ...others.slice(0, 7).map(({ name }) => `  ${name} 1.0.0 → 1.0.1`),
+    '  and 2 more, in pnpm-lock.yaml',
+  ]);
+  assert.deepEqual(movedLines([{ name: 'gone', from: ['1.0.0'], to: [] }], held), ['  gone 1.0.0 → none']);
+});
+
 test('held back, update --yes waits: the deployment as it was, and when each package is old enough', async () => {
   const { dir, env, published, close } = await heldDeployment();
   try {
@@ -205,8 +221,11 @@ test('held back, update --yes waits: the deployment as it was, and when each pac
     const run = { status, stderr };
     assert.equal(run.status, 1, run.stderr);
     const clears = new Date(published.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 16).replace('T', ' ');
-    assert.match(run.stderr, new RegExp(`pnpm holds back 1 package younger than this deployment's minimumReleaseAge, 7 days: pg-protocol@1\\.16\\.1, old enough from ${clears} UTC`));
-    assert.match(run.stderr, /Run coffre update after .* UTC, or on a terminal to exclude them until then/);
+    assert.match(
+      run.stderr,
+      new RegExp(`pnpm holds back 1 package younger than this deployment's minimumReleaseAge, 7 days, and no older version fits: pg-protocol@1\\.16\\.1, old enough from ${clears} UTC`),
+    );
+    assert.match(run.stderr, /Run coffre update after .* UTC, or on a terminal to let them through until then\. package\.json, pnpm-workspace\.yaml and pnpm-lock\.yaml are as they were/);
     assert.equal(readFileSync(join(dir, 'package.json'), 'utf8'), before, 'pins and pnpm as they were');
     assert.doesNotMatch(readFileSync(join(dir, 'pnpm-workspace.yaml'), 'utf8'), /coffre update: until/, 'never a silent exclusion');
   } finally {
@@ -239,5 +258,102 @@ test('held back, update on a terminal lets them through by name, until each is o
   } finally {
     close();
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('any failed install puts package.json, pnpm-workspace.yaml and pnpm-lock.yaml back, byte for byte, and says so', async () => {
+  const { dir, env, close } = await heldDeployment();
+  try {
+    writeFileSync(join(dir, '.bin', 'pnpm'), '#!/bin/sh\necho "ERR_PNPM_FETCH_404 GET http://registry.example/@coffre/server: Not Found" >&2\nexit 1\n');
+    writeFileSync(join(dir, 'pnpm-lock.yaml'), "lockfileVersion: '9.0'\n# as pnpm 10 wrote it\n");
+    const before = ['package.json', 'pnpm-workspace.yaml', 'pnpm-lock.yaml'].map((name) => readFileSync(join(dir, name), 'utf8'));
+    const { spawn } = await import('node:child_process');
+    const child = spawn(process.execPath, ['--conditions=coffre:source', main, 'update', '--yes'], { cwd: dir, env });
+    let stderr = '';
+    child.stderr.setEncoding('utf8').on('data', (chunk: string) => (stderr += chunk));
+    assert.equal(await new Promise((resolve) => child.on('close', resolve)), 1);
+    assert.match(stderr, /ERR_PNPM_FETCH_404.*package\.json, pnpm-workspace\.yaml and pnpm-lock\.yaml are as they were; node_modules may be incomplete/s);
+    assert.deepEqual(['package.json', 'pnpm-workspace.yaml', 'pnpm-lock.yaml'].map((name) => readFileSync(join(dir, name), 'utf8')), before);
+  } finally {
+    close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- with pnpm itself ----------------------------------------------------------------
+
+/** Whether pnpm runs here, at the version a project asks for: online, or from a cache. */
+function pnpmAt(version: string): boolean {
+  const dir = mkdtempSync(join(tmpdir(), 'coffre-pnpm-probe-'));
+  try {
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'probe', private: true, packageManager: `pnpm@${version}` }));
+    const ran = spawnSync('pnpm', ['--version'], { cwd: dir, encoding: 'utf8', env: { ...process.env, COREPACK_ENABLE_DOWNLOAD_PROMPT: '0' }, timeout: 60_000 });
+    return ran.status === 0 && ran.stdout.trim() === version;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const needsPnpm = (...versions: string[]) => ({ skip: versions.every(pnpmAt) ? false : `needs pnpm ${versions.join(' and ')}` });
+
+test('a deployment moved from pnpm 10 to 11 installs without a terminal, its node_modules purged', needsPnpm('10.15.0', '11.8.0'), async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'coffre-majors-'));
+  try {
+    mkdirSync(join(dir, 'dep'));
+    writeFileSync(join(dir, 'dep', 'package.json'), JSON.stringify({ name: 'dep', version: '1.0.0' }));
+    const manifest = (pnpm: string) =>
+      writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'deployment', private: true, packageManager: `pnpm@${pnpm}`, dependencies: { dep: 'file:./dep' } }));
+    manifest('10.15.0');
+    await install(dir);
+    manifest('11.8.0');
+    // What erwinkn/secrets met: pnpm 11 would remove pnpm 10's node_modules, and without a terminal it stops.
+    await assert.rejects(install(dir), /ABORTED_REMOVE_MODULES_DIR_NO_TTY/);
+    await install(dir, { purge: true });
+    assert.match(readFileSync(join(dir, 'node_modules', '.modules.yaml'), 'utf8'), /pnpm@11\.8\.0/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * A deployment whose lockfile an older pnpm wrote, holding proto@1.0.1, a
+ * day old: what pnpm 11 then holds back. `allowed`, the range pg-like asks
+ * of proto: one 1.0.0, a month old, fits, or not.
+ */
+async function lockedYoung(range: string) {
+  const published = await registry({
+    proto: [{ version: '1.0.0', daysAgo: 30 }, { version: '1.0.1', daysAgo: 1 }],
+    other: [{ version: '2.0.0', daysAgo: 40 }],
+    'pg-like': [{ version: '1.0.0', daysAgo: 30, dependencies: { proto: range, other: '^2.0.0' } }],
+  });
+  const dir = mkdtempSync(join(tmpdir(), 'coffre-locked-'));
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'deployment', private: true, packageManager: 'pnpm@11.8.0', dependencies: { 'pg-like': '1.0.0' } }));
+  writeFileSync(join(dir, '.npmrc'), `registry=${published.origin}/\n`);
+  writeFileSync(join(dir, 'pnpm-workspace.yaml'), 'minimumReleaseAge: 0\n');
+  await install(dir);
+  writeFileSync(join(dir, 'pnpm-workspace.yaml'), 'minimumReleaseAge: 10080\n');
+  return { dir, close: () => (published.close(), rmSync(dir, { recursive: true, force: true })) };
+}
+
+test('held back by an old lockfile, resolving again picks a version old enough, and nothing is let through', needsPnpm('11.8.0'), async () => {
+  const { dir, close } = await lockedYoung('^1.0.0');
+  try {
+    await assert.rejects(install(dir), (error: unknown) => error instanceof HeldBack && error.held.map(({ spec }) => spec).join() === 'proto@1.0.1');
+    assert.deepEqual(await resolveAgain(dir), [{ name: 'proto', from: ['1.0.1'], to: ['1.0.0'] }]);
+    assert.doesNotMatch(readFileSync(join(dir, 'pnpm-workspace.yaml'), 'utf8'), /Exclude/);
+    await install(dir);
+  } finally {
+    close();
+  }
+});
+
+test('when no version old enough fits, resolving again says which, and puts the lockfile back', needsPnpm('11.8.0'), async () => {
+  const { dir, close } = await lockedYoung('^1.0.1');
+  try {
+    const lockfile = readFileSync(join(dir, 'pnpm-lock.yaml'), 'utf8');
+    await assert.rejects(resolveAgain(dir), (error: unknown) => error instanceof HeldBack && error.held.map(({ spec }) => spec).join() === 'proto@1.0.1');
+    assert.equal(readFileSync(join(dir, 'pnpm-lock.yaml'), 'utf8'), lockfile);
+  } finally {
+    close();
   }
 });

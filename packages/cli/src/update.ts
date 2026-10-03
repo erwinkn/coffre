@@ -3,7 +3,7 @@
 // the release changes for the database: the migrations it adds, which
 // `coffre migrate` applies once the new version is deployed.
 import { spawn, spawnSync } from 'node:child_process';
-import { readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,6 +21,9 @@ import {
   minimumReleaseAge,
   pinPackageManager,
   removeCleared,
+  resolveAgain,
+  type Held,
+  type Moved,
 } from './deployment.ts';
 import { templateDir, type Kind } from './init.ts';
 import { StepFailed, Steps } from './steps.ts';
@@ -221,48 +224,91 @@ export async function update(args: string[]): Promise<void> {
         if (!(await ask(question, step))) return { text: `This deployment stays as it is, at ${was}`, details };
 
         before = deploymentMigrations(deployment) ?? before;
-        const manifest = join(deployment, 'package.json');
-        const saved = readFileSync(manifest, 'utf8');
-        bumpPins(deployment, latest);
-        if (repin) {
-          const replaced = pinPackageManager(deployment, pnpm!);
-          details.push(`Pinned ${pnpm}${replaced ? `, not ${replaced}` : ''}: every install, here, in CI and on Workers Builds, holds minimumReleaseAge alike`);
-        }
-        step.note(`Installing coffre ${latest}'s packages, with pnpm`);
-        try {
-          await install(deployment);
-        } catch (error) {
-          if (!(error instanceof HeldBack)) throw error;
-          // Too new for this deployment's minimumReleaseAge: wait until each clears, or say which to let through, and until when.
+        // Put back byte for byte however this ends short of installed: the
+        // deployment's pins, pnpm and lockfile stay as they were.
+        const files = ['package.json', 'pnpm-workspace.yaml', 'pnpm-lock.yaml'].map((name) => {
+          const path = join(deployment, name);
+          return { path, text: existsSync(path) ? readFileSync(path, 'utf8') : null };
+        });
+        const restore = () => {
+          for (const { path, text } of files) {
+            if (text === null) rmSync(path, { force: true });
+            else writeFileSync(path, text);
+          }
+        };
+        const kept = 'package.json, pnpm-workspace.yaml and pnpm-lock.yaml are as they were';
+        /**
+         * No version old enough fits: wait, everything as it was, or let
+         * these through by name, each until it is old enough. Never asked
+         * without a terminal, nor with --yes: then it waits, and says so.
+         */
+        const decide = async (error: HeldBack): Promise<{ until: Date | null; lines: string[] }> => {
           const age = minimumReleaseAge(deployment);
           const clears = error.held
             .map(({ spec, publishedAt }) => ({ spec, clears: new Date(publishedAt.getTime() + age * 60_000) }))
             .sort((x, y) => x.clears.getTime() - y.clears.getTime());
           const last = clears.at(-1)!.clears;
           const lines = clears.map(({ spec, clears: at }) => `${spec}, old enough from ${when(at)}`);
-          const held = `pnpm holds back ${clears.length === 1 ? '1 package' : `${clears.length} packages`} younger than this deployment's minimumReleaseAge, ${days(age)}`;
+          const heading =
+            `pnpm holds back ${clears.length === 1 ? '1 package' : `${clears.length} packages`} younger than this ` +
+            `deployment's minimumReleaseAge, ${days(age)}, and no older version fits`;
           if (yes || keys() === null) {
-            writeFileSync(manifest, saved);
-            throw new Error(`${held}: ${lines.join('; ')}. Run coffre update after ${when(last)}, or on a terminal to exclude them until then`);
+            throw new HeldBack(error.held, `${heading}: ${lines.join('; ')}. Run coffre update after ${when(last)}, or on a terminal to let them through until then`);
           }
           step.under(lines);
-          const choice = await step.choose(held, [
+          const choice = await step.choose(heading, [
             `Wait: stay at ${was}, and run coffre update again after ${when(last)}`,
             `Proceed: let ${clears.length === 1 ? 'it' : 'these'} through until each is old enough, named in pnpm-workspace.yaml`,
           ]);
           step.under([]);
           if (choice === 0) {
-            writeFileSync(manifest, saved);
-            return { text: `This deployment stays at ${was}, until ${when(last)}`, details: [...details, ...lines, `Run coffre update again after ${when(last)}`] };
+            restore();
+            return { until: last, lines: [...lines, `${kept}. Run coffre update again after ${when(last)}`] };
           }
           excludeUntil(deployment, clears, `for coffre ${latest}`);
+          return {
+            until: null,
+            lines: [
+              'Let through until each is old enough, named in pnpm-workspace.yaml:',
+              ...clears.map(({ spec, clears: at }) => `  ${spec}, until ${when(at)}`),
+              `The first coffre update after ${when(last)} removes them`,
+            ],
+          };
+        };
+        try {
+          bumpPins(deployment, latest);
+          if (repin) {
+            const replaced = pinPackageManager(deployment, pnpm!);
+            details.push(`Pinned ${pnpm}${replaced ? `, not ${replaced}` : ''}: every install, here, in CI and on Workers Builds, holds minimumReleaseAge alike`);
+          }
           step.note(`Installing coffre ${latest}'s packages, with pnpm`);
-          await install(deployment);
-          details.push(
-            'Let through until each is old enough, named in pnpm-workspace.yaml:',
-            ...clears.map(({ spec, clears: at }) => `  ${spec}, until ${when(at)}`),
-            `The first coffre update after ${when(last)} removes them`,
-          );
+          try {
+            await install(deployment, { purge: true });
+          } catch (error) {
+            if (!(error instanceof HeldBack)) throw error;
+            // A lockfile another pnpm wrote can hold versions too young for
+            // this one; resolving again picks versions old enough, when the
+            // ranges allow, and needs nothing let through.
+            step.note('Resolving again, for versions old enough');
+            try {
+              const moved = await resolveAgain(deployment);
+              details.push(`Resolved again, for versions old enough, as ${error.held.map(({ spec }) => spec).join(', ')} held back:`, ...movedLines(moved, error.held));
+            } catch (again) {
+              if (!(again instanceof HeldBack)) throw again;
+              const decided = await decide(again);
+              if (decided.until !== null) {
+                return { text: `This deployment stays at ${was}, until ${when(decided.until)}`, details: decided.lines };
+              }
+              step.note(`Installing coffre ${latest}'s packages, with pnpm`);
+              const moved = await resolveAgain(deployment);
+              details.push(...decided.lines, ...movedLines(moved, again.held));
+            }
+          }
+        } catch (error) {
+          restore();
+          if (error instanceof Cancelled) throw error;
+          const reason = error instanceof Error ? error.message : String(error);
+          throw new Error(`${reason}. ${kept}${error instanceof HeldBack ? '' : '; node_modules may be incomplete, which pnpm install puts right'}`);
         }
         after = deploymentMigrations(deployment) ?? after;
         return {
@@ -302,6 +348,17 @@ function templatePackageManager(kind: Kind): string | null {
 
 function coffrePackageManager(dir: string): string | undefined {
   return (JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as { packageManager?: string }).packageManager;
+}
+
+/**
+ * What a fresh resolution moved, the held packages first: every package
+ * may move within its range, so each is said, up to a screenful.
+ */
+export function movedLines(moved: Moved[], held: Held[]): string[] {
+  const named = new Set(held.map(({ spec }) => spec.slice(0, spec.lastIndexOf('@'))));
+  const ordered = [...moved.filter(({ name }) => named.has(name)), ...moved.filter(({ name }) => !named.has(name))];
+  const shown = ordered.slice(0, 8).map(({ name, from, to }) => `  ${name} ${from.join(', ') || 'none'} → ${to.join(', ') || 'none'}`);
+  return ordered.length > shown.length ? [...shown, `  and ${ordered.length - shown.length} more, in pnpm-lock.yaml`] : shown;
 }
 
 /** A moment, to the minute, in UTC: when a package is old enough. */

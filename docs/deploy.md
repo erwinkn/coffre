@@ -113,12 +113,22 @@ Three steps, in this order, for every release:
    to the one coffre installs with, as `coffre init` writes it: then your
    machine, CI and Workers Builds install with the same pnpm, and each holds
    `minimumReleaseAge` alike. Without it, Workers Builds picks a pnpm of its
-   own, and a lockfile one pnpm wrote can fail another's check. If pnpm
-   still holds a package back, `coffre update` says when each is old enough
-   and offers two choices: wait, the deployment left as it was, or let those
+   own, and a lockfile one pnpm wrote can fail another's check. Moving to
+   another pnpm major makes pnpm rebuild `node_modules` from scratch, which
+   `coffre update` lets it do without asking again.
+
+   If pnpm holds a package back, as when a lockfile an older pnpm wrote has
+   `pg-protocol@1.16.1`, a day old, `coffre update` first resolves the
+   lockfile again: pnpm then picks the newest versions old enough, say
+   `pg-protocol@1.16.0`, and nothing is let through. Any other package may
+   move within its range too, so it lists every version that moved. Only
+   when no version old enough fits does it say when each is old enough and
+   offer two choices: wait, the deployment left as it was, or let those
    packages through by name, each until it is old enough, in
    `pnpm-workspace.yaml`. The first `coffre update` after that date removes
    them. With `--yes` it waits: it never lets a package through unasked.
+   Whenever the install fails, it puts `package.json`, `pnpm-workspace.yaml`
+   and `pnpm-lock.yaml` back as they were, and says so.
 2. **Deploy** as you do: `pnpm run deploy` (the vault, then the app), a push
    for Workers Builds, or a restart on Node. Each release says whether it runs
    on the schema before its migrations; 0.1.12 does.

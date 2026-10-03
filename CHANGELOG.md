@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+`coffre update` moves a deployment from pnpm 10 to 11 without a terminal:
+pnpm's question about removing `node_modules` no longer stops it. When a
+lockfile another pnpm wrote holds a package too young for this one, it first
+resolves again for versions old enough, and lists every version that moved;
+only when no older version fits does it offer to wait or to let the package
+through. An install that fails leaves `package.json`, `pnpm-workspace.yaml`
+and `pnpm-lock.yaml` as they were, byte for byte, and says so.
+
 Deployments pin pnpm: `coffre init` writes `"packageManager": "pnpm@11.8.0"`,
 and `coffre update` adds it to a deployment that lacks it, so every
 install, Workers Builds' included, holds `minimumReleaseAge` alike. When
