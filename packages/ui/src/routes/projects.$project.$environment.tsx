@@ -7,10 +7,13 @@ import {
   type ComponentProps,
   type InputHTMLAttributes,
 } from 'react';
-import { createFileRoute, Link, useLoaderData, useRouter } from '@tanstack/react-router';
+import { useQueryClient, useSuspenseQuery } from '@tanstack/react-query';
+import { createFileRoute, Link } from '@tanstack/react-router';
+import { useShell } from '../lib/use-shell';
 import { DropdownMenu } from 'radix-ui';
 import { toast } from 'sonner';
 import { failureMessage, Refusal, uiResult, useCoffre } from '../lib/coffre';
+import { affects, queries, refresh } from '../lib/queries';
 import { useAction } from '../lib/use-action';
 import type {
   ImportPlanEntry,
@@ -78,20 +81,17 @@ export const Route = createFileRoute('/projects/$project/$environment')({
   validateSearch: (search: Record<string, unknown>): { filter?: string } => ({
     filter: typeof search.filter === 'string' && search.filter !== '' ? search.filter : undefined,
   }),
-  loader: async ({ context: { client }, params }) => {
-    const path = `${params.project}/${params.environment}`;
-    const [keys, syncs] = await Promise.all([
-      uiResult(() => client.secrets.list(path)),
-      uiResult(() => client.syncs.list(path)),
-    ]);
-    return { keys, syncs };
-  },
+  loader: ({ context: { client, queryClient }, params }) =>
+    Promise.all([
+      queryClient.fetchQuery(queries.secrets(client, params)),
+      queryClient.fetchQuery(queries.syncs(client, params)),
+    ]),
   component: EnvironmentPage,
 });
 
 function EnvironmentPage() {
-  const { keys: result, syncs } = Route.useLoaderData();
   const { project, environment } = Route.useParams();
+  const { data: result } = useSuspenseQuery(queries.secrets(useCoffre(), { project, environment }));
 
   if (!result.ok) {
     return (
@@ -124,7 +124,6 @@ function EnvironmentPage() {
       environment={environment}
       permissions={result.permissions}
       keys={result.keys}
-      syncs={syncs}
     />
   );
 }
@@ -136,15 +135,13 @@ function EnvironmentLedger({
   environment,
   permissions,
   keys,
-  syncs,
 }: {
   project: string;
   environment: string;
   permissions: Permission[];
   keys: SecretKey[];
-  syncs: ComponentProps<typeof Syncs>['result'];
 }) {
-  const router = useRouter();
+  const queryClient = useQueryClient();
   const coffre = useCoffre();
   const place = `${project}/${environment}`;
   const [drafts, setDrafts] = useState<SecretDraft[]>([]);
@@ -263,7 +260,7 @@ function EnvironmentLedger({
 
     if (outcome.applied > 0) {
       try {
-        await router.invalidate();
+        await refresh(queryClient, affects.secrets({ project, environment }));
       } catch {
         setSaveError('Saved, but the page could not refresh. Reload before you retry.');
         setSaving(false);
@@ -512,7 +509,6 @@ function EnvironmentLedger({
       <Syncs
         project={project}
         environment={environment}
-        result={syncs}
         canRun={canWrite || permissions.includes('environment.manage')}
       />
 
@@ -619,7 +615,7 @@ function EnvironmentLedger({
 
 /** The display name sits beside the slug; it comes from the shell's project tree. */
 function EnvironmentName({ project, environment }: { project: string; environment: string }) {
-  const { projects } = useLoaderData({ from: '__root__' });
+  const { projects } = useShell();
   const name = projects
     .find((entry) => entry.slug === project)
     ?.environments.find((entry) => entry.slug === environment)?.name;
@@ -1228,12 +1224,15 @@ function ArchivedRow({
   function setArchived(archived: boolean) {
     run(
       () => coffre.secrets.update(`${project}/${environment}/${entry.key}`, { archived }),
-      () =>
-        // Restoring is fully reversible, so it gets an undo rather than a
-        // confirmation dialog in front of it.
-        toast.success(archived ? `${entry.key} archived` : `${entry.key} restored`, {
-          action: { label: 'Undo', onClick: () => setArchived(!archived) },
-        }),
+      {
+        affects: affects.secrets({ project, environment }),
+        onSuccess: () =>
+          // Restoring is fully reversible, so it gets an undo rather than a
+          // confirmation dialog in front of it.
+          toast.success(archived ? `${entry.key} archived` : `${entry.key} restored`, {
+            action: { label: 'Undo', onClick: () => setArchived(!archived) },
+          }),
+      },
     );
   }
 
@@ -1436,9 +1435,12 @@ function VersionHistory({
                                 `${project}/${environment}/${secretKey}`,
                                 version.version,
                               ),
-                            () => {
-                              onRolledBack();
-                              toast.success(`${secretKey} rolled back to v${version.version}`);
+                            {
+                              affects: affects.secrets({ project, environment }),
+                              onSuccess: () => {
+                                onRolledBack();
+                                toast.success(`${secretKey} rolled back to v${version.version}`);
+                              },
                             },
                           )
                         }
@@ -1504,9 +1506,13 @@ function ImportEnv({ project, environment }: { project: string; environment: str
   function preview() {
     run(
       () => planEnv(coffre, path, content),
-      (result) => {
-        setProblems(result.problems);
-        setPlan({ entries: result.plan, changes: result.changes });
+      {
+        // A dry run: nothing changes.
+        affects: [],
+        onSuccess: (result) => {
+          setProblems(result.problems);
+          setPlan({ entries: result.plan, changes: result.changes });
+        },
       },
     );
   }
@@ -1516,9 +1522,12 @@ function ImportEnv({ project, environment }: { project: string; environment: str
     const written = Object.keys(plan.changes).length;
     run(
       () => coffre.secrets.set(path, plan.changes),
-      () => {
-        toast.success(`Imported ${written} change${written === 1 ? '' : 's'}`);
-        close();
+      {
+        affects: affects.secrets({ project, environment }),
+        onSuccess: () => {
+          toast.success(`Imported ${written} change${written === 1 ? '' : 's'}`);
+          close();
+        },
       },
     );
   }

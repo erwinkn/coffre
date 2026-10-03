@@ -303,6 +303,22 @@ test('environment grants expose only the listed names of inaccessible siblings',
   });
 });
 
+test('a project counts each secret name once, across the environments the caller can open', async () => {
+  await seedProject();
+  await root.environments.create('market/dev', { name: 'Development' });
+  await root.secrets.set('market/prod', { SHARED: 'one', PROD_ONLY: 'two' });
+  await root.secrets.set('market/dev', { SHARED: 'three', DEV_ONLY: 'four' });
+
+  await root.access.set(READER, { 'market/dev': 'viewer' });
+  assert.equal((await reader.projects.list()).projects[0].secretCount, 2);
+  await root.access.set(READER, { market: 'viewer' });
+  assert.equal((await reader.projects.list()).projects[0].secretCount, 3);
+
+  // Managing a project opens none of its secrets, so there is nothing to count.
+  await root.members.add(OWNER, { owner: true });
+  assert.equal((await owner.projects.list()).projects[0].secretCount, null);
+});
+
 test('removed members must be explicitly re-added before regranting access', async () => {
   await seedProject();
   await root.access.set(READER, { market: 'viewer' });

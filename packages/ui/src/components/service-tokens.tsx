@@ -2,6 +2,7 @@ import type { ServiceTokenRow } from '@coffre/client';
 import { useState } from 'react';
 import { toast } from 'sonner';
 import { memberRef, useCoffre } from '../lib/coffre';
+import { affects } from '../lib/queries';
 import { useAction } from '../lib/use-action';
 import { Card } from './page';
 import { ConfirmButton, CopyButton, EmptyState, ErrorLine, Modal, Notice, Spinner, Timestamp } from './ui';
@@ -96,7 +97,10 @@ export function ServiceTokens({ serviceId, tokens }: { serviceId: string; tokens
                       onConfirm={() =>
                         run(
                           () => coffre.tokens.revoke(memberRef('service', serviceId), token.id),
-                          () => toast.success('Token revoked'),
+                          {
+                            affects: affects.credentials(memberRef('service', serviceId)),
+                            onSuccess: () => toast.success('Token revoked'),
+                          },
                         )
                       }
                     />
@@ -148,7 +152,10 @@ function IssueToken({ serviceId }: { serviceId: string }) {
                     label: label.trim() === '' ? null : label.trim(),
                     expiresInDays: days,
                   }),
-                (credential) => setIssued(credential),
+                {
+                  affects: affects.credentials(memberRef('service', serviceId)),
+                  onSuccess: (credential) => setIssued(credential),
+                },
               );
             }}
           >

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router';
 import { failureMessage, statusOf, uiResult, useCoffre } from '../lib/coffre';
+import { loadShell } from '../lib/queries';
 import { ClosedDoor } from '../components/page';
 import { ErrorLine, Spinner, Timestamp } from '../components/ui';
 import { CheckCircle, SlashCircle, Terminal } from '../components/icons';
@@ -17,9 +18,10 @@ export const Route = createFileRoute('/auth/device')({
     return typeof code === 'string' && code.length <= 16 ? { code } : {};
   },
   loaderDeps: ({ search }) => ({ code: search.code }),
-  loader: async ({ context: { client }, deps, parentMatchPromise }) => {
+  // Its own read, not a query: it is asked once, and nothing here refreshes it.
+  loader: async ({ context: { client, queryClient }, deps }) => {
     if (deps.code === undefined) return null;
-    if (!(await parentMatchPromise).loaderData?.auth.signin) {
+    if (!(await loadShell(queryClient, client)).auth.signin) {
       return { ok: false as const, error: 'This instance has no CLI sign-in.' };
     }
     const code = deps.code;

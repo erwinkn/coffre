@@ -1,17 +1,21 @@
+import { useSuspenseQuery } from '@tanstack/react-query';
 import { createFileRoute } from '@tanstack/react-router';
-import { AddPrincipal, DirectoryTable, loadDirectory } from '../components/directory';
+import { AddPrincipal, DirectoryTable } from '../components/directory';
+import { useCoffre } from '../lib/coffre';
+import { loadDirectory, queries } from '../lib/queries';
+import { useShell } from '../lib/use-shell';
 import { ClosedDoor, PageHeader } from '../components/page';
 import { RemovedList } from '../components/offboarding';
 import { Key } from '../components/icons';
 
 export const Route = createFileRoute('/tokens/')({
-  loader: async ({ context: { client }, parentMatchPromise }) =>
-    loadDirectory(client, (await parentMatchPromise).loaderData?.capabilities.canManageGrants ?? false),
+  loader: ({ context: { client, queryClient } }) => loadDirectory(queryClient, client),
   component: TokensPage,
 });
 
 function TokensPage() {
-  const result = Route.useLoaderData();
+  const { capabilities } = useShell();
+  const { data: result } = useSuspenseQuery(queries.directory(useCoffre(), capabilities.canManageGrants));
 
   if (!result.ok) {
     return (

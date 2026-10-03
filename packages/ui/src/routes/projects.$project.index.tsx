@@ -1,8 +1,11 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { createFileRoute, Link, useLoaderData, useRouter } from '@tanstack/react-router';
+import { useSuspenseQuery } from '@tanstack/react-query';
+import { createFileRoute, Link, useRouter } from '@tanstack/react-router';
+import { useShell } from '../lib/use-shell';
 import { DropdownMenu } from 'radix-ui';
 import { toast } from 'sonner';
-import { Refusal, useCoffre } from '../lib/coffre';
+import { memberRef, Refusal, useCoffre } from '../lib/coffre';
+import { affects, loadProject, projectOf, queries } from '../lib/queries';
 import { useAction } from '../lib/use-action';
 import type { GrantRow, ProjectSummary } from '../shared/models';
 import {
@@ -19,7 +22,7 @@ import {
   Spinner,
 } from '../components/ui';
 import { Card, ClosedDoor, PageHeader } from '../components/page';
-import { ensureGrant, GrantRowView, GrantsTable, loadProject } from '../components/grants';
+import { ensureGrant, GrantRowView, GrantsTable } from '../components/grants';
 import { PrincipalLink } from '../components/principal';
 import { PrincipalPicker } from '../components/principal-picker';
 import {
@@ -51,7 +54,7 @@ export const Route = createFileRoute('/projects/$project/')({
         ? search.tab
         : undefined,
   }),
-  loader: ({ context: { client }, params }) => loadProject(client, params.project),
+  loader: ({ context: { client, queryClient }, params }) => loadProject(queryClient, client, params.project),
   component: ProjectPage,
 });
 
@@ -63,9 +66,9 @@ const TABS: { key: ProjectTab; label: string; icon: ReactNode }[] = [
 ];
 
 function ProjectPage() {
-  const result = Route.useLoaderData();
   const { project: projectSlug } = Route.useParams();
-  const search = Route.useSearch();
+  const { data: projects } = useSuspenseQuery(queries.projects(useCoffre()));
+  const result = projectOf(projects, projectSlug);
 
   if (!result.ok) {
     return (
@@ -85,7 +88,33 @@ function ProjectPage() {
     );
   }
 
-  const { project, grants, grantsError } = result;
+  return result.managesAccess ? (
+    <ManagedProject project={result.project} />
+  ) : (
+    <ProjectView project={result.project} grants={[]} grantsError={null} />
+  );
+}
+
+/** A project whose access you manage, with its grants. */
+function ManagedProject({ project }: { project: ProjectSummary }) {
+  const { data: result } = useSuspenseQuery(queries.grants(useCoffre(), project.slug));
+  return result.ok ? (
+    <ProjectView project={project} grants={result.grants} grantsError={null} />
+  ) : (
+    <ProjectView project={project} grants={[]} grantsError={result.error} />
+  );
+}
+
+function ProjectView({
+  project,
+  grants,
+  grantsError,
+}: {
+  project: ProjectSummary;
+  grants: GrantRow[];
+  grantsError: string | null;
+}) {
+  const search = Route.useSearch();
 
   // Each tab is gated on its own permission, not on one blanket "admin".
   // That is what lets an access manager administer grants without being able
@@ -362,9 +391,12 @@ function EnvironmentCard({
                 run(
                   () =>
                     coffre.environments.update(`${project}/${environment.slug}`, { slug, name }),
-                  () => {
-                    setRenaming(false);
-                    toast.success('Environment renamed');
+                  {
+                    affects: affects.places(),
+                    onSuccess: () => {
+                      setRenaming(false);
+                      toast.success('Environment renamed');
+                    },
                   },
                 );
               }}
@@ -452,10 +484,13 @@ function EnvironmentCard({
               run(
                 () =>
                   coffre.environments.update(`${project}/${environment.slug}`, { archived: !isArchived }),
-                () =>
-                  toast.success(
-                    isArchived ? `${environment.slug} restored` : `${environment.slug} archived`,
-                  ),
+                {
+                  affects: affects.places(),
+                  onSuccess: () =>
+                    toast.success(
+                      isArchived ? `${environment.slug} restored` : `${environment.slug} archived`,
+                    ),
+                },
               )
             }
           />
@@ -503,11 +538,14 @@ function NewEnvironment({ project }: { project: string }) {
                 const { created } = await coffre.environments.create(`${project}/${slug}`, { name });
                 if (!created) throw new Refusal(`An environment named "${slug}" already exists.`);
               },
-              () => {
-                toast.success(`Environment ${slug} added`);
-                setSlug('');
-                setName('');
-                close();
+              {
+                affects: affects.places(),
+                onSuccess: () => {
+                  toast.success(`Environment ${slug} added`);
+                  setSlug('');
+                  setName('');
+                  close();
+                },
               },
             );
           }}
@@ -620,7 +658,7 @@ function NewGrant({
   environments: ProjectSummary['environments'];
   grants: GrantRow[];
 }) {
-  const { capabilities } = useLoaderData({ from: '__root__' });
+  const { capabilities } = useShell();
   const [open, setOpen] = useState(false);
   const [principalId, setPrincipalId] = useState('');
   const [permission, setPermission] = useState('viewer:');
@@ -669,19 +707,22 @@ function NewGrant({
                   expiresAt:
                     expiresAt === '' ? null : new Date(`${expiresAt}T23:59:59Z`).toISOString(),
                 }),
-              ({ existed }) => {
-                const label =
-                  permissionOptions.find((option) => option.value === permission)?.label ??
-                  'access';
-                toast.success(
-                  existed
-                    ? `${principalId} already has ${label}`
-                    : `${principalId} granted ${label.toLowerCase()}`,
-                );
-                setPrincipalId('');
-                setExpiresAt('');
-                setPermission('viewer:');
-                close();
+              {
+                affects: affects.access(project, memberRef(principalType, principalId.trim())),
+                onSuccess: ({ existed }) => {
+                  const label =
+                    permissionOptions.find((option) => option.value === permission)?.label ??
+                    'access';
+                  toast.success(
+                    existed
+                      ? `${principalId} already has ${label}`
+                      : `${principalId} granted ${label.toLowerCase()}`,
+                  );
+                  setPrincipalId('');
+                  setExpiresAt('');
+                  setPermission('viewer:');
+                  close();
+                },
               },
             );
           }}
@@ -781,16 +822,19 @@ function GeneralSettings({ project }: { project: ProjectSummary }) {
           event.preventDefault();
           run(
             () => coffre.projects.update(project.slug, { slug, name }),
-            async () => {
-              toast.success('Project renamed');
-              // The slug is part of the URL, so a rename has to navigate.
-              if (slug !== project.slug) {
-                await router.navigate({
-                  to: '/projects/$project',
-                  params: { project: slug },
-                  search: { tab: 'settings' },
-                });
-              }
+            {
+              affects: affects.places(),
+              onSuccess: async () => {
+                toast.success('Project renamed');
+                // The slug is part of the URL, so a rename has to navigate.
+                if (slug !== project.slug) {
+                  await router.navigate({
+                    to: '/projects/$project',
+                    params: { project: slug },
+                    search: { tab: 'settings' },
+                  });
+                }
+              },
             },
           );
         }}
@@ -905,10 +949,13 @@ function DangerZone({ project }: { project: ProjectSummary }) {
           run(
             () =>
               coffre.projects.update(project.slug, { archived: !isArchived }),
-            () =>
-              toast.success(
-                isArchived ? `${project.slug} restored` : `${project.slug} archived`,
-              ),
+            {
+              affects: affects.places(),
+              onSuccess: () =>
+                toast.success(
+                  isArchived ? `${project.slug} restored` : `${project.slug} archived`,
+                ),
+            },
           )
         }
       />

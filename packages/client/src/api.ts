@@ -40,6 +40,7 @@ export type Api = {
             secretCount: number | null;
           };
         }[];
+        secretCount: number | null;
       }[];
     };
   };
@@ -920,6 +921,7 @@ export type ProjectSummary = {
       secretCount: number | null;
     };
   }[];
+  secretCount: number | null;
 };
 
 export type RemovedMember = {

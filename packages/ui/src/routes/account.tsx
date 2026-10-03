@@ -1,5 +1,7 @@
 import type { IdentityRow, SessionRow } from '@coffre/client';
-import { createFileRoute, useLoaderData } from '@tanstack/react-router';
+import { useSuspenseQueries } from '@tanstack/react-query';
+import { createFileRoute } from '@tanstack/react-router';
+import { useShell } from '../lib/use-shell';
 import { toast } from 'sonner';
 import { Card, Fact, PageHeader } from '../components/page';
 import { ThemeCards } from '../components/theme';
@@ -7,7 +9,8 @@ import { InstanceRole } from '../components/directory';
 import { ConfirmButton, EmptyState, ErrorLine, Notice, Timestamp } from '../components/ui';
 import { Monitor, ProviderMark, SignOut, Terminal, X } from '../components/icons';
 import { signinErrorMessage } from '../lib/signin-errors';
-import { uiResult, useCoffre } from '../lib/coffre';
+import { useCoffre } from '../lib/coffre';
+import { affects, loadShell, queries } from '../lib/queries';
 import { useAction } from '../lib/use-action';
 
 type Search = { linked?: string; error?: string };
@@ -27,32 +30,21 @@ export const Route = createFileRoute('/account')({
     }
     return out;
   },
-  // The sign-in half: which accounts you sign in with, where you are signed
-  // in, and which providers you could link. Absent behind Cloudflare Access,
-  // which owns sessions there.
-  loader: async ({ context: { client }, parentMatchPromise }) => {
-    const auth = (await parentMatchPromise).loaderData?.auth;
-    if (auth === undefined || auth.signin === null) {
-      return {
-        ok: true as const,
-        signin: false,
-        providers: [] as { id: string; label: string; brand: string }[],
-        identities: [] as IdentityRow[],
-        sessions: [] as SessionRow[],
-      };
-    }
-    const { providers } = auth.signin;
-    return uiResult(async () => {
-      const [{ identities }, { sessions }] = await Promise.all([client.identities.list(), client.sessions.list()]);
-      return { signin: true, providers, identities, sessions };
-    });
+  // The sign-in half: which accounts you sign in with and where you are
+  // signed in. Absent behind Cloudflare Access, which owns sessions there.
+  loader: async ({ context: { client, queryClient } }) => {
+    const shell = await loadShell(queryClient, client);
+    if (shell.auth.signin === null || shell.principal?.type !== 'user') return;
+    await Promise.all([
+      queryClient.fetchQuery(queries.identities(client)),
+      queryClient.fetchQuery(queries.sessions(client)),
+    ]);
   },
   component: AccountPage,
 });
 
 function AccountPage() {
-  const { principal, instanceRole } = useLoaderData({ from: '__root__' });
-  const signin = Route.useLoaderData();
+  const { principal, instanceRole, auth } = useShell();
 
   return (
     <>
@@ -87,17 +79,25 @@ function AccountPage() {
         </Card>
       )}
 
-      {!signin.ok ? (
-        <ErrorLine error={signin.error} />
-      ) : (
-        signin.signin &&
-        principal?.type === 'user' && (
-          <>
-            <SigninAccounts email={principal.id} {...signin} />
-            <Sessions sessions={signin.sessions} providers={signin.providers} />
-          </>
-        )
+      {auth.signin !== null && principal?.type === 'user' && (
+        <SignIn email={principal.id} providers={auth.signin.providers} />
       )}
+    </>
+  );
+}
+
+/** Which accounts you sign in with, and where you are signed in. */
+function SignIn({ email, providers }: { email: string; providers: Provider[] }) {
+  const client = useCoffre();
+  const [{ data: identities }, { data: sessions }] = useSuspenseQueries({
+    queries: [queries.identities(client), queries.sessions(client)],
+  });
+  if (!identities.ok) return <ErrorLine error={identities.error} />;
+  if (!sessions.ok) return <ErrorLine error={sessions.error} />;
+  return (
+    <>
+      <SigninAccounts email={email} providers={providers} identities={identities.identities} />
+      <Sessions sessions={sessions.sessions} providers={providers} />
     </>
   );
 }
@@ -223,7 +223,10 @@ function SigninAccounts({
                         onConfirm={() =>
                           run(
                             () => coffre.identities.unlink(identity.id),
-                            () => toast.success(`${label} account unlinked`),
+                            {
+                              affects: affects.identities(),
+                              onSuccess: () => toast.success(`${label} account unlinked`),
+                            },
                           )
                         }
                       />
@@ -339,7 +342,7 @@ function Sessions({
                         onClick={() =>
                           run(
                             () => coffre.sessions.revoke(session.id),
-                            () => toast.success('Session ended'),
+                            { affects: affects.sessions(), onSuccess: () => toast.success('Session ended') },
                           )
                         }
                       >

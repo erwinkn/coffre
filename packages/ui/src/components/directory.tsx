@@ -1,8 +1,8 @@
-import type { CoffreClient } from '@coffre/client';
 import { useEffect, useState } from 'react';
 import { DropdownMenu } from 'radix-ui';
 import { toast } from 'sonner';
-import { memberRef, Refusal, uiResult, useCoffre } from '../lib/coffre';
+import { memberRef, Refusal, useCoffre } from '../lib/coffre';
+import { affects } from '../lib/queries';
 import { useAction } from '../lib/use-action';
 import type { DirectoryPrincipal } from '../shared/models';
 import { ConfirmDialog, EmptyState, ErrorLine, Modal, Spinner, Toggletip } from './ui';
@@ -18,22 +18,6 @@ import { Key, Lock, MoreHorizontal, Pencil, Plus, ShieldCheck, User, X } from '.
  */
 
 type PrincipalType = DirectoryPrincipal['principalType'];
-
-/**
- * Everyone in the directory, and who was removed. The API shows grant
- * managers the members of their projects; the directory pages stay the
- * owners' own, and asking for anyone else would only log a refusal.
- */
-export async function loadDirectory(client: CoffreClient, canManage: boolean) {
-  if (!canManage) return { ok: false as const, error: 'Only owners can manage users and service accounts.' };
-  return uiResult(async () => {
-    const { members, removed } = await client.members.list();
-    const principals: DirectoryPrincipal[] = members.map(
-      ({ principalType, principalId, instanceRole, isRootAdmin, tampered }) => ({ principalType, principalId, instanceRole, isRootAdmin, tampered }),
-    );
-    return { principals, removed };
-  });
-}
 
 export const ROLE_LABEL: Record<DirectoryPrincipal['instanceRole'], string> = {
   'root-admin': 'Root admin',
@@ -184,12 +168,10 @@ export function InstanceRole({ principal }: { principal: DirectoryPrincipal }) {
 export function PrincipalActions({
   principal,
   trigger = 'act act-quiet act-menu',
-  onRemoved,
 }: {
   principal: DirectoryPrincipal;
   /** The menu button's classes: a row action in tables, a button in a page head. */
   trigger?: string;
-  onRemoved?: () => unknown;
 }) {
   const [editing, setEditing] = useState(false);
   const [confirming, setConfirming] = useState(false);
@@ -268,11 +250,14 @@ export function PrincipalActions({
                   coffre.members.add(memberRef('user', principal.principalId), {
                     owner: instanceRole === 'owner',
                   }),
-                () => {
-                  toast.success(
-                    `${principal.principalId} is now ${ROLE_LABEL[instanceRole].toLowerCase()}`,
-                  );
-                  setEditing(false);
+                {
+                  affects: affects.role(memberRef('user', principal.principalId)),
+                  onSuccess: () => {
+                    toast.success(
+                      `${principal.principalId} is now ${ROLE_LABEL[instanceRole].toLowerCase()}`,
+                    );
+                    setEditing(false);
+                  },
                 },
               );
             }}
@@ -319,9 +304,9 @@ export function PrincipalActions({
         onConfirm={() =>
           void run(
             () => coffre.members.remove(memberRef(principal.principalType, principal.principalId)),
-            async () => {
-              toast.success(`${principal.principalId} removed`);
-              await onRemoved?.();
+            {
+              affects: affects.removal(memberRef(principal.principalType, principal.principalId)),
+              onSuccess: () => toast.success(`${principal.principalId} removed`),
             },
           )
         }
@@ -373,9 +358,12 @@ export function AddPrincipal({ principalType }: { principalType: PrincipalType }
                 }
                 await coffre.members.add(member, { owner: principalType === 'user' && instanceRole === 'owner' });
               },
-              () => {
-                toast.success(`${principalId.trim()} added`);
-                close();
+              {
+                affects: affects.admission(),
+                onSuccess: () => {
+                  toast.success(`${principalId.trim()} added`);
+                  close();
+                },
               },
             );
           }}

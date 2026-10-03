@@ -2,49 +2,13 @@ import type { CoffreClient } from '@coffre/client';
 import type { Role } from '@coffre/core/access';
 import type { ReactNode } from 'react';
 import { toast } from 'sonner';
-import { failureMessage, memberRef, uiFailure, useCoffre } from '../lib/coffre';
+import { memberRef, useCoffre } from '../lib/coffre';
+import { affects } from '../lib/queries';
 import { useAction } from '../lib/use-action';
 import { projectAccessLabel } from '../lib/project-access';
 import type { GrantRow, ProjectSummary } from '../shared/models';
 import { ConfirmButton, ErrorLine, Spinner } from './ui';
 import { Clock, ShieldCheck } from './icons';
-
-/**
- * One project and, when you manage its access, its grants. A project that is
- * not there for you fails with no message: the page words that itself.
- */
-export async function loadProject(client: CoffreClient, slug: string) {
-  let project: ProjectSummary | undefined;
-  try {
-    project = (await client.projects.list()).projects.find((entry) => entry.slug === slug);
-  } catch (error) {
-    return uiFailure(error);
-  }
-  if (project === undefined) return { ok: false as const, error: null };
-  if (!project.permissions.includes('grant.manage')) {
-    return { ok: true as const, project, grants: [] as GrantRow[], grantsError: null };
-  }
-
-  try {
-    const { members } = await client.members.list(slug);
-    const grants: GrantRow[] = members.flatMap((member) =>
-      member.grants.map((grant) => ({
-        id: grant.id,
-        principalType: member.principalType,
-        principalId: member.principalId,
-        role: grant.role,
-        roleName: grant.roleName,
-        permissions: grant.permissions,
-        scope: grant.environment === null ? ('project' as const) : ('environment' as const),
-        environmentSlug: grant.environment,
-        expiresAt: grant.expiresAt,
-      })),
-    );
-    return { ok: true as const, project, grants, grantsError: null };
-  } catch (error) {
-    return { ok: true as const, project, grants: [] as GrantRow[], grantsError: failureMessage(error) };
-  }
-}
 
 /** Where a grant applies, as the API names it: `market`, or `market/prod`. */
 export function grantPlace(project: string, environmentSlug: string | null): string {
@@ -186,7 +150,10 @@ export function GrantRowView({
                   coffre.access.set(memberRef(grant.principalType, grant.principalId), {
                     [grantPlace(project, grant.environmentSlug)]: null,
                   }),
-                () => toast.success(`Revoked ${label} on ${project} from ${grant.principalId}`),
+                {
+                  affects: affects.access(project, memberRef(grant.principalType, grant.principalId)),
+                  onSuccess: () => toast.success(`Revoked ${label} on ${project} from ${grant.principalId}`),
+                },
               )
             }
           />

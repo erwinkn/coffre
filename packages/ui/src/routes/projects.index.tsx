@@ -1,10 +1,11 @@
-import type { CoffreClient } from '@coffre/client';
 import { useState } from 'react';
-import { createFileRoute, Link, useRouter } from '@tanstack/react-router';
+import { useSuspenseQuery } from '@tanstack/react-query';
+import { createFileRoute, Link } from '@tanstack/react-router';
 import { toast } from 'sonner';
-import { deriveUiCapabilities } from '../lib/capabilities';
-import { Refusal, uiResult, useCoffre } from '../lib/coffre';
+import { Refusal, useCoffre } from '../lib/coffre';
+import { affects, queries } from '../lib/queries';
 import { useAction } from '../lib/use-action';
+import { useShell } from '../lib/use-shell';
 import type { ProjectSummary } from '../shared/models';
 import { isActiveAccessibleEnvironment } from '../lib/project-environments';
 import { slugProblem } from '../lib/validation';
@@ -18,55 +19,13 @@ import {
 } from '../components/affordances';
 
 export const Route = createFileRoute('/projects/')({
-  loader: async ({ context: { client } }) => {
-    const result = await uiResult(async () => {
-      const [me, { projects }] = await Promise.all([client.me(), client.projects.list()]);
-      return { projects, capabilities: deriveUiCapabilities(me, projects) };
-    });
-    return { result, secrets: result.ok ? await countSecrets(client, result.projects) : {} };
-  },
+  loader: ({ context: { client, queryClient } }) => queryClient.fetchQuery(queries.projects(client)),
   component: ProjectsPage,
 });
 
-/**
- * Distinct secret names per project, across the environments you can open.
- *
- * The project summary only counts secrets per environment, and the same key
- * in dev and prod is one secret, not two. So this lists the keys of every
- * environment you can open and counts the names. Listing keys reads no value
- * and writes no audit row. Environments you cannot open are not asked: the
- * refusal would be audited.
- *
- * A project whose keys could not all be listed gets no count rather than a
- * short one.
- */
-async function countSecrets(
-  client: CoffreClient,
-  projects: ProjectSummary[],
-): Promise<Record<string, number | null>> {
-  const counts = await Promise.all(
-    projects
-      .filter((project) => project.archivedAt === null)
-      .map(async (project) => {
-        const environments = project.environments.filter(isActiveAccessibleEnvironment);
-        if (environments.length === 0) return [project.slug, null] as const;
-        const lists = await Promise.all(
-          environments.map((environment) => uiResult(() => client.secrets.list(`${project.slug}/${environment.slug}`))),
-        );
-        const names = new Set<string>();
-        for (const list of lists) {
-          if (!list.ok) return [project.slug, null] as const;
-          for (const key of list.keys) if (!key.archived) names.add(key.key);
-        }
-        return [project.slug, names.size] as const;
-      }),
-  );
-  return Object.fromEntries(counts);
-}
-
 function ProjectsPage() {
-  const { result, secrets } = Route.useLoaderData();
-  const router = useRouter();
+  const { data: result, refetch } = useSuspenseQuery(queries.projects(useCoffre()));
+  const { capabilities } = useShell();
 
   if (!result.ok) {
     return (
@@ -80,7 +39,7 @@ function ProjectsPage() {
             </Link>
           ) : (
             // An outage, not a sign-out: signing in again would not help, and asking again might.
-            <button type="button" className="btn" onClick={() => void router.invalidate()}>
+            <button type="button" className="btn" onClick={() => void refetch()}>
               Try again
             </button>
           )
@@ -99,7 +58,7 @@ function ProjectsPage() {
       <PageHeader
         title="Projects"
         actions={
-          <RootAdminOnly capabilities={result.capabilities}>
+          <RootAdminOnly capabilities={capabilities}>
             <NewProject />
           </RootAdminOnly>
         }
@@ -109,14 +68,14 @@ function ProjectsPage() {
         <div className="card">
           <EmptyState title="Nothing here for you yet">
             <ProjectEmptyStateCopy
-              capabilities={result.capabilities}
+              capabilities={capabilities}
               hasArchivedProjects={archived.length > 0}
             />
           </EmptyState>
         </div>
       ) : (
         <section className="card" aria-label="Projects">
-          <ProjectTable projects={active} secrets={secrets} />
+          <ProjectTable projects={active} />
         </section>
       )}
 
@@ -126,7 +85,7 @@ function ProjectsPage() {
             Archived
           </h2>
           <div className="card">
-            <ProjectTable projects={archived} secrets={secrets} />
+            <ProjectTable projects={archived} />
           </div>
         </section>
       )}
@@ -134,13 +93,7 @@ function ProjectsPage() {
   );
 }
 
-function ProjectTable({
-  projects,
-  secrets,
-}: {
-  projects: ProjectSummary[];
-  secrets: Record<string, number | null>;
-}) {
+function ProjectTable({ projects }: { projects: ProjectSummary[] }) {
   return (
     <div className="dt-wrap">
       <table className="dt projects stacks">
@@ -169,12 +122,7 @@ function ProjectTable({
         </thead>
         <tbody>
           {projects.map((project, index) => (
-            <ProjectRow
-              key={project.slug}
-              number={index + 1}
-              project={project}
-              secrets={secrets[project.slug] ?? null}
-            />
+            <ProjectRow key={project.slug} number={index + 1} project={project} />
           ))}
         </tbody>
       </table>
@@ -186,15 +134,8 @@ function ProjectTable({
  * One project. The whole row opens it; the environment links inside it sit
  * above that and go straight to the environment.
  */
-function ProjectRow({
-  number,
-  project,
-  secrets,
-}: {
-  number: number;
-  project: ProjectSummary;
-  secrets: number | null;
-}) {
+function ProjectRow({ number, project }: { number: number; project: ProjectSummary }) {
+  const secrets = project.secretCount;
   const isArchived = project.archivedAt !== null;
   const listedEnvironments = project.environments.filter(
     (environment) =>
@@ -302,11 +243,14 @@ function NewProject() {
                 const { created } = await coffre.projects.create(slug, { name });
                 if (!created) throw new Refusal(`A project named "${slug}" already exists.`);
               },
-              () => {
-                toast.success(`Project ${slug} created`);
-                setSlug('');
-                setName('');
-                setOpen(false);
+              {
+                affects: affects.places(),
+                onSuccess: () => {
+                  toast.success(`Project ${slug} created`);
+                  setSlug('');
+                  setName('');
+                  setOpen(false);
+                },
               },
             );
           }}

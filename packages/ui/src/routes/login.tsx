@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { createFileRoute, useLoaderData } from '@tanstack/react-router';
+import { createFileRoute } from '@tanstack/react-router';
+import { useShell } from '../lib/use-shell';
 import { signinErrorMessage } from '../lib/signin-errors';
 import { ErrorLine, Spinner } from '../components/ui';
 import { ClosedDoor } from '../components/page';
@@ -28,7 +29,7 @@ export const Route = createFileRoute('/login')({
  * page only explains why it is showing at all.
  */
 function LoginPage() {
-  const { signin, access } = useLoaderData({ from: '__root__' }).auth;
+  const { signin, access } = useShell().auth;
   if (signin !== null) return <ProviderLoginPage {...signin} />;
   return access?.assertion ? <CloudflareAuthenticationFailed /> : <CloudflareAccessRequired />;
 }

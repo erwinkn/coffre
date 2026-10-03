@@ -1,7 +1,9 @@
-import type { AuditEntryView, CoffreClient } from '@coffre/client';
+import type { AuditEntryView } from '@coffre/client';
 import { Fragment, useState, type ReactNode } from 'react';
+import { useSuspenseQueries } from '@tanstack/react-query';
 import { createFileRoute, Link } from '@tanstack/react-router';
-import { statusOf, uiResult } from '../lib/coffre';
+import { useCoffre } from '../lib/coffre';
+import { queries, type AuditSearch, type ChainResult } from '../lib/queries';
 import {
   decidedBy,
   describe,
@@ -24,11 +26,6 @@ import {
   X,
 } from '../components/icons';
 
-type AuditSearch = { decision?: 'deny'; actorId?: string; detail?: '1' };
-
-const PAGE_SIZE = 200;
-type ChainResult = Awaited<ReturnType<typeof verifyChain>>;
-
 export const Route = createFileRoute('/audit')({
   // Filters live in the URL so a finding can cite the exact view it came from.
   validateSearch: (search: Record<string, unknown>): AuditSearch => ({
@@ -39,62 +36,21 @@ export const Route = createFileRoute('/audit')({
   }),
   loaderDeps: ({ search }) => search,
   // The log is verified on every visit rather than on demand: a status that
-  // is always current beats a button nobody presses.
-  loader: async ({ context: { client }, deps }) => {
-    const [entries, chain] = await Promise.all([listEntries(client, deps), verifyChain(client)]);
-    return { entries, chain };
-  },
+  // is always current beats a button nobody presses. Both are read fresh.
+  loader: ({ context: { client, queryClient }, deps }) =>
+    Promise.all([
+      queryClient.fetchQuery(queries.auditEntries(client, deps)),
+      queryClient.fetchQuery(queries.auditChain(client)),
+    ]),
   component: AuditPage,
 });
 
-function listEntries(client: CoffreClient, search: AuditSearch) {
-  return uiResult(async () => {
-    // Detail is left out by the server unless asked for, and counted.
-    return client.audit.list({
-      limit: PAGE_SIZE,
-      decision: search.decision,
-      actor: search.actorId,
-      detail: search.detail,
-    });
-  });
-}
-
-/**
- * Whether the log holds, or why that is not known. Verifying is for owners:
- * anyone else reads their projects' part of the log, and a part cannot be
- * checked as a chain, so for them it is a fact about the page, not a fault.
- */
-async function verifyChain(client: CoffreClient) {
-  try {
-    const result = await client.audit.verify();
-    return result.ok
-      ? {
-          integrity: 'intact' as const,
-          through: result.through,
-          entries: result.entries,
-          checkpoint: result.checkpoint,
-          pending: result.pending ?? 0,
-        }
-      : {
-          integrity: 'broken' as const,
-          through: result.through,
-          failedAtSeq: result.failedAtSeq,
-          author: result.author,
-          reason: result.reason,
-        };
-  } catch (error) {
-    const status = statusOf(error);
-    if (status === 403) return { integrity: 'owners-only' as const };
-    return {
-      integrity: 'unknown' as const,
-      problem: status === undefined ? 'the request never got an answer' : `the request failed with HTTP ${status}`,
-    };
-  }
-}
-
 function AuditPage() {
-  const { entries: result, chain } = Route.useLoaderData();
   const search = Route.useSearch();
+  const client = useCoffre();
+  const [{ data: result }, { data: chain }] = useSuspenseQueries({
+    queries: [queries.auditEntries(client, search), queries.auditChain(client)],
+  });
   const { decision, actorId } = search;
   const detail = search.detail === '1';
   const deniedOnly = decision === 'deny';
