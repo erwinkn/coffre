@@ -8,6 +8,7 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { PassThrough, Writable } from 'node:stream';
 
+import { stopWranglers } from '../src/cloudflare.ts';
 import { templateDir } from '../src/init.ts';
 
 async function body(request: IncomingMessage): Promise<string> {
@@ -255,6 +256,19 @@ export function fakeOpener(dir: string): void {
     writeFileSync(join(dir, name), `#!/bin/sh\nprintf '%s\\n' "$1" >> '${dir}/opened'\n`);
     chmodSync(join(dir, name), 0o755);
   }
+}
+
+/**
+ * A test's end, failed or not, in the order that leaves nothing behind: a
+ * Ctrl-C at its prompt, which cancels what waits there; its wranglers
+ * stopped, which ends what waits on one; its task awaited, a while at most;
+ * its steps ended. Only then may its directory go.
+ */
+export async function settle(keys: PassThrough, task: Promise<unknown>, steps?: { end(): void }): Promise<void> {
+  keys.write('\x03');
+  stopWranglers();
+  await Promise.race([task.catch(() => {}), new Promise((resolve) => setTimeout(resolve, 5_000).unref())]);
+  steps?.end();
 }
 
 const terminals: PassThrough[] = [];

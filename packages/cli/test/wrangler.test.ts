@@ -14,7 +14,7 @@ import { cloudflareToken, deploymentWrangler, said, stopWranglers } from '../src
 import { editWorker } from '../src/deployment.ts';
 import { templateDir } from '../src/init.ts';
 import { Steps } from '../src/steps.ts';
-import { cancelTerminals, fakeTerminal, realWrangler } from './fakes.ts';
+import { cancelTerminals, fakeTerminal, realWrangler, settle } from './fakes.ts';
 
 // Whatever a failed test leaves waiting, a prompt, a wrangler on its port, goes: this file's process always ends.
 after(() => {
@@ -88,9 +88,10 @@ test("wrangler's login prints the link setup reads, and its listener takes the a
   const restore = isolated(dir);
   const terminal = fakeTerminal();
   const steps = new Steps(terminal.out, ['Sign in to Cloudflare'], () => terminal.keys, String);
+  let signing: Promise<void> = Promise.resolve();
   try {
     const links: string[] = [];
-    const signing = steps.run(0, async (step) => (await cloudflareToken(deploymentWrangler(dir), step, (_label, address) => links.push(address)), 'Signed in'));
+    signing = steps.run(0, async (step) => (await cloudflareToken(deploymentWrangler(dir), step, (_label, address) => links.push(address)), 'Signed in'));
     signing.catch(() => {});
     const refused = assert.rejects(signing);
     for (let tries = 0; links.length === 0; tries += 1) {
@@ -114,7 +115,8 @@ test("wrangler's login prints the link setup reads, and its listener takes the a
       return true;
     });
   } finally {
-    steps.end();
+    // However it ended: the sign-in cancelled and wrangler stopped, off port 8976, before the directory goes (deployment's after).
+    await settle(terminal.keys, signing, steps);
     restore();
   }
 });
