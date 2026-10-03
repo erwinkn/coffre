@@ -21,7 +21,7 @@ function memory(initial: Checked = {}) {
 test('a database behind its code is said in one line, with what to run', () => {
   assert.equal(
     noticeFor(ORIGIN, behind),
-    'https://coffre.example runs coffre 0.1.12, and 1 database migration is pending (0001_remove_syncs): run `coffre migrate`',
+    '1 migration pending on https://coffre.example (0001_remove_syncs): run `coffre migrate`',
   );
 });
 
@@ -84,7 +84,7 @@ test('a command run by an owner says so on stderr, once a day; and nothing once 
     );
     const first = await projects(origin, home);
     assert.equal(first.code, 0, first.stderr);
-    assert.match(first.stderr, /1 database migration is pending \(0001_remove_syncs\): run `coffre migrate`/);
+    assert.match(first.stderr, /1 migration pending on http:\/\/127\.0\.0\.1:\d+ \(0001_remove_syncs\): run `coffre migrate`/);
     assert.equal((await projects(origin, home)).stderr, '', 'once a day');
 
     instance = current;

@@ -32,10 +32,7 @@ export function install(dir: string): Promise<void> {
   return (async () => {
     const ran = (await attempt('pnpm', ['install'])) ?? (await attempt('corepack', ['pnpm', 'install']));
     if (ran === null) throw new Error('pnpm is not installed: corepack enable, or npm install -g pnpm, then run setup again');
-    if (ran.code !== 0) {
-      const tail = ran.output.trim().split('\n').slice(-3).join(' ');
-      throw new Error(`pnpm install failed: ${tail}`);
-    }
+    if (ran.code !== 0) throw new Error(installFailure(ran.output));
   })();
 }
 
@@ -65,6 +62,24 @@ export function bumpPins(dir: string, version: string): void {
     }
   }
   writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`);
+}
+
+/**
+ * Why pnpm install failed, in a sentence. The deployment's minimumReleaseAge
+ * holds back every package published within the week, coffre's own
+ * excepted, and that includes what coffre's packages depend on: say which,
+ * and what to do, rather than pnpm's last lines.
+ */
+export function installFailure(output: string): string {
+  if (output.includes('MINIMUM_RELEASE_AGE')) {
+    const held = [...output.matchAll(/^\s*(\S+@\d\S*) was published at/gm)].map((match) => match[1]!);
+    return (
+      `pnpm held back ${held.length === 0 ? 'packages' : held.join(', ')}: published within this deployment's ` +
+      'minimumReleaseAge (pnpm-workspace.yaml), a week. Install again once they are a week old, ' +
+      'or add them to minimumReleaseAgeExclude if you trust them'
+    );
+  }
+  return `pnpm install failed: ${output.trim().split('\n').slice(-3).join(' ')}`;
 }
 
 /** What setup reads of a Worker's wrangler.jsonc. */

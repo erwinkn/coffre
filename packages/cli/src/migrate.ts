@@ -110,7 +110,7 @@ export async function migrate(args: string[], connect: (url: string | undefined)
     const { url, secrets: typed } = await readDatabaseUrl(out, s, {
       variable: URL_VARIABLE,
       question: "The database owner's connection string",
-      hint: "Hidden as you type. The direct Postgres URL of the login that owns coffre's tables, not a runtime login's or Hyperdrive's.",
+      hint: "Hidden as you type. The login that owns coffre's tables, direct: not a runtime login, not Hyperdrive.",
       command: 'coffre migrate',
     });
     secrets.push(...typed);

@@ -14,8 +14,8 @@ export function noticeFor(origin: string, instance: InstanceState | null): strin
   if (instance === null) return null;
   const pending = instance.migrations.known.slice(instance.migrations.applied);
   if (pending.length === 0) return null;
-  const what = pending.length === 1 ? `1 database migration is pending (${pending[0]})` : `${pending.length} database migrations are pending (${pending.join(', ')})`;
-  return `${origin} runs coffre ${instance.version}, and ${what}: run \`coffre migrate\``;
+  const what = pending.length === 1 ? '1 migration' : `${pending.length} migrations`;
+  return `${what} pending on ${origin} (${pending.join(', ')}): run \`coffre migrate\``;
 }
 
 /**

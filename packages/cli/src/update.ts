@@ -48,8 +48,10 @@ export function installOf(path: string, roots: { npm: string | null; pnpm: strin
 /** The migrations a deployment's installed coffre ships, through its server's own @coffre/db; null before an install. */
 export function deploymentMigrations(dir: string): string[] | null {
   try {
-    const server = createRequire(join(dir, 'node_modules', '@coffre', 'server', 'package.json'));
-    return journalTags(join(dirname(server.resolve('@coffre/db/migrate')), 'migrations', 'postgres'));
+    // From where pnpm keeps the server, its dependencies beside it; by @coffre/db's package.json,
+    // which every condition resolves alike. Its build copies the migrations into dist.
+    const server = createRequire(realpathSync(join(dir, 'node_modules', '@coffre', 'server', 'package.json')));
+    return journalTags(join(dirname(server.resolve('@coffre/db/package.json')), 'dist', 'migrations', 'postgres'));
   } catch {
     return null;
   }
@@ -61,15 +63,15 @@ function journalTags(folder: string): string[] {
 }
 
 /**
- * What a release adds for the database, said once it is installed: the
- * migrations `after` has and `before` did not.
+ * What moving from version `from` to `to` asks of the database, said once it
+ * is installed: the migrations `after` has and `before` did not.
  */
-export function migrationsAdded(version: string, before: readonly string[], after: readonly string[]): string {
+export function migrationsAdded(from: string, to: string, before: readonly string[], after: readonly string[]): string {
   const added = after.filter((tag) => !before.includes(tag));
-  if (added.length === 0) return `coffre ${version} adds no migration: deploying it is all.`;
+  if (added.length === 0) return `coffre ${to} adds no migration to ${from}'s: deploying it is all.`;
   return (
-    `coffre ${version} adds ${added.length === 1 ? '1 migration' : `${added.length} migrations`} (${listed(added, 'and')}): ` +
-    'after deploying, run `coffre migrate`.'
+    `coffre ${to} adds ${added.length === 1 ? '1 migration' : `${added.length} migrations`} to ${from}'s ` +
+    `(${listed(added, 'and')}): after deploying, run \`coffre migrate\`.`
   );
 }
 
@@ -84,7 +86,13 @@ async function latestVersion(): Promise<string> {
 function globalRoot(manager: 'npm' | 'pnpm'): string | null {
   const ran = spawnSync(manager, ['root', '-g'], { encoding: 'utf8', timeout: 10_000 });
   const root = ran.status === 0 ? ran.stdout.trim() : '';
-  return root === '' ? null : realpathSync(root);
+  if (root === '') return null;
+  // A manager with no global package yet names a root that does not exist.
+  try {
+    return realpathSync(root);
+  } catch {
+    return root;
+  }
 }
 
 /** A command, its output kept to explain a failure. */
@@ -147,6 +155,8 @@ export async function update(args: string[]): Promise<void> {
   );
   // What the database had to know of before, and of after: this CLI's migrations, or the deployment's.
   let before: readonly string[] = (deployment === null ? null : deploymentMigrations(deployment)) ?? KNOWN_MIGRATIONS.postgres;
+  // The version those are: the deployment's, or this CLI's.
+  const from = deployment !== null && pinned.length === 1 ? pinned[0]! : current;
   let after: readonly string[] | null = null;
   let latest = current;
   try {
@@ -183,9 +193,9 @@ export async function update(args: string[]): Promise<void> {
     if (deployment !== null) {
       await steps.run(2, async (step) => {
         if (pinned.length === 1 && pinned[0] === latest) return `This deployment's coffre packages are at ${latest} already`;
-        const from = pinned.length === 1 ? pinned[0] : listed(pinned, 'and');
-        if (!(await ask(`Move this deployment's coffre packages from ${from} to ${latest}, and install them?`, step))) {
-          return { text: `This deployment stays at ${from}`, details: [] };
+        const was = pinned.length === 1 ? pinned[0] : listed(pinned, 'and');
+        if (!(await ask(`Move this deployment's coffre packages from ${was} to ${latest}, and install them?`, step))) {
+          return { text: `This deployment stays at ${was}`, details: [] };
         }
         before = deploymentMigrations(deployment) ?? before;
         bumpPins(deployment, latest);
@@ -193,9 +203,9 @@ export async function update(args: string[]): Promise<void> {
         await install(deployment);
         after = deploymentMigrations(deployment) ?? after;
         return {
-          text: `Moved this deployment from ${from} to ${latest}, and installed it`,
+          text: `Moved this deployment from ${was} to ${latest}, and installed it`,
           // Coffre's own packages are exempt from the deployment's minimumReleaseAge: a fix lands the day it is out.
-          details: [`${listed(Object.keys(pins), 'and')}; your other packages still wait out minimumReleaseAge`],
+          details: [`${Object.keys(pins).length} coffre packages, which minimumReleaseAge lets through at once`],
         };
       });
     }
@@ -210,7 +220,7 @@ export async function update(args: string[]): Promise<void> {
 
   out.write('\n');
   if (after !== null) {
-    out.write(`  ${migrationsAdded(latest, before, after)}\n`);
+    out.write(`  ${migrationsAdded(from, latest, before, after)}\n`);
     if (deployment !== null) {
       const deploy = kind === 'workers' ? '`pnpm run deploy`, or a push for Workers Builds' : 'restarting the server';
       out.write(`  ${s.dim(`Deploy it as you do: ${deploy}.`)}\n`);
