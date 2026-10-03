@@ -49,15 +49,23 @@ export async function until(what: string, probe: () => Promise<boolean>, seconds
 type Passed<T> = string | { detail: string; value: T };
 
 export class Report {
-  readonly #results: { name: string; status: 'ok' | 'FAIL' | 'skip' }[] = [];
+  readonly #results: { name: string; status: 'ok' | 'FAIL' | 'skip'; line: string }[] = [];
   readonly #width: number;
+  readonly #quiet: boolean;
 
-  constructor(width = 19) {
+  /** `quiet`: keep the lines rather than print them, for a check made of checks to sum up. */
+  constructor(width = 19, quiet = false) {
     this.#width = width;
+    this.#quiet = quiet;
   }
 
   get failed(): string[] {
     return this.#results.filter((result) => result.status === 'FAIL').map((result) => result.name);
+  }
+
+  /** Each check's name, what came of it, and its line. */
+  get results(): readonly { name: string; status: 'ok' | 'FAIL' | 'skip'; line: string }[] {
+    return this.#results;
   }
 
   /**
@@ -91,7 +99,8 @@ export class Report {
   }
 
   #print(name: string, status: 'ok' | 'FAIL' | 'skip', line: string, detail?: unknown): void {
-    this.#results.push({ name, status });
+    this.#results.push({ name, status, line });
+    if (this.#quiet) return;
     const text = `  ${status.padEnd(5)} ${name.padEnd(this.#width)} ${line}`;
     if (status !== 'FAIL') {
       console.log(text);

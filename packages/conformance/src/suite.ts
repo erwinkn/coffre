@@ -12,6 +12,7 @@ import { refusedCheckpoint, missingCheckpoint, middleCut } from './checks/readin
 import { editedGeneration, forgedCredential, forgedIdentity, forgedApproval } from './checks/signin.ts';
 import { canaryScan } from './checks/canaries.ts';
 import { anonymousChecks, tokenChecks, type Canary } from './checks/live.ts';
+import { type Approve, probeAsUser, probeInterrupted, probeLeftovers, probeRun, signedInChecks } from './checks/probe.ts';
 import { pageLoad, personas, setUp, setUpLive, signInAdmin } from './checks/people.ts';
 import { health } from './checks/surface.ts';
 
@@ -36,6 +37,15 @@ export async function conform(deployment: Deployment, options: { bulkLimit: numb
   await report.check('cross-site', all, ({ people, canaries }) => crossSite(people, canaries));
   const live = await report.check('live setup', { admin, canaries }, ({ admin, canaries }) => setUpLive(admin, canaries));
   await tokenChecks(report, deployment.origin, live ?? {});
+  // `probe --sign-in`, as an owner runs it against an instance: a user is turned away, two runs, and what stays.
+  const origin = deployment.origin;
+  const before = await report.check('probe as a user', { admin, people }, ({ admin, people }) => probeAsUser(origin, people.reader, admin));
+  const first = await report.check('probe --sign-in', { admin, before }, ({ admin }) => probeRun(origin, admin));
+  const second = await report.check('probe again', { admin, first }, ({ admin }) => probeRun(origin, admin));
+  await report.check('probe interrupted', { admin, second }, ({ admin }) => probeInterrupted(origin, admin));
+  await report.check('probe leftovers', { admin, before, first, second, live }, ({ admin, before, first, second, live }) =>
+    probeLeftovers(origin, admin, [first, second], before, live.canary),
+  );
   await report.check('offboarding', all, ({ people, canaries }) => offboarding(deployment, people, canaries));
   await report.check('bulk limit', { people }, ({ people }) => bulkLimit(people, options.bulkLimit));
 
@@ -74,12 +84,14 @@ export async function conform(deployment: Deployment, options: { bulkLimit: numb
 
 /**
  * What can be checked of an instance someone else runs: as no one, and with
- * a token that reads a canary when given one. Nothing is written but the
- * audit log's entries for the token's reads.
+ * a token that reads a canary when given one, or, with `signIn`, as an owner
+ * who signs the probe in and lets it set up its own token. With a token,
+ * nothing is written but the audit log's entries for the token's reads.
  */
-export async function probe(origin: string, live: { token?: string; canary?: Canary }): Promise<string[]> {
+export async function probe(origin: string, live: { token?: string; canary?: Canary; signIn?: Approve }): Promise<string[]> {
   const report = new Report();
   await anonymousChecks(report, origin, { health: true });
-  if (live.token !== undefined) await tokenChecks(report, origin, live);
+  if (live.signIn !== undefined) await signedInChecks(report, origin, live.signIn);
+  else if (live.token !== undefined) await tokenChecks(report, origin, live);
   return report.failed;
 }
