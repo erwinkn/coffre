@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+Deployments pin pnpm: `coffre init` writes `"packageManager": "pnpm@11.8.0"`,
+and `coffre update` adds it to a deployment that lacks it, so every
+install, Workers Builds' included, holds `minimumReleaseAge` alike. When
+pnpm holds a package back, `coffre update` says when it is old enough, and
+offers to wait or to let it through by name until then, never silently.
+
 `coffre update` and `coffre migrate` upgrade a deployment: update the CLI
 and the deployment's coffre packages, deploy, then migrate the database
 with the owner's URL, asked for at a hidden prompt. `coffre migrate` first

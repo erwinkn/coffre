@@ -27,7 +27,10 @@ A package imports another only by name (`@coffre/core/vault`, never
 `src`, `test` and `scripts` to it, so each package builds, ships and can be
 internalized into a deployment on its own. The `@coffre/*` dependencies are
 `workspace:*` and every package carries one version: `pnpm bump <version>` moves
-them all and the examples' pins, and `pnpm check:pins` fails on any drift.
+them all and the examples' pins, and says whether any dependency the release
+pins is younger than the week deployments wait, for the release notes;
+`pnpm check:pins` fails on any drift, including the examples' `packageManager`,
+which must be the workspace's pnpm.
 
 Every package's `exports` lists a `coffre:source` condition first, pointing at
 `src/*.ts`. Inside the workspace, dev, tests and typecheck turn it on and read the

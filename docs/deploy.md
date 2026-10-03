@@ -108,6 +108,17 @@ Three steps, in this order, for every release:
    migration (0001_remove_syncs): after deploying, run `coffre migrate`". The
    deployment's `minimumReleaseAge` exempts `@coffre/*`, so a fix installs the
    day it is published; your other packages still wait a week.
+
+   It also pins the deployment's pnpm, `packageManager` in its package.json,
+   to the one coffre installs with, as `coffre init` writes it: then your
+   machine, CI and Workers Builds install with the same pnpm, and each holds
+   `minimumReleaseAge` alike. Without it, Workers Builds picks a pnpm of its
+   own, and a lockfile one pnpm wrote can fail another's check. If pnpm
+   still holds a package back, `coffre update` says when each is old enough
+   and offers two choices: wait, the deployment left as it was, or let those
+   packages through by name, each until it is old enough, in
+   `pnpm-workspace.yaml`. The first `coffre update` after that date removes
+   them. With `--yes` it waits: it never lets a package through unasked.
 2. **Deploy** as you do: `pnpm run deploy` (the vault, then the app), a push
    for Workers Builds, or a restart on Node. Each release says whether it runs
    on the schema before its migrations; 0.1.12 does.

@@ -3,7 +3,7 @@
 // the release changes for the database: the migrations it adds, which
 // `coffre migrate` applies once the new version is deployed.
 import { spawn, spawnSync } from 'node:child_process';
-import { readFileSync, realpathSync } from 'node:fs';
+import { readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,7 +11,18 @@ import { parseArgs } from 'node:util';
 
 import { KNOWN_MIGRATIONS } from '@coffre/db/schema-version';
 
-import { bumpPins, coffrePins, deploymentKind, install } from './deployment.ts';
+import {
+  bumpPins,
+  coffrePins,
+  deploymentKind,
+  excludeUntil,
+  HeldBack,
+  install,
+  minimumReleaseAge,
+  pinPackageManager,
+  removeCleared,
+} from './deployment.ts';
+import { templateDir, type Kind } from './init.ts';
 import { StepFailed, Steps } from './steps.ts';
 import { Cancelled, listed, openTerminal, type Output, release, style } from './tty.ts';
 import { cliVersion } from './version.ts';
@@ -192,20 +203,71 @@ export async function update(args: string[]): Promise<void> {
     });
     if (deployment !== null) {
       await steps.run(2, async (step) => {
-        if (pinned.length === 1 && pinned[0] === latest) return `This deployment's coffre packages are at ${latest} already`;
-        const was = pinned.length === 1 ? pinned[0] : listed(pinned, 'and');
-        if (!(await ask(`Move this deployment's coffre packages from ${was} to ${latest}, and install them?`, step))) {
-          return { text: `This deployment stays at ${was}`, details: [] };
+        const details: string[] = [];
+        // Exclusions an earlier run wrote, whose packages have cleared since: gone first.
+        const cleared = removeCleared(deployment, new Date());
+        if (cleared.length > 0) details.push(`No longer excluded from minimumReleaseAge, now old enough: ${listed(cleared, 'and')}`);
+        const pnpm = templatePackageManager(kind as Kind);
+        const repin = pnpm !== null && coffrePackageManager(deployment) !== pnpm;
+        const current = pinned.length === 1 && pinned[0] === latest;
+        if (current && !repin) {
+          return { text: `This deployment's coffre packages are at ${latest} already`, details };
         }
+        const was = pinned.length === 1 ? pinned[0]! : listed(pinned, 'and');
+        const on = pnpm?.replace('@', ' ');
+        const question = current
+          ? `Pin this deployment to ${on}, as coffre installs with, and install it?`
+          : `Move this deployment from ${was} to ${latest}${repin ? `, on ${on},` : ''} and install it?`;
+        if (!(await ask(question, step))) return { text: `This deployment stays as it is, at ${was}`, details };
+
         before = deploymentMigrations(deployment) ?? before;
+        const manifest = join(deployment, 'package.json');
+        const saved = readFileSync(manifest, 'utf8');
         bumpPins(deployment, latest);
+        if (repin) {
+          const replaced = pinPackageManager(deployment, pnpm!);
+          details.push(`Pinned ${pnpm}${replaced ? `, not ${replaced}` : ''}: every install, here, in CI and on Workers Builds, holds minimumReleaseAge alike`);
+        }
         step.note(`Installing coffre ${latest}'s packages, with pnpm`);
-        await install(deployment);
+        try {
+          await install(deployment);
+        } catch (error) {
+          if (!(error instanceof HeldBack)) throw error;
+          // Too new for this deployment's minimumReleaseAge: wait until each clears, or say which to let through, and until when.
+          const age = minimumReleaseAge(deployment);
+          const clears = error.held
+            .map(({ spec, publishedAt }) => ({ spec, clears: new Date(publishedAt.getTime() + age * 60_000) }))
+            .sort((x, y) => x.clears.getTime() - y.clears.getTime());
+          const last = clears.at(-1)!.clears;
+          const lines = clears.map(({ spec, clears: at }) => `${spec}, old enough from ${when(at)}`);
+          const held = `pnpm holds back ${clears.length === 1 ? '1 package' : `${clears.length} packages`} younger than this deployment's minimumReleaseAge, ${days(age)}`;
+          if (yes || keys() === null) {
+            writeFileSync(manifest, saved);
+            throw new Error(`${held}: ${lines.join('; ')}. Run coffre update after ${when(last)}, or on a terminal to exclude them until then`);
+          }
+          step.under(lines);
+          const choice = await step.choose(held, [
+            `Wait: stay at ${was}, and run coffre update again after ${when(last)}`,
+            `Proceed: let ${clears.length === 1 ? 'it' : 'these'} through until each is old enough, named in pnpm-workspace.yaml`,
+          ]);
+          step.under([]);
+          if (choice === 0) {
+            writeFileSync(manifest, saved);
+            return { text: `This deployment stays at ${was}, until ${when(last)}`, details: [...details, ...lines, `Run coffre update again after ${when(last)}`] };
+          }
+          excludeUntil(deployment, clears, `for coffre ${latest}`);
+          step.note(`Installing coffre ${latest}'s packages, with pnpm`);
+          await install(deployment);
+          details.push(
+            'Let through until each is old enough, named in pnpm-workspace.yaml:',
+            ...clears.map(({ spec, clears: at }) => `  ${spec}, until ${when(at)}`),
+            `The first coffre update after ${when(last)} removes them`,
+          );
+        }
         after = deploymentMigrations(deployment) ?? after;
         return {
-          text: `Moved this deployment from ${was} to ${latest}, and installed it`,
-          // Coffre's own packages are exempt from the deployment's minimumReleaseAge: a fix lands the day it is out.
-          details: [`${Object.keys(pins).length} coffre packages, which minimumReleaseAge lets through at once`],
+          text: current ? `Pinned ${pnpm}, and installed it` : `Moved this deployment from ${was} to ${latest}, and installed it`,
+          details,
         };
       });
     }
@@ -227,6 +289,29 @@ export async function update(args: string[]): Promise<void> {
     }
     out.write('\n');
   }
+}
+
+/** The pnpm coffre installs with, as the template of a deployment of `kind` pins it. */
+function templatePackageManager(kind: Kind): string | null {
+  try {
+    return (JSON.parse(readFileSync(join(templateDir(kind), 'package.json'), 'utf8')) as { packageManager?: string }).packageManager ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function coffrePackageManager(dir: string): string | undefined {
+  return (JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as { packageManager?: string }).packageManager;
+}
+
+/** A moment, to the minute, in UTC: when a package is old enough. */
+export function when(date: Date): string {
+  return `${date.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+}
+
+function days(minutes: number): string {
+  const d = minutes / (24 * 60);
+  return Number.isInteger(d) ? `${d} day${d === 1 ? '' : 's'}` : `${minutes} minutes`;
 }
 
 function finish(out: Output, message: string, code: number): never {
