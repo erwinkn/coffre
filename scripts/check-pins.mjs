@@ -40,9 +40,17 @@ try {
     problems.push(error.message);
 }
 
+// The one pnpm: the workspace's, which the examples pin too, so that a
+// deployment `init` writes installs with it everywhere, Workers Builds and
+// CI included, and each enforces minimumReleaseAge alike.
+const pnpm = read('package.json').packageManager;
+
 for (const manifest of manifests) {
     const pkg = read(manifest);
     const inWorkspace = !manifest.startsWith('examples/');
+    if (!inWorkspace && pkg.packageManager !== pnpm) {
+        problems.push(`${manifest}: packageManager ${pkg.packageManager ?? 'missing'} is not ${pnpm}, the workspace's`);
+    }
     if (manifest.startsWith('packages/') && pkg.version !== version) {
         problems.push(`${manifest}: version ${pkg.version} is not ${version}, the other packages'`);
     }

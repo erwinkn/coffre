@@ -32,7 +32,10 @@ export function install(dir: string): Promise<void> {
   return (async () => {
     const ran = (await attempt('pnpm', ['install'])) ?? (await attempt('corepack', ['pnpm', 'install']));
     if (ran === null) throw new Error('pnpm is not installed: corepack enable, or npm install -g pnpm, then run setup again');
-    if (ran.code !== 0) throw new Error(installFailure(ran.output));
+    if (ran.code !== 0) {
+      const held = heldBack(ran.output);
+      throw held.length > 0 ? new HeldBack(held, installFailure(ran.output)) : new Error(installFailure(ran.output));
+    }
   })();
 }
 
@@ -62,6 +65,103 @@ export function bumpPins(dir: string, version: string): void {
     }
   }
   writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`);
+}
+
+/** A package pnpm would not install yet, and when it was published. */
+export type Held = { spec: string; publishedAt: Date };
+
+/** pnpm install refused packages younger than the deployment's minimumReleaseAge. */
+export class HeldBack extends Error {
+  readonly held: Held[];
+
+  constructor(held: Held[], message: string) {
+    super(message);
+    this.held = held;
+  }
+}
+
+/** The packages pnpm held back, as its error names them. */
+export function heldBack(output: string): Held[] {
+  if (!output.includes('MINIMUM_RELEASE_AGE')) return [];
+  return [...output.matchAll(/^\s*(\S+@\d\S*) was published at (\S+?),?\s/gm)].map((match) => ({
+    spec: match[1]!,
+    publishedAt: new Date(match[2]!),
+  }));
+}
+
+/** The deployment's minimumReleaseAge, in minutes, as its pnpm-workspace.yaml sets it; pnpm's own default, none, without one. */
+export function minimumReleaseAge(dir: string): number {
+  const path = join(dir, 'pnpm-workspace.yaml');
+  const match = existsSync(path) ? /^minimumReleaseAge:\s*(\d+)/m.exec(readFileSync(path, 'utf8')) : null;
+  return match === null ? 0 : Number(match[1]);
+}
+
+/** How every temporary exclusion `coffre update` writes ends: with when it lapses. */
+const EXCLUDED = /^\s*- '([^']+)' # coffre update: until (\S+)/;
+
+/**
+ * Exclude `held` from minimumReleaseAge, each until it clears, named in the
+ * deployment's pnpm-workspace.yaml with that date: never silently, and
+ * removed by `removeCleared` once the date has passed.
+ */
+export function excludeUntil(dir: string, held: { spec: string; clears: Date }[], reason: string): void {
+  const path = join(dir, 'pnpm-workspace.yaml');
+  const lines = (existsSync(path) ? readFileSync(path, 'utf8') : '').replace(/\n*$/, '').split('\n');
+  const entries = held.map(({ spec, clears }) => `  - '${spec}' # coffre update: until ${clears.toISOString()}, ${reason}`);
+  const key = lines.findIndex((line) => /^minimumReleaseAgeExclude:/.test(line));
+  if (key === -1) {
+    lines.push('minimumReleaseAgeExclude:', ...entries);
+  } else {
+    let end = key + 1;
+    while (end < lines.length && /^\s+(-|#)/.test(lines[end]!)) end++;
+    lines.splice(end, 0, ...entries);
+  }
+  writeFileSync(path, `${lines.join('\n')}\n`);
+}
+
+/** Remove the exclusions `excludeUntil` wrote whose date has passed; the packages they named. */
+export function removeCleared(dir: string, now: Date): string[] {
+  const path = join(dir, 'pnpm-workspace.yaml');
+  if (!existsSync(path)) return [];
+  const removed: string[] = [];
+  const kept = readFileSync(path, 'utf8')
+    .split('\n')
+    .filter((line) => {
+      const match = EXCLUDED.exec(line);
+      if (match === null || new Date(match[2]!.replace(/,$/, '')) > now) return true;
+      removed.push(match[1]!);
+      return false;
+    });
+  if (removed.length > 0) writeFileSync(path, kept.join('\n'));
+  return removed;
+}
+
+/**
+ * The pnpm a deployment runs, `packageManager` in its package.json, set to
+ * `wanted`, coffre's: then a laptop, CI and Workers Builds all install with
+ * one pnpm, which holds minimumReleaseAge alike. The value it had, when it
+ * changed; null when it was right already.
+ */
+export function pinPackageManager(dir: string, wanted: string): string | undefined | null {
+  const path = join(dir, 'package.json');
+  const manifest = JSON.parse(readFileSync(path, 'utf8')) as { packageManager?: string } & Record<string, unknown>;
+  if (manifest.packageManager === wanted) return null;
+  const was = manifest.packageManager;
+  let next: Record<string, unknown>;
+  if (was !== undefined) {
+    next = { ...manifest, packageManager: wanted };
+  } else {
+    // New: after "private", or "name", as the examples have it.
+    const after = 'private' in manifest ? 'private' : 'name';
+    next = {};
+    for (const [field, value] of Object.entries(manifest)) {
+      next[field] = value;
+      if (field === after) next.packageManager = wanted;
+    }
+    next.packageManager ??= wanted;
+  }
+  writeFileSync(path, `${JSON.stringify(next, null, 2)}\n`);
+  return was;
 }
 
 /**
