@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# `coffre setup` against disposable clusters: as a superuser, and as an
+# `coffre setup` and `coffre migrate` against disposable clusters: as a superuser, and as an
 # owner such as managed hosts give, with CREATEROLE but not superuser. Roles
 # are cluster-wide, and setup creates coffre's and sets their passwords, so
 # never against the shared dev cluster. A second cluster holds a second
@@ -25,4 +25,4 @@ for container in "${containers[@]}"; do
     urls+=("postgresql://postgres:local-setup-only@127.0.0.1:$(docker port "$container" 5432/tcp | cut -d: -f2)")
 done
 COFFRE_TEST_SETUP_CLUSTER="${urls[0]}" COFFRE_TEST_SETUP_OTHER_CLUSTER="${urls[1]}" \
-    node --conditions=coffre:source --test --test-concurrency=1 packages/cli/test/setup.test.ts packages/cli/test/setup-workers.test.ts
+    node --conditions=coffre:source --test --test-concurrency=1 packages/cli/test/setup.test.ts packages/cli/test/setup-workers.test.ts packages/cli/test/migrate.test.ts

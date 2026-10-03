@@ -4,7 +4,10 @@ import type { Permission } from '@coffre/core/access';
 import { isUniqueViolation } from '@coffre/db/dialect';
 import { environments, projects } from '@coffre/db/schema';
 
-import { distinctSecretCounts, insert, places, update, type ResolvedPath } from '../db/queries.ts';
+import { knownMigrations } from '@coffre/db/schema-version';
+
+import { appliedMigrations, distinctSecretCounts, insert, places, update, type ResolvedPath } from '../db/queries.ts';
+import { COFFRE_VERSION } from '../version.ts';
 import { can, canAnywhere, permissionsAt, seesProject } from './caller.ts';
 import { allowed, audited, denied, Refusal, requireOwner, type ApiContext } from './context.ts';
 import { conflict, notFound } from './errors.ts';
@@ -23,7 +26,16 @@ export type Me = {
   canReadAudit: boolean;
   /** Every live environment the caller holds something in, and what. */
   environments: { project: string; environment: string; permissions: Permission[] }[];
+  /**
+   * The deployment, for owners and root admins only, who upgrade it: the
+   * version of coffre it runs, and its database's migrations, the first
+   * `applied` of `known`, which are this version's. Null for anyone else:
+   * versions tell an attacker what to try.
+   */
+  instance: InstanceState | null;
 };
+
+export type InstanceState = { version: string; migrations: { applied: number; known: string[] } };
 
 export type ProjectEnvironmentSummary = {
   slug: string;
@@ -80,6 +92,15 @@ export async function me(ctx: ApiContext): Promise<Me> {
     isRootAdmin: caller.isRootAdmin,
     canReadAudit: caller.isOwner || canAnywhere(caller, 'audit.read'),
     environments: reachable,
+    instance: caller.isOwner || caller.isRootAdmin ? await instanceState(ctx) : null,
+  };
+}
+
+/** The version this server runs, and how far its database's migrations are (`appliedMigrations`, as readiness counts them). */
+async function instanceState(ctx: ApiContext): Promise<InstanceState> {
+  return {
+    version: COFFRE_VERSION,
+    migrations: { applied: await appliedMigrations(ctx.db), known: [...knownMigrations(ctx.db)] },
   };
 }
 

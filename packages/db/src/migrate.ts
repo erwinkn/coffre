@@ -185,15 +185,45 @@ async function sqliteMigrator(url: string): Promise<Migrator> {
   };
 }
 
-/** A migration run's plan: `applied` of the `total` migrations there before it, the rest applied by it. */
-export type MigrationPlan = { applied: number; total: number };
+/**
+ * A migration run's plan: `applied` of the `total` migrations there before
+ * it, and the tags of the rest, which it applies.
+ */
+export type MigrationPlan = { applied: number; total: number; pending: string[] };
+
+/**
+ * Which of this version's migrations a database has applied, and which it
+ * has not, without changing it or waiting on a migration under way. A
+ * history that is not a prefix of this version's is refused, as
+ * `migrateDatabase` refuses it.
+ */
+export async function migrationStatus(url: string): Promise<{ applied: string[]; pending: string[] }> {
+  const engine = engineOfUrl(url);
+  const expected = await expectedMigrations(engine);
+  const migrator = await { postgres: postgresMigrator, sqlite: sqliteMigrator }[engine](url);
+  try {
+    const history = await migrator.applied();
+    verifyHistory(expected, history, false);
+    const applied = history?.length ?? 0;
+    return {
+      applied: expected.slice(0, applied).map((entry) => entry.tag),
+      pending: expected.slice(applied).map((entry) => entry.tag),
+    };
+  } finally {
+    await migrator.close();
+  }
+}
 
 /**
  * Apply missing migrations, check their history and reassert database
- * privileges. `onPlan` hears how many there are to apply before they are:
- * all of them go in one call, with no word of each.
+ * privileges. `onPlan` hears what there is to apply before it is, under
+ * the migration lock, and may stop the run by throwing: all of it then goes
+ * in one call, with no word of each.
  */
-export async function migrateDatabase(url: string, onPlan?: (plan: MigrationPlan) => void): Promise<void> {
+export async function migrateDatabase(
+  url: string,
+  onPlan?: (plan: MigrationPlan) => void | Promise<void>,
+): Promise<void> {
   const engine = engineOfUrl(url);
   const expected = await expectedMigrations(engine);
   const migrator = await { postgres: postgresMigrator, sqlite: sqliteMigrator }[engine](url);
@@ -205,7 +235,8 @@ export async function migrateDatabase(url: string, onPlan?: (plan: MigrationPlan
 
     const applied = await migrator.applied();
     verifyHistory(expected, applied, false);
-    onPlan?.({ applied: applied?.length ?? 0, total: expected.length });
+    const done = applied?.length ?? 0;
+    await onPlan?.({ applied: done, total: expected.length, pending: expected.slice(done).map((entry) => entry.tag) });
     await migrator.migrate(migrationsFolder(engine));
     verifyHistory(expected, await migrator.applied(), true);
     await migrator.restrict();

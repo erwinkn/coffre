@@ -53,6 +53,8 @@ export class Steps {
   /** The first step still redrawn: those above it have settled, and been printed for good. */
   #from = 0;
   #timer: NodeJS.Timeout | null = null;
+  /** Whether the failed step has been printed, where nothing is redrawn. */
+  #reported = false;
   readonly #restoreCursor = () => this.#out.write('\x1b[?25h');
   /** Ctrl-C while a step runs, the terminal in its usual mode: the cursor back, then out, with nothing more to show. */
   readonly #interrupt = () => {
@@ -271,8 +273,12 @@ export class Steps {
     this.#timer = null;
     this.#draw();
     if (!this.#s.ansi) {
+      // Once: a failure stops the list, and ending it stops it again.
       const failed = this.#steps.find((each) => each.status === 'failed');
-      if (failed !== undefined) this.#out.write(`✗ ${failed.text}\n${failed.details.map((line) => `  ${line}\n`).join('')}`);
+      if (failed !== undefined && !this.#reported) {
+        this.#reported = true;
+        this.#out.write(`✗ ${failed.text}\n${failed.details.map((line) => `  ${line}\n`).join('')}`);
+      }
     } else if (this.#steps.some((each) => each.status === 'failed')) {
       this.#release();
     }

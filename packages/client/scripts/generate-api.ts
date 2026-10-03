@@ -27,6 +27,7 @@ const NAMED = {
   DryRunOutcome: 'api/secrets.ts',
   DryRunResult: 'api/secrets.ts',
   IdentityRow: 'api/signin.ts',
+  InstanceState: 'api/projects.ts',
   Me: 'api/projects.ts',
   Member: 'api/members.ts',
   OffboardingReport: 'api/members.ts',

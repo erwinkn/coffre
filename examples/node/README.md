@@ -62,8 +62,10 @@ With AWS KMS instead of a key of your own, the vault also needs a
 To do the same by hand, see
 [deploy.md](https://github.com/erwinkn/coffre/blob/main/docs/deploy.md#appendix-the-database-by-hand).
 
-Run `pnpm migrate`, with the administrator's URL in `DATABASE_URL`, after
-every package upgrade, before starting either process.
+To upgrade: `coffre update` here, restart both processes, then `coffre migrate`
+([upgrading](https://github.com/erwinkn/coffre/blob/main/docs/deploy.md#upgrading)).
+For automation, `pnpm migrate`, with the administrator's URL in
+`DATABASE_URL`, does the last step.
 
 For tests and local development only, both URLs may instead name the same
 absolute SQLite file, e.g. `file:/tmp/coffre-local.db`; migrate that URL once

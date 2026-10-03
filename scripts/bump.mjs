@@ -10,6 +10,8 @@
 import { readdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { bumpPins } from '../packages/cli/src/deployment.ts';
+
 const root = new URL('..', import.meta.url).pathname;
 const version = process.argv[2];
 if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version ?? '')) {
@@ -34,13 +36,8 @@ for (const manifest of manifests('packages')) {
         pkg.version = version;
     });
 }
-for (const manifest of manifests('examples')) {
-    edit(manifest, (pkg) => {
-        for (const field of ['dependencies', 'devDependencies']) {
-            for (const name of Object.keys(pkg[field] ?? {})) {
-                if (name.startsWith('@coffre/')) pkg[field][name] = version;
-            }
-        }
-    });
+// The examples as `coffre update` moves a deployment: every @coffre/* pin.
+for (const example of readdirSync(join(root, 'examples'))) {
+    if (existsSync(join(root, 'examples', example, 'package.json'))) bumpPins(join(root, 'examples', example), version);
 }
 console.log(`coffre ${version}: every package and both examples. Run pnpm install to relink the examples.`);

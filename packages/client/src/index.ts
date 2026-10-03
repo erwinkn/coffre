@@ -19,6 +19,7 @@ export type {
   DryRunOutcome,
   DryRunResult,
   IdentityRow,
+  InstanceState,
   Me,
   Member,
   OffboardingReport,

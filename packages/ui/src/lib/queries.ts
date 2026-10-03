@@ -268,6 +268,8 @@ export function shellOf(
     projects: listed,
     capabilities: deriveUiCapabilities(member, listed),
     registrationRequired: me !== null && !me.registered,
+    /** The deployment's version and migrations: told to owners and root admins only. */
+    instance: member?.instance ?? null,
     /** A member the vault refuses: their record failed its integrity check. */
     accessTampered: me?.tampered === true,
   };
