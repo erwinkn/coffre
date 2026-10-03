@@ -13,7 +13,7 @@ case "$COFFRE_TEST_ENGINE" in
     postgres)
         export COFFRE_TEST_DATABASE="$(node --input-type=module -e '
             import { randomBytes } from "node:crypto";
-            const base = (process.env.COFFRE_TEST_DATABASE ?? "coffre_test").replace(/[^a-zA-Z0-9_]/g, "_").slice(0, 32);
+            const base = (process.env.COFFRE_TEST_DATABASE || "coffre_test").replace(/[^a-zA-Z0-9_]/g, "_").slice(0, 32);
             console.log(`${base}_${randomBytes(8).toString("hex")}`);
         ')"
         trap 'node scripts/test-databases.mjs cleanup "$COFFRE_TEST_DATABASE"' EXIT
