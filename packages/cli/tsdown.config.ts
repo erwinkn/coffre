@@ -4,11 +4,14 @@ import { defineConfig } from 'tsdown';
 // here, are bundled in. `coffre setup` is a chunk of its own, with the
 // Postgres driver and the migrator, which scripts/copy-migrations.ts puts
 // the migrations beside. It refuses SQLite before reaching its driver, which
-// stays out, as does pg's optional native binding.
+// stays out, as does pg's optional native binding. jsonc-parser's `main` is
+// a UMD build that requires its parts at run time, which a bundle cannot
+// follow: its ES modules are bundled instead.
 export default defineConfig({
   entry: ['src/main.ts'],
   platform: 'node',
   dts: false,
   fixedExtension: false,
   external: [/^@libsql\//, /^drizzle-orm\/libsql/, 'pg-native'],
+  alias: { 'jsonc-parser': 'jsonc-parser/lib/esm/main.js' },
 });

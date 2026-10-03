@@ -51,6 +51,12 @@ that the app, which faces the network, never holds what decrypts a value:
 To do the same by hand, see
 [deploy.md](https://github.com/erwinkn/coffre/blob/main/docs/deploy.md#appendix-the-database-by-hand).
 
+On a terminal, setup then offers to do Cloudflare too: it signs you in, makes
+the Hyperdrive configs and the GitHub App, fills in both `wrangler.jsonc`,
+and deploys, with the keys as secrets. That is sections 1, 3 and 4 below,
+and the database URLs then go straight to Hyperdrive, unshown
+([deploy.md](https://github.com/erwinkn/coffre/blob/main/docs/deploy.md#setup-does-cloudflare-too)).
+
 ## 3. Hyperdrive and secrets
 
 Run the two `wrangler hyperdrive create` commands from setup's screen: one

@@ -18,4 +18,4 @@ for attempt in $(seq 60); do
 done
 port="$(docker port "$container" 5432/tcp | cut -d: -f2)"
 COFFRE_TEST_SETUP_CLUSTER="postgresql://postgres:local-setup-only@127.0.0.1:$port" \
-    node --conditions=coffre:source --test --test-concurrency=1 packages/cli/test/setup.test.ts
+    node --conditions=coffre:source --test --test-concurrency=1 packages/cli/test/setup.test.ts packages/cli/test/setup-workers.test.ts

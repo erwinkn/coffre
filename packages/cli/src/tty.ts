@@ -104,6 +104,11 @@ export function paragraph(out: Output, text: string, indent = 2): string {
   return wrap(text, Math.max(20, (out.columns || 80) - indent - 1)).map((line) => `${pad}${line}`).join('\n');
 }
 
+/** "a, b or c". */
+export function listed(items: readonly string[], last: 'and' | 'or'): string {
+  return items.length < 2 ? items.join('') : `${items.slice(0, -1).join(', ')} ${last} ${items.at(-1)}`;
+}
+
 /** A labelled row: `label` in a column of `column`, `text` wrapped beside it with a hanging indent. */
 export function row(out: Output, s: Style, label: string, text: string, indent = 4, column = 10): string {
   const lines = wrap(text, Math.max(20, (out.columns || 80) - indent - column - 1));
@@ -144,25 +149,119 @@ export function release(keys: Keyboard): void {
   if (keys !== process.stdin) keys.destroy?.();
 }
 
-/** Every key pressed, in raw mode, until `until` returns true. */
-export function readKeys(keys: Keyboard, until: (key: Key, sequence: string) => boolean | Promise<boolean>): Promise<void> {
+/** Every key pressed, in raw mode, until `until` returns true, or `signal` aborts the reading. */
+export function readKeys(
+  keys: Keyboard,
+  until: (key: Key, sequence: string) => boolean | Promise<boolean>,
+  signal?: AbortSignal,
+): Promise<void> {
   emitKeypressEvents(keys);
   keys.setRawMode?.(true);
   keys.resume();
   return new Promise((resolve, reject) => {
     let busy = Promise.resolve();
+    const stop = () => {
+      keys.off('keypress', onKey);
+      signal?.removeEventListener('abort', stop);
+      keys.setRawMode?.(false);
+      keys.pause();
+      resolve();
+    };
     const onKey = (sequence: string | undefined, key: Key | undefined) => {
       busy = busy.then(async () => {
-        if (await until(key ?? { sequence }, sequence ?? key?.sequence ?? '')) {
-          keys.off('keypress', onKey);
-          keys.setRawMode?.(false);
-          keys.pause();
-          resolve();
-        }
+        if (await until(key ?? { sequence }, sequence ?? key?.sequence ?? '')) stop();
       }).catch(reject);
     };
     keys.on('keypress', onKey);
+    if (signal?.aborted) stop();
+    else signal?.addEventListener('abort', stop);
   });
+}
+
+/** What a typed key does to a line: its new text, or `submit`, or `cancel`. */
+export function edit(text: string, key: Key, sequence: string): string | 'submit' | 'cancel' {
+  if (key.ctrl && key.name === 'c') return 'cancel';
+  if (key.name === 'return' || key.name === 'enter') return 'submit';
+  if (key.name === 'backspace') return text.slice(0, -1);
+  if (key.ctrl && key.name === 'u') return '';
+  if (!key.ctrl && !key.meta && sequence.length > 0 && !sequence.startsWith('\x1b') && sequence >= ' ') return text + sequence;
+  return text;
+}
+
+/**
+ * A question answered by typing, shown as typed, `initial` to start from;
+ * `check` says why an answer will not do, under it. Once given, the
+ * question becomes one line: what was asked, and the answer. Ctrl-C
+ * cancels.
+ */
+export async function textLine(
+  keys: Keyboard,
+  out: Output,
+  s: Style,
+  question: string,
+  hint: string,
+  options: { initial?: string; check?: (answer: string) => string | null } = {},
+): Promise<string> {
+  const columns = Math.max(20, (out.columns || 80) - 1);
+  out.write(`${truncate(`  ${s.accent('?')} ${s.bold(question)} ${s.dim(hint)}`, columns)}\n`);
+  let typed = options.initial ?? '';
+  let error: string | null = null;
+  // The input, then its error below it, the cursor back at the end of the input.
+  const draw = () =>
+    out.write(
+      `\r\x1b[J${error === null ? '' : `\n${truncate(`    ${s.red(error)}`, columns)}\x1b[1A`}\r${truncate(`    ${s.accent('›')} ${typed}`, columns)}`,
+    );
+  draw();
+  let cancelled = false;
+  await readKeys(keys, (key, sequence) => {
+    const next = edit(typed, key, sequence);
+    if (next === 'cancel') cancelled = true;
+    else if (next === 'submit') {
+      if (typed.trim() === '') return false;
+      error = options.check?.(typed.trim()) ?? null;
+      if (error === null) return true;
+    } else {
+      typed = next;
+      error = null;
+    }
+    if (cancelled) return true;
+    draw();
+    return false;
+  });
+  out.write('\r\x1b[J\x1b[1A\x1b[2K');
+  if (cancelled) throw new Cancelled();
+  out.write(`${truncate(`  ${s.green('✓')} ${s.dim(question)}  ${typed.trim()}`, columns)}\n`);
+  return typed.trim();
+}
+
+/** One of `options`, chosen with the arrows and Enter; then one line, as `textLine` leaves. Ctrl-C cancels. */
+export async function select(keys: Keyboard, out: Output, s: Style, question: string, options: readonly string[]): Promise<number> {
+  const columns = Math.max(20, (out.columns || 80) - 1);
+  let at = 0;
+  let drawn = 0;
+  const draw = () => {
+    const lines = [
+      `  ${s.accent('?')} ${s.bold(question)} ${s.dim('↑↓ then Enter')}`,
+      ...options.map((option, i) => (i === at ? `    ${s.accent('›')} ${s.accent(option)}` : `      ${option}`)),
+    ];
+    out.write(`${drawn > 0 ? `\x1b[${drawn}F` : ''}${lines.map((line) => `${truncate(line, columns)}\x1b[K\n`).join('')}`);
+    drawn = lines.length;
+  };
+  draw();
+  let cancelled = false;
+  await readKeys(keys, (key) => {
+    if (key.ctrl && key.name === 'c') cancelled = true;
+    else if (key.name === 'return' || key.name === 'enter') return true;
+    else if (key.name === 'up' || key.name === 'k') at = (at - 1 + options.length) % options.length;
+    else if (key.name === 'down' || key.name === 'j' || key.name === 'tab') at = (at + 1) % options.length;
+    if (cancelled) return true;
+    draw();
+    return false;
+  });
+  out.write(`\x1b[${drawn}F\x1b[J`);
+  if (cancelled) throw new Cancelled();
+  out.write(`${truncate(`  ${s.green('✓')} ${s.dim(question)}  ${options[at]}`, columns)}\n`);
+  return at;
 }
 
 export class Cancelled extends Error {
@@ -187,11 +286,10 @@ export async function hiddenLine(keys: Keyboard, out: Output, s: Style, question
   draw();
   let cancelled = false;
   await readKeys(keys, (key, sequence) => {
-    if (key.ctrl && key.name === 'c') cancelled = true;
-    else if (key.name === 'return' || key.name === 'enter') return true;
-    else if (key.name === 'backspace') typed = typed.slice(0, -1);
-    else if (key.ctrl && key.name === 'u') typed = '';
-    else if (!key.ctrl && !key.meta && sequence.length > 0 && !sequence.startsWith('\x1b') && sequence >= ' ') typed += sequence;
+    const next = edit(typed, key, sequence);
+    if (next === 'cancel') cancelled = true;
+    else if (next === 'submit') return true;
+    else typed = next;
     if (cancelled) return true;
     draw();
     return false;

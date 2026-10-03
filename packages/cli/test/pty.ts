@@ -20,15 +20,16 @@ export type Session = {
 
 const quote = (arg: string) => `'${arg.replace(/'/g, `'\\''`)}'`;
 
-/** Run `coffre <args>` in a terminal of `columns` by `rows`, play `session`, and return everything it wrote. */
+/** Run `coffre <args>` in a terminal of `columns` by `rows`, in `cwd`, play `session`, and return everything it wrote. */
 export async function inTerminal(
   args: string[],
   env: NodeJS.ProcessEnv,
   play: (session: Session) => Promise<void>,
   size = { columns: 160, rows: 48 },
+  cwd?: string,
 ): Promise<{ output: string; code: number | null }> {
   const command = `stty cols ${size.columns} rows ${size.rows}; exec ${[process.execPath, '--conditions=coffre:source', main, ...args].map(quote).join(' ')}`;
-  const child = spawn('script', ['-qfec', command, '/dev/null'], { env: { TERM: 'xterm-256color', ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn('script', ['-qfec', command, '/dev/null'], { cwd, env: { TERM: 'xterm-256color', ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
   let output = '';
   let seen = 0;
   const waiters: { text: string; resolve: () => void }[] = [];
@@ -63,7 +64,9 @@ export async function inTerminal(
     child.kill();
     throw error;
   }
-  return { output, code: await exited };
+  // The exit first: `output` read before it would miss what came after the last key.
+  const code = await exited;
+  return { output, code };
 }
 
 /** The output outside the alternate screen, and inside it. */

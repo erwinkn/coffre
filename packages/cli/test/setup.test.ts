@@ -10,17 +10,10 @@ import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 
 import { asJson, hyperdriveCommand, loginFor, loginUrl, scramVerifier, setupScreen, setupValues, type SetupResult } from '../src/setup.ts';
+import { asSuperuser, CLUSTER, connects, database, emptyCluster, needsCluster } from './cluster.ts';
 import { inTerminal, ptySkip, screens, visible } from './pty.ts';
 
 const main = fileURLToPath(new URL('../src/main.ts', import.meta.url));
-
-/**
- * A superuser's URL, without a database, to a disposable Postgres cluster:
- * roles are cluster-wide, so these tests make and drop coffre's own.
- * scripts/test-setup.sh starts one, from `pnpm test:schema`.
- */
-const CLUSTER = process.env.COFFRE_TEST_SETUP_CLUSTER;
-const needsCluster = { skip: CLUSTER === undefined && 'needs a disposable cluster: scripts/test-setup.sh' };
 
 type Run = { status: number | null; stdout: string; stderr: string };
 
@@ -176,61 +169,6 @@ test('a Hyperdrive command reads the URL without echo, and hands wrangler it wit
 });
 
 // --- against a disposable cluster -------------------------------------------------------
-
-async function asSuperuser<T>(database: string, work: (client: pg.Client) => Promise<T>): Promise<T> {
-  const client = new pg.Client({ connectionString: `${CLUSTER}/${database}` });
-  await client.connect();
-  try {
-    return await work(client);
-  } finally {
-    await client.end();
-  }
-}
-
-/** Connect as `url`, and say whether it worked. */
-async function connects(url: string): Promise<boolean> {
-  const client = new pg.Client({ connectionString: url });
-  try {
-    await client.connect();
-    await client.query('SELECT count(*) FROM vault_members');
-    return true;
-  } catch {
-    return false;
-  } finally {
-    await client.end().catch(() => {});
-  }
-}
-
-/** The cluster as a fresh managed service's: no coffre roles, no databases of ours. */
-async function emptyCluster(): Promise<void> {
-  await asSuperuser('postgres', async (client) => {
-    for (const { datname } of (await client.query<{ datname: string }>("SELECT datname FROM pg_database WHERE datname LIKE 'setup\\_%'")).rows) {
-      await client.query(`DROP DATABASE ${client.escapeIdentifier(datname)} WITH (FORCE)`);
-    }
-    await client.query('DROP ROLE IF EXISTS coffre_runtime, coffre_vault_runtime, coffre_app, coffre_vault, setup_owner');
-  });
-}
-
-/**
- * A database, and the URL of its administrator: the superuser, or an owner
- * as PlanetScale and other managed hosts give one, with CREATEROLE and
- * CREATEDB but neither superuser nor any role's membership.
- */
-async function database(name: string, as: 'superuser' | 'owner'): Promise<string> {
-  if (as === 'superuser') {
-    await asSuperuser('postgres', (client) => client.query(`CREATE DATABASE ${name}`));
-    return `${CLUSTER}/${name}`;
-  }
-  await asSuperuser('postgres', (client) => client.query("CREATE ROLE setup_owner LOGIN CREATEROLE CREATEDB PASSWORD 'owner-only-p4ss'"));
-  const owner = new URL(CLUSTER!);
-  owner.username = 'setup_owner';
-  owner.password = 'owner-only-p4ss';
-  const client = new pg.Client({ connectionString: `${owner.href.replace(/\/$/, '')}/postgres` });
-  await client.connect();
-  await client.query(`CREATE DATABASE ${name}`);
-  await client.end();
-  return `${owner.href.replace(/\/$/, '')}/${name}`;
-}
 
 beforeEach(async () => {
   if (CLUSTER !== undefined) await emptyCluster();

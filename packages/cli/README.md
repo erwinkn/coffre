@@ -4,7 +4,7 @@ The `coffre` command: secrets in your shell, and a new deployment.
 
 ```sh
 npx @coffre/cli init --workers my-coffre   # or --node
-npx @coffre/cli setup                      # its database logins, migrations and keys
+npx @coffre/cli setup                      # its database, keys and, on Workers, Cloudflare
 coffre login https://secrets.acme.example
 coffre run market/prod -- node server.js
 ```

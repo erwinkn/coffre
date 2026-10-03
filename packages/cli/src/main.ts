@@ -1022,7 +1022,8 @@ const USAGE = `coffre - secrets, with an audit log
     coffre init --node [<dir>]              a Node server, and its vault beside it
     coffre setup [--reset-passwords] [--json]
                                             its database logins, migrations and keys in one go,
-                                            shown once on a screen of their own
+                                            shown once on a screen of their own; on Workers,
+                                            Cloudflare too, and in an empty directory, the deployment
     coffre keys [--json]                    the app key, vault key and vault ID alone, shown the same way
 
   Session

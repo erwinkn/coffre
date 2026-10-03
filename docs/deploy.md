@@ -13,7 +13,8 @@ pnpm install
 
 These are [examples/workers](../examples/workers) and
 [examples/node](../examples/node), with the project's name and the CLI's
-package version. Until the packages are published, install from tarballs;
+package version. `coffre setup`, run in an empty directory, offers to make
+one there too, and installs its packages. Until the packages are published, install from tarballs;
 `pnpm test:consumer` exercises that path.
 
 ## The database and its keys, for either deployment
@@ -51,7 +52,9 @@ argument, where the shell's history and other users could read it. Then:
    and its database URL. For the vault, the vault ID, the vault key and its
    database URL. Each is masked until you reveal it with `r`, and `c` copies
    it; `w` shows where each goes, on Workers and on Node, with the commands
-   to copy.
+   to copy. When setup does Cloudflare too ([below](#setup-does-cloudflare-too)),
+   the database URLs go straight to Hyperdrive, and the screen shows the
+   three keys alone.
 
 **Copy each value into your password manager before leaving the screen.**
 They are shown once: coffre keeps no copy, and writes no file. A copy goes
@@ -103,6 +106,51 @@ acme-secrets/
   vault/src/worker.ts    vault(env => ({ database, kek, rootAdmins }))
   vault/wrangler.jsonc   VAULT_HYPERDRIVE; no public route
 ```
+
+### Setup does Cloudflare too
+
+On a terminal, in a Workers deployment, `coffre setup` offers to do the rest
+of this section itself. Say yes, and it:
+
+1. signs in to Cloudflare through wrangler's browser login, and asks which
+   account when there are several;
+2. asks coffre's address, under one of the account's domains, and the root
+   admins;
+3. after the database steps, makes a Hyperdrive config for each login, with
+   caching off, the password going only in the request to Cloudflare's API;
+4. makes the GitHub App people sign in with, from a manifest: GitHub's page
+   opens filled in, and the app's name, `coffre-` and the address, is yours
+   to change there;
+5. fills in both `wrangler.jsonc`: the account, the Hyperdrive ids, the
+   address as a custom domain, GitHub's client ID, the root admins and the
+   vault ID;
+6. shows the keys on their screen, then deploys the vault and the app with
+   them as secrets, on wrangler's stdin, and waits for the address to
+   answer.
+
+The database URLs are never shown: Hyperdrive has them, and nothing else
+does. Nothing is written but the two `wrangler.jsonc`.
+
+**On a machine your browser is not on**, such as a server over SSH, each
+browser step ends at a localhost address the browser cannot reach. Paste
+that address at setup's prompt, and setup finishes the step itself, on its
+own machine. It only ever requests a pasted address on localhost. For
+GitHub, open the `data:` address setup prints in that browser instead of
+its local page. With no browser at all, set `CLOUDFLARE_API_TOKEN` to a
+token that may edit Workers and Hyperdrive and read the account's zones.
+
+**Run again**, setup finds what it made and keeps it: the Hyperdrive configs,
+by the ids in `wrangler.jsonc` or the Workers' names; the GitHub App, by its
+client ID and the app Worker's secret; each Worker's key. It never makes a
+key for a Worker that has one, and when a Worker lacks its key but the
+database holds data, it stops before changing anything. A run that failed
+partway carries on from where it stopped. Keys shown by a run whose deploy
+failed never reached Cloudflare: the next run makes new ones, and its screen
+says they replace them.
+
+Native Windows keeps the steps below, since wrangler cannot read secrets
+from `/dev/stdin` there; WSL works. So does saying no, for a deployment
+you would rather set up by hand.
 
 ### 1. Settings
 

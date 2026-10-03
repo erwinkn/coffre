@@ -19,6 +19,8 @@ export type GuideBlock = { title: string; lines: (string | Command)[] };
 export type Screen = {
   title: string;
   sections: Section[];
+  /** Above the values, what to do with them; by default, to save them now. */
+  intro?: string;
   /** The 'where these go' view. */
   guide: GuideBlock[];
 };
@@ -95,7 +97,7 @@ export function render(screen: Screen, state: ScreenState, columns: number, rows
     `${title}${' '.repeat(Math.max(1, columns - width(title) - width(right) - 2))}${right}`,
     rule,
     ...(state.view === 'values'
-      ? wrap("Save each one in your password manager now. They aren't stored anywhere, and won't be shown again.", columns - 4).map((line) => `  ${line}`)
+      ? wrap(screen.intro ?? "Save each one in your password manager now. They aren't stored anywhere, and won't be shown again.", columns - 4).map((line) => `  ${line}`)
       : [`  ${s.bold('Where these go')}`]),
     '',
   ];
