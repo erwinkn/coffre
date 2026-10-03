@@ -5,7 +5,6 @@ import { statusOf, uiResult } from '../lib/coffre';
 import {
   decidedBy,
   describe,
-  hiddenInWords,
   lines,
   who,
   type Part,
@@ -111,7 +110,6 @@ function AuditPage() {
   const broken = chain.integrity === 'broken' ? chain : null;
   const breakAt = broken?.failedAtSeq ?? null;
   const shown = lines(result.entries);
-  const hiddenText = detail ? null : hiddenInWords(result.hidden ?? []);
   const filters = { decision, actorId };
 
   return (
@@ -137,24 +135,13 @@ function AuditPage() {
                     ; <code>coffre audit</code> lists them all.
                   </>
                 ) : (
-                  <>
-                    : it may be detail,{' '}
-                    <Link to="/audit" search={{ ...filters, detail: '1' }}>
-                      shown on request
-                    </Link>
-                    .
-                  </>
+                  ': it may be detail, which Show detail lists.'
                 )}
               </>
             )}
           </Notice>
         </div>
       )}
-
-      <p className="section-desc">
-        Everything done in coffre, one line per action, refusals included, and who decided it: the
-        app, or the vault, which holds the keys and the access.
-      </p>
 
       <div className="toolbar">
         <nav className="segmented" aria-label="Filter by decision">
@@ -244,14 +231,6 @@ function AuditPage() {
         )}
       </section>
 
-      {hiddenText !== null && (
-        <p className="hint section-foot">
-          Hidden: {hiddenText}.{' '}
-          <Link to="/audit" search={{ ...filters, detail: '1' }}>
-            Show detail
-          </Link>
-        </p>
-      )}
     </>
   );
 }
@@ -537,7 +516,7 @@ function ChainStatus({ chain }: { chain: ChainResult }) {
       >
         <button type="button" className="chain-seal">
           <ShieldCheck size={14} />
-          {chain.through === null ? 'Verified' : `Verified through ${chain.through}`}
+          Verified
         </button>
       </Toggletip>
     </div>

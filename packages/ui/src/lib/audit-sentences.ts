@@ -428,37 +428,6 @@ export function lines<T extends AuditEntry>(entries: T[]): T[][] {
   return shown;
 }
 
-/** What a kind of hidden entry is called, by action or its prefix. */
-const HIDDEN_KINDS: [prefix: string, one: string, many: string][] = [
-  ['key.', 'key operation', 'key operations'],
-  ['sign_in', 'sign-in', 'sign-ins'],
-  ['sign_out', 'sign-out', 'sign-outs'],
-  ['token.', 'token change', 'token changes'],
-  ['device.', 'CLI sign-in approval', 'CLI sign-in approvals'],
-  ['account.', 'account link', 'account links'],
-  ['sync.run', 'sync run', 'sync runs'],
-  ['audit.heartbeat', 'heartbeat', 'heartbeats'],
-  ['audit.checkpoint', 'checkpoint', 'checkpoints'],
-];
-
-/**
- * "2 key operations, 3 sign-ins and 12 heartbeats": the detail the server
- * left out of the page, as it counts it, by action.
- */
-export function hiddenInWords(hidden: { action: string; count: number }[]): string | null {
-  const counts = new Map<string, { one: string; many: string; count: number }>();
-  for (const { action, count } of hidden) {
-    if (count === 0) continue;
-    const [, one, many] = HIDDEN_KINDS.find(([prefix]) => action.startsWith(prefix)) ?? [action, action, action];
-    const kind = counts.get(one) ?? { one, many, count: 0 };
-    kind.count += count;
-    counts.set(one, kind);
-  }
-  const phrases = [...counts.values()].map(({ one, many, count }) => `${count} ${count === 1 ? one : many}`);
-  if (phrases.length === 0) return null;
-  return phrases.length === 1 ? phrases[0]! : `${phrases.slice(0, -1).join(', ')} and ${phrases.at(-1)}`;
-}
-
 /** A sentence as text. */
 export function plain(parts: Part[]): string {
   return parts
