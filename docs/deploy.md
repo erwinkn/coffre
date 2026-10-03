@@ -76,10 +76,11 @@ stderr.
 the vault key, or for a database set up by hand
 ([appendix](#appendix-the-database-by-hand)).
 
-Run `pnpm migrate` after every upgrade of coffre's packages, before starting
-either component. It runs `coffre-server migrate` with the administrator's
-URL from `DATABASE_URL`, or as an argument; clear it from the shell
-afterwards (`unset DATABASE_URL`).
+Run `pnpm migrate` after every upgrade of coffre's packages, in the order
+given by that release's upgrade instructions. It runs `coffre-server migrate`
+with the database owner's URL from `DATABASE_URL`; clear it from the shell
+afterwards (`unset DATABASE_URL`). The running components do not migrate
+the database automatically.
 
 PlanetScale URLs include `sslrootcert=system`. The Node connections and
 migrator use Node's default trusted CAs for that value. They require
@@ -107,6 +108,44 @@ acme-secrets/
   vault/src/worker.ts    vault(env => ({ database, kek, rootAdmins }))
   vault/wrangler.jsonc   VAULT_HYPERDRIVE; no public route
 ```
+
+### Upgrading to 0.1.12 with Workers Builds
+
+Deploy the new code first, then migrate. Version 0.1.12 works with both
+`0000` and `0001_remove_syncs`: it ignores the old sync tables and refuses
+legacy sync principals. `/readyz` accepts either schema prefix, subject to
+its usual audit heartbeat and checkpoint checks. A database with no baseline
+still fails readiness. Workers Builds deploys code; it does not run migrations.
+
+1. [Check for syncs](../CHANGELOG.md), including archived destinations, and
+   move each destination into your deploy pipeline. Back up the database.
+2. Update the deployment's coffre packages to 0.1.12 and install them with
+   `pnpm install`. Deploy the vault, then the app. The example's `pnpm deploy`
+   does both in this order. With Workers Builds, wait until both deployments
+   finish and the old versions have stopped receiving requests and scheduled
+   events before dropping their tables.
+3. From the updated deployment directory, run the migration using the
+   **database owner's direct Postgres URL**, with its existing TLS parameters.
+   Use the login that owns the tables, not `coffre_runtime` or
+   `coffre_vault_runtime`, and not a Hyperdrive connection. In Bash, paste that
+   URL at the hidden prompt:
+
+   ```sh
+   read -rs -p 'Database owner URL: ' DATABASE_URL
+   printf '\n'
+   export DATABASE_URL
+   pnpm migrate
+   unset DATABASE_URL
+   ```
+
+   `pnpm migrate` runs the installed version's `coffre-server migrate`.
+   If either sync table still has rows, it refuses without changing the
+   schema. After moving the destinations and stopping old versions, have
+   the owner clear `sync_keys`, then `syncs`, as described in the release
+   notes, and run the migration again.
+4. Check `/readyz` and verify the audit log. Past sync entries still verify
+   and render on the audit page. After `0001` drops the tables, rolling back
+   to code that still uses syncs requires restoring the pre-upgrade database.
 
 ### Setup does Cloudflare too
 

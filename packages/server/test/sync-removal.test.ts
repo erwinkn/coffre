@@ -7,14 +7,15 @@ import test from 'node:test';
 
 import { getTableColumns, sql, type SQL } from 'drizzle-orm';
 import pg from 'pg';
-import { tablesOf, type Database } from '@coffre/db';
+import { createDatabase, tablesOf, type Database } from '@coffre/db';
 import { openDatabase } from '@coffre/db/connect';
 import { migrateDatabase, migrationsFolder } from '@coffre/db/migrate';
 import { localVault } from '@coffre/vault/node';
 
 import { clientFor, type TestVault } from './api-fixture.ts';
+import { auditReadiness, writeAuditHeartbeat } from '../src/heartbeat.ts';
 import { TEST_ENGINE, withLogUnlocked } from './db/engine.ts';
-import { TEST_OWNER_DATABASE_URL } from './db/connections.ts';
+import { TEST_OWNER_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
 import { testPostgresPool } from './db/postgres-pool.ts';
 
 const ROOT = 'admin@acme.example';
@@ -60,10 +61,12 @@ test('the upgrade refuses populated syncs atomically, then preserves the old log
   const url = TEST_ENGINE === 'postgres' ? new URL(TEST_OWNER_DATABASE_URL) : null;
   if (url) url.pathname = `/${name}`;
   let opened: Awaited<ReturnType<typeof openDatabase>> | null = null;
+  const pools: pg.Pool[] = [];
   const databaseUrl = url?.href ?? `file:${directory}/upgrade.db`;
   // A teardown failure must not hide which upgrade assertion failed.
   t.after(async () => {
     try {
+      await Promise.all(pools.map((pool) => pool.end()));
       await opened?.close();
       // Every connection belongs to this test and has been closed. Never
       // terminate a client to hide unfinished work during teardown.
@@ -97,13 +100,36 @@ test('the upgrade refuses populated syncs atomically, then preserves the old log
     await execute(sql`INSERT INTO __drizzle_migrations (hash, created_at) VALUES (${hash}, ${journal.entries[0].when})`);
   }
   await history(db);
-  const original = await db.select().from(tablesOf(db).auditLog).orderBy(tablesOf(db).auditLog.seq);
   const fakeCredential = '00000000-0000-4000-8000-000000000004';
   // A configured destination must not be silently discarded, and its
   // referenced secret must survive upgrade.
   await db.insert(tablesOf(db).secrets).values({ id: fakeCredential, projectId: '00000000-0000-4000-8000-000000000001', environmentId: '00000000-0000-4000-8000-000000000002', key: 'OLD_TOKEN' });
   await execute(sql`INSERT INTO syncs (id, project_id, environment_id, provider, config, credential_secret_id, created_by) VALUES ('00000000-0000-4000-8000-000000000003', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000002', 'github-actions', '{}', ${fakeCredential}, ${ROOT})`);
   await execute(sql`INSERT INTO sync_keys (sync_id, key) VALUES ('00000000-0000-4000-8000-000000000003', 'VALUE')`);
+  const runtimeDatabase = (connection: string) => {
+    if (TEST_ENGINE !== 'postgres') return db;
+    const scoped = new URL(connection);
+    scoped.pathname = `/${name}`;
+    const pool = testPostgresPool(scoped.href);
+    pools.push(pool);
+    return createDatabase(pool);
+  };
+  const appDb = runtimeDatabase(TEST_RUNTIME_DATABASE_URL);
+  const vaultDb = runtimeDatabase(TEST_VAULT_DATABASE_URL);
+  const kek = Buffer.alloc(32, 17);
+  const vault = await localVault({ database: vaultDb, kek: { id: 'legacy', key: kek.toString('base64') }, rootAdmins: [ROOT] });
+  const chainKey = Buffer.alloc(32, 23);
+  const deps = { db: appDb, vault: vault as unknown as TestVault, chainKey };
+  const root = clientFor(deps, ROOT);
+  // Workers Builds does not migrate. The new app and vault must operate on
+  // 0000 using their restricted logins, even while sync tables still exist.
+  assert.equal((await root.audit.verify()).ok, true);
+  await root.secrets.set('market/prod', { OLD_TOKEN: 'preserved credential' });
+  assert.deepEqual((await root.secrets.reveal('market/prod/OLD_TOKEN')).values, { OLD_TOKEN: 'preserved credential' });
+  assert.equal(await writeAuditHeartbeat(appDb, chainKey, vault, { warn: () => {} }), true);
+  assert.equal((await auditReadiness(appDb, vault)).ok, true, '0000 is ready: deploy before migrating');
+  assert.equal((await vault.access(SYNC)).status, 'unknown');
+  const original = await db.select().from(tablesOf(db).auditLog).orderBy(tablesOf(db).auditLog.seq);
   await assert.rejects(migrateDatabase(databaseUrl), /syncs.*(?:removed|cleared)/);
   assert.deepEqual(await db.select().from(tablesOf(db).auditLog).orderBy(tablesOf(db).auditLog.seq), original);
   // A second attempt must still meet the old tables, not a partial upgrade;
@@ -117,17 +143,16 @@ test('the upgrade refuses populated syncs atomically, then preserves the old log
   for (const table of ['syncs', 'sync_keys']) await assert.rejects(execute(sql.raw(`SELECT * FROM ${table}`)));
   assert.deepEqual(await db.select().from(tablesOf(db).auditLog).orderBy(tablesOf(db).auditLog.seq), original);
   assert.equal((await db.select().from(tablesOf(db).secrets)).length, 1);
-  const kek = Buffer.alloc(32, 17);
-  const vault = await localVault({ database: db, kek: { id: 'legacy', key: kek.toString('base64') }, rootAdmins: [ROOT] });
-  const deps = { db, vault: vault as unknown as TestVault, chainKey: Buffer.alloc(32, 23) };
-  const root = clientFor(deps, ROOT);
   assert.equal((await root.audit.verify()).ok, true);
+  assert.equal((await auditReadiness(appDb, vault)).ok, true, '0001 remains ready after migrating');
+  assert.deepEqual((await root.secrets.reveal('market/prod/OLD_TOKEN')).values, { OLD_TOKEN: 'preserved credential' });
   assert.deepEqual((await vault.access(SYNC)).grants, []);
   assert.equal((await vault.access(SYNC)).status, 'unknown');
   assert.equal((await vault.setAccess({ actor: `user:${ROOT}`, principal: SYNC, changes: [{ projectId: '00000000-0000-4000-8000-000000000001', environmentId: null, role: 'viewer', expiresAt: null }] })).ok, false);
   assert.equal((await vault.admit({ actor: `user:${ROOT}`, principal: SYNC })).ok, false);
   await root.secrets.set('market/prod', { VALUE: 'still private' });
-  const [version] = await db.select().from(tablesOf(db).secretVersions);
+  const versions = await db.select().from(tablesOf(db).secretVersions);
+  const version = versions.find((version) => version.secretId !== fakeCredential)!;
   const denied = await vault.unwrap({ principal: SYNC, purpose: 'run', items: [{ secretVersionId: version.id }] });
   assert.equal(denied.ok, false, 'even an old sealed sync grant cannot release a value');
   assert.equal((await root.audit.verify()).ok, true);

@@ -76,8 +76,10 @@ test('each migration tree ends at its schema and preserves its original baseline
   assert.deepEqual(stale, { postgres: [], sqlite: [] });
 });
 
-test('the app requires every migration of each tree', async () => {
+test('the runtime requires a nonempty prefix that exists in each migration tree', async () => {
   for (const engine of ENGINES) {
-    assert.equal(REQUIRED_MIGRATIONS[engine], (await journal(engine)).length, engine);
+    const required = REQUIRED_MIGRATIONS[engine];
+    assert.ok(Number.isSafeInteger(required) && required > 0, engine);
+    assert.ok(required <= (await journal(engine)).length, engine);
   }
 });
