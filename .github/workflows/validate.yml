@@ -35,9 +35,20 @@ jobs:
           # Tests use coffre:source and generate their own Worker fixtures.
           build: 'false'
       - name: Tests
-        run: |
-          pnpm test
-          pnpm test:schema
+        run: pnpm test
+
+  schema:
+    name: Database schema
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out the selected revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/prepare
+        with:
+          build: 'false'
+      - name: Database schema
+        run: pnpm test:schema
 
   workers:
     name: Workers conformance
@@ -84,7 +95,7 @@ jobs:
   validate:
     name: Validate
     runs-on: ubuntu-24.04
-    needs: [checks, tests, workers, node, consumer]
+    needs: [checks, tests, schema, workers, node, consumer]
     if: always()
     steps:
       - name: Require every validation job to succeed
