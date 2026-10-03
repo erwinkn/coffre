@@ -21,7 +21,7 @@ const fields = gs.record({
   relatedSeq: gs.oneOf(gs.just(null), gs.bigIntegers({ minValue: 0n, maxValue: 100n })),
   metadata: gs.record({ name: text, count: gs.integers(), values: gs.arrays(text, { maxSize: 3 }) }).map(JSON.stringify),
 });
-const settings = propertySettings(1, 64);
+const settings = propertySettings(64);
 
 function broken(log: StoredEntry[], keys: ReturnType<typeof deriveLogKey>[], seq: bigint, kind: string) {
   const result = verifyEntries(log, { keys });

@@ -40,7 +40,7 @@ function modelAllows(member: Holdings, permission: Permission, place: Place): bo
   return false;
 }
 
-const settings = propertySettings(2, 128);
+const settings = propertySettings(128);
 test(`access decisions match the independent role/scope model, seed ${settings.seed}`, () => hegel.test((tc) => {
   const member = tc.draw(holder);
   // Holdings is the core boundary: membership, expiry and credential validity
