@@ -14,6 +14,7 @@ import {
 } from './auth.ts';
 import { apiCaller } from './fetch-api.ts';
 import { errorResponse, jsonResponse, readJson } from './http.ts';
+import { logged } from './logged.ts';
 import type { CoffreRuntime } from './runtime.ts';
 import {
   callbackUrl,
@@ -151,7 +152,7 @@ export async function startSignin(
   try {
     started = await config.start(callbackUrl(signin.config, config.id));
   } catch (error) {
-    if (!(error instanceof SigninError)) console.error('sign-in start failed', error);
+    if (!(error instanceof SigninError)) console.error('sign-in start failed', logged(error));
     return redirectResponse(`${back}?error=provider_unavailable`);
   }
 
@@ -200,11 +201,11 @@ export async function finishSignin(
     // messages name the step that failed and never carry tokens or codes.
     if (error instanceof SigninError) {
       if (error.code === 'provider_unavailable' || error.code === 'invalid_response') {
-        console.warn(`sign-in with ${config.id} failed: ${error.message}`, error.cause ?? '');
+        console.warn(`sign-in with ${config.id} failed: ${error.message}`, logged(error.cause) ?? '');
       }
       return fail(error.code);
     }
-    console.error('sign-in callback failed', error);
+    console.error('sign-in callback failed', logged(error));
     return fail('provider_unavailable');
   }
 

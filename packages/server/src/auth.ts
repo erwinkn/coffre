@@ -1,6 +1,7 @@
 import { ACCESS_JWT_HEADER, type AuthConfig, type Principal } from '@coffre/core/identity';
+import type { Access } from '@coffre/core/vault';
 
-import { loadCaller, type Caller } from './api/caller.ts';
+import { callerFrom, loadCaller, type Caller } from './api/caller.ts';
 import { ApiError } from './api/errors.ts';
 import { CredentialUncheckable } from './api/signin.ts';
 import { errorResponse } from './http.ts';
@@ -109,12 +110,14 @@ export async function authenticateRequest(
   let principal: Principal;
   let credentialId: string | null = null;
   let credentialGeneration: number | undefined;
+  let checked: Access | undefined;
   try {
     const verified = (await runtime.verifier.verify(token, { sourceIp })) as Principal & {
       credentialId?: string;
       credentialGeneration?: number;
+      access?: Access;
     };
-    ({ credentialId = null, credentialGeneration, ...principal } = verified);
+    ({ credentialId = null, credentialGeneration, access: checked, ...principal } = verified);
   } catch (error) {
     // Only a credential checked and refused is a sign-out; one that could not be checked is an outage.
     if (error instanceof CredentialUncheckable) return errorResponse(new ApiError('unavailable', 'coffre cannot check who you are right now'));
@@ -122,7 +125,8 @@ export async function authenticateRequest(
   }
 
   try {
-    const caller = await loadCaller(runtime.vault, principal);
+    // A coffre credential was checked against what the vault says of its member: that answer, not a second call.
+    const caller = checked === undefined ? await loadCaller(runtime.vault, principal) : callerFrom({ type: principal.type, id: principal.id }, checked);
     // Removal may have raced the credential verification above.
     if (credentialGeneration !== undefined && caller.generation !== credentialGeneration) {
       return unauthenticated(runtime.auth);

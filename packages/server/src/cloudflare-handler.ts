@@ -24,7 +24,8 @@ export type WorkerHandler<Env> = {
  * The app Worker, for a UI. Configuration is read and checked once per
  * `env`, which the isolate keeps; the database client is built per
  * invocation, since a Worker's I/O objects belong to the request that made
- * them.
+ * them: one client its queries take turns on, closed once the request and
+ * the work it left to finish are done.
  */
 export function cloudflareHandler<Env>(configure: (env: Env) => WorkersConfig, ui: Ui): WorkerHandler<Env> {
   const configs = new WeakMap<object, { config: WorkersConfig; resolved: ResolvedConfig }>();
@@ -36,17 +37,33 @@ export function cloudflareHandler<Env>(configure: (env: Env) => WorkersConfig, u
       entry = { config, resolved: resolveConfig(config) };
       configs.set(env as object, entry);
     }
-    const db = createDatabase(new HyperdrivePool(entry.config.database.hyperdrive.connectionString));
-    return createRuntime(entry.resolved, db, entry.config.vault, (promise) => ctx.waitUntil(promise));
+    const pool = new HyperdrivePool(entry.config.database.hyperdrive.connectionString);
+    const left: Promise<unknown>[] = [];
+    const runtime = createRuntime(entry.resolved, createDatabase(pool), entry.config.vault, (promise) => {
+      left.push(promise);
+      ctx.waitUntil(promise);
+    });
+    /** Close the client once `done`, and whatever the request left to finish, are. */
+    const close = async (done: Promise<unknown>) => {
+      await done.catch(() => {});
+      while (left.length > 0) await Promise.allSettled(left.splice(0));
+      await pool.end();
+    };
+    return { runtime, close };
   }
 
   return {
     fetch(request, env, ctx) {
-      const runtime = runtimeFor(env, ctx);
-      return handleRequest(request, runtime, ui, cloudflareSourceIp(request));
+      const { runtime, close } = runtimeFor(env, ctx);
+      const response = handleRequest(request, runtime, ui, cloudflareSourceIp(request));
+      ctx.waitUntil(close(response));
+      return response;
     },
     async scheduled(_controller, env, ctx) {
-      await runScheduled(runtimeFor(env, ctx));
+      const { runtime, close } = runtimeFor(env, ctx);
+      const ran = runScheduled(runtime);
+      ctx.waitUntil(close(ran));
+      await ran;
     },
   };
 }

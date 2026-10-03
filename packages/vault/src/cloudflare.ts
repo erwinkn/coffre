@@ -51,10 +51,22 @@ const ready = new WeakMap<object, { database: PostgresDatabase; prepared: Prepar
 
 /**
  * What the app's `VAULT` service binding calls. Each call gets a database of
- * its own, since a Worker's connections belong to the call that made them.
+ * its own, one client that its queries take turns on, since a Worker's
+ * connections belong to the call that made them; it is closed once the
+ * call is done.
  */
 export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
-  async #vault(): Promise<Vault> {
+  async #call<T>(run: (vault: Vault) => Promise<T>): Promise<T> {
+    const { prepared, database } = await this.#ready();
+    const pool = new HyperdrivePool(database.hyperdrive.connectionString);
+    try {
+      return await run(openVault(createDatabase(pool), prepared));
+    } finally {
+      this.ctx.waitUntil(pool.end());
+    }
+  }
+
+  async #ready(): Promise<{ database: PostgresDatabase; prepared: PreparedVault }> {
     const env = this.env as object;
     let entry = ready.get(env);
     if (entry === undefined) {
@@ -65,21 +77,20 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
       entry = ready.get(env) ?? { database: config.database, prepared };
       ready.set(env, entry);
     }
-    const { database, prepared } = entry;
-    return openVault(createDatabase(new HyperdrivePool(database.hyperdrive.connectionString)), prepared);
+    return entry;
   }
 
-  async unwrap(input: UnwrapInput) { return (await this.#vault()).unwrap(input); }
-  async wrap(input: WrapInput) { return (await this.#vault()).wrap(input); }
-  async rewrap(input: RewrapInput) { return (await this.#vault()).rewrap(input); }
-  async access(principal: string) { return (await this.#vault()).access(principal); }
-  async setAccess(input: SetAccessInput) { return (await this.#vault()).setAccess(input); }
-  async admit(input: AdmitInput) { return (await this.#vault()).admit(input); }
-  async remove(input: RemoveInput) { return (await this.#vault()).remove(input); }
-  async checkpoint() { return (await this.#vault()).checkpoint(); }
-  async about() { return (await this.#vault()).about(); }
-  async keyChecks() { return (await this.#vault()).keyChecks(); }
-  async verifyLog(input: VerifyLogInput) { return (await this.#vault()).verifyLog(input); }
+  async unwrap(input: UnwrapInput) { return this.#call((vault) => vault.unwrap(input)); }
+  async wrap(input: WrapInput) { return this.#call((vault) => vault.wrap(input)); }
+  async rewrap(input: RewrapInput) { return this.#call((vault) => vault.rewrap(input)); }
+  async access(principal: string) { return this.#call((vault) => vault.access(principal)); }
+  async setAccess(input: SetAccessInput) { return this.#call((vault) => vault.setAccess(input)); }
+  async admit(input: AdmitInput) { return this.#call((vault) => vault.admit(input)); }
+  async remove(input: RemoveInput) { return this.#call((vault) => vault.remove(input)); }
+  async checkpoint() { return this.#call((vault) => vault.checkpoint()); }
+  async about() { return this.#call((vault) => vault.about()); }
+  async keyChecks() { return this.#call((vault) => vault.keyChecks()); }
+  async verifyLog(input: VerifyLogInput) { return this.#call((vault) => vault.verifyLog(input)); }
 
   /** No HTTP surface: only the app's service binding reaches the vault. */
   fetch() {

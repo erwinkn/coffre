@@ -25,6 +25,7 @@ import {
   type SyncProviderInfo,
 } from '../sync/index.ts';
 import type { SyncTiming } from '../config.ts';
+import { logged } from '../logged.ts';
 import { can } from './caller.ts';
 import { allowed, audited, denied, missing, recorded, Refusal, vaultRefusal, withRefusals, type ApiContext } from './context.ts';
 import { badRequest, conflict, forbidden, notFound } from './errors.ts';
@@ -264,10 +265,10 @@ export class SyncRunner {
         rows.map((row) => this.runSettled(row.id, 'change', systemActor(row.id))),
       );
       for (const result of results) {
-        if (result.status === 'rejected') console.error('sync after change failed', result.reason);
+        if (result.status === 'rejected') console.error('sync after change failed', logged(result.reason));
       }
     } catch (error) {
-      console.error('sync after change failed', error);
+      console.error('sync after change failed', logged(error));
     }
   }
 
@@ -296,7 +297,7 @@ export class SyncRunner {
 
     const results = await Promise.allSettled(toRun.map((id) => this.runSettled(id, 'scheduled', systemActor(id))));
     for (const result of results) {
-      if (result.status === 'rejected') console.error('scheduled sync failed', result.reason);
+      if (result.status === 'rejected') console.error('scheduled sync failed', logged(result.reason));
     }
     return { ran: toRun.length };
   }
@@ -564,7 +565,7 @@ export class SyncRunner {
     } catch (error) {
       // The lease runs out on its own; the next run re-pushes whatever was
       // not recorded, which is safe because every push is an overwrite.
-      console.error('sync result could not be recorded', error);
+      console.error('sync result could not be recorded', logged(error));
     }
     return outcome;
   }
@@ -856,7 +857,7 @@ function describeError(error: unknown): string {
   if (error instanceof SyncProviderError || error instanceof SyncConfigError || error instanceof SyncFailure) {
     return truncate(error.message);
   }
-  console.error('sync run failed', error);
+  console.error('sync run failed', logged(error));
   return 'internal error; see the server log';
 }
 

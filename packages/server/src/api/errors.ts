@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import { logged } from '../logged.ts';
+
 /**
  * Every API error has one shape, `{ "error": code, "message": sentence }`,
  * and the code decides the status:
@@ -87,7 +89,7 @@ export function toErrorBody(error: unknown): { status: number; body: ErrorBody }
       body: { error: 'bad_request', message: `${where}${issue?.message ?? 'invalid input'}` },
     };
   }
-  console.error('unhandled API error', error);
+  console.error('unhandled API error', logged(error));
   return {
     status: 500,
     body: { error: 'internal_error', message: 'something went wrong; see the server log' },

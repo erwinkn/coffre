@@ -10,6 +10,7 @@ import { openDatabase } from '@coffre/db/connect';
 
 import { handleRequest, runScheduled } from './app.ts';
 import { resolveConfig, type CoffreConfig } from './config.ts';
+import { logged } from './logged.ts';
 import { createRuntime } from './runtime.ts';
 import type { Ui } from './ui.ts';
 
@@ -44,7 +45,7 @@ export async function serveWith(options: ServeOptions, ui: Ui, staticFiles: stri
 
   const server = createServer((req, res) => {
     void respond(req, res).catch((error: unknown) => {
-      console.error('request failed', error);
+      console.error('request failed', logged(error));
       if (!res.headersSent) res.writeHead(500, { 'content-type': 'text/plain' });
       res.end();
     });
@@ -75,7 +76,7 @@ export async function serveWith(options: ServeOptions, ui: Ui, staticFiles: stri
   if (schedule !== false) {
     if (!(schedule.everyMinutes >= 1)) throw new Error('schedule.everyMinutes must be at least 1');
     const tick = () =>
-      runScheduled(runtime).catch((error: unknown) => console.error('scheduled job failed', error));
+      runScheduled(runtime).catch((error: unknown) => console.error('scheduled job failed', logged(error)));
     void tick();
     timer = setInterval(tick, schedule.everyMinutes * 60_000);
     timer.unref();

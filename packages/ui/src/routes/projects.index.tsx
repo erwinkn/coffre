@@ -1,6 +1,6 @@
 import type { CoffreClient } from '@coffre/client';
 import { useState } from 'react';
-import { createFileRoute, Link } from '@tanstack/react-router';
+import { createFileRoute, Link, useRouter } from '@tanstack/react-router';
 import { toast } from 'sonner';
 import { deriveUiCapabilities } from '../lib/capabilities';
 import { Refusal, uiResult, useCoffre } from '../lib/coffre';
@@ -66,6 +66,7 @@ async function countSecrets(
 
 function ProjectsPage() {
   const { result, secrets } = Route.useLoaderData();
+  const router = useRouter();
 
   if (!result.ok) {
     return (
@@ -73,9 +74,16 @@ function ProjectsPage() {
         icon={<AlertTriangle size={18} />}
         title="Projects could not be listed"
         actions={
-          <Link className="btn" to="/login">
-            Sign in again
-          </Link>
+          result.signedOut ? (
+            <Link className="btn" to="/login">
+              Sign in again
+            </Link>
+          ) : (
+            // An outage, not a sign-out: signing in again would not help, and asking again might.
+            <button type="button" className="btn" onClick={() => void router.invalidate()}>
+              Try again
+            </button>
+          )
         }
       >
         {result.error}

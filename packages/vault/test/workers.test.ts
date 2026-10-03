@@ -33,11 +33,14 @@ beforeEach(async () => {
 /**
  * Postgres as Hyperdrive serves it from far away: each chunk either way
  * delayed by `ms`. Locally a query answers in well under a millisecond,
- * which hides calls waiting on each other's I/O.
+ * which hides calls waiting on each other's I/O. `opened` counts the
+ * connections made to it.
  */
-async function slowPostgres(ms: number): Promise<{ url: string; close(): Promise<void> }> {
+async function slowPostgres(ms: number): Promise<{ url: string; readonly opened: number; close(): Promise<void> }> {
   const target = new URL(VAULT_URL);
+  let opened = 0;
   const server: Server = createServer((client) => {
+    opened += 1;
     const upstream = connect(Number(target.port), target.hostname);
     const relay = (from: NodeJS.ReadableStream, to: NodeJS.WritableStream) =>
       from.on('data', (chunk) => setTimeout(() => to.write(chunk), ms));
@@ -54,7 +57,13 @@ async function slowPostgres(ms: number): Promise<{ url: string; close(): Promise
   const address = server.address() as { port: number };
   const url = new URL(VAULT_URL);
   url.port = String(address.port);
-  return { url: url.href, close: () => new Promise((resolve) => server.close(() => resolve())) };
+  return {
+    url: url.href,
+    get opened() {
+      return opened;
+    },
+    close: () => new Promise((resolve) => server.close(() => resolve())),
+  };
 }
 
 /** A fresh isolate of the vault Worker, over the suite's database through the vault's login. */
@@ -149,3 +158,33 @@ test('a fresh isolate answers concurrent first key operations', { skip, timeout:
   }
 });
 
+test('each call opens one connection at most: on Cloudflare, a call that opened several at once was cancelled as hung', { skip, timeout: 120_000 }, async () => {
+  const database = await slowPostgres(5);
+  const vault = await freshVault(database.url);
+  try {
+    // A fresh isolate's first calls settle its keys and give the root admin a row: the most queries a call makes.
+    const calls: [string, ...unknown[]][] = [
+      ['access', ROOT],
+      ['access', 'user:ada@acme.example'],
+      ['about'],
+      ['verifyLog', {}],
+      ['access', ROOT],
+      ['checkpoint'],
+    ];
+    const opened: Record<string, number> = {};
+    for (const [index, [method, ...args]] of calls.entries()) {
+      const before = database.opened;
+      const result = await vault.call(method, ...args);
+      assert.ok(result.ok || method === 'checkpoint', `${method} failed: ${result.error}`);
+      opened[`${index} ${method}`] = database.opened - before;
+    }
+    assert.deepEqual(
+      Object.entries(opened).filter(([, count]) => count > 1),
+      [],
+      `connections each call opened: ${JSON.stringify(opened)}`,
+    );
+  } finally {
+    await vault.stop();
+    await database.close();
+  }
+});

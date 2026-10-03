@@ -131,6 +131,20 @@ test('an auditor sees only projects on which they hold audit.read', async () => 
   assert.equal(keys.includes('OTHER_KEY'), false);
 });
 
+test('the log lists only the denied entries when asked, to an owner and to an auditor', async () => {
+  await root.access.set(AUDITOR, { market: 'auditor' });
+  // The developer holds nothing on market: each read is refused, and logged.
+  await assert.rejects(developer.secrets.reveal('market/prod/API_KEY'), { status: 403 });
+  await assert.rejects(developer.secrets.reveal('market/prod'), { status: 403 });
+  for (const reader of [root, auditor]) {
+    const { entries, hidden } = await reader.audit.list({ limit: 200, decision: 'deny' });
+    assert.ok(entries.length > 0, 'no denied entry listed');
+    assert.ok(entries.every((entry) => entry.decision === 'deny'), 'an allowed entry listed');
+    assert.deepEqual(entries.map((entry) => [entry.action, entry.key]), [['secret.read', null], ['secret.read', 'API_KEY']]);
+    assert.deepEqual(hidden, []);
+  }
+});
+
 test('an archived-environment audit grant remains meaningful', async () => {
   await root.environments.create('market/dev', { name: 'Development' });
   await root.secrets.set('market/dev', { DEV_KEY: 'not-visible' });

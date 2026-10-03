@@ -66,11 +66,14 @@ export function isSameOrigin(request: Request, publicUrl: string): boolean {
  * made with a cookie must come from one of coffre's own pages: otherwise any
  * site the person visits could make it in their name (CSRF). Headers need no
  * such check, since another site's page cannot make the browser send them.
+ * `authenticate` checks the credential; a page's render passes one that
+ * checks it once for all its calls (`pageClient`).
  */
 export async function apiCaller(
   request: Request,
   runtime: CoffreRuntime,
   sourceIp: string | null,
+  authenticate: Authenticate = (token) => authenticateRequest(request, runtime, crypto.randomUUID(), token, sourceIp),
 ): Promise<AuthenticatedIdentity | Response> {
   const credential = apiCredential(request, runtime.auth);
   if (credential === null) return unauthenticated(runtime.auth);
@@ -79,8 +82,11 @@ export async function apiCaller(
       new ApiError('cross_origin', 'a change sent with a browser session must come from coffre itself'),
     );
   }
-  return authenticateRequest(request, runtime, crypto.randomUUID(), credential.token, sourceIp);
+  return authenticate(credential.token);
 }
+
+/** How a credential becomes its caller, or the response that turns them away. */
+type Authenticate = (token: string) => Promise<AuthenticatedIdentity | Response>;
 
 /**
  * How this instance signs people in, which the sign-in page, the account
@@ -119,14 +125,14 @@ function authInfo(request: Request, runtime: CoffreRuntime): AuthInfo {
 export async function fetchApi(
   request: Request,
   runtime: CoffreRuntime,
-  options: { sourceIp: string | null },
+  options: { sourceIp: string | null; authenticate?: Authenticate },
 ): Promise<Response> {
   try {
     const { pathname } = new URL(request.url);
     if (pathname === '/api/auth') {
       return request.method === 'GET' ? jsonResponse(authInfo(request, runtime)) : methodNotAllowed(['GET']);
     }
-    const identity = await apiCaller(request, runtime, options.sourceIp);
+    const identity = await apiCaller(request, runtime, options.sourceIp, options.authenticate);
     if (identity instanceof Response) return identity;
     if (!identity.registered && !(request.method === 'GET' && pathname === '/api/me')) {
       return identity.caller.tampered ? accessTampered() : registrationRequired();
@@ -158,13 +164,33 @@ export function pageCredential(page: Request, auth: AuthConfig): Record<string, 
  * browser sent it, so a cookie stays a cookie: a change attempted during a
  * render has no origin to show and is refused, as from any other site. The
  * visitor's address rides alongside, not as a header, for the audit log and
- * the session's last-seen address.
+ * the session's last-seen address. `answered` hears each answer's status.
+ *
+ * The render is one request: its calls carry one credential, which is
+ * checked once, by one call to the vault, and its caller is every call's.
+ * Each call still passes the checks of its own method.
  */
-export function pageClient(page: Request, runtime: CoffreRuntime, sourceIp: string | null): CoffreClient {
+export function pageClient(
+  page: Request,
+  runtime: CoffreRuntime,
+  sourceIp: string | null,
+  answered: (status: number) => void = () => {},
+): CoffreClient {
   const credential = pageCredential(page, runtime.auth);
+  let checked: Promise<AuthenticatedIdentity | Response> | undefined;
+  const authenticate: Authenticate = async (token) => {
+    checked ??= authenticateRequest(page, runtime, crypto.randomUUID(), token, sourceIp);
+    const identity = await checked;
+    // A refusal's body is read once: each call answers with its own copy.
+    return identity instanceof Response ? identity.clone() : identity;
+  };
   return createClient({
     url: new URL(page.url).origin,
     headers: () => credential,
-    transport: (request) => fetchApi(request, runtime, { sourceIp }),
+    transport: async (request) => {
+      const response = await fetchApi(request, runtime, { sourceIp, authenticate });
+      answered(response.status);
+      return response;
+    },
   });
 }

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import type { CoffreClient } from '@coffre/client';
 import { github, signin, type AuthConfig, type Principal } from '@coffre/core/identity';
 import type { Access } from '@coffre/core/vault';
 
@@ -90,6 +91,39 @@ test('pages get the response nonce; everything else stays away from the UI', asy
   const post = await handleRequest(new Request('https://coffre.test/projects', { method: 'POST' }), runtime, ui, null);
   assert.equal(post.status, 405);
   assert.equal(ui.seen.length, 2);
+});
+
+/** A stand-in for `@coffre/ui` that renders as Start does: its loader asks the API, and a loader that throws makes a 500 page. */
+function renderingUi(ask: (client: CoffreClient) => Promise<unknown>, fails = false) {
+  const html = { 'content-type': 'text/html' };
+  return {
+    fetch: async (_request: Request, init: { context: { client: CoffreClient } }) => {
+      try {
+        await ask(init.context.client);
+        if (fails) throw new Error('a bug in the page');
+        return new Response('<html>the page</html>', { headers: html });
+      } catch {
+        return new Response('<html>This page could not be shown</html>', { status: 500, headers: html });
+      }
+    },
+  };
+}
+
+test("a page whose render met an outage answers 503, as the API does; the page's own bug stays a 500", async () => {
+  const page = () => new Request('https://coffre.test/projects', { headers: { 'cf-access-jwt-assertion': 'assertion' } });
+  const unreachable = Object.assign(appRuntime(cloudflare) as object, {
+    vault: { access: async () => Promise.reject(new Error('the vault is unreachable')) },
+  }) as never;
+  const outage = await handleRequest(page(), unreachable, renderingUi((client) => client.me()), null);
+  assert.equal(outage.status, 503);
+  assert.equal(outage.headers.get('retry-after'), '5');
+  assert.equal(await outage.text(), '<html>This page could not be shown</html>');
+  assert.ok(outage.headers.get('content-security-policy'), 'the security headers');
+
+  const fine = await handleRequest(page(), unreachable, renderingUi((client) => client.auth()), null);
+  assert.equal(fine.status, 200);
+  const bug = await handleRequest(page(), unreachable, renderingUi((client) => client.auth(), true), null);
+  assert.equal(bug.status, 500);
 });
 
 test('the Next.js middleware header is refused outright', async () => {
