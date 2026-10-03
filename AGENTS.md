@@ -80,6 +80,14 @@ taking the audit head before application rows. Reads commit their app audit befo
 returning values. The integration fixture tracks transactions and rejects vault
 calls made inside them, including errors swallowed by handlers or background jobs.
 
+**What an isolate keeps.** On Workers, every call opens its own database
+and its I/O belongs to it; the isolate keeps state between calls (the vault's
+prepared state, config caches). Keep only settled values there, never a
+pending promise: a call that awaits another call's in-flight work is
+cancelled as hung on Cloudflare when that call goes, which local workerd
+does not reproduce. Concurrent first calls each do their own reads
+(`packages/vault/test/isolate.test.ts`).
+
 **Tests / checks.**
 - `pnpm test` = lint + recreate `coffre_test` + `node --test --test-concurrency=1`
   (serial: the integration suite shares one DB and resets it per test). Needs Postgres.

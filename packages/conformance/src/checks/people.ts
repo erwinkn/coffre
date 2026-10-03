@@ -184,3 +184,17 @@ async function deviceLogin(deployment: Deployment, browser: Browser): Promise<st
   expect(polled.ok && session.access_token, `the approved device login gave no token: ${polled.status}`, session);
   return session.access_token;
 }
+
+/**
+ * A page's worth of API calls at once, as the pages fire them on a load,
+ * right after sign-in, while the vault is fresh: every one answers. A call
+ * that waited on another's work in the vault would be cancelled on
+ * Cloudflare as hung, and the page would read the 503 or 401 as signed out.
+ */
+export async function pageLoad(person: Person): Promise<string> {
+  const paths = ['/api/me', '/api/sessions', '/api/projects', '/api/members', '/api/audit', '/api/identities', '/api/me', '/api/projects'];
+  const statuses = await Promise.all(paths.map(async (path) => [path, (await person.browser.fetch(path)).status] as const));
+  const failed = statuses.filter(([, status]) => status !== 200);
+  expect(failed.length === 0, 'a call of the page load did not answer 200', failed.map(([path, status]) => `${path}: ${status}`).join(', '));
+  return `${paths.length} calls at once, each answered`;
+}

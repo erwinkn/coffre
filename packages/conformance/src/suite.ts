@@ -12,7 +12,7 @@ import { refusedCheckpoint, missingCheckpoint, middleCut } from './checks/readin
 import { editedGeneration, forgedCredential, forgedIdentity, forgedApproval } from './checks/signin.ts';
 import { canaryScan } from './checks/canaries.ts';
 import { anonymousChecks, tokenChecks, type Canary } from './checks/live.ts';
-import { personas, setUp, setUpLive, signInAdmin } from './checks/people.ts';
+import { pageLoad, personas, setUp, setUpLive, signInAdmin } from './checks/people.ts';
 import { health } from './checks/surface.ts';
 
 /** The names of the checks that failed. */
@@ -24,6 +24,7 @@ export async function conform(deployment: Deployment, options: { bulkLimit: numb
   // database and processes.
   await anonymousChecks(report, deployment.origin, { health: false });
   const admin = await report.check('sign-in', {}, () => signInAdmin(deployment));
+  await report.check('page load', { admin }, ({ admin }) => pageLoad(admin));
   const canaries = await report.check('setup', { admin }, ({ admin }) => setUp(admin));
   const people = await report.check('personas', { admin, canaries }, ({ admin }) => personas(deployment, admin));
   const all = { people, canaries };
