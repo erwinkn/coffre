@@ -2,7 +2,7 @@ import { createFileRoute, Link } from '@tanstack/react-router';
 import { loadDirectory } from '../components/directory';
 import { Card, Fact, PageHeader } from '../components/page';
 
-/** The workspace's settings. Your own are under Account, at the sidebar's foot. */
+/** The instance's settings. Your own are under Account, at the sidebar's foot. */
 export const Route = createFileRoute('/settings')({
   // Instance facts come from the directory, which only owners may list.
   // Asking on everyone's behalf would write a refusal to the audit log for

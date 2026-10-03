@@ -198,7 +198,7 @@ export function CommandPalette({
               />
             )}
             <Command.Item
-              value="settings workspace instance sign-in"
+              value="settings instance sign-in"
               onSelect={() => {
                 setOpen(false);
                 navigate({ to: '/settings' });
