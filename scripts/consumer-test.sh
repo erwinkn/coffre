@@ -5,7 +5,8 @@
 # workspace in sight, then typecheck and build each one, and hold it to
 # `coffre-conformance`, as its own `pnpm conformance`.
 #
-#   pnpm test:consumer [<dir>]    <dir> defaults to a new temporary one
+#   pnpm test:consumer [--kind workers|node] [<dir>]
+# <dir> defaults to a new temporary one. Without --kind, exercise both kinds.
 #
 # Temporary directories are removed on success and kept on failure. An explicit
 # directory is always kept.
@@ -16,6 +17,13 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
+kinds=(workers node)
+if [[ "${1:-}" == --kind ]]; then
+    case "${2:-}" in
+        workers | node) kinds=("$2"); shift 2 ;;
+        *) echo 'consumer-test: --kind must be workers or node' >&2; exit 2 ;;
+    esac
+fi
 temporary=false
 if [[ -n "${1:-}" ]]; then
     work="$1"
@@ -66,6 +74,9 @@ ls "$work/tarballs"
 # The CLI bundles everything it runs, so its tarball unpacked is the CLI.
 mkdir -p "$work/cli"
 tar -xzf "$work"/tarballs/coffre-cli-*.tgz -C "$work/cli"
+# Keep the dependency cache selected before isolating CLI/Workers state in HOME.
+# Otherwise setup-node's restored store is ignored and downloads repeat.
+consumer_store="$(pnpm --dir "$root" store path)"
 export HOME="$work/home"
 
 # `coffre setup` is a chunk of its own, with the Postgres driver and the
@@ -87,7 +98,7 @@ for args in "" "--json"; do
     fi
 done
 
-for kind in workers node; do
+for kind in "${kinds[@]}"; do
     project="$work/coffre-$kind"
     echo "==> coffre init --$kind"
     node "$work/cli/package/dist/main.js" init "--$kind" "$project" >/dev/null
@@ -108,7 +119,7 @@ for kind in workers node; do
     } >>"$project/pnpm-workspace.yaml"
 
     echo "==> install, typecheck and build coffre-$kind"
-    pnpm --dir "$project" install --silent
+    pnpm --dir "$project" install --store-dir "$consumer_store" --silent
     if [[ -L "$project/node_modules/@coffre/server" && "$(readlink -f "$project/node_modules/@coffre/server")" == "$root"/* ]]; then
         echo "consumer-test: @coffre/server resolved into the workspace" >&2
         exit 1

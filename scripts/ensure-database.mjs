@@ -17,6 +17,11 @@ if (!/^coffre[a-z0-9_]*$/.test(name ?? '')) {
 const client = new pg.Client('postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/postgres');
 await client.connect();
 try {
+    // Roles belong to the cluster, not this run's database. Match the lock
+    // in setup-test-database.sh so independent checkouts cannot race ALTER.
+    // A session lock also covers CREATE DATABASE, which cannot run in a
+    // transaction; ending this client releases it, including on failure.
+    await client.query("SELECT pg_advisory_lock(hashtextextended('coffre:local-roles', 0))");
     const options = 'LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS';
     for (const [login, password] of [['coffre_runtime', 'local-runtime-only'], ['coffre_vault_runtime', 'local-vault-only']]) {
         const role = await client.query('SELECT 1 FROM pg_roles WHERE rolname = $1', [login]);

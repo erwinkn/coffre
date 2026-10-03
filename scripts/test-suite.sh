@@ -1,21 +1,22 @@
 #!/usr/bin/env bash
-# Run the integration suite on the engine COFFRE_TEST_ENGINE names:
-# postgres (the default) or sqlite.
-#
-#   postgres  coffre_test in the compose Postgres, recreated
-#   sqlite    a file in a temporary directory, deleted afterwards
-#
-# COFFRE_TEST_DATABASE names another database than coffre_test, for a second
-# run beside the first. Tests import the other packages' sources, under the
-# `coffre:source` condition in their `exports`.
+# Each test process gets a clone of one migrated template. Cases within a
+# file still run sequentially and retain all their resets and transaction guards.
+# COFFRE_TEST_DATABASE is the base name; a random suffix isolates each run.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 export COFFRE_TEST_ENGINE="${COFFRE_TEST_ENGINE:-postgres}"
-database="${COFFRE_TEST_DATABASE:-coffre_test}"
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 case "$COFFRE_TEST_ENGINE" in
     postgres)
+        export COFFRE_TEST_DATABASE="$(node --input-type=module -e '
+            import { randomBytes } from "node:crypto";
+            const base = (process.env.COFFRE_TEST_DATABASE ?? "coffre_test").replace(/[^a-zA-Z0-9_]/g, "_").slice(0, 32);
+            console.log(`${base}_${randomBytes(8).toString("hex")}`);
+        ')"
+        trap 'node scripts/test-databases.mjs cleanup "$COFFRE_TEST_DATABASE"' EXIT
         ./scripts/setup-test-database.sh
         ;;
     sqlite)
@@ -30,4 +31,4 @@ case "$COFFRE_TEST_ENGINE" in
         ;;
 esac
 
-node --conditions=coffre:source --test --test-concurrency=1 "scripts/*.test.mjs" "packages/*/test/**/*.test.ts" "dev/**/test/*.test.ts" "examples/**/test/*.test.ts"
+node --conditions=coffre:source --import ./scripts/test-database-worker.mjs --test --test-concurrency=4 "$@" "scripts/*.test.mjs" "packages/*/test/**/*.test.ts" "dev/**/test/*.test.ts" "examples/**/test/*.test.ts"
