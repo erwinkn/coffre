@@ -7,44 +7,79 @@ permissions:
   contents: read
 
 jobs:
-  validate:
-    name: Validate
+  checks:
+    name: Checks
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-
     steps:
       - name: Check out the selected revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
-
-      - name: Install Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 24
-          cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
-
-      - name: Install frozen dependencies
-        run: pnpm install --frozen-lockfile
-
-      # First: the typecheck needs what it generates (the UI's route tree, and
-      # its .d.ts for the server), and conformance runs the built packages.
-      - name: Build the packages
-        run: pnpm build
-
-      - name: Validate application and database contracts
+      - uses: ./.github/actions/prepare
+      - name: Checks
         run: |
-          pnpm test
-          pnpm test:schema
+          pnpm lint
+          pnpm typecheck
           pnpm check:pins
           pnpm check:contrast
           pnpm check:docs
-          pnpm typecheck
 
-      - name: Hold both examples to conformance, from the workspace and from packed tarballs
+  tests:
+    name: Tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out the selected revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/prepare
+      - name: Tests
+        run: |
+          pnpm test
+          pnpm test:schema
+
+  workers:
+    name: Workers conformance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out the selected revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/prepare
+      - name: Workers conformance
         run: |
           pnpm conformance:workers
+
+  node:
+    name: Node conformance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out the selected revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/prepare
+      - name: Node conformance
+        run: |
           pnpm conformance:node
+
+  consumer:
+    name: Packed consumer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out the selected revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/prepare
+      - name: Packed consumer
+        run: |
           pnpm test:consumer
+
+  validate:
+    name: Validate
+    runs-on: ubuntu-24.04
+    needs: [checks, tests, workers, node, consumer]
+    if: always()
+    steps:
+      - name: Require every validation job to succeed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          jq -e 'all(.[]; .result == "success")' <<< "$RESULTS"
