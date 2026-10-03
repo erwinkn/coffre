@@ -1,6 +1,6 @@
 {
   "name": "@coffre/core",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "description": "What coffre's packages share: roles, envelopes, identity, the audit chain and the vault's contract.",
   "license": "MIT",
   "repository": {
