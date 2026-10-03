@@ -88,7 +88,7 @@ In order, since each builds on the ones before:
 | live setup | The admin sets up what `probe --token` asks an operator for: `conformance/live/CANARY`, and `token:conformance-live`, a viewer there and auditor on the project |
 | token, token reveal, token scan, token scope, token verification | What `probe --token` checks, with that token; see [below](#against-a-running-instance) |
 | probe as a user | `probe --sign-in`, approved by the reader, a plain user: it says plainly it needs an owner or a root admin, makes nothing, and ends the session. No member, grant, project or environment changes |
-| probe --sign-in, probe again | `probe --sign-in`, approved by the root admin, twice: every check of the [signed-in tier](#against-a-running-instance) passes. The first makes `token:conformance-probe` and its grants; the second finds everything. No line shows the credential, the session or the canary |
+| probe --sign-in, probe again | `probe --sign-in`, approved by the root admin, twice: every check of the [signed-in tier](#against-a-running-instance) passes, and none is skipped. The first makes `token:conformance-probe` and its grants; the second finds everything. No line shows the credential, the session or the canary |
 | probe interrupted | The command itself, `coffre-conformance probe <url> --sign-in`, approved by the admin and stopped with Ctrl-C mid-run: it exits 130, its credential revoked and its session ended, and nothing it printed shows a credential or a canary |
 | probe leftovers | After the runs: each run's credential and session refuse, the service holds no credential, `conformance/live/CANARY` is as the live setup wrote it, no other member, grant, project or environment changed, and the runs' entries are in the audit log |
 | offboarding | Removing the leaver names the values they read, to rotate; their browser session, their CLI session and a new sign-in all stop at once. A removed service's token stops too |
@@ -217,7 +217,7 @@ Signed in as anyone else, it says so and stops before it makes anything.
 |---|---|
 | sign-in | The device login is approved, by an owner or a root admin |
 | probe setup | What step 1 and 2 found and made, a fresh canary and a fresh credential |
-| token, token reveal, token scan, token scope, token verification | The token tier, as the fresh credential |
+| token, token reveal, token scan, token scope | The token tier, as the fresh credential. Its last check, token verification, which a token can only skip, is left out: the owner's comes next |
 | owner verification | The whole audit chain verifies, read by the owner |
 | clean-up | The credential revoked and the session ended; what stays |
 

@@ -60,15 +60,25 @@ export async function anonymousChecks(report: Report, origin: string, options: {
   await report.check('anonymous answers', {}, () => anonymousAnswers(origin));
 }
 
-/** The checks with a service token that reads the canary, and audits its project. `prefix` names them apart, run twice. */
-export async function tokenChecks(report: Report, origin: string, setup: { token?: string; canary?: Canary }, prefix = ''): Promise<void> {
+/**
+ * The checks with a service token that reads the canary, and audits its
+ * project. `prefix` names them apart, run twice; `verification` false leaves
+ * out the last, which a token can only skip, for a caller that verifies the
+ * chain otherwise.
+ */
+export async function tokenChecks(
+  report: Report,
+  origin: string,
+  setup: { token?: string; canary?: Canary },
+  { prefix = '', verification = true }: { prefix?: string; verification?: boolean } = {},
+): Promise<void> {
   const api = setup.token === undefined ? undefined : bearer(origin, setup.token);
   const token = await report.check(`${prefix}token`, { api, canary: setup.canary }, ({ api, canary }) => whoIsToken(origin, api, canary));
   const needs = { api, canary: setup.canary, token, secret: setup.token };
   await report.check(`${prefix}token reveal`, needs, ({ api, canary, token }) => tokenReveal(api, canary, token));
   await report.check(`${prefix}token scan`, needs, ({ canary, secret }) => tokenScan(origin, secret, canary));
   await report.check(`${prefix}token scope`, needs, ({ api, canary }) => tokenScope(api, canary));
-  await report.check(`${prefix}token verification`, { api }, ({ api }) => tokenVerification(api));
+  if (verification) await report.check(`${prefix}token verification`, { api }, ({ api }) => tokenVerification(api));
 }
 
 // --- as no one ----------------------------------------------------------------
