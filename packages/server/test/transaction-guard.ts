@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { afterEach } from 'node:test';
 
 import type { Database } from '@coffre/db';
+import { drainBackgroundTasks } from './background-tasks.ts';
 
 const transaction = new AsyncLocalStorage<{ open: boolean }>();
 const violations: string[] = [];
@@ -26,7 +27,8 @@ export function assertOutsideTransaction(method: string): void {
 }
 
 // An API error or failed background sync must not hide a violation.
-afterEach(() => {
+afterEach(async () => {
+  await drainBackgroundTasks();
   const found = violations.splice(0);
   assert.deepEqual(found, [], 'vault calls must happen outside app transactions');
 });
