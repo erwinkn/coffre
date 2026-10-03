@@ -19,24 +19,17 @@ export type {
   DryRunOutcome,
   DryRunResult,
   IdentityRow,
-  Json,
   Me,
   Member,
   OffboardingReport,
   ProjectSummary,
   RemovedMember,
-  RunOutcome,
   SecretKey,
   SecretVersion,
   ServiceTokenRow,
   SessionRow,
   SetResult,
-  SyncField,
-  SyncProviderInfo,
-  SyncView,
 } from './api.ts';
-export { configFromArguments, configFromForm, firstMissing, initialValues, isAsked } from './sync-fields.ts';
-export type { FormValues } from './sync-fields.ts';
 
 export type RouteKey = keyof Api;
 /** What a caller sends: the body, or the query string for a GET. */
@@ -243,18 +236,6 @@ export function createClient(options: ClientOptions) {
     deviceLogins: {
       get: (code: string) => call('GET /device-logins/:code', { code }),
       decide: (code: string, approve: boolean) => call('POST /device-logins/:code', { code }, { approve }),
-    },
-
-    syncs: {
-      /** Where a sync can push on this instance, and what each asks for. */
-      providers: () => call('GET /syncs/providers', {}),
-      list: (path: string) => call('GET /syncs/:project/:environment', place(path)),
-      add: (path: string, input: RouteInput<'POST /syncs/:project/:environment'>) =>
-        call('POST /syncs/:project/:environment', place(path), input),
-      update: (id: string, patch: RouteInput<'PATCH /syncs/by-id/:id'>) =>
-        call('PATCH /syncs/by-id/:id', { id }, patch),
-      remove: (id: string) => call('DELETE /syncs/by-id/:id', { id }),
-      run: (id: string) => call('POST /syncs/by-id/:id/runs', { id }),
     },
 
     audit: {

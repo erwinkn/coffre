@@ -150,7 +150,7 @@ EXCEPTION
 END
 $$;
 
--- 8. Nor read the app's sign-in rows or syncs, empty any table, rewrite a
+-- 8. Nor read the app's sign-in rows, empty any table, rewrite a
 -- grant, become the app, or create temporary objects. It may restore a
 -- member's created_at and created_by, from its own log, when it starts a
 -- tampered member over.
@@ -162,12 +162,8 @@ BEGIN
         'SELECT * FROM identities',
         'SELECT * FROM credentials',
         'SELECT * FROM device_authorizations',
-        'SELECT * FROM syncs',
-        'SELECT * FROM sync_keys',
             'DELETE FROM identities',
         'DELETE FROM device_authorizations',
-        'DELETE FROM syncs',
-        'DELETE FROM sync_keys',
         'TRUNCATE vault_members',
         'TRUNCATE vault_grants',
         'TRUNCATE audit_log',

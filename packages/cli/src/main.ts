@@ -30,12 +30,9 @@ import {
   type Target,
 } from './instance.ts';
 import {
-  configFromArguments,
   createClient,
   planImport,
   type CoffreClient,
-  type SyncField,
-  type SyncProviderInfo,
 } from '@coffre/client';
 import { assignableToEnvironment, isRole, ROLES, type Role } from '@coffre/core/access';
 import { formatDotenv, formatShellExports, parseDotenv } from '@coffre/core/dotenv';
@@ -731,15 +728,6 @@ async function offboard(args: string[]): Promise<void> {
     );
   });
 
-  if (report.syncs.length > 0) {
-    process.stdout.write(`\nSyncs ${they} set up, which keep pushing\n`);
-    for (const entry of report.syncs) {
-      const paused = entry.paused ? ' (paused)' : '';
-      process.stdout.write(
-        `  ${entry.project}/${entry.environment} -> ${entry.providerLabel} ${entry.destination}${paused}\n`,
-      );
-    }
-  }
   if (report.issuedTokens.length > 0) {
     process.stdout.write(`\nService tokens ${they} issued, which still work\n`);
     for (const token of report.issuedTokens) {
@@ -835,41 +823,6 @@ async function verifyLog(): Promise<void> {
   process.exit(2);
 }
 
-type SyncView = Awaited<ReturnType<CoffreClient['syncs']['list']>>['syncs'][number];
-
-const SYNC_USAGE = `usage:
-  coffre sync providers
-  coffre sync list   <project>/<environment>
-  coffre sync add    <project>/<environment> <provider> name=value… --credential <project>/<environment>/<KEY>
-  coffre sync run    <project>/<environment> <sync>
-  coffre sync pause  <project>/<environment> <sync>
-  coffre sync resume <project>/<environment> <sync>
-  coffre sync remove <project>/<environment> <sync>
-
-\`coffre sync providers\` lists where this instance can sync to, and what each
-provider takes. <sync> is the start of an id from \`coffre sync list\`, or the
-provider's id when the environment syncs there only once.
-`;
-
-/** Where this instance can sync to, one provider to a paragraph. */
-function printProviders(providers: SyncProviderInfo[]): void {
-  if (providers.length === 0) {
-    process.stdout.write('This instance offers no sync providers.\n');
-    return;
-  }
-  process.stdout.write(
-    'What is in brackets can be left out. A choice left out is what comes\n' +
-      'before the first |, and several choices go comma-separated.\n',
-  );
-  for (const provider of providers) {
-    process.stdout.write(
-      `\n${provider.id}  ${provider.label}\n` +
-        `    ${[...provider.fields.map(fieldUsage), `--credential ${provider.credential.placeholder}`].join(' ')}\n` +
-        `${indented(provider.credential.hint)}\n`,
-    );
-  }
-}
-
 /** Prose under a usage line, indented and wrapped to a terminal's 80 columns. */
 function indented(text: string): string {
   const lines: string[] = [];
@@ -879,143 +832,6 @@ function indented(text: string): string {
     else lines.push(word);
   }
   return lines.map((line) => `    ${line}`).join('\n');
-}
-
-function fieldUsage(field: SyncField): string {
-  if (field.type === 'text') return field.optional ? `[${field.name}=…]` : `${field.name}=…`;
-  // What is picked when the field is left out comes first.
-  const others = field.options.map((option) => option.value).filter((value) => !field.initial.includes(value));
-  return `[${field.name}=${[field.initial.join(','), ...others].join('|')}]`;
-}
-
-/**
- * Push an environment somewhere else and keep it current. The server does
- * the work and checks every field; this names things and reports back.
- */
-async function sync(args: string[]): Promise<void> {
-  const [verb, path, ...rest] = args;
-  if (verb === 'providers') {
-    const { providers } = await client().syncs.providers();
-    printProviders(providers);
-    return;
-  }
-  if (verb === undefined || verb === '--help' || path === undefined) {
-    process.stdout.write(SYNC_USAGE);
-    process.exit(verb === undefined || verb === '--help' ? 0 : 1);
-  }
-  const { project, environment, key } = parsePath(path);
-  if (key !== undefined) fail(`syncs belong to an environment: use ${project}/${environment}`);
-  const place = `${project}/${environment}`;
-  const coffre = client();
-
-  if (verb === 'list') {
-    const { syncs } = await coffre.syncs.list(place);
-    if (syncs.length === 0) process.stdout.write(`${project}/${environment} is not synced anywhere\n`);
-    for (const entry of syncs) printSync(entry);
-    return;
-  }
-
-  if (verb === 'add') {
-    const { values, positionals } = parseArgs({
-      args: rest,
-      options: { credential: { type: 'string' } },
-      allowPositionals: true,
-    });
-    const [id, ...assignments] = positionals;
-    const { providers } = await coffre.syncs.providers();
-    const provider = providers.find((candidate) => candidate.id === id);
-    if (provider === undefined) {
-      const offered = providers.length === 0 ? 'none' : providers.map((candidate) => candidate.id).join(', ');
-      fail(`name a provider this instance offers (${offered}); \`coffre sync providers\` shows what each takes`);
-    }
-    if (values.credential === undefined) {
-      fail(`--credential names the secret holding the ${provider.label} token, such as ${provider.credential.placeholder}`);
-    }
-    const config = attempt(() => configFromArguments(provider, assignments));
-    const created = await coffre.syncs.add(place, { provider: provider.id, config, credential: values.credential });
-    process.stdout.write(
-      `Syncing ${project}/${environment} to ${created.destination} (${created.providerLabel}), id ${created.id.slice(0, 8)}.\n` +
-        `The first push has started; \`coffre sync list ${project}/${environment}\` shows how it went.\n`,
-    );
-    return;
-  }
-
-  if (!['run', 'pause', 'resume', 'remove'].includes(verb)) fail(`unknown sync command "${verb}"; see \`coffre sync --help\``);
-  const reference = rest[0];
-  if (reference === undefined) fail(`usage: coffre sync ${verb} ${project}/${environment} <sync>`);
-  const { syncs } = await coffre.syncs.list(place);
-  const chosen = attempt(() => pickSync(syncs, reference));
-
-  if (verb === 'run') {
-    // The server would only answer that it is busy.
-    if (chosen.paused) fail(`syncing to ${chosen.destination} is paused; resume it first`);
-    const { sync: after, outcome } = await coffre.syncs.run(chosen.id);
-    if (outcome.status === 'busy') fail(`a run to ${chosen.destination} is already under way`);
-    for (const failure of outcome.failed) {
-      process.stderr.write(`  could not ${failure.operation === 'upsert' ? 'push' : 'remove'} ${failure.key}: ${failure.message}\n`);
-    }
-    if (outcome.status === 'failed') fail(`could not sync to ${after.destination}: ${outcome.error ?? 'the run failed'}`);
-    const changed = outcome.upserted.length + outcome.deleted.length;
-    process.stdout.write(
-      changed === 0 && outcome.failed.length === 0
-        ? `${after.destination} was already current\n`
-        : `Pushed ${outcome.upserted.length}, removed ${outcome.deleted.length} at ${after.destination}\n`,
-    );
-    if (outcome.status === 'partial') process.exit(1);
-    return;
-  }
-
-  if (verb === 'remove') {
-    await coffre.syncs.remove(chosen.id);
-    process.stdout.write(
-      `No longer syncing to ${chosen.destination}. Keys coffre pushed there stay; remove them at ${chosen.providerLabel} if they should go too.\n`,
-    );
-    return;
-  }
-
-  const paused = verb === 'pause';
-  await coffre.syncs.update(chosen.id, { paused });
-  process.stdout.write(
-    paused
-      ? `Paused syncing to ${chosen.destination}\n`
-      : `Resumed syncing to ${chosen.destination}; changes since the pause go out on the next run\n`,
-  );
-}
-
-/** By id prefix, or by provider when only one sync here goes there. */
-function pickSync(syncs: SyncView[], reference: string): SyncView {
-  const byProvider = syncs.filter((entry) => entry.provider === reference);
-  if (byProvider.length === 1) return byProvider[0];
-  if (byProvider.length > 1) throw new Error(`more than one ${reference} sync here; name it by id (coffre sync list)`);
-  if (reference.length < 4) throw new Error('give at least 4 characters of a sync id, or a provider id');
-  const byId = syncs.filter((entry) => entry.id.startsWith(reference.toLowerCase()));
-  if (byId.length === 1) return byId[0];
-  if (byId.length > 1) throw new Error(`"${reference}" starts more than one sync id; give more of it`);
-  throw new Error(`no sync "${reference}" here; \`coffre sync list\` shows them`);
-}
-
-function printSync(entry: SyncView): void {
-  const state = entry.running
-    ? 'pushing'
-    : entry.paused
-      ? 'paused'
-      : entry.lastStatus === 'failed'
-        ? 'failed'
-        : entry.lastStatus === 'partial'
-          ? 'partial'
-          : entry.lastRunAt === null
-            ? 'not run yet'
-            : entry.pending > 0
-              ? 'behind'
-              : 'in sync';
-  const counts = [`${entry.synced} synced`, ...(entry.pending > 0 ? [`${entry.pending} pending`] : [])];
-  if (entry.lastRunAt !== null) counts.push(`last run ${entry.lastRunAt.slice(0, 16).replace('T', ' ')}`);
-  process.stdout.write(`${entry.id.slice(0, 8)}  ${entry.providerLabel.padEnd(18)} ${entry.destination}\n`);
-  process.stdout.write(`          ${state}: ${counts.join(', ')}; token from ${entry.credential}\n`);
-  if (entry.lastError !== null && !entry.running) process.stdout.write(`          ${entry.lastError}\n`);
-  for (const skipped of entry.skipped) {
-    process.stdout.write(`          skips ${skipped.key}: ${skipped.reason}\n`);
-  }
 }
 
 /** `coffre init --workers|--node [<dir>]`: a new deployment of coffre. */
@@ -1077,11 +893,6 @@ const USAGE = `coffre - secrets, with an audit log
     coffre offboard <principal> [--service] [--apply]
                                             what removing them revokes, and what to rotate
 
-  Syncs (coffre sync providers for where to, and what each takes)
-    coffre sync list   <project>/<environment>
-    coffre sync add    <project>/<environment> <provider> name=value…
-                       --credential <project>/<environment>/<KEY>
-    coffre sync run|pause|resume|remove <project>/<environment> <sync>
 
   Audit
     coffre audit [--limit N] [--actor <id>] [--denied] [--detail]
@@ -1162,9 +973,6 @@ switch (command) {
     break;
   case 'offboard':
     await offboard(rest);
-    break;
-  case 'sync':
-    await sync(rest);
     break;
   case 'audit':
     await audit(rest);

@@ -153,8 +153,7 @@ async function tokenScope(api: CoffreClient, canary: Canary): Promise<string> {
   for (const path of [...others, nowhere]) {
     await refused(`the token listed ${path}`, api.secrets.list(path));
     await refused(`the token revealed ${path}`, api.secrets.reveal(path));
-    await refused(`the token read ${path}'s syncs`, api.syncs.list(path));
-    refusals += 3;
+    refusals += 2;
   }
   // Its project's log is the token's to read, as `audit.read` there; another's is not.
   await refused(`the token read ${nowhere}'s audit`, api.audit.list({ path: nowhere, limit: 1 }));

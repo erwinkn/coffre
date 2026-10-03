@@ -107,7 +107,6 @@ export async function emptyDatabase(owner: Database): Promise<void> {
   await owner.update(secrets).set({ currentVersionId: null });
   await run(owner, sql`DELETE FROM secret_versions`);
   await owner.delete(secrets);
-  await run(owner, sql`DELETE FROM syncs`);
   await owner.delete(environments);
   await owner.delete(projects);
   forgetLogHeads();

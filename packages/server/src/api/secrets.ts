@@ -78,15 +78,9 @@ export function secretRef(
   };
 }
 
-/** Tell the environment's syncs to push, once the change has committed. */
-function changed(ctx: ApiContext, environmentId: string): void {
-  // Never throws: the write has committed, and the scheduler picks up any run missed here.
-  ctx.waitUntil(ctx.syncs.runForEnvironment(environmentId));
-}
-
 /**
  * The current value of every live secret in an environment, or of one
- * secret. What reveals and syncs decrypt.
+ * secret. What reveals decrypt.
  */
 export async function currentEnvelopes(
   db: Queryable,
@@ -246,7 +240,6 @@ export async function setSecrets(
       return { operationId, keys };
     });
   });
-  if (Object.keys(patch).length > 0) changed(ctx, environment.environmentId);
   return result;
 }
 
@@ -349,7 +342,6 @@ export async function patchSecret(
     if (renaming) log.push(allowed(ctx, 'secret.rename', { ...where, metadata: { key: secret.key, nextKey } }));
     return { key: renaming ? nextKey : secret.key, archived };
   });
-  changed(ctx, environment.environmentId);
   return result;
 }
 
@@ -425,7 +417,6 @@ export async function restoreVersion(
       return { key: prepared.key, version };
     });
   });
-  changed(ctx, environment.environmentId);
   return result;
 }
 

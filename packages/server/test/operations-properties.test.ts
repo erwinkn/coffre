@@ -12,7 +12,6 @@ import { clientFor, openTestDatabase, resetDatabase, testVault, waitUntil, type 
 import { drainBackgroundTasks } from './background-tasks.ts';
 import { auditLog, vaultMembers, vaultGrants, credentials as storedCredentials, identities } from './db/tables.ts';
 import { SigninService } from '../src/api/signin.ts';
-import { SyncRunner } from '../src/api/syncs.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 
@@ -57,7 +56,7 @@ async function scenario(operations: readonly Operation[]) {
   deps.signin = signin;
   const runtime: CoffreRuntime = {
     ...deps, signin,
-    syncs: new SyncRunner(deps),
+
     auth: { mode: 'signin', signin: signinConfig },
     publicUrl: 'https://coffre.test', verifier: signin, waitUntil,
   };

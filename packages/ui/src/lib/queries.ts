@@ -47,7 +47,6 @@ export const keys = {
   projects: ['projects'],
   grants: (project: string) => ['grants', project],
   secrets: ({ project, environment }: Place) => ['secrets', project, environment],
-  syncs: ({ project, environment }: Place) => ['syncs', project, environment],
   directory: ['directory'],
   report: (member: string) => ['report', member],
   credentials: (member: string) => ['credentials', member],
@@ -131,12 +130,6 @@ export const queries = {
     queryOptions({
       queryKey: keys.secrets(place),
       queryFn: () => uiResult(() => client.secrets.list(`${place.project}/${place.environment}`)),
-    }),
-
-  syncs: (client: CoffreClient, place: Place) =>
-    queryOptions({
-      queryKey: keys.syncs(place),
-      queryFn: () => uiResult(() => client.syncs.list(`${place.project}/${place.environment}`)),
     }),
 
   /**
@@ -355,9 +348,8 @@ export function managedProjects(projects: ProjectSummary[]): ProjectSummary[] {
 export const affects = {
   /** A project or environment made, renamed or archived: the tree, and where you hold access. */
   places: (): QueryKey[] => [keys.projects, keys.me],
-  /** Secrets written, renamed, restored or archived: the environment, its syncs, which push them, and the counts. */
-  secrets: (place: Place): QueryKey[] => [keys.secrets(place), keys.syncs(place), keys.projects],
-  syncs: (place: Place): QueryKey[] => [keys.syncs(place)],
+  /** Secrets written, renamed, restored or archived: the environment and the counts. */
+  secrets: (place: Place): QueryKey[] => [keys.secrets(place), keys.projects],
   /**
    * Someone's access in a project changed: its grants, their report, and, as
    * it may be your own, what you can see.

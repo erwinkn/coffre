@@ -9,7 +9,6 @@ import { forbidden, vaultRefused, type ApiError } from './errors.ts';
 import type { Asking } from './keys.ts';
 import { formatMember } from './paths.ts';
 import type { SigninService } from './signin.ts';
-import type { SyncRunner } from './syncs.ts';
 
 /** What every handler works with: the stores, and who is asking. */
 export type ApiContext = {
@@ -17,10 +16,8 @@ export type ApiContext = {
   chainKey: Buffer;
   /** Keys, grants, who is a member, root admins: every decision the app cannot make alone. */
   vault: Vault;
-  /** Background work that must outlive the response, such as syncs. */
+  /** Background work that must outlive the response, that is explicitly scheduled. */
   waitUntil: (promise: Promise<unknown>) => void;
-  /** Runs syncs: after a commit that changed an environment's secrets, and on request. */
-  syncs: SyncRunner;
   /** coffre's own sign-in and the tokens it issues; null behind Cloudflare Access. */
   signin: SigninService | null;
   caller: Caller;
@@ -171,7 +168,7 @@ export function asking(ctx: Pick<ApiContext, 'caller' | 'requestId'>, operationI
 
 /**
  * The vault said no to part of something larger the app was doing, such as
- * the grant behind a new sync: the app logs what the person tried, refused
+ * a requested grant: the app logs what the person tried, refused
  * as `vault_<code>`, beside the vault's own entry for the part it refused.
  * Where the vault's refusal is the whole of the action, a read, a write, an
  * access change, its entry is the record: throw `vaultRefused` instead.

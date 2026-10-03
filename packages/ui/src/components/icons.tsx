@@ -11,7 +11,6 @@ import {
   CircleAlert,
   CircleCheck,
   Clock as ClockGlyph,
-  Cloud as CloudGlyph,
   Copy as CopyGlyph,
   Ellipsis,
   Eye as EyeGlyph,
@@ -35,7 +34,6 @@ import {
   Pencil as PencilGlyph,
   Play as PlayGlyph,
   Plus as PlusGlyph,
-  RefreshCw,
   RotateCcw,
   ScrollText,
   Search as SearchGlyph,
@@ -43,7 +41,6 @@ import {
   ShieldCheck as ShieldCheckGlyph,
   Sun as SunGlyph,
   Terminal as TerminalGlyph,
-  TrainFront,
   TriangleAlert,
   Upload as UploadGlyph,
   User as UserGlyph,
@@ -161,7 +158,6 @@ export const Archive = lucide(ArchiveGlyph);
 export const History = lucide(HistoryGlyph);
 export const RotateBack = lucide(RotateCcw);
 export const Upload = lucide(UploadGlyph);
-export const Sync = lucide(RefreshCw);
 export const Pause = lucide(PauseGlyph);
 export const Play = lucide(PlayGlyph);
 export const Lock = lucide(LockGlyph);
@@ -242,36 +238,6 @@ export function Microsoft({ size = 16, className, style }: IconProps) {
       <rect x="11" y="11" width="10" height="10" fill="#FFB900" />
     </svg>
   );
-}
-
-/** Vercel's triangle. */
-export function Vercel({ size = 16, className, style }: IconProps) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" className={className} style={style} aria-hidden>
-      <path d="M12 2.5 23 21.5H1Z" />
-    </svg>
-  );
-}
-
-// Railway and Cloudflare marks are detailed enough that a redraw would be a
-// guess; a plain glyph stands in for them.
-const Cloud = lucide(CloudGlyph);
-const Train = lucide(TrainFront);
-
-/** The mark beside a sync provider; any other brand gets the sync glyph. */
-export function SyncMark({ brand, size = 16 }: { brand: string; size?: number }) {
-  switch (brand) {
-    case 'github':
-      return <GitHub size={size} />;
-    case 'vercel':
-      return <Vercel size={size} />;
-    case 'railway':
-      return <Train size={size} />;
-    case 'cloudflare':
-      return <Cloud size={size} />;
-    default:
-      return <Sync size={size} />;
-  }
 }
 
 /** The mark on a provider's button; any other OpenID Connect issuer gets a key. */

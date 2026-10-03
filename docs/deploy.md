@@ -91,7 +91,7 @@ The migration creates two group roles and grants their membership:
 
 | Login | Group | Rights |
 |---|---|---|
-| `coffre_runtime` | `coffre_app` | app data, sessions and syncs; app entries in the log; read-only access to members and grants |
+| `coffre_runtime` | `coffre_app` | app data and sessions; app entries in the log; read-only access to members and grants |
 | `coffre_vault_runtime` | `coffre_vault` | members and grants; read the secret context it decides on; vault entries in the log |
 
 Neither login owns tables or may change or delete audit entries. Row-level

@@ -228,15 +228,13 @@ test('each segment is one level: …/prod/versions is a secret named versions', 
   assert.equal(response.headers.get('allow'), 'PATCH');
 });
 
-test('a literal segment beats a name, among the routes that take the method', async () => {
-  await root.projects.create('by-id', { name: 'By id' });
-  await root.environments.create('by-id/runs', { name: 'Runs' });
-
-  // Only `GET /syncs/:project/:environment` takes a GET: a project named by-id.
-  assert.deepEqual((await root.syncs.list('by-id/runs')).syncs, []);
-  // `DELETE /syncs/by-id/:id` is more specific: a sync id, which must be a uuid.
-  const response = await raw('DELETE', '/syncs/by-id/runs');
-  assert.equal(response.status, 400);
+test('removed sync routes cannot be called', async () => {
+  for (const [method, path] of [
+    ['GET', '/syncs/providers'], ['GET', '/syncs/market/prod'],
+    ['POST', '/syncs/market/prod'], ['PATCH', '/syncs/by-id/00000000-0000-4000-8000-000000000001'],
+    ['DELETE', '/syncs/by-id/00000000-0000-4000-8000-000000000001'], ['POST', '/syncs/by-id/00000000-0000-4000-8000-000000000001/runs'],
+  ]) assert.equal((await raw(method, path)).status, 404);
+  assert.equal((await raw('PATCH', '/access/sync:00000000-0000-4000-8000-000000000001', { 'market/prod': 'viewer' })).status, 400);
 });
 
 test('unknown places are 404 and are not logged', async () => {

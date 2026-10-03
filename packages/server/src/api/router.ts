@@ -45,9 +45,8 @@ const PARAMS: Record<string, z.ZodType<string>> = {
 /**
  * The route a request means: of the shapes that fit the path and take its
  * method, the most specific, where at the first segment two shapes differ,
- * a literal beats a parameter. So `DELETE /syncs/by-id/…` names a sync,
- * while `GET /syncs/by-id/prod` is still the syncs of a project named
- * `by-id`. When no shape takes the method, `allowed` lists the methods
+ * a literal beats a parameter. When no shape takes the method,
+ * `allowed` lists the methods
  * the path does take.
  */
 function match(

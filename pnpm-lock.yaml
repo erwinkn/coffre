@@ -260,15 +260,9 @@ importers:
       '@coffre/ui':
         specifier: workspace:*
         version: link:../ui
-      '@noble/hashes':
-        specifier: 2.4.0
-        version: 2.4.0
       drizzle-orm:
         specifier: 0.45.2
         version: 0.45.2(@cloudflare/workers-types@5.20260920.1)(@libsql/client@0.18.0)(@types/pg@8.20.0)(pg@8.16.3)
-      tweetnacl:
-        specifier: 1.0.3
-        version: 1.0.3
       zod:
         specifier: 4.4.3
         version: 4.4.3
@@ -1450,10 +1444,6 @@ packages:
 
   '@neon-rs/load@0.0.4':
     resolution: {integrity: sha512-kTPhdZyTQxB+2wpiRcFWrDcejc4JI6tkPuS7UZCG4l6Zvc5kU/gGQ/ozvHTh1XR5tS+UlfAfGuPajjzQjCiHCw==}
-
-  '@noble/hashes@2.4.0':
-    resolution: {integrity: sha512-X5XaVWZIBCT7HHZGm5I7ZQXDwLG+bGXuSrMQAW+7Zvl87h1kmc1ZB1VSRJcpUfoUrGQp4Fkoxm5kZ+Ms+aW+eA==}
-    engines: {node: '>= 20.19.0'}
 
   '@oozcitak/dom@2.0.2':
     resolution: {integrity: sha512-GjpKhkSYC3Mj4+lfwEyI1dqnsKTgwGy48ytZEhm4A/xnH/8z9M3ZVXKr/YGQi3uCLs1AEBS+x5T2JPiueEDW8w==}
@@ -3665,9 +3655,6 @@ packages:
     engines: {node: '>=18.0.0'}
     hasBin: true
 
-  tweetnacl@1.0.3:
-    resolution: {integrity: sha512-6rt+RN7aOi1nGMyC4Xa5DdYiukl2UWCbcJft7YhxReBGQD7OAM8Pbxw6YMo4r2diNEA8FEmu32YOn9rhaiE5yw==}
-
   type-check@0.4.0:
     resolution: {integrity: sha512-XleUoc9uwGXqjWwXaUTZAmzMcFZ5858QA2vvx1Ur5xIcixXIP+8LnFDgRplU30us6teqdlskFfu+ae4K79Ooew==}
     engines: {node: '>= 0.8.0'}
@@ -4635,8 +4622,6 @@ snapshots:
     optional: true
 
   '@neon-rs/load@0.0.4': {}
-
-  '@noble/hashes@2.4.0': {}
 
   '@oozcitak/dom@2.0.2':
     dependencies:
@@ -6765,8 +6750,6 @@ snapshots:
       esbuild: 0.28.1
     optionalDependencies:
       fsevents: 2.3.3
-
-  tweetnacl@1.0.3: {}
 
   type-check@0.4.0:
     dependencies:

@@ -4,7 +4,6 @@ import type { Database } from '@coffre/db';
 
 import type { ApiContext } from './api/context.ts';
 import { SigninService } from './api/signin.ts';
-import { SyncRunner } from './api/syncs.ts';
 import type { AuthenticatedIdentity } from './auth.ts';
 import type { ResolvedConfig } from './config.ts';
 import { logged } from './logged.ts';
@@ -14,13 +13,12 @@ export type CoffreRuntime = {
   /** Keys, grants and members: the vault Worker's binding, or a Node vault. */
   vault: Vault;
   chainKey: Buffer;
-  syncs: SyncRunner;
   /** Present in signin mode only. */
   signin: SigninService | null;
   auth: ResolvedConfig['auth'];
   publicUrl: string;
   verifier: IdentityVerifier;
-  /** Background work that must outlive the response, such as syncs. */
+  /** Background work that must outlive the response, that is explicitly scheduled. */
   waitUntil: (promise: Promise<unknown>) => void;
 };
 
@@ -54,13 +52,6 @@ export function createRuntime(
     db,
     vault,
     chainKey: config.auditChainKey,
-    syncs: new SyncRunner({
-      db,
-      vault,
-      chainKey: config.auditChainKey,
-      providers: config.syncs.providers,
-      timing: config.syncs,
-    }),
     signin,
     auth: config.auth,
     publicUrl: config.publicUrl,
@@ -76,7 +67,6 @@ export function apiContext(runtime: CoffreRuntime, identity: AuthenticatedIdenti
     chainKey: runtime.chainKey,
     vault: runtime.vault,
     waitUntil: runtime.waitUntil,
-    syncs: runtime.syncs,
     signin: runtime.signin,
     caller: identity.caller,
     requestId: identity.requestId,

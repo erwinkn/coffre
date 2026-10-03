@@ -32,7 +32,7 @@ export function failureMessage(error: unknown): string {
   }
   if (error.status === 404) return 'Not found. It may have been renamed or archived.';
   // A 400 or 409 carries a sentence written for the person, such as which
-  // field of a sync's destination is wrong. Anything unexpected stays generic.
+  // field of a request is wrong. Anything unexpected stays generic.
   if (error.status === 400 || error.status === 409) return error.message;
   return 'coffre is unavailable. Nothing was read or written.';
 }

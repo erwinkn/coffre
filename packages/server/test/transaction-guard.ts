@@ -26,7 +26,7 @@ export function assertOutsideTransaction(method: string): void {
   throw new Error(message);
 }
 
-// An API error or failed background sync must not hide a violation.
+// An API error or failed background task must not hide a violation.
 afterEach(async () => {
   await drainBackgroundTasks();
   const found = violations.splice(0);

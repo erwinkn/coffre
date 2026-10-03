@@ -8,6 +8,8 @@ coffre before this design, with the vault's own store; the
 [implementation plan](#implementation-plan) names the pull request that built
 each step, and what was parked is under its step 11, "Later".
 [architecture.md](../architecture.md) describes coffre as it now is.
+The sync engine described here has since been removed; its old audit entries
+and sealed records remain verifiable. This document records that earlier design.
 
 Every decision in it is settled; the list is at the end. This version folds
 in three reviews of that day. The security reviews of keys and integrity (F)

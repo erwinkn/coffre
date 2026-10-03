@@ -4,7 +4,6 @@ import assert from 'node:assert/strict';
 import { cloudflareAccess, github, signin } from '@coffre/core/identity';
 
 import { resolveConfig, type CoffreConfig } from '../src/config.ts';
-import { vercel } from '../src/sync/index.ts';
 
 const vault = {} as CoffreConfig['vault'];
 const auditChainKey = Buffer.alloc(32, 7).toString('base64');
@@ -16,17 +15,11 @@ const base: CoffreConfig = {
   auditChainKey,
 };
 
-test('a deployment as the docs write it resolves, with the sync defaults', () => {
+test('a deployment as the docs write it resolves', () => {
   const resolved = resolveConfig(base);
   assert.equal(resolved.publicUrl, 'https://secrets.acme.example');
   assert.equal(resolved.auth.mode, 'cloudflare');
   assert.equal(resolved.auditChainKey.length, 32);
-  const { providers, ...timing } = resolved.syncs;
-  assert.deepEqual(timing, { driftCheckMs: 60 * 60_000, retryAfterMs: 15 * 60_000 });
-  assert.deepEqual(
-    providers.map((provider) => provider.id),
-    ['github-actions', 'vercel', 'railway', 'cloudflare-workers'],
-  );
 });
 
 test('sign-in callbacks are built on the public URL', () => {
@@ -45,9 +38,6 @@ test('a bad configuration fails on start, naming what is wrong', () => {
     [{ auditChainKey: Buffer.alloc(16).toString('base64') }, /auditChainKey must be 32 bytes.*got 16/],
     [{ auditChainKey: undefined as never }, /auditChainKey/],
     [{ vault: undefined as never }, /vault is required/],
-    [{ syncs: { driftCheckMinutes: 0 } }, /syncs\.driftCheckMinutes/],
-    [{ syncs: { retryAfterMinutes: Number.NaN } }, /syncs\.retryAfterMinutes/],
-    [{ syncs: { providers: [vercel(), vercel()] } }, /sync provider id "vercel" is used twice/],
   ];
   for (const [change, message] of cases) {
     assert.throws(() => resolveConfig({ ...base, ...change }), message, JSON.stringify(change));

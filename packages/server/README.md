@@ -1,6 +1,6 @@
 # @coffre/server
 
-coffre's API under `/api`, sign-in, syncs to other services, the audit log
+coffre's API under `/api`, sign-in, the audit log
 and the scheduled job, on Cloudflare Workers or Node. A deployment
 configures it in code:
 

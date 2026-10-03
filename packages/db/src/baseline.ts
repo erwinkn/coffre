@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { readFile, rm, writeFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -15,17 +15,15 @@ import * as postgres from './schema.ts';
 import * as sqlite from './schema.sqlite.ts';
 
 /**
- * coffre has never been deployed, so there is no database to upgrade: each
- * engine has one migration, its baseline, and a schema change regenerates it
- * rather than adding a second. After the first deployment, changes become new
- * migrations and this goes.
+ * Applied migrations are immutable. Schema changes append a migration to
+ * each engine's journal; custom safety checks belong in that new migration.
  *
  * A baseline is baseline/<engine>.sql with its `-- @schema` line replaced by
  * the tables drizzle-kit generates from that engine's schema. The template
  * holds what a schema cannot say: the audit chain's first rows, and the
  * Postgres runtime role and its grants.
  *
- * `pnpm db:generate` runs this file and rewrites the baselines that are stale.
+ * `pnpm db:generate` runs this file and appends pending schema changes.
  */
 
 export const ENGINES: readonly Engine[] = ['postgres', 'sqlite'];
@@ -63,13 +61,13 @@ async function pending(engine: Engine): Promise<string[]> {
   }
 }
 
-/** Why the engine's baseline is out of date: empty when it is not. */
+/** Why the migration tree is out of date: empty when it matches the schema. */
 export async function staleness(engine: Engine): Promise<string[]> {
   const tags = await journal(engine).then(
     (entries) => entries.map((entry) => entry.tag),
     () => [],
   );
-  if (tags.length !== 1 || tags[0] !== TAG) return [`expected only ${TAG}, found [${tags.join(', ')}]`];
+  if (tags[0] !== TAG) return [`expected the immutable ${TAG} first`];
   const reasons = await pending(engine);
   const { head, tail } = await template(engine);
   const baseline = await readFile(`${migrationsFolder(engine)}/${TAG}.sql`, 'utf8');
@@ -77,28 +75,22 @@ export async function staleness(engine: Engine): Promise<string[]> {
   return reasons;
 }
 
-async function regenerate(engine: Engine): Promise<void> {
-  const folder = migrationsFolder(engine);
-  await rm(folder, { recursive: true, force: true });
+function generate(engine: Engine): void {
   execFileSync(
     `${packageRoot}node_modules/.bin/drizzle-kit`,
-    ['generate', '--config', `drizzle.${engine}.config.ts`, '--name', 'baseline'],
+    ['generate', '--config', `drizzle.${engine}.config.ts`, '--name', process.argv[2] ?? 'schema'],
     { cwd: here, stdio: 'inherit' },
   );
-  const tables = (await readFile(`${folder}/${TAG}.sql`, 'utf8')).trimEnd();
-  const breakpoint = tables.endsWith('--> statement-breakpoint') ? '' : '--> statement-breakpoint';
-  const { head, tail } = await template(engine);
-  await writeFile(`${folder}/${TAG}.sql`, `${head}${tables}${breakpoint}\n${tail}`);
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   for (const engine of ENGINES) {
     const reasons = await staleness(engine);
     if (reasons.length === 0) {
-      console.log(`${engine}: the baseline is up to date`);
+      console.log(`${engine}: the migration tree is up to date`);
       continue;
     }
-    console.log(`${engine}: regenerating the baseline (${reasons.length} change${reasons.length === 1 ? '' : 's'})`);
-    await regenerate(engine);
+    console.log(`${engine}: appending a migration (${reasons.length} change${reasons.length === 1 ? '' : 's'})`);
+    generate(engine);
   }
 }

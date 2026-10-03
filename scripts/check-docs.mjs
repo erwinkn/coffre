@@ -26,7 +26,6 @@ const files = [
   ...markdown('docs'),
   ...markdown('examples').filter((path) => !path.includes('node_modules')),
   ...readdirSync(join(root, 'packages')).map((name) => `packages/${name}/README.md`).filter((path) => existsSync(join(root, path))),
-  'packages/server/src/sync/README.md',
 ];
 const historical = (path) => path.startsWith('docs/design/') || path.startsWith('docs/spikes/');
 

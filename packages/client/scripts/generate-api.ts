@@ -18,7 +18,7 @@ const target = fileURLToPath(new URL('../src/api.ts', import.meta.url));
 
 /**
  * The named types the client re-exports, beside the route map: what callers
- * hold on to and pass around, such as the pages' views of a member or a sync.
+ * hold on to and pass around, such as the pages' views of a member.
  */
 const NAMED = {
   AccessValue: 'api/access.ts',
@@ -32,15 +32,11 @@ const NAMED = {
   OffboardingReport: 'api/members.ts',
   ProjectSummary: 'api/projects.ts',
   RemovedMember: 'api/members.ts',
-  RunOutcome: 'api/syncs.ts',
   SecretKey: 'api/secrets.ts',
   SecretVersion: 'api/secrets.ts',
   ServiceTokenRow: 'api/signin.ts',
   SessionRow: 'api/signin.ts',
   SetResult: 'api/secrets.ts',
-  SyncField: 'sync/types.ts',
-  SyncProviderInfo: 'sync/types.ts',
-  SyncView: 'api/syncs.ts',
 } as const;
 
 const PROBE = `${root}__api_probe.ts`;

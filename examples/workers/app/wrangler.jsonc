@@ -28,7 +28,7 @@
   "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "replace-with-your-hyperdrive-id" }],
   // The vault Worker, vault/wrangler.jsonc. Deploy it first.
   "services": [{ "binding": "VAULT", "service": "coffre-vault" }],
-  // The heartbeat, audit checkpoints and due syncs.
+  // The heartbeat and audit checkpoints.
   "triggers": { "crons": ["*/5 * * * *"] },
   // The pages' scripts, styles and fonts, all under /_coffre/assets/.
   "assets": { "directory": "../node_modules/@coffre/ui/dist/client" }

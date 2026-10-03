@@ -10,7 +10,6 @@ import { loadCaller } from '../src/api/caller.ts';
 import type { ApiContext } from '../src/api/context.ts';
 import { serveApi } from '../src/api/router.ts';
 import type { SigninService } from '../src/api/signin.ts';
-import { SyncRunner } from '../src/api/syncs.ts';
 import { emptyLog, openVaultDatabase } from './db/engine.ts';
 import { assertOutsideTransaction } from './transaction-guard.ts';
 import { drainBackgroundTasks, trackBackgroundTask } from './background-tasks.ts';
@@ -20,7 +19,6 @@ export type FixtureDeps = {
   vault: TestVault;
   chainKey: Buffer;
   waitUntil?: ApiContext['waitUntil'];
-  syncs?: SyncRunner;
   signin?: SigninService;
 };
 
@@ -119,7 +117,6 @@ export async function contextFor(
         waitUntil(promise);
       }
     },
-    syncs: deps.syncs ?? new SyncRunner({ db: deps.db, vault: deps.vault, chainKey: deps.chainKey }),
     signin: deps.signin ?? null,
     caller: await loadCaller(deps.vault, { type, id }),
     requestId: randomUUID(),
@@ -172,13 +169,9 @@ export async function resetDatabase(owner: Database): Promise<void> {
     projects,
     secrets,
     secretVersions,
-    syncKeys,
-    syncs,
     vaultGrants,
     vaultMembers,
   } = tablesOf(owner);
-  await owner.delete(syncKeys);
-  await owner.delete(syncs);
   await owner.delete(credentials);
   await owner.delete(deviceAuthorizations);
   await owner.delete(identities);

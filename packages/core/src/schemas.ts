@@ -8,4 +8,3 @@ export const principalId = z.string().trim().min(1).max(320);
 export const instanceRole = z.enum(['user', 'owner']);
 export const grantId = z.string().uuid();
 export const emailAddress = z.string().email().max(320);
-export const syncId = z.string().uuid();

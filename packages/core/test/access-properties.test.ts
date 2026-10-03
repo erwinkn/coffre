@@ -59,20 +59,16 @@ test(`access decisions match the independent role/scope model, seed ${settings.s
   }
 }, settings));
 
-test(`roles and sync grant management match the model, seed ${settings.seed}`, () => hegel.test((tc) => {
+test(`roles and grant management match the model, seed ${settings.seed}`, () => hegel.test((tc) => {
   const actor = tc.draw(holder);
   const change = tc.draw(grant);
   for (const role of roles) {
     for (const permission of permissions) assert.equal(roleGrants(role, permission), rights[role].includes(permission));
     assert.equal(assignableToEnvironment(role), rights[role].every((permission) => !management.includes(permission)));
   }
-  for (const subject of ['user:ada@acme.example', 'token:ci', 'sync:one']) {
-    for (const role of [...roles, null]) {
-      const place = { projectId: change.projectId, environmentId: change.environmentId, role };
-      const canManage = modelAllows(actor, 'grant.manage', { projectId: place.projectId });
-      const canManageSync = subject.startsWith('sync:') && modelAllows(actor, 'environment.manage', { projectId: place.projectId }) &&
-        (role === null || (role === 'viewer' && place.environmentId !== null && modelAllows(actor, 'secret.read', place)));
-      assert.equal(mayManageAccess(actor, subject, place), canManage || canManageSync, JSON.stringify({ actor, subject, place }));
-    }
+  for (const role of [...roles, null]) {
+    const place = { projectId: change.projectId, environmentId: change.environmentId, role };
+    const canManage = modelAllows(actor, 'grant.manage', { projectId: place.projectId });
+    assert.equal(mayManageAccess(actor, place), canManage, JSON.stringify({ actor, place }));
   }
 }, settings));

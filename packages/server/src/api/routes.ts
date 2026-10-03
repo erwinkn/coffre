@@ -20,7 +20,6 @@ import {
   type DryRunResult,
   type SetResult,
 } from './secrets.ts';
-import { archiveSync, createSync, listSyncs, runSync, setSyncPaused } from './syncs.ts';
 
 /** A permission at the route's place, or at its project for project-wide ones. */
 export type Check = Permission | { permission: Permission; on: 'project' };
@@ -240,38 +239,6 @@ export const routes = {
   ...route('POST /device-logins/:code', {
     input: z.object({ approve: z.boolean() }).strict(),
     run: (ctx, { params, input }) => signin(ctx).decideDevice(ctx, params.code, input.approve),
-  }),
-
-  // Syncs
-  ...route('GET /syncs/providers', {
-    run: async (ctx) => ({ providers: ctx.syncs.providers() }),
-  }),
-  ...route('GET /syncs/:project/:environment', {
-    needs: 'secret.read',
-    action: 'sync.list',
-    run: (ctx, { place }) => listSyncs(ctx, { projectId: place.project.id, environmentId: place.environment!.id }),
-  }),
-  ...route('POST /syncs/:project/:environment', {
-    input: z.object({
-      provider: z.string().min(1).max(64),
-      config: z.record(z.string(), z.unknown()),
-      credential: z.string().min(1).max(400),
-    }),
-    // It pushes the environment's values somewhere, so it needs to read them.
-    needs: [{ permission: 'environment.manage', on: 'project' }, 'secret.read'],
-    action: 'sync.create',
-    run: (ctx, { place, input }) =>
-      createSync(ctx, { projectId: place.project.id, environmentId: place.environment!.id }, input),
-  }),
-  ...route('PATCH /syncs/by-id/:id', {
-    input: z.object({ paused: z.boolean() }).strict(),
-    run: (ctx, { params, input }) => setSyncPaused(ctx, params.id, input.paused),
-  }),
-  ...route('DELETE /syncs/by-id/:id', {
-    run: (ctx, { params }) => archiveSync(ctx, params.id),
-  }),
-  ...route('POST /syncs/by-id/:id/runs', {
-    run: (ctx, { params }) => runSync(ctx, params.id),
   }),
 
   // The log
