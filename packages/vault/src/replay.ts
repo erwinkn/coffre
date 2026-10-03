@@ -1,12 +1,9 @@
 import type { StoredEntry } from '@coffre/core/audit';
 import type { AccessFault, FaultGrant } from '@coffre/core/vault';
-import type { Queryable } from '@coffre/db';
 
-import { ACCESS_ACTIONS, allMembers, grants, vaultEntriesOf, type GrantRow, type Member, type Place } from './store.ts';
+import { ACCESS_ACTIONS, type GrantRow, type Member, type Place } from './store.ts';
 
 export { ACCESS_ACTIONS };
-
-const BATCH = 1000;
 
 /**
  * Why the members and grants in the database do not follow from the
@@ -17,25 +14,15 @@ const BATCH = 1000;
  * written around the vault: a grant inserted with the database's own login,
  * a removal undone.
  *
- * Call it after the chain is verified, in the same snapshot, so every entry
- * it replays carries the vault's MAC.
+ * `state` is the allowed access entries replayed (`apply`), each after its
+ * MAC was checked, in the snapshot `rows` and `stored` were read in.
  *
  * Grants are compared as they are live at `at`. Clearing one that has
  * lapsed changes nothing anyone holds, so it is not logged.
  */
-export async function replay(db: Queryable, at: number): Promise<AccessFault | null> {
-  const state: Replayed = { members: new Map(), held: new Map() };
-  for (let after = -1n; ; ) {
-    const batch = await vaultEntriesOf(db, ACCESS_ACTIONS, after, BATCH);
-    for (const row of batch) {
-      const fault = apply(state, row);
-      if (fault !== null) return fault;
-    }
-    if (batch.length < BATCH) break;
-    after = batch[batch.length - 1].seq;
-  }
+export function replayFault(state: Replayed, rows: readonly Member[], storedGrants: readonly GrantRow[], at: number): AccessFault | null {
   const { members, held } = state;
-  const stored = new Map((await allMembers(db)).map((member) => [member.principal, member]));
+  const stored = new Map(rows.map((member) => [member.principal, member]));
   for (const principal of [...new Set([...stored.keys(), ...members.keys()])].sort()) {
     const [inStore, inLog] = [stored.get(principal), members.get(principal)];
     if (inLog === undefined) return { kind: 'unlogged-member', principal };
@@ -46,7 +33,7 @@ export async function replay(db: Queryable, at: number): Promise<AccessFault | n
 
   const live = (grant: GrantRow) => grant.expiresAt === null || grant.expiresAt > at;
   const logged = new Set([...held.values()].flatMap((grantsOf) => [...grantsOf.values()]).filter(live).map(grantKey));
-  const inStore = new Set((await grants(db)).filter(live).map(grantKey));
+  const inStore = new Set(storedGrants.filter(live).map(grantKey));
   const extra = [...inStore].sort().find((grant) => !logged.has(grant));
   if (extra !== undefined) return { kind: 'unlogged-grant', grant: faultGrant(extra) };
   const missing = [...logged].sort().find((grant) => !inStore.has(grant));

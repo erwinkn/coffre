@@ -287,6 +287,35 @@ export async function entriesFrom(db: Queryable, fromSeq: bigint, limit: number)
   return stored(rows);
 }
 
+/** Up to `limit` of the vault's entries after `afterSeq`, oldest first: every one, whatever its action or decision. */
+export async function vaultEntriesAfter(db: Queryable, afterSeq: bigint, limit: number): Promise<StoredEntry[]> {
+  const { auditLog } = tablesOf(db);
+  const rows = await db
+    .select(entryColumns(db))
+    .from(auditLog)
+    .where(and(eq(auditLog.author, 'vault' satisfies Author), gt(auditLog.seq, afterSeq)))
+    .orderBy(asc(auditLog.seq))
+    .limit(limit);
+  return stored(rows);
+}
+
+/** The hash of the entry at each of `seqs` the log holds, by seq. */
+export async function hashesAt(db: Queryable, seqs: readonly bigint[]): Promise<Map<bigint, Buffer>> {
+  const { auditLog } = tablesOf(db);
+  const hashes = new Map<bigint, Buffer>();
+  for (let from = 0; from < seqs.length; from += HASHES_AT_ONCE) {
+    const rows = await db
+      .select({ seq: auditLog.seq, hash: auditLog.hash })
+      .from(auditLog)
+      .where(inArray(auditLog.seq, seqs.slice(from, from + HASHES_AT_ONCE)));
+    for (const { seq, hash } of rows) hashes.set(seq, hash);
+  }
+  return hashes;
+}
+
+/** How many entries' hashes one query asks for: a checkpoint every five minutes is tens of thousands of a year. */
+const HASHES_AT_ONCE = 5000;
+
 /** The entry at `seq`'s hash, or undefined when there is none. */
 export async function hashAt(db: Queryable, seq: bigint): Promise<Buffer | undefined> {
   const { auditLog } = tablesOf(db);

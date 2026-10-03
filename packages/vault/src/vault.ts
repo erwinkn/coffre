@@ -9,7 +9,7 @@ import {
   type Permission,
   type Role,
 } from '@coffre/core/access';
-import { verifyEntries, type LogKey, type StoredEntry } from '@coffre/core/audit';
+import { GENESIS_HASH, verifyEntries, type LogKey, type StoredEntry } from '@coffre/core/audit';
 import { checkContext, type SecretContext } from '@coffre/core/envelope';
 import {
   DEK_BYTES,
@@ -26,7 +26,7 @@ import {
 } from '@coffre/core/kek';
 import {
   checkpointMessage,
-  verifyCheckpoint,
+  checkpointVerifier,
   describeAccessFault,
   type Access,
   type AccessChange,
@@ -56,11 +56,11 @@ import type { Database, Queryable, Transaction } from '@coffre/db';
 import { isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
 import { appendEntries, lockLogHead, type Appended, type NewEntry } from '@coffre/db/log';
 
-import { verifyAccounting } from './accounting.ts';
+import { KeyAccounting } from './accounting.ts';
 import { signer, type Signer } from './checkpoint.ts';
 import type { ResolvedVaultConfig } from './config.ts';
-import { carries, further, UNVERIFIED, vaultLogKey, VERIFY_BATCH, verifyChain, type Anchor } from './log.ts';
-import { apply, replay, type LoggedMember, type Replayed } from './replay.ts';
+import { carries, forward, further, UNVERIFIED, vaultLogKey, VERIFY_BATCH, verifyChain, withCause, type Anchor } from './log.ts';
+import { apply, replayFault, type LoggedMember, type Replayed } from './replay.ts';
 import { memberMac, rowKey, sameGrants, sealed } from './rows.ts';
 import * as store from './store.ts';
 import { ACCESS_ACTIONS, type GrantRow, type Member } from './store.ts';
@@ -1456,93 +1456,175 @@ class VaultService implements Vault {
   }
 
   verifyLog(input: VerifyLogInput): Promise<LogVerification> {
-    return this.#verifyAll([], input.upTo ?? null);
-  }
-
-  /** `shown`, and the chain from `anchor`; the furthest verified is kept for the next check. */
-  async #verify(db: Queryable, shown: readonly StoredEntry[], anchor: Anchor): Promise<LogVerification> {
-    const { verification, anchor: reached } = await verifyChain(db, this.#prepared.logKeys, shown, anchor);
-    if (verification.ok) this.#prepared.verified = further(this.#prepared.verified, reached);
-    return verification;
+    return this.#verifyAll(input.upTo ?? null);
   }
 
   /**
-   * `shown`, and the chain from its first entry, in one snapshot: every
-   * link and hash, the vault's MACs; then the heads that must still be
-   * there: the one the app verified up to (`upTo`), so both authors are
-   * checked over the same entries, the one the app last recorded from a
-   * checkpoint (`through`), and the last checkpoint's; and the members and
-   * grants replayed from it.
+   * The whole log, in one snapshot and one pass over the vault's entries:
+   * each by its MAC, the keys it moved through, and what the other checks
+   * need of it, gathered as it goes (`Findings`); then every checkpoint, the
+   * heads that must still be there, the key batches accounted for, and the
+   * members and grants replayed.
+   *
+   * With `upTo`, the head the app verified to, the links and hashes of the
+   * chain are the app's to recompute, as it just has, over its own snapshot,
+   * through that head; `carries(upTo)` ties this snapshot to that one. So
+   * the vault reads only its own entries, each checked against its own hash
+   * and MAC over the link it names. Without `upTo`, nobody else recomputed
+   * the chain: the vault reads it all, and rehashes every link.
    */
-  async #verifyAll(shown: readonly StoredEntry[], upTo: LogHead | null): Promise<LogVerification> {
+  async #verifyAll(upTo: LogHead | null): Promise<LogVerification> {
     await this.#settled();
     return this.#db.transaction(async (tx) => {
       const remembered = this.#prepared.verified;
-      const verification = await this.#verify(tx, shown, UNVERIFIED);
-      if (!verification.ok) return verification;
-      if (upTo !== null && !(await carries(tx, upTo))) {
+      const findings = new Findings();
+      const read = upTo === null ? await this.#rehashed(tx, findings) : await this.#ownEntries(tx, findings);
+      if (!read.ok) return read;
+      // Each head the log must still hold, in one read: the app's, every checkpoint's, and the last this vault rehashed.
+      const heads: LogHead[] = [...(upTo === null ? [] : [upTo]), ...findings.checkpoints.map(({ checkpoint }) => checkpoint)];
+      const rememberedHead = remembered.nextSeq > 0n ? { seq: Number(remembered.nextSeq - 1n), hash: remembered.hash.toString('hex') } : null;
+      if (rememberedHead !== null) heads.push(rememberedHead);
+      const hashes = await store.hashesAt(tx, [...new Set(heads.map((head) => BigInt(head.seq)))]);
+      const holds = (head: LogHead) => head.hash === GENESIS_HASH.toString('hex') || hashes.get(BigInt(head.seq))?.toString('hex') === head.hash;
+      if (upTo !== null && !holds(upTo)) {
         return { ok: false, failedAtSeq: upTo.seq, reason: 'not the entry the app verified up to: the log changed between the two checks' };
       }
-      const unsigned = await this.#checkpointFault(tx);
+      const unsigned = await this.#checkpointFault(findings, holds);
       if (unsigned !== null) return unsigned;
       // What this vault last verified must still be there: whoever holds
       // its key can seal a rewrite, but cannot put back the head it saw. A
       // checkpoint names an earlier break, so it is reported first.
-      if (remembered.nextSeq > 0n) {
-        const seq = remembered.nextSeq - 1n;
-        if (!(await carries(tx, { seq: Number(seq), hash: remembered.hash.toString('hex') }))) {
-          return { ok: false, failedAtSeq: Number(seq), reason: 'changed since the vault last verified it' };
-        }
+      if (rememberedHead !== null && !holds(rememberedHead)) {
+        return { ok: false, failedAtSeq: rememberedHead.seq, reason: 'changed since the vault last verified it' };
       }
       const at = await this.#now(tx);
-      const accounting = await verifyAccounting(tx, at);
+      const accounting = findings.accounting.result(at);
       if (!accounting.ok) return accounting;
-      const fault = (await this.#unsealed(tx)) ?? (await replay(tx, at));
+      const [rows, held] = await Promise.all([store.allMembers(tx), store.grants(tx)]);
+      const fault = this.#unsealed(rows, held, findings.newestAccess) ?? findings.replayFault ?? replayFault(findings.replayed, rows, held, at);
       if (fault !== null) return { ok: false, failedAtSeq: null, reason: describeAccessFault(fault), fault };
-      return accounting.pending === 0 ? verification : { ...verification, pending: accounting.pending };
+      const verified = { ok: true as const, entries: findings.entries };
+      return accounting.pending === 0 ? verified : { ...verified, pending: accounting.pending };
     }, SNAPSHOT);
   }
 
   /**
-   * Every checkpoint, not only the newest: each signed by the key whose log
-   * key wrote its entry, over a prefix the log still holds, entry for entry.
-   * The chain is verified by now, so each checkpoint entry is the vault's,
-   * and one under a key it replaced comes before the rotation.
+   * The vault's own entries, oldest first: each against its own hash, and by
+   * its MAC, over the link it names, which the app checked; and the vault's
+   * keys moving only forward through them.
    */
-  async #checkpointFault(db: Queryable): Promise<Extract<LogVerification, { ok: false }> | null> {
+  async #ownEntries(tx: Queryable, findings: Findings): Promise<{ ok: true } | Extract<LogVerification, { ok: false }>> {
+    const { logKeys } = this.#prepared;
+    let keys: readonly string[] = [];
     for (let after = -1n; ; ) {
-      const batch = await store.vaultEntriesOf(db, [CHECKPOINT], after, VERIFY_BATCH);
+      const batch = await store.vaultEntriesAfter(tx, after, VERIFY_BATCH);
       for (const entry of batch) {
-        const checkpoint = JSON.parse(entry.metadata) as Checkpoint;
-        const broken = (reason: string) => ({ ok: false as const, failedAtSeq: Number(entry.seq), reason });
-        const { logKeys, signers } = this.#prepared;
-        const by = signers[logKeys.findIndex((key) => key.keyId === entry.keyId)];
-        if (by?.keyId !== checkpoint.keyId) return broken(`a checkpoint signed under ${checkpoint.keyId}, in an entry written under ${entry.keyId}: each key signs only its own`);
-        if (!(await verifyCheckpoint(checkpoint, by.publicKey))) return broken('a checkpoint the vault did not sign');
-        if (BigInt(checkpoint.seq) >= entry.seq || !(await carries(db, checkpoint))) {
-          return broken(`the log up to entry ${checkpoint.seq} is not the prefix this checkpoint signed: it was rewritten`);
-        }
+        const result = verifyEntries([entry], { startSeq: entry.seq, startPrevHash: entry.prevHash, keys: logKeys });
+        if (!result.ok) return { ok: false, failedAtSeq: Number(result.failedAtSeq), reason: withCause(result.reason) };
       }
-      if (batch.length < VERIFY_BATCH) return null;
-      after = batch[batch.length - 1].seq;
+      const moved = forward(batch, keys, logKeys[0]!.keyId);
+      if ('failedAtSeq' in moved) return { ok: false, failedAtSeq: Number(moved.failedAtSeq), reason: moved.reason };
+      keys = moved.keys;
+      for (const entry of batch) findings.add(entry);
+      if (batch.length < VERIFY_BATCH) return { ok: true };
+      after = batch[batch.length - 1]!.seq;
     }
+  }
+
+  /** The whole chain from its first entry: every link and hash, the vault's MACs; the furthest verified is kept for checkpoints. */
+  async #rehashed(tx: Queryable, findings: Findings): Promise<{ ok: true } | Extract<LogVerification, { ok: false }>> {
+    const { verification, anchor } = await verifyChain(tx, this.#prepared.logKeys, [], UNVERIFIED, (batch) => {
+      for (const entry of batch) if (entry.author === 'vault') findings.add(entry);
+    });
+    if (!verification.ok) return verification;
+    this.#prepared.verified = further(this.#prepared.verified, anchor);
+    return { ok: true };
+  }
+
+  /**
+   * Every checkpoint, not only the newest: each signed by the key whose log
+   * key wrote its entry, over a prefix the log still holds (`holds`), entry
+   * for entry. Its entry's MAC is checked by now, and one under a key the
+   * vault replaced comes before the rotation.
+   */
+  async #checkpointFault(findings: Findings, holds: (head: LogHead) => boolean): Promise<Extract<LogVerification, { ok: false }> | null> {
+    const { logKeys, signers } = this.#prepared;
+    // Each signer's key imported once, for this check only.
+    const verifiers = new Map<string, Promise<(checkpoint: Checkpoint) => Promise<boolean>>>();
+    const signed = (checkpoint: Checkpoint, by: Signer) => {
+      let verifier = verifiers.get(by.keyId);
+      if (verifier === undefined) verifiers.set(by.keyId, (verifier = checkpointVerifier(by.publicKey)));
+      return verifier.then((verify) => verify(checkpoint));
+    };
+    const { checkpoints } = findings;
+    for (let from = 0; from < checkpoints.length; from += SIGNATURES_AT_ONCE) {
+      const chunk = checkpoints.slice(from, from + SIGNATURES_AT_ONCE);
+      // The signatures of a chunk at once, where crypto runs beside the code; the first fault, in the log's order.
+      const faults = await Promise.all(chunk.map(async ({ entry, checkpoint }) => {
+        const by = signers[logKeys.findIndex((key) => key.keyId === entry.keyId)];
+        if (by?.keyId !== checkpoint.keyId) return `a checkpoint signed under ${checkpoint.keyId}, in an entry written under ${entry.keyId}: each key signs only its own`;
+        if (!(await signed(checkpoint, by))) return 'a checkpoint the vault did not sign';
+        if (BigInt(checkpoint.seq) >= entry.seq || !holds(checkpoint)) {
+          return `the log up to entry ${checkpoint.seq} is not the prefix this checkpoint signed: it was rewritten`;
+        }
+        return null;
+      }));
+      const at = faults.findIndex((fault) => fault !== null);
+      if (at !== -1) return { ok: false, failedAtSeq: Number(chunk[at]!.entry.seq), reason: faults[at]! };
+    }
+    return null;
   }
 
   /**
    * The first member whose row fails its MAC, or names an older access
-   * entry than the log's newest about them. The chain is verified by now,
-   * so every entry read here carries the vault's MAC.
+   * entry than the log's newest about them (`newest`, from the full check's
+   * pass, where each entry's MAC was checked).
    */
-  async #unsealed(db: Queryable): Promise<AccessFault | null> {
-    const [rows, held, newest] = await Promise.all([store.allMembers(db), store.grants(db), store.newestAccessEntries(db)]);
+  #unsealed(rows: readonly Member[], held: readonly GrantRow[], newest: ReadonlyMap<string, bigint>): AccessFault | null {
     for (const row of rows) {
       const grants = held.filter((grant) => grant.principal === row.principal);
       if (!this.#sealed(row, grants)) return { kind: 'tampered-member', principal: row.principal, why: 'mac' };
-      if (newest.get(row.principal)?.seq !== row.accessSeq) return { kind: 'tampered-member', principal: row.principal, why: 'stale' };
+      if (newest.get(row.principal) !== row.accessSeq) return { kind: 'tampered-member', principal: row.principal, why: 'stale' };
     }
     return null;
   }
 }
+
+/**
+ * What one pass over the vault's entries gathers for the other checks of a
+ * full verification, so that the log is read once: the key batches, the
+ * access entries replayed, each member's newest, and the checkpoints. Each
+ * entry comes after its MAC was checked.
+ */
+class Findings {
+  readonly accounting = new KeyAccounting();
+  readonly replayed: Replayed = { members: new Map(), held: new Map() };
+  /** The first access entry the replay could not apply. */
+  replayFault: AccessFault | null = null;
+  /** Each member's newest allowed access entry, by seq. */
+  readonly newestAccess = new Map<string, bigint>();
+  /** Every allowed checkpoint, with its entry's seq and key: tens of thousands a year, so nothing more of it. */
+  readonly checkpoints: { entry: { seq: bigint; keyId: string }; checkpoint: Checkpoint }[] = [];
+  /** The vault's entries read. */
+  entries = 0;
+
+  add(entry: StoredEntry): void {
+    this.entries += 1;
+    this.accounting.add(entry);
+    if (entry.decision !== 'allow') return;
+    if (ACCESS.has(entry.action)) {
+      this.replayFault ??= apply(this.replayed, entry);
+      if (entry.subjectPrincipal !== null) this.newestAccess.set(entry.subjectPrincipal, entry.seq);
+    } else if (entry.action === CHECKPOINT) {
+      this.checkpoints.push({ entry: { seq: entry.seq, keyId: entry.keyId }, checkpoint: JSON.parse(entry.metadata) as Checkpoint });
+    }
+  }
+}
+
+const ACCESS = new Set<string>(ACCESS_ACTIONS);
+
+/** Checkpoint signatures checked at once, in a full verification. */
+const SIGNATURES_AT_ONCE = 256;
 
 /** Settle every operation before releasing the member lock, including cancelled requests. */
 async function settle<T extends { wipe: () => void }>(

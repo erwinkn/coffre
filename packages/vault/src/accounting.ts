@@ -1,9 +1,5 @@
 import type { StoredEntry } from '@coffre/core/audit';
 import type { LogVerification } from '@coffre/core/vault';
-import type { Queryable } from '@coffre/db';
-
-import { VERIFY_BATCH } from './log.ts';
-import { entriesFrom } from './store.ts';
 
 const KEY_ACTIONS = new Set(['secret.read', 'key.wrap', 'key.rewrap']);
 
@@ -13,54 +9,61 @@ type ParsedOutcome = Item & { intentId: string; relatedSeq: bigint };
 type Intent = ParsedIntent & { entry: StoredEntry; seen: Set<number> };
 type Accounting = { ok: true; pending: number } | Extract<LogVerification, { ok: false }>;
 
-/** The chain can hold while a process died between an intent and its outcomes. */
-export async function verifyAccounting(db: Queryable, at: number): Promise<Accounting> {
-  const intents = new Map<bigint, Intent>();
-  const ids = new Set<string>();
-  const broken = (entry: StoredEntry, reason: string): Accounting => ({ ok: false, failedAtSeq: Number(entry.seq), reason });
-  let next = 0n;
-  for (;;) {
-    const batch = await entriesFrom(db, next, VERIFY_BATCH);
-    if (batch.length === 0) break;
-    for (const entry of batch) {
-      if (entry.author !== 'vault') continue;
-      if (entry.action === 'key.intent') {
-        const parsed = parseIntent(entry);
-        if (typeof parsed === 'string') return broken(entry, parsed);
-        if (ids.has(parsed.intentId)) return broken(entry, 'key intent repeats an operation identity');
-        ids.add(parsed.intentId);
-        if (parsed.keys.length > 0) intents.set(entry.seq, { ...parsed, entry, seen: new Set() });
-      } else if (KEY_ACTIONS.has(entry.action) && entry.relatedSeq !== null) {
-        // An outcome names its intent; a key released with no service to call has none.
-        const parsed = parseOutcome(entry);
-        if (typeof parsed === 'string') return broken(entry, parsed);
-        const intent = intents.get(parsed.relatedSeq);
-        const key = intent?.keys[parsed.item];
-        if (intent === undefined || key === undefined || intent.seen.has(parsed.item)) {
-          return broken(entry, 'key outcome does not identify one item of its intent');
-        }
-        if (parsed.intentId !== intent.intentId || entry.actor !== intent.entry.actor || entry.action !== intent.operation) {
-          return broken(entry, 'key outcome belongs to another operation');
-        }
-        if (parsed.secretId !== key.secretId || parsed.version !== key.version || parsed.subject !== key.subject) {
-          return broken(entry, 'key outcome does not match its intended secret');
-        }
-        intent.seen.add(parsed.item);
-        // Completed batches need no state, and another outcome for one is a duplicate.
-        if (intent.seen.size === intent.keys.length) intents.delete(intent.entry.seq);
+/**
+ * Every key operation's intent and its outcomes, entry by entry, oldest
+ * first, as the full check reads the vault's entries (`add`); then what is
+ * still open (`result`). The chain can hold while a process died between an
+ * intent and its outcomes: only a missed deadline is a fault.
+ */
+export class KeyAccounting {
+  readonly #intents = new Map<bigint, Intent>();
+  readonly #ids = new Set<string>();
+  #fault: Extract<Accounting, { ok: false }> | null = null;
+
+  add(entry: StoredEntry): void {
+    if (this.#fault !== null || entry.author !== 'vault') return;
+    const broken = (reason: string) => {
+      this.#fault = { ok: false, failedAtSeq: Number(entry.seq), reason };
+    };
+    if (entry.action === 'key.intent') {
+      const parsed = parseIntent(entry);
+      if (typeof parsed === 'string') return broken(parsed);
+      if (this.#ids.has(parsed.intentId)) return broken('key intent repeats an operation identity');
+      this.#ids.add(parsed.intentId);
+      if (parsed.keys.length > 0) this.#intents.set(entry.seq, { ...parsed, entry, seen: new Set() });
+    } else if (KEY_ACTIONS.has(entry.action) && entry.relatedSeq !== null) {
+      // An outcome names its intent; a key released with no service to call has none.
+      const parsed = parseOutcome(entry);
+      if (typeof parsed === 'string') return broken(parsed);
+      const intent = this.#intents.get(parsed.relatedSeq);
+      const key = intent?.keys[parsed.item];
+      if (intent === undefined || key === undefined || intent.seen.has(parsed.item)) {
+        return broken('key outcome does not identify one item of its intent');
       }
+      if (parsed.intentId !== intent.intentId || entry.actor !== intent.entry.actor || entry.action !== intent.operation) {
+        return broken('key outcome belongs to another operation');
+      }
+      if (parsed.secretId !== key.secretId || parsed.version !== key.version || parsed.subject !== key.subject) {
+        return broken('key outcome does not match its intended secret');
+      }
+      intent.seen.add(parsed.item);
+      // Completed batches need no state, and another outcome for one is a duplicate.
+      if (intent.seen.size === intent.keys.length) this.#intents.delete(intent.entry.seq);
     }
-    next = batch[batch.length - 1].seq + 1n;
-    if (batch.length < VERIFY_BATCH) break;
   }
-  // Live calls can finish after this snapshot. Only a missed deadline is a fault.
-  const overdue = [...intents.values()].filter((intent) => intent.expiresAt <= at).sort((a, b) => a.expiresAt - b.expiresAt);
-  if (overdue.length === 0) return { ok: true, pending: intents.size };
-  const reason = overdue.map((intent) => {
-    const missing = intent.keys.length - intent.seen.size;
-    return `key intent ${intent.intentId} is overdue: ${missing} of ${intent.keys.length} outcomes missing`;
-  }).join('; ');
-  return broken(overdue[0].entry, reason);
+
+  /** The first fault, or the batches still under way at `at`: live calls can finish after the snapshot. */
+  result(at: number): Accounting {
+    if (this.#fault !== null) return this.#fault;
+    const intents = [...this.#intents.values()];
+    const overdue = intents.filter((intent) => intent.expiresAt <= at).sort((a, b) => a.expiresAt - b.expiresAt);
+    if (overdue.length === 0) return { ok: true, pending: intents.length };
+    const reason = overdue.map((intent) => {
+      const missing = intent.keys.length - intent.seen.size;
+      return `key intent ${intent.intentId} is overdue: ${missing} of ${intent.keys.length} outcomes missing`;
+    }).join('; ');
+    return { ok: false, failedAtSeq: Number(overdue[0]!.entry.seq), reason };
+  }
 }
 
 function parseIntent(entry: StoredEntry): ParsedIntent | string {
