@@ -2,6 +2,9 @@
 
 The `coffre` command: secrets in your shell, and a new deployment.
 
+The published CLI runs on Node 20 or newer. Developing coffre from its
+TypeScript sources and running a deployment require Node 24.
+
 ```sh
 npx @coffre/cli init --workers my-coffre   # or --node
 npx @coffre/cli setup                      # its database, keys and, on Workers, Cloudflare

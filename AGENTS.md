@@ -40,11 +40,13 @@ Running a package's `.ts` with plain `node` outside those scripts needs the flag
 
 ## Setup
 
-**Toolchain.** Node **>= 24** and pnpm 11.8.0 (via corepack). Node 24 is a hard runtime
-requirement, not just an `engines` field: the CLI, dev IdP, migrations, and the
+**Toolchain.** Node **>= 24** and pnpm 11.8.0 (via corepack). Node 24 is a hard requirement
+for workspace source, not just an `engines` field: the CLI, dev IdP, migrations, and the
 `node --test` suite all execute TypeScript source (`*.ts`) directly with plain `node`,
-which relies on native type-stripping (default only in Node 23.6+/24). `pnpm install`
-itself is version-agnostic.
+which relies on native type-stripping (default only in Node 23.6+/24). The
+published CLI is bundled JavaScript targeting Node 20 and runs on Node >= 20;
+this does not relax the workspace's or deployments' Node 24 requirement.
+`pnpm install` itself is version-agnostic.
 
 **Database.** Postgres runs in Docker via `docker compose` on **:55432** (owner
 `coffre_owner`, restricted runtime logins `coffre_runtime` for the app and

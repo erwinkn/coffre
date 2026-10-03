@@ -1,0 +1,156 @@
+name: Test the GitHub Action
+
+on:
+  pull_request:
+    paths:
+      - 'action/**'
+      - '.github/workflows/action-test.yml'
+      - '.github/actions/prepare/**'
+      - 'packages/cli/**'
+      - 'packages/core/src/dotenv.ts'
+      - 'packages/server/**'
+      - 'packages/vault/**'
+      - 'packages/db/**'
+      - 'packages/conformance/**'
+      - 'examples/node/**'
+      - 'scripts/action-pin*'
+      - 'scripts/bump.mjs'
+      - 'scripts/check-pins.mjs'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  smoke:
+    name: Action smoke (${{ matrix.node }})
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['runner', '20.0.0', '20', '22', '24']
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Record the runner's default Node
+        id: runner
+        run: |
+          echo "bin=$(dirname "$(command -v node)")" >> "$GITHUB_OUTPUT"
+          echo "version=$(node --version)" >> "$GITHUB_OUTPUT"
+          node --version
+      - uses: ./.github/actions/prepare
+      - name: Keep the Node 24 binary for test tooling
+        id: tooling
+        run: echo "node=$(command -v node)" >> "$GITHUB_OUTPUT"
+      - name: Install this revision's packed CLI
+        # npx uses a local package when its name and version match exactly.
+        # Test the candidate tarball, including before it is published.
+        run: |
+          mkdir -p "$RUNNER_TEMP/coffre-action-consumer"
+          pnpm --filter @coffre/cli pack --pack-destination "$RUNNER_TEMP/coffre-action-consumer"
+          version=$(node -p 'JSON.parse(require("fs").readFileSync("packages/cli/package.json")).version')
+          npm install --ignore-scripts --no-audit --no-fund --prefix "$RUNNER_TEMP/coffre-action-consumer" "$RUNNER_TEMP/coffre-action-consumer/coffre-cli-$version.tgz"
+          mkdir -p node_modules/@coffre
+          ln -s "$RUNNER_TEMP/coffre-action-consumer/node_modules/@coffre/cli" node_modules/@coffre/cli
+          ln -s ../@coffre/cli/dist/main.js node_modules/.bin/coffre
+      - name: Boot and seed a real coffre deployment
+        run: |
+          node --conditions=coffre:source packages/conformance/scripts/action-test.ts serve "$RUNNER_TEMP/coffre-action-ready" > "$RUNNER_TEMP/coffre-action-fixture.log" 2>&1 &
+          fixture_pid=$!
+          echo "$fixture_pid" > "$RUNNER_TEMP/coffre-action-pid"
+          for ((attempt=0; attempt<180; attempt++)); do
+            if test -f "$RUNNER_TEMP/coffre-action-ready"; then
+              grep '^::add-mask::' "$RUNNER_TEMP/coffre-action-fixture.log"
+              exit 0
+            fi
+            if ! kill -0 "$fixture_pid" 2>/dev/null; then
+              cat "$RUNNER_TEMP/coffre-action-fixture.log"
+              exit 1
+            fi
+            sleep 1
+          done
+          echo 'The fixture did not become ready within three minutes.' >&2
+          exit 1
+      # Only the test job selects its caller's toolchain. The Action must
+      # use it and leave it intact. Its background fixture stays on Node 24.
+      - name: Select the caller's Node
+        if: matrix.node != 'runner'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Restore the runner's default Node
+        if: matrix.node == 'runner'
+        env:
+          RUNNER_NODE_BIN: ${{ steps.runner.outputs.bin }}
+        run: echo "$RUNNER_NODE_BIN" >> "$GITHUB_PATH"
+      - name: Record the caller's toolchain
+        env:
+          NODE_CASE: ${{ matrix.node }}
+          RUNNER_DEFAULT_NODE: ${{ steps.runner.outputs.version }}
+        run: |
+          if test "$NODE_CASE" = runner; then
+            test "$(node --version)" = "$RUNNER_DEFAULT_NODE"
+          fi
+          node --version > "$RUNNER_TEMP/coffre-action-node-before"
+          printf '%s' "$PATH" > "$RUNNER_TEMP/coffre-action-path-before"
+      - name: Check other bundled CLI commands on the caller's Node
+        run: |
+          cli="$RUNNER_TEMP/coffre-action-consumer/node_modules/@coffre/cli/dist/main.js"
+          node "$cli" roles > /dev/null
+          node "$cli" keys --json > /dev/null
+          node "$cli" init --node "$RUNNER_TEMP/coffre-action-generated" > /dev/null
+      - name: Load secrets through the Action
+        uses: ./action
+        env:
+          # A missing local candidate must fail instead of testing npm's
+          # already-published package at the same version.
+          npm_config_offline: 'true'
+        with:
+          url: ${{ env.COFFRE_API_URL }}
+          token: ${{ env.COFFRE_TOKEN }}
+          environment: action-test/ci
+      - name: Assert values and exercise runner masking
+        env:
+          TOOLING_NODE: ${{ steps.tooling.outputs.node }}
+        run: |
+          node --version > "$RUNNER_TEMP/coffre-action-node-after"
+          cmp "$RUNNER_TEMP/coffre-action-node-before" "$RUNNER_TEMP/coffre-action-node-after"
+          printf '%s' "$PATH" > "$RUNNER_TEMP/coffre-action-path-after"
+          cmp "$RUNNER_TEMP/coffre-action-path-before" "$RUNNER_TEMP/coffre-action-path-after"
+          "$TOOLING_NODE" --conditions=coffre:source packages/conformance/scripts/action-test.ts assert-env
+      - name: Stop the fixture and its processes
+        if: always()
+        run: |
+          if test -f "$RUNNER_TEMP/coffre-action-pid"; then
+            fixture_pid=$(cat "$RUNNER_TEMP/coffre-action-pid")
+            kill -TERM "$fixture_pid" 2>/dev/null || true
+            for ((attempt=0; attempt<15; attempt++)); do
+              if ! kill -0 "$fixture_pid" 2>/dev/null; then
+                exit 0
+              fi
+              sleep 1
+            done
+            echo 'The fixture did not stop.' >&2
+            exit 1
+          fi
+
+  masks:
+    name: Action masks
+    needs: smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - name: Verify masking in the completed smoke job's log
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" --jq '.jobs[] | select(.name | startswith("Action smoke (")) | .id' > "$RUNNER_TEMP/coffre-action-job-ids"
+          test "$(wc -l < "$RUNNER_TEMP/coffre-action-job-ids")" -eq 5
+          while read -r job; do
+            gh api --allow-escape-sequences "repos/$GITHUB_REPOSITORY/actions/jobs/$job/logs" > "$RUNNER_TEMP/coffre-action-job-$job.log"
+            node packages/conformance/scripts/action-test.ts verify-masks "$RUNNER_TEMP/coffre-action-job-$job.log"
+          done < "$RUNNER_TEMP/coffre-action-job-ids"

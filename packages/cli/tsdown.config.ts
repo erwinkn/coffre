@@ -12,6 +12,9 @@ import { defineConfig } from 'tsdown';
 export default defineConfig({
   entry: ['src/main.ts'],
   platform: 'node',
+  // The published CLI runs on the caller's Node; workspace TypeScript
+  // sources and deployments still need Node 24.
+  target: 'node20',
   dts: false,
   fixedExtension: false,
   external: [/^@libsql\//, /^drizzle-orm\/libsql/, 'pg-native'],

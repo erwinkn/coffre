@@ -1,0 +1,34 @@
+name: coffre
+description: Read an environment from coffre, mask its secrets, and make them available to subsequent steps
+inputs:
+  url:
+    description: URL of your coffre instance
+    required: true
+  token:
+    description: A coffre service token with read access to the environment
+    required: true
+  environment:
+    description: The project/environment to read
+    required: true
+  oidc:
+    description: 'Coming: authenticate with GitHub OIDC instead of a service token. This input has no effect yet.'
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - name: Read and mask secrets
+      shell: bash
+      env:
+        COFFRE_API_URL: ${{ inputs.url }}
+        COFFRE_TOKEN: ${{ inputs.token }}
+        INPUT_ENVIRONMENT: ${{ inputs.environment }}
+      run: |
+        if ! command -v node >/dev/null || ! command -v npx >/dev/null; then
+          echo '::error::coffre requires Node.js 20 or newer and npx. Set up your job toolchain before this Action.' >&2
+          exit 1
+        fi
+        if ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 20 ? 0 : 1)'; then
+          echo '::error::coffre requires Node.js 20 or newer. Set up your job toolchain before this Action.' >&2
+          exit 1
+        fi
+        npx -y @coffre/cli@0.1.14 export --format github "$INPUT_ENVIRONMENT"
