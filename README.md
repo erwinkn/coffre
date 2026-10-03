@@ -119,7 +119,7 @@ coffre list     market/dev
 coffre get      market/dev/DATABASE_URL
 coffre set      market/dev/DATABASE_URL     # reads the value from stdin
 coffre run      market/dev -- printenv
-coffre export   market/dev --format dotenv  # or json, shell
+coffre export   market/dev --format dotenv  # or json, shell, github
 coffre history  market/dev/DATABASE_URL
 coffre rollback market/dev/DATABASE_URL 2   # restores version 2 as a new version
 coffre import   market/dev --file .env      # previews; --apply writes
@@ -136,6 +136,17 @@ coffre verify log                           # checks the whole log
 coffre verify keys                          # checks the keys you keep, on your machine (docs/keys.md)
 coffre verify instance                      # checks the instance from outside (docs/conformance.md)
 ```
+
+`coffre export market/prod --format github` appends values to `GITHUB_ENV`
+for subsequent GitHub Actions steps and emits mask commands for the values
+and their individual lines before writing the file. It refuses outside an
+Actions step without `GITHUB_ENV`, and refuses names GitHub cannot set there:
+`GITHUB_*`, `RUNNER_*`, and `NODE_OPTIONS`.
+
+The default `dotenv` format is data for `.env` parsers, including coffre's
+import, with escaped line breaks. Do not source it as shell code. For a shell,
+use `--format shell`, which quotes values literally, including quotes and
+newlines, or use `coffre run` to pass them directly to a child process.
 
 A session lasts 30 days, is kept per instance in `~/.coffre/credentials.json`
 (mode 0600), and can be revoked from the account page. CI stores nothing: it

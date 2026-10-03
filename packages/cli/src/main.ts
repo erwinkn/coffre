@@ -8,7 +8,7 @@
  */
 import { parseArgs } from 'node:util';
 import { execFile, spawn } from 'node:child_process';
-import { chmodSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, existsSync } from 'node:fs';
+import { appendFileSync, chmodSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, existsSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -17,6 +17,7 @@ import { keys } from './keys.ts';
 import type { Instance } from './migrate.ts';
 import { dailyNotice, type Checked } from './notice.ts';
 import { style } from './tty.ts';
+import { githubEnvironment, githubMasks } from './github-env.ts';
 import { pickCheck, verifyInstance, verifyKeys, VERIFY_USAGE } from './verify/index.ts';
 import {
   credentialHeaders,
@@ -554,16 +555,23 @@ async function exportEnv(args: string[]): Promise<void> {
     options: { format: { type: 'string', default: 'dotenv' } },
     allowPositionals: true,
   });
-  const usage = 'usage: coffre export <project>/<environment> [--format dotenv|json|shell]';
+  const usage = 'usage: coffre export <project>/<environment> [--format dotenv|json|shell|github]';
   if (!positionals[0]) fail(usage);
   const format = values.format;
-  if (format !== 'dotenv' && format !== 'json' && format !== 'shell') fail(usage);
+  if (format !== 'dotenv' && format !== 'json' && format !== 'shell' && format !== 'github') fail(usage);
+  const githubEnv = process.env.GITHUB_ENV;
+  if (format === 'github' && !githubEnv) fail('--format github requires GITHUB_ENV (run it in a GitHub Actions step)');
 
   const { project, environment } = parsePath(positionals[0]);
   const revealed = await client().secrets.reveal(`${project}/${environment}`);
 
   const entries = Object.entries(revealed.values).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-  process.stdout.write(
+  if (format === 'github') {
+    // All masks precede validation, file I/O and the summary. Never print the
+    // environment records, even if the file cannot be written.
+    process.stdout.write(githubMasks(entries));
+    attempt(() => appendFileSync(githubEnv!, githubEnvironment(entries), { encoding: 'utf8', mode: 0o600 }));
+  } else process.stdout.write(
     format === 'json'
       ? `${JSON.stringify(Object.fromEntries(entries), null, 2)}\n`
       : attempt(() => (format === 'shell' ? formatShellExports(entries) : formatDotenv(entries))),
@@ -958,7 +966,7 @@ const USAGE = `coffre - secrets, with an audit log
     coffre get      <project>/<environment>/<KEY>
     coffre set      <project>/<environment>/<KEY> [value]   (reads stdin if omitted)
     coffre run      <project>/<environment> -- <command>
-    coffre export   <project>/<environment> [--format dotenv|json|shell]
+    coffre export   <project>/<environment> [--format dotenv|json|shell|github]
     coffre history  <project>/<environment>/<KEY>
     coffre rollback <project>/<environment>/<KEY> <version>
     coffre import   <project>/<environment> [--file .env] [--apply]
