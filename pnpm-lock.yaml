@@ -67,14 +67,14 @@ importers:
   examples/node:
     dependencies:
       '@coffre/server':
-        specifier: 0.1.7
+        specifier: 0.1.8
         version: link:../../packages/server
       '@coffre/vault':
-        specifier: 0.1.7
+        specifier: 0.1.8
         version: link:../../packages/vault
     devDependencies:
       '@coffre/conformance':
-        specifier: 0.1.7
+        specifier: 0.1.8
         version: link:../../packages/conformance
       '@types/node':
         specifier: 26.1.1
@@ -86,20 +86,20 @@ importers:
   examples/workers:
     dependencies:
       '@coffre/server':
-        specifier: 0.1.7
+        specifier: 0.1.8
         version: link:../../packages/server
       '@coffre/ui':
-        specifier: 0.1.7
+        specifier: 0.1.8
         version: link:../../packages/ui
       '@coffre/vault':
-        specifier: 0.1.7
+        specifier: 0.1.8
         version: link:../../packages/vault
     devDependencies:
       '@cloudflare/workers-types':
         specifier: 5.20260920.1
         version: 5.20260920.1
       '@coffre/conformance':
-        specifier: 0.1.7
+        specifier: 0.1.8
         version: link:../../packages/conformance
       typescript:
         specifier: 5.9.3
