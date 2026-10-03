@@ -51,6 +51,7 @@ import {
   Users as UsersGlyph,
   X as XGlyph,
 } from 'lucide-react';
+import { markPath } from './mark';
 
 /**
  * One icon vocabulary for the whole app: Lucide, at one stroke weight.
@@ -58,7 +59,7 @@ import {
  * Mixing icon families is the fastest way to make a product UI feel assembled
  * rather than designed, so every glyph comes through here and call sites never
  * import Lucide themselves: changing one is a line in this file. The
- * exceptions are marks that are not ours to redraw: coffre's keyhole and the
+ * exceptions are marks that are not ours to redraw: coffre's mark and the
  * sign-in providers' logos.
  */
 
@@ -99,20 +100,25 @@ function Svg({
 }
 
 /**
- * The mark: a keyhole, drawn solid so it holds up white-on-ink inside the
- * brand tile at 16px. `MARK_SVG` below is the tile and keyhole together, for
- * the favicon.
+ * The mark, bare, in the text's colour, so it follows the theme. The tiled
+ * favicon and app icons are drawn from the same paths, in `./mark`.
  */
-export function Mark(props: IconProps) {
+export function Mark({ size = 16, className, style, label }: IconProps) {
   return (
-    <Svg {...props}>
-      <circle cx="12" cy="9.5" r="3.4" fill="currentColor" stroke="none" />
-      <path d="M10.35 11.2h3.3l1.15 7.3h-5.6Z" fill="currentColor" stroke="none" />
-    </Svg>
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 32 32"
+      className={className}
+      style={style}
+      aria-hidden={label === undefined}
+      aria-label={label}
+      role={label === undefined ? undefined : 'img'}
+    >
+      <path d={markPath(size)} fill="currentColor" />
+    </svg>
   );
 }
-
-export const MARK_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="#171717"/><circle cx="16" cy="13" r="4.3" fill="#fafafa"/><path d="M13.9 15.2h4.2l1.45 9.2h-7.1Z" fill="#fafafa"/></svg>`;
 
 /**
  * Lucide draws on a 24-unit grid with a 2-unit stroke. At the 14-16px these

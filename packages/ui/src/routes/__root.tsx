@@ -18,7 +18,9 @@ import { Brand, Shell, sidebarBootScript } from '../components/shell';
 import { TooltipProvider } from '../components/ui';
 import { ThemeToggle, themeBootScript } from '../components/theme';
 import { Agentation } from '../components/agentation';
-import { MARK_SVG } from '../components/icons';
+import { markSvg } from '../components/mark';
+import faviconPng from '../assets/favicon-32.png?url';
+import appleTouchIcon from '../assets/apple-touch-icon.png?url';
 
 export const Route = createRootRouteWithContext<RouterContext>()({
   head: () => ({
@@ -30,9 +32,13 @@ export const Route = createRootRouteWithContext<RouterContext>()({
     ],
     links: [
       { rel: 'stylesheet', href: globalsCss },
-      // Inline, so the icon needs no route of its own: in Cloudflare mode
-      // every path but the health checks is behind Access.
-      { rel: 'icon', type: 'image/svg+xml', href: `data:image/svg+xml,${encodeURIComponent(MARK_SVG)}` },
+      // Inline, so the icons need no route of their own: in Cloudflare mode
+      // every path but the health checks is behind Access. Vite inlines the
+      // PNGs too, being small. The PNG is for browsers without SVG icons;
+      // sized, so the others still pick the SVG.
+      { rel: 'icon', type: 'image/png', sizes: '32x32', href: faviconPng },
+      { rel: 'icon', type: 'image/svg+xml', href: `data:image/svg+xml,${encodeURIComponent(markSvg(16, { adaptive: true }))}` },
+      { rel: 'apple-touch-icon', href: appleTouchIcon },
     ],
   }),
 

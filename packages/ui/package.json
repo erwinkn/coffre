@@ -30,7 +30,8 @@
   "scripts": {
     "build": "vite build && rm dist/server/wrangler.json && tsdown && node ../../scripts/check-client-bundle.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "node --conditions=coffre:source --test"
+    "test": "node --conditions=coffre:source --test",
+    "icons": "node scripts/icons.ts"
   },
   "dependencies": {
     "@coffre/client": "workspace:*"

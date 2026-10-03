@@ -456,16 +456,6 @@ kbd {
   letter-spacing: -0.01em;
 }
 
-.brand-mark {
-  display: grid;
-  place-items: center;
-  width: 1.75rem;
-  height: 1.75rem;
-  border-radius: 7px;
-  background: var(--ink);
-  color: var(--panel);
-}
-
 .main {
   min-width: 0;
   display: flex;
