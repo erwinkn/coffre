@@ -15,7 +15,7 @@ type Search = { linked?: string; error?: string };
 /**
  * Your own settings: how coffre looks here, who it takes you for and, when
  * coffre runs its own sign-in, which accounts you sign in with and where you
- * are signed in. The sidebar's Settings is the workspace's; this page is
+ * are signed in. The sidebar's Settings is the instance's; this page is
  * reached from your account at the sidebar's foot.
  */
 export const Route = createFileRoute('/account')({

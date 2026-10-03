@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { Link, useLoaderData, useNavigate, useRouterState } from '@tanstack/react-router';
 import { Dialog, DropdownMenu } from 'radix-ui';
-import { toast } from 'sonner';
 import type { ProjectSummary } from '../shared/models';
 import type { UiCapabilities } from '../lib/capabilities';
 import { isActiveAccessibleEnvironment } from '../lib/project-environments';
@@ -20,7 +19,6 @@ import {
   Mark,
   Menu,
   PanelLeft,
-  Plus,
   Settings,
   SignOut,
   UserCog,
@@ -40,12 +38,6 @@ type ShellProps = {
 };
 
 const REPOSITORY = 'https://github.com/erwinkn/coffre';
-
-/**
- * The workspace this deployment serves. The server has no such notion yet --
- * one deployment is one workspace -- so the name lives here until it does.
- */
-const WORKSPACE = 'Acme';
 
 const SIDEBAR_KEY = 'coffre-sidebar';
 
@@ -111,7 +103,7 @@ export function Brand() {
 }
 
 /**
- * The application frame: a sidebar of sections, headed by the workspace and
+ * The application frame: a sidebar of sections, headed by coffre's mark and
  * footed by your account, and a bar across the content with search on the
  * right. The sidebar folds down to its icons (⌘B, or the button at the left
  * of the bar) and stays folded across visits.
@@ -256,7 +248,12 @@ function Sidebar({
   return (
     <>
       <div className="sidebar-head">
-        <WorkspaceMenu collapsed={collapsed} />
+        <CollapsedTip collapsed={collapsed} label="coffre">
+          <Link className="brand sidebar-brand" to="/projects">
+            <Mark size={24} />
+            <span className="brand-name">coffre</span>
+          </Link>
+        </CollapsedTip>
         {close}
       </div>
 
@@ -287,7 +284,7 @@ function Sidebar({
         />
       </nav>
 
-      {/* Settings above is the workspace's; yours are here, with you. */}
+      {/* Settings above is the instance's; yours are here, with you. */}
       {principal !== null && (
         <div className="sidebar-foot">
           <AccountMenu principal={principal} instanceRole={instanceRole} collapsed={collapsed} />
@@ -346,51 +343,6 @@ function NavLink({
         <span className="nav-label">{label}</span>
       </Link>
     </CollapsedTip>
-  );
-}
-
-/**
- * The workspace you are in, and where the others would be.
- *
- * For now this lists the one there is, and creating another says why it
- * cannot yet rather than opening a form that goes nowhere.
- */
-function WorkspaceMenu({ collapsed }: { collapsed: boolean }) {
-  const navigate = useNavigate();
-  return (
-    <DropdownMenu.Root>
-      <CollapsedTip collapsed={collapsed} label={WORKSPACE}>
-        <DropdownMenu.Trigger asChild>
-          <button type="button" className="workspace">
-            <Tile name={WORKSPACE} />
-            <span className="workspace-name">{WORKSPACE}</span>
-            <ChevronsUpDown size={14} className="workspace-chevron" />
-          </button>
-        </DropdownMenu.Trigger>
-      </CollapsedTip>
-      <DropdownMenu.Portal>
-        <DropdownMenu.Content className="menu menu-workspace" align="start" sideOffset={6}>
-          <DropdownMenu.Label className="menu-label">Workspaces</DropdownMenu.Label>
-          <DropdownMenu.Item className="menu-item" onSelect={() => navigate({ to: '/projects' })}>
-            <Tile name={WORKSPACE} />
-            {WORKSPACE}
-            <Check size={14} className="menu-check" />
-          </DropdownMenu.Item>
-          <DropdownMenu.Separator className="menu-sep" />
-          <DropdownMenu.Item
-            className="menu-item"
-            onSelect={() =>
-              toast('One workspace per deployment, for now', {
-                description: `Creating another needs server support coffre does not have yet. This deployment is ${WORKSPACE}.`,
-              })
-            }
-          >
-            <Plus size={14} />
-            Create workspace
-          </DropdownMenu.Item>
-        </DropdownMenu.Content>
-      </DropdownMenu.Portal>
-    </DropdownMenu.Root>
   );
 }
 

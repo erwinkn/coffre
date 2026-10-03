@@ -146,7 +146,7 @@ export const Folder = lucide(FolderGlyph);
 export const Layers = lucide(LayersGlyph);
 export const Users = lucide(UsersGlyph);
 export const User = lucide(UserGlyph);
-/** Your own settings, so they never share the workspace's gear. */
+/** Your own settings, so they never share the instance's gear. */
 export const UserCog = lucide(UserRoundCog);
 export const Key = lucide(KeyRound);
 export const Ledger = lucide(ScrollText);
