@@ -1,8 +1,9 @@
-// The API's routes, as the checks call them. Both tables are typed over the
-// client's route map, so a route added to the server fails the typecheck
-// here until it is listed, and from then on every check that walks a table
-// covers it: the anonymous refusal, the canary scans, the cross-site one.
-import type { Params, RouteInput, RouteKey } from '@coffre/client';
+// The API's routes, as checks call them: `coffre verify instance` and the
+// local conformance run. Both tables are typed over the route map, so a
+// route added to the server fails the typecheck here until it is listed,
+// and from then on every check that walks a table covers it: the anonymous
+// refusal, the canary scans, the cross-site one.
+import type { Params, RouteInput, RouteKey } from './index.ts';
 
 export type GetKey = Extract<RouteKey, `GET ${string}`>;
 
@@ -40,6 +41,7 @@ export function getCalls({ places, secrets, members, services }: Subjects): GetC
     'GET /syncs/:project/:environment': places.map((params) => ({ params })),
     'GET /audit': [{ params: {}, input: { limit: 500 } }, { params: {}, input: { limit: 500, detail: '1' } }],
     'GET /audit/verification': [{ params: {} }],
+    'GET /audit/keys': [{ params: {} }],
   };
 }
 
@@ -88,6 +90,7 @@ const EVERY_ROUTE: { [K in RouteKey]: true } = {
   'POST /syncs/by-id/:id/runs': true,
   'GET /audit': true,
   'GET /audit/verification': true,
+  'GET /audit/keys': true,
 };
 
 /**

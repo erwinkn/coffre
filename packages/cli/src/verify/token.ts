@@ -1,37 +1,12 @@
-// What can be checked of an instance that is already running, from outside
-// and without writing anything: as no one, and with a service token the
-// operator set up for it, which reads one canary. The local run takes the
-// same checks against the deployment it booted, so they run in CI too.
-//
-// Each run with a token adds a few entries to the instance's audit log,
-// which is append-only, so they stay: the canary's read, and the reads it
-// was refused. It changes nothing else.
+// An instance checked with a service token that reads one canary and
+// audits its project: its value nowhere but its reveal, the reveal audited,
+// nothing else in reach. The token is the operator's, from CI, or the one
+// `coffre verify instance` issues for the run when an owner is signed in.
 import { CoffreError, type AuthInfo, type CoffreClient } from '@coffre/client';
+import { getCalls, getUrls } from '@coffre/client/routes';
 
-import { bearer } from '../browser.ts';
-import { expect, refused, Skip, type Report } from '../report.ts';
-import { everyRoute, getCalls, getUrls } from '../routes.ts';
-import { headers, reachable } from './surface.ts';
-
-/** The page anyone may open. Every other page sends no one to /login. */
-const OPEN_PAGES = ['/login'];
-/** The pages behind sign-in, whatever the instance holds. */
-const CLOSED_PAGES = [
-  '/',
-  '/account',
-  '/access',
-  '/audit',
-  '/auth/device',
-  '/settings',
-  '/projects',
-  '/users',
-  '/tokens',
-  '/unregistered',
-];
-
-/** A made-up place and member, which no instance has. */
-const NOWHERE = { project: 'conformance-nowhere', environment: 'none' };
-const NOBODY = 'token:conformance-nobody';
+import { CLOSED_PAGES, NOBODY, NOWHERE, OPEN_PAGES } from './anonymous.ts';
+import { bearer, expect, refused, Skip, type Checks } from './checks.ts';
 
 /** A secret the operator set up, and its value, for the token to read and to look for. */
 export type Canary = { project: string; environment: string; key: string; value: string };
@@ -50,16 +25,6 @@ export function parseCanary(text: string, value?: string): Canary {
   return { project, environment, key, value: given };
 }
 
-/** The checks anyone can run: no sign-in, nothing written. `health` false when the caller checked it already. */
-export async function anonymousChecks(report: Report, origin: string, options: { health: boolean }): Promise<void> {
-  if (options.health) await report.check('health', {}, () => reachable(origin));
-  await report.check('headers', {}, () => headers(origin));
-  await report.check('anonymous api', {}, () => anonymousApi(origin));
-  await report.check('forged cross-site', {}, () => forgedCrossSite(origin));
-  await report.check('sign-in info', {}, () => signinInfo(origin));
-  await report.check('anonymous answers', {}, () => anonymousAnswers(origin));
-}
-
 /**
  * The checks with a service token that reads the canary, and audits its
  * project. `prefix` names them apart, run twice; `verification` false leaves
@@ -67,7 +32,7 @@ export async function anonymousChecks(report: Report, origin: string, options: {
  * chain otherwise.
  */
 export async function tokenChecks(
-  report: Report,
+  report: Checks,
   origin: string,
   setup: { token?: string; canary?: Canary },
   { prefix = '', verification = true }: { prefix?: string; verification?: boolean } = {},
@@ -79,100 +44,6 @@ export async function tokenChecks(
   await report.check(`${prefix}token scan`, needs, ({ canary, secret }) => tokenScan(origin, secret, canary));
   await report.check(`${prefix}token scope`, needs, ({ api, canary }) => tokenScope(api, canary));
   if (verification) await report.check(`${prefix}token verification`, { api }, ({ api }) => tokenVerification(api));
-}
-
-// --- as no one ----------------------------------------------------------------
-
-/** Every route, whatever its method, turns away a caller with no credential, and says nothing else. */
-async function anonymousApi(origin: string): Promise<string> {
-  const routes = everyRoute(origin);
-  for (const { key, method, url } of routes) {
-    const response = await fetch(url, {
-      method,
-      headers: { 'content-type': 'application/json' },
-      body: method === 'GET' ? undefined : '{}',
-    });
-    const text = await response.text();
-    expect(response.status === 401, `${key} answered ${response.status} to no one`, text);
-    expect(onlyRefusal(text), `${key} refused no one with more than a refusal`, text);
-  }
-  return `${routes.length} routes, every method: 401, and nothing but the refusal`;
-}
-
-/**
- * A change sent with a session cookie from another site's page is refused
- * before the cookie is even looked at, so a made-up one shows it: a real
- * cookie would get the same answer. Behind Cloudflare Access the same holds
- * for its cookie and assertion.
- */
-async function forgedCrossSite(origin: string): Promise<string> {
-  const changes = everyRoute(origin).filter((route) => route.method !== 'GET');
-  const forged = {
-    cookie: 'coffre_session=conformance-forged; __Host-coffre_session=conformance-forged; CF_Authorization=conformance-forged',
-    'cf-access-jwt-assertion': 'conformance-forged',
-    origin: 'https://attacker.example',
-    'sec-fetch-site': 'cross-site',
-    'content-type': 'application/json',
-  };
-  for (const { key, method, url } of [...changes, { key: 'POST /auth/signout', method: 'POST', url: `${origin}/auth/signout` }]) {
-    const response = await fetch(url, { method, headers: forged, body: '{}', redirect: 'manual' });
-    const text = await response.text();
-    expect(response.status === 403, `${key} from another site answered ${response.status}`, text);
-  }
-  return `${changes.length + 1} changes, sign-out included, from another site with a session cookie: 403`;
-}
-
-/** `GET /api/auth` names how to sign in, and nothing more. */
-async function signinInfo(origin: string): Promise<string> {
-  const response = await fetch(`${origin}/api/auth`);
-  expect(response.ok, `/api/auth answered ${response.status}`);
-  const info = (await response.json()) as AuthInfo;
-  expect(sameKeys(info, ['access', 'signin']), '/api/auth says more than how to sign in', info);
-  expect((info.signin === null) !== (info.access === null), '/api/auth names neither or both ways in', info);
-  if (info.access !== null) {
-    expect(sameKeys(info.access, ['assertion']) && info.access.assertion === false, '/api/auth says more of Access than whether it vouched', info);
-    return 'Cloudflare Access, and nothing more';
-  }
-  const signin = info.signin!;
-  expect(sameKeys(signin, ['note', 'providers', 'title']), '/api/auth says more of its sign-in than a page needs', signin);
-  for (const provider of signin.providers) {
-    expect(sameKeys(provider, ['brand', 'id', 'label']), `/api/auth says more of ${provider.id} than its button`, provider);
-  }
-  return `coffre's sign-in through ${signin.providers.map((provider) => provider.id).join(', ')}, and nothing more`;
-}
-
-/**
- * Nothing that could be a stored value in what no one is shown. Without a
- * canary this is a best effort: the API's refusals are checked to be only
- * refusals above, every closed page must send no one to /login with an
- * empty body, and the open pages must carry no credential coffre issues.
- */
-async function anonymousAnswers(origin: string): Promise<string> {
-  const pages = [...CLOSED_PAGES, `/projects/${NOWHERE.project}`, `/projects/${NOWHERE.project}/${NOWHERE.environment}`];
-  for (const path of pages) {
-    // Followed by hand, on this origin only, each hop without a body.
-    let at = path;
-    for (let hop = 0; at !== '/login'; hop++) {
-      const response = await fetch(`${origin}${at}`, { redirect: 'manual' });
-      const text = await response.text();
-      const to = new URL(response.headers.get('location') ?? at, origin);
-      expect(
-        hop < 3 && response.status >= 300 && response.status < 400 && to.origin === origin,
-        `${at} answered no one ${response.status}${response.headers.has('location') ? ` to ${to.href}` : ''}, not a redirect on to /login`,
-        text.slice(0, 2000),
-      );
-      expect(text.trim().length < 512, `${at} sent no one a body with its redirect`, text.slice(0, 2000));
-      at = to.pathname;
-    }
-  }
-  for (const path of OPEN_PAGES) {
-    const response = await fetch(`${origin}${path}`, { redirect: 'manual' });
-    const text = await response.text();
-    expect(response.status === 200, `${path} answered ${response.status}`);
-    const issued = /coffre_(svc|cli|web)_[A-Za-z0-9_-]{20,}/.exec(text);
-    expect(issued === null, `${path} carries a credential coffre issues`, issued?.[0]);
-  }
-  return `best effort, without a canary: ${pages.length} closed pages send no one to /login with nothing else; /login carries no credential`;
 }
 
 // --- with a token ---------------------------------------------------------------
@@ -313,19 +184,4 @@ async function tokenVerification(api: CoffreClient): Promise<string> {
   }
   expect(verified.ok, 'the audit log does not verify', verified);
   return `${verified.entries} entries verify, through entry ${verified.through}`;
-}
-
-// --- helpers --------------------------------------------------------------------
-
-/** `{ error, message }` and nothing else. */
-function onlyRefusal(text: string): boolean {
-  try {
-    return sameKeys(JSON.parse(text), ['error', 'message']);
-  } catch {
-    return false;
-  }
-}
-
-function sameKeys(value: unknown, keys: string[]): boolean {
-  return typeof value === 'object' && value !== null && JSON.stringify(Object.keys(value).sort()) === JSON.stringify(keys);
 }

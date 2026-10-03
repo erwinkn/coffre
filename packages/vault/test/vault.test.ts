@@ -6,7 +6,18 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
 import { entryHash, entryMac, type LogKey, type StoredEntry } from '@coffre/core/audit';
-import { awsKms, KekRegistry, KekUnavailableError, LocalKekProvider, type KekProvider, type KeyOperation } from '@coffre/core/kek';
+import {
+  awsKms,
+  KEY_CHECK,
+  KEY_CHECK_CONTEXT,
+  KEY_CHECK_VALUE,
+  KekRegistry,
+  KekUnavailableError,
+  LocalKekProvider,
+  opensKeyCheck,
+  type KekProvider,
+  type KeyOperation,
+} from '@coffre/core/kek';
 import { verifyCheckpoint, type SecretRef, type WrappedKey } from '@coffre/core/vault';
 import { tablesOf, type Database } from '@coffre/db';
 import { appendEntries, LogHeadMismatch, LogRewound } from '@coffre/db/log';
@@ -1542,6 +1553,35 @@ test('a vault still running with the replaced KEK, as during a deploy, writes no
   assert.match(!refused.ok ? refused.refusal.message : '', /^the log moved on from this vault's key, vault:\S+, to vault:\S+: a vault given a newer vault key replaced it/);
   assert.equal((await vaultLog(after)).length, logged, 'neither wrote anything');
   assert.equal((await after.vault.verifyLog({})).ok, true);
+});
+
+test("what an escrowed vault key is checked against: each key's check, newest first, the current key named, and only the checks the vault wrote", async () => {
+  const placed = await places(db.owner);
+  const [old, next] = [localKek('kek-1'), localKek('kek-2')];
+  // A vault that has opened nothing yet writes its key's check when asked, as before its first key operation.
+  const before = await configured(placed, { kek: old });
+  const first = await before.vault.keyChecks();
+  assert.deepEqual(first.current, { kekProvider: 'local', kekId: 'kek-1' });
+  assert.deepEqual(first.checks.map(({ kekId }) => kekId), ['kek-1']);
+
+  const after = await configured(placed, { kek: next, previousKeks: [old] });
+  const { current, checks } = await after.vault.keyChecks();
+  assert.deepEqual(current, { kekProvider: 'local', kekId: 'kek-2' });
+  assert.deepEqual(checks.map(({ kekId }) => kekId), ['kek-2', 'kek-1']);
+  assert.ok(checks[0]!.seq > checks[1]!.seq);
+  // Each opens under its own key, and only there: none of it is a secret.
+  const opens = (kek: { key: string }, check: WrappedKey) => opensKeyCheck(Buffer.from(kek.key, 'base64'), { ...check, bytes: Buffer.from(check.bytes, 'base64') });
+  assert.deepEqual(
+    await Promise.all([opens(next, checks[0]!), opens(old, checks[1]!), opens(old, checks[0]!), opens(localKek('kek-2'), checks[0]!)]),
+    [true, true, false, false],
+  );
+
+  // A check in the vault's name that it did not write, newer, under a key whoever wrote it knows, is not given.
+  const forger = localKek('kek-2');
+  const wrapped = await new LocalKekProvider(Buffer.from(forger.key, 'base64'), 'kek-2').wrap(Buffer.from(KEY_CHECK_VALUE), KEY_CHECK_CONTEXT);
+  const metadata = JSON.stringify({ kekProvider: 'local', kekId: 'kek-2', kekVersion: wrapped.kekVersion, bytes: wrapped.bytes.toString('base64'), proof: null });
+  await db.vault.transaction((tx) => appendEntries(tx, keysFrom(forger).log, [{ actor: 'system:vault', action: KEY_CHECK, decision: 'allow', metadata }]));
+  assert.deepEqual((await after.vault.keyChecks()).checks, checks);
 });
 
 test('a KEK a key service holds needs a signing key, and the error says why', () => {

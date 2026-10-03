@@ -7,6 +7,7 @@ npx @coffre/cli init --workers my-coffre   # or --node
 npx @coffre/cli setup                      # its database, keys and, on Workers, Cloudflare
 coffre login https://secrets.acme.example
 coffre run market/prod -- node server.js
+coffre verify                              # the instance from outside, the keys you keep, or the log
 ```
 
 It bundles everything it runs, so it installs with no dependencies:

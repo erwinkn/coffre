@@ -429,7 +429,7 @@ minutes old and a checkpoint after it carries the vault's signature. A log
 that stops taking writes, a vault that stops signing, a cut in the log or a
 wrong vault key all turn it red within one beat. There is no heartbeat table.
 
-`GET /api/audit/verification` (owners only), also called by `coffre verify`,
+`GET /api/audit/verification` (owners only), also called by `coffre verify log`,
 checks the chain from its first entry and authenticates the app's MACs.
 It asks the vault to check its MACs over the same prefix, every checkpoint
 against the prefix it signed, and to replay member and grant changes.

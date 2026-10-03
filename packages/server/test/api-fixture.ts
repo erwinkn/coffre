@@ -86,6 +86,7 @@ export function testVault(
     remove: call('remove'),
     checkpoint: call('checkpoint'),
     about: call('about'),
+    keyChecks: call('keyChecks'),
     verifyLog: call('verifyLog'),
     kek,
     signingKey,

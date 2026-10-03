@@ -91,14 +91,14 @@ test('the HTTP scan waits for every reply and finds a leak in its final answer',
     active++;
     await new Promise<void>((resolve) => setImmediate(resolve));
     active--;
-    return new Response(call === 320 ? value : '{}');
+    return new Response(call === 328 ? value : '{}');
   });
   const database = deployment.database;
   t.mock.method(deployment, 'database', async () => {
     assert.equal(active, 0, 'HTTP replies must finish before storage inspection');
-    assert.equal(calls, 320, 'every GET route and page must be read as every caller');
+    assert.equal(calls, 328, 'every GET route and page must be read as every caller');
     return database();
   });
   await assert.rejects(canaryScan(deployment, people, { KEY: value }), /a value was found outside a reveal/);
-  assert.equal(calls, 320);
+  assert.equal(calls, 328);
 });

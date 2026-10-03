@@ -134,7 +134,10 @@ coffre sync add market/prod github-actions owner=acme repo=market \
                 --credential ops/sync/GITHUB_TOKEN   # docs/syncs.md
 
 coffre audit --denied
-coffre verify                               # checks the whole log, owners only
+coffre verify                               # asks which: instance, keys or log; owners only
+coffre verify log                           # checks the whole log
+coffre verify keys                          # checks the keys you keep, on your machine (docs/keys.md)
+coffre verify instance                      # checks the instance from outside (docs/conformance.md)
 ```
 
 A session lasts 30 days, is kept per instance in `~/.coffre/credentials.json`

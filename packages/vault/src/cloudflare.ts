@@ -78,6 +78,7 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
   async remove(input: RemoveInput) { return (await this.#vault()).remove(input); }
   async checkpoint() { return (await this.#vault()).checkpoint(); }
   async about() { return (await this.#vault()).about(); }
+  async keyChecks() { return (await this.#vault()).keyChecks(); }
   async verifyLog(input: VerifyLogInput) { return (await this.#vault()).verifyLog(input); }
 
   /** No HTTP surface: only the app's service binding reaches the vault. */

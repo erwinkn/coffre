@@ -99,7 +99,7 @@ start_coffre "$restored_db" "$COFFRE_VAULT_KEY"
 node scripts/restore-drill.mjs check "$scratch/state.json"
 COFFRE_TOKEN="$(node -p "JSON.parse(require('fs').readFileSync('$scratch/state.json')).token")" \
 COFFRE_CONFORMANCE_CANARY="$(node -p "JSON.parse(require('fs').readFileSync('$scratch/state.json')).canary")" \
-    node --conditions=coffre:source packages/conformance/src/main.ts probe "$COFFRE_API_URL" --canary market/prod/DRILL_CANARY
+    node --conditions=coffre:source packages/cli/src/main.ts verify instance "$COFFRE_API_URL" --canary market/prod/DRILL_CANARY
 stop_coffre
 
 log 'once more, with the wrong KEK'

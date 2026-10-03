@@ -152,6 +152,9 @@ importers:
 
   packages/conformance:
     dependencies:
+      '@coffre/cli':
+        specifier: workspace:*
+        version: link:../cli
       '@coffre/db':
         specifier: workspace:*
         version: link:../db

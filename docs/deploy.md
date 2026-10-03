@@ -315,8 +315,8 @@ Workers needs three local Postgres URLs: `--postgres` for the owner,
 `--runtime` for the app and `--vault-runtime` for the vault. The harness
 creates, migrates and drops its own database. Node uses a temporary SQLite
 file shared by both processes. Both use test keys and a stand-in GitHub,
-not your live credentials. [conformance.md](conformance.md) lists the checks
-and the separate `probe` command for a live instance.
+not your live credentials. [conformance.md](conformance.md) lists the checks,
+and what `coffre verify instance` checks of a live one.
 
 ## Appendix: the database by hand
 

@@ -105,8 +105,12 @@ does not reproduce. Concurrent first calls each do their own reads
   as such an owner: setup makes cluster-wide roles, so never on the shared
   one. Postgres only.
 - `pnpm build` builds every package in dependency order (core and client first, the
-  UI before the server, whose build reads their `dist/`). Conformance, the
-  examples' typecheck and `test:consumer` want it first.
+  UI before the server, whose build reads their `dist/`). Core and client build
+  in a run of their own: core's tests use conformance's dev IdP, and
+  conformance runs the CLI, which bundles core, so the graph has a cycle that
+  pnpm would order as it likes. The CLI's build fails on an import it cannot
+  resolve rather than ship it. Conformance, the examples' typecheck and
+  `test:consumer` want it first.
 - `pnpm conformance:workers` / `pnpm conformance:node` run an example's own
   `pnpm conformance` (`docs/conformance.md`), on ports 3082 to +2; add `--port <n>`
   for another three. Workers needs Postgres and makes its own

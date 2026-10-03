@@ -89,7 +89,7 @@ repository holds no instance's configuration.
 - **Moving in:** `coffre import` from the existing `.env` files.
 - **Monitoring:** an external check on `/readyz` that pages.
 - **Conformance:** `pnpm conformance` in the deployment's repository before
-  each deploy, and `coffre-conformance probe` against the live address after.
+  each deploy, and `coffre verify instance` against the live address after.
 - **Exit:** a few weeks of daily use with no open bugs, a restore drill on a
   PlanetScale branch, and a rotation drill (a new vault key, the old one in
   `previousKeks`).

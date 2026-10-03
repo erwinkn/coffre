@@ -6,7 +6,9 @@ import { defineConfig } from 'tsdown';
 // the migrations beside. It refuses SQLite before reaching its driver, which
 // stays out, as does pg's optional native binding. jsonc-parser's `main` is
 // a UMD build that requires its parts at run time, which a bundle cannot
-// follow: its ES modules are bundled instead.
+// follow: its ES modules are bundled instead. An import left unresolved,
+// as when a package it bundles was not built yet, would ship as an import
+// of a package the CLI does not depend on: it fails the build.
 export default defineConfig({
   entry: ['src/main.ts'],
   platform: 'node',
@@ -14,4 +16,9 @@ export default defineConfig({
   fixedExtension: false,
   external: [/^@libsql\//, /^drizzle-orm\/libsql/, 'pg-native'],
   alias: { 'jsonc-parser': 'jsonc-parser/lib/esm/main.js' },
+  inputOptions: {
+    onLog(level, log, handler) {
+      handler(log.code === 'UNRESOLVED_IMPORT' ? 'error' : level, log);
+    },
+  },
 });

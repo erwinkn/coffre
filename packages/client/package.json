@@ -22,6 +22,11 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./routes": {
+      "coffre:source": "./src/routes.ts",
+      "types": "./dist/routes.d.ts",
+      "default": "./dist/routes.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {

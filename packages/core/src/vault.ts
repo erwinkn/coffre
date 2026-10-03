@@ -71,6 +71,12 @@ export interface Vault {
    */
   about(): Promise<{ checkpointKeys: Record<string, CheckpointKey>; rootAdmins: string[] }>;
   /**
+   * What an escrowed vault key is checked against: the vault key it wraps
+   * under now, and each one's check, as the vault wrote it. None of it is
+   * secret, and the vault answers no guess: a check opens only under its key.
+   */
+  keyChecks(): Promise<KeyChecks>;
+  /**
    * Check the whole log: rehash it from the first entry, the vault's
    * entries by their MACs, every checkpoint against the prefix it signed,
    * and replay it to see that who is a member, and what they hold, follow
@@ -142,6 +148,14 @@ export type SecretRef = {
 
 /** A wrapped data key and the key encryption key that wrapped it; `bytes` is base64. */
 export type WrappedKey = { kekProvider: string; kekId: string; kekVersion: string; bytes: string };
+
+/**
+ * The vault key the vault wraps under now, by provider and ID, and each
+ * vault key's check, newest first: a known value wrapped under it
+ * (`KEY_CHECK_VALUE` in `@coffre/core/kek`), in its newest `key.check`
+ * entry that carries the vault's MAC, at `seq`.
+ */
+export type KeyChecks = { current: { kekProvider: string; kekId: string }; checks: (WrappedKey & { seq: number })[] };
 
 /** Why someone reads: shown in the log, and the same rules apply to each. */
 export type Purpose = 'reveal' | 'run' | 'compare' | 'sync';
