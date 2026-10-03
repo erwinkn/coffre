@@ -19,7 +19,7 @@ import type { Database, Transaction } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
 import { credentials, deviceAuthorizations, identities } from '@coffre/db/schema';
 
-import { authMac } from '../auth-rows.ts';
+import { authMac, AuthRowTampered } from '../auth-rows.ts';
 import type { AuditEntry } from '../db/audit.ts';
 import {
   findCredential,
@@ -70,7 +70,8 @@ export type SigninRefusal =
 /**
  * A credential that could not be checked, rather than one checked and
  * refused: the database or the vault did not answer. It is no sign that
- * the caller is signed out, and must not read as one (auth.ts).
+ * the caller is signed out, and must not read as one (auth.ts). A row that
+ * answered and failed its MAC was checked: that is a refusal.
  */
 export class CredentialUncheckable extends Error {
   constructor(cause: unknown) {
@@ -496,6 +497,7 @@ export class SigninService {
       row = await findCredential(db, this.#deps.chainKey, { tokenHash: hashToken(token) });
       if (row !== null) access = await this.#deps.vault.access(row.principal);
     } catch (error) {
+      if (error instanceof AuthRowTampered) throw error;
       throw new CredentialUncheckable(error);
     }
     if (row === null || access === null || !this.#liveCredential(row, access, now)) throw new Error('unknown, expired or revoked credential');

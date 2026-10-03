@@ -92,7 +92,14 @@ test('a session the vault cannot check right now is an outage, answered 503, not
   assert.equal(unchecked.status, 503, 'the page must not read a vault outage as signed out');
   hung.mock.restore();
   assert.ok(!((await authenticate()) instanceof Response), 'the same session, once the vault answers');
-  // A credential checked and refused is still a sign-out.
+  // A row that answered and fails its MAC was checked: refused, a sign-out, never an outage.
+  const [row] = await db.owner.select().from(credentials).where(eq(credentials.tokenHash, hashToken(session.token)));
+  await db.owner.update(credentials).set({ expiresAt: new Date(Date.now() + 7 * 86_400_000) }).where(eq(credentials.id, row!.id));
+  const tampered = await authenticate();
+  assert.ok(tampered instanceof Response);
+  assert.equal(tampered.status, 401);
+  await db.owner.update(credentials).set({ expiresAt: row!.expiresAt }).where(eq(credentials.id, row!.id));
+  // And one checked and revoked, too.
   await signin.signOut(session.token, meta());
   const refused = await authenticate();
   assert.ok(refused instanceof Response);

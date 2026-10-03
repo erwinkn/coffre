@@ -47,7 +47,17 @@ export function checkAuthRow<K extends AuthTable>(chainKey: Buffer, table: K, ro
   return false;
 }
 
+/** A sign-in row that fails its MAC: checked and refused, never an outage. */
+export class AuthRowTampered extends Error {
+  readonly table: AuthTable;
+  constructor(table: AuthTable) {
+    super('sign-in row failed authentication');
+    this.name = 'AuthRowTampered';
+    this.table = table;
+  }
+}
+
 /** Authentication at use still refuses the whole request. */
 export function verifyAuthRow<K extends AuthTable>(chainKey: Buffer, table: K, row: Fields[K] & { id: string; authMac: Buffer }): void {
-  if (!checkAuthRow(chainKey, table, row)) throw new Error('sign-in row failed authentication');
+  if (!checkAuthRow(chainKey, table, row)) throw new AuthRowTampered(table);
 }
