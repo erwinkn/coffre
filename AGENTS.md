@@ -57,6 +57,12 @@ this does not relax the workspace's or deployments' Node 24 requirement.
 DB-backed tests need it up. Export `COMPOSE_PROJECT_NAME=coffre` whenever you invoke
 `docker compose` directly.
 
+`scripts/ensure-postgres.sh` reuses a healthy or initializing container and
+serializes cold starts across worktrees with the host's advisory lock
+(`flock` on Linux, `lockf` on macOS), then starts with `--no-recreate`. CI reserves 55432 from Linux's outgoing port allocation before
+package downloads; the port is inside the default outgoing range. The
+reservation script is CI-only and does not change a developer's host.
+
 **Run the stack.** `pnpm dev` brings up Postgres + dev IdP (:8081) + coffre (:3000) +
 seed data. It runs the deployment in `dev/deployment/` (`app.ts`, `vault.ts`, their
 `wrangler.jsonc`) under `vite dev`, with the vault as an auxiliary Worker beside the
