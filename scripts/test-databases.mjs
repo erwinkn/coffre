@@ -1,9 +1,10 @@
 // Scratch databases belonging to one test run. The random run suffix keeps
 // concurrent invocations and other checkouts separate, even with the same base.
 import pg from 'pg';
+import { restrictDatabase } from '@coffre/db/migrate';
 
-export async function withOwner(work) {
-    const owner = new pg.Client('postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/postgres');
+export async function withOwner(work, database = 'postgres') {
+    const owner = new pg.Client(`postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/${encodeURIComponent(database)}`);
     await owner.connect();
     try {
         return await work(owner);
@@ -15,10 +16,10 @@ export async function withOwner(work) {
 export async function cloneDatabase(template, name) {
     await withOwner(async (owner) => {
         await owner.query(`CREATE DATABASE ${pg.escapeIdentifier(name)} TEMPLATE ${pg.escapeIdentifier(template)}`);
-        // CREATE DATABASE copies the schema's grants, but not database ACLs.
-        // Keep the same restricted logins and database privileges as migration.
-        await owner.query(`REVOKE CREATE, TEMPORARY ON DATABASE ${pg.escapeIdentifier(name)} FROM PUBLIC, coffre_app, coffre_runtime, coffre_vault, coffre_vault_runtime`);
     });
+    // TEMPLATE copies schema grants but not database ACLs. Use the same
+    // restriction as migration, connected to the clone it must restrict.
+    await withOwner(restrictDatabase, name);
 }
 
 export async function removeDatabases(template) {

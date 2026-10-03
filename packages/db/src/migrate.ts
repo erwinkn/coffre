@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
+import type { PoolClient } from 'pg';
 
 import { engineOfUrl } from './connect.ts';
 import type { Engine } from './dialect.ts';
@@ -18,6 +19,16 @@ import { postgresConnection } from './postgres.ts';
  */
 
 const MIGRATION_LOCK_KEY = '7165058122361679213';
+
+/** Reassert database privileges that pg_dump and CREATE DATABASE TEMPLATE do not carry. */
+export async function restrictDatabase(client: Pick<PoolClient, 'query'>): Promise<void> {
+  await client.query(`DO $$ BEGIN
+    EXECUTE format(
+      'REVOKE CREATE, TEMPORARY ON DATABASE %I FROM PUBLIC, coffre_app, coffre_runtime, coffre_vault, coffre_vault_runtime',
+      current_database()
+    );
+  END $$`);
+}
 
 interface JournalEntry {
   idx: number;
@@ -140,15 +151,7 @@ async function postgresMigrator(url: string): Promise<Migrator> {
       await client.query('SELECT pg_advisory_unlock($1::bigint)', [MIGRATION_LOCK_KEY]);
     },
     migrate: (migrationsFolder) => migrate(drizzle(client), { migrationsFolder }),
-    async restrict() {
-      // pg_dump carries table privileges, but not privileges on the database itself.
-      await client.query(`DO $$ BEGIN
-        EXECUTE format(
-          'REVOKE CREATE, TEMPORARY ON DATABASE %I FROM PUBLIC, coffre_app, coffre_runtime, coffre_vault, coffre_vault_runtime',
-          current_database()
-        );
-      END $$`);
-    },
+    restrict: () => restrictDatabase(client),
     async close() {
       client.release();
       await pool.end();
