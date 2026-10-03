@@ -417,3 +417,273 @@ Only this review document changes. No implementation or design edits are
 included. The cryptographic reproduction used ephemeral local keys and
 wrote no source files; platform checks used public documentation rather
 than live CI accounts.
+
+## Re-review
+
+Reviewed on 2026-10-03 against
+[`f045790d9692073b1d112126b54fef53e2b94dac`](https://github.com/erwinkn/coffre/blob/f045790d9692073b1d112126b54fef53e2b94dac/docs/design/oidc.md).
+All section and line references below refer to that revision. The original
+review above remains unchanged.
+
+I would not sign off on implementation of this revision yet. The
+cryptographic and transaction changes are sound, but three workload
+profiles still admit runs outside their apparent scope. There are also
+three medium-severity issues to resolve in the profile, revocation and
+admission contracts. None is critical.
+
+### Status of the original findings
+
+| Original # | Status | Assessment |
+| --- | --- | --- |
+| 1 | Closed | Hashing the verified signing input removes the ES256 twin bypass. The separate, globally unique consumption table also survives credential cleanup. |
+| 2 | Partial | Server enforcement is the right change. CircleCI, Buildkite and reusable GitHub workflows still have unsafe minimums, and GitLab lost its namespace constraint. See R1 to R4. |
+| 3 | Closed | The required callee SHA closes mutable-path trust. The caller's ref is a separate remaining problem, R3. |
+| 4 | Partial | Unknown bindings cause no vault call or fetch; verification precedes the vault; issuance and logs are bounded. The claimed deployment-wide admission bound is not supplied by the specified limiter. See R6. |
+| 5 | Closed in principle | Immutable, never-reused IDs plus revocation on replacement close the edited-row rollback. Define precisely which log entries revoke them, R5. |
+| 6 | Race closed; rollback guarantee narrowed | The shared audit-head transaction closes normal issuance/unbind races. Credential checks still omit the log veto, so the revision explicitly accepts up to five minutes of credential-row rollback. See the discussion below. |
+| 7 | Closed at design level | Connection-time public-address policy, full deadline/body bound and named Workers transport address the finding. Verification on the actual Node transport remains necessary during implementation. |
+| 8 | Closed by scope reduction | Kubernetes has no v1 profile or projection integration. A custom issuer remains an owner-vouched subject, without Kubernetes UID or online-revocation guarantees. |
+| 9 | Closed for the supported contract | Kubernetes projection is deferred; GitLab's one-use constraint and lost-response recovery are explicit. |
+| 10 | Closed for platform capabilities | Audience types, optional `nbf`, time bounds, CircleCI acquisition and Buildkite IDs are corrected. Deferred platforms are named. Safe minimum claim sets still need R1 to R4. |
+| 11 | Closed | A durable exchange-to-credential link and credential IDs copied into app and vault entries provide the missing correlation after row cleanup. |
+| 12 | Core argument closed | The vault comparison and readiness limit are accurate. I accept the denial-only MAC argument, subject to the successful-unbind predicate in R5. |
+
+### Ranked remaining findings
+
+#### R1. High: CircleCI still accepts a fork with the same branch name
+
+Section 1, profile table, line 46; section 5, claim-confusion assurances,
+lines 199 to 207.
+
+The required CircleCI claims identify a project and a ref, but not the
+repository that supplied the code. If that project enables tokens for fork
+builds, a fork with a branch named `main` can satisfy the same project ID
+and `refs/heads/main` policy as the intended repository. CircleCI explicitly
+requires checking `oidc.circleci.com/vcs-origin` for this case in its
+[OIDC fork guidance](https://circleci.com/docs/guides/permissions-authentication/openid-connect-tokens/#oidc-in-open-source-projects).
+The organization-specific issuer does not distinguish those builds.
+
+Require an exact `oidc.circleci.com/vcs-origin` alongside project ID and
+VCS ref. Refuse token forms that omit it, including custom-webhook forms,
+instead of falling back to the other claims. Add a negative profile case
+where the issuer, project ID and ref match but the fork origin differs.
+
+#### R2. High: Buildkite's required branch claim also admits fork builds
+
+Section 1, profile table, line 45; section 7, supported acquisition and
+deferred platforms, lines 266 to 268 and 282 to 283.
+
+A Buildkite pipeline can build a third-party fork while retaining its
+organization and pipeline IDs. With fork builds enabled and fork-branch
+prefixing disabled, a fork's `main` is still called `main`. All three
+required claims then match a production binding. Buildkite documents
+[fork builds and the optional branch prefix](https://buildkite.com/docs/pipelines/source-control/github),
+and warns that public fork builds can
+[request OIDC credentials](https://buildkite.com/docs/pipelines/security/oidc/azure#untrusted-builds-can-authenticate-to-azure).
+This is an untrusted trigger admitted by the profile itself, not merely a
+trusted deployment script choosing to run unsafe code.
+
+Defer the general Buildkite profile alongside Bitbucket and Fly.io until
+its signed claims can enforce the supported trust policy, with a concrete
+fork-negative case. If a restricted profile is kept now, specify its
+enforceable constraints or make the dependency on administratively
+disabled fork/untrusted builds an explicit prerequisite. Merely adding
+`build_source=webhook` is insufficient: the documented
+[source claim](https://buildkite.com/docs/agent/cli/reference/oidc#claims)
+does not distinguish a push webhook from a pull-request webhook.
+
+#### R3. High: pinning a reusable workflow leaves every caller branch trusted
+
+Section 1, reusable profile and rules, lines 43 and 55 to 57;
+section 5, the claim that refs are exact, lines 199 to 202.
+
+The ordinary GitHub profile requires `ref`; the reusable profile does not.
+Consider a reviewed, SHA-pinned deploy workflow that checks out the caller
+and runs its deployment script using coffre secrets. A contributor who can
+push a feature branch, but cannot change protected `main`, adds a caller
+workflow on that branch and modifies the script. Its owner/repository IDs,
+`event_name=push` and callee SHA all satisfy the proposed minimum. The
+callee is unchanged, yet the feature branch receives production access.
+[GitHub's reusable-token documentation](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-with-reusable-workflows)
+distinguishes caller context from the called workflow.
+
+Require the caller's exact `ref` for reusable bindings too. If trusting
+all caller refs is needed, make that a separate explicit scope choice;
+the existing "any repository" choice does not authorize all branches.
+Require `workflow_ref` as well when trust depends on a particular calling
+workflow, or state that all callers at the selected ref are trusted.
+Keep the immutable callee SHA and event restriction. Test a feature-branch
+caller against the same pinned callee used by an allowed `main` caller.
+
+#### R4. Medium: GitLab bindings follow projects into a different owner's namespace
+
+Section 1, GitLab profile, line 44; section 7, CLI example, line 260.
+
+The original tenant-identifying `namespace_id` requirement disappeared.
+`project_id` uniquely identifies a project but remains stable across a
+namespace transfer. If `acme/api` is transferred to a vendor, its new owner
+can still produce the same project ID, branch and pipeline-source claims
+and obtain the former organization's coffre service credential. This
+does not require forging an ID or reusing a deleted project. GitLab
+documents both the
+[stable project ID and namespace-specific identity](https://docs.gitlab.com/ci/secrets/id_token_authentication/#use-id-token-claims-in-cloud-trust-policies)
+and [project transfers](https://docs.gitlab.com/user/project/working_with_projects/#transfer-a-project).
+
+Require `namespace_id` as well as `project_id`, and include it in the CLI
+and UI flow. Choose the source-project versus job-project claim family
+consistently for the supported pipeline sources and GitLab versions.
+Following a project across ownership changes, if supported, should be an
+explicit policy choice. Add a case where only the namespace ID changes.
+
+#### R5. Medium: an attempted unbind must not count as a successful revocation
+
+Section 2, commit, lines 93 to 94; section 6, log veto, lines 232 to 236;
+review response 12, line 303.
+
+The rule currently refuses a binding if any `token.unbind` names it.
+Coffre records denied administrative actions using the same action name
+and `decision=deny`: see `requireOwner` in
+[context.ts](../../packages/server/src/api/context.ts) and the denied
+`token.revoke` entries in
+[signin.ts](../../packages/server/src/api/signin.ts). If unbind follows that
+convention, a non-owner who knows a binding ID can attempt removal, receive
+a 403, and leave an authentic audit entry that disables the binding. A
+former owner who remains an ordinary member is one concrete example.
+Checking the entry's MAC would not help: the denial was genuinely logged.
+
+Define a tombstone as an exact binding-ID match on an app-authored,
+successful `token.unbind`, with `decision=allow`. Failed attempts never
+qualify. Use an indexed existence check over all such entries, not a
+"latest event wins" rule that could hide an earlier removal. Keep the
+tombstones independently of credential/consumption cleanup. Reuse this
+definition at exchange and commit, and test that an audited forbidden
+unbind does not affect access.
+
+Skipping the MAC for this denial-only predicate is acceptable under the
+stated database-owner threat model. A forged matching success row can only
+deny access, which that owner can already do. It must never establish a
+binding, clear a revocation or grant a newer generation. The distinction
+between a successful operation and a denied attempt is still essential.
+
+#### R6. Medium: the admission mechanism is not a deployment-wide bound
+
+Section 2, admission, lines 74 to 81; section 4, lines 181 to 187.
+
+Cloudflare's rate-limiting binding gives each location its own allowance
+and is intentionally permissive and eventually consistent. Ten locations
+can each admit the configured allowance while all requests reach the same
+Postgres database. Cold isolates also retain independent JWKS caches and
+cooldowns. Node's limit multiplies with the number of server processes.
+The new ordering reduces the cost of each rejected request, but does not
+make the stated aggregate bound true.
+[Cloudflare's locality and accuracy contract](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/#locality)
+is explicit about this limitation.
+
+Choose and document the actual guarantee. A hard deployment-wide cap needs
+shared admission or another finite shared capacity bound, with bounded
+waiting and rejection before the protected work. If v1 intentionally uses
+approximate per-location/per-process limits, remove the global-bound claim
+and state the accepted aggregate exposure, deployment sizing and overload
+behavior. Define both source-address and aggregate keys; a per-address
+key alone does not bound a distributed flood. Keep the early limiter,
+late vault call and transactional issuance cap.
+
+Also put finite limits on the binding rows/claim bytes and distinct JWKS
+URLs one exchange can examine. An indexed query can return arbitrarily
+many live bindings; "one indexed read" is not a bound on the resulting
+MAC checks, signature attempts or fetches. Specify which limits are
+required deployment configuration, and fail configuration rather than
+silently omitting admission when its Workers binding is missing.
+
+### Checks of the revised mechanisms
+
+The consumption key is correct for the stated compact-JWS protocol. I
+repeated the ES256 experiment on Node 24.21.0 with `jose` 6.2.3. Both
+signatures verified; there were two distinct whole-token hashes and one
+signing-input hash. Keep the exact encoded `header.payload` bytes used by
+the verifier, without decoding and reserializing JSON for hashing. The
+issuer is already inside the authenticated payload, so this key is not
+missing issuer scoping. With consumption at time `t0`, the allowed `iat`
+is at most `t0 + 30`; that assertion stops passing the age check by
+`t0 + 3630`. Two hours of retention from consumption is sufficient. Verify
+before inserting, and let the unique constraint decide concurrent use
+inside the issuance/audit transaction.
+
+The commit sequence matches existing sign-in's discipline: prepare outside
+SQL, take the audit head, recheck current member generation and the same
+immutable binding, recheck times, then consume, issue and audit together.
+Use the transaction's queries throughout, and preserve
+`CredentialUncheckable` for database/vault outages. The per-binding
+issuance count belongs under that same head; a rate refusal must roll back
+the consumption. Settled-only isolate state remains a requirement for
+successful fetches, failures and key imports. Nothing in the revision
+requires sharing an in-flight promise.
+
+Credential provenance also fits the existing trust split. The app supplies
+the ID of the credential it actually verified, not a caller-supplied
+correlation value. The vault copies that bounded ID into its authenticated
+entries without using it for authorization. Thread it through both the
+Workers and Node transports and the common entry constructors, including
+denials. A join from a vault entry directly to `token.exchange` must work
+after deletion of the credential row; no foreign key to that short-lived
+row should be needed. The vault's signature proves what the vault
+recorded, not independent validation of the app's credential claim.
+
+One original recommendation was deliberately not adopted. Section 2's
+credential check reads only the binding row, while section 6 explicitly
+allows restoring a genuine credential and its binding for the remaining
+five-minute lifetime. A surviving unbind entry therefore prevents new
+exchanges but not use of that restored credential. I accept this as the
+now-stated, bounded row-rollback limit, consistent with the existing
+[authentication limits](../architecture.md#limits), rather than claiming
+the original tombstone-on-every-request recommendation was implemented.
+Applying the same successful-unbind predicate to credential checks would
+close it cheaply. Whichever contract is chosen, keep these lookups out of
+Hyperdrive's query cache, as `findCredential` already does, and retain the
+per-request vault generation check.
+
+### GitHub event allowlist
+
+`push`, `workflow_dispatch`, `schedule` and `release` are a defensible
+conservative v1 subset. They are not a proof that every command executed
+by the job is trusted. Keep the section 5 warning about untrusted checkout,
+downloaded artifacts, caller inputs and compromised runners. The missing
+caller ref in R3 matters even with this allowlist.
+
+| Event | Required interpretation |
+| --- | --- |
+| `push` | Bind the exact branch or tag ref. A tag named `main` is distinct from `refs/heads/main`. |
+| `workflow_dispatch` | A writer can select a branch or tag; the workflow's presence on the default branch does not constrain the dispatched ref to it. Bind the chosen ref and treat inputs as data. |
+| `schedule` | Runs the default branch's current workflow. An exact ref should fail closed when that default changes. |
+| `release` | Uses `refs/tags/<tag>`, not the repository's default branch. The preset must accept an exact tag. `event_name=release` does not distinguish `published`, `edited`, `prereleased` or other release activity; restrict those in workflow YAML if needed. |
+
+These ref and activity rules come from
+[GitHub's event reference](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows).
+The documentation separately confirms
+[manual-dispatch write access](https://docs.github.com/actions/managing-workflow-runs/manually-running-a-workflow)
+and [release-management permissions](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository).
+Reword section 1's claim that these events run "only code" placed by a
+writer to describe the trusted triggering/ref context instead. Continue
+refusing `pull_request`, `pull_request_target` and `workflow_run` in this
+profile, even when their refs happen to match a trusted branch. A safe
+workflow using an excluded event is outside this deliberately narrower v1
+contract, not evidence that all such workflows are inherently unsafe.
+
+### Changes that must be retained
+
+- Hash the verified signing input, with independent consumption retention
+  and atomic consumption, issuance and audit.
+- Enforce profiles on the server, keep IDs and callee SHAs, and replace
+  bindings with new IDs instead of editing their security fields.
+- Keep unauthenticated work ahead of the vault call, bounded request and
+  fetch bodies, settled-only caches, and the shared audit-head commit.
+- Persist credential provenance in both authors' audit entries, while
+  leaving authorization with the vault's principal and generation.
+- Keep Kubernetes deferred and state rollback, lost-response and
+  readiness limits honestly. The denial-only MAC tradeoff is acceptable;
+  successful-revocation semantics still need R5.
+
+This re-review changes only this document. Platform scenarios are grounded
+in the linked documentation, not live runs on CI accounts. Implementation
+sign-off remains withheld until R1 to R6 are resolved or the supported
+scope is narrowed accordingly.
