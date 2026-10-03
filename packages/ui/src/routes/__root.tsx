@@ -118,7 +118,7 @@ function Toasts() {
 }
 
 function RootComponent() {
-  const { principal, instanceRole, projects, capabilities } = useShell();
+  const { principal, instanceRole, projects, capabilities, instance } = useShell();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
 
   // Sign-in gets no navigation. Every destination in the sidebar and the
@@ -156,6 +156,7 @@ function RootComponent() {
         principal={principal}
         instanceRole={instanceRole}
         capabilities={capabilities}
+        instance={instance}
       >
         <Outlet />
       </Shell>

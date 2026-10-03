@@ -14,7 +14,9 @@ import {
   loadShell,
   queries,
   refresh,
+  shellOf,
 } from '../src/lib/queries.ts';
+import { pendingMigrations } from '../src/lib/instance.ts';
 
 const market = {
   slug: 'market',
@@ -181,4 +183,22 @@ test('nobody but an owner is asked for the directory', async () => {
   const answer = await queryClient.fetchQuery(queries.directory(client, false));
   assert.equal(answer.ok, false);
   assert.deepEqual(calls, []);
+});
+
+test('owners and root admins see pending migrations; everyone else is told nothing', () => {
+  const instance = { version: '0.1.12', migrations: { applied: 1, known: ['0000_baseline', '0001_remove_syncs'] } };
+  const root = shellOf({ mode: 'signin', signin: null, access: null } as never, { ...me, instance } as never, {
+    ok: true,
+    projects: [market],
+  } as never);
+  assert.deepEqual(pendingMigrations(root.instance), ['0001_remove_syncs']);
+
+  const member = shellOf({ mode: 'signin', signin: null, access: null } as never, { ...me, instanceRole: 'user', instance: null } as never, {
+    ok: true,
+    projects: [market],
+  } as never);
+  assert.deepEqual(pendingMigrations(member.instance), []);
+
+  const current = { ...instance, migrations: { ...instance.migrations, applied: 2 } };
+  assert.deepEqual(pendingMigrations(current), []);
 });

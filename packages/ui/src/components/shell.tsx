@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useRouterState } from '@tanstack/react-router';
 import { Dialog, DropdownMenu } from 'radix-ui';
+import type { InstanceState } from '@coffre/client';
 import type { ProjectSummary } from '../shared/models';
+import { pendingMigrations, UPGRADE_DOC } from '../lib/instance';
 import type { UiCapabilities } from '../lib/capabilities';
 import { isActiveAccessibleEnvironment } from '../lib/project-environments';
 import { AdministrationItems } from './affordances';
 import { CommandPalette } from './command-palette';
 import { ThemeMenuItems } from './theme';
 import { Tile } from './tile';
-import { Tip } from './ui';
+import { Notice, Tip } from './ui';
 import {
   Check,
   ChevronsUpDown,
@@ -34,6 +36,7 @@ type ShellProps = {
   principal: Principal;
   instanceRole: InstanceRole;
   capabilities: UiCapabilities;
+  instance: InstanceState | null;
   children: ReactNode;
 };
 
@@ -92,6 +95,26 @@ function roleLabel(principal: Principal, instanceRole: InstanceRole): string {
   return 'Member';
 }
 
+/**
+ * Above every page, for owners and root admins, while the database is behind
+ * the code this instance runs: what to run, and where the steps are.
+ */
+function MigrationBanner({ instance }: { instance: InstanceState | null }) {
+  const pending = pendingMigrations(instance);
+  if (pending.length === 0) return null;
+  return (
+    <div className="migration-banner">
+      <Notice tone="info">
+        <strong>Database migrations pending:</strong> run <code>coffre migrate</code> to apply{' '}
+        <span className="mono">{pending.join(', ')}</span>, which coffre {instance?.version} ships.{' '}
+        <a href={UPGRADE_DOC} target="_blank" rel="noreferrer">
+          How to upgrade
+        </a>
+      </Notice>
+    </div>
+  );
+}
+
 /** The product's mark and name, for the pages you see before signing in. */
 export function Brand() {
   return (
@@ -113,7 +136,7 @@ export function Brand() {
  * navigation lives outside the pages themselves. Everywhere else the page's
  * own title says where you are, so the bar leaves it out rather than repeat it.
  */
-export function Shell({ projects, principal, instanceRole, capabilities, children }: ShellProps) {
+export function Shell({ projects, principal, instanceRole, capabilities, instance, children }: ShellProps) {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [collapsed, toggleSidebar] = useSidebarCollapsed();
@@ -223,6 +246,7 @@ export function Shell({ projects, principal, instanceRole, capabilities, childre
         </header>
 
         <main className="content" id="content">
+          <MigrationBanner instance={instance} />
           {children}
         </main>
       </div>

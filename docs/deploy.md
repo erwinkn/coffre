@@ -76,11 +76,9 @@ stderr.
 the vault key, or for a database set up by hand
 ([appendix](#appendix-the-database-by-hand)).
 
-Run `pnpm migrate` after every upgrade of coffre's packages, in the order
-given by that release's upgrade instructions. It runs `coffre-server migrate`
-with the database owner's URL from `DATABASE_URL`; clear it from the shell
-afterwards (`unset DATABASE_URL`). The running components do not migrate
-the database automatically.
+After every upgrade of coffre's packages, migrate the database
+([Upgrading](#upgrading)). The running components never migrate it
+themselves.
 
 PlanetScale URLs include `sslrootcert=system`. The Node connections and
 migrator use Node's default trusted CAs for that value. They require
@@ -98,6 +96,49 @@ The migration creates two group roles and grants their membership:
 Neither login owns tables or may change or delete audit entries. Row-level
 security permits each to append only as its own author. Do not run either
 component as the owner or give the runtime logins additional roles.
+
+## Upgrading
+
+Three steps, in this order, for every release:
+
+1. **`coffre update`**, in the deployment's directory. It updates the CLI
+   the way it was installed (an npm or pnpm global; npx needs nothing), moves
+   the deployment's `@coffre/*` pins to the release and installs them, and
+   ends with what the release asks of the database: "coffre 0.1.12 adds 1
+   migration (0001_remove_syncs): after deploying, run `coffre migrate`". The
+   deployment's `minimumReleaseAge` exempts `@coffre/*`, so a fix installs the
+   day it is published; your other packages still wait a week.
+2. **Deploy** as you do: `pnpm run deploy` (the vault, then the app), a push
+   for Workers Builds, or a restart on Node. Each release says whether it runs
+   on the schema before its migrations; 0.1.12 does.
+3. **`coffre migrate`**, signed in as an owner or a root admin. It asks the
+   instance which version it runs and which of that version's migrations its
+   database lacks, and stops unless the CLI is that same version: it applies
+   its own migrations, so it says "run `coffre update` (to 0.1.12)" instead.
+   Then it asks for the **database owner's direct Postgres URL** at a hidden
+   prompt (or reads `COFFRE_MIGRATE_DATABASE_URL`, or stdin), checks that the
+   database lacks what the instance says it lacks, shows what it will apply
+   and asks (`--yes` for scripts), applies it as `coffre-server migrate`
+   does, under the migration lock and with the database's privileges
+   reasserted, and checks that the instance sees the new schema and that
+   `/readyz` passes. Use the login that owns the tables, not `coffre_runtime`
+   or `coffre_vault_runtime`, and not a Hyperdrive connection. `--url` picks
+   an instance other than the current one.
+
+Until the database is migrated, owners and root admins see "Database
+migrations pending" above every page, and any CLI command they run against
+the instance says so on stderr, once a day.
+
+**For automation**, `pnpm migrate` in the deployment runs the installed
+version's `coffre-server migrate`, with the owner's URL in `DATABASE_URL`:
+
+```sh
+read -rs -p 'Database owner URL: ' DATABASE_URL
+printf '\n'
+export DATABASE_URL
+pnpm migrate
+unset DATABASE_URL
+```
 
 ## On Workers
 
@@ -119,30 +160,20 @@ still fails readiness. Workers Builds deploys code; it does not run migrations.
 
 1. [Check for syncs](../CHANGELOG.md), including archived destinations, and
    move each destination into your deploy pipeline. Back up the database.
-2. Update the deployment's coffre packages to 0.1.12 and install them with
-   `pnpm install`. Deploy the vault, then the app. The example's `pnpm deploy`
-   does both in this order. With Workers Builds, wait until both deployments
-   finish and the old versions have stopped receiving requests and scheduled
-   events before dropping their tables.
-3. From the updated deployment directory, run the migration using the
-   **database owner's direct Postgres URL**, with its existing TLS parameters.
-   Use the login that owns the tables, not `coffre_runtime` or
-   `coffre_vault_runtime`, and not a Hyperdrive connection. In Bash, paste that
-   URL at the hidden prompt:
-
-   ```sh
-   read -rs -p 'Database owner URL: ' DATABASE_URL
-   printf '\n'
-   export DATABASE_URL
-   pnpm migrate
-   unset DATABASE_URL
-   ```
-
-   `pnpm migrate` runs the installed version's `coffre-server migrate`.
-   If either sync table still has rows, it refuses without changing the
-   schema. After moving the destinations and stopping old versions, have
-   the owner clear `sync_keys`, then `syncs`, as described in the release
-   notes, and run the migration again.
+2. In the deployment's directory, run `coffre update`: it moves the
+   deployment's coffre packages to 0.1.12 and installs them. Deploy the
+   vault, then the app; the example's `pnpm deploy` does both in this
+   order. With Workers Builds, wait until both deployments finish and the
+   old versions have stopped receiving requests and scheduled events before
+   dropping their tables.
+3. Run `coffre migrate`, with the **database owner's direct Postgres URL**
+   and its existing TLS parameters ([Upgrading](#upgrading)), or `pnpm
+   migrate` for automation. If either sync table still has rows, it refuses
+   without changing the schema: "syncs are removed: migrate destinations to
+   service tokens, back up and clear syncs and sync_keys before upgrading".
+   After moving the destinations and stopping old versions, have the owner
+   clear `sync_keys`, then `syncs`, as described in the release notes, and
+   run it again.
 4. Check `/readyz` and verify the audit log. Past sync entries still verify
    and render on the audit page. After `0001` drops the tables, rolling back
    to code that still uses syncs requires restoring the pre-upgrade database.

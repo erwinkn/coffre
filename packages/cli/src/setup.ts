@@ -19,12 +19,14 @@ import { postgresConnection } from '@coffre/db/connect';
 import { migrateDatabase, type MigrationPlan } from '@coffre/db/migrate';
 import pg from 'pg';
 
+import { readDatabaseUrl } from './database-url.ts';
 import { deploymentKind, install } from './deployment.ts';
 import { init, KINDS, type Kind } from './init.ts';
 import { generateKeys, jsonWarning, keyGuide, keyValues, needsTerminal, type Keys } from './keys.ts';
 import { type Screen, showSecrets, type Value } from './secrets.ts';
 import { StepFailed, Steps } from './steps.ts';
-import { Cancelled, hiddenLine, type Keyboard, listed, openTerminal, type Output, paragraph, release, row, select, style, type Style } from './tty.ts';
+import { Cancelled, type Keyboard, listed, openTerminal, type Output, paragraph, release, row, select, style, type Style } from './tty.ts';
+import { cliVersion } from './version.ts';
 import { Cloudflare, deployedSummary } from './workers.ts';
 
 /** Where the administrator's connection string comes from, when not from a hidden prompt. */
@@ -123,10 +125,13 @@ export async function setup(args: string[]): Promise<void> {
     const about = offers && (kind === 'workers' || kind === 'empty') ? "a deployment's database, keys and Cloudflare" : "a deployment's database logins, migrations and keys";
     if (s.ansi) out.write(`\n  ${s.bold('coffre setup')}  ${s.dim(about)}\n\n`);
     if (kind === 'empty' && terminal !== null) kind = await scaffold(dir, terminal.keys, out, clean);
-    const text = await readAdministrator(out, s);
-    secrets.push(text);
-    const administrator = administratorUrl(text);
-    if (administrator.password !== '') secrets.push(administrator.password, decodeURIComponent(administrator.password));
+    const { url: administrator, secrets: typed } = await readDatabaseUrl(out, s, {
+      variable: URL_VARIABLE,
+      question: "The database administrator's connection string",
+      hint: "Hidden as you type. Your host's admin URL, such as PlanetScale's Connect page gives.",
+      command: 'coffre setup',
+    });
+    secrets.push(...typed);
     let cloudflare: Cloudflare | null = null;
     if (offers && kind === 'workers') {
       const choice = await select(terminal.keys, out, s, 'Set Cloudflare up too?', [
@@ -183,48 +188,6 @@ function parseOptions(args: string[]): { resetPasswords: boolean; json: boolean 
         (leaked ? ' One of the arguments looks like one: change that password, which is in your shell history now.' : ''),
     );
   }
-}
-
-/** The connection string: from the environment, from stdin when it is piped, or typed at a hidden prompt. */
-async function readAdministrator(out: Output, s: Style): Promise<string> {
-  const given = process.env[URL_VARIABLE];
-  delete process.env[URL_VARIABLE];
-  if (given !== undefined && given.trim() !== '') return given.trim();
-  if (!process.stdin.isTTY) {
-    const line = readFileSync(0, 'utf8').split('\n').find((candidate) => candidate.trim() !== '');
-    if (line === undefined) throw new SetupError(`no connection string: pipe it to stdin, or set ${URL_VARIABLE}`);
-    return line.trim();
-  }
-  const text = await hiddenLine(
-    process.stdin,
-    out,
-    s,
-    "The database administrator's connection string",
-    "Hidden as you type. Your host's admin URL, such as PlanetScale's Connect page gives.",
-  );
-  if (text === '') throw new SetupError('no connection string given');
-  return text;
-}
-
-function administratorUrl(text: string): URL {
-  let url: URL;
-  try {
-    url = new URL(text);
-  } catch {
-    throw new SetupError('that is not a connection string, such as postgresql://user:password@host:5432/database');
-  }
-  if (url.protocol !== 'postgres:' && url.protocol !== 'postgresql:') {
-    throw new SetupError('coffre setup needs a Postgres connection string, postgresql://…');
-  }
-  if (url.username === '' || url.hostname === '' || url.pathname.length <= 1) {
-    throw new SetupError('the connection string must name a user, a host and a database');
-  }
-  return url;
-}
-
-/** This CLI's version: the schema it migrates to, and the version of coffre a deployment it makes runs. */
-function cliVersion(): string {
-  return (JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }).version;
 }
 
 /**
@@ -325,7 +288,7 @@ async function run(
       return described(logins);
     });
     await step(3, async (progress) => {
-      let plan: MigrationPlan = { applied: 0, total: 0 };
+      let plan: MigrationPlan = { applied: 0, total: 0, pending: [] };
       await migrateDatabase(administrator.href, (planned) => {
         plan = planned;
         const pending = planned.total - planned.applied;

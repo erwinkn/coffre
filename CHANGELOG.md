@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+`coffre update` and `coffre migrate` upgrade a deployment: update the CLI
+and the deployment's coffre packages, deploy, then migrate the database
+with the owner's URL, asked for at a hidden prompt. `coffre migrate` first
+checks that the instance runs the CLI's own version, and shows what it will
+apply. `/me` now tells owners and root admins the version an instance runs
+and how many of its migrations the database has applied; owners see a
+banner while some are pending, and the CLI says so once a day. `pnpm
+migrate` stays, for automation. [Upgrading](docs/deploy.md#upgrading).
+
 Syncs are removed; use a service token with `coffre run` or `coffre export`,
 or the GitHub Action.
 

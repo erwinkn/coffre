@@ -39,6 +39,34 @@ export function install(dir: string): Promise<void> {
   })();
 }
 
+/** A deployment's `@coffre/*` pins, as its package.json has them. */
+export function coffrePins(dir: string): Record<string, string> {
+  const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as Record<string, Record<string, string> | undefined>;
+  const pins: Record<string, string> = {};
+  for (const field of ['dependencies', 'devDependencies']) {
+    for (const [name, version] of Object.entries(manifest[field] ?? {})) {
+      if (name.startsWith('@coffre/')) pins[name] = version;
+    }
+  }
+  return pins;
+}
+
+/**
+ * Every `@coffre/*` pin in `dir`'s package.json, moved to `version`; the
+ * rest left as it is. What `pnpm bump` does to the examples, which `coffre
+ * init` copies.
+ */
+export function bumpPins(dir: string, version: string): void {
+  const path = join(dir, 'package.json');
+  const manifest = JSON.parse(readFileSync(path, 'utf8')) as Record<string, Record<string, string> | undefined>;
+  for (const field of ['dependencies', 'devDependencies']) {
+    for (const name of Object.keys(manifest[field] ?? {})) {
+      if (name.startsWith('@coffre/')) manifest[field]![name] = version;
+    }
+  }
+  writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`);
+}
+
 /** What setup reads of a Worker's wrangler.jsonc. */
 export type WorkerConfig = {
   /** Its path, relative to the deployment, as wrangler's `-c` takes it. */

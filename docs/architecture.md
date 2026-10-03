@@ -115,10 +115,15 @@ Each is checked when the deployment starts, and a bad value (a 31-byte key,
 a public URL with a path, no root admin) fails it with a message naming the
 setting.
 
-Migrations live in `@coffre/db` and run through `@coffre/server`'s command,
-`pnpm exec coffre-server migrate`, not the CLI: the schema must match the
-server's version exactly, which the lockstep version guarantees, and the
-CLI's may differ.
+Migrations live in `@coffre/db`. The schema must match the server's
+version exactly, which the lockstep version guarantees. `coffre migrate`
+applies the CLI's own migrations, so it first asks the instance which
+version it runs (`/me`, to owners and root admins only) and refuses unless
+the CLI is that version. `pnpm exec coffre-server migrate`, the server's
+command, applies the installed version's, for automation. A Worker has no
+files, so the migrations each version ships are compiled into
+`@coffre/db/schema-version` from their journals: `/me` reports how many the
+database has applied of those.
 
 ## The UI
 

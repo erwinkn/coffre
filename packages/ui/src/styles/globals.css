@@ -439,6 +439,11 @@ kbd {
   text-decoration: none;
 }
 
+/* Above every page while the database is behind the code (owners only). */
+.migration-banner {
+  margin-bottom: 1.25rem;
+}
+
 .main {
   min-width: 0;
   display: flex;
