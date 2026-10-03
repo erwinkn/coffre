@@ -11,8 +11,7 @@ import { accessAuthorship, memberTampering, noAuditNoAccess, sealingRace } from 
 import { refusedCheckpoint, missingCheckpoint, middleCut } from './checks/readiness.ts';
 import { editedGeneration, forgedCredential, forgedIdentity, forgedApproval } from './checks/signin.ts';
 import { canaryScan } from './checks/canaries.ts';
-import { anonymousChecks, tokenChecks, type Canary } from './checks/live.ts';
-import { type Approve, probeAsUser, probeInterrupted, probeLeftovers, probeRun, signedInChecks } from './checks/probe.ts';
+import { Cli, cliLogin, verifyAsOwner, verifyAsUser, verifyInterrupted, verifyKeys, verifyLeftovers, verifyWithToken } from './checks/cli.ts';
 import { pageLoad, personas, setUp, setUpLive, signInAdmin } from './checks/people.ts';
 import { health } from './checks/surface.ts';
 
@@ -20,10 +19,6 @@ import { health } from './checks/surface.ts';
 export async function conform(deployment: Deployment, options: { bulkLimit: number }): Promise<string[]> {
   const report = new Report();
   await report.check('health', {}, () => health(deployment));
-  // What `probe` checks of a running instance, from outside: as no one, and
-  // with a token reading one canary. The rest needs this run's own keys,
-  // database and processes.
-  await anonymousChecks(report, deployment.origin, { health: false });
   const admin = await report.check('sign-in', {}, () => signInAdmin(deployment));
   await report.check('page load', { admin }, ({ admin }) => pageLoad(admin));
   const canaries = await report.check('setup', { admin }, ({ admin }) => setUp(admin));
@@ -36,16 +31,25 @@ export async function conform(deployment: Deployment, options: { bulkLimit: numb
   await report.check('runs audited', all, ({ people, canaries }) => revealAudited(deployment, people, canaries, 'run'));
   await report.check('cross-site', all, ({ people, canaries }) => crossSite(people, canaries));
   const live = await report.check('live setup', { admin, canaries }, ({ admin, canaries }) => setUpLive(admin, canaries));
-  await tokenChecks(report, deployment.origin, live ?? {});
-  // `probe --sign-in`, as an owner runs it against an instance: a user is turned away, two runs, and what stays.
-  const origin = deployment.origin;
-  const before = await report.check('probe as a user', { admin, people }, ({ admin, people }) => probeAsUser(origin, people.reader, admin));
-  const first = await report.check('probe --sign-in', { admin, before }, ({ admin }) => probeRun(origin, admin));
-  const second = await report.check('probe again', { admin, first }, ({ admin }) => probeRun(origin, admin));
-  await report.check('probe interrupted', { admin, second }, ({ admin }) => probeInterrupted(origin, admin));
-  await report.check('probe leftovers', { admin, before, first, second, live }, ({ admin, before, first, second, live }) =>
-    probeLeftovers(origin, admin, [first, second], before, live.canary),
-  );
+  // `coffre verify`, as an operator runs it against an instance: with a
+  // token from CI; then signed in with `coffre login`, a user turned away,
+  // the admin twice, interrupted, and what stays; and the keys.
+  const clis = [new Cli(deployment.origin), new Cli(deployment.origin), new Cli(deployment.origin)] as const;
+  try {
+    await report.check('verify with a token', { live }, ({ live }) => verifyWithToken(clis[0], live));
+    const user = await report.check('login as a user', { people }, ({ people }) => cliLogin(clis[1], people.reader));
+    const before = await report.check('verify as a user', { admin, people, user }, ({ admin, people, user }) => verifyAsUser(user, people.reader, admin));
+    const owner = await report.check('login as the admin', { admin, before }, ({ admin }) => cliLogin(clis[2], admin));
+    const first = await report.check('verify as the admin', { owner }, ({ owner }) => verifyAsOwner(owner));
+    const second = await report.check('verify again', { owner, first }, ({ owner }) => verifyAsOwner(owner));
+    await report.check('verify interrupted', { admin, owner, second }, ({ admin, owner }) => verifyInterrupted(owner, admin));
+    await report.check('verify leftovers', { admin, owner, before, first, second, live }, ({ admin, owner, before, first, second, live }) =>
+      verifyLeftovers(owner, admin, [first, second], before, live.canary),
+    );
+    await report.check('verify keys', { owner }, ({ owner }) => verifyKeys(owner));
+  } finally {
+    for (const cli of clis) cli.remove();
+  }
   await report.check('offboarding', all, ({ people, canaries }) => offboarding(deployment, people, canaries));
   await report.check('bulk limit', { people }, ({ people }) => bulkLimit(people, options.bulkLimit));
 
@@ -79,19 +83,5 @@ export async function conform(deployment: Deployment, options: { bulkLimit: numb
   await report.check('batch gap', { people }, ({ people }) => missingEntry(deployment, people, 'batch'));
   await report.check('earlier checkpoint', { people }, ({ people }) => earlierCheckpoint(deployment, people));
   await report.check('tail deleted', { people }, ({ people }) => deletedTail(deployment, people));
-  return report.failed;
-}
-
-/**
- * What can be checked of an instance someone else runs: as no one, and with
- * a token that reads a canary when given one, or, with `signIn`, as an owner
- * who signs the probe in and lets it set up its own token. With a token,
- * nothing is written but the audit log's entries for the token's reads.
- */
-export async function probe(origin: string, live: { token?: string; canary?: Canary; signIn?: Approve }): Promise<string[]> {
-  const report = new Report();
-  await anonymousChecks(report, origin, { health: true });
-  if (live.signIn !== undefined) await signedInChecks(report, origin, live.signIn);
-  else if (live.token !== undefined) await tokenChecks(report, origin, live);
   return report.failed;
 }

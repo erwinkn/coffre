@@ -3,7 +3,7 @@ import { displayName, secretKey, slug } from '@coffre/core/schemas';
 import { z } from 'zod';
 
 import { setAccess } from './access.ts';
-import { listAudit, verifyAudit } from './audit.ts';
+import { auditKeys, listAudit, verifyAudit } from './audit.ts';
 import type { ApiContext } from './context.ts';
 import { notFound } from './errors.ts';
 import { listMembers, memberReport, putMember, removeMember } from './members.ts';
@@ -293,6 +293,8 @@ export const routes = {
       }),
   }),
   ...route('GET /audit/verification', { run: (ctx) => verifyAudit(ctx) }),
+  // What `coffre verify keys` checks an escrowed key against, on the operator's machine.
+  ...route('GET /audit/keys', { run: (ctx) => auditKeys(ctx) }),
 };
 
 export type Routes = typeof routes;

@@ -100,6 +100,24 @@ export type AuditVerification =
       reason: string;
     };
 
+/**
+ * What an escrowed key is checked against, and nothing more: the id the
+ * log records for the app key, a fingerprint of it; the vault key the vault
+ * wraps under now; and each vault key's check, a known value wrapped under
+ * it, as the vault wrote it. `coffre verify keys` holds a key to them on the
+ * operator's machine, so the key is never sent, and nothing here answers a
+ * guess: it is public material, as hard to use against a 32-byte key as the
+ * log itself.
+ */
+export type AuditKeys = {
+  app: { keyId: string };
+  vault: {
+    current: { vaultId: string; provider: string };
+    /** Newest first: the vault ID each names, and the check value wrapped under it, base64. */
+    checks: { seq: number; vaultId: string; provider: string; version: string; wrapped: string }[];
+  };
+};
+
 /** The vault's verdict as the API gives it, its fault already in words. */
 export type VaultVerification =
   | { ok: true; entries: number; pending?: number }
@@ -202,6 +220,21 @@ function entryView(row: Awaited<ReturnType<typeof auditPage>>[number]): AuditEnt
     relatedSeq: row.relatedSeq === null ? null : Number(row.relatedSeq),
     requestId: row.requestId,
     metadata,
+  };
+}
+
+/** What the keys are checked against (`AuditKeys`): owners and root admins only, as verification is. */
+export async function auditKeys(ctx: ApiContext): Promise<AuditKeys> {
+  if (!ctx.caller.isOwner) {
+    throw forbidden('only a root admin or instance owner may read what the keys are checked against');
+  }
+  const { current, checks } = await ctx.vault.keyChecks();
+  return {
+    app: { keyId: appLogKey(ctx.chainKey).keyId },
+    vault: {
+      current: { vaultId: current.kekId, provider: current.kekProvider },
+      checks: checks.map(({ seq, kekProvider, kekId, kekVersion, bytes }) => ({ seq, vaultId: kekId, provider: kekProvider, version: kekVersion, wrapped: bytes })),
+    },
   };
 }
 

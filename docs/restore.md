@@ -24,6 +24,12 @@ instead of deriving one from the vault key. See [keys.md](keys.md).
 Keep the keys apart from the backups. A backup alone opens nothing, and the
 keys alone hold nothing; whoever has both has every value.
 
+Check your escrow before you need it: `coffre verify keys`, as an owner or a
+root admin, asks for the vault key and the app key you keep, and checks
+each against the running instance on your machine, sending neither. A vault
+key it replaced is named as such ([keys.md](keys.md#check-your-escrow)). Do
+it once the keys are saved, and after every rotation.
+
 ## Before you restore
 
 Restore the whole database to one moment. coffre's guarantees hold between
@@ -147,7 +153,7 @@ Restore:
 
 Before reopening traffic:
 
-1. `coffre verify`, as an owner or root admin. It must say `audit log OK`,
+1. `coffre verify log`, as an owner or root admin. It must say `audit log OK`,
    verified through the newest entry, with the last checkpoint the backup
    held. It checks every link, both authors' MACs, every checkpoint against
    the prefix it signed, and replays the members and grants.
@@ -161,8 +167,10 @@ Before reopening traffic:
    green on the backup's own last heartbeat, for up to eleven minutes; only
    a beat after the restore shows the restored instance writing and the
    vault signing.
-6. Optionally, `coffre-conformance probe <url>` from outside, with a service
-   token and the canary ([conformance.md](conformance.md)).
+6. `coffre verify keys` with the keys you deployed it with, from the
+   escrow: both must be the instance's, the vault key the current one.
+7. Optionally, `coffre verify instance` from outside: as no one, then as
+   you, with a token of its own ([conformance.md](conformance.md#against-a-running-instance)).
 
 Verification proves the restored history is the one coffre wrote, up to the
 backup's moment. It cannot show what was written after it: a complete older
@@ -187,7 +195,7 @@ HTTP 503  {"error":"unavailable","reason":"wrong_kek",
 
 The scheduled checkpoint is refused too, so `/readyz` turns red after the
 next beat (`checkpointed: false`), and verification fails at the first
-entry the vault wrote, which `coffre verify` explains:
+entry the vault wrote, which `coffre verify log` explains:
 
 ```
 written under vault:3f1c…, a key this verifier does not hold: either it is forged,
@@ -246,7 +254,7 @@ this machine, against the compose Postgres, after `pnpm build`:
    - the canary reveals;
    - the removed member's kept session is refused, and they cannot sign in;
    - a new value writes and reads back, and the next beat checkpoints;
-   - `coffre-conformance probe` passes, as no one and with the restored
+   - `coffre verify instance` passes, as no one and with the restored
      token, which reads the canary.
 5. It restarts the example with a random vault key under the same id, and checks
    that the canary and a new write are both refused with `wrong_kek`, that

@@ -10,9 +10,9 @@ tampering with either author's entries is caught. Workers takes
 `--postgres <owner URL>`, `--runtime <coffre_runtime URL>` and
 `--vault-runtime <coffre_vault_runtime URL>` on a local Postgres server;
 it creates and drops its own database. Node uses one temporary SQLite file
-for both processes. Neither run uses the deployment's real database or keys. `coffre-conformance probe <url>` checks a running
-instance from outside, without changing it: as no one, and with a service
-token that reads one canary (`--token`, `--canary`); see
+for both processes. Neither run uses the deployment's real database or keys. A running
+instance is checked from outside by the CLI, `coffre verify instance`
+(`@coffre/cli`), which the run takes too; see
 [Against a running instance](https://github.com/erwinkn/coffre/blob/main/docs/conformance.md#against-a-running-instance).
 
 `@coffre/conformance/idp` is the stand-in identity provider it signs in

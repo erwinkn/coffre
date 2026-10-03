@@ -6,7 +6,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { using } from '../database.ts';
 import type { Deployment } from '../harness.ts';
 import { expect } from '../report.ts';
-import { getCalls, getUrls } from '../routes.ts';
+import { getCalls, getUrls } from '@coffre/client/routes';
 import { scanTables, tables } from './storage.ts';
 import { canary, BULK, DEV, PROD, PROJECT, SERVICE, type Canaries, type People } from './people.ts';
 

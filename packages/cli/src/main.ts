@@ -14,6 +14,7 @@ import { join, dirname, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { init, KINDS, type Kind } from './init.ts';
 import { keys } from './keys.ts';
+import { pickCheck, verifyInstance, verifyKeys, VERIFY_USAGE } from './verify/index.ts';
 import {
   credentialHeaders,
   emptyStore,
@@ -791,7 +792,32 @@ async function audit(args: string[]): Promise<void> {
   }
 }
 
-async function verify(): Promise<void> {
+/** One check of the instance, named, or chosen on the terminal (`verify/index.ts`). */
+async function verify(args: string[]): Promise<void> {
+  const [named, ...more] = args;
+  if (named === '--help' || named === '-h') {
+    process.stdout.write(`${VERIFY_USAGE}\n`);
+    return;
+  }
+  const check = named ?? (await pickCheck());
+  switch (check) {
+    case 'instance':
+      return verifyInstance(more, readStore(), process.env);
+    case 'keys': {
+      const to = target();
+      return verifyKeys(more, client(to), to.origin, process.env);
+    }
+    case 'log':
+      if (more.length > 0) fail('usage: coffre verify log');
+      return verifyLog();
+    default:
+      process.stderr.write(`coffre: no check named ${check}\n${VERIFY_USAGE}\n`);
+      process.exit(2);
+  }
+}
+
+/** The whole audit log, verified by the app and the vault, as an owner. */
+async function verifyLog(): Promise<void> {
   const result = await client().audit.verify();
 
   if (result.ok) {
@@ -1059,7 +1085,11 @@ const USAGE = `coffre - secrets, with an audit log
 
   Audit
     coffre audit [--limit N] [--actor <id>] [--denied] [--detail]
-    coffre verify
+
+  Verify (coffre verify alone asks which, on a terminal)
+    coffre verify instance [<url>]          the instance from outside: as no one, then as you, an owner
+    coffre verify keys                      the vault key and app key you keep, checked on this machine
+    coffre verify log                       the whole audit log, as an owner
 
   Environment (each overrides the saved session for one command)
     COFFRE_API_URL          which instance to talk to
@@ -1140,7 +1170,7 @@ switch (command) {
     await audit(rest);
     break;
   case 'verify':
-    await verify();
+    await verify(rest);
     break;
   default:
     process.stdout.write(USAGE);

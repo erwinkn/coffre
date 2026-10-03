@@ -60,6 +60,46 @@ running with the old vault key, as for the seconds a deploy takes, writes nothin
 after the rotation: its calls fail until it is replaced. And a vault key, once
 replaced, cannot come back as `kek`: the vault refuses to write under it.
 
+## Check your escrow
+
+Once the keys are in your password manager, and again from time to time,
+check that what you keep is what the instance runs with:
+
+```sh
+coffre verify keys
+```
+
+It asks for the vault key, then the app key, without showing either, and
+checks each against the current instance on your machine: neither is sent
+anywhere. Enter alone skips one. It needs an owner or a root admin.
+
+```
+Checking your keys against https://secrets.example.com
+  On this machine: what they're checked against was read from the instance, and the keys go nowhere.
+
+  ✓ vault key           the current one, vault ID vault-2026-10-02-k7q2xm
+  ✗ app key             not this instance's app key: the app signs with another
+
+✗ The app key is not https://secrets.example.com's.
+```
+
+How it knows, without the instance learning anything: for each vault key,
+the vault writes a check, a known value wrapped under that key, in a
+`key.check` entry of the log; and every entry the app signs names its key by
+a fingerprint. The CLI reads the checks the vault vouches for and the app
+key's fingerprint (`GET /api/audit/keys`, owners only; none of it is
+secret), opens the current vault key's check with the key you pasted, and
+derives the fingerprint of the app key you pasted. The vault ID is bound
+into each check, so the one opened names it; `--vault-id <id>` checks the
+one you keep as well. A vault key the vault replaced opens its own check,
+and is named as such: "this is a previous vault key (vault ID …), not the
+current one". With AWS KMS there is no vault key to paste; a local key it
+replaced still checks as previous.
+
+In a script, the keys come in `COFFRE_VAULT_KEY` and `COFFRE_APP_KEY`, or on
+stdin, the vault key on the first line and the app key on the second; never
+as arguments. It exits 1 unless every key given is the instance's.
+
 ## AWS KMS
 
 ```ts

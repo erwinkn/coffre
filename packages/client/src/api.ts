@@ -726,6 +726,27 @@ export type Api = {
       reason: string;
     };
   };
+  "GET /audit/keys": {
+    input: undefined;
+    output: {
+      app: {
+        keyId: string;
+      };
+      vault: {
+        current: {
+          vaultId: string;
+          provider: string;
+        };
+        checks: {
+          seq: number;
+          vaultId: string;
+          provider: string;
+          version: string;
+          wrapped: string;
+        }[];
+      };
+    };
+  };
 };
 
 export type AccessValue = "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer" | null | {

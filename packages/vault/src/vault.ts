@@ -1,4 +1,4 @@
-import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 
 import {
   allows,
@@ -14,6 +14,9 @@ import { verifyEntries, type LogKey, type StoredEntry } from '@coffre/core/audit
 import { checkContext, type SecretContext } from '@coffre/core/envelope';
 import {
   DEK_BYTES,
+  KEY_CHECK,
+  KEY_CHECK_CONTEXT,
+  KEY_CHECK_VALUE,
   KekBadClaimError,
   KekCancelledError,
   KekUnavailableError,
@@ -34,6 +37,7 @@ import {
   type CheckpointKey,
   type Grant,
   type GrantChange,
+  type KeyChecks,
   type LogHead,
   type LogVerification,
   type Outcome,
@@ -150,16 +154,11 @@ const PRINCIPAL = /^(user|token|sync):[^\s:][^\s]*$/;
 /** Who acts for the vault itself, as when it gives a root admin a member row. */
 const VAULT_ACTOR = 'system:vault';
 
-/**
- * A KEK's check: a known value, the size of a data key, wrapped under it in
- * a context no secret has (the nil UUID), and kept in a `key.check` entry.
- * Opening it again tells the vault its KEK is the one that wrapped the
- * data, without opening any data.
- */
-const KEY_CHECK = 'key.check';
-const KEY_CHECK_VALUE = createHash('sha256').update('coffre.kek.check.v1').digest();
-const NIL = '00000000-0000-0000-0000-000000000000';
-const KEY_CHECK_CONTEXT: SecretContext = { projectId: NIL, environmentId: NIL, secretId: NIL };
+// A KEK's check: a known value, the size of a data key, wrapped under it in
+// a context no secret has (the nil UUID), and kept in a `key.check` entry
+// (@coffre/core/kek). Opening it again tells the vault its KEK is the one
+// that wrapped the data, without opening any data; `coffre verify keys`
+// holds an escrowed key to it the same way.
 
 /** How many stored keys a KEK with no check yet is tried on: one that opens proves it. */
 const KEY_CHECK_SAMPLE = 3;
@@ -1352,7 +1351,7 @@ class VaultService implements Vault {
       const mismatch = `the vault key ${kek.keyId}${kek.provider === 'local' ? '' : ` (${kek.provider})`}, kek or previousKeks in the vault's config, is not the one that wrapped these values`;
       const check = checks.get(`${kek.provider}:${kek.keyId}`);
       if (check !== undefined) {
-        if (!(await opens(check, KEY_CHECK_CONTEXT, KEY_CHECK_VALUE))) return mismatch;
+        if (!(await opens(unwrappable(check.wrapped), KEY_CHECK_CONTEXT, KEY_CHECK_VALUE))) return mismatch;
         continue;
       }
       const samples = await store.wrappedUnder(this.#db, kek.provider, kek.keyId, KEY_CHECK_SAMPLE);
@@ -1378,14 +1377,14 @@ class VaultService implements Vault {
     return null;
   }
 
-  /** Each KEK's recorded check value, by `provider:keyId`. */
-  async #checkValues(db: Queryable): Promise<Map<string, WrappedDek>> {
-    const checks = new Map<string, WrappedDek>();
+  /** Each KEK's recorded check value, by `provider:keyId`, and the entry that holds it. */
+  async #checkValues(db: Queryable): Promise<Map<string, { seq: bigint; wrapped: WrappedKey }>> {
+    const checks = new Map<string, { seq: bigint; wrapped: WrappedKey }>();
     for (const entry of await store.vaultEntriesOf(db, [KEY_CHECK], -1n, VERIFY_BATCH)) {
       // A check in the vault's name that the vault did not write proves nothing either way.
       if (!this.#authentic(entry)) continue;
-      const wrapped = JSON.parse(entry.metadata) as WrappedKey;
-      checks.set(`${wrapped.kekProvider}:${wrapped.kekId}`, unwrappable(wrapped));
+      const { kekProvider, kekId, kekVersion, bytes } = JSON.parse(entry.metadata) as WrappedKey;
+      checks.set(`${kekProvider}:${kekId}`, { seq: entry.seq, wrapped: { kekProvider, kekId, kekVersion, bytes } });
     }
     return checks;
   }
@@ -1462,6 +1461,16 @@ class VaultService implements Vault {
       checkpointKeys: Object.fromEntries(signers.map(({ keyId, publicKey }, i) => [keyId, { publicKey, until: i === 0 ? null : until }])),
       rootAdmins: this.#config.rootAdmins.map((email) => `user:${email}`),
     };
+  }
+
+  async keyChecks(): Promise<KeyChecks> {
+    // A vault key with no check yet gets one first, as before the first key operation.
+    await this.#kekMismatch();
+    const { provider, keyId } = this.#config.keks.primary;
+    const checks = [...(await this.#checkValues(this.#db)).values()]
+      .sort((a, b) => (a.seq < b.seq ? 1 : -1))
+      .map(({ seq, wrapped }) => ({ ...wrapped, seq: Number(seq) }));
+    return { current: { kekProvider: provider, kekId: keyId }, checks };
   }
 
   verifyLog(input: VerifyLogInput): Promise<LogVerification> {

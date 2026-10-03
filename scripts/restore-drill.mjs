@@ -57,7 +57,7 @@ async function prepare() {
     assert.notEqual(refused, 200, 'a removed member’s session still works');
     say(`granted outsider viewer on market/dev; removed ${LEAVER}, whose session now answers ${refused}`);
 
-    // A token for the probe: it reads the canary's environment, and audits its project.
+    // A token for `coffre verify instance`: it reads the canary's environment, and audits its project.
     await call(admin, 'PATCH', `/api/access/${encodeURIComponent('token:ci-deploy')}`, { market: 'auditor' });
     const { token } = await call(admin, 'POST', `${member('token:ci-deploy')}/tokens`, { label: 'drill', expiresInDays: 1 });
 
