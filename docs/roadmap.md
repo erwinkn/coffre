@@ -138,8 +138,6 @@ ends. Passkeys would make a good recent sign-in for revealing.
   it; checkpoints copied off the box behind a retention lock; and each
   member's state under the checkpoint's signature, so a cut the checkpoint
   covers is refused at use rather than found at the next one.
-- **A slower or resumable full recomputation**, once the log passes about
-  250,000 entries ([the limits](architecture.md#limits)).
 - **Changing the app's key**, and with KMS the vault's signing key: neither
   can change today, since what each signed verifies only under it.
 - **The current-version pointer**, a

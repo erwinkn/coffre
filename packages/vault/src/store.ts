@@ -2,7 +2,7 @@ import type { Author, StoredEntry } from '@coffre/core/audit';
 import { ACCESS_ACTIONS, type SecretRef, type WrappedKey } from '@coffre/core/vault';
 import { tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import { clockMillis, engineOf, forUpdate } from '@coffre/db/dialect';
-import { and, asc, count, desc, eq, gt, gte, inArray, isNull, lt, sql } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gt, gte, inArray, isNull, lt, lte, sql } from 'drizzle-orm';
 
 /**
  * Every query the vault makes, and the only code in it that holds them.
@@ -315,6 +315,17 @@ export async function hashesAt(db: Queryable, seqs: readonly bigint[]): Promise<
 
 /** How many entries' hashes one query asks for: a checkpoint every five minutes is tens of thousands of a year. */
 const HASHES_AT_ONCE = 5000;
+
+/**
+ * Whether every entry from the first through `seq` is there. Seqs are the
+ * primary key, so the count is `seq + 1` exactly when none is missing: one
+ * pass over the key's index, never the entries.
+ */
+export async function complete(db: Queryable, seq: bigint): Promise<boolean> {
+  const { auditLog } = tablesOf(db);
+  const [{ n }] = await db.select({ n: count() }).from(auditLog).where(and(gte(auditLog.seq, 0n), lte(auditLog.seq, seq)));
+  return BigInt(n) === seq + 1n;
+}
 
 /** The entry at `seq`'s hash, or undefined when there is none. */
 export async function hashAt(db: Queryable, seq: bigint): Promise<Buffer | undefined> {

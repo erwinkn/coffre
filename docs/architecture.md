@@ -418,20 +418,28 @@ the MACs still expose changes made without the keys.
 
 Every five minutes the Cron trigger appends an `audit.heartbeat` entry, then
 asks the vault to checkpoint the log. The vault reads the log itself: it
-recomputes the whole chain from its first entry, every hash from content
-and its own entries by their MACs, checks that the prefix its last
-checkpoint signed is still there, then signs the log up to its last entry
-with Ed25519, in an `audit.checkpoint` entry of its own. It signs nothing
-over a rewrite or a cut, anywhere in the log, and a call with nothing new
-returns the last one. The recomputation runs in a snapshot, without the
-log's lock, so writes never wait for it. The same checkpoint checks every
+recomputes the chain, every hash from content and its own entries by their
+MACs, checks that the prefix its last checkpoint signed is still there,
+then signs the log up to its last entry with Ed25519, in an
+`audit.checkpoint` entry of its own. The first checkpoint of each hour
+recomputes the whole chain from its first entry. The others resume from the
+prefix the last one signed, which the vault recomputed itself, and
+recompute only what is new since. They resume only while that prefix still
+ends at the hash it signed, which a rewrite chained again changes, and
+still has every entry, which a cut changes, as one count; otherwise they
+recompute from the first entry too. So a rewrite or a cut anywhere is never
+signed over, and an entry edited in place before the last checkpoint is
+found within the hour (see [Limits](#limits)). A call with nothing new
+returns the last checkpoint. The recomputation runs in a snapshot, without
+the log's lock, so writes never wait for it. The same checkpoint checks every
 member's row, as `access` would, and logs a `vault.tampered` for each one
 changed around the vault.
 
 `/readyz` is a query: ready while the newest heartbeat is under eleven
 minutes old and a checkpoint after it carries the vault's signature. A log
 that stops taking writes, a vault that stops signing, a cut in the log or a
-wrong vault key all turn it red within one beat. There is no heartbeat table.
+wrong vault key all turn it red within one beat; an entry edited in place,
+within the hour. There is no heartbeat table.
 
 `GET /api/audit/verification` (owners only), also called by `coffre verify log`,
 checks the chain from its first entry, every link and hash, and authenticates
@@ -596,19 +604,23 @@ Each limit is stated here once; the other documents link to it.
   behind the head it remembers, and, with AWS KMS, CloudTrail, whose Decrypts
   then have no entries. Restarting both processes after a restore is what
   makes a deliberate rewind work ([restore.md](restore.md)).
-- **A cut in the middle of the log is found at the next checkpoint, not at
-  once.** Say Ada was removed at entry 812, and the database's owner deletes
-  812 and puts back Ada's row from before. Her row and the entries that
-  remain agree, so the vault lets her in. Within five minutes the next
-  checkpoint recomputes the chain, finds the gap, refuses to sign and turns
-  `/readyz` red; full verification says the same. Until then, her reads are
-  logged under her name.
-- **The full recomputation grows with the log.** Every checkpoint recomputes
-  the chain from its first entry: about 4 seconds per 100,000 entries on a
-  small shared Postgres. A team's instance writes some 600 entries a day of
-  heartbeats and checkpoints alone, plus its own work. Past about 250,000
-  entries, ten seconds a pass, the recomputation should move to a slower
-  cadence or a pass that resumes where the last stopped; neither is built.
+- **A cut in the middle of the log is found at the next checkpoint, and an
+  edit in place within the hour, not at once.** Say Ada was removed at entry
+  812, and the database's owner deletes 812 and puts back Ada's row from
+  before. Her row and the entries that remain agree, so the vault lets her
+  in. Within five minutes the next checkpoint finds an entry missing,
+  recomputes the chain, finds the gap, refuses to sign and turns `/readyz`
+  red; full verification says the same. If the owner edits 812 in place
+  instead, so that it is no longer about Ada, every entry is there and the
+  hash the last checkpoint signed stays: the checkpoints of that hour sign
+  on, each extending the chain the vault recomputed before the edit, so the
+  log as it now is verifies no better. The hour's first checkpoint
+  recomputes the chain from entry 0 and refuses; full verification finds it
+  at once. Until then, her reads are logged under her name.
+- **The full recomputation grows with the log,** once an hour: about 4
+  seconds per 100,000 entries on a small shared Postgres. A team's instance
+  writes some 600 entries a day of heartbeats and checkpoints alone, plus
+  its own work. The other checkpoints read only what is new since the last.
 - **What only KMS gives.** With a local vault key, whoever holds the vault's
   configuration and a copy of the database holds every value, and nothing
   outside coffre records either being used. AWS KMS adds a second record
@@ -626,7 +638,7 @@ Each limit is stated here once; the other documents link to it.
 - **A replaced vault key stays configured to verify the past, and can't vouch for
   anything after the rotation.** What the vault wrote under the key an old
   vault key stands for verifies only while that vault key is in `previousKeks`, and the
-  log is checked from its first entry at every checkpoint. After the
+  log is checked from its first entry once an hour. After the
   rotation, nothing under its keys counts, so a vault key replaced because it
   leaked forges nothing new; what was forged with it before verifies like
   the rest. The app key, `APP_KEY`, and with KMS the vault's
