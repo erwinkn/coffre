@@ -86,6 +86,7 @@ The checks:
 pnpm test              # lint, then every test on Postgres (needs it up: pnpm db:up)
 pnpm test:sqlite       # the same suite on SQLite
 pnpm test:properties   # bounded Hegel properties; --long for 100x cases (docs/property-tests.md)
+pnpm test:properties:server  # modeled server operations; --long for 40 sequences
 pnpm test:schema       # what the restricted logins may and may not do
 pnpm build             # every package
 pnpm typecheck         # every package, the examples and dev/ (after pnpm build)
