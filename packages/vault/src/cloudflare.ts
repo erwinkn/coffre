@@ -42,8 +42,12 @@ export type WorkersVaultConfig = VaultConfig & { database: PostgresDatabase };
 /** Set when the Worker's module runs `vault(…)`, before any call comes in. */
 let configure: ((env: never) => WorkersVaultConfig) | null = null;
 
-/** The configuration, checked and made ready once per `env`, which the isolate keeps. */
-const ready = new WeakMap<object, Promise<{ database: PostgresDatabase; prepared: PreparedVault }>>();
+/**
+ * The configuration, checked and made ready once per `env`, which the
+ * isolate keeps: the ready value itself, never the work of making it, which
+ * would belong to the call that started it (vault.ts, `PreparedVault`).
+ */
+const ready = new WeakMap<object, { database: PostgresDatabase; prepared: PreparedVault }>();
 
 /**
  * What the app's `VAULT` service binding calls. Each call gets a database of
@@ -56,11 +60,12 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
     if (entry === undefined) {
       if (configure === null) throw new Error('the vault Worker must export default vault(…)');
       const config = configure(env as never);
-      entry = prepareVault(resolveVaultConfig(config)).then((prepared) => ({ database: config.database, prepared }));
+      const prepared = await prepareVault(resolveVaultConfig(config));
+      // Calls that raced here each made one; the first kept serves them all from now on.
+      entry = ready.get(env) ?? { database: config.database, prepared };
       ready.set(env, entry);
-      entry.catch(() => ready.delete(env));
     }
-    const { database, prepared } = await entry;
+    const { database, prepared } = entry;
     return openVault(createDatabase(new HyperdrivePool(database.hyperdrive.connectionString)), prepared);
   }
 

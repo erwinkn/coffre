@@ -75,7 +75,9 @@ export type VaultOptions = {
 /**
  * A vault's configuration made ready to use, once per process, or once per
  * isolate on Workers: its signer, its log key, and how far it has verified
- * the log. Everything else is in the database, so any number of instances
+ * the log. It holds settled values only, never work under way: on Workers,
+ * a call's I/O is that call's, and a call that waited on another's would be
+ * cancelled with it, as hung (isolate.test.ts). Everything else is in the database, so any number of instances
  * share one set of members, one log and one bulk count.
  */
 export type PreparedVault = {
@@ -101,12 +103,10 @@ export type PreparedVault = {
   since: bigint | null;
   /** Why it writes nothing, once settled that it may not. */
   superseded: string | null;
-  /** The settling under way. */
-  settling: Promise<void> | null;
   /** Tampering this process has logged already, so that a forged row is one entry, not one per request. */
   reported: Set<string>;
-  /** Whether its KEKs open what they wrapped, once asked: `#kekMismatch`. */
-  kekCheck: Promise<string | null> | null;
+  /** Whether its KEKs are decided to open what they wrapped, or not: `#kekMismatch`. */
+  kekChecked: boolean;
   /** Why not, once decided that they do not. */
   wrongKek: string | null;
 };
@@ -121,8 +121,7 @@ export async function prepareVault(config: ResolvedVaultConfig, options: VaultOp
     reported: new Set(),
     since: null,
     superseded: null,
-    settling: null,
-    kekCheck: null,
+    kekChecked: false,
     wrongKek: null,
   };
 }
@@ -485,12 +484,10 @@ class VaultService implements Vault {
    */
   async #settled(): Promise<string | null> {
     const prepared = this.#prepared;
-    if (prepared.since === null && prepared.superseded === null) {
-      prepared.settling ??= this.#settle().finally(() => {
-        prepared.settling = null;
-      });
-      await prepared.settling;
-    }
+    // Each call that finds it unsettled reads for itself, over its own
+    // database; calls that race settle it alike, and a rotation they race
+    // to write goes in once (`#rotate`).
+    if (prepared.since === null && prepared.superseded === null) await this.#settle();
     return prepared.superseded;
   }
 
@@ -1310,22 +1307,21 @@ class VaultService implements Vault {
   /**
    * Null when every KEK the vault is given opens what it wrapped; otherwise
    * why not, naming the KEK, never its key. Decided once per process, before
-   * its first key operation or checkpoint. A key service that cannot answer
-   * leaves it undecided: the error is thrown, and the next call asks again.
+   * its first key operation or checkpoint: until then, each call checks for
+   * itself, over its own database, and the first verdict is kept. A key
+   * service that cannot answer leaves it undecided: the error is thrown,
+   * and the next call asks again.
    */
-  #kekMismatch(): Promise<string | null> {
+  async #kekMismatch(): Promise<string | null> {
     const prepared = this.#prepared;
-    if (prepared.kekCheck === null) {
-      const check = this.#checkKeks();
-      prepared.kekCheck = check;
-      check.then(
-        (wrong) => void (prepared.wrongKek = wrong),
-        () => {
-          if (prepared.kekCheck === check) prepared.kekCheck = null;
-        },
-      );
+    if (!prepared.kekChecked) {
+      const wrong = await this.#checkKeks();
+      if (!prepared.kekChecked) {
+        prepared.wrongKek = wrong;
+        prepared.kekChecked = true;
+      }
     }
-    return prepared.kekCheck;
+    return prepared.wrongKek;
   }
 
   /**
@@ -1338,13 +1334,7 @@ class VaultService implements Vault {
     // A vault that may not write cannot record a check either; why it may not is the answer.
     const superseded = await this.#settled();
     if (superseded !== null) return superseded;
-    const checks = new Map<string, WrappedDek>();
-    for (const entry of await store.vaultEntriesOf(this.#db, [KEY_CHECK], -1n, VERIFY_BATCH)) {
-      // A check in the vault's name that the vault did not write proves nothing either way.
-      if (!this.#authentic(entry)) continue;
-      const wrapped = JSON.parse(entry.metadata) as WrappedKey;
-      checks.set(`${wrapped.kekProvider}:${wrapped.kekId}`, unwrappable(wrapped));
-    }
+    const checks = await this.#checkValues(this.#db);
     const budget = this.#prepared.options.keyBudgetMs;
     for (const kek of this.#config.keks.all) {
       const operation = { deadline: Date.now() + budget, signal: AbortSignal.timeout(budget) };
@@ -1375,14 +1365,29 @@ class VaultService implements Vault {
       }
       if (samples.length > 0 && proof === null) return mismatch;
       const wrapped = await kek.wrap(Buffer.from(KEY_CHECK_VALUE), KEY_CHECK_CONTEXT, operation);
-      // The key it opened, if any, is in the log, as every key the vault opens is.
-      await this.#db.transaction((tx) =>
-        this.#append(tx, [
+      // The key it opened, if any, is in the log, as every key the vault opens is. Another call that
+      // checked at the same time may have recorded one first: under the log's lock, the first stays.
+      await this.#db.transaction(async (tx) => {
+        await lockLogHead(tx);
+        if ((await this.#checkValues(tx)).has(`${kek.provider}:${kek.keyId}`)) return;
+        await this.#append(tx, [
           { actor: VAULT_ACTOR, action: KEY_CHECK, decision: 'allow', metadata: JSON.stringify({ ...serialisable(wrapped), proof }) },
-        ]),
-      );
+        ]);
+      });
     }
     return null;
+  }
+
+  /** Each KEK's recorded check value, by `provider:keyId`. */
+  async #checkValues(db: Queryable): Promise<Map<string, WrappedDek>> {
+    const checks = new Map<string, WrappedDek>();
+    for (const entry of await store.vaultEntriesOf(db, [KEY_CHECK], -1n, VERIFY_BATCH)) {
+      // A check in the vault's name that the vault did not write proves nothing either way.
+      if (!this.#authentic(entry)) continue;
+      const wrapped = JSON.parse(entry.metadata) as WrappedKey;
+      checks.set(`${wrapped.kekProvider}:${wrapped.kekId}`, unwrappable(wrapped));
+    }
+    return checks;
   }
 
   // --- checkpoints and the log --------------------------------------------------

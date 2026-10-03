@@ -2,6 +2,7 @@ import { ACCESS_JWT_HEADER, type AuthConfig, type Principal } from '@coffre/core
 
 import { loadCaller, type Caller } from './api/caller.ts';
 import { ApiError } from './api/errors.ts';
+import { CredentialUncheckable } from './api/signin.ts';
 import { errorResponse } from './http.ts';
 import type { CoffreRuntime } from './runtime.ts';
 
@@ -114,7 +115,9 @@ export async function authenticateRequest(
       credentialGeneration?: number;
     };
     ({ credentialId = null, credentialGeneration, ...principal } = verified);
-  } catch {
+  } catch (error) {
+    // Only a credential checked and refused is a sign-out; one that could not be checked is an outage.
+    if (error instanceof CredentialUncheckable) return errorResponse(new ApiError('unavailable', 'coffre cannot check who you are right now'));
     return errorResponse(new ApiError('unauthenticated', 'that credential is unknown, expired or revoked'));
   }
 

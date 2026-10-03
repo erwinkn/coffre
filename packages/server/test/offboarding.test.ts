@@ -6,7 +6,8 @@ import { defineSignin, generateToken, github, hashToken } from '@coffre/core/ide
 import { eq, isNull } from 'drizzle-orm';
 
 import { auditLog, credentials, identities, secrets, syncs } from './db/tables.ts';
-import { SigninService } from '../src/api/signin.ts';
+import { CredentialUncheckable, SigninService } from '../src/api/signin.ts';
+import { authenticateRequest } from '../src/auth.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 const ROOT = 'admin@acme.example';
@@ -75,6 +76,35 @@ async function cliSession(email: string) {
   if (polled.status !== 'approved') throw new Error('unreachable');
   return polled.credential;
 }
+
+// --- an outage is not a sign-out ------------------------------------------------
+
+test('a session the vault cannot check right now is an outage, answered 503, not a sign-out', async (t) => {
+  const session = await browserSession(DEV, 'dev-account');
+  const runtime = { auth: null, verifier: signin, vault: deps.vault } as never;
+  const authenticate = () => authenticateRequest(new Request('https://coffre.test/api/me'), runtime, randomUUID(), session.token);
+  const hung = t.mock.method(deps.vault, 'access', async () => {
+    throw new Error("The Workers runtime canceled this request because it detected that your Worker's code had hung");
+  });
+  await assert.rejects(signin.verify(session.token), CredentialUncheckable);
+  const unchecked = await authenticate();
+  assert.ok(unchecked instanceof Response);
+  assert.equal(unchecked.status, 503, 'the page must not read a vault outage as signed out');
+  hung.mock.restore();
+  assert.ok(!((await authenticate()) instanceof Response), 'the same session, once the vault answers');
+  // A row that answered and fails its MAC was checked: refused, a sign-out, never an outage.
+  const [row] = await db.owner.select().from(credentials).where(eq(credentials.tokenHash, hashToken(session.token)));
+  await db.owner.update(credentials).set({ expiresAt: new Date(Date.now() + 7 * 86_400_000) }).where(eq(credentials.id, row!.id));
+  const tampered = await authenticate();
+  assert.ok(tampered instanceof Response);
+  assert.equal(tampered.status, 401);
+  await db.owner.update(credentials).set({ expiresAt: row!.expiresAt }).where(eq(credentials.id, row!.id));
+  // And one checked and revoked, too.
+  await signin.signOut(session.token, meta());
+  const refused = await authenticate();
+  assert.ok(refused instanceof Response);
+  assert.equal(refused.status, 401);
+});
 
 // --- removal ------------------------------------------------------------------
 

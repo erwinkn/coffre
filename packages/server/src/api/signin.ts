@@ -19,7 +19,7 @@ import type { Database, Transaction } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
 import { credentials, deviceAuthorizations, identities } from '@coffre/db/schema';
 
-import { authMac } from '../auth-rows.ts';
+import { authMac, AuthRowTampered } from '../auth-rows.ts';
 import type { AuditEntry } from '../db/audit.ts';
 import {
   findCredential,
@@ -66,6 +66,19 @@ export type SigninRefusal =
   | 'already_linked'
   /** The matching person's record failed the vault's integrity check. */
   | 'tampered';
+
+/**
+ * A credential that could not be checked, rather than one checked and
+ * refused: the database or the vault did not answer. It is no sign that
+ * the caller is signed out, and must not read as one (auth.ts). A row that
+ * answered and failed its MAC was checked: that is a refusal.
+ */
+export class CredentialUncheckable extends Error {
+  constructor(cause: unknown) {
+    super('coffre cannot check this credential right now', { cause });
+    this.name = 'CredentialUncheckable';
+  }
+}
 
 class SigninRefused extends Error {
   readonly reason: SigninRefusal;
@@ -478,10 +491,16 @@ export class SigninService {
     const { db } = this.#deps;
     const now = new Date();
 
-    const row = await findCredential(db, this.#deps.chainKey, { tokenHash: hashToken(token) });
-    if (row === null) throw new Error('unknown, expired or revoked credential');
-    const access = await this.#deps.vault.access(row.principal);
-    if (!this.#liveCredential(row, access, now)) throw new Error('unknown, expired or revoked credential');
+    let row: Awaited<ReturnType<typeof findCredential>>;
+    let access: Access | null = null;
+    try {
+      row = await findCredential(db, this.#deps.chainKey, { tokenHash: hashToken(token) });
+      if (row !== null) access = await this.#deps.vault.access(row.principal);
+    } catch (error) {
+      if (error instanceof AuthRowTampered) throw error;
+      throw new CredentialUncheckable(error);
+    }
+    if (row === null || access === null || !this.#liveCredential(row, access, now)) throw new Error('unknown, expired or revoked credential');
 
     const lastUsed = row.lastUsedAt?.getTime() ?? 0;
     if (now.getTime() - lastUsed > TOUCH_INTERVAL_MS) {
