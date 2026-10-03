@@ -258,10 +258,11 @@ export class Steps {
   #tick(): void {
     this.#draw();
     if (this.#s.ansi && this.#timer === null) {
+      // Only drawing: what a step waits on keeps the process alive, never the spinner.
       this.#timer = setInterval(() => {
         this.#frame = (this.#frame + 1) % SPINNER.length;
         this.#draw();
-      }, FRAME_MS);
+      }, FRAME_MS).unref();
     }
   }
 

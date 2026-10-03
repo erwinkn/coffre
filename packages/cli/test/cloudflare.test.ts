@@ -1,20 +1,31 @@
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { parse } from 'jsonc-parser';
 
 import { localCallback } from '../src/browser.ts';
-import { callbackOf, CloudflareApi, cloudflareToken, deploymentWrangler, deployWorker, originOf } from '../src/cloudflare.ts';
+import { callbackOf, CloudflareApi, cloudflareToken, deploymentWrangler, deployWorker, originOf, stopWranglers } from '../src/cloudflare.ts';
 import { deploymentKind, editWorker, placeholder, readWorker } from '../src/deployment.ts';
 import { appManifest, appName, convert, createGitHubApp, manifestAddress, manifestPage } from '../src/github-app.ts';
 import { templateDir } from '../src/init.ts';
 import { Steps } from '../src/steps.ts';
 import { Cancelled } from '../src/tty.ts';
 import { addressOf, addressProblem, adminsProblem, isOurs, nameFrom, nameProblem, ourConfig, recordsOf } from '../src/workers.ts';
-import { fakeCloudflare, fakeGitHub, fakeTerminal, fakeWrangler, manifestForm, submitManifest } from './fakes.ts';
+import { cancelTerminals, fakeCloudflare, fakeGitHub, fakeOpener, fakeTerminal, fakeWrangler, manifestForm, submitManifest } from './fakes.ts';
+
+// Whatever a failed test leaves waiting, a prompt, a wrangler, a listener, goes: this file's process always ends.
+after(() => {
+  cancelTerminals();
+  stopWranglers();
+});
+
+/** For a test that runs a process or listens: it fails, rather than waits for ever. */
+const LIMIT = { timeout: 30_000 };
 
 const TOKEN = `cf-oauth-${'t'.repeat(40)}`;
 
@@ -28,10 +39,10 @@ async function type(keys: NodeJS.WritableStream, text: string): Promise<void> {
   await new Promise((resolve) => setImmediate(resolve));
 }
 
-async function until<T>(read: () => T | undefined, timeoutMs = 10_000): Promise<T> {
+async function until<T>(read: () => T | undefined | Promise<T | undefined>, timeoutMs = 10_000): Promise<T> {
   const start = Date.now();
   for (;;) {
-    const value = read();
+    const value = await read();
     if (value !== undefined) return value;
     if (Date.now() - start > timeoutMs) throw new Error('timed out');
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -181,7 +192,7 @@ test("a deployment's name: from its address, as a Worker's name can be", () => {
 
 // --- Cloudflare's API ------------------------------------------------------------------------
 
-test("Cloudflare's API: the token as a bearer, a database password only in a body, never in an error, and caching off", async () => {
+test("Cloudflare's API: the token as a bearer, a database password only in a body, never in an error, and caching off", LIMIT, async () => {
   const cloudflare = await fakeCloudflare(TOKEN);
   try {
     const api = new CloudflareApi(TOKEN, cloudflare.url);
@@ -220,7 +231,7 @@ test("Cloudflare's API: the token as a bearer, a database password only in a bod
 
 // --- wrangler ---------------------------------------------------------------------------------
 
-test("wrangler deploys with the secrets on its stdin, as its secrets file: never in its arguments, and none when there are none", async () => {
+test("wrangler deploys with the secrets on its stdin, as its secrets file: never in its arguments, and none when there are none", LIMIT, async () => {
   const dir = scratch();
   const cloudflare = await fakeCloudflare(TOKEN);
   const env = process.env.CLOUDFLARE_API_BASE_URL;
@@ -253,70 +264,145 @@ test("wrangler deploys with the secrets on its stdin, as its secrets file: never
   }
 });
 
-test("Cloudflare sign-in: wrangler's login, finished by its callback pasted back, which setup fetches here; a foreign address is refused", async () => {
+/** A Workers deployment with the fake wrangler, and an opener that only notes what it opens; all gone after the test. */
+function signInSetup(t: { after: (fn: () => void) => void }) {
   const dir = scratch();
   const state = join(dir, '.state');
   const opener = join(dir, '.bin');
   const path = process.env.PATH;
+  t.after(() => {
+    process.env.PATH = path;
+    rmSync(dir, { recursive: true, force: true });
+  });
+  cpSync(templateDir('workers'), dir, { recursive: true, filter: (each) => !each.includes('node_modules') });
+  fakeWrangler(dir, state, TOKEN);
+  fakeOpener(opener);
+  process.env.PATH = `${opener}:${path}`;
+  const terminal = fakeTerminal();
+  const steps = new Steps(terminal.out, ['Sign in to Cloudflare'], () => terminal.keys, String);
+  t.after(() => steps.end());
+  const printed: [string, string][] = [];
+  const signing = steps.run(0, async (step) => (await cloudflareToken(deploymentWrangler(dir), step, (label, address) => printed.push([label, address])), 'Signed in'));
+  // Settled one way or another by the end, by the test or by the Ctrl-C after it: never an unhandled rejection.
+  signing.catch(() => {});
+  const login = () =>
+    until(() => (existsSync(join(state, 'login')) ? (JSON.parse(readFileSync(join(state, 'login'), 'utf8')) as { port: number; state: string }) : undefined));
+  return { dir, state, opener, terminal, printed, signing, login };
+}
+
+/** Whether a process is still there. */
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+test("Cloudflare sign-in: wrangler's login, finished by its callback pasted back, which setup fetches here; a foreign address is refused", LIMIT, async (t) => {
+  const { state, opener, terminal, printed, signing, login } = signInSetup(t);
+  const { port, state: nonce } = await login();
+  await until(() => (terminal.drawn().includes('paste that address here') && printed.length > 0 ? true : undefined));
+  assert.equal(printed[0]![0], 'If no browser opened, sign in to Cloudflare at');
+  assert.match(printed[0]![1], /^https:\/\/dash\.cloudflare\.com\/oauth2\/auth\?/);
+  // The opener runs on its own: what it was asked to open shows up when it does.
+  const opened = await until(() => (existsSync(join(opener, 'opened')) ? readFileSync(join(opener, 'opened'), 'utf8') || undefined : undefined));
+  assert.match(opened, /^https:\/\/dash\.cloudflare\.com\/oauth2\/auth\?/);
+
+  await type(terminal.keys, `http://evil.example:${port}/oauth/callback?code=c0de&state=${nonce}\r`);
+  await until(() => (terminal.drawn().includes('not a localhost address') ? true : undefined));
+  await type(terminal.keys, `http://localhost:${port}/oauth/callback?code=c0de&state=${nonce}\r`);
+  await signing;
+  assert.ok(!terminal.drawn().includes('c0de'), 'the pasted address is never drawn');
+  const calls = readFileSync(join(state, 'calls.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line).args.join(' '));
+  assert.deepEqual(calls, ['auth token --json', 'login --browser=false', 'auth token --json']);
+});
+
+test('wrangler prints its link before it listens: an address pasted at once is tried again until it answers', LIMIT, async (t) => {
+  const setup = signInSetup(t);
+  writeFileSync(join(setup.state, 'listen-late'), '');
+  const { port, state: nonce } = await setup.login();
+  await until(() => (setup.terminal.drawn().includes('paste that address here') ? true : undefined));
+  await type(setup.terminal.keys, `http://localhost:${port}/oauth/callback?code=c0de&state=${nonce}\r`);
+  await setup.signing;
+  assert.ok(!setup.terminal.drawn().includes('not answering'), 'it answered in time, and nobody was asked again');
+});
+
+test('wrangler not listening yet, two seconds on: the prompt says so, and takes the address again', LIMIT, async (t) => {
+  const setup = signInSetup(t);
+  writeFileSync(join(setup.state, 'listen-late'), '3000');
+  const { port, state: nonce } = await setup.login();
+  await until(() => (setup.terminal.drawn().includes('paste that address here') ? true : undefined));
+  const address = `http://localhost:${port}/oauth/callback?code=c0de&state=${nonce}\r`;
+  await type(setup.terminal.keys, address);
+  await until(() => (setup.terminal.drawn().includes('wrangler is not answering at that address yet: paste it again in a moment') ? true : undefined));
+  // Once it answers, the same address, again: the sign-in goes on.
+  await new Promise((resolve) => setTimeout(resolve, 1_500));
+  await type(setup.terminal.keys, address);
+  await setup.signing;
+});
+
+test('Ctrl-C at the sign-in prompt cancels, and takes wrangler, still listening, with it', LIMIT, async (t) => {
+  const { terminal, signing, login } = signInSetup(t);
+  const { port } = await login();
+  await until(() => (terminal.drawn().includes('paste that address here') ? true : undefined));
+  const cancelled = assert.rejects(signing, Cancelled);
+  await type(terminal.keys, '\x03');
+  await cancelled;
+  await assert.rejects(fetch(`http://localhost:${port}/oauth/callback`), 'nothing listens there any more');
+});
+
+test('wrangler stopped from outside, as at setup\'s exit: its login, still listening, goes', LIMIT, async (t) => {
+  const { state, login } = signInSetup(t);
+  const { port } = await login();
+  const pid = Number(readFileSync(join(state, 'pid-login'), 'utf8'));
+  assert.ok(alive(pid));
+  stopWranglers();
+  await until(() => (alive(pid) ? undefined : true));
+  await assert.rejects(fetch(`http://localhost:${port}/oauth/callback`));
+});
+
+test('setup ended by a signal, as when its terminal closes: wrangler, in a session of its own, goes with it', LIMIT, async () => {
+  const dir = scratch();
   try {
     cpSync(templateDir('workers'), dir, { recursive: true, filter: (each) => !each.includes('node_modules') });
-    fakeWrangler(dir, state, TOKEN);
-    // No browser here: the opener does nothing.
-    const { fakeOpener } = await import('./fakes.ts');
-    fakeOpener(opener);
-    process.env.PATH = `${opener}:${path}`;
-    const terminal = fakeTerminal();
-    const steps = new Steps(terminal.out, ['Sign in to Cloudflare'], () => terminal.keys, String);
-    const printed: [string, string][] = [];
-    let token: string | null = null;
-    const signing = steps.run(0, async (step) => {
-      token = await cloudflareToken(deploymentWrangler(dir), step, (label, address) => printed.push([label, address]));
-      return 'Signed in';
-    });
-    const login = await until(() => (existsSync(join(state, 'login')) ? (JSON.parse(readFileSync(join(state, 'login'), 'utf8')) as { port: number; state: string }) : undefined));
-    await until(() => (terminal.drawn().includes('paste that address here') && printed.length > 0 ? true : undefined));
-    assert.equal(printed[0]![0], 'If no browser opened, sign in to Cloudflare at');
-    assert.match(printed[0]![1], /^https:\/\/dash\.cloudflare\.com\/oauth2\/auth\?/);
-    assert.match(readFileSync(join(opener, 'opened'), 'utf8'), /^https:\/\/dash\.cloudflare\.com\/oauth2\/auth\?/);
-
-    await type(terminal.keys, `http://evil.example:${login.port}/oauth/callback?code=c0de&state=${login.state}\r`);
-    await until(() => (terminal.drawn().includes('not a localhost address') ? true : undefined));
-    const callback = `http://localhost:${login.port}/oauth/callback?code=c0de&state=${login.state}`;
-    await type(terminal.keys, `${callback}\r`);
-    await signing;
-    steps.end();
-    assert.equal(token, TOKEN);
-    assert.ok(!terminal.drawn().includes('c0de'), 'the pasted address is never drawn');
-    const calls = readFileSync(join(state, 'calls.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line).args.join(' '));
-    assert.deepEqual(calls, ['auth token --json', 'login --browser=false', 'auth token --json']);
+    fakeWrangler(dir, join(dir, '.state'), TOKEN);
+    // A process standing for setup: it starts wrangler's login, then waits, until a SIGHUP ends it.
+    const cli = fileURLToPath(new URL('../src/cloudflare.ts', import.meta.url));
+    const standIn = spawn(
+      process.execPath,
+      ['--conditions=coffre:source', '--input-type=module', '-e', `import { deploymentWrangler } from ${JSON.stringify(cli)}; deploymentWrangler(${JSON.stringify(dir)})(['login', '--browser=false']); setInterval(() => {}, 1000);`],
+      { stdio: 'ignore' },
+    );
+    const pid = await until(() => (existsSync(join(dir, '.state', 'pid-login')) ? Number(readFileSync(join(dir, '.state', 'pid-login'), 'utf8')) : undefined));
+    await until(() => (existsSync(join(dir, '.state', 'login')) ? true : undefined));
+    standIn.kill('SIGHUP');
+    const code = await new Promise((resolve) => standIn.on('exit', (exitCode) => resolve(exitCode)));
+    assert.equal(code, 129);
+    await until(() => (alive(pid) ? undefined : true));
   } finally {
-    process.env.PATH = path;
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test('Ctrl-C at the sign-in prompt cancels, and takes wrangler, still listening, with it', async () => {
+test('a deploy cancelled stops all of it: sh, cat and wrangler, its secrets with them', LIMIT, async () => {
   const dir = scratch();
-  const state = join(dir, '.state');
-  const path = process.env.PATH;
   try {
     cpSync(templateDir('workers'), dir, { recursive: true, filter: (each) => !each.includes('node_modules') });
-    fakeWrangler(dir, state, TOKEN);
-    const { fakeOpener } = await import('./fakes.ts');
-    fakeOpener(join(dir, '.bin'));
-    process.env.PATH = `${join(dir, '.bin')}:${path}`;
-    const terminal = fakeTerminal();
-    const steps = new Steps(terminal.out, ['Sign in to Cloudflare'], () => terminal.keys, String);
-    const signing = steps.run(0, async (step) => (await cloudflareToken(deploymentWrangler(dir), step, () => {}), 'Signed in'));
-    const login = await until(() => (existsSync(join(state, 'login')) ? (JSON.parse(readFileSync(join(state, 'login'), 'utf8')) as { port: number }) : undefined));
-    await until(() => (terminal.drawn().includes('paste that address here') ? true : undefined));
-    const cancelled = assert.rejects(signing, Cancelled);
-    await type(terminal.keys, '\x03');
-    await cancelled;
-    steps.end();
-    await assert.rejects(fetch(`http://localhost:${login.port}/oauth/callback`), 'nothing listens there any more');
+    fakeWrangler(dir, join(dir, '.state'), TOKEN);
+    writeFileSync(join(dir, '.state', 'token'), TOKEN);
+    writeFileSync(join(dir, '.state', 'slow'), '');
+    const stop = new AbortController();
+    const deploying = deploymentWrangler(dir)(['deploy', '-c', 'vault/wrangler.jsonc', '--secrets-file', '/dev/stdin'], {
+      input: JSON.stringify({ VAULT_KEY: 'K'.repeat(43) + '=' }),
+      signal: stop.signal,
+    });
+    const pid = await until(() => (existsSync(join(dir, '.state', 'pid-deploy')) ? Number(readFileSync(join(dir, '.state', 'pid-deploy'), 'utf8')) : undefined));
+    stop.abort();
+    await deploying;
+    await until(() => (alive(pid) ? undefined : true));
   } finally {
-    process.env.PATH = path;
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -354,7 +440,7 @@ test('the page and the data: address post the same manifest, to GitHub and nowhe
   assert.ok(address.length < 700, `short enough to copy: ${address.length}`);
 });
 
-test("a manifest's code converts once, into the client ID and secret; the private key is dropped", async () => {
+test("a manifest's code converts once, into the client ID and secret; the private key is dropped", LIMIT, async () => {
   const fake = await fakeGitHub();
   try {
     const page = manifestPage(fake.github, appManifest('https://secrets.acme.test', 'http://127.0.0.1:1/created'), 's');
@@ -369,7 +455,7 @@ test("a manifest's code converts once, into the client ID and secret; the privat
 });
 
 for (const road of ['the browser here', 'the address pasted back'] as const) {
-  test(`the GitHub App, made through ${road}; an address from another run is refused`, async () => {
+  test(`the GitHub App, made through ${road}; an address from another run is refused`, LIMIT, async () => {
     const fake = await fakeGitHub();
     const dir = scratch();
     const path = process.env.PATH;
