@@ -13,7 +13,7 @@ import { appManifest, appName, convert, createGitHubApp, manifestAddress, manife
 import { templateDir } from '../src/init.ts';
 import { Steps } from '../src/steps.ts';
 import { Cancelled } from '../src/tty.ts';
-import { addressOf, addressProblem, adminsProblem } from '../src/workers.ts';
+import { addressOf, addressProblem, adminsProblem, isOurs, nameFrom, nameProblem, ourConfig, recordsOf } from '../src/workers.ts';
 import { fakeCloudflare, fakeGitHub, fakeTerminal, fakeWrangler, manifestForm, submitManifest } from './fakes.ts';
 
 const TOKEN = `cf-oauth-${'t'.repeat(40)}`;
@@ -133,6 +133,52 @@ test('the address and the root admins: what will do, and why not', () => {
   assert.match(adminsProblem('a@acme.test, nobody')!, /not an email: nobody/);
 });
 
+// --- whose a Worker and a Hyperdrive config are ---------------------------------------------
+
+test('what a directory records of its deployment: the Hyperdrive ids it binds, and a vault ID setup made, not the template\'s', () => {
+  const dir = scratch();
+  try {
+    cpSync(templateDir('workers'), dir, { recursive: true, filter: (path) => !path.includes('node_modules') });
+    const read = () => recordsOf({ app: readWorker(dir, 'app/wrangler.jsonc'), vault: readWorker(dir, 'vault/wrangler.jsonc') });
+    assert.deepEqual(read(), { hyperdrive: { app: null, vault: null }, vaultKeyId: null }, 'a fresh deployment records nothing, vault-1 included');
+    editWorker(dir, 'app/wrangler.jsonc', [{ path: ['hyperdrive', 0, 'id'], value: 'hd-app' }]);
+    editWorker(dir, 'vault/wrangler.jsonc', [{ path: ['vars', 'VAULT_KEY_ID'], value: 'vault-2026-10-03-abcdef' }]);
+    assert.deepEqual(read(), { hyperdrive: { app: 'hd-app', vault: null }, vaultKeyId: 'vault-2026-10-03-abcdef' });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a Worker is this deployment's only when it binds what this directory records; another deployment's otherwise", () => {
+  const records = { hyperdrive: { app: 'hd-app', vault: 'hd-vault' }, vaultKeyId: 'vault-2026-10-03-abcdef' };
+  const nothing = { hyperdrive: { app: null, vault: null }, vaultKeyId: null };
+  const app = [{ type: 'hyperdrive', name: 'HYPERDRIVE', id: 'hd-app' }];
+  assert.equal(isOurs('app', app, records), true);
+  assert.equal(isOurs('app', [{ type: 'hyperdrive', name: 'HYPERDRIVE', id: 'hd-elsewhere' }], records), false);
+  assert.equal(isOurs('app', app, nothing), false, 'a fresh directory owns no Worker that exists');
+  const vault = [{ type: 'plain_text', name: 'VAULT_KEY_ID', text: 'vault-2026-10-03-abcdef' }];
+  assert.equal(isOurs('vault', vault, { ...records, hyperdrive: { app: null, vault: null } }), true, 'by its vault ID');
+  assert.equal(isOurs('vault', [{ type: 'plain_text', name: 'VAULT_KEY_ID', text: 'vault-1' }], nothing), false);
+});
+
+test("a Hyperdrive config is this deployment's by the id it records, or by name only on this run's database", () => {
+  const administrator = new URL('postgresql://owner:pw@db.acme.test:5432/coffre');
+  const config = (id: string, name: string, host: string, database: string) => ({ id, name, origin: { host, port: 5432, database, user: 'coffre_runtime' } });
+  const live = config('hd-live', 'coffre', 'db.live.test', 'coffre');
+  const leftover = config('hd-left', 'coffre-try', 'db.acme.test', 'coffre');
+  assert.equal(ourConfig([live], 'coffre', null, administrator), undefined, 'another database: never touched');
+  assert.equal(ourConfig([live], 'coffre', 'hd-live', administrator), live, 'recorded here: ours, wherever it points');
+  assert.equal(ourConfig([live, leftover], 'coffre-try', null, administrator), leftover, "made by a run that stopped before recording it");
+  assert.equal(ourConfig([config('hd-x', 'coffre', 'db.acme.test', 'other')], 'coffre', null, administrator), undefined, 'same host, another database');
+});
+
+test("a deployment's name: from its address, as a Worker's name can be", () => {
+  assert.equal(nameFrom('coffre-try.erwinkn.com'), 'coffre-try');
+  assert.equal(nameFrom('secrets.acme.com'), 'secrets');
+  assert.equal(nameProblem('coffre-try'), null);
+  for (const bad of ['Coffre', '-x', 'x-', 'a_b', 'x'.repeat(58)]) assert.match(nameProblem(bad)!, /lower-case letters, digits and dashes/, bad);
+});
+
 // --- Cloudflare's API ------------------------------------------------------------------------
 
 test("Cloudflare's API: the token as a bearer, a database password only in a body, never in an error, and caching off", async () => {
@@ -145,6 +191,10 @@ test("Cloudflare's API: the token as a bearer, a database password only in a bod
     assert.equal((await api.zones('acc-acme')).length, 120);
     assert.equal(await api.email(), 'ops@acme.test');
     assert.deepEqual(await api.secretNames('acc-acme', 'coffre'), null, 'a Worker not deployed yet');
+    assert.equal(await api.bindings('acc-acme', 'coffre'), null);
+    cloudflare.state.scripts.set('acc-acme/coffre', { secrets: new Set(['APP_KEY']), bindings: [{ type: 'hyperdrive', name: 'HYPERDRIVE', id: 'hd-1' }] });
+    assert.deepEqual(await api.bindings('acc-acme', 'coffre'), [{ type: 'hyperdrive', name: 'HYPERDRIVE', id: 'hd-1' }]);
+    assert.deepEqual(await api.secretNames('acc-acme', 'coffre'), ['APP_KEY']);
     const origin = originOf('postgresql://coffre_runtime.br4nch:p%40ss-word@db.acme.test:6432/coffre?sslmode=verify-full');
     assert.deepEqual(origin, { host: 'db.acme.test', port: 6432, database: 'coffre', user: 'coffre_runtime.br4nch', password: 'p@ss-word' });
     const id = await api.createHyperdrive('acc-acme', 'coffre', origin);

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -80,5 +80,11 @@ test('coffre init refuses a directory that is not empty, and needs one kind', (t
   assert.throws(() => coffre(['init', '--workers', '.'], scratch, scratch), /is not empty/);
   assert.equal(readFileSync(join(scratch, 'notes.txt'), 'utf8'), 'mine\n');
   assert.throws(() => coffre(['init', '--workers', '--node', 'x'], scratch, scratch), /usage: coffre init/);
+
+  // A repository made first and cloned holds only .git: that is still empty.
+  const clone = join(scratch, 'clone');
+  mkdirSync(join(clone, '.git'), { recursive: true });
+  coffre(['init', '--workers', '.'], clone, scratch);
+  assert.ok(existsSync(join(clone, 'app', 'wrangler.jsonc')));
   assert.throws(() => coffre(['init', 'x'], scratch, scratch), /usage: coffre init/);
 });

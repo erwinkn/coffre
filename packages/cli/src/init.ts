@@ -75,9 +75,14 @@ function manifest(source: string, name: string, version: string): string {
   return `${JSON.stringify(pkg, null, 2)}\n`;
 }
 
-/** Write a new deployment into `target`, which must be empty or absent. Returns the files written. */
+/** Whether a directory holds nothing yet, or nothing but `.git`: a repository made first, then cloned. */
+export function isEmpty(dir: string): boolean {
+  return !existsSync(dir) || readdirSync(dir).every((entry) => entry === '.git');
+}
+
+/** Write a new deployment into `target`, which must be empty (`isEmpty`) or absent. Returns the files written. */
 export function init(kind: Kind, target: string, version: string): string[] {
-  if (existsSync(target) && readdirSync(target).length > 0) {
+  if (!isEmpty(target)) {
     throw new Error(`${target} is not empty; give \`coffre init\` a new directory`);
   }
   const source = templateDir(kind);

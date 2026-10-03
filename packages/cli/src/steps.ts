@@ -191,10 +191,10 @@ export class Steps {
     this.#stop();
     const before = state.text;
     Object.assign(state, { text: `${question} ${this.#s.dim('↑↓ then Enter')}`, status: 'asking', choice: { options, at: 0 } });
-    this.#draw();
     let cancelled = false;
     try {
-      await readKeys(keys, (key) => {
+      // Raw mode before the question shows (see readKeys).
+      const chosen = readKeys(keys, (key) => {
         const choice = state.choice!;
         if (key.ctrl && key.name === 'c') cancelled = true;
         else if (key.name === 'return' || key.name === 'enter') return true;
@@ -204,6 +204,8 @@ export class Steps {
         this.#draw();
         return false;
       });
+      this.#draw();
+      await chosen;
       if (cancelled) throw new Cancelled();
       return state.choice!.at;
     } finally {
@@ -219,11 +221,11 @@ export class Steps {
       return null;
     }
     state.input = { prompt, typed: '', error: null };
-    this.#draw();
     let taken: string | null = null;
     let cancelled = false;
     try {
-      await readKeys(
+      // Raw mode before the prompt shows: what is pasted the moment it does is never echoed.
+      const pasted = readKeys(
         keys,
         async (key, sequence) => {
           const input = state.input!;
@@ -243,6 +245,8 @@ export class Steps {
         },
         signal,
       );
+      this.#draw();
+      await pasted;
     } finally {
       state.input = null;
       this.#draw();

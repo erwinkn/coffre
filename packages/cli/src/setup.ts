@@ -11,7 +11,8 @@
 // then the database URLs go straight to Hyperdrive, and the keys, once
 // shown, to the Workers it deploys.
 import { createHash, createHmac, pbkdf2Sync, randomBytes } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 
 import { postgresConnection } from '@coffre/db/connect';
@@ -132,7 +133,7 @@ export async function setup(args: string[]): Promise<void> {
         'Yes: Hyperdrive, GitHub sign-in, the keys as secrets, and the deploy',
         "No, I'll do Cloudflare myself",
       ]);
-      if (choice === 0) cloudflare = await Cloudflare.connect(dir, out, terminal.keys, clean, secrets);
+      if (choice === 0) cloudflare = await Cloudflare.connect(dir, out, terminal.keys, clean, secrets, administrator);
     }
     const result = await run(administrator, out, questions, { resetPasswords: options.resetPasswords, cloudflare }, secrets, clean);
     if (cloudflare !== null) {
@@ -233,7 +234,8 @@ function cliVersion(): string {
 async function scaffold(dir: string, keys: Keyboard, out: Output, clean: (error: unknown) => string): Promise<Kind | 'empty'> {
   const s = style(out);
   const names = { workers: 'Cloudflare Workers', node: 'Node' } as const;
-  const choice = await select(keys, out, s, 'This directory is empty. Make a deployment of coffre here?', [
+  const empty = existsSync(join(dir, '.git')) ? 'This directory holds only .git' : 'This directory is empty';
+  const choice = await select(keys, out, s, `${empty}. Make a deployment of coffre here?`, [
     ...KINDS.map((kind) => names[kind]),
     'No, only the database',
   ]);
@@ -309,8 +311,16 @@ async function run(
                   (await progress.ask(existing.size === 1 ? `${[...existing][0]} exists already. Set new passwords?` : 'Both logins exist already. Set new passwords?')));
               return () => all;
             }
-          : async () => (component: Component) =>
-              options.resetPasswords || cloudflare.needsPassword(component, administrator, loginFor(ROLES[component], user));
+          : async (existing: ReadonlySet<string>) => {
+              const resets = {} as Record<Component, boolean>;
+              for (const component of ['app', 'vault'] as const) {
+                const login = loginFor(ROLES[component], user);
+                resets[component] = options.resetPasswords || cloudflare.needsPassword(component, administrator, login);
+                // Both checked before either changes: another deployment's login is never given a new password.
+                if (resets[component] && existing.has(ROLES[component])) cloudflare.refuseShared(component, administrator, login);
+              }
+              return (component: Component) => resets[component];
+            };
       logins = await provision(client, administrator, user, reset, secrets);
       return described(logins);
     });

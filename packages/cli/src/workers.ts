@@ -6,7 +6,24 @@
 // database are the record: a second run finds what the first made, keeps
 // it, and carries on where it stopped. It never makes a key for a Worker
 // that has one, nor for a database already in use.
-import { deploymentWrangler, CloudflareApi, cloudflareToken, deployWorker, originOf, type Account, type HyperdriveConfig, type Link, type Wrangler, type Zone } from './cloudflare.ts';
+//
+// An account may hold other deployments of coffre. A Worker or a Hyperdrive
+// config is this deployment's only when this directory says so, and setup
+// never touches another's: when one already has this deployment's names,
+// it asks for new ones.
+import {
+  type Account,
+  type Binding,
+  CloudflareApi,
+  cloudflareToken,
+  deploymentWrangler,
+  deployWorker,
+  type HyperdriveConfig,
+  type Link,
+  originOf,
+  type Wrangler,
+  type Zone,
+} from './cloudflare.ts';
 import { editWorker, placeholder, readWorker, type Change, type WorkerConfig } from './deployment.ts';
 import { createGitHubApp, GITHUB, type GitHub } from './github-app.ts';
 import { generateKeys, keyValues, type Keys } from './keys.ts';
@@ -33,6 +50,56 @@ export function addressProblem(address: string, zones: readonly string[]): strin
   return null;
 }
 
+/** What this directory's wrangler.jsonc records of the deployment it is: the Hyperdrive configs it binds, and a vault ID setup made. */
+export type Records = { hyperdrive: Record<Component, string | null>; vaultKeyId: string | null };
+
+/** A vault ID as setup makes them, which names one vault; not the template's `vault-1`, which any deployment may keep. */
+const MADE_VAULT_ID = /^vault-\d{4}-\d{2}-\d{2}-[a-z2-7]{6}$/;
+
+export function recordsOf(workers: Record<Component, WorkerConfig>): Records {
+  const id = workers.vault.vars.VAULT_KEY_ID;
+  return {
+    hyperdrive: { app: workers.app.hyperdrive, vault: workers.vault.hyperdrive },
+    vaultKeyId: id !== undefined && MADE_VAULT_ID.test(id) ? id : null,
+  };
+}
+
+/** Whether a Worker that exists is this deployment's: it binds a Hyperdrive config this directory records, or, the vault, its vault ID. */
+export function isOurs(component: Component, bindings: readonly Binding[], records: Records): boolean {
+  const config = records.hyperdrive[component];
+  if (config !== null && bindings.some(({ type, id }) => type === 'hyperdrive' && id === config)) return true;
+  return (
+    component === 'vault' &&
+    records.vaultKeyId !== null &&
+    bindings.some(({ type, name, text }) => type === 'plain_text' && name === 'VAULT_KEY_ID' && text === records.vaultKeyId)
+  );
+}
+
+/** Whether a Hyperdrive config points at this run's database: the same host, the same database. */
+export function sameDatabase(origin: HyperdriveConfig['origin'], administrator: URL): boolean {
+  return origin.host === administrator.hostname && origin.database === decodeURIComponent(administrator.pathname.slice(1));
+}
+
+/**
+ * A Worker's Hyperdrive config: the one this directory records; else one
+ * named after the Worker that points at this run's database, made by a
+ * run that stopped before recording it. One under the name that points
+ * elsewhere is another deployment's.
+ */
+export function ourConfig(configs: readonly HyperdriveConfig[], name: string, recorded: string | null, administrator: URL): HyperdriveConfig | undefined {
+  return configs.find(({ id }) => id === recorded) ?? configs.find((config) => config.name === name && sameDatabase(config.origin, administrator));
+}
+
+/** A name for this deployment, from its address: `coffre-try` for coffre-try.example.com. */
+export function nameFrom(address: string): string {
+  return address.split('.')[0]!.replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 57) || 'coffre';
+}
+
+/** Why a deployment's name will not do as a Worker's, with `-vault` after it for the vault's. Null when it will. */
+export function nameProblem(name: string): string | null {
+  return /^[a-z0-9]([a-z0-9-]{0,55}[a-z0-9])?$/.test(name) ? null : 'lower-case letters, digits and dashes, at most 57';
+}
+
 /** Why a list of root admins will not do. Null when it will. */
 export function adminsProblem(answer: string): string | null {
   const wrong = answer.split(',').map((email) => email.trim()).filter((email) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email));
@@ -45,15 +112,39 @@ type Found = {
   account: Account;
   zones: Zone[];
   configs: HyperdriveConfig[];
+  /** What under this deployment's names is another deployment's, in a few words each. */
+  others: string[];
   /** Each Worker's secrets, by name: none for a Worker not deployed yet. */
   secrets: Record<Component, Set<string>>;
   email: string | null;
 };
 
+/** What under these names, on the account, is another deployment's: its Workers, and its Hyperdrive configs. */
+async function othersUnder(
+  api: CloudflareApi,
+  account: string,
+  configs: readonly HyperdriveConfig[],
+  names: Record<Component, string>,
+  records: Records,
+  administrator: URL,
+): Promise<string[]> {
+  const others: string[] = [];
+  for (const component of COMPONENTS) {
+    const bindings = await api.bindings(account, names[component]);
+    if (bindings !== null && !isOurs(component, bindings, records)) others.push(`the Worker ${names[component]}`);
+    const named = configs.find(({ name }) => name === names[component]);
+    if (named !== undefined && named !== ourConfig(configs, names[component], records.hyperdrive[component], administrator)) {
+      others.push(`the Hyperdrive config ${names[component]}`);
+    }
+  }
+  return others;
+}
+
 export class Cloudflare {
   readonly #dir: string;
   readonly #wrangler: Wrangler;
   readonly #found: Found;
+  readonly #administrator: URL;
   readonly #github: GitHub;
   /** Each secret this run handles, to take out of any error shown. */
   readonly #secrets: string[];
@@ -68,11 +159,20 @@ export class Cloudflare {
   /** What this run changed in each wrangler.jsonc, in a few words each. */
   readonly #wrote: Record<Component, Set<string>> = { app: new Set(), vault: new Set() };
 
-  private constructor(dir: string, wrangler: Wrangler, workers: Record<Component, WorkerConfig>, found: Found, answers: { address: string; rootAdmins: string }, secrets: string[]) {
+  private constructor(
+    dir: string,
+    wrangler: Wrangler,
+    workers: Record<Component, WorkerConfig>,
+    found: Found,
+    administrator: URL,
+    answers: { address: string; rootAdmins: string },
+    secrets: string[],
+  ) {
     this.#dir = dir;
     this.#wrangler = wrangler;
     this.workers = workers;
     this.#found = found;
+    this.#administrator = administrator;
     this.address = answers.address;
     this.rootAdmins = answers.rootAdmins;
     this.#secrets = secrets;
@@ -82,11 +182,20 @@ export class Cloudflare {
 
   /**
    * Sign in to Cloudflare, choose the account, read what is there, and ask
-   * the two things setup cannot know: coffre's address, and its root admins.
+   * what setup cannot know: coffre's address, its root admins, and, when
+   * another deployment has its names, a name of its own.
    */
-  static async connect(dir: string, out: Output, keys: Keyboard, describe: (error: unknown) => string, secrets: string[]): Promise<Cloudflare> {
+  static async connect(
+    dir: string,
+    out: Output,
+    keys: Keyboard,
+    describe: (error: unknown) => string,
+    secrets: string[],
+    administrator: URL,
+  ): Promise<Cloudflare> {
     const s = style(out);
     const workers = { app: readWorker(dir, 'app/wrangler.jsonc'), vault: readWorker(dir, 'vault/wrangler.jsonc') };
+    const records = recordsOf(workers);
     const wrangler = deploymentWrangler(dir);
     const steps = new Steps(out, ['Sign in to Cloudflare'], () => keys, describe);
     let found!: Found;
@@ -101,16 +210,11 @@ export class Cloudflare {
         const account =
           accounts.find(({ id }) => id === workers.app.accountId) ??
           (accounts.length === 1 ? accounts[0]! : accounts[await step.choose('Which Cloudflare account?', accounts.map(({ name }) => name))]!);
-        const names = async (component: Component) => new Set((await api.secretNames(account.id, workers[component].name)) ?? []);
-        const [zones, configs, app, vault, email] = await Promise.all([
-          api.zones(account.id),
-          api.hyperdriveConfigs(account.id),
-          names('app'),
-          names('vault'),
-          api.email(),
-        ]);
+        const [zones, configs, email] = await Promise.all([api.zones(account.id), api.hyperdriveConfigs(account.id), api.email()]);
         if (zones.length === 0) throw new Error(`the account ${account.name} has no domain, and coffre needs one for its address: add one to Cloudflare first`);
-        found = { api, account, zones, configs, secrets: { app, vault }, email };
+        const names = { app: workers.app.name, vault: workers.vault.name };
+        const others = await othersUnder(api, account.id, configs, names, records, administrator);
+        found = { api, account, zones, configs, others, secrets: { app: new Set(), vault: new Set() }, email };
         return `Signed in to Cloudflare${email === null ? '' : ` as ${email}`}, account ${account.name}`;
       });
     } finally {
@@ -125,10 +229,32 @@ export class Cloudflare {
         check: (answer) => addressProblem(addressOf(answer), zones),
       }),
     );
+    if (found.others.length > 0) {
+      // Another deployment's, under these names: setup leaves it be, and this one takes names of its own.
+      const one = found.others.length === 1;
+      out.write(`${s.dim(paragraph(out, `On this account, ${listed(found.others, 'and')} ${one ? 'is' : 'are'} another deployment's. Setup leaves ${one ? 'it as it is' : 'them as they are'}.`, 2))}\n`);
+      const name = await textLine(keys, out, s, "This deployment's name", 'its Workers are <name> and <name>-vault', {
+        initial: nameFrom(address),
+        check: async (answer) => {
+          const problem = nameProblem(answer);
+          if (problem !== null) return problem;
+          const others = await othersUnder(found.api, found.account.id, found.configs, { app: answer, vault: `${answer}-vault` }, records, administrator);
+          return others.length === 0 ? null : `${listed(others, 'and')}: another deployment's too`;
+        },
+      });
+      workers.app.name = name;
+      workers.vault.name = `${name}-vault`;
+    }
+    for (const component of COMPONENTS) {
+      found.secrets[component] = new Set((await found.api.secretNames(found.account.id, workers[component].name)) ?? []);
+    }
     const admins = workers.vault.vars.ROOT_ADMINS;
+    const prefilled = placeholder(admins) && found.email !== null;
     const rootAdmins = (
       await textLine(keys, out, s, 'Root admins', 'their GitHub emails, comma-separated: the first people in', {
         initial: placeholder(admins) ? (found.email ?? '') : admins,
+        // Sign-in checks the GitHub account's emails: one that is not among them leaves nobody able to sign in as root.
+        note: `${prefilled ? "That's your Cloudflare email. " : ''}Each must be an email on the GitHub account its admin will sign in with, or root is locked out.`,
         check: adminsProblem,
       })
     )
@@ -136,14 +262,13 @@ export class Cloudflare {
       .map((email) => email.trim())
       .join(',');
     out.write('\n');
-    return new Cloudflare(dir, wrangler, workers, found, { address, rootAdmins }, secrets);
+    return new Cloudflare(dir, wrangler, workers, found, administrator, { address, rootAdmins }, secrets);
   }
 
-  /** A Worker's Hyperdrive config: the one its wrangler.jsonc names, else the one named after it. */
+  /** A Worker's Hyperdrive config, when there is one of this deployment's (`ourConfig`). */
   #config(component: Component): HyperdriveConfig | undefined {
     const worker = this.workers[component];
-    const configs = this.#found.configs;
-    return configs.find(({ id }) => id === worker.hyperdrive) ?? configs.find(({ name }) => name === worker.name);
+    return ourConfig(this.#found.configs, worker.name, worker.hyperdrive, this.#administrator);
   }
 
   /**
@@ -159,6 +284,29 @@ export class Cloudflare {
       (origin.port ?? 5432) !== Number(administrator.port || 5432) ||
       origin.database !== decodeURIComponent(administrator.pathname.slice(1)) ||
       origin.user !== login
+    );
+  }
+
+  /**
+   * Stop before a login that exists gets a new password, when it is also
+   * the login of another deployment's Hyperdrive config, on the same
+   * server: a login is the server's, not a database's, and that deployment
+   * would be cut off. On PlanetScale, a login names its branch, and never is.
+   */
+  refuseShared(component: Component, administrator: URL, login: string): void {
+    const ours = new Set(COMPONENTS.map((each) => this.#config(each)));
+    const other = this.#found.configs.find(
+      (config) =>
+        !ours.has(config) &&
+        config.origin.host === administrator.hostname &&
+        (config.origin.port ?? 5432) === Number(administrator.port || 5432) &&
+        config.origin.user === login,
+    );
+    if (other === undefined) return;
+    throw new Error(
+      `${login} is also the login of the Hyperdrive config ${other.name}, another deployment's, on this database server: ` +
+        `a new password for the ${component}'s config would cut that deployment off. Two deployments can't share a server's logins: ` +
+        'give this one a server of its own. Nothing was changed.',
     );
   }
 
@@ -189,10 +337,19 @@ export class Cloudflare {
   /** What each Cloudflare step does while it runs. */
   static readonly TITLES = ['Point Hyperdrive at the database', "Make coffre's GitHub App", 'Fill in app/ and vault/wrangler.jsonc'];
 
-  /** Make `changes`, each named in a few words, and the account, to a Worker's wrangler.jsonc. */
+  /**
+   * Make `changes`, each named in a few words, to a Worker's wrangler.jsonc,
+   * and with them, what this deployment is: its account, its names, and, the
+   * app, the vault it binds.
+   */
   #edit(component: Component, changes: (Change & { what: string })[]): void {
     const worker = this.workers[component];
-    const all = [{ path: ['account_id'], value: this.#found.account.id, after: 'name', what: 'the account' }, ...changes];
+    const all = [
+      { path: ['name'], value: worker.name, what: 'its name' },
+      { path: ['account_id'], value: this.#found.account.id, after: 'name', what: 'the account' },
+      ...(component === 'app' ? [{ path: ['services', 0, 'service'], value: this.workers.vault.name, what: "the vault's name" }] : []),
+      ...changes,
+    ];
     const changed = editWorker(this.#dir, worker.path, all);
     all.forEach(({ what }, i) => changed[i] && this.#wrote[component].add(what));
     worker.accountId = this.#found.account.id;
