@@ -1,4 +1,4 @@
-# coffre
+# <img src="docs/brand/mark.svg" width="64" height="64" alt="" align="absmiddle"> coffre
 
 A small secrets manager you deploy yourself, built around its audit log.
 People sign in with GitHub, Google, Microsoft or any OpenID Connect provider,

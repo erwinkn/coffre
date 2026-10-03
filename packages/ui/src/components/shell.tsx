@@ -104,9 +104,7 @@ function roleLabel(principal: Principal, instanceRole: InstanceRole): string {
 export function Brand() {
   return (
     <span className="brand">
-      <span className="brand-mark" aria-hidden>
-        <Mark size={16} />
-      </span>
+      <Mark size={24} />
       <span className="brand-name">coffre</span>
     </span>
   );
