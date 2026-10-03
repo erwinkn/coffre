@@ -60,6 +60,10 @@ jobs:
           exit 1
       - name: Load secrets through the Action
         uses: ./action
+        env:
+          # A missing local candidate must fail instead of testing npm's
+          # already-published package at the same version.
+          npm_config_offline: 'true'
         with:
           url: ${{ env.COFFRE_API_URL }}
           token: ${{ env.COFFRE_TOKEN }}
