@@ -24,6 +24,8 @@ const NAMED = {
   AccessValue: 'api/access.ts',
   AuditEntryView: 'api/audit.ts',
   AuthInfo: 'fetch-api.ts',
+  BindingPlan: 'api/workloads.ts',
+  BindingView: 'api/workloads.ts',
   DryRunOutcome: 'api/secrets.ts',
   DryRunResult: 'api/secrets.ts',
   IdentityRow: 'api/signin.ts',

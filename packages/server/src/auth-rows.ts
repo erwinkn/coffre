@@ -1,21 +1,24 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
 import { deriveKey } from '@coffre/core/identity';
-import type { credentials, deviceAuthorizations, identities } from '@coffre/db/schema';
+import type { credentials, deviceAuthorizations, identities, serviceBindings } from '@coffre/db/schema';
 
 type Rows = {
   identities: typeof identities.$inferSelect;
   credentials: typeof credentials.$inferSelect;
   device_authorizations: typeof deviceAuthorizations.$inferSelect;
+  service_bindings: typeof serviceBindings.$inferSelect;
 };
 export type AuthTable = keyof Rows;
 
 // IDs and userCode bind a MAC to the row an approval or revocation selects.
 // decidedAt also matters: clearing it would make a device decidable again.
+// A binding's policy is all of it but its label and last use.
 const FIELDS = {
   identities: ['id', 'provider', 'issuerHash', 'subject', 'principal', 'generation', 'revokedAt'],
   credentials: ['id', 'tokenHash', 'kind', 'principal', 'generation', 'identityId', 'expiresAt', 'revokedAt'],
   device_authorizations: ['id', 'deviceCodeHash', 'userCode', 'decision', 'decidedAt', 'principal', 'generation', 'expiresAt', 'consumedAt'],
+  service_bindings: ['id', 'principal', 'generation', 'profile', 'issuer', 'jwksUri', 'claims', 'revokedAt'],
 } as const satisfies { [K in AuthTable]: readonly (keyof Rows[K])[] };
 
 type Fields = { [K in AuthTable]: Pick<Rows[K], Extract<typeof FIELDS[K][number], keyof Rows[K]>> };

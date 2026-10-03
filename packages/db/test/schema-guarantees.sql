@@ -244,4 +244,33 @@ BEGIN
 END
 $$;
 
+-- 15. A trust binding is never changed in place: only its label, last use and
+-- revocation, with the MAC that covers them. Nor deleted.
+DO $$
+DECLARE
+    statement text;
+BEGIN
+    FOREACH statement IN ARRAY ARRAY[
+        'UPDATE service_bindings SET claims = claims',
+        'UPDATE service_bindings SET issuer = issuer',
+        'UPDATE service_bindings SET jwks_uri = jwks_uri',
+        'UPDATE service_bindings SET profile = profile',
+        'UPDATE service_bindings SET principal = principal',
+        'UPDATE service_bindings SET generation = generation',
+        'UPDATE service_bindings SET id = id',
+        'DELETE FROM service_bindings',
+        'TRUNCATE service_bindings'
+    ] LOOP
+        BEGIN
+            EXECUTE statement;
+            RAISE EXCEPTION 'FAIL: coffre_app was able to run: %', statement;
+        EXCEPTION
+            WHEN insufficient_privilege THEN NULL;
+        END;
+    END LOOP;
+    UPDATE service_bindings SET label = label, last_used_at = last_used_at, revoked_at = revoked_at, revoked_by = revoked_by, auth_mac = auth_mac;
+    RAISE NOTICE 'PASS: coffre_app changes a binding only where its MAC allows, and never deletes one';
+END
+$$;
+
 \echo '--- all schema guarantees held ---'

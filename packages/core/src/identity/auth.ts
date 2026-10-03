@@ -1,4 +1,4 @@
-import { defineSignin, type SigninConfig } from './signin/config.ts';
+import { defineSignin, type SigninConfig, type WorkloadsOptions } from './signin/config.ts';
 import type { SigninProvider } from './signin/types.ts';
 import type { AccessVerifierConfig } from './types.ts';
 
@@ -99,6 +99,8 @@ export type SigninOptions = {
   browserSessionHours?: number;
   /** Absolute lifetime of a CLI session; 30 days unless set, at most a year. */
   cliSessionDays?: number;
+  /** Lets CI runs sign in as services with their platform's ID token: `{}` turns it on. */
+  workloads?: WorkloadsOptions;
 };
 
 /**
@@ -120,5 +122,6 @@ function toSignin(options: SigninOptions) {
     page: { title: options.title, note: options.note },
     browserSessionHours: options.browserSessionHours,
     cliSessionDays: options.cliSessionDays,
+    workloads: options.workloads,
   };
 }

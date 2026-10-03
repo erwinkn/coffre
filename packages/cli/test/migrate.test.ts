@@ -170,14 +170,14 @@ async function schema(url: string): Promise<{ applied: number; syncs: boolean }>
   }
 }
 
-test('migrate applies 0001 to a database at the baseline, and the instance then sees it, ready', needsCluster, async () => {
+test('migrate applies what a database at the baseline lacks, and the instance then sees it, ready', needsCluster, async () => {
   const url = await atBaseline('setup_migrate_baseline');
   assert.deepEqual(await schema(url), { applied: 1, syncs: true });
   const { origin, server } = await instance(cliVersion(), url);
   try {
     const run = await migrate(origin, url);
     assert.equal(run.code, 0, run.output);
-    assert.match(run.output, /Applied 0001_remove_syncs, and reasserted the database's privileges/);
+    assert.match(run.output, new RegExp(`Applied ${KNOWN.slice(1).join(' and ')}, and reasserted the database's privileges`));
     assert.match(run.output, /sees the new schema, and is ready/);
     assert.ok(!run.output.includes(new URL(url).password), 'the password is never shown');
     assert.deepEqual(await schema(url), { applied: KNOWN.length, syncs: false });

@@ -162,6 +162,7 @@ BEGIN
         'SELECT * FROM identities',
         'SELECT * FROM credentials',
         'SELECT * FROM device_authorizations',
+        'SELECT * FROM service_bindings',
             'DELETE FROM identities',
         'DELETE FROM device_authorizations',
         'TRUNCATE vault_members',

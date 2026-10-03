@@ -12,6 +12,7 @@ import { handleRequest, runScheduled } from './app.ts';
 import { resolveConfig, type CoffreConfig } from './config.ts';
 import { logged } from './logged.ts';
 import { createRuntime } from './runtime.ts';
+import { nodeTransport } from './workloads/node-transport.ts';
 import type { Ui } from './ui.ts';
 
 export type ServeOptions = CoffreConfig & {
@@ -40,7 +41,7 @@ export async function serveWith(options: ServeOptions, ui: Ui, staticFiles: stri
     throw new Error('database must be a URL: postgres://… or file:…');
   }
   const database = await openDatabase(options.database);
-  const runtime = createRuntime(config, database.db, options.vault);
+  const runtime = createRuntime(config, database.db, options.vault, nodeTransport());
   const origin = config.publicUrl;
 
   const server = createServer((req, res) => {

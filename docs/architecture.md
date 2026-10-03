@@ -198,6 +198,7 @@ the verb:
 | list, add or offboard members | `GET /api/members`, `PUT` / `DELETE /api/members/user:ada@acme.example` |
 | what a member holds and has seen, before offboarding | `GET /api/members/user:ada@acme.example` |
 | list, issue or revoke a token's credentials | `GET` / `POST /api/members/token:ci-deploy/tokens`, `DELETE …/tokens/:id` |
+| list, make (`?dryRun=1` to preview) or remove a token's trust bindings | `GET` / `POST /api/members/token:ci-deploy/bindings`, `DELETE …/bindings/:id` |
 | change someone's access, in one transaction | `PATCH /api/access/user:ada@acme.example {"market": "developer", "market/prod": null}` |
 | my sessions and linked sign-in accounts, and ending them | `GET` / `DELETE /api/sessions/:id`, `GET` / `DELETE /api/identities/:id` |
 | approve or deny a `coffre login` device code | `GET` / `POST /api/device-logins/:code {"approve": true}` |
@@ -503,6 +504,7 @@ purpose `coffre/signin-rows/v1`. The message is a JSON tuple beginning with
 | `identities` | id, provider, issuer hash, subject, principal type and id, generation, revoked at |
 | `credentials` | id, token hash, kind, principal type and id, generation, identity id, expires at, revoked at |
 | `device_authorizations` | id, device code hash, user code, decision, decided at, principal type and id, generation, expires at, consumed at |
+| `service_bindings` | id, principal, generation, profile, issuer, JWKS URL, claims, revoked at |
 
 Dates are integer milliseconds, bytes are hex, and null is distinct from
 any value. Row IDs and the device's short user code bind the MAC to the
@@ -523,6 +525,42 @@ must belong to the same member and generation, enforced by a foreign key.
 
 Changing `auditChainKey` invalidates these rows too. A MAC proves a row
 genuine, not current: see [Limits](#limits).
+
+### Trust bindings
+
+A service can be trusted to sign in with the ID token its CI platform signs
+for a run. A trust binding names an issuer and the claims a token must
+carry; the [design](design/oidc.md) has the reasons. A deployment turns
+bindings on with `signin({ …, workloads: {} })`, and owners make and remove
+them through `/api/members/token:…/bindings`. The exchange that uses them is
+not built yet.
+
+- **Profiles.** The server checks each binding against its profile, which
+  sets the claims it must name:
+  - `github`: a workflow of the repository;
+  - `github-reusable` and `github-reusable-organization`: a reusable
+    workflow, pinned to its commit;
+  - `gitlab`;
+  - `custom`: any other issuer, by `sub`.
+
+  github.com's and gitlab.com's issuers force their profiles.
+- **Discovery.** Making a binding asks the issuer's discovery document where
+  its keys are. The transport follows no redirect and stops after 5 seconds
+  and 64 KiB. On Node it connects only to public addresses. The binding
+  keeps the keys' URL under its MAC.
+- **Immutability.** Only a binding's label, last use and revocation ever
+  change. Any other change is a new binding, which replaces the old one.
+- **Limits.** A service holds at most 16 live bindings, and those on one
+  issuer share one key set's URL.
+- **Tombstones.** Removing a binding writes an allowed `token.unbind`, its
+  tombstone. A binding with a tombstone never counts again, whatever its row
+  says. A denied attempt is no tombstone.
+- **Generations.** Removing the service moves its generation past every
+  binding it had.
+
+The table comes with migration `0002_service_bindings`. This release runs
+on the schema before it. Until an owner runs `coffre migrate`, the bindings
+routes answer 503.
 
 ## Databases
 

@@ -28,6 +28,8 @@ export default coffre((env: Env) => {
         oidc({ ...local, id: 'local', label: 'Dev IdP', issuer: idp }),
       ],
       note: 'Local development. Both buttons lead to the dev IdP.',
+      // CI runs signing in as services; the dev IdP is plain HTTP on loopback.
+      workloads: { allowLoopback: true },
     }),
     auditChainKey: env.COFFRE_APP_KEY,
   };

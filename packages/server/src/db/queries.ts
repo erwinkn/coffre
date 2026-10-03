@@ -95,7 +95,7 @@ export async function update<T extends Table>(
 }
 
 /** State changes authenticate the old row first and cannot overwrite a concurrent change. */
-export async function updateAuth<T extends Tables['identities'] | Tables['credentials'] | Tables['deviceAuthorizations']>(
+export async function updateAuth<T extends Tables['identities'] | Tables['credentials'] | Tables['deviceAuthorizations'] | Tables['serviceBindings']>(
   db: Queryable,
   chainKey: Buffer,
   table: T,
@@ -560,6 +560,70 @@ export async function findCredential(db: Queryable, chainKey: Buffer, by: { toke
     subject: row.identity?.subject ?? null,
     now: row.now,
   };
+}
+
+// --- trust bindings -----------------------------------------------------------
+
+export type BindingRow = Tables['serviceBindings']['$inferSelect'];
+
+/**
+ * A service's live bindings, oldest first: made in its current generation,
+ * its row not revoked, its MAC the app's, and no tombstone. A row that fails
+ * its MAC is reported and passed over; a row put back after its binding was
+ * removed is passed over by its tombstone, whatever the row says. A removal
+ * moves the generation past every binding at once.
+ */
+export async function liveBindings(db: Queryable, chainKey: Buffer, principal: string, generation: number): Promise<BindingRow[]> {
+  const { serviceBindings } = tablesOf(db);
+  const rows = await db
+    .select()
+    .from(serviceBindings)
+    .where(and(eq(serviceBindings.principal, principal), eq(serviceBindings.generation, generation), isNull(serviceBindings.revokedAt)))
+    .orderBy(asc(serviceBindings.createdAt), asc(serviceBindings.id));
+  const genuine = rows.filter((row) => checkAuthRow(chainKey, 'service_bindings', row));
+  const dead = await tombstoned(db, genuine.map((row) => row.id));
+  return genuine.filter((row) => !dead.has(row.id));
+}
+
+/**
+ * One binding of `principal`'s, by ID: revoked or not, tombstoned or not.
+ * Null for none, or for a row that fails its MAC, which is reported.
+ */
+export async function findBinding(db: Queryable, chainKey: Buffer, principal: string, id: string): Promise<BindingRow | null> {
+  const { serviceBindings } = tablesOf(db);
+  const [row] = await db
+    .select()
+    .from(serviceBindings)
+    .where(and(eq(serviceBindings.id, id), eq(serviceBindings.principal, principal)));
+  return row !== undefined && checkAuthRow(chainKey, 'service_bindings', row) ? row : null;
+}
+
+/**
+ * Which of these bindings have a tombstone: an app entry `token.unbind`,
+ * allowed, naming the binding's ID. A denied attempt is logged under the
+ * same action and never counts. Every such entry counts, never only the
+ * latest; their MACs are not checked, since a forged tombstone can only
+ * refuse. One read through `audit_log_unbind_idx`, whose expression this
+ * repeats.
+ */
+export async function tombstoned(db: Queryable, ids: readonly string[]): Promise<Set<string>> {
+  if (ids.length === 0) return new Set();
+  const { auditLog } = tablesOf(db);
+  const bindingId = dialect.engineOf(db) === 'postgres'
+    ? sql<string>`((${auditLog.metadata})::jsonb ->> 'bindingId')`
+    : sql<string>`json_extract(${auditLog.metadata}, '$.bindingId')`;
+  const rows = await db
+    .select({ id: bindingId })
+    .from(auditLog)
+    .where(and(eq(auditLog.author, 'app'), eq(auditLog.action, 'token.unbind'), eq(auditLog.decision, 'allow'), inArray(bindingId, [...ids])));
+  return new Set(rows.map((row) => row.id));
+}
+
+export async function insertBinding(db: Queryable, chainKey: Buffer, row: Omit<NewRow<Tables['serviceBindings']>, 'authMac'> & {
+  id: string; principal: string; generation: number; profile: string; issuer: string; jwksUri: string; claims: string;
+}): Promise<void> {
+  const signed = { ...row, revokedAt: null };
+  await insert(db, tablesOf(db).serviceBindings, { ...signed, authMac: authMac(chainKey, 'service_bindings', signed) });
 }
 
 /** Retire directory records from older memberships, including a sweep that rolled back. */

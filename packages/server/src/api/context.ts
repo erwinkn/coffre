@@ -9,6 +9,7 @@ import { forbidden, vaultRefused, type ApiError } from './errors.ts';
 import type { Asking } from './keys.ts';
 import { formatMember } from './paths.ts';
 import type { SigninService } from './signin.ts';
+import type { WorkloadService } from './workloads.ts';
 
 /** What every handler works with: the stores, and who is asking. */
 export type ApiContext = {
@@ -20,6 +21,8 @@ export type ApiContext = {
   waitUntil: (promise: Promise<unknown>) => void;
   /** coffre's own sign-in and the tokens it issues; null behind Cloudflare Access. */
   signin: SigninService | null;
+  /** Trust bindings for CI runs, when sign-in turns them on (`signin({ workloads })`); null otherwise. */
+  workloads: WorkloadService | null;
   caller: Caller;
   requestId: string;
   sourceIp: string | null;

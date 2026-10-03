@@ -303,6 +303,10 @@ export const auditLog = sqliteTable(
     index('audit_log_action_idx').on(table.author, table.action, table.seq),
     index('audit_log_releases_idx').on(table.author, table.actor, table.action, table.decision, table.occurredAt),
     index('audit_log_subject_idx').on(table.author, table.subjectPrincipal, table.seq),
+    // A binding's tombstone: the app's successful `token.unbind` naming it.
+    index('audit_log_unbind_idx')
+      .on(sql`json_extract(${table.metadata}, '$.bindingId')`)
+      .where(sql`${table.author} = 'app' AND ${table.action} = 'token.unbind' AND ${table.decision} = 'allow'`),
   ],
 );
 
@@ -351,6 +355,40 @@ export const identities = sqliteTable(
     }).onDelete('restrict'),
     uniqueIndex('identities_active_subject').on(table.provider, table.issuerHash, table.activeSubject),
     index('identities_principal_idx').on(table.principal, table.generation),
+  ],
+);
+
+export const serviceBindings = sqliteTable(
+  'service_bindings',
+  {
+    id: text().primaryKey(),
+    authMac: bytes('auth_mac').notNull(),
+    // The service it signs in as, `token:<id>`, under the generation it was bound in.
+    principal: text().notNull(),
+    generation: integer().notNull(),
+    profile: text().notNull(),
+    issuer: text().notNull(),
+    // From the issuer's discovery when the binding was made, never refetched.
+    jwksUri: text('jwks_uri').notNull(),
+    // JSON, sorted by claim name.
+    claims: text().notNull(),
+    label: text(),
+    createdAt: createdAt(),
+    createdBy: text('created_by').notNull(),
+    lastUsedAt: time('last_used_at'),
+    revokedAt: time('revoked_at'),
+    revokedBy: text('revoked_by'),
+  },
+  (table) => [
+    check('service_bindings_principal_check', sql`${table.principal} LIKE 'token:%'`),
+    check('service_bindings_auth_mac_check', sql`octet_length(${table.authMac}) = 32`),
+    check('service_bindings_claims_check', sql`json_valid(${table.claims})`),
+    foreignKey({
+      name: 'service_bindings_principal_fkey',
+      columns: [table.principal],
+      foreignColumns: [vaultMembers.principal],
+    }).onDelete('restrict'),
+    index('service_bindings_principal_idx').on(table.principal, table.issuer),
   ],
 );
 
