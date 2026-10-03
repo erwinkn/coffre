@@ -884,10 +884,16 @@ class VaultService implements Vault {
    * it like anyone's. Logged, and made in a transaction of its own, under
    * the log's lock: a decision that held the head and then waited for a
    * member row would take the locks out of order. The row never makes
-   * anyone a root admin; the configuration does.
+   * anyone a root admin; the configuration does. Rows are never deleted, so
+   * one read finds it made already, as on every fresh isolate but the first,
+   * without queueing on the log's lock.
    */
   async #rootRow(principal: string): Promise<void> {
     if (this.#prepared.rooted.has(principal) || (await this.#settled()) !== null) return;
+    if ((await store.member(this.#db, principal)) !== undefined) {
+      this.#prepared.rooted.add(principal);
+      return;
+    }
     await this.#db.transaction(async (tx) => {
       await lockLogHead(tx);
       if ((await store.member(tx, principal)) !== undefined) return;

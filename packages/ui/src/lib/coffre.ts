@@ -13,7 +13,8 @@ export function useCoffre(): CoffreClient {
 /** A refusal the page words itself, shown as it is. */
 export class Refusal extends Error {}
 
-type Failure = { ok: false; error: string };
+/** A call that failed: what to say, and whether signing in again would help, which it does only for an ended session. */
+type Failure = { ok: false; error: string; signedOut: boolean };
 
 /** The HTTP status of an API error; undefined when the request never got an answer. */
 export function statusOf(error: unknown): number | undefined {
@@ -37,7 +38,7 @@ export function failureMessage(error: unknown): string {
 }
 
 export function uiFailure(error: unknown): Failure {
-  return { ok: false, error: failureMessage(error) };
+  return { ok: false, error: failureMessage(error), signedOut: statusOf(error) === 401 };
 }
 
 /** A loader's answer: what it read, or what to say instead. */

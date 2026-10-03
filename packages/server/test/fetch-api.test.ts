@@ -187,7 +187,8 @@ test('a member whose record fails the vault\'s check is told so, and listed so, 
   const { vaultMembers } = tablesOf(db.owner);
   // Someone who owns the database makes DEV an owner, around the vault.
   await db.owner.update(vaultMembers).set({ owner: true }).where(eq(vaultMembers.principal, `user:${DEV}`));
-  const client = pageClient(new Request(`${ORIGIN}/projects`, { headers: { cookie: `${SESSION}=${DEV}` } }), runtimeFor(own));
+  const page = () => pageClient(new Request(`${ORIGIN}/projects`, { headers: { cookie: `${SESSION}=${DEV}` } }), runtimeFor(own));
+  const client = page();
   const me = await client.me();
   assert.deepEqual([me.registered, me.tampered], [false, true]);
   await assert.rejects(client.projects.list(), (error: unknown) =>
@@ -198,7 +199,9 @@ test('a member whose record fails the vault\'s check is told so, and listed so, 
   assert.deepEqual([listed?.tampered, listed?.instanceRole], [true, 'user']);
   await root.members.remove(`user:${DEV}`);
   await root.members.add(`user:${DEV}`);
-  assert.deepEqual([(await client.me()).registered, (await client.me()).tampered], [true, false]);
+  // The next page load: a render checks its caller once, so the one above still sees them as it did.
+  const again = await page().me();
+  assert.deepEqual([again.registered, again.tampered], [true, false]);
 });
 
 test('how to sign in is public', async () => {

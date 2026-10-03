@@ -110,7 +110,12 @@ export type SigninResult =
   | { ok: false; reason: SigninRefusal };
 
 /** A caller authenticated by a coffre-issued credential. */
-export type CredentialPrincipal = Principal & { credentialId: string; credentialGeneration: number };
+/**
+ * Who a credential is, and what the vault said of them when it was checked:
+ * the request's one vault call, which loading the caller reads rather than
+ * asking again.
+ */
+export type CredentialPrincipal = Principal & { credentialId: string; credentialGeneration: number; access: Access };
 
 export type ClientMeta = {
   requestId: string;
@@ -511,7 +516,7 @@ export class SigninService {
 
     const member = memberOf(row.principal);
     return member.type === 'service'
-      ? { type: 'service', id: member.id, commonName: member.id, credentialId: row.id, credentialGeneration: row.generation }
+      ? { type: 'service', id: member.id, commonName: member.id, credentialId: row.id, credentialGeneration: row.generation, access }
       : {
           type: 'user',
           id: member.id,
@@ -519,6 +524,7 @@ export class SigninService {
           subject: row.subject ?? member.id,
           credentialId: row.id,
           credentialGeneration: row.generation,
+          access,
         };
   }
 

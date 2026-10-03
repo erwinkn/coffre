@@ -88,6 +88,17 @@ cancelled as hung on Cloudflare when that call goes, which local workerd
 does not reproduce. Concurrent first calls each do their own reads
 (`packages/vault/test/isolate.test.ts`).
 
+**One connection per call.** On Workers, each app request and each vault
+call has one Postgres client through Hyperdrive (`HyperdrivePool` in
+`@coffre/db`), connected on its first query. Its queries take turns on it,
+and a transaction holds it from BEGIN to COMMIT. So code inside a
+transaction queries through its `tx`, never the database: a query on the
+database would wait for the transaction, which waits for it. A call that
+opened several Hyperdrive connections at once was now and then cancelled
+as hung on Cloudflare (`packages/vault/test/workers.test.ts` counts them).
+A request asks the vault about its caller once: a page's render checks its
+credential once for all its API calls (`pageClient`).
+
 **Tests / checks.**
 - `pnpm test` = lint + migrate a scratch template + `node --test --test-concurrency=4`.
   Each file gets a private Postgres clone or SQLite copy; cases within a file remain

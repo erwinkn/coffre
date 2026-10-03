@@ -320,7 +320,8 @@ test('a first sign-in with an invited email binds the account and opens a browse
     credentialId: result.credential.id,
   });
 
-  assert.deepEqual(await signin.verify(result.credential.token), {
+  const { access, ...verified } = await signin.verify(result.credential.token);
+  assert.deepEqual(verified, {
     type: 'user',
     id: DEV,
     email: DEV,
@@ -328,6 +329,8 @@ test('a first sign-in with an invited email binds the account and opens a browse
     credentialId: result.credential.id,
     credentialGeneration: 0,
   });
+  // What the vault said of them, which the request's caller is: no second call.
+  assert.deepEqual([access.principal, access.status, access.generation], [`user:${DEV}`, 'active', 0]);
 });
 
 test('any verified email on the account may match, not only the primary one', async () => {
@@ -765,13 +768,15 @@ test('owners issue service tokens that verify as the service', async () => {
   const issued = await signin.issueServiceToken(lead, SERVICE, { label: 'deploys', expiresInDays: 30 });
   assert.match(issued.token, /^coffre_svc_/);
   assert.ok(Math.abs(hoursFromNow(issued.expiresAt) - 30 * 24) < 0.01);
-  assert.deepEqual(await signin.verify(issued.token), {
+  const { access, ...verified } = await signin.verify(issued.token);
+  assert.deepEqual(verified, {
     type: 'service',
     id: SERVICE,
     commonName: SERVICE,
     credentialId: issued.id,
     credentialGeneration: 0,
   });
+  assert.deepEqual([access.principal, access.status], [`token:${SERVICE}`, 'active']);
 
   const byRoot = await signin.issueServiceToken(root, SERVICE, { label: null, expiresInDays: 366 });
   assert.equal((await signin.verify(byRoot.token)).id, SERVICE);
@@ -925,7 +930,8 @@ test('device flow: start, describe, approve, then one poll gets a CLI session', 
   assert.deepEqual(approved.principal, { type: 'user', id: DEV });
   assert.match(approved.credential.token, /^coffre_cli_/);
   assert.ok(Math.abs(hoursFromNow(approved.credential.expiresAt) - 30 * 24) < 0.01);
-  assert.deepEqual(await signin.verify(approved.credential.token), {
+  const { access, ...verified } = await signin.verify(approved.credential.token);
+  assert.deepEqual(verified, {
     type: 'user',
     id: DEV,
     email: DEV,
@@ -933,6 +939,7 @@ test('device flow: start, describe, approve, then one poll gets a CLI session', 
     credentialId: approved.credential.id,
     credentialGeneration: 0,
   });
+  assert.deepEqual([access.principal, access.status], [`user:${DEV}`, 'active']);
 
   // Exactly once.
   assert.deepEqual(await poll(started.deviceCode), { status: 'expired' });

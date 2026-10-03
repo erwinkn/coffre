@@ -10,6 +10,7 @@ import {
 import { fetchApi, isSameOrigin, pageClient } from './fetch-api.ts';
 import { auditReadiness, writeAuditHeartbeat } from './heartbeat.ts';
 import { errorResponse, jsonResponse, methodNotAllowed } from './http.ts';
+import { logged } from './logged.ts';
 import type { CoffreRuntime } from './runtime.ts';
 import { cspNonce, withSecurityHeaders } from './security-headers.ts';
 import type { Ui } from './ui.ts';
@@ -65,7 +66,23 @@ async function route(request: Request, runtime: CoffreRuntime, sourceIp: string 
   }
 
   if (request.method !== 'GET' && request.method !== 'HEAD') return methodNotAllowed(['GET']);
-  return ui.fetch(request, { context: { cspNonce: nonce, client: pageClient(request, runtime, sourceIp) } });
+  return page(request, runtime, sourceIp, ui, nonce);
+}
+
+/**
+ * A page, rendered with the visitor's API client. One whose render failed
+ * because the API answered it 503, the vault or the database out of reach,
+ * is an outage, not a bug: it answers 503, as the API did, with the page
+ * the UI rendered for the failure, and a moment to wait before trying again.
+ */
+async function page(request: Request, runtime: CoffreRuntime, sourceIp: string | null, ui: Ui, nonce: string): Promise<Response> {
+  let unavailable = false;
+  const client = pageClient(request, runtime, sourceIp, (status) => (unavailable ||= status === 503));
+  const rendered = await ui.fetch(request, { context: { cspNonce: nonce, client } });
+  if (rendered.status !== 500 || !unavailable) return rendered;
+  const headers = new Headers(rendered.headers);
+  headers.set('retry-after', '5');
+  return new Response(rendered.body, { status: 503, statusText: 'Service Unavailable', headers });
 }
 
 /**
@@ -107,7 +124,7 @@ export async function runScheduled(runtime: CoffreRuntime): Promise<void> {
     }),
     runtime.syncs.reconcile(),
   ]);
-  if (syncs.status === 'rejected') console.error('scheduled syncs failed', syncs.reason);
+  if (syncs.status === 'rejected') console.error('scheduled syncs failed', logged(syncs.reason));
   if (heartbeat.status === 'rejected' || !heartbeat.value) {
     throw new Error('scheduled audit heartbeat failed', {
       cause: heartbeat.status === 'rejected' ? heartbeat.reason : undefined,

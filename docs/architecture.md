@@ -329,8 +329,9 @@ them, which starts them over.
 - **Workers**: the vault is a Worker of its own, `coffre-vault`, with no
   public route. The app reaches its RPC entrypoint through the `VAULT`
   service binding. Each call opens the shared Postgres database through
-  `VAULT_HYPERDRIVE`, using the vault's login. No database connection lives
-  across requests.
+  `VAULT_HYPERDRIVE`, using the vault's login: one connection, which its
+  queries take turns on, closed when the call is done. No database
+  connection lives across requests.
 - **Node, its own process** (`serveVault` and `connectVault`): the vault
   opens the same Postgres database as the app, through its own login, and
   answers on a Unix socket. The socket is its authentication: a file made
@@ -535,7 +536,8 @@ The database comes from its URL: `postgres://` or `postgresql://` opens
 node-postgres; `file:` or `libsql:` opens @libsql/client for SQLite
 (`packages/db/src/connect.ts`). The SQLite driver loads only when
 asked for. The Worker builds its Postgres database from the Hyperdrive pool
-with `createDatabase`.
+with `createDatabase`: one connection for each request or vault call, which
+its queries take turns on and a transaction holds until it ends.
 
 Each query is written once, typed against the Postgres schema. Drizzle has no
 type shared by its dialects, so the SQLite database is cast to the Postgres

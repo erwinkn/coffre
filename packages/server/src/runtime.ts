@@ -7,6 +7,7 @@ import { SigninService } from './api/signin.ts';
 import { SyncRunner } from './api/syncs.ts';
 import type { AuthenticatedIdentity } from './auth.ts';
 import type { ResolvedConfig } from './config.ts';
+import { logged } from './logged.ts';
 
 export type CoffreRuntime = {
   db: Database;
@@ -33,7 +34,7 @@ export function createRuntime(
   db: Database,
   vault: Vault,
   waitUntil: CoffreRuntime['waitUntil'] = (promise) => {
-    promise.catch((error: unknown) => console.error('background task failed', error));
+    promise.catch((error: unknown) => console.error('background task failed', logged(error)));
   },
 ): CoffreRuntime {
   let signin: SigninService | null = null;
