@@ -1,12 +1,14 @@
 # OIDC login for services
 
-A proposal, written on 2026-10-03, for review before any code.
+A proposal, written on 2026-10-03 and revised the same day after an
+independent review ([PR #90](https://github.com/erwinkn/coffre/pull/90)),
+whose findings are answered at the end. There is no code yet.
 
-A CI job proves who it is with the ID token its platform signs for it, and
-trades it for a coffre credential that lasts five minutes. That replaces the
-service token kept for up to a year in the CI's secret store. Service tokens
-stay as the fallback. This is for coffre's own sign-in; behind Cloudflare
-Access, CI keeps Access service tokens.
+A CI job proves who it is with the ID token its platform signs for it. It
+trades that token for a coffre credential that lasts five minutes, instead of
+keeping a service token for up to a year in the CI's secret store. Service
+tokens stay as the fallback. This is for coffre's own sign-in; behind
+Cloudflare Access, CI keeps Access service tokens.
 
 Say `token:api-deploy` holds `viewer` on `market/prod`, and an owner binds it
 to `deploy.yml` pushed to `main` of `acme/api`. The job holds no secret:
@@ -20,204 +22,282 @@ steps:
 
 ## 1. Trust bindings
 
-A binding belongs to one service: an issuer, and claims a token must carry.
+A binding belongs to one service. It names a profile, an issuer, and the
+claims a token must carry, each a top-level string matched exactly:
 
 ```json
-{ "issuer": "https://token.actions.githubusercontent.com",
+{ "profile": "github", "issuer": "https://token.actions.githubusercontent.com",
   "claims": { "repository_owner_id": "9919", "repository_id": "41532",
               "workflow_ref": "acme/api/.github/workflows/deploy.yml@refs/heads/main",
-              "event_name": "push" } }
+              "ref": "refs/heads/main", "event_name": "push" } }
 ```
 
-A token matches when its `iss` is the issuer byte for byte and each claim is
-a top-level string of exactly that value. Any one of a service's bindings is
-enough: two branches are two bindings.
+**The server enforces each profile's minimum.** It checks every binding
+against its profile, whether it comes from the UI, the CLI or the API, and
+refuses one that lacks a required claim. A known issuer URL forces its
+profile. A GitHub Enterprise Server or a self-managed GitLab picks its own.
 
-**What a binding must name.**
-- At least one claim besides `iss`, `aud` and the times.
-- For an issuer shared by every customer of a platform, the claim that names
-  the customer: GitHub's `repository_owner_id`, GitLab.com's `namespace_id`,
-  Buildkite's `organization_slug` or Google's `sub`. On GitHub, also a
-  repository (`repository_id`) or a reusable workflow (`job_workflow_ref`),
-  never a whole organization.
-- CircleCI, Fly.io and Kubernetes issue from one URL per customer, so the
-  issuer is enough there.
+| Profile | Required claims |
+|---|---|
+| `github`, a workflow of the repository | `repository_owner_id`, `repository_id`, `workflow_ref`, `ref`, `event_name` |
+| `github`, a reusable workflow | `repository_owner_id`, `job_workflow_ref`, `job_workflow_sha`, `event_name`, and `repository_id` unless "any repository of the organization" is chosen explicitly |
+| `gitlab` | `project_id`, `ref_type`, `ref`, `pipeline_source` |
+| `buildkite` | `organization_id`, `pipeline_id`, `build_branch` |
+| `circleci`, on the organization's own issuer | `oidc.circleci.com/project-id`, `oidc.circleci.com/vcs-ref` |
+| `google`, a service account | `sub`, its unique ID |
+| `custom`, any other issuer | `sub`, and the UI says the owner vouches for what it means |
 
-**No wildcards in v1.** Patterns are where claim confusion lives:
-`repo:acme/api:*` also matches `repo:acme/api:pull_request`. Exact values
-fail closed, so a pattern can come later if a real case needs one.
+Some rules within the profiles:
+- **GitHub events.** `event_name` must be `push`, `workflow_dispatch`, `schedule` or
+  `release`. Those events run only code that someone with write access put in the
+  repository. `pull_request_target`, `workflow_run` and the like can run a stranger's
+  code under the base branch's ref, so the server refuses them.
+- **Reusable workflows.** A reusable workflow is trusted at one commit. Its path can be reused and
+  its branch changed, so `job_workflow_sha` pins it. A new version needs a new
+  binding. The caller's IDs say who may call it, not what it is.
+- **GitLab.** `ref_type` tells branch `main` from tag `main`. `pipeline_source`, say `push`,
+  keeps out merge-request pipelines, whose `project_id` names the source project.
+
+**No wildcards.** Patterns are where claim confusion lives:
+`repo:acme/api:*` also matches `repo:acme/api:pull_request`.
+
+**Bindings are immutable.** Its profile, issuer, JWKS URL and claims never
+change. Changing one revokes the binding and creates another, with a new ID
+that is never reused, and both go in the log. Only the label and the time of
+last use change in place.
 
 ## 2. The exchange
 
 `POST /api/auth/oidc {"service": "token:api-deploy", "token": "<JWT>"}`
-answers `{"token": "coffre_svc_…", "expiresAt": "…"}`.
+answers `{"token": "coffre_svc_…", "expiresAt": "…"}`. The caller names the
+service, as AWS's `AssumeRoleWithWebIdentity` names a role, and only that
+service's bindings are read. A stranger costs at most one indexed read:
 
-- **The caller names the service.** AWS's `AssumeRoleWithWebIdentity` names
-  a role the same way. Only that service's bindings are read, so two
-  services can't be confused, and the log shows what was asked.
-- **It is an ordinary service credential,** with the member's generation and
-  the binding that issued it. Each request asks the vault what its principal
-  holds, so the credential carries exactly the service's grants.
-- **It lasts five minutes.** It stays in the asking process, never in a file
-  or a later step. `coffre run` needs it for seconds, to fetch before it
-  starts the command. Asking again costs one request, so a longer life would
-  only keep a leaked credential alive.
-- **It is audited as the service.** A `token.exchange` entry, beside
-  `token.create`, names the binding, the issuer, `sub`, `jti`, the bound
-  claims and the run (GitHub's `run_id` and `sha`).
-- **A refusal is a 401, with no audit entry,** like an unknown bearer token.
-  Anyone can mint a genuine token from their own repository, so logged
-  refusals would let anyone fill the log. The process log gets a line, and
-  the answer says why: `expired`, `too_old`, `audience`, `replayed`, or
-  `no_match`. `no_match` names the claims that differ, never the values
-  expected. An unknown service and an unbound issuer answer the same.
+1. **Admission.** The body is read as a stream and cut off at 16 KiB.
+   Requests are limited per source address and per deployment before any
+   database, crypto or network work, and answered 429 beyond. On Workers
+   that's a rate-limiting binding in the deployment, which Cloudflare
+   enforces per location. On Node, a limit per address and a bound on
+   exchanges in flight, per process.
+2. **Shape** (section 3).
+3. **The binding.** One app query reads the service's live bindings for the
+   token's `iss`, and checks each one's MAC. With none, the request is
+   refused, with no vault call and no fetch.
+4. **The token:** its signature, then audience, times and claims, and
+   that it isn't spent yet, a read (section 3).
+5. **The member.** One `vault.access`, outside any transaction, checks the
+   service is active and at the binding's generation.
+6. **Commit**, in one app transaction, as sign-in does:
+   - take the audit head first;
+   - check the member still stands at that generation (`memberStanding`);
+   - read the binding again: its MAC holds, it isn't revoked, and no
+     `token.unbind` names it;
+   - check the times again, then consume the token, insert the
+     credential and append `token.exchange`.
 
-## 3. Validation
+   Unbinding takes the same head, so an exchange and a removal can't cross.
+   A binding issues at most 60 credentials a minute, counted here.
 
-Each step runs in order, and nothing is fetched before step 3.
+**The credential** is an ordinary service credential, plus its binding.
+- It has kind `service` and the member's principal and generation, plus
+  `binding_id`. All of them are under its MAC.
+- The binding must belong to the same principal and generation, a link the
+  database enforces as it does for an identity.
+- Checking the credential, on every request, also reads its binding's row:
+  its MAC must hold and it must not be revoked.
+- It lasts five minutes, stays in the asking process, and carries exactly
+  the service's grants. One `coffre run` needs it for seconds, and asking
+  again costs one request.
 
-1. **Shape.** A compact JWS of at most 8 KiB, decoded but not yet trusted.
-2. **The service.** It is active, from the request's one `vault.access`. It
-   holds a live binding of its current generation for the token's `iss`. So
-   a stranger can only make coffre fetch URLs an owner set.
-3. **The signature**, under the issuer's keys (section 4).
-   - The algorithm is RS256 or ES256, as for Access assertions today; never
-     `none` or HS\*.
-   - No key or URL from the token's header (`jwk`, `jku`, `x5u`) is used.
-   - RSA keys are at least 2048 bits.
-4. **`aud`** is this instance's `publicUrl`, alone. So a token minted for
-   another instance, or for another service as well, is refused. Platforms
-   whose audience is fixed keep service tokens; Bitbucket's and Azure
-   Pipelines' look fixed, and each preset will confirm.
-5. **Times**, with 30 s of tolerance.
-   - `exp` is in the future.
-   - `nbf` and `iat` are not.
-   - `iat` is at most an hour old. That fits tokens handed out at job start
-     (GitLab's `id_tokens`, Kubernetes' projected tokens) and refuses
-     day-old ones.
-6. **The claims** match a binding that no `token.unbind` entry names
-   (section 6).
-7. **Single use.** The token's SHA-256 is stored with the credential it
-   bought, under a unique index, so a token is spent once the job used it.
-   This also works for issuers that send no `jti`. The rows go after two
-   hours, past step 5's limit, and the audit entry stays.
+**Audit and provenance.** `token.exchange` names the service as its actor.
+It records the credential, the binding, the generation, the issuer, the
+expiry, and the verified run claims (GitHub's `run_id`, `sha` and
+`workflow_ref`), bounded in size. Those claims are what the issuer asserts,
+not proof of which run sent the request.
 
-The price is one credential per token. GitHub, CircleCI and Buildkite mint
-tokens on demand, and the CLI asks each run. On GitLab, a job that runs
-coffre twice declares two `id_tokens`, or wraps its steps in one `coffre run`.
+Every entry written for a request made with that credential records the
+credential's ID: the app's entries in their metadata, the vault's through a
+new `credentialId` in the calls' correlation, which the vault copies and
+never decides on. So a secret read leads back to its run in one join, after
+the credential row is long gone.
 
-## 4. Fetching keys, on Workers too
+**Refusals stay out of the audit log**: 401, 429 at admission, 503 when the
+issuer can't be reached. The process log records them, sampled. The answer
+gives a reason a CI user can act on: `expired`, `too_old`, `audience`,
+`replayed`, or `no_match`, which names the claims that differ but never the
+values expected. An unknown service and an unbound issuer answer the same.
 
-**Discovery runs once, when the binding is made.** coffre checks that the
-document's `issuer` matches, and stores its `jwks_uri` in the binding, under
-the MAC. The owner sees that URL before saving. An exchange fetches only that
-URL. It never fetches a URL from a token, or a discovery document that
-changed since. An issuer that moves its keys needs its bindings saved again.
+## 3. The token
 
-**Every fetch is checked.**
-- URLs are `https`, on port 443, with a host name. No IP literal, no user or
-  password, no `localhost`, `.local` or `.internal`. On Workers, `fetch`
-  reaches only the public internet. On Node, loopback, private, link-local
-  (cloud metadata) and unique-local addresses are refused when connecting,
-  so DNS rebinding can't slip past.
-- A fetch has a 5 s timeout and follows no redirects. It needs a 200 with
-  JSON, cut off past 64 KiB, and keeps at most 32 keys.
-- The dev IdP's `http://127.0.0.1` is allowed only where the deployment
-  allows it: in dev and conformance.
+- **Shape.** A compact JWS, decoded but not yet trusted. `iss` and `sub` are
+  nonempty strings. `exp` and `iat` are finite numbers, and so is `nbf` when
+  present.
+- **Signature.** jose verifies under the binding's keys.
+  - RS256 or ES256 (P-256) only; never `none` or HS\*. RSA keys are at least 2048 bits.
+  - No key or URL from the header (`jwk`, `jku`, `x5u`) is used, and an unknown `crit` is refused.
+  - Neither the Access verifier's audience check nor its cached JWKS object is reused: this profile
+    is stricter.
+- **Audience.** Exactly `publicUrl`, as a string or a one-element array.
+- **Times.** With t now and a tolerance of 30 s: `exp > t − 30`, `iat ≤ t + 30`,
+  `nbf ≤ t + 30`, and `t − iat ≤ 3600`. They are checked again at commit.
+- **Claims** match the binding's exactly.
+- **Single use.** Commit consumes the SHA-256 of the token's signing input,
+  `header.payload` as received. It sits in a table of its own, under a unique
+  index across every service, and is kept two hours, past the acceptance
+  window, whatever becomes of the credential.
+  - Hashing the whole token would not do. An ES256 signature `(r, s)` has a
+    twin, `(r, n − s)`, that verifies the same claims, so one token has two
+    spellings. The signing input is what the signature covers, so it has
+    only one.
+  - A thief who redeems a token before its job does isn't stopped by this,
+    but the job then fails loudly.
+- **One token, one credential.** GitHub, Buildkite and CircleCI mint tokens
+  on demand, and the CLI asks for one per run. GitLab issues one per
+  `id_tokens` entry: a job that runs coffre twice declares two, or wraps its
+  work in one `coffre run`. If the answer to a committed exchange is lost,
+  that token is spent. The client asks for a fresh one, or on GitLab the job
+  is retried.
 
-**The cache keeps settled values only,** per isolate: each key set by URL, with when it was
-fetched. It never keeps a promise.
-- Two first exchanges in one isolate each fetch, rather than one awaiting the other's request,
-  which Cloudflare cancels as hung once the first ends (#57).
-- Sets are kept ten minutes, for at most 64 URLs.
-- An unknown `kid` refetches, at most once a minute per URL and isolate.
+## 4. Fetching keys
 
-**When the issuer is down,** the answer is a 503 with `Retry-After`. coffre keeps no copy of
-the keys in the database for this case, because an issuer that can't serve its keys can rarely
-mint tokens. A job that must run anyway uses a service token.
+**Discovery runs once, when a binding is made.** Its `issuer` must match
+exactly. The binding stores the `jwks_uri` under its MAC, and the owner sees
+it before saving. An issuer that moves its keys needs a new binding.
+
+**Discovery and key fetches share one transport.**
+- `https` on port 443, host names only, with no credentials and no redirects.
+- One 5 s deadline covers DNS, the connection, TLS and the body. The body
+  is decompressed and cut off at 64 KiB, and at most 32 keys are kept.
+- On Node, the connection's resolver admits only globally routable unicast
+  addresses, IPv4 and IPv6, per IANA's special-purpose registries. That rules
+  out loopback, private, shared (`100.64.0.0/10`), link-local, unique-local,
+  documentation, IPv4-mapped and translation addresses. It checks each
+  address it connects to and keeps the host name for TLS, so a DNS answer
+  can't be swapped after the check.
+- On Workers, the standard public `fetch`, never a private-network (VPC)
+  binding.
+- Loopback, for the dev IdP, is a deployment's setting, never a binding's.
+
+**The cache keeps settled values only,** per isolate: never a pending fetch,
+key import or failure. Two first exchanges each fetch.
+- Key sets are kept ten minutes, for at most 64 URLs.
+- After an unknown `kid` or a failed fetch, that isolate waits a minute
+  before fetching that URL again, cold cache included. Until then such
+  tokens get a 503.
+- Admission is the deployment-wide bound.
+
+**When the issuer is down,** the answer is a 503 with `Retry-After`. Fresh
+cached keys work until they expire. No copy of the keys is kept in the
+database: an issuer that can't serve its keys can rarely mint tokens.
 
 ## 5. Threats
 
 - **The issuer is compromised.** Its key matches every binding on it, as at
-  every cloud that trusts it: AWS, Google Cloud and Azure trust GitHub's
-  tokens the same way. What bounds it:
-  - each service holds only its own grants;
-  - each exchange logs the run it claims, which the platform can confirm;
-  - the bulk limit applies;
-  - `coffre untrust --issuer <url>` drops every binding on an issuer.
-- **Claim confusion.** GitHub presets bind single claims, never `sub`. An
-  organization can change `sub`'s format, and a coarse one, such as owner
-  only, matches every repository.
-  - A `pull_request` run has a `ref` of `refs/pull/…/merge`.
-  - A `pull_request_target` run has the base branch's `ref`, but another
-    `workflow_ref` or `event_name`.
-  - IDs, unlike names, can't be re-registered by someone else after a
-    rename.
-- **Another repository in the organization** matches no binding naming a
-  repository. A reusable workflow is bound with the owner's ID, because
-  anyone's repository can call a public one.
-- **A token or credential in a job log.** The token is spent once used, and
-  at most an hour old. The credential dies in five minutes, and keeps the
-  `coffre_svc_` prefix that secret scanners know. The CLI prints neither,
-  and the Action masks both.
+  every cloud that trusts it. Each service holds only its own grants. The
+  bulk limit applies. `coffre untrust --issuer <url>` drops every binding on
+  an issuer at once. Its forged run claims prove nothing (section 2).
+- **Claim confusion.**
+  - GitHub's profiles never bind `sub`, whose format an organization can
+    change. They bind the claims instead, with the events listed and the
+    refs exact.
+  - IDs can't be registered again by someone else after a rename, as names
+    can, so profiles use IDs.
+- **Another repository in the organization** matches nothing without the
+  repository's ID. A binding open to the whole organization is an explicit,
+  displayed choice, for a reusable workflow pinned to one commit.
+- **The job's own code.** OIDC proves which job asked, not that everything
+  it runs is safe. A compromised runner, a build step that runs untrusted
+  code, or a reusable workflow that executes its caller's inputs reads what
+  the service can. Bindings narrow which jobs; grants narrow what they read.
+- **A token or credential in a log.** The token is spent once used, and
+  never more than an hour old. The credential dies in five minutes and
+  keeps the `coffre_svc_` prefix that secret scanners know. The CLI prints
+  neither, and the Action masks both.
 - **SSRF and poisoned keys:** section 4.
-- **A database owner adds or edits a binding:** it fails the app's MAC, and
-  is refused as `auth_row_tampered`.
+- **A database owner adds, edits or restores a binding:** section 6.
 
 ## 6. Where bindings live
 
-**In the app, beside sign-in accounts.** A binding is to a service what an `identities` row is
-to a person: "these runs are `token:api-deploy`" rather than "this GitHub user is
-`user:ada@acme.example`". Both say who someone is. The app decides that; the vault decides what
-they may decrypt.
+In the app, beside sign-in accounts: a binding is to a service what an
+`identities` row is to a person. Both say who someone is, which the app
+decides; the vault decides what they may decrypt.
 
-**The table.** `service_bindings` keeps the principal, its generation, the issuer, the JWKS URL,
-the claims and the revocation, under the app key's MAC like the sign-in rows. The label and
-last use sit outside the MAC.
-- Owners add and remove bindings, as `token.bind` and `token.unbind`.
-- Removing a binding revokes its live credentials.
-- A binding of an earlier generation is dead: removing the service ends it, and admitting the
-  service again doesn't revive it.
+A row written without the app's key fails its MAC. The MAC covers:
+- the ID, principal and generation;
+- the profile, the issuer and the JWKS URL;
+- the claims, as JSON with sorted keys;
+- the revocation.
 
-**Why not in the vault?** The vault's sealed member record would add little.
-- A compromised app already acts as any member.
-- The app's MAC already refuses a forged or edited row.
-- The one gap is a removed binding put back. A MAC proves a row genuine, not current, and a
-  binding doesn't expire as a session does. So step 6 refuses a binding a `token.unbind` entry
-  names, at the cost of one indexed lookup among rare entries. Deleting that entry breaks the
-  chain, which the next checkpoint finds within five minutes, turning `/readyz` red.
-
-The vault would refuse at once instead. It would cost bindings in `access`, two more vault calls,
-and sign-in configuration in the vault. I don't think it's worth it, but it's the first call to
-challenge.
+**Rollback is the accepted limit, as everywhere in coffre.**
+- **An old binding put back.** Bindings are immutable, so every binding
+  replaced or removed has a `token.unbind` entry, and both the exchange and
+  its commit refuse any binding that one names. To get past that, the
+  owner must delete or edit the entry. That is a change to the log, found
+  the next time the log is checked ([Limits](../architecture.md#limits)).
+  A credential row put back with its binding buys what is left of its five
+  minutes.
+- **The vault would close no gap.** Its sealed member record has the same
+  gap, a row put back with the newer entry cut out. A rewind of the whole
+  database gets past both.
+- **Finding it doesn't stop it.** A red `/readyz` stops nothing by itself.
+  Containment would be a design of its own, as for the rest of coffre.
 
 ## 7. UI, CLI and the Action
 
-- **The UI.** A service's Tokens page gets a "Trusted workloads" list: issuer, claims, who added
-  it, last use, and Remove.
-  - Presets cover GitHub Actions, GitLab, CircleCI, Buildkite, Kubernetes and Google Cloud, plus
-    any OIDC issuer.
-  - The GitHub preset asks for repository, workflow, branch and event. It looks up the IDs of a
-    public repository, or shows `gh api repos/acme/api --jq '.id, .owner.id'` for a private one.
-  - Presets only fill in claims, shown in full before saving.
-- **The CLI**, naming members as `coffre grant` does:
-  ```sh
-  coffre trust api-deploy                 # lists its bindings
-  coffre trust api-deploy --github acme/api --workflow deploy.yml --branch main
-  coffre trust api-deploy --issuer https://gitlab.com --claim namespace_id=12 --claim project_id=345 --claim ref=main
-  coffre untrust api-deploy <binding-id>
-  ```
-- **In CI**, with `COFFRE_SERVICE` set and no `COFFRE_TOKEN`, the CLI exchanges a token itself.
-  - It takes the token from `COFFRE_ID_TOKEN` or `COFFRE_ID_TOKEN_FILE` (a Kubernetes projected
-    token).
-  - On GitHub, it asks for one with the instance URL as audience.
-  - It keeps the credential in memory, never in `~/.coffre`: a self-hosted runner's disk
-    outlives the job.
-- **The Action** needs `id-token: write`, and takes `service:` instead of `token:`. It calls
-  `core.getIDToken(<instance URL>)`, exchanges the token, and masks both.
+**The UI.** A service's Tokens page gets a "Trusted workloads" list: issuer,
+claims, who added the binding, its last use, and Remove.
+- Adding one offers the profiles above, and shows the exact claims before
+  saving.
+- The GitHub form asks for the repository, workflow, branch and event, or
+  for a reusable workflow and its commit. It looks up the IDs of a public
+  repository, or shows `gh api repos/acme/api --jq '.id, .owner.id'` for a
+  private one.
+
+**The CLI** names members as `coffre grant` does:
+```sh
+coffre trust api-deploy                 # lists its bindings
+coffre trust api-deploy --github acme/api --workflow deploy.yml --branch main --event push
+coffre trust api-deploy --gitlab 345 --branch main --source push
+coffre untrust api-deploy <binding-id>
+```
+
+**In CI**, with `COFFRE_SERVICE` set and no `COFFRE_TOKEN`, the CLI exchanges
+a token itself.
+- On GitHub, Buildkite and CircleCI, it asks the platform for a fresh token
+  with the instance URL as audience (`circleci run oidc get`, not the
+  default token, whose audience is the organization's).
+- Elsewhere it reads `COFFRE_ID_TOKEN`.
+- It keeps the credential in memory, never in `~/.coffre`, because a
+  self-hosted runner's disk outlives the job.
+
+**The Action** needs `id-token: write`, and takes `service:` instead of
+`token:`. It calls `core.getIDToken(<instance URL>)`, exchanges the token,
+and masks both.
 
 **Not in v1:**
-- Cloudflare Access.
-- Patterns, and claims that are nested or not strings.
-- Issuers the internet can't reach: a binding with pasted keys would cover them, when asked.
-- Narrower grants per binding: two needs mean two services.
+- Cloudflare Access deployments.
+- Kubernetes. A name in `sub` can be reused, and the immutable UID is nested. A deleted account's
+  tokens stay valid offline, without TokenReview. A projected token is read again on each call,
+  which single use refuses. A later profile would need a typed UID path and TokenRequest.
+- Bitbucket Pipelines and Fly.io: their audiences can be set, but their
+  profiles wait until their untrusted triggers are checked.
+- Azure Pipelines, whose documented flow fixes the audience.
+- CircleCI's shared root issuer.
+- Patterns; nested or non-string claims; narrower grants per binding.
+
+## Review responses
+
+| # | Finding | Response |
+|---|---|---|
+| 1 | ES256 twins defeat a whole-token hash | Accepted: the signing input's hash is consumed, in its own table; a test presents the twin (section 3). |
+| 2 | Minimums accept unrelated workloads | Accepted: profiles enforced on the server, GitHub's events listed, the job's own code under threats (sections 1, 5). |
+| 3 | A reusable workflow's name isn't its identity | Accepted: `job_workflow_sha` required; organization-wide trust only by explicit choice (section 1). |
+| 4 | Anonymous requests reach the vault | Accepted, in the PM's order: admission first, the vault last; issuance bounded per binding; refusal logs sampled; fetch cooldowns (sections 2, 4). |
+| 5 | An edited binding rolls back undetected | Accepted: bindings are immutable; a change is a new ID (sections 1, 6). |
+| 6 | Exchange races unbinding | Accepted: sign-in's commit discipline; the credential's MAC and foreign key carry its binding, read on every check; races tested on both engines (section 2). |
+| 7 | The public-address policy is undefined | Accepted: globally routable unicast, per address, in the resolver; the Workers transport named (section 4). |
+| 8 | Kubernetes identity and revocation | Left out of v1 (section 7). |
+| 9 | Projected tokens break single use | Moot without Kubernetes; GitLab's limit and a lost answer's recovery stated (section 3). |
+| 10 | Platform facts, token profile | Accepted: Bitbucket corrected, then left out for another reason; CircleCI through `oidc get`; Buildkite by IDs; types and inequalities spelled out (sections 1, 3, 7). |
+| 11 | Reads can't be traced to a run | Accepted: the credential's ID in every entry its requests write, the vault's through correlation (section 2). |
+| 12 | Section 6 overstated the vault | Accepted, rewritten (section 6). Argued: a `token.unbind` refuses without its MAC being checked, since a forged one can only deny service, which a database owner can do anyway. |
