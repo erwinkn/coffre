@@ -21,8 +21,8 @@ it, instead of a token kept in the CI's secrets. An owner trusts the
 workflow, on the service's page under "Trusted workloads", or with
 `coffre trust` ([how a binding is checked](design/oidc.md)). Each run then
 trades its ID token for a credential that lasts five minutes, and nothing
-long-lived is stored. The deployment must turn this on
-([deploy.md](deploy.md#ci-runs-without-a-stored-token)).
+long-lived is stored. A deployment `coffre init` writes has this on; an
+older one turns it on ([deploy.md](deploy.md#ci-runs-without-a-stored-token)).
 
 ```sh
 coffre trust api-deploy --github acme/api --workflow deploy.yml --branch main --apply

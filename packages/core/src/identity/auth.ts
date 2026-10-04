@@ -109,8 +109,10 @@ export type SigninOptions = {
  *   signin({ providers: [github({ clientId, clientSecret, organization: 'acme' })] })
  */
 export function signin(options: SigninOptions): Auth {
-  // Checked now, where the deployment wrote it, and again with the URL.
-  defineSignin({ ...toSignin(options), publicUrl: 'https://coffre.invalid' });
+  // Checked now, where the deployment wrote it, and again with the URL. Now on
+  // a loopback stand-in: what turns on the URL, such as loopback issuers, is
+  // decided with the real one.
+  defineSignin({ ...toSignin(options), publicUrl: 'http://127.0.0.1' });
   return {
     resolve: (publicUrl) => ({ mode: 'signin', signin: defineSignin({ ...toSignin(options), publicUrl }) }),
   };

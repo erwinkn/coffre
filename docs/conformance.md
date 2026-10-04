@@ -51,9 +51,12 @@ the CLI's own entry, so that it is tested in this repository's CI.
 The settings go in as the environment the deployment's own files would give
 it: `wrangler dev -c app/wrangler.jsonc -c vault/wrangler.jsonc` with
 Worker secrets from the environment, or `src/vault.ts` and `src/server.ts`
-with what `server.env` and `vault.env` would hold. Two things are the
-run's own: fixed local keys, and GitHub's URLs, pointed at the dev IdP
-(`@coffre/conformance/idp`) in the checker's process. So a deployment must
+with what `server.env` and `vault.env` would hold. Three things are the
+run's own: fixed local keys; GitHub's URLs, pointed at the dev IdP
+(`@coffre/conformance/idp`) in the checker's process; and
+`ALLOW_LOOPBACK_ISSUERS_FOR_DEVELOPMENT=true`, so that a trust binding may
+name the dev IdP's CI issuer, plain HTTP on loopback, as an instance on
+loopback may. So a deployment must
 list `github(…)` among its `signin(…)` providers, as `init` writes it; one
 behind Access, or with only other providers, cannot be booted as it is. Nothing from the shell's
 `COFFRE_*` reaches it.
@@ -67,6 +70,7 @@ The people:
 | leaver | a developer on `conformance/dev`, in a browser and in the CLI (a device login); removed along the way |
 | bulk reader | a viewer on `conformance/bulk`, where there are more values than the bulk limit |
 | service | `token:conformance-ci`, a viewer on dev with a token; removed along the way |
+| CI run | `token:conformance-run`, a viewer on dev with no token: a trust binding lets a GitHub workflow's runs sign in as it, by the ID token the dev IdP signs for them |
 | stranger | never admitted |
 
 Every value set is a canary, `coffre-canary-<random>`, never to be seen
@@ -95,6 +99,14 @@ In order, since each builds on the ones before:
 | verify keys | `coffre verify keys` with the admin's session: the deployment's own keys pass, vault ID included; a wrong vault key, on stdin, and a malformed app key are each named. No key shows in what it prints |
 | offboarding | Removing the leaver names the values they read, to rotate; their browser session, their CLI session and a new sign-in all stop at once. A removed service's token stops too |
 | bulk limit | One more value at once than the limit allows gets 403 `bulk_limit`, with reason `bulk_limit`; a single value still opens |
+| trust a run | The admin trusts `deploy.yml`, pushed to `main` of `acme/api`, to sign in as `token:conformance-run`, from the dev IdP's CI issuer (`/workloads`). A deployment that trusts no workloads skips this and the checks after it, to tokens unlogged |
+| run signs in | That run's ID token buys a five-minute credential at `POST /api/auth/oidc`, which reads dev as the service. The vault's `secret.read` names the credential, and the audit log leads from the read to the run |
+| run token spent | A token is taken once: sent again, it is refused as `replayed`, and so is an ES256 token's twin, its signature's (r, n − s) in place of (r, s) |
+| runs refused | Tokens for another instance, expired, from a feature branch, from a pull request or from another repository, and a good token for a service no binding names: each 401 with its reason, never what the binding expects, and none logged as an exchange |
+| run signs in by CLI | `coffre get` with `COFFRE_SERVICE`, as on GitHub Actions (asking the runner's token endpoint) and with `COFFRE_ID_TOKEN`: it reads the value, prints no token, and keeps no credential on disk |
+| run unbound | Removing the binding ends the credential it issued at once, and the next run's token buys none |
+| exchanges limited | Malformed tokens from one address get 429 `busy`, with `Retry-After: 60`, within 200 a minute: the limit counts before anything is read. Last of these, since it spends the address's minute |
+| tokens unlogged | No ID token or credential these checks used is in the processes' output, nor any service credential |
 | checkpoints | Each Cron run has the vault sign the log up to its last entry, in an `audit.checkpoint` entry of its own that covers the one before, and the log verifies through it |
 | keys behind writes | Every `secret.write` and `secret.restore` names, by `related_seq`, the vault's `key.wrap` or `key.rewrap` for the same member, request, operation, secret and version; and no value read is logged by the app, only by the vault |
 | no audit, no value | With a trigger refusing `secret.read` appends, a reveal gets 500 `internal_error`, the injected cause appears in the process output, and no value leaves; it works again once the log does |

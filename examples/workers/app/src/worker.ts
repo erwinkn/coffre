@@ -13,6 +13,11 @@ type Env = {
   GITHUB_URL?: string;
   GITHUB_API_URL?: string;
   APP_KEY: string;
+  /** What every CI run's exchange passes first: app/wrangler.jsonc's rate-limiting bindings. */
+  WORKLOADS_PER_SOURCE: RateLimit;
+  WORKLOADS_TOTAL: RateLimit;
+  /** Set by conformance only: a binding's issuer may then be plain HTTP on loopback. Refused unless PUBLIC_URL is loopback too. */
+  ALLOW_LOOPBACK_ISSUERS_FOR_DEVELOPMENT?: string;
 };
 
 export default coffre((env: Env) => ({
@@ -28,6 +33,12 @@ export default coffre((env: Env) => ({
         apiUrl: env.GITHUB_API_URL,
       }),
     ],
+    // CI runs may sign in as services with their platform's ID token, through
+    // the trust bindings owners make (docs/design/oidc.md).
+    workloads: {
+      limits: { perSource: env.WORKLOADS_PER_SOURCE, total: env.WORKLOADS_TOTAL },
+      allowLoopbackIssuersForDevelopment: env.ALLOW_LOOPBACK_ISSUERS_FOR_DEVELOPMENT === 'true',
+    },
   }),
   auditChainKey: env.APP_KEY,
 }));

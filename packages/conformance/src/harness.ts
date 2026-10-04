@@ -185,6 +185,8 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       ...['--persist-to', state, '--show-interactive-dev-session=false'],
       // Not in wrangler.jsonc's vars, so not taken from the environment.
       ...['--var', `GITHUB_URL:${github.GITHUB_URL}`, '--var', `GITHUB_API_URL:${github.GITHUB_API_URL}`],
+      // The dev IdP's workload issuer is plain HTTP on loopback, which only a check may trust.
+      ...['--var', 'ALLOW_LOOPBACK_ISSUERS_FOR_DEVELOPMENT:true'],
     ], {
       // Wrangler hands each Worker the vars and secrets its own
       // wrangler.jsonc declares, from here: the app never sees the vault key.
@@ -237,6 +239,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
         DATABASE_URL: `file:${database}`,
         VAULT_SOCKET: socket,
         APP_KEY: KEYS.APP_KEY,
+        ALLOW_LOOPBACK_ISSUERS_FOR_DEVELOPMENT: 'true',
         ...github,
       });
     let server = startServer();

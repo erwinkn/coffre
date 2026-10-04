@@ -14,6 +14,7 @@ import { canaryScan } from './checks/canaries.ts';
 import { Cli, cliLogin, verifyAsOwner, verifyAsUser, verifyInterrupted, verifyKeys, verifyLeftovers, verifyWithToken } from './checks/cli.ts';
 import { pageLoad, personas, setUp, setUpLive, signInAdmin } from './checks/people.ts';
 import { health } from './checks/surface.ts';
+import { cliSignsIn, exchangesLimited, runSignsIn, runsRefused, runUnbound, spentOnce, tokensUnlogged, trustRun } from './checks/workloads.ts';
 
 /** The names of the checks that failed. */
 export async function conform(deployment: Deployment, options: { bulkLimit: number }): Promise<string[]> {
@@ -52,6 +53,16 @@ export async function conform(deployment: Deployment, options: { bulkLimit: numb
   }
   await report.check('offboarding', all, ({ people, canaries }) => offboarding(deployment, people, canaries));
   await report.check('bulk limit', { people }, ({ people }) => bulkLimit(people, options.bulkLimit));
+  // A CI run signing in with its ID token, through a binding. The limit
+  // comes last of these: it spends this address's exchanges for the minute.
+  const binding = await report.check('trust a run', { admin }, ({ admin }) => trustRun(deployment, admin));
+  const credential = await report.check('run signs in', { admin, canaries, binding }, ({ admin, canaries }) => runSignsIn(deployment, admin, canaries));
+  await report.check('run token spent', { binding }, () => spentOnce(deployment));
+  await report.check('runs refused', { admin, binding }, ({ admin }) => runsRefused(deployment, admin));
+  await report.check('run signs in by CLI', { canaries, binding }, ({ canaries }) => cliSignsIn(deployment, canaries));
+  await report.check('run unbound', { admin, binding, credential }, ({ admin, binding, credential }) => runUnbound(deployment, admin, binding, credential));
+  await report.check('exchanges limited', { binding }, () => exchangesLimited(deployment));
+  await report.check('tokens unlogged', { binding }, () => tokensUnlogged(deployment));
 
   await report.check('checkpoints', { people }, ({ people }) => checkpoints(deployment, people));
   await report.check('keys behind writes', { people }, ({ people }) => writesAgree(deployment));

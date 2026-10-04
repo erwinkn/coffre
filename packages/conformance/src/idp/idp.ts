@@ -5,6 +5,7 @@ import { AuthorizationServer } from './authorize.ts';
 import { FakeGitHub } from './github.ts';
 import type { Route } from './http.ts';
 import { OidcProvider } from './oidc.ts';
+import { WorkloadIssuer } from './workloads.ts';
 import {
   defaultGitHubAccount,
   defaultSubject,
@@ -73,6 +74,9 @@ export class DevIdp {
   /** See {@link DevIdpOptions.autoApprove}. */
   autoApprove: boolean;
 
+  /** A CI platform's ID tokens, under `/workloads`, for trust bindings. */
+  readonly workloads = new WorkloadIssuer(() => this.origin);
+
   constructor(options: DevIdpOptions = {}) {
     this.autoApprove = options.autoApprove ?? false;
     this.#clients.set(DEFAULT_CLIENT.clientId, {
@@ -83,7 +87,7 @@ export class DevIdp {
     for (const client of options.clients ?? []) this.registerClient(client);
 
     const authz = new AuthorizationServer(this);
-    this.#routes = [...new OidcProvider(this, authz).routes(), ...new FakeGitHub(this, authz).routes()];
+    this.#routes = [...new OidcProvider(this, authz).routes(), ...new FakeGitHub(this, authz).routes(), ...this.workloads.routes()];
   }
 
   get origin(): string {
@@ -105,6 +109,7 @@ export class DevIdp {
     const { privateKey, publicKey } = await generateKeyPair('RS256', { extractable: true });
     this.privateKey = privateKey;
     this.publicJwk = { ...(await exportJWK(publicKey)), kid: this.kid, alg: 'RS256', use: 'sig' };
+    await this.workloads.start();
 
     this.#server = createServer((req, res) => {
       // Dev-only: stands in for `cloudflared access login`. Cloudflare Access

@@ -391,9 +391,13 @@ uses Postgres; Node conformance uses SQLite to exercise the local option.
 
 A service can be trusted to sign in with the ID token a CI platform signs
 for each run, instead of a token kept in the CI's secrets
-([design](design/oidc.md)). It is off until the deployment turns it on, and
-an exchange always passes two limits first, per source address and in
-total, which the deployment provides.
+([design](design/oidc.md)). A deployment `coffre init` writes has it on,
+and trusts no run until an owner makes a binding for it. An exchange always
+passes two limits first, per source address and in total, which the
+deployment provides. An older deployment adds them as below;
+leaving `workloads` out turns it off. `ALLOW_LOOPBACK_ISSUERS_FOR_DEVELOPMENT`,
+in the examples, is for conformance: an instance whose public URL is not
+loopback refuses to start with it set.
 
 On Workers, two rate-limiting bindings in `app/wrangler.jsonc`:
 

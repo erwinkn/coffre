@@ -1,7 +1,7 @@
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { defineSignin, github, MAX_BINDINGS, type BindingClaims } from '@coffre/core/identity';
+import { defineSignin, github, MAX_BINDINGS, signin as signinAuth, type BindingClaims } from '@coffre/core/identity';
 import type { Database } from '@coffre/db';
 import { migrationLedger } from '@coffre/db/dialect';
 import { asc, eq, sql, type SQL } from 'drizzle-orm';
@@ -262,6 +262,21 @@ test('with workloads off, the routes say how to turn them on', async () => {
     /workloads need their limits, per source and in total/,
   );
   assert.equal(defineSignin({ publicUrl: 'https://secrets.acme.example', providers: [github({ clientId: 'a', clientSecret: 'b' })] }).workloads, null);
+});
+
+test('loopback issuers are for development: an instance off loopback refuses to start with them', () => {
+  const at = (publicUrl: string) =>
+    defineSignin({ publicUrl, providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: LIMITS, allowLoopbackIssuersForDevelopment: true } }).workloads;
+  assert.throws(() => at('https://secrets.acme.example'), /allowLoopbackIssuersForDevelopment is for an instance on loopback, and https:\/\/secrets\.acme\.example is not one: turn it off/);
+  assert.throws(() => at('https://127.0.0.1.nip.io'), /is not one/);
+  for (const publicUrl of ['http://127.0.0.1:3000', 'http://localhost:3000', 'http://[::1]:3000']) {
+    assert.deepEqual(at(publicUrl), { allowLoopback: true, limits: LIMITS });
+  }
+  // As a deployment writes it: signin() takes it, and the instance's own URL decides.
+  const auth = signinAuth({ providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: LIMITS, allowLoopbackIssuersForDevelopment: true } });
+  assert.throws(() => auth.resolve('https://secrets.acme.example'), /is not one: turn it off/);
+  const local = auth.resolve('http://127.0.0.1:3082');
+  assert.equal(local.mode === 'signin' && local.signin.workloads?.allowLoopback, true);
 });
 
 /** Raw SQL as the owner, on either engine. */

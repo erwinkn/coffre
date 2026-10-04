@@ -210,6 +210,10 @@ provider, and its authorize page asks which seeded person you are. Plain
 HTTP is accepted for a provider on loopback only, so no deployment can end
 up trusting it. The seed signs in the same way, as the root admin, and
 conformance does too, with the dev IdP in its own process for the run.
+It also plays a CI platform under `/workloads`, which a trust binding may
+name in development: `curl -s -X POST http://127.0.0.1:8081/workloads/token
+-d aud=http://127.0.0.1:3000` mints a run's ID token, for the CLI's
+`COFFRE_ID_TOKEN`.
 Nothing local stands in for Access: its verifier is covered by unit tests
 against Access-shaped tokens.
 
