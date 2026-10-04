@@ -611,7 +611,9 @@ adds two small rows.
 names it, as `credentialId` in its metadata: the app's own, and the
 vault's, through a `credentialId` in its calls' correlation that it copies
 and never decides on. The exchange's entry names the same credential, with
-the run's claims. So a secret read leads back to its run in one indexed
+the run's claims. A credential an entry acts on (one a sign-in opens, a
+token issued, a session revoked) is its `targetCredentialId`, so revoking
+another run's credential is the caller's act, never that run's. So a secret read leads back to its run in one indexed
 read, whatever became of the credential's row, and the audit page shows the
 run under the actor ("acme/api run 7001 at 3f2a9c1"): what the issuer
 asserted, not proof of which run sent the request.

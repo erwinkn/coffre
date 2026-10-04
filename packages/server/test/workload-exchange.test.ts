@@ -357,6 +357,37 @@ test("Hyperdrive's cache revives nothing: rows put back after a removal stay dea
   }
 });
 
+test("a revocation is its caller's act: the credential it ends is its target, never the entry's run", async () => {
+  /** A run's credential, by its run_id: the token, and its ID from the exchange's entry. */
+  const runOf = async (runId: string) => {
+    const { body } = await trade(token(rsa, { run_id: runId }));
+    const entry = (await appEntries('token.exchange')).find((exchange) => (exchange.metadata.run as { run_id?: string }).run_id === runId);
+    return { token: body.token!, id: entry!.metadata.credentialId as string };
+  };
+  const [a, b, c] = [await runOf('7001'), await runOf('7002'), await runOf('7003')];
+  const revoke = (credential: string, id: string) =>
+    handleRequest(new Request(`${ORIGIN}/api/sessions/${id}`, { method: 'DELETE', headers: { authorization: `Bearer ${credential}` } }), runtime, ui, IP);
+  // Run A revokes a credential that is no one's, then run B's, its own service's.
+  const nobody = '22222222-2222-4222-8222-222222222222';
+  assert.equal((await revoke(a.token, nobody)).status, 404);
+  assert.equal((await revoke(a.token, b.id)).status, 200);
+  // The root admin, signed in as a person, revokes run C's.
+  await runtime.signin!.revokeCredential(await contextFor(deps, ROOT), c.id);
+
+  const revocations = (await appEntries('token.revoke')).map(({ actor, decision, metadata }) => ({
+    actor, decision, credentialId: metadata.credentialId, targetCredentialId: metadata.targetCredentialId,
+  }));
+  assert.deepEqual(revocations, [
+    { actor: MEMBER, decision: 'deny', credentialId: a.id, targetCredentialId: nobody },
+    { actor: MEMBER, decision: 'allow', credentialId: a.id, targetCredentialId: b.id },
+    { actor: `user:${ROOT}`, decision: 'allow', credentialId: undefined, targetCredentialId: c.id },
+  ]);
+  // On the audit page: A's run for A's two, and no run for the admin's.
+  const { entries } = await clientFor(deps, ROOT).audit.list({ detail: '1' });
+  const shown = entries.filter((entry) => entry.action === 'token.revoke').sort((x, y) => x.seq - y.seq).map((entry) => entry.run?.claims.run_id ?? null);
+  assert.deepEqual(shown, ['7001', '7001', null]);
+});
+
 test('a key the issuer rotated in is fetched once; while the issuer cannot be reached, a 503, and cached keys still work', async () => {
   assert.equal((await trade(token(rsa))).status, 200);
   const rotated = key('RS256', 'rs-2');

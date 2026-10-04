@@ -317,7 +317,7 @@ test('a first sign-in with an invited email binds the account and opens a browse
     subject: '101',
     emails: [DEV],
     identityId: identity.id,
-    credentialId: result.credential.id,
+    targetCredentialId: result.credential.id,
   });
 
   const { access, ...verified } = await signin.verify(result.credential.token);
@@ -522,7 +522,7 @@ test('signing out revokes that credential only, once, and is audited', async () 
     `sign_in allow ${DEV}`,
     `sign_out allow ${DEV}`,
   ]);
-  assert.deepEqual(rows[3].metadata, { credentialId: ended.credential.id, kind: 'browser' });
+  assert.deepEqual(rows[3].metadata, { targetCredentialId: ended.credential.id, kind: 'browser' });
 });
 
 test('sign-ins stay in the log, and the audit list shows them only when asked', async () => {
@@ -601,13 +601,13 @@ test('people revoke their own credentials; only owners revoke anyone else\'s', a
     ],
   );
   assert.deepEqual(rows[5].metadata, {
-    credentialId: devSession.credential.id,
+    targetCredentialId: devSession.credential.id,
     kind: 'browser',
     principalType: 'user',
     principalId: DEV,
   });
   assert.deepEqual(rows[6].metadata, {
-    credentialId: token.id,
+    targetCredentialId: token.id,
     kind: 'service',
     principalType: 'service',
     principalId: SERVICE,
@@ -800,7 +800,7 @@ test('owners issue service tokens that verify as the service', async () => {
     principalType: 'service',
     principalId: SERVICE,
     label: 'deploys',
-    credentialId: issued.id,
+    targetCredentialId: issued.id,
     expiresAt: issued.expiresAt,
   });
 
@@ -960,7 +960,7 @@ test('device flow: start, describe, approve, then one poll gets a CLI session', 
   });
   assert.deepEqual(rows[1].metadata, {
     kind: 'cli',
-    credentialId: approved.credential.id,
+    targetCredentialId: approved.credential.id,
     deviceAuthorizationId: stored.id,
     clientLabel: 'coffre CLI on laptop',
     clientIp: IP,
