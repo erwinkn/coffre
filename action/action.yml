@@ -31,4 +31,4 @@ runs:
           echo '::error::coffre requires Node.js 20 or newer. Set up your job toolchain before this Action.' >&2
           exit 1
         fi
-        npx -y @coffre/cli@0.1.15 export --format github "$INPUT_ENVIRONMENT"
+        npx -y @coffre/cli@0.1.16-gate-probe.1 export --format github "$INPUT_ENVIRONMENT"
