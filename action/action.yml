@@ -42,4 +42,4 @@ runs:
           echo '::error::service needs the job to have `permissions: id-token: write`.' >&2
           exit 1
         fi
-        npx -y @coffre/cli@0.1.16 export --format github "$INPUT_ENVIRONMENT"
+        npx -y @coffre/cli@0.1.17 export --format github "$INPUT_ENVIRONMENT"
