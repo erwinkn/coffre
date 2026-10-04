@@ -104,26 +104,64 @@ echo '{ "private": true }' >"$work/cli/package.json"
 quietly "installing @coffre/cli@$release" "$work/cli.log" \
     pnpm --dir "$work/cli" add --save-exact --store-dir "$store" "@coffre/cli@$release"
 
-# Every way the release's conformance may migrate: coffre-server migrate
-# <url>, or the CLI's coffre migrate with the URL in its environment. The
-# conformance hands its children no COFFRE_* of the shell's, so all the
-# shim needs is written into it. It leaves a mark, so that a release that
-# migrates some other way fails here rather than passing unchecked.
-shim() {
-    local bin="$1" extra="$2"
-    [[ -e "$bin" ]] || return 0
-    mv "$bin" "$bin.release"
-    cat >"$bin" <<EOF
-#!/bin/sh
-# pnpm test:compat: migrate with $against, not the release's own.
-[ "\$1" = migrate ] || exec "$bin.release" "\$@"
+# The ways the release's conformance migrates, each replaced by one that
+# migrates with $against and leaves a mark, so that a release migrating some
+# other way fails here rather than passing unchecked:
+#
+# - its coffre-server bin, which it runs as `coffre-server migrate <url>`:
+#   every kind up to 0.1.16, and Node's after;
+# - its CLI's entry, which its Workers conformance runs with node, as
+#   `coffre migrate --yes`, from 0.1.17 on: found from the deployment's
+#   folder, as that conformance finds it. Every other command of the CLI
+#   runs as the release's own, in the same process.
+#
+# Each replaced file moves aside and a new one takes its place, never written
+# through: pnpm links them from its store. Its children get no COFFRE_* of
+# the shell's, so all a shim needs is written into it.
+migration() {
+    cat <<EOF
 url="\${COFFRE_MIGRATE_DATABASE_URL:-\${DATABASE_URL:-}}"
 for arg in "\$@"; do case "\$arg" in postgres*|file:*) url="\$arg" ;; esac; done
 $migrator "\$url"
-[ -z "$extra" ] || node '$root/scripts/compat-migrate.mjs' --only "\$url" '$extra'
+[ -z "$1" ] || node '$root/scripts/compat-migrate.mjs' --only "\$url" '$1'
 touch '$work/migrated'
 EOF
+}
+
+shim_bin() {
+    local bin="$1" extra="$2"
+    [[ -e "$bin" || -e "$bin.release" ]] || return 0
+    [[ -e "$bin.release" ]] || mv "$bin" "$bin.release"
+    rm -f "$bin"
+    {
+        echo '#!/bin/sh'
+        echo "# pnpm test:compat: migrate with $against, not the release's own."
+        echo "[ \"\$1\" = migrate ] || exec '$bin.release' \"\$@\""
+        migration "$extra"
+    } >"$bin"
     chmod +x "$bin"
+}
+
+shim_cli() {
+    local project="$1" extra="$2" manifest entry
+    manifest="$(cd "$project" && node -e "process.stdout.write(require.resolve('@coffre/cli/package.json'))" 2>/dev/null)" || return 0
+    entry="$(dirname "$manifest")/$(node -e "process.stdout.write(require(process.argv[1]).bin.coffre)" "$manifest")"
+    [[ -e "${entry%.js}.release.js" ]] || mv "$entry" "${entry%.js}.release.js"
+    rm -f "$entry"
+    { echo '#!/bin/sh'; migration "$extra"; } >"$entry.compat.sh"
+    cat >"$entry" <<EOF
+// pnpm test:compat: \`coffre migrate\` migrates with $against; every other command is the release's own.
+if (process.argv[2] === 'migrate') {
+  const { spawnSync } = await import('node:child_process');
+  process.exit(spawnSync('/bin/sh', ['$entry.compat.sh', ...process.argv.slice(3)], { stdio: 'inherit' }).status ?? 1);
+}
+await import('./$(basename "${entry%.js}").release.js');
+EOF
+}
+
+shim() {
+    shim_bin "$1/node_modules/.bin/coffre-server" "$2"
+    shim_cli "$1" "$2"
 }
 
 conformance() {
@@ -150,7 +188,7 @@ for kind in "${kinds[@]}"; do
     quietly "installing coffre-$kind" "$work/$kind-install.log" pnpm --dir "$project" install --store-dir "$store"
     engine="$([[ "$kind" == workers ]] && echo postgres || echo sqlite)"
 
-    for bin in coffre-server coffre; do shim "$project/node_modules/.bin/$bin" ''; done
+    shim "$project" ''
     if conformance "$project" "$kind" "$work/$kind.log"; then
         echo "    conformant"
     else
@@ -161,11 +199,7 @@ for kind in "${kinds[@]}"; do
 
     # The check, shown able to fail: a destructive migration on top, which
     # renames a column the release writes at every sign-in.
-    for bin in coffre-server coffre; do
-        [[ -e "$project/node_modules/.bin/$bin.release" ]] || continue
-        mv "$project/node_modules/.bin/$bin.release" "$project/node_modules/.bin/$bin"
-        shim "$project/node_modules/.bin/$bin" "$root/scripts/compat/destructive.$engine.sql"
-    done
+    shim "$project" "$root/scripts/compat/destructive.$engine.sql"
     if conformance "$project" "$kind" "$work/$kind-destructive.log"; then
         echo "compat-check: coffre $release passed with a destructive migration applied; the check cannot fail, see $work/$kind-destructive.log" >&2
         exit 1
