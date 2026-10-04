@@ -5,8 +5,9 @@ coffre uses in tests and local development, their migrations and the
 migrator, the helpers for what the two engines do differently, and the
 connections, Hyperdrive's included.
 
-A deployment does not import it. `@coffre/server` runs its migrations with
-`coffre-server migrate`. The server and vault open the same database with
+A deployment does not import it. Its own CLI applies the migrations,
+`pnpm exec coffre migrate`, before the deploy; `coffre-server migrate` does
+the same for local SQLite and tests. The server and vault open the same database with
 separate logins, `coffre_runtime` and `coffre_vault_runtime`. The migrations
 grant each its own rights; only the owner runs migrations. The owner needs
 `CREATEROLE` and `CREATEDB`, and `ADMIN OPTION` on existing group roles.

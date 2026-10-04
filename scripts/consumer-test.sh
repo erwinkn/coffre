@@ -125,6 +125,18 @@ for kind in "${kinds[@]}"; do
         exit 1
     fi
     pnpm --dir "$project" typecheck
+
+    # Its pipeline's migrate: the CLI it pins, as `pnpm exec coffre`, takes
+    # the folder for a deployment of its own version, and gets as far as
+    # asking for the owner's URL, which no one gives it here.
+    if said="$(pnpm --dir "$project" exec coffre migrate --yes </dev/null 2>&1)"; then
+        echo "consumer-test: pnpm exec coffre migrate succeeded with no database" >&2
+        exit 1
+    fi
+    if [[ "$said" != *'no connection string'*COFFRE_MIGRATE_DATABASE_URL* ]]; then
+        echo "consumer-test: pnpm exec coffre migrate answered: $said" >&2
+        exit 1
+    fi
     if [[ "$kind" == workers ]]; then
         pnpm --dir "$project" build >"$work/$kind-build.log"
         grep -E 'Total Upload' "$work/$kind-build.log" | sed 's/^/    /'

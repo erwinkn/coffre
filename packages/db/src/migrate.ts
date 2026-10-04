@@ -101,27 +101,47 @@ async function expectedMigrations(engine: Engine): Promise<ExpectedMigration[]> 
   return expected;
 }
 
+/**
+ * A database a newer coffre migrated: it has applied every migration this
+ * version knows, and more. The ledger keeps no names, so each one it does not
+ * know is named by when it was made and its hash.
+ */
+export class DatabaseAhead extends Error {
+  readonly known: string[];
+  readonly unknown: { createdAt: string; hash: string }[];
+
+  constructor(known: string[], unknown: { createdAt: string; hash: string }[]) {
+    const made = unknown.map(({ createdAt, hash }) => `one made ${new Date(Number(createdAt)).toISOString().slice(0, 16).replace('T', ' ')} UTC (${hash.slice(0, 12)})`);
+    super(
+      `the database has applied ${unknown.length === 1 ? 'a migration' : `${unknown.length} migrations`} this version does not know, ` +
+        `after ${known.at(-1) ?? 'none'}: ${made.join(', ')}. A newer coffre migrated it`,
+    );
+    this.name = 'DatabaseAhead';
+    this.known = known;
+    this.unknown = unknown;
+  }
+}
+
 function verifyHistory(
   expected: ExpectedMigration[],
   applied: AppliedMigration[] | null,
   requireComplete: boolean,
 ): void {
   const rows = applied ?? [];
-  if (rows.length > expected.length) {
-    throw new Error('database contains migrations that are absent from this image');
-  }
-  if (requireComplete && rows.length !== expected.length) {
-    throw new Error(`migration history is incomplete: expected ${expected.length}, found ${rows.length}`);
-  }
-
-  rows.forEach((row, index) => {
-    const local = expected[index];
+  rows.slice(0, expected.length).forEach((row, index) => {
+    const local = expected[index]!;
     if (row.created_at !== local.createdAt || row.hash !== local.hash) {
       throw new Error(
         `migration history diverged at ${local.tag}; applied migrations must never be edited`,
       );
     }
   });
+  if (rows.length > expected.length) {
+    throw new DatabaseAhead(expected.map((entry) => entry.tag), rows.slice(expected.length).map((row) => ({ createdAt: row.created_at, hash: row.hash })));
+  }
+  if (requireComplete && rows.length !== expected.length) {
+    throw new Error(`migration history is incomplete: expected ${expected.length}, found ${rows.length}`);
+  }
 }
 
 async function postgresMigrator(url: string): Promise<Migrator> {

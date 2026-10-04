@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,7 +12,7 @@ import pg from 'pg';
 
 import { migrationsFolder } from '@coffre/db/migrate';
 
-import { migrationFailure, pendingOf, versionProblem } from '../src/migrate.ts';
+import { migrationFailure, pendingOf, pinProblem, versionProblem } from '../src/migrate.ts';
 import { cliVersion } from '../src/version.ts';
 import { database, emptyCluster, needsCluster } from './cluster.ts';
 
@@ -128,6 +128,59 @@ test('migrate refuses an instance that runs another version, before asking for a
   }
 });
 
+/** A deployment's folder, as `coffre init --node` writes one, its coffre packages pinned as given. */
+function deploymentFolder(pins: Record<string, string>): string {
+  const dir = mkdtempSync(join(tmpdir(), 'coffre-deployment-'));
+  mkdirSync(join(dir, 'src'));
+  writeFileSync(join(dir, 'src', 'vault.ts'), '');
+  writeFileSync(join(dir, 'vault.env.example'), '');
+  const [dependencies, devDependencies] = [{} as Record<string, string>, {} as Record<string, string>];
+  for (const [name, version] of Object.entries(pins)) (name === '@coffre/cli' ? devDependencies : dependencies)[name] = version;
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ private: true, dependencies, devDependencies }));
+  return dir;
+}
+
+const pinnedAt = (version: string) => ({ '@coffre/server': version, '@coffre/vault': version, '@coffre/cli': version });
+
+/** `coffre migrate`, as a deployment's pipeline runs it in its folder: no terminal, no session, the URL in the environment. */
+function migrateIn(dir: string, url: string | null, args: string[] = ['--yes']): Promise<{ code: number | null; output: string }> {
+  const home = mkdtempSync(join(tmpdir(), 'coffre-migrate-'));
+  const child = spawn(process.execPath, ['--conditions=coffre:source', main, 'migrate', ...args], {
+    cwd: dir,
+    env: { PATH: process.env.PATH, HOME: home, ...(url === null ? {} : { COFFRE_MIGRATE_DATABASE_URL: url }) },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let output = '';
+  child.stdout.setEncoding('utf8').on('data', (chunk: string) => (output += chunk));
+  child.stderr.setEncoding('utf8').on('data', (chunk: string) => (output += chunk));
+  return new Promise((resolve) =>
+    child.on('close', (code) => {
+      rmSync(home, { recursive: true, force: true });
+      resolve({ code, output });
+    }),
+  );
+}
+
+test("in a deployment's folder, a CLI that is not the version it pins refuses, before asking for anything", async () => {
+  assert.equal(pinProblem('0.1.17', '0.1.17'), null);
+  const dirs = [deploymentFolder(pinnedAt('0.0.1')), deploymentFolder({ ...pinnedAt(cliVersion()), '@coffre/vault': '0.0.1' })];
+  try {
+    const other = await migrateIn(dirs[0]!, null);
+    assert.equal(other.code, 1);
+    assert.match(other.output, new RegExp(`this deployment pins coffre 0\\.0\\.1, and this CLI is ${cliVersion().replace(/\./g, '\\.')}, whose migrations are another version's: migrate with the deployment's own, \`pnpm exec coffre migrate\``));
+    assert.doesNotMatch(other.output, /connection string/, 'it never asks for the database');
+    const mixed = await migrateIn(dirs[1]!, null);
+    assert.equal(mixed.code, 1);
+    assert.match(mixed.output, /pinned at .* and 0\.0\.1, not one: `coffre update` moves them together/);
+    // An instance is not what it migrates there.
+    const named = await migrateIn(deploymentFolder(pinnedAt(cliVersion())), null, ['--yes', '--url', ORIGIN]);
+    assert.equal(named.code, 1);
+    assert.match(named.output, /--url names an instance, and in a deployment's folder coffre migrate asks none/);
+  } finally {
+    for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // --- on a disposable cluster ---------------------------------------------------------
 
 /**
@@ -187,6 +240,68 @@ test('migrate applies what a database at the baseline lacks, and the instance th
     assert.match(again.output, /database is up to date/, 'once applied, there is nothing to ask for');
   } finally {
     server.close();
+  }
+});
+
+const SPINNER = /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/;
+
+test("in a deployment's folder, its pipeline migrates before the deploy, asking no instance; the deploy then finds its schema, and is ready", needsCluster, async () => {
+  const url = await atBaseline('setup_migrate_pipeline');
+  const dir = deploymentFolder(pinnedAt(cliVersion()));
+  try {
+    // Without a terminal, only with --yes.
+    const asked = await migrateIn(dir, url, []);
+    assert.equal(asked.code, 1);
+    assert.match(asked.output, /nothing here to confirm on: run coffre migrate on a terminal, or pass --yes/);
+    assert.deepEqual(await schema(url), { applied: 1, syncs: true });
+
+    const run = await migrateIn(dir, url);
+    assert.equal(run.code, 0, run.output);
+    assert.match(run.output, new RegExp(`${KNOWN.length - 1} migrations to apply to \\S+, for coffre ${cliVersion().replace(/\./g, '\\.')}`));
+    assert.match(run.output, new RegExp(`✓ Applied ${KNOWN.slice(1, -1).join(', ')} and ${KNOWN.at(-1)}, and reasserted the database's privileges`));
+    // As a CI log keeps it: plain lines, no escape codes, no spinner, no password.
+    assert.doesNotMatch(run.output, /\x1b\[/);
+    assert.doesNotMatch(run.output, SPINNER);
+    assert.ok(!run.output.includes(new URL(url).password), 'the password is never shown');
+    assert.deepEqual(await schema(url), { applied: KNOWN.length, syncs: false });
+
+    // Then the deploy: the new version finds every migration it knows applied, and is ready.
+    const { origin, server } = await instance(cliVersion(), url);
+    try {
+      const me = (await (await fetch(`${origin}/api/me`)).json()) as { instance: Parameters<typeof pendingOf>[0] };
+      assert.deepEqual(pendingOf(me.instance), []);
+      assert.equal(((await (await fetch(`${origin}/readyz`)).json()) as { ok: boolean }).ok, true);
+    } finally {
+      server.close();
+    }
+    const again = await migrateIn(dir, url);
+    assert.equal(again.code, 0, again.output);
+    assert.match(again.output, new RegExp(`✓ \\S+ is up to date, at coffre \\S+'s schema: ${KNOWN.length} migrations, the last ${KNOWN.at(-1)}`));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a database a newer coffre migrated is refused in a deployment's folder, its unknown migration named, and nothing changes", needsCluster, async () => {
+  const url = await atBaseline('setup_migrate_ahead');
+  const dir = deploymentFolder(pinnedAt(cliVersion()));
+  try {
+    assert.equal((await migrateIn(dir, url)).code, 0);
+    // What a later coffre would have recorded: a migration this one has never seen.
+    const client = new pg.Client({ connectionString: url });
+    await client.connect();
+    await client.query('INSERT INTO drizzle.__drizzle_migrations (hash, created_at) VALUES ($1, $2)', ['ab'.repeat(32), Date.UTC(2030, 0, 2, 3, 4)]);
+    await client.end();
+
+    const run = await migrateIn(dir, url);
+    assert.equal(run.code, 1);
+    assert.match(
+      run.output,
+      new RegExp(`is ahead of coffre \\S+: has applied a migration this version does not know, after ${KNOWN.at(-1)}: one made 2030-01-02 03:04 UTC \\(abababababab\\)\\. A newer coffre migrated it\\. Deploy that version, or, to go back, restore the database from before it \\(docs/restore\\.md\\)\\. Nothing was changed`),
+    );
+    assert.deepEqual(await schema(url), { applied: KNOWN.length + 1, syncs: false });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
