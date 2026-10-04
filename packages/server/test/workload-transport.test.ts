@@ -2,6 +2,7 @@ import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 import { isPublicAddress } from '../src/workloads/addresses.ts';
 import { discoverKeys, DiscoveryFailed } from '../src/workloads/discovery.ts';
@@ -75,6 +76,30 @@ for (const [name, transport] of [
     ] as const) {
       await assert.rejects(transport.json(new URL(`${origin}${path}`)), (error: Error) => error instanceof FetchRefused && why.test(error.message), path);
     }
+  });
+
+  test(`${name} closes a refused answer at its status, never reading its body`, async () => {
+    // An issuer, or a CDN before it, that answers 503 and goes on sending: 2 MiB, 16 KiB at a time.
+    let written = 0;
+    let closed!: () => void;
+    const gone = new Promise<void>((resolve) => (closed = resolve));
+    answers.set('/flood', (res) => {
+      res.writeHead(503, { 'content-type': 'text/plain' });
+      res.on('close', () => closed());
+      const chunk = Buffer.alloc(16 * 1024, 'x');
+      const timer = setInterval(() => {
+        if (res.destroyed || written >= 2 * 1024 * 1024) {
+          clearInterval(timer);
+          if (!res.destroyed) res.end();
+          return;
+        }
+        res.write(chunk);
+        written += chunk.byteLength;
+      }, 2);
+    });
+    await assert.rejects(transport.json(new URL(`${origin}/flood`)), /answered 503/);
+    await Promise.race([gone, sleep(2000).then(() => assert.fail('the connection stayed open'))]);
+    assert.ok(written < 1024 * 1024, `the issuer sent ${written} bytes before the connection closed`);
   });
 }
 

@@ -61,7 +61,8 @@ export const publicLookup: LookupFunction = (hostname, options, callback) => {
 function read(url: URL, response: IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
     if (response.statusCode !== 200) {
-      response.resume();
+      // Closed, not drained: its body would be read past every bound.
+      response.destroy();
       reject(new FetchRefused(url, `answered ${response.statusCode}`));
       return;
     }
