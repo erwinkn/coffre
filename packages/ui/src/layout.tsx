@@ -9,7 +9,6 @@ import { TooltipProvider } from './components/ui';
 import { ThemeToggle } from './components/theme';
 import { PreferencesContext, rememberSidebar, rememberTheme, type Preferences, type Theme } from './lib/preferences';
 import type { RouterContext } from './router';
-import { Agentation } from './components/agentation';
 import { LiveRegion } from './components/row-state';
 import { useShell } from './lib/use-shell';
 
@@ -77,7 +76,6 @@ export function CoffreProvider({ children }: { children: ReactNode }) {
           {children}
           <Toasts />
           <LiveRegion />
-          <Agentation />
         </TooltipProvider>
       </div>
     </PreferencesContext.Provider>

@@ -100,6 +100,13 @@ if (existsSync(routerManifest)) {
     }
 }
 
+// A Node deployment imports SQLite's driver itself, where its server's
+// build leaves it out (examples/node/app/vite.config.ts): the one
+// @coffre/db is built with.
+const libsql = read('packages/db/package.json').dependencies['@libsql/client'];
+const nodeDriver = read('examples/node/package.json').dependencies?.['@libsql/client'];
+if (nodeDriver !== libsql) problems.push(`examples/node/package.json: @libsql/client is ${nodeDriver ?? 'missing'}, and @coffre/db's is ${libsql}`);
+
 if (problems.length > 0) {
     console.error('Dependency pinning check FAILED:\n');
     for (const problem of problems) console.error(`  ${problem}`);

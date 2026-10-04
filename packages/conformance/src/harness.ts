@@ -5,8 +5,8 @@
 //   workers  two Workers under `wrangler dev`, on a Postgres database of
 //            their own, created for the run and dropped after, each through
 //            its own login
-//   node     the server and its vault process, on one SQLite file in a temp
-//            dir
+//   node     the app's build under srvx and its vault process, on one SQLite
+//            file in a temp dir
 //
 // Ports: coffre on `port`, the IdP on the next, wrangler's inspector on the
 // one after.
@@ -54,6 +54,8 @@ export type Deployment = {
   vaultRuntime: (() => Promise<Sql>) | null;
   /** The file holding the database, when it is one. */
   databaseFile: string | null;
+  /** The browser's half of the app's build: its static files. */
+  clientDir: string;
   /** The processes' output: all of it, or the last `tail` characters of each. */
   output(tail?: number): string;
   stop(): Promise<void>;
@@ -239,6 +241,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       runtime: () => postgres(runtime),
       vaultRuntime: () => postgres(vaultRuntime),
       databaseFile: null,
+      clientDir: join(dir, 'app/dist/client'),
       output,
       stop,
     };
@@ -258,8 +261,9 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
     await until('the vault socket', async () => existsSync(socket), 30, alive);
     // The pages as they run: the deployment's Start app, built by its own Vite.
     await run(bin('vite'), ['build', 'app']);
+    // As `pnpm start` runs it: the app's build, under srvx.
     const startServer = () =>
-      start('server', process.execPath, ['src/server.ts'], {
+      start('server', process.execPath, [join(dir, 'node_modules/srvx/bin/srvx.mjs'), '--prod', '--host=127.0.0.1', '-s', '../client', 'app/dist/server/server.js'], {
         PORT: String(port),
         PUBLIC_URL: origin,
         DATABASE_URL: `file:${database}`,
@@ -289,6 +293,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       runtime: null,
       vaultRuntime: null,
       databaseFile: database,
+      clientDir: join(dir, 'app/dist/client'),
       output,
       stop,
     };

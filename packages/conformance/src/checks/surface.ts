@@ -1,6 +1,7 @@
 // Health: up, and ready only once the scheduled job has beaten and the
 // vault has checkpointed it. What else anyone on the network sees, its
 // headers among it, `coffre verify instance` checks, here as anywhere.
+import { clientFiles, serverCodeIn } from '../bundle.ts';
 import type { Deployment } from '../harness.ts';
 import type { Person } from './people.ts';
 import { expect, until } from '../report.ts';
@@ -71,4 +72,17 @@ export async function headers(deployment: Deployment, admin: Person): Promise<st
     nonces.add(nonce);
   }
   return `${kinds.length} kinds of response, each with coffre's headers and a nonce of its own`;
+}
+
+/**
+ * Nothing of the server in what the browser loads: the database layer, a
+ * driver, a table only the server knows, a `COFFRE_*` read. Read from the
+ * client files the app's own build wrote, as the browser gets them.
+ */
+export async function browserBundle(deployment: Deployment): Promise<string> {
+  const files = clientFiles(deployment.clientDir);
+  expect(files.length > 0, `no client files in ${deployment.clientDir}`);
+  const found = serverCodeIn(files);
+  expect(found.length === 0, 'what the browser loads holds server code: a page imports something of the server', found.join('\n'));
+  return `${files.length} files the browser loads, none with server code in it`;
 }

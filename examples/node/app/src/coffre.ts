@@ -1,10 +1,8 @@
-// coffre's server: the API, sign-in, pages and scheduled job, in one
-// process. The pages are app/, a TanStack Start app built by Vite, with
-// coffre's routes and middleware; this is coffre's configuration, which
-// each of its requests is handed. It holds no vault key: it asks the vault,
-// a process of its own (src/vault.ts), over a Unix socket. Settings come
-// from server.env.
-import { createCoffre, github, processLimits, serve, signin } from '@coffre/server/node';
+// coffre's configuration, once, from the server's environment (server.env,
+// which `pnpm start` reads): read by src/server.ts, and so only on the
+// server. It holds no vault key: it asks the vault, a process of its own
+// (src/vault.ts), over a Unix socket.
+import { createCoffre, github, processLimits, signin, type CoffreContext } from '@coffre/server/node';
 import { connectVault } from '@coffre/vault/node';
 
 function env(name: string): string {
@@ -13,7 +11,7 @@ function env(name: string): string {
   return value;
 }
 
-const coffre = createCoffre({
+export const coffre = createCoffre({
   publicUrl: env('PUBLIC_URL'),
   database: env('DATABASE_URL'),
   vault: connectVault(env('VAULT_SOCKET')),
@@ -42,10 +40,9 @@ const coffre = createCoffre({
   auditChainKey: env('APP_KEY'),
 });
 
-// app/, built by `vite build app`.
-const server = await serve({ app: new URL('../app/dist/', import.meta.url), coffre, port: Number(env('PORT')) });
-console.log(`coffre is listening on ${server.url}`);
-
-for (const signal of ['SIGINT', 'SIGTERM'] as const) {
-  process.once(signal, () => void server.close().then(() => process.exit(0)));
+// What src/server.ts hands Start with each request, for Start's types.
+declare module '@tanstack/react-router' {
+  interface Register {
+    server: { requestContext: CoffreContext };
+  }
 }

@@ -6,10 +6,10 @@ import { TrustedWorkloads } from '../components/trusted-workloads';
 import { memberRef, useCoffre } from '../lib/coffre';
 import { queries } from '../lib/queries';
 import { useShell } from '../lib/use-shell';
-import { pageRoute, type Parent } from '../lib/page-route';
-import type { token } from '../routes';
+import { pageRoute } from '../lib/page-route';
+import type { token } from '../options';
 
-const Route = pageRoute<ReturnType<typeof token<Parent>>>();
+const Route = pageRoute<typeof token>();
 
 export function TokenPage() {
   const { token } = Route.useParams();

@@ -2,22 +2,23 @@
 
 Two processes, configured in code:
 
-- `src/server.ts`, the server: the API, sign-in, the pages and a job every
-  five minutes, on one port. Put a proxy that terminates TLS in front of it.
-  coffre is configured there, and serves `app/`, a TanStack Start app of
-  its own: `app/src/router.tsx` is its routes, its root and coffre's routes
-  under it, which you may mount one by one beside your own
-  ([Your own routes](https://github.com/erwinkn/coffre/blob/main/docs/deploy.md#your-own-routes)),
-  and `app/src/start.ts` puts coffre's middleware in front of every
-  response. `pnpm build` builds it with Vite (`app/vite.config.ts`) into
-  `app/dist`.
+- `app/`, the server: the API, sign-in, the pages and a job every five
+  minutes, on one port, a TanStack Start app of its own. Put a proxy that
+  terminates TLS in front of it. coffre is configured in
+  `app/src/coffre.ts`; `app/src/server.ts` hands it each request;
+  `app/src/start.ts` puts its middleware in front of every response; and
+  `app/src/routes/` holds its routes, the root and a file for each of
+  coffre's pages, beside any of your own
+  ([Your own routes](https://github.com/erwinkn/coffre/blob/main/docs/deploy.md#your-own-routes)).
+  `pnpm build` builds it with Vite (`app/vite.config.ts`) into `app/dist`,
+  which `pnpm start` runs, under srvx.
 - `src/vault.ts`, the vault: the keys, and the members and grants, which it
   keeps in the server's database through a login of its own. It answers
   only the server, on a Unix socket.
 
 Run them as two users that share a group, and the process facing the network
-never holds the vault key. For local development, `server.ts` can run the vault
-in its own process instead; see the comment there. Everything below runs
+never holds the vault key. For local development, the server can run the vault
+in its own process instead; see the comment in `app/src/coffre.ts`. Everything below runs
 from this directory, on Node 24 or later.
 
 ## 1. Settings

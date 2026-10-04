@@ -51,15 +51,15 @@ the CLI's own entry, so that it is tested in this repository's CI.
 ## How it runs a deployment
 
 It first builds the app as it deploys: the deployment's own `vite build
-app`, which on Workers leaves the Worker in `app/dist/server`, for wrangler
-to run as built, and on Node the pages in `app/dist`, which `serve` loads.
-A build that fails, or that puts server code where the browser loads it,
-stops the run there.
+app`, which leaves the server in `app/dist/server`, for wrangler, or on
+Node srvx, to run as built, and the browser's files in `app/dist/client`.
+A build that fails stops the run there.
 
 The settings go in as the environment the deployment's own files would give
 it: `wrangler dev` of `app/dist/server/wrangler.json` and
-`vault/wrangler.jsonc`, with Worker secrets from the environment, or `src/vault.ts` and
-`src/server.ts` with what `server.env` and `vault.env` would hold. Three things are the
+`vault/wrangler.jsonc`, with Worker secrets from the environment, or `src/vault.ts` and the
+built app under srvx, as `pnpm start` runs it, with what `server.env` and
+`vault.env` would hold. Three things are the
 run's own: fixed local keys; GitHub's URLs, pointed at the dev IdP
 (`@coffre/conformance/idp`) in the checker's process; and
 `ALLOW_LOOPBACK_ISSUERS_FOR_DEVELOPMENT=true`, so that a trust binding may
@@ -99,6 +99,7 @@ In order, since each builds on the ones before:
 | Check | What must hold |
 |---|---|
 | health | `/livez` answers. On Workers, `/readyz` fails before any heartbeat, and passes once the Cron trigger has run and the vault has checkpointed it |
+| browser bundle | Nothing of the server in what the browser loads: every text file of the build's `app/dist/client`, read as the browser gets it, holds no database layer, driver, table only the server knows or `COFFRE_*` read. A page importing across the line otherwise just grows by the database layer, with no error |
 | sign-in | The root admin signs in through GitHub, and is the root admin |
 | setup, personas | The admin creates the project, its values and the people above |
 | pages in a browser | Signed in as the admin, `/projects`, the project and `/audit`, in headless Chrome, over the DevTools protocol: each shows its heading once its scripts have run and settled, with no uncaught error, console error or failed load. Run between setup and personas. It is what caught wrangler's `keep_names` wrapping the functions seroval writes into a signed-in page in an `__name` only the Worker has |

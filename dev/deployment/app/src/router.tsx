@@ -1,28 +1,16 @@
-// The app's routes. Its root is the document every page renders in, with
-// coffre's head entries and the provider its pages need; under it, coffre's
-// server routes (/api, /auth, /livez and /readyz) and coffre's pages. To
-// leave one out, or put a page of this app's own at a path, mount them one
-// by one: see coffre's docs/deploy.md, "Your own routes".
-import { createRootRouteWithContext, HeadContent, Scripts } from '@tanstack/react-router';
+// `pnpm dev`'s routes, in code: coffre's server routes and pages under the
+// root (src/routes/__root.tsx), with any page files beside it, as Start's
+// generator found them.
 import { coffreServerRoutes } from '@coffre/server/routes';
-import { CoffreProvider, coffreHead, coffreRoutes, createRouter, type CoffreContext } from '@coffre/ui';
+import { createRouter } from '@coffre/ui';
+import { coffreRoutes } from '@coffre/ui/routes';
 
-export const root = createRootRouteWithContext<CoffreContext>()({
-  head: () => coffreHead(),
-  shellComponent: ({ children }) => (
-    <html lang="en" suppressHydrationWarning>
-      <head>
-        <HeadContent />
-      </head>
-      <body>
-        <CoffreProvider>{children}</CoffreProvider>
-        <Scripts />
-      </body>
-    </html>
-  ),
-});
+import { routeTree as files, type RootRouteChildren } from './routeTree.gen';
+import { Route as root } from './routes/__root';
 
-export const routeTree = root.addChildren([...coffreServerRoutes(root), ...coffreRoutes(root)]);
+const pages = Object.values(files.children ?? {}) as RootRouteChildren[keyof RootRouteChildren][];
+
+export const routeTree = root.addChildren([...pages, ...coffreServerRoutes(root), ...coffreRoutes(root)]);
 
 export const getRouter = () => createRouter(routeTree);
 

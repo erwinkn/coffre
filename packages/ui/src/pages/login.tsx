@@ -5,10 +5,10 @@ import { signinErrorMessage } from '../lib/signin-errors';
 import { ErrorLine, Spinner } from '../components/ui';
 import { ClosedDoor } from '../components/page';
 import { Lock, ProviderMark, ShieldCheck } from '../components/icons';
-import { pageRoute, type Parent } from '../lib/page-route';
-import type { login } from '../routes';
+import { pageRoute } from '../lib/page-route';
+import type { login } from '../options';
 
-const Route = pageRoute<ReturnType<typeof login<Parent>>>();
+const Route = pageRoute<typeof login>();
 
 /**
  * The front door, as `GET /api/auth` describes it.

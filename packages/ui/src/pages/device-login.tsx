@@ -5,10 +5,10 @@ import { failureMessage, statusOf, useCoffre } from '../lib/coffre';
 import { ClosedDoor } from '../components/page';
 import { ErrorLine, Spinner, Timestamp } from '../components/ui';
 import { CheckCircle, SlashCircle, Terminal } from '../components/icons';
-import { pageRoute, type Parent } from '../lib/page-route';
-import type { deviceLogin } from '../routes';
+import { pageRoute } from '../lib/page-route';
+import type { deviceLogin } from '../options';
 
-const Route = pageRoute<ReturnType<typeof deviceLogin<Parent>>>();
+const Route = pageRoute<typeof deviceLogin>();
 
 /**
  * Where `coffre login` sends you: approve a terminal's sign-in with the

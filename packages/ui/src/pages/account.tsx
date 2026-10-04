@@ -14,10 +14,10 @@ import { endSession, unlinkIdentity } from '../lib/changes';
 import { queries } from '../lib/queries';
 import { useChange, useChangeStatus } from '../lib/use-change';
 import { RowFailure, RowPending, rowClass } from '../components/row-state';
-import { pageRoute, type Parent } from '../lib/page-route';
-import type { account } from '../routes';
+import { pageRoute } from '../lib/page-route';
+import type { account } from '../options';
 
-const Route = pageRoute<ReturnType<typeof account<Parent>>>();
+const Route = pageRoute<typeof account>();
 
 type Search = { linked?: string; error?: string };
 

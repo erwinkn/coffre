@@ -1,7 +1,7 @@
 import { CoffreError, type CoffreClient } from '@coffre/client';
 import { useRouter } from '@tanstack/react-router';
 
-import type { CoffreContext } from '../routes';
+import type { CoffreContext } from '../options';
 
 /**
  * The API as whoever is looking at the page, with their permissions: what

@@ -109,14 +109,13 @@ function renderingUi(ask: (client: CoffreClient) => Promise<unknown>, fails = fa
   };
 }
 
-test("a page whose render met an outage answers 503, as the API does; the page's own bug stays a 500", async () => {
+test('a page whose render met an outage shows its error state, with the security headers', async () => {
   const page = () => new Request('https://coffre.test/projects', { headers: { 'cf-access-jwt-assertion': 'assertion' } });
   const unreachable = Object.assign(appRuntime(cloudflare) as object, {
     vault: { access: async () => Promise.reject(new Error('the vault is unreachable')) },
   }) as never;
   const outage = await answer(page(), unreachable, renderingUi((client) => client.me()), null);
-  assert.equal(outage.status, 503);
-  assert.equal(outage.headers.get('retry-after'), '5');
+  assert.equal(outage.status, 500);
   assert.equal(await outage.text(), '<html>This page could not be shown</html>');
   assert.ok(outage.headers.get('content-security-policy'), 'the security headers');
 
@@ -124,16 +123,6 @@ test("a page whose render met an outage answers 503, as the API does; the page's
   assert.equal(fine.status, 200);
   const bug = await answer(page(), unreachable, renderingUi((client) => client.auth(), true), null);
   assert.equal(bug.status, 500);
-});
-
-test('the Next.js middleware header is refused outright', async () => {
-  const response = await answer(
-    new Request('https://coffre.test/livez', { headers: { 'x-middleware-subrequest': 'middleware' } }),
-    appRuntime(own),
-    fakeUi(),
-    null,
-  );
-  assert.equal(response.status, 400);
 });
 
 test('sign-in routes take one method, and browser posts only from coffre itself', async () => {

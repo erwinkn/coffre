@@ -7,8 +7,8 @@ Two Workers, configured in code:
   (`app/vite.config.ts`). coffre is configured in `app/src/coffre.ts`;
   `app/src/server.ts`, the Worker, hands it each request; `app/src/start.ts`
   puts coffre's middleware in front of every response; and
-  `app/src/router.tsx` is the app's routes: its root, the document, and
-  coffre's routes under it, which you may mount one by one beside your own
+  `app/src/routes/` holds its routes, the root and a file for each of
+  coffre's pages, beside any of your own
   ([Your own routes](https://github.com/erwinkn/coffre/blob/main/docs/deploy.md#your-own-routes)).
   It reaches Postgres through Hyperdrive, and the vault through a service
   binding.

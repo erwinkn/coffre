@@ -7,11 +7,11 @@ import { fileURLToPath } from 'node:url';
 
 import { bumpPins, coffrePins } from '../src/deployment.ts';
 import { templateDir, templateFiles, type Kind } from '../src/init.ts';
-import { applyChanges, blob, lineDiff, NODE_ENTRIES, shownChange, startAppMove, undo, WORKERS_ENTRIES, type Move } from '../src/layout.ts';
+import { applyChanges, blob, lineDiff, NODE_ENTRIES, pageMove, ROUTE_FILES, shownChange, startAppMove, undo, WORKERS_ENTRIES, type Move } from '../src/layout.ts';
 
 const fixtures = fileURLToPath(new URL('fixtures/', import.meta.url));
 const ENTRY: Record<Kind, string> = { workers: 'app/src/worker.ts', node: 'src/server.ts' };
-const CONFIG: Record<Kind, string> = { workers: 'app/src/coffre.ts', node: 'src/server.ts' };
+const CONFIG: Record<Kind, string> = { workers: 'app/src/coffre.ts', node: 'app/src/coffre.ts' };
 
 /** A deployment of 0.1.18, as its init wrote it, in a directory of its own. */
 function deployment(kind: Kind): string {
@@ -119,7 +119,7 @@ for (const kind of ['workers', 'node'] as const) {
       const config = readFileSync(join(dir, CONFIG[kind]), 'utf8');
       assert.match(config, /auditChainKey: env(\.AUDIT_CHAIN_KEY|\('AUDIT_CHAIN_KEY'\)),/);
       assert.doesNotMatch(config, /workloads|APP_KEY/);
-      assert.match(config, kind === 'workers' ? /export const coffre = createCoffre\(\(env: Env\) => \(\{/ : /const coffre = createCoffre\(\{/);
+      assert.match(config, kind === 'workers' ? /export const coffre = createCoffre\(\(env: Env\) => \(\{/ : /export const coffre = createCoffre\(\{/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -202,7 +202,7 @@ test('every problem is said at once', () => {
       writeFileSync(join(dir, 'app/src/router.tsx'), 'export {};\n');
       writeFileSync(join(dir, 'app/vite.config.ts'), 'export default {};\n');
     },
-    /app\/vite\.config\.ts is there already[\s\S]*\napp\/src\/router\.tsx is there already/,
+    /app\/src\/router\.tsx is there already[\s\S]*\napp\/vite\.config\.ts is there already/,
   );
 });
 
@@ -215,7 +215,7 @@ test("a tsconfig.json or README.md of its own stays so, and the move says what t
       const move = startAppMove(dir, kind, templateDir(kind));
       assert.ok('changes' in move);
       assert.ok(!move.changes.some(({ path }) => path === 'tsconfig.json' || path === 'README.md'));
-      assert.match(move.notes.join('\n'), kind === 'workers' ? /add "jsx": "react-jsx" to its compilerOptions$/m : /add "jsx": "react-jsx" to its compilerOptions, and "app\/src" to its include/);
+      assert.match(move.notes.join('\n'), kind === 'workers' ? /add "jsx": "react-jsx" to its compilerOptions and "vite\/client" to their types$/m : /and "vite\/client" to their types, set their moduleResolution to "bundler", and add "app\/src" to its include/);
       assert.match(move.notes.join('\n'), /README\.md is the deployment's own, and stays as it is/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -252,6 +252,38 @@ test('a deployment moved by hand, its files its own since, is left alone; one wi
     }
   }
   refused('workers', (dir) => rmSync(join(dir, 'app/src/worker.ts')), /app\/src\/worker\.ts, where coffre 0\.1 is configured, and app\/src\/coffre\.ts, where 0\.2 is, are both missing/);
+});
+
+test('every route file the template has is known by the release that first wrote it', () => {
+  for (const kind of ['workers', 'node'] as const) {
+    const routes = templateFiles(templateDir(kind)).filter((path) => path.startsWith('app/src/routes/'));
+    assert.deepEqual(routes.sort(), Object.keys(ROUTE_FILES).sort(), kind);
+  }
+});
+
+test("a page a later release adds is a file the deployment gains; one it had left out stays out; one retired goes only as coffre wrote it", () => {
+  const dir = deployment('workers');
+  try {
+    applyChanges(dir, changesOf(startAppMove(dir, 'workers', templateDir('workers'))));
+    const template = templateDir('workers');
+    const added = 'app/src/routes/_coffre/projects.index.tsx';
+    const retired = 'app/src/routes/_coffre/audit.tsx';
+    rmSync(join(dir, added));
+    const files = (since: string) => ({
+      added: { [added]: since },
+      retired: { [retired]: { since: '0.3.0', blobs: [blob(readFileSync(join(template, retired), 'utf8'))] } },
+    });
+    // Moving from 0.2.0 to a release that added the page in 0.2.1, and retired another in 0.3.0.
+    const move = changesOf(pageMove(dir, template, '0.2.0', files('0.2.1')));
+    assert.deepEqual(move.map(({ path, becomes }) => [path, becomes === null ? 'removed' : 'added']), [[added, 'added'], [retired, 'removed']]);
+    // From 0.2.1, the page was there to be had: its file missing is the deployment's choice.
+    assert.deepEqual(changesOf(pageMove(dir, template, '0.2.1', files('0.2.1'))).map(({ path }) => path), [retired]);
+    // A retired page the deployment changed is its own.
+    writeFileSync(join(dir, retired), '// ours\n');
+    assert.match(problemsOf(pageMove(dir, template, '0.2.1', files('0.2.1'))), /audit\.tsx is a page coffre 0\.3\.0 no longer has, and is not as coffre wrote it/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('a change is shown by the lines that go and come, a file added or removed by its name', () => {

@@ -68,10 +68,10 @@ import {
   Upload,
   X,
 } from '../components/icons';
-import { pageRoute, type Parent } from '../lib/page-route';
-import type { environment } from '../routes';
+import { pageRoute } from '../lib/page-route';
+import type { environment } from '../options';
 
-const Route = pageRoute<ReturnType<typeof environment<Parent>>>();
+const Route = pageRoute<typeof environment>();
 
 /**
  * How long a revealed value stays on screen.

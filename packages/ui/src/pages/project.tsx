@@ -53,10 +53,10 @@ import {
   User,
   Users,
 } from '../components/icons';
-import { pageRoute, type Parent } from '../lib/page-route';
-import type { project } from '../routes';
+import { pageRoute } from '../lib/page-route';
+import type { project } from '../options';
 
-const Route = pageRoute<ReturnType<typeof project<Parent>>>();
+const Route = pageRoute<typeof project>();
 
 export type ProjectTab = 'environments' | 'users' | 'tokens' | 'settings';
 

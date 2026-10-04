@@ -26,10 +26,10 @@ import {
   User,
   X,
 } from '../components/icons';
-import { pageRoute, type Parent } from '../lib/page-route';
-import type { audit } from '../routes';
+import { pageRoute } from '../lib/page-route';
+import type { audit } from '../options';
 
-const Route = pageRoute<ReturnType<typeof audit<Parent>>>();
+const Route = pageRoute<typeof audit>();
 
 export function AuditPage() {
   const search = Route.useSearch();

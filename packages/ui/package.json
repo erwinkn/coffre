@@ -22,11 +22,24 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./routes": {
+      "coffre:source": "./src/routes.ts",
+      "types": "./dist/routes.d.ts",
+      "default": "./dist/routes.js"
+    },
+    "./pages/*": {
+      "coffre:source": "./src/pages/*.tsx",
+      "types": "./dist/pages/*.d.ts",
+      "default": "./dist/pages/*.js"
+    },
     "./vite": {
       "coffre:source": "./src/vite.ts",
       "types": "./dist/vite.d.ts",
       "default": "./dist/vite.js"
     },
+    "./styles.css": "./src/styles/globals.css",
+    "./icon.svg": "./src/assets/icon.svg",
+    "./apple-touch-icon.png": "./src/assets/apple-touch-icon.png",
     "./package.json": "./package.json"
   },
   "scripts": {
@@ -62,7 +75,6 @@
     "@types/node": "26.1.1",
     "@types/react": "19.2.17",
     "@vitejs/plugin-react": "6.0.3",
-    "agentation": "3.0.2",
     "react": "19.2.7",
     "react-dom": "19.2.7",
     "tsdown": "0.23.0",

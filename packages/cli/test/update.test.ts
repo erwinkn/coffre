@@ -23,6 +23,7 @@ import {
   START_PACKAGES,
   startPinMoves,
 } from '../src/deployment.ts';
+import { templateFiles } from '../src/init.ts';
 import { registry } from './registry.ts';
 import { inTerminal, ptySkip } from './pty.ts';
 import { deploymentMigrations, globalCli, installOf, migrationsAdded, movedLines, notUpdated } from '../src/update.ts';
@@ -237,9 +238,9 @@ test('update --yes makes a Workers deployment of 0.1.18 its own Start app, as in
     let stderr = '';
     child.stderr.setEncoding('utf8').on('data', (chunk: string) => (stderr += chunk));
     assert.equal(await new Promise((resolve) => child.on('close', resolve)), 0, stderr);
-    assert.match(stderr, /Made it its own Start app: app\/vite\.config\.ts, app\/src\/start\.ts, app\/src\/router\.tsx, app\/src\/server\.ts, app\/src\/coffre\.ts, app\/wrangler\.jsonc, package\.json, tsconfig\.json, \.gitignore, README\.md and app\/src\/worker\.ts/);
+    assert.match(stderr, /Made it its own Start app, as coffre init writes one: \d+ files, as shown\. Its app now builds with vite build app/);
     const template = join(examples, 'workers');
-    for (const path of ['app/vite.config.ts', 'app/src/start.ts', 'app/src/router.tsx', 'app/src/server.ts', 'app/src/coffre.ts', 'app/wrangler.jsonc', 'tsconfig.json', '.gitignore', 'README.md']) {
+    for (const path of ['app/vite.config.ts', 'app/src/start.ts', 'app/src/router.tsx', 'app/src/server.ts', 'app/src/coffre.ts', 'app/src/routes/__root.tsx', 'app/src/routes/_coffre/projects.index.tsx', 'app/wrangler.jsonc', 'tsconfig.json', '.gitignore', 'README.md']) {
       assert.equal(readFileSync(join(dir, path), 'utf8'), readFileSync(join(template, path), 'utf8'), path);
     }
     assert.equal(existsSync(join(dir, 'app/src/worker.ts')), false);
@@ -282,7 +283,8 @@ test("update --yes leaves a deployment it cannot move as it was, byte for byte, 
  */
 async function heldDeployment() {
   const dir = mkdtempSync(join(tmpdir(), 'coffre-held-'));
-  for (const file of ['package.json', 'pnpm-workspace.yaml', 'app/wrangler.jsonc', 'app/vite.config.ts', 'app/src/coffre.ts', 'app/src/start.ts', 'app/src/router.tsx', 'app/src/server.ts', 'vault/wrangler.jsonc']) {
+  // The template's every file, as a deployment moved to 0.2 has them.
+  for (const file of templateFiles(join(examples, 'workers'))) {
     mkdirSync(join(dir, file, '..'), { recursive: true });
     cpSync(join(examples, 'workers', file), join(dir, file));
   }

@@ -1,11 +1,19 @@
+import { readdirSync } from 'node:fs';
+
 import { defineConfig } from 'tsdown';
 
-// The declarations of the package's two halves, and the Vite plugin itself:
-// `vite build` makes the pages' modules, into the same `dist/`, which this
-// must leave alone.
+const pages = Object.fromEntries(
+  readdirSync('src/pages')
+    .filter((file) => file.endsWith('.tsx'))
+    .map((file) => [`pages/${file.slice(0, -'.tsx'.length)}`, `src/pages/${file}`]),
+);
+
+// The declarations of the package's entries, and the Vite plugin itself:
+// `vite build` makes the modules, into the same `dist/`, which this must
+// leave alone.
 export default defineConfig([
   {
-    entry: { index: 'src/index.ts' },
+    entry: { index: 'src/index.ts', routes: 'src/routes.ts', ...pages },
     platform: 'neutral',
     dts: { emitDtsOnly: true },
     clean: false,

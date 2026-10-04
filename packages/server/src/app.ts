@@ -89,12 +89,9 @@ export type PageContext = { cspNonce: string; client: CoffreClient; preferences:
 
 /**
  * One request, whatever answers it, a page or one of coffre's routes: it
- * gets a fresh nonce and the visitor's API client to render with, and
- * coffre's security headers on whatever comes back. A page whose render
- * failed because the API answered it 503, the vault or the database out of
- * reach, is an outage, not a bug: it answers 503, as the API did, with the
- * page the UI rendered for the failure, and a moment to wait before trying
- * again. `sourceIp` is the adapter's to vouch for: Cloudflare's header on
+ * gets a fresh nonce, the visitor's API client and their preferences to
+ * render with, and coffre's security headers on whatever comes back.
+ * `sourceIp` is the platform's to vouch for: Cloudflare's header on
  * Workers, the socket's address on Node.
  */
 export async function respond(
@@ -106,31 +103,17 @@ export async function respond(
   const nonce = cspNonce();
   let response: Response;
   try {
-    // Next.js's internal header, which has let requests skip middleware
-    // elsewhere; nothing legitimate sends it here.
-    if (request.headers.has('x-middleware-subrequest')) {
-      response = errorResponse(badRequest('x-middleware-subrequest is not accepted'));
-    } else {
-      let unavailable = false;
-      const client = pageClient(request, runtime, sourceIp, (status) => (unavailable ||= status === 503));
-      const rendered = await render({ cspNonce: nonce, client, preferences: preferencesOf(request) });
-      response = rendered.status === 500 && unavailable ? retryLater(rendered) : rendered;
-    }
+    response = await render({ cspNonce: nonce, client: pageClient(request, runtime, sourceIp), preferences: preferencesOf(request) });
   } catch (error) {
     response = errorResponse(error);
   }
   const auth = runtime.auth;
-  return setSecurityHeaders(request, response, {
+  return setSecurityHeaders(response, {
     nonce,
+    publicUrl: runtime.publicUrl,
     // Access's logout form posts to Access itself.
     formOrigins: auth.mode === 'cloudflare' ? [auth.access.issuer] : [],
   });
-}
-
-function retryLater(rendered: Response): Response {
-  const headers = new Headers(rendered.headers);
-  headers.set('retry-after', '5');
-  return new Response(rendered.body, { status: 503, statusText: 'Service Unavailable', headers });
 }
 
 /** The scheduled audit heartbeat and checkpoint. Throws so the scheduler reports failures. */

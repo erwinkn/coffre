@@ -16,7 +16,7 @@ import { dirname, join } from 'node:path';
 import { applyEdits, modify, parse } from 'jsonc-parser';
 
 import { KEEP_NAMES_WHY } from './deployment.ts';
-import type { Kind } from './init.ts';
+import { templateFiles, type Kind } from './init.ts';
 
 /** One file of a deployment: its text before, and after; null where there is none. */
 export type FileChange = { path: string; was: string | null; becomes: string | null };
@@ -74,7 +74,7 @@ export const WORKERS_ENTRIES: readonly Known[] = [
 ];
 
 const NODE_WORKLOADS: Difference[] = [
-  ['github, processLimits, serve, signin }', 'github, serve, signin }'],
+  ['github, processLimits, ', 'github, '],
   [
     "    // CI runs may sign in as services with their platform's ID token, through\n" +
       '    // the trust bindings owners make (docs/design/oidc.md). Each exchange\n' +
@@ -146,14 +146,90 @@ const SCRIPTS_0_1: Record<Kind, Record<string, string>> = {
     build: 'wrangler deploy --dry-run -c vault/wrangler.jsonc && wrangler deploy --dry-run -c app/wrangler.jsonc',
     deploy: 'wrangler deploy -c vault/wrangler.jsonc && wrangler deploy -c app/wrangler.jsonc',
   },
-  node: {},
+  node: {
+    start: 'node --env-file=server.env src/server.ts',
+  },
 };
 
-/** The files of 0.2's app that hold nothing of a deployment's own, written as the template has them. */
-const APP_FILES: Record<Kind, readonly string[]> = {
-  workers: ['app/vite.config.ts', 'app/src/start.ts', 'app/src/router.tsx', 'app/src/server.ts'],
-  node: ['app/vite.config.ts', 'app/src/start.ts', 'app/src/router.tsx'],
-};
+/** The files of 0.2's app that hold nothing of a deployment's own, written as the template has them: all of `app/` but its configuration and its Worker's settings. */
+function appFiles(template: string): string[] {
+  return templateFiles(template).filter((path) => path.startsWith('app/') && path !== 'app/src/coffre.ts' && path !== 'app/wrangler.jsonc');
+}
+
+/**
+ * Each of coffre's route files, by the release that first wrote it. A
+ * deployment moving past that release gains the file: a page coffre adds is
+ * a file the deployment adds. One from a release it had already reached is
+ * one it left out, and stays out. A test holds this to the template.
+ */
+export const ROUTE_FILES: Record<string, string> = Object.fromEntries(
+  [
+    '__root.tsx',
+    'api.$.ts',
+    'auth.$.ts',
+    'livez.ts',
+    'readyz.ts',
+    '_coffre.tsx',
+    '_coffre/index.tsx',
+    '_coffre/projects.index.tsx',
+    '_coffre/projects.$project.index.tsx',
+    '_coffre/projects.$project.$environment.tsx',
+    '_coffre/audit.tsx',
+    '_coffre/access.tsx',
+    '_coffre/users.index.tsx',
+    '_coffre/users.$user.tsx',
+    '_coffre/tokens.index.tsx',
+    '_coffre/tokens.$token.tsx',
+    '_coffre/settings.tsx',
+    '_coffre/account.tsx',
+    '_solo.tsx',
+    '_solo/login.tsx',
+    '_solo/unregistered.tsx',
+    '_solo/auth.device.tsx',
+  ].map((file) => [`app/src/routes/${file}`, '0.2.0']),
+);
+
+/**
+ * The route files coffre wrote and no longer does, a page removed or
+ * renamed: by the release that retired each, and the blobs of what releases
+ * before it wrote there. None yet.
+ */
+export const RETIRED_ROUTE_FILES: Record<string, { since: string; blobs: readonly string[] }> = {};
+
+/** Whether release `a` comes after release `b`. */
+function after(a: string, b: string): boolean {
+  const [x, y] = [a, b].map((version) => version.split(/[.-]/).map((part) => Number.parseInt(part, 10) || 0));
+  for (let i = 0; i < Math.max(x!.length, y!.length); i++) {
+    if ((x![i] ?? 0) !== (y![i] ?? 0)) return (x![i] ?? 0) > (y![i] ?? 0);
+  }
+  return false;
+}
+
+/**
+ * The page files a deployment of 0.2 or later, at release `from`, gains and
+ * loses moving to the template's: those added since `from`, where it has
+ * none; and those retired since, where it has exactly what coffre wrote.
+ * One retired that it changed is its own: refused, with what to do.
+ */
+export function pageMove(
+  dir: string,
+  template: string,
+  from: string,
+  files: { added: Record<string, string>; retired: Record<string, { since: string; blobs: readonly string[] }> } = { added: ROUTE_FILES, retired: RETIRED_ROUTE_FILES },
+): Move {
+  const changes: FileChange[] = [];
+  const problems: string[] = [];
+  for (const [path, since] of Object.entries(files.added)) {
+    if (after(since, from) && read(dir, path) === null) changes.push({ path, was: null, becomes: readFileSync(join(template, path), 'utf8') });
+  }
+  for (const [path, { since, blobs }] of Object.entries(files.retired)) {
+    const was = read(dir, path);
+    if (!after(since, from) || was === null) continue;
+    if (blobs.includes(blob(was))) changes.push({ path, was, becomes: null });
+    else problems.push(`${path} is a page coffre ${since} no longer has, and is not as coffre wrote it: delete it, or keep it as a page of the deployment's own`);
+  }
+  return problems.length > 0 ? { problems } : { changes, notes: [] };
+}
 
 /** 0.1's `assets`, the prebuilt pages in node_modules: the app's build sets its own now. */
 const ASSETS_0_1 = '../node_modules/@coffre/ui/dist/client';
@@ -173,11 +249,9 @@ export function startAppMove(dir: string, kind: Kind, template: string): Move {
   const known = entry === null ? undefined : (kind === 'workers' ? WORKERS_ENTRIES : NODE_ENTRIES).find((k) => k.blob === blob(entry));
   if (known === undefined) {
     // Moved already, by an earlier run or by hand: what is there now is the deployment's.
-    if (kind === 'workers' ? entry === null && existsSync(join(dir, 'app/src/coffre.ts')) : existsSync(join(dir, 'app/vite.config.ts'))) {
-      return { changes: [], notes: [] };
-    }
+    if (entry === null && existsSync(join(dir, 'app/src/coffre.ts'))) return { changes: [], notes: [] };
     if (entry === null) {
-      return { problems: ['app/src/worker.ts, where coffre 0.1 is configured, and app/src/coffre.ts, where 0.2 is, are both missing'] };
+      return { problems: [`${entryPath}, where coffre 0.1 is configured, and app/src/coffre.ts, where 0.2 is, are both missing`] };
     }
     return { problems: [`${entryPath} is not as any release of coffre 0.1 wrote it, so its configuration is the deployment's own: ${BY_HAND}`] };
   }
@@ -193,7 +267,7 @@ export function startAppMove(dir: string, kind: Kind, template: string): Move {
     readFileSync(join(template, path === '.gitignore' && !existsSync(join(template, path)) ? 'gitignore' : path), 'utf8');
 
   // The configuration, in 0.2's shape, as this release had it.
-  const configPath = kind === 'workers' ? 'app/src/coffre.ts' : 'src/server.ts';
+  const configPath = 'app/src/coffre.ts';
   const config = undo(templateText(configPath), known.differences);
   if (config === null) throw new Error(`${configPath} of the template no longer holds what ${known.releases} differ by`);
 
@@ -205,8 +279,8 @@ export function startAppMove(dir: string, kind: Kind, template: string): Move {
     if (was === null) changes.push({ path, was, becomes });
     else if (was !== becomes) problems.push(`${path} is there already, and is not what coffre 0.2 writes there: move it aside, or ${BY_HAND}`);
   };
-  for (const path of APP_FILES[kind]) own(path, templateText(path));
-  if (kind === 'workers') own(configPath, config);
+  for (const path of appFiles(template)) own(path, templateText(path));
+  own(configPath, config);
 
   if (kind === 'workers') {
     const wrangler = read(dir, 'app/wrangler.jsonc');
@@ -239,15 +313,14 @@ export function startAppMove(dir: string, kind: Kind, template: string): Move {
       if (!was.split(/\r?\n/).includes('dist')) change(path, `${was}${was.endsWith('\n') ? '' : '\n'}dist\n`, was);
     } else if (path === 'tsconfig.json') {
       notes.push(
-        `tsconfig.json is the deployment's own, and stays so: for pnpm typecheck to check the app, add "jsx": "react-jsx" to its compilerOptions${kind === 'node' ? ', and "app/src" to its include' : ''}`,
+        `tsconfig.json is the deployment's own, and stays so: for pnpm typecheck to check the app, add "jsx": "react-jsx" to its compilerOptions and "vite/client" to their types${kind === 'node' ? ', set their moduleResolution to "bundler", and add "app/src" to its include' : ''}`,
       );
     } else notes.push(`${path} is the deployment's own, and stays as it is`);
   }
 
   if (problems.length > 0) return { problems };
   // Last, the entry: until it changes, the move is not done, and the next run finishes it.
-  if (kind === 'workers') change(entryPath, null, entry);
-  else change(entryPath, config, entry);
+  change(entryPath, null, entry);
   return { changes, notes };
 }
 

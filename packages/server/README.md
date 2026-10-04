@@ -19,10 +19,11 @@ export const coffre = createCoffre((env: Env) => ({
 
 and mounts it: its server entry hands Start each request with
 `coffre.request(env, ctx)` as its context, `coffreMiddleware`
-(`@coffre/server/start`) secures every response, and
-`coffreServerRoutes(root)` (`@coffre/server/routes`) puts `/api`, `/auth`,
-`/livez` and `/readyz` in its route tree. On Node, `createCoffre({ … })`
-and `serve({ app, coffre })` from `@coffre/server/node`. A deployment brings
+(`@coffre/server/start`) secures every response, and its route files spread
+coffre's server routes, `createFileRoute('/api/$')({ ...api })`, from
+`@coffre/server/routes`, with `/auth/$`, `/livez` and `/readyz`. On Node,
+`createCoffre({ … })` from `@coffre/server/node`, and
+`coffre.request(request)`, in the app srvx runs. A deployment brings
 the shared Postgres database up to date with its own CLI, `pnpm exec coffre
 migrate`, as its owner, before it deploys; `coffre-server migrate` does the
 same for local SQLite and tests. The server connects as `coffre_runtime`;

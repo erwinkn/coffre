@@ -5,7 +5,8 @@
 import { createRootRouteWithContext } from '@tanstack/react-router';
 
 import type { createRouter } from './router';
-import { coffreRoutes, type CoffreContext } from './routes';
+import type { CoffreContext } from './options';
+import { coffreRoutes } from './routes';
 
 const root = createRootRouteWithContext<CoffreContext>()({});
 const routeTree = root.addChildren(coffreRoutes(root));

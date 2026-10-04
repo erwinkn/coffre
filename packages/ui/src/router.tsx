@@ -5,7 +5,7 @@ import { NotFound, RouteError } from './components/route-states';
 import { createQueryClient } from './lib/queries';
 import { DEFAULT_PREFERENCES, requestPage } from './lib/page-context';
 import { browserPreferences, type Preferences } from './lib/preferences';
-import type { CoffreContext } from './routes';
+import type { CoffreContext } from './options';
 
 /**
  * The deployment's router, around its route tree, which holds coffre's

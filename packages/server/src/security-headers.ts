@@ -18,6 +18,12 @@ export type SecurityHeaderOptions = {
   /** This response's script nonce, from `cspNonce()`. */
   nonce: string;
   /**
+   * coffre's public URL. Its scheme, not the request's, says whether
+   * browsers reach coffre over HTTPS: behind a proxy that ends TLS, the
+   * request itself arrives as plain HTTP.
+   */
+  publicUrl: string;
+  /**
    * Origins forms may post to besides coffre's own. Signing out behind
    * Cloudflare Access redirects to Access's logout, which may send the
    * browser on to the team domain, and browsers hold a form's redirects to
@@ -26,7 +32,7 @@ export type SecurityHeaderOptions = {
   formOrigins?: readonly string[];
 };
 
-export function contentSecurityPolicy({ nonce, formOrigins = [] }: SecurityHeaderOptions): string {
+export function contentSecurityPolicy({ nonce, formOrigins = [] }: Pick<SecurityHeaderOptions, 'nonce' | 'formOrigins'>): string {
   return [
     "default-src 'self'",
     `script-src 'self' 'nonce-${nonce}'`,
@@ -52,7 +58,7 @@ export function contentSecurityPolicy({ nonce, formOrigins = [] }: SecurityHeade
  * `new Response(…)` are; `Response.redirect()`'s and `fetch()`'s are not,
  * and coffre makes neither.
  */
-export function setSecurityHeaders(request: Request, response: Response, options: SecurityHeaderOptions): Response {
+export function setSecurityHeaders(response: Response, options: SecurityHeaderOptions): Response {
   const headers = response.headers;
 
   // Enforced in development too, so a script that lacks the nonce fails
@@ -69,7 +75,7 @@ export function setSecurityHeaders(request: Request, response: Response, options
   // Another site cannot pull coffre's responses into its own page.
   headers.set('cross-origin-resource-policy', 'same-origin');
   // Only over HTTPS, where the browser honours it; plain HTTP is development.
-  if (new URL(request.url).protocol === 'https:') {
+  if (options.publicUrl.startsWith('https:')) {
     headers.set('strict-transport-security', 'max-age=31536000; includeSubDomains');
   }
   // Every page names secrets and who may read them, and another person can

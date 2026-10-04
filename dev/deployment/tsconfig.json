@@ -5,8 +5,8 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "lib": ["ES2023"],
-    "types": ["@cloudflare/workers-types"],
+    "lib": ["ES2023", "DOM"],
+    "types": ["@cloudflare/workers-types", "vite/client"],
     "customConditions": [],
     "jsx": "react-jsx"
   },

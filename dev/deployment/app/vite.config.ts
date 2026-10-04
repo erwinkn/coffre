@@ -55,7 +55,7 @@ export default defineConfig({
       // Where wrangler keeps its local state.
       persistState: { path: process.env.COFFRE_STATE_DIR ?? here('../../.wrangler/state') },
     }),
-    tanstackStart({ router: { enableRouteGeneration: false } }),
+    tanstackStart(),
     viteReact(),
     coffre(),
     workspaceSources(),

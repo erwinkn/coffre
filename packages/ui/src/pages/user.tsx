@@ -1,8 +1,8 @@
 import { PrincipalPage } from '../components/principal-page';
-import { pageRoute, type Parent } from '../lib/page-route';
-import type { user } from '../routes';
+import { pageRoute } from '../lib/page-route';
+import type { user } from '../options';
 
-const Route = pageRoute<ReturnType<typeof user<Parent>>>();
+const Route = pageRoute<typeof user>();
 
 export function UserPage() {
   const { user } = Route.useParams();

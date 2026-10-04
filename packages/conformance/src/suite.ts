@@ -14,13 +14,14 @@ import { canaryScan } from './checks/canaries.ts';
 import { Cli, cliLogin, verifyAsOwner, verifyAsUser, verifyInterrupted, verifyKeys, verifyLeftovers, verifyWithToken } from './checks/cli.ts';
 import { pageLoad, personas, setUp, setUpLive, signInAdmin } from './checks/people.ts';
 import { pagesInBrowser } from './checks/pages.ts';
-import { headers, health } from './checks/surface.ts';
+import { browserBundle, headers, health } from './checks/surface.ts';
 import { cliSignsIn, exchangesLimited, runSignsIn, runsRefused, runUnbound, spentOnce, tokensUnlogged, trustRun } from './checks/workloads.ts';
 
 /** The names of the checks that failed. */
 export async function conform(deployment: Deployment, options: { bulkLimit: number; browser: string | null }): Promise<string[]> {
   const report = new Report();
   await report.check('health', {}, () => health(deployment));
+  await report.check('browser bundle', {}, () => browserBundle(deployment));
   const admin = await report.check('sign-in', {}, () => signInAdmin(deployment));
   await report.check('page load', { admin }, ({ admin }) => pageLoad(admin));
   await report.check('security headers', { admin }, ({ admin }) => headers(deployment, admin));

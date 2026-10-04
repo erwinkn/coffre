@@ -2,7 +2,7 @@
   "compilerOptions": {
     "target": "ES2023",
     "lib": ["ES2023"],
-    "types": ["@cloudflare/workers-types"],
+    "types": ["@cloudflare/workers-types", "vite/client"],
     "module": "esnext",
     "moduleResolution": "bundler",
     "strict": true,

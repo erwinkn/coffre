@@ -299,12 +299,12 @@ both colour schemes, following the system's with a manual override.
   market/prod: 9 secrets"), with technical steps and sign-ins hidden until
   asked for.
 
-The pages are TanStack Start, as `@coffre/ui`: a deployment's app is a Start
-app of its own, built once by Vite, which mounts coffre's pages, its server
-routes (`/api`, `/auth`, the health checks) and its middleware, as it would
-an auth SDK's, all of them or one by one, beside pages of its own
-([Your own routes](docs/deploy.md#your-own-routes)). The pages read and
-write only through `@coffre/client`.
+The pages are TanStack Start, as `@coffre/ui`: a deployment's app is a
+conventional Start app of its own, built once by Vite, whose route files
+mount coffre's pages and server routes (`/api`, `/auth`, the health checks),
+and whose start file its middleware, as it would an auth SDK's, beside pages
+of its own ([Your own routes](docs/deploy.md#your-own-routes)). The pages
+read and write only through `@coffre/client`.
 
 ## Layout
 

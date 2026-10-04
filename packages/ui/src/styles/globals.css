@@ -21,8 +21,8 @@
 
 /* All of coffre's look is scoped to its element, which <CoffreProvider>
    renders, with the visitor's theme and sidebar as attributes: the
-   deployment's own document keeps its own. No theme is "system", which
-   these follow by color-scheme alone. */
+   deployment's own document keeps its own, and its own color-scheme. No
+   theme is "system", which these follow by color-scheme alone. */
 .coffre {
   color-scheme: light dark;
 
@@ -104,19 +104,6 @@
 html {
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
-}
-
-/* The page's own scrollbar and overscroll, in coffre's scheme. */
-:root:has(.coffre) {
-  color-scheme: light dark;
-}
-
-:root:has(.coffre[data-theme='light']) {
-  color-scheme: light;
-}
-
-:root:has(.coffre[data-theme='dark']) {
-  color-scheme: dark;
 }
 
 body {

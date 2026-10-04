@@ -58,15 +58,19 @@ hands it, in practice once per isolate; `coffre.request(env, ctx)` opens the
 invocation's database client, closed once coffre's work for the request is
 done.
 
-A Node deployment is the same idea, as two processes:
+A Node deployment is the same idea, as two processes: the same Start app,
+which a server such as srvx runs, and the vault.
 
 ```ts
-// src/server.ts
-import { createCoffre, github, serve, signin } from '@coffre/server/node';
+// app/src/coffre.ts
+import { createCoffre, github, signin } from '@coffre/server/node';
 import { connectVault } from '@coffre/vault/node';
 
-const coffre = createCoffre({ publicUrl, database: 'postgres://coffre_runtime:…@db:5432/coffre', vault: connectVault('vault.sock'), auth, auditChainKey });
-await serve({ app: new URL('../app/dist/', import.meta.url), coffre, port: 3000 });
+export const coffre = createCoffre({ publicUrl, database: 'postgres://coffre_runtime:…@db:5432/coffre', vault: connectVault('vault.sock'), auth, auditChainKey });
+
+// app/src/server.ts
+coffre.schedule();
+export default { fetch: (request: Request) => handler.fetch(request, { context: coffre.request(request) }) };
 
 // src/vault.ts
 import { serveVault } from '@coffre/vault/node';
@@ -113,14 +117,17 @@ one package is seen by the others without a build. Builds leave it off.
 | Entry point | What a deployment calls |
 |---|---|
 | `@coffre/server/cloudflare` | `createCoffre(env => ({ database, …config }))` → `{ request(env, ctx), scheduled }`; `postgres(env.HYPERDRIVE)` |
-| `@coffre/server/node` | `createCoffre({ database, …config })`; `serve({ app, coffre, port?, host? })` → `{ url, close }`; `migrate(url)` |
+| `@coffre/server/node` | `createCoffre({ database, …config })` → `{ request(request), schedule() }`; `migrate(url)` |
 | `@coffre/server/start` | `coffreMiddleware`, for the app's `createStart(() => ({ requestMiddleware: [coffreMiddleware, …] }))` |
-| `@coffre/server/routes` | `coffreServerRoutes(root)`; or one by one, `api`, `auth`, `livez`, `readyz`, each a function of its parent |
+| `@coffre/server/routes` | `api`, `auth`, `livez`, `readyz`, route options for file routes; in code, `coffreServerRoutes(root)`, or `apiRoute(root)` and the like |
 | `@coffre/server` (both) | `signin`, `github`, `google`, `microsoft`, `oidc`, `cloudflareAccess`, `SigninError`; `githubActions`, `vercel`, `railway`, `cloudflareWorkers`, `SyncConfigError`, `SyncProviderError`; and the config types, `SigninProvider` and `SyncProvider` among them |
 | `@coffre/vault/cloudflare` | `vault(env => config)`, the RPC Worker's default export; `postgres(env.VAULT_HYPERDRIVE)` |
 | `@coffre/vault` (both) | `awsKms`, `KekUnavailableError`, `KekBadClaimError`, and the config types, `KekProvider` among them |
 | `@coffre/vault/node` | `serveVault({ socket, database, …config })`, `connectVault(socket)`, `localVault({ database, …config })` |
-| `@coffre/ui` | `coffreRoutes(root)`, or `coffreShell`, `coffreSolo` and each page, a function of its parent; `createRouter(routeTree)`; `coffreHead()`, `<CoffreProvider>`, `useCoffre()`; `CoffreContext` |
+| `@coffre/ui` | each layout's and page's route options, `shell`, `solo`, `projects` and the like; `createRouter(routeTree)`; `<CoffreProvider>`, `useCoffre()`; `CoffreContext` |
+| `@coffre/ui/pages/<name>` | each page's component, `ProjectsPage` and the like, for its file route |
+| `@coffre/ui/routes` | the same routes in code: `coffreRoutes(root)`, or `shellRoute(root)`, `projectsRoute(shell)` and the like |
+| `@coffre/ui/styles.css`, `icon.svg`, `apple-touch-icon.png` | the stylesheet and icons, for the root's head |
 | `@coffre/ui/vite` | `coffre()`, the deployment's Vite plugin |
 | `@coffre/client` | `createClient({ url, headers?, transport? })` |
 
@@ -149,72 +156,79 @@ database has applied of those.
 ## The UI
 
 The UI is server-rendered TanStack Start, and a deployment's app is a Start
-app of its own, which mounts coffre's pieces, as it would an auth SDK's:
-Vite builds it once, with `@coffre/ui` and `@coffre/server` as libraries
-inside it. Its files are few:
+app of its own, a conventional one, which mounts coffre's pieces as it would
+an auth SDK's: Vite builds it once, with `@coffre/ui` and `@coffre/server`
+as libraries inside it. Its files:
 
 ```
-app/vite.config.ts    plugins: [cloudflare(…), tanstackStart({ router: { enableRouteGeneration: false } }), viteReact(), coffre()]
-app/src/start.ts      createStart(() => ({ requestMiddleware: [coffreMiddleware, createCsrfMiddleware(…)] }))
-app/src/router.tsx    the root, the document; root.addChildren([...coffreServerRoutes(root), ...coffreRoutes(root)])
-app/src/server.ts     handler.fetch(request, { context: coffre.request(env, ctx) }); scheduled
-app/src/coffre.ts     export const coffre = createCoffre(env => ({ publicUrl, database, … }))
+app/vite.config.ts            plugins: [cloudflare(…), tanstackStart(), viteReact(), coffre()]
+app/src/start.ts              createStart(() => ({ requestMiddleware: [coffreMiddleware, createCsrfMiddleware(…)] }))
+app/src/router.tsx            createRouter(routeTree), the tree Start generates from src/routes
+app/src/routes/__root.tsx     the document: coffre's stylesheet and icons, <CoffreProvider>
+app/src/routes/api.$.ts       createFileRoute('/api/$')({ ...api }); auth.$.ts, livez.ts, readyz.ts likewise
+app/src/routes/_coffre.tsx    createFileRoute('/_coffre')({ ...shell }), and each page under it in _coffre/
+app/src/routes/_solo.tsx      the sign-in pages' frame, and its pages in _solo/
+app/src/server.ts             handler.fetch(request, { context: coffre.request(env, ctx) }); scheduled
+app/src/coffre.ts             export const coffre = createCoffre(env => ({ publicUrl, database, … }))
 ```
 
 **A request.** The Worker's `fetch` hands Start's handler the request with
 coffre in its context: `coffre.request(env, ctx)`, the invocation's
-database and vault. On Node, `serve({ app, coffre })` does the same for
-each request, and serves the app's static files. Start runs coffre's
-middleware first, for every request: it mints the response's nonce, builds
-the visitor's API client, an in-process call with their credential, reads
-the visitor's preferences from their cookies, and passes the three on; then
-it sets the security headers, nonce included, on whatever comes back, in
-place: a page Start rendered, a redirect, a not-found, a refusal, or one of
-coffre's server routes. In place, because Start goes on to handle what the
-middleware hands back, a TanStack redirect by a marker it carries, which a
-copy would lose; so a response must have headers that can change, as a
-`new Response(…)`'s do and `Response.redirect()`'s and `fetch()`'s do not.
-One response comes before any middleware: Start answers a path that
-starts with `//` with a 308 to the same path on the same origin, without
-coffre's headers. It names no other site, so it is no open redirect. Those, `/api/$`, `/auth/$`, `/livez` and
-`/readyz`, hand the request to coffre's server, which answers it as before.
-A route or a page rendered without the middleware fails, saying how to add
-it, rather than answer without headers. Nothing coffre answers waits for a
-request body it does not read.
+database and vault. On Node, the server entry does the same with
+`coffre.request(request)`, and srvx runs it and serves the static files.
+Start runs coffre's middleware first, for every request: it mints the
+response's nonce, builds the visitor's API client, an in-process call with
+their credential, reads the visitor's preferences from their cookies, and
+passes the three on; then it sets the security headers, nonce included, on
+whatever comes back, in place: a page Start rendered, a redirect, a
+not-found, a refusal, or one of coffre's server routes. In place, because
+Start goes on to handle what the middleware hands back, a TanStack redirect
+by a marker it carries, which a copy would lose; so a response must have
+headers that can change, as a `new Response(…)`'s do and
+`Response.redirect()`'s and `fetch()`'s do not. One response comes before
+any middleware: Start answers a path that starts with `//` with a 308 to the
+same path on the same origin, without coffre's headers. It names no other
+site, so it is no open redirect. coffre's server routes, `/api/$`,
+`/auth/$`, `/livez` and `/readyz`, hand the request to coffre's server,
+which answers it as before. A route or a page rendered without the
+middleware fails, saying how to add it, rather than answer without
+headers. Nothing coffre answers waits for a request body it does not read.
 
-**Server code stays on the server by construction.** TanStack Start strips
-a route's server handlers from the browser's build only for routes in files
-its generator finds; routes made in code, as coffre's are, keep them. So
-coffre's server routes and middleware import nothing of the server: they
-reach it through the request's context, which only the server entry, and
-what it imports, sets. The browser's build then holds their few lines, and
-none of the database layer, and `coffre()` checks it.
+**Server code stays on the server.** As file routes, coffre's server routes
+are stripped from the browser's build by Start, as any app's are. As routes
+in code they are not, so they and the middleware import nothing of the
+server: they reach it through the request's context, which only the server
+entry, and what it imports, sets. Conformance checks what the browser loads,
+in the build it runs, for the database layer, a driver, a table only the
+server knows or a `COFFRE_*` read ([conformance](conformance.md)).
 
-**Routes in code, each a function of its parent.** The app owns its root,
-the document, with `coffreHead()` in its head and `<CoffreProvider>` in its
-body. `coffreRoutes(root)` is coffre's pages under two layouts:
-`coffreShell`, the nav, which lets in only signed-in, registered visitors,
-and `coffreSolo`, the frame of the sign-in pages. Each layout and page is a
-function of its parent, so the app mounts them all, or one by one, leaving
-any out or putting a page of its own at a path; coffre's nav shows only
-those mounted. A page's component reads its own route's data through the
-match it renders in, so it works wherever it is mounted. The app's router
-registers its tree, so every link, coffre's and the app's, is checked
-against it ([Your own routes](deploy.md#your-own-routes)).
+**Route options.** coffre gives each layout and page as route options: its
+loader, search, redirects, and a layout's component; not its path. A
+deployment mounts them as Start's file routes, a page's file naming its
+component from `@coffre/ui/pages/<name>`, so that Start's splitter puts each
+page in a chunk of its own, with Start's own preload hints. Or in code,
+`@coffre/ui/routes`, whose pages come in the main bundle, which on a cold
+load costs fewer requests and a few more kilobytes
+([Your own routes](deploy.md#your-own-routes)). `shell`, the nav, lets in only
+signed-in, registered visitors; `solo` is the frame of the sign-in pages.
+A page's component reads its own route's data through the match it renders
+in, so it works wherever it is mounted. The app's router registers its
+tree, so every link, coffre's and the app's, is checked against it, and
+coffre's nav offers only the pages the deployment kept.
 
-**What `@coffre/ui` ships.** The routes as compiled ES modules, built by
-Vite in library mode, each page's component a chunk of its own,
-`dist/pages/<name>.js`, loaded as the page is. React, the router, Start and
-Query stay imports, so the deployment's single copy of each serves both,
-and the stylesheet and icons stay imports of the package's `src/`, which the
-deployment's Vite processes, fonts and all. A release that adds a page needs
-a line in a deployment that mounts its pages one by one, and none in one
-that mounts `coffreRoutes`. Start's preload hints come from its route
-generator, which finds no file routes here; so `coffre()` finds, in the
-client's build, each page's chunk and every chunk it imports, and each
-page's `head()` names them as `modulepreload` links: the browser fetches a
-page's code beside the app's entry, rather than once the entry has run,
-about a round trip sooner.
+**Preferences.** The theme and the folded sidebar are cookies, which the
+middleware reads and the browser reads back to hydrate, so a page is drawn
+as its visitor left it from the first byte, with no script of coffre's own.
+`<CoffreProvider>` renders them as attributes on coffre's element, which its
+stylesheet, and its menus, dialogs and tooltips, are scoped to: the
+deployment's document keeps its own look.
+
+**What `@coffre/ui` ships.** ES modules, built by Vite in library mode: the
+route options and provider, the routes in code, and each page as a module
+of its own. React, the router, Start and Query stay imports, so the
+deployment's single copy of each serves both. The stylesheet and icons are
+files of the package, which the root links with `?url`, so the
+deployment's Vite processes them, fonts and all.
 
 **One copy of what the pages share.** `@coffre/ui`'s peers, React,
 react-dom, TanStack Router, Start, Query, the router's Query integration and
@@ -227,14 +241,10 @@ to `@coffre/ui`'s.
 **`coffre()`, the deployment's Vite plugin.** It puts the static files under
 `/_coffre/assets/`, beside `/api` and `/auth`, and never inlines a font, which
 the Content-Security-Policy would refuse as `data:`. It makes the server's
-build hold everything it renders with (`ssr.noExternal`), as a Worker's
-does, so that Node resolves nothing from `node_modules`. It gives the
-server the pages' preload hints. It checks the versions above. And it
-fails the build if what the browser loads holds server code: the database
-layer, a driver, a `COFFRE_*` read or the dev toolbar, by strings only those
-carry, in every file the build emits, chunks, stylesheets, workers, and
-scripts Vite emits as bytes. A page that imports across the line otherwise
-just grows by the database layer, with no error.
+build hold everything it runs (`ssr.noExternal`), as a Worker's does, so
+that Node resolves nothing from `node_modules`; a Node deployment keeps
+SQLite's driver, with its native binding, out of it, as a dependency of its
+own. And it checks the versions above.
 
 **On Workers**, `@cloudflare/vite-plugin` builds the app into
 `app/dist/server`, with a `wrangler.json` that says `no_bundle`: `wrangler
@@ -250,10 +260,10 @@ drill, which run the built app under `wrangler dev`, put an entry of their
 own in front of it that reads such a body before answering. coffre itself
 never does.
 
-`@coffre/client` can be in a deployment twice: on Node, the server runs
-from `node_modules` and the pages from their own build. Anything the pages
-check by class must survive that: `CoffreError` answers `instanceof` by a
-`Symbol.for` mark every copy sets, not by its prototype.
+**On Node**, the same build, without Cloudflare's plugin:
+`app/dist/server/server.js`, whose `fetch` srvx runs, and `app/dist/client`,
+which it serves. One copy of coffre's code serves both the server and its
+pages.
 
 Pages get their data through `@coffre/client`, the same client the CLI uses,
 never by reaching into the services. The client takes a transport: HTTP in the

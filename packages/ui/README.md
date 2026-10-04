@@ -1,32 +1,28 @@
 # @coffre/ui
 
-coffre's web pages, as routes in code for a deployment's own TanStack Start
-app, whose pages read only through `@coffre/client`; and `@coffre/ui/vite`,
-the Vite plugin the app's build adds. `coffre init` writes such an app:
+coffre's web pages, for a deployment's own TanStack Start app, whose pages
+read only through `@coffre/client`; and `@coffre/ui/vite`, the Vite plugin
+the app's build adds. Each page and layout is route options the app mounts
+as Start's file routes, which is what `coffre init` writes:
 
 ```tsx
-// app/src/router.tsx
-export const root = createRootRouteWithContext<CoffreContext>()({
-  head: () => coffreHead(),
-  shellComponent: ({ children }) => (
-    <html lang="en" suppressHydrationWarning>
-      <head><HeadContent /></head>
-      <body><CoffreProvider>{children}</CoffreProvider><Scripts /></body>
-    </html>
-  ),
-});
-export const routeTree = root.addChildren([...coffreServerRoutes(root), ...coffreRoutes(root)]);
-export const getRouter = () => createRouter(routeTree);
+// app/src/routes/_coffre.tsx: coffre's nav
+export const Route = createFileRoute('/_coffre')({ ...shell });
 
-// app/vite.config.ts
-plugins: [cloudflare({ viteEnvironment: { name: 'ssr' } }), tanstackStart({ router: { enableRouteGeneration: false } }), viteReact(), coffre()]
+// app/src/routes/_coffre/projects.index.tsx
+import { projects } from '@coffre/ui';
+import { ProjectsPage } from '@coffre/ui/pages/projects';
+
+export const Route = createFileRoute('/_coffre/projects/')({ ...projects, component: ProjectsPage });
 ```
 
-Each page and layout is also exported as a function of its parent, to mount
-one by one, and `useCoffre()` gives an app's own page the API as the
-signed-in visitor. React, TanStack Router, Start, Query and Vite are peers,
-pinned exactly: the app has them at those versions, and its build stops
-when one differs.
+The app's root puts `<CoffreProvider>` around them, and links
+`@coffre/ui/styles.css`, `icon.svg` and `apple-touch-icon.png`; its router
+is `createRouter(routeTree)`. The same routes mount in code from
+`@coffre/ui/routes`, all at once, `coffreRoutes(root)`, or one at a time.
+`useCoffre()` gives an app's own page the API as the signed-in visitor.
+React, TanStack Router, Start, Query and Vite are peers, pinned exactly:
+the app has them at those versions, and its build stops when one differs.
 
 Part of [coffre](https://github.com/erwinkn/coffre), a secrets manager you
 deploy as a small project of your own. Its eight `@coffre/*` packages are

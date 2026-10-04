@@ -15,10 +15,12 @@ and the dev IdP, `@coffre/conformance/idp`, the local stand-in for Cloudflare Ac
 GitHub and OIDC), and `packages/core` (`@coffre/core`: access rules, the audit chain,
 envelope encryption, vault keys, identity and sign-in, and the contract between server and
 vault in `src/vault.ts`). `examples/workers` and `examples/node` are deployments,
-exactly what `coffre init` writes (a test diffs them); each one's `app/` is a TanStack
-Start app of its own, built once by Vite, which mounts coffre's server routes
-(`@coffre/server/routes`), middleware (`@coffre/server/start`) and pages, and whose
-server entry hands each request coffre as its context (`docs/architecture.md`, "The UI"). `dev/` holds what only the dev
+exactly what `coffre init` writes (a test diffs them); each one's `app/` is a
+conventional TanStack Start app, built once by Vite, whose file routes
+(`app/src/routes/`, and the generated `routeTree.gen.ts`, committed) mount coffre's
+route options (`@coffre/ui`, `@coffre/server/routes`), whose `start.ts` adds coffre's
+middleware (`@coffre/server/start`), and whose server entry hands each request coffre as
+its context (`docs/architecture.md`, "The UI"); on Node, srvx runs the built app. `dev/` holds what only the dev
 loop uses and nothing ships: `dev/start.sh` (`pnpm dev`), the deployment it runs, the
 dev IdP's launcher (`dev/idp`) and the seed. `scripts/` holds what dev, tests and CI share. The root `README.md` and the
 `package.json` scripts are the source of truth for commands; this file only adds what
@@ -70,7 +72,9 @@ reservation script is CI-only and does not change a developer's host.
 **Run the stack.** `pnpm dev` brings up Postgres + dev IdP (:8081) + coffre (:3000) +
 seed data. It runs `dev/deployment/`, shaped like `examples/workers` (`app/`, a
 Start app, and `vault/`), under `vite dev`, with the vault as an auxiliary Worker
-beside the app and no port of its own. `dev/deployment/app/vite.config.ts` resolves
+beside the app and no port of its own. It mounts coffre's routes in code
+(`@coffre/ui/routes`), under its root file, the form the examples do not use, and renders
+the Agentation toolbar from its root. `dev/deployment/app/vite.config.ts` resolves
 every `@coffre/*` import, the config's own included, to its sources through
 `coffre:source`, so an edit to any package, a page or a route hot-reloads without a
 build. The vault keeps its members, grants and log entries in the same
@@ -153,8 +157,8 @@ fast path. Parse errors or an unsupported diff select full validation.
   as such an owner: setup makes cluster-wide roles, so never on the shared
   one. Postgres only.
 - `pnpm build` builds every package in dependency order (core and client first). The
-  UI builds as a library, `vite build` with TanStack's router plugin, so each route is
-  a chunk of its own; the examples build their apps from it. Core and client build
+  UI builds as a library, `vite build`, each page a module of its own
+  (`@coffre/ui/pages/<name>`), which the examples' file routes name, and Start splits. Core and client build
   in a run of their own: core's tests use conformance's dev IdP, and
   conformance runs the CLI, which bundles core, so the graph has a cycle that
   pnpm would order as it likes. The CLI's build fails on an import it cannot
@@ -167,7 +171,10 @@ fast path. Parse errors or an unsupported diff select full validation.
   bundle again, behind an entry of the harness's own that reads an unread request
   body (locally, wrangler fails the next request otherwise; coffre never waits on one). Workers needs Postgres and makes its own
   `coffre_conformance_<hex>` database, dropped after; Node runs on SQLite in a temp
-  dir. A check that fails prints what it saw, then the processes' output.
+  dir, the built app under srvx, as its `pnpm start`. Each holds the build's client
+  files to holding no server code (`packages/conformance/src/bundle.ts`): a deployment's
+  own build no longer checks. A check that fails prints what it saw, then the processes'
+  output.
 - `pnpm test:compat [--kind workers|node] [--release <v>] [--schema <v>]` installs
   the newest release from npm as `init` writes it, has its own conformance
   migrate with this checkout's migrations, and requires it conformant; then

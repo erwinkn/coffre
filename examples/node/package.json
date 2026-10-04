@@ -9,7 +9,7 @@
   "scripts": {
     "vault": "node --env-file=vault.env src/vault.ts",
     "build": "vite build app",
-    "start": "node --env-file=server.env src/server.ts",
+    "start": "node --env-file=server.env node_modules/srvx/bin/srvx.mjs --prod --host=127.0.0.1 -s ../client app/dist/server/server.js",
     "typecheck": "tsc --noEmit",
     "conformance": "coffre-conformance node"
   },
@@ -17,12 +17,14 @@
     "@coffre/server": "0.1.18",
     "@coffre/ui": "0.1.18",
     "@coffre/vault": "0.1.18",
+    "@libsql/client": "0.18.0",
     "@tanstack/react-query": "5.103.1",
     "@tanstack/react-router": "1.170.18",
     "@tanstack/react-router-ssr-query": "1.167.2",
     "@tanstack/react-start": "1.168.32",
     "react": "19.2.7",
-    "react-dom": "19.2.7"
+    "react-dom": "19.2.7",
+    "srvx": "0.11.22"
   },
   "devDependencies": {
     "@coffre/cli": "0.1.18",

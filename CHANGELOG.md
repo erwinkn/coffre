@@ -2,43 +2,41 @@
 
 ## Unreleased
 
-**A deployment's app is a TanStack Start app of its own** (0.2.0), and
-coffre is a set of pieces it mounts, as an auth SDK's are. Vite builds the app
-once, and nothing bundles it again: on Workers, `wrangler deploy` uploads what
-Vite built, so no second pass rewrites what the pages send the browser, as
-wrangler's `keep_names` did in 0.1.17. The app's files, as `coffre init`
-writes them:
+**A deployment's app is a TanStack Start app of its own** (0.2.0), a
+conventional one, and coffre is a set of pieces it mounts, as an auth SDK's
+are. Vite builds the app once, and nothing bundles it again: on Workers,
+`wrangler deploy` uploads what Vite built, so no second pass rewrites what
+the pages send the browser, as wrangler's `keep_names` did in 0.1.17. On
+Node, srvx runs the same build, as TanStack Start documents, and the
+vault stays a process of its own. The app's files, as `coffre init` writes
+them:
 
-- `src/coffre.ts` on Workers: the configuration, once,
-  `export const coffre = createCoffre((env: Env) => ({ … }))`;
-- `src/server.ts`: Start's handler, each request carrying coffre:
-  `handler.fetch(request, { context: coffre.request(env, ctx) })`, and
-  `scheduled: coffre.scheduled`. On Node, `src/server.ts` configures with
-  `createCoffre({ … })` and runs the built app with
-  `serve({ app: new URL('../app/dist/', import.meta.url), coffre })`;
+- `app/src/coffre.ts`: the configuration, once, `export const coffre =
+  createCoffre(…)`;
+- `app/src/server.ts`: Start's handler, each request carrying coffre,
+  `handler.fetch(request, { context: coffre.request(…) })`, and coffre's
+  scheduled job;
 - `app/src/start.ts`: `createStart(() => ({ requestMiddleware: [coffreMiddleware,
   createCsrfMiddleware(…)] }))`. coffre's middleware gives every response
   coffre's security headers and a fresh CSP nonce, and the pages the
   visitor's API client. A server route or page rendered without it fails,
   saying how to add it. Start's CSRF check for server functions, which Start
   drops once an app sets middleware of its own, stays for the app's;
-- `app/src/router.tsx`: the app's own root, its document, with
-  `coffreHead()` and `<CoffreProvider>`, and under it coffre's routes:
-  `root.addChildren([...coffreServerRoutes(root), ...coffreRoutes(root)])`.
-  `/api/$`, `/auth/$`, `/livez` and `/readyz` are server routes, and each
-  page a route of its own, made in code, each a function of its parent:
-  mount them all, or one by one, leaving any out or putting a page of the
-  app's own at a path. coffre's nav offers only the pages mounted. Links are
-  type-checked against the app's tree. A page of the app's own may call the
-  API as the signed-in visitor, `useCoffre()` in a component or
-  `context.coffre` in a loader ([Your own routes](docs/deploy.md#your-own-routes));
-- `app/vite.config.ts`: `cloudflare(…)` on Workers,
-  `tanstackStart({ router: { enableRouteGeneration: false } })`,
-  `viteReact()`, and `coffre()` from `@coffre/ui/vite`, which puts the pages'
-  files under `/_coffre/assets/`, tells the server which files each page
-  needs, for the browser to fetch them beside the app's entry, checks the
-  versions below, and fails the build if server code reaches what the
-  browser loads, in whatever form Vite emits it.
+- `app/src/routes/`: Start's file routes. The root, the app's own
+  document, with coffre's stylesheet and icons and `<CoffreProvider>`; and a
+  file for each of coffre's server routes, layouts and pages, each spreading
+  coffre's route options: `createFileRoute('/_coffre/projects/')({ ...projects,
+  component: ProjectsPage })`. Start splits each page into a chunk of its
+  own, with its preload hints. Delete a page's file to leave it out; add
+  files for the app's own pages, under coffre's nav or not. coffre's nav
+  offers only the pages there. A page of the app's own may call the API as
+  the signed-in visitor, `useCoffre()` in a component or `context.coffre` in
+  a loader. The same routes mount in code, `@coffre/ui/routes`, all at once
+  or one at a time ([Your own routes](docs/deploy.md#your-own-routes));
+- `app/src/router.tsx`: `createRouter(routeTree)`, Start's generated tree;
+- `app/vite.config.ts`: `cloudflare(…)` on Workers, `tanstackStart()`,
+  `viteReact()`, and `coffre()` from `@coffre/ui/vite`, which puts the
+  pages' files under `/_coffre/assets/` and checks the versions below.
 
 The theme and the folded sidebar are cookies now, `coffre-theme` and
 `coffre-sidebar`, which the server reads, so a page is drawn as the visitor
@@ -49,7 +47,8 @@ app's document keeps its own.
 
 React, TanStack Router, Start, Query and Vite are the deployment's own
 dependencies now, pinned at exactly the versions `@coffre/ui` is built with;
-`coffre update` moves them with coffre's packages. On Workers, `pnpm dev` is
+`coffre update` moves them with coffre's packages, and adds the file of a
+page a release adds. On Workers, `pnpm dev` is
 now `vite dev app`, the vault beside the app. A refusal no longer waits for
 the request's body: nothing in coffre reads what a caller is still sending
 before answering.

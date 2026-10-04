@@ -1,22 +1,10 @@
-// `@coffre/ui`: coffre's pages, as routes in code for a deployment's own
-// TanStack Start app, under the root it owns, and the router they render in.
-// Its src/router.tsx, as `coffre init` writes it:
-//
-//   import { coffreServerRoutes } from '@coffre/server/routes';
-//   import { CoffreProvider, coffreHead, coffreRoutes, createRouter, type CoffreContext } from '@coffre/ui';
-//
-//   export const root = createRootRouteWithContext<CoffreContext>()({
-//     head: () => coffreHead(),
-//     shellComponent: ({ children }) => (
-//       <html lang="en" suppressHydrationWarning>
-//         <head><HeadContent /></head>
-//         <body><CoffreProvider>{children}</CoffreProvider><Scripts /></body>
-//       </html>
-//     ),
-//   });
-//   export const routeTree = root.addChildren([...coffreServerRoutes(root), ...coffreRoutes(root)]);
-//   export const getRouter = () => createRouter(routeTree);
-export { coffreHead } from './head.ts';
+// `@coffre/ui`: coffre's pages, for a deployment's own TanStack Start app.
+// Each page's and layout's route options, which the deployment's file
+// routes mount (`./options.ts`); `<CoffreProvider>`, around them in its root
+// document; and the router they render in. Each page's component is at
+// `@coffre/ui/pages/<name>`, the same routes in code at `@coffre/ui/routes`,
+// and the stylesheet and icons at `@coffre/ui/styles.css`, `icon.svg` and
+// `apple-touch-icon.png`.
 export { CoffreProvider } from './layout.tsx';
 export { useCoffre } from './lib/coffre.ts';
 export { createRouter } from './router.tsx';
@@ -24,9 +12,6 @@ export {
   access,
   account,
   audit,
-  coffreRoutes,
-  coffreShell,
-  coffreSolo,
   deviceLogin,
   environment,
   home,
@@ -34,11 +19,12 @@ export {
   project,
   projects,
   settings,
+  shell,
+  solo,
   token,
   tokens,
   unregistered,
   user,
   users,
   type CoffreContext,
-  type CoffreParent,
-} from './routes.ts';
+} from './options.ts';

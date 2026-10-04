@@ -11,7 +11,7 @@ export default defineConfig(({ command }) => ({
       // `vite dev` runs the vault beside the app; it deploys on its own.
       auxiliaryWorkers: command === 'serve' ? [{ configPath: '../vault/wrangler.jsonc' }] : [],
     }),
-    tanstackStart({ router: { enableRouteGeneration: false } }),
+    tanstackStart(),
     viteReact(),
     coffre(),
   ],
