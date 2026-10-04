@@ -14,9 +14,9 @@
     "conformance": "coffre-conformance workers"
   },
   "dependencies": {
-    "@coffre/server": "0.1.18",
-    "@coffre/ui": "0.1.18",
-    "@coffre/vault": "0.1.18",
+    "@coffre/server": "0.2.0",
+    "@coffre/ui": "0.2.0",
+    "@coffre/vault": "0.2.0",
     "@tanstack/react-query": "5.103.1",
     "@tanstack/react-router": "1.170.18",
     "@tanstack/react-router-ssr-query": "1.167.2",
@@ -27,8 +27,8 @@
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.50.0",
     "@cloudflare/workers-types": "5.20260920.1",
-    "@coffre/cli": "0.1.18",
-    "@coffre/conformance": "0.1.18",
+    "@coffre/cli": "0.2.0",
+    "@coffre/conformance": "0.2.0",
     "@types/react": "19.2.17",
     "@vitejs/plugin-react": "6.0.3",
     "typescript": "5.9.3",
