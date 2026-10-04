@@ -3,9 +3,9 @@
  * holds coffre's pages to the little they need: scripts only from coffre,
  * never framed, never sniffed, never cached.
  *
- * The inline scripts a page needs (the theme and sidebar boot scripts, and
- * the data TanStack streams in for hydration) carry a nonce minted for that
- * response, so an injected `<script>` has no way to run.
+ * The inline scripts a page needs, the data TanStack streams in for
+ * hydration, carry a nonce minted for that response, so an injected
+ * `<script>` has no way to run.
  */
 
 /** A fresh nonce for one response's scripts: 128 random bits. */
@@ -46,16 +46,14 @@ export function contentSecurityPolicy({ nonce, formOrigins = [] }: SecurityHeade
 }
 
 /**
- * `response` with the security headers set. A copy, because some responses,
- * such as `Response.redirect()`'s, have headers that cannot change.
+ * Set the security headers on `response`, in place: the response Start
+ * goes on to handle stays the one the route or page made, a TanStack
+ * redirect's marker and all. Its headers must be changeable, as those of a
+ * `new Response(…)` are; `Response.redirect()`'s and `fetch()`'s are not,
+ * and coffre makes neither.
  */
-export function withSecurityHeaders(
-  request: Request,
-  response: Response,
-  options: SecurityHeaderOptions,
-): Response {
-  const secured = new Response(response.body, response);
-  const headers = secured.headers;
+export function setSecurityHeaders(request: Request, response: Response, options: SecurityHeaderOptions): Response {
+  const headers = response.headers;
 
   // Enforced in development too, so a script that lacks the nonce fails
   // where it is written rather than once deployed.
@@ -78,5 +76,5 @@ export function withSecurityHeaders(
   // change either at any moment: nothing is worth keeping.
   if (!headers.has('cache-control')) headers.set('cache-control', 'no-store');
 
-  return secured;
+  return response;
 }

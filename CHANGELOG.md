@@ -16,10 +16,12 @@ writes them:
   `scheduled: coffre.scheduled`. On Node, `src/server.ts` configures with
   `createCoffre({ … })` and runs the built app with
   `serve({ app: new URL('../app/dist/', import.meta.url), coffre })`;
-- `app/src/start.ts`: `createStart(() => ({ requestMiddleware: [coffreMiddleware] }))`.
-  The middleware gives every response coffre's security headers and a fresh
-  CSP nonce, and the pages the visitor's API client. A server route or page
-  rendered without it fails, saying how to add it;
+- `app/src/start.ts`: `createStart(() => ({ requestMiddleware: [coffreMiddleware,
+  createCsrfMiddleware(…)] }))`. coffre's middleware gives every response
+  coffre's security headers and a fresh CSP nonce, and the pages the
+  visitor's API client. A server route or page rendered without it fails,
+  saying how to add it. Start's CSRF check for server functions, which Start
+  drops once an app sets middleware of its own, stays for the app's;
 - `app/src/router.tsx`: the app's own root, its document, with
   `coffreHead()` and `<CoffreProvider>`, and under it coffre's routes:
   `root.addChildren([...coffreServerRoutes(root), ...coffreRoutes(root)])`.
@@ -37,6 +39,13 @@ writes them:
   needs, for the browser to fetch them beside the app's entry, checks the
   versions below, and fails the build if server code reaches what the
   browser loads, in whatever form Vite emits it.
+
+The theme and the folded sidebar are cookies now, `coffre-theme` and
+`coffre-sidebar`, which the server reads, so a page is drawn as the visitor
+left it from the first byte, with no script of coffre's own before it: a
+theme chosen before 0.2, kept in the browser's storage, is chosen once more.
+coffre's look is scoped to the element `<CoffreProvider>` renders; the
+app's document keeps its own.
 
 React, TanStack Router, Start, Query and Vite are the deployment's own
 dependencies now, pinned at exactly the versions `@coffre/ui` is built with;

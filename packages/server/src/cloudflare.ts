@@ -38,7 +38,7 @@ export {
   type WaitUntil,
   type WorkersConfig,
 } from './cloudflare-handler.ts';
-export type { CoffreContext, CoffreRequest, PageContext } from './scope.ts';
+export type { CoffreContext, CoffreRequest, PageContext, Preferences } from './scope.ts';
 export * from './index.ts';
 
 /**

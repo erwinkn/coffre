@@ -30,7 +30,7 @@ import { requestScope, type CoffreContext } from './scope.ts';
 
 export * from './index.ts';
 export type { NodeConfig, ServeOptions, Server };
-export type { CoffreContext, CoffreRequest, PageContext } from './scope.ts';
+export type { CoffreContext, CoffreRequest, PageContext, Preferences } from './scope.ts';
 /** Limits for workload exchanges that count in this process: `signin({ workloads: { limits: processLimits() } })`. */
 export { processLimits } from './workloads/limits.ts';
 

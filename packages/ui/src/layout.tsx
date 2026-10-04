@@ -1,12 +1,14 @@
 // What coffre's pages render in: the provider the deployment's document puts
 // them in; the shell, coffre's nav, for signed-in pages; and the solo frame
 // of the sign-in pages. The routes that render the two are in routes.ts.
-import type { ReactNode } from 'react';
-import { Outlet, ScriptOnce } from '@tanstack/react-router';
+import { useMemo, useRef, useState, type ReactNode } from 'react';
+import { Outlet, useRouter } from '@tanstack/react-router';
 import { Toaster } from 'sonner';
-import { Brand, Shell, sidebarBootScript } from './components/shell';
+import { Brand, Shell } from './components/shell';
 import { TooltipProvider } from './components/ui';
-import { ThemeToggle, themeBootScript } from './components/theme';
+import { ThemeToggle } from './components/theme';
+import { PreferencesContext, rememberSidebar, rememberTheme, type Preferences, type Theme } from './lib/preferences';
+import type { RouterContext } from './router';
 import { Agentation } from './components/agentation';
 import { LiveRegion } from './components/row-state';
 import { useShell } from './lib/use-shell';
@@ -36,27 +38,49 @@ function Toasts() {
 /**
  * What coffre's pages need around them, for the deployment's document to put
  * in its body: `<body><CoffreProvider>{children}</CoffreProvider><Scripts /></body>`.
- * The theme and the sidebar's width, set before anything paints; tooltips,
- * toasts and the live region, which the deployment's own pages may use too.
- * The query client comes with the router (`createRouter`).
+ * coffre's element, drawn in the visitor's theme, its sidebar folded or not,
+ * as their cookies say, from the first byte: the server and the browser
+ * both render it from them, so nothing waits for a script. Tooltips, toasts
+ * and the live region, which the deployment's own pages may use too. The
+ * query client comes with the router (`createRouter`).
  */
 export function CoffreProvider({ children }: { children: ReactNode }) {
+  const initial = (useRouter().options.context as RouterContext).preferences;
+  const [theme, setThemeState] = useState(initial.theme);
+  const [sidebar, setSidebarState] = useState(initial.sidebar);
+  const portal = useRef<HTMLDivElement>(null);
+  const preferences = useMemo(
+    () => ({
+      theme,
+      sidebar,
+      setTheme: (next: Theme) => {
+        rememberTheme(next);
+        setThemeState(next);
+      },
+      setSidebar: (next: Preferences['sidebar']) => {
+        rememberSidebar(next);
+        setSidebarState(next);
+      },
+      portal,
+    }),
+    [theme, sidebar],
+  );
   return (
-    <>
-      {/* First in the body, so they run before anything in it paints.
-          ScriptOnce gives them the page's CSP nonce, and removes them once
-          run, so hydration finds nothing to reconcile. They are not in
-          coffreHead(): the router re-adds a head script it cannot find by its
-          nonce, which browsers hide, and so without one, which the CSP refuses. */}
-      <ScriptOnce>{themeBootScript}</ScriptOnce>
-      <ScriptOnce>{sidebarBootScript}</ScriptOnce>
-      <TooltipProvider>
-        {children}
-        <Toasts />
-        <LiveRegion />
-        <Agentation />
-      </TooltipProvider>
-    </>
+    <PreferencesContext.Provider value={preferences}>
+      <div
+        ref={portal}
+        className="coffre"
+        data-theme={theme === 'system' ? undefined : theme}
+        data-sidebar={sidebar === 'collapsed' ? 'collapsed' : undefined}
+      >
+        <TooltipProvider>
+          {children}
+          <Toasts />
+          <LiveRegion />
+          <Agentation />
+        </TooltipProvider>
+      </div>
+    </PreferencesContext.Provider>
   );
 }
 

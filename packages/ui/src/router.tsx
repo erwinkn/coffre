@@ -1,9 +1,10 @@
 import { createClient, type CoffreClient } from '@coffre/client';
 import { createRouter as createTanStackRouter, type AnyRoute } from '@tanstack/react-router';
 import { setupRouterSsrQueryIntegration } from '@tanstack/react-router-ssr-query';
-import { getGlobalStartContext } from '@tanstack/react-start';
 import { NotFound, RouteError } from './components/route-states';
 import { createQueryClient } from './lib/queries';
+import { DEFAULT_PREFERENCES, requestPage } from './lib/page-context';
+import { browserPreferences, type Preferences } from './lib/preferences';
 import type { CoffreContext } from './routes';
 
 /**
@@ -22,6 +23,12 @@ import type { CoffreContext } from './routes';
  */
 export function createRouter<TRouteTree extends AnyRoute>(routeTree: TRouteTree) {
   const queryClient = createQueryClient();
+  const page = typeof window === 'undefined' ? requestPage() : undefined;
+  const context: RouterContext = {
+    coffre: page?.client ?? browserClient(),
+    queryClient,
+    preferences: page?.preferences ?? (typeof window === 'undefined' ? DEFAULT_PREFERENCES : browserPreferences()),
+  };
   const router = createTanStackRouter({
     routeTree,
     defaultPreload: 'intent',
@@ -30,53 +37,25 @@ export function createRouter<TRouteTree extends AnyRoute>(routeTree: TRouteTree)
     scrollRestoration: true,
     defaultNotFoundComponent: NotFound,
     defaultErrorComponent: RouteError,
-    ssr: { nonce: cspNonce() },
-    context: { coffre: requestClient(), queryClient } satisfies CoffreContext,
+    // The nonce coffre's middleware minted for this response's policy, which
+    // the router puts on every script it renders. The browser has none to
+    // give: hydration reads it back from the page.
+    ssr: { nonce: page?.cspNonce },
+    context,
   });
   setupRouterSsrQueryIntegration({ router, queryClient });
   return router;
 }
 
-/** What coffre's middleware hands each request's render (`@coffre/server/start`). */
-type PageContext = { cspNonce?: string; client?: CoffreClient };
-
-function pageContext(): PageContext | undefined {
-  try {
-    return getGlobalStartContext() as PageContext | undefined;
-  } catch {
-    // Outside a request: a router built only to resolve a redirect renders nothing.
-    return undefined;
-  }
-}
+/** What the router gives every route: coffre's context, and how the visitor has the pages drawn, for `<CoffreProvider>`. */
+export type RouterContext = CoffreContext & { preferences: Preferences };
 
 /**
- * The API as this visitor, which every loader reads through:
- * `context.coffre.secrets.list('market/dev')`. On the server coffre's
- * middleware builds it per request, calling the API in process with the
- * visitor's credential; the pages only use it. In the browser it is plain
- * `fetch` to `/api`, which sends the session cookie itself.
+ * The API as this visitor in the browser, which every loader reads through
+ * (`context.coffre.secrets.list('market/dev')`): plain `fetch` to `/api`,
+ * which sends the session cookie itself. On the server, coffre's
+ * middleware builds it per request; outside one, nothing calls it.
  */
-function requestClient(): CoffreClient {
-  if (typeof window !== 'undefined') return createClient({ url: window.location.origin });
-  const client = pageContext()?.client;
-  if (client !== undefined) return client;
-  return createClient({
-    url: 'http://coffre.invalid',
-    transport: () =>
-      Promise.reject(
-        new Error(
-          "coffre's request middleware is not installed: add coffreMiddleware, from @coffre/server/start, to " +
-            "createStart(() => ({ requestMiddleware: [coffreMiddleware] })) in the app's src/start.ts",
-        ),
-      ),
-  });
-}
-
-/**
- * The nonce coffre's middleware minted for this response's
- * Content-Security-Policy, which the router puts on every script it renders.
- * The client has none to give: hydration reads it back from the page.
- */
-function cspNonce(): string | undefined {
-  return pageContext()?.cspNonce;
+function browserClient(): CoffreClient {
+  return createClient({ url: typeof window === 'undefined' ? 'http://coffre.invalid' : window.location.origin });
 }

@@ -6,8 +6,8 @@ import type { ProjectSummary } from '../shared/models';
 import type { UiCapabilities } from '../lib/capabilities';
 import { isActiveAccessibleEnvironment } from '../lib/project-environments';
 import { useMounted } from '../lib/mounted';
+import { usePreferences } from '../lib/preferences';
 import { administrationEntries } from './affordances';
-import { setTheme } from './theme';
 import {
   Folder,
   Key,
@@ -65,6 +65,7 @@ export function CommandPalette({
   projects: ProjectSummary[];
   capabilities: UiCapabilities;
 }) {
+  const { portal, setTheme } = usePreferences();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
 
@@ -226,7 +227,7 @@ export function CommandPalette({
         <kbd aria-hidden>⌘K</kbd>
       </button>
 
-      <Dialog.Portal>
+      <Dialog.Portal container={portal}>
         <Dialog.Backdrop className="overlay" />
         <Dialog.Popup className="palette" aria-label="Jump to a project, environment or page">
           {/* `inline`: the list sits in the dialog, always shown, not in a popup of its own. */}

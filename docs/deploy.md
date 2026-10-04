@@ -207,7 +207,7 @@ unset COFFRE_MIGRATE_DATABASE_URL
 acme-secrets/
   app/src/coffre.ts      createCoffre(env => ({ publicUrl, database, vault, auth, auditChainKey }))
   app/src/server.ts      { fetch: Start's handler, coffre.request(env, ctx) its context; scheduled }
-  app/src/start.ts       createStart(() => ({ requestMiddleware: [coffreMiddleware] }))
+  app/src/start.ts       createStart(() => ({ requestMiddleware: [coffreMiddleware, createCsrfMiddleware(…)] }))
   app/src/router.tsx     the root, the document; coffre's server routes and pages under it
   app/vite.config.ts     cloudflare(…), tanstackStart(…), viteReact(), coffre()
   app/wrangler.jsonc     HYPERDRIVE, VAULT service binding, Cron
@@ -534,7 +534,7 @@ coffre login https://secrets.example.com
 acme-secrets/
   src/server.ts          createCoffre({ database, vault: connectVault(socket), … }); serve({ app: app/dist, coffre })
   src/vault.ts           serveVault({ socket, database, kek, rootAdmins })
-  app/src/start.ts       createStart(() => ({ requestMiddleware: [coffreMiddleware] }))
+  app/src/start.ts       createStart(() => ({ requestMiddleware: [coffreMiddleware, createCsrfMiddleware(…)] }))
   app/src/router.tsx     the root, the document; coffre's server routes and pages under it
   app/vite.config.ts     tanstackStart(…), viteReact(), coffre()
   server.env.example     app settings
@@ -691,6 +691,16 @@ export const routeTree = root.addChildren([
     server: { handlers: { POST: ({ request, context }) => context.hooks.deployed(request) } },
   });
   ```
+
+  coffre sets its headers on the response a route returns, in place, so a
+  route returns one whose headers can change: `new Response(…)`, not
+  `Response.redirect()` or a `fetch()`'s own. TanStack's `redirect()` is
+  fine.
+- **Server functions are checked for CSRF.** `src/start.ts` lists Start's
+  `createCsrfMiddleware(…)` after coffre's: Start applies it by itself only
+  to an app that sets no middleware of its own, and coffre's is one. It
+  looks at server functions alone; coffre's `/api` and `/auth` judge their
+  own requests.
 
 ## CI runs without a stored token
 

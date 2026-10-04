@@ -1,45 +1,6 @@
-import { useEffect, useState } from 'react';
 import { Menu } from '@base-ui/react/menu';
+import { usePreferences, type Theme } from '../lib/preferences';
 import { Check, Monitor, Moon, Sun } from './icons';
-
-export type Theme = 'system' | 'light' | 'dark';
-
-const STORAGE_KEY = 'coffre-theme';
-const CHANGE_EVENT = 'coffre-theme-change';
-
-/**
- * Applied before first paint, inlined in <head>.
- *
- * Without this the page renders in the system palette and then snaps to the
- * stored choice once React hydrates -- a full-screen flash on every load for
- * anyone who overrode it. Kept as a string so it runs synchronously; there is
- * no way to do this correctly from a component.
- */
-export const themeBootScript = `(function(){try{var t=localStorage.getItem(${JSON.stringify(
-  STORAGE_KEY,
-)});if(t==="light"||t==="dark"){document.documentElement.setAttribute("data-theme",t)}}catch(e){}})()`;
-
-function stored(): Theme {
-  try {
-    const value = localStorage.getItem(STORAGE_KEY);
-    return value === 'light' || value === 'dark' ? value : 'system';
-  } catch {
-    return 'system';
-  }
-}
-
-function apply(theme: Theme) {
-  const root = document.documentElement;
-  try {
-    if (theme === 'system') localStorage.removeItem(STORAGE_KEY);
-    else localStorage.setItem(STORAGE_KEY, theme);
-  } catch {
-    // Storage refused (private mode); the choice still holds for this page.
-  }
-  if (theme === 'system') root.removeAttribute('data-theme');
-  else root.setAttribute('data-theme', theme);
-  window.dispatchEvent(new CustomEvent(CHANGE_EVENT));
-}
 
 const OPTIONS: { value: Theme; label: string; Icon: typeof Sun }[] = [
   { value: 'system', label: 'Match system', Icon: Monitor },
@@ -47,35 +8,11 @@ const OPTIONS: { value: Theme; label: string; Icon: typeof Sun }[] = [
   { value: 'dark', label: 'Dark', Icon: Moon },
 ];
 
-/**
- * The stored choice, kept in step with changes made elsewhere (the command
- * palette, another tab).
- *
- * Server-rendered markup cannot know the stored preference, so it starts on
- * "system" and corrects itself on mount. Any other approach hydration-mismatches.
- */
-function useTheme(): Theme {
-  const [theme, setThemeState] = useState<Theme>('system');
-
-  useEffect(() => {
-    const sync = () => setThemeState(stored());
-    sync();
-    window.addEventListener(CHANGE_EVENT, sync);
-    window.addEventListener('storage', sync);
-    return () => {
-      window.removeEventListener(CHANGE_EVENT, sync);
-      window.removeEventListener('storage', sync);
-    };
-  }, []);
-
-  return theme;
-}
-
 /** The theme as a radio group inside a dropdown menu (the account menu). */
 export function ThemeMenuItems() {
-  const theme = useTheme();
+  const { theme, setTheme } = usePreferences();
   return (
-    <Menu.RadioGroup value={theme} onValueChange={(value: Theme) => apply(value)}>
+    <Menu.RadioGroup value={theme} onValueChange={(value: Theme) => setTheme(value)}>
       <Menu.GroupLabel className="menu-label">Theme</Menu.GroupLabel>
       {OPTIONS.map(({ value, label, Icon }) => (
         <Menu.RadioItem key={value} value={value} className="menu-item" closeOnClick>
@@ -95,7 +32,7 @@ export function ThemeMenuItems() {
  * A menu for a three-way choice costs a click to find out the current value.
  */
 export function ThemeToggle() {
-  const theme = useTheme();
+  const { theme, setTheme } = usePreferences();
 
   return (
     <div className="theme-choice" role="group" aria-label="Colour scheme">
@@ -106,7 +43,7 @@ export function ThemeToggle() {
           aria-pressed={theme === value}
           aria-label={label}
           title={label}
-          onClick={() => apply(value)}
+          onClick={() => setTheme(value)}
         >
           <Icon size={14} />
         </button>
@@ -115,14 +52,9 @@ export function ThemeToggle() {
   );
 }
 
-/** Imperative theme setter, so the command palette can offer the same options. */
-export function setTheme(theme: Theme) {
-  apply(theme);
-}
-
 /** The theme as three large choices, for the Settings page. */
 export function ThemeCards() {
-  const theme = useTheme();
+  const { theme, setTheme } = usePreferences();
   return (
     <div className="choice-grid" role="group" aria-label="Colour scheme">
       {OPTIONS.map(({ value, label, Icon }) => (
@@ -131,7 +63,7 @@ export function ThemeCards() {
           type="button"
           className="choice"
           aria-pressed={theme === value}
-          onClick={() => apply(value)}
+          onClick={() => setTheme(value)}
         >
           <Icon size={16} />
           {label}

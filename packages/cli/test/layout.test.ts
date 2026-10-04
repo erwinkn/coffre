@@ -223,6 +223,22 @@ test("a tsconfig.json or README.md of its own stays so, and the move says what t
   }
 });
 
+test("a Node deployment's own build script, which 0.1 never wrote, is kept, and the move says so", () => {
+  const dir = deployment('node');
+  try {
+    const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
+    manifest.scripts.build = 'tsc -p .';
+    writeFileSync(join(dir, 'package.json'), `${JSON.stringify(manifest, null, 2)}\n`);
+    const move = startAppMove(dir, 'node', templateDir('node'));
+    assert.ok('changes' in move, JSON.stringify(move));
+    applyChanges(dir, move.changes);
+    assert.equal(JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')).scripts.build, 'tsc -p .');
+    assert.match(move.notes.join('\n'), /package\.json's "build" script is the deployment's own, and stays so: coffre 0\.2's is `vite build app`/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a deployment moved by hand, its files its own since, is left alone; one with neither layout is refused', () => {
   for (const kind of ['workers', 'node'] as const) {
     const dir = deployment(kind);

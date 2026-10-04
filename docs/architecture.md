@@ -114,7 +114,7 @@ one package is seen by the others without a build. Builds leave it off.
 |---|---|
 | `@coffre/server/cloudflare` | `createCoffre(env => ({ database, …config }))` → `{ request(env, ctx), scheduled }`; `postgres(env.HYPERDRIVE)` |
 | `@coffre/server/node` | `createCoffre({ database, …config })`; `serve({ app, coffre, port?, host? })` → `{ url, close }`; `migrate(url)` |
-| `@coffre/server/start` | `coffreMiddleware`, for the app's `createStart(() => ({ requestMiddleware: [coffreMiddleware] }))` |
+| `@coffre/server/start` | `coffreMiddleware`, for the app's `createStart(() => ({ requestMiddleware: [coffreMiddleware, …] }))` |
 | `@coffre/server/routes` | `coffreServerRoutes(root)`; or one by one, `api`, `auth`, `livez`, `readyz`, each a function of its parent |
 | `@coffre/server` (both) | `signin`, `github`, `google`, `microsoft`, `oidc`, `cloudflareAccess`, `SigninError`; `githubActions`, `vercel`, `railway`, `cloudflareWorkers`, `SyncConfigError`, `SyncProviderError`; and the config types, `SigninProvider` and `SyncProvider` among them |
 | `@coffre/vault/cloudflare` | `vault(env => config)`, the RPC Worker's default export; `postgres(env.VAULT_HYPERDRIVE)` |
@@ -155,7 +155,7 @@ inside it. Its files are few:
 
 ```
 app/vite.config.ts    plugins: [cloudflare(…), tanstackStart({ router: { enableRouteGeneration: false } }), viteReact(), coffre()]
-app/src/start.ts      createStart(() => ({ requestMiddleware: [coffreMiddleware] }))
+app/src/start.ts      createStart(() => ({ requestMiddleware: [coffreMiddleware, createCsrfMiddleware(…)] }))
 app/src/router.tsx    the root, the document; root.addChildren([...coffreServerRoutes(root), ...coffreRoutes(root)])
 app/src/server.ts     handler.fetch(request, { context: coffre.request(env, ctx) }); scheduled
 app/src/coffre.ts     export const coffre = createCoffre(env => ({ publicUrl, database, … }))
@@ -166,10 +166,17 @@ coffre in its context: `coffre.request(env, ctx)`, the invocation's
 database and vault. On Node, `serve({ app, coffre })` does the same for
 each request, and serves the app's static files. Start runs coffre's
 middleware first, for every request: it mints the response's nonce, builds
-the visitor's API client, an in-process call with their credential, and
-passes both on, then sets the security headers, nonce included, on
-whatever comes back: a page Start rendered, a redirect, a not-found, or one
-of coffre's server routes. Those, `/api/$`, `/auth/$`, `/livez` and
+the visitor's API client, an in-process call with their credential, reads
+the visitor's preferences from their cookies, and passes the three on; then
+it sets the security headers, nonce included, on whatever comes back, in
+place: a page Start rendered, a redirect, a not-found, a refusal, or one of
+coffre's server routes. In place, because Start goes on to handle what the
+middleware hands back, a TanStack redirect by a marker it carries, which a
+copy would lose; so a response must have headers that can change, as a
+`new Response(…)`'s do and `Response.redirect()`'s and `fetch()`'s do not.
+One response comes before any middleware: Start answers a path that
+starts with `//` with a 308 to the same path on the same origin, without
+coffre's headers. It names no other site, so it is no open redirect. Those, `/api/$`, `/auth/$`, `/livez` and
 `/readyz`, hand the request to coffre's server, which answers it as before.
 A route or a page rendered without the middleware fails, saying how to add
 it, rather than answer without headers. Nothing coffre answers waits for a

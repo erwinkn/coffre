@@ -19,7 +19,11 @@
 /* Tokens                                                                     */
 /* ========================================================================== */
 
-:root {
+/* All of coffre's look is scoped to its element, which <CoffreProvider>
+   renders, with the visitor's theme and sidebar as attributes: the
+   deployment's own document keeps its own. No theme is "system", which
+   these follow by color-scheme alone. */
+.coffre {
   color-scheme: light dark;
 
   --font-sans: 'Inter Variable', system-ui, -apple-system, 'Segoe UI', sans-serif;
@@ -68,11 +72,11 @@
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-:root[data-theme='light'] {
+.coffre[data-theme='light'] {
   color-scheme: light;
 }
 
-:root[data-theme='dark'] {
+.coffre[data-theme='dark'] {
   color-scheme: dark;
   --shadow-xs: 0 1px 2px oklch(0 0 0 / 0.3);
   --shadow-md: 0 1px 2px oklch(0 0 0 / 0.4), 0 8px 24px -8px oklch(0 0 0 / 0.6);
@@ -80,7 +84,7 @@
 }
 
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme='light']) {
+  .coffre:not([data-theme='light']) {
     --shadow-xs: 0 1px 2px oklch(0 0 0 / 0.3);
     --shadow-md: 0 1px 2px oklch(0 0 0 / 0.4), 0 8px 24px -8px oklch(0 0 0 / 0.6);
     --shadow-lg: 0 1px 3px oklch(0 0 0 / 0.5), 0 24px 56px -16px oklch(0 0 0 / 0.8);
@@ -100,12 +104,28 @@
 html {
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
-  scrollbar-color: var(--border) transparent;
+}
+
+/* The page's own scrollbar and overscroll, in coffre's scheme. */
+:root:has(.coffre) {
+  color-scheme: light dark;
+}
+
+:root:has(.coffre[data-theme='light']) {
+  color-scheme: light;
+}
+
+:root:has(.coffre[data-theme='dark']) {
+  color-scheme: dark;
 }
 
 body {
   margin: 0;
+}
+
+.coffre {
   min-height: 100vh;
+  scrollbar-color: var(--border) transparent;
   background: var(--canvas);
   color: var(--ink);
   font-family: var(--font-sans);
@@ -618,11 +638,11 @@ a.crumb-link:hover {
    the avatar share one centre line, the same folded or not, so folding moves
    the page and nothing in the sidebar. */
 @media (width > 60rem) {
-  :root[data-sidebar='collapsed'] .shell {
+  .coffre[data-sidebar='collapsed'] .shell {
     grid-template-columns: 3.5rem minmax(0, 1fr);
   }
 
-  :root[data-sidebar='collapsed']
+  .coffre[data-sidebar='collapsed']
     .shell
     > .sidebar
     :is(.brand-name, .nav-label, .account-text) {
@@ -635,21 +655,21 @@ a.crumb-link:hover {
   }
 
   /* Folded, the mark is the size of the icons below it. */
-  :root[data-sidebar='collapsed'] .shell > .sidebar .sidebar-brand {
+  .coffre[data-sidebar='collapsed'] .shell > .sidebar .sidebar-brand {
     justify-content: center;
     padding-inline: 0;
   }
 
-  :root[data-sidebar='collapsed'] .shell > .sidebar .sidebar-brand svg {
+  .coffre[data-sidebar='collapsed'] .shell > .sidebar .sidebar-brand svg {
     width: 1.25rem;
     height: 1.25rem;
   }
 
-  :root[data-sidebar='collapsed'] .shell > .sidebar .sidebar-foot {
+  .coffre[data-sidebar='collapsed'] .shell > .sidebar .sidebar-foot {
     flex-direction: column-reverse;
   }
 
-  :root[data-sidebar='collapsed'] .shell > .sidebar .sidebar-foot-settings {
+  .coffre[data-sidebar='collapsed'] .shell > .sidebar .sidebar-foot-settings {
     width: 100%;
     height: 2rem;
   }

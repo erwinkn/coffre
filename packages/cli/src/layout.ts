@@ -223,7 +223,10 @@ export function startAppMove(dir: string, kind: Kind, template: string): Move {
   else {
     const moved = startManifest(manifest, template, SCRIPTS_0_1[kind]);
     if ('problem' in moved) problems.push(`package.json: ${moved.problem}`);
-    else change('package.json', moved.text, manifest);
+    else {
+      change('package.json', moved.text, manifest);
+      notes.push(...moved.kept);
+    }
   }
 
   // Unedited, 0.2's; edited, the deployment's, with what it then lacks said.
@@ -288,16 +291,25 @@ const json = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`;
  * package.json for a Start app: the template's scripts, in place of 0.1's;
  * and the template's dependencies the deployment lacks, at the template's
  * versions. A script that is neither 0.1's nor 0.2's is the deployment's:
- * refused, as it would still build 0.1's app.
+ * refused where 0.1 wrote one, as it would still build 0.1's app; kept, and
+ * named, where 0.1 wrote none, as Node's `build`.
  */
-export function startManifest(text: string, template: string, was: Record<string, string>): { text: string } | { problem: string } {
+export function startManifest(
+  text: string,
+  template: string,
+  was: Record<string, string>,
+): { text: string; kept: string[] } | { problem: string } {
   const manifest = JSON.parse(text) as Record<string, Record<string, string> | unknown>;
   const wanted = JSON.parse(readFileSync(join(template, 'package.json'), 'utf8')) as Record<string, Record<string, string>>;
   const scripts = { ...(manifest.scripts as Record<string, string> | undefined) };
   const edited: string[] = [];
+  const kept: string[] = [];
   for (const [name, script] of Object.entries(wanted.scripts ?? {})) {
     if (scripts[name] === undefined || scripts[name] === was[name]) scripts[name] = script;
     else if (scripts[name] !== script && name in was) edited.push(name);
+    else if (scripts[name] !== script) {
+      kept.push(`package.json's "${name}" script is the deployment's own, and stays so: coffre 0.2's is \`${script}\`, and the app needs what it does`);
+    }
   }
   if (edited.length > 0) {
     const names = edited.map((name) => `"${name}"`).join(' and ');
@@ -318,7 +330,7 @@ export function startManifest(text: string, template: string, was: Record<string
     for (const [name, version] of Object.entries(wanted[field] ?? {})) if (!has(name)) own[name] = version;
     manifest[field] = Object.fromEntries(Object.entries(own).sort(([a], [b]) => a.localeCompare(b)));
   }
-  return { text: json(manifest) };
+  return { text: json(manifest), kept };
 }
 
 /** Make the changes, in order. */

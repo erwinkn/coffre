@@ -10,12 +10,13 @@ import {
   startDevice,
   startSignin,
 } from './auth-routes.ts';
+import { readCookie } from './auth.ts';
 import { fetchApi, isSameOrigin, pageClient } from './fetch-api.ts';
 import { auditReadiness, writeAuditHeartbeat } from './heartbeat.ts';
 import { errorResponse, jsonResponse, methodNotAllowed } from './http.ts';
 import { logged } from './logged.ts';
 import type { CoffreRuntime } from './runtime.ts';
-import { cspNonce, withSecurityHeaders } from './security-headers.ts';
+import { cspNonce, setSecurityHeaders } from './security-headers.ts';
 
 
 type Handler = (request: Request, runtime: CoffreRuntime, sourceIp: string | null) => Promise<Response>;
@@ -68,8 +69,23 @@ export async function coffreRoute(request: Request, runtime: CoffreRuntime, sour
   return null;
 }
 
-/** What a page renders with: this response's nonce, and the API as the visitor. */
-export type PageContext = { cspNonce: string; client: CoffreClient };
+/**
+ * How the visitor has coffre's pages drawn, from their cookies: the theme
+ * they chose, `system` when none, and whether the sidebar is folded. The
+ * pages set them (`@coffre/ui`), and render with them from the first byte.
+ */
+export type Preferences = { theme: 'system' | 'light' | 'dark'; sidebar: 'expanded' | 'collapsed' };
+
+function preferencesOf(request: Request): Preferences {
+  const theme = readCookie(request, 'coffre-theme');
+  return {
+    theme: theme === 'light' || theme === 'dark' ? theme : 'system',
+    sidebar: readCookie(request, 'coffre-sidebar') === 'collapsed' ? 'collapsed' : 'expanded',
+  };
+}
+
+/** What a page renders with: this response's nonce, the API as the visitor, and how they have the pages drawn. */
+export type PageContext = { cspNonce: string; client: CoffreClient; preferences: Preferences };
 
 /**
  * One request, whatever answers it, a page or one of coffre's routes: it
@@ -97,14 +113,14 @@ export async function respond(
     } else {
       let unavailable = false;
       const client = pageClient(request, runtime, sourceIp, (status) => (unavailable ||= status === 503));
-      const rendered = await render({ cspNonce: nonce, client });
+      const rendered = await render({ cspNonce: nonce, client, preferences: preferencesOf(request) });
       response = rendered.status === 500 && unavailable ? retryLater(rendered) : rendered;
     }
   } catch (error) {
     response = errorResponse(error);
   }
   const auth = runtime.auth;
-  return withSecurityHeaders(request, response, {
+  return setSecurityHeaders(request, response, {
     nonce,
     // Access's logout form posts to Access itself.
     formOrigins: auth.mode === 'cloudflare' ? [auth.access.issuer] : [],
