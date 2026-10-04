@@ -8,8 +8,14 @@ import { fileURLToPath } from 'node:url';
 import { actionPin, bumpAction } from './action-pin.mjs';
 
 const versionPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
-const validVersion = (value) => typeof value === 'string' && versionPattern.test(value)
-    && (!value.includes('-') || value.slice(value.indexOf('-') + 1).split('.').every((id) => !/^\d+$/.test(id) || /^(0|[1-9]\d*)$/.test(id)));
+function validVersion(value) {
+    // Match the entire literal, including final newlines, and keep within
+    // npm/node-semver's version length and numeric component limits.
+    if (typeof value !== 'string' || value.length > 256) return false;
+    const match = versionPattern.exec(value);
+    if (!match || match[0] !== value || !match.slice(1, 4).every((part) => Number.isSafeInteger(Number(part)))) return false;
+    return !value.includes('-') || value.slice(value.indexOf('-') + 1).split('.').every((id) => !/^\d+$/.test(id) || /^(0|[1-9]\d*)$/.test(id));
+}
 const sections = ['dependencies', 'devDependencies'];
 const canonical = (value) => `${JSON.stringify(value, null, 2)}\n`;
 

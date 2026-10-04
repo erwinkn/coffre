@@ -138,7 +138,7 @@ test('deletions, renames, new files and permission changes are not version bumps
 });
 
 test('invalid or non-string versions never qualify, even when all fields agree', (t) => {
-    for (const version of [['0.1.14'], '01.1.14', '0.1.14-rc..1', '0.1.14-01']) {
+    for (const version of [['0.1.14'], '01.1.14', '0.1.14-rc..1', '0.1.14-01', '0.1.14\n', '9007199254740992.0.0', '0.1.14-' + 'r'.repeat(256)]) {
         const f = fixture(t);
         for (const path of ['packages/cli/package.json', 'packages/core/package.json']) {
             f.edit(path, (text) => { const pkg = JSON.parse(text); pkg.version = version; return json(pkg); });
