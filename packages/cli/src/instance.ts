@@ -44,7 +44,9 @@ export type Credential =
   | { kind: 'token'; token: string }
   | { kind: 'access-service-token'; clientId: string; clientSecret: string }
   /** Ask `cloudflared access token -app=<origin>` at request time. */
-  | { kind: 'cloudflared' };
+  | { kind: 'cloudflared' }
+  /** A CI run's ID token, traded for a five-minute credential of `service` before the first request (`workload.ts`). */
+  | { kind: 'workload'; service: string };
 
 export type Target = { origin: string; mode: AuthMode; credential: Credential };
 
@@ -188,6 +190,14 @@ export function resolveTarget(env: Environment, store: Store, now: Date = new Da
   const token = env.COFFRE_TOKEN?.trim();
   if (token) return { origin, mode, credential: { kind: 'token', token } };
 
+  const service = env.COFFRE_SERVICE?.trim();
+  if (service) {
+    if (mode === 'cloudflare') {
+      throw new Error("COFFRE_SERVICE signs a CI run in with its ID token, which coffre's own sign-in takes: behind Cloudflare Access, use an Access service token");
+    }
+    return { origin, mode, credential: { kind: 'workload', service: service.startsWith('token:') ? service : `token:${service}` } };
+  }
+
   if (mode === 'cloudflare' && accessClientId) {
     const clientSecret = env.COFFRE_ACCESS_CLIENT_SECRET?.trim();
     if (!clientSecret) {
@@ -226,7 +236,7 @@ function lookupSession(store: Store, requested: string): Session | undefined {
  * standard bearer token. Cloudflare Access takes its user token, or a service
  * token's id and secret, at the edge, and hands coffre its own assertion.
  */
-export function credentialHeaders(mode: AuthMode, credential: Credential, cloudflaredToken?: string): Record<string, string> {
+export function credentialHeaders(mode: AuthMode, credential: Credential, issued?: string): Record<string, string> {
   switch (credential.kind) {
     case 'access-service-token':
       return {
@@ -234,8 +244,11 @@ export function credentialHeaders(mode: AuthMode, credential: Credential, cloudf
         'cf-access-client-secret': credential.clientSecret,
       };
     case 'cloudflared':
-      if (!cloudflaredToken) throw new Error('cloudflared did not return a token');
-      return { 'cf-access-token': cloudflaredToken };
+      if (!issued) throw new Error('cloudflared did not return a token');
+      return { 'cf-access-token': issued };
+    case 'workload':
+      if (!issued) throw new Error('the run was not signed in: no credential was exchanged');
+      return { authorization: `Bearer ${issued}` };
     case 'token':
       return mode === 'cloudflare'
         ? { 'cf-access-token': credential.token }
