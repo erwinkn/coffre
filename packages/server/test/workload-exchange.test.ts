@@ -13,7 +13,7 @@ import { migrationLedger } from '@coffre/db/dialect';
 import { auditLog, credentials, serviceBindings } from './db/tables.ts';
 import { handleRequest, type Ui } from '../src/app.ts';
 import { resolveConfig } from '../src/config.ts';
-import { exchangeCandidates } from '../src/db/queries.ts';
+import { exchangeCandidates, exchangesSince } from '../src/db/queries.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
@@ -412,6 +412,28 @@ test("an exchange's first read visits the live bindings only, whatever the retir
     const plan = await planOf(pool, seen.find((statement) => /from "service_bindings"/i.test(statement.text))!, 'service_bindings');
     assert.ok(plan.indexes.includes('service_bindings_live_idx'), plan.indexes.join(', '));
     assert.ok(plan.visited <= 2, `visited ${plan.visited} binding rows for one live binding`);
+  } finally {
+    await pool.end();
+  }
+});
+
+test("a binding's rate is counted over its last minute, whatever the credentials it issued before", postgresOnly('it reads Postgres query plans'), async () => {
+  const [binding] = await db.owner.select().from(serviceBindings);
+  // 50,000 runs a month ago, each with its credential, expired since; then one now.
+  await run(sql`INSERT INTO credentials (kind, auth_mac, token_hash, token_hint, generation, principal, created_by, created_at, expires_at)
+    SELECT 'service', decode(repeat('00', 32), 'hex'), sha256(convert_to(gen_random_uuid()::text, 'UTF8')), 'coffre_svc_…', ${binding!.generation}, ${MEMBER},
+      ${`binding:${binding!.id}`}, now() - interval '30 days', now() - interval '30 days' + interval '5 minutes'
+    FROM generate_series(1, 50000)`);
+  await run(sql`ANALYZE credentials`);
+  assert.equal((await trade(token(rsa))).status, 200);
+  const pool = testPostgresPool(TEST_RUNTIME_DATABASE_URL);
+  const seen: Statement[] = [];
+  try {
+    const recent = await exchangesSince(createDatabase(counted(pool, seen)), MEMBER, `binding:${binding!.id}`, new Date(Date.now() - 60_000), 60);
+    assert.equal(recent, 1);
+    const plan = await planOf(pool, seen.find((statement) => /from "credentials"/i.test(statement.text))!, 'credentials');
+    assert.ok(plan.indexes.includes('credentials_issued_by_idx'), plan.indexes.join(', '));
+    assert.ok(plan.visited <= 2, `visited ${plan.visited} credential rows for one recent credential`);
   } finally {
     await pool.end();
   }

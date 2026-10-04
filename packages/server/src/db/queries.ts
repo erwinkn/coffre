@@ -724,14 +724,19 @@ export async function consumeToken(db: Queryable, hash: Buffer): Promise<boolean
   return (await insertIfAbsent(db, tablesOf(db).consumedTokens, { hash })) === 1;
 }
 
-/** How many credentials a binding issued since `since`. */
-export async function exchangesSince(db: Queryable, principal: string, createdBy: string, since: Date): Promise<number> {
+/**
+ * How many credentials a binding issued since `since`, up to `atMost`: the
+ * count stops there. Through `credentials_issued_by_idx`, it visits that
+ * binding's last minute, not the expired history a CI service runs up.
+ */
+export async function exchangesSince(db: Queryable, principal: string, createdBy: string, since: Date, atMost: number): Promise<number> {
   const { credentials } = tablesOf(db);
-  const [{ n }] = await db
-    .select({ n: count() })
+  const rows = await db
+    .select({ id: credentials.id })
     .from(credentials)
-    .where(and(eq(credentials.principal, principal), eq(credentials.createdBy, createdBy), gt(credentials.createdAt, since)));
-  return Number(n);
+    .where(and(eq(credentials.principal, principal), eq(credentials.createdBy, createdBy), gt(credentials.createdAt, since)))
+    .limit(atMost);
+  return rows.length;
 }
 
 export async function insertBinding(db: Queryable, chainKey: Buffer, row: Omit<NewRow<Tables['serviceBindings']>, 'authMac'> & {

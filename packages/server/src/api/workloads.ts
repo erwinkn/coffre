@@ -442,7 +442,7 @@ export class WorkloadService {
       if (seconds - decoded.claims.iat > MAX_TOKEN_AGE_SECONDS + CLOCK_TOLERANCE_SECONDS) {
         throw new ExchangeRefused('too_old', `the token was issued more than ${MAX_TOKEN_AGE_SECONDS / 60} minutes ago`);
       }
-      const recent = await exchangesSince(tx, member, issuedBy(binding.id), new Date(now.getTime() - 60_000));
+      const recent = await exchangesSince(tx, member, issuedBy(binding.id), new Date(now.getTime() - 60_000), EXCHANGES_PER_BINDING_MINUTE);
       if (recent >= EXCHANGES_PER_BINDING_MINUTE) {
         throw new ExchangeRefused('busy', `this binding issued ${EXCHANGES_PER_BINDING_MINUTE} credentials in the last minute: try again shortly`, 429);
       }
