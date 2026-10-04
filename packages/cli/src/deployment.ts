@@ -22,9 +22,9 @@ export function deploymentKind(dir: string): Kind | 'empty' | 'other' {
  * corepack when pnpm itself is missing. `purge`, when the person has said
  * yes already: a pnpm of another major than the one that installed
  * node_modules removes it first, and without a terminal it would ask, and
- * stop.
+ * stop. `frozen`: exactly as the lockfile says, changing nothing.
  */
-export function install(dir: string, { purge = false }: { purge?: boolean } = {}): Promise<void> {
+export function install(dir: string, { purge = false, frozen = false }: { purge?: boolean; frozen?: boolean } = {}): Promise<void> {
   const attempt = (command: string, args: string[]) =>
     new Promise<{ code: number | null; output: string } | null>((resolve) => {
       // Corepack would otherwise ask, on a stdin nobody types into, before fetching pnpm.
@@ -37,7 +37,12 @@ export function install(dir: string, { purge = false }: { purge?: boolean } = {}
     });
   return (async () => {
     // pnpm's box about its own new release would come after the error, and take its place.
-    const args = ['install', '--config.update-notifier=false', ...(purge ? ['--config.confirm-modules-purge=false'] : [])];
+    const args = [
+      'install',
+      '--config.update-notifier=false',
+      ...(purge ? ['--config.confirm-modules-purge=false'] : []),
+      ...(frozen ? ['--frozen-lockfile'] : []),
+    ];
     const ran = (await attempt('pnpm', args)) ?? (await attempt('corepack', ['pnpm', ...args]));
     if (ran === null) throw new Error('pnpm is not installed: corepack enable, or npm install -g pnpm, then run setup again');
     if (ran.code !== 0) {
@@ -45,6 +50,30 @@ export function install(dir: string, { purge = false }: { purge?: boolean } = {}
       throw held.length > 0 ? new HeldBack(held, installFailure(ran.output)) : new Error(installFailure(ran.output));
     }
   })();
+}
+
+/**
+ * Whether a deployment's packages are installed as its lockfile says. pnpm
+ * keeps a copy of the lockfile it last installed in node_modules/.pnpm, the
+ * same byte for byte: none, or another, is an install to do. Without a
+ * lockfile, there is nothing to match: node_modules being there is all.
+ */
+export function installed(dir: string): boolean {
+  const lockfile = join(dir, 'pnpm-lock.yaml');
+  if (!existsSync(lockfile)) return existsSync(join(dir, 'node_modules'));
+  const copy = join(dir, 'node_modules', '.pnpm', 'lock.yaml');
+  return existsSync(copy) && readFileSync(copy, 'utf8') === readFileSync(lockfile, 'utf8');
+}
+
+/**
+ * Install a deployment that is not, before running its own tools (wrangler,
+ * its CLI): a fresh clone has no node_modules. As its lockfile says, when it
+ * has one, with the pnpm it pins; false when it was installed already.
+ */
+export async function installAsLocked(dir: string): Promise<boolean> {
+  if (installed(dir)) return false;
+  await install(dir, { purge: true, frozen: existsSync(join(dir, 'pnpm-lock.yaml')) });
+  return true;
 }
 
 /** A deployment's `@coffre/*` pins, as its package.json has them. */
@@ -196,6 +225,9 @@ export function installFailure(output: string): string {
       'minimumReleaseAge (pnpm-workspace.yaml), a week. Install again once they are a week old, ' +
       'or add them to minimumReleaseAgeExclude if you trust them'
     );
+  }
+  if (/OUTDATED_LOCKFILE/.test(output)) {
+    return "pnpm-lock.yaml doesn't match package.json, so pnpm won't install from it: run pnpm install here, and commit the lockfile it writes";
   }
   return `pnpm install failed: ${output.trim().split('\n').slice(-3).join(' ')}`;
 }

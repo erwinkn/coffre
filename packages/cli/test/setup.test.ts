@@ -2,7 +2,7 @@ import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash, createHmac } from 'node:crypto';
-import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,7 +10,9 @@ import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 
 import { asJson, hyperdriveCommand, loginFor, loginUrl, scramVerifier, setupScreen, setupValues, type SetupResult } from '../src/setup.ts';
+import { templateDir } from '../src/init.ts';
 import { asSuperuser, CLUSTER, connects, database, emptyCluster, needsCluster } from './cluster.ts';
+import { fakeOpener, fakeWrangler } from './fakes.ts';
 import { inTerminal, ptySkip, screens, visible } from './pty.ts';
 
 const main = fileURLToPath(new URL('../src/main.ts', import.meta.url));
@@ -165,6 +167,87 @@ test('a Hyperdrive command reads the URL without echo, and hands wrangler it wit
     ]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * A Workers deployment as a fresh clone has it: its files and lockfile, no
+ * node_modules. Its pnpm installs the fake wrangler, as pnpm would the real
+ * one, and keeps its arguments; or, `refusing`, fails as pnpm does.
+ */
+function freshClone(refusing?: string) {
+  const dir = mkdtempSync(join(tmpdir(), 'coffre-clone-'));
+  const deployment = join(dir, 'secrets');
+  cpSync(templateDir('workers'), deployment, { recursive: true, filter: (path) => !path.includes('node_modules') });
+  writeFileSync(join(deployment, 'pnpm-lock.yaml'), "lockfileVersion: '9.0'\n");
+  // What the install brings: the deployment's own wrangler, kept aside until then.
+  const state = join(dir, 'wrangler');
+  fakeWrangler(join(dir, 'packages'), state, `cf-oauth-${'t'.repeat(40)}`);
+  const bin = join(dir, 'bin');
+  fakeOpener(bin);
+  writeFileSync(
+    join(bin, 'pnpm'),
+    refusing === undefined
+      ? `#!/bin/sh\nprintf '%s\\n' "$@" > '${dir}/pnpm-argv'\ncp -R '${dir}/packages/node_modules' .\nmkdir -p node_modules/.pnpm\ncp pnpm-lock.yaml node_modules/.pnpm/lock.yaml\n`
+      : `#!/bin/sh\necho '${refusing}' >&2\nexit 1\n`,
+  );
+  chmodSync(join(bin, 'pnpm'), 0o755);
+  const env = { PATH: `${bin}:${process.env.PATH}`, HOME: dir, COFFRE_SETUP_DATABASE_URL: 'postgresql://postgres:unused@127.0.0.1:1/coffre' };
+  return { dir, deployment, state, env, remove: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+test("a fresh clone of a Workers deployment: setup installs it as its lockfile says, then signs in with its own wrangler", { skip: ptySkip }, async () => {
+  const clone = freshClone();
+  try {
+    const { output } = await inTerminal(
+      ['setup'],
+      clone.env,
+      async (terminal) => {
+        await terminal.waitFor('Set Cloudflare up too?');
+        terminal.send('\r');
+        // wrangler's login, waiting for its address: the deployment's wrangler ran.
+        await terminal.waitFor('paste that address here');
+        terminal.send('\x03');
+      },
+      { columns: 160, rows: 48 },
+      clone.deployment,
+    );
+    const text = visible(screens(output).main);
+    assert.match(text, /✓ Installed its packages, as pnpm-lock\.yaml says[\s\S]*Sign in to Cloudflare/);
+    assert.doesNotMatch(text, /ENOENT/);
+    assert.deepEqual(readFileSync(join(clone.dir, 'pnpm-argv'), 'utf8').trim().split('\n'), [
+      'install',
+      '--config.update-notifier=false',
+      '--config.confirm-modules-purge=false',
+      '--frozen-lockfile',
+    ]);
+    const calls = readFileSync(join(clone.state, 'calls.jsonl'), 'utf8').trim().split('\n').map((line) => (JSON.parse(line) as { args: string[] }).args.join(' '));
+    assert.equal(calls[0], 'auth token --json', 'the deployment\'s wrangler, installed, ran');
+  } finally {
+    clone.remove();
+  }
+});
+
+test('when its install fails, setup says why in a sentence, and runs nothing of the deployment', { skip: ptySkip }, async () => {
+  const clone = freshClone(' ERR_PNPM_OUTDATED_LOCKFILE  Cannot install with "frozen-lockfile" because pnpm-lock.yaml is not up to date with package.json');
+  try {
+    const { output, code } = await inTerminal(
+      ['setup'],
+      clone.env,
+      async (terminal) => {
+        await terminal.waitFor('Set Cloudflare up too?');
+        terminal.send('\r');
+      },
+      { columns: 160, rows: 48 },
+      clone.deployment,
+    );
+    const text = visible(screens(output).main);
+    assert.equal(code, 1, text);
+    assert.match(text, /✗ Install its packages\s+pnpm-lock\.yaml doesn't match package\.json, so pnpm won't install from it: run pnpm install here, and commit the lockfile it writes/);
+    assert.doesNotMatch(text, /Sign in to Cloudflare|ENOENT/);
+    assert.ok(!existsSync(join(clone.state, 'calls.jsonl')), 'no wrangler ran');
+  } finally {
+    clone.remove();
   }
 });
 

@@ -20,7 +20,7 @@ import { migrateDatabase, type MigrationPlan } from '@coffre/db/migrate';
 import pg from 'pg';
 
 import { readDatabaseUrl } from './database-url.ts';
-import { deploymentKind, install } from './deployment.ts';
+import { deploymentKind, install, installAsLocked, installed } from './deployment.ts';
 import { init, KINDS, type Kind } from './init.ts';
 import { generateKeys, jsonWarning, keyGuide, keyValues, needsTerminal, type Keys } from './keys.ts';
 import { type Screen, showSecrets, type Value } from './secrets.ts';
@@ -138,7 +138,11 @@ export async function setup(args: string[]): Promise<void> {
         'Yes: Hyperdrive, GitHub sign-in, the keys as secrets, and the deploy',
         "No, I'll do Cloudflare myself",
       ]);
-      if (choice === 0) cloudflare = await Cloudflare.connect(dir, out, terminal.keys, clean, secrets, administrator);
+      if (choice === 0) {
+        // Cloudflare goes through the deployment's own wrangler, which a fresh clone has yet to install.
+        await installFirst(dir, out, clean);
+        cloudflare = await Cloudflare.connect(dir, out, terminal.keys, clean, secrets, administrator);
+      }
     }
     const result = await run(administrator, out, questions, { resetPasswords: options.resetPasswords, cloudflare }, secrets, clean);
     if (cloudflare !== null) {
@@ -216,6 +220,20 @@ async function scaffold(dir: string, keys: Keyboard, out: Output, clean: (error:
   }
   out.write('\n');
   return kind;
+}
+
+/** The deployment's packages, installed as its lockfile says when they are not, shown as a step of its own. */
+async function installFirst(dir: string, out: Output, clean: (error: unknown) => string): Promise<void> {
+  if (installed(dir)) return;
+  const steps = new Steps(out, ['Install its packages'], () => null, clean);
+  try {
+    await steps.run(0, async () => {
+      await installAsLocked(dir);
+      return existsSync(join(dir, 'pnpm-lock.yaml')) ? 'Installed its packages, as pnpm-lock.yaml says' : 'Installed its packages, with pnpm';
+    });
+  } finally {
+    steps.end();
+  }
 }
 
 async function run(

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+`coffre setup` in a fresh clone of a deployment, with no `node_modules`,
+installs it first, as its lockfile says, before Cloudflare's sign-in runs the
+deployment's own wrangler: it no longer fails with `spawn …/wrangler ENOENT`.
+An install that fails says why in a sentence. `coffre update` installs such
+a clone as it was before moving it, so that the migrations it says the
+release adds are counted from the deployment's own.
+
 `coffre update` recognizes a CLI installed globally with pnpm 11, which
 keeps it in its store's `links/` directory, and updates it with `pnpm add -g`
 instead of calling it a dependency of that directory. It asks npm and pnpm

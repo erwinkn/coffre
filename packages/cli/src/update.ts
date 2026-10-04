@@ -19,6 +19,8 @@ import {
   excludeUntil,
   HeldBack,
   install,
+  installAsLocked,
+  installed,
   minimumReleaseAge,
   pinPackageManager,
   removeCleared,
@@ -298,7 +300,6 @@ export async function update(args: string[]): Promise<void> {
           : `Move this deployment from ${was} to ${latest}${repin ? `, on ${on},` : ''} and install it?`;
         if (!(await ask(question, step))) return { text: `This deployment stays as it is, at ${was}`, details };
 
-        before = deploymentMigrations(deployment) ?? before;
         // Put back byte for byte however this ends short of installed: the
         // deployment's pins, pnpm and lockfile stay as they were.
         const files = ['package.json', 'pnpm-workspace.yaml', 'pnpm-lock.yaml'].map((name) => {
@@ -351,6 +352,13 @@ export async function update(args: string[]): Promise<void> {
           };
         };
         try {
+          // Its migrations now are its installed server's: a fresh clone installs first, as its lockfile says.
+          if (existsSync(join(deployment, 'pnpm-lock.yaml')) && !installed(deployment)) {
+            step.note('Installing its packages as they are, to know its migrations');
+            await installAsLocked(deployment);
+            details.push('Installed its packages as they were, as pnpm-lock.yaml says, to know its migrations');
+          }
+          before = deploymentMigrations(deployment) ?? before;
           bumpPins(deployment, latest);
           if (repin) {
             const replaced = pinPackageManager(deployment, pnpm!);
