@@ -3,6 +3,7 @@ import {
   finishSignin,
   logout,
   pollDevice,
+  exchangeWorkloadToken,
   signOut,
   startDevice,
   startSignin,
@@ -32,6 +33,7 @@ const ROUTES: Record<string, { method: 'GET' | 'POST'; handler: Handler; browser
   '/api/auth/device': { method: 'POST', handler: startDevice },
   '/api/auth/device/token': { method: 'POST', handler: pollDevice },
   '/api/auth/logout': { method: 'POST', handler: logout },
+  '/api/auth/oidc': { method: 'POST', handler: exchangeWorkloadToken },
   // Posted by coffre's own pages, with the browser's cookies.
   '/auth/signout': { method: 'POST', handler: signOut, browserForm: true },
 };

@@ -24,6 +24,35 @@ export function methodNotAllowed(allowed: readonly string[]): Response {
   );
 }
 
+/**
+ * A JSON body of at most `max` bytes, read as it streams: past the limit
+ * the rest is never read. For a route anyone may call.
+ */
+export async function readLimitedJson(request: Request, max: number): Promise<unknown> {
+  const reader = request.body?.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  if (reader !== undefined) {
+    for (;;) {
+      const { done, value } = await reader.read().catch(() => {
+        throw badRequest('the body could not be read');
+      });
+      if (done) break;
+      size += value.byteLength;
+      if (size > max) {
+        await reader.cancel().catch(() => {});
+        throw new ApiError('bad_request', `the body is larger than ${max} bytes`);
+      }
+      chunks.push(value);
+    }
+  }
+  try {
+    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)));
+  } catch {
+    throw badRequest('the body is not JSON');
+  }
+}
+
 /** A JSON body, or `fallback` when the body is empty. */
 export async function readJson(request: Request, fallback?: unknown): Promise<unknown> {
   let text: string;

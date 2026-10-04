@@ -387,6 +387,43 @@ SQLite file (`file:/tmp/coffre-local.db`), migrated once with `pnpm migrate`
 and that URL. SQLite has no per-login privileges. The deployed example
 uses Postgres; Node conformance uses SQLite to exercise the local option.
 
+## CI runs without a stored token
+
+A service can be trusted to sign in with the ID token a CI platform signs
+for each run, instead of a token kept in the CI's secrets
+([design](design/oidc.md)). It is off until the deployment turns it on, and
+an exchange always passes two limits first, per source address and in
+total, which the deployment provides.
+
+On Workers, two rate-limiting bindings in `app/wrangler.jsonc`:
+
+```jsonc
+"ratelimits": [
+  { "name": "WORKLOADS_PER_SOURCE", "namespace_id": "1001", "simple": { "limit": 30, "period": 60 } },
+  { "name": "WORKLOADS_TOTAL", "namespace_id": "1002", "simple": { "limit": 300, "period": 60 } }
+],
+```
+
+and in `app/src/worker.ts`:
+
+```ts
+auth: signin({
+  providers: [/* … */],
+  workloads: { limits: { perSource: env.WORKLOADS_PER_SOURCE, total: env.WORKLOADS_TOTAL } },
+}),
+```
+
+Cloudflare counts each limit per location, so a flood from many places can
+reach the limit times the locations it comes through. On Node,
+`processLimits()` from `@coffre/server/node` counts per process:
+
+```ts
+workloads: { limits: processLimits({ perSource: 30, total: 300 }) },
+```
+
+Then an owner trusts a workflow on a service's page, under "Trusted
+workloads", or with `coffre trust`.
+
 ## Backups, restores and monitoring
 
 Back up the one database, and keep the escrowed keys apart from it: the

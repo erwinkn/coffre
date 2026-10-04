@@ -7,7 +7,9 @@ import { migrationLedger } from '@coffre/db/dialect';
 import { asc, eq, sql, type SQL } from 'drizzle-orm';
 
 import { auditLog, serviceBindings } from './db/tables.ts';
+import { SigninService } from '../src/api/signin.ts';
 import { WorkloadService } from '../src/api/workloads.ts';
+import { processLimits } from '../src/workloads/limits.ts';
 import { liveBindings, tombstoned } from '../src/db/queries.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
@@ -29,6 +31,9 @@ const DEPLOY: BindingClaims = {
   ref: 'refs/heads/main',
   event_name: 'push',
 };
+
+const LIMITS = processLimits();
+const SIGNIN = defineSignin({ publicUrl: 'https://secrets.acme.example', providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: LIMITS } });
 
 let db: { owner: Database; runtime: Database; close: () => Promise<void> };
 let deps: FixtureDeps;
@@ -54,7 +59,10 @@ beforeEach(async () => {
   await resetDatabase(db.owner);
   documents = new Map([[`${GITHUB}/.well-known/openid-configuration`, { issuer: GITHUB, jwks_uri: KEYS }]]);
   deps = testDeps(db.runtime, [ROOT]);
-  deps.workloads = new WorkloadService({ db: deps.db, chainKey: deps.chainKey, vault: deps.vault, config: { allowLoopback: false }, transport });
+  const signin = new SigninService({ db: deps.db, chainKey: deps.chainKey, vault: deps.vault, signin: SIGNIN });
+  deps.workloads = new WorkloadService({
+    db: deps.db, chainKey: deps.chainKey, vault: deps.vault, config: SIGNIN.workloads!, transport, signin, publicUrl: SIGNIN.publicUrl,
+  });
   for (const [principal, owner] of [[`user:${LEAD}`, true], [`user:${DEV}`, false], [MEMBER, false]] as const) {
     assert.equal((await deps.vault.admit({ actor: `user:${ROOT}`, principal, owner })).ok, true);
   }
@@ -224,19 +232,21 @@ test('removing the service ends its bindings, and admitting it again does not br
 });
 
 test('without the migration that adds bindings, the routes say so and everything else works', async () => {
-  // Forget 0002 in the ledger, as on a database deployed to before `coffre migrate`.
+  // Forget every migration after 0001 in the ledger, as on a database deployed to before `coffre migrate`.
+  // SQLite's ledger has no IDs: entries are in order of time, and their hashes name them.
   const ledger = migrationLedger(db.owner);
-  // SQLite's ledger has no IDs: the newest is by time, and its hash names it.
-  const [kept] = await rows(sql`SELECT * FROM ${ledger} ORDER BY created_at DESC LIMIT 1`);
-  await run(sql`DELETE FROM ${ledger} WHERE hash = ${kept!.hash}`);
+  const later = (await rows(sql`SELECT * FROM ${ledger} ORDER BY created_at`)).slice(2);
+  for (const entry of later) await run(sql`DELETE FROM ${ledger} WHERE hash = ${entry.hash}`);
   try {
     await assert.rejects(bind(), /trust bindings need this release's database migration/);
     await assert.rejects(as(LEAD).bindings.list(MEMBER), /trust bindings need this release's database migration/);
     assert.ok((await as(LEAD).members.list()).members.some((member) => member.member === MEMBER));
   } finally {
-    const columns = Object.keys(kept!);
-    await run(sql`INSERT INTO ${ledger} (${sql.join(columns.map((column) => sql.identifier(column)), sql`, `)})
-      VALUES (${sql.join(columns.map((column) => sql`${kept![column]}`), sql`, `)})`);
+    for (const entry of later) {
+      const columns = Object.keys(entry);
+      await run(sql`INSERT INTO ${ledger} (${sql.join(columns.map((column) => sql.identifier(column)), sql`, `)})
+        VALUES (${sql.join(columns.map((column) => sql`${entry[column]}`), sql`, `)})`);
+    }
   }
   await bind();
 });
@@ -245,7 +255,12 @@ test('with workloads off, the routes say how to turn them on', async () => {
   delete deps.workloads;
   await assert.rejects(bind(), /this instance trusts no workloads: the deployment's signin\(\{ workloads \}\) turns them on/);
   // The configuration that turns them on.
-  assert.deepEqual(defineSignin({ publicUrl: 'https://secrets.acme.example', providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: {} }).workloads, { allowLoopback: false });
+  assert.deepEqual(SIGNIN.workloads, { allowLoopback: false, limits: LIMITS });
+  // Never without both limits.
+  assert.throws(
+    () => defineSignin({ publicUrl: 'https://secrets.acme.example', providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: {} as never }),
+    /workloads need their limits, per source and in total/,
+  );
   assert.equal(defineSignin({ publicUrl: 'https://secrets.acme.example', providers: [github({ clientId: 'a', clientSecret: 'b' })] }).workloads, null);
 });
 

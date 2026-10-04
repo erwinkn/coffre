@@ -177,7 +177,7 @@ test('migrate applies what a database at the baseline lacks, and the instance th
   try {
     const run = await migrate(origin, url);
     assert.equal(run.code, 0, run.output);
-    assert.match(run.output, new RegExp(`Applied ${KNOWN.slice(1).join(' and ')}, and reasserted the database's privileges`));
+    assert.match(run.output, new RegExp(`Applied ${KNOWN.slice(1, -1).join(', ')} and ${KNOWN.at(-1)}, and reasserted the database's privileges`));
     assert.match(run.output, /sees the new schema, and is ready/);
     assert.ok(!run.output.includes(new URL(url).password), 'the password is never shown');
     assert.deepEqual(await schema(url), { applied: KNOWN.length, syncs: false });

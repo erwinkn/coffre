@@ -23,11 +23,38 @@ const FIELDS = {
 
 type Fields = { [K in AuthTable]: Pick<Rows[K], Extract<typeof FIELDS[K][number], keyof Rows[K]>> };
 
+/**
+ * A credential a trust binding issued, for a CI run's ID token, says so in
+ * `created_by`: `binding:<id>`. Its MAC is of another kind, which covers
+ * that too, so the link cannot be cut, nor added to a token an owner issued:
+ * either way the row no longer carries its MAC. Every check of it checks
+ * its binding as well (`findCredential`).
+ */
+const EXCHANGED = 'binding:';
+
+export function issuedBy(bindingId: string): string {
+  return `${EXCHANGED}${bindingId}`;
+}
+
+/** The binding that issued a credential, by its `created_by`; null for one an owner or a sign-in issued. */
+export function issuingBinding(createdBy: unknown): string | null {
+  return typeof createdBy === 'string' && createdBy.startsWith(EXCHANGED) ? createdBy.slice(EXCHANGED.length) : null;
+}
+
+/** The tuple's kind and fields: an exchanged credential's are its own. */
+function kindOf(table: AuthTable, row: object): { kind: string; fields: readonly string[] } {
+  if (table === 'credentials' && issuingBinding((row as { createdBy?: unknown }).createdBy) !== null) {
+    return { kind: 'exchanged_credentials', fields: [...FIELDS.credentials, 'createdBy'] };
+  }
+  return { kind: table, fields: FIELDS[table] };
+}
+
 export type AuthRow = { [K in AuthTable]: Fields[K] & { authMac: Buffer } }[AuthTable];
 
 /** A versioned tuple: fixed field order, distinct nulls, bytes as hex and dates as milliseconds. */
 export function authMac<K extends AuthTable>(chainKey: Buffer, table: K, row: Fields[K]): Buffer {
-  const values = FIELDS[table].map((field) => {
+  const { kind, fields } = kindOf(table, row);
+  const values = fields.map((field) => {
     const value = (row as Record<string, unknown>)[field];
     if (value === undefined) throw new Error(`missing ${table}.${field} for its authentication MAC`);
     if (value instanceof Date) return value.getTime();
@@ -36,7 +63,7 @@ export function authMac<K extends AuthTable>(chainKey: Buffer, table: K, row: Fi
   });
   const key = deriveKey(chainKey, 'signin-rows/v1');
   try {
-    return createHmac('sha256', key).update(JSON.stringify(['coffre.auth.v2', table, ...values])).digest();
+    return createHmac('sha256', key).update(JSON.stringify(['coffre.auth.v2', kind, ...values])).digest();
   } finally {
     key.fill(0);
   }

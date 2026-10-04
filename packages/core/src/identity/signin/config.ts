@@ -78,11 +78,25 @@ export type SigninConfig = {
  * on the service (docs/design/oidc.md). Off unless the deployment turns it on.
  */
 export type WorkloadsOptions = {
+  /**
+   * The two limits every exchange passes before coffre does any work for
+   * it: one per source address, and one for all sources together. On
+   * Workers, two rate-limiting bindings (`env.WORKLOADS_PER_SOURCE`,
+   * `env.WORKLOADS_TOTAL`), which Cloudflare counts per location; on Node,
+   * `processLimits()` from `@coffre/server/node`, which counts per process.
+   * Required: an exchange is never without them.
+   */
+  limits: WorkloadLimits;
   /** Lets a binding's issuer be plain HTTP on loopback: the dev IdP's, never production's. */
   allowLoopback?: boolean;
 };
 
-export type WorkloadsConfig = { allowLoopback: boolean };
+/** Cloudflare's rate-limiting binding, as coffre calls it; `processLimits()` has the same shape. */
+export type RateLimiter = { limit(options: { key: string }): Promise<{ success: boolean }> };
+
+export type WorkloadLimits = { perSource: RateLimiter; total: RateLimiter };
+
+export type WorkloadsConfig = { allowLoopback: boolean; limits: WorkloadLimits };
 
 const PROVIDER_ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const BRANDS: readonly SigninBrand[] = ['github', 'google', 'microsoft', 'oidc'];
@@ -287,8 +301,19 @@ export function defineSignin(options: {
     },
     browserSessionHours: lifetime(options.browserSessionHours, 'browserSessionHours', 12, 24 * 7),
     cliSessionDays: lifetime(options.cliSessionDays, 'cliSessionDays', 30, 365),
-    workloads: options.workloads === undefined ? null : { allowLoopback: options.workloads.allowLoopback === true },
+    workloads: options.workloads === undefined ? null : workloadsConfig(options.workloads),
   };
+}
+
+/** Workloads, checked: both limits given, each one a limiter. */
+function workloadsConfig(options: WorkloadsOptions): WorkloadsConfig {
+  const limiter = (value: unknown) => typeof (value as RateLimiter | undefined)?.limit === 'function';
+  if (!limiter(options.limits?.perSource) || !limiter(options.limits?.total)) {
+    throw new Error(
+      'workloads need their limits, per source and in total: on Workers, two rate-limiting bindings; on Node, processLimits()',
+    );
+  }
+  return { allowLoopback: options.allowLoopback === true, limits: options.limits };
 }
 
 /** A deployment's own provider is checked like coffre's: it is only typed, not trusted. */

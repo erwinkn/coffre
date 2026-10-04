@@ -4,6 +4,7 @@ import { z } from 'zod';
 
 import { ApiError, notFound } from './api/errors.ts';
 import type { SignedInAccount } from './api/signin.ts';
+import { ExchangeRefused } from './api/workloads.ts';
 import {
   accessTokenForRequest,
   authenticateRequest,
@@ -13,7 +14,7 @@ import {
   type AuthenticatedIdentity,
 } from './auth.ts';
 import { apiCaller } from './fetch-api.ts';
-import { errorResponse, jsonResponse, readJson } from './http.ts';
+import { errorResponse, jsonResponse, readJson, readLimitedJson } from './http.ts';
 import { logged } from './logged.ts';
 import type { CoffreRuntime } from './runtime.ts';
 import {
@@ -102,6 +103,49 @@ export async function pollDevice(request: Request, runtime: CoffreRuntime, sourc
         });
     }
   } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+/** An exchange's body: the service and the token, and nothing else, in at most this many bytes. */
+const EXCHANGE_BODY_BYTES = 16 * 1024;
+const exchangeBody = z.object({ service: z.string().max(120), token: z.string().max(8 * 1024) }).strict();
+
+const REFUSED_CODE = { 401: 'unauthenticated', 429: 'too_many_requests', 503: 'unavailable' } as const;
+
+/**
+ * POST /api/auth/oidc: a CI run's ID token, for a five-minute credential of
+ * the service it names (docs/design/oidc.md). `{ service, token }` answers
+ * `{ token, expiresAt }`.
+ *
+ * Admission comes before anything else: both limits, one per source address
+ * and one for all, then the body, read only to its limit. A limiter that
+ * fails refuses, and never lets a request through.
+ */
+export async function exchangeWorkloadToken(request: Request, runtime: CoffreRuntime, sourceIp: string | null) {
+  const workloads = runtime.workloads;
+  if (workloads === null) return errorResponse(notFound('this instance trusts no workloads'));
+  const refuse = (error: ExchangeRefused) =>
+    jsonResponse(
+      { error: REFUSED_CODE[error.status], reason: error.reason, message: error.message },
+      error.status,
+      error.status === 401 ? {} : { 'retry-after': '60' },
+    );
+  try {
+    const [source, total] = await Promise.all([
+      workloads.limits.perSource.limit({ key: `source:${sourceIp ?? 'unknown'}` }),
+      workloads.limits.total.limit({ key: 'total' }),
+    ]);
+    if (!source.success || !total.success) return refuse(new ExchangeRefused('busy', 'too many exchanges: try again in a minute', 429));
+  } catch (error) {
+    console.error('workload limiter failed', logged(error));
+    return refuse(new ExchangeRefused('busy', 'coffre cannot count exchanges right now: try again shortly', 503));
+  }
+  try {
+    const body = exchangeBody.parse(await readLimitedJson(request, EXCHANGE_BODY_BYTES));
+    return jsonResponse(await workloads.exchange(body, { requestId: crypto.randomUUID(), sourceIp }));
+  } catch (error) {
+    if (error instanceof ExchangeRefused) return refuse(error);
     return errorResponse(error);
   }
 }

@@ -532,11 +532,13 @@ genuine, not current: see [Limits](#limits).
 A service can be trusted to sign in with the ID token its CI platform signs
 for a run. A trust binding names an issuer and the claims a token must
 carry; the [design](design/oidc.md) has the reasons. A deployment turns
-bindings on with `signin({ …, workloads: {} })`. Owners make and remove
-them on a service's page, under "Trusted workloads", with `coffre trust` and
-`coffre untrust`, or through `/api/members/token:…/bindings`. The page and
-the CLI show every claim, the issuer and its keys' URL before anything is
-saved. The exchange that uses them is not built yet.
+workloads on with `signin({ …, workloads: { limits } })` ([deploy.md](deploy.md#ci-runs-without-a-stored-token)).
+Owners make and remove bindings on a service's page, under "Trusted
+workloads", with `coffre trust` and `coffre untrust`, or through
+`/api/members/token:…/bindings`. The page and the CLI show every claim, the
+issuer and its keys' URL before anything is saved. A run trades its token at
+`POST /api/auth/oidc` for a credential of the service that lasts five
+minutes (below).
 
 - **Profiles.** The server checks each binding against its profile, which
   sets the claims it must name:
@@ -561,9 +563,54 @@ saved. The exchange that uses them is not built yet.
 - **Generations.** Removing the service moves its generation past every
   binding it had.
 
-The table comes with migration `0002_service_bindings`. This release runs
-on the schema before it. Until an owner runs `coffre migrate`, the bindings
-routes answer 503.
+**The exchange.** `POST /api/auth/oidc {"service": "token:api-deploy",
+"token": "<JWT>"}` answers `{"token": "coffre_svc_…", "expiresAt": "…"}`, in
+this order, so that a stranger costs one bounded read at most:
+
+1. **Admission**: the deployment's two limiters, per source address and in
+   total, then the body, read only to 16 KiB. A limiter that fails refuses.
+   Cloudflare counts per location and a Node process per process, so these
+   bound a flood per location or process, not across the deployment.
+2. **The token's shape**: a compact JWS of at most 8 KiB, `iss` and `sub`
+   nonempty strings, `exp` and `iat` numbers.
+3. **The bindings**: one read of the service's live bindings on the token's
+   issuer, in its current generation, without tombstones.
+4. **The token**, by jose, under the issuer's keys: RS256 or ES256 only,
+   nothing taken from the header but `alg` and `kid`, the audience this
+   instance's public URL alone, `exp`, `nbf` and `iat` within 30 seconds,
+   `iat` at most an hour old; then the claims of one binding, exactly.
+5. **Unspent**: a read of the token's signing input's SHA-256.
+6. **The member**: one `vault.access`, outside any transaction.
+7. **Commit**, holding the log's head: the member and the binding again,
+   the times again, at most 60 credentials a minute per binding, the token
+   spent (its hash's primary key decides a race), the credential issued,
+   and `token.exchange` logged with the run the issuer asserts.
+
+A token no binding can take costs its admission and step 3's one read,
+through `service_bindings_principal_idx` on the service and issuer: no
+other query, no transaction, no vault call, no fetch. The database's
+migrations are asked only of a token some binding might take.
+`workload-exchange.test.ts` counts the statements that reach Postgres.
+
+A refusal answers 401 with a reason a CI user can act on, 429, or 503 when
+the issuer cannot be asked, and stays out of the audit log: anyone can mint
+a genuine token. Each isolate keeps the issuers' keys it fetched, settled
+values only, for ten minutes; a key it lacks fetches them again once a
+minute at most.
+
+**The credential** is a service credential like any other, whose
+`created_by` names its binding, `binding:<id>`. Its MAC is of its own kind
+and covers that field, so the link can be neither cut nor added. Checking
+it checks its binding too, in the same request: its MAC, its revocation,
+its tombstone. Removing the binding ends it at once, and a credential row
+put back with its binding stays dead. Spent tokens and exchanged
+credentials are kept, since the runtime logins delete nothing; a CI run
+adds two small rows.
+
+Bindings come with migration `0002_service_bindings` and spent tokens with
+`0003_exchanges`. This release runs on the schema before them. Until
+an owner runs `coffre migrate`, the bindings routes and the exchange answer
+503.
 
 ## Databases
 
