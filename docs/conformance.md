@@ -34,7 +34,9 @@ are local; nothing is deployed.
 
 coffre takes `--port` (3082), the stand-in IdP the next port, and wrangler's
 inspector the one after. `--bulk-limit <n>` names the vault's `bulkLimit`
-when the deployment changed it. Each run starts from nothing and leaves
+when the deployment changed it. `--browser <path>` names the Chrome or
+Chromium the pages are loaded in; without it, one found on the machine is,
+and without one, that check is skipped and says so. Each run starts from nothing and leaves
 nothing behind. It inspects the whole log several times, including deliberate rewrites; runtime depends on the deployment and database.
 
 In this repository, `pnpm conformance:workers` and `pnpm conformance:node`
@@ -85,6 +87,7 @@ In order, since each builds on the ones before:
 | health | `/livez` answers. On Workers, `/readyz` fails before any heartbeat, and passes once the Cron trigger has run and the vault has checkpointed it |
 | sign-in | The root admin signs in through GitHub, and is the root admin |
 | setup, personas | The admin creates the project, its values and the people above |
+| pages in a browser | Signed in as the admin, `/projects`, the project and `/audit`, in headless Chrome, over the DevTools protocol: each shows its heading once its scripts have run and settled, with no uncaught error, console error or failed load. Run between setup and personas. It is what caught wrangler's `keep_names` wrapping the functions seroval writes into a signed-in page in an `__name` only the Worker has |
 | members only | The stranger's sign-in is refused and leaves no session; no one gets 401 reading, revealing or writing, and a made-up token is refused |
 | grant scoping | The reader reads dev and nothing else, and changes nothing: no write, no grant, no member, no token. So does the service, with its token. The bulk reader cannot read dev |
 | reveals audited, runs audited | A single-secret reveal or an environment read writes one `secret.read` of the vault's per value, under the reveal's operation and request, at the versions revealed |

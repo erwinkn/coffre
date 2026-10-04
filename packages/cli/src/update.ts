@@ -21,10 +21,13 @@ import {
   install,
   installAsLocked,
   installed,
+  KEEP_NAMES_WHY,
+  keepsNames,
   minimumReleaseAge,
   pinPackageManager,
   removeCleared,
   resolveAgain,
+  stopKeepingNames,
   type Held,
   type Moved,
 } from './deployment.ts';
@@ -287,6 +290,18 @@ export async function update(args: string[]): Promise<void> {
         // Exclusions an earlier run wrote, whose packages have cleared since: gone first.
         const cleared = removeCleared(deployment, new Date());
         if (cleared.length > 0) details.push(`No longer excluded from minimumReleaseAge, now old enough: ${listed(cleared, 'and')}`);
+        // wrangler keeps function names unless told not to, and that blanks every signed-in page.
+        if (kind === 'workers' && keepsNames(deployment)) {
+          step.under(['app/wrangler.jsonc, after "compatibility_flags":', ...[...KEEP_NAMES_WHY, '"keep_names": false,'].map((line) => `  + ${line}`)]);
+          const off = await ask('Turn keep_names off in app/wrangler.jsonc? With it on, signed-in pages go blank', step);
+          step.under([]);
+          if (off) {
+            stopKeepingNames(deployment);
+            details.push('Turned keep_names off in app/wrangler.jsonc: signed-in pages render once it is deployed');
+          } else {
+            details.push('app/wrangler.jsonc still keeps function names: signed-in pages go blank until its keep_names is false');
+          }
+        }
         const pnpm = templatePackageManager(kind as Kind);
         const repin = pnpm !== null && coffrePackageManager(deployment) !== pnpm;
         const current = pinned.length === 1 && pinned[0] === latest;
