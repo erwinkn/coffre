@@ -6,7 +6,7 @@
 // stops before changing a database in use.
 // Every deploy is also the real wrangler's, in a dry run, on the same files
 // and the same stdin.
-import test, { after, before } from 'node:test';
+import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
@@ -110,9 +110,14 @@ type Call = { args: string[]; stdin: string; account: string | null };
 function calls(): Call[] {
   const path = join(dir, 'wrangler', 'calls.jsonl');
   const all = existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n').map((line) => JSON.parse(line) as Call) : [];
-  unlinkSync(path);
+  rmSync(path, { force: true });
   return all;
 }
+
+// Each test's calls are its own: none left by one that failed before it read them.
+beforeEach(() => {
+  if (!skip) rmSync(join(dir, 'wrangler', 'calls.jsonl'), { force: true });
+});
 
 /** The addresses starting with `prefix` the browser was asked to open. */
 function openedAll(prefix: string): string[] {
@@ -342,7 +347,8 @@ test("a second deployment on the same account: it takes names of its own, and th
       terminal.send('q');
       await terminal.waitFor('Have you saved all three values?');
       terminal.send('y');
-      await terminal.waitFor('coffre is at');
+      // Both deploys, each with the real wrangler's dry run, which bundles: slow on a loaded host.
+      await terminal.waitFor('coffre is at', 60_000);
     },
     second,
     { COFFRE_SETUP_DATABASE_URL: `${OTHER_CLUSTER}/setup_workers_two` },
