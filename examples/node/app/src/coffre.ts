@@ -1,5 +1,5 @@
-// coffre's configuration, once, from the server's environment (server.env,
-// which `pnpm start` reads): read by src/server.ts, and so only on the
+// coffre's configuration, once, from the server's environment (.env, which
+// `pnpm start` reads): read by src/server.ts, and so only on the
 // server. It holds no vault key: it asks the vault, a process of its own
 // (src/vault.ts), over a Unix socket.
 import { createCoffre, github, processLimits, signin, type CoffreContext } from '@coffre/server/node';
@@ -7,7 +7,7 @@ import { connectVault } from '@coffre/vault/node';
 
 function env(name: string): string {
   const value = process.env[name];
-  if (!value) throw new Error(`${name} is not set; see server.env.example`);
+  if (!value) throw new Error(`${name} is not set; see .env.example`);
   return value;
 }
 

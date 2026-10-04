@@ -10,7 +10,8 @@ import {
   startDevice,
   startSignin,
 } from './auth-routes.ts';
-import { readCookie } from './auth.ts';
+import { preferencesIn, type Preferences } from '@coffre/core/pages';
+
 import { fetchApi, isSameOrigin, pageClient } from './fetch-api.ts';
 import { auditReadiness, writeAuditHeartbeat } from './heartbeat.ts';
 import { errorResponse, jsonResponse, methodNotAllowed } from './http.ts';
@@ -50,7 +51,9 @@ export async function coffreRoute(request: Request, runtime: CoffreRuntime, sour
 
   const exact = ROUTES[pathname];
   if (exact !== undefined) {
-    if (request.method !== exact.method) return methodNotAllowed([exact.method]);
+    // HEAD is GET without the body, which the platform drops: what a monitor asks /livez and /readyz.
+    const method = request.method === 'HEAD' && exact.method === 'GET' ? 'GET' : request.method;
+    if (method !== exact.method) return methodNotAllowed([exact.method]);
     if (exact.browserForm && !isSameOrigin(request, runtime.publicUrl)) {
       return errorResponse(new ApiError('cross_origin', 'this must be sent from coffre itself'));
     }
@@ -67,21 +70,6 @@ export async function coffreRoute(request: Request, runtime: CoffreRuntime, sour
       : finishSignin(request, runtime, sourceIp, id);
   }
   return null;
-}
-
-/**
- * How the visitor has coffre's pages drawn, from their cookies: the theme
- * they chose, `system` when none, and whether the sidebar is folded. The
- * pages set them (`@coffre/ui`), and render with them from the first byte.
- */
-export type Preferences = { theme: 'system' | 'light' | 'dark'; sidebar: 'expanded' | 'collapsed' };
-
-function preferencesOf(request: Request): Preferences {
-  const theme = readCookie(request, 'coffre-theme');
-  return {
-    theme: theme === 'light' || theme === 'dark' ? theme : 'system',
-    sidebar: readCookie(request, 'coffre-sidebar') === 'collapsed' ? 'collapsed' : 'expanded',
-  };
 }
 
 /** What a page renders with: this response's nonce, the API as the visitor, and how they have the pages drawn. */
@@ -103,17 +91,23 @@ export async function respond(
   const nonce = cspNonce();
   let response: Response;
   try {
-    response = await render({ cspNonce: nonce, client: pageClient(request, runtime, sourceIp), preferences: preferencesOf(request) });
+    response = await render({ cspNonce: nonce, client: pageClient(request, runtime, sourceIp), preferences: preferencesIn(request.headers.get('cookie')) });
   } catch (error) {
     response = errorResponse(error);
   }
   const auth = runtime.auth;
-  return setSecurityHeaders(response, {
+  const options = {
     nonce,
     publicUrl: runtime.publicUrl,
     // Access's logout form posts to Access itself.
     formOrigins: auth.mode === 'cloudflare' ? [auth.access.issuer] : [],
-  });
+  };
+  try {
+    return setSecurityHeaders(response, options);
+  } catch (error) {
+    // A route's response that cannot take them: said in the log, and answered with one that can.
+    return setSecurityHeaders(errorResponse(error), options);
+  }
 }
 
 /** The scheduled audit heartbeat and checkpoint. Throws so the scheduler reports failures. */

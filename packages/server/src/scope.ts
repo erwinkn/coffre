@@ -3,7 +3,9 @@
 // coffreMiddleware (`@coffre/server/start`) and coffre's server routes
 // (`@coffre/server/routes`) read. Neither imports any of this: they run in
 // files the browser loads too, and reach the server only through here.
-import { coffreRoute, respond, type PageContext, type Preferences } from './app.ts';
+import type { Preferences } from '@coffre/core/pages';
+
+import { coffreRoute, respond, type PageContext } from './app.ts';
 import { ApiError } from './api/errors.ts';
 import { errorResponse } from './http.ts';
 import type { CoffreRuntime } from './runtime.ts';

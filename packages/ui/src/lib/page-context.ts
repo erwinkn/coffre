@@ -1,4 +1,5 @@
 import type { CoffreClient } from '@coffre/client';
+import { NO_MIDDLEWARE } from '@coffre/core/pages';
 import { getGlobalStartContext } from '@tanstack/react-start';
 
 import type { Preferences } from './preferences';
@@ -8,9 +9,6 @@ export type PageContext = { cspNonce: string; client: CoffreClient; preferences:
 
 export const DEFAULT_PREFERENCES: Preferences = { theme: 'system', sidebar: 'expanded' };
 
-const NO_MIDDLEWARE =
-  "coffre's request middleware is not installed: add coffreMiddleware, from @coffre/server/start, to " +
-  "createStart(() => ({ requestMiddleware: [coffreMiddleware] })) in the app's src/start.ts";
 
 /**
  * On the server, the request's page context: the visitor's API client, an

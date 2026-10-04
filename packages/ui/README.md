@@ -18,8 +18,8 @@ export const Route = createFileRoute('/_coffre/projects/')({ ...projects, compon
 
 The app's root puts `<CoffreProvider>` around them, and links
 `@coffre/ui/styles.css`, `icon.svg` and `apple-touch-icon.png`; its router
-is `createRouter(routeTree)`. The same routes mount in code from
-`@coffre/ui/routes`, all at once, `coffreRoutes(root)`, or one at a time.
+is `createRouter(routeTree)`. An app that prefers routes in code mounts
+the same options with TanStack's `createRoute`.
 `useCoffre()` gives an app's own page the API as the signed-in visitor.
 React, TanStack Router, Start, Query and Vite are peers, pinned exactly:
 the app has them at those versions, and its build stops when one differs.

@@ -6,8 +6,8 @@ its queries in `src/db`; `/cloudflare` and `/node` entry
 points), `packages/db` (`@coffre/db`: the Drizzle schemas for Postgres and SQLite, their
 migrations and migrator, the dialect helpers, and the connections, Hyperdrive's
 included), `packages/ui` (`@coffre/ui`: the TanStack
-Start pages as a library, routes in code a deployment's own Start app mounts under its
-root, and `@coffre/ui/vite`, the Vite plugin its build adds), `packages/vault` (`@coffre/vault`: keys, grants, members, its
+Start pages as a library, route options a deployment's own Start app mounts as file
+routes, and `@coffre/ui/vite`, the Vite plugin its build adds), `packages/vault` (`@coffre/vault`: keys, grants, members, its
 entries in the shared log), `packages/client` (the typed API client the CLI and UI call), `packages/cli`
 (`coffre`, including `coffre init`), `packages/conformance` (`@coffre/conformance`:
 `coffre-conformance`, which boots a deployment and holds it to what it must never do,
@@ -72,9 +72,8 @@ reservation script is CI-only and does not change a developer's host.
 **Run the stack.** `pnpm dev` brings up Postgres + dev IdP (:8081) + coffre (:3000) +
 seed data. It runs `dev/deployment/`, shaped like `examples/workers` (`app/`, a
 Start app, and `vault/`), under `vite dev`, with the vault as an auxiliary Worker
-beside the app and no port of its own. It mounts coffre's routes in code
-(`@coffre/ui/routes`), under its root file, the form the examples do not use, and renders
-the Agentation toolbar from its root. `dev/deployment/app/vite.config.ts` resolves
+beside the app and no port of its own. Its routes are files, as the examples', and
+its root renders the Agentation toolbar. `dev/deployment/app/vite.config.ts` resolves
 every `@coffre/*` import, the config's own included, to its sources through
 `coffre:source`, so an edit to any package, a page or a route hot-reloads without a
 build. The vault keeps its members, grants and log entries in the same

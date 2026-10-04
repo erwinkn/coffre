@@ -525,7 +525,7 @@ export function setupScreen(result: SetupResult): Screen {
   ];
   const node = [
     ...(result.keys === null ? [] : keys.node),
-    ...set.map((component) => `${component === 'app' ? 'server.env' : 'vault.env'} takes the ${component} database URL, as DATABASE_URL.`),
+    ...set.map((component) => `${component === 'app' ? '.env' : 'vault.env'} takes the ${component} database URL, as DATABASE_URL.`),
     'Keep each file readable only by its process (chmod 600).',
   ];
   return {
@@ -577,7 +577,7 @@ export function summary(result: SetupResult, out: Output): string {
     ...(result.keys === null ? [] : [row(out, s, 'Vault ID', `${result.keys.VAULT_KEY_ID}, not a secret`), '']),
     `    ${s.bold('Next')}`,
     row(out, s, 'Workers', `${workers.join('; ')}${fresh ? '; then pnpm run deploy' : ', which needs no redeploy'}.`),
-    row(out, s, 'Node', fresh ? 'server.env and vault.env, then pnpm vault and pnpm start.' : 'each DATABASE_URL updated, then both processes restarted.'),
+    row(out, s, 'Node', fresh ? '.env and vault.env, then pnpm vault and pnpm start.' : 'each DATABASE_URL updated, then both processes restarted.'),
     s.dim(paragraph(out, 'After every upgrade of coffre, pnpm exec coffre migrate --yes here, then the deploy or the restart. docs/deploy.md has each step.', 4)),
     '',
     '',

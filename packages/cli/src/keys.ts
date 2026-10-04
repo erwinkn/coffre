@@ -58,7 +58,7 @@ export function keyGuide(): { workers: GuideBlock['lines']; node: GuideBlock['li
       { command: 'pnpm exec wrangler secret put APP_KEY -c app/wrangler.jsonc' },
       { command: 'pnpm exec wrangler secret put VAULT_KEY -c vault/wrangler.jsonc' },
     ],
-    node: ['server.env takes APP_KEY; vault.env takes VAULT_KEY_ID and VAULT_KEY.'],
+    node: ['.env takes APP_KEY; vault.env takes VAULT_KEY_ID and VAULT_KEY.'],
   };
 }
 

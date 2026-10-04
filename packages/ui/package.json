@@ -22,11 +22,6 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
-    "./routes": {
-      "coffre:source": "./src/routes.ts",
-      "types": "./dist/routes.d.ts",
-      "default": "./dist/routes.js"
-    },
     "./pages/*": {
       "coffre:source": "./src/pages/*.tsx",
       "types": "./dist/pages/*.d.ts",

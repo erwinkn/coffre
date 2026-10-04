@@ -1,7 +1,5 @@
 // The root of `pnpm dev`'s app: examples/workers', and the Agentation
-// toolbar, for annotating the pages in development. Under it, src/router.tsx
-// puts coffre's routes in code, as a deployment may instead of as files:
-// this app keeps that form in use.
+// toolbar, for annotating the pages in development.
 import { createRootRouteWithContext, HeadContent, Scripts } from '@tanstack/react-router';
 import { CoffreProvider, type CoffreContext } from '@coffre/ui';
 

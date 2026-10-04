@@ -13,7 +13,7 @@ const pages = Object.fromEntries(
 // leave alone.
 export default defineConfig([
   {
-    entry: { index: 'src/index.ts', routes: 'src/routes.ts', ...pages },
+    entry: { index: 'src/index.ts', ...pages },
     platform: 'neutral',
     dts: { emitDtsOnly: true },
     clean: false,

@@ -146,7 +146,7 @@ Restore:
    ```
 
 6. Point both components at the restored database, each with its own login:
-   both Hyperdrive configs on Workers, or `DATABASE_URL` in `server.env` and
+   both Hyperdrive configs on Workers, or `DATABASE_URL` in `.env` and
    `vault.env` on Node. Keep the same keys and settings.
 7. Restart both processes, or redeploy both Workers.
 

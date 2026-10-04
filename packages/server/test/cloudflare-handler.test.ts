@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { signin, github } from '@coffre/core/identity';
 
 import { coffre, createCoffre, postgres, type CoffreContext } from '../src/cloudflare.ts';
-import { apiRoute, authRoute, coffreServerRoutes, livezRoute, readyzRoute } from '../src/routes.ts';
+import { api, auth, livez, readyz } from '../src/routes.ts';
 import { NO_COFFRE, NO_MIDDLEWARE } from '../src/wiring.ts';
 import { testVault } from './api-fixture.ts';
 
@@ -50,15 +50,10 @@ test("0.1's coffre(env => …) says how to move, the moment it runs", () => {
 });
 
 test("coffre's server routes, without its middleware or without coffre in the context, say which is missing", async () => {
-  const root = { id: '__root__' } as never;
-  for (const route of [...coffreServerRoutes(root), apiRoute(root), authRoute(root), livezRoute(root), readyzRoute(root)]) {
-    const handler = (route.options as unknown as { server: { handlers: { ANY: (ctx: { request: Request; context: unknown }) => unknown } } }).server.handlers.ANY;
+  for (const route of [api, auth, livez, readyz]) {
+    const handler = route.server.handlers.ANY;
     const request = new Request('https://coffre.test/livez');
     assert.throws(() => handler({ request, context: {} }), (error: Error) => error.message === NO_MIDDLEWARE);
     assert.throws(() => handler({ request, context: { coffreMiddleware: true } }), (error: Error) => error.message === NO_COFFRE);
   }
-  assert.deepEqual(
-    coffreServerRoutes({ id: "__root__" } as never).map((route) => (route.options as unknown as { path: string }).path),
-    ['/api/$', '/auth/$', '/livez', '/readyz'],
-  );
 });

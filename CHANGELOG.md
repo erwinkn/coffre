@@ -31,8 +31,8 @@ them:
   files for the app's own pages, under coffre's nav or not. coffre's nav
   offers only the pages there. A page of the app's own may call the API as
   the signed-in visitor, `useCoffre()` in a component or `context.coffre` in
-  a loader. The same routes mount in code, `@coffre/ui/routes`, all at once
-  or one at a time ([Your own routes](docs/deploy.md#your-own-routes));
+  a loader. An app that prefers routes in code mounts the same options with
+  TanStack's `createRoute` ([Your own routes](docs/deploy.md#your-own-routes));
 - `app/src/router.tsx`: `createRouter(routeTree)`, Start's generated tree;
 - `app/vite.config.ts`: `cloudflare(…)` on Workers, `tanstackStart()`,
   `viteReact()`, and `coffre()` from `@coffre/ui/vite`, which puts the

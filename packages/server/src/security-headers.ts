@@ -51,6 +51,12 @@ export function contentSecurityPolicy({ nonce, formOrigins = [] }: Pick<Security
   ].join('; ');
 }
 
+/** What a route that answers with a response coffre cannot add its headers to hears. */
+export const IMMUTABLE =
+  'a route answered with a Response whose headers cannot change, as Response.redirect() and fetch() make them, ' +
+  "and coffre sets its security headers on the response in place: return new Response(null, { status: 302, headers: { location } }) " +
+  'for a redirect, or new Response(upstream.body, upstream) for a fetched response (docs/deploy.md, "Your own routes")';
+
 /**
  * Set the security headers on `response`, in place: the response Start
  * goes on to handle stays the one the route or page made, a TanStack
@@ -60,10 +66,15 @@ export function contentSecurityPolicy({ nonce, formOrigins = [] }: Pick<Security
  */
 export function setSecurityHeaders(response: Response, options: SecurityHeaderOptions): Response {
   const headers = response.headers;
-
   // Enforced in development too, so a script that lacks the nonce fails
-  // where it is written rather than once deployed.
-  headers.set('content-security-policy', contentSecurityPolicy(options));
+  // where it is written rather than once deployed. The first header set
+  // finds out whether the response takes them.
+  try {
+    headers.set('content-security-policy', contentSecurityPolicy(options));
+  } catch (error) {
+    throw new Error(IMMUTABLE, { cause: error });
+  }
+
   // Frame protection for browsers that predate `frame-ancestors`.
   headers.set('x-frame-options', 'DENY');
   headers.set('x-content-type-options', 'nosniff');

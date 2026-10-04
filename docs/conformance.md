@@ -58,7 +58,7 @@ A build that fails stops the run there.
 The settings go in as the environment the deployment's own files would give
 it: `wrangler dev` of `app/dist/server/wrangler.json` and
 `vault/wrangler.jsonc`, with Worker secrets from the environment, or `src/vault.ts` and the
-built app under srvx, as `pnpm start` runs it, with what `server.env` and
+built app under srvx, as `pnpm start` runs it, with what `.env` and
 `vault.env` would hold. Three things are the
 run's own: fixed local keys; GitHub's URLs, pointed at the dev IdP
 (`@coffre/conformance/idp`) in the checker's process; and

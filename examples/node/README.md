@@ -25,9 +25,9 @@ from this directory, on Node 24 or later.
 
 ```sh
 pnpm install
-cp server.env.example server.env
+cp .env.example .env
 cp vault.env.example vault.env
-chmod 600 server.env vault.env
+chmod 600 .env vault.env
 ```
 
 Fill in `PUBLIC_URL`, a GitHub OAuth app whose callback is
@@ -55,7 +55,7 @@ beside the OAuth client secret, then into its file; `w` shows where each
 goes. Nothing keeps a copy. There is one key for each process, so that the
 server, which faces the network, never holds what decrypts a value.
 
-- `server.env` takes the app key, `APP_KEY`, and the app's database URL, as
+- `.env` takes the app key, `APP_KEY`, and the app's database URL, as
   `DATABASE_URL`. The app key signs the server's log entries, sessions and
   tokens. Lose it, and everyone is signed out and the log stops verifying.
 - `vault.env` takes the vault ID, `VAULT_KEY_ID`, the vault key, `VAULT_KEY`,

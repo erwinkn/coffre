@@ -13,9 +13,9 @@ const pages = Object.fromEntries(
     .map((file) => [`pages/${file.slice(0, -'.tsx'.length)}`, here(`src/pages/${file}`)]),
 );
 
-// Builds `@coffre/ui` as a library: its route options and provider, the
-// same routes in code (`routes`), and each page, as ES modules a
-// deployment's own TanStack Start build bundles, and its splitter splits.
+// Builds `@coffre/ui` as a library: its route options and provider, and
+// each page, as ES modules a deployment's own TanStack Start build bundles,
+// and its splitter splits.
 // React, the router, Start and Query stay imports, so the deployment's
 // single copy serves both. `pnpm dev` runs the sources instead.
 export default defineConfig({
@@ -28,7 +28,7 @@ export default defineConfig({
     minify: false,
     sourcemap: true,
     target: 'es2022',
-    lib: { entry: { index: here('src/index.ts'), routes: here('src/routes.ts'), ...pages }, formats: ['es'] },
+    lib: { entry: { index: here('src/index.ts'), ...pages }, formats: ['es'] },
     rollupOptions: {
       // Every package stays an import: the deployment installs and bundles it once.
       external: (id) => !id.startsWith('.') && !id.startsWith('/') && !id.startsWith('\0') && !/^[A-Za-z]:/.test(id),

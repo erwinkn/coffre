@@ -65,6 +65,13 @@ function fakeUi() {
   };
 }
 
+test('a monitor may ask the health checks with HEAD; other methods are refused', async () => {
+  const head = await answer(new Request('https://coffre.test/livez', { method: 'HEAD' }), appRuntime(cloudflare), fakeUi(), null);
+  assert.equal(head.status, 200);
+  const post = await answer(new Request('https://coffre.test/livez', { method: 'POST' }), appRuntime(cloudflare), fakeUi(), null);
+  assert.equal(post.status, 405);
+});
+
 test('health is public, and every response carries the security headers', async () => {
   const response = await answer(new Request('https://coffre.test/livez'), appRuntime(cloudflare), fakeUi(), null);
   assert.equal(response.status, 200);

@@ -9,7 +9,8 @@
 //   import { ProjectsPage } from '@coffre/ui/pages/projects';
 //   export const Route = createFileRoute('/_coffre/projects/')({ ...projects, component: ProjectsPage });
 //
-// or in code, with `@coffre/ui/routes`. A layout's options hold its
+// or in code, with TanStack's own `createRoute({ getParentRoute, path,
+// ...projects, component: ProjectsPage })`. A layout's options hold its
 // component. A page's do not: the route file names it, from its own module,
 // so that Start's splitter puts each page in a chunk of its own, with its
 // preload hints. Each page goes at the path coffre's links name; one at
@@ -33,8 +34,7 @@ export type CoffreContext = { coffre: CoffreClient; queryClient: QueryClient };
 
 /**
  * coffre's context, as a route's loader reads it. The options take any
- * parent, a file route's or a code route's, whose context the types cannot
- * follow; the root's is coffre's.
+ * parent, whose context the types cannot follow; the root's is coffre's.
  */
 const coffreOf = (context: unknown) => context as CoffreContext;
 

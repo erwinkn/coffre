@@ -9,6 +9,7 @@ export default defineConfig({
     envelope: 'src/envelope.ts',
     identity: 'src/identity/index.ts',
     kek: 'src/kek/index.ts',
+    pages: 'src/pages.ts',
     schemas: 'src/schemas.ts',
     vault: 'src/vault.ts',
     // Trust bindings' rules alone, for the pages and the CLI: none of sign-in's own code.

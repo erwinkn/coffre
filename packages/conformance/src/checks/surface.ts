@@ -71,7 +71,20 @@ export async function headers(deployment: Deployment, admin: Person): Promise<st
     expect(!nonces.has(nonce), `${kind} (${response.status}) has the nonce of an earlier response`, seen);
     nonces.add(nonce);
   }
-  return `${kinds.length} kinds of response, each with coffre's headers and a nonce of its own`;
+  // On Node the app serves its static files itself, which keep for good and are never sniffed; on
+  // Workers, Cloudflare serves them, before the Worker runs.
+  if (deployment.kind === 'node') {
+    const asset = clientFiles(deployment.clientDir).find(({ name }) => name.startsWith('_coffre/assets/') && name.endsWith('.js'));
+    expect(asset !== undefined, 'the build has no script under _coffre/assets/');
+    const response = await anonymous(`/${asset.name}`);
+    await response.body?.cancel();
+    const seen = Object.fromEntries(response.headers);
+    expect(response.status === 200, `the static file /${asset.name} answered ${response.status}`, seen);
+    expect(response.headers.get('cache-control') === 'public, max-age=31536000, immutable', `/${asset.name} is not kept for good`, seen);
+    expect(response.headers.get('x-content-type-options') === 'nosniff', `/${asset.name} lacks nosniff`, seen);
+    expect(response.headers.get('cross-origin-resource-policy') === 'same-origin', `/${asset.name} lacks a same-origin CORP`, seen);
+  }
+  return `${kinds.length} kinds of response, each with coffre's headers and a nonce of its own${deployment.kind === 'node' ? '; static files kept for good, nosniff and same-origin' : ''}`;
 }
 
 /**

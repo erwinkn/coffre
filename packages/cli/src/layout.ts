@@ -139,6 +139,14 @@ const OTHERS: Record<Kind, Record<string, readonly string[]>> = {
   },
 };
 
+/** server.env.example, as each release of 0.1 wrote it: .env.example since 0.2. */
+const SERVER_ENV_EXAMPLES = [
+  '0e6554f5585990049d6ec90c150ef280b4c2c23d',
+  '3cf1335eb10e2e16f997f11052e46bd5a0986a8d',
+  '5846ba5a1773b0cd8122bfe3e83519853196872a',
+  'd9e929d46902e880e4f8ad23817d2fad97ba58dd',
+];
+
 /** The scripts 0.1 wrote, which 0.2's replace: every release's alike. */
 const SCRIPTS_0_1: Record<Kind, Record<string, string>> = {
   workers: {
@@ -196,20 +204,45 @@ export const ROUTE_FILES: Record<string, string> = Object.fromEntries(
  */
 export const RETIRED_ROUTE_FILES: Record<string, { since: string; blobs: readonly string[] }> = {};
 
-/** Whether release `a` comes after release `b`. */
-function after(a: string, b: string): boolean {
-  const [x, y] = [a, b].map((version) => version.split(/[.-]/).map((part) => Number.parseInt(part, 10) || 0));
-  for (let i = 0; i < Math.max(x!.length, y!.length); i++) {
-    if ((x![i] ?? 0) !== (y![i] ?? 0)) return (x![i] ?? 0) > (y![i] ?? 0);
+/**
+ * Whether release `a` comes after release `b`, as semver orders them: by
+ * major, minor and patch, then a prerelease before its release
+ * (`0.2.1-beta.1` before `0.2.1`), prereleases by their parts.
+ */
+export function after(a: string, b: string): boolean {
+  const parse = (version: string) => {
+    const [core = '', pre] = version.split(/-(.*)/s);
+    return { core: core.split('.').map((part) => Number.parseInt(part, 10) || 0), pre: pre === undefined ? null : pre.split('.') };
+  };
+  const [x, y] = [parse(a), parse(b)];
+  for (let i = 0; i < 3; i++) if ((x.core[i] ?? 0) !== (y.core[i] ?? 0)) return (x.core[i] ?? 0) > (y.core[i] ?? 0);
+  if (x.pre === null || y.pre === null) return x.pre === null && y.pre !== null;
+  for (let i = 0; i < Math.max(x.pre.length, y.pre.length); i++) {
+    const [p, q] = [x.pre[i], y.pre[i]];
+    if (p === q) continue;
+    if (p === undefined || q === undefined) return q === undefined;
+    const [m, n] = [Number(p), Number(q)];
+    if (!Number.isNaN(m) && !Number.isNaN(n)) return m > n;
+    if (!Number.isNaN(m) || !Number.isNaN(n)) return Number.isNaN(m);
+    return p > q;
   }
   return false;
 }
 
+/** The first release whose deployments mount coffre as file routes: what one that has them is counted from. */
+export const FIRST_FILE_ROUTES = '0.2.0';
+
+/** coffre's layouts as file routes, under which a deployment mounts its pages. */
+const LAYOUT_FILES = ['app/src/routes/_coffre.tsx', 'app/src/routes/_solo.tsx'];
+
 /**
- * The page files a deployment of 0.2 or later, at release `from`, gains and
- * loses moving to the template's: those added since `from`, where it has
- * none; and those retired since, where it has exactly what coffre wrote.
- * One retired that it changed is its own: refused, with what to do.
+ * The page files a deployment with coffre's file routes, at release `from`,
+ * gains and loses moving to the template's: those added since `from`, or
+ * since file routes began if it is from before them, as one moved by hand
+ * is, where it has none; and those retired since, where it has exactly what
+ * coffre wrote. One retired that it changed is its own: refused, with what
+ * to do. So is a deployment without coffre's layouts as file routes, the
+ * only way coffre mounts.
  */
 export function pageMove(
   dir: string,
@@ -217,16 +250,24 @@ export function pageMove(
   from: string,
   files: { added: Record<string, string>; retired: Record<string, { since: string; blobs: readonly string[] }> } = { added: ROUTE_FILES, retired: RETIRED_ROUTE_FILES },
 ): Move {
+  if (LAYOUT_FILES.every((path) => read(dir, path) === null)) {
+    return {
+      problems: [
+        `${LAYOUT_FILES.join(' and ')}, coffre's layouts as file routes, are both missing: since 0.2 coffre mounts as Start's file routes, as coffre init writes them (docs/deploy.md, "Your own routes")`,
+      ],
+    };
+  }
+  const since = after(FIRST_FILE_ROUTES, from) ? FIRST_FILE_ROUTES : from;
   const changes: FileChange[] = [];
   const problems: string[] = [];
-  for (const [path, since] of Object.entries(files.added)) {
-    if (after(since, from) && read(dir, path) === null) changes.push({ path, was: null, becomes: readFileSync(join(template, path), 'utf8') });
+  for (const [path, added] of Object.entries(files.added)) {
+    if (after(added, since) && read(dir, path) === null) changes.push({ path, was: null, becomes: readFileSync(join(template, path), 'utf8') });
   }
-  for (const [path, { since, blobs }] of Object.entries(files.retired)) {
+  for (const [path, { since: retired, blobs }] of Object.entries(files.retired)) {
     const was = read(dir, path);
-    if (!after(since, from) || was === null) continue;
+    if (!after(retired, since) || was === null) continue;
     if (blobs.includes(blob(was))) changes.push({ path, was, becomes: null });
-    else problems.push(`${path} is a page coffre ${since} no longer has, and is not as coffre wrote it: delete it, or keep it as a page of the deployment's own`);
+    else problems.push(`${path} is a page coffre ${retired} no longer has, and is not as coffre wrote it: delete it, or keep it as a page of the deployment's own`);
   }
   return problems.length > 0 ? { problems } : { changes, notes: [] };
 }
@@ -316,6 +357,14 @@ export function startAppMove(dir: string, kind: Kind, template: string): Move {
         `tsconfig.json is the deployment's own, and stays so: for pnpm typecheck to check the app, add "jsx": "react-jsx" to its compilerOptions and "vite/client" to their types${kind === 'node' ? ', set their moduleResolution to "bundler", and add "app/src" to its include' : ''}`,
       );
     } else notes.push(`${path} is the deployment's own, and stays as it is`);
+  }
+
+  // On Node, the server's settings are .env, which srvx reads, and their template .env.example.
+  if (kind === 'node') {
+    change('.env.example', templateText('.env.example'));
+    const example = read(dir, 'server.env.example');
+    if (example !== null && SERVER_ENV_EXAMPLES.includes(blob(example))) change('server.env.example', null, example);
+    notes.push('The server reads its settings from .env now, which srvx loads: rename server.env to .env where the server runs');
   }
 
   if (problems.length > 0) return { problems };

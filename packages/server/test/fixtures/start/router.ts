@@ -15,4 +15,11 @@ const hook = createRoute({
   },
 });
 
-export const getRouter = () => createRouter({ routeTree: root.addChildren([hook]) });
+// One that answers with a response whose headers cannot change.
+const elsewhere = createRoute({
+  getParentRoute: () => root,
+  path: '/hooks/elsewhere',
+  server: { handlers: { GET: () => Response.redirect('https://elsewhere.example/', 302) } },
+});
+
+export const getRouter = () => createRouter({ routeTree: root.addChildren([hook, elsewhere]) });

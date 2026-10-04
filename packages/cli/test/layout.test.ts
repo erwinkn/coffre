@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 import { bumpPins, coffrePins } from '../src/deployment.ts';
 import { templateDir, templateFiles, type Kind } from '../src/init.ts';
-import { applyChanges, blob, lineDiff, NODE_ENTRIES, pageMove, ROUTE_FILES, shownChange, startAppMove, undo, WORKERS_ENTRIES, type Move } from '../src/layout.ts';
+import { after, applyChanges, blob, lineDiff, NODE_ENTRIES, pageMove, ROUTE_FILES, shownChange, startAppMove, undo, WORKERS_ENTRIES, type Move } from '../src/layout.ts';
 
 const fixtures = fileURLToPath(new URL('fixtures/', import.meta.url));
 const ENTRY: Record<Kind, string> = { workers: 'app/src/worker.ts', node: 'src/server.ts' };
@@ -284,6 +284,40 @@ test("a page a later release adds is a file the deployment gains; one it had lef
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("a deployment moved by hand, its pins still 0.1's, is not offered the pages it left out", () => {
+  const dir = deployment('workers');
+  try {
+    applyChanges(dir, changesOf(startAppMove(dir, 'workers', templateDir('workers'))));
+    rmSync(join(dir, 'app/src/routes/_coffre/audit.tsx'));
+    rmSync(join(dir, 'app/src/routes/_coffre/access.tsx'));
+    assert.deepEqual(pageMove(dir, templateDir('workers'), '0.1.18'), { changes: [], notes: [] });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a deployment without coffre's layouts as file routes is refused, not given pages", () => {
+  const dir = deployment('workers');
+  try {
+    applyChanges(dir, changesOf(startAppMove(dir, 'workers', templateDir('workers'))));
+    rmSync(join(dir, 'app/src/routes'), { recursive: true });
+    assert.match(problemsOf(pageMove(dir, templateDir('workers'), '0.2.0')), /_coffre\.tsx and app\/src\/routes\/_solo\.tsx, coffre's layouts as file routes, are both missing/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('releases are ordered as semver orders them, a prerelease before its release', () => {
+  assert.ok(after('0.2.1', '0.2.0'));
+  assert.ok(after('0.10.0', '0.9.9'));
+  assert.ok(after('0.2.1', '0.2.1-beta.1'));
+  assert.ok(!after('0.2.1-beta.1', '0.2.1'));
+  assert.ok(after('0.2.1-beta.2', '0.2.1-beta.1'));
+  assert.ok(after('0.2.1-beta.10', '0.2.1-beta.9'));
+  assert.ok(after('0.2.1-beta', '0.2.1-alpha'));
+  assert.ok(!after('0.2.0', '0.2.0'));
 });
 
 test('a change is shown by the lines that go and come, a file added or removed by its name', () => {

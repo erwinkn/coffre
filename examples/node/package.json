@@ -9,7 +9,7 @@
   "scripts": {
     "vault": "node --env-file=vault.env src/vault.ts",
     "build": "vite build app",
-    "start": "node --env-file=server.env node_modules/srvx/bin/srvx.mjs --prod --host=127.0.0.1 -s ../client app/dist/server/server.js",
+    "start": "srvx --prod --host=127.0.0.1 app/dist/server/server.js",
     "typecheck": "tsc --noEmit",
     "conformance": "coffre-conformance node"
   },

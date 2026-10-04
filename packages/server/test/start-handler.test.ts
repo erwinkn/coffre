@@ -64,3 +64,12 @@ test("a server function called from another site is refused by Start's CSRF chec
   const route = await fetchApp(new Request('https://coffre.test/hooks/deployed', { method: 'POST', headers: crossSite }));
   assert.equal(route.status, 307);
 });
+
+test('a route that answers with a response whose headers cannot change gets a 500 with coffre\'s headers, and the log says why', async (t) => {
+  const logged: string[] = [];
+  t.mock.method(console, 'error', (...args: unknown[]) => void logged.push(JSON.stringify(args)));
+  const response = await fetchApp(new Request('https://coffre.test/hooks/elsewhere'));
+  assert.equal(response.status, 500);
+  assert.match(response.headers.get('content-security-policy') ?? '', /'nonce-/);
+  assert.match(logged.join('\n'), /a route answered with a Response whose headers cannot change/);
+});

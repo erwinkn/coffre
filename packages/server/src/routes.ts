@@ -1,19 +1,16 @@
 /**
  * coffre's server routes: its API, sign-in and health, which coffre's
- * server answers. As route options, for the deployment's file routes,
+ * server answers. As route options, for the deployment's file routes:
  *
  *   // src/routes/api.$.ts
  *   export const Route = createFileRoute('/api/$')({ ...api });
  *
- * or in code, `coffreServerRoutes(root)`, or one at a time, `apiRoute(root)`.
  * `/api/$` is the whole API, which the pages and the CLI need all of. A
  * route at a more specific path, `/api/hello`, would win over it, and take
  * a path of coffre's: a deployment's own go elsewhere. Each reaches coffre
- * through the request's context, which the server entry sets: this file
- * runs in the browser's bundle too, when its routes are code, and imports
- * nothing of the server.
+ * through the request's context, which the server entry sets, and imports
+ * nothing of the server itself.
  */
-import { createRoute, type AnyRoute } from '@tanstack/react-router';
 import type {} from '@tanstack/react-start';
 
 import { coffreOf, requireMiddleware } from './wiring.ts';
@@ -37,13 +34,3 @@ export const auth = route;
 export const livez = route;
 /** `/readyz`: whether coffre can take writes, the audit log's heartbeat and checkpoint. */
 export const readyz = route;
-
-export const apiRoute = <TParent extends AnyRoute>(parent: TParent) => createRoute({ getParentRoute: () => parent, path: '/api/$', ...api });
-export const authRoute = <TParent extends AnyRoute>(parent: TParent) => createRoute({ getParentRoute: () => parent, path: '/auth/$', ...auth });
-export const livezRoute = <TParent extends AnyRoute>(parent: TParent) => createRoute({ getParentRoute: () => parent, path: '/livez', ...livez });
-export const readyzRoute = <TParent extends AnyRoute>(parent: TParent) => createRoute({ getParentRoute: () => parent, path: '/readyz', ...readyz });
-
-/** All of coffre's server routes, under `parent`, the root. */
-export function coffreServerRoutes<TParent extends AnyRoute>(parent: TParent) {
-  return [apiRoute(parent), authRoute(parent), livezRoute(parent), readyzRoute(parent)] as const;
-}

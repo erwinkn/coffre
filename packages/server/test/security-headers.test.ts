@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  IMMUTABLE,
   contentSecurityPolicy,
   cspNonce,
   setSecurityHeaders,
@@ -61,4 +62,9 @@ test('a response that chose its caching keeps it', () => {
   const cached = new Response(null, { headers: { 'cache-control': 'public, max-age=60' } });
   const secured = setSecurityHeaders(cached, https);
   assert.equal(secured.headers.get('cache-control'), 'public, max-age=60');
+});
+
+test("a response whose headers cannot change is refused, saying the rule and the fix", () => {
+  assert.throws(() => setSecurityHeaders(Response.redirect('https://coffre.example.com/elsewhere', 302), https), (error: Error) => error.message === IMMUTABLE);
+  assert.match(IMMUTABLE, /return new Response\(null, \{ status: 302, headers: \{ location \} \}\)/);
 });

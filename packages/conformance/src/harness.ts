@@ -1,5 +1,5 @@
 // Run a deployment made like `coffre init` makes one, unedited: settings go
-// in as the environment its wrangler.jsonc or server.env would give it, with
+// in as the environment its wrangler.jsonc or .env would give it, with
 // GitHub's URLs pointed at a stand-in IdP running in this process.
 //
 //   workers  two Workers under `wrangler dev`, on a Postgres database of
@@ -263,7 +263,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
     await run(bin('vite'), ['build', 'app']);
     // As `pnpm start` runs it: the app's build, under srvx.
     const startServer = () =>
-      start('server', process.execPath, [join(dir, 'node_modules/srvx/bin/srvx.mjs'), '--prod', '--host=127.0.0.1', '-s', '../client', 'app/dist/server/server.js'], {
+      start('server', bin('srvx'), ['--prod', '--host=127.0.0.1', 'app/dist/server/server.js'], {
         PORT: String(port),
         PUBLIC_URL: origin,
         DATABASE_URL: `file:${database}`,

@@ -371,7 +371,7 @@ server entry, `app/src/server.ts`, hands it to each request:
  // package.json
 +    "build": "vite build app",
 -    "start": "node --env-file=server.env src/server.ts",
-+    "start": "node --env-file=server.env node_modules/srvx/bin/srvx.mjs --prod --host=127.0.0.1 -s ../client app/dist/server/server.js",
++    "start": "srvx --prod --host=127.0.0.1 app/dist/server/server.js",
 ```
 
 Then copy the rest of `app/` from the release's `coffre init --node`, as
@@ -380,7 +380,9 @@ dependencies its [package.json](../examples/node/package.json) has that
 yours lacks, `srvx` and `@libsql/client` among them, at exactly its
 versions; add `"jsx": "react-jsx"` to `tsconfig.json`'s `compilerOptions`,
 `"vite/client"` to its `types` and `"app/src"` to its `include`, set its
-`moduleResolution` to `"bundler"`, and add `dist` to `.gitignore`.
+`moduleResolution` to `"bundler"`, and add `dist` to `.gitignore`. srvx
+reads the server's settings from `.env`: rename `server.env` to `.env`, and
+`server.env.example` to `.env.example`.
 
 Then `pnpm typecheck`, and deploy: on Workers, set the app's build and
 deploy commands as [Workers Builds](#workers-builds) says, or `pnpm run
@@ -556,41 +558,43 @@ coffre login https://secrets.example.com
 
 ```
 acme-secrets/
-  app/src/coffre.ts      createCoffre({ database, vault: connectVault(socket), … }), from server.env
+  app/src/coffre.ts      createCoffre({ database, vault: connectVault(socket), … }), from .env
   app/src/server.ts      { fetch: Start's handler, coffre.request(request) its context }; coffre.schedule()
   app/src/routes/        the root and coffre's routes, as on Workers
   app/vite.config.ts     tanstackStart(), viteReact(), coffre()
   src/vault.ts           serveVault({ socket, database, kek, rootAdmins })
-  server.env.example     app settings
+  .env.example           app settings
   vault.env.example      vault settings
 ```
 
 The app, `app/`, is a TanStack Start app, as on Workers, which `pnpm build`
 builds. `pnpm start` runs what it built under
-[srvx](https://srvx.h3.dev), as TanStack Start documents for Node: the
-server's `fetch`, and the client files beside it, on `127.0.0.1` and
-`PORT`, for a proxy in front to terminate TLS. The server runs coffre's
-scheduled job itself, every five minutes. The vault is a process of its
-own.
+[srvx](https://srvx.h3.dev), as TanStack Start documents for Node, with
+the settings srvx reads from `.env`: the server's `fetch`, on `127.0.0.1`
+and `PORT`, for a proxy in front to terminate TLS, and the client files,
+which the server entry serves itself under `/_coffre/assets/`, kept for good
+(each name holds its content's hash), never sniffed and same-origin. The
+server runs coffre's scheduled job itself, every five minutes. The vault is
+a process of its own.
 
 Use Node 24 or later. Run `coffre setup` as above, then:
 
 ```sh
-cp server.env.example server.env
+cp .env.example .env
 cp vault.env.example vault.env
-chmod 600 server.env vault.env
+chmod 600 .env vault.env
 ```
 
 Fill in `PUBLIC_URL`, the GitHub OAuth settings and `ROOT_ADMINS`, then
 the values from `coffre setup`'s screen ([step 3 above](#3-keys-and-secrets)
-says what each key is for). `server.env` takes the app key, `APP_KEY`, and
+says what each key is for). `.env` takes the app key, `APP_KEY`, and
 the app's database URL, as `DATABASE_URL`. `vault.env` takes the vault ID,
 `VAULT_KEY_ID`, the vault key, `VAULT_KEY`, and the vault's database URL.
 Both URLs name one database, through different logins, with the TLS
 settings the administrator's connection string had:
 
 ```dotenv
-# server.env
+# .env
 DATABASE_URL=postgresql://coffre_runtime:…@db.example.com:5432/coffre?sslmode=verify-full
 # vault.env
 DATABASE_URL=postgresql://coffre_vault_runtime:…@db.example.com:5432/coffre?sslmode=verify-full
@@ -624,12 +628,10 @@ root, `app/src/routes/__root.tsx`, is the app's: the document, with
 coffre's stylesheet and icons in its head and `<CoffreProvider>`, which
 coffre's pages need around them, in its body. coffre gives each of its
 routes as route options: what the route does, its loader, its search and
-its redirects, but not where it goes. The app mounts them, in one of three
-ways.
-
-**As file routes**, what `coffre init` writes, Start's own convention. One
-file per route, each spreading coffre's options; a page's names its
-component, from its own module:
+its redirects, but not where it goes. The app mounts them as Start's file
+routes, which is what `coffre init` writes: one file per route, each
+spreading coffre's options; a page's names its component, from its own
+module:
 
 ```tsx
 // app/src/routes/_coffre.tsx: coffre's nav, around the pages in _coffre/
@@ -657,39 +659,9 @@ The app's own pages are files beside them, as in any Start app:
 visitors only. A release that adds a page to coffre adds its file to the
 deployment, through `coffre update`, which shows it first.
 
-**In code, all of them**, with `@coffre/ui/routes` and
-`@coffre/server/routes`, under the root:
-
-```tsx
-// app/src/router.tsx
-import { routeTree as files, type RootRouteChildren } from './routeTree.gen';
-import { Route as root } from './routes/__root';
-
-// The app's own pages, any other files in src/routes.
-const pages = Object.values(files.children ?? {}) as RootRouteChildren[keyof RootRouteChildren][];
-
-export const routeTree = root.addChildren([...pages, ...coffreServerRoutes(root), ...coffreRoutes(root)]);
-```
-
-**In code, one at a time**, which is all `coffreRoutes(root)` does: each
-route is a function of its parent, `projectsRoute(shell)`. Here the audit
-log is left out:
-
-```tsx
-const shell = shellRoute(root);
-const solo = soloRoute(root);
-
-export const routeTree = root.addChildren([
-  apiRoute(root), authRoute(root), livezRoute(root), readyzRoute(root),
-  solo.addChildren([loginRoute(solo), unregisteredRoute(solo), deviceLoginRoute(solo)]),
-  shell.addChildren([homeRoute(shell), projectsRoute(shell), projectRoute(shell), environmentRoute(shell), accessRoute(shell),
-    usersRoute(shell), userRoute(shell), tokensRoute(shell), tokenRoute(shell), settingsRoute(shell), accountRoute(shell)]),
-]);
-```
-
-Routes in code are not split: all of coffre's pages come with the app's
-main bundle, where file routes give each page a chunk of its own, which
-Start's preload hints fetch with the page.
+An app that prefers its routes in code mounts the same options with
+TanStack's own `createRoute({ getParentRoute, path, ...projects, component:
+ProjectsPage })`; coffre has no helper of its own for it.
 
 - **Paths are fixed.** Each of coffre's pages is at its own path, as its
   links expect; there is no base path. Links, coffre's and the app's, are

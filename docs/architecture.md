@@ -119,14 +119,13 @@ one package is seen by the others without a build. Builds leave it off.
 | `@coffre/server/cloudflare` | `createCoffre(env => ({ database, …config }))` → `{ request(env, ctx), scheduled }`; `postgres(env.HYPERDRIVE)` |
 | `@coffre/server/node` | `createCoffre({ database, …config })` → `{ request(request), schedule() }`; `migrate(url)` |
 | `@coffre/server/start` | `coffreMiddleware`, for the app's `createStart(() => ({ requestMiddleware: [coffreMiddleware, …] }))` |
-| `@coffre/server/routes` | `api`, `auth`, `livez`, `readyz`, route options for file routes; in code, `coffreServerRoutes(root)`, or `apiRoute(root)` and the like |
+| `@coffre/server/routes` | `api`, `auth`, `livez`, `readyz`, route options for file routes |
 | `@coffre/server` (both) | `signin`, `github`, `google`, `microsoft`, `oidc`, `cloudflareAccess`, `SigninError`; `githubActions`, `vercel`, `railway`, `cloudflareWorkers`, `SyncConfigError`, `SyncProviderError`; and the config types, `SigninProvider` and `SyncProvider` among them |
 | `@coffre/vault/cloudflare` | `vault(env => config)`, the RPC Worker's default export; `postgres(env.VAULT_HYPERDRIVE)` |
 | `@coffre/vault` (both) | `awsKms`, `KekUnavailableError`, `KekBadClaimError`, and the config types, `KekProvider` among them |
 | `@coffre/vault/node` | `serveVault({ socket, database, …config })`, `connectVault(socket)`, `localVault({ database, …config })` |
 | `@coffre/ui` | each layout's and page's route options, `shell`, `solo`, `projects` and the like; `createRouter(routeTree)`; `<CoffreProvider>`, `useCoffre()`; `CoffreContext` |
 | `@coffre/ui/pages/<name>` | each page's component, `ProjectsPage` and the like, for its file route |
-| `@coffre/ui/routes` | the same routes in code: `coffreRoutes(root)`, or `shellRoute(root)`, `projectsRoute(shell)` and the like |
 | `@coffre/ui/styles.css`, `icon.svg`, `apple-touch-icon.png` | the stylesheet and icons, for the root's head |
 | `@coffre/ui/vite` | `coffre()`, the deployment's Vite plugin |
 | `@coffre/client` | `createClient({ url, headers?, transport? })` |
@@ -175,7 +174,9 @@ app/src/coffre.ts             export const coffre = createCoffre(env => ({ publi
 **A request.** The Worker's `fetch` hands Start's handler the request with
 coffre in its context: `coffre.request(env, ctx)`, the invocation's
 database and vault. On Node, the server entry does the same with
-`coffre.request(request)`, and srvx runs it and serves the static files.
+`coffre.request(request)`, and srvx runs it; the entry serves the static
+files itself, kept for good, as srvx's own static serving sets no
+headers.
 Start runs coffre's middleware first, for every request: it mints the
 response's nonce, builds the visitor's API client, an in-process call with
 their credential, reads the visitor's preferences from their cookies, and
@@ -194,11 +195,10 @@ which answers it as before. A route or a page rendered without the
 middleware fails, saying how to add it, rather than answer without
 headers. Nothing coffre answers waits for a request body it does not read.
 
-**Server code stays on the server.** As file routes, coffre's server routes
-are stripped from the browser's build by Start, as any app's are. As routes
-in code they are not, so they and the middleware import nothing of the
-server: they reach it through the request's context, which only the server
-entry, and what it imports, sets. Conformance checks what the browser loads,
+**Server code stays on the server.** Start strips a file route's server
+handlers from the browser's build, and coffre's server routes and its
+middleware import nothing of the server besides: they reach it through the
+request's context, which only the server entry, and what it imports, sets. Conformance checks what the browser loads,
 in the build it runs, for the database layer, a driver, a table only the
 server knows or a `COFFRE_*` read ([conformance](conformance.md)).
 
@@ -206,9 +206,9 @@ server knows or a `COFFRE_*` read ([conformance](conformance.md)).
 loader, search, redirects, and a layout's component; not its path. A
 deployment mounts them as Start's file routes, a page's file naming its
 component from `@coffre/ui/pages/<name>`, so that Start's splitter puts each
-page in a chunk of its own, with Start's own preload hints. Or in code,
-`@coffre/ui/routes`, whose pages all come in the main bundle
-([Your own routes](deploy.md#your-own-routes)). `shell`, the nav, lets in only
+page in a chunk of its own, with Start's own preload hints
+([Your own routes](deploy.md#your-own-routes)). An app that prefers routes
+in code mounts the same options with TanStack's `createRoute`. `shell`, the nav, lets in only
 signed-in, registered visitors; `solo` is the frame of the sign-in pages.
 A page's component reads its own route's data through the match it renders
 in, so it works wherever it is mounted. The app's router registers its
@@ -223,8 +223,7 @@ stylesheet, and its menus, dialogs and tooltips, are scoped to: the
 deployment's document keeps its own look.
 
 **What `@coffre/ui` ships.** ES modules, built by Vite in library mode: the
-route options and provider, the routes in code, and each page as a module
-of its own. React, the router, Start and Query stay imports, so the
+route options and provider, and each page as a module of its own. React, the router, Start and Query stay imports, so the
 deployment's single copy of each serves both. The stylesheet and icons are
 files of the package, which the root links with `?url`, so the
 deployment's Vite processes them, fonts and all.
@@ -261,8 +260,9 @@ never does.
 
 **On Node**, the same build, without Cloudflare's plugin:
 `app/dist/server/server.js`, whose `fetch` srvx runs, and `app/dist/client`,
-which it serves. One copy of coffre's code serves both the server and its
-pages.
+which the server entry serves itself, through srvx's static middleware, with
+the headers that middleware has no option for. One copy of coffre's code
+serves both the server and its pages.
 
 Pages get their data through `@coffre/client`, the same client the CLI uses,
 never by reaching into the services. The client takes a transport: HTTP in the
