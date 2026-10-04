@@ -85,6 +85,8 @@ let published: Map<string, unknown>;
 let issuer: { down: boolean; fetches: number; hold?: () => Promise<void> };
 let limits: { perSource: RateLimiter; total: RateLimiter };
 let vaultCalls: number;
+/** Waited for before the vault is asked about the member: the last step before the commit. */
+let beforeAccess: (() => Promise<void>) | undefined;
 
 const transport: WorkloadTransport = {
   json: async (url) => {
@@ -115,9 +117,11 @@ beforeEach(async () => {
   limits = processLimits({ perSource: 1000, total: 1000 });
   deps = testDeps(db.runtime, [ROOT]);
   vaultCalls = 0;
+  beforeAccess = undefined;
   const access = deps.vault.access.bind(deps.vault);
   deps.vault.access = async (principal) => {
     vaultCalls++;
+    await beforeAccess?.();
     return access(principal);
   };
   config = resolveConfig({
@@ -630,6 +634,16 @@ test('admission comes first: both limits, a limiter that fails, and the body\'s 
   limits = processLimits();
   assert.equal((await exchange(JSON.stringify({ service: MEMBER, token: 'x'.repeat(17 * 1024) }))).status, 400);
   assert.equal((await exchange({ service: MEMBER, token: token(rsa), extra: true })).status, 400);
+});
+
+test('an hour at most, exactly, at the commit too: a token in time when verified and past the hour when committed is refused', async () => {
+  // In time by a second when verified; held two before the commit.
+  beforeAccess = () => sleep(2100);
+  const late = await trade(token(rsa, { iat: seconds() - 3599 }));
+  assert.deepEqual([late.status, late.body.reason], [401, 'too_old']);
+  assert.deepEqual(await db.owner.select().from(credentials), []);
+  beforeAccess = undefined;
+  assert.equal((await trade(token(rsa, { iat: seconds() - 3590 }))).status, 200);
 });
 
 test('a binding issues at most 60 credentials a minute', async () => {

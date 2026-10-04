@@ -108,19 +108,35 @@ export async function verifyWorkloadToken(
     ({ payload } = await jwtVerify(token, createLocalJWKSet(keys), {
       algorithms: [...WORKLOAD_ALGORITHMS],
       issuer: expected.issuer,
+      // For exp and nbf; iat's bounds are issuedRefusal's, since jose would stretch the hour by the tolerance too.
       clockTolerance: CLOCK_TOLERANCE_SECONDS,
-      maxTokenAge: MAX_TOKEN_AGE_SECONDS,
       requiredClaims: ['iss', 'sub', 'exp', 'iat'],
       currentDate: expected.now,
     }));
   } catch (error) {
     throw refusalOf(error);
   }
+  const issued = issuedRefusal(payload.iat!, expected.now.getTime() / 1000);
+  if (issued !== null) throw issued;
   const { aud } = payload;
   if (!(aud === expected.audience || (Array.isArray(aud) && aud.length === 1 && aud[0] === expected.audience))) {
     throw new WorkloadTokenRefused('audience', `the token is for ${JSON.stringify(aud ?? null)}, not ${expected.audience} alone`);
   }
   return payload as JWTPayload & DecodedToken['claims'];
+}
+
+/**
+ * Why a token issued at `iat` may not be exchanged at `now`, both in
+ * seconds, or null: issued an hour ago at most, exactly, and no further
+ * ahead than the clock tolerance. Verification and the exchange's commit
+ * both ask it.
+ */
+export function issuedRefusal(iat: number, now: number): WorkloadTokenRefused | null {
+  if (now - iat > MAX_TOKEN_AGE_SECONDS) {
+    return new WorkloadTokenRefused('too_old', `the token was issued more than ${MAX_TOKEN_AGE_SECONDS / 60} minutes ago`);
+  }
+  if (iat - now > CLOCK_TOLERANCE_SECONDS) return new WorkloadTokenRefused('too_old', 'the token says it was issued in the future');
+  return null;
 }
 
 function refusalOf(error: unknown): WorkloadTokenRefused {

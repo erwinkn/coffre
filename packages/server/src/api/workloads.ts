@@ -8,8 +8,8 @@ import {
   CLOCK_TOLERANCE_SECONDS,
   decodeWorkloadToken,
   GITLAB_ISSUER,
+  issuedRefusal,
   MAX_BINDINGS,
-  MAX_TOKEN_AGE_SECONDS,
   WorkloadTokenRefused,
   type BindingClaims,
   type DecodedToken,
@@ -441,9 +441,8 @@ export class WorkloadService {
       // The times again, should the request have waited.
       const seconds = now.getTime() / 1000;
       if (decoded.claims.exp <= seconds - CLOCK_TOLERANCE_SECONDS) throw new ExchangeRefused('expired', 'the token has expired');
-      if (seconds - decoded.claims.iat > MAX_TOKEN_AGE_SECONDS + CLOCK_TOLERANCE_SECONDS) {
-        throw new ExchangeRefused('too_old', `the token was issued more than ${MAX_TOKEN_AGE_SECONDS / 60} minutes ago`);
-      }
+      const issued = issuedRefusal(decoded.claims.iat, seconds);
+      if (issued !== null) throw refused(issued);
       const recent = await exchangesSince(tx, member, issuedBy(binding.id), new Date(now.getTime() - 60_000), EXCHANGES_PER_BINDING_MINUTE);
       if (recent >= EXCHANGES_PER_BINDING_MINUTE) {
         throw new ExchangeRefused('busy', `this binding issued ${EXCHANGES_PER_BINDING_MINUTE} credentials in the last minute: try again shortly`, 429);
