@@ -62,7 +62,7 @@ export function commandLine(argv: readonly string[]): { session: SessionArgs; co
   let at = 0;
   for (; at < argv.length; at++) {
     const [name, value] = argv[at]!.startsWith('--') ? argv[at]!.slice(2).split(/=(.*)/s) : [];
-    if (name === undefined || !(name in SESSION_OPTIONS)) break;
+    if (name === undefined || !Object.hasOwn(SESSION_OPTIONS, name)) break;
     if (value === undefined) at++;
   }
   const session: SessionArgs = { ...parseArgs({ args: argv.slice(0, at), options: SESSION_OPTIONS, strict: true }).values };
@@ -73,7 +73,7 @@ export function commandLine(argv: readonly string[]): { session: SessionArgs; co
   const end = rest.indexOf('--');
   for (const arg of SELF.has(command) ? [] : end === -1 ? rest : rest.slice(0, end)) {
     const name = arg.startsWith('--') ? arg.slice(2).split('=')[0]! : '';
-    if (name in SESSION_OPTIONS && !own.includes(name)) {
+    if (Object.hasOwn(SESSION_OPTIONS, name) && !own.includes(name)) {
       throw new Error(`--${name} is a session flag, which goes before the command: coffre --${name} ${placeholder(name)} ${command} …`);
     }
   }

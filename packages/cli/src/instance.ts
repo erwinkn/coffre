@@ -198,7 +198,7 @@ export function resolveTarget(flags: SessionFlags, store: Store, now: Date = new
   const ways = ([['--token-file', flags.token], ['--service', flags.service], ['--access-client-id', flags.accessClientId]] as const)
     .filter(([, value]) => value?.trim())
     .map(([flag]) => flag);
-  if (ways.length > 1) throw new Error(`${ways.join(' and ')} are two ways to sign in: give one`);
+  if (ways.length > 1) throw new Error(`${ways.join(' and ')} are ${ways.length === 2 ? 'two' : 'three'} ways to sign in: give one`);
   if (flags.idToken !== undefined && !flags.service?.trim()) {
     throw new Error('--id-token-file goes with --service: the ID token signs a CI run in as that service');
   }

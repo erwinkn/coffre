@@ -467,9 +467,11 @@ async function whoami(): Promise<void> {
   const via =
     to.credential.kind === 'access-service-token'
       ? 'an Access service token'
-      : sessionFlags.token !== undefined
-        ? 'the token in --token-file'
-        : { signin: 'coffre sign-in', cloudflare: 'Cloudflare Access' }[to.mode];
+      : to.credential.kind === 'workload'
+        ? "the run's ID token, as --service"
+        : sessionFlags.token !== undefined
+          ? 'the token in --token-file'
+          : { signin: 'coffre sign-in', cloudflare: 'Cloudflare Access' }[to.mode];
   process.stdout.write(`${me.principal.id} (${me.principal.type}) on ${to.origin}, via ${via}\n`);
   if (sessionFlags.token === undefined && session?.expiresAt) {
     const days = Math.round((Date.parse(session.expiresAt) - Date.now()) / 86_400_000);
