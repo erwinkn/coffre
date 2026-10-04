@@ -36,7 +36,8 @@ export function install(dir: string, { purge = false }: { purge?: boolean } = {}
       child.on('close', (code) => resolve({ code, output }));
     });
   return (async () => {
-    const args = purge ? ['install', '--config.confirm-modules-purge=false'] : ['install'];
+    // pnpm's box about its own new release would come after the error, and take its place.
+    const args = ['install', '--config.update-notifier=false', ...(purge ? ['--config.confirm-modules-purge=false'] : [])];
     const ran = (await attempt('pnpm', args)) ?? (await attempt('corepack', ['pnpm', ...args]));
     if (ran === null) throw new Error('pnpm is not installed: corepack enable, or npm install -g pnpm, then run setup again');
     if (ran.code !== 0) {
