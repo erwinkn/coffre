@@ -1,10 +1,11 @@
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign as signWith, type KeyObject } from 'node:crypto';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 import type pg from 'pg';
 
-import { github, signin, type BindingClaims, type RateLimiter } from '@coffre/core/identity';
+import { github, signin, type BindingClaims, type RateLimiter, type WorkloadProfile } from '@coffre/core/identity';
 import { createDatabase, type Database } from '@coffre/db';
 import { asc, eq, sql, type SQL } from 'drizzle-orm';
 import { migrationLedger } from '@coffre/db/dialect';
@@ -78,15 +79,16 @@ let runtime: CoffreRuntime;
 let config: ReturnType<typeof resolveConfig>;
 let rsa: Key;
 let ec: Key;
-/** What the issuer publishes, by URL; `down` makes it unreachable. */
+/** What the issuer publishes, by URL; `down` makes it unreachable, `hold` keeps a fetch waiting. */
 let published: Map<string, unknown>;
-let issuer: { down: boolean; fetches: number };
+let issuer: { down: boolean; fetches: number; hold?: () => Promise<void> };
 let limits: { perSource: RateLimiter; total: RateLimiter };
 let vaultCalls: number;
 
 const transport: WorkloadTransport = {
   json: async (url) => {
     issuer.fetches++;
+    await issuer.hold?.();
     if (issuer.down || !published.has(url.href)) throw new FetchRefused(url, issuer.down ? 'could not be fetched' : 'answered 404');
     return published.get(url.href);
   },
@@ -130,8 +132,8 @@ beforeEach(async () => {
   await bind(DEPLOY);
 });
 
-async function bind(claims: BindingClaims, replaces: string[] = []): Promise<string> {
-  const made = await runtime.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'github', issuer: null, claims, label: 'deploys', replaces }, { dryRun: false });
+async function bind(claims: BindingClaims, replaces: string[] = [], profile: WorkloadProfile = 'github'): Promise<string> {
+  const made = await runtime.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile, issuer: null, claims, label: 'deploys', replaces }, { dryRun: false });
   assert.ok('binding' in made);
   return made.binding.id;
 }
@@ -328,6 +330,7 @@ test('removing a binding ends its credentials at once; a denied attempt changes 
   const devContext = await contextFor(deps, DEV);
   await assert.rejects(runtime.workloads!.unbind(devContext, SERVICE, id), /only owners/);
   assert.equal(await caller(credential), `service:${SERVICE}`);
+  assert.equal((await trade(token(rsa))).status, 200, 'its entry is no tombstone');
 
   await runtime.workloads!.unbind(await contextFor(deps, ROOT), SERVICE, id);
   assert.equal(await caller(credential), 401);
@@ -356,6 +359,60 @@ test('an exchange racing a removal never leaves a credential the removal missed'
   assert.equal((await deps.vault.admit({ actor: `user:${ROOT}`, principal: MEMBER })).ok, true);
   assert.equal(await caller(body.token!), 401);
   assert.equal((await trade(token(rsa))).body.reason, 'no_match');
+});
+
+test("a reusable workflow's binding names its caller's ref: a feature branch calling the same pinned commit is refused", async () => {
+  const called = { job_workflow_ref: 'acme/workflows/.github/workflows/deploy.yml@refs/tags/v1', job_workflow_sha: 'a'.repeat(40) };
+  const id = await bind({ repository_owner_id: '9919', repository_id: '41532', ref: 'refs/heads/main', event_name: 'push', ...called }, [], 'github-reusable');
+  const caller = (ref: string) => ({ ...called, ref, workflow_ref: `acme/api/.github/workflows/release.yml@${ref}` });
+  const feature = (await trade(token(rsa, caller('refs/heads/feature')))).body;
+  assert.deepEqual([feature.reason, feature.message], ['no_match', `no binding of ${MEMBER} trusts these claims: ref differ`]);
+  assert.equal((await trade(token(rsa, caller('refs/heads/main')))).status, 200);
+  assert.equal((await appEntries('token.exchange'))[0]!.metadata.bindingId, id);
+});
+
+test('a GitLab binding names the namespace by ID: the same project moved to another namespace is refused', async () => {
+  const gitlab = 'https://gitlab.com';
+  published.set(`${gitlab}/.well-known/openid-configuration`, { issuer: gitlab, jwks_uri: `${gitlab}/oauth/discovery/keys` });
+  published.set(`${gitlab}/oauth/discovery/keys`, { keys: [rsa.jwk] });
+  const pipeline = { namespace_id: '77', project_id: '4242', ref_type: 'branch', ref: 'main', pipeline_source: 'push' };
+  await bind(pipeline, [], 'gitlab');
+  const run = (claims: Record<string, unknown>) => token(rsa, { iss: gitlab, sub: 'project_path:acme/api:ref_type:branch:ref:main', ...pipeline, ...claims });
+  const moved = (await trade(run({ namespace_id: '78', namespace_path: 'other' }))).body;
+  assert.deepEqual([moved.reason, moved.message], ['no_match', `no binding of ${MEMBER} trusts these claims: namespace_id differ`]);
+  assert.equal((await trade(run({}))).status, 200);
+});
+
+test("keys that moved, replaced while a run exchanges: its credential stands only while the binding it came from does", async () => {
+  const old = (await db.owner.select().from(serviceBindings))[0]!.id;
+  const moved = `${ISSUER}/.well-known/jwks-2`;
+  published.set(`${ISSUER}/.well-known/openid-configuration`, { issuer: ISSUER, jwks_uri: moved });
+  published.set(moved, { keys: [rsa.jwk, ec.jwk] });
+  const [exchanged, made] = await Promise.all([trade(token(rsa)), bind(DEPLOY)]);
+  assert.equal((await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, old)))[0]!.revokedAt !== null, true, 'the old binding was replaced');
+  if (exchanged.status === 200) {
+    const [issued] = await db.owner.select().from(credentials);
+    assert.equal(await caller(exchanged.body.token!), issued!.createdBy === `binding:${made}` ? `service:${SERVICE}` : 401);
+  }
+  // The next run is verified under the keys' new URL, by the binding that replaced it.
+  assert.equal((await trade(token(rsa))).status, 200);
+  assert.equal((await appEntries('token.exchange')).at(-1)!.metadata.bindingId, made);
+});
+
+test("two first exchanges at once each fetch the issuer's keys, rather than one waiting on the other's request", async () => {
+  forgetKeys();
+  issuer.fetches = 0;
+  let started = 0;
+  let bothStarted!: () => void;
+  const both = new Promise<void>((resolve) => (bothStarted = resolve));
+  // Each fetch waits until the other has begun, or two seconds: one that waited on the other would never begin.
+  issuer.hold = async () => {
+    if (++started === 2) bothStarted();
+    await Promise.race([both, sleep(2000)]);
+  };
+  const outcomes = await Promise.all([trade(token(rsa)), trade(token(ec))]);
+  assert.deepEqual(outcomes.map((outcome) => outcome.status), [200, 200]);
+  assert.equal(issuer.fetches, 2);
 });
 
 test('admission comes first: both limits, a limiter that fails, and the body\'s size', async () => {

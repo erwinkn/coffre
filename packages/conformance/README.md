@@ -16,7 +16,8 @@ instance is checked from outside by the CLI, `coffre verify instance`
 [Against a running instance](https://github.com/erwinkn/coffre/blob/main/docs/conformance.md#against-a-running-instance).
 
 `@coffre/conformance/idp` is the stand-in identity provider it signs in
-with, which plays GitHub, an OIDC provider and Cloudflare Access.
+with, which plays GitHub, an OIDC provider and Cloudflare Access, and a CI
+platform that signs ID tokens for its runs.
 
 Part of [coffre](https://github.com/erwinkn/coffre), a secrets manager you
 deploy as a small project of your own. Its eight `@coffre/*` packages are

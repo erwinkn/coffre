@@ -1,7 +1,7 @@
 // coffre's server: the API, sign-in, pages and scheduled job, in one
 // process. It holds no vault key: it asks the vault, a process of its own
 // (src/vault.ts), over a Unix socket. Settings come from server.env.
-import { github, serve, signin } from '@coffre/server/node';
+import { github, processLimits, serve, signin } from '@coffre/server/node';
 import { connectVault } from '@coffre/vault/node';
 
 function env(name: string): string {
@@ -27,6 +27,15 @@ const server = await serve({
         apiUrl: process.env.GITHUB_API_URL,
       }),
     ],
+    // CI runs may sign in as services with their platform's ID token, through
+    // the trust bindings owners make (docs/design/oidc.md). Each exchange
+    // passes these first; they count in this process.
+    workloads: {
+      limits: processLimits({ perSource: 30, total: 300 }),
+      // Set by conformance only: a binding's issuer may then be plain HTTP on
+      // loopback. Refused unless PUBLIC_URL is loopback too.
+      allowLoopbackIssuersForDevelopment: process.env.ALLOW_LOOPBACK_ISSUERS_FOR_DEVELOPMENT === 'true',
+    },
   }),
   auditChainKey: env('APP_KEY'),
 });

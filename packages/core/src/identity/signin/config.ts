@@ -87,8 +87,12 @@ export type WorkloadsOptions = {
    * Required: an exchange is never without them.
    */
   limits: WorkloadLimits;
-  /** Lets a binding's issuer be plain HTTP on loopback: the dev IdP's, never production's. */
-  allowLoopback?: boolean;
+  /**
+   * Lets a binding's issuer be plain HTTP on loopback, as the dev IdP's is:
+   * for local development and conformance. Refused unless the public URL is
+   * loopback too, so no instance anyone else can reach ever trusts one.
+   */
+  allowLoopbackIssuersForDevelopment?: boolean;
 };
 
 /** Cloudflare's rate-limiting binding, as coffre calls it; `processLimits()` has the same shape. */
@@ -301,19 +305,25 @@ export function defineSignin(options: {
     },
     browserSessionHours: lifetime(options.browserSessionHours, 'browserSessionHours', 12, 24 * 7),
     cliSessionDays: lifetime(options.cliSessionDays, 'cliSessionDays', 30, 365),
-    workloads: options.workloads === undefined ? null : workloadsConfig(options.workloads),
+    workloads: options.workloads === undefined ? null : workloadsConfig(options.workloads, publicOrigin(options.publicUrl)),
   };
 }
 
-/** Workloads, checked: both limits given, each one a limiter. */
-function workloadsConfig(options: WorkloadsOptions): WorkloadsConfig {
+/** Workloads, checked: both limits given, each one a limiter; loopback issuers only on a loopback instance. */
+function workloadsConfig(options: WorkloadsOptions, publicUrl: string): WorkloadsConfig {
   const limiter = (value: unknown) => typeof (value as RateLimiter | undefined)?.limit === 'function';
   if (!limiter(options.limits?.perSource) || !limiter(options.limits?.total)) {
     throw new Error(
       'workloads need their limits, per source and in total: on Workers, two rate-limiting bindings; on Node, processLimits()',
     );
   }
-  return { allowLoopback: options.allowLoopback === true, limits: options.limits };
+  const loopback = options.allowLoopbackIssuersForDevelopment === true;
+  if (loopback && !isLoopback(new URL(publicUrl))) {
+    throw new Error(
+      `workloads.allowLoopbackIssuersForDevelopment is for an instance on loopback, and ${publicUrl} is not one: turn it off`,
+    );
+  }
+  return { allowLoopback: loopback, limits: options.limits };
 }
 
 /** A deployment's own provider is checked like coffre's: it is only typed, not trusted. */
