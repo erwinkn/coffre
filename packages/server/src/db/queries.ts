@@ -666,11 +666,19 @@ export async function exchangeCandidates(db: Queryable, chainKey: Buffer, princi
   return rows.map((row) => row.binding).filter((row) => checkAuthRow(chainKey, 'service_bindings', row));
 }
 
-/** Whether a credential's binding still stands: its row the app's, not revoked, no tombstone, of the same member and generation. */
+/**
+ * Whether a credential's binding still stands: its row the app's, not
+ * revoked, no tombstone, of the same member and generation. It reads the
+ * database clock, as `findCredential` does, so that Hyperdrive never
+ * answers it from its cache: a cached "no tombstone" would let a credential
+ * whose rows were put back after its binding was removed sign in again. A
+ * query of its own, not a join in `findCredential`, which every request
+ * runs and which must work before the migration that made bindings.
+ */
 export async function bindingStands(db: Queryable, chainKey: Buffer, bindingId: string, principal: string, generation: number): Promise<boolean> {
   const { serviceBindings } = tablesOf(db);
   const [row] = await db
-    .select({ binding: serviceBindings, tombstoned: truth(hasTombstone(db, bindingId)) })
+    .select({ binding: serviceBindings, tombstoned: truth(hasTombstone(db, bindingId)), now: clock(db) })
     .from(serviceBindings)
     .where(eq(serviceBindings.id, bindingId));
   return row !== undefined && !row.tombstoned && row.binding.revokedAt === null
@@ -699,10 +707,14 @@ export async function exchangesOf(db: Queryable, credentialIds: readonly string[
   }));
 }
 
-/** Whether this token, by its signing input's hash, was exchanged already. */
+/**
+ * Whether this token, by its signing input's hash, was exchanged already.
+ * Uncached, as `bindingStands` is: a cached "not yet" would send a replay
+ * on to the vault and the commit, which refuses it only there.
+ */
 export async function tokenConsumed(db: Queryable, hash: Buffer): Promise<boolean> {
   const { consumedTokens } = tablesOf(db);
-  const [row] = await db.select({ hash: consumedTokens.hash }).from(consumedTokens).where(eq(consumedTokens.hash, hash));
+  const [row] = await db.select({ hash: consumedTokens.hash, now: clock(db) }).from(consumedTokens).where(eq(consumedTokens.hash, hash));
   return row !== undefined;
 }
 

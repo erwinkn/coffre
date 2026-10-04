@@ -300,6 +300,63 @@ test('a token no binding can take costs its admission and one indexed read: no o
   }
 });
 
+/**
+ * `pool` as a Hyperdrive config with caching on answers it outside
+ * transactions: a read that calls no stable or volatile function is answered
+ * with what it returned the first time, and writes invalidate nothing
+ * (developers.cloudflare.com/hyperdrive/concepts/query-caching). Its cache
+ * here lasts the test, where Hyperdrive's lasts a minute by default.
+ */
+function hyperdriveCached(pool: pg.Pool): pg.Pool {
+  const cache = new Map<string, unknown>();
+  const UNCACHEABLE = /\b(now|current_timestamp|current_date|current_time|localtime|localtimestamp|clock_timestamp|statement_timestamp|txid_current|timeofday|random|lastval)\b/i;
+  return new Proxy(pool, {
+    get(on, key) {
+      const value: unknown = Reflect.get(on, key, on);
+      if (typeof value !== 'function') return value;
+      if (key !== 'query') return value.bind(on);
+      return async (query: string | { text: string; values?: unknown[] }, values?: unknown[]) => {
+        const text = typeof query === 'string' ? query : query.text;
+        if (!/^\s*select\b/i.test(text) || / for update\b/i.test(text) || UNCACHEABLE.test(text)) return value.call(on, query, values);
+        const keyed = JSON.stringify([text, typeof query === 'string' ? values : (query.values ?? values)]);
+        if (!cache.has(keyed)) cache.set(keyed, await value.call(on, query, values));
+        return cache.get(keyed);
+      };
+    },
+  });
+}
+
+test("Hyperdrive's cache revives nothing: rows put back after a removal stay dead, and a replay never reaches the vault", postgresOnly('it models Hyperdrive, which caches Postgres reads'), async () => {
+  const pool = testPostgresPool(TEST_RUNTIME_DATABASE_URL);
+  try {
+    const cached = createRuntime(config, createDatabase(hyperdriveCached(pool)), deps.vault, transport);
+    const send = (request: Request) => handleRequest(request, cached, ui, IP);
+    const trade = async (jwt: string) => {
+      const response = await send(new Request(`${ORIGIN}/api/auth/oidc`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ service: MEMBER, token: jwt }) }));
+      return { status: response.status, body: (await response.json()) as Record<string, string> };
+    };
+    const me = async (credential: string) => (await send(new Request(`${ORIGIN}/api/me`, { headers: { authorization: `Bearer ${credential}` } }))).status;
+
+    const jwt = token(rsa);
+    const { body } = await trade(jwt);
+    assert.equal(await me(body.token!), 200);
+    // The same token again: spent, said before the vault is asked.
+    vaultCalls = 0;
+    assert.deepEqual([(await trade(jwt)).body.reason, vaultCalls], ['replayed', 0]);
+
+    const [binding] = await db.owner.select().from(serviceBindings);
+    const [credential] = await db.owner.select().from(credentials);
+    await runtime.workloads!.unbind(await contextFor(deps, ROOT), SERVICE, binding!.id);
+    assert.equal(await me(body.token!), 401);
+    // Whoever owns the database puts both rows back as they were: the tombstone is read afresh, and holds.
+    await db.owner.update(serviceBindings).set({ revokedAt: null, revokedBy: null, authMac: binding!.authMac }).where(eq(serviceBindings.id, binding!.id));
+    await db.owner.update(credentials).set({ revokedAt: null, revokedBy: null, authMac: credential!.authMac }).where(eq(credentials.id, credential!.id));
+    assert.equal(await me(body.token!), 401);
+  } finally {
+    await pool.end();
+  }
+});
+
 test('a key the issuer rotated in is fetched once; while the issuer cannot be reached, a 503, and cached keys still work', async () => {
   assert.equal((await trade(token(rsa))).status, 200);
   const rotated = key('RS256', 'rs-2');
