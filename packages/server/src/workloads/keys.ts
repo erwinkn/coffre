@@ -60,12 +60,16 @@ function cooling(entry: Entry | undefined, now: number): boolean {
   return entry?.failedAt != null && now - entry.failedAt < KEYS_COOLDOWN_MS;
 }
 
+/** The token's key is not in a set fetched just now: the issuer's, or no one's. */
+const KEY_ABSENT = "the token's key is not among the issuer's, which were fetched a moment ago; try again in a minute";
+
 /**
  * Verify a token under the keys at `url`: the cached set while fresh, else
- * fetched. A key the set lacks fetches it again, once a minute at most, in
- * case the issuer rotated; until then, or while the issuer cannot be
- * reached, `IssuerUnavailable`. Fresh cached keys work while the issuer is
- * down.
+ * fetched. At most one fetch an exchange: a key missing from a set this
+ * call fetched is not there, and a key missing from an older set is fetched
+ * for once, in case the issuer rotated. Either way the URL then waits a
+ * minute before the next fetch, and until then, or while the issuer cannot
+ * be reached, `IssuerUnavailable`. Fresh cached keys work all the while.
  */
 export async function verifyWithKeys(
   transport: WorkloadTransport,
@@ -76,6 +80,7 @@ export async function verifyWithKeys(
   const now = expected.now.getTime();
   let entry = entries.get(url);
   let keys = entry?.keys != null && now - entry.fetchedAt < KEYS_FRESH_MS ? entry.keys : null;
+  const fetched = keys === null;
   if (keys === null) {
     if (cooling(entry, now)) throw new IssuerUnavailable("the issuer's keys could not be fetched a moment ago; try again in a minute");
     keys = await fetchKeys(transport, url, now);
@@ -83,13 +88,25 @@ export async function verifyWithKeys(
   try {
     return await verifyWorkloadToken(token, keys, expected);
   } catch (error) {
-    if (!(error instanceof WorkloadTokenRefused) || error.reason !== 'unknown_key') throw error;
+    if (!absentKey(error)) throw error;
     entry = entries.get(url);
-    if (cooling(entry, now)) throw new IssuerUnavailable("the token's key is not among the issuer's, which were fetched a moment ago; try again in a minute");
+    if (fetched || cooling(entry, now)) {
+      if (fetched) remember(url, { ...(entry ?? { keys, fetchedAt: now }), failedAt: now });
+      throw new IssuerUnavailable(KEY_ABSENT);
+    }
     // The issuer may have rotated: fetch once, and wait a minute before the next.
     remember(url, { ...(entry ?? { keys: null, fetchedAt: 0 }), failedAt: now });
     const fresh = await fetchKeys(transport, url, now);
     remember(url, { keys: fresh, fetchedAt: now, failedAt: now });
-    return verifyWorkloadToken(token, fresh, expected);
+    try {
+      return await verifyWorkloadToken(token, fresh, expected);
+    } catch (refetched) {
+      if (absentKey(refetched)) throw new IssuerUnavailable(KEY_ABSENT);
+      throw refetched;
+    }
   }
+}
+
+function absentKey(error: unknown): boolean {
+  return error instanceof WorkloadTokenRefused && error.reason === 'unknown_key';
 }
