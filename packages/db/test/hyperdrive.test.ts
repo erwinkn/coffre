@@ -158,18 +158,35 @@ test('a query on the database from inside its own transaction is refused at once
   // A transaction opened inside one would wait for it just the same.
   await assert.rejects(db.transaction(async () => db.transaction(async (inner) => inner.execute(sql`select 1`))), QueryOutsideTransaction);
 
-  // Another flow's query waits its turn, as before; and what a transaction left running after it ended queries freely.
+  // Another flow's query waits its turn, as before; and what a transaction left running queries freely
+  // once its work is done, even before its COMMIT has come back: held here, as a slow network would.
+  let commit!: () => void;
+  const committed = new Promise<void>((resolve) => (commit = resolve));
+  const connect = pool.connect.bind(pool);
+  pool.connect = async () => {
+    const client = await connect();
+    const query = (async (...args: Parameters<typeof client.query>) => {
+      if (/^commit/i.test(typeof args[0] === 'string' ? args[0] : (args[0] as { text: string }).text)) await committed;
+      return (client.query as (...queryArgs: unknown[]) => unknown)(...args);
+    }) as typeof client.query;
+    return { ...client, query };
+  };
   let release!: () => void;
   const held = new Promise<void>((resolve) => (release = resolve));
   let left: Promise<unknown> = Promise.resolve();
   const transaction = db.transaction(async (tx) => {
     await tx.execute(sql`insert into turns values ('committed')`);
     left = held.then(() => new Promise((resolve) => setTimeout(resolve, 20))).then(() => db.execute(sql`select count(*)::int as n from turns`));
+    // Awaited below, after the transaction: a refusal meanwhile is this test's failure, not an unhandled rejection.
+    left.catch(() => {});
     await held;
   });
   const elsewhere = db.execute(sql`select 1 as n`).then(n);
   await new Promise((resolve) => setTimeout(resolve, 30));
   release();
+  // The work is done, the COMMIT held, and what it left running asks for its query at 20 ms.
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  commit();
   await transaction;
   assert.equal(await elsewhere, 1);
   assert.equal(n((await left) as { rows: Record<string, unknown>[] }), 1);

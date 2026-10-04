@@ -49,7 +49,7 @@ const inside = new AsyncLocalStorage<{ pool: PoolLike; open: boolean }>();
 /**
  * `pool`, refusing a query or a transaction asked from inside a transaction
  * it is already running. Work from any other flow, a concurrent request's,
- * or what the transaction left running after it ended, goes on as before.
+ * or what the transaction left running once its work was done, goes on as before.
  */
 function guarded(pool: PoolLike): PoolLike {
   return new Proxy(pool, {
@@ -76,17 +76,27 @@ function brokenRule(error: unknown): QueryOutsideTransaction | undefined {
 
 export function createDatabase(pool: PoolLike): Database {
   const db = drizzle(guarded(pool) as pg.Pool, { schema });
-  // Each transaction's work runs knowing which one it is in, until the transaction ends.
+  // Each transaction's work runs knowing which one it is in, until that work is done. Not until
+  // the COMMIT comes back: the transaction waits on nothing then, so what the work left running
+  // may ask for a query, which waits for the transaction to end rather than for itself.
   const run = db.transaction.bind(db);
   db.transaction = (async (work, config) => {
     const open = { pool, open: true };
     try {
-      return await run((tx) => inside.run(open, () => work(tx)), config);
+      return await run(
+        (tx) =>
+          inside.run(open, async () => {
+            try {
+              return await work(tx);
+            } finally {
+              open.open = false;
+            }
+          }),
+        config,
+      );
     } catch (error) {
       // Drizzle wraps what a query throws: the rule broken is what to say.
       throw brokenRule(error) ?? error;
-    } finally {
-      open.open = false;
     }
   }) as Database['transaction'];
   return trackCommits(db);
