@@ -13,6 +13,7 @@ import { migrationLedger } from '@coffre/db/dialect';
 import { auditLog, credentials, serviceBindings } from './db/tables.ts';
 import { handleRequest, type Ui } from '../src/app.ts';
 import { resolveConfig } from '../src/config.ts';
+import { exchangeCandidates } from '../src/db/queries.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
@@ -359,6 +360,58 @@ test("Hyperdrive's cache revives nothing: rows put back after a removal stay dea
     await db.owner.update(serviceBindings).set({ revokedAt: null, revokedBy: null, authMac: binding!.authMac }).where(eq(serviceBindings.id, binding!.id));
     await db.owner.update(credentials).set({ revokedAt: null, revokedBy: null, authMac: credential!.authMac }).where(eq(credentials.id, credential!.id));
     assert.equal(await me(body.token!), 401);
+  } finally {
+    await pool.end();
+  }
+});
+
+type PlanNode = {
+  'Relation Name'?: string;
+  'Index Name'?: string;
+  'Actual Rows'?: number;
+  'Actual Loops'?: number;
+  'Rows Removed by Filter'?: number;
+  Plans?: PlanNode[];
+};
+
+/**
+ * How `statement` ran, by EXPLAIN ANALYZE: every index it used, and how
+ * many rows of `table` it visited, kept or filtered out, over every loop.
+ */
+async function planOf(pool: pg.Pool, statement: Statement, table: string): Promise<{ indexes: string[]; visited: number }> {
+  const { rows: [explained] } = await pool.query(`EXPLAIN (ANALYZE, FORMAT JSON) ${statement.text}`, statement.values);
+  const nodes: PlanNode[] = [];
+  const walk = (node: PlanNode) => {
+    nodes.push(node);
+    node.Plans?.forEach(walk);
+  };
+  walk((explained as { 'QUERY PLAN': { Plan: PlanNode }[] })['QUERY PLAN'][0]!.Plan);
+  return {
+    indexes: nodes.flatMap((node) => node['Index Name'] ?? []),
+    visited: nodes
+      .filter((node) => node['Relation Name'] === table)
+      .reduce((n, node) => n + ((node['Actual Rows'] ?? 0) + (node['Rows Removed by Filter'] ?? 0)) * (node['Actual Loops'] ?? 1), 0),
+  };
+}
+
+test("an exchange's first read visits the live bindings only, whatever the retired and earlier history", postgresOnly('it reads Postgres query plans'), async () => {
+  const [live] = await db.owner.select().from(serviceBindings);
+  // 50,000 replaced over the years, and 5,000 left from before the service was removed and admitted again.
+  for (const [count, generation, revoked] of [[50_000, live!.generation, true], [5_000, live!.generation - 1, false]] as const) {
+    await run(sql`INSERT INTO service_bindings (id, auth_mac, principal, generation, profile, issuer, jwks_uri, claims, created_by, created_at, revoked_at, revoked_by)
+      SELECT gen_random_uuid(), decode(repeat('00', 32), 'hex'), ${MEMBER}, ${generation}, 'github', ${ISSUER}, ${KEYS}, '{}', 'history',
+        now() - interval '30 days', ${revoked ? sql`now() - interval '1 day'` : sql`NULL`}, ${revoked ? 'history' : null}
+      FROM generate_series(1, ${count})`);
+  }
+  await run(sql`ANALYZE service_bindings`);
+  const pool = testPostgresPool(TEST_RUNTIME_DATABASE_URL);
+  const seen: Statement[] = [];
+  try {
+    const candidates = await exchangeCandidates(createDatabase(counted(pool, seen)), deps.chainKey, MEMBER, ISSUER, 16);
+    assert.deepEqual(candidates.map((candidate) => candidate.id), [live!.id]);
+    const plan = await planOf(pool, seen.find((statement) => /from "service_bindings"/i.test(statement.text))!, 'service_bindings');
+    assert.ok(plan.indexes.includes('service_bindings_live_idx'), plan.indexes.join(', '));
+    assert.ok(plan.visited <= 2, `visited ${plan.visited} binding rows for one live binding`);
   } finally {
     await pool.end();
   }
