@@ -115,7 +115,13 @@ export type SigninResult =
  * the request's one vault call, which loading the caller reads rather than
  * asking again.
  */
-export type CredentialPrincipal = Principal & { credentialId: string; credentialGeneration: number; access: Access };
+export type CredentialPrincipal = Principal & {
+  credentialId: string;
+  credentialGeneration: number;
+  access: Access;
+  /** Whether a trust binding issued it, for a CI run: the request's entries then name it. */
+  exchanged: boolean;
+};
 
 export type ClientMeta = {
   requestId: string;
@@ -518,7 +524,7 @@ export class SigninService {
 
     const member = memberOf(row.principal);
     return member.type === 'service'
-      ? { type: 'service', id: member.id, commonName: member.id, credentialId: row.id, credentialGeneration: row.generation, access }
+      ? { type: 'service', id: member.id, commonName: member.id, credentialId: row.id, credentialGeneration: row.generation, access, exchanged: row.bindingStands !== null }
       : {
           type: 'user',
           id: member.id,
@@ -526,6 +532,7 @@ export class SigninService {
           subject: row.subject ?? member.id,
           credentialId: row.id,
           credentialGeneration: row.generation,
+          exchanged: false,
           access,
         };
   }

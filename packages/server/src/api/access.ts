@@ -121,6 +121,7 @@ export async function setAccess(
       principal,
       requestId: ctx.requestId,
       operationId: randomUUID(),
+      credentialId: ctx.provenance,
       changes: located.map((want) => ({
         ...scoped(want),
         role: want.role,

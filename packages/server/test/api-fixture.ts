@@ -125,6 +125,7 @@ export async function contextFor(
     requestId: randomUUID(),
     sourceIp: null,
     credentialId: null,
+    provenance: null,
   };
 }
 

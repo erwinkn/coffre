@@ -9,6 +9,7 @@ import {
   auditHead,
   auditPage,
   auditRange,
+  exchangesOf,
   latestCheckpoint,
   places,
   resolvePath,
@@ -50,6 +51,13 @@ export type AuditEntryView = {
   relatedSeq: number | null;
   /** The request that wrote it. */
   requestId: string | null;
+  /**
+   * For an entry written on a credential a trust binding issued, and for
+   * the exchange itself: the CI run the issuer said it was for, from the
+   * `token.exchange` entry at `exchangeSeq`. What the issuer asserted, not
+   * proof of which run sent the request.
+   */
+  run: { exchangeSeq: number; claims: Record<string, string | number> } | null;
   metadata: Record<string, unknown>;
 };
 
@@ -187,13 +195,33 @@ export async function listAudit(
   if (query.before !== undefined) filter.beforeSeq = BigInt(query.before);
 
   const rows = await auditPage(ctx.db, filter);
-  const entries = rows.map(entryView);
+  const entries = await withRuns(ctx, rows.map(entryView));
   if (query.detail === true) return { entries };
   const last = rows.length < query.limit ? undefined : rows[rows.length - 1].seq;
   const hidden = await auditActionCounts(ctx.db, filter, DETAIL_ACTIONS, last);
   // Most of what is hidden first.
   hidden.sort((a, b) => b.count - a.count || (a.action < b.action ? -1 : a.action > b.action ? 1 : 0));
   return { entries, hidden };
+}
+
+/** Each entry's run, when it was written on a credential a trust binding issued: one read for the page. */
+async function withRuns(ctx: ApiContext, entries: AuditEntryView[]): Promise<AuditEntryView[]> {
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  const ids = [...new Set(entries.flatMap((entry) => {
+    const id = entry.metadata.credentialId;
+    return entry.action !== 'token.exchange' && typeof id === 'string' && UUID.test(id) ? [id] : [];
+  }))];
+  const exchanges = await exchangesOf(ctx.db, ids);
+  return entries.map((entry) => {
+    if (entry.action === 'token.exchange') return { ...entry, run: { exchangeSeq: entry.seq, claims: runClaims(entry.metadata.run) } };
+    const exchange = typeof entry.metadata.credentialId === 'string' ? exchanges.get(entry.metadata.credentialId) : undefined;
+    return exchange === undefined ? entry : { ...entry, run: { exchangeSeq: Number(exchange.seq), claims: runClaims(exchange.run) } };
+  });
+}
+
+function runClaims(run: unknown): Record<string, string | number> {
+  if (typeof run !== 'object' || run === null) return {};
+  return Object.fromEntries(Object.entries(run).filter((pair): pair is [string, string | number] => typeof pair[1] === 'string' || typeof pair[1] === 'number'));
 }
 
 const DETAIL = new Set<string>(DETAIL_ACTIONS);
@@ -220,6 +248,7 @@ function entryView(row: Awaited<ReturnType<typeof auditPage>>[number]): AuditEnt
     operationId: row.operationId,
     relatedSeq: row.relatedSeq === null ? null : Number(row.relatedSeq),
     requestId: row.requestId,
+    run: null,
     metadata,
   };
 }

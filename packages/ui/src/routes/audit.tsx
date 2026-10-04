@@ -8,6 +8,7 @@ import {
   decidedBy,
   describe,
   lines,
+  runLabel,
   who,
   type Part,
 } from '../lib/audit-sentences';
@@ -329,6 +330,12 @@ function Row({
             </Link>
           )}
         </span>
+        {entry.run !== null && (
+          // The run its issuer named when the credential was exchanged: what it asserted, kept in entry #exchangeSeq.
+          <small className="actor-run" title={`Exchanged in entry ${entry.run.exchangeSeq}`}>
+            {runLabel(entry.run)}
+          </small>
+        )}
       </td>
       <td className="cell-sentence" data-label="What they did">
         <span className="sentence">

@@ -9,7 +9,7 @@ import type { Purpose, Refusal, SecretRef, Vault, WrappedKey } from '@coffre/cor
  */
 
 /** Who is asking the vault, and why: the operation id ties the vault's entries to the app's for the same action. */
-export type Asking = { principal: string; requestId: string | null; operationId: string | null };
+export type Asking = { principal: string; requestId: string | null; operationId: string | null; credentialId?: string | null };
 
 export type Keyed<T> = { ok: true; values: T[] } | { ok: false; refusal: Refusal };
 

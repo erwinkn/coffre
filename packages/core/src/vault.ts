@@ -173,6 +173,12 @@ type Correlation = {
    * reads, a write's versions, an access change. Its entries share it.
    */
   operationId?: string | null;
+  /**
+   * The credential the request came in on, when a trust binding issued it
+   * for a CI run: the vault copies it into the entries it writes, and never
+   * decides on it, so that a read leads back to its run (docs/design/oidc.md).
+   */
+  credentialId?: string | null;
 };
 
 export type UnwrapInput = Correlation & {

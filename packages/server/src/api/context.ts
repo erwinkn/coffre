@@ -28,6 +28,12 @@ export type ApiContext = {
   sourceIp: string | null;
   /** The coffre credential that authenticated this request, in signin mode. */
   credentialId: string | null;
+  /**
+   * That credential, when a trust binding issued it for a CI run: every
+   * entry the request writes names it, the vault's through its calls'
+   * correlation, so that each leads back to the run (`token.exchange`).
+   */
+  provenance: string | null;
 };
 
 /** The fields of an audit entry that are the same for everything one request does. */
@@ -44,16 +50,25 @@ export function actor(
 
 type EntryFields = Omit<AuditEntry, 'actorType' | 'actorId' | 'requestId' | 'sourceIp' | 'action' | 'decision'>;
 
+type Writer = Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp'> & { provenance?: string | null };
+
+/** What an entry's metadata adds for a request that came in on a credential a trust binding issued. */
+function traced(ctx: Writer, metadata: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  if (ctx.provenance == null) return metadata;
+  return { credentialId: ctx.provenance, ...metadata };
+}
+
 export function allowed(
-  ctx: Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp'>,
+  ctx: Writer,
   action: string,
   fields: EntryFields = {},
 ): AuditEntry {
-  return { ...actor(ctx), action, decision: 'allow', ...fields };
+  const metadata = traced(ctx, fields.metadata);
+  return { ...actor(ctx), action, decision: 'allow', ...fields, ...(metadata === undefined ? {} : { metadata }) };
 }
 
 export function denied(
-  ctx: Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp'>,
+  ctx: Writer,
   action: string,
   reason: string,
   fields: EntryFields = {},
@@ -63,7 +78,7 @@ export function denied(
     action,
     decision: 'deny',
     ...fields,
-    metadata: { ...fields.metadata, reason },
+    metadata: { ...traced(ctx, fields.metadata), reason },
   };
 }
 
@@ -165,8 +180,8 @@ export function need(
 }
 
 /** The caller, as the vault knows them, for this request. */
-export function asking(ctx: Pick<ApiContext, 'caller' | 'requestId'>, operationId: string | null = null): Asking {
-  return { principal: formatMember(ctx.caller.principal), requestId: ctx.requestId, operationId };
+export function asking(ctx: Pick<ApiContext, 'caller' | 'requestId'> & { provenance?: string | null }, operationId: string | null = null): Asking {
+  return { principal: formatMember(ctx.caller.principal), requestId: ctx.requestId, operationId, credentialId: ctx.provenance ?? null };
 }
 
 /**

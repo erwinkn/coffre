@@ -7,13 +7,15 @@
 // from far away.
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { connect, createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { tablesOf } from '@coffre/db';
+import { and, eq, inArray } from 'drizzle-orm';
 import { unstable_dev, type Unstable_DevWorker } from 'wrangler';
 
 import { emptyDatabase, ENGINE, openTestDatabase, places, VAULT_URL, type TestDatabase } from './database.ts';
@@ -199,5 +201,28 @@ test('in workerd too, a query on the database inside its own transaction is refu
   } finally {
     await vault.stop();
     await database.close();
+  }
+});
+
+test('through the entrypoint, the credential a CI run came in on is copied into the entries it caused, never decided on', { skip, timeout: 120_000 }, async () => {
+  const placed = await places(db.owner);
+  const secret = await placed.secret(placed.dev);
+  const credentialId = randomUUID();
+  const vault = await freshVault(VAULT_URL);
+  try {
+    assert.ok((await vault.call('wrap', { principal: ROOT, credentialId, items: [{ secret, key: randomBytes(32).toString('base64') }] })).ok);
+    assert.ok((await vault.call('admit', { actor: ROOT, principal: 'token:ci-deploy', credentialId })).ok);
+    const { auditLog } = tablesOf(db.owner);
+    // The root admin's own row, which the vault writes on its first call, is its own: only what the calls asked for counts.
+    const entries = (await db.owner.select({ action: auditLog.action, subject: auditLog.subjectPrincipal, metadata: auditLog.metadata }).from(auditLog)
+      .where(and(eq(auditLog.author, 'vault'), inArray(auditLog.action, ['key.wrap', 'member.add'])))).filter((entry) => entry.subject !== ROOT);
+    assert.deepEqual(entries.map((entry) => [entry.action, (JSON.parse(entry.metadata) as { credentialId?: string }).credentialId]).sort(), [
+      ['key.wrap', credentialId],
+      ['member.add', credentialId],
+    ]);
+    const refused = await vault.call('admit', { actor: ROOT, principal: 'token:other', credentialId: 'not-a-uuid' });
+    assert.match(refused.error ?? '', /credentialId must be a lowercase UUID/);
+  } finally {
+    await vault.stop();
   }
 });

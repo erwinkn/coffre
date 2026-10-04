@@ -16,7 +16,7 @@ import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
-import { contextFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 import { TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
 import { postgresOnly, TEST_ENGINE } from './db/engine.ts';
 import { testPostgresPool } from './db/postgres-pool.ts';
@@ -409,3 +409,36 @@ async function run(query: SQL): Promise<void> {
   if (TEST_ENGINE === 'sqlite') await (db.owner as unknown as { run: (q: SQL) => Promise<unknown> }).run(query);
   else await (db.owner as unknown as { execute: (q: SQL) => Promise<unknown> }).execute(query);
 }
+
+test('every entry a run\'s credential causes names it, the vault\'s too; the audit page reads its run, after the credential row is gone', async () => {
+  const root = clientFor(deps, ROOT);
+  await root.projects.create('market', { name: 'Market' });
+  await root.environments.create('market/prod', { name: 'Production' });
+  await root.secrets.set('market/prod', { API_KEY: 'sk_live' });
+  await root.access.set(MEMBER, { 'market/prod': 'viewer' });
+
+  const { body } = await trade(token(rsa));
+  const [exchange] = await appEntries('token.exchange');
+  const credentialId = exchange!.metadata.credentialId as string;
+  const reveal = (path: string) => handleRequest(
+    new Request(`${ORIGIN}/api/reveals`, { method: 'POST', headers: { authorization: `Bearer ${body.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ path }) }),
+    runtime, ui, IP,
+  );
+  assert.equal((await reveal('market/prod/API_KEY')).status, 200);
+  // And one refused: every entry the run caused names its credential, the app's and the vault's, allowed or not.
+  assert.equal((await reveal('market/nowhere/API_KEY')).status, 404);
+  const caused = (await db.owner.select({ author: auditLog.author, action: auditLog.action, decision: auditLog.decision, metadata: auditLog.metadata })
+    .from(auditLog).where(eq(auditLog.actor, MEMBER)).orderBy(asc(auditLog.seq)))
+    .map((entry) => ({ ...entry, credentialId: (JSON.parse(entry.metadata) as { credentialId?: string }).credentialId }));
+  assert.deepEqual(caused.map(({ author, action, decision }) => `${author} ${action} ${decision}`), ['app token.exchange allow', 'vault secret.read allow', 'app secret.read deny']);
+  assert.ok(caused.every((entry) => entry.credentialId === credentialId));
+
+  // Whoever owns the database deletes the credential's row: the log still leads from the read to its run.
+  await db.owner.delete(credentials).where(eq(credentials.id, credentialId));
+  const { entries } = await root.audit.list({ detail: '1' });
+  const shown = entries.find((entry) => entry.action === 'secret.read')!;
+  assert.deepEqual(shown.run, { exchangeSeq: entries.find((entry) => entry.action === 'token.exchange')!.seq, claims: exchange!.metadata.run });
+  assert.equal(entries.find((entry) => entry.action === 'token.exchange')!.run!.claims.run_id, '7001');
+  // An entry no exchanged credential wrote has no run.
+  assert.equal(entries.find((entry) => entry.action === 'secret.write')!.run, null);
+});
