@@ -307,13 +307,14 @@ test('a deployment moved from pnpm 10 to 11 installs without a terminal, its nod
     await install(dir);
     manifest('11.8.0');
     // What erwinkn/secrets met: pnpm 11 would remove pnpm 10's node_modules, and without a terminal it stops.
-    // Not under CI, where pnpm removes it unasked.
+    // Not as CI, where pnpm removes it unasked: CI=false says so, whatever else the environment holds.
     const ci = process.env.CI;
-    delete process.env.CI;
+    process.env.CI = 'false';
     try {
       await assert.rejects(install(dir), /ABORTED_REMOVE_MODULES_DIR_NO_TTY/);
     } finally {
-      if (ci !== undefined) process.env.CI = ci;
+      if (ci === undefined) delete process.env.CI;
+      else process.env.CI = ci;
     }
     await install(dir, { purge: true });
     assert.match(readFileSync(join(dir, 'node_modules', '.modules.yaml'), 'utf8'), /pnpm@11\.8\.0/);
