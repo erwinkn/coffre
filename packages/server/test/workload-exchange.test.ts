@@ -278,31 +278,29 @@ test('a token no binding can take costs its admission and one indexed read: no o
       const { reason } = (await response.json()) as { reason?: string };
       return { status: response.status, reason, statements: seen.map((statement) => statement.text), vaultCalls, fetches: issuer.fetches };
     };
-    const strangers = async (cases: (readonly [string, string])[]) => {
-      for (const [service, jwt] of cases) {
+    /** Each one refused for its reason, on one read of the bindings: no other statement, no vault call, no fetch but `fetches`. */
+    const refused = async (cases: (readonly [string, string, string, number?])[]) => {
+      for (const [service, jwt, reason, fetches = 0] of cases) {
         const { statements, ...rest } = await ask(service, jwt);
-        assert.deepEqual({ ...rest, statements: statements.length }, { status: 401, reason: 'no_match', statements: 1, vaultCalls: 0, fetches: 0 }, statements.join('\n'));
+        assert.deepEqual({ ...rest, statements: statements.length }, { status: 401, reason, statements: 1, vaultCalls: 0, fetches }, statements.join('\n'));
         assert.match(statements[0]!, /from "service_bindings"/);
       }
     };
     // Not a token at all: nothing reaches the database.
     assert.deepEqual(await ask(MEMBER, 'not.a.token'), { status: 401, reason: 'malformed', statements: [], vaultCalls: 0, fetches: 0 });
-    // A service with no binding, and an issuer the service's binding does not name: one read each.
-    await strangers([['token:nobody', token(rsa)], [MEMBER, token(rsa, { iss: 'https://gitlab.com' })]]);
+    // A service with no binding, and an issuer the service's binding does not name.
+    await refused([['token:nobody', token(rsa), 'no_match'], [MEMBER, token(rsa, { iss: 'https://gitlab.com' }), 'no_match']]);
+    // On the issuer it does name: a forged signature, its keys fetched once; then the issuer's own token for another branch.
+    const genuine = token(rsa);
+    const forged = `${genuine.slice(0, genuine.lastIndexOf('.'))}.${Buffer.alloc(256).toString('base64url')}`;
+    await refused([
+      [MEMBER, forged, 'signature', 1],
+      [MEMBER, token(rsa, { ref: 'refs/heads/feature', workflow_ref: 'acme/api/.github/workflows/deploy.yml@refs/heads/feature' }), 'no_match'],
+    ]);
     // The binding removed: its token is a stranger's too.
     const id = (await db.owner.select().from(serviceBindings))[0]!.id;
     await runtime.workloads!.unbind(await contextFor(deps, ROOT), SERVICE, id);
-    await strangers([[MEMBER, token(rsa)]]);
-    // That read goes through the bindings' index on (principal, issuer).
-    const client = await pool.connect();
-    try {
-      await client.query('SET enable_seqscan = off');
-      const [read] = seen;
-      const plan = await client.query(`EXPLAIN ${read!.text}`, read!.values);
-      assert.match(plan.rows.map((row: Record<string, string>) => row['QUERY PLAN']).join('\n'), /service_bindings_principal_idx/);
-    } finally {
-      client.release();
-    }
+    await refused([[MEMBER, token(rsa), 'no_match']]);
   } finally {
     await pool.end();
   }

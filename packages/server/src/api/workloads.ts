@@ -400,7 +400,8 @@ export class WorkloadService {
     const pending = () => new ExchangeRefused('migration_pending', 'exchanges need this release\'s database migrations: an owner runs `coffre migrate`', 503);
 
     // The bindings first, so that a token none can take costs this one read:
-    // the migrations are asked of a read that failed, or of a binding's token.
+    // the migrations are asked of a read that failed, or of a token that
+    // verified and matched a binding.
     let candidates: BindingRow[];
     try {
       candidates = await exchangeCandidates(db, chainKey, member, issuer, MAX_BINDINGS);
@@ -411,9 +412,6 @@ export class WorkloadService {
       throw error;
     }
     if (candidates.length === 0) throw unbound();
-    await this.#migrated(EXCHANGE_MIGRATION).catch(() => {
-      throw pending();
-    });
     // A service's bindings on one issuer share its keys' URL; one made after the keys moved replaced the rest.
     const jwksUri = candidates[candidates.length - 1]!.jwksUri;
     let claims: Record<string, unknown>;
@@ -425,6 +423,10 @@ export class WorkloadService {
     }
     const binding = matching(candidates.filter((candidate) => candidate.jwksUri === jwksUri), claims, member);
 
+    // Only now, for a token a binding takes, whether spent tokens have their table.
+    await this.#migrated(EXCHANGE_MIGRATION).catch(() => {
+      throw pending();
+    });
     if (await tokenConsumed(db, decoded.signingInputHash)) throw new ExchangeRefused('replayed', 'this token was exchanged already: ask your CI for a fresh one');
     const standing = await vault.access(member);
     if (standing.status !== 'active' || standing.generation !== binding.generation) throw unbound();
