@@ -130,4 +130,3 @@ export function allows(holder: Holdings, permission: Permission, place: Place): 
 export function mayManageAccess(actor: Holdings, place: Place): boolean {
   return allows(actor, 'grant.manage', { projectId: place.projectId });
 }
-export const versionGateProbe = true;
