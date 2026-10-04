@@ -114,6 +114,12 @@ A request asks the vault about its caller once: a page's render checks its
 credential once for all its API calls (`pageClient`).
 
 **Tests / checks.**
+`Validate` runs the full CI suite except for a proven, synchronized version
+bump. `scripts/version-only.mjs` compares Git objects and rejects any edit
+beyond package versions, example pins, their lockfile specifiers and the
+Action's literal CLI pin. The detector and gate tests run even on that
+fast path. Parse errors or an unsupported diff select full validation.
+
 - `pnpm test` = lint + migrate a scratch template + `node --test --test-concurrency=4`.
   Each file gets a private Postgres clone or SQLite copy; cases within a file remain
   sequential and reset per test. Templates and clones are removed after the run.
