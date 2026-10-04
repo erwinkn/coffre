@@ -417,7 +417,8 @@ export async function members(
       // A sync is a member too, but signs nothing in.
       .where(and(of(vaultMembers.principal), or(sql`${vaultMembers.principal} LIKE 'user:%'`, sql`${vaultMembers.principal} LIKE 'token:%'`)))
       .orderBy(asc(vaultMembers.principal)),
-    db.select().from(credentials).where(of(credentials.principal)),
+    // Live ones only, through `credentials_live_idx`: a CI service leaves an expired one behind each run.
+    db.select().from(credentials).where(and(of(credentials.principal), isNull(credentials.revokedAt), gt(credentials.expiresAt, now))),
     db.select().from(identities).where(of(identities.principal)),
     db
       .select({
@@ -750,16 +751,42 @@ export async function revokePriorMembership(
 ): Promise<void> {
   const { credentials, identities } = tablesOf(db);
   const revokedAt = new Date();
-  for (const table of [credentials, identities]) {
-    const rows = await db.select().from(table).where(and(
-      eq(table.principal, principalOf(principal)),
-      lt(table.generation, generation),
-    ));
-    for (const row of rows) {
+  const older = (table: typeof credentials | typeof identities) =>
+    and(eq(table.principal, principalOf(principal)), lt(table.generation, generation), isNull(table.revokedAt));
+  // Expired credentials are dead already, and a CI service leaves one behind each run.
+  const tables = [
+    [credentials, and(older(credentials), gt(credentials.expiresAt, revokedAt))],
+    [identities, older(identities)],
+  ] as const;
+  for (const [table, where] of tables) {
+    for (const row of await db.select().from(table).where(where)) {
       if (!checkAuthRow(chainKey, getTableName(table) as AuthTable, row)) continue;
-      if (row.revokedAt === null) await updateAuth(db, chainKey, table, { id: row.id, authMac: row.authMac }, { revokedAt, revokedBy });
+      await updateAuth(db, chainKey, table, { id: row.id, authMac: row.authMac }, { revokedAt, revokedBy });
     }
   }
+}
+
+/**
+ * Revoke a member's credentials still live at `at`, or only those
+ * `createdBy` issued: not revoked, not expired. Expired ones are dead
+ * already, and a CI service's run to thousands; through
+ * `credentials_live_idx`, the work is what is live, whatever the history.
+ */
+export async function revokeLiveCredentials(
+  db: Queryable,
+  chainKey: Buffer,
+  live: { principal: string; createdBy?: string; at: Date },
+  changes: { revokedAt: Date; revokedBy: string },
+): Promise<number> {
+  const { credentials } = tablesOf(db);
+  const rows = await db.select({ id: credentials.id }).from(credentials).where(and(
+    eq(credentials.principal, live.principal),
+    isNull(credentials.revokedAt),
+    gt(credentials.expiresAt, live.at),
+    live.createdBy === undefined ? undefined : eq(credentials.createdBy, live.createdBy),
+  ));
+  if (rows.length === 0) return 0;
+  return updateAuth(db, chainKey, credentials, { id: rows.map((row) => row.id), revokedAt: null }, changes);
 }
 
 /** Device authorizations: one by either of its codes, or every one still waiting for a decision. */

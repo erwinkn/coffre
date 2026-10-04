@@ -235,16 +235,23 @@ test('refusals say why, never what a binding expects, and a stranger never reach
   assert.deepEqual(await appEntries('token.exchange'), []);
 });
 
-/** `pool`, telling `seen` every statement it sends to the server, inside a transaction or not. */
-function counted(pool: pg.Pool, seen: { text: string; values: unknown[] }[]): pg.Pool {
+type Statement = { text: string; values: unknown[]; rows: number };
+
+/** `pool`, telling `seen` every statement it sends to the server, inside a transaction or not, and how many rows it answered. */
+function counted(pool: pg.Pool, seen: Statement[]): pg.Pool {
   const watch = <T extends object>(target: T): T => new Proxy(target, {
     get(on, key) {
       const value: unknown = Reflect.get(on, key, on);
       if (typeof value !== 'function') return value;
       if (key === 'query') {
-        return (query: string | { text: string; values?: unknown[] }, values?: unknown[]) => {
-          seen.push(typeof query === 'string' ? { text: query, values: values ?? [] } : { text: query.text, values: query.values ?? values ?? [] });
-          return value.call(on, query, values);
+        return async (query: string | { text: string; values?: unknown[] }, values?: unknown[]) => {
+          const statement = typeof query === 'string'
+            ? { text: query, values: values ?? [], rows: 0 }
+            : { text: query.text, values: query.values ?? values ?? [], rows: 0 };
+          seen.push(statement);
+          const result = (await value.call(on, query, values)) as { rowCount?: number | null };
+          statement.rows = result.rowCount ?? 0;
+          return result;
         };
       }
       if (key === 'connect') return async () => watch(await value.call(on));
@@ -256,7 +263,7 @@ function counted(pool: pg.Pool, seen: { text: string; values: unknown[] }[]): pg
 
 test('a token no binding can take costs its admission and one indexed read: no other query, no transaction, no vault call, no fetch', postgresOnly('it counts the statements that reach the server'), async () => {
   const pool = testPostgresPool(TEST_RUNTIME_DATABASE_URL);
-  const seen: { text: string; values: unknown[] }[] = [];
+  const seen: Statement[] = [];
   try {
     const stranger = createRuntime(config, createDatabase(counted(pool, seen)), deps.vault, transport);
     /** What one exchange cost: the statements it sent, its vault calls and its fetches. */
@@ -352,6 +359,36 @@ test("Hyperdrive's cache revives nothing: rows put back after a removal stay dea
     await db.owner.update(serviceBindings).set({ revokedAt: null, revokedBy: null, authMac: binding!.authMac }).where(eq(serviceBindings.id, binding!.id));
     await db.owner.update(credentials).set({ revokedAt: null, revokedBy: null, authMac: credential!.authMac }).where(eq(credentials.id, credential!.id));
     assert.equal(await me(body.token!), 401);
+  } finally {
+    await pool.end();
+  }
+});
+
+test('removing a binding revokes only what is live: its expired history costs nothing there, nor on the members page', postgresOnly('it counts the statements and rows that reach the server'), async () => {
+  const [binding] = await db.owner.select().from(serviceBindings);
+  // A thousand runs long over, and one under way.
+  const over = new Date(Date.now() - 3_600_000);
+  await db.owner.transaction(async (tx) => {
+    for (let i = 0; i < 1000; i++) {
+      await runtime.signin!.issueExchanged(tx, SERVICE, { generation: binding!.generation, bindingId: binding!.id, label: null, expiresAt: over });
+    }
+  });
+  // Issued then, too, outside the binding's rate; the MAC does not cover when.
+  await db.owner.update(credentials).set({ createdAt: new Date(over.getTime() - 300_000) }).where(eq(credentials.expiresAt, over));
+  const { body } = await trade(token(rsa));
+  assert.ok(body.token, JSON.stringify(body));
+  const pool = testPostgresPool(TEST_RUNTIME_DATABASE_URL);
+  const seen: Statement[] = [];
+  try {
+    const counting = { ...deps, db: createDatabase(counted(pool, seen)) };
+    const read = (table: string) => seen.filter((statement) => new RegExp(`from "${table}"`, 'i').test(statement.text)).reduce((n, statement) => n + statement.rows, 0);
+    await createRuntime(config, counting.db, deps.vault, transport).workloads!.unbind(await contextFor(counting, ROOT), SERVICE, binding!.id);
+    assert.equal(seen.filter((statement) => /^update "credentials"/i.test(statement.text)).length, 1, 'the run under way, not the thousand over');
+    assert.ok(read('credentials') <= 2, `read ${read('credentials')} credential rows`);
+    assert.equal(await caller(body.token!), 401);
+    seen.length = 0;
+    await clientFor(counting, ROOT).members.list();
+    assert.equal(read('credentials'), 0, 'no credential is live, so the members page reads none');
   } finally {
     await pool.end();
   }

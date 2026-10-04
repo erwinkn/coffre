@@ -19,7 +19,7 @@ import {
 import type { Access, Vault } from '@coffre/core/vault';
 import type { Database, Transaction } from '@coffre/db';
 import { knownMigrations } from '@coffre/db/schema-version';
-import { credentials, serviceBindings } from '@coffre/db/schema';
+import { serviceBindings } from '@coffre/db/schema';
 
 import { issuedBy } from '../auth-rows.ts';
 import {
@@ -32,6 +32,7 @@ import {
   insertBinding,
   liveBindings,
   memberStanding,
+  revokeLiveCredentials,
   tokenConsumed,
   update,
   updateAuth,
@@ -253,7 +254,7 @@ export class WorkloadService {
         };
         await insertBinding(tx, this.#deps.chainKey, row);
         for (const replaced of planned.replaces) {
-          await this.#revoke(tx, replaced.id, ctx.caller.principal.id, now);
+          await this.#revoke(tx, replaced.id, `token:${serviceId}`, ctx.caller.principal.id, now);
           log.push(allowed(ctx, 'token.unbind', {
             metadata: { bindingId: replaced.id, principalType: 'service', principalId: serviceId, reason: replaced.why === 'asked' ? 'replaced' : 'keys_moved', by: id },
           }));
@@ -292,7 +293,7 @@ export class WorkloadService {
         const row = await findBinding(tx, this.#deps.chainKey, member, bindingId);
         const live = row !== null && row.revokedAt === null
           && (await liveBindings(tx, this.#deps.chainKey, member, row.generation)).some((candidate) => candidate.id === bindingId);
-        if (!live || (await this.#revoke(tx, bindingId, ctx.caller.principal.id, new Date())) === 0) {
+        if (!live || (await this.#revoke(tx, bindingId, member, ctx.caller.principal.id, new Date())) === 0) {
           throw new Refusal(notFound('unknown trust binding'), denied(ctx, 'token.unbind', 'unknown_binding', { metadata }));
         }
         log.push(allowed(ctx, 'token.unbind', { metadata: { ...metadata, reason: 'removed' } }));
@@ -344,9 +345,15 @@ export class WorkloadService {
   }
 
   /** Revoke a binding, and every credential it issued that still lives: they die with it. */
-  async #revoke(tx: Transaction, id: string, by: string, at: Date): Promise<number> {
+  /**
+   * Revoke a binding, and the credentials it issued that are still live: at
+   * most a few minutes' worth, however long its history. Every use of a
+   * credential checks its binding too, so these rows are belt and braces;
+   * the expired ones are dead already and are left as they are.
+   */
+  async #revoke(tx: Transaction, id: string, member: string, by: string, at: Date): Promise<number> {
     const revoked = await updateAuth(tx, this.#deps.chainKey, serviceBindings, { id, revokedAt: null }, { revokedAt: at, revokedBy: by });
-    await updateAuth(tx, this.#deps.chainKey, credentials, { createdBy: issuedBy(id), revokedAt: null }, { revokedAt: at, revokedBy: by });
+    await revokeLiveCredentials(tx, this.#deps.chainKey, { principal: member, createdBy: issuedBy(id), at }, { revokedAt: at, revokedBy: by });
     return revoked;
   }
 
