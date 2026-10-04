@@ -71,7 +71,19 @@ export async function verifyInstance(args: string[], store: Store, session: Sess
   });
   if (values.help) stop(0, INSTANCE_USAGE);
   if (positionals.length > 1) stop(2, INSTANCE_USAGE);
-  const requested = positionals[0] ?? (session.url?.trim() || store.current);
+  if (positionals[0] !== undefined && session.url !== undefined) {
+    stop(2, 'coffre: name the instance once: coffre verify instance <url>, or coffre --url <url> verify instance');
+  }
+  // As no one, then with a token, or as you: never as a CI run or through Access.
+  const other = (['service', 'idToken', 'accessClientId', 'accessClientSecret'] as const).filter((name) => session[name] !== undefined);
+  if (other.length > 0) {
+    stop(
+      2,
+      'coffre: verify instance checks as no one, then with a service token in --token-file, or as you with the session `coffre login` saved: ' +
+        '--service, --id-token-file and the Access flags are for other commands',
+    );
+  }
+  const requested = positionals[0] ?? session.url ?? store.current;
   if (!requested) stop(1, 'coffre: not signed in anywhere yet: run `coffre login <url>` first');
   let origin: string;
   try {
@@ -81,10 +93,10 @@ export async function verifyInstance(args: string[], store: Store, session: Sess
   }
   const s = style(out);
   const report = new Checks(out);
-  const token = session.token?.trim();
+  const token = session.token;
   const valueFile = values['canary-value-file'];
 
-  if (token !== undefined && token !== '') {
+  if (token !== undefined) {
     if (values.canary === undefined) stop(2, 'coffre: with a token, name its canary: --canary <project>/<environment>/<KEY>[=<value>]');
     if (valueFile !== undefined && values.canary.includes('=')) stop(2, 'coffre: the canary has its value after =, and in --canary-value-file: give one');
     let canary: Canary;

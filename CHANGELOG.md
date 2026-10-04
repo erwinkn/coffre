@@ -44,8 +44,10 @@ coffre: COFFRE_TOKEN is no longer read: unset it, and pass --token-file <path|->
 | a database URL, keys or a canary piped in, unasked | the same, with the flag and `-` |
 
 Two ways to sign in at once, `--token-file` beside `--service` say, are
-refused, where the token used to win unsaid; so is a session flag after the
-command, or one a command has no use for. The GitHub Action's inputs are as
+refused, where the token used to win unsaid; so are an empty session flag,
+which is what an unset variable expands to, an instance named both as an
+argument and as `--url`, a session flag after the command, and one a
+command has no use for. The GitHub Action's inputs are as
 they were; it hands the token to the CLI on stdin. On Workers Builds,
 rename the vault's build variable `COFFRE_MIGRATE_DATABASE_URL` to
 `DATABASE_OWNER_URL`, and its build command to `printenv DATABASE_OWNER_URL

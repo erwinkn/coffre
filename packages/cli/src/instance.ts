@@ -103,12 +103,11 @@ export function parseStore(text: string): Store {
 }
 
 export function parseMode(raw: string | undefined): AuthMode | undefined {
-  const value = raw?.trim();
-  if (value === undefined || value === '') return undefined;
-  if (!(MODES as readonly string[]).includes(value)) {
-    throw new Error(`--auth-mode must be one of ${MODES.join(', ')}, not "${value}"`);
+  if (raw === undefined) return undefined;
+  if (!(MODES as readonly string[]).includes(raw)) {
+    throw new Error(`--auth-mode must be one of ${MODES.join(', ')}, not "${raw}"`);
   }
-  return value as AuthMode;
+  return raw as AuthMode;
 }
 
 function isLoopback(hostname: string): boolean {
@@ -186,53 +185,52 @@ export function loginMode(origin: string, status: number, body: unknown): AuthMo
 
 /**
  * Decide where the next request goes and what it carries, or explain why it
- * cannot be sent. Pure, so every precedence rule is testable.
+ * cannot be sent. Pure, so every precedence rule is testable. A flag given
+ * is given: `readSession` refused an empty one, which falling back to the
+ * saved session would have taken for none.
  */
 export function resolveTarget(flags: SessionFlags, store: Store, now: Date = new Date()): Target {
   const explicitMode = parseMode(flags.authMode);
-  const requested = flags.url?.trim() || store.current;
+  const requested = flags.url ?? store.current;
   if (!requested) {
     throw new Error('not signed in anywhere yet: run `coffre login <url>`');
   }
 
   const ways = ([['--token-file', flags.token], ['--service', flags.service], ['--access-client-id', flags.accessClientId]] as const)
-    .filter(([, value]) => value?.trim())
+    .filter(([, value]) => value !== undefined)
     .map(([flag]) => flag);
   if (ways.length > 1) throw new Error(`${ways.join(' and ')} are ${ways.length === 2 ? 'two' : 'three'} ways to sign in: give one`);
-  if (flags.idToken !== undefined && !flags.service?.trim()) {
+  if (flags.idToken !== undefined && flags.service === undefined) {
     throw new Error('--id-token-file goes with --service: the ID token signs a CI run in as that service');
   }
-  if (flags.accessClientSecret !== undefined && !flags.accessClientId?.trim()) {
+  if (flags.accessClientSecret !== undefined && flags.accessClientId === undefined) {
     throw new Error('--access-client-secret-file goes with --access-client-id');
   }
 
   const session = lookupSession(store, requested);
-  const accessClientId = flags.accessClientId?.trim();
-  const mode: AuthMode = explicitMode ?? (accessClientId ? 'cloudflare' : (session?.mode ?? 'signin'));
+  const { token, service, idToken, accessClientId } = flags;
+  const mode: AuthMode = explicitMode ?? (accessClientId !== undefined ? 'cloudflare' : (session?.mode ?? 'signin'));
   const origin = instanceOrigin(requested);
 
-  const token = flags.token?.trim();
-  if (token) return { origin, mode, credential: { kind: 'token', token } };
+  if (token !== undefined) return { origin, mode, credential: { kind: 'token', token } };
 
-  const service = flags.service?.trim();
-  if (service) {
+  if (service !== undefined) {
     if (mode === 'cloudflare') {
       throw new Error("--service signs a CI run in with its ID token, which coffre's own sign-in takes: behind Cloudflare Access, use an Access service token");
     }
-    const idToken = flags.idToken?.trim();
     return {
       origin,
       mode,
-      credential: { kind: 'workload', service: service.startsWith('token:') ? service : `token:${service}`, ...(idToken ? { idToken } : {}) },
+      credential: { kind: 'workload', service: service.startsWith('token:') ? service : `token:${service}`, ...(idToken === undefined ? {} : { idToken }) },
     };
   }
 
-  if (accessClientId) {
+  if (accessClientId !== undefined) {
     if (mode !== 'cloudflare') {
       throw new Error('--access-client-id is a Cloudflare Access service token, and --auth-mode signin says coffre signs in itself: give one');
     }
-    const clientSecret = flags.accessClientSecret?.trim();
-    if (!clientSecret) {
+    const clientSecret = flags.accessClientSecret;
+    if (clientSecret === undefined) {
       throw new Error('--access-client-id needs its secret: --access-client-secret-file <path|->');
     }
     return { origin, mode, credential: { kind: 'access-service-token', clientId: accessClientId, clientSecret } };

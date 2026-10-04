@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { commandLine, removedVariables, secretFile } from '../src/flags.ts';
+import { commandLine, readSession, removedVariables, secretFile } from '../src/flags.ts';
 
 const main = fileURLToPath(new URL('../src/main.ts', import.meta.url));
 
@@ -53,6 +53,9 @@ test('a variable an earlier CLI read stops the command, in one line naming what 
   assert.equal(removedVariables({ COFFRE_APP_KEY: 'k' }, ['verify', 'instance']), null);
   assert.match(removedVariables({ COFFRE_APP_KEY: 'k' }, ['verify', 'keys']) ?? '', /COFFRE_APP_KEY is no longer read: unset it, and pass coffre verify keys --app-key-file <path\|->/);
   assert.match(removedVariables({ COFFRE_MIGRATE_DATABASE_URL: 'postgresql://o@h/d' }, ['migrate', '--yes']) ?? '', /coffre migrate --database-url-file/);
+  // A command that talks to no instance never read the session's.
+  assert.equal(removedVariables({ COFFRE_TOKEN: 'coffre_svc_x', COFFRE_API_URL: 'https://coffre.example.com' }, ['init', '--node']), null);
+  assert.equal(removedVariables({ COFFRE_SETUP_DATABASE_URL: 'postgresql://o@h/d', COFFRE_TOKEN: 'x' }, ['setup']), 'COFFRE_SETUP_DATABASE_URL is no longer read: unset it, and pass coffre setup --database-url-file <path|->');
 });
 
 test('a secret comes from its file, trimmed, and an empty or missing file is said as it is', (t) => {
@@ -61,8 +64,30 @@ test('a secret comes from its file, trimmed, and an empty or missing file is sai
   writeFileSync(join(dir, 'token'), 'coffre_svc_x\n');
   writeFileSync(join(dir, 'empty'), '\n');
   assert.equal(secretFile('--token-file', join(dir, 'token')), 'coffre_svc_x');
-  assert.throws(() => secretFile('--token-file', join(dir, 'empty')), /--token-file names .*empty, which is empty/);
-  assert.throws(() => secretFile('--token-file', join(dir, 'nope')), /--token-file names .*nope, which could not be read: ENOENT/);
+  assert.throws(() => secretFile('--token-file', join(dir, 'empty')), /^Error: --token-file: its file is empty$/);
+  assert.throws(() => secretFile('--token-file', join(dir, 'nope')), /^Error: --token-file: its file could not be read \(ENOENT\)$/);
+  // A secret given where its path goes is not shown back.
+  assert.throws(
+    () => secretFile('--token-file', 'coffre_svc_given-by-mistake'),
+    (error: Error) => !error.message.includes('coffre_svc_given-by-mistake'),
+  );
+});
+
+test('an empty session flag is refused, never taken for one left out', () => {
+  // What an unset variable expands to: left out, it would mean the saved session's instance, or its person.
+  assert.throws(() => readSession({ url: '' }), /^Error: --url is empty: an unset variable, perhaps$/);
+  assert.throws(() => readSession({ url: 'https://coffre.example.com', service: '  ' }), /--service is empty/);
+  assert.throws(() => readSession({ 'auth-mode': '' }), /--auth-mode is empty/);
+  assert.throws(() => readSession({ 'token-file': '' }), /--token-file is empty/);
+  assert.deepEqual(readSession({ url: ' https://coffre.example.com ', service: 'deploy' }), {
+    url: 'https://coffre.example.com',
+    token: undefined,
+    service: 'deploy',
+    idToken: undefined,
+    accessClientId: undefined,
+    accessClientSecret: undefined,
+    authMode: undefined,
+  });
 });
 
 /** The CLI, with none of this process's COFFRE_ variables, and `input` on stdin. */
@@ -76,10 +101,34 @@ function coffre(args: string[], env: Record<string, string> = {}, input = '') {
   }
 }
 
-test('the CLI refuses a removed variable before anything else, in one line', () => {
+test('the CLI refuses a removed variable before anything else, in one line, where it was read', () => {
   const run = coffre(['whoami'], { COFFRE_TOKEN: 'coffre_svc_x' });
   assert.equal(run.status, 1);
   assert.equal(run.stderr, 'coffre: COFFRE_TOKEN is no longer read: unset it, and pass --token-file <path|->\n');
+  assert.equal(coffre(['roles'], { COFFRE_TOKEN: 'coffre_svc_x' }).status, 0);
+});
+
+test('with an empty --url or --service, the CLI stops before sending anything, saved session or not', () => {
+  for (const session of [['--url', '', '--token-file', '-'], ['--url', 'http://127.0.0.1:9', '--service', '']]) {
+    const run = coffre([...session, 'whoami'], {}, 'coffre_svc_x\n');
+    assert.equal(run.status, 1);
+    assert.match(run.stderr, /^coffre: --(url|service) is empty: an unset variable, perhaps\n$/);
+  }
+});
+
+test('an instance named twice, as an argument and as --url, is refused', () => {
+  const login = coffre(['--url', 'http://127.0.0.1:9', 'login', 'http://127.0.0.1:8']);
+  assert.equal(login.status, 1);
+  assert.match(login.stderr, /name the instance once: coffre login <url>, or coffre --url <url> login/);
+  const verify = coffre(['--url', 'http://127.0.0.1:9', 'verify', 'instance', 'http://127.0.0.1:8']);
+  assert.equal(verify.status, 2);
+  assert.match(verify.stderr, /name the instance once/);
+});
+
+test('verify instance refuses the flags of a CI run, in a line', () => {
+  const run = coffre(['--service', 'deploy', 'verify', 'instance', 'http://127.0.0.1:9']);
+  assert.equal(run.status, 2);
+  assert.match(run.stderr, /^coffre: verify instance checks as no one, then with a service token in --token-file, or as you .* are for other commands\n$/);
 });
 
 test('stdin goes to one reader: a token from - leaves none for set, import or run', () => {

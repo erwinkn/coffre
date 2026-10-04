@@ -232,6 +232,14 @@ async function send(request: Request, to: Target): Promise<Response> {
   return response;
 }
 
+/** The instance a command names, as its argument or as --url: one of the two, or neither. */
+function oneUrl(given: string | undefined, command: string): string | undefined {
+  if (given !== undefined && sessionFlags.url !== undefined) {
+    throw new Error(`name the instance once: coffre ${command} <url>, or coffre --url <url> ${command}`);
+  }
+  return given ?? sessionFlags.url;
+}
+
 /** Parse `project/environment/KEY` or `project/environment`. */
 function parsePath(raw: string): { project: string; environment: string; key?: string } {
   const parts = raw.split('/');
@@ -274,7 +282,7 @@ async function login(args: string[]): Promise<void> {
     allowPositionals: true,
   });
 
-  const requested = positionals[0] ?? sessionFlags.url ?? readStore().current;
+  const requested = attempt(() => oneUrl(positionals[0], 'login')) ?? readStore().current;
   if (!requested) fail('usage: coffre login <url>, for example `coffre login https://coffre.example.com`');
   const origin = attempt(() => instanceOrigin(requested));
   const mode = attempt(() => parseMode(sessionFlags.authMode)) ?? (await askMode(origin));
@@ -432,7 +440,7 @@ async function accessLogin(origin: string): Promise<void> {
 /** End the session on the server, then forget it here. */
 async function logout(args: string[]): Promise<void> {
   const store = readStore();
-  const requested = args[0] ?? sessionFlags.url ?? store.current;
+  const requested = attempt(() => oneUrl(args[0], 'logout')) ?? store.current;
   if (!requested) fail('not signed in anywhere');
   const origin = attempt(() => instanceOrigin(requested));
   const session = store.instances[origin];

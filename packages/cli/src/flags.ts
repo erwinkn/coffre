@@ -39,6 +39,7 @@ const TAKES: Record<string, readonly SessionName[]> = {
   update: [],
   use: [],
   roles: [],
+  help: [],
   login: ['url', 'auth-mode'],
   logout: ['url'],
 };
@@ -90,17 +91,25 @@ function placeholder(name: string): string {
   return { url: '<url>', service: '<name>', 'access-client-id': '<id>', 'auth-mode': 'signin|cloudflare' }[name] ?? '…';
 }
 
-/** The session flags with their files read: a credential's secret is never a flag's value. */
+/**
+ * The session flags with their files read: a credential's secret is never a
+ * flag's value. An empty one is refused, never read as left out: it is what
+ * an unset variable expands to, and left out would mean the saved session,
+ * another instance or another person than the script meant.
+ */
 export function readSession(args: SessionArgs): SessionFlags {
+  for (const [name, value] of Object.entries(args)) {
+    if (value.trim() === '') throw new Error(`--${name} is empty: an unset variable, perhaps`);
+  }
   const file = (name: SessionName) => (args[name] === undefined ? undefined : secretFile(`--${name}`, args[name]));
   return {
-    url: args.url,
+    url: args.url?.trim(),
     token: file('token-file'),
-    service: args.service,
+    service: args.service?.trim(),
     idToken: file('id-token-file'),
-    accessClientId: args['access-client-id'],
+    accessClientId: args['access-client-id']?.trim(),
     accessClientSecret: file('access-client-secret-file'),
-    authMode: args['auth-mode'],
+    authMode: args['auth-mode']?.trim(),
   };
 }
 
@@ -119,14 +128,15 @@ export function secretFile(flag: string, path: string): string {
     stdinReader = flag;
     text = readFileSync(0, 'utf8');
   } else {
+    // Never the path in what goes wrong: a secret given in its place would be shown.
     try {
       text = readFileSync(path, 'utf8');
     } catch (error) {
-      throw new Error(`${flag} names ${path}, which could not be read: ${(error as NodeJS.ErrnoException).code ?? String(error)}`);
+      throw new Error(`${flag}: its file could not be read (${(error as NodeJS.ErrnoException).code ?? String(error)})`);
     }
   }
   const value = text.trim();
-  if (value === '') throw new Error(path === '-' ? `${flag} -: nothing came on stdin` : `${flag} names ${path}, which is empty`);
+  if (value === '') throw new Error(path === '-' ? `${flag} -: nothing came on stdin` : `${flag}: its file is empty`);
   return value;
 }
 
@@ -155,12 +165,15 @@ export const REMOVED: readonly { variable: string; flag: string; command?: reado
 
 /**
  * Why the command `words` start with will not run while a variable an
- * earlier CLI read for it is set, in one line; null when none is. A variable
+ * earlier CLI read for it is set, in one line; null when none is. A
+ * command that talks to no instance never read the session's. A variable
  * left from before would otherwise do nothing, silently: the run would go
  * elsewhere, or as someone else, than its author meant.
  */
 export function removedVariables(env: Readonly<Record<string, string | undefined>>, words: readonly string[]): string | null {
-  const reads = (only: readonly string[] | undefined) => only === undefined || only.every((word, i) => words[i] === word);
+  // The session's variables, for a command that talks to an instance; another's, for that command alone.
+  const local = TAKES[words[0] ?? '']?.length === 0;
+  const reads = (only: readonly string[] | undefined) => (only === undefined ? !local : only.every((word, i) => words[i] === word));
   const set = REMOVED.filter(({ variable, command }) => reads(command) && env[variable]?.trim());
   if (set.length === 0) return null;
   const flags = [...new Set(set.map(({ flag }) => flag))];
