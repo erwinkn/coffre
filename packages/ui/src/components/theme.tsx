@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { DropdownMenu } from 'radix-ui';
+import { Menu } from '@base-ui/react/menu';
 import { Check, Monitor, Moon, Sun } from './icons';
 
 export type Theme = 'system' | 'light' | 'dark';
@@ -75,17 +75,18 @@ function useTheme(): Theme {
 export function ThemeMenuItems() {
   const theme = useTheme();
   return (
-    <DropdownMenu.RadioGroup value={theme} onValueChange={(value: string) => apply(value as Theme)}>
+    <Menu.RadioGroup value={theme} onValueChange={(value: Theme) => apply(value)}>
+      <Menu.GroupLabel className="menu-label">Theme</Menu.GroupLabel>
       {OPTIONS.map(({ value, label, Icon }) => (
-        <DropdownMenu.RadioItem key={value} value={value} className="menu-item">
+        <Menu.RadioItem key={value} value={value} className="menu-item" closeOnClick>
           <Icon size={15} />
           {label}
-          <DropdownMenu.ItemIndicator className="menu-check">
+          <Menu.RadioItemIndicator className="menu-check">
             <Check size={14} />
-          </DropdownMenu.ItemIndicator>
-        </DropdownMenu.RadioItem>
+          </Menu.RadioItemIndicator>
+        </Menu.RadioItem>
       ))}
-    </DropdownMenu.RadioGroup>
+    </Menu.RadioGroup>
   );
 }
 

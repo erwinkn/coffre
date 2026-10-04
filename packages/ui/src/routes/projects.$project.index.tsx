@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { useSuspenseQuery } from '@tanstack/react-query';
 import { createFileRoute, Link, useRouter } from '@tanstack/react-router';
 import { useShell } from '../lib/use-shell';
-import { DropdownMenu } from 'radix-ui';
+import { Menu } from '@base-ui/react/menu';
 import { toast } from 'sonner';
 import { useCoffre } from '../lib/coffre';
 import {
@@ -27,6 +27,7 @@ import {
   ConfirmDialog,
   EmptyState,
   ErrorLine,
+  MenuPopup,
   Modal,
   Notice,
   Spinner,
@@ -362,39 +363,35 @@ function EnvironmentCard({
       {pending && <RowPending status={state} />}
 
       {manageable && !pending && (
-        <DropdownMenu.Root>
-          <DropdownMenu.Trigger asChild>
-            <button
-              className="act act-quiet env-card-menu"
-              aria-label={`Actions for ${environment.slug}`}
+        <Menu.Root>
+          <Menu.Trigger
+            className="act act-quiet env-card-menu"
+            aria-label={`Actions for ${environment.slug}`}
+          >
+            <MoreHorizontal size={16} />
+          </Menu.Trigger>
+          <MenuPopup align="end">
+            <Menu.Item
+              className="menu-item"
+              onClick={() => {
+                setSlug(environment.slug);
+                setName(environment.name);
+                setRenaming(true);
+              }}
             >
-              <MoreHorizontal size={16} />
-            </button>
-          </DropdownMenu.Trigger>
-          <DropdownMenu.Portal>
-            <DropdownMenu.Content className="menu" sideOffset={6} align="end">
-              <DropdownMenu.Item
-                className="menu-item"
-                onSelect={() => {
-                  setSlug(environment.slug);
-                  setName(environment.name);
-                  setRenaming(true);
-                }}
-              >
-                <Pencil size={14} />
-                Rename
-              </DropdownMenu.Item>
-              <DropdownMenu.Separator className="menu-sep" />
-              <DropdownMenu.Item
-                className={`menu-item${isArchived ? '' : ' menu-item-danger'}`}
-                onSelect={() => setConfirming(true)}
-              >
-                {isArchived ? <RotateBack size={14} /> : <Archive size={14} />}
-                {isArchived ? 'Restore' : 'Archive…'}
-              </DropdownMenu.Item>
-            </DropdownMenu.Content>
-          </DropdownMenu.Portal>
-        </DropdownMenu.Root>
+              <Pencil size={14} />
+              Rename
+            </Menu.Item>
+            <Menu.Separator className="menu-sep" />
+            <Menu.Item
+              className={`menu-item${isArchived ? '' : ' menu-item-danger'}`}
+              onClick={() => setConfirming(true)}
+            >
+              {isArchived ? <RotateBack size={14} /> : <Archive size={14} />}
+              {isArchived ? 'Restore' : 'Archive…'}
+            </Menu.Item>
+          </MenuPopup>
+        </Menu.Root>
       )}
 
       {manageable && (

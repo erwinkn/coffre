@@ -1,13 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { useNavigate } from '@tanstack/react-router';
-import { Command } from 'cmdk';
+import { Autocomplete } from '@base-ui/react/autocomplete';
+import { Dialog } from '@base-ui/react/dialog';
 import type { ProjectSummary } from '../shared/models';
 import type { UiCapabilities } from '../lib/capabilities';
 import { isActiveAccessibleEnvironment } from '../lib/project-environments';
-import {
-  AdministrationItems,
-  hasAdministrationItems,
-} from './affordances';
+import { administrationEntries } from './affordances';
 import { setTheme } from './theme';
 import {
   Folder,
@@ -23,6 +21,30 @@ import {
   UserCog,
   Users,
 } from './icons';
+
+/** One line of the palette. */
+type Command = {
+  /** What a query is matched against: the name, then words people may type for it. */
+  value: string;
+  icon: ReactNode;
+  label: ReactNode;
+  hint?: string;
+  run: () => void;
+};
+
+type CommandGroup = { value: string; items: Command[] };
+
+/**
+ * Every word of the query appears somewhere in the command's value, so
+ * `prod acme` finds `acme/prod` and `denied` finds "Audit, denials only".
+ */
+function matches(command: Command, query: string): boolean {
+  const value = command.value.toLowerCase();
+  return query
+    .toLowerCase()
+    .split(/\s+/)
+    .every((word) => value.includes(word));
+}
 
 /**
  * Command palette.
@@ -55,9 +77,127 @@ export function CommandPalette({
   }, []);
 
   const active = projects.filter((project) => project.archivedAt === null);
+  const closing = (action: () => unknown) => () => {
+    setOpen(false);
+    action();
+  };
+
+  const groups: CommandGroup[] = [
+    {
+      value: 'Environments',
+      items: active.flatMap((project) =>
+        project.environments.filter(isActiveAccessibleEnvironment).map((environment) => ({
+          value: `${project.slug}/${environment.slug} ${environment.name}`,
+          icon: <Layers size={15} />,
+          label: (
+            <span className="mono">
+              {project.slug}/{environment.slug}
+            </span>
+          ),
+          hint: `${environment.details.secretCount} secret${
+            environment.details.secretCount === 1 ? '' : 's'
+          }`,
+          run: closing(() =>
+            navigate({
+              to: '/projects/$project/$environment',
+              params: { project: project.slug, environment: environment.slug },
+            }),
+          ),
+        })),
+      ),
+    },
+    {
+      value: 'Projects',
+      items: active.map((project) => ({
+        value: `${project.slug} ${project.name}`,
+        icon: <Folder size={15} />,
+        label: <span className="mono">{project.slug}</span>,
+        hint: project.name,
+        run: closing(() =>
+          navigate({ to: '/projects/$project', params: { project: project.slug } }),
+        ),
+      })),
+    },
+    {
+      value: 'Pages',
+      items: [
+        {
+          value: 'projects all',
+          icon: <Folder size={15} />,
+          label: 'Projects',
+          run: closing(() => navigate({ to: '/projects' })),
+        },
+        ...administrationEntries<Command>(capabilities, {
+          users: [
+            {
+              value: 'users people members directory',
+              icon: <Users size={15} />,
+              label: 'Users',
+              run: closing(() => navigate({ to: '/users' })),
+            },
+            {
+              value: 'tokens service accounts machines ci directory',
+              icon: <Key size={15} />,
+              label: 'Tokens',
+              run: closing(() => navigate({ to: '/tokens' })),
+            },
+          ],
+          audit: [
+            {
+              value: 'audit log history reads',
+              icon: <Ledger size={15} />,
+              label: 'Audit',
+              run: closing(() => navigate({ to: '/audit', search: {} })),
+            },
+            {
+              value: 'audit denials denied refused',
+              icon: <SlashCircle size={15} />,
+              label: 'Audit, denials only',
+              run: closing(() => navigate({ to: '/audit', search: { decision: 'deny' } })),
+            },
+          ],
+        }),
+        {
+          value: 'settings instance sign-in',
+          icon: <Settings size={15} />,
+          label: 'Settings',
+          run: closing(() => navigate({ to: '/settings' })),
+        },
+        {
+          value: 'account preferences appearance identity profile me',
+          icon: <UserCog size={15} />,
+          label: 'Account',
+          run: closing(() => navigate({ to: '/account' })),
+        },
+      ],
+    },
+    {
+      value: 'Appearance',
+      items: [
+        {
+          value: 'theme system automatic',
+          icon: <Monitor size={15} />,
+          label: 'Match system colours',
+          run: closing(() => setTheme('system')),
+        },
+        {
+          value: 'theme light paper',
+          icon: <Sun size={15} />,
+          label: 'Light',
+          run: closing(() => setTheme('light')),
+        },
+        {
+          value: 'theme dark night',
+          icon: <Moon size={15} />,
+          label: 'Dark',
+          run: closing(() => setTheme('dark')),
+        },
+      ],
+    },
+  ].filter((group) => group.items.length > 0);
 
   return (
-    <>
+    <Dialog.Root open={open} onOpenChange={setOpen}>
       <button
         type="button"
         className="search-trigger"
@@ -70,202 +210,71 @@ export function CommandPalette({
         <kbd aria-hidden>⌘K</kbd>
       </button>
 
-      <Command.Dialog
-        open={open}
-        onOpenChange={setOpen}
-        label="Jump to a project, environment or page"
-        overlayClassName="overlay"
-        contentClassName="palette"
-        loop
-      >
-        <Command.Input placeholder="Search projects, environments and pages…" />
+      <Dialog.Portal>
+        <Dialog.Backdrop className="overlay" />
+        <Dialog.Popup className="palette" aria-label="Jump to a project, environment or page">
+          {/* `inline`: the list sits in the dialog, always shown, not in a popup of its own. */}
+          <Autocomplete.Root
+            items={groups}
+            filter={matches}
+            itemToStringValue={(command: Command) => command.value}
+            open
+            inline
+            autoHighlight="always"
+            keepHighlight
+          >
+            <Autocomplete.Input
+              className="palette-input"
+              placeholder="Search projects, environments and pages…"
+              aria-label="Search projects, environments and pages"
+            />
 
-        <Command.List>
-          <Command.Empty>Nothing by that name.</Command.Empty>
+            <div className="palette-list">
+              <Autocomplete.Empty className="palette-empty">
+                Nothing by that name.
+              </Autocomplete.Empty>
+              <Autocomplete.List>
+                {(group: CommandGroup) => (
+                  <Autocomplete.Group key={group.value} items={group.items}>
+                    <Autocomplete.GroupLabel className="palette-group-label">
+                      {group.value}
+                    </Autocomplete.GroupLabel>
+                    <Autocomplete.Collection>
+                      {(command: Command) => (
+                        <Autocomplete.Item
+                          key={command.value}
+                          value={command}
+                          className="palette-item"
+                          onClick={command.run}
+                        >
+                          {command.icon}
+                          {command.label}
+                          {command.hint !== undefined && (
+                            <span className="palette-hint">{command.hint}</span>
+                          )}
+                        </Autocomplete.Item>
+                      )}
+                    </Autocomplete.Collection>
+                  </Autocomplete.Group>
+                )}
+              </Autocomplete.List>
+            </div>
 
-          {active.length > 0 && (
-            <Command.Group heading="Environments">
-              {active.flatMap((project) =>
-                project.environments
-                  .filter(isActiveAccessibleEnvironment)
-                  .map((environment) => (
-                    <Command.Item
-                      key={`${project.slug}/${environment.slug}`}
-                      value={`${project.slug}/${environment.slug} ${environment.name}`}
-                      onSelect={() => {
-                        setOpen(false);
-                        navigate({
-                          to: '/projects/$project/$environment',
-                          params: { project: project.slug, environment: environment.slug },
-                        });
-                      }}
-                    >
-                      <Layers size={15} />
-                      <span className="mono">
-                        {project.slug}/{environment.slug}
-                      </span>
-                      <span className="palette-hint">
-                        {environment.details.secretCount} secret
-                        {environment.details.secretCount === 1 ? '' : 's'}
-                      </span>
-                    </Command.Item>
-                  )),
-              )}
-            </Command.Group>
-          )}
-
-          {active.length > 0 && (
-            <Command.Group heading="Projects">
-              {active.map((project) => (
-                <Command.Item
-                  key={project.slug}
-                  value={`${project.slug} ${project.name}`}
-                  onSelect={() => {
-                    setOpen(false);
-                    navigate({ to: '/projects/$project', params: { project: project.slug } });
-                  }}
-                >
-                  <Folder size={15} />
-                  <span className="mono">{project.slug}</span>
-                  <span className="palette-hint">{project.name}</span>
-                </Command.Item>
-              ))}
-            </Command.Group>
-          )}
-
-          <Command.Group heading="Pages">
-            <Command.Item
-              value="projects all"
-              onSelect={() => {
-                setOpen(false);
-                navigate({ to: '/projects' });
-              }}
-            >
-              <Folder size={15} />
-              Projects
-            </Command.Item>
-            {hasAdministrationItems(capabilities) && (
-              <AdministrationItems
-                capabilities={capabilities}
-                audit={
-                  <>
-                    <Command.Item
-                      value="audit log history reads"
-                      onSelect={() => {
-                        setOpen(false);
-                        navigate({ to: '/audit', search: {} });
-                      }}
-                    >
-                      <Ledger size={15} />
-                      Audit
-                    </Command.Item>
-                    <Command.Item
-                      value="audit denials denied refused"
-                      onSelect={() => {
-                        setOpen(false);
-                        navigate({ to: '/audit', search: { decision: 'deny' } });
-                      }}
-                    >
-                      <SlashCircle size={15} />
-                      Audit, denials only
-                    </Command.Item>
-                  </>
-                }
-                users={
-                  <>
-                    <Command.Item
-                      value="users people members directory"
-                      onSelect={() => {
-                        setOpen(false);
-                        navigate({ to: '/users' });
-                      }}
-                    >
-                      <Users size={15} />
-                      Users
-                    </Command.Item>
-                    <Command.Item
-                      value="tokens service accounts machines ci directory"
-                      onSelect={() => {
-                        setOpen(false);
-                        navigate({ to: '/tokens' });
-                      }}
-                    >
-                      <Key size={15} />
-                      Tokens
-                    </Command.Item>
-                  </>
-                }
-              />
-            )}
-            <Command.Item
-              value="settings instance sign-in"
-              onSelect={() => {
-                setOpen(false);
-                navigate({ to: '/settings' });
-              }}
-            >
-              <Settings size={15} />
-              Settings
-            </Command.Item>
-            <Command.Item
-              value="account preferences appearance identity profile me"
-              onSelect={() => {
-                setOpen(false);
-                navigate({ to: '/account' });
-              }}
-            >
-              <UserCog size={15} />
-              Account
-            </Command.Item>
-          </Command.Group>
-
-          <Command.Group heading="Appearance">
-            <Command.Item
-              value="theme system automatic"
-              onSelect={() => {
-                setTheme('system');
-                setOpen(false);
-              }}
-            >
-              <Monitor size={15} />
-              Match system colours
-            </Command.Item>
-            <Command.Item
-              value="theme light paper"
-              onSelect={() => {
-                setTheme('light');
-                setOpen(false);
-              }}
-            >
-              <Sun size={15} />
-              Light
-            </Command.Item>
-            <Command.Item
-              value="theme dark night"
-              onSelect={() => {
-                setTheme('dark');
-                setOpen(false);
-              }}
-            >
-              <Moon size={15} />
-              Dark
-            </Command.Item>
-          </Command.Group>
-        </Command.List>
-
-        <div className="palette-foot" aria-hidden>
-          <span>
-            <kbd>↑</kbd>
-            <kbd>↓</kbd> move
-          </span>
-          <span>
-            <kbd>↵</kbd> open
-          </span>
-          <span>
-            <kbd>esc</kbd> close
-          </span>
-        </div>
-      </Command.Dialog>
-    </>
+            <div className="palette-foot" aria-hidden>
+              <span>
+                <kbd>↑</kbd>
+                <kbd>↓</kbd> move
+              </span>
+              <span>
+                <kbd>↵</kbd> open
+              </span>
+              <span>
+                <kbd>esc</kbd> close
+              </span>
+            </div>
+          </Autocomplete.Root>
+        </Dialog.Popup>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }

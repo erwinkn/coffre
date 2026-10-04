@@ -1,12 +1,9 @@
-import {
-  useEffect,
-  useRef,
-  useState,
-  type MouseEvent,
-  type PointerEvent,
-  type ReactNode,
-} from 'react';
-import { AlertDialog, Dialog, Popover, Tooltip } from 'radix-ui';
+import { useEffect, useRef, useState, type ReactElement, type ReactNode } from 'react';
+import { AlertDialog } from '@base-ui/react/alert-dialog';
+import { Dialog } from '@base-ui/react/dialog';
+import { Menu } from '@base-ui/react/menu';
+import { Popover } from '@base-ui/react/popover';
+import { Tooltip } from '@base-ui/react/tooltip';
 import { AlertCircle, AlertTriangle, Check, Copy, Info, Loader, X } from './icons';
 
 /* -------------------------------------------------------------------------- */
@@ -18,7 +15,7 @@ export function TooltipProvider({ children }: { children: ReactNode }) {
   // makes a row of controls feel immediate without the delay losing its
   // purpose (preventing accidental activation on a passing cursor).
   return (
-    <Tooltip.Provider delayDuration={400} skipDelayDuration={300}>
+    <Tooltip.Provider delay={400} timeout={300}>
       {children}
     </Tooltip.Provider>
   );
@@ -31,15 +28,20 @@ export function Tip({
 }: {
   label: ReactNode;
   side?: 'top' | 'right' | 'bottom' | 'left';
-  children: ReactNode;
+  children: ReactElement;
 }) {
   return (
     <Tooltip.Root>
-      <Tooltip.Trigger asChild>{children}</Tooltip.Trigger>
+      <Tooltip.Trigger render={children} />
       <Tooltip.Portal>
-        <Tooltip.Content className="tooltip" side={side} sideOffset={6} collisionPadding={8}>
-          {label}
-        </Tooltip.Content>
+        <Tooltip.Positioner
+          className="tooltip-positioner"
+          side={side}
+          sideOffset={6}
+          collisionPadding={8}
+        >
+          <Tooltip.Popup className="tooltip">{label}</Tooltip.Popup>
+        </Tooltip.Positioner>
       </Tooltip.Portal>
     </Tooltip.Root>
   );
@@ -63,43 +65,78 @@ export function Toggletip({
   side?: 'top' | 'right' | 'bottom' | 'left';
   /** `end` for a trigger at the right edge, so the tip opens leftwards. */
   align?: 'start' | 'center' | 'end';
-  children: ReactNode;
+  children: ReactElement;
 }) {
   const [open, setOpen] = useState(false);
-  const pointer = useRef<string | null>(null);
+  const mouse = useRef(false);
   const hover = (next: boolean) => (event: { pointerType: string }) => {
     if (event.pointerType === 'mouse') setOpen(next);
   };
 
   return (
-    <Popover.Root open={open} onOpenChange={setOpen}>
+    <Popover.Root
+      open={open}
+      onOpenChange={(next, { reason }) => {
+        const clicked = reason === 'trigger-press' && mouse.current;
+        mouse.current = false;
+        if (!clicked) setOpen(next);
+      }}
+    >
       <Popover.Trigger
-        asChild
+        render={children}
         onPointerEnter={hover(true)}
         onPointerLeave={hover(false)}
-        onPointerDown={(event: PointerEvent) => {
-          pointer.current = event.pointerType;
+        onPointerDown={(event) => {
+          mouse.current = event.pointerType === 'mouse';
         }}
-        onClick={(event: MouseEvent) => {
-          if (pointer.current === 'mouse') event.preventDefault();
-          pointer.current = null;
-        }}
-      >
-        {children}
-      </Popover.Trigger>
+      />
       <Popover.Portal>
-        <Popover.Content
-          className="tooltip"
+        <Popover.Positioner
+          className="tooltip-positioner"
           side={side}
           align={align}
           sideOffset={6}
           collisionPadding={16}
-          onOpenAutoFocus={(event: Event) => event.preventDefault()}
         >
-          {label}
-        </Popover.Content>
+          {/* Focus stays on the trigger, so there is nothing to return it to. */}
+          <Popover.Popup className="tooltip" initialFocus={false} finalFocus={false}>
+            {label}
+          </Popover.Popup>
+        </Popover.Positioner>
       </Popover.Portal>
     </Popover.Root>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Menu                                                                        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A menu's floating panel, placed against its `Menu.Trigger`.
+ *
+ * The callers keep the rest of Base UI's menu parts: the trigger, the items
+ * and their separators read better at the call site than behind props.
+ */
+export function MenuPopup({
+  side,
+  align,
+  className,
+  children,
+}: {
+  side?: 'top' | 'bottom';
+  align: 'start' | 'end';
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <Menu.Portal>
+      <Menu.Positioner className="menu-positioner" side={side} align={align} sideOffset={6}>
+        <Menu.Popup className={className === undefined ? 'menu' : `menu ${className}`}>
+          {children}
+        </Menu.Popup>
+      </Menu.Positioner>
+    </Menu.Portal>
   );
 }
 
@@ -267,24 +304,20 @@ type ConfirmProps = {
 function ConfirmContent({ title, body, confirmLabel, destructive, onConfirm }: ConfirmProps) {
   return (
     <AlertDialog.Portal>
-      <AlertDialog.Overlay className="overlay" />
-      <AlertDialog.Content className="dialog dialog-confirm">
+      <AlertDialog.Backdrop className="overlay" />
+      <AlertDialog.Popup className="dialog dialog-confirm">
         <AlertDialog.Title className="dialog-title">{title}</AlertDialog.Title>
         <AlertDialog.Description className="dialog-body">{body}</AlertDialog.Description>
         <div className="dialog-actions">
-          <AlertDialog.Cancel asChild>
-            <button className="btn">Cancel</button>
-          </AlertDialog.Cancel>
-          <AlertDialog.Action asChild>
-            <button
-              className={`btn ${destructive === false ? 'btn-primary' : 'btn-danger'}`}
-              onClick={onConfirm}
-            >
-              {confirmLabel}
-            </button>
-          </AlertDialog.Action>
+          <AlertDialog.Close className="btn">Cancel</AlertDialog.Close>
+          <AlertDialog.Close
+            className={`btn ${destructive === false ? 'btn-primary' : 'btn-danger'}`}
+            onClick={onConfirm}
+          >
+            {confirmLabel}
+          </AlertDialog.Close>
         </div>
-      </AlertDialog.Content>
+      </AlertDialog.Popup>
     </AlertDialog.Portal>
   );
 }
@@ -293,12 +326,10 @@ export function ConfirmButton({
   trigger,
   disabled,
   ...confirm
-}: ConfirmProps & { trigger: ReactNode; disabled?: boolean }) {
+}: ConfirmProps & { trigger: ReactElement; disabled?: boolean }) {
   return (
     <AlertDialog.Root>
-      <AlertDialog.Trigger asChild disabled={disabled}>
-        {trigger}
-      </AlertDialog.Trigger>
+      <AlertDialog.Trigger render={trigger} disabled={disabled} />
       <ConfirmContent {...confirm} />
     </AlertDialog.Root>
   );
@@ -347,27 +378,19 @@ export function Modal({
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
-        <Dialog.Overlay className="overlay" />
-        <Dialog.Content
-          className={`dialog${wide ? ' dialog-wide' : ''}`}
-          // Radix warns when a dialog has no description. Most of these forms
-          // are their own explanation, so opt out rather than write a
-          // paragraph of preamble for each one.
-          {...(description === undefined ? { 'aria-describedby': undefined } : {})}
-        >
+        <Dialog.Backdrop className="overlay" />
+        <Dialog.Popup className={`dialog${wide ? ' dialog-wide' : ''}`}>
           <div className="dialog-head">
             <Dialog.Title className="dialog-title">{title}</Dialog.Title>
-            <Dialog.Close asChild>
-              <button className="btn btn-quiet btn-sm btn-icon" aria-label="Close">
-                <X size={15} />
-              </button>
+            <Dialog.Close className="btn btn-quiet btn-sm btn-icon" aria-label="Close">
+              <X size={15} />
             </Dialog.Close>
           </div>
           {description !== undefined && (
             <Dialog.Description className="dialog-body">{description}</Dialog.Description>
           )}
           {children}
-        </Dialog.Content>
+        </Dialog.Popup>
       </Dialog.Portal>
     </Dialog.Root>
   );

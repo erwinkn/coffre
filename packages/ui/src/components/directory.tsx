@@ -1,11 +1,11 @@
 import { Fragment, useState } from 'react';
-import { DropdownMenu } from 'radix-ui';
+import { Menu } from '@base-ui/react/menu';
 import { changeRole, directoryList, invite, removeMember, type InviteVars } from '../lib/changes';
 import { memberRef, useCoffre } from '../lib/coffre';
 import { useChange, useChangeStatus } from '../lib/use-change';
 import type { DirectoryPrincipal } from '../shared/models';
 import { RowFailure, RowPending, rowClass } from './row-state';
-import { ConfirmDialog, EmptyState, Modal, Spinner, Toggletip } from './ui';
+import { ConfirmDialog, EmptyState, MenuPopup, Modal, Spinner, Toggletip } from './ui';
 import { PrincipalLink } from './principal';
 import { Key, Lock, MoreHorizontal, Pencil, Plus, ShieldCheck, User, X } from './icons';
 
@@ -222,43 +222,39 @@ export function PrincipalActions({
 
   return (
     <>
-      <DropdownMenu.Root>
-        <DropdownMenu.Trigger asChild>
-          <button
-            className={trigger}
-            aria-label={`Actions for ${principal.principalId}`}
-            disabled={pending}
+      <Menu.Root>
+        <Menu.Trigger
+          className={trigger}
+          aria-label={`Actions for ${principal.principalId}`}
+          disabled={pending}
+        >
+          {pending ? <Spinner size={13} /> : <MoreHorizontal size={16} />}
+        </Menu.Trigger>
+        <MenuPopup align="end">
+          {principal.principalType === 'user' && (
+            <>
+              <Menu.Item
+                className="menu-item"
+                onClick={() => {
+                  setInstanceRole(principal.instanceRole === 'owner' ? 'owner' : 'user');
+                  setEditing(true);
+                }}
+              >
+                <Pencil size={14} />
+                Change role
+              </Menu.Item>
+              <Menu.Separator className="menu-sep" />
+            </>
+          )}
+          <Menu.Item
+            className="menu-item menu-item-danger"
+            onClick={() => setConfirming(true)}
           >
-            {pending ? <Spinner size={13} /> : <MoreHorizontal size={16} />}
-          </button>
-        </DropdownMenu.Trigger>
-        <DropdownMenu.Portal>
-          <DropdownMenu.Content className="menu" sideOffset={6} align="end">
-            {principal.principalType === 'user' && (
-              <>
-                <DropdownMenu.Item
-                  className="menu-item"
-                  onSelect={() => {
-                    setInstanceRole(principal.instanceRole === 'owner' ? 'owner' : 'user');
-                    setEditing(true);
-                  }}
-                >
-                  <Pencil size={14} />
-                  Change role
-                </DropdownMenu.Item>
-                <DropdownMenu.Separator className="menu-sep" />
-              </>
-            )}
-            <DropdownMenu.Item
-              className="menu-item menu-item-danger"
-              onSelect={() => setConfirming(true)}
-            >
-              <X size={14} />
-              Remove {kind}…
-            </DropdownMenu.Item>
-          </DropdownMenu.Content>
-        </DropdownMenu.Portal>
-      </DropdownMenu.Root>
+            <X size={14} />
+            Remove {kind}…
+          </Menu.Item>
+        </MenuPopup>
+      </Menu.Root>
 
       {principal.principalType === 'user' && (
         <Modal

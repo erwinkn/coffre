@@ -9,7 +9,7 @@ import {
 import { useSuspenseQuery } from '@tanstack/react-query';
 import { createFileRoute, Link } from '@tanstack/react-router';
 import { useShell } from '../lib/use-shell';
-import { DropdownMenu } from 'radix-ui';
+import { Menu } from '@base-ui/react/menu';
 import { toast } from 'sonner';
 import { failureMessage, useCoffre } from '../lib/coffre';
 import { archiveSecret, restoreSecret, saveSecrets, UnsavedEdits } from '../lib/changes';
@@ -40,6 +40,7 @@ import {
   CopyButton,
   EmptyState,
   ErrorLine,
+  MenuPopup,
   Modal,
   Notice,
   Spinner,
@@ -987,46 +988,42 @@ function SecretRow({
                     </Tip>
                   )}
                   {(canReveal || canArchive) && (
-                    <DropdownMenu.Root>
-                      <DropdownMenu.Trigger asChild>
-                        <button
-                          className="act act-icon act-quiet"
-                          aria-label={`More for ${entry.key}`}
-                          disabled={disabled}
-                        >
-                          <MoreHorizontal size={16} />
-                        </button>
-                      </DropdownMenu.Trigger>
-                      <DropdownMenu.Portal>
-                        <DropdownMenu.Content className="menu" sideOffset={6} align="end">
-                          <SecretReadOnly canReveal={canReveal}>
-                            <DropdownMenu.Item
-                              className="menu-item"
-                              onSelect={() => setHistoryOpen((open) => !open)}
+                    <Menu.Root>
+                      <Menu.Trigger
+                        className="act act-icon act-quiet"
+                        aria-label={`More for ${entry.key}`}
+                        disabled={disabled}
+                      >
+                        <MoreHorizontal size={16} />
+                      </Menu.Trigger>
+                      <MenuPopup align="end">
+                        <SecretReadOnly canReveal={canReveal}>
+                          <Menu.Item
+                            className="menu-item"
+                            onClick={() => setHistoryOpen((open) => !open)}
+                          >
+                            <History size={14} />
+                            {historyOpen ? 'Hide history' : 'Version history'}
+                          </Menu.Item>
+                        </SecretReadOnly>
+                        {canArchive && (
+                          <>
+                            {canReveal && <Menu.Separator className="menu-sep" />}
+                            <Menu.Item
+                              className="menu-item menu-item-danger"
+                              onClick={() => {
+                                setReveal(null);
+                                onMarkArchive();
+                              }}
                             >
-                              <History size={14} />
-                              {historyOpen ? 'Hide history' : 'Version history'}
-                            </DropdownMenu.Item>
-                          </SecretReadOnly>
-                          {canArchive && (
-                            <>
-                              {canReveal && <DropdownMenu.Separator className="menu-sep" />}
-                              <DropdownMenu.Item
-                                className="menu-item menu-item-danger"
-                                onSelect={() => {
-                                  setReveal(null);
-                                  onMarkArchive();
-                                }}
-                              >
-                                <Archive size={14} />
-                                Archive
-                                <span className="menu-hint">on save</span>
-                              </DropdownMenu.Item>
-                            </>
-                          )}
-                        </DropdownMenu.Content>
-                      </DropdownMenu.Portal>
-                    </DropdownMenu.Root>
+                              <Archive size={14} />
+                              Archive
+                              <span className="menu-hint">on save</span>
+                            </Menu.Item>
+                          </>
+                        )}
+                      </MenuPopup>
+                    </Menu.Root>
                   )}
                 </>
               )}
