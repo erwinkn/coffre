@@ -688,12 +688,8 @@ export const routeTree = root.addChildren([
 ```
 
 Routes in code are not split: all of coffre's pages come with the app's
-main bundle. Measured on a cold load of a project's page in Chrome, at
-50 ms latency, against `wrangler dev`: in code, 240 KB of scripts,
-gzipped, in one file, interactive at 370 ms; as file routes, 230 KB for
-that page, of 268 KB for all, in 26 files, interactive at 530 ms. Local
-`wrangler dev` speaks HTTP/1.1, where many files queue; Cloudflare's
-HTTP/2 and 3 do not.
+main bundle, where file routes give each page a chunk of its own, which
+Start's preload hints fetch with the page.
 
 - **Paths are fixed.** Each of coffre's pages is at its own path, as its
   links expect; there is no base path. Links, coffre's and the app's, are

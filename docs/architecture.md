@@ -207,8 +207,7 @@ loader, search, redirects, and a layout's component; not its path. A
 deployment mounts them as Start's file routes, a page's file naming its
 component from `@coffre/ui/pages/<name>`, so that Start's splitter puts each
 page in a chunk of its own, with Start's own preload hints. Or in code,
-`@coffre/ui/routes`, whose pages come in the main bundle, which on a cold
-load costs fewer requests and a few more kilobytes
+`@coffre/ui/routes`, whose pages all come in the main bundle
 ([Your own routes](deploy.md#your-own-routes)). `shell`, the nav, lets in only
 signed-in, registered visitors; `solo` is the frame of the sign-in pages.
 A page's component reads its own route's data through the match it renders
