@@ -16,9 +16,11 @@ import {
   minimumReleaseAge,
   HeldBack,
   install,
+  keepsNames,
   pinPackageManager,
   removeCleared,
   resolveAgain,
+  stopKeepingNames,
 } from '../src/deployment.ts';
 import { registry } from './registry.ts';
 import { inTerminal, ptySkip } from './pty.ts';
@@ -193,6 +195,53 @@ test("a deployment pins coffre's pnpm, beside \"private\", whatever it had", () 
     assert.equal(pinPackageManager(dir, 'pnpm@11.8.0'), null, 'right already');
     assert.equal(pinPackageManager(dir, 'pnpm@12.0.0'), 'pnpm@11.8.0');
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/** The template's app/wrangler.jsonc as 0.1.17 wrote it: keep_names, and its reason, not there. */
+function keepingNames(): string {
+  const template = readFileSync(join(examples, 'workers', 'app', 'wrangler.jsonc'), 'utf8');
+  const without = template.replace(/(\n[ \t]*\/\/[^\n]*){3}\n[ \t]*"keep_names": false,/, '');
+  assert.notEqual(without, template, 'the template turns keep_names off');
+  return without;
+}
+
+test("an app Worker that keeps function names gets keep_names off, with the template's reason, byte for byte as init writes it", () => {
+  const dir = mkdtempSync(join(tmpdir(), 'coffre-keep-names-'));
+  try {
+    mkdirSync(join(dir, 'app'));
+    writeFileSync(join(dir, 'app', 'wrangler.jsonc'), keepingNames());
+    assert.equal(keepsNames(dir), true);
+    stopKeepingNames(dir);
+    assert.equal(readFileSync(join(dir, 'app', 'wrangler.jsonc'), 'utf8'), readFileSync(join(examples, 'workers', 'app', 'wrangler.jsonc'), 'utf8'));
+    assert.equal(keepsNames(dir), false);
+    // Set to true by hand: turned off where it is, with no second reason.
+    writeFileSync(join(dir, 'app', 'wrangler.jsonc'), keepingNames().replace('"compatibility_flags"', '"keep_names": true,\n  "compatibility_flags"'));
+    stopKeepingNames(dir);
+    const text = readFileSync(join(dir, 'app', 'wrangler.jsonc'), 'utf8');
+    assert.match(text, /"keep_names": false,\n  "compatibility_flags"/);
+    assert.doesNotMatch(text, /seroval/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('update --yes turns keep_names off in a Workers deployment at the latest release, and says so', async () => {
+  const { dir, env, close } = await heldDeployment();
+  try {
+    bumpPins(dir, '9.9.9');
+    pinPackageManager(dir, (JSON.parse(readFileSync(join(examples, 'workers', 'package.json'), 'utf8')) as { packageManager: string }).packageManager);
+    writeFileSync(join(dir, 'app', 'wrangler.jsonc'), keepingNames());
+    const { spawn } = await import('node:child_process');
+    const child = spawn(process.execPath, ['--conditions=coffre:source', main, 'update', '--yes'], { cwd: dir, env });
+    let stderr = '';
+    child.stderr.setEncoding('utf8').on('data', (chunk: string) => (stderr += chunk));
+    assert.equal(await new Promise((resolve) => child.on('close', resolve)), 0, stderr);
+    assert.match(stderr, /Turned keep_names off in app\/wrangler\.jsonc: signed-in pages render once it is deployed/);
+    assert.equal(keepsNames(dir), false);
+  } finally {
+    close();
     rmSync(dir, { recursive: true, force: true });
   }
 });

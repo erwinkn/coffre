@@ -17,6 +17,8 @@ const USAGE = `usage:
   <dir>             the deployment, as \`coffre init\` wrote it (default: here)
   --port <n>        coffre's port; the IdP gets the next, wrangler's inspector the one after (3082)
   --bulk-limit <n>  the vault's bulkLimit count, when not the default (1000)
+  --browser <path>  Chrome or Chromium, to load the pages in (default: one found here;
+                    without one, that check is skipped)
   --postgres <url>  workers: a Postgres login that may create databases; one is made for the run
   --runtime <url>   workers: the same server as coffre_runtime, the login the app runs as
   --vault-runtime <url>
@@ -30,6 +32,7 @@ const { values, positionals } = parseArgs({
   options: {
     port: { type: 'string', default: '3082' },
     'bulk-limit': { type: 'string', default: '1000' },
+    browser: { type: 'string' },
     postgres: { type: 'string' },
     runtime: { type: 'string' },
     'vault-runtime': { type: 'string' },
@@ -63,7 +66,7 @@ try {
 console.log(`  up on ${deployment.origin}`);
 let failed: string[];
 try {
-  failed = await conform(deployment, { bulkLimit });
+  failed = await conform(deployment, { bulkLimit, browser: values.browser || null });
   if (failed.length > 0) console.error(`\nThe processes' output, last lines:\n${deployment.output(4000)}`);
 } finally {
   await deployment.stop();

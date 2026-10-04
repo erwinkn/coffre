@@ -315,6 +315,41 @@ export function readWorker(dir: string, path: string): WorkerConfig {
   };
 }
 
+/** Why the app Worker keeps no function names, as the template says it above `keep_names`. */
+export const KEEP_NAMES_WHY = [
+  '// Off: seroval writes its own functions into each signed-in page as source,',
+  "// and keep_names would wrap them in an __name that only the Worker has, so",
+  '// the page would render, then go blank. coffre needs no function\'s name.',
+];
+
+/** Whether the app Worker keeps function names, as wrangler does unless its keep_names is false. */
+export function keepsNames(dir: string): boolean {
+  const config = parse(readFileSync(join(dir, 'app', 'wrangler.jsonc'), 'utf8'), [], { allowTrailingComma: true }) as { keep_names?: unknown };
+  return config.keep_names !== false;
+}
+
+/**
+ * The app Worker's keep_names, false, with the template's reason above it:
+ * set where it is, or added after the compatibility flags' line, as the
+ * template has it.
+ */
+export function stopKeepingNames(dir: string): void {
+  const path = join(dir, 'app', 'wrangler.jsonc');
+  const text = readFileSync(path, 'utf8');
+  if (/"keep_names"\s*:/.test(text)) {
+    editWorker(dir, 'app/wrangler.jsonc', [{ path: ['keep_names'], value: false }]);
+    return;
+  }
+  const flags = /^([ \t]*)"compatibility_flags":[^\n]*,\n/m.exec(text);
+  if (flags !== null) {
+    const at = flags.index + flags[0].length;
+    const block = [...KEEP_NAMES_WHY, '"keep_names": false,'].map((line) => `${flags[1]}${line}\n`).join('');
+    writeFileSync(path, text.slice(0, at) + block + text.slice(at));
+    return;
+  }
+  editWorker(dir, 'app/wrangler.jsonc', [{ path: ['keep_names'], value: false }]);
+}
+
 /** A value as the examples write one on a single line: `[{ "pattern": "…", "custom_domain": true }]`. */
 function inline(value: unknown): string {
   return JSON.stringify(value, null, 1).replace(/\n\s*/g, ' ').replace(/\[ /g, '[').replace(/ \]/g, ']');

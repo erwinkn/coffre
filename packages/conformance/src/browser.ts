@@ -10,6 +10,11 @@ export class Browser {
     this.origin = origin;
   }
 
+  /** The cookies coffre left this browser, to hand a real one. */
+  cookies(): [string, string][] {
+    return [...this.#jar];
+  }
+
   /** Whether coffre left this browser a cookie. */
   get hasCookies(): boolean {
     return this.#jar.size > 0;

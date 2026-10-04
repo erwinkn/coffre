@@ -90,8 +90,9 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: ./.github/actions/prepare
       - name: Workers conformance
+        # The runner's Chrome, named: the pages check runs, rather than skips.
         run: |
-          pnpm conformance:workers
+          pnpm conformance:workers --browser /usr/bin/google-chrome
 
   node:
     needs: changes
@@ -105,7 +106,7 @@ jobs:
       - uses: ./.github/actions/prepare
       - name: Node conformance
         run: |
-          pnpm conformance:node
+          pnpm conformance:node --browser /usr/bin/google-chrome
 
   consumer:
     needs: changes

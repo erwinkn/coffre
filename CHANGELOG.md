@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+**Workers deployments: signed-in pages no longer go blank.** wrangler bundles
+with esbuild's `keep_names` on, which wraps functions in an `__name` helper
+that only the Worker has; seroval, which streams a page's data, writes its own
+functions into the page as source, and with them the `__name` calls: in the
+browser, `ReferenceError: __name is not defined`, then a blank page.
+`app/wrangler.jsonc` now sets `"keep_names": false`, as `coffre init` writes
+it, and `coffre update` offers to set it in an existing deployment, showing the
+lines it adds. Deploy the app after. Node deployments were not affected.
+
+Conformance loads the pages in a real browser: signed in, `/projects`, a
+project and `/audit`, in headless Chrome, with no console error. Without a
+Chrome on the machine, the check is skipped and says so; `--browser <path>`
+names one.
+
 `coffre setup` in a fresh clone of a deployment, with no `node_modules`,
 installs it first, as its lockfile says, before Cloudflare's sign-in runs the
 deployment's own wrangler: it no longer fails with `spawn …/wrangler ENOENT`.
