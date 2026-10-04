@@ -1,4 +1,5 @@
 import { ROLE_NAMES, type Permission } from '@coffre/core/access';
+import { MAX_BINDINGS, MAX_CLAIMS, WORKLOAD_PROFILES } from '@coffre/core/identity';
 import { displayName, secretKey, slug } from '@coffre/core/schemas';
 import { z } from 'zod';
 
@@ -80,6 +81,12 @@ const role = z.enum(ROLE_NAMES);
 function signin(ctx: ApiContext) {
   if (ctx.signin === null) throw notFound("this instance has no sign-in of its own");
   return ctx.signin;
+}
+
+/** Trust bindings for CI runs: on when the deployment's sign-in says so. */
+function workloads(ctx: ApiContext) {
+  if (ctx.workloads === null) throw notFound("this instance trusts no workloads: the deployment's signin({ workloads }) turns them on");
+  return ctx.workloads;
 }
 
 function serviceId(member: string): string {
@@ -206,6 +213,30 @@ export const routes = {
       serviceId(params.member);
       return signin(ctx).revokeCredential(ctx, params.id);
     },
+  }),
+  ...route('GET /members/:member/bindings', {
+    run: async (ctx, { params }) => ({
+      bindings: await workloads(ctx).listBindings(ctx, serviceId(params.member)),
+    }),
+  }),
+  ...route('POST /members/:member/bindings', {
+    input: z.object({
+      profile: z.enum(WORKLOAD_PROFILES),
+      // github.com's or gitlab.com's when left out; a custom binding names its own.
+      issuer: z.string().max(400).nullable().default(null),
+      claims: z
+        .record(z.string().max(64), z.string().max(1024))
+        .refine((claims) => Object.keys(claims).length <= MAX_CLAIMS, `a binding names at most ${MAX_CLAIMS} claims`),
+      label: z.string().trim().min(1).max(120).nullable().default(null),
+      replaces: z.array(z.string().uuid()).max(MAX_BINDINGS).default([]),
+    }).strict(),
+    // `?dryRun=1` checks the binding and asks its issuer where its keys are, and writes nothing.
+    query: z.object({ dryRun: z.enum(['1', 'true']).optional() }).strict(),
+    run: (ctx, { params, input, query }) =>
+      workloads(ctx).bind(ctx, serviceId(params.member), input, { dryRun: query.dryRun !== undefined }),
+  }),
+  ...route('DELETE /members/:member/bindings/:id', {
+    run: (ctx, { params }) => workloads(ctx).unbind(ctx, serviceId(params.member), params.id),
   }),
   ...route('PATCH /access/:member', {
     input: z.record(

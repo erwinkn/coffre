@@ -45,6 +45,7 @@ before(async () => {
     chainKey: deps.chainKey,
 
     signin: service,
+    workloads: null,
     auth,
     publicUrl: ORIGIN,
     verifier: service,

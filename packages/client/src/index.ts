@@ -9,13 +9,15 @@
  * else: the web app hands requests straight to its router, and the CLI adds
  * its own handling of Cloudflare Access redirects.
  */
-import type { Api, AuthInfo, DryRunOutcome, DryRunResult, SetResult } from './api.ts';
+import type { Api, AuthInfo, BindingPlan, BindingView, DryRunOutcome, DryRunResult, SetResult } from './api.ts';
 
 export type {
   AccessValue,
   Api,
   AuditEntryView,
   AuthInfo,
+  BindingPlan,
+  BindingView,
   DryRunOutcome,
   DryRunResult,
   IdentityRow,
@@ -213,6 +215,19 @@ export function createClient(options: ClientOptions) {
       issue: (member: string, input: RouteInput<'POST /members/:member/tokens'>) =>
         call('POST /members/:member/tokens', { member }, input),
       revoke: (member: string, id: string) => call('DELETE /members/:member/tokens/:id', { member, id }),
+    },
+
+    /** Trust bindings: which CI runs may sign in as a service, by their platform's ID token. */
+    bindings: {
+      list: (member: string) => call('GET /members/:member/bindings', { member }),
+      /** The binding as it would be saved, the keys its issuer names, and what it replaces; writes nothing. */
+      preview: (member: string, input: RouteInput<'POST /members/:member/bindings'>) => {
+        const [method, route] = address('POST /members/:member/bindings', { member });
+        return send(method, `${route}?dryRun=1`, input) as Promise<BindingPlan>;
+      },
+      create: (member: string, input: RouteInput<'POST /members/:member/bindings'>) =>
+        call('POST /members/:member/bindings', { member }, input) as Promise<{ binding: BindingView; replaced: string[] }>,
+      remove: (member: string, id: string) => call('DELETE /members/:member/bindings/:id', { member, id }),
     },
 
     access: {

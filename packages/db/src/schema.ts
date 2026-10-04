@@ -300,6 +300,10 @@ export const auditLog = pgTable(
     index('audit_log_releases_idx').on(table.author, table.actor, table.action, table.decision, table.occurredAt),
     // What the vault logged about one member, in order.
     index('audit_log_subject_idx').on(table.author, table.subjectPrincipal, table.seq),
+    // A binding's tombstone: the app's successful `token.unbind` naming it.
+    index('audit_log_unbind_idx')
+      .on(sql`((${table.metadata})::jsonb ->> 'bindingId')`)
+      .where(sql`${table.author} = 'app' AND ${table.action} = 'token.unbind' AND ${table.decision} = 'allow'`),
   ],
 );
 
@@ -358,6 +362,47 @@ export const identities = pgTable(
     // while the identity is not revoked (see ACTIVE_SUBJECT).
     uniqueIndex('identities_active_subject').on(table.provider, table.issuerHash, table.activeSubject),
     index('identities_principal_idx').on(table.principal, table.generation),
+  ],
+);
+
+/**
+ * A trust binding: which CI runs may sign in as a service, by the ID token
+ * their platform signs (`@coffre/core/identity`'s workloads.ts). Immutable
+ * but for its label, last use and revocation: a change is a new binding, and
+ * the old one's `token.unbind` entry is its tombstone, which outlives any
+ * row put back. The MAC covers what decides (auth-rows.ts in the server).
+ */
+export const serviceBindings = pgTable(
+  'service_bindings',
+  {
+    id: uuid().primaryKey(),
+    authMac: bytea('auth_mac').notNull(),
+    // The service it signs in as, `token:<id>`, under the generation it was bound in.
+    principal: text().notNull(),
+    generation: integer().notNull(),
+    profile: text().notNull(),
+    issuer: text().notNull(),
+    // From the issuer's discovery when the binding was made, never refetched.
+    jwksUri: text('jwks_uri').notNull(),
+    // JSON, sorted by claim name.
+    claims: text().notNull(),
+    label: text(),
+    createdAt: createdAt(),
+    createdBy: text('created_by').notNull(),
+    lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    revokedBy: text('revoked_by'),
+  },
+  (table) => [
+    check('service_bindings_principal_check', sql`${table.principal} LIKE 'token:%'`),
+    check('service_bindings_auth_mac_check', sql`octet_length(${table.authMac}) = 32`),
+    check('service_bindings_claims_check', sql`${table.claims}::jsonb IS NOT NULL`),
+    foreignKey({
+      name: 'service_bindings_principal_fkey',
+      columns: [table.principal],
+      foreignColumns: [vaultMembers.principal],
+    }).onDelete('restrict'),
+    index('service_bindings_principal_idx').on(table.principal, table.issuer),
   ],
 );
 

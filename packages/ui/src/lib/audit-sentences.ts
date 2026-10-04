@@ -223,6 +223,17 @@ const TEMPLATES: Record<string, Template> = {
         ? [...place(facts.entry), ` from ${destination(facts.entry)}`]
         : [plural(facts.count, 'secret'), ' of ', ...environmentOf(facts.entry), ` from ${destination(facts.entry)}`],
   },
+  // A binding trusts CI runs to sign in as a service; removing one is its tombstone.
+  'token.bind': {
+    did: 'trusted CI runs to sign in as',
+    tried: 'trust CI runs to sign in as',
+    what: (facts) => subject(facts.entry),
+  },
+  'token.unbind': {
+    did: 'stopped trusting CI runs to sign in as',
+    tried: 'stop trusting CI runs to sign in as',
+    what: (facts) => subject(facts.entry),
+  },
   'vault.tampered': {
     did: 'found',
     tried: 'check',

@@ -331,6 +331,68 @@ export type Api = {
       revoked: true;
     };
   };
+  "GET /members/:member/bindings": {
+    input: undefined;
+    output: {
+      bindings: {
+        id: string;
+        profile: "custom" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab";
+        issuer: string;
+        jwksUri: string;
+        claims: {
+          [key: string]: string;
+        };
+        label: string | null;
+        createdAt: string;
+        createdBy: string;
+        lastUsedAt: string | null;
+      }[];
+    };
+  };
+  "POST /members/:member/bindings": {
+    input: {
+      profile: "custom" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab";
+      claims: {
+        [key: string]: string;
+      };
+      issuer?: string | null;
+      label?: string | null;
+      replaces?: string[];
+    };
+    output: {
+      profile: "custom" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab";
+      issuer: string;
+      jwksUri: string;
+      claims: {
+        [key: string]: string;
+      };
+      replaces: {
+        id: string;
+        why: "asked" | "keys_moved";
+      }[];
+    } | {
+      binding: {
+        id: string;
+        profile: "custom" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab";
+        issuer: string;
+        jwksUri: string;
+        claims: {
+          [key: string]: string;
+        };
+        label: string | null;
+        createdAt: string;
+        createdBy: string;
+        lastUsedAt: string | null;
+      };
+      replaced: string[];
+    };
+  };
+  "DELETE /members/:member/bindings/:id": {
+    input: undefined;
+    output: {
+      unbound: true;
+    };
+  };
   "PATCH /access/:member": {
     input: {
       [key: string]: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer" | null | {
@@ -527,6 +589,33 @@ export type AuthInfo = {
   access: null | {
     assertion: boolean;
   };
+};
+
+export type BindingPlan = {
+  profile: "custom" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab";
+  issuer: string;
+  jwksUri: string;
+  claims: {
+    [key: string]: string;
+  };
+  replaces: {
+    id: string;
+    why: "asked" | "keys_moved";
+  }[];
+};
+
+export type BindingView = {
+  id: string;
+  profile: "custom" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab";
+  issuer: string;
+  jwksUri: string;
+  claims: {
+    [key: string]: string;
+  };
+  label: string | null;
+  createdAt: string;
+  createdBy: string;
+  lastUsedAt: string | null;
 };
 
 export type DryRunOutcome = "added" | "archived" | "changed" | "unchanged";

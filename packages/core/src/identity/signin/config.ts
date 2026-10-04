@@ -68,7 +68,21 @@ export type SigninConfig = {
   browserSessionHours: number;
   /** Absolute lifetime of a CLI session. */
   cliSessionDays: number;
+  /** CI runs signing in as services with their platform's ID token, when on (`workloads.ts`). */
+  workloads: WorkloadsConfig | null;
 };
+
+/**
+ * Workload identity: CI runs that sign in as a service with the ID token
+ * their platform signs for them, through the trust bindings an owner sets
+ * on the service (docs/design/oidc.md). Off unless the deployment turns it on.
+ */
+export type WorkloadsOptions = {
+  /** Lets a binding's issuer be plain HTTP on loopback: the dev IdP's, never production's. */
+  allowLoopback?: boolean;
+};
+
+export type WorkloadsConfig = { allowLoopback: boolean };
 
 const PROVIDER_ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const BRANDS: readonly SigninBrand[] = ['github', 'google', 'microsoft', 'oidc'];
@@ -253,6 +267,7 @@ export function defineSignin(options: {
   page?: { title?: string; note?: string };
   browserSessionHours?: number;
   cliSessionDays?: number;
+  workloads?: WorkloadsOptions;
 }): SigninConfig {
   if (options.providers.length === 0) {
     throw new Error('sign-in needs at least one provider');
@@ -272,6 +287,7 @@ export function defineSignin(options: {
     },
     browserSessionHours: lifetime(options.browserSessionHours, 'browserSessionHours', 12, 24 * 7),
     cliSessionDays: lifetime(options.cliSessionDays, 'cliSessionDays', 30, 365),
+    workloads: options.workloads === undefined ? null : { allowLoopback: options.workloads.allowLoopback === true },
   };
 }
 

@@ -40,6 +40,12 @@ const EXPECTED_UPDATE_COLUMNS = [
   'secrets.current_version_id',
   'secrets.key',
   'secrets.updated_at',
+  // A binding changes in place only in its label, last use and revocation, with the MAC that covers them.
+  'service_bindings.auth_mac',
+  'service_bindings.label',
+  'service_bindings.last_used_at',
+  'service_bindings.revoked_at',
+  'service_bindings.revoked_by',
 ];
 
 test(
@@ -52,7 +58,7 @@ test(
       const migrations = await owner.query<{ count: number }>(
         'SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations',
       );
-      assert.equal(migrations.rows[0].count, 2);
+      assert.equal(migrations.rows[0].count, 3);
 
       const identity = await runtime.query<{
         current_user: string;

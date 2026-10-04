@@ -217,6 +217,7 @@ test('defineSignin needs a provider, and each needs a client id and secret', () 
       page: { title: 'Acme secrets', note: null },
       browserSessionHours: 4,
       cliSessionDays: 30,
+      workloads: null,
     },
   );
 });

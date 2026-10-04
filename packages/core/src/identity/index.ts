@@ -4,3 +4,4 @@ export * from './signin/index.ts';
 export * from './tokens.ts';
 export * from './types.ts';
 export * from './verifier.ts';
+export * from './workloads.ts';

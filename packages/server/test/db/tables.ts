@@ -24,4 +24,5 @@ export const {
   identities,
   credentials,
   deviceAuthorizations,
+  serviceBindings,
 } = schema;

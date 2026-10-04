@@ -5,6 +5,7 @@ import { handleRequest, runScheduled } from './app.ts';
 import { cloudflareSourceIp } from './auth.ts';
 import { resolveConfig, type CoffreConfig, type ResolvedConfig } from './config.ts';
 import { createRuntime } from './runtime.ts';
+import { fetchTransport } from './workloads/transport.ts';
 import type { Ui } from './ui.ts';
 
 export { postgres, type PostgresDatabase } from '@coffre/db/hyperdrive';
@@ -39,7 +40,7 @@ export function cloudflareHandler<Env>(configure: (env: Env) => WorkersConfig, u
     }
     const pool = new HyperdrivePool(entry.config.database.hyperdrive.connectionString);
     const left: Promise<unknown>[] = [];
-    const runtime = createRuntime(entry.resolved, createDatabase(pool), entry.config.vault, (promise) => {
+    const runtime = createRuntime(entry.resolved, createDatabase(pool), entry.config.vault, fetchTransport(), (promise) => {
       left.push(promise);
       ctx.waitUntil(promise);
     });

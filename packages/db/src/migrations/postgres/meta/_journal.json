@@ -15,6 +15,13 @@
       "when": 1791062292678,
       "tag": "0001_remove_syncs",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1791069304538,
+      "tag": "0002_service_bindings",
+      "breakpoints": true
     }
   ]
 }

@@ -4,9 +4,11 @@ import type { Database } from '@coffre/db';
 
 import type { ApiContext } from './api/context.ts';
 import { SigninService } from './api/signin.ts';
+import { WorkloadService } from './api/workloads.ts';
 import type { AuthenticatedIdentity } from './auth.ts';
 import type { ResolvedConfig } from './config.ts';
 import { logged } from './logged.ts';
+import type { WorkloadTransport } from './workloads/transport.ts';
 
 export type CoffreRuntime = {
   db: Database;
@@ -15,6 +17,8 @@ export type CoffreRuntime = {
   chainKey: Buffer;
   /** Present in signin mode only. */
   signin: SigninService | null;
+  /** Trust bindings, when sign-in turns them on. */
+  workloads: WorkloadService | null;
   auth: ResolvedConfig['auth'];
   publicUrl: string;
   verifier: IdentityVerifier;
@@ -31,11 +35,14 @@ export function createRuntime(
   config: ResolvedConfig,
   db: Database,
   vault: Vault,
+  /** How an issuer's discovery and keys are fetched: the runtime's own (`workloads/transport.ts`). */
+  transport: WorkloadTransport,
   waitUntil: CoffreRuntime['waitUntil'] = (promise) => {
     promise.catch((error: unknown) => console.error('background task failed', logged(error)));
   },
 ): CoffreRuntime {
   let signin: SigninService | null = null;
+  let workloads: WorkloadService | null = null;
   let verifier: IdentityVerifier;
   if (config.auth.mode === 'signin') {
     signin = new SigninService({
@@ -45,6 +52,8 @@ export function createRuntime(
       signin: config.auth.signin,
     });
     verifier = signin;
+    const trusted = config.auth.signin.workloads;
+    if (trusted !== null) workloads = new WorkloadService({ db, chainKey: config.auditChainKey, vault, config: trusted, transport });
   } else {
     verifier = accessVerifier(config.auth.access);
   }
@@ -53,6 +62,7 @@ export function createRuntime(
     vault,
     chainKey: config.auditChainKey,
     signin,
+    workloads,
     auth: config.auth,
     publicUrl: config.publicUrl,
     verifier,
@@ -68,6 +78,7 @@ export function apiContext(runtime: CoffreRuntime, identity: AuthenticatedIdenti
     vault: runtime.vault,
     waitUntil: runtime.waitUntil,
     signin: runtime.signin,
+    workloads: runtime.workloads,
     caller: identity.caller,
     requestId: identity.requestId,
     sourceIp: identity.sourceIp,

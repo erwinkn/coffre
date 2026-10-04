@@ -10,6 +10,7 @@ import { loadCaller } from '../src/api/caller.ts';
 import type { ApiContext } from '../src/api/context.ts';
 import { serveApi } from '../src/api/router.ts';
 import type { SigninService } from '../src/api/signin.ts';
+import type { WorkloadService } from '../src/api/workloads.ts';
 import { emptyLog, openVaultDatabase } from './db/engine.ts';
 import { assertOutsideTransaction } from './transaction-guard.ts';
 import { drainBackgroundTasks, trackBackgroundTask } from './background-tasks.ts';
@@ -20,6 +21,7 @@ export type FixtureDeps = {
   chainKey: Buffer;
   waitUntil?: ApiContext['waitUntil'];
   signin?: SigninService;
+  workloads?: WorkloadService;
 };
 
 /**
@@ -118,6 +120,7 @@ export async function contextFor(
       }
     },
     signin: deps.signin ?? null,
+    workloads: deps.workloads ?? null,
     caller: await loadCaller(deps.vault, { type, id }),
     requestId: randomUUID(),
     sourceIp: null,
@@ -169,10 +172,12 @@ export async function resetDatabase(owner: Database): Promise<void> {
     projects,
     secrets,
     secretVersions,
+    serviceBindings,
     vaultGrants,
     vaultMembers,
   } = tablesOf(owner);
   await owner.delete(credentials);
+  await owner.delete(serviceBindings);
   await owner.delete(deviceAuthorizations);
   await owner.delete(identities);
   await emptyLog(owner);
