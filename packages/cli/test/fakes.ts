@@ -177,13 +177,18 @@ export function fakeWrangler(dir: string, state: string, token: string, real?: s
   const jsonc = createRequire(import.meta.url).resolve('jsonc-parser');
   const script = `#!${process.execPath}
 import { spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import jsonc from ${JSON.stringify(jsonc)};
 const STATE = ${JSON.stringify(state)};
 const REAL = ${JSON.stringify(real ?? null)};
 const args = process.argv.slice(2);
-writeFileSync(STATE + '/pid-' + args[0], String(process.pid));
+// What a test waits for, whole the moment it exists: written beside it, then renamed, never seen empty.
+const publish = (path, text) => {
+  writeFileSync(path + '.partial', text);
+  renameSync(path + '.partial', path);
+};
+publish(STATE + '/pid-' + args[0], String(process.pid));
 // The secrets file by its path, as wrangler reads it: /dev/stdin must open as a file.
 const stdin = args.includes('--secrets-file') ? readFileSync(args[args.indexOf('--secrets-file') + 1], 'utf8') : '';
 appendFileSync(STATE + '/calls.jsonl', JSON.stringify({ args, stdin, account: process.env.CLOUDFLARE_ACCOUNT_ID ?? null }) + '\\n');
@@ -201,7 +206,7 @@ if (args[0] === 'auth') {
     console.log('Successfully logged in.');
   });
   const announce = (port) => {
-    writeFileSync(STATE + '/login', JSON.stringify({ port, state }));
+    publish(STATE + '/login', JSON.stringify({ port, state }));
     console.log('Attempting to login via OAuth...');
     console.log('Visit this link to authenticate: https://dash.cloudflare.com/oauth2/auth?response_type=code&client_id=54d11594&redirect_uri=' + encodeURIComponent('http://127.0.0.1:' + port + '/oauth/callback') + '&scope=account%3Aread&state=' + state);
   };
