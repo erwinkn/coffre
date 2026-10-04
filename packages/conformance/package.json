@@ -1,6 +1,6 @@
 {
   "name": "@coffre/conformance",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "description": "Checks a coffre deployment from outside: what it must never do, whatever code it runs.",
   "license": "MIT",
   "repository": {
