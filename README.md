@@ -122,7 +122,7 @@ coffre use                                  # the instances you are signed in to
 
 coffre list     market/dev
 coffre get      market/dev/DATABASE_URL
-coffre set      market/dev/DATABASE_URL     # reads the value from stdin
+coffre set      market/dev/DATABASE_URL     # asks for the value, or reads it piped in
 coffre run      market/dev -- printenv
 coffre export   market/dev --format dotenv  # or json, shell, github
 coffre history  market/dev/DATABASE_URL
@@ -158,17 +158,17 @@ use `--format shell`, which quotes values literally, including quotes and
 newlines, or use `coffre run` to pass them directly to a child process.
 
 A session lasts 30 days, is kept per instance in `~/.coffre/credentials.json`
-(mode 0600), and can be revoked from the account page. CI stores nothing:
-the session flags, before the command, say where and as whom, and the CLI
-reads no environment variable. `--url` names the instance, and
-`--token-file` a file that holds a service token from the Tokens page, or
-`-` for stdin; `--service` signs a CI run in by its ID token instead
-([docs/ci.md](docs/ci.md)), and `--access-client-id` with
-`--access-client-secret-file` passes Access
+(mode 0600), and can be revoked from the account page. The CLI reads no
+environment variable, and a secret is never a flag or an argument: a command
+asks for it at a hidden prompt, or reads it from stdin. CI signs in the same
+way, with a service token from the Tokens page, piped to `coffre login
+--token`; or as a service by its ID token, `--service`
+([docs/ci.md](docs/ci.md)); or with an Access service token
 ([docs/deployment-auth.md](docs/deployment-auth.md)):
 
 ```sh
-printf '%s' "$TOKEN" | coffre --url https://secrets.acme.example --token-file - export market/prod
+printf '%s' "$TOKEN" | coffre login https://secrets.acme.example --token
+coffre run market/prod -- ./deploy
 ```
 
 ## The API

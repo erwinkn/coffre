@@ -15,6 +15,7 @@ import { migrationsFolder } from '@coffre/db/migrate';
 import { migrationFailure, pendingOf, pinProblem, versionProblem } from '../src/migrate.ts';
 import { cliVersion } from '../src/version.ts';
 import { database, emptyCluster, needsCluster } from './cluster.ts';
+import { signedInWithToken } from './fakes.ts';
 
 const main = fileURLToPath(new URL('../src/main.ts', import.meta.url));
 const ORIGIN = 'https://coffre.example';
@@ -91,12 +92,11 @@ async function instance(version: string, url: string | null): Promise<{ origin: 
   return { origin: `http://127.0.0.1:${address.port}`, server };
 }
 
-/** `coffre migrate`, as a script runs it: no terminal, the token in a file, the URL on stdin. */
+/** `coffre migrate`, as a script runs it: no terminal, signed in with a service token, the URL piped in. */
 function migrate(origin: string, url: string | null, args: string[] = ['--yes']): Promise<{ code: number | null; output: string }> {
   const home = mkdtempSync(join(tmpdir(), 'coffre-migrate-'));
-  writeFileSync(join(home, 'token'), 'coffre_svc_test\n');
-  const session = ['--url', origin, '--auth-mode', 'signin', '--token-file', join(home, 'token')];
-  const child = spawn(process.execPath, ['--conditions=coffre:source', main, ...session, 'migrate', ...args, ...(url === null ? [] : ['--database-url-file', '-'])], {
+  signedInWithToken(home, origin, 'coffre_svc_test');
+  const child = spawn(process.execPath, ['--conditions=coffre:source', main, 'migrate', ...args], {
     env: { PATH: process.env.PATH, HOME: home },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
@@ -143,7 +143,7 @@ const pinnedAt = (version: string) => ({ '@coffre/server': version, '@coffre/vau
 /** `coffre migrate`, as a deployment's pipeline runs it in its folder: no terminal, no session, the URL on stdin. */
 function migrateIn(dir: string, url: string | null, args: string[] = ['--yes'], session: string[] = []): Promise<{ code: number | null; output: string }> {
   const home = mkdtempSync(join(tmpdir(), 'coffre-migrate-'));
-  const child = spawn(process.execPath, ['--conditions=coffre:source', main, ...session, 'migrate', ...args, ...(url === null ? [] : ['--database-url-file', '-'])], {
+  const child = spawn(process.execPath, ['--conditions=coffre:source', main, ...session, 'migrate', ...args], {
     cwd: dir,
     env: { PATH: process.env.PATH, HOME: home },
     stdio: ['pipe', 'pipe', 'pipe'],

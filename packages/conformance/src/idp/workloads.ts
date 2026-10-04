@@ -17,7 +17,7 @@ import { readParams, sendJson, type Route } from './http.ts';
  * `POST /workloads/token` mints one, for trying the CLI by hand:
  *
  *   curl -s -X POST http://127.0.0.1:8081/workloads/token -d aud=http://127.0.0.1:3000 | jq -r .token |
- *     coffre --url http://127.0.0.1:3000 --service <name> --id-token-file - whoami
+ *     coffre login http://127.0.0.1:3000 --service <name> --id-token
  */
 export class WorkloadIssuer {
   readonly #origin: () => string;

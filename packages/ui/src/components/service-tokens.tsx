@@ -200,8 +200,8 @@ function IssueToken({ serviceId }: { serviceId: string }) {
           <div className="form">
             <Notice tone="info">
               This is the only time the value is shown. Store it where the service keeps its
-              secrets; the CLI reads it from a file, or stdin, with{' '}
-              <span className="mono">coffre --token-file &lt;path|-&gt;</span>.
+              secrets; a CI run signs the CLI in with it, piped to{' '}
+              <span className="mono">coffre login &lt;url&gt; --token</span>.
             </Notice>
             <div className="token-once">
               <code className="mono">{issued.token}</code>

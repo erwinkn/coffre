@@ -20,7 +20,7 @@ export function parseCanary(text: string, value?: string): Canary {
   if (parts.length !== 3 || parts.some((part) => part === '')) {
     throw new Error(`the canary is <project>/<environment>/<KEY>, not "${path}"`);
   }
-  if (given === undefined || given === '') throw new Error('the canary has no value: pass it after =, or in --canary-value-file <path|->');
+  if (given === undefined || given === '') throw new Error('the canary has no value: paste it when asked, or pipe it in');
   const [project, environment, key] = parts as [string, string, string];
   return { project, environment, key, value: given };
 }

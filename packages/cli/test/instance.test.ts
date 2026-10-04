@@ -95,6 +95,7 @@ test('with no session flags, the current instance and its session are used', () 
   assert.deepEqual(resolveTarget({}, storeWith(), NOW), {
     origin: OURS,
     mode: 'signin',
+    by: 'person',
     credential: { kind: 'token', token: 'coffre_cli_ours' },
   });
 });
@@ -103,43 +104,37 @@ test('--url picks another saved instance, with that instance’s mode', () => {
   assert.deepEqual(resolveTarget({ url: 'coffre.acme.example' }, storeWith(), NOW), {
     origin: THEIRS,
     mode: 'cloudflare',
+    by: 'person',
     credential: { kind: 'cloudflared' },
   });
 });
 
-test('a service token in --token-file works with nothing saved, as in CI', () => {
-  assert.deepEqual(
-    resolveTarget({ url: OURS, token: 'coffre_svc_ci' }, emptyStore(), NOW),
-    { origin: OURS, mode: 'signin', credential: { kind: 'token', token: 'coffre_svc_ci' } },
-  );
-});
-
-test('a Cloudflare Access service token implies Cloudflare mode', () => {
-  const target = resolveTarget(
-    {
-      url: THEIRS,
-      accessClientId: 'id.access',
-      accessClientSecret: 'shh',
-    },
-    emptyStore(),
-    NOW,
-  );
-  assert.deepEqual(target, {
+test('a CI run signs in with `coffre login`, and its session is used as a person’s is', () => {
+  const token = withSession(emptyStore(), OURS, { mode: 'signin', kind: 'token', token: 'coffre_svc_ci', expiresAt: null, obtainedAt: '2026-09-26T00:00:00Z' });
+  assert.deepEqual(resolveTarget({}, token, NOW), { origin: OURS, mode: 'signin', by: 'token', credential: { kind: 'token', token: 'coffre_svc_ci' } });
+  const access = withSession(emptyStore(), THEIRS, { mode: 'cloudflare', kind: 'access', clientId: 'id.access', clientSecret: 'shh', obtainedAt: '2026-09-26T00:00:00Z' });
+  assert.deepEqual(resolveTarget({}, access, NOW), {
     origin: THEIRS,
     mode: 'cloudflare',
+    by: 'access',
     credential: { kind: 'access-service-token', clientId: 'id.access', clientSecret: 'shh' },
   });
+  // A run's credential lasts five minutes, and says how to get another.
+  const run = withSession(emptyStore(), OURS, {
+    mode: 'signin',
+    kind: 'run',
+    token: 'coffre_svc_run',
+    principal: { type: 'service', id: 'token:api-deploy' },
+    expiresAt: '2026-09-26T12:05:00Z',
+    obtainedAt: '2026-09-26T12:00:00Z',
+  });
+  assert.equal(resolveTarget({}, run, NOW).by, 'run');
   assert.throws(
-    () => resolveTarget({ url: THEIRS, accessClientId: 'id' }, emptyStore(), NOW),
-    /--access-client-id needs its secret: --access-client-secret-file/,
+    () => resolveTarget({}, run, new Date('2026-09-26T12:06:00Z')),
+    /lasted until 12:05:00: sign in again, `coffre login https:\/\/coffre\.example\.com --service token:api-deploy`/,
   );
-  // Even where a session is saved for coffre's own sign-in: the flag says which.
-  assert.equal(resolveTarget({ url: OURS, accessClientId: 'id', accessClientSecret: 'shh' }, storeWith(), NOW).credential.kind, 'access-service-token');
-  assert.throws(
-    () => resolveTarget({ url: OURS, accessClientId: 'id', accessClientSecret: 'shh', authMode: 'signin' }, storeWith(), NOW),
-    /--access-client-id is a Cloudflare Access service token, and --auth-mode signin/,
-  );
-  assert.throws(() => resolveTarget({ url: THEIRS, accessClientSecret: 'shh' }, emptyStore(), NOW), /--access-client-secret-file goes with --access-client-id/);
+  // An unknown kind, from a later CLI say, is no session at all.
+  assert.deepEqual(parseStore(JSON.stringify({ version: 2, current: OURS, instances: { [OURS]: { mode: 'signin', kind: 'robot', token: 't' } } })), emptyStore());
 });
 
 test('an instance with no saved session asks for a login there', () => {

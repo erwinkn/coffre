@@ -1,16 +1,15 @@
 // A database's owner URL, as `coffre setup` and `coffre migrate` take it:
-// from the file --database-url-file names, from stdin for `-`, or typed at a
-// hidden prompt; never from the command line, where the shell's history and
-// other users can read it.
-import { secretFile } from './flags.ts';
+// typed at a hidden prompt on a terminal, or piped in, as a pipeline does
+// (`printenv DATABASE_OWNER_URL | coffre migrate --yes`); never from the
+// command line, where the shell's history and other users can read it.
+import { readFileSync } from 'node:fs';
+
 import { hiddenLine, type Output, type Style } from './tty.ts';
 
 /** Why there is no usable URL, said as it is. */
 export class DatabaseUrlError extends Error {}
 
 export type Asking = {
-  /** What --database-url-file names: a path, or `-` for stdin. */
-  file: string | undefined;
   question: string;
   hint: string;
   /** The command, as messages name it: `coffre setup`. */
@@ -18,23 +17,18 @@ export type Asking = {
 };
 
 /**
- * The connection string: from the file, or typed at a hidden prompt. With
- * it, every form of its secrets, as typed and decoded, for the caller to
- * keep out of anything it shows.
+ * The connection string: typed at a hidden prompt on a terminal, or the
+ * whole of stdin. With it, every form of its secrets, as typed and decoded,
+ * for the caller to keep out of anything it shows.
  */
 export async function readDatabaseUrl(out: Output, s: Style, asking: Asking): Promise<{ url: URL; secrets: string[] }> {
   let text: string;
-  if (asking.file !== undefined) {
-    try {
-      text = secretFile('--database-url-file', asking.file);
-    } catch (error) {
-      throw new DatabaseUrlError((error as Error).message);
-    }
-  } else if (process.stdin.isTTY) {
+  if (process.stdin.isTTY) {
     text = await hiddenLine(process.stdin, out, s, asking.question, asking.hint);
     if (text === '') throw new DatabaseUrlError('no connection string given');
   } else {
-    throw new DatabaseUrlError('no connection string, and no terminal to ask for it on: pass --database-url-file <path>, or - for stdin');
+    text = readFileSync(0, 'utf8').trim();
+    if (text === '') throw new DatabaseUrlError(`no connection string: pipe it in, as \`printenv DATABASE_OWNER_URL | ${asking.command} …\`, or run it on a terminal`);
   }
   const url = databaseUrl(text, asking.command);
   return { url, secrets: url.password === '' ? [text] : [text, url.password, decodeURIComponent(url.password)] };

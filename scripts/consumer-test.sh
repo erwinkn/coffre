@@ -87,7 +87,7 @@ echo "==> coffre setup, packed"
 test -f "$work/cli/package/dist/migrations/postgres/meta/_journal.json"
 unreachable="postgresql://smoke:smoke-only-password@127.0.0.1:9/coffre"
 for args in "" "--json"; do
-    if said="$(echo "$unreachable" | node "$work/cli/package/dist/main.js" setup $args --database-url-file - 2>&1)"; then
+    if said="$(echo "$unreachable" | node "$work/cli/package/dist/main.js" setup $args 2>&1)"; then
         echo "consumer-test: coffre setup $args accepted a database it cannot reach" >&2
         exit 1
     fi
@@ -133,7 +133,7 @@ for kind in "${kinds[@]}"; do
         echo "consumer-test: pnpm exec coffre migrate succeeded with no database" >&2
         exit 1
     fi
-    if [[ "$said" != *'no connection string'*--database-url-file* ]]; then
+    if [[ "$said" != *'no connection string: pipe it in'* ]]; then
         echo "consumer-test: pnpm exec coffre migrate answered: $said" >&2
         exit 1
     fi

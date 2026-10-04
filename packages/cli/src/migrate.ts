@@ -11,10 +11,10 @@
 // only when it is that same version, and asks it afterwards whether it sees
 // the new schema and is ready.
 //
-// Either way it reads the database owner's direct URL from the file
-// --database-url-file names, stdin for `-`, or a hidden prompt, never the
-// command line; shows what it will apply; and applies it under the migration
-// lock, with the privileges reasserted. Without a terminal, only with --yes.
+// Either way it asks for the database owner's direct URL, at a hidden prompt
+// or on stdin, never the command line; shows what it will apply; and applies
+// it under the migration lock, with the privileges reasserted. Without a
+// terminal, only with --yes.
 import { parseArgs } from 'node:util';
 
 import type { InstanceState } from '@coffre/client';
@@ -105,7 +105,7 @@ export function migrationFailure(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-type Options = { yes: boolean; file: string | undefined };
+type Options = { yes: boolean };
 
 /**
  * `connect` reaches the instance: the current one, or the one `--url` names,
@@ -153,7 +153,6 @@ export async function migrate(args: string[], connect: () => Instance, session: 
     if (s.ansi) out.write(`\n  ${s.bold('coffre migrate')}  ${s.dim(`${instance.origin}, coffre ${me.instance.version}`)}\n\n`);
     out.write(`  ${count(pending.length, 'migration')} to apply: ${listed(pending, 'and')}\n\n`);
     const { url, secrets: typed } = await readDatabaseUrl(out, s, {
-      file: options.file,
       question: "The database owner's connection string",
       hint: "Hidden as you type. The login that owns coffre's tables, direct: not a runtime login, not Hyperdrive.",
       command: 'coffre migrate',
@@ -194,7 +193,6 @@ async function migrateDeployment(
 
   if (s.ansi) out.write(`\n  ${s.bold('coffre migrate')}  ${s.dim(`this deployment, coffre ${deployment.version}`)}\n\n`);
   const { url, secrets: typed } = await readDatabaseUrl(out, s, {
-    file: options.file,
     question: "The database owner's connection string",
     hint: "Hidden as you type. The login that owns coffre's tables, direct: not a runtime login, not Hyperdrive.",
     command: 'coffre migrate',
@@ -311,19 +309,17 @@ function parseOptions(args: string[]): Options {
   try {
     const { values } = parseArgs({
       args,
-      options: { yes: { type: 'boolean', default: false }, 'database-url-file': { type: 'string' } },
+      options: { yes: { type: 'boolean', default: false } },
       strict: true,
     });
-    const file = values['database-url-file'];
-    if (file !== undefined && /postgres(ql)?:/i.test(file)) throw new Error('a database URL');
-    return { yes: values.yes, file };
+    return { yes: values.yes };
   } catch {
     // The error would quote the argument, which may be the connection string itself.
     const leaked = args.some((arg) => /postgres(ql)?:|@/i.test(arg));
     throw new MigrateError(
-      'coffre migrate takes only --yes and --database-url-file; the session flags, --url among them, go before it: coffre --url <url> migrate. ' +
-        `It reads the database owner's connection string from a hidden prompt, ` +
-        `or the file --database-url-file names, - for stdin, never from the command line, where the shell's history and other users can read it.` +
+      'coffre migrate takes only --yes; the session flags, --url among them, go before it: coffre --url <url> migrate. ' +
+        `It asks for the database owner's connection string, at a hidden prompt or on stdin, ` +
+        `never from the command line, where the shell's history and other users can read it.` +
         (leaked ? ' One of the arguments looks like one: change that password, which is in your shell history now.' : ''),
     );
   }

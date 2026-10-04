@@ -561,7 +561,7 @@ export function deployedSummary(cloudflare: Cloudflare, out: Output): string {
       out,
       s,
       'Builds',
-      'With Workers Builds, the vault Worker builds with printenv DATABASE_OWNER_URL | pnpm exec coffre migrate --yes --database-url-file -, ' +
+      'With Workers Builds, the vault Worker builds with printenv DATABASE_OWNER_URL | pnpm exec coffre migrate --yes, ' +
         'and its secret build variable DATABASE_OWNER_URL is the database URL you gave setup; the app builds with pnpm exec vite build app, ' +
         'and deploys with npx wrangler deploy -c app/dist/server/wrangler.json.',
     ),

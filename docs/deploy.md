@@ -35,9 +35,8 @@ npx @coffre/cli setup
 Run it with the CLI you ran `coffre init` with: it migrates with the
 migrations it was built with, which are those of the `@coffre/server` of the
 same version. It asks for the connection string at a hidden prompt; a script
-names a file that holds it, `--database-url-file <path>`, or `-` for stdin.
-It never takes it as an argument, where the shell's history and other users
-could read it. Then:
+pipes it in, or redirects a file to it. It never takes it as an argument or a
+flag, where the shell's history and other users could read it. Then:
 
 1. It makes the two runtime logins, `coffre_runtime` for the app and
    `coffre_vault_runtime` for the vault, each with a fresh password that
@@ -150,7 +149,7 @@ old schema.
    directory:
 
    ```sh
-   pnpm exec coffre migrate --yes --database-url-file "$OWNER_URL_FILE"   # or - for stdin
+   printenv DATABASE_OWNER_URL | pnpm exec coffre migrate --yes   # the owner's URL, piped in
    pnpm run deploy                  # on Node: pnpm build, then restart both processes
    ```
 3. **Check `/readyz`**, which passes once the new code's scheduled job has
@@ -171,9 +170,9 @@ runs the previous version, by design. It stops unless:
   changed. Deploy that version, or restore the database from before it
   ([restore.md](restore.md)).
 
-It reads the **database owner's direct Postgres URL** from the file
-`--database-url-file` names, from stdin for `-`, or at a hidden prompt;
-never from the command line, and never prints it. Use the login that owns the tables,
+It asks for the **database owner's direct Postgres URL**, at a hidden
+prompt, or reads it from stdin when that is no terminal; never from the
+command line, and never prints it. Use the login that owns the tables,
 not `coffre_runtime` or `coffre_vault_runtime`, and not a Hyperdrive
 connection. It shows what it will apply, and asks, on a terminal; without
 one, it applies only with `--yes`. It applies it under the migration lock,
@@ -197,7 +196,7 @@ A script that asks for the URL itself:
 ```sh
 read -rs -p 'Database owner URL: ' owner_url
 printf '\n'
-printf '%s' "$owner_url" | pnpm exec coffre migrate --yes --database-url-file -
+printf '%s' "$owner_url" | pnpm exec coffre migrate --yes
 unset owner_url
 ```
 
@@ -236,14 +235,14 @@ with the repository connected and the deployment's directory as the root:
 
 | Worker | Build command | Deploy command | Build variables |
 |---|---|---|---|
-| the vault, `<name>-vault` | `printenv DATABASE_OWNER_URL \| pnpm exec coffre migrate --yes --database-url-file -` | `npx wrangler deploy -c vault/wrangler.jsonc` | `DATABASE_OWNER_URL`, the database owner's direct URL, as a secret |
+| the vault, `<name>-vault` | `printenv DATABASE_OWNER_URL \| pnpm exec coffre migrate --yes` | `npx wrangler deploy -c vault/wrangler.jsonc` | `DATABASE_OWNER_URL`, the database owner's direct URL, as a secret |
 | the app, `<name>` | `pnpm exec vite build app` | `npx wrangler deploy -c app/dist/server/wrangler.json` | none |
 
 The owner's URL is the one `coffre setup` asked for. It is a build variable,
 which only the build sees; the Worker never does. Workers Builds hands it to
 the build command in its environment, and `printenv` passes it to the CLI
 on stdin, never as an argument. The CLI reads no variable itself: a vault
-set up by an earlier release named this one `COFFRE_MIGRATE_DATABASE_URL` and built
+set up by a release before 0.3 named this one `COFFRE_MIGRATE_DATABASE_URL` and built
 with `pnpm exec coffre migrate --yes`, which the CLI now refuses, saying
 so; rename the variable and change the build command as above. A build that cannot
 migrate fails before its deploy, and the vault keeps running the previous

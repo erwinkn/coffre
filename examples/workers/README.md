@@ -35,9 +35,8 @@ npx @coffre/cli setup
 ```
 
 Run it with the CLI you ran `coffre init` with. It asks for the database
-administrator's connection string at a hidden prompt. A script names a file
-holding it, `--database-url-file <path>`, or `-` for stdin; never pass it
-as an argument. It
+administrator's connection string at a hidden prompt. A script pipes it in;
+never pass it as an argument. It
 makes the two logins coffre runs as, `coffre_runtime` for the app and
 `coffre_vault_runtime` for the vault, migrates the database, and checks that
 each login holds only its rights.
@@ -86,7 +85,7 @@ pnpm exec wrangler secret put GITHUB_CLIENT_SECRET -c app/wrangler.jsonc
 
 To upgrade: `coffre update` here, then migrate and deploy: commit and push
 for Workers Builds, whose vault build runs `printenv DATABASE_OWNER_URL |
-pnpm exec coffre migrate --yes --database-url-file -`, with the
+pnpm exec coffre migrate --yes`, with the
 administrator's URL as its secret build variable `DATABASE_OWNER_URL`; or
 here, `pnpm exec coffre migrate`, then
 `pnpm run deploy`

@@ -105,10 +105,13 @@ COFFRE_RUNTIME_ROLE=coffre_runtime DATABASE_URL="postgresql://coffre_runtime:loc
 log 'checking the restored instance, with the same keys'
 start_coffre "$restored_db" "$COFFRE_VAULT_KEY"
 node scripts/restore-drill.mjs check "$scratch/state.json"
-# The token on stdin and the canary's value in a file, never in an argument.
+# As CI does: the token piped to `coffre login --token`, in a home of the
+# drill's own, then the canary's value to the check; never an argument.
 state() { node -p "JSON.parse(require('fs').readFileSync('$scratch/state.json')).$1"; }
-state token | node --conditions=coffre:source packages/cli/src/main.ts --token-file - \
-    verify instance "$COFFRE_DEV_URL" --canary market/prod/DRILL_CANARY --canary-value-file <(state canary)
+cli() { HOME="$scratch/home" node --conditions=coffre:source packages/cli/src/main.ts "$@"; }
+mkdir -p "$scratch/home"
+state token | cli login "$COFFRE_DEV_URL" --token >/dev/null
+state canary | cli verify instance "$COFFRE_DEV_URL" --canary market/prod/DRILL_CANARY
 stop_coffre
 
 log 'once more, with the wrong KEK'

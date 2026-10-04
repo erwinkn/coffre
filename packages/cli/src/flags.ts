@@ -1,15 +1,15 @@
 /**
- * What the CLI is told, it is told on its command line: it reads no COFFRE_*
- * variable. The session flags come before the command, and say which coffre
- * to talk to and how to sign in there, for that one command:
+ * What the CLI is told, it is told on its command line, and it reads no
+ * COFFRE_* variable. Flags configure; a secret is never one, but asked for
+ * (`secret.ts`). The session flags come before the command, and say which
+ * coffre to talk to, and as which service, for that one command:
  *
- *   coffre --url https://coffre.example.com --token-file - export app/prod
+ *   coffre --url https://coffre.example.com --service api-deploy export app/prod
  *
- * A value on the command line is in `ps`, the shell's history and CI logs,
- * so a secret comes in a file a flag names, or on stdin for `-`, which one
- * flag at most may read.
+ * The credential itself is the session `coffre login` saved: a person's,
+ * or a CI run's, with a service token or an Access service token it asked
+ * for, or an ID token traded for a credential.
  */
-import { readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 
 import type { SessionFlags } from './instance.ts';
@@ -18,17 +18,13 @@ import { listed } from './tty.ts';
 /** The session flags, each a string, and each overriding the saved session for one command. */
 export const SESSION_OPTIONS = {
   url: { type: 'string' },
-  'token-file': { type: 'string' },
   service: { type: 'string' },
-  'id-token-file': { type: 'string' },
-  'access-client-id': { type: 'string' },
-  'access-client-secret-file': { type: 'string' },
   'auth-mode': { type: 'string' },
 } as const;
 
 type SessionName = keyof typeof SESSION_OPTIONS;
 
-/** The session flags as given, their files not read yet. */
+/** The session flags as given. */
 export type SessionArgs = { [name in SessionName]?: string };
 
 /** The session flags each command takes, when not all of them: none where it talks to no instance. */
@@ -44,8 +40,12 @@ const TAKES: Record<string, readonly SessionName[]> = {
   logout: ['url'],
 };
 
-/** A command's own flags that share a session flag's name: `coffre grant … --service` names a service's grant. */
-const OWN: Record<string, readonly string[]> = { grant: ['service'], offboard: ['service'] };
+/**
+ * A command's own flags that share a session flag's name: `coffre grant …
+ * --service` names a service's grant, `coffre login <url> --service <name>`
+ * the service a CI run signs in as.
+ */
+const OWN: Record<string, readonly string[]> = { grant: ['service'], offboard: ['service'], login: ['service'] };
 
 /**
  * The commands that refuse any flag but theirs themselves, and say more: that
@@ -87,80 +87,37 @@ export function commandLine(argv: readonly string[]): { session: SessionArgs; co
 }
 
 function placeholder(name: string): string {
-  if (name.endsWith('-file')) return '<path|->';
-  return { url: '<url>', service: '<name>', 'access-client-id': '<id>', 'auth-mode': 'signin|cloudflare' }[name] ?? '…';
+  return { url: '<url>', service: '<name>', 'auth-mode': 'signin|cloudflare' }[name] ?? '…';
 }
 
 /**
- * The session flags with their files read: a credential's secret is never a
- * flag's value. An empty one is refused, never read as left out: it is what
- * an unset variable expands to, and left out would mean the saved session,
- * another instance or another person than the script meant.
+ * The session flags, trimmed. An empty one is refused, never read as left
+ * out: it is what an unset variable expands to, and left out would mean the
+ * saved session, another instance or another person than the script meant.
  */
 export function readSession(args: SessionArgs): SessionFlags {
   for (const [name, value] of Object.entries(args)) {
     if (value.trim() === '') throw new Error(`--${name} is empty: an unset variable, perhaps`);
   }
-  const file = (name: SessionName) => (args[name] === undefined ? undefined : secretFile(`--${name}`, args[name]));
-  return {
-    url: args.url?.trim(),
-    token: file('token-file'),
-    service: args.service?.trim(),
-    idToken: file('id-token-file'),
-    accessClientId: args['access-client-id']?.trim(),
-    accessClientSecret: file('access-client-secret-file'),
-    authMode: args['auth-mode']?.trim(),
-  };
-}
-
-/** The flag that read stdin, once one has: no other may. */
-let stdinReader: string | null = null;
-
-/**
- * A secret, from the file `path` names, or from stdin for `-`: trimmed, and
- * never empty. `flag` names it in what goes wrong.
- */
-export function secretFile(flag: string, path: string): string {
-  let text: string;
-  if (path === '-') {
-    if (stdinReader !== null) throw new Error(`${stdinReader} and ${flag} both read stdin: give one of them a path`);
-    if (process.stdin.isTTY) throw new Error(`${flag} - reads stdin, which is this terminal: pipe the value in, or give a path`);
-    stdinReader = flag;
-    text = readFileSync(0, 'utf8');
-  } else {
-    // Never the path in what goes wrong: a secret given in its place would be shown.
-    try {
-      text = readFileSync(path, 'utf8');
-    } catch (error) {
-      throw new Error(`${flag}: its file could not be read (${(error as NodeJS.ErrnoException).code ?? String(error)})`);
-    }
-  }
-  const value = text.trim();
-  if (value === '') throw new Error(path === '-' ? `${flag} -: nothing came on stdin` : `${flag}: its file is empty`);
-  return value;
-}
-
-/** The flag that read stdin, if one did: for a command that reads stdin itself, or hands it on. */
-export function stdinReadBy(): string | null {
-  return stdinReader;
+  return { url: args.url?.trim(), service: args.service?.trim(), authMode: args['auth-mode']?.trim() };
 }
 
 /** The variables earlier CLIs read, and what took each one's place; `command` when only that one read it. */
-export const REMOVED: readonly { variable: string; flag: string; command?: readonly string[] }[] = [
-  { variable: 'COFFRE_API_URL', flag: '--url <url>' },
-  { variable: 'COFFRE_TOKEN', flag: '--token-file <path|->' },
-  { variable: 'COFFRE_SERVICE', flag: '--service <name>' },
-  { variable: 'COFFRE_ID_TOKEN', flag: '--id-token-file <path|->' },
-  { variable: 'COFFRE_ID_TOKEN_FILE', flag: '--id-token-file <path|->' },
-  { variable: 'COFFRE_ACCESS_CLIENT_ID', flag: '--access-client-id <id>' },
-  { variable: 'COFFRE_ACCESS_CLIENT_SECRET', flag: '--access-client-secret-file <path|->' },
-  { variable: 'COFFRE_AUTH_MODE', flag: '--auth-mode signin|cloudflare' },
-  { variable: 'COFFRE_MIGRATE_DATABASE_URL', flag: 'coffre migrate --database-url-file <path|->', command: ['migrate'] },
-  { variable: 'COFFRE_SETUP_DATABASE_URL', flag: 'coffre setup --database-url-file <path|->', command: ['setup'] },
-  { variable: 'COFFRE_VAULT_KEY', flag: 'coffre verify keys --vault-key-file <path|->', command: ['verify', 'keys'] },
-  { variable: 'COFFRE_APP_KEY', flag: 'coffre verify keys --app-key-file <path|->', command: ['verify', 'keys'] },
-  { variable: 'COFFRE_VAULT_KEY_ID', flag: 'coffre verify keys --vault-id <id>', command: ['verify', 'keys'] },
-  { variable: 'COFFRE_CONFORMANCE_CANARY', flag: 'coffre verify instance --canary-value-file <path|->', command: ['verify', 'instance'] },
+export const REMOVED: readonly { variable: string; instead: string; command?: readonly string[] }[] = [
+  { variable: 'COFFRE_API_URL', instead: 'pass --url <url>, or `coffre login <url>` once' },
+  { variable: 'COFFRE_TOKEN', instead: 'run `coffre login <url> --token` and paste the token, or pipe it in' },
+  { variable: 'COFFRE_SERVICE', instead: 'pass --service <name>' },
+  { variable: 'COFFRE_ID_TOKEN', instead: 'pipe the ID token to `coffre login <url> --service <name> --id-token`' },
+  { variable: 'COFFRE_ID_TOKEN_FILE', instead: 'redirect the file to `coffre login <url> --service <name> --id-token`' },
+  { variable: 'COFFRE_ACCESS_CLIENT_ID', instead: 'run `coffre login <url> --access-client-id <id>` and paste the secret, or pipe it in' },
+  { variable: 'COFFRE_ACCESS_CLIENT_SECRET', instead: 'run `coffre login <url> --access-client-id <id>` and paste the secret, or pipe it in' },
+  { variable: 'COFFRE_AUTH_MODE', instead: 'pass --auth-mode signin|cloudflare' },
+  { variable: 'COFFRE_MIGRATE_DATABASE_URL', instead: 'paste the URL when coffre migrate asks, or pipe it in', command: ['migrate'] },
+  { variable: 'COFFRE_SETUP_DATABASE_URL', instead: 'paste the URL when coffre setup asks, or pipe it in', command: ['setup'] },
+  { variable: 'COFFRE_VAULT_KEY', instead: 'paste the keys when coffre verify keys asks, or pipe them in, the vault key first', command: ['verify', 'keys'] },
+  { variable: 'COFFRE_APP_KEY', instead: 'paste the keys when coffre verify keys asks, or pipe them in, the vault key first', command: ['verify', 'keys'] },
+  { variable: 'COFFRE_VAULT_KEY_ID', instead: 'pass coffre verify keys --vault-id <id>', command: ['verify', 'keys'] },
+  { variable: 'COFFRE_CONFORMANCE_CANARY', instead: 'paste the value when coffre verify instance asks, or pipe it in', command: ['verify', 'instance'] },
 ];
 
 /**
@@ -176,7 +133,7 @@ export function removedVariables(env: Readonly<Record<string, string | undefined
   const reads = (only: readonly string[] | undefined) => (only === undefined ? !local : only.every((word, i) => words[i] === word));
   const set = REMOVED.filter(({ variable, command }) => reads(command) && env[variable]?.trim());
   if (set.length === 0) return null;
-  const flags = [...new Set(set.map(({ flag }) => flag))];
+  const instead = [...new Set(set.map(({ instead }) => instead))];
   const [them, are] = set.length === 1 ? ['it', 'is'] : ['them', 'are'];
-  return `${listed(set.map(({ variable }) => variable), 'and')} ${are} no longer read: unset ${them}, and pass ${listed(flags, 'and')}`;
+  return `${listed(set.map(({ variable }) => variable), 'and')} ${are} no longer read: unset ${them}; instead, ${instead.join('; ')}`;
 }

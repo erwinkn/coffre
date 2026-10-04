@@ -331,3 +331,13 @@ export function fakeTerminal(columns = 120) {
   );
   return { keys, out, drawn: () => drawn };
 }
+
+/**
+ * A home whose CLI is signed in to `origin`, as `coffre login <origin>
+ * --token` leaves it: a service token, saved as the session there.
+ */
+export function signedInWithToken(home: string, origin: string, token: string): void {
+  mkdirSync(join(home, '.coffre'), { recursive: true, mode: 0o700 });
+  const session = { mode: 'signin', kind: 'token', token, expiresAt: null, obtainedAt: new Date().toISOString() };
+  writeFileSync(join(home, '.coffre', 'credentials.json'), JSON.stringify({ version: 2, current: origin, instances: { [origin]: session } }), { mode: 0o600 });
+}

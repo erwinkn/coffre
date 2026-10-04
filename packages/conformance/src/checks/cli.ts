@@ -1,12 +1,12 @@
 // `coffre verify`, as an operator runs it against this deployment: the
 // CLI's own entry, as @coffre/cli ships it, in a child process with a home
 // of its own and none of this process's COFFRE_ variables. `verify
-// instance` with a token from CI, in files; signed in with `coffre login`, as a user,
+// instance` with a token from CI, signed in with `coffre login --token`; with `coffre login`, as a user,
 // who is turned away, and as the admin, twice, then interrupted, its
 // session left signed in each time; and `verify keys` with this
 // deployment's keys, a wrong one and a malformed one.
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -84,13 +84,6 @@ export class Cli {
     return { code, output: running.output() };
   }
 
-  /** A file of this home's, holding `text`: a secret, as a flag names it. */
-  file(name: string, text: string): string {
-    const path = join(this.home, name);
-    writeFileSync(path, `${text}\n`, { mode: 0o600 });
-    return path;
-  }
-
   /** The session `coffre login` keeps here, for this run to check it is still signed in. */
   session(): string {
     const store = JSON.parse(readFileSync(join(this.home, '.coffre', 'credentials.json'), 'utf8')) as { instances: Record<string, { token?: string }> };
@@ -124,12 +117,10 @@ function marks(output: string): Record<string, string> {
 /** The token's run, from CI: as no one, then as the token, which is no owner and skips verification. */
 export async function verifyWithToken(cli: Cli, live: { token: string; canary: Canary }): Promise<string> {
   const { canary } = live;
-  // The token on stdin, as a CI step pipes it; the canary's value in a file.
-  const run = await cli.run(
-    ['--token-file', '-', 'verify', 'instance', cli.origin, '--canary', `${canary.project}/${canary.environment}/${canary.key}`, '--canary-value-file', cli.file('canary', canary.value)],
-    {},
-    `${live.token}\n`,
-  );
+  // As a CI step does: the token piped to `coffre login --token`, then the canary's value to the check.
+  const login = await cli.run(['login', cli.origin, '--token'], {}, `${live.token}\n`);
+  expect(login.code === 0, `coffre login --token exited ${login.code}`, login.output);
+  const run = await cli.run(['verify', 'instance', cli.origin, '--canary', `${canary.project}/${canary.environment}/${canary.key}`], {}, `${canary.value}\n`);
   const seen = marks(run.output);
   expect(run.code === 0, `coffre verify instance with a token exited ${run.code}`, run.output);
   expect(seen['token verification'] === '–', 'a token that is no owner did not skip verification', run.output);
@@ -228,17 +219,17 @@ export async function verifyLeftovers(cli: Cli, admin: Person, setups: string[],
 }
 
 /**
- * `coffre verify keys`, with the admin's session: this deployment's keys
- * pass, from files; a wrong vault key fails, from stdin, and the right app
- * key passes; a malformed app key fails. No key is ever printed.
+ * `coffre verify keys`, with the admin's session, the keys piped in: this
+ * deployment's pass; a wrong vault key fails and the right app key passes;
+ * a malformed app key fails. No key is ever printed.
  */
 export async function verifyKeys(cli: Cli): Promise<string> {
   const wrong = Buffer.alloc(32, 7).toString('base64');
-  const [vaultKey, appKey] = [cli.file('vault-key', KEYS.VAULT_KEY), cli.file('app-key', KEYS.APP_KEY)];
-  const runs: { args: string[]; input?: string; code: number; vault: string; app: string; said?: RegExp }[] = [
-    { args: ['--vault-key-file', vaultKey, '--app-key-file', appKey, '--vault-id', KEYS.VAULT_KEY_ID], code: 0, vault: '✓', app: '✓' },
-    { args: ['--vault-key-file', '-', '--app-key-file', appKey], input: `${wrong}\n`, code: 1, vault: '✗', app: '✓', said: /✗ vault key +not this instance's vault key/ },
-    { args: ['--vault-key-file', vaultKey, '--app-key-file', cli.file('malformed', 'not-a-key')], code: 1, vault: '✓', app: '✗', said: /✗ app key +not an app key/ },
+  // Piped in, as a script does: the vault key's line, then the app key's.
+  const runs: { args: string[]; input: string; code: number; vault: string; app: string; said?: RegExp }[] = [
+    { args: ['--vault-id', KEYS.VAULT_KEY_ID], input: `${KEYS.VAULT_KEY}\n${KEYS.APP_KEY}\n`, code: 0, vault: '✓', app: '✓' },
+    { args: [], input: `${wrong}\n${KEYS.APP_KEY}\n`, code: 1, vault: '✗', app: '✓', said: /✗ vault key +not this instance's vault key/ },
+    { args: [], input: `${KEYS.VAULT_KEY}\nnot-a-key\n`, code: 1, vault: '✓', app: '✗', said: /✗ app key +not an app key/ },
   ];
   for (const { args, input, code, vault, app, said } of runs) {
     const run = await cli.run(['verify', 'keys', ...args], {}, input);

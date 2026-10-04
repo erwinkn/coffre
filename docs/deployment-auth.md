@@ -147,14 +147,14 @@ header the origin verifies. If the Access application answers non-browser
 clients with a 401 instead of a redirect, say which mode to use:
 `coffre --auth-mode cloudflare login https://…`.
 
-CI and other machines use an Access service token instead, with nothing
-stored on disk. Its ID is a flag; its secret comes in a file, or on stdin
-for `-`, never as a flag's value:
+CI and other machines sign in with an Access service token instead. Its ID
+is a flag; its secret is asked for, or piped in, never a flag's value. The
+session it makes is the instance's, for the commands after it, and `coffre
+logout` forgets it there without revoking anything:
 
 ```sh
-coffre --url https://<coffre-api-hostname> \
-  --access-client-id <id>.access --access-client-secret-file "$ACCESS_SECRET_FILE" \
-  run app/prod -- ./deploy.sh
+printf '%s' "$ACCESS_CLIENT_SECRET" | coffre login https://<coffre-api-hostname> --access-client-id <id>.access
+coffre run app/prod -- ./deploy.sh
 ```
 
 The CLI refuses a plaintext, credentialed, or path-bearing address before
@@ -212,8 +212,8 @@ up trusting it. The seed signs in the same way, as the root admin, and
 conformance does too, with the dev IdP in its own process for the run.
 It also plays a CI platform under `/workloads`, which a trust binding may
 name in development: `curl -s -X POST http://127.0.0.1:8081/workloads/token
--d aud=http://127.0.0.1:3000` mints a run's ID token, for the CLI's
-`--id-token-file -`.
+-d aud=http://127.0.0.1:3000` mints a run's ID token, to pipe to the CLI's
+`coffre login <url> --service <name> --id-token`.
 Nothing local stands in for Access: its verifier is covered by unit tests
 against Access-shaped tokens.
 

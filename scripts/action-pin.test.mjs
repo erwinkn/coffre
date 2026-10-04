@@ -31,7 +31,7 @@ test('bump moves the Action with the packages and examples; check:pins rejects d
     const dir = checkout(t);
     const bumped = run(dir, 'bump.mjs', '9.8.7-test.1');
     assert.equal(bumped.status, 0, bumped.stderr);
-    assert.match(readFileSync(join(dir, 'action/action.yml'), 'utf8'), /npx -y @coffre\/cli@9\.8\.7-test\.1 --url /);
+    assert.match(readFileSync(join(dir, 'action/action.yml'), 'utf8'), /npx -y @coffre\/cli@9\.8\.7-test\.1 "\$@"/);
     assert.equal(run(dir, 'check-pins.mjs').status, 0);
     for (const pin of ['9.8.6', '^9.8.7-test.1']) {
         const path = join(dir, 'action/action.yml');
@@ -73,12 +73,13 @@ test('the Action takes one of a token or a service, and a service only with the 
     const bin = join(dir, 'bin');
     mkdirSync(bin);
     writeFileSync(join(bin, 'node'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
-    writeFileSync(join(bin, 'npx'), '#!/bin/sh\necho "npx ran with: $*"\necho "stdin: $(cat)"\nexit 0\n', { mode: 0o755 });
+    writeFileSync(join(bin, 'npx'), `#!/bin/sh\necho "$*" >> '${join(dir, 'calls')}'\necho "npx ran with: $*"\necho "stdin: $(cat)"\nexit 0\n`, { mode: 0o755 });
     // The shell's own tools, beside the fakes: cat, for the fake npx.
     const path = `${bin}:/usr/bin:/bin`;
     const text = readFileSync(join(dir, 'action/action.yml'), 'utf8');
     const shell = text.match(/      run: \|\n((?:        [^\n]*\n?)+)/)[1].replace(/^        /gm, '');
     const inputs = { INPUT_URL: 'https://coffre.example.com', INPUT_ENVIRONMENT: 'app/ci' };
+    const cli = `-y @coffre/cli@${text.match(/@coffre\/cli@(\S+)/)[1]}`;
     const run = (env) => spawnSync('/bin/bash', ['-e', '-c', shell], { encoding: 'utf8', env: { PATH: path, ...inputs, ...env }, timeout: 10_000 });
     for (const env of [{}, { INPUT_TOKEN: 'coffre_svc_x', INPUT_SERVICE: 'token:api-deploy' }]) {
         const ran = run(env);
@@ -90,8 +91,15 @@ test('the Action takes one of a token or a service, and a service only with the 
     assert.match(noIdToken.stderr, /permissions: id-token: write/);
     const service = run({ INPUT_SERVICE: 'token:api-deploy', ACTIONS_ID_TOKEN_REQUEST_URL: 'https://runner.example/token' });
     assert.equal(service.status, 0, service.stderr);
-    assert.match(service.stdout, /npx ran with: -y @coffre\/cli@\S+ --url https:\/\/coffre\.example\.com --service token:api-deploy export --format github app\/ci\n/);
+    assert.equal(service.stdout, `npx ran with: ${cli} --url https://coffre.example.com --service token:api-deploy export --format github app/ci\nstdin: \n`);
     const token = run({ INPUT_TOKEN: 'coffre_svc_x' });
     assert.equal(token.status, 0, token.stderr);
-    assert.match(token.stdout, /npx ran with: -y @coffre\/cli@\S+ --url https:\/\/coffre\.example\.com --token-file - export --format github app\/ci\nstdin: coffre_svc_x\n/);
+    // The token piped to login, never an argument; the export as that session; and the session forgotten after.
+    assert.equal(
+        token.stdout,
+        `npx ran with: ${cli} login https://coffre.example.com --token\nstdin: coffre_svc_x\n` +
+            `npx ran with: ${cli} --url https://coffre.example.com export --format github app/ci\nstdin: \n`,
+    );
+    assert.ok(readFileSync(join(dir, 'calls'), 'utf8').endsWith(`\n${cli} logout https://coffre.example.com\n`), 'the session was not forgotten');
+    assert.ok(!token.stderr.includes('coffre_svc_x'));
 });

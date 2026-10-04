@@ -1,11 +1,12 @@
 /**
  * A CI run signing in as a service, with the ID token its platform signs
- * for it (docs/design/oidc.md): `coffre --service api-deploy …`, and no
- * `--token-file`. The CLI takes the run's ID token, trades it at
- * `POST /api/auth/oidc` for a credential that lasts five minutes, and
- * keeps that credential in memory only: a self-hosted runner's disk
- * outlives the job. Each run of the CLI asks once; a token is spent once
- * used, so on GitHub each run asks the runner for a fresh one.
+ * for it (docs/design/oidc.md), and no service token: `coffre --service
+ * api-deploy …` for one command, or `coffre login <url> --service
+ * api-deploy` for the commands after it. The CLI takes the run's ID token,
+ * trades it at `POST /api/auth/oidc` for a credential that lasts five
+ * minutes, and keeps that credential in memory, or, after a login, in the
+ * session it saves, which lasts as long. A token is spent once used, so on
+ * GitHub each exchange asks the runner for a fresh one.
  */
 
 type Fetch = (url: string, init?: RequestInit) => Promise<Response>;
@@ -18,9 +19,9 @@ export type Runner = {
 
 /**
  * The run's ID token, for `audience`, this instance's URL: the one
- * `--id-token-file` gave (GitLab's `id_tokens`, or any issuer's), or
- * GitHub's runner's, asked for a fresh one, when the job has
- * `permissions: id-token: write`.
+ * `coffre login --service <name> --id-token` asked for (GitLab's
+ * `id_tokens`, or any issuer's), or GitHub's runner's, asked for a fresh
+ * one, when the job has `permissions: id-token: write`.
  */
 export async function idToken(given: string | undefined, runner: Runner, audience: string, fetchImpl: Fetch): Promise<string> {
   if (given) return given;
@@ -35,7 +36,7 @@ export async function idToken(given: string | undefined, runner: Runner, audienc
   }
   throw new Error(
     '--service signs in with the run\'s ID token, and there is none: on GitHub Actions, give the job ' +
-      '`permissions: id-token: write`; elsewhere, pass it in --id-token-file <path|-> (GitLab: an `id_tokens` entry whose aud is ' +
+      '`permissions: id-token: write`; elsewhere, pipe it to `coffre login <url> --service <name> --id-token` (GitLab: an `id_tokens` entry whose aud is ' +
       `${audience})`,
   );
 }

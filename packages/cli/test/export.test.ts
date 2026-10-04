@@ -10,6 +10,7 @@ import test from 'node:test';
 import { formatDotenv, formatShellExports, parseDotenv } from '@coffre/core/dotenv';
 
 import { githubEnvironment, githubMasks } from '../src/github-env.ts';
+import { signedInWithToken } from './fakes.ts';
 
 const awkward = {
   EMPTY: '',
@@ -115,14 +116,11 @@ async function fixture(t: test.TestContext, values: Record<string, string> = awk
     requests: () => requests,
     async run(format: string, path: string | null = envFile) {
       const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('COFFRE_') && key !== 'GITHUB_ENV'));
-      Object.assign(env, { COFFRE_STATE_DIR: directory });
+      Object.assign(env, { COFFRE_STATE_DIR: directory, HOME: directory });
       if (path !== null) env.GITHUB_ENV = path;
-      // As the Action runs it: the token on stdin, never in an argument or a variable.
-      const session = ['--url', `http://127.0.0.1:${address.port}`, '--token-file', '-'];
-      const child = spawn(process.execPath, ['--conditions=coffre:source', new URL('../src/main.ts', import.meta.url).pathname, ...session, 'export', 'market/prod', '--format', format], { env, stdio: ['pipe', 'pipe', 'pipe'], timeout: 10_000 });
-      // A run that stops before reading stdin closes it: not this test's failure.
-      child.stdin.on('error', () => {});
-      child.stdin.end(`${TOKEN}\n`);
+      // As the Action runs it: the token saved by `coffre login --token`, never in an argument or a variable.
+      signedInWithToken(directory, `http://127.0.0.1:${address.port}`, TOKEN);
+      const child = spawn(process.execPath, ['--conditions=coffre:source', new URL('../src/main.ts', import.meta.url).pathname, 'export', 'market/prod', '--format', format], { env, stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 });
       let stdout = '';
       let stderr = '';
       child.stdout.setEncoding('utf8').on('data', (data: string) => stdout += data);

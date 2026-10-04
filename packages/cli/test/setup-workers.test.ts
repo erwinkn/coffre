@@ -19,7 +19,7 @@ import { editWorker, readWorker } from '../src/deployment.ts';
 import { templateDir } from '../src/init.ts';
 import { asSuperuser, CLUSTER, connects, database, emptyCluster, needsCluster, OTHER_CLUSTER } from './cluster.ts';
 import { fakeCloudflare, fakeGitHub, fakeOpener, fakeVite, fakeWrangler, realWrangler, submitManifest } from './fakes.ts';
-import { ENTER_ALT, inTerminal, ptySkip, screens, type Session, visible } from './pty.ts';
+import { ENTER_ALT, inTerminal, ptySkip, screens, type Session, typingUrl, visible } from './pty.ts';
 
 const skip = needsCluster.skip || ptySkip;
 const TOKEN = `cf-oauth-${'t'.repeat(40)}`;
@@ -30,7 +30,7 @@ let cloudflare: Awaited<ReturnType<typeof fakeCloudflare>>;
 let github: Awaited<ReturnType<typeof fakeGitHub>>;
 let live: ReturnType<typeof createServer>;
 let env: NodeJS.ProcessEnv;
-/** The database owner's URL setup is given, in the file --database-url-file names. */
+/** The database owner's URL setup is given, typed at its prompt. */
 let url: string;
 
 before(async () => {
@@ -104,9 +104,7 @@ function another(name: string): string {
 const deployment = () => join(dir, 'deployment');
 
 function setup(play: (terminal: Session) => Promise<void>, where = deployment(), databaseUrl = url) {
-  const file = join(dir, 'database-url');
-  writeFileSync(file, `${databaseUrl}\n`);
-  return inTerminal(['setup', '--database-url-file', file], env, play, { columns: 160, rows: 48 }, where);
+  return inTerminal(['setup'], env, typingUrl(databaseUrl, play), { columns: 160, rows: 48 }, where);
 }
 
 /** What the real wrangler said, in its dry run of a Worker's last deploy. */

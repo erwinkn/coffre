@@ -29,8 +29,6 @@ import { Cancelled, type Keyboard, listed, openTerminal, type Output, paragraph,
 import { cliVersion } from './version.ts';
 import { Cloudflare, deployedSummary } from './workers.ts';
 
-/** Where the administrator's connection string comes from, when not from a hidden prompt. */
-
 /** The two runtime roles, as the migration names them, and the Hyperdrive config each gets on Workers. */
 const ROLES = { app: 'coffre_runtime', vault: 'coffre_vault_runtime' } as const;
 const HYPERDRIVE = { app: 'coffre', vault: 'coffre-vault' } as const;
@@ -103,7 +101,7 @@ function newPassword(): string {
 export async function setup(args: string[]): Promise<void> {
   const secrets: string[] = [];
   const clean = (error: unknown) => redact(error instanceof Error ? error.message : String(error), secrets);
-  let options: { resetPasswords: boolean; json: boolean; file: string | undefined };
+  let options: { resetPasswords: boolean; json: boolean };
   try {
     options = parseOptions(args);
   } catch (error) {
@@ -125,7 +123,6 @@ export async function setup(args: string[]): Promise<void> {
     if (s.ansi) out.write(`\n  ${s.bold('coffre setup')}  ${s.dim(about)}\n\n`);
     if (kind === 'empty' && terminal !== null) kind = await scaffold(dir, terminal.keys, out, clean);
     const { url: administrator, secrets: typed } = await readDatabaseUrl(out, s, {
-      file: options.file,
       question: "The database administrator's connection string",
       hint: "Hidden as you type. Your host's admin URL, such as PlanetScale's Connect page gives.",
       command: 'coffre setup',
@@ -173,27 +170,21 @@ function fail(out: Output, message: string, code = 1): never {
   process.exit(code);
 }
 
-function parseOptions(args: string[]): { resetPasswords: boolean; json: boolean; file: string | undefined } {
+function parseOptions(args: string[]): { resetPasswords: boolean; json: boolean } {
   try {
     const { values } = parseArgs({
       args,
-      options: {
-        'reset-passwords': { type: 'boolean', default: false },
-        json: { type: 'boolean', default: false },
-        'database-url-file': { type: 'string' },
-      },
+      options: { 'reset-passwords': { type: 'boolean', default: false }, json: { type: 'boolean', default: false } },
       allowPositionals: false,
       strict: true,
     });
-    const file = values['database-url-file'];
-    if (file !== undefined && /postgres(ql)?:/i.test(file)) throw new Error('a database URL');
-    return { resetPasswords: values['reset-passwords'], json: values.json, file };
+    return { resetPasswords: values['reset-passwords'], json: values.json };
   } catch {
     // The error would quote the argument, which may be the connection string itself.
     const leaked = args.some((arg) => /postgres(ql)?:|@/i.test(arg));
     throw new SetupError(
-      `coffre setup takes only --reset-passwords, --json and --database-url-file. It reads the administrator's connection string from a hidden prompt, ` +
-        `or the file --database-url-file names, - for stdin, never from the command line, where the shell's history and other users can read it.` +
+      `coffre setup takes only --reset-passwords and --json. It asks for the administrator's connection string, at a hidden prompt or on stdin, ` +
+        `never from the command line, where the shell's history and other users can read it.` +
         (leaked ? ' One of the arguments looks like one: change that password, which is in your shell history now.' : ''),
     );
   }

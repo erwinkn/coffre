@@ -158,37 +158,27 @@ test('coffre verify keys reads what the keys are checked against, and sends noth
   const instance = await fakeInstance(t, (method, path) => (method === 'GET' && path === '/api/audit/keys' ? material : undefined));
   const { home } = signedInHome(t, instance.origin);
 
-  const file = (name: string, key: Buffer) => {
-    writeFileSync(join(home, name), `${b64(key)}\n`, { mode: 0o600 });
-    return join(home, name);
-  };
-
-  // One key on stdin, the other in a file.
-  const right = await coffre(['verify', 'keys', '--vault-key-file', '-', '--app-key-file', file('app', keys.app)], home, `${b64(keys.current)}\n`);
+  // On stdin, as a script pipes them: the vault key's line, then the app key's.
+  const right = await coffre(['verify', 'keys'], home, `${b64(keys.current)}\n${b64(keys.app)}\n`);
   assert.equal(right.code, 0, right.stderr);
   assert.match(right.stdout, /✓ vault key +the current one, vault ID vault-2026-10-03-bbbbbb \(from stdin\)/);
-  assert.match(right.stdout, /✓ app key +the one the app signs with now \(from --app-key-file\)/);
+  assert.match(right.stdout, /✓ app key +the one the app signs with now \(from stdin\)/);
   assert.match(right.stdout, new RegExp(`Both keys are ${instance.origin}'s\\.`));
 
-  const previous = await coffre(['verify', 'keys', '--vault-key-file', file('previous', keys.previous), '--app-key-file', file('other', randomBytes(32))], home);
+  const previous = await coffre(['verify', 'keys'], home, `${b64(keys.previous)}\n${b64(randomBytes(32))}\n`);
   assert.equal(previous.code, 1);
-  assert.match(previous.stdout, /✗ vault key +this is a previous vault key \(vault ID vault-2025-01-10-aaaaaa\), not the current one: .* \(from --vault-key-file\)/);
-  assert.match(previous.stdout, /✗ app key +not this instance's app key: the app signs with another \(from --app-key-file\)/);
+  assert.match(previous.stdout, /✗ vault key +this is a previous vault key \(vault ID vault-2025-01-10-aaaaaa\), not the current one: .* \(from stdin\)/);
+  assert.match(previous.stdout, /✗ app key +not this instance's app key: the app signs with another \(from stdin\)/);
   assert.match(previous.stdout, /Neither key is /);
 
-  // One key alone, without a terminal to ask for the other: that one skipped, not failed.
-  const one = await coffre(['verify', 'keys', '--app-key-file', '-'], home, `${b64(keys.app)}\n`);
+  // One key alone, a blank line for the other: that one skipped, not failed.
+  const one = await coffre(['verify', 'keys'], home, `\n${b64(keys.app)}\n`);
   assert.equal(one.code, 0);
   assert.match(one.stdout, /– vault key +not given: not checked/);
   assert.match(one.stdout, /The app key is /);
-  // Neither: nothing to check, and nowhere to ask.
-  const none = await coffre(['verify', 'keys'], home, `${b64(keys.current)}\n`);
-  assert.equal(none.code, 2);
-  assert.match(none.stderr, /no terminal to ask for the keys on: pass them in --vault-key-file and --app-key-file/);
-  // Stdin is one file: one flag reads it.
-  const both = await coffre(['verify', 'keys', '--vault-key-file', '-', '--app-key-file', '-'], home, `${b64(keys.current)}\n`);
-  assert.equal(both.code, 2);
-  assert.match(both.stderr, /--vault-key-file and --app-key-file both read stdin: give one of them a path/);
+  const none = await coffre(['verify', 'keys'], home, '\n\n');
+  assert.equal(none.code, 1);
+  assert.match(none.stdout, /No key given: nothing checked/);
 
   assert.deepEqual(new Set(instance.seen.map(({ method, url }) => `${method} ${url}`)), new Set(['GET /api/audit/keys']));
   const sent = JSON.stringify(instance.seen);

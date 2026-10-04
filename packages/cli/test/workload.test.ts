@@ -9,20 +9,16 @@ const noFetch = async (): Promise<Response> => {
   throw new Error('nothing to fetch');
 };
 
-test('--service, and no --token-file, signs the run in as the service, by its ID token', () => {
+test('--service signs the run in as the service, by its ID token, whatever the saved session', () => {
   const target = resolveTarget({ url: ORIGIN, service: 'api-deploy' }, emptyStore());
-  assert.deepEqual(target, { origin: ORIGIN, mode: 'signin', credential: { kind: 'workload', service: 'token:api-deploy' } });
+  assert.deepEqual(target, { origin: ORIGIN, mode: 'signin', by: 'service', credential: { kind: 'workload', service: 'token:api-deploy' } });
   assert.deepEqual(resolveTarget({ url: ORIGIN, service: 'token:api-deploy' }, emptyStore()).credential, { kind: 'workload', service: 'token:api-deploy' });
-  assert.deepEqual(resolveTarget({ url: ORIGIN, service: 'api-deploy', idToken: 'a.b.c' }, emptyStore()).credential, { kind: 'workload', service: 'token:api-deploy', idToken: 'a.b.c' });
-  // One way to sign in, said: a token beside a service is a mistake, not a precedence.
-  assert.throws(() => resolveTarget({ url: ORIGIN, service: 'api-deploy', token: 'coffre_svc_x' }, emptyStore()), /--token-file and --service are two ways to sign in: give one/);
-  assert.throws(() => resolveTarget({ url: ORIGIN, idToken: 'a.b.c' }, emptyStore()), /--id-token-file goes with --service/);
   assert.throws(() => resolveTarget({ url: ORIGIN, service: 'api-deploy', authMode: 'cloudflare' }, emptyStore()), /behind Cloudflare Access/);
   assert.deepEqual(credentialHeaders('signin', target.credential, 'coffre_svc_issued'), { authorization: 'Bearer coffre_svc_issued' });
   assert.throws(() => credentialHeaders('signin', target.credential), /no credential was exchanged/);
 });
 
-test('the ID token is the one --id-token-file gave, or a fresh one from GitHub for this instance', async () => {
+test('the ID token is the one login asked for, or a fresh one from GitHub for this instance', async () => {
   const runner = { ACTIONS_ID_TOKEN_REQUEST_URL: 'https://pipelines.actions.githubusercontent.com/abc?api-version=2.0', ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'runner-bearer' };
   assert.equal(await idToken('a.b.c', runner, ORIGIN, noFetch), 'a.b.c');
   let asked: { url: string; authorization: string | null } | null = null;
@@ -36,7 +32,7 @@ test('the ID token is the one --id-token-file gave, or a fresh one from GitHub f
     authorization: 'bearer runner-bearer',
   });
   await assert.rejects(idToken(undefined, runner, ORIGIN, async () => new Response('', { status: 403 })), /GitHub did not give this job an ID token \(status 403\)/);
-  await assert.rejects(idToken(undefined, {}, ORIGIN, noFetch), /permissions: id-token: write`; elsewhere, pass it in --id-token-file/);
+  await assert.rejects(idToken(undefined, {}, ORIGIN, noFetch), /permissions: id-token: write`; elsewhere, pipe it to `coffre login <url> --service <name> --id-token`/);
 });
 
 test('the exchange answers a credential, or says why the instance refused', async () => {

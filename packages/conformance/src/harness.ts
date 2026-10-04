@@ -12,7 +12,7 @@
 // one after.
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -110,14 +110,18 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
   const logs = () => output(4000);
   const alive = () => !children.some((entry) => entry.daemon && entry.exited);
 
-  function start(name: string, command: string, args: string[], env: Record<string, string>, daemon = true): Child {
+  function start(name: string, command: string, args: string[], env: Record<string, string>, daemon = true, input?: string): Child {
     const child = spawn(command, args, {
       cwd: dir,
       env: { ...shell, ...env },
       // Its own process group, so stopping it stops what it started (workerd).
       detached: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
     });
+    if (input !== undefined) {
+      child.stdin!.on('error', () => {});
+      child.stdin!.end(input);
+    }
     const entry: Child = { name, child, daemon, exited: false, output: [] };
     child.stdout!.on('data', (chunk: Buffer) => entry.output.push(chunk));
     child.stderr!.on('data', (chunk: Buffer) => entry.output.push(chunk));
@@ -131,8 +135,8 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
     return entry;
   }
 
-  async function run(command: string, args: string[], env: Record<string, string> = {}): Promise<void> {
-    const entry = start(args[0] ?? command, command, args, env, false);
+  async function run(command: string, args: string[], env: Record<string, string> = {}, input?: string): Promise<void> {
+    const entry = start(args[0] ?? command, command, args, env, false, input);
     const code = await new Promise((done) => {
       entry.child.once('exit', done);
       entry.child.once('error', done);
@@ -198,11 +202,9 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
         sql.exec(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`),
       );
     // As the deployment's pipeline does before it deploys: its own CLI's
-    // `coffre migrate`, in its folder, the owner's URL in a file of its own.
+    // `coffre migrate`, in its folder, the owner's URL piped in.
     // A fresh log has no heartbeat: only the scheduled job can make /readyz pass.
-    const ownerFile = join(scratch, 'owner-url');
-    writeFileSync(ownerFile, owner, { mode: 0o600 });
-    await run(process.execPath, [deploymentCli(dir), 'migrate', '--yes', '--database-url-file', ownerFile]);
+    await run(process.execPath, [deploymentCli(dir), 'migrate', '--yes'], {}, `${owner}\n`);
     // The app as it deploys: its Start app, built by its own Vite, which wrangler runs unbundled.
     await run(bin('vite'), ['build', 'app']);
     const state = join(scratch, 'state');
