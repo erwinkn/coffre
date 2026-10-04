@@ -7,8 +7,7 @@ import {
   lines,
   plain,
   who,
-  type AuditEntry,
-} from '../src/lib/audit-sentences.ts';
+  type AuditEntry, runLabel } from '../src/lib/audit-sentences.ts';
 
 let next = 1000;
 function entry(fields: Partial<AuditEntry> & Pick<AuditEntry, 'action'>): AuditEntry {
@@ -231,4 +230,12 @@ test('every historical sync action still renders as a human sentence', () => {
   for (const [action, sentence] of Object.entries(cases)) {
     assert.equal(said(entry({ action, ...prod, metadata: { destination: 'acme/market', paused: true } })), sentence, action);
   }
+});
+
+test('an entry a CI run wrote reads with its run, as its issuer stated it', () => {
+  assert.equal(runLabel(null), null);
+  assert.equal(runLabel({ claims: { repository: 'acme/api', run_id: '7001', sha: 'f'.repeat(40) } }), 'acme/api run 7001 at fffffff');
+  assert.equal(runLabel({ claims: { project_path: 'acme/api', pipeline_id: 99 } }), 'acme/api pipeline 99');
+  assert.equal(runLabel({ claims: { sub: '104000' } }), 'CI run 104000');
+  assert.equal(runLabel({ claims: {} }), 'a CI run');
 });

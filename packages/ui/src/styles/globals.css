@@ -1385,6 +1385,13 @@ a.crumb-link:hover {
     0 0 0 1px var(--border);
 }
 
+/* The CI run an entry was written for, under its actor. */
+.actor-run {
+  display: block;
+  color: var(--ink-2);
+  font-size: 0.75rem;
+}
+
 /* A checkbox and its words, in a form. */
 .check {
   display: inline-flex;

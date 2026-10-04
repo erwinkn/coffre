@@ -16,6 +16,8 @@ export type AuthenticatedIdentity = {
   sourceIp: string | null;
   /** The coffre credential that authenticated this request, in signin mode. */
   credentialId: string | null;
+  /** That credential, when a trust binding issued it for a CI run: every entry the request writes names it. */
+  provenance: string | null;
 };
 
 type AuthenticationRuntime = Pick<
@@ -110,14 +112,16 @@ export async function authenticateRequest(
   let principal: Principal;
   let credentialId: string | null = null;
   let credentialGeneration: number | undefined;
+  let exchanged = false;
   let checked: Access | undefined;
   try {
     const verified = (await runtime.verifier.verify(token, { sourceIp })) as Principal & {
       credentialId?: string;
       credentialGeneration?: number;
       access?: Access;
+      exchanged?: boolean;
     };
-    ({ credentialId = null, credentialGeneration, access: checked, ...principal } = verified);
+    ({ credentialId = null, credentialGeneration, access: checked, exchanged = false, ...principal } = verified);
   } catch (error) {
     // Only a credential checked and refused is a sign-out; one that could not be checked is an outage.
     if (error instanceof CredentialUncheckable) return errorResponse(new ApiError('unavailable', 'coffre cannot check who you are right now'));
@@ -138,6 +142,7 @@ export async function authenticateRequest(
       requestId,
       sourceIp,
       credentialId,
+      provenance: exchanged ? credentialId : null,
     };
   } catch {
     return errorResponse(new ApiError('unavailable', 'coffre cannot check who you are right now'));

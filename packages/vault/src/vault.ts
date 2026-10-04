@@ -265,7 +265,12 @@ type Decision = {
 type KeyAction = 'secret.read' | 'key.wrap' | 'key.rewrap';
 
 /** What ties an entry to the app's request, and to the one action it is part of. */
-type Correlation = { requestId?: string | null; operationId?: string | null };
+type Correlation = { requestId?: string | null; operationId?: string | null; credentialId?: string | null };
+
+/** The credential a CI run's request came in on, as its entries record it: copied, never decided on. */
+function traced(correlation: Correlation): { credentialId?: string } {
+  return correlation.credentialId == null ? {} : { credentialId: correlation.credentialId };
+}
 
 /** Why a member's row is not the one the vault last wrote; rows.ts. */
 type Fault = 'mac' | 'stale';
@@ -714,7 +719,7 @@ class VaultService implements Vault {
         if (version === undefined) return {
           actor: input.principal, action, decision: 'deny', code: 'bad_claim',
           operationId: input.operationId, requestId: input.requestId,
-          metadata: JSON.stringify({ ...detail, secretVersionId: id }),
+          metadata: JSON.stringify({ ...detail, secretVersionId: id, ...traced(input) }),
         };
         return { ...keyEntry(action, input.principal, version.secret, 'deny', 'bad_claim', input, detail), secretVersionId: id };
       }));
@@ -824,6 +829,7 @@ class VaultService implements Vault {
             // Member and outcome locks can each wait before accounting is overdue.
             expiresAt: at + this.#prepared.options.keyBudgetMs + 2 * LOCK_TIMEOUT_MS,
             ...(call.input.purpose === undefined ? {} : { purpose: call.input.purpose }),
+            ...traced(call.input),
             keys: secrets.map((secret, item) => ({ item, subject: secret.path, secretId: secret.secretId, version: secret.version })),
           }),
         }]);
@@ -1712,6 +1718,9 @@ function validateCorrelation(input: Correlation): void {
   if (input.operationId != null && (typeof input.operationId !== 'string' || !UUID.test(input.operationId))) {
     throw new Error(`operationId must be a lowercase UUID, got: ${String(input.operationId)}`);
   }
+  if (input.credentialId != null && (typeof input.credentialId !== 'string' || !UUID.test(input.credentialId))) {
+    throw new Error(`credentialId must be a lowercase UUID, got: ${String(input.credentialId)}`);
+  }
 }
 
 /** Validate the entire batch before any provider sees a key. */
@@ -1780,6 +1789,7 @@ function keyEntry(
       ...(action === 'key.wrap' ? { secretId: secret.secretId } : {}),
       version: secret.version,
       ...detail,
+      ...traced(correlation),
     }),
   };
 }
@@ -1813,7 +1823,7 @@ function accessEntry(
     subjectPrincipal: PRINCIPAL.test(principal) ? principal : null,
     operationId: correlation.operationId ?? null,
     requestId: correlation.requestId ?? null,
-    metadata: JSON.stringify(PRINCIPAL.test(principal) ? detail : { subject: principal, ...detail }),
+    metadata: JSON.stringify(PRINCIPAL.test(principal) ? { ...detail, ...traced(correlation) } : { subject: principal, ...detail, ...traced(correlation) }),
   };
 }
 

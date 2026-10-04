@@ -512,6 +512,12 @@ export type Api = {
         operationId: string | null;
         relatedSeq: number | null;
         requestId: string | null;
+        run: null | {
+          exchangeSeq: number;
+          claims: {
+            [key: string]: string | number;
+          };
+        };
         metadata: {
           [key: string]: unknown;
         };
@@ -587,6 +593,12 @@ export type AuditEntryView = {
   operationId: string | null;
   relatedSeq: number | null;
   requestId: string | null;
+  run: null | {
+    exchangeSeq: number;
+    claims: {
+      [key: string]: string | number;
+    };
+  };
   metadata: {
     [key: string]: unknown;
   };

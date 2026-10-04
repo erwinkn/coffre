@@ -412,6 +412,7 @@ export async function putMember(
       owner: input.owner,
       requestId: ctx.requestId,
       operationId: randomUUID(),
+      credentialId: ctx.provenance,
     });
     if (!result.ok) throw vaultRefused(result.refusal);
     // Housekeeping: rows of an earlier membership are dead already, by their generation.
@@ -441,6 +442,7 @@ export async function removeMember(
       principal,
       requestId: ctx.requestId,
       operationId: randomUUID(),
+      credentialId: ctx.provenance,
     });
     if (!result.ok) {
       if (result.refusal.code === 'not_a_member' || result.refusal.code === 'removed') {

@@ -328,6 +328,7 @@ test('a first sign-in with an invited email binds the account and opens a browse
     subject: '101',
     credentialId: result.credential.id,
     credentialGeneration: 0,
+    exchanged: false,
   });
   // What the vault said of them, which the request's caller is: no second call.
   assert.deepEqual([access.principal, access.status, access.generation], [`user:${DEV}`, 'active', 0]);
@@ -775,6 +776,7 @@ test('owners issue service tokens that verify as the service', async () => {
     commonName: SERVICE,
     credentialId: issued.id,
     credentialGeneration: 0,
+    exchanged: false,
   });
   assert.deepEqual([access.principal, access.status], [`token:${SERVICE}`, 'active']);
 
@@ -938,6 +940,7 @@ test('device flow: start, describe, approve, then one poll gets a CLI session', 
     subject: DEV,
     credentialId: approved.credential.id,
     credentialGeneration: 0,
+    exchanged: false,
   });
   assert.deepEqual([access.principal, access.status], [`user:${DEV}`, 'active']);
 

@@ -678,6 +678,27 @@ export async function bindingStands(db: Queryable, chainKey: Buffer, bindingId: 
     && checkAuthRow(chainKey, 'service_bindings', row.binding);
 }
 
+/**
+ * The exchanges that issued these credentials, by credential ID: each one's
+ * entry and the run its issuer asserted. One read through
+ * `audit_log_exchange_idx`, whose expression this repeats.
+ */
+export async function exchangesOf(db: Queryable, credentialIds: readonly string[]): Promise<Map<string, { seq: bigint; run: Record<string, unknown> }>> {
+  if (credentialIds.length === 0) return new Map();
+  const { auditLog } = tablesOf(db);
+  const credentialId = dialect.engineOf(db) === 'postgres'
+    ? sql<string>`((${auditLog.metadata})::jsonb ->> 'credentialId')`
+    : sql<string>`json_extract(${auditLog.metadata}, '$.credentialId')`;
+  const rows = await db
+    .select({ credentialId, seq: auditLog.seq, metadata: auditLog.metadata })
+    .from(auditLog)
+    .where(and(eq(auditLog.author, 'app'), eq(auditLog.action, 'token.exchange'), eq(auditLog.decision, 'allow'), inArray(credentialId, [...credentialIds])));
+  return new Map(rows.map((row) => {
+    const run = (JSON.parse(row.metadata) as { run?: unknown }).run;
+    return [row.credentialId, { seq: row.seq, run: typeof run === 'object' && run !== null ? (run as Record<string, unknown>) : {} }];
+  }));
+}
+
 /** Whether this token, by its signing input's hash, was exchanged already. */
 export async function tokenConsumed(db: Queryable, hash: Buffer): Promise<boolean> {
   const { consumedTokens } = tablesOf(db);

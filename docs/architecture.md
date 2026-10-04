@@ -607,6 +607,15 @@ put back with its binding stays dead. Spent tokens and exchanged
 credentials are kept, since the runtime logins delete nothing; a CI run
 adds two small rows.
 
+**Which run did what.** Every entry a request on such a credential writes
+names it, as `credentialId` in its metadata: the app's own, and the
+vault's, through a `credentialId` in its calls' correlation that it copies
+and never decides on. The exchange's entry names the same credential, with
+the run's claims. So a secret read leads back to its run in one indexed
+read, whatever became of the credential's row, and the audit page shows the
+run under the actor ("acme/api run 7001 at 3f2a9c1"): what the issuer
+asserted, not proof of which run sent the request.
+
 Bindings come with migration `0002_service_bindings` and spent tokens with
 `0003_exchanges`. This release runs on the schema before them. Until
 an owner runs `coffre migrate`, the bindings routes and the exchange answer
