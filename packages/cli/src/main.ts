@@ -316,6 +316,8 @@ async function login(args: string[]): Promise<void> {
   if (machine.length > 1) fail(`${machine.map((name) => `--${name}`).join(' and ')} are two ways to sign in: give one`);
   if (values['id-token'] && values.service === undefined) fail('--id-token goes with --service <name>: the ID token signs a CI run in as that service');
   if (machine.length > 0 && values['no-browser']) fail('--no-browser is for a person\'s sign-in, in a browser');
+  // Each machine sign-in implies its mode: a service token and an ID token are coffre's own, an Access service token Access's.
+  if (machine.length > 0 && sessionFlags.authMode !== undefined) fail(`--auth-mode is for a person's sign-in: --${machine[0]} says which`);
   for (const name of ['access-client-id', 'service'] as const) {
     if (values[name]?.trim() === '') fail(`--${name} is empty: an unset variable, perhaps`);
   }
@@ -323,6 +325,11 @@ async function login(args: string[]): Promise<void> {
   const requested = attempt(() => oneUrl(positionals[0], 'login')) ?? readStore().current;
   if (!requested) fail('usage: coffre login <url>, for example `coffre login https://coffre.example.com`');
   const origin = attempt(() => instanceOrigin(requested));
+  // A person's session there is not replaced unseen, and left valid on the server: they sign out first.
+  const kept = readStore().instances[origin];
+  if (machine.length > 0 && kept !== undefined && kept.kind === undefined) {
+    fail(`signed in to ${origin} as ${kept.principal?.id ?? 'a person'}: \`coffre logout ${origin}\` first, or sign the run in from a home of its own`);
+  }
   if (values.token) return tokenLogin(origin);
   if (values['access-client-id'] !== undefined) return accessServiceLogin(origin, values['access-client-id'].trim());
   if (values.service !== undefined) return runLogin(origin, serviceMember(values.service.trim()), values['id-token']);
@@ -452,9 +459,8 @@ function openBrowser(url: string): void {
 
 /**
  * A CI run's sign-in, saved as the instance's session for the commands
- * after it: whoever `to` is, as the instance says, kept as `session`. A
- * session of a person's this replaces is not signed out: the run's own
- * home is where this belongs.
+ * after it: whoever `to` is, as the instance says, kept as `session`. It
+ * replaces another run's session there, never a person's (`login`).
  */
 async function saveRun(to: Target, session: Omit<Session, 'principal' | 'obtainedAt'>): Promise<void> {
   const me = await client(to).me();
@@ -648,15 +654,16 @@ async function set(args: string[]): Promise<void> {
 }
 
 /**
- * A secret's value: typed at a hidden prompt on a terminal, or stdin as it
- * is, a value of several lines included, less one final line break.
+ * A secret's value, as it is: typed at a hidden prompt on a terminal, or
+ * stdin, a value of several lines included, less exactly one final line
+ * break. Never empty: an unset variable piped in would blank the secret.
  */
 async function readValue(key: string): Promise<string> {
-  if (process.stdin.isTTY) {
-    const s = style(process.stderr);
-    return hiddenLine(process.stdin, process.stderr, s, `${key}:`, 'Hidden as you type; for a value of several lines, pipe it in.');
-  }
-  return readFileSync(0, 'utf8').replace(/\r?\n$/, '');
+  const value = process.stdin.isTTY
+    ? await hiddenLine(process.stdin, process.stderr, style(process.stderr), `${key}:`, 'Hidden as you type; for a value of several lines, pipe it in.', true)
+    : readFileSync(0, 'utf8').replace(/\r?\n$/, '');
+  if (value === '') fail(process.stdin.isTTY ? 'no value given' : 'no value: none came on stdin, and there is no terminal to ask on');
+  return value;
 }
 
 /**

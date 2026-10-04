@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
@@ -73,7 +73,8 @@ test('the Action takes one of a token or a service, and a service only with the 
     const bin = join(dir, 'bin');
     mkdirSync(bin);
     writeFileSync(join(bin, 'node'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
-    writeFileSync(join(bin, 'npx'), `#!/bin/sh\necho "$*" >> '${join(dir, 'calls')}'\necho "npx ran with: $*"\necho "stdin: $(cat)"\nexit 0\n`, { mode: 0o755 });
+    // It says where its home is, and leaves a mark there, which must go with the step.
+    writeFileSync(join(bin, 'npx'), `#!/bin/sh\necho "$HOME" >> '${join(dir, 'homes')}'\ntouch "$HOME/session"\necho "npx ran with: $*"\necho "stdin: $(cat)"\nexit 0\n`, { mode: 0o755 });
     // The shell's own tools, beside the fakes: cat, for the fake npx.
     const path = `${bin}:/usr/bin:/bin`;
     const text = readFileSync(join(dir, 'action/action.yml'), 'utf8');
@@ -100,6 +101,12 @@ test('the Action takes one of a token or a service, and a service only with the 
         `npx ran with: ${cli} login https://coffre.example.com --token\nstdin: coffre_svc_x\n` +
             `npx ran with: ${cli} --url https://coffre.example.com export --format github app/ci\nstdin: \n`,
     );
-    assert.ok(readFileSync(join(dir, 'calls'), 'utf8').endsWith(`\n${cli} logout https://coffre.example.com\n`), 'the session was not forgotten');
     assert.ok(!token.stderr.includes('coffre_svc_x'));
+    // Each step's CLI had a home of its own, not the runner user's, and it went with the step.
+    const homes = readFileSync(join(dir, 'homes'), 'utf8').trim().split('\n');
+    assert.equal(new Set(homes).size, 2, 'one home per step, shared by its commands');
+    for (const home of homes) {
+        assert.notEqual(home, process.env.HOME);
+        assert.equal(existsSync(home), false, `${home} outlived the step`);
+    }
 });

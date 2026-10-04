@@ -129,6 +129,14 @@ test('a secret is never an argument: set refuses a value, login refuses two ways
   assert.match(both.stderr, /--token and --service are two ways to sign in: give one/);
   const id = coffre(['login', 'http://127.0.0.1:9', '--id-token']);
   assert.match(id.stderr, /--id-token goes with --service <name>/);
+  // An unset variable piped in would blank the secret: refused, before anything is sent.
+  const empty = coffre(['--url', 'http://127.0.0.1:9', 'set', 'app/prod/KEY'], {}, '');
+  assert.equal(empty.status, 1);
+  assert.equal(empty.stderr, 'coffre: no value: none came on stdin, and there is no terminal to ask on\n');
+  // A machine sign-in says its own mode.
+  const mode = coffre(['--auth-mode', 'cloudflare', 'login', 'http://127.0.0.1:9', '--token'], {}, 'coffre_svc_x\n');
+  assert.equal(mode.status, 1);
+  assert.equal(mode.stderr, "coffre: --auth-mode is for a person's sign-in: --token says which\n");
   // Nothing on stdin and no terminal: said, before anything is sent.
   const none = coffre(['login', 'http://127.0.0.1:9', '--token']);
   assert.equal(none.status, 1);

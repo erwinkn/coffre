@@ -42,14 +42,17 @@ runs:
           echo '::error::service needs the job to have `permissions: id-token: write`.' >&2
           exit 1
         fi
-        coffre() { npx -y @coffre/cli@0.2.0 "$@"; }
+        # The CLI's home is the step's own, and goes with it: on a runner
+        # whose user several runners share, no other job sees the session.
+        # npx keeps its cache where it was.
+        home="$(mktemp -d)"
+        trap 'rm -rf "$home"' EXIT
+        coffre() { npm_config_cache="${npm_config_cache:-$HOME/.npm}" HOME="$home" npx -y @coffre/cli@0.2.0 "$@"; }
         if [ -n "$INPUT_SERVICE" ]; then
           # Nothing more than its name, and the runner's ID token.
           coffre --url "$INPUT_URL" --service "$INPUT_SERVICE" export --format github "$INPUT_ENVIRONMENT"
         else
-          # The token goes on stdin, never in an argument, which ps shows; the
-          # session it makes is forgotten when the step ends, and not revoked.
-          trap 'coffre logout "$INPUT_URL" > /dev/null 2>&1 || true' EXIT
+          # The token goes on stdin, never in an argument, which ps shows.
           printf '%s' "$INPUT_TOKEN" | coffre login "$INPUT_URL" --token
           coffre --url "$INPUT_URL" export --format github "$INPUT_ENVIRONMENT"
         fi

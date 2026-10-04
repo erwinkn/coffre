@@ -46,14 +46,18 @@ coffre: COFFRE_TOKEN is no longer read: unset it; instead, run `coffre login <ur
 | `coffre migrate --url <url>` | `coffre --url <url> migrate` |
 
 `coffre logout` forgets a service token's or an Access service token's
-session there, and revokes nothing: the token is the service's. An empty
+session there, and revokes nothing: the token is the service's. A machine
+sign-in never replaces a person's session unseen: they sign out first, or
+the run signs in from a home of its own. `coffre set` refuses an empty
+value, which an unset variable piped in would be, and takes one as it is,
+at the prompt or piped, less exactly one final line break. An empty
 session flag, which is what an unset variable expands to, an instance named
 both as an argument and as `--url`, a session flag after the command, and
 one a command has no use for are refused. When the instance does not know
 the session saved for it, as after it was reset at the same address, the
 CLI says so and names `coffre login <url>`. The GitHub Action's inputs are
-as they were; it pipes the token to `coffre login --token`, and forgets
-that session when its step ends. On Workers Builds, rename the vault's
+as they were; it pipes the token to `coffre login --token`, the CLI in a
+home of the step's own, removed when the step ends. On Workers Builds, rename the vault's
 build variable `COFFRE_MIGRATE_DATABASE_URL` to `DATABASE_OWNER_URL`, and
 its build command to `printenv DATABASE_OWNER_URL | pnpm exec coffre migrate
 --yes` ([Workers Builds](docs/deploy.md#workers-builds)). On GitLab, name the

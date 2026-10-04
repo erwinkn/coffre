@@ -12,7 +12,7 @@ import { parseArgs } from 'node:util';
 import type { CoffreClient, RouteOutput } from '@coffre/client';
 import { appLogKeyId, opensKeyCheck } from '@coffre/core/kek';
 
-import { hiddenLine, openTerminal, release, style, type Output } from '../tty.ts';
+import { hiddenLine, style, type Output } from '../tty.ts';
 import { Checks, Failure, Skip, stop } from './checks.ts';
 
 export const KEYS_USAGE = `usage:
@@ -113,17 +113,12 @@ async function readKeys(): Promise<{ vault: Source; app: Source }> {
     const lines = text.split(/\r?\n/);
     missing.forEach((which, i) => (asked[which] = { text: lines[i]?.trim() ?? '', from: 'stdin' }));
   } else {
-    const terminal = openTerminal();
-    if (terminal === null) stop(2, 'coffre: no terminal to ask for the keys on: pipe them in, the vault key on the first line and the app key on the second');
-    const s = style(terminal.out);
-    try {
-      for (const which of missing) {
-        const name = which === 'vault' ? 'Vault key' : 'App key';
-        const text = await hiddenLine(terminal.keys, terminal.out, s, `${name}?`, 'Paste it: it stays hidden, and on this machine. Enter alone skips it.');
-        asked[which] = { text, from: 'the prompt' };
-      }
-    } finally {
-      release(terminal.keys);
+    // On the terminal stdin is, as every prompt: stdout may be a pipe, as `coffre verify keys | tee report`.
+    const s = style(process.stderr);
+    for (const which of missing) {
+      const name = which === 'vault' ? 'Vault key' : 'App key';
+      const text = await hiddenLine(process.stdin, process.stderr, s, `${name}?`, 'Paste it: it stays hidden, and on this machine. Enter alone skips it.');
+      asked[which] = { text, from: 'the prompt' };
     }
   }
   return { vault: asked.vault!, app: asked.app! };

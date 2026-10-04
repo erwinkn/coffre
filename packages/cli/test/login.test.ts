@@ -79,6 +79,7 @@ async function ciInstance(t: test.TestContext) {
       req.headers.authorization === 'Bearer coffre_svc_run' ||
       (req.headers['cf-access-client-id'] === 'id.access' && req.headers['cf-access-client-secret'] === 'shh');
     if (req.url === '/api/me' && known) return send(200, { principal: { type: 'service', id: 'deploy' }, registered: true, environments: [] });
+    if (req.method === 'PATCH' && req.url === '/api/secrets/app/prod' && known) return send(200, { operationId: 'op', keys: { KEY: { version: 1 } } });
     send(401, { error: 'unauthenticated', message: 'that credential is unknown, expired or revoked' });
   });
   server.listen(0, '127.0.0.1');
@@ -133,6 +134,17 @@ test('a CI run signs in with what login asks it for, piped in, and later command
     assert.ok(!seen.slice(before).some(({ url }) => url === '/api/auth/logout'), 'logout sent the service credential to be revoked');
     assert.equal(JSON.parse(readFileSync(join(home, '.coffre', 'credentials.json'), 'utf8')).instances[origin], undefined);
   }
+  // A person's session is not replaced unseen, and left valid on the server.
+  const person = mkdtempSync(join(tmpdir(), 'coffre-login-ci-'));
+  t.after(() => rmSync(person, { recursive: true, force: true }));
+  mkdirSync(join(person, '.coffre'), { mode: 0o700 });
+  const ada = { mode: 'signin', token: 'coffre_cli_ada', principal: { type: 'user', id: 'ada@acme.example' }, expiresAt: '2099-01-01T00:00:00Z', obtainedAt: '2026-10-01T00:00:00Z' };
+  writeFileSync(join(person, '.coffre', 'credentials.json'), JSON.stringify({ version: 2, current: origin, instances: { [origin]: ada } }), { mode: 0o600 });
+  const replacing = await cli(person, ['login', origin, '--token'], 'coffre_svc_ci\n');
+  assert.equal(replacing.status, 1);
+  assert.equal(replacing.stderr, `coffre: signed in to ${origin} as ada@acme.example: \`coffre logout ${origin}\` first, or sign the run in from a home of its own\n`);
+  assert.deepEqual(JSON.parse(readFileSync(join(person, '.coffre', 'credentials.json'), 'utf8')).instances[origin], ada);
+
   // A token the instance does not know: said, and nothing saved.
   const home = mkdtempSync(join(tmpdir(), 'coffre-login-ci-'));
   t.after(() => rmSync(home, { recursive: true, force: true }));
@@ -140,4 +152,16 @@ test('a CI run signs in with what login asks it for, piped in, and later command
   assert.equal(refused.status, 1);
   assert.match(refused.stderr, /does not know/);
   assert.equal(existsSync(join(home, '.coffre', 'credentials.json')), false);
+});
+
+test('set takes a piped value as it is, less exactly one final line break', async (t) => {
+  const { origin, seen } = await ciInstance(t);
+  const home = mkdtempSync(join(tmpdir(), 'coffre-set-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  assert.equal((await cli(home, ['login', origin, '--token'], 'coffre_svc_ci\n')).status, 0);
+  for (const [piped, value] of [['  spaced  \n', '  spaced  '], ['l1\nl2\n\n', 'l1\nl2\n'], ['no break', 'no break']]) {
+    const set = await cli(home, ['set', 'app/prod/KEY'], piped!);
+    assert.equal(set.status, 0, set.stderr);
+    assert.deepEqual(JSON.parse(seen.at(-1)!.body), { KEY: value });
+  }
 });

@@ -11,8 +11,14 @@ commands after it use.
 ```sh
 printf '%s' "$TOKEN" | coffre login https://secrets.acme.example --token
 coffre run market/prod -- ./deploy
-coffre logout   # forgets the token here, on a runner whose disk outlives the job; revokes nothing
 ```
+
+The session lives in the job's home, `~/.coffre`, one per instance. On a
+runner that several jobs share under one user, a self-hosted runner or a
+GitLab shell executor, give each job a home of its own, so that no other
+job signs in over it or reads with it: `export HOME="$(mktemp -d)"` before
+`coffre login`, removed when the job ends. `coffre logout` forgets the
+token there too, and revokes nothing.
 
 A service token works without an interactive login. The runner must be
 able to reach your instance; behind Cloudflare Access, the job signs in
@@ -61,6 +67,7 @@ With the CLI:
       ID_TOKEN:
         aud: https://secrets.acme.example
     script:
+      - export HOME="$(mktemp -d)"   # on a shell executor, a home of the job's own
       - printf '%s' "$ID_TOKEN" | coffre login https://secrets.acme.example --service api-deploy --id-token
       - coffre run market/prod -- ./deploy
   ```
@@ -106,8 +113,8 @@ steps:
 The Action uses your job's existing Node, which must be version 20 or newer,
 and runs `@coffre/cli` at the same exact version as the tag. It leaves your
 toolchain and `PATH` unchanged. It pipes the token to `coffre login --token`,
-never in a command argument, and forgets that session when the step ends,
-revoking nothing. The secrets become environment variables in subsequent steps
+never in a command argument, with the CLI in a home of the step's own,
+removed when the step ends: no other job on the runner sees the session. The secrets become environment variables in subsequent steps
 of the same job. Their values, and each line of multiline values, are
 masked before being written to `GITHUB_ENV`. Newlines, quotes, `=` and `%`
 are kept intact. Empty values are exported too.
