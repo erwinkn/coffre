@@ -85,6 +85,19 @@ or `serveVault({…})`. The env vars left are the CLI's user-facing ones (`COFFR
 tooling's (`COFFRE_DEV_*`, `COFFRE_STATE_DIR`, `COFFRE_TEST_ENGINE`,
 `COFFRE_TEST_DATABASE`). Don't add another to a package.
 
+**Migrations: expand, then contract.** A deployment runs `coffre migrate` in
+its pipeline, before it deploys, so each migration first meets the previous
+release's code, and must work with it as well as with the code it ships:
+the old code on the new schema, and the new code on the old schema until it
+runs. Then the order of migrating and deploying does not matter. So a
+migration adds: tables, columns that are nullable or have a default,
+indexes, grants. What removes or tightens (dropping or renaming a table or a
+column, NOT NULL on an existing column, a narrower check or type, a unique
+or foreign key the old code may break) ships one release after the code
+stops using it. `pnpm test:compat` holds the newest release to this
+checkout's schema, through that release's own conformance; it would have
+caught `0001_remove_syncs`, which dropped tables 0.1.11 still read.
+
 **Transactions and the vault.** No app database transaction may stay open across
 any vault call. Prepare outside SQL; commit app writes and their audit together,
 taking the audit head before application rows. Reads commit their app audit before
@@ -147,6 +160,12 @@ fast path. Parse errors or an unsupported diff select full validation.
   for another three. Workers needs Postgres and makes its own
   `coffre_conformance_<hex>` database, dropped after; Node runs on SQLite in a temp
   dir. A check that fails prints what it saw, then the processes' output.
+- `pnpm test:compat [--kind workers|node] [--release <v>] [--schema <v>]` installs
+  the newest release from npm as `init` writes it, has its own conformance
+  migrate with this checkout's migrations, and requires it conformant; then
+  requires a synthetic destructive migration to fail it. `--schema` applies a
+  published version's migrations instead, to check past releases. It needs
+  network and Postgres.
 - `pnpm test:consumer [<dir>]` packs the eight packages, runs the packed CLI's
   `init` for both kinds outside the workspace, diffs them against the examples,
   installs the tarballs (pnpm overrides, no workspace links), then typechecks,

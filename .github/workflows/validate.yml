@@ -127,10 +127,30 @@ jobs:
       - name: Packed consumer
         run: pnpm test:consumer --kind ${{ matrix.kind }}
 
+  compat:
+    needs: changes
+    if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.version_only != 'true') }}
+    name: Previous release on this schema (${{ matrix.kind }})
+    strategy:
+      fail-fast: false
+      matrix:
+        kind: [workers, node]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out the selected revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/prepare
+        with:
+          # The schema comes from this checkout's sources; the release from npm.
+          build: 'false'
+      - name: The newest release, migrated with this revision's migrations
+        run: pnpm test:compat --kind ${{ matrix.kind }}
+
   validate:
     name: Validate
     runs-on: ubuntu-24.04
-    needs: [changes, checks, tests, schema, workers, node, consumer]
+    needs: [changes, checks, tests, schema, workers, node, consumer, compat]
     if: always()
     steps:
       - name: Require full validation or a proven version-only bump
