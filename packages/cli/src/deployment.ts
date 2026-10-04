@@ -2,7 +2,7 @@
 // kind the directory holds, and on Workers, each Worker's wrangler.jsonc,
 // read and edited in place, its comments kept.
 import { spawn } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { applyEdits, type JSONPath, modify, parse, type ParseError, printParseErrorCode } from 'jsonc-parser';
@@ -17,8 +17,14 @@ export function deploymentKind(dir: string): Kind | 'empty' | 'other' {
   return 'other';
 }
 
-/** Install a new deployment's packages, as its README says: pnpm, through corepack when pnpm itself is missing. */
-export function install(dir: string): Promise<void> {
+/**
+ * Install a deployment's packages, as its README says: pnpm, through
+ * corepack when pnpm itself is missing. `purge`, when the person has said
+ * yes already: a pnpm of another major than the one that installed
+ * node_modules removes it first, and without a terminal it would ask, and
+ * stop.
+ */
+export function install(dir: string, { purge = false }: { purge?: boolean } = {}): Promise<void> {
   const attempt = (command: string, args: string[]) =>
     new Promise<{ code: number | null; output: string } | null>((resolve) => {
       // Corepack would otherwise ask, on a stdin nobody types into, before fetching pnpm.
@@ -30,7 +36,9 @@ export function install(dir: string): Promise<void> {
       child.on('close', (code) => resolve({ code, output }));
     });
   return (async () => {
-    const ran = (await attempt('pnpm', ['install'])) ?? (await attempt('corepack', ['pnpm', 'install']));
+    // pnpm's box about its own new release would come after the error, and take its place.
+    const args = ['install', '--config.update-notifier=false', ...(purge ? ['--config.confirm-modules-purge=false'] : [])];
+    const ran = (await attempt('pnpm', args)) ?? (await attempt('corepack', ['pnpm', ...args]));
     if (ran === null) throw new Error('pnpm is not installed: corepack enable, or npm install -g pnpm, then run setup again');
     if (ran.code !== 0) {
       const held = heldBack(ran.output);
@@ -80,9 +88,12 @@ export class HeldBack extends Error {
   }
 }
 
-/** The packages pnpm held back, as its error names them. */
+/**
+ * The packages pnpm held back, as its error names them: in a lockfile it
+ * checked, or as the only versions a range allows when it resolved.
+ */
 export function heldBack(output: string): Held[] {
-  if (!output.includes('MINIMUM_RELEASE_AGE')) return [];
+  if (!/MINIMUM_RELEASE_AGE|NO_MATURE_MATCHING_VERSION/.test(output)) return [];
   return [...output.matchAll(/^\s*(\S+@\d\S*) was published at (\S+?),?\s/gm)].map((match) => ({
     spec: match[1]!,
     publishedAt: new Date(match[2]!),
@@ -171,7 +182,7 @@ export function pinPackageManager(dir: string, wanted: string): string | undefin
  * and what to do, rather than pnpm's last lines.
  */
 export function installFailure(output: string): string {
-  if (output.includes('MINIMUM_RELEASE_AGE')) {
+  if (/MINIMUM_RELEASE_AGE|NO_MATURE_MATCHING_VERSION/.test(output)) {
     const held = [...output.matchAll(/^\s*(\S+@\d\S*) was published at/gm)].map((match) => match[1]!);
     return (
       `pnpm held back ${held.length === 0 ? 'packages' : held.join(', ')}: published within this deployment's ` +
@@ -180,6 +191,51 @@ export function installFailure(output: string): string {
     );
   }
   return `pnpm install failed: ${output.trim().split('\n').slice(-3).join(' ')}`;
+}
+
+/** Each package's locked versions, from a pnpm lockfile's `packages:`. */
+export function lockedVersions(lockfile: string): Map<string, Set<string>> {
+  const versions = new Map<string, Set<string>>();
+  const section = /^packages:\n([\s\S]*?)(?=^\S|(?![\s\S]))/m.exec(lockfile)?.[1] ?? '';
+  for (const match of section.matchAll(/^  '?(@?[^@\s']+)@([^:('\s]+)/gm)) {
+    const set = versions.get(match[1]!) ?? new Set<string>();
+    set.add(match[2]!);
+    versions.set(match[1]!, set);
+  }
+  return versions;
+}
+
+/** A package whose locked version a fresh resolution moved. */
+export type Moved = { name: string; from: string[]; to: string[] };
+
+/**
+ * Resolve every package again, from nothing, under the deployment's policy:
+ * what a lockfile another pnpm wrote held too young, pnpm 11 replaces with
+ * the newest version old enough, when the ranges allow one. Only a fresh
+ * resolution does that: `pnpm update` checks the lockfile first and stops
+ * there, and a lockfile with the held entries cut out installs without
+ * them. So every package may move within its range, and each move is
+ * returned, to be said. On failure the lockfile is put back.
+ */
+export async function resolveAgain(dir: string): Promise<Moved[]> {
+  const path = join(dir, 'pnpm-lock.yaml');
+  const before = existsSync(path) ? readFileSync(path, 'utf8') : null;
+  rmSync(path, { force: true });
+  // pnpm's copy of it, in node_modules, which it would check just the same.
+  rmSync(join(dir, 'node_modules', '.pnpm', 'lock.yaml'), { force: true });
+  try {
+    await install(dir, { purge: true });
+  } catch (error) {
+    if (before !== null) writeFileSync(path, before);
+    throw error;
+  }
+  const [was, now] = [lockedVersions(before ?? ''), lockedVersions(existsSync(path) ? readFileSync(path, 'utf8') : '')];
+  const moved: Moved[] = [];
+  for (const name of [...new Set([...was.keys(), ...now.keys()])].sort()) {
+    const [from, to] = [[...(was.get(name) ?? [])].sort(), [...(now.get(name) ?? [])].sort()];
+    if (from.join() !== to.join()) moved.push({ name, from, to });
+  }
+  return moved;
 }
 
 /** What setup reads of a Worker's wrangler.jsonc. */
