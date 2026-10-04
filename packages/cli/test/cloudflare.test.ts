@@ -497,7 +497,7 @@ for (const road of ['the browser here', 'the address pasted back'] as const) {
         app = await createGitHubApp(step, say, fake.github, 'https://secrets.acme.test');
         return 'Made';
       });
-      const here = await until(() => (existsSync(join(dir, 'opened')) ? readFileSync(join(dir, 'opened'), 'utf8').trim() : undefined));
+      const here = await until(() => (existsSync(join(dir, 'opened')) ? readFileSync(join(dir, 'opened'), 'utf8').trim() || undefined : undefined));
       assert.match(here, /^http:\/\/127\.0\.0\.1:\d+\/$/);
       assert.deepEqual(asides, ["coffre's GitHub App may read the email addresses of whoever signs in with it, and nothing else."], 'said before the browser opens');
       assert.deepEqual(printed[0], ['If no browser opened, create it at', here]);

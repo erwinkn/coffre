@@ -254,11 +254,17 @@ if (args[0] === 'auth') {
   chmodSync(join(dir, 'node_modules', '.bin', 'wrangler'), 0o755);
 }
 
-/** A browser opener that only notes what it was asked to open, in `<dir>/opened`: put `dir` first on PATH. */
+/**
+ * A browser opener that only notes what it was asked to open, a line each, in
+ * `<dir>/opened`: put `dir` first on PATH. Tests poll that file while it runs,
+ * so it never appends in place, which shows them an empty file or half a
+ * line: the list so far and the new address go beside it, then are renamed.
+ */
 export function fakeOpener(dir: string): void {
   mkdirSync(dir, { recursive: true });
+  const opened = `'${dir}/opened'`;
   for (const name of ['xdg-open', 'open']) {
-    writeFileSync(join(dir, name), `#!/bin/sh\nprintf '%s\\n' "$1" >> '${dir}/opened'\n`);
+    writeFileSync(join(dir, name), `#!/bin/sh\n{ cat ${opened} 2>/dev/null; printf '%s\\n' "$1"; } > ${opened}.$$ && mv ${opened}.$$ ${opened}\n`);
     chmodSync(join(dir, name), 0o755);
   }
 }
