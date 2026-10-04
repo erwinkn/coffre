@@ -18,6 +18,8 @@ export type WorkloadTransport = {
 export const FETCH_DEADLINE_MS = 5_000;
 /** Discovery documents and key sets are a few kilobytes. */
 export const MAX_BODY_BYTES = 64 * 1024;
+/** GitHub's API refuses a request that names no client. */
+export const USER_AGENT = 'coffre';
 
 /** A fetch that broke a limit, or failed: the message names the URL and why, never a body. */
 export class FetchRefused extends Error {
@@ -36,7 +38,7 @@ export function fetchTransport(fetchImpl: typeof fetch = fetch): WorkloadTranspo
         response = await fetchImpl(url, {
           redirect: 'manual',
           signal: AbortSignal.timeout(FETCH_DEADLINE_MS),
-          headers: { accept: 'application/json' },
+          headers: { accept: 'application/json', 'user-agent': USER_AGENT },
         });
       } catch (error) {
         throw new FetchRefused(url, 'could not be fetched', { cause: error });

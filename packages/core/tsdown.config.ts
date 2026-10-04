@@ -11,6 +11,8 @@ export default defineConfig({
     kek: 'src/kek/index.ts',
     schemas: 'src/schemas.ts',
     vault: 'src/vault.ts',
+    // Trust bindings' rules alone, for the pages and the CLI: none of sign-in's own code.
+    workloads: 'src/identity/workloads.ts',
   },
   platform: 'node',
   dts: true,

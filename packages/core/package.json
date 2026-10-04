@@ -57,6 +57,11 @@
       "types": "./dist/vault.d.ts",
       "default": "./dist/vault.js"
     },
+    "./workloads": {
+      "coffre:source": "./src/identity/workloads.ts",
+      "types": "./dist/workloads.d.ts",
+      "default": "./dist/workloads.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {

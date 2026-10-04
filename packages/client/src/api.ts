@@ -387,6 +387,22 @@ export type Api = {
       replaced: string[];
     };
   };
+  "GET /workloads/lookup": {
+    input: {
+      github?: string;
+      gitlab?: string;
+      gitlabUrl?: string;
+    };
+    output: {
+      github: string;
+      repositoryId: string;
+      ownerId: string;
+    } | {
+      gitlab: string;
+      projectId: string;
+      namespaceId: string;
+    };
+  };
   "DELETE /members/:member/bindings/:id": {
     input: undefined;
     output: {
@@ -616,6 +632,16 @@ export type BindingView = {
   createdAt: string;
   createdBy: string;
   lastUsedAt: string | null;
+};
+
+export type WorkloadIds = {
+  github: string;
+  repositoryId: string;
+  ownerId: string;
+} | {
+  gitlab: string;
+  projectId: string;
+  namespaceId: string;
 };
 
 export type DryRunOutcome = "added" | "archived" | "changed" | "unchanged";

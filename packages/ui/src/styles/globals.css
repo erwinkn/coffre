@@ -1385,6 +1385,42 @@ a.crumb-link:hover {
     0 0 0 1px var(--border);
 }
 
+/* A checkbox and its words, in a form. */
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--ink);
+  font-size: 0.875rem;
+}
+
+/* A trust binding's claims, what a run's ID token must carry, in full. */
+.claims summary {
+  color: var(--ink-2);
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.claims-table {
+  margin-top: 0.25rem;
+  border-collapse: collapse;
+  font-size: 0.75rem;
+}
+
+.claims-table th {
+  padding: 0.125rem 0.75rem 0.125rem 0;
+  color: var(--ink-2);
+  font-weight: 550;
+  text-align: left;
+  white-space: nowrap;
+  vertical-align: top;
+}
+
+.claims-table td {
+  padding: 0.125rem 0;
+  overflow-wrap: anywhere;
+}
+
 /* Theme choice on sign-in pages, three glyphs wide. */
 .theme-choice {
   display: inline-flex;

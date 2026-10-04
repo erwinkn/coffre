@@ -26,6 +26,7 @@ const NAMED = {
   AuthInfo: 'fetch-api.ts',
   BindingPlan: 'api/workloads.ts',
   BindingView: 'api/workloads.ts',
+  WorkloadIds: 'api/workloads.ts',
   DryRunOutcome: 'api/secrets.ts',
   DryRunResult: 'api/secrets.ts',
   IdentityRow: 'api/signin.ts',

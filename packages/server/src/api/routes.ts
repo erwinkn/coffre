@@ -235,6 +235,14 @@ export const routes = {
     run: (ctx, { params, input, query }) =>
       workloads(ctx).bind(ctx, serviceId(params.member), input, { dryRun: query.dryRun !== undefined }),
   }),
+  ...route('GET /workloads/lookup', {
+    input: z.object({
+      github: z.string().max(200).optional(),
+      gitlab: z.string().max(400).optional(),
+      gitlabUrl: z.string().max(400).optional(),
+    }).strict(),
+    run: (ctx, { input }) => workloads(ctx).lookup(ctx, input),
+  }),
   ...route('DELETE /members/:member/bindings/:id', {
     run: (ctx, { params }) => workloads(ctx).unbind(ctx, serviceId(params.member), params.id),
   }),
