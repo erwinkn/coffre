@@ -24,6 +24,8 @@ import { serveWith, type ServeOptions, type Server } from './node-server.ts';
 
 export * from './index.ts';
 export type { ServeOptions, Server };
+/** Limits for workload exchanges that count in this process: `signin({ workloads: { limits: processLimits() } })`. */
+export { processLimits } from './workloads/limits.ts';
 
 /** Bring the database up to date: what `coffre-server migrate` runs. */
 export function migrate(database: string): Promise<void> {

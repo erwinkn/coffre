@@ -307,6 +307,10 @@ export const auditLog = sqliteTable(
     index('audit_log_unbind_idx')
       .on(sql`json_extract(${table.metadata}, '$.bindingId')`)
       .where(sql`${table.author} = 'app' AND ${table.action} = 'token.unbind' AND ${table.decision} = 'allow'`),
+    // The run a credential was issued for: its exchange's entry, by the credential's ID.
+    index('audit_log_exchange_idx')
+      .on(sql`json_extract(${table.metadata}, '$.credentialId')`)
+      .where(sql`${table.author} = 'app' AND ${table.action} = 'token.exchange' AND ${table.decision} = 'allow'`),
   ],
 );
 
@@ -390,6 +394,15 @@ export const serviceBindings = sqliteTable(
     }).onDelete('restrict'),
     index('service_bindings_principal_idx').on(table.principal, table.issuer),
   ],
+);
+
+export const consumedTokens = sqliteTable(
+  'consumed_tokens',
+  {
+    hash: bytes('hash').primaryKey(),
+    consumedAt: time('consumed_at').notNull().default(now),
+  },
+  (table) => [check('consumed_tokens_hash_check', sql`octet_length(${table.hash}) = 32`)],
 );
 
 export const credentials = sqliteTable(

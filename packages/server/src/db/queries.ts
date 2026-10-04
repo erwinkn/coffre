@@ -7,7 +7,7 @@ import { canonicalTimestamp, changedRows, clock, clockMillis, forUpdate, migrati
 import type * as schema from '@coffre/db/schema';
 import { and, asc, count, countDistinct, desc, eq, getTableColumns, getTableName, gt, gte, inArray, isNull, lt, notInArray, or, sql, type SQL } from 'drizzle-orm';
 
-import { authMac, checkAuthRow, verifyAuthRow, type AuthRow, type AuthTable } from '../auth-rows.ts';
+import { authMac, checkAuthRow, issuingBinding, verifyAuthRow, type AuthRow, type AuthTable } from '../auth-rows.ts';
 
 /**
  * Every query coffre runs, and nowhere else: named reads returning all
@@ -552,8 +552,11 @@ export async function findCredential(db: Queryable, chainKey: Buffer, by: { toke
   verifyAuthRow(chainKey, 'credentials', row.credential);
   if (row.identity !== null) verifyAuthRow(chainKey, 'identities', row.identity);
   if (row.credential.identityId !== null && row.identity === null) throw new Error('credential identity is missing');
+  const binding = issuingBinding(row.credential.createdBy);
   return {
     ...row.credential,
+    /** For a credential a trust binding issued: whether that binding still stands. Null for any other. */
+    bindingStands: binding === null ? null : await bindingStands(db, chainKey, binding, row.credential.principal, row.credential.generation),
     identityRevokedAt: row.identity?.revokedAt ?? null,
     identityProvider: row.identity?.provider ?? null,
     identityIssuerHash: row.identity?.issuerHash ?? null,
@@ -617,6 +620,84 @@ export async function tombstoned(db: Queryable, ids: readonly string[]): Promise
     .from(auditLog)
     .where(and(eq(auditLog.author, 'app'), eq(auditLog.action, 'token.unbind'), eq(auditLog.decision, 'allow'), inArray(bindingId, [...ids])));
   return new Set(rows.map((row) => row.id));
+}
+
+/** The expression `audit_log_unbind_idx` indexes: the binding an entry names. */
+function namedBinding(db: Queryable): SQL<string> {
+  const { auditLog } = tablesOf(db);
+  return dialect.engineOf(db) === 'postgres'
+    ? sql<string>`((${auditLog.metadata})::jsonb ->> 'bindingId')`
+    : sql<string>`json_extract(${auditLog.metadata}, '$.bindingId')`;
+}
+
+/** Whether the binding `id` (a column or a value) has a tombstone: an allowed app `token.unbind` naming it. */
+function hasTombstone(db: Queryable, id: SQL | string): SQL {
+  const { auditLog } = tablesOf(db);
+  return sql`EXISTS (SELECT 1 FROM ${auditLog} WHERE ${auditLog.author} = 'app' AND ${auditLog.action} = 'token.unbind'
+    AND ${auditLog.decision} = 'allow' AND ${namedBinding(db)} = ${id})`;
+}
+
+/**
+ * What an exchange may match, in one read: the service's live bindings on
+ * this issuer, in its current generation as its member row says, with no
+ * tombstone, each MAC-checked. A service holds at most `MAX_BINDINGS`, made
+ * so under the log's head; more than that here is a database changed
+ * around the app, and matches nothing.
+ */
+export async function exchangeCandidates(db: Queryable, chainKey: Buffer, principal: string, issuer: string, max: number): Promise<BindingRow[]> {
+  const { serviceBindings, vaultMembers } = tablesOf(db);
+  const id = dialect.engineOf(db) === 'postgres' ? sql`${serviceBindings.id}::text` : sql`${serviceBindings.id}`;
+  const rows = await db
+    .select({ binding: serviceBindings })
+    .from(serviceBindings)
+    .innerJoin(vaultMembers, and(eq(vaultMembers.principal, serviceBindings.principal), eq(vaultMembers.generation, serviceBindings.generation)))
+    .where(and(
+      eq(serviceBindings.principal, principal),
+      eq(serviceBindings.issuer, issuer),
+      isNull(serviceBindings.revokedAt),
+      sql`NOT ${hasTombstone(db, id)}`,
+    ))
+    .orderBy(asc(serviceBindings.createdAt), asc(serviceBindings.id))
+    .limit(max + 1);
+  if (rows.length > max) {
+    console.error({ event: 'bindings_over_limit', principal, issuer }, 'a service holds more bindings than any can');
+    return [];
+  }
+  return rows.map((row) => row.binding).filter((row) => checkAuthRow(chainKey, 'service_bindings', row));
+}
+
+/** Whether a credential's binding still stands: its row the app's, not revoked, no tombstone, of the same member and generation. */
+export async function bindingStands(db: Queryable, chainKey: Buffer, bindingId: string, principal: string, generation: number): Promise<boolean> {
+  const { serviceBindings } = tablesOf(db);
+  const [row] = await db
+    .select({ binding: serviceBindings, tombstoned: truth(hasTombstone(db, bindingId)) })
+    .from(serviceBindings)
+    .where(eq(serviceBindings.id, bindingId));
+  return row !== undefined && !row.tombstoned && row.binding.revokedAt === null
+    && row.binding.principal === principal && row.binding.generation === generation
+    && checkAuthRow(chainKey, 'service_bindings', row.binding);
+}
+
+/** Whether this token, by its signing input's hash, was exchanged already. */
+export async function tokenConsumed(db: Queryable, hash: Buffer): Promise<boolean> {
+  const { consumedTokens } = tablesOf(db);
+  const [row] = await db.select({ hash: consumedTokens.hash }).from(consumedTokens).where(eq(consumedTokens.hash, hash));
+  return row !== undefined;
+}
+
+/** Spend a token: false when it was spent already, which the primary key decides. */
+export async function consumeToken(db: Queryable, hash: Buffer): Promise<boolean> {
+  return (await insertIfAbsent(db, tablesOf(db).consumedTokens, { hash })) === 1;
+}
+
+/** How many credentials a binding issued since `since`. */
+export async function exchangesSince(db: Queryable, principal: string, createdBy: string, since: Date): Promise<number> {
+  const { credentials } = tablesOf(db);
+  const [{ n }] = await db
+    .select({ n: count() })
+    .from(credentials)
+    .where(and(eq(credentials.principal, principal), eq(credentials.createdBy, createdBy), gt(credentials.createdAt, since)));
+  return Number(n);
 }
 
 export async function insertBinding(db: Queryable, chainKey: Buffer, row: Omit<NewRow<Tables['serviceBindings']>, 'authMac'> & {

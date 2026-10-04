@@ -55,6 +55,7 @@ await pool.query('DELETE FROM credentials');
 await pool.query('DELETE FROM device_authorizations');
 await pool.query('DELETE FROM identities');
 await pool.query('DELETE FROM service_bindings');
+await pool.query('DELETE FROM consumed_tokens');
 await pool.query('DELETE FROM vault_grants');
 await pool.query('DELETE FROM vault_members');
 await pool.query('UPDATE secrets SET current_version_id = NULL');

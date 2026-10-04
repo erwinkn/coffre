@@ -273,4 +273,26 @@ BEGIN
 END
 $$;
 
+-- 16. A token once exchanged stays spent: its record is never changed or deleted.
+DO $$
+DECLARE
+    statement text;
+BEGIN
+    FOREACH statement IN ARRAY ARRAY[
+        'UPDATE consumed_tokens SET hash = hash',
+        'UPDATE consumed_tokens SET consumed_at = consumed_at',
+        'DELETE FROM consumed_tokens',
+        'TRUNCATE consumed_tokens'
+    ] LOOP
+        BEGIN
+            EXECUTE statement;
+            RAISE EXCEPTION 'FAIL: coffre_app was able to run: %', statement;
+        EXCEPTION
+            WHEN insufficient_privilege THEN NULL;
+        END;
+    END LOOP;
+    RAISE NOTICE 'PASS: coffre_app records a spent token and never unspends one';
+END
+$$;
+
 \echo '--- all schema guarantees held ---'

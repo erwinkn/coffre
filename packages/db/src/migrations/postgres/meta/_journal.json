@@ -22,6 +22,13 @@
       "when": 1791069304538,
       "tag": "0002_service_bindings",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1791072336889,
+      "tag": "0003_exchanges",
+      "breakpoints": true
     }
   ]
 }

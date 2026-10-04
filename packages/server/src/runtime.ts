@@ -53,7 +53,9 @@ export function createRuntime(
     });
     verifier = signin;
     const trusted = config.auth.signin.workloads;
-    if (trusted !== null) workloads = new WorkloadService({ db, chainKey: config.auditChainKey, vault, config: trusted, transport });
+    if (trusted !== null) {
+      workloads = new WorkloadService({ db, chainKey: config.auditChainKey, vault, config: trusted, transport, signin, publicUrl: config.publicUrl });
+    }
   } else {
     verifier = accessVerifier(config.auth.access);
   }

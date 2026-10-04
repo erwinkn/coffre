@@ -5,7 +5,7 @@
 // Every value is a local fixture; see wrangler.jsonc and .env.dev.
 import { coffre, github, oidc, postgres, signin } from '@coffre/server/cloudflare';
 
-import type { Vault } from '@coffre/server/cloudflare';
+import type { RateLimiter, Vault } from '@coffre/server/cloudflare';
 
 type Env = {
   HYPERDRIVE: { connectionString: string };
@@ -13,6 +13,8 @@ type Env = {
   COFFRE_PUBLIC_URL: string;
   COFFRE_DEV_IDP_URL: string;
   COFFRE_APP_KEY: string;
+  WORKLOADS_PER_SOURCE: RateLimiter;
+  WORKLOADS_TOTAL: RateLimiter;
 };
 
 export default coffre((env: Env) => {
@@ -29,7 +31,7 @@ export default coffre((env: Env) => {
       ],
       note: 'Local development. Both buttons lead to the dev IdP.',
       // CI runs signing in as services; the dev IdP is plain HTTP on loopback.
-      workloads: { allowLoopback: true },
+      workloads: { limits: { perSource: env.WORKLOADS_PER_SOURCE, total: env.WORKLOADS_TOTAL }, allowLoopback: true },
     }),
     auditChainKey: env.COFFRE_APP_KEY,
   };

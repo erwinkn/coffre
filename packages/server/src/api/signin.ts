@@ -19,7 +19,7 @@ import type { Database, Transaction } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
 import { credentials, deviceAuthorizations, identities } from '@coffre/db/schema';
 
-import { authMac, AuthRowTampered } from '../auth-rows.ts';
+import { authMac, AuthRowTampered, issuedBy, issuingBinding } from '../auth-rows.ts';
 import type { AuditEntry } from '../db/audit.ts';
 import {
   findCredential,
@@ -453,6 +453,8 @@ export class SigninService {
   #liveCredential(row: Awaited<ReturnType<typeof findCredential>>, access: Access, now: Date): boolean {
     return row !== null && row.revokedAt === null && row.expiresAt > now && row.identityRevokedAt === null
       && access.status === 'active' && row.generation === access.generation
+      // One a trust binding issued lives no longer than the binding: removed, replaced or put back, it ends.
+      && row.bindingStands !== false
       && (row.kind !== 'browser' || (row.identityIssuerHash !== null
         && row.identityIssuerHash === this.#issuerHash(row.identityProvider ?? '')));
   }
@@ -665,6 +667,8 @@ export class SigninService {
     if (!self && !ctx.caller.isOwner) throw forbidden('only owners may see service tokens');
     const [service] = await members(this.#deps.db, this.#deps.chainKey, { member: { type: 'service', id: serviceId } }, new Date());
     return (service?.credentials ?? [])
+      // Those its trust bindings issued are a CI run's for five minutes, not tokens anyone keeps.
+      .filter((row) => issuingBinding(row.createdBy) === null)
       .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
       .map((row) => ({
         id: row.id,
@@ -721,6 +725,26 @@ export class SigninService {
         );
         return credential;
       });
+    });
+  }
+
+  /**
+   * A credential for a CI run, which a trust binding vouched for
+   * (`WorkloadService.exchange`): in the transaction that holds the log's
+   * head, its member checked under it. It names its binding in
+   * `created_by`, under its MAC, and dies with it.
+   */
+  async issueExchanged(
+    tx: Transaction,
+    service: string,
+    options: { generation: number; bindingId: string; label: string | null; expiresAt: Date },
+  ): Promise<IssuedCredential> {
+    return this.#issue(tx, 'service', { type: 'service', id: service }, {
+      generation: options.generation,
+      identityId: null,
+      label: options.label,
+      createdBy: issuedBy(options.bindingId),
+      expiresAt: options.expiresAt,
     });
   }
 

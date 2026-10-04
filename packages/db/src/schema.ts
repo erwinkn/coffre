@@ -304,6 +304,10 @@ export const auditLog = pgTable(
     index('audit_log_unbind_idx')
       .on(sql`((${table.metadata})::jsonb ->> 'bindingId')`)
       .where(sql`${table.author} = 'app' AND ${table.action} = 'token.unbind' AND ${table.decision} = 'allow'`),
+    // The run a credential was issued for: its exchange's entry, by the credential's ID.
+    index('audit_log_exchange_idx')
+      .on(sql`((${table.metadata})::jsonb ->> 'credentialId')`)
+      .where(sql`${table.author} = 'app' AND ${table.action} = 'token.exchange' AND ${table.decision} = 'allow'`),
   ],
 );
 
@@ -404,6 +408,21 @@ export const serviceBindings = pgTable(
     }).onDelete('restrict'),
     index('service_bindings_principal_idx').on(table.principal, table.issuer),
   ],
+);
+
+/**
+ * ID tokens exchanged for a credential, each once: the SHA-256 of what its
+ * signature covers, `header.payload` as received, so that no other
+ * spelling of the same token counts as another. Kept whatever becomes of
+ * the credential it bought; the primary key decides a race.
+ */
+export const consumedTokens = pgTable(
+  'consumed_tokens',
+  {
+    hash: bytea('hash').primaryKey(),
+    consumedAt: timestamp('consumed_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [check('consumed_tokens_hash_check', sql`octet_length(${table.hash}) = 32`)],
 );
 
 /**

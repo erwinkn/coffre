@@ -173,11 +173,13 @@ export async function resetDatabase(owner: Database): Promise<void> {
     secrets,
     secretVersions,
     serviceBindings,
+    consumedTokens,
     vaultGrants,
     vaultMembers,
   } = tablesOf(owner);
   await owner.delete(credentials);
   await owner.delete(serviceBindings);
+  await owner.delete(consumedTokens);
   await owner.delete(deviceAuthorizations);
   await owner.delete(identities);
   await emptyLog(owner);
