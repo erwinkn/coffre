@@ -50,10 +50,16 @@ the CLI's own entry, so that it is tested in this repository's CI.
 
 ## How it runs a deployment
 
+It first builds the app as it deploys: the deployment's own `vite build
+app`, which leaves the server in `app/dist/server`, for wrangler, or on
+Node srvx, to run as built, and the browser's files in `app/dist/client`.
+A build that fails stops the run there.
+
 The settings go in as the environment the deployment's own files would give
-it: `wrangler dev -c app/wrangler.jsonc -c vault/wrangler.jsonc` with
-Worker secrets from the environment, or `src/vault.ts` and `src/server.ts`
-with what `server.env` and `vault.env` would hold. Three things are the
+it: `wrangler dev` of `app/dist/server/wrangler.json` and
+`vault/wrangler.jsonc`, with Worker secrets from the environment, or `src/vault.ts` and the
+built app under srvx, as `pnpm start` runs it, with what `.env` and
+`vault.env` would hold. Three things are the
 run's own: fixed local keys; GitHub's URLs, pointed at the dev IdP
 (`@coffre/conformance/idp`) in the checker's process; and
 `ALLOW_LOOPBACK_ISSUERS_FOR_DEVELOPMENT=true`, so that a trust binding may
@@ -62,6 +68,14 @@ loopback may. So a deployment must
 list `github(…)` among its `signin(…)` providers, as `init` writes it; one
 behind Access, or with only other providers, cannot be booted as it is. Nothing from the shell's
 `COFFRE_*` reaches it.
+
+On Workers, wrangler runs the app's build behind an entry of the run's own,
+written beside it in `app/dist/server` and replaced by the next build. It
+reads a request's body before passing the app's answer on, when the app
+left it unread, as every refusal does: locally, and only there, a Worker
+wrangler did not bundle fails every request after one whose body it left
+unread. The app itself never waits on a body it does not read, and a check
+sends only bodies that end.
 
 The people:
 
@@ -85,9 +99,11 @@ In order, since each builds on the ones before:
 | Check | What must hold |
 |---|---|
 | health | `/livez` answers. On Workers, `/readyz` fails before any heartbeat, and passes once the Cron trigger has run and the vault has checkpointed it |
+| browser bundle | Nothing of the server in what the browser loads: every text file of the build's `app/dist/client`, read as the browser gets it, holds no database layer, driver, table only the server knows or `COFFRE_*` read. A page importing across the line otherwise just grows by the database layer, with no error |
 | sign-in | The root admin signs in through GitHub, and is the root admin |
 | setup, personas | The admin creates the project, its values and the people above |
 | pages in a browser | Signed in as the admin, `/projects`, the project and `/audit`, in headless Chrome, over the DevTools protocol: each shows its heading once its scripts have run and settled, with no uncaught error, console error or failed load. Run between setup and personas. It is what caught wrangler's `keep_names` wrapping the functions seroval writes into a signed-in page in an `__name` only the Worker has |
+| security headers | Twelve kinds of response, each with coffre's headers (`X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`, the two cross-origin policies, `Cache-Control`) and a Content-Security-Policy whose nonce no other response had: the sign-in page, a signed-in page, a page's redirect to sign in, a page not found, an API read and an API refusal, a path under `/api` or `/auth` that is not one, a method refused with its body unread, sign-in's redirect to the provider, `/livez` and `/readyz`. Whatever answers each, Start's render or one of coffre's server routes, coffre's middleware must have secured it |
 | members only | The stranger's sign-in is refused and leaves no session; no one gets 401 reading, revealing or writing, and a made-up token is refused |
 | grant scoping | The reader reads dev and nothing else, and changes nothing: no write, no grant, no member, no token. So does the service, with its token. The bulk reader cannot read dev |
 | reveals audited, runs audited | A single-secret reveal or an environment read writes one `secret.read` of the vault's per value, under the reveal's operation and request, at the versions revealed |

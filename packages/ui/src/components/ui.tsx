@@ -5,6 +5,7 @@ import { Menu } from '@base-ui/react/menu';
 import { Popover } from '@base-ui/react/popover';
 import { Tooltip } from '@base-ui/react/tooltip';
 import { AlertCircle, AlertTriangle, Check, Copy, Info, Loader, X } from './icons';
+import { usePreferences } from '../lib/preferences';
 
 /* -------------------------------------------------------------------------- */
 /* Tooltip                                                                     */
@@ -30,10 +31,11 @@ export function Tip({
   side?: 'top' | 'right' | 'bottom' | 'left';
   children: ReactElement;
 }) {
+  const { portal } = usePreferences();
   return (
     <Tooltip.Root>
       <Tooltip.Trigger render={children} />
-      <Tooltip.Portal>
+      <Tooltip.Portal container={portal}>
         <Tooltip.Positioner
           className="tooltip-positioner"
           side={side}
@@ -67,6 +69,7 @@ export function Toggletip({
   align?: 'start' | 'center' | 'end';
   children: ReactElement;
 }) {
+  const { portal } = usePreferences();
   const [open, setOpen] = useState(false);
   const mouse = useRef(false);
   const hover = (next: boolean) => (event: { pointerType: string }) => {
@@ -90,7 +93,7 @@ export function Toggletip({
           mouse.current = event.pointerType === 'mouse';
         }}
       />
-      <Popover.Portal>
+      <Popover.Portal container={portal}>
         <Popover.Positioner
           className="tooltip-positioner"
           side={side}
@@ -129,8 +132,9 @@ export function MenuPopup({
   className?: string;
   children: ReactNode;
 }) {
+  const { portal } = usePreferences();
   return (
-    <Menu.Portal>
+    <Menu.Portal container={portal}>
       <Menu.Positioner className="menu-positioner" side={side} align={align} sideOffset={6}>
         <Menu.Popup className={className === undefined ? 'menu' : `menu ${className}`}>
           {children}
@@ -302,8 +306,9 @@ type ConfirmProps = {
 };
 
 function ConfirmContent({ title, body, confirmLabel, destructive, onConfirm }: ConfirmProps) {
+  const { portal } = usePreferences();
   return (
-    <AlertDialog.Portal>
+    <AlertDialog.Portal container={portal}>
       <AlertDialog.Backdrop className="overlay" />
       <AlertDialog.Popup className="dialog dialog-confirm">
         <AlertDialog.Title className="dialog-title">{title}</AlertDialog.Title>
@@ -375,9 +380,10 @@ export function Modal({
   wide?: boolean;
   children: ReactNode;
 }) {
+  const { portal } = usePreferences();
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Portal>
+      <Dialog.Portal container={portal}>
         <Dialog.Backdrop className="overlay" />
         <Dialog.Popup className={`dialog${wide ? ' dialog-wide' : ''}`}>
           <div className="dialog-head">

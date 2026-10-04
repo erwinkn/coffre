@@ -2,9 +2,16 @@
 
 Two Workers, configured in code:
 
-- `app/src/worker.ts`, the app: the API, sign-in, the pages and a Cron job
-  every five minutes. It reaches Postgres through Hyperdrive, and the vault
-  through a service binding.
+- `app/`, the app: the API, sign-in, the pages and a Cron job every five
+  minutes. It is a TanStack Start app of its own, built by Vite
+  (`app/vite.config.ts`). coffre is configured in `app/src/coffre.ts`;
+  `app/src/server.ts`, the Worker, hands it each request; `app/src/start.ts`
+  puts coffre's middleware in front of every response; and
+  `app/src/routes/` holds its routes, the root and a file for each of
+  coffre's pages, beside any of your own
+  ([Your own routes](https://github.com/erwinkn/coffre/blob/main/docs/deploy.md#your-own-routes)).
+  It reaches Postgres through Hyperdrive, and the vault through a service
+  binding.
 - `vault/src/worker.ts`, the vault: the keys, and the members and grants,
   which it keeps in the same database through a login of its own. It has no
   URL of its own.
@@ -95,7 +102,9 @@ instead of a key of your own, the vault also needs a `SIGNING_KEY`
 pnpm run deploy
 ```
 
-deploys the vault, then the app, which binds to it. Route the app to
+deploys the vault, then builds the app with Vite and deploys what it
+built, which binds to the vault. Wrangler uploads that build as it is
+(`app/dist/server/wrangler.json`), without bundling it again. Route the app to
 `PUBLIC_URL` in the dashboard, or with `routes` in `app/wrangler.jsonc`, then
 sign in there as a root admin, and from a terminal:
 
@@ -112,14 +121,19 @@ follow the [restore runbook](https://github.com/erwinkn/coffre/blob/main/docs/re
 
 ## Locally
 
-`pnpm dev` runs both Workers with `wrangler dev`. Put local secrets in
-`app/.dev.vars` and `vault/.dev.vars`, and point Hyperdrive at a local
+`pnpm dev` runs both Workers under `vite dev`, the vault beside the app, and
+reloads the app as you edit it. Put local secrets in `app/.dev.vars` and `vault/.dev.vars`, and point Hyperdrive at a local
 database with `CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE`,
 for the app's login, and
 `CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_VAULT_HYPERDRIVE`, for the
 vault's.
 `pnpm typecheck` checks the configuration against coffre's types, and
-`pnpm build` bundles both Workers without deploying them.
+`pnpm build` builds both Workers without deploying them.
+
+The app's React, TanStack Router, Start, Query and Vite are this project's
+own dependencies, pinned at the versions `@coffre/ui` is built with; its
+build stops with what to change when one differs, and `coffre update` moves
+them with coffre's packages.
 
 ## Conformance
 
@@ -130,7 +144,7 @@ pnpm conformance \
   --vault-runtime "postgres://coffre_vault_runtime:…@127.0.0.1:5432"
 ```
 
-runs both Workers under `wrangler dev`, on a database of their own that it
+builds the app, runs both Workers under `wrangler dev`, on a database of their own that it
 creates on that Postgres and drops after, signs people in through a
 stand-in GitHub, and checks what coffre must never do: show a value to
 someone without access, act for another site with someone's cookie, keep a

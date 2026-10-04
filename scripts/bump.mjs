@@ -64,7 +64,16 @@ const pinned = new Set();
 for (const manifest of manifests('packages')) {
     const pkg = JSON.parse(readFileSync(join(root, manifest), 'utf8'));
     if (pkg.private) continue;
-    for (const [name, pin] of Object.entries(pkg.dependencies ?? {})) {
+    // A peer is pinned too: the deployment installs it, at exactly that version.
+    for (const [name, pin] of Object.entries({ ...pkg.dependencies, ...pkg.peerDependencies })) {
+        if (!name.startsWith('@coffre/')) pinned.add(`${name}@${pin}`);
+    }
+}
+// And what `coffre init` writes, which every deployment installs as its own:
+// its Start app's React, router, Vite and their plugins, and its tools.
+for (const manifest of manifests('examples')) {
+    const pkg = JSON.parse(readFileSync(join(root, manifest), 'utf8'));
+    for (const [name, pin] of Object.entries({ ...pkg.dependencies, ...pkg.devDependencies })) {
         if (!name.startsWith('@coffre/')) pinned.add(`${name}@${pin}`);
     }
 }

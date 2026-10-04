@@ -1,12 +1,12 @@
 // Run a deployment made like `coffre init` makes one, unedited: settings go
-// in as the environment its wrangler.jsonc or server.env would give it, with
+// in as the environment its wrangler.jsonc or .env would give it, with
 // GitHub's URLs pointed at a stand-in IdP running in this process.
 //
 //   workers  two Workers under `wrangler dev`, on a Postgres database of
 //            their own, created for the run and dropped after, each through
 //            its own login
-//   node     the server and its vault process, on one SQLite file in a temp
-//            dir
+//   node     the app's build under srvx and its vault process, on one SQLite
+//            file in a temp dir
 //
 // Ports: coffre on `port`, the IdP on the next, wrangler's inspector on the
 // one after.
@@ -20,6 +20,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 import { postgres, sqlite, using, type Sql } from './database.ts';
 import { KEYS } from './fixtures.ts';
+import { drainingConfig } from './draining.ts';
 import { DevIdp } from './idp/index.ts';
 import { Failure, until } from './report.ts';
 
@@ -53,6 +54,8 @@ export type Deployment = {
   vaultRuntime: (() => Promise<Sql>) | null;
   /** The file holding the database, when it is one. */
   databaseFile: string | null;
+  /** The browser's half of the app's build: its static files. */
+  clientDir: string;
   /** The processes' output: all of it, or the last `tail` characters of each. */
   output(tail?: number): string;
   stop(): Promise<void>;
@@ -198,10 +201,12 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
     // `coffre migrate`, in its folder, the owner's URL in its environment.
     // A fresh log has no heartbeat: only the scheduled job can make /readyz pass.
     await run(process.execPath, [deploymentCli(dir), 'migrate', '--yes'], { COFFRE_MIGRATE_DATABASE_URL: owner });
+    // The app as it deploys: its Start app, built by its own Vite, which wrangler runs unbundled.
+    await run(bin('vite'), ['build', 'app']);
     const state = join(scratch, 'state');
     start('wrangler', bin('wrangler'), [
       'dev',
-      ...['-c', 'app/wrangler.jsonc', '-c', 'vault/wrangler.jsonc'],
+      ...['-c', drainingConfig(join(dir, 'app/dist/server')), '-c', 'vault/wrangler.jsonc'],
       ...['--ip', '127.0.0.1', '--port', String(port), '--inspector-port', String(port + 2)],
       ...['--persist-to', state, '--show-interactive-dev-session=false'],
       // Not in wrangler.jsonc's vars, so not taken from the environment.
@@ -236,6 +241,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       runtime: () => postgres(runtime),
       vaultRuntime: () => postgres(vaultRuntime),
       databaseFile: null,
+      clientDir: join(dir, 'app/dist/client'),
       output,
       stop,
     };
@@ -253,8 +259,11 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       ROOT_ADMINS: ROOT_ADMIN,
     });
     await until('the vault socket', async () => existsSync(socket), 30, alive);
+    // The pages as they run: the deployment's Start app, built by its own Vite.
+    await run(bin('vite'), ['build', 'app']);
+    // As `pnpm start` runs it: the app's build, under srvx.
     const startServer = () =>
-      start('server', process.execPath, ['src/server.ts'], {
+      start('server', bin('srvx'), ['--prod', '--host=127.0.0.1', 'app/dist/server/server.js'], {
         PORT: String(port),
         PUBLIC_URL: origin,
         DATABASE_URL: `file:${database}`,
@@ -284,6 +293,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       runtime: null,
       vaultRuntime: null,
       databaseFile: database,
+      clientDir: join(dir, 'app/dist/client'),
       output,
       stop,
     };

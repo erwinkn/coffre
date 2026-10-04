@@ -146,7 +146,7 @@ Restore:
    ```
 
 6. Point both components at the restored database, each with its own login:
-   both Hyperdrive configs on Workers, or `DATABASE_URL` in `server.env` and
+   both Hyperdrive configs on Workers, or `DATABASE_URL` in `.env` and
    `vault.env` on Node. Keep the same keys and settings.
 7. Restart both processes, or redeploy both Workers.
 
@@ -238,8 +238,8 @@ vault key configured for …". Keep earlier vault keys in `previousKeks`.
 `scripts/restore-drill.sh` runs the plain-Postgres restore end to end on
 this machine, against the compose Postgres, after `pnpm build`:
 
-1. It starts the Workers example (as `coffre init` writes it) under
-   `wrangler dev`, over a new database, `coffre_drill`, with the dev IdP for
+1. It builds the Workers example (as `coffre init` writes it) and starts it
+   under `wrangler dev`, over a new database, `coffre_drill`, with the dev IdP for
    sign-in and `.env.dev`'s keys. It seeds it, writes a canary, grants a
    member access, removes another whose browser session it keeps, issues a
    service token, and lets two heartbeats checkpoint the log.

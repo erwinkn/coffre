@@ -16,3 +16,6 @@ dist/
 # Generated from src/routes by the TanStack Start plugin. Committing it means
 # resolving conflicts in a file nobody edits.
 routeTree.gen.ts
+# Start's route trees that an app's router imports, and so commits.
+!examples/*/app/src/routeTree.gen.ts
+!dev/deployment/app/src/routeTree.gen.ts

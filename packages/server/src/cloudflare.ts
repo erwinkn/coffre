@@ -1,9 +1,11 @@
 /**
- * coffre's app Worker:
+ * coffre on Workers, in the deployment's own TanStack Start app, built by
+ * Vite with `@cloudflare/vite-plugin`. The configuration, once:
  *
- *   import { coffre, postgres, signin, github } from '@coffre/server/cloudflare';
+ *   // src/coffre.ts
+ *   import { createCoffre, github, postgres, signin } from '@coffre/server/cloudflare';
  *
- *   export default coffre((env: Env) => ({
+ *   export const coffre = createCoffre((env: Env) => ({
  *     publicUrl: 'https://secrets.acme.example',
  *     database: postgres(env.HYPERDRIVE),
  *     vault: env.VAULT,
@@ -11,17 +13,45 @@
  *     auditChainKey: env.APP_KEY,
  *   }));
  *
- * Pages come from `@coffre/ui`, whose static files the Worker's `assets`
- * serve; see `coffre init --workers`.
+ * and the Worker, Start's server entry, which hands Start coffre as each
+ * request's context:
+ *
+ *   // src/server.ts
+ *   import handler from '@tanstack/react-start/server-entry';
+ *   import { coffre, type Env } from './coffre';
+ *
+ *   export default {
+ *     fetch: (request: Request, env: Env, ctx: ExecutionContext) =>
+ *       handler.fetch(request, { context: coffre.request(env, ctx) }),
+ *     scheduled: coffre.scheduled,
+ *   };
+ *
+ * coffre's server routes (`@coffre/server/routes`) and pages (`@coffre/ui`)
+ * go in the app's route tree, and its middleware (`@coffre/server/start`) in
+ * its src/start.ts; see `coffre init --workers`.
  */
-import { createUi } from '@coffre/ui';
-
-import { cloudflareHandler, type WorkerHandler, type WorkersConfig } from './cloudflare-handler.ts';
-
-export { postgres, type PostgresDatabase, type WaitUntil, type WorkerHandler, type WorkersConfig } from './cloudflare-handler.ts';
+export {
+  createCoffre,
+  postgres,
+  type CoffreWorker,
+  type PostgresDatabase,
+  type WaitUntil,
+  type WorkersConfig,
+} from './cloudflare-handler.ts';
+export type { CoffreContext, CoffreRequest, PageContext, Preferences } from './scope.ts';
 export * from './index.ts';
 
-/** The app Worker's default export: `{ fetch, scheduled }`, configured from its `env`. */
-export function coffre<Env>(configure: (env: Env) => WorkersConfig): WorkerHandler<Env> {
-  return cloudflareHandler(configure, createUi());
+/**
+ * 0.1's app Worker, which wrapped prebuilt pages. Since 0.2 the app is a
+ * Start app of its own: this says so, the moment a deployment that has not
+ * moved starts.
+ *
+ * @deprecated Since 0.2, `createCoffre(env => …)`: run `npx @coffre/cli@latest update`, or see docs/deploy.md, "Upgrading to 0.2".
+ */
+export function coffre(..._configure: unknown[]): never {
+  throw new Error(
+    'coffre(env => …) is from coffre 0.1: since 0.2 the app is a TanStack Start app of its own, configured with ' +
+      'createCoffre(env => …). Run `npx @coffre/cli@latest update` in the deployment to move it, or see ' +
+      'docs/deploy.md, "Upgrading to 0.2"',
+  );
 }

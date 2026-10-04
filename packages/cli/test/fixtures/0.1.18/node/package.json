@@ -1,0 +1,25 @@
+{
+  "name": "coffre-node",
+  "private": true,
+  "packageManager": "pnpm@11.8.0",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "vault": "node --env-file=vault.env src/vault.ts",
+    "start": "node --env-file=server.env src/server.ts",
+    "typecheck": "tsc --noEmit",
+    "conformance": "coffre-conformance node"
+  },
+  "dependencies": {
+    "@coffre/server": "0.1.18",
+    "@coffre/vault": "0.1.18"
+  },
+  "devDependencies": {
+    "@coffre/cli": "0.1.18",
+    "@coffre/conformance": "0.1.18",
+    "@types/node": "26.1.1",
+    "typescript": "5.9.3"
+  }
+}

@@ -255,6 +255,32 @@ if (args[0] === 'auth') {
 }
 
 /**
+ * The deployment's Vite, as `vite build app` leaves a Workers app: its
+ * wrangler.jsonc as Vite's plugin writes it for the build, JSON, with the
+ * Worker it built as its entry and nothing to bundle. Says it ran in
+ * `<dir>/vite-builds`.
+ */
+export function fakeVite(dir: string): void {
+  mkdirSync(join(dir, 'node_modules', '.bin'), { recursive: true });
+  const jsonc = createRequire(import.meta.url).resolve('jsonc-parser');
+  writeFileSync(
+    join(dir, 'node_modules', '.bin', 'vite'),
+    `#!${process.execPath}
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import jsonc from ${JSON.stringify(jsonc)};
+const [command, root] = process.argv.slice(2);
+if (command !== 'build' || root !== 'app') { console.error('fake vite: build app only'); process.exit(1); }
+appendFileSync('vite-builds', 'app\\n');
+const config = jsonc.parse(readFileSync('app/wrangler.jsonc', 'utf8'));
+mkdirSync('app/dist/server', { recursive: true });
+writeFileSync('app/dist/server/index.js', 'export default { fetch: () => new Response("ok") };\\n');
+writeFileSync('app/dist/server/wrangler.json', JSON.stringify({ ...config, main: 'index.js', no_bundle: true }, null, 2));
+`,
+  );
+  chmodSync(join(dir, 'node_modules', '.bin', 'vite'), 0o755);
+}
+
+/**
  * A browser opener that only notes what it was asked to open, a line each, in
  * `<dir>/opened`: put `dir` first on PATH. Tests poll that file while it runs,
  * so it never appends in place, which shows them an empty file or half a

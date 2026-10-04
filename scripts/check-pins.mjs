@@ -68,6 +68,45 @@ for (const manifest of manifests) {
     }
 }
 
+// What a deployment's Start app shares with the pages: one copy of each, at
+// the version @coffre/ui is built with, which each example pins exactly, as
+// `coffre init` writes it and `coffre update` moves it.
+const peers = read('packages/ui/package.json').peerDependencies ?? {};
+for (const manifest of manifests.filter((path) => path.startsWith('examples/'))) {
+    const pkg = read(manifest);
+    for (const [name, wanted] of Object.entries(peers)) {
+        const pin = pkg.dependencies?.[name] ?? pkg.devDependencies?.[name];
+        if (pin !== wanted) problems.push(`${manifest}: ${name} is ${pin ?? 'missing'}, and @coffre/ui is built for ${wanted}`);
+    }
+}
+
+// @coffre/server's routes and middleware go in that same app, so it peers on
+// the same TanStack. Both name router-core, whose types their declarations
+// import, at the version react-router itself depends on: another copy would
+// lack react-router's additions to its `Route`, and coffre's routes would not
+// fit the deployment's tree.
+const server = read('packages/server/package.json');
+for (const [name, wanted] of Object.entries(server.peerDependencies ?? {})) {
+    if (name.startsWith('@tanstack/') && peers[name] !== wanted) {
+        problems.push(`packages/server/package.json: peer ${name} is ${wanted}, and @coffre/ui's is ${peers[name] ?? 'missing'}`);
+    }
+}
+const routerManifest = join(root, 'packages/ui/node_modules/@tanstack/react-router/package.json');
+if (existsSync(routerManifest)) {
+    const core = JSON.parse(readFileSync(routerManifest, 'utf8')).dependencies['@tanstack/router-core'];
+    for (const manifest of ['packages/ui/package.json', 'packages/server/package.json']) {
+        const pin = read(manifest).dependencies?.['@tanstack/router-core'];
+        if (pin !== core) problems.push(`${manifest}: @tanstack/router-core is ${pin ?? 'missing'}, and react-router depends on ${core}`);
+    }
+}
+
+// A Node deployment imports SQLite's driver itself, where its server's
+// build leaves it out (examples/node/app/vite.config.ts): the one
+// @coffre/db is built with.
+const libsql = read('packages/db/package.json').dependencies['@libsql/client'];
+const nodeDriver = read('examples/node/package.json').dependencies?.['@libsql/client'];
+if (nodeDriver !== libsql) problems.push(`examples/node/package.json: @libsql/client is ${nodeDriver ?? 'missing'}, and @coffre/db's is ${libsql}`);
+
 if (problems.length > 0) {
     console.error('Dependency pinning check FAILED:\n');
     for (const problem of problems) console.error(`  ${problem}`);

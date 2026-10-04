@@ -68,9 +68,16 @@ test('coffre init names the project after its directory and pins coffre at its o
   const pkg = JSON.parse(readFileSync(join(scratch, 'Acme Secrets', 'package.json'), 'utf8')) as {
     name: string;
     dependencies: Record<string, string>;
+    devDependencies: Record<string, string>;
   };
   assert.equal(pkg.name, 'acme-secrets');
-  assert.deepEqual(pkg.dependencies, { '@coffre/server': version, '@coffre/vault': version });
+  const ours = Object.entries(pkg.dependencies).filter(([name]) => name.startsWith('@coffre/'));
+  assert.deepEqual(Object.fromEntries(ours), { '@coffre/server': version, '@coffre/ui': version, '@coffre/vault': version });
+  // What its Start app shares with the pages, exactly as @coffre/ui is built with.
+  const { peerDependencies } = JSON.parse(readFileSync(join(root, 'packages/ui/package.json'), 'utf8')) as { peerDependencies: Record<string, string> };
+  for (const [name, wanted] of Object.entries(peerDependencies)) {
+    assert.equal(pkg.dependencies[name] ?? pkg.devDependencies[name], wanted, name);
+  }
 });
 
 test('coffre init refuses a directory that is not empty, and needs one kind', (t) => {

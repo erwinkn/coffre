@@ -7,22 +7,32 @@
     "node": ">=24"
   },
   "scripts": {
-    "dev": "wrangler dev -c app/wrangler.jsonc -c vault/wrangler.jsonc",
+    "dev": "vite dev app",
     "typecheck": "tsc --noEmit",
-    "build": "wrangler deploy --dry-run -c vault/wrangler.jsonc && wrangler deploy --dry-run -c app/wrangler.jsonc",
-    "deploy": "wrangler deploy -c vault/wrangler.jsonc && wrangler deploy -c app/wrangler.jsonc",
+    "build": "wrangler deploy --dry-run -c vault/wrangler.jsonc && vite build app && wrangler deploy --dry-run -c app/dist/server/wrangler.json",
+    "deploy": "wrangler deploy -c vault/wrangler.jsonc && vite build app && wrangler deploy -c app/dist/server/wrangler.json",
     "conformance": "coffre-conformance workers"
   },
   "dependencies": {
     "@coffre/server": "0.1.18",
     "@coffre/ui": "0.1.18",
-    "@coffre/vault": "0.1.18"
+    "@coffre/vault": "0.1.18",
+    "@tanstack/react-query": "5.103.1",
+    "@tanstack/react-router": "1.170.18",
+    "@tanstack/react-router-ssr-query": "1.167.2",
+    "@tanstack/react-start": "1.168.32",
+    "react": "19.2.7",
+    "react-dom": "19.2.7"
   },
   "devDependencies": {
+    "@cloudflare/vite-plugin": "1.50.0",
     "@cloudflare/workers-types": "5.20260920.1",
     "@coffre/cli": "0.1.18",
     "@coffre/conformance": "0.1.18",
+    "@types/react": "19.2.17",
+    "@vitejs/plugin-react": "6.0.3",
     "typescript": "5.9.3",
+    "vite": "8.1.5",
     "wrangler": "4.118.0"
   }
 }

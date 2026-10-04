@@ -1,3 +1,5 @@
+import type { CoffreClient } from '@coffre/client';
+
 import { ApiError, badRequest } from './api/errors.ts';
 import {
   finishSignin,
@@ -8,15 +10,15 @@ import {
   startDevice,
   startSignin,
 } from './auth-routes.ts';
+import { preferencesIn, type Preferences } from '@coffre/core/pages';
+
 import { fetchApi, isSameOrigin, pageClient } from './fetch-api.ts';
 import { auditReadiness, writeAuditHeartbeat } from './heartbeat.ts';
 import { errorResponse, jsonResponse, methodNotAllowed } from './http.ts';
 import { logged } from './logged.ts';
 import type { CoffreRuntime } from './runtime.ts';
-import { cspNonce, withSecurityHeaders } from './security-headers.ts';
-import type { Ui } from './ui.ts';
+import { cspNonce, setSecurityHeaders } from './security-headers.ts';
 
-export type { Ui };
 
 type Handler = (request: Request, runtime: CoffreRuntime, sourceIp: string | null) => Promise<Response>;
 
@@ -40,17 +42,18 @@ const ROUTES: Record<string, { method: 'GET' | 'POST'; handler: Handler; browser
 
 const PROVIDER_ROUTE = /^\/auth\/(signin|callback)\/([a-z0-9-]{1,32})$/;
 
-async function route(request: Request, runtime: CoffreRuntime, sourceIp: string | null, ui: Ui, nonce: string) {
-  // Next.js's internal header, which has let requests skip middleware
-  // elsewhere; nothing legitimate sends it here.
-  if (request.headers.has('x-middleware-subrequest')) {
-    return errorResponse(badRequest('x-middleware-subrequest is not accepted'));
-  }
+/**
+ * coffre's own paths: health, sign-in and the API. Null for any other, a
+ * page's, which the deployment's Start app renders.
+ */
+export async function coffreRoute(request: Request, runtime: CoffreRuntime, sourceIp: string | null): Promise<Response | null> {
   const { pathname } = new URL(request.url);
 
   const exact = ROUTES[pathname];
   if (exact !== undefined) {
-    if (request.method !== exact.method) return methodNotAllowed([exact.method]);
+    // HEAD is GET without the body, which the platform drops: what a monitor asks /livez and /readyz.
+    const method = request.method === 'HEAD' && exact.method === 'GET' ? 'GET' : request.method;
+    if (method !== exact.method) return methodNotAllowed([exact.method]);
     if (exact.browserForm && !isSameOrigin(request, runtime.publicUrl)) {
       return errorResponse(new ApiError('cross_origin', 'this must be sent from coffre itself'));
     }
@@ -66,51 +69,45 @@ async function route(request: Request, runtime: CoffreRuntime, sourceIp: string 
       ? startSignin(request, runtime, sourceIp, id)
       : finishSignin(request, runtime, sourceIp, id);
   }
-
-  if (request.method !== 'GET' && request.method !== 'HEAD') return methodNotAllowed(['GET']);
-  return page(request, runtime, sourceIp, ui, nonce);
+  return null;
 }
 
-/**
- * A page, rendered with the visitor's API client. One whose render failed
- * because the API answered it 503, the vault or the database out of reach,
- * is an outage, not a bug: it answers 503, as the API did, with the page
- * the UI rendered for the failure, and a moment to wait before trying again.
- */
-async function page(request: Request, runtime: CoffreRuntime, sourceIp: string | null, ui: Ui, nonce: string): Promise<Response> {
-  let unavailable = false;
-  const client = pageClient(request, runtime, sourceIp, (status) => (unavailable ||= status === 503));
-  const rendered = await ui.fetch(request, { context: { cspNonce: nonce, client } });
-  if (rendered.status !== 500 || !unavailable) return rendered;
-  const headers = new Headers(rendered.headers);
-  headers.set('retry-after', '5');
-  return new Response(rendered.body, { status: 503, statusText: 'Service Unavailable', headers });
-}
+/** What a page renders with: this response's nonce, the API as the visitor, and how they have the pages drawn. */
+export type PageContext = { cspNonce: string; client: CoffreClient; preferences: Preferences };
 
 /**
- * One request, on either runtime: health, sign-in, the API, then pages.
- * `sourceIp` is the adapter's to vouch for: Cloudflare's header on Workers,
- * the socket's address on Node.
+ * One request, whatever answers it, a page or one of coffre's routes: it
+ * gets a fresh nonce, the visitor's API client and their preferences to
+ * render with, and coffre's security headers on whatever comes back.
+ * `sourceIp` is the platform's to vouch for: Cloudflare's header on
+ * Workers, the socket's address on Node.
  */
-export async function handleRequest(
+export async function respond(
   request: Request,
   runtime: CoffreRuntime,
-  ui: Ui,
   sourceIp: string | null,
+  render: (context: PageContext) => Promise<Response>,
 ): Promise<Response> {
   const nonce = cspNonce();
   let response: Response;
   try {
-    response = await route(request, runtime, sourceIp, ui, nonce);
+    response = await render({ cspNonce: nonce, client: pageClient(request, runtime, sourceIp), preferences: preferencesIn(request.headers.get('cookie')) });
   } catch (error) {
     response = errorResponse(error);
   }
   const auth = runtime.auth;
-  return withSecurityHeaders(request, response, {
+  const options = {
     nonce,
+    publicUrl: runtime.publicUrl,
     // Access's logout form posts to Access itself.
     formOrigins: auth.mode === 'cloudflare' ? [auth.access.issuer] : [],
-  });
+  };
+  try {
+    return setSecurityHeaders(response, options);
+  } catch (error) {
+    // A route's response that cannot take them: said in the log, and answered with one that can.
+    return setSecurityHeaders(errorResponse(error), options);
+  }
 }
 
 /** The scheduled audit heartbeat and checkpoint. Throws so the scheduler reports failures. */

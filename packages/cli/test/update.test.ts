@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,12 +16,14 @@ import {
   minimumReleaseAge,
   HeldBack,
   install,
-  keepsNames,
   pinPackageManager,
   removeCleared,
   resolveAgain,
-  stopKeepingNames,
+  movePins,
+  START_PACKAGES,
+  startPinMoves,
 } from '../src/deployment.ts';
+import { templateFiles } from '../src/init.ts';
 import { registry } from './registry.ts';
 import { inTerminal, ptySkip } from './pty.ts';
 import { deploymentMigrations, globalCli, installOf, migrationsAdded, movedLines, notUpdated } from '../src/update.ts';
@@ -199,47 +201,75 @@ test("a deployment pins coffre's pnpm, beside \"private\", whatever it had", () 
   }
 });
 
-/** The template's app/wrangler.jsonc as 0.1.17 wrote it: keep_names, and its reason, not there. */
-function keepingNames(): string {
-  const template = readFileSync(join(examples, 'workers', 'app', 'wrangler.jsonc'), 'utf8');
-  const without = template.replace(/(\n[ \t]*\/\/[^\n]*){3}\n[ \t]*"keep_names": false,/, '');
-  assert.notEqual(without, template, 'the template turns keep_names off');
-  return without;
-}
+test("the Start app's packages update moves are @coffre/ui's peers, and Vite's plugins for them", () => {
+  const { peerDependencies } = JSON.parse(readFileSync(join(examples, '..', 'packages', 'ui', 'package.json'), 'utf8')) as {
+    peerDependencies: Record<string, string>;
+  };
+  assert.deepEqual([...START_PACKAGES].sort(), [...Object.keys(peerDependencies), '@vitejs/plugin-react', '@cloudflare/vite-plugin'].sort());
+});
 
-test("an app Worker that keeps function names gets keep_names off, with the template's reason, byte for byte as init writes it", () => {
-  const dir = mkdtempSync(join(tmpdir(), 'coffre-keep-names-'));
+test("a deployment's Start app packages move to the template's versions, and nothing else does", () => {
+  const dir = mkdtempSync(join(tmpdir(), 'coffre-start-pins-'));
   try {
-    mkdirSync(join(dir, 'app'));
-    writeFileSync(join(dir, 'app', 'wrangler.jsonc'), keepingNames());
-    assert.equal(keepsNames(dir), true);
-    stopKeepingNames(dir);
-    assert.equal(readFileSync(join(dir, 'app', 'wrangler.jsonc'), 'utf8'), readFileSync(join(examples, 'workers', 'app', 'wrangler.jsonc'), 'utf8'));
-    assert.equal(keepsNames(dir), false);
-    // Set to true by hand: turned off where it is, with no second reason.
-    writeFileSync(join(dir, 'app', 'wrangler.jsonc'), keepingNames().replace('"compatibility_flags"', '"keep_names": true,\n  "compatibility_flags"'));
-    stopKeepingNames(dir);
-    const text = readFileSync(join(dir, 'app', 'wrangler.jsonc'), 'utf8');
-    assert.match(text, /"keep_names": false,\n  "compatibility_flags"/);
-    assert.doesNotMatch(text, /seroval/);
+    const template = join(examples, 'workers');
+    const manifest = JSON.parse(readFileSync(join(template, 'package.json'), 'utf8')) as Record<string, Record<string, string>>;
+    manifest.dependencies!.react = '19.0.0';
+    manifest.devDependencies!.typescript = '5.0.0';
+    writeFileSync(join(dir, 'package.json'), JSON.stringify(manifest));
+    const moves = startPinMoves(dir, template);
+    assert.deepEqual(moves, [{ name: 'react', from: '19.0.0', to: JSON.parse(readFileSync(join(template, 'package.json'), 'utf8')).dependencies.react }]);
+    movePins(dir, moves);
+    assert.deepEqual(startPinMoves(dir, template), []);
+    assert.equal((JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as Record<string, Record<string, string>>).devDependencies!.typescript, '5.0.0');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test('update --yes turns keep_names off in a Workers deployment at the latest release, and says so', async () => {
+test('update --yes makes a Workers deployment of 0.1.18 its own Start app, as init writes it, and says so', async () => {
   const { dir, env, close } = await heldDeployment();
   try {
-    bumpPins(dir, '9.9.9');
-    pinPackageManager(dir, (JSON.parse(readFileSync(join(examples, 'workers', 'package.json'), 'utf8')) as { packageManager: string }).packageManager);
-    writeFileSync(join(dir, 'app', 'wrangler.jsonc'), keepingNames());
+    // 0.1.18's files where this release's are, and a pnpm that installs whatever it is given.
+    rmSync(join(dir, 'app'), { recursive: true, force: true });
+    cpSync(fileURLToPath(new URL('fixtures/0.1.18/workers/', import.meta.url)), dir, { recursive: true });
+    writeFileSync(join(dir, '.bin', 'pnpm'), '#!/bin/sh\nexit 0\n');
     const { spawn } = await import('node:child_process');
     const child = spawn(process.execPath, ['--conditions=coffre:source', main, 'update', '--yes'], { cwd: dir, env });
     let stderr = '';
     child.stderr.setEncoding('utf8').on('data', (chunk: string) => (stderr += chunk));
     assert.equal(await new Promise((resolve) => child.on('close', resolve)), 0, stderr);
-    assert.match(stderr, /Turned keep_names off in app\/wrangler\.jsonc: signed-in pages render once it is deployed/);
-    assert.equal(keepsNames(dir), false);
+    assert.match(stderr, /Made it its own Start app, as coffre init writes one: \d+ files, as shown\. Its app now builds with vite build app/);
+    const template = join(examples, 'workers');
+    for (const path of ['app/vite.config.ts', 'app/src/start.ts', 'app/src/router.tsx', 'app/src/server.ts', 'app/src/coffre.ts', 'app/src/routes/__root.tsx', 'app/src/routes/_coffre/projects.index.tsx', 'app/wrangler.jsonc', 'tsconfig.json', '.gitignore', 'README.md']) {
+      assert.equal(readFileSync(join(dir, path), 'utf8'), readFileSync(join(template, path), 'utf8'), path);
+    }
+    assert.equal(existsSync(join(dir, 'app/src/worker.ts')), false);
+    assert.ok(Object.values(coffrePins(dir)).every((version) => version === '9.9.9'));
+  } finally {
+    close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("update --yes leaves a deployment it cannot move as it was, byte for byte, and says why and what to do", async () => {
+  const { dir, env, close } = await heldDeployment();
+  try {
+    rmSync(join(dir, 'app'), { recursive: true, force: true });
+    cpSync(fileURLToPath(new URL('fixtures/0.1.18/workers/', import.meta.url)), dir, { recursive: true });
+    writeFileSync(join(dir, 'app/src/server.ts'), 'export const helper = () => 42;\n');
+    writeFileSync(join(dir, '.bin', 'pnpm'), '#!/bin/sh\nexit 0\n');
+    const before = ['package.json', 'app/wrangler.jsonc', 'app/src/worker.ts', 'app/src/server.ts'].map((path) => readFileSync(join(dir, path), 'utf8'));
+    const { spawn } = await import('node:child_process');
+    const child = spawn(process.execPath, ['--conditions=coffre:source', main, 'update', '--yes'], { cwd: dir, env });
+    let stderr = '';
+    child.stderr.setEncoding('utf8').on('data', (chunk: string) => (stderr += chunk));
+    await new Promise((resolve) => child.on('close', resolve));
+    assert.match(stderr, /cannot be moved to it as it is\. Nothing was changed/);
+    assert.match(stderr, /app\/src\/server\.ts is there already, and is not what coffre 0\.2 writes there/);
+    assert.match(stderr, /Make the move by hand \(docs\/deploy\.md, "Upgrading to 0\.2"\), then run coffre update again/);
+    const after = ['package.json', 'app/wrangler.jsonc', 'app/src/worker.ts', 'app/src/server.ts'].map((path) => readFileSync(join(dir, path), 'utf8'));
+    assert.deepEqual(after, before);
+    assert.equal(existsSync(join(dir, 'app/vite.config.ts')), false);
   } finally {
     close();
     rmSync(dir, { recursive: true, force: true });
@@ -253,7 +283,8 @@ test('update --yes turns keep_names off in a Workers deployment at the latest re
  */
 async function heldDeployment() {
   const dir = mkdtempSync(join(tmpdir(), 'coffre-held-'));
-  for (const file of ['package.json', 'pnpm-workspace.yaml', 'app/wrangler.jsonc', 'vault/wrangler.jsonc']) {
+  // The template's every file, as a deployment moved to 0.2 has them.
+  for (const file of templateFiles(join(examples, 'workers'))) {
     mkdirSync(join(dir, file, '..'), { recursive: true });
     cpSync(join(examples, 'workers', file), join(dir, file));
   }

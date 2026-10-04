@@ -24,7 +24,7 @@ import {
   type Wrangler,
   type Zone,
 } from './cloudflare.ts';
-import { editWorker, placeholder, readWorker, type Change, type WorkerConfig } from './deployment.ts';
+import { BUILT_APP, buildApp, editWorker, placeholder, readWorker, type Change, type WorkerConfig } from './deployment.ts';
 import { createGitHubApp, GITHUB, type GitHub } from './github-app.ts';
 import { generateKeys, keyValues, type Keys } from './keys.ts';
 import type { Screen } from './secrets.ts';
@@ -500,12 +500,16 @@ export class Cloudflare {
         await deployWorker(this.#wrangler, this.workers.vault.path, account, secrets);
         return `Deployed the vault, ${this.workers.vault.name}${this.#missing.vault ? ', with its key' : ''}`;
       });
-      await steps.run(1, async () => {
+      await steps.run(1, async (step) => {
+        // The app as Vite builds it, which wrangler then uploads as it is.
+        step.note('Build the app, with Vite');
+        await buildApp(this.#dir);
+        step.note('Deploy the app');
         const secrets = {
           ...(this.#missing.app ? { APP_KEY: this.keys!.APP_KEY } : {}),
           ...(this.#clientSecret === null ? {} : { GITHUB_CLIENT_SECRET: this.#clientSecret }),
         };
-        await deployWorker(this.#wrangler, this.workers.app.path, account, secrets);
+        await deployWorker(this.#wrangler, BUILT_APP, account, secrets);
         const what = [...(this.#missing.app ? ['its key'] : []), ...(this.#clientSecret === null ? [] : ["GitHub's secret"])];
         return `Deployed the app, ${this.workers.app.name}${what.length === 0 ? '' : `, with ${listed(what, 'and')}`}`;
       });
@@ -558,7 +562,8 @@ export function deployedSummary(cloudflare: Cloudflare, out: Output): string {
       s,
       'Builds',
       'With Workers Builds, the vault Worker builds with pnpm exec coffre migrate --yes, and its secret build variable ' +
-        'COFFRE_MIGRATE_DATABASE_URL is the database URL you gave setup; the app builds as it is.',
+        'COFFRE_MIGRATE_DATABASE_URL is the database URL you gave setup; the app builds with pnpm exec vite build app, ' +
+        'and deploys with npx wrangler deploy -c app/dist/server/wrangler.json.',
     ),
     s.dim(paragraph(out, 'After every upgrade of coffre, pnpm exec coffre migrate --yes, then pnpm run deploy, or a push to Workers Builds. docs/deploy.md has each step.', 4)),
     '',

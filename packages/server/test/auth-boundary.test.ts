@@ -5,7 +5,7 @@ import type { CoffreClient } from '@coffre/client';
 import { github, signin, type AuthConfig, type Principal } from '@coffre/core/identity';
 import type { Access } from '@coffre/core/vault';
 
-import { handleRequest } from '../src/app.ts';
+import { answer } from './start-fixture.ts';
 import { accessTokenForRequest, authenticateRequest, cloudflareSourceIp } from '../src/auth.ts';
 
 const cloudflare: AuthConfig = {
@@ -65,8 +65,15 @@ function fakeUi() {
   };
 }
 
+test('a monitor may ask the health checks with HEAD; other methods are refused', async () => {
+  const head = await answer(new Request('https://coffre.test/livez', { method: 'HEAD' }), appRuntime(cloudflare), fakeUi(), null);
+  assert.equal(head.status, 200);
+  const post = await answer(new Request('https://coffre.test/livez', { method: 'POST' }), appRuntime(cloudflare), fakeUi(), null);
+  assert.equal(post.status, 405);
+});
+
 test('health is public, and every response carries the security headers', async () => {
-  const response = await handleRequest(new Request('https://coffre.test/livez'), appRuntime(cloudflare), fakeUi(), null);
+  const response = await answer(new Request('https://coffre.test/livez'), appRuntime(cloudflare), fakeUi(), null);
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { ok: true });
   assert.equal(response.headers.get('x-frame-options'), 'DENY');
@@ -78,17 +85,17 @@ test('health is public, and every response carries the security headers', async 
 test('pages get the response nonce; everything else stays away from the UI', async () => {
   const ui = fakeUi();
   const runtime = appRuntime(own);
-  const page = await handleRequest(new Request('https://coffre.test/projects'), runtime, ui, null);
+  const page = await answer(new Request('https://coffre.test/projects'), runtime, ui, null);
   assert.equal(page.status, 200);
   assert.equal(ui.seen.length, 1);
   assert.equal(ui.seen[0].path, '/projects');
   assert.ok(page.headers.get('content-security-policy')?.includes(`'nonce-${ui.seen[0].nonce}'`));
 
-  const api = await handleRequest(new Request('https://coffre.test/api/me'), runtime, ui, null);
+  const api = await answer(new Request('https://coffre.test/api/me'), runtime, ui, null);
   assert.equal(api.status, 401);
-  const apiary = await handleRequest(new Request('https://coffre.test/apiary'), runtime, ui, null);
+  const apiary = await answer(new Request('https://coffre.test/apiary'), runtime, ui, null);
   assert.equal(apiary.status, 200, '/apiary is a page, not the API');
-  const post = await handleRequest(new Request('https://coffre.test/projects', { method: 'POST' }), runtime, ui, null);
+  const post = await answer(new Request('https://coffre.test/projects', { method: 'POST' }), runtime, ui, null);
   assert.equal(post.status, 405);
   assert.equal(ui.seen.length, 2);
 });
@@ -109,37 +116,26 @@ function renderingUi(ask: (client: CoffreClient) => Promise<unknown>, fails = fa
   };
 }
 
-test("a page whose render met an outage answers 503, as the API does; the page's own bug stays a 500", async () => {
+test('a page whose render met an outage shows its error state, with the security headers', async () => {
   const page = () => new Request('https://coffre.test/projects', { headers: { 'cf-access-jwt-assertion': 'assertion' } });
   const unreachable = Object.assign(appRuntime(cloudflare) as object, {
     vault: { access: async () => Promise.reject(new Error('the vault is unreachable')) },
   }) as never;
-  const outage = await handleRequest(page(), unreachable, renderingUi((client) => client.me()), null);
-  assert.equal(outage.status, 503);
-  assert.equal(outage.headers.get('retry-after'), '5');
+  const outage = await answer(page(), unreachable, renderingUi((client) => client.me()), null);
+  assert.equal(outage.status, 500);
   assert.equal(await outage.text(), '<html>This page could not be shown</html>');
   assert.ok(outage.headers.get('content-security-policy'), 'the security headers');
 
-  const fine = await handleRequest(page(), unreachable, renderingUi((client) => client.auth()), null);
+  const fine = await answer(page(), unreachable, renderingUi((client) => client.auth()), null);
   assert.equal(fine.status, 200);
-  const bug = await handleRequest(page(), unreachable, renderingUi((client) => client.auth(), true), null);
+  const bug = await answer(page(), unreachable, renderingUi((client) => client.auth(), true), null);
   assert.equal(bug.status, 500);
-});
-
-test('the Next.js middleware header is refused outright', async () => {
-  const response = await handleRequest(
-    new Request('https://coffre.test/livez', { headers: { 'x-middleware-subrequest': 'middleware' } }),
-    appRuntime(own),
-    fakeUi(),
-    null,
-  );
-  assert.equal(response.status, 400);
 });
 
 test('sign-in routes take one method, and browser posts only from coffre itself', async () => {
   const runtime = appRuntime(own);
   const signout = (headers: Record<string, string>, method = 'POST') =>
-    handleRequest(new Request('https://coffre.test/auth/signout', { method, headers }), runtime, fakeUi(), null);
+    answer(new Request('https://coffre.test/auth/signout', { method, headers }), runtime, fakeUi(), null);
 
   assert.equal((await signout({}, 'GET')).status, 405);
   const refusals: Record<string, string>[] = [{ 'sec-fetch-site': 'cross-site' }, { origin: 'https://evil.test' }, {}];
@@ -155,14 +151,14 @@ test('sign-in routes take one method, and browser posts only from coffre itself'
 
   // Behind Access, the session is Access's, and so are CLI logins.
   const behindAccess = appRuntime(cloudflare);
-  const accessSignout = await handleRequest(
+  const accessSignout = await answer(
     new Request('https://coffre.test/auth/signout', { method: 'POST', headers: { 'sec-fetch-site': 'same-origin' } }),
     behindAccess,
     fakeUi(),
     null,
   );
   assert.equal(accessSignout.headers.get('location'), '/cdn-cgi/access/logout');
-  const device = await handleRequest(
+  const device = await answer(
     new Request('https://coffre.test/api/auth/device', { method: 'POST' }),
     behindAccess,
     fakeUi(),

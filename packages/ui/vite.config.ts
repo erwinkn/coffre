@@ -1,26 +1,42 @@
-import { cloudflare } from '@cloudflare/vite-plugin';
-import { tanstackStart } from '@tanstack/react-start/plugin/vite';
+import { readdirSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
 import viteReact from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
 
-// Builds `@coffre/ui`: `src/entry.ts` and its pages alone (wrangler.jsonc),
-// with their static files under `/_coffre/assets/`. `pnpm dev` runs these
-// pages inside a whole deployment instead, with dev/vite.config.ts.
-export default defineConfig({
-  build: {
-    // A deployment serves these from its own origin, beside `/api` and
-    // `/auth`; the prefix keeps the two apart.
-    assetsDir: '_coffre/assets',
-    // Vite inlines files under 4 KiB as data: URLs, which caught one small
-    // font subset. The Content-Security-Policy takes fonts from coffre alone.
-    assetsInlineLimit: (file) => (/\.woff2?$/.test(file) ? false : undefined),
-  },
+const here = (path: string) => fileURLToPath(new URL(path, import.meta.url));
 
-  plugins: [
-    cloudflare({ viteEnvironment: { name: 'ssr' }, configPath: 'wrangler.jsonc' }),
-    // Generates src/routeTree.gen.ts from src/routes, and wires the SSR
-    // server. Must come before the React plugin.
-    tanstackStart(),
-    viteReact(),
-  ],
+/** Each page, an entry of its own, `@coffre/ui/pages/<name>`: a file route names its component from there. */
+const pages = Object.fromEntries(
+  readdirSync(here('src/pages'))
+    .filter((file) => file.endsWith('.tsx'))
+    .map((file) => [`pages/${file.slice(0, -'.tsx'.length)}`, here(`src/pages/${file}`)]),
+);
+
+// Builds `@coffre/ui` as a library: its route options and provider, and
+// each page, as ES modules a deployment's own TanStack Start build bundles,
+// and its splitter splits.
+// React, the router, Start and Query stay imports, so the deployment's
+// single copy serves both. `pnpm dev` runs the sources instead.
+export default defineConfig({
+  mode: 'production',
+  plugins: [viteReact()],
+  build: {
+    outDir: 'dist',
+    emptyOutDir: true,
+    // Readable: the deployment's build minifies what it ships.
+    minify: false,
+    sourcemap: true,
+    target: 'es2022',
+    lib: { entry: { index: here('src/index.ts'), ...pages }, formats: ['es'] },
+    rollupOptions: {
+      // Every package stays an import: the deployment installs and bundles it once.
+      external: (id) => !id.startsWith('.') && !id.startsWith('/') && !id.startsWith('\0') && !/^[A-Za-z]:/.test(id),
+      output: {
+        format: 'es',
+        entryFileNames: '[name].js',
+        chunkFileNames: 'chunks/[name]-[hash].js',
+      },
+    },
+  },
 });

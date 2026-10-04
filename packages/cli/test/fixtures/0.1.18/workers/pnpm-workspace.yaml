@@ -1,0 +1,14 @@
+# wrangler's esbuild and workerd each come with an install script that checks
+# the platform binary it already has as an optional dependency. Neither needs
+# to run, and pnpm wants to be told.
+allowBuilds:
+  esbuild: false
+  workerd: false
+
+# Do not install a version published in the last 7 days: most malicious
+# releases are yanked within hours, and a service that holds every credential
+# can wait a week. Coffre's own packages are exempt, so a fix to them lands
+# the day it is published; they depend on nothing newer than this allows.
+minimumReleaseAge: 10080
+minimumReleaseAgeExclude:
+  - '@coffre/*'

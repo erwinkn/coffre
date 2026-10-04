@@ -11,7 +11,7 @@ import { asc, eq, sql, type SQL } from 'drizzle-orm';
 import { migrationLedger } from '@coffre/db/dialect';
 
 import { auditLog, credentials, serviceBindings } from './db/tables.ts';
-import { handleRequest, type Ui } from '../src/app.ts';
+import { answer, type Pages } from './start-fixture.ts';
 import { resolveConfig } from '../src/config.ts';
 import { exchangeCandidates, exchangesSince } from '../src/db/queries.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
@@ -143,10 +143,10 @@ async function bind(claims: BindingClaims, replaces: string[] = [], profile: Wor
   return made.binding.id;
 }
 
-const ui = {} as Ui;
+const ui = {} as Pages;
 
 async function exchange(body: unknown, sourceIp: string | null = IP): Promise<{ status: number; body: Record<string, string> }> {
-  const response = await handleRequest(
+  const response = await answer(
     new Request(`${ORIGIN}/api/auth/oidc`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: typeof body === 'string' ? body : JSON.stringify(body) }),
     runtime,
     ui,
@@ -159,7 +159,7 @@ const trade = (jwt: string, service = MEMBER) => exchange({ service, token: jwt 
 
 /** Who a credential reads as, through the API: the service, or a 401. */
 async function caller(credential: string): Promise<number | string> {
-  const response = await handleRequest(new Request(`${ORIGIN}/api/me`, { headers: { authorization: `Bearer ${credential}` } }), runtime, ui, IP);
+  const response = await answer(new Request(`${ORIGIN}/api/me`, { headers: { authorization: `Bearer ${credential}` } }), runtime, ui, IP);
   if (response.status !== 200) return response.status;
   const me = (await response.json()) as { principal: { type: string; id: string } };
   return `${me.principal.type}:${me.principal.id}`;
@@ -275,7 +275,7 @@ test('a token no binding can take costs its admission and one indexed read: no o
     const ask = async (service: string, jwt: string) => {
       seen.length = 0;
       [vaultCalls, issuer.fetches] = [0, 0];
-      const response = await handleRequest(
+      const response = await answer(
         new Request(`${ORIGIN}/api/auth/oidc`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ service, token: jwt }) }),
         stranger, ui, IP,
       );
@@ -340,7 +340,7 @@ test("Hyperdrive's cache revives nothing: rows put back after a removal stay dea
   const pool = testPostgresPool(TEST_RUNTIME_DATABASE_URL);
   try {
     const cached = createRuntime(config, createDatabase(hyperdriveCached(pool)), deps.vault, transport);
-    const send = (request: Request) => handleRequest(request, cached, ui, IP);
+    const send = (request: Request) => answer(request, cached, ui, IP);
     const trade = async (jwt: string) => {
       const response = await send(new Request(`${ORIGIN}/api/auth/oidc`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ service: MEMBER, token: jwt }) }));
       return { status: response.status, body: (await response.json()) as Record<string, string> };
@@ -480,7 +480,7 @@ test("a revocation is its caller's act: the credential it ends is its target, ne
   };
   const [a, b, c] = [await runOf('7001'), await runOf('7002'), await runOf('7003')];
   const revoke = (credential: string, id: string) =>
-    handleRequest(new Request(`${ORIGIN}/api/sessions/${id}`, { method: 'DELETE', headers: { authorization: `Bearer ${credential}` } }), runtime, ui, IP);
+    answer(new Request(`${ORIGIN}/api/sessions/${id}`, { method: 'DELETE', headers: { authorization: `Bearer ${credential}` } }), runtime, ui, IP);
   // Run A revokes a credential that is no one's, then run B's, its own service's.
   const nobody = '22222222-2222-4222-8222-222222222222';
   assert.equal((await revoke(a.token, nobody)).status, 404);
@@ -692,7 +692,7 @@ test('every entry a run\'s credential causes names it, the vault\'s too; the aud
   const { body } = await trade(token(rsa));
   const [exchange] = await appEntries('token.exchange');
   const credentialId = exchange!.metadata.credentialId as string;
-  const reveal = (path: string) => handleRequest(
+  const reveal = (path: string) => answer(
     new Request(`${ORIGIN}/api/reveals`, { method: 'POST', headers: { authorization: `Bearer ${body.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ path }) }),
     runtime, ui, IP,
   );

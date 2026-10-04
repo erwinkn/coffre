@@ -2,12 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  IMMUTABLE,
   contentSecurityPolicy,
   cspNonce,
-  withSecurityHeaders,
+  setSecurityHeaders,
 } from '../src/security-headers.ts';
 
-const page = new Request('https://coffre.example.com/projects');
+const https = { nonce: 'abc', publicUrl: 'https://coffre.example.com' };
 
 test('each nonce is fresh, and 128 bits', () => {
   const nonce = cspNonce();
@@ -30,10 +31,13 @@ test('scripts need the nonce; nothing may frame the page', () => {
   assert.match(access, /form-action 'self' https:\/\/acme\.cloudflareaccess\.com;/);
 });
 
-test('a response gets the headers, on a copy it can change', async () => {
-  const redirect = Response.redirect('https://coffre.example.com/login', 302);
-  const secured = withSecurityHeaders(page, redirect, { nonce: 'abc' });
+test('a response gets the headers in place: the same response, nothing it carries lost', async () => {
+  const redirect = new Response(null, { status: 302, headers: { location: 'https://coffre.example.com/login' } });
+  const marked = Object.assign(redirect, { options: { to: '/login' } });
+  const secured = setSecurityHeaders(marked, https);
 
+  assert.equal(secured, marked);
+  assert.deepEqual(secured.options, { to: '/login' });
   assert.equal(secured.status, 302);
   assert.equal(secured.headers.get('location'), 'https://coffre.example.com/login');
   assert.match(secured.headers.get('content-security-policy')!, /'nonce-abc'/);
@@ -44,22 +48,23 @@ test('a response gets the headers, on a copy it can change', async () => {
   assert.equal(secured.headers.get('strict-transport-security'), 'max-age=31536000; includeSubDomains');
   assert.equal(secured.headers.get('cache-control'), 'no-store');
 
-  const body = withSecurityHeaders(page, new Response('hello'), { nonce: 'abc' });
+  const body = setSecurityHeaders(new Response('hello'), https);
   assert.equal(await body.text(), 'hello');
 });
 
-test('plain HTTP, which is development, gets no HSTS', () => {
-  const secured = withSecurityHeaders(
-    new Request('http://127.0.0.1:3000/projects'),
-    new Response(null),
-    { nonce: 'abc' },
-  );
+test('a public URL on plain HTTP, which is development, gets no HSTS', () => {
+  const secured = setSecurityHeaders(new Response(null), { nonce: 'abc', publicUrl: 'http://127.0.0.1:3000' });
   assert.match(secured.headers.get('content-security-policy')!, /'nonce-abc'/);
   assert.equal(secured.headers.get('strict-transport-security'), null);
 });
 
 test('a response that chose its caching keeps it', () => {
   const cached = new Response(null, { headers: { 'cache-control': 'public, max-age=60' } });
-  const secured = withSecurityHeaders(page, cached, { nonce: 'abc' });
+  const secured = setSecurityHeaders(cached, https);
   assert.equal(secured.headers.get('cache-control'), 'public, max-age=60');
+});
+
+test("a response whose headers cannot change is refused, saying the rule and the fix", () => {
+  assert.throws(() => setSecurityHeaders(Response.redirect('https://coffre.example.com/elsewhere', 302), https), (error: Error) => error.message === IMMUTABLE);
+  assert.match(IMMUTABLE, /return new Response\(null, \{ status: 302, headers: \{ location \} \}\)/);
 });

@@ -1,13 +1,14 @@
 # @coffre/server
 
-coffre's API under `/api`, sign-in, the audit log
-and the scheduled job, on Cloudflare Workers or Node. A deployment
-configures it in code:
+coffre's API under `/api`, sign-in, the audit log and the scheduled job, on
+Cloudflare Workers or Node, in a deployment's own TanStack Start app. A
+deployment configures it once, in code:
 
 ```ts
-import { coffre, github, postgres, signin } from '@coffre/server/cloudflare';
+// app/src/coffre.ts
+import { createCoffre, github, postgres, signin } from '@coffre/server/cloudflare';
 
-export default coffre((env) => ({
+export const coffre = createCoffre((env: Env) => ({
   publicUrl: env.PUBLIC_URL,
   database: postgres(env.HYPERDRIVE),
   vault: env.VAULT,
@@ -16,13 +17,19 @@ export default coffre((env) => ({
 }));
 ```
 
-On Node, `serve({ … })` from `@coffre/server/node`. A deployment brings the
-shared Postgres database up to date with its own CLI, `pnpm exec coffre
+and mounts it: its server entry hands Start each request with
+`coffre.request(env, ctx)` as its context, `coffreMiddleware`
+(`@coffre/server/start`) secures every response, and its route files spread
+coffre's server routes, `createFileRoute('/api/$')({ ...api })`, from
+`@coffre/server/routes`, with `/auth/$`, `/livez` and `/readyz`. On Node,
+`createCoffre({ … })` from `@coffre/server/node`, and
+`coffre.request(request)`, in the app srvx runs. A deployment brings
+the shared Postgres database up to date with its own CLI, `pnpm exec coffre
 migrate`, as its owner, before it deploys; `coffre-server migrate` does the
-same for local SQLite and tests. The server
-connects as `coffre_runtime`; the vault connects to the same database as
-`coffre_vault_runtime`, with a Hyperdrive config of its own on Workers. `npx @coffre/cli init --workers` or
-`--node` writes a whole deployment.
+same for local SQLite and tests. The server connects as `coffre_runtime`;
+the vault connects to the same database as `coffre_vault_runtime`, with a
+Hyperdrive config of its own on Workers. `npx @coffre/cli init --workers`
+or `--node` writes a whole deployment.
 
 Part of [coffre](https://github.com/erwinkn/coffre), a secrets manager you
 deploy as a small project of your own. Its eight `@coffre/*` packages are

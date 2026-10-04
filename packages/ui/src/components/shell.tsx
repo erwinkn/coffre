@@ -1,5 +1,4 @@
 import {
-  useCallback,
   useEffect,
   useRef,
   useState,
@@ -14,6 +13,8 @@ import type { ProjectSummary } from '../shared/models';
 import { pendingMigrations, UPGRADE_DOC } from '../lib/instance';
 import type { UiCapabilities } from '../lib/capabilities';
 import { isActiveAccessibleEnvironment } from '../lib/project-environments';
+import { useMounted } from '../lib/mounted';
+import { usePreferences } from '../lib/preferences';
 import { AdministrationItems } from './affordances';
 import { CommandPalette } from './command-palette';
 import { ThemeMenuItems } from './theme';
@@ -50,47 +51,14 @@ type ShellProps = {
 
 const REPOSITORY = 'https://github.com/erwinkn/coffre';
 
-const SIDEBAR_KEY = 'coffre-sidebar';
-
 /** Wide enough for the sidebar to sit beside the page; narrower, it is a drawer. */
 const WIDE = '(width > 60rem)';
 
-/**
- * Collapses the sidebar before first paint, inlined in <head> like the
- * theme's script: drawn wide and then snapped narrow, the whole page would
- * lurch sideways on every load.
- */
-export const sidebarBootScript = `(function(){try{if(localStorage.getItem(${JSON.stringify(
-  SIDEBAR_KEY,
-)})==="collapsed"){document.documentElement.setAttribute("data-sidebar","collapsed")}}catch(e){}})()`;
-
-/**
- * Whether the sidebar is folded down to its icons, and the switch.
- *
- * The attribute on <html> is the truth and the stylesheet reads it, so the
- * boot script has already drawn the right width. Server-rendered markup
- * cannot know it, so this state starts expanded and catches up on mount.
- */
+/** Whether the sidebar is folded down to its icons, as the visitor left it, and the switch. */
 function useSidebarCollapsed(): [boolean, () => void] {
-  const [collapsed, setCollapsed] = useState(false);
-
-  useEffect(() => setCollapsed(document.documentElement.dataset.sidebar === 'collapsed'), []);
-
-  const toggle = useCallback(() => {
-    const root = document.documentElement;
-    const next = root.dataset.sidebar !== 'collapsed';
-    if (next) root.dataset.sidebar = 'collapsed';
-    else delete root.dataset.sidebar;
-    try {
-      if (next) localStorage.setItem(SIDEBAR_KEY, 'collapsed');
-      else localStorage.removeItem(SIDEBAR_KEY);
-    } catch {
-      // Storage refused (private mode); the choice still holds for this page.
-    }
-    setCollapsed(next);
-  }, []);
-
-  return [collapsed, toggle];
+  const { sidebar, setSidebar } = usePreferences();
+  const collapsed = sidebar === 'collapsed';
+  return [collapsed, () => setSidebar(collapsed ? 'expanded' : 'collapsed')];
 }
 
 /** Marks the current route without each link having to compare paths itself. */
@@ -145,6 +113,7 @@ export function Brand() {
  * own title says where you are, so the bar leaves it out rather than repeat it.
  */
 export function Shell({ projects, principal, instanceRole, capabilities, instance, children }: ShellProps) {
+  const { portal } = usePreferences();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const [drawerOpen, setDrawerOpen] = useState(false);
   const drawerClose = useRef<HTMLButtonElement>(null);
@@ -205,7 +174,7 @@ export function Shell({ projects, principal, instanceRole, capabilities, instanc
             >
               <MenuIcon size={18} />
             </Dialog.Trigger>
-            <Dialog.Portal>
+            <Dialog.Portal container={portal}>
               <Dialog.Backdrop className="overlay" />
               {/* The close button rather than the first link, the logo. */}
               <Dialog.Popup className="drawer" initialFocus={drawerClose}>
@@ -274,6 +243,7 @@ function Sidebar({
   collapsed?: boolean;
   close?: ReactNode;
 }) {
+  const mounted = useMounted();
   return (
     <>
       <div className="sidebar-head">
@@ -317,6 +287,7 @@ function Sidebar({
       {principal !== null && (
         <div className="sidebar-foot">
           <AccountMenu principal={principal} instanceRole={instanceRole} collapsed={collapsed} />
+{mounted('/account') && (
           <Tip label="Account settings" side={collapsed ? 'right' : undefined}>
             <Link
               className="btn btn-quiet btn-icon sidebar-foot-settings"
@@ -327,6 +298,7 @@ function Sidebar({
               <UserCog size={16} />
             </Link>
           </Tip>
+          )}
         </div>
       )}
     </>
@@ -363,6 +335,9 @@ function NavLink({
   icon: ReactNode;
   collapsed: boolean;
 }) {
+  // A page the deployment left out has no link.
+  const mounted = useMounted();
+  if (!mounted(to)) return null;
   // Matching is by prefix, so Projects stays current inside a project and
   // Audit stays current whatever its filters.
   return (

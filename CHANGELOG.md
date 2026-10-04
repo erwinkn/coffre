@@ -2,6 +2,74 @@
 
 ## Unreleased
 
+**A deployment's app is a TanStack Start app of its own** (0.2.0), a
+conventional one, and coffre is a set of pieces it mounts, as an auth SDK's
+are. Vite builds the app once, and nothing bundles it again: on Workers,
+`wrangler deploy` uploads what Vite built, so no second pass rewrites what
+the pages send the browser, as wrangler's `keep_names` did in 0.1.17. On
+Node, srvx runs the same build, as TanStack Start documents, and the
+vault stays a process of its own. The app's files, as `coffre init` writes
+them:
+
+- `app/src/coffre.ts`: the configuration, once, `export const coffre =
+  createCoffre(…)`;
+- `app/src/server.ts`: Start's handler, each request carrying coffre,
+  `handler.fetch(request, { context: coffre.request(…) })`, and coffre's
+  scheduled job;
+- `app/src/start.ts`: `createStart(() => ({ requestMiddleware: [coffreMiddleware,
+  createCsrfMiddleware(…)] }))`. coffre's middleware gives every response
+  coffre's security headers and a fresh CSP nonce, and the pages the
+  visitor's API client. A server route or page rendered without it fails,
+  saying how to add it. Start's CSRF check for server functions, which Start
+  drops once an app sets middleware of its own, stays for the app's;
+- `app/src/routes/`: Start's file routes. The root, the app's own
+  document, with coffre's stylesheet and icons and `<CoffreProvider>`; and a
+  file for each of coffre's server routes, layouts and pages, each spreading
+  coffre's route options: `createFileRoute('/_coffre/projects/')({ ...projects,
+  component: ProjectsPage })`. Start splits each page into a chunk of its
+  own, with its preload hints. Delete a page's file to leave it out; add
+  files for the app's own pages, under coffre's nav or not. coffre's nav
+  offers only the pages there. A page of the app's own may call the API as
+  the signed-in visitor, `useCoffre()` in a component or `context.coffre` in
+  a loader. An app that prefers routes in code mounts the same options with
+  TanStack's `createRoute` ([Your own routes](docs/deploy.md#your-own-routes));
+- `app/src/router.tsx`: `createRouter(routeTree)`, Start's generated tree;
+- `app/vite.config.ts`: `cloudflare(…)` on Workers, `tanstackStart()`,
+  `viteReact()`, and `coffre()` from `@coffre/ui/vite`, which puts the
+  pages' files under `/_coffre/assets/` and checks the versions below.
+
+The theme and the folded sidebar are cookies now, `coffre-theme` and
+`coffre-sidebar`, which the server reads, so a page is drawn as the visitor
+left it from the first byte, with no script of coffre's own before it: a
+theme chosen before 0.2, kept in the browser's storage, is chosen once more.
+coffre's look is scoped to the element `<CoffreProvider>` renders; the
+app's document keeps its own.
+
+React, TanStack Router, Start, Query and Vite are the deployment's own
+dependencies now, pinned at exactly the versions `@coffre/ui` is built with;
+`coffre update` moves them with coffre's packages, and adds the file of a
+page a release adds. On Workers, `pnpm dev` is
+now `vite dev app`, the vault beside the app. A refusal no longer waits for
+the request's body: nothing in coffre reads what a caller is still sending
+before answering.
+
+To upgrade, in the deployment's directory, with the 0.2 CLI:
+
+```sh
+npx @coffre/cli@0.2.0 update
+```
+
+It moves a deployment whose files are as a release of 0.1 wrote them, its
+configuration kept as that release had it, and shows each file it changes
+before asking once. It changes nothing when a file is the deployment's own,
+or one is already where 0.2 puts its own: it names each, and
+[Upgrading to 0.2](docs/deploy.md#upgrading-to-02) shows the move by hand.
+A move cut short is finished by the next run. Then `pnpm typecheck`, and
+deploy: on Workers Builds, the app's build command is now `pnpm exec vite
+build app` and its deploy command `npx wrangler deploy -c
+app/dist/server/wrangler.json`; `pnpm run deploy` does both. On Node,
+`pnpm build`, then restart both processes.
+
 **Workers deployments: signed-in pages no longer go blank.** wrangler bundles
 with esbuild's `keep_names` on, which wraps functions in an `__name` helper
 that only the Worker has; seroval, which streams a page's data, writes its own

@@ -174,7 +174,6 @@ export function pageClient(
   page: Request,
   runtime: CoffreRuntime,
   sourceIp: string | null,
-  answered: (status: number) => void = () => {},
 ): CoffreClient {
   const credential = pageCredential(page, runtime.auth);
   let checked: Promise<AuthenticatedIdentity | Response> | undefined;
@@ -187,10 +186,6 @@ export function pageClient(
   return createClient({
     url: new URL(page.url).origin,
     headers: () => credential,
-    transport: async (request) => {
-      const response = await fetchApi(request, runtime, { sourceIp, authenticate });
-      answered(response.status);
-      return response;
-    },
+    transport: (request) => fetchApi(request, runtime, { sourceIp, authenticate }),
   });
 }

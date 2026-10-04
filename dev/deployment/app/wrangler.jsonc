@@ -1,0 +1,29 @@
+// The app Worker of `vite dev` (src/server.ts): examples/workers/app/wrangler.jsonc,
+// on loopback. dev/start.sh points Hyperdrive at local Postgres with
+// CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE, and its
+// environment overrides these vars: Wrangler hands the Worker the names
+// declared here, from the shell when it has them, and nothing else.
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "coffre-dev",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-08-06",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "COFFRE_PUBLIC_URL": "http://127.0.0.1:3000",
+    "COFFRE_DEV_IDP_URL": "http://127.0.0.1:8081"
+  },
+  "secrets": {
+    "required": ["COFFRE_APP_KEY"]
+  },
+  "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "local" }],
+  "services": [{ "binding": "VAULT", "service": "coffre-dev-vault" }],
+  // Workload exchanges, per caller's address and in total (docs/design/oidc.md).
+  "ratelimits": [
+    { "name": "WORKLOADS_PER_SOURCE", "namespace_id": "1001", "simple": { "limit": 30, "period": 60 } },
+    { "name": "WORKLOADS_TOTAL", "namespace_id": "1002", "simple": { "limit": 300, "period": 60 } }
+  ],
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  }
+}

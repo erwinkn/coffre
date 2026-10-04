@@ -1,13 +1,17 @@
 import { CoffreError, type CoffreClient } from '@coffre/client';
 import { useRouter } from '@tanstack/react-router';
 
+import type { CoffreContext } from '../options';
+
 /**
- * The API as whoever is looking at the page. In the browser this is plain
- * `fetch` to `/api`, carrying the session cookie; mutations call it straight
- * from event handlers, and loaders read through `context.client`.
+ * The API as whoever is looking at the page, with their permissions: what
+ * coffre's pages call, and a deployment's own may too. In the browser this
+ * is plain `fetch` to `/api`, carrying the session cookie; on the server,
+ * the API in process. Components call it from event handlers; loaders read
+ * the same client as `context.coffre`.
  */
 export function useCoffre(): CoffreClient {
-  return useRouter().options.context.client;
+  return (useRouter().options.context as CoffreContext).coffre;
 }
 
 /** A refusal the page words itself, shown as it is. */

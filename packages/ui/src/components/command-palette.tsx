@@ -5,8 +5,9 @@ import { Dialog } from '@base-ui/react/dialog';
 import type { ProjectSummary } from '../shared/models';
 import type { UiCapabilities } from '../lib/capabilities';
 import { isActiveAccessibleEnvironment } from '../lib/project-environments';
+import { useMounted } from '../lib/mounted';
+import { usePreferences } from '../lib/preferences';
 import { administrationEntries } from './affordances';
-import { setTheme } from './theme';
 import {
   Folder,
   Key,
@@ -30,6 +31,8 @@ type Command = {
   label: ReactNode;
   hint?: string;
   run: () => void;
+  /** The page it opens, offered only if the deployment kept it. */
+  path?: string;
 };
 
 type CommandGroup = { value: string; items: Command[] };
@@ -62,6 +65,7 @@ export function CommandPalette({
   projects: ProjectSummary[];
   capabilities: UiCapabilities;
 }) {
+  const { portal, setTheme } = usePreferences();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
 
@@ -82,7 +86,8 @@ export function CommandPalette({
     action();
   };
 
-  const groups: CommandGroup[] = [
+  const mounted = useMounted();
+  const commands: CommandGroup[] = [
     {
       value: 'Environments',
       items: active.flatMap((project) =>
@@ -97,6 +102,7 @@ export function CommandPalette({
           hint: `${environment.details.secretCount} secret${
             environment.details.secretCount === 1 ? '' : 's'
           }`,
+          path: '/projects/$project/$environment',
           run: closing(() =>
             navigate({
               to: '/projects/$project/$environment',
@@ -113,6 +119,7 @@ export function CommandPalette({
         icon: <Folder size={15} />,
         label: <span className="mono">{project.slug}</span>,
         hint: project.name,
+        path: '/projects/$project',
         run: closing(() =>
           navigate({ to: '/projects/$project', params: { project: project.slug } }),
         ),
@@ -125,6 +132,7 @@ export function CommandPalette({
           value: 'projects all',
           icon: <Folder size={15} />,
           label: 'Projects',
+          path: '/projects',
           run: closing(() => navigate({ to: '/projects' })),
         },
         ...administrationEntries<Command>(capabilities, {
@@ -133,12 +141,14 @@ export function CommandPalette({
               value: 'users people members directory',
               icon: <Users size={15} />,
               label: 'Users',
+              path: '/users',
               run: closing(() => navigate({ to: '/users' })),
             },
             {
               value: 'tokens service accounts machines ci directory',
               icon: <Key size={15} />,
               label: 'Tokens',
+              path: '/tokens',
               run: closing(() => navigate({ to: '/tokens' })),
             },
           ],
@@ -147,12 +157,14 @@ export function CommandPalette({
               value: 'audit log history reads',
               icon: <Ledger size={15} />,
               label: 'Audit',
+              path: '/audit',
               run: closing(() => navigate({ to: '/audit', search: {} })),
             },
             {
               value: 'audit denials denied refused',
               icon: <SlashCircle size={15} />,
               label: 'Audit, denials only',
+              path: '/audit',
               run: closing(() => navigate({ to: '/audit', search: { decision: 'deny' } })),
             },
           ],
@@ -161,12 +173,14 @@ export function CommandPalette({
           value: 'settings instance sign-in',
           icon: <Settings size={15} />,
           label: 'Settings',
+          path: '/settings',
           run: closing(() => navigate({ to: '/settings' })),
         },
         {
           value: 'account preferences appearance identity profile me',
           icon: <UserCog size={15} />,
           label: 'Account',
+          path: '/account',
           run: closing(() => navigate({ to: '/account' })),
         },
       ],
@@ -194,7 +208,10 @@ export function CommandPalette({
         },
       ],
     },
-  ].filter((group) => group.items.length > 0);
+  ];
+  const groups = commands
+    .map((group) => ({ ...group, items: group.items.filter((item) => item.path === undefined || mounted(item.path)) }))
+    .filter((group) => group.items.length > 0);
 
   return (
     <Dialog.Root open={open} onOpenChange={setOpen}>
@@ -210,7 +227,7 @@ export function CommandPalette({
         <kbd aria-hidden>⌘K</kbd>
       </button>
 
-      <Dialog.Portal>
+      <Dialog.Portal container={portal}>
         <Dialog.Backdrop className="overlay" />
         <Dialog.Popup className="palette" aria-label="Jump to a project, environment or page">
           {/* `inline`: the list sits in the dialog, always shown, not in a popup of its own. */}
