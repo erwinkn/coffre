@@ -117,11 +117,18 @@ quietly "installing @coffre/cli@$release" "$work/cli.log" \
 #
 # Each replaced file moves aside and a new one takes its place, never written
 # through: pnpm links them from its store. Its children get no COFFRE_* of
-# the shell's, so all a shim needs is written into it.
+# the shell's, so all a shim needs is written into it. The owner's URL comes
+# as the release gives it: an argument, `--database-url-file`, or, in the
+# releases before that flag, COFFRE_MIGRATE_DATABASE_URL.
 migration() {
     cat <<EOF
 url="\${COFFRE_MIGRATE_DATABASE_URL:-\${DATABASE_URL:-}}"
-for arg in "\$@"; do case "\$arg" in postgres*|file:*) url="\$arg" ;; esac; done
+file=''
+for arg in "\$@"; do
+    if [ "\$file" = next ]; then file="\$arg"; continue; fi
+    case "\$arg" in --database-url-file) file=next ;; --database-url-file=*) file="\${arg#*=}" ;; postgres*|file:*) url="\$arg" ;; esac
+done
+if [ "\$file" = - ]; then url="\$(cat)"; elif [ -n "\$file" ]; then url="\$(cat "\$file")"; fi
 $migrator "\$url"
 [ -z "$1" ] || node '$root/scripts/compat-migrate.mjs' --only "\$url" '$1'
 touch '$work/migrated'

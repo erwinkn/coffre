@@ -16,8 +16,8 @@ import { readParams, sendJson, type Route } from './http.ts';
  * `permissions: id-token: write`, to the bearer of `requestToken`. Locally,
  * `POST /workloads/token` mints one, for trying the CLI by hand:
  *
- *   COFFRE_ID_TOKEN=$(curl -s -X POST http://127.0.0.1:8081/workloads/token \
- *     -d aud=http://127.0.0.1:3000 | jq -r .token)
+ *   curl -s -X POST http://127.0.0.1:8081/workloads/token -d aud=http://127.0.0.1:3000 | jq -r .token |
+ *     coffre --url http://127.0.0.1:3000 --service <name> --id-token-file - whoami
  */
 export class WorkloadIssuer {
   readonly #origin: () => string;

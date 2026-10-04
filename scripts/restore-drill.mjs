@@ -15,7 +15,7 @@ import { readFileSync } from 'node:fs';
 
 import { browser } from '../dev/browser.mjs';
 
-const API = process.env.COFFRE_API_URL;
+const API = process.env.COFFRE_DEV_URL;
 const ADMIN = 'admin@acme.example';
 const LEAVER = 'dev@acme.example';
 const CANARY = 'market/prod/DRILL_CANARY';

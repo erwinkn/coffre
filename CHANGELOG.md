@@ -2,6 +2,58 @@
 
 ## Unreleased
 
+**The CLI reads no environment variable: what it is told comes as flags,
+and a secret in a file.** `COFFRE_TOKEN`, `COFFRE_API_URL` and the rest
+used to override the saved session where no one could see it, and a secret
+in a variable reaches every process the shell starts. Now the session flags
+come before the command, and say where and as whom, for that one command;
+the session `coffre login` saved stays the default when there are none:
+
+```sh
+printf '%s' "$TOKEN" | coffre --url https://secrets.acme.example --token-file - export market/prod
+coffre --url https://secrets.acme.example --service api-deploy run market/prod -- ./deploy
+```
+
+A secret is never a flag's value, which `ps`, the shell's history and CI
+logs show: its flag names a file, or `-` for stdin, and one flag at most
+reads stdin. `coffre run`, which hands stdin to its command, and `coffre
+set` and `coffre import`, when they read their input there, take the token
+from a file. A variable an earlier CLI read, still set, stops the command
+that read it, in one line naming what replaced it, rather than leaving the
+run to go elsewhere, or as someone else, unseen:
+
+```
+coffre: COFFRE_TOKEN is no longer read: unset it, and pass --token-file <path|->
+```
+
+| Before | Now |
+|---|---|
+| `COFFRE_API_URL` | `--url <url>` |
+| `COFFRE_TOKEN` | `--token-file <path\|->` |
+| `COFFRE_SERVICE` | `--service <name>`; on GitHub Actions, still nothing else |
+| `COFFRE_ID_TOKEN`, `COFFRE_ID_TOKEN_FILE` | `--id-token-file <path\|->` |
+| `COFFRE_ACCESS_CLIENT_ID` | `--access-client-id <id>` |
+| `COFFRE_ACCESS_CLIENT_SECRET` | `--access-client-secret-file <path\|->` |
+| `COFFRE_AUTH_MODE` | `--auth-mode signin\|cloudflare` |
+| `COFFRE_MIGRATE_DATABASE_URL` | `coffre migrate --database-url-file <path\|->` |
+| `COFFRE_SETUP_DATABASE_URL` | `coffre setup --database-url-file <path\|->` |
+| `COFFRE_VAULT_KEY`, `COFFRE_APP_KEY` | `coffre verify keys --vault-key-file <path\|->`, `--app-key-file <path\|->` |
+| `COFFRE_VAULT_KEY_ID` | `coffre verify keys --vault-id <id>`, as before |
+| `COFFRE_CONFORMANCE_CANARY` | `coffre verify instance --canary-value-file <path\|->` |
+| `coffre migrate --url <url>` | `coffre --url <url> migrate` |
+| a database URL, keys or a canary piped in, unasked | the same, with the flag and `-` |
+
+Two ways to sign in at once, `--token-file` beside `--service` say, are
+refused, where the token used to win unsaid; so is a session flag after the
+command, or one a command has no use for. The GitHub Action's inputs are as
+they were; it hands the token to the CLI on stdin. On Workers Builds,
+rename the vault's build variable `COFFRE_MIGRATE_DATABASE_URL` to
+`DATABASE_OWNER_URL`, and its build command to `printenv DATABASE_OWNER_URL
+| pnpm exec coffre migrate --yes --database-url-file -`
+([Workers Builds](docs/deploy.md#workers-builds)). On GitLab, name the ID
+token anything but `COFFRE_ID_TOKEN`, and hand it to `--id-token-file`
+([docs/ci.md](docs/ci.md#without-a-stored-token)).
+
 **A deployment's app is a TanStack Start app of its own** (0.2.0), a
 conventional one, and coffre is a set of pieces it mounts, as an auth SDK's
 are. Vite builds the app once, and nothing bundles it again: on Workers,

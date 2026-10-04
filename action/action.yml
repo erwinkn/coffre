@@ -21,9 +21,9 @@ runs:
     - name: Read and mask secrets
       shell: bash
       env:
-        COFFRE_API_URL: ${{ inputs.url }}
-        COFFRE_TOKEN: ${{ inputs.token }}
-        COFFRE_SERVICE: ${{ inputs.service }}
+        INPUT_URL: ${{ inputs.url }}
+        INPUT_TOKEN: ${{ inputs.token }}
+        INPUT_SERVICE: ${{ inputs.service }}
         INPUT_ENVIRONMENT: ${{ inputs.environment }}
       run: |
         if ! command -v node >/dev/null || ! command -v npx >/dev/null; then
@@ -34,12 +34,19 @@ runs:
           echo '::error::coffre requires Node.js 20 or newer. Set up your job toolchain before this Action.' >&2
           exit 1
         fi
-        if { [ -n "$COFFRE_TOKEN" ] && [ -n "$COFFRE_SERVICE" ]; } || { [ -z "$COFFRE_TOKEN" ] && [ -z "$COFFRE_SERVICE" ]; }; then
+        if { [ -n "$INPUT_TOKEN" ] && [ -n "$INPUT_SERVICE" ]; } || { [ -z "$INPUT_TOKEN" ] && [ -z "$INPUT_SERVICE" ]; }; then
           echo '::error::coffre needs one of token or service: service signs this run in with its ID token, without a stored secret.' >&2
           exit 1
         fi
-        if [ -n "$COFFRE_SERVICE" ] && [ -z "$ACTIONS_ID_TOKEN_REQUEST_URL" ]; then
+        if [ -n "$INPUT_SERVICE" ] && [ -z "$ACTIONS_ID_TOKEN_REQUEST_URL" ]; then
           echo '::error::service needs the job to have `permissions: id-token: write`.' >&2
           exit 1
         fi
-        npx -y @coffre/cli@0.2.0 export --format github "$INPUT_ENVIRONMENT"
+        # The token goes on stdin, never in an argument, which ps shows; a
+        # service needs nothing more than its name and the runner's ID token.
+        if [ -n "$INPUT_SERVICE" ]; then
+          set -- --service "$INPUT_SERVICE"
+        else
+          set -- --token-file -
+        fi
+        printf '%s' "$INPUT_TOKEN" | npx -y @coffre/cli@0.2.0 --url "$INPUT_URL" "$@" export --format github "$INPUT_ENVIRONMENT"

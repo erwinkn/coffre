@@ -26,11 +26,11 @@ database="${COFFRE_DEV_DATABASE:-coffre}"
 state_dir="${COFFRE_STATE_DIR:-$root/dev/.wrangler/state}"
 owner_url="postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/$database"
 
-# What deployment/app/src/server.ts, the dev IdP, the seed and the CLI read. The app's
+# What deployment/app/src/server.ts, the dev IdP and the seed read. The app's
 # Hyperdrive binding reaches Postgres as the restricted runtime login, and
 # the vault's as its own.
 export COFFRE_PUBLIC_URL="http://127.0.0.1:$port"
-export COFFRE_API_URL="$COFFRE_PUBLIC_URL"
+export COFFRE_DEV_URL="$COFFRE_PUBLIC_URL"
 export COFFRE_DEV_IDP_URL="http://127.0.0.1:$idp_port"
 export COFFRE_DEV_IDP_PORT="$idp_port"
 export COFFRE_STATE_DIR="$state_dir"

@@ -149,28 +149,29 @@ export async function runsRefused(deployment: Deployment, admin: Person): Promis
 }
 
 /**
- * The CLI, as a CI job runs it: on GitHub Actions, with the runner's
- * token endpoint and nothing else; elsewhere, with the token in
- * COFFRE_ID_TOKEN. It keeps the credential in memory, and prints neither.
+ * The CLI, as a CI job runs it, with `--service`: on GitHub Actions, with
+ * the runner's token endpoint and nothing else; elsewhere, with the token
+ * piped to `--id-token-file -`. It keeps the credential in memory, and
+ * prints neither.
  */
 export async function cliSignsIn(deployment: Deployment, canaries: Canaries): Promise<string> {
   const issuer = deployment.idp.workloads;
   const cli = new Cli(deployment.origin);
   try {
-    const base = { COFFRE_API_URL: deployment.origin, COFFRE_SERVICE: RUNNER };
+    const session = ['--url', deployment.origin, '--service', RUNNER];
     const given = await mint(deployment);
-    const runs = {
-      'on GitHub Actions': { ...base, ACTIONS_ID_TOKEN_REQUEST_URL: issuer.requestUrl, ACTIONS_ID_TOKEN_REQUEST_TOKEN: issuer.requestToken },
-      'with COFFRE_ID_TOKEN': { ...base, COFFRE_ID_TOKEN: given },
+    const runs: Record<string, { args: string[]; env: Record<string, string>; input?: string }> = {
+      'on GitHub Actions': { args: session, env: { ACTIONS_ID_TOKEN_REQUEST_URL: issuer.requestUrl, ACTIONS_ID_TOKEN_REQUEST_TOKEN: issuer.requestToken } },
+      'with --id-token-file': { args: [...session, '--id-token-file', '-'], env: {}, input: `${given}\n` },
     };
-    for (const [where, env] of Object.entries(runs)) {
-      const run = await cli.run(['get', `${DEV}/API_KEY`], env);
+    for (const [where, { args, env, input }] of Object.entries(runs)) {
+      const run = await cli.run([...args, 'get', `${DEV}/API_KEY`], env, input);
       expect(run.code === 0, `coffre get ${where} exited ${run.code}`, run.output);
       expect(run.output.trim() === canaries[`${DEV}/API_KEY`], `coffre get ${where} did not print the value`);
       expect(!run.output.includes(given) && !run.output.includes(issuer.requestToken) && !/coffre_svc_/.test(run.output), `coffre get ${where} printed a token`);
     }
     expect(!existsSync(join(cli.home, '.coffre', 'credentials.json')), 'the CLI kept a credential on disk');
-    return `\`coffre get\` as ${RUNNER}, on GitHub Actions and with COFFRE_ID_TOKEN; no token printed, nothing written`;
+    return `\`coffre --service ${RUNNER} get\`, on GitHub Actions and with --id-token-file; no token printed, nothing written`;
   } finally {
     cli.remove();
   }

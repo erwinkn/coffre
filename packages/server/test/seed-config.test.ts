@@ -9,7 +9,7 @@ import {
 
 const local = {
   DATABASE_URL: 'postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/coffre',
-  COFFRE_API_URL: 'http://127.0.0.1:3000',
+  COFFRE_DEV_URL: 'http://127.0.0.1:3000',
   COFFRE_DEV_IDP_URL: 'http://127.0.0.1:8081',
   COFFRE_ROOT_ADMINS: 'admin@acme.example',
 };
@@ -28,7 +28,7 @@ test('seed accepts a second local stack, on its own database and ports', () => {
   const second = loadLocalSeedConfig({
     ...local,
     DATABASE_URL: 'postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/coffre_step6',
-    COFFRE_API_URL: 'http://127.0.0.1:3080',
+    COFFRE_DEV_URL: 'http://127.0.0.1:3080',
     COFFRE_DEV_IDP_URL: 'http://127.0.0.1:3081',
   });
   assert.equal(second.apiUrl, 'http://127.0.0.1:3080');
@@ -95,7 +95,7 @@ test('the closed-door persona is in the directory with no grant', () => {
 
 test('seed rejects a remote API or IdP', () => {
   assert.throws(
-    () => loadLocalSeedConfig({ ...local, COFFRE_API_URL: 'https://coffre.example.com' }),
+    () => loadLocalSeedConfig({ ...local, COFFRE_DEV_URL: 'https://coffre.example.com' }),
     /refuses non-local apiUrl/,
   );
   assert.throws(

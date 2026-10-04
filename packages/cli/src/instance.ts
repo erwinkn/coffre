@@ -14,10 +14,11 @@
  *     }
  *   }
  *
- * Environment variables override the file for one command, which is how CI
- * uses the CLI: `COFFRE_API_URL` picks the instance, `COFFRE_TOKEN` (a
- * service token) or `COFFRE_ACCESS_CLIENT_ID`/`_SECRET` (a Cloudflare Access
- * service token) authenticates, and nothing is written to disk.
+ * The session flags override the file for one command, which is how CI uses
+ * the CLI (`flags.ts`): `--url` picks the instance, `--token-file` (a service
+ * token), `--service` (a CI run's ID token) or `--access-client-id` and its
+ * secret's file (a Cloudflare Access service token) authenticates, and
+ * nothing is written to disk.
  */
 
 import type { AuthInfo } from '@coffre/client';
@@ -45,12 +46,25 @@ export type Credential =
   | { kind: 'access-service-token'; clientId: string; clientSecret: string }
   /** Ask `cloudflared access token -app=<origin>` at request time. */
   | { kind: 'cloudflared' }
-  /** A CI run's ID token, traded for a five-minute credential of `service` before the first request (`workload.ts`). */
-  | { kind: 'workload'; service: string };
+  /**
+   * A CI run's ID token, traded for a five-minute credential of `service`
+   * before the first request (`workload.ts`): the one given, or, on GitHub
+   * Actions, a fresh one from the runner.
+   */
+  | { kind: 'workload'; service: string; idToken?: string };
 
 export type Target = { origin: string; mode: AuthMode; credential: Credential };
 
-type Environment = Readonly<Record<string, string | undefined>>;
+/** What the session flags say, their files read (`flags.ts`). */
+export type SessionFlags = {
+  url?: string;
+  token?: string;
+  service?: string;
+  idToken?: string;
+  accessClientId?: string;
+  accessClientSecret?: string;
+  authMode?: string;
+};
 
 const MODES: readonly AuthMode[] = ['signin', 'cloudflare'];
 
@@ -92,7 +106,7 @@ export function parseMode(raw: string | undefined): AuthMode | undefined {
   const value = raw?.trim();
   if (value === undefined || value === '') return undefined;
   if (!(MODES as readonly string[]).includes(value)) {
-    throw new Error(`COFFRE_AUTH_MODE must be one of ${MODES.join(', ')}, not "${value}"`);
+    throw new Error(`--auth-mode must be one of ${MODES.join(', ')}, not "${value}"`);
   }
   return value as AuthMode;
 }
@@ -164,7 +178,7 @@ export function loginMode(origin: string, status: number, body: unknown): AuthMo
     // 401 or 403 rather than a redirect.
     throw new Error(
       `${origin} turned the CLI away (status ${status}). If it is behind Cloudflare Access,\n` +
-        `  run \`COFFRE_AUTH_MODE=cloudflare coffre login ${origin}\``,
+        `  run \`coffre --auth-mode cloudflare login ${origin}\``,
     );
   }
   throw new Error(`${origin} does not look like coffre: GET /api/auth answered ${status}`);
@@ -174,34 +188,52 @@ export function loginMode(origin: string, status: number, body: unknown): AuthMo
  * Decide where the next request goes and what it carries, or explain why it
  * cannot be sent. Pure, so every precedence rule is testable.
  */
-export function resolveTarget(env: Environment, store: Store, now: Date = new Date()): Target {
-  const explicitMode = parseMode(env.COFFRE_AUTH_MODE);
-  const requested = env.COFFRE_API_URL?.trim() || store.current;
+export function resolveTarget(flags: SessionFlags, store: Store, now: Date = new Date()): Target {
+  const explicitMode = parseMode(flags.authMode);
+  const requested = flags.url?.trim() || store.current;
   if (!requested) {
     throw new Error('not signed in anywhere yet: run `coffre login <url>`');
   }
 
-  const session = lookupSession(store, requested);
-  const accessClientId = env.COFFRE_ACCESS_CLIENT_ID?.trim();
-  const mode: AuthMode =
-    explicitMode ?? session?.mode ?? (accessClientId ? 'cloudflare' : 'signin');
-  const origin = instanceOrigin(requested);
-
-  const token = env.COFFRE_TOKEN?.trim();
-  if (token) return { origin, mode, credential: { kind: 'token', token } };
-
-  const service = env.COFFRE_SERVICE?.trim();
-  if (service) {
-    if (mode === 'cloudflare') {
-      throw new Error("COFFRE_SERVICE signs a CI run in with its ID token, which coffre's own sign-in takes: behind Cloudflare Access, use an Access service token");
-    }
-    return { origin, mode, credential: { kind: 'workload', service: service.startsWith('token:') ? service : `token:${service}` } };
+  const ways = ([['--token-file', flags.token], ['--service', flags.service], ['--access-client-id', flags.accessClientId]] as const)
+    .filter(([, value]) => value?.trim())
+    .map(([flag]) => flag);
+  if (ways.length > 1) throw new Error(`${ways.join(' and ')} are two ways to sign in: give one`);
+  if (flags.idToken !== undefined && !flags.service?.trim()) {
+    throw new Error('--id-token-file goes with --service: the ID token signs a CI run in as that service');
+  }
+  if (flags.accessClientSecret !== undefined && !flags.accessClientId?.trim()) {
+    throw new Error('--access-client-secret-file goes with --access-client-id');
   }
 
-  if (mode === 'cloudflare' && accessClientId) {
-    const clientSecret = env.COFFRE_ACCESS_CLIENT_SECRET?.trim();
+  const session = lookupSession(store, requested);
+  const accessClientId = flags.accessClientId?.trim();
+  const mode: AuthMode = explicitMode ?? (accessClientId ? 'cloudflare' : (session?.mode ?? 'signin'));
+  const origin = instanceOrigin(requested);
+
+  const token = flags.token?.trim();
+  if (token) return { origin, mode, credential: { kind: 'token', token } };
+
+  const service = flags.service?.trim();
+  if (service) {
+    if (mode === 'cloudflare') {
+      throw new Error("--service signs a CI run in with its ID token, which coffre's own sign-in takes: behind Cloudflare Access, use an Access service token");
+    }
+    const idToken = flags.idToken?.trim();
+    return {
+      origin,
+      mode,
+      credential: { kind: 'workload', service: service.startsWith('token:') ? service : `token:${service}`, ...(idToken ? { idToken } : {}) },
+    };
+  }
+
+  if (accessClientId) {
+    if (mode !== 'cloudflare') {
+      throw new Error('--access-client-id is a Cloudflare Access service token, and --auth-mode signin says coffre signs in itself: give one');
+    }
+    const clientSecret = flags.accessClientSecret?.trim();
     if (!clientSecret) {
-      throw new Error('COFFRE_ACCESS_CLIENT_ID is set but COFFRE_ACCESS_CLIENT_SECRET is not');
+      throw new Error('--access-client-id needs its secret: --access-client-secret-file <path|->');
     }
     return { origin, mode, credential: { kind: 'access-service-token', clientId: accessClientId, clientSecret } };
   }

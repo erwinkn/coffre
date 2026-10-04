@@ -15,7 +15,8 @@ import { parseArgs } from 'node:util';
 
 import { CoffreError, createClient, type CoffreClient } from '@coffre/client';
 
-import { credentialHeaders, instanceOrigin, resolveTarget, type Store } from '../instance.ts';
+import { secretFile } from '../flags.ts';
+import { credentialHeaders, instanceOrigin, resolveTarget, type SessionFlags, type Store } from '../instance.ts';
 import { style, type Output } from '../tty.ts';
 import { anonymousChecks } from './anonymous.ts';
 import { Checks, expect, Failure, stop } from './checks.ts';
@@ -32,7 +33,8 @@ export const PROBE = {
 
 export const INSTANCE_USAGE = `usage:
   coffre verify instance [<url>]
-  COFFRE_TOKEN=<service token> coffre verify instance [<url>] --canary <project>/<environment>/<KEY>[=<value>]
+  coffre --token-file <path|-> verify instance [<url>] --canary <project>/<environment>/<KEY>
+         [--canary-value-file <path|->]
 
 Checks an instance from outside, the current one unless <url> names another:
 
@@ -44,13 +46,14 @@ Checks an instance from outside, the current one unless <url> names another:
                    fresh canary, runs the token's checks below, then verifies
                    the whole audit log as you. The credential is revoked
                    however the run ends, and your session stays signed in
-  with a token     a service token in COFFRE_TOKEN, for CI, that reads the
+  with a token     a service token in --token-file, for CI, that reads the
                    canary's environment and holds auditor on its project: its
                    value nowhere but its reveal, the reveal audited, nothing
                    else in reach
-  --canary         the canary the token reads; its value after =, or in
-                   COFFRE_CONFORMANCE_CANARY, or on stdin, so that it stays
-                   out of the shell's history
+  --canary         the canary the token reads, and its value after =; or
+  --canary-value-file
+                   its value, from this file, or stdin for -, so that it
+                   stays out of the shell's history
 
 Each run adds a few entries to the instance's audit log, which is
 append-only, so they stay: the canary's read, and the reads it was refused.
@@ -60,15 +63,15 @@ and writes its canary and its grants. Exits 1 when a check fails.`;
 /** What the run issued, to revoke at its end. */
 type Issued = { member: string; id: string };
 
-export async function verifyInstance(args: string[], store: Store, env: NodeJS.ProcessEnv, out: Output = process.stdout): Promise<void> {
+export async function verifyInstance(args: string[], store: Store, session: SessionFlags, out: Output = process.stdout): Promise<void> {
   const { values, positionals } = parseArgs({
     args,
     allowPositionals: true,
-    options: { canary: { type: 'string' }, help: { type: 'boolean', short: 'h' } },
+    options: { canary: { type: 'string' }, 'canary-value-file': { type: 'string' }, help: { type: 'boolean', short: 'h' } },
   });
   if (values.help) stop(0, INSTANCE_USAGE);
   if (positionals.length > 1) stop(2, INSTANCE_USAGE);
-  const requested = positionals[0] ?? (env.COFFRE_API_URL?.trim() || store.current);
+  const requested = positionals[0] ?? (session.url?.trim() || store.current);
   if (!requested) stop(1, 'coffre: not signed in anywhere yet: run `coffre login <url>` first');
   let origin: string;
   try {
@@ -78,29 +81,33 @@ export async function verifyInstance(args: string[], store: Store, env: NodeJS.P
   }
   const s = style(out);
   const report = new Checks(out);
-  const token = env.COFFRE_TOKEN?.trim();
+  const token = session.token?.trim();
+  const valueFile = values['canary-value-file'];
 
   if (token !== undefined && token !== '') {
     if (values.canary === undefined) stop(2, 'coffre: with a token, name its canary: --canary <project>/<environment>/<KEY>[=<value>]');
+    if (valueFile !== undefined && values.canary.includes('=')) stop(2, 'coffre: the canary has its value after =, and in --canary-value-file: give one');
     let canary: Canary;
     try {
-      canary = parseCanary(values.canary, values.canary.includes('=') ? undefined : await canaryValue(env));
+      canary = parseCanary(values.canary, valueFile === undefined ? undefined : secretFile('--canary-value-file', valueFile));
     } catch (error) {
       stop(2, `coffre: ${error instanceof Error ? error.message : String(error)}`);
     }
-    out.write(`${s.bold(`Checking ${origin}`)}, as no one and with the token in COFFRE_TOKEN\n`);
+    out.write(`${s.bold(`Checking ${origin}`)}, as no one and with the token in --token-file\n`);
     out.write(s.dim("  The token's reads add a few entries to the instance's audit log, for good.\n\n"));
     await anonymousChecks(report, origin);
     await tokenChecks(report, origin, { token, canary });
     return finish(out, report);
   }
-  if (values.canary !== undefined) stop(2, "coffre: --canary goes with a service token in COFFRE_TOKEN; as an owner, the run writes a canary of its own");
+  if (values.canary !== undefined || valueFile !== undefined) {
+    stop(2, "coffre: --canary goes with a service token in --token-file; as an owner, the run writes a canary of its own");
+  }
 
   // The session `coffre login` made, and none other: no second sign-in.
   if (store.instances[origin] === undefined) stop(1, `coffre: not signed in to ${origin}: run \`coffre login ${origin}\` first`);
   let api: CoffreClient;
   try {
-    const to = resolveTarget({ ...env, COFFRE_API_URL: origin, COFFRE_TOKEN: undefined }, store);
+    const to = resolveTarget({ ...session, url: origin, token: undefined }, store);
     if (to.mode === 'cloudflare') {
       stop(
         1,
@@ -165,7 +172,7 @@ async function signedIn(api: CoffreClient, origin: string): Promise<{ detail: st
   }
   const who = me.principal.id;
   if (me.instanceRole === 'user') {
-    throw new Failure(`${who} is neither an owner nor a root admin of ${origin}: nothing was made. Sign in as one, or use a service token in COFFRE_TOKEN with --canary`);
+    throw new Failure(`${who} is neither an owner nor a root admin of ${origin}: nothing was made. Sign in as one, or use a service token in --token-file with --canary`);
   }
   return { detail: `${who}, ${me.instanceRole === 'owner' ? 'an owner' : 'a root admin'}, with this CLI's session`, value: who };
 }
@@ -217,16 +224,6 @@ async function cleanUp(api: CoffreClient, issued: Issued[]): Promise<string> {
     `${issued.length === 0 ? 'nothing issued' : 'the credential revoked'}; your session stays. Staying: ${PROBE.project}/${PROBE.environment} and its ` +
     `${PROBE.key}, ${PROBE.service} with ${others}, and this run's entries in the audit log`
   );
-}
-
-/** The canary's value from the environment, or the first line of stdin when it is piped. */
-async function canaryValue(env: NodeJS.ProcessEnv): Promise<string | undefined> {
-  const given = env.COFFRE_CONFORMANCE_CANARY;
-  if (given !== undefined && given !== '') return given;
-  if (process.stdin.isTTY) return undefined;
-  let text = '';
-  for await (const chunk of process.stdin) text += String(chunk);
-  return text.split(/\r?\n/)[0];
 }
 
 /** The verdict, under the checks, and the exit code: 0 when every one passed, or was skipped for a reason given. */

@@ -145,16 +145,16 @@ refreshes it; the CLI asks it for the current token on every command
 Cloudflare validates at the edge before adding the `Cf-Access-Jwt-Assertion`
 header the origin verifies. If the Access application answers non-browser
 clients with a 401 instead of a redirect, say which mode to use:
-`COFFRE_AUTH_MODE=cloudflare coffre login https://…`.
+`coffre --auth-mode cloudflare login https://…`.
 
 CI and other machines use an Access service token instead, with nothing
-stored on disk:
+stored on disk. Its ID is a flag; its secret comes in a file, or on stdin
+for `-`, never as a flag's value:
 
 ```sh
-COFFRE_API_URL=https://<coffre-api-hostname> \
-COFFRE_ACCESS_CLIENT_ID=<id>.access \
-COFFRE_ACCESS_CLIENT_SECRET=<secret> \
-  coffre run app/prod -- ./deploy.sh
+coffre --url https://<coffre-api-hostname> \
+  --access-client-id <id>.access --access-client-secret-file "$ACCESS_SECRET_FILE" \
+  run app/prod -- ./deploy.sh
 ```
 
 The CLI refuses a plaintext, credentialed, or path-bearing address before
@@ -213,7 +213,7 @@ conformance does too, with the dev IdP in its own process for the run.
 It also plays a CI platform under `/workloads`, which a trust binding may
 name in development: `curl -s -X POST http://127.0.0.1:8081/workloads/token
 -d aud=http://127.0.0.1:3000` mints a run's ID token, for the CLI's
-`COFFRE_ID_TOKEN`.
+`--id-token-file -`.
 Nothing local stands in for Access: its verifier is covered by unit tests
 against Access-shaped tokens.
 

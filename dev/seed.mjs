@@ -128,4 +128,4 @@ await fetch(`${API}/auth/signout`, {
 });
 await pool.end();
 
-console.log(`\nSeeded. As ci-deploy, which reads market/prod:\n  COFFRE_TOKEN=${ci.token}`);
+console.log(`\nSeeded. As ci-deploy, which reads market/prod, its token on stdin:\n  echo ${ci.token} | pnpm coffre --url ${API} --token-file - list market/prod`);

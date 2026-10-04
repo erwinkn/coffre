@@ -12,7 +12,7 @@
 // one after.
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -198,9 +198,11 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
         sql.exec(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`),
       );
     // As the deployment's pipeline does before it deploys: its own CLI's
-    // `coffre migrate`, in its folder, the owner's URL in its environment.
+    // `coffre migrate`, in its folder, the owner's URL in a file of its own.
     // A fresh log has no heartbeat: only the scheduled job can make /readyz pass.
-    await run(process.execPath, [deploymentCli(dir), 'migrate', '--yes'], { COFFRE_MIGRATE_DATABASE_URL: owner });
+    const ownerFile = join(scratch, 'owner-url');
+    writeFileSync(ownerFile, owner, { mode: 0o600 });
+    await run(process.execPath, [deploymentCli(dir), 'migrate', '--yes', '--database-url-file', ownerFile]);
     // The app as it deploys: its Start app, built by its own Vite, which wrangler runs unbundled.
     await run(bin('vite'), ['build', 'app']);
     const state = join(scratch, 'state');

@@ -26,7 +26,7 @@ idp_port="${COFFRE_DEV_IDP_PORT:-8481}"
 source_db="${COFFRE_DRILL_DATABASE:-coffre_drill}"
 restored_db="${source_db}_restored"
 scratch="$(mktemp -d "${TMPDIR:-/tmp}/coffre-drill.XXXXXX")"
-export COFFRE_API_URL="http://127.0.0.1:$port" COFFRE_DEV_IDP_URL="http://127.0.0.1:$idp_port" COFFRE_DEV_IDP_PORT="$idp_port"
+export COFFRE_DEV_URL="http://127.0.0.1:$port" COFFRE_DEV_IDP_URL="http://127.0.0.1:$idp_port" COFFRE_DEV_IDP_PORT="$idp_port"
 owner_url() { echo "postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/$1"; }
 psql_as_owner() { docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -qU coffre_owner "$@"; }
 log() { printf '\n==> %s\n' "$1"; }
@@ -55,7 +55,7 @@ start_coffre() {
     local state="$scratch/state-$1-$RANDOM"
     (
         cd examples/workers
-        export PUBLIC_URL="$COFFRE_API_URL" ROOT_ADMINS="$COFFRE_ROOT_ADMINS" WRANGLER_SEND_METRICS=false
+        export PUBLIC_URL="$COFFRE_DEV_URL" ROOT_ADMINS="$COFFRE_ROOT_ADMINS" WRANGLER_SEND_METRICS=false
         export GITHUB_CLIENT_ID=coffre-local GITHUB_CLIENT_SECRET=coffre-local-secret
         export APP_KEY="$COFFRE_APP_KEY" VAULT_KEY_ID="$COFFRE_VAULT_KEY_ID" VAULT_KEY="$2"
         export CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE="postgresql://coffre_runtime:local-runtime-only@127.0.0.1:55432/$1"
@@ -67,7 +67,7 @@ start_coffre() {
     ) >"$scratch/coffre-$1.log" 2>&1 &
     coffre=$!
     for _ in $(seq 120); do
-        if curl -sf "$COFFRE_API_URL/livez" >/dev/null; then return; fi
+        if curl -sf "$COFFRE_DEV_URL/livez" >/dev/null; then return; fi
         sleep 1
     done
     cat "$scratch/coffre-$1.log" >&2
@@ -105,9 +105,10 @@ COFFRE_RUNTIME_ROLE=coffre_runtime DATABASE_URL="postgresql://coffre_runtime:loc
 log 'checking the restored instance, with the same keys'
 start_coffre "$restored_db" "$COFFRE_VAULT_KEY"
 node scripts/restore-drill.mjs check "$scratch/state.json"
-COFFRE_TOKEN="$(node -p "JSON.parse(require('fs').readFileSync('$scratch/state.json')).token")" \
-COFFRE_CONFORMANCE_CANARY="$(node -p "JSON.parse(require('fs').readFileSync('$scratch/state.json')).canary")" \
-    node --conditions=coffre:source packages/cli/src/main.ts verify instance "$COFFRE_API_URL" --canary market/prod/DRILL_CANARY
+# The token on stdin and the canary's value in a file, never in an argument.
+state() { node -p "JSON.parse(require('fs').readFileSync('$scratch/state.json')).$1"; }
+state token | node --conditions=coffre:source packages/cli/src/main.ts --token-file - \
+    verify instance "$COFFRE_DEV_URL" --canary market/prod/DRILL_CANARY --canary-value-file <(state canary)
 stop_coffre
 
 log 'once more, with the wrong KEK'

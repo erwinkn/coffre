@@ -109,8 +109,9 @@ other's sources.
 
 ## The CLI
 
-`pnpm coffre <command>` runs the CLI from this checkout against the local
-stack. A deployed instance needs only its address:
+`pnpm coffre <command>` runs the CLI from this checkout; `pnpm coffre login
+http://127.0.0.1:3000` signs it in to the local stack. A deployed instance
+needs only its address:
 
 ```sh
 coffre setup                                # a new deployment's logins, migrations and keys, and on Workers, Cloudflare (docs/deploy.md)
@@ -157,10 +158,18 @@ use `--format shell`, which quotes values literally, including quotes and
 newlines, or use `coffre run` to pass them directly to a child process.
 
 A session lasts 30 days, is kept per instance in `~/.coffre/credentials.json`
-(mode 0600), and can be revoked from the account page. CI stores nothing: it
-sets `COFFRE_API_URL` and `COFFRE_TOKEN`, a service token from the Tokens
-page, or `COFFRE_ACCESS_CLIENT_ID` and `COFFRE_ACCESS_CLIENT_SECRET` behind
-Access ([docs/deployment-auth.md](docs/deployment-auth.md)).
+(mode 0600), and can be revoked from the account page. CI stores nothing:
+the session flags, before the command, say where and as whom, and the CLI
+reads no environment variable. `--url` names the instance, and
+`--token-file` a file that holds a service token from the Tokens page, or
+`-` for stdin; `--service` signs a CI run in by its ID token instead
+([docs/ci.md](docs/ci.md)), and `--access-client-id` with
+`--access-client-secret-file` passes Access
+([docs/deployment-auth.md](docs/deployment-auth.md)):
+
+```sh
+printf '%s' "$TOKEN" | coffre --url https://secrets.acme.example --token-file - export market/prod
+```
 
 ## The API
 

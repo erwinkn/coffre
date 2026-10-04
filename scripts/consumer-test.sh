@@ -133,7 +133,7 @@ for kind in "${kinds[@]}"; do
         echo "consumer-test: pnpm exec coffre migrate succeeded with no database" >&2
         exit 1
     fi
-    if [[ "$said" != *'no connection string'*COFFRE_MIGRATE_DATABASE_URL* ]]; then
+    if [[ "$said" != *'no connection string'*--database-url-file* ]]; then
         echo "consumer-test: pnpm exec coffre migrate answered: $said" >&2
         exit 1
     fi

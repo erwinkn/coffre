@@ -109,20 +109,20 @@ In order, since each builds on the ones before:
 | reveals audited, runs audited | A single-secret reveal or an environment read writes one `secret.read` of the vault's per value, under the reveal's operation and request, at the versions revealed |
 | cross-site | A write, a reveal and a sign-out with the admin's cookie, from another site or from no page at all: 403, no value in the answer, nothing changed |
 | live setup | The admin sets up what a token from CI needs: `conformance/live/CANARY`, and `token:conformance-live`, a viewer there and auditor on the project |
-| verify with a token | `coffre verify instance`, the built CLI in a home of its own, with that token in `COFFRE_TOKEN` and its canary, as CI runs it: every check [as no one and with the token](#against-a-running-instance) passes, but the token's verification, which it skips. Neither the token nor the canary shows in what it prints |
+| verify with a token | `coffre verify instance`, the built CLI in a home of its own, with that token on stdin (`--token-file -`) and its canary in `--canary-value-file`, as CI runs it: every check [as no one and with the token](#against-a-running-instance) passes, but the token's verification, which it skips. Neither the token nor the canary shows in what it prints |
 | login as a user, login as the admin | `coffre login`, in a CLI of each one's own, approved by the reader and by the root admin in their browsers |
 | verify as a user | `coffre verify instance` with the reader's session, a plain user: it exits 1, says plainly it needs an owner or a root admin, and makes nothing. The session still works. No member, grant, project or environment changes |
 | verify as the admin, verify again | With the root admin's session, twice: every check of the [owner tier](#signed-in-as-an-owner) passes, and none is skipped. The first makes `token:conformance-probe` and its grants; the second finds everything. No line shows a credential, the session or the canary, and the session still works after |
 | verify interrupted | The same, stopped with Ctrl-C mid-run: it exits 130, its credential revoked and the session still signed in, and nothing it printed shows a credential or a canary |
 | verify leftovers | After the runs: the service holds no credential, the CLI's session is the one `coffre login` made, `conformance/live/CANARY` is as the live setup wrote it, no other member, grant, project or environment changed, and the runs' entries are in the audit log |
-| verify keys | `coffre verify keys` with the admin's session: the deployment's own keys pass, vault ID included; a wrong vault key, on stdin, and a malformed app key are each named. No key shows in what it prints |
+| verify keys | `coffre verify keys` with the admin's session: the deployment's own keys pass, from `--vault-key-file` and `--app-key-file`, vault ID included; a wrong vault key, on stdin, and a malformed app key are each named. No key shows in what it prints |
 | offboarding | Removing the leaver names the values they read, to rotate; their browser session, their CLI session and a new sign-in all stop at once. A removed service's token stops too |
 | bulk limit | One more value at once than the limit allows gets 403 `bulk_limit`, with reason `bulk_limit`; a single value still opens |
 | trust a run | The admin trusts `deploy.yml`, pushed to `main` of `acme/api`, to sign in as `token:conformance-run`, from the dev IdP's CI issuer (`/workloads`). A deployment that trusts no workloads skips this and the checks after it, to tokens unlogged |
 | run signs in | That run's ID token buys a five-minute credential at `POST /api/auth/oidc`, which reads dev as the service. The vault's `secret.read` names the credential, and the audit log leads from the read to the run |
 | run token spent | A token is taken once: sent again, it is refused as `replayed`, and so is an ES256 token's twin, its signature's (r, n − s) in place of (r, s) |
 | runs refused | Tokens for another instance, expired, from a feature branch, from a pull request or from another repository, and a good token for a service no binding names: each 401 with its reason, never what the binding expects, and none logged as an exchange |
-| run signs in by CLI | `coffre get` with `COFFRE_SERVICE`, as on GitHub Actions (asking the runner's token endpoint) and with `COFFRE_ID_TOKEN`: it reads the value, prints no token, and keeps no credential on disk |
+| run signs in by CLI | `coffre --service … get`, as on GitHub Actions (asking the runner's token endpoint) and with the token on stdin (`--id-token-file -`): it reads the value, prints no token, and keeps no credential on disk |
 | run unbound | Removing the binding ends the credential it issued at once, and the next run's token buys none |
 | exchanges limited | Malformed tokens from one address get 429 `busy`, with `Retry-After: 60`, within 200 a minute: the limit counts before anything is read. Last of these, since it spends the address's minute |
 | tokens unlogged | No ID token or credential these checks used is in the processes' output, nor any service credential |
@@ -281,23 +281,24 @@ three are made in the pages; the rest is the CLI.
 
    Keep `$CANARY` beside the token: the check looks for it.
 
-Then, with the token in `COFFRE_TOKEN`, as for every CLI command in CI:
+Then, with the token in `--token-file`, as for every CLI command in CI, a
+file or `-` for stdin:
 
 ```sh
-COFFRE_TOKEN=coffre_svc_… COFFRE_CONFORMANCE_CANARY="$CANARY" \
-  coffre verify instance https://secrets.example.com --canary conformance/live/CANARY
+printf '%s' "$TOKEN" | coffre --token-file - verify instance https://secrets.example.com \
+  --canary conformance/live/CANARY --canary-value-file <(printf '%s' "$CANARY")
 ```
 
 `--canary <project>/<env>/<KEY>=<value>` works too, but leaves the value in
-the shell's history. Without `=<value>`, the value is read from
-`COFFRE_CONFORMANCE_CANARY`, or else from the first line of stdin. The token
-is never an argument.
+the shell's history. Without `=<value>`, the value comes from the file
+`--canary-value-file` names, or stdin for `-`, when the token does not.
+Neither is ever an argument.
 
 For example, on an instance with another project, `market`, which the token
 holds nothing on:
 
 ```
-Checking https://secrets.example.com, as no one and with the token in COFFRE_TOKEN
+Checking https://secrets.example.com, as no one and with the token in --token-file
   The token's reads add a few entries to the instance's audit log, for good.
 
   ✓ health              /livez and /readyz
@@ -335,10 +336,12 @@ jobs:
         with:
           node-version: 24
       - name: Verify the live instance
-        run: npx --yes @coffre/cli verify instance https://secrets.example.com --canary conformance/live/CANARY
+        run: |
+          printf '%s' "$PROBE_TOKEN" | npx --yes @coffre/cli --token-file - verify instance https://secrets.example.com \
+            --canary conformance/live/CANARY --canary-value-file <(printf '%s' "$PROBE_CANARY")
         env:
-          COFFRE_TOKEN: ${{ secrets.COFFRE_PROBE_TOKEN }}
-          COFFRE_CONFORMANCE_CANARY: ${{ secrets.COFFRE_PROBE_CANARY }}
+          PROBE_TOKEN: ${{ secrets.COFFRE_PROBE_TOKEN }}
+          PROBE_CANARY: ${{ secrets.COFFRE_PROBE_CANARY }}
 ```
 
 Each run adds its two entries to the audit log.

@@ -43,8 +43,9 @@ npx @coffre/cli setup
 ```
 
 Run it with the CLI you ran `coffre init` with. It asks for the database
-administrator's connection string at a hidden prompt. A script can pipe it
-in, or set `COFFRE_SETUP_DATABASE_URL`; never pass it as an argument. It
+administrator's connection string at a hidden prompt. A script names a file
+holding it, `--database-url-file <path>`, or `-` for stdin; never pass it
+as an argument. It
 makes the two logins coffre runs as, `coffre_runtime` for the server and
 `coffre_vault_runtime` for the vault, migrates the database, and checks that
 each login holds only its rights.
@@ -71,8 +72,8 @@ To do the same by hand, see
 [deploy.md](https://github.com/erwinkn/coffre/blob/main/docs/deploy.md#appendix-the-database-by-hand).
 
 To upgrade: `coffre update` here, then `pnpm exec coffre migrate` with the
-administrator's URL (at its prompt, or in `COFFRE_MIGRATE_DATABASE_URL`
-with `--yes` in a script), then `pnpm build` and restart both processes
+administrator's URL (at its prompt, or, in a script, with `--yes` and
+`--database-url-file <path|->`), then `pnpm build` and restart both processes
 ([upgrading](https://github.com/erwinkn/coffre/blob/main/docs/deploy.md#upgrading)).
 
 For tests and local development only, both URLs may instead name the same

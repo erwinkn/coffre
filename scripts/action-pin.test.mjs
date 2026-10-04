@@ -31,7 +31,7 @@ test('bump moves the Action with the packages and examples; check:pins rejects d
     const dir = checkout(t);
     const bumped = run(dir, 'bump.mjs', '9.8.7-test.1');
     assert.equal(bumped.status, 0, bumped.stderr);
-    assert.match(readFileSync(join(dir, 'action/action.yml'), 'utf8'), /npx -y @coffre\/cli@9\.8\.7-test\.1 export/);
+    assert.match(readFileSync(join(dir, 'action/action.yml'), 'utf8'), /npx -y @coffre\/cli@9\.8\.7-test\.1 --url /);
     assert.equal(run(dir, 'check-pins.mjs').status, 0);
     for (const pin of ['9.8.6', '^9.8.7-test.1']) {
         const path = join(dir, 'action/action.yml');
@@ -68,25 +68,30 @@ test('the Action refuses an unsupported Node before npx runs, with a clear minim
     assert.doesNotMatch(ran.stdout, /npx-must-not-run/);
 });
 
-test('the Action takes one of a token or a service, and a service only with the job\'s ID token', (t) => {
+test('the Action takes one of a token or a service, and a service only with the job\'s ID token; the token goes on stdin', (t) => {
     const dir = checkout(t);
     const bin = join(dir, 'bin');
     mkdirSync(bin);
     writeFileSync(join(bin, 'node'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
-    writeFileSync(join(bin, 'npx'), '#!/bin/sh\necho "npx ran with service=$COFFRE_SERVICE"\nexit 0\n', { mode: 0o755 });
+    writeFileSync(join(bin, 'npx'), '#!/bin/sh\necho "npx ran with: $*"\necho "stdin: $(cat)"\nexit 0\n', { mode: 0o755 });
+    // The shell's own tools, beside the fakes: cat, for the fake npx.
+    const path = `${bin}:/usr/bin:/bin`;
     const text = readFileSync(join(dir, 'action/action.yml'), 'utf8');
     const shell = text.match(/      run: \|\n((?:        [^\n]*\n?)+)/)[1].replace(/^        /gm, '');
-    const run = (env) => spawnSync('/bin/bash', ['-e', '-c', shell], { encoding: 'utf8', env: { PATH: bin, ...env }, timeout: 10_000 });
-    for (const env of [{}, { COFFRE_TOKEN: 'coffre_svc_x', COFFRE_SERVICE: 'token:api-deploy' }]) {
+    const inputs = { INPUT_URL: 'https://coffre.example.com', INPUT_ENVIRONMENT: 'app/ci' };
+    const run = (env) => spawnSync('/bin/bash', ['-e', '-c', shell], { encoding: 'utf8', env: { PATH: path, ...inputs, ...env }, timeout: 10_000 });
+    for (const env of [{}, { INPUT_TOKEN: 'coffre_svc_x', INPUT_SERVICE: 'token:api-deploy' }]) {
         const ran = run(env);
         assert.equal(ran.status, 1);
         assert.match(ran.stderr, /needs one of token or service/);
     }
-    const noIdToken = run({ COFFRE_SERVICE: 'token:api-deploy' });
+    const noIdToken = run({ INPUT_SERVICE: 'token:api-deploy' });
     assert.equal(noIdToken.status, 1);
     assert.match(noIdToken.stderr, /permissions: id-token: write/);
-    const service = run({ COFFRE_SERVICE: 'token:api-deploy', ACTIONS_ID_TOKEN_REQUEST_URL: 'https://runner.example/token' });
+    const service = run({ INPUT_SERVICE: 'token:api-deploy', ACTIONS_ID_TOKEN_REQUEST_URL: 'https://runner.example/token' });
     assert.equal(service.status, 0, service.stderr);
-    assert.match(service.stdout, /npx ran with service=token:api-deploy/);
-    assert.equal(run({ COFFRE_TOKEN: 'coffre_svc_x' }).status, 0);
+    assert.match(service.stdout, /npx ran with: -y @coffre\/cli@\S+ --url https:\/\/coffre\.example\.com --service token:api-deploy export --format github app\/ci\n/);
+    const token = run({ INPUT_TOKEN: 'coffre_svc_x' });
+    assert.equal(token.status, 0, token.stderr);
+    assert.match(token.stdout, /npx ran with: -y @coffre\/cli@\S+ --url https:\/\/coffre\.example\.com --token-file - export --format github app\/ci\nstdin: coffre_svc_x\n/);
 });
