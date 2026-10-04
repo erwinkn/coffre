@@ -25,7 +25,7 @@ test('what the browser loads is refused when it carries the database, a driver o
 });
 
 test('server code is found in a build, whatever form Vite emits it in', async () => {
-  const { build } = await import('vite');
+  const { build, defaultClientConditions } = await import('vite');
   const marker = 'console.log("secret_versions");';
   const cases: { name: string; files: Record<string, string> }[] = [
     { name: 'a static import', files: { 'entry.js': 'import "./leak.js";', 'leak.js': marker } },
@@ -53,6 +53,8 @@ test('server code is found in a build, whatever form Vite emits it in', async ()
         root: fileURLToPath(new URL('..', import.meta.url)),
         publicDir: false,
         logLevel: 'silent',
+        // The packages' sources, as the tests read them, built or not.
+        resolve: { conditions: ['coffre:source', ...defaultClientConditions] },
         build: { outDir: join(dir, 'dist'), emptyOutDir: true, rolldownOptions: { input: join(dir, 'src', 'entry.js') } },
       });
       return serverCodeIn(clientFiles(join(dir, 'dist')));
