@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+`coffre update` recognizes a CLI installed globally with pnpm 11, which
+keeps it in its store's `links/` directory, and updates it with `pnpm add -g`
+instead of calling it a dependency of that directory. It asks npm and pnpm
+where their globals are (`ls -g`), with pnpm's `PNPM_HOME` when pnpm can't
+answer; when neither claims the CLI, it says so and prints what each manager
+would run. Run in a deployment, `pnpm coffre update` now knows its CLI as
+one of the deployment's packages.
+
 `coffre update` moves a deployment from pnpm 10 to 11 without a terminal:
 pnpm's question about removing `node_modules` no longer stops it. When a
 lockfile another pnpm wrote holds a package too young for this one, it first

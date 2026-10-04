@@ -5,6 +5,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { homedir } from 'node:os';
 import { dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -42,21 +43,43 @@ export type Install =
   | { kind: 'checkout' }
   /** A dependency of a project, updated with that project's packages. */
   | { kind: 'project'; dir: string }
-  | { kind: 'unknown' };
+  | { kind: 'unknown'; path: string };
 
 /**
- * How the CLI at `path` was installed: under npx's cache, a global root
- * (`npm root -g`, `pnpm root -g`), a project's node_modules, or a checkout.
+ * Where each package manager's own global @coffre/cli is, as it says, through
+ * its links: null when it has none. `pnpmHome`, only when pnpm could not
+ * say: its PNPM_HOME, which holds its globals, pnpm 10's and 11's alike.
  */
-export function installOf(path: string, roots: { npm: string | null; pnpm: string | null }): Install {
+export type Globals = { npm: string | null; pnpm: string | null; pnpmHome: string | null };
+
+/**
+ * How the CLI at `path`, a real path, was installed: under npx's cache, as
+ * npm's or pnpm's global, as a dependency of a project, or in a checkout.
+ * By what the managers say, not by the shape of the path: pnpm 11 keeps a
+ * global package in its store's links/, where a project's may be too.
+ * `isProject` says whether a directory is one that depends on @coffre/cli.
+ */
+export function installOf(path: string, globals: Globals, isProject: (dir: string) => boolean = dependsOnCli): Install {
+  const within = (dir: string | null) => dir !== null && (path === dir || path.startsWith(dir + sep));
   if (path.includes(`${sep}_npx${sep}`)) return { kind: 'npx' };
-  // pnpm's global packages live in a store beside its root's node_modules.
-  if (roots.pnpm !== null && path.startsWith(dirname(roots.pnpm) + sep)) return { kind: 'pnpm' };
-  if (roots.npm !== null && path.startsWith(roots.npm + sep)) return { kind: 'npm' };
-  const modules = path.lastIndexOf(`${sep}node_modules${sep}`);
-  if (modules !== -1) return { kind: 'project', dir: path.slice(0, modules) };
+  if (within(globals.pnpm)) return { kind: 'pnpm' };
+  if (within(globals.npm)) return { kind: 'npm' };
+  if (within(globals.pnpmHome)) return { kind: 'pnpm' };
+  // The project is where its node_modules starts: pnpm's own packages are further down, in node_modules/.pnpm.
+  const modules = path.indexOf(`${sep}node_modules${sep}`);
+  if (modules !== -1) return isProject(path.slice(0, modules)) ? { kind: 'project', dir: path.slice(0, modules) } : { kind: 'unknown', path };
   if (path.includes(`${sep}packages${sep}cli${sep}`)) return { kind: 'checkout' };
-  return { kind: 'unknown' };
+  return { kind: 'unknown', path };
+}
+
+/** Whether `dir` is a project with @coffre/cli among its dependencies. */
+function dependsOnCli(dir: string): boolean {
+  try {
+    const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as Record<string, Record<string, string> | undefined>;
+    return ['dependencies', 'devDependencies', 'optionalDependencies'].some((field) => manifest[field]?.[PACKAGE] !== undefined);
+  } catch {
+    return false;
+  }
 }
 
 /** The migrations a deployment's installed coffre ships, through its server's own @coffre/db; null before an install. */
@@ -89,6 +112,31 @@ export function migrationsAdded(from: string, to: string, before: readonly strin
   );
 }
 
+/** What there is to say, and do, about a CLI its update leaves as it is: not npm's or pnpm's global. */
+export function notUpdated(how: Exclude<Install, { kind: 'npm' | 'pnpm' }>, latest: string, deployment: string | null): { text: string; details: string[] } {
+  switch (how.kind) {
+    case 'npx':
+      return { text: 'Nothing to update: npx runs the version it is given', details: [`npx ${PACKAGE}@${latest} … runs ${latest}`] };
+    case 'checkout':
+      return { text: 'Nothing to update here: this CLI runs from a checkout of coffre', details: ['git pull, then pnpm install and pnpm build'] };
+    case 'project':
+      return how.dir === deployment
+        ? { text: `This CLI is one of the deployment's packages, updated with them below`, details: [] }
+        : { text: `Nothing updated: this CLI is a dependency of ${how.dir}`, details: [`update it there: its @coffre/cli pin, to ${latest}`] };
+    case 'unknown':
+      // Neither npm nor pnpm says this CLI is its global, nor is it a project's: say so, and what each would run.
+      return {
+        text: "Nothing updated: coffre can't tell how this CLI was installed",
+        details: [
+          `It runs from ${how.path}, which neither npm nor pnpm lists as its global, nor is it a project's`,
+          `Installed with npm: npm install -g ${PACKAGE}@${latest}`,
+          `With pnpm: pnpm add -g ${PACKAGE}@${latest}`,
+          `In a project: its ${PACKAGE} pin, to ${latest}, then its install`,
+        ],
+      };
+  }
+}
+
 /** coffre's latest release, as the registry has it. */
 async function latestVersion(): Promise<string> {
   const registry = (process.env.npm_config_registry ?? 'https://registry.npmjs.org/').replace(/\/?$/, '/');
@@ -97,15 +145,50 @@ async function latestVersion(): Promise<string> {
   return ((await response.json()) as { version: string }).version;
 }
 
-function globalRoot(manager: 'npm' | 'pnpm'): string | null {
-  const ran = spawnSync(manager, ['root', '-g'], { encoding: 'utf8', timeout: 10_000 });
-  const root = ran.status === 0 ? ran.stdout.trim() : '';
-  if (root === '') return null;
-  // A manager with no global package yet names a root that does not exist.
+/**
+ * Where `manager` keeps its global @coffre/cli, as its `ls -g` says, through
+ * its links: null when it has none, undefined when it cannot say (not
+ * installed, or pnpm with its bin directory off PATH). Asked from the home
+ * directory, as globals are installed, not a project that pins a pnpm.
+ */
+export function globalCli(manager: 'npm' | 'pnpm', env: NodeJS.ProcessEnv = process.env, cwd = homedir()): string | null | undefined {
+  const ran = spawnSync(manager, ['ls', '-g', '--json', '--depth', '0', '--long'], {
+    cwd,
+    encoding: 'utf8',
+    timeout: 15_000,
+    env: { ...env, COREPACK_ENABLE_DOWNLOAD_PROMPT: '0' },
+  });
+  let listed: unknown;
   try {
-    return realpathSync(root);
+    listed = JSON.parse(ran.stdout);
   } catch {
-    return root;
+    return undefined;
+  }
+  // pnpm lists each global directory, npm its one prefix.
+  for (const each of [listed].flat() as { dependencies?: Record<string, { path?: string }> }[]) {
+    const path = each?.dependencies?.[PACKAGE]?.path;
+    if (typeof path !== 'string') continue;
+    try {
+      return realpathSync(path);
+    } catch {
+      return null;
+    }
+  }
+  return ran.status === 0 ? null : undefined;
+}
+
+/** How this CLI was installed, asking npm and pnpm where their globals are. */
+function thisInstall(self: string): Install {
+  const pnpm = globalCli('pnpm');
+  const home = pnpm === undefined && process.env.PNPM_HOME ? process.env.PNPM_HOME : null;
+  return installOf(self, { npm: globalCli('npm') ?? null, pnpm: pnpm ?? null, pnpmHome: home === null ? null : realOr(home) });
+}
+
+function realOr(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
   }
 }
 
@@ -153,7 +236,7 @@ export async function update(args: string[]): Promise<void> {
 
   const current = cliVersion();
   const self = realpathSync(fileURLToPath(import.meta.url));
-  const how = installOf(self, { npm: globalRoot('npm'), pnpm: globalRoot('pnpm') });
+  const how = thisInstall(self);
   const dir = process.cwd();
   const kind = deploymentKind(dir);
   const deployment = kind === 'workers' || kind === 'node' ? dir : null;
@@ -180,29 +263,21 @@ export async function update(args: string[]): Promise<void> {
     });
     await steps.run(1, async (step) => {
       if (current === latest) return `This CLI is up to date, at ${current}`;
-      switch (how.kind) {
-        case 'npx':
-          return { text: 'Nothing to update: npx runs the version it is given', details: [`npx ${PACKAGE}@${latest} … runs ${latest}`] };
-        case 'checkout':
-          return { text: 'Nothing to update here: this CLI runs from a checkout of coffre', details: ['git pull, then pnpm install and pnpm build'] };
-        case 'project':
-          return how.dir === deployment
-            ? { text: `This CLI is one of the deployment's packages, updated with them below`, details: [] }
-            : { text: `Nothing updated: this CLI is a dependency of ${how.dir}`, details: [`update it there: its @coffre/cli pin, to ${latest}`] };
-        case 'unknown':
-          return { text: 'Nothing updated: where this CLI was installed from is unclear', details: [`npm install -g ${PACKAGE}@${latest}, or pnpm add -g ${PACKAGE}@${latest}`] };
-        default: {
-          const run = how.kind === 'npm' ? ['npm', ['install', '-g', `${PACKAGE}@${latest}`]] as const : ['pnpm', ['add', '-g', `${PACKAGE}@${latest}`]] as const;
-          if (!(await ask(`Update this CLI from ${current} to ${latest}, with ${run[0]} ${run[1].join(' ')}?`, step))) {
-            return { text: `This CLI stays at ${current}`, details: [] };
-          }
-          step.note(`Updating this CLI, with ${run[0]}`);
-          await command(run[0], [...run[1]], dir);
-          // The new CLI is where this one was: its migrations ship beside it.
-          after ??= journalTags(join(dirname(self), 'migrations', 'postgres'));
-          return `Updated this CLI from ${current} to ${latest}, with ${run[0]}`;
-        }
+      if (how.kind !== 'npm' && how.kind !== 'pnpm') return notUpdated(how, latest, deployment);
+      const run = how.kind === 'npm' ? ['npm', ['install', '-g', `${PACKAGE}@${latest}`]] as const : ['pnpm', ['add', '-g', `${PACKAGE}@${latest}`]] as const;
+      if (!(await ask(`Update this CLI from ${current} to ${latest}, with ${run[0]} ${run[1].join(' ')}?`, step))) {
+        return { text: `This CLI stays at ${current}`, details: [] };
       }
+      step.note(`Updating this CLI, with ${run[0]}`);
+      await command(run[0], [...run[1]], homedir());
+      // The new CLI's migrations ship in it, where its manager keeps it now: not where this one ran, under pnpm.
+      const updated = globalCli(how.kind);
+      try {
+        if (updated) after ??= journalTags(join(updated, 'dist', 'migrations', 'postgres'));
+      } catch {
+        // Without them, the release's migrations go unsaid; the update itself is done.
+      }
+      return `Updated this CLI from ${current} to ${latest}, with ${run[0]}`;
     });
     if (deployment !== null) {
       await steps.run(2, async (step) => {
