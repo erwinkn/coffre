@@ -529,17 +529,20 @@ test('a binding issues at most 60 credentials a minute', async () => {
 });
 
 test('before the migration that records spent tokens, an exchange says so, and nothing is issued', async () => {
+  // Forget 0003_exchanges and every migration after it, as on a database deployed to before `coffre migrate`.
   const ledger = migrationLedger(db.owner);
-  const [newest] = await rows(sql`SELECT * FROM ${ledger} ORDER BY created_at DESC LIMIT 1`);
-  await run(sql`DELETE FROM ${ledger} WHERE hash = ${newest!.hash}`);
+  const later = (await rows(sql`SELECT * FROM ${ledger} ORDER BY created_at`)).slice(3);
+  for (const entry of later) await run(sql`DELETE FROM ${ledger} WHERE hash = ${entry.hash}`);
   try {
     const refused = await trade(token(rsa));
     assert.deepEqual([refused.status, refused.body.reason], [503, 'migration_pending']);
     assert.deepEqual(await db.owner.select().from(credentials), []);
   } finally {
-    const columns = Object.keys(newest!);
-    await run(sql`INSERT INTO ${ledger} (${sql.join(columns.map((column) => sql.identifier(column)), sql`, `)})
-      VALUES (${sql.join(columns.map((column) => sql`${newest![column]}`), sql`, `)})`);
+    for (const entry of later) {
+      const columns = Object.keys(entry);
+      await run(sql`INSERT INTO ${ledger} (${sql.join(columns.map((column) => sql.identifier(column)), sql`, `)})
+        VALUES (${sql.join(columns.map((column) => sql`${entry[column]}`), sql`, `)})`);
+    }
   }
   assert.equal((await trade(token(rsa))).status, 200);
 });

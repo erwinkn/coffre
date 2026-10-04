@@ -407,6 +407,11 @@ export const serviceBindings = pgTable(
       foreignColumns: [vaultMembers.principal],
     }).onDelete('restrict'),
     index('service_bindings_principal_idx').on(table.principal, table.issuer),
+    // What an exchange may match: a service's live bindings on an issuer, in a
+    // generation, in the order it reads them, without the retired history.
+    index('service_bindings_live_idx')
+      .on(table.principal, table.issuer, table.generation, table.createdAt, table.id)
+      .where(sql`${table.revokedAt} IS NULL`),
   ],
 );
 
@@ -473,6 +478,11 @@ export const credentials = pgTable(
       foreignColumns: [identities.id, identities.principal, identities.generation],
     }).onDelete('restrict'),
     index('credentials_principal_idx').on(table.principal, table.generation),
+    // A member's credentials still live, however many have expired: a CI run
+    // leaves one behind each time it signs in.
+    index('credentials_live_idx').on(table.principal, table.expiresAt).where(sql`${table.revokedAt} IS NULL`),
+    // What a trust binding issued lately, for its rate.
+    index('credentials_issued_by_idx').on(table.principal, table.createdBy, table.createdAt),
   ],
 );
 

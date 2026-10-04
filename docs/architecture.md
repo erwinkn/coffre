@@ -621,7 +621,12 @@ asserted, not proof of which run sent the request.
 Bindings come with migration `0002_service_bindings` and spent tokens with
 `0003_exchanges`. This release runs on the schema before them. Until
 an owner runs `coffre migrate`, the bindings routes and the exchange answer
-503.
+503. `0004_live_indexes` keeps what CI leaves behind out of the way: every
+run leaves an expired credential, and every replaced binding a retired one.
+Indexes on the live bindings, on a member's live credentials and on what a
+binding issued lately bound the exchange's first read, its rate count, a
+binding's removal and the members page by what is live, not by history.
+Before it runs, the same queries work, more slowly.
 
 ## Databases
 
