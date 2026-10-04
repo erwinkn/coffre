@@ -56,11 +56,11 @@ export function install(dir: string, { purge = false, frozen = false }: { purge?
  * Whether a deployment's packages are installed as its lockfile says. pnpm
  * keeps a copy of the lockfile it last installed in node_modules/.pnpm, the
  * same byte for byte: none, or another, is an install to do. Without a
- * lockfile, an install of any kind.
+ * lockfile, there is nothing to match: node_modules being there is all.
  */
 export function installed(dir: string): boolean {
   const lockfile = join(dir, 'pnpm-lock.yaml');
-  if (!existsSync(lockfile)) return existsSync(join(dir, 'node_modules', '.modules.yaml'));
+  if (!existsSync(lockfile)) return existsSync(join(dir, 'node_modules'));
   const copy = join(dir, 'node_modules', '.pnpm', 'lock.yaml');
   return existsSync(copy) && readFileSync(copy, 'utf8') === readFileSync(lockfile, 'utf8');
 }
