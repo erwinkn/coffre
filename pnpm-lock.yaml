@@ -73,6 +73,9 @@ importers:
         specifier: 0.1.16
         version: link:../../packages/vault
     devDependencies:
+      '@coffre/cli':
+        specifier: 0.1.16
+        version: link:../../packages/cli
       '@coffre/conformance':
         specifier: 0.1.16
         version: link:../../packages/conformance
@@ -98,6 +101,9 @@ importers:
       '@cloudflare/workers-types':
         specifier: 5.20260920.1
         version: 5.20260920.1
+      '@coffre/cli':
+        specifier: 0.1.16
+        version: link:../../packages/cli
       '@coffre/conformance':
         specifier: 0.1.16
         version: link:../../packages/conformance

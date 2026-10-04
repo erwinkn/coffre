@@ -12,9 +12,10 @@
 // one after.
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import { postgres, sqlite, using, type Sql } from './database.ts';
@@ -60,6 +61,24 @@ export type Deployment = {
 const ROOT_ADMIN = 'root@conformance.example';
 
 type Child = { name: string; child: ChildProcess; daemon: boolean; exited: boolean; output: Buffer[] };
+
+/**
+ * The CLI the deployment pins, as its pipeline runs it: `pnpm exec coffre`,
+ * found from its folder, so only as one of its own packages. Its entry is
+ * run with Node, so that it needs no bin linked, as a workspace links none
+ * before its build.
+ */
+function deploymentCli(dir: string): string {
+  let manifest: string;
+  try {
+    manifest = createRequire(join(dir, 'package.json')).resolve('@coffre/cli/package.json');
+  } catch {
+    throw new Failure(`${dir} has no @coffre/cli of its own: pin it among its devDependencies, as coffre init does, and install`);
+  }
+  const bin = (JSON.parse(readFileSync(manifest, 'utf8')) as { bin?: Record<string, string> }).bin?.coffre;
+  if (bin === undefined) throw new Failure(`${manifest} names no coffre bin`);
+  return join(dirname(manifest), bin);
+}
 
 export async function boot(kind: Kind, at: string, options: HarnessOptions): Promise<Deployment> {
   const { port } = options;
@@ -109,8 +128,8 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
     return entry;
   }
 
-  async function run(command: string, args: string[]): Promise<void> {
-    const entry = start(args[0] ?? command, command, args, {}, false);
+  async function run(command: string, args: string[], env: Record<string, string> = {}): Promise<void> {
+    const entry = start(args[0] ?? command, command, args, env, false);
     const code = await new Promise((done) => {
       entry.child.once('exit', done);
       entry.child.once('error', done);
@@ -175,8 +194,10 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       using(postgres(withDatabase(options.postgres!, 'postgres')), (sql) =>
         sql.exec(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`),
       );
+    // As the deployment's pipeline does before it deploys: its own CLI's
+    // `coffre migrate`, in its folder, the owner's URL in its environment.
     // A fresh log has no heartbeat: only the scheduled job can make /readyz pass.
-    await run(bin('coffre-server'), ['migrate', owner]);
+    await run(process.execPath, [deploymentCli(dir), 'migrate', '--yes'], { COFFRE_MIGRATE_DATABASE_URL: owner });
     const state = join(scratch, 'state');
     start('wrangler', bin('wrangler'), [
       'dev',

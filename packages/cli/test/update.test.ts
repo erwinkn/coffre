@@ -47,6 +47,25 @@ test('update moves every @coffre/* pin of a deployment, and nothing else', () =>
   }
 });
 
+test('a deployment from before its CLI was one of its packages gains it, pinned with the rest', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'coffre-update-cli-'));
+  try {
+    const manifest = JSON.parse(readFileSync(join(examples, 'workers', 'package.json'), 'utf8')) as Record<string, Record<string, string>>;
+    delete manifest.devDependencies!['@coffre/cli'];
+    writeFileSync(join(dir, 'package.json'), JSON.stringify(manifest, null, 2));
+    bumpPins(dir, '9.9.9');
+    const after = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as Record<string, Record<string, string>>;
+    assert.equal(after.devDependencies!['@coffre/cli'], '9.9.9');
+    assert.deepEqual(Object.keys(after.devDependencies!), Object.keys(after.devDependencies!).sort(), 'in order, as pnpm keeps them');
+    // Pinned once: bumping again moves it, and adds nothing.
+    bumpPins(dir, '9.9.10');
+    assert.equal(Object.keys(coffrePins(dir)).filter((name) => name === '@coffre/cli').length, 1);
+    assert.equal(coffrePins(dir)['@coffre/cli'], '9.9.10');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('how the CLI was installed says how to update it', () => {
   const roots = { npm: '/usr/lib/node_modules', pnpm: '/home/ada/.local/share/pnpm/global/5/node_modules' };
   assert.deepEqual(installOf('/usr/lib/node_modules/@coffre/cli/dist/main.js', roots), { kind: 'npm' });

@@ -1,18 +1,28 @@
-// `coffre migrate`: bring an instance's database up to the schema the code
-// it runs ships. The instance says which version it runs and how far its
-// database is (`/me`, to owners and root admins); this CLI applies its own
-// migrations, so it goes ahead only when it is that same version. Then it
-// asks for the database owner's direct URL, never on the command line,
-// shows what it will apply, applies it as `coffre-server migrate` does,
-// under the migration lock and with the privileges reasserted, and asks the
-// instance whether it sees the new schema and is ready.
+// `coffre migrate`: bring a database up to the schema a version of coffre
+// ships, with the migrations this CLI carries, which are its version's.
+//
+// In a deployment's folder, as its pipeline runs it before the deploy: the
+// deployment's own migrations, so this CLI must be the version it pins. It
+// needs no session and asks no instance, which runs the previous version
+// until the deploy, by design.
+//
+// Anywhere else, an instance's: it says which version it runs and how far
+// its database is (`/me`, to owners and root admins), so this CLI goes ahead
+// only when it is that same version, and asks it afterwards whether it sees
+// the new schema and is ready.
+//
+// Either way it reads the database owner's direct URL from
+// COFFRE_MIGRATE_DATABASE_URL, stdin or a hidden prompt, never the command
+// line; shows what it will apply; and applies it under the migration lock,
+// with the privileges reasserted. Without a terminal, only with --yes.
 import { parseArgs } from 'node:util';
 
 import type { InstanceState } from '@coffre/client';
-import { migrateDatabase, migrationStatus } from '@coffre/db/migrate';
+import { DatabaseAhead, migrateDatabase, migrationStatus } from '@coffre/db/migrate';
 
 import { readDatabaseUrl } from './database-url.ts';
-import { StepFailed, Steps } from './steps.ts';
+import { coffrePins, deploymentKind } from './deployment.ts';
+import { type Step, StepFailed, Steps } from './steps.ts';
 import { Cancelled, type Keyboard, listed, openTerminal, type Output, release, style } from './tty.ts';
 import { cliVersion } from './version.ts';
 
@@ -29,6 +39,33 @@ export type Instance = {
 };
 
 class MigrateError extends Error {}
+
+/** A deployment's folder: where it is, and the one version its `@coffre/*` packages are pinned at. */
+export type Deployment = { dir: string; version: string };
+
+/** The deployment `dir` holds, as `coffre init` writes one; null for a folder that holds none. */
+export function deploymentAt(dir: string): Deployment | null {
+  const kind = deploymentKind(dir);
+  if (kind !== 'workers' && kind !== 'node') return null;
+  const versions = [...new Set(Object.values(coffrePins(dir)))];
+  if (versions.length !== 1) {
+    throw new MigrateError(
+      `this deployment's @coffre/* packages are pinned at ${versions.length === 0 ? 'no version' : listed(versions, 'and')}, not one: ` +
+        '`coffre update` moves them together',
+    );
+  }
+  return { dir, version: versions[0]! };
+}
+
+/**
+ * Why this CLI may not migrate a deployment that pins `pinned`: the
+ * migrations it carries are its own version's. Null when they agree.
+ */
+export function pinProblem(cli: string, pinned: string): string | null {
+  if (cli === pinned) return null;
+  return `this deployment pins coffre ${pinned}, and this CLI is ${cli}, whose migrations are another version's: ` +
+    "migrate with the deployment's own, `pnpm exec coffre migrate`, after `pnpm install`";
+}
 
 /** The migrations a database that has applied `applied` of `known` still lacks. */
 export function pendingOf(state: InstanceState): string[] {
@@ -82,11 +119,16 @@ export async function migrate(args: string[], connect: (url: string | undefined)
     return fail(process.stderr, clean(error));
   }
   const { yes } = options;
-  const instance = connect(options.url);
   const terminal = openTerminal();
   const out = terminal?.out ?? process.stderr;
   const s = style(out);
   try {
+    const deployment = deploymentAt(process.cwd());
+    if (deployment !== null) {
+      await migrateDeployment(deployment, options, out, terminal, secrets, clean);
+      return;
+    }
+    const instance = connect(options.url);
     // Before anything is asked: whether there is anything to do, and whether this CLI may do it.
     const me = await instance.me();
     if (me.instance === null) {
@@ -125,6 +167,81 @@ export async function migrate(args: string[], connect: (url: string | undefined)
 }
 
 /**
+ * In a deployment's folder: its database to the schema of the version it
+ * pins, which this CLI must be. What its pipeline runs before the deploy.
+ */
+async function migrateDeployment(
+  deployment: Deployment,
+  options: { yes: boolean; url: string | undefined },
+  out: Output,
+  terminal: { keys: Keyboard } | null,
+  secrets: string[],
+  clean: (error: unknown) => string,
+): Promise<void> {
+  const s = style(out);
+  if (options.url !== undefined) {
+    throw new MigrateError(
+      `--url names an instance, and in a deployment's folder coffre migrate asks none: it migrates the database with ${deployment.dir}'s own migrations, before the deploy`,
+    );
+  }
+  const problem = pinProblem(cliVersion(), deployment.version);
+  if (problem !== null) throw new MigrateError(problem);
+
+  if (s.ansi) out.write(`\n  ${s.bold('coffre migrate')}  ${s.dim(`this deployment, coffre ${deployment.version}`)}\n\n`);
+  const { url, secrets: typed } = await readDatabaseUrl(out, s, {
+    variable: URL_VARIABLE,
+    question: "The database owner's connection string",
+    hint: "Hidden as you type. The login that owns coffre's tables, direct: not a runtime login, not Hyperdrive.",
+    command: 'coffre migrate',
+  });
+  secrets.push(...typed);
+  const where = `${url.hostname}${decodeURIComponent(url.pathname)}`;
+  let status: { applied: string[]; pending: string[] };
+  try {
+    status = await migrationStatus(url.href);
+  } catch (error) {
+    if (!(error instanceof DatabaseAhead)) throw error;
+    throw new MigrateError(
+      `${where} is ahead of coffre ${deployment.version}: ${error.message.replace(/^the database /, '')}. ` +
+        'Deploy that version, or, to go back, restore the database from before it (docs/restore.md). Nothing was changed',
+    );
+  }
+  const { applied, pending } = status;
+  if (pending.length === 0) {
+    out.write(`${s.green('✓')} ${where} is up to date, at coffre ${deployment.version}'s schema: ${count(applied.length, 'migration')}, the last ${applied.at(-1)}\n`);
+    return;
+  }
+  if (!options.yes && terminal === null) {
+    throw new MigrateError('nothing here to confirm on: run coffre migrate on a terminal, or pass --yes to apply without asking');
+  }
+  out.write(`  ${count(pending.length, 'migration')} to apply to ${where}, for coffre ${deployment.version}: ${listed(pending, 'and')}\n\n`);
+  const steps = new Steps(out, [`Apply ${listed(pending, 'and')}`], () => terminal?.keys ?? null, clean);
+  try {
+    await steps.run(0, (step) => apply(url, where, pending, step, options.yes));
+  } finally {
+    steps.end();
+  }
+}
+
+/** Apply `pending` to the database, asking first unless told yes; what the instance's steps and the deployment's share. */
+async function apply(url: URL, where: string, pending: string[], step: Step, yes: boolean): Promise<string> {
+  if (!yes && !(await step.ask(`Apply ${count(pending.length, 'migration')} to ${where}?`))) throw new Cancelled();
+  step.note(`Applying ${listed(pending, 'and')}`);
+  try {
+    await migrateDatabase(url.href, (plan) => {
+      // Under the lock now: what was read before, or another run got there first.
+      if (plan.pending.join() !== pending.join()) {
+        throw new MigrateError(`another migration ran meanwhile: ${where} now lacks ${listed(plan.pending, 'and') || 'nothing'}`);
+      }
+    });
+  } catch (error) {
+    if (error instanceof MigrateError) throw error;
+    throw new MigrateError(migrationFailure(error));
+  }
+  return `Applied ${listed(pending, 'and')}, and reasserted the database's privileges`;
+}
+
+/**
  * The steps: read the database's history and hold it to what the instance
  * reported, so that a URL to another database stops here; show what will be
  * applied and ask; apply it; then ask the instance what it now sees.
@@ -159,21 +276,7 @@ async function run(
         details: [],
       };
     });
-    await steps.run(1, async (step) => {
-      if (!yes && !(await step.ask(`Apply ${count(pending.length, 'migration')} to ${where}?`))) throw new Cancelled();
-      step.note(`Applying ${listed(pending, 'and')}`);
-      try {
-        await migrateDatabase(url.href, (plan) => {
-          // Under the lock now: what was read before, or another run got there first.
-          if (plan.pending.join() !== pending.join()) {
-            throw new MigrateError(`another migration ran meanwhile: ${where} now lacks ${listed(plan.pending, 'and') || 'nothing'}`);
-          }
-        });
-      } catch (error) {
-        throw new MigrateError(migrationFailure(error));
-      }
-      return `Applied ${listed(pending, 'and')}, and reasserted the database's privileges`;
-    });
+    await steps.run(1, (step) => apply(url, where, pending, step, yes));
     await steps.run(2, async () => {
       const after = (await instance.me()).instance;
       const left = after === null ? pending : pendingOf(after);

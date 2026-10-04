@@ -16,8 +16,10 @@ export default coffre((env) => ({
 }));
 ```
 
-On Node, `serve({ … })` from `@coffre/server/node`. `coffre-server migrate`
-brings the shared Postgres database up to date, as its owner. The server
+On Node, `serve({ … })` from `@coffre/server/node`. A deployment brings the
+shared Postgres database up to date with its own CLI, `pnpm exec coffre
+migrate`, as its owner, before it deploys; `coffre-server migrate` does the
+same for local SQLite and tests. The server
 connects as `coffre_runtime`; the vault connects to the same database as
 `coffre_vault_runtime`, with a Hyperdrive config of its own on Workers. `npx @coffre/cli init --workers` or
 `--node` writes a whole deployment.

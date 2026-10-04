@@ -44,7 +44,7 @@ argument, where the shell's history and other users could read it. Then:
    they log in as `coffre_runtime.<branch id>` and
    `coffre_vault_runtime.<branch id>`, the branch taken from the
    administrator's own login.
-2. It migrates the database as the administrator, as `pnpm migrate` does.
+2. It migrates the database as the administrator, as `coffre migrate` does.
 3. It connects as each login and checks the boundary, in transactions it
    rolls back: the app's login cannot write members, neither can delete log
    entries or create tables, and the vault's login can write members.
@@ -76,9 +76,9 @@ stderr.
 the vault key, or for a database set up by hand
 ([appendix](#appendix-the-database-by-hand)).
 
-After every upgrade of coffre's packages, migrate the database
-([Upgrading](#upgrading)). The running components never migrate it
-themselves.
+After every upgrade of coffre's packages, migrate the database, before
+the deploy ([Upgrading](#upgrading)). The running components never migrate
+it themselves.
 
 PlanetScale URLs include `sslrootcert=system`. The Node connections and
 migrator use Node's default trusted CAs for that value. They require
@@ -99,15 +99,22 @@ component as the owner or give the runtime logins additional roles.
 
 ## Upgrading
 
-Three steps, in this order, for every release:
+The database migrates before the deploy, in the deployment's own pipeline:
+Workers Builds, CI, or a script before a restart. Every migration keeps the
+previous release working, and every release runs on the schema before its
+migrations ([expand, then contract](architecture.md#expand-then-contract)),
+so either order works; migrating first means the new code never meets the
+old schema.
 
 1. **`coffre update`**, in the deployment's directory. It updates the CLI
    the way it was installed (an npm or pnpm global; npx needs nothing), moves
    the deployment's `@coffre/*` pins to the release and installs them, and
    ends with what the release asks of the database: "coffre 0.1.12 adds 1
-   migration (0001_remove_syncs): after deploying, run `coffre migrate`". The
-   deployment's `minimumReleaseAge` exempts `@coffre/*`, so a fix installs the
-   day it is published; your other packages still wait a week.
+   migration (0001_remove_syncs)". The deployment's `minimumReleaseAge`
+   exempts `@coffre/*`, so a fix installs the day it is published; your
+   other packages still wait a week. A deployment from before its CLI was one
+   of its packages gains `@coffre/cli` among its devDependencies, pinned with
+   the rest: its pipeline migrates with it.
 
    It also pins the deployment's pnpm, `packageManager` in its package.json,
    to the one coffre installs with, as `coffre init` writes it: then your
@@ -129,36 +136,61 @@ Three steps, in this order, for every release:
    them. With `--yes` it waits: it never lets a package through unasked.
    Whenever the install fails, it puts `package.json`, `pnpm-workspace.yaml`
    and `pnpm-lock.yaml` back as they were, and says so.
-2. **Deploy** as you do: `pnpm run deploy` (the vault, then the app), a push
-   for Workers Builds, or a restart on Node. Each release says whether it runs
-   on the schema before its migrations; 0.1.12 does.
-3. **`coffre migrate`**, signed in as an owner or a root admin. It asks the
-   instance which version it runs and which of that version's migrations its
-   database lacks, and stops unless the CLI is that same version: it applies
-   its own migrations, so it says "run `coffre update` (to 0.1.12)" instead.
-   Then it asks for the **database owner's direct Postgres URL** at a hidden
-   prompt (or reads `COFFRE_MIGRATE_DATABASE_URL`, or stdin), checks that the
-   database lacks what the instance says it lacks, shows what it will apply
-   and asks (`--yes` for scripts), applies it as `coffre-server migrate`
-   does, under the migration lock and with the database's privileges
-   reasserted, and checks that the instance sees the new schema and that
-   `/readyz` passes. Use the login that owns the tables, not `coffre_runtime`
-   or `coffre_vault_runtime`, and not a Hyperdrive connection. `--url` picks
-   an instance other than the current one.
+2. **Migrate, then deploy.** Commit and push: [Workers Builds](#workers-builds)
+   does both. By hand, or in any other pipeline, in the deployment's
+   directory:
+
+   ```sh
+   pnpm exec coffre migrate --yes   # COFFRE_MIGRATE_DATABASE_URL: the owner's URL
+   pnpm run deploy                  # on Node: restart both processes
+   ```
+3. **Check `/readyz`**, which passes once the new code's scheduled job has
+   run on the new schema.
+
+In a deployment's directory, `coffre migrate` migrates its database to the
+schema of the version the deployment pins, with that version's own
+migrations, which the deployment's CLI carries; `pnpm exec` runs that CLI.
+It needs no session, and asks no instance: until the deploy, the instance
+runs the previous version, by design. It stops unless:
+
+- **the CLI is the version the deployment pins.** A global `coffre` of
+  another version says to run `pnpm exec coffre migrate`, after `pnpm
+  install`.
+- **the database is not ahead of that version.** A database a newer coffre
+  migrated, as after rolling a deployment back, is refused, each migration
+  it does not know named by when it was made and its hash, and nothing is
+  changed. Deploy that version, or restore the database from before it
+  ([restore.md](restore.md)).
+
+It reads the **database owner's direct Postgres URL** from
+`COFFRE_MIGRATE_DATABASE_URL`, from stdin, or at a hidden prompt; never from
+the command line, and never prints it. Use the login that owns the tables,
+not `coffre_runtime` or `coffre_vault_runtime`, and not a Hyperdrive
+connection. It shows what it will apply, and asks, on a terminal; without
+one, it applies only with `--yes`. It applies it under the migration lock,
+with the database's privileges reasserted, and writes plain lines to a CI
+log: no colours, no spinner.
+
+From a laptop, run it in the deployment's directory as well. Anywhere else,
+`coffre migrate`, signed in as an owner or a root admin, works on an
+instance instead: it asks the instance which version it runs and which of
+that version's migrations its database lacks, stops unless the CLI is that
+version, checks that the database lacks what the instance says it lacks, and
+after applying, that the instance sees the new schema and `/readyz` passes.
+`--url` picks an instance other than the current one.
 
 Until the database is migrated, owners and root admins see "Database
 migrations pending" above every page, and any CLI command they run against
 the instance says so on stderr, once a day.
 
-**For automation**, `pnpm migrate` in the deployment runs the installed
-version's `coffre-server migrate`, with the owner's URL in `DATABASE_URL`:
+A script that asks for the URL itself:
 
 ```sh
-read -rs -p 'Database owner URL: ' DATABASE_URL
+read -rs -p 'Database owner URL: ' COFFRE_MIGRATE_DATABASE_URL
 printf '\n'
-export DATABASE_URL
-pnpm migrate
-unset DATABASE_URL
+export COFFRE_MIGRATE_DATABASE_URL
+pnpm exec coffre migrate --yes
+unset COFFRE_MIGRATE_DATABASE_URL
 ```
 
 ## On Workers
@@ -171,13 +203,34 @@ acme-secrets/
   vault/wrangler.jsonc   VAULT_HYPERDRIVE; no public route
 ```
 
-### Upgrading to 0.1.12 with Workers Builds
+### Workers Builds
 
-Deploy the new code first, then migrate. Version 0.1.12 works with both
-`0000` and `0001_remove_syncs`: it ignores the old sync tables and refuses
-legacy sync principals. `/readyz` accepts either schema prefix, subject to
-its usual audit heartbeat and checkpoint checks. A database with no baseline
-still fails readiness. Workers Builds deploys code; it does not run migrations.
+Workers Builds builds and deploys both Workers on every push, the vault's
+build migrating the database first. In each Worker's **Settings > Build**,
+with the repository connected and the deployment's directory as the root:
+
+| Worker | Build command | Deploy command | Build variables |
+|---|---|---|---|
+| the vault, `<name>-vault` | `pnpm exec coffre migrate --yes` | `npx wrangler deploy -c vault/wrangler.jsonc` | `COFFRE_MIGRATE_DATABASE_URL`, the database owner's direct URL, as a secret |
+| the app, `<name>` | none | `npx wrangler deploy -c app/wrangler.jsonc` | none |
+
+The owner's URL is the one `coffre setup` asked for. It is a build variable,
+which only the build sees; the Worker never does. A build that cannot
+migrate fails before its deploy, and the vault keeps running the previous
+version. The app may deploy before or after the vault's migration: each
+release runs on the schema before and after its migrations.
+
+### Upgrading to 0.1.12
+
+Deploy the new code first, then migrate: `0001_remove_syncs`, from before
+[expand, then contract](architecture.md#expand-then-contract), drops tables
+0.1.11 still reads, so a pipeline that migrates first would break the
+running 0.1.11. Version 0.1.12 works with both `0000` and
+`0001_remove_syncs`: it ignores the old sync tables and refuses legacy sync
+principals. `/readyz` accepts either schema prefix, subject to its usual
+audit heartbeat and checkpoint checks. A database with no baseline still
+fails readiness. Upgrade from 0.1.11 to 0.1.12 first, before setting the
+vault's build command.
 
 1. [Check for syncs](../CHANGELOG.md), including archived destinations, and
    move each destination into your deploy pipeline. Back up the database.
@@ -187,9 +240,8 @@ still fails readiness. Workers Builds deploys code; it does not run migrations.
    order. With Workers Builds, wait until both deployments finish and the
    old versions have stopped receiving requests and scheduled events before
    dropping their tables.
-3. Run `coffre migrate`, with the **database owner's direct Postgres URL**
-   and its existing TLS parameters ([Upgrading](#upgrading)), or `pnpm
-   migrate` for automation. If either sync table still has rows, it refuses
+3. Run `pnpm exec coffre migrate`, with the **database owner's direct
+   Postgres URL** and its existing TLS parameters ([Upgrading](#upgrading)). If either sync table still has rows, it refuses
    without changing the schema: "syncs are removed: migrate destinations to
    service tokens, back up and clear syncs and sync_keys before upgrading".
    After moving the destinations and stopping old versions, have the owner
@@ -383,8 +435,8 @@ of it and forward requests to that address. Its scheduled job runs in the
 server process.
 
 For tests and local development only, both URLs can name the same absolute
-SQLite file (`file:/tmp/coffre-local.db`), migrated once with `pnpm migrate`
-and that URL. SQLite has no per-login privileges. The deployed example
+SQLite file (`file:/tmp/coffre-local.db`), migrated once with `pnpm exec
+coffre-server migrate file:/tmp/coffre-local.db`. SQLite has no per-login privileges. The deployed example
 uses Postgres; Node conformance uses SQLite to exercise the local option.
 
 ## CI runs without a stored token
@@ -479,12 +531,13 @@ groups without trying to alter their superuser-only attributes. Postgres 16
 and later give a role creator `ADMIN OPTION` on its new roles; if the group
 roles already exist, the migration login needs `ADMIN OPTION` on them.
 
-Then migrate as the owner, with its URL in `DATABASE_URL`, including the
-password and the TLS settings your host requires, and URL-encode special
-characters in passwords:
+Then migrate as the owner, in the deployment's directory, with its URL
+including the password and the TLS settings your host requires, and
+special characters in the password URL-encoded. It asks for it at a hidden
+prompt:
 
 ```sh
-pnpm migrate
+pnpm exec coffre migrate
 ```
 
 Make the keys with `coffre keys`, which shows them once, on a screen of
@@ -496,5 +549,6 @@ owner's, with the login's name and password.
 The environment variable names above belong to the examples. Packages take
 typed configuration and read no deployment environment variables themselves.
 The exceptions are the CLI's user settings, `COFFRE_SETUP_DATABASE_URL`
-among them, and the `DATABASE_URL` fallback for `coffre-server migrate` when
+and `COFFRE_MIGRATE_DATABASE_URL` among them, and the `DATABASE_URL`
+fallback for `coffre-server migrate`, which tests and local SQLite use, when
 no URL is given.

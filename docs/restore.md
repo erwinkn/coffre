@@ -83,8 +83,8 @@ role logs in to the new branch as `<role>.<new branch id>`.
 
    By hand, steps 3 and 4 are `\password` for both logins as the owner, the
    two updates with `coffre_runtime.<branch id>` and
-   `coffre_vault_runtime.<branch id>`, and `pnpm migrate` with the owner's
-   URL for the new branch.
+   `coffre_vault_runtime.<branch id>`, and `pnpm exec coffre migrate`, in
+   the deployment's directory, with the owner's URL for the new branch.
 5. Redeploy both Workers with `pnpm run deploy`, the same keys and settings:
    a fresh deployment remembers no log head.
 6. Check the result, below, then reopen traffic. Promote the branch, or
@@ -95,7 +95,7 @@ role logs in to the new branch as `<role>.<new branch id>`.
 A `pg_dump` is a logical copy of one database: its tables, rows, privileges
 and row-level policies, but not the cluster's roles or their passwords, and
 not the privileges on the database itself. Provision the roles before
-restoring; `pnpm migrate` reasserts the database privileges afterwards.
+restoring; `coffre migrate` reasserts the database privileges afterwards.
 This is what the drill runs.
 
 Back up, as the owner, as often as you can afford to lose:
@@ -118,8 +118,8 @@ Restore:
    ```
 
    The group roles, `coffre_app` and `coffre_vault`, and the logins'
-   membership in them must exist too: run `pnpm migrate` once against an
-   empty database on this server if they do not.
+   membership in them must exist too: run `pnpm exec coffre migrate` once
+   against an empty database on this server if they do not.
 3. Create an empty database owned by the owner, and restore into it:
 
    ```sh
@@ -127,10 +127,11 @@ Restore:
    pg_restore --exit-on-error --dbname="$OWNER_URL_OF_COFFRE_RESTORED" coffre-….dump
    ```
 
-4. Run `pnpm migrate` with the owner's URL for the restored database:
+4. In the deployment's directory, run `coffre migrate` with the owner's
+   URL for the restored database:
 
    ```sh
-   DATABASE_URL="$OWNER_URL_OF_COFFRE_RESTORED" pnpm migrate
+   COFFRE_MIGRATE_DATABASE_URL="$OWNER_URL_OF_COFFRE_RESTORED" pnpm exec coffre migrate --yes
    ```
 
    Besides applying missing migrations, every run revokes `CREATE` and

@@ -8,14 +8,16 @@ TypeScript sources and running a deployment require Node 24.
 ```sh
 npx @coffre/cli init --workers my-coffre   # or --node
 npx @coffre/cli setup                      # its database, keys and, on Workers, Cloudflare
+pnpm exec coffre migrate --yes             # in a deployment, before its deploy
 coffre login https://secrets.acme.example
 coffre run market/prod -- node server.js
 coffre verify                              # the instance from outside, the keys you keep, or the log
 ```
 
 It bundles everything it runs, so it installs with no dependencies:
-`setup` brings its own Postgres driver and coffre's migrations, at the
-CLI's version.
+`setup` and `migrate` bring their own Postgres driver and coffre's
+migrations, at the CLI's version. A deployment pins it among its
+devDependencies, so its pipeline migrates with the version it deploys.
 
 Part of [coffre](https://github.com/erwinkn/coffre), a secrets manager you
 deploy as a small project of your own. Its eight `@coffre/*` packages are

@@ -114,6 +114,7 @@ stack. A deployed instance needs only its address:
 
 ```sh
 coffre setup                                # a new deployment's logins, migrations and keys, and on Workers, Cloudflare (docs/deploy.md)
+pnpm exec coffre migrate --yes              # in a deployment, before its deploy: its pinned version's migrations
 coffre login https://secrets.acme.example   # a device login: approve it in the browser
 coffre whoami
 coffre use                                  # the instances you are signed in to

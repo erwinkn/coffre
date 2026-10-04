@@ -1038,7 +1038,10 @@ const USAGE = `coffre - secrets, with an audit log
   Upgrade
     coffre update [--yes]                   this CLI, and in a deployment, its coffre packages
     coffre migrate [--url <url>] [--yes]    the instance's database, to the schema its version ships,
-                                            with the owner's connection string, asked for hidden
+                                            with the owner's connection string, asked for hidden;
+                                            in a deployment's folder, as its pipeline runs it before
+                                            the deploy: to its pinned version's, with no instance
+                                            (COFFRE_MIGRATE_DATABASE_URL and --yes, without a terminal)
 
   Session
     coffre login [<url>] [--no-browser]     sign in, and make <url> the current instance

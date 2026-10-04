@@ -76,10 +76,13 @@ pnpm exec wrangler secret put APP_KEY -c app/wrangler.jsonc
 pnpm exec wrangler secret put GITHUB_CLIENT_SECRET -c app/wrangler.jsonc
 ```
 
-To upgrade: `coffre update` here, deploy, then `coffre migrate`
-([upgrading](https://github.com/erwinkn/coffre/blob/main/docs/deploy.md#upgrading)).
-For automation, `pnpm migrate`, with the administrator's URL in
-`DATABASE_URL`, does the last step.
+To upgrade: `coffre update` here, then migrate and deploy: commit and push
+for Workers Builds, whose vault build runs `pnpm exec coffre migrate --yes`
+with the administrator's URL as its secret build variable
+`COFFRE_MIGRATE_DATABASE_URL`; or here, `pnpm exec coffre migrate`, then
+`pnpm run deploy`
+([upgrading](https://github.com/erwinkn/coffre/blob/main/docs/deploy.md#upgrading),
+[Workers Builds](https://github.com/erwinkn/coffre/blob/main/docs/deploy.md#workers-builds)).
 
 Keep older vault keys after a rotation, for good: what they wrapped still
 needs them, and so does what the vault signed under them before it. With AWS KMS
