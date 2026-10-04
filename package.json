@@ -20,6 +20,7 @@
     "conformance:workers": "./scripts/ensure-postgres.sh && node scripts/ensure-database.mjs coffre && pnpm --filter coffre-workers conformance --postgres postgresql://coffre_owner:local-dev-only@127.0.0.1:55432 --runtime postgresql://coffre_runtime:local-runtime-only@127.0.0.1:55432 --vault-runtime postgresql://coffre_vault_runtime:local-vault-only@127.0.0.1:55432",
     "conformance:node": "pnpm --filter coffre-node conformance",
     "test:consumer": "./scripts/consumer-test.sh",
+    "test:compat": "./scripts/compat-check.sh",
     "lint": "eslint \"packages/*/{src,test,scripts}/**/*.{ts,tsx}\"",
     "check:pins": "node scripts/check-pins.mjs",
     "bump": "node scripts/bump.mjs",

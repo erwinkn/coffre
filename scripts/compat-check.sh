@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+# Hold the last release to this checkout's schema: its code on a database
+# this checkout's migrations brought up to date, as a deployment runs
+# between `coffre migrate` and its deploy. Every migration must keep the
+# previous release working (AGENTS.md, "Migrations: expand, then
+# contract"); this is that, tested.
+#
+# The release is installed as `coffre init` writes a deployment, from npm,
+# and held to its own conformance. That conformance migrates the database it
+# makes through the deployment's own bins; here they apply this checkout's
+# migrations instead (scripts/compat-migrate.mjs). Then the check is shown
+# able to fail: the same run with a synthetic destructive migration after
+# them must not be conformant.
+#
+#   pnpm test:compat [--kind workers|node] [--release <version>] [--schema <version>] [--port <n>] [<dir>]
+#
+#   --release  the release to hold; by default the newest on npm
+#   --schema   a published version's migrations instead of this checkout's,
+#              to check past releases: --release 0.1.11 --schema 0.1.12
+#
+# Temporary directories are removed on success and kept on failure.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+kinds=(workers node)
+release=""
+schema=""
+port=3082
+while [[ "${1:-}" == --* ]]; do
+    case "$1" in
+        --kind)
+            case "${2:-}" in workers | node) kinds=("$2") ;; *) echo 'compat-check: --kind must be workers or node' >&2; exit 2 ;; esac
+            shift 2 ;;
+        --release) release="${2:?--release needs a version}"; shift 2 ;;
+        --schema) schema="${2:?--schema needs a version}"; shift 2 ;;
+        --port) port="${2:?--port needs a number}"; shift 2 ;;
+        *) echo "compat-check: unknown option $1" >&2; exit 2 ;;
+    esac
+done
+release="${release:-$(npm view @coffre/cli version)}"
+temporary=false
+if [[ -n "${1:-}" ]]; then
+    work="$1"
+else
+    work="$(mktemp -d "${TMPDIR:-/tmp}/coffre-compat.XXXXXX")"
+    temporary=true
+fi
+case "$work" in
+"$root" | "$root"/*)
+    echo "compat-check: $work is inside the workspace; give it a directory outside" >&2
+    exit 2
+    ;;
+esac
+mkdir -p "$work"
+work="$(cd "$work" && pwd)"
+
+# A step's output kept in the work directory, and its end shown when it fails.
+quietly() {
+    local what="$1" log="$2"
+    shift 2
+    if ! "$@" >"$log" 2>&1; then
+        tail -n 20 "$log" >&2
+        echo "compat-check: $what failed; see $log" >&2
+        exit 1
+    fi
+}
+
+finish() {
+    result=$?
+    if ((result != 0)); then
+        echo "compat check failed; kept work directory for inspection: $work" >&2
+    elif [[ "$temporary" == true ]]; then
+        rm -rf -- "$work"
+    fi
+}
+trap finish EXIT
+
+"$root/scripts/ensure-postgres.sh"
+node "$root/scripts/ensure-database.mjs" coffre
+postgres=postgresql://coffre_owner:local-dev-only@127.0.0.1:55432
+runtime=postgresql://coffre_runtime:local-runtime-only@127.0.0.1:55432
+vault_runtime=postgresql://coffre_vault_runtime:local-vault-only@127.0.0.1:55432
+store="$(pnpm --dir "$root" store path)"
+
+# What applies the schema: this checkout's migrations, from its sources, or
+# a published server's own.
+if [[ -n "$schema" ]]; then
+    mkdir -p "$work/schema"
+    echo '{ "private": true }' >"$work/schema/package.json"
+    quietly "installing @coffre/server@$schema" "$work/schema.log" \
+        pnpm --dir "$work/schema" add --save-exact --store-dir "$store" "@coffre/server@$schema"
+    migrator="'$work/schema/node_modules/.bin/coffre-server' migrate"
+    against="coffre $schema's migrations"
+else
+    migrator="node --conditions=coffre:source '$root/scripts/compat-migrate.mjs'"
+    against="this checkout's migrations"
+fi
+export HOME="$work/home" npm_config_update_notifier=false COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+mkdir -p "$HOME"
+
+# The release's own CLI, to write its deployments.
+mkdir -p "$work/cli"
+echo '{ "private": true }' >"$work/cli/package.json"
+quietly "installing @coffre/cli@$release" "$work/cli.log" \
+    pnpm --dir "$work/cli" add --save-exact --store-dir "$store" "@coffre/cli@$release"
+
+# Every way the release's conformance may migrate: coffre-server migrate
+# <url>, or the CLI's coffre migrate with the URL in its environment. The
+# conformance hands its children no COFFRE_* of the shell's, so all the
+# shim needs is written into it. It leaves a mark, so that a release that
+# migrates some other way fails here rather than passing unchecked.
+shim() {
+    local bin="$1" extra="$2"
+    [[ -e "$bin" ]] || return 0
+    mv "$bin" "$bin.release"
+    cat >"$bin" <<EOF
+#!/bin/sh
+# pnpm test:compat: migrate with $against, not the release's own.
+[ "\$1" = migrate ] || exec "$bin.release" "\$@"
+url="\${COFFRE_MIGRATE_DATABASE_URL:-\${DATABASE_URL:-}}"
+for arg in "\$@"; do case "\$arg" in postgres*|file:*) url="\$arg" ;; esac; done
+$migrator "\$url"
+[ -z "$extra" ] || node '$root/scripts/compat-migrate.mjs' --only "\$url" '$extra'
+touch '$work/migrated'
+EOF
+    chmod +x "$bin"
+}
+
+conformance() {
+    local project="$1" kind="$2" log="$3"
+    rm -f "$work/migrated"
+    local code=0
+    if [[ "$kind" == workers ]]; then
+        pnpm --dir "$project" conformance --postgres "$postgres" --runtime "$runtime" --vault-runtime "$vault_runtime" --port "$port" >"$log" 2>&1 || code=$?
+    else
+        pnpm --dir "$project" conformance --port "$port" >"$log" 2>&1 || code=$?
+    fi
+    if [[ ! -e "$work/migrated" ]]; then
+        echo "compat-check: coffre $release's conformance did not migrate through the shim; see $log" >&2
+        exit 1
+    fi
+    return "$code"
+}
+
+for kind in "${kinds[@]}"; do
+    project="$work/coffre-$kind"
+    echo "==> coffre $release, as init writes it (--$kind), on $against"
+    rm -rf "$project"
+    quietly "coffre $release init --$kind" "$work/$kind-init.log" "$work/cli/node_modules/.bin/coffre" init "--$kind" "$project"
+    quietly "installing coffre-$kind" "$work/$kind-install.log" pnpm --dir "$project" install --store-dir "$store"
+    engine="$([[ "$kind" == workers ]] && echo postgres || echo sqlite)"
+
+    for bin in coffre-server coffre; do shim "$project/node_modules/.bin/$bin" ''; done
+    if conformance "$project" "$kind" "$work/$kind.log"; then
+        echo "    conformant"
+    else
+        grep -E '^  FAIL|conformant' "$work/$kind.log" >&2 || true
+        echo "compat-check: coffre $release is not conformant on $against: a migration breaks the code it must keep working; see $work/$kind.log" >&2
+        exit 1
+    fi
+
+    # The check, shown able to fail: a destructive migration on top, which
+    # renames a column the release writes at every sign-in.
+    for bin in coffre-server coffre; do
+        [[ -e "$project/node_modules/.bin/$bin.release" ]] || continue
+        mv "$project/node_modules/.bin/$bin.release" "$project/node_modules/.bin/$bin"
+        shim "$project/node_modules/.bin/$bin" "$root/scripts/compat/destructive.$engine.sql"
+    done
+    if conformance "$project" "$kind" "$work/$kind-destructive.log"; then
+        echo "compat-check: coffre $release passed with a destructive migration applied; the check cannot fail, see $work/$kind-destructive.log" >&2
+        exit 1
+    fi
+    failed="$(grep -cE '^  FAIL' "$work/$kind-destructive.log" || true)"
+    echo "    and not conformant with a destructive migration on top: $failed failed, the checks after them skipped"
+done

@@ -696,6 +696,34 @@ the audit chain reads the previous hash, computes the next in JavaScript, then
 writes. Drizzle's D1 transactions send `BEGIN`, which D1 rejects. Both
 Workers use Postgres.
 
+### Expand, then contract
+
+A deployment migrates in its pipeline, before it deploys
+([deploy.md](deploy.md)). Until the deploy is done, and for good if it
+fails, the previous release runs on the new schema; a deploy that runs
+before its migration has the new release on the old one. So every
+migration works with both, and the order does not matter:
+
+- **A migration expands.** It adds tables, columns that are nullable or have
+  a default, indexes and grants. The code that uses them works without them
+  too, until the migration runs: the trust bindings answer 503 until
+  `0002_service_bindings`, the exchange until `0003_exchanges`.
+- **What contracts waits a release.** Dropping or renaming a table or a
+  column, NOT NULL on an existing column, a narrower check or type, or a
+  unique or foreign key the old code may break, ships one release after the
+  code stops using what it changes. Retiring a column: release n stops
+  reading and writing it, and release n+1 drops it. `0001_remove_syncs` did
+  both in one, and 0.1.11 broke on its schema: its member pages still read
+  the sync tables.
+
+`pnpm test:compat`, in CI for both engines, holds the newest release to
+the schema of the change under review. It installs that release from npm
+as `coffre init` writes a deployment, and lets its own conformance boot it,
+with the database migrated by the change's migrations instead of the
+release's. A synthetic destructive migration on top must then fail it, so
+that the check is known to be able to. Run against 0.1.12's migrations,
+0.1.11 fails ten checks; 0.1.15 on `0002` to `0004` passes.
+
 ## Limits
 
 Each limit is stated here once; the other documents link to it.
