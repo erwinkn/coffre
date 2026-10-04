@@ -107,7 +107,9 @@ so either order works; migrating first means the new code never meets the
 old schema.
 
 1. **`coffre update`**, in the deployment's directory. It updates the CLI
-   the way it was installed (an npm or pnpm global; npx needs nothing), moves
+   the way it was installed (an npm or pnpm global, as each lists its
+   globals; npx needs nothing; when neither claims it, it says so and what
+   each would run), moves
    the deployment's `@coffre/*` pins to the release and installs them, and
    ends with what the release asks of the database: "coffre 0.1.12 adds 1
    migration (0001_remove_syncs)". The deployment's `minimumReleaseAge`

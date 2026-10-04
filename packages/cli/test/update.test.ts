@@ -22,7 +22,7 @@ import {
 } from '../src/deployment.ts';
 import { registry } from './registry.ts';
 import { inTerminal, ptySkip } from './pty.ts';
-import { deploymentMigrations, installOf, migrationsAdded, movedLines } from '../src/update.ts';
+import { deploymentMigrations, globalCli, installOf, migrationsAdded, movedLines, notUpdated } from '../src/update.ts';
 
 const examples = fileURLToPath(new URL('../../../examples/', import.meta.url));
 
@@ -66,20 +66,44 @@ test('a deployment from before its CLI was one of its packages gains it, pinned 
   }
 });
 
-test('how the CLI was installed says how to update it', () => {
-  const roots = { npm: '/usr/lib/node_modules', pnpm: '/home/ada/.local/share/pnpm/global/5/node_modules' };
-  assert.deepEqual(installOf('/usr/lib/node_modules/@coffre/cli/dist/main.js', roots), { kind: 'npm' });
-  assert.deepEqual(
-    installOf('/home/ada/.local/share/pnpm/global/5/.pnpm/@coffre+cli@0.1.11/node_modules/@coffre/cli/dist/main.js', roots),
-    { kind: 'pnpm' },
-  );
-  assert.deepEqual(installOf('/home/ada/.npm/_npx/0a1b2c/node_modules/@coffre/cli/dist/main.js', roots), { kind: 'npx' });
-  assert.deepEqual(installOf('/srv/coffre-deploy/node_modules/@coffre/cli/dist/main.js', roots), {
+test('how the CLI was installed: by what npm and pnpm say their globals are, not by the shape of the path', () => {
+  const none = { npm: null, pnpm: null, pnpmHome: null };
+  const npm = '/usr/lib/node_modules/@coffre/cli';
+  assert.deepEqual(installOf(`${npm}/dist/main.js`, { ...none, npm }), { kind: 'npm' });
+  // pnpm 10, on Linux: its global, in its own virtual store.
+  const ten = '/home/ada/.local/share/pnpm/global/5/.pnpm/@coffre+cli@0.1.11/node_modules/@coffre/cli';
+  assert.deepEqual(installOf(`${ten}/dist/main.js`, { ...none, pnpm: ten }), { kind: 'pnpm' });
+  // pnpm 11, on Erwin's Mac: its global, in the store's links/, which read as a project's dependency.
+  const eleven = '/Users/erwin/Library/pnpm/store/v11/links/@coffre/cli/0.1.16/7ee22ffdfe0eadd9777d18ac111f4d8648f16c979bfc6c2d111f2f16d124454d/node_modules/@coffre/cli';
+  const there = `${eleven}/dist/main.js`;
+  assert.deepEqual(installOf(there, { ...none, pnpm: eleven }), { kind: 'pnpm' });
+  // pnpm unable to say (its bin directory off PATH): its PNPM_HOME holds it.
+  assert.deepEqual(installOf(there, { ...none, pnpmHome: '/Users/erwin/Library/pnpm' }), { kind: 'pnpm' });
+  // pnpm's global is another copy, and the store's directory is no project: coffre can't tell, and says so.
+  assert.deepEqual(installOf(there, { ...none, pnpm: '/elsewhere/@coffre/cli' }), { kind: 'unknown', path: there });
+
+  assert.deepEqual(installOf('/home/ada/.npm/_npx/0a1b2c/node_modules/@coffre/cli/dist/main.js', none), { kind: 'npx' });
+  // A project's, as pnpm installs it: the project is where node_modules starts, not pnpm's own directory under it.
+  const project = (dir: string) => dir === '/srv/coffre-deploy';
+  assert.deepEqual(installOf('/srv/coffre-deploy/node_modules/.pnpm/@coffre+cli@0.1.16/node_modules/@coffre/cli/dist/main.js', none, project), {
     kind: 'project',
     dir: '/srv/coffre-deploy',
   });
-  assert.deepEqual(installOf('/home/ada/coffre/packages/cli/src/update.ts', roots), { kind: 'checkout' });
-  assert.deepEqual(installOf('/opt/coffre/main.js', { npm: null, pnpm: null }), { kind: 'unknown' });
+  assert.deepEqual(installOf('/srv/coffre-deploy/node_modules/@coffre/cli/dist/main.js', none, project), { kind: 'project', dir: '/srv/coffre-deploy' });
+  assert.deepEqual(installOf('/home/ada/coffre/packages/cli/src/update.ts', none), { kind: 'checkout' });
+  assert.deepEqual(installOf('/opt/coffre/main.js', none), { kind: 'unknown', path: '/opt/coffre/main.js' });
+});
+
+test("when coffre can't tell how its CLI was installed, it says so, where it runs from, and what each manager would run", () => {
+  const said = notUpdated({ kind: 'unknown', path: '/opt/coffre/dist/main.js' }, '0.1.17', null);
+  assert.equal(said.text, "Nothing updated: coffre can't tell how this CLI was installed");
+  assert.deepEqual(said.details, [
+    "It runs from /opt/coffre/dist/main.js, which neither npm nor pnpm lists as its global, nor is it a project's",
+    'Installed with npm: npm install -g @coffre/cli@0.1.17',
+    'With pnpm: pnpm add -g @coffre/cli@0.1.17',
+    'In a project: its @coffre/cli pin, to 0.1.17, then its install',
+  ]);
+  assert.match(notUpdated({ kind: 'project', dir: '/srv/coffre-deploy' }, '0.1.17', '/srv/coffre-deploy').text, /one of the deployment's packages/);
 });
 
 test('update ends with what the release asks of the database', () => {
@@ -382,5 +406,36 @@ test('when no version old enough fits, resolving again says which, and puts the 
     assert.equal(readFileSync(join(dir, 'pnpm-lock.yaml'), 'utf8'), lockfile);
   } finally {
     close();
+  }
+});
+
+test("pnpm 11's own global install, as it lays it out: found by asking pnpm, though it lives in the store's links/", needsPnpm('11.8.0'), () => {
+  const dir = mkdtempSync(join(tmpdir(), 'coffre-pnpm-global-'));
+  try {
+    // A stand-in @coffre/cli, which says where it runs from as the real one finds itself: its real path.
+    mkdirSync(join(dir, 'cli', 'package', 'dist'), { recursive: true });
+    writeFileSync(join(dir, 'cli', 'package', 'package.json'), JSON.stringify({ name: '@coffre/cli', version: '9.9.9', bin: { coffre: 'dist/main.js' } }));
+    writeFileSync(join(dir, 'cli', 'package', 'dist', 'main.js'), "#!/usr/bin/env node\nconsole.log(require('node:fs').realpathSync(__filename));\n");
+    spawnSync('tar', ['czf', join(dir, 'cli.tgz'), '-C', join(dir, 'cli'), 'package']);
+    // pnpm 11, its home and data of its own, as `pnpm setup` leaves them: its bin directory on PATH.
+    const home = join(dir, 'home');
+    mkdirSync(home);
+    writeFileSync(join(home, 'package.json'), JSON.stringify({ name: 'home', private: true, packageManager: 'pnpm@11.8.0' }));
+    const pnpmHome = join(dir, 'pnpm');
+    const base = { ...process.env, PNPM_HOME: pnpmHome, XDG_DATA_HOME: join(dir, 'data'), XDG_CONFIG_HOME: join(dir, 'config'), XDG_STATE_HOME: join(dir, 'state') };
+    const env = { ...base, PATH: `${join(pnpmHome, 'bin')}:${process.env.PATH}` };
+    const added = spawnSync('pnpm', ['add', '-g', join(dir, 'cli.tgz')], { cwd: home, env, encoding: 'utf8' });
+    assert.equal(added.status, 0, added.stdout + added.stderr);
+    const self = spawnSync(join(pnpmHome, 'bin', 'coffre'), [], { env, encoding: 'utf8' }).stdout.trim();
+    assert.match(self, /\/store\/v11\/links\/@coffre\/cli\/9\.9\.9\/[0-9a-f]+\/node_modules\/@coffre\/cli\/dist\/main\.js$/, 'where 0.1.16 was misread');
+
+    const pnpm = globalCli('pnpm', env, home);
+    assert.ok(typeof pnpm === 'string' && self.startsWith(`${pnpm}/`), `pnpm says its global is ${pnpm}`);
+    assert.deepEqual(installOf(self, { npm: null, pnpm, pnpmHome: null }), { kind: 'pnpm' });
+    // With its bin directory off PATH, pnpm may not answer; its PNPM_HOME still says it is pnpm's.
+    const off = globalCli('pnpm', base, home);
+    assert.deepEqual(installOf(self, { npm: null, pnpm: off ?? null, pnpmHome: off === undefined ? pnpmHome : null }), { kind: 'pnpm' });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
