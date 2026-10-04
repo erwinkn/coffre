@@ -1,6 +1,14 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactElement,
+  type ReactNode,
+} from 'react';
 import { Link, useNavigate, useRouterState } from '@tanstack/react-router';
-import { Dialog, DropdownMenu } from 'radix-ui';
+import { Dialog } from '@base-ui/react/dialog';
+import { Menu } from '@base-ui/react/menu';
 import type { InstanceState } from '@coffre/client';
 import type { ProjectSummary } from '../shared/models';
 import { pendingMigrations, UPGRADE_DOC } from '../lib/instance';
@@ -10,7 +18,7 @@ import { AdministrationItems } from './affordances';
 import { CommandPalette } from './command-palette';
 import { ThemeMenuItems } from './theme';
 import { Tile } from './tile';
-import { Notice, Tip } from './ui';
+import { MenuPopup, Notice, Tip } from './ui';
 import {
   Check,
   ChevronsUpDown,
@@ -19,7 +27,7 @@ import {
   Key,
   Ledger,
   Mark,
-  Menu,
+  Menu as MenuIcon,
   PanelLeft,
   Settings,
   SignOut,
@@ -139,6 +147,7 @@ export function Brand() {
 export function Shell({ projects, principal, instanceRole, capabilities, instance, children }: ShellProps) {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const drawerClose = useRef<HTMLButtonElement>(null);
   const [collapsed, toggleSidebar] = useSidebarCollapsed();
 
   // Following a link in the drawer should land on the page, not leave the
@@ -190,36 +199,32 @@ export function Shell({ projects, principal, instanceRole, capabilities, instanc
           </Tip>
 
           <Dialog.Root open={drawerOpen} onOpenChange={setDrawerOpen}>
-            <Dialog.Trigger asChild>
-              <button
-                type="button"
-                className="btn btn-quiet btn-icon header-menu"
-                aria-label="Open navigation"
-              >
-                <Menu size={18} />
-              </button>
+            <Dialog.Trigger
+              className="btn btn-quiet btn-icon header-menu"
+              aria-label="Open navigation"
+            >
+              <MenuIcon size={18} />
             </Dialog.Trigger>
             <Dialog.Portal>
-              <Dialog.Overlay className="overlay" />
-              <Dialog.Content className="drawer" aria-describedby={undefined}>
+              <Dialog.Backdrop className="overlay" />
+              {/* The close button rather than the first link, the logo. */}
+              <Dialog.Popup className="drawer" initialFocus={drawerClose}>
                 <Dialog.Title className="visually-hidden">Navigation</Dialog.Title>
                 <Sidebar
                   principal={principal}
                   instanceRole={instanceRole}
                   capabilities={capabilities}
                   close={
-                    <Dialog.Close asChild>
-                      <button
-                        type="button"
-                        className="btn btn-quiet btn-sm btn-icon"
-                        aria-label="Close navigation"
-                      >
-                        <X size={16} />
-                      </button>
+                    <Dialog.Close
+                      ref={drawerClose}
+                      className="btn btn-quiet btn-sm btn-icon"
+                      aria-label="Close navigation"
+                    >
+                      <X size={16} />
                     </Dialog.Close>
                   }
                 />
-              </Dialog.Content>
+              </Dialog.Popup>
             </Dialog.Portal>
           </Dialog.Root>
 
@@ -336,7 +341,7 @@ function CollapsedTip({
 }: {
   collapsed: boolean;
   label: string;
-  children: ReactNode;
+  children: ReactElement;
 }) {
   return collapsed ? (
     <Tip label={label} side="right">
@@ -394,42 +399,28 @@ function AccountMenu({
   collapsed: boolean;
 }) {
   return (
-    <DropdownMenu.Root>
+    <Menu.Root>
       <CollapsedTip collapsed={collapsed} label={principal.id}>
-        <DropdownMenu.Trigger asChild>
-          <button
-            type="button"
-            className="account"
-            title={collapsed ? undefined : principal.id}
-          >
-            <span className="avatar" aria-hidden>
-              {principal.id.slice(0, 1)}
-            </span>
-            <span className="account-text">
-              <span className="account-name">{principal.id}</span>
-              <span className="account-role">{roleLabel(principal, instanceRole)}</span>
-            </span>
-          </button>
-        </DropdownMenu.Trigger>
+        <Menu.Trigger className="account" title={collapsed ? undefined : principal.id}>
+          <span className="avatar" aria-hidden>
+            {principal.id.slice(0, 1)}
+          </span>
+          <span className="account-text">
+            <span className="account-name">{principal.id}</span>
+            <span className="account-role">{roleLabel(principal, instanceRole)}</span>
+          </span>
+        </Menu.Trigger>
       </CollapsedTip>
-      <DropdownMenu.Portal>
-        <DropdownMenu.Content
-          className="menu menu-account"
-          side="top"
-          align="start"
-          sideOffset={6}
-        >
-          <DropdownMenu.Label className="menu-label">Theme</DropdownMenu.Label>
-          <ThemeMenuItems />
+      <MenuPopup className="menu-account" side="top" align="start">
+        <ThemeMenuItems />
 
-          <DropdownMenu.Separator className="menu-sep" />
-          <DropdownMenu.Item className="menu-item" onSelect={signOut}>
-            <SignOut size={14} />
-            Sign out
-          </DropdownMenu.Item>
-        </DropdownMenu.Content>
-      </DropdownMenu.Portal>
-    </DropdownMenu.Root>
+        <Menu.Separator className="menu-sep" />
+        <Menu.Item className="menu-item" onClick={signOut}>
+          <SignOut size={14} />
+          Sign out
+        </Menu.Item>
+      </MenuPopup>
+    </Menu.Root>
   );
 }
 
@@ -530,20 +521,18 @@ function ProjectCrumb({
         <Tile name={slug} />
         <span className="crumb-project-name">{slug}</span>
       </Link>
-      <DropdownMenu.Root>
-        <DropdownMenu.Trigger asChild>
-          <button type="button" className="crumb-switch" aria-label="Switch project">
-            <ChevronsUpDown size={14} />
-          </button>
-        </DropdownMenu.Trigger>
-        <DropdownMenu.Portal>
-          <DropdownMenu.Content className="menu" sideOffset={6} align="start">
-            <DropdownMenu.Label className="menu-label">Projects</DropdownMenu.Label>
+      <Menu.Root>
+        <Menu.Trigger className="crumb-switch" aria-label="Switch project">
+          <ChevronsUpDown size={14} />
+        </Menu.Trigger>
+        <MenuPopup align="start">
+          <Menu.Group>
+            <Menu.GroupLabel className="menu-label">Projects</Menu.GroupLabel>
             {projects.map((project) => (
-              <DropdownMenu.Item
+              <Menu.Item
                 key={project.slug}
                 className="menu-item"
-                onSelect={() =>
+                onClick={() =>
                   navigate({ to: '/projects/$project', params: { project: project.slug } })
                 }
               >
@@ -551,11 +540,11 @@ function ProjectCrumb({
                 {project.slug}
                 <span className="menu-hint">{project.name}</span>
                 {project.slug === slug && <Check size={14} className="menu-check" />}
-              </DropdownMenu.Item>
+              </Menu.Item>
             ))}
-          </DropdownMenu.Content>
-        </DropdownMenu.Portal>
-      </DropdownMenu.Root>
+          </Menu.Group>
+        </MenuPopup>
+      </Menu.Root>
     </span>
   );
 }
@@ -576,22 +565,20 @@ function EnvironmentCrumb({
         <span>{slug}</span>
       </span>
       {environments.length > 0 && (
-        <DropdownMenu.Root>
-          <DropdownMenu.Trigger asChild>
-            <button type="button" className="crumb-switch" aria-label="Switch environment">
-              <ChevronsUpDown size={14} />
-            </button>
-          </DropdownMenu.Trigger>
-          <DropdownMenu.Portal>
-            <DropdownMenu.Content className="menu" sideOffset={6} align="start">
-              <DropdownMenu.Label className="menu-label">
+        <Menu.Root>
+          <Menu.Trigger className="crumb-switch" aria-label="Switch environment">
+            <ChevronsUpDown size={14} />
+          </Menu.Trigger>
+          <MenuPopup align="start">
+            <Menu.Group>
+              <Menu.GroupLabel className="menu-label">
                 Environments in {projectSlug}
-              </DropdownMenu.Label>
+              </Menu.GroupLabel>
               {environments.map((environment) => (
-                <DropdownMenu.Item
+                <Menu.Item
                   key={environment.slug}
                   className="menu-item"
-                  onSelect={() =>
+                  onClick={() =>
                     navigate({
                       to: '/projects/$project/$environment',
                       params: { project: projectSlug, environment: environment.slug },
@@ -604,11 +591,11 @@ function EnvironmentCrumb({
                     {environment.details?.secretCount === 1 ? '' : 's'}
                   </span>
                   {environment.slug === slug && <Check size={14} className="menu-check" />}
-                </DropdownMenu.Item>
+                </Menu.Item>
               ))}
-            </DropdownMenu.Content>
-          </DropdownMenu.Portal>
-        </DropdownMenu.Root>
+            </Menu.Group>
+          </MenuPopup>
+        </Menu.Root>
       )}
     </span>
   );

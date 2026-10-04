@@ -21,13 +21,19 @@ export function AdministrationItems({
   return createElement(
     Fragment,
     null,
-    capabilities.canManageGrants ? users : null,
-    capabilities.canReadAudit ? audit : null,
+    ...administrationEntries(capabilities, { users: [users], audit: [audit] }),
   );
 }
 
-export function hasAdministrationItems(capabilities: UiCapabilities): boolean {
-  return capabilities.canManageGrants || capabilities.canReadAudit;
+/** The same rule, for destinations kept as data (the command palette's). */
+export function administrationEntries<T>(
+  capabilities: UiCapabilities,
+  { users, audit }: { users: T[]; audit: T[] },
+): T[] {
+  return [
+    ...(capabilities.canManageGrants ? users : []),
+    ...(capabilities.canReadAudit ? audit : []),
+  ];
 }
 
 /** Project creation exists before a grantable resource, so it is owner-only. */

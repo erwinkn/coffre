@@ -37,6 +37,7 @@
     "@coffre/client": "workspace:*"
   },
   "devDependencies": {
+    "@base-ui/react": "1.8.0",
     "@cloudflare/vite-plugin": "1.50.0",
     "@cloudflare/workers-types": "5.20260920.1",
     "@coffre/core": "workspace:*",
@@ -50,9 +51,7 @@
     "@types/react": "19.2.17",
     "@vitejs/plugin-react": "6.0.3",
     "agentation": "3.0.2",
-    "cmdk": "1.1.1",
     "lucide-react": "1.47.0",
-    "radix-ui": "1.6.3",
     "react": "19.2.7",
     "react-dom": "19.2.7",
     "sonner": "2.0.7",
