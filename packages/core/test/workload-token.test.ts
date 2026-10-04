@@ -47,6 +47,14 @@ test('an ES256 signature has a twin that verifies the same claims; the signing i
   assert.deepEqual(decodeWorkloadToken(twin).signingInputHash, decodeWorkloadToken(token).signingInputHash);
 });
 
+test('an hour at most, exactly: issued 3,600 seconds ago it verifies, 3,601 not; 30 seconds ahead it verifies, 31 not', async () => {
+  const { jwk, sign } = await signer('RS256', 'age');
+  await verify(await sign({ iat: at(-3600) }), [jwk]);
+  await refused(verify(await sign({ iat: at(-3601) }), [jwk]), 'too_old');
+  await verify(await sign({ iat: at(30) }), [jwk]);
+  await refused(verify(await sign({ iat: at(31) }), [jwk]), 'too_old');
+});
+
 test('refusals say why: audience, times, signature, algorithm and key', async () => {
   const { jwk, sign } = await signer('RS256', 'rs');
   await refused(verify(await sign({ aud: 'https://other.example' }), [jwk]), 'audience');

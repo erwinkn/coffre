@@ -611,7 +611,9 @@ adds two small rows.
 names it, as `credentialId` in its metadata: the app's own, and the
 vault's, through a `credentialId` in its calls' correlation that it copies
 and never decides on. The exchange's entry names the same credential, with
-the run's claims. So a secret read leads back to its run in one indexed
+the run's claims. A credential an entry acts on (one a sign-in opens, a
+token issued, a session revoked) is its `targetCredentialId`, so revoking
+another run's credential is the caller's act, never that run's. So a secret read leads back to its run in one indexed
 read, whatever became of the credential's row, and the audit page shows the
 run under the actor ("acme/api run 7001 at 3f2a9c1"): what the issuer
 asserted, not proof of which run sent the request.
@@ -619,7 +621,12 @@ asserted, not proof of which run sent the request.
 Bindings come with migration `0002_service_bindings` and spent tokens with
 `0003_exchanges`. This release runs on the schema before them. Until
 an owner runs `coffre migrate`, the bindings routes and the exchange answer
-503.
+503. `0004_live_indexes` keeps what CI leaves behind out of the way: every
+run leaves an expired credential, and every replaced binding a retired one.
+Indexes on the live bindings, on a member's live credentials and on what a
+binding issued lately bound the exchange's first read, its rate count, a
+binding's removal and the members page by what is live, not by history.
+Before it runs, the same queries work, more slowly.
 
 ## Databases
 

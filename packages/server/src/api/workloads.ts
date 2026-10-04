@@ -8,8 +8,8 @@ import {
   CLOCK_TOLERANCE_SECONDS,
   decodeWorkloadToken,
   GITLAB_ISSUER,
+  issuedRefusal,
   MAX_BINDINGS,
-  MAX_TOKEN_AGE_SECONDS,
   WorkloadTokenRefused,
   type BindingClaims,
   type DecodedToken,
@@ -19,7 +19,7 @@ import {
 import type { Access, Vault } from '@coffre/core/vault';
 import type { Database, Transaction } from '@coffre/db';
 import { knownMigrations } from '@coffre/db/schema-version';
-import { credentials, serviceBindings } from '@coffre/db/schema';
+import { serviceBindings } from '@coffre/db/schema';
 
 import { issuedBy } from '../auth-rows.ts';
 import {
@@ -32,6 +32,7 @@ import {
   insertBinding,
   liveBindings,
   memberStanding,
+  revokeLiveCredentials,
   tokenConsumed,
   update,
   updateAuth,
@@ -253,7 +254,7 @@ export class WorkloadService {
         };
         await insertBinding(tx, this.#deps.chainKey, row);
         for (const replaced of planned.replaces) {
-          await this.#revoke(tx, replaced.id, ctx.caller.principal.id, now);
+          await this.#revoke(tx, replaced.id, `token:${serviceId}`, ctx.caller.principal.id, now);
           log.push(allowed(ctx, 'token.unbind', {
             metadata: { bindingId: replaced.id, principalType: 'service', principalId: serviceId, reason: replaced.why === 'asked' ? 'replaced' : 'keys_moved', by: id },
           }));
@@ -292,7 +293,7 @@ export class WorkloadService {
         const row = await findBinding(tx, this.#deps.chainKey, member, bindingId);
         const live = row !== null && row.revokedAt === null
           && (await liveBindings(tx, this.#deps.chainKey, member, row.generation)).some((candidate) => candidate.id === bindingId);
-        if (!live || (await this.#revoke(tx, bindingId, ctx.caller.principal.id, new Date())) === 0) {
+        if (!live || (await this.#revoke(tx, bindingId, member, ctx.caller.principal.id, new Date())) === 0) {
           throw new Refusal(notFound('unknown trust binding'), denied(ctx, 'token.unbind', 'unknown_binding', { metadata }));
         }
         log.push(allowed(ctx, 'token.unbind', { metadata: { ...metadata, reason: 'removed' } }));
@@ -344,9 +345,15 @@ export class WorkloadService {
   }
 
   /** Revoke a binding, and every credential it issued that still lives: they die with it. */
-  async #revoke(tx: Transaction, id: string, by: string, at: Date): Promise<number> {
+  /**
+   * Revoke a binding, and the credentials it issued that are still live: at
+   * most a few minutes' worth, however long its history. Every use of a
+   * credential checks its binding too, so these rows are belt and braces;
+   * the expired ones are dead already and are left as they are.
+   */
+  async #revoke(tx: Transaction, id: string, member: string, by: string, at: Date): Promise<number> {
     const revoked = await updateAuth(tx, this.#deps.chainKey, serviceBindings, { id, revokedAt: null }, { revokedAt: at, revokedBy: by });
-    await updateAuth(tx, this.#deps.chainKey, credentials, { createdBy: issuedBy(id), revokedAt: null }, { revokedAt: at, revokedBy: by });
+    await revokeLiveCredentials(tx, this.#deps.chainKey, { principal: member, createdBy: issuedBy(id), at }, { revokedAt: at, revokedBy: by });
     return revoked;
   }
 
@@ -393,7 +400,8 @@ export class WorkloadService {
     const pending = () => new ExchangeRefused('migration_pending', 'exchanges need this release\'s database migrations: an owner runs `coffre migrate`', 503);
 
     // The bindings first, so that a token none can take costs this one read:
-    // the migrations are asked of a read that failed, or of a binding's token.
+    // the migrations are asked of a read that failed, or of a token that
+    // verified and matched a binding.
     let candidates: BindingRow[];
     try {
       candidates = await exchangeCandidates(db, chainKey, member, issuer, MAX_BINDINGS);
@@ -404,9 +412,6 @@ export class WorkloadService {
       throw error;
     }
     if (candidates.length === 0) throw unbound();
-    await this.#migrated(EXCHANGE_MIGRATION).catch(() => {
-      throw pending();
-    });
     // A service's bindings on one issuer share its keys' URL; one made after the keys moved replaced the rest.
     const jwksUri = candidates[candidates.length - 1]!.jwksUri;
     let claims: Record<string, unknown>;
@@ -418,6 +423,10 @@ export class WorkloadService {
     }
     const binding = matching(candidates.filter((candidate) => candidate.jwksUri === jwksUri), claims, member);
 
+    // Only now, for a token a binding takes, whether spent tokens have their table.
+    await this.#migrated(EXCHANGE_MIGRATION).catch(() => {
+      throw pending();
+    });
     if (await tokenConsumed(db, decoded.signingInputHash)) throw new ExchangeRefused('replayed', 'this token was exchanged already: ask your CI for a fresh one');
     const standing = await vault.access(member);
     if (standing.status !== 'active' || standing.generation !== binding.generation) throw unbound();
@@ -432,10 +441,9 @@ export class WorkloadService {
       // The times again, should the request have waited.
       const seconds = now.getTime() / 1000;
       if (decoded.claims.exp <= seconds - CLOCK_TOLERANCE_SECONDS) throw new ExchangeRefused('expired', 'the token has expired');
-      if (seconds - decoded.claims.iat > MAX_TOKEN_AGE_SECONDS + CLOCK_TOLERANCE_SECONDS) {
-        throw new ExchangeRefused('too_old', `the token was issued more than ${MAX_TOKEN_AGE_SECONDS / 60} minutes ago`);
-      }
-      const recent = await exchangesSince(tx, member, issuedBy(binding.id), new Date(now.getTime() - 60_000));
+      const issued = issuedRefusal(decoded.claims.iat, seconds);
+      if (issued !== null) throw refused(issued);
+      const recent = await exchangesSince(tx, member, issuedBy(binding.id), new Date(now.getTime() - 60_000), EXCHANGES_PER_BINDING_MINUTE);
       if (recent >= EXCHANGES_PER_BINDING_MINUTE) {
         throw new ExchangeRefused('busy', `this binding issued ${EXCHANGES_PER_BINDING_MINUTE} credentials in the last minute: try again shortly`, 429);
       }

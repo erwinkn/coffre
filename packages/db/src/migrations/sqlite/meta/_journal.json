@@ -29,6 +29,13 @@
       "when": 1791072337548,
       "tag": "0003_exchanges",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1791084355588,
+      "tag": "0004_live_indexes",
+      "breakpoints": true
     }
   ]
 }

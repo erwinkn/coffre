@@ -357,7 +357,7 @@ export class SigninService {
           ...base,
           actorId: principalId,
           decision: 'allow',
-          metadata: { ...account, identityId, credentialId: credential.id },
+          metadata: { ...account, identityId, targetCredentialId: credential.id },
         });
         return { ok: true as const, principal, credential };
       });
@@ -561,7 +561,8 @@ export class SigninService {
         decision: 'allow',
         requestId: meta.requestId,
         sourceIp: meta.sourceIp,
-        metadata: { credentialId: row.id, kind: row.kind },
+        // A run's credential signing itself out is the run's act, too.
+        metadata: { targetCredentialId: row.id, kind: row.kind, ...(issuingBinding(row.createdBy) === null ? {} : { credentialId: row.id }) },
       });
     });
   }
@@ -573,7 +574,7 @@ export class SigninService {
       const unknown = () =>
         new Refusal(
           notFound('unknown credential'),
-          denied(ctx, 'token.revoke', 'unknown_credential', { metadata: { credentialId } }),
+          denied(ctx, 'token.revoke', 'unknown_credential', { metadata: { targetCredentialId: credentialId } }),
         );
       if (row === null || row.revokedAt !== null) throw unknown();
       const { principal } = ctx.caller;
@@ -581,7 +582,7 @@ export class SigninService {
       if (!own && !ctx.caller.isOwner) {
         throw new Refusal(
           forbidden("only owners may revoke other people's credentials"),
-          denied(ctx, 'token.revoke', 'requires_instance_owner', { metadata: { credentialId } }),
+          denied(ctx, 'token.revoke', 'requires_instance_owner', { metadata: { targetCredentialId: credentialId } }),
         );
       }
       const revoked = await updateAuth(
@@ -594,7 +595,7 @@ export class SigninService {
       if (revoked === 0) throw unknown();
       log.push(
         allowed(ctx, 'token.revoke', {
-          metadata: { credentialId, kind: row.kind, principalType: memberOf(row.principal).type, principalId: memberOf(row.principal).id },
+          metadata: { targetCredentialId: credentialId, kind: row.kind, principalType: memberOf(row.principal).type, principalId: memberOf(row.principal).id },
         }),
       );
       return { revoked: true as const };
@@ -727,7 +728,7 @@ export class SigninService {
         });
         log.push(
           allowed(ctx, 'token.create', {
-            metadata: { ...details, credentialId: credential.id, expiresAt: credential.expiresAt },
+            metadata: { ...details, targetCredentialId: credential.id, expiresAt: credential.expiresAt },
           }),
         );
         return credential;
@@ -916,7 +917,7 @@ export class SigninService {
           sourceIp: meta.sourceIp,
           metadata: {
             kind: 'cli',
-            credentialId: credential.id,
+            targetCredentialId: credential.id,
             deviceAuthorizationId: row.id,
             clientLabel: row.clientLabel,
             clientIp: row.clientIp,

@@ -58,7 +58,7 @@ test(
       const migrations = await owner.query<{ count: number }>(
         'SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations',
       );
-      assert.equal(migrations.rows[0].count, 4);
+      assert.equal(migrations.rows[0].count, 5);
 
       const identity = await runtime.query<{
         current_user: string;

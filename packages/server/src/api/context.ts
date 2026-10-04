@@ -52,10 +52,15 @@ type EntryFields = Omit<AuditEntry, 'actorType' | 'actorId' | 'requestId' | 'sou
 
 type Writer = Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp'> & { provenance?: string | null };
 
-/** What an entry's metadata adds for a request that came in on a credential a trust binding issued. */
+/**
+ * What an entry's metadata adds for a request that came in on a credential
+ * a trust binding issued: `credentialId`, the caller's, written last so that
+ * nothing the operation says can stand in for it. A credential the operation
+ * acts on is its `targetCredentialId`.
+ */
 function traced(ctx: Writer, metadata: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
   if (ctx.provenance == null) return metadata;
-  return { credentialId: ctx.provenance, ...metadata };
+  return { ...metadata, credentialId: ctx.provenance };
 }
 
 export function allowed(
