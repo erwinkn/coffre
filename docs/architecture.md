@@ -97,16 +97,18 @@ one package is seen by the others without a build. Builds leave it off.
 
 | Entry point | What a deployment calls |
 |---|---|
-| `@coffre/server/cloudflare` | `coffre(env => config)` → `{ fetch, scheduled }`; `postgres(env.HYPERDRIVE)` |
-| `@coffre/server/node` | `serve({ port?, host?, database, …config })` → `{ url, close }`; `migrate(url)` |
+| `@coffre/server/cloudflare` | `coffre(env => ({ pages, …config }))` → `{ fetch, scheduled }`; `postgres(env.HYPERDRIVE)` |
+| `@coffre/server/node` | `serve({ pages, port?, host?, database, …config })` → `{ url, close }`; `migrate(url)` |
 | `@coffre/server` (both) | `signin`, `github`, `google`, `microsoft`, `oidc`, `cloudflareAccess`, `SigninError`; `githubActions`, `vercel`, `railway`, `cloudflareWorkers`, `SyncConfigError`, `SyncProviderError`; and the config types, `SigninProvider` and `SyncProvider` among them |
 | `@coffre/vault/cloudflare` | `vault(env => config)`, the RPC Worker's default export; `postgres(env.VAULT_HYPERDRIVE)` |
 | `@coffre/vault` (both) | `awsKms`, `KekUnavailableError`, `KekBadClaimError`, and the config types, `KekProvider` among them |
 | `@coffre/vault/node` | `serveVault({ socket, database, …config })`, `connectVault(socket)`, `localVault({ database, …config })` |
-| `@coffre/ui` | `createUi()` → `{ fetch(request, { context: { cspNonce, client } }) }`; files in `dist/client` |
+| `@coffre/ui` | `getRouter()`, for the deployment's `src/router.tsx` |
+| `@coffre/ui/vite` | `coffre()`, the deployment's Vite plugin |
 | `@coffre/client` | `createClient({ url, headers?, transport? })` |
 
 Where `config` is, for the server, `{ publicUrl, vault, auth, auditChainKey }`
+(and `pages`, see [The UI](#the-ui))
 and, for the vault, `{ database, kek, previousKeks?, rootAdmins,
 signingKey?, bulkLimit? }`, a vault key being a local key or `awsKms(…)`
 ([keys.md](keys.md)). The vault derives its signing key from a local vault key;
@@ -130,39 +132,83 @@ database has applied of those.
 
 ## The UI
 
-The UI stays a server-rendered TanStack Start app, published prebuilt as
-`@coffre/ui`. `@coffre/server` routes `/api`, `/auth/*`, `/livez` and
-`/readyz` itself and hands every other path to the UI:
+The UI is server-rendered TanStack Start, and a deployment's app is a Start
+app of its own: Vite builds it once, with `@coffre/ui` and `@coffre/server`
+as libraries inside it. Its files are few:
+
+```
+app/vite.config.ts    plugins: [cloudflare(…), tanstackStart(), viteReact(), coffre()]
+app/src/router.tsx    export { getRouter } from '@coffre/ui'
+app/src/server.ts     export default coffre(env => ({ pages, publicUrl, database, … }))
+```
+
+`pages` is Start's own handler, `import pages from
+'@tanstack/react-start/server-entry'`. `@coffre/server` wraps it: it answers
+`/api`, `/auth/*`, `/livez`, `/readyz` and `scheduled` itself, and hands
+every other path to the pages with the response's nonce and the visitor's
+API client, then sets the security headers on whatever comes back:
 
 ```ts
 type Ui = {
-  fetch(request: Request, options: { context: { cspNonce: string; client: CoffreClient } }): Promise<Response>;
+  fetch(request: Request, options: { context: { cspNonce: string; client: CoffreClient } }): Response | Promise<Response>;
 };
-export function createUi(options?: UiOptions): Ui;
 ```
 
-The server mints the nonce, builds the request's client and sets the security
-headers; the UI only renders. It reads no configuration, API or database of
-its own, and `scripts/check-client-bundle.mjs` fails its build if database or
-server code reached it. Its static files sit in
-`node_modules/@coffre/ui/dist/client`, under `/_coffre/assets/` so they cannot
-collide with a deployment's own paths:
+The server mints the nonce, builds the request's client and sets the
+headers; the pages only render. On Node the deployment's app is the same
+Start app, without Cloudflare's plugin, and `serve({ pages: app/dist })`
+loads its handler and serves its static files.
 
-- **On Workers**, `app/wrangler.jsonc` names that directory as the Worker's
-  static assets, so Cloudflare serves them before the Worker runs.
-  `wrangler deploy --dry-run` reads all of them through pnpm's symlink, and
-  `pnpm test:consumer` runs it on an installed project.
-- **On Node**, `serve` finds the directory with `import.meta.resolve` and
-  serves files under `/_coffre/` itself, immutable-cached, before handing
-  anything else to the UI.
+**What `@coffre/ui` ships.** The pages as compiled ES modules, built by Vite
+with TanStack's router plugin: `getRouter`, its route tree generated, and
+each route's component a chunk of its own, loaded as the route is. React,
+the router, Start and Query stay imports, so the deployment's single copy of
+each serves both, and the stylesheet and icons stay imports of the
+package's `src/`, which the deployment's Vite processes, fonts and all. A
+release that adds a page changes nothing in the deployment. Start splits
+only the routes its own generator finds, so the package splits its own; and
+Start's preload hints come from that generator too, so for a route from the
+package the browser fetches its chunk as the route loads, one round trip
+after the page's entry.
 
-[A spike](spikes/ssr-ui.md) first showed the approach: a separate
-Worker imported the built UI, rendered with one copy of React and hydrated
-with the nonce intact.
+**One copy of what the pages share.** `@coffre/ui`'s peers, React,
+react-dom, TanStack Router, Start, Query, the router's Query integration and
+Vite, are pinned exactly, and the deployment pins them itself at those
+versions: `coffre init` writes them, `coffre update` moves them with
+coffre's packages, and the build stops, naming each, when one differs.
+`pnpm check:pins` holds the examples to them.
 
-`@coffre/ui` and `@coffre/server` each bundle `@coffre/client`, so a page is
-handed a client built from the server's copy. Anything the pages check by
-class must survive that: `CoffreError` answers `instanceof` by a
+**`coffre()`, the deployment's Vite plugin.** It puts the static files under
+`/_coffre/assets/`, beside `/api` and `/auth`, and never inlines a font, which
+the Content-Security-Policy would refuse as `data:`. It makes the server's
+build hold everything it renders with (`ssr.noExternal`), as a Worker's
+does, so that Node resolves nothing from `node_modules`. It checks the
+versions above. And it fails the build if what the browser loads holds
+server code: the database layer, a driver, a `COFFRE_*` read or the dev
+toolbar, by strings only those carry. A page that imports across the line
+otherwise just grows by the database layer, with no error.
+
+**On Workers**, `@cloudflare/vite-plugin` builds the app into
+`app/dist/server`, with a `wrangler.json` that says `no_bundle`: `wrangler
+deploy -c app/dist/server/wrangler.json` uploads what Vite built as it is,
+and the client files Vite built are the Worker's static assets, which
+Cloudflare serves before the Worker runs. Nothing bundles the code a second
+time, so nothing rewrites what the pages send the browser: 0.1.17's blank
+pages came from wrangler's esbuild wrapping seroval's functions in
+`__name`, and Vite's build adds no such helper. Locally, a Worker wrangler
+did not bundle runs without wrangler's middleware that drains a request
+body the Worker answered unread, so `@coffre/server` reads such a body
+itself, a mebibyte at most, before answering; this runs in production too.
+
+**Custom pages** are not supported yet, and the door is open: the
+deployment's `src/router.tsx` could build its router from `@coffre/ui`'s
+route tree with routes of its own added, and its Start would code-split
+those as an app's own. What it would need from `@coffre/ui` is the route
+tree as an export and the root route's layout to add to.
+
+`@coffre/client` can be in a deployment twice: on Node, the server runs
+from `node_modules` and the pages from their own build. Anything the pages
+check by class must survive that: `CoffreError` answers `instanceof` by a
 `Symbol.for` mark every copy sets, not by its prototype.
 
 Pages get their data through `@coffre/client`, the same client the CLI uses,

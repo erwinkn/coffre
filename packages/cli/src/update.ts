@@ -21,17 +21,17 @@ import {
   install,
   installAsLocked,
   installed,
-  KEEP_NAMES_WHY,
-  keepsNames,
   minimumReleaseAge,
   pinPackageManager,
   removeCleared,
   resolveAgain,
-  stopKeepingNames,
+  movePins,
+  startPinMoves,
   type Held,
   type Moved,
 } from './deployment.ts';
 import { templateDir, type Kind } from './init.ts';
+import { applyChanges, needsStartApp, shownChange, startAppMove } from './layout.ts';
 import { StepFailed, Steps } from './steps.ts';
 import { Cancelled, listed, openTerminal, type Output, release, style } from './tty.ts';
 import { cliVersion } from './version.ts';
@@ -290,34 +290,40 @@ export async function update(args: string[]): Promise<void> {
         // Exclusions an earlier run wrote, whose packages have cleared since: gone first.
         const cleared = removeCleared(deployment, new Date());
         if (cleared.length > 0) details.push(`No longer excluded from minimumReleaseAge, now old enough: ${listed(cleared, 'and')}`);
-        // wrangler keeps function names unless told not to, and that blanks every signed-in page.
-        if (kind === 'workers' && keepsNames(deployment)) {
-          step.under(['app/wrangler.jsonc, after "compatibility_flags":', ...[...KEEP_NAMES_WHY, '"keep_names": false,'].map((line) => `  + ${line}`)]);
-          const off = await ask('Turn keep_names off in app/wrangler.jsonc? With it on, signed-in pages go blank', step);
-          step.under([]);
-          if (off) {
-            stopKeepingNames(deployment);
-            details.push('Turned keep_names off in app/wrangler.jsonc: signed-in pages render once it is deployed');
-          } else {
-            details.push('app/wrangler.jsonc still keeps function names: signed-in pages go blank until its keep_names is false');
-          }
-        }
+        const template = templateDir(kind as Kind);
         const pnpm = templatePackageManager(kind as Kind);
         const repin = pnpm !== null && coffrePackageManager(deployment) !== pnpm;
+        const was = pinned.length === 1 ? pinned[0]! : listed(pinned, 'and');
+        // A deployment from before its app was a Start app of its own becomes one, file by file, as init writes it.
+        const move = needsStartApp(deployment) ? startAppMove(deployment, kind as Kind, template) : [];
+        if (!Array.isArray(move)) {
+          return {
+            text: `This deployment stays as it is, at ${was}: coffre ${latest}'s app is a TanStack Start app of its own, and ${move.problem}`,
+            details: [...details, 'Make the move by hand (docs/deploy.md, Upgrading to 0.2), then run coffre update again'],
+          };
+        }
+        // What its Start app builds with, as the release's pages are built with.
+        const shared = startPinMoves(deployment, template);
         const current = pinned.length === 1 && pinned[0] === latest;
-        if (current && !repin) {
+        if (current && !repin && move.length === 0 && shared.length === 0) {
           return { text: `This deployment's coffre packages are at ${latest} already`, details };
         }
-        const was = pinned.length === 1 ? pinned[0]! : listed(pinned, 'and');
         const on = pnpm?.replace('@', ' ');
         const question = current
-          ? `Pin this deployment to ${on}, as coffre installs with, and install it?`
-          : `Move this deployment from ${was} to ${latest}${repin ? `, on ${on},` : ''} and install it?`;
-        if (!(await ask(question, step))) return { text: `This deployment stays as it is, at ${was}`, details };
+          ? move.length > 0
+            ? 'Make this deployment its own Start app, as above, and install it?'
+            : repin
+              ? `Pin this deployment to ${on}, as coffre installs with, and install it?`
+              : `Move its Start app's packages to the versions coffre ${latest} is built with, and install it?`
+          : `Move this deployment from ${was} to ${latest}${move.length > 0 ? ', as its own Start app as above,' : ''}${repin ? ` on ${on},` : ''} and install it?`;
+        step.under([...move.flatMap((change) => shownChange(change)), ...shared.map(({ name, from, to }) => `~ ${name} ${from} → ${to}`)]);
+        const accepted = await ask(question, step);
+        step.under([]);
+        if (!accepted) return { text: `This deployment stays as it is, at ${was}`, details };
 
         // Put back byte for byte however this ends short of installed: the
         // deployment's pins, pnpm and lockfile stay as they were.
-        const files = ['package.json', 'pnpm-workspace.yaml', 'pnpm-lock.yaml'].map((name) => {
+        const files = [...new Set(['package.json', 'pnpm-workspace.yaml', 'pnpm-lock.yaml', ...move.map(({ path }) => path)])].map((name) => {
           const path = join(deployment, name);
           return { path, text: existsSync(path) ? readFileSync(path, 'utf8') : null };
         });
@@ -327,7 +333,10 @@ export async function update(args: string[]): Promise<void> {
             else writeFileSync(path, text);
           }
         };
-        const kept = 'package.json, pnpm-workspace.yaml and pnpm-lock.yaml are as they were';
+        const kept =
+          move.length > 0
+            ? `${listed([...new Set(['package.json', 'pnpm-workspace.yaml', 'pnpm-lock.yaml', ...move.map(({ path }) => path)])], 'and')} are as they were`
+            : 'package.json, pnpm-workspace.yaml and pnpm-lock.yaml are as they were';
         /**
          * No version old enough fits: wait, everything as it was, or let
          * these through by name, each until it is old enough. Never asked
@@ -374,6 +383,14 @@ export async function update(args: string[]): Promise<void> {
             details.push('Installed its packages as they were, as pnpm-lock.yaml says, to know its migrations');
           }
           before = deploymentMigrations(deployment) ?? before;
+          if (move.length > 0) {
+            applyChanges(deployment, move);
+            details.push(`Made it its own Start app: ${listed(move.map(({ path }) => path), 'and')}. Its app now builds with vite build app`);
+          }
+          if (shared.length > 0) {
+            movePins(deployment, shared);
+            details.push(`Moved its Start app's ${listed(shared.map(({ name, to }) => `${name} to ${to}`), 'and')}, as coffre's pages are built with`);
+          }
           bumpPins(deployment, latest);
           if (repin) {
             const replaced = pinPackageManager(deployment, pnpm!);

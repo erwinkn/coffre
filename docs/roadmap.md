@@ -67,8 +67,12 @@ Done. coffre is eight packages a deployment imports and configures in code
 
 - one route table under `/api`, with `@coffre/client` typed from it, and the
   CLI and the pages built on the client;
-- the pages as `@coffre/ui`, a prebuilt handler the server calls, which reads
-  only through the client;
+- the pages as `@coffre/ui`, a library a deployment's own TanStack Start app
+  builds once, with Vite, and the server wraps; they read only through the
+  client. Since the deployment builds the pages itself, a page of its own, or
+  one of coffre's swapped, is a route added to its router rather than a
+  fork of the package; not supported yet, the way is in
+  [architecture.md](architecture.md#the-ui);
 - Postgres through Drizzle, with SQLite for tests and local development, and
   one set of queries for both;
 - the vault, `@coffre/vault`, which holds the vault key and decides access, as a

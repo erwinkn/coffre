@@ -76,6 +76,28 @@ export async function installAsLocked(dir: string): Promise<boolean> {
   return true;
 }
 
+/** Where `buildApp` leaves a Workers app, as wrangler deploys it: Vite's own wrangler.json for the build. */
+export const BUILT_APP = 'app/dist/server/wrangler.json';
+
+/**
+ * Build the deployment's app, its own TanStack Start app, with its own
+ * Vite, as its `pnpm run deploy` does: what wrangler then uploads as it is.
+ */
+export function buildApp(dir: string): Promise<void> {
+  const vite = join(dir, 'node_modules', '.bin', process.platform === 'win32' ? 'vite.cmd' : 'vite');
+  return new Promise((resolve, reject) => {
+    if (!existsSync(vite)) return reject(new Error(`${vite} is missing: install the deployment first, with pnpm install`));
+    const child = spawn(vite, ['build', 'app'], { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, NO_COLOR: '1' } });
+    let output = '';
+    child.stdout.setEncoding('utf8').on('data', (chunk: string) => (output += chunk));
+    child.stderr.setEncoding('utf8').on('data', (chunk: string) => (output += chunk));
+    child.on('error', reject);
+    child.on('close', (code) =>
+      code === 0 ? resolve() : reject(new Error(`vite build app failed: ${output.trim().split('\n').slice(-4).join(' ')}`)),
+    );
+  });
+}
+
 /** A deployment's `@coffre/*` pins, as its package.json has them. */
 export function coffrePins(dir: string): Record<string, string> {
   const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as Record<string, Record<string, string> | undefined>;
@@ -315,39 +337,59 @@ export function readWorker(dir: string, path: string): WorkerConfig {
   };
 }
 
-/** Why the app Worker keeps no function names, as the template says it above `keep_names`. */
+/**
+ * Why 0.1.18's app Worker kept no function names, as its template said
+ * above `keep_names`: its move to a Start app takes the line out.
+ */
 export const KEEP_NAMES_WHY = [
   '// Off: seroval writes its own functions into each signed-in page as source,',
   "// and keep_names would wrap them in an __name that only the Worker has, so",
   '// the page would render, then go blank. coffre needs no function\'s name.',
 ];
 
-/** Whether the app Worker keeps function names, as wrangler does unless its keep_names is false. */
-export function keepsNames(dir: string): boolean {
-  const config = parse(readFileSync(join(dir, 'app', 'wrangler.jsonc'), 'utf8'), [], { allowTrailingComma: true }) as { keep_names?: unknown };
-  return config.keep_names !== false;
+/**
+ * What a deployment's Start app builds with and shares with coffre's pages:
+ * @coffre/ui's peers, which it must have at exactly the versions the pages
+ * are built with, and Vite's plugins for them. `coffre update` moves them
+ * with coffre's own packages; a test holds the list to @coffre/ui's peers.
+ */
+export const START_PACKAGES = [
+  'react',
+  'react-dom',
+  '@tanstack/react-query',
+  '@tanstack/react-router',
+  '@tanstack/react-router-ssr-query',
+  '@tanstack/react-start',
+  'vite',
+  '@vitejs/plugin-react',
+  '@cloudflare/vite-plugin',
+];
+
+/** A pin to move: a package, at the version a deployment has, and the one it gets. */
+export type PinMove = { name: string; from: string; to: string };
+
+/** The Start app's pins of the deployment in `dir` that are not the template's, at `template`. */
+export function startPinMoves(dir: string, template: string): PinMove[] {
+  const pins = (path: string) => {
+    const manifest = JSON.parse(readFileSync(join(path, 'package.json'), 'utf8')) as Record<string, Record<string, string> | undefined>;
+    return { ...manifest.dependencies, ...manifest.devDependencies };
+  };
+  const [have, wanted] = [pins(dir), pins(template)];
+  return START_PACKAGES.filter((name) => have[name] !== undefined && wanted[name] !== undefined && have[name] !== wanted[name]).map((name) => ({
+    name,
+    from: have[name]!,
+    to: wanted[name]!,
+  }));
 }
 
-/**
- * The app Worker's keep_names, false, with the template's reason above it:
- * set where it is, or added after the compatibility flags' line, as the
- * template has it.
- */
-export function stopKeepingNames(dir: string): void {
-  const path = join(dir, 'app', 'wrangler.jsonc');
-  const text = readFileSync(path, 'utf8');
-  if (/"keep_names"\s*:/.test(text)) {
-    editWorker(dir, 'app/wrangler.jsonc', [{ path: ['keep_names'], value: false }]);
-    return;
+/** Set each of `moves` in the deployment's package.json, where it has it. */
+export function movePins(dir: string, moves: readonly PinMove[]): void {
+  const path = join(dir, 'package.json');
+  const manifest = JSON.parse(readFileSync(path, 'utf8')) as Record<string, Record<string, string> | undefined>;
+  for (const { name, to } of moves) {
+    for (const field of ['dependencies', 'devDependencies']) if (manifest[field]?.[name] !== undefined) manifest[field]![name] = to;
   }
-  const flags = /^([ \t]*)"compatibility_flags":[^\n]*,\n/m.exec(text);
-  if (flags !== null) {
-    const at = flags.index + flags[0].length;
-    const block = [...KEEP_NAMES_WHY, '"keep_names": false,'].map((line) => `${flags[1]}${line}\n`).join('');
-    writeFileSync(path, text.slice(0, at) + block + text.slice(at));
-    return;
-  }
-  editWorker(dir, 'app/wrangler.jsonc', [{ path: ['keep_names'], value: false }]);
+  writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`);
 }
 
 /** A value as the examples write one on a single line: `[{ "pattern": "…", "custom_domain": true }]`. */

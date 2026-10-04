@@ -1,8 +1,10 @@
-// The app Worker `pnpm dev` runs: a deployment like examples/workers, with
-// coffre's own sign-in page. The dev IdP stands in for GitHub and for an
-// OpenID Connect provider, so both provider kinds run without a network.
+// The app Worker `pnpm dev` runs, and its Start app's server entry: a
+// deployment like examples/workers, with coffre's own sign-in page. The dev
+// IdP stands in for GitHub and for an OpenID Connect provider, so both
+// provider kinds run without a network.
 //
 // Every value is a local fixture; see wrangler.jsonc and .env.dev.
+import pages from '@tanstack/react-start/server-entry';
 import { coffre, github, oidc, postgres, signin } from '@coffre/server/cloudflare';
 
 import type { RateLimiter, Vault } from '@coffre/server/cloudflare';
@@ -21,6 +23,7 @@ export default coffre((env: Env) => {
   const idp = env.COFFRE_DEV_IDP_URL;
   const local = { clientId: 'coffre-local', clientSecret: 'coffre-local-secret' };
   return {
+    pages,
     publicUrl: env.COFFRE_PUBLIC_URL,
     database: postgres(env.HYPERDRIVE),
     vault: env.VAULT,

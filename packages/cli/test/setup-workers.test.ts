@@ -18,7 +18,7 @@ import pg from 'pg';
 import { editWorker, readWorker } from '../src/deployment.ts';
 import { templateDir } from '../src/init.ts';
 import { asSuperuser, CLUSTER, connects, database, emptyCluster, needsCluster, OTHER_CLUSTER } from './cluster.ts';
-import { fakeCloudflare, fakeGitHub, fakeOpener, fakeWrangler, realWrangler, submitManifest } from './fakes.ts';
+import { fakeCloudflare, fakeGitHub, fakeOpener, fakeVite, fakeWrangler, realWrangler, submitManifest } from './fakes.ts';
 import { ENTER_ALT, inTerminal, ptySkip, screens, type Session, visible } from './pty.ts';
 
 const skip = needsCluster.skip || ptySkip;
@@ -59,6 +59,7 @@ globalThis.fetch = (input, init) => {
     { path: ['vars', 'GITHUB_API_URL'], value: github.github.api },
   ]);
   fakeWrangler(deployment, join(dir, 'wrangler'), TOKEN, realWrangler());
+  fakeVite(deployment);
   fakeOpener(join(dir, 'bin'));
   env = {
     PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
@@ -94,6 +95,7 @@ function another(name: string): string {
     { path: ['vars', 'GITHUB_API_URL'], value: github.github.api },
   ]);
   fakeWrangler(where, join(dir, 'wrangler'), TOKEN, realWrangler());
+  fakeVite(where);
   return where;
 }
 
@@ -204,7 +206,7 @@ test('a first run: signed in, Hyperdrive, the GitHub App and the files done; the
     /✓ Filled in app\/wrangler\.jsonc and vault\/wrangler\.jsonc\n\s+app\s+the account, Hyperdrive, GitHub's client ID, the address and its custom domain\n\s+vault\s+the account, Hyperdrive, the root admins and the vault ID\n/,
   );
   assert.match(text, /✓ Deployed the vault, coffre-vault, with its key/);
-  assert.match(text, /✗ Deploy the app\n\s+wrangler could not deploy app\/wrangler\.jsonc/);
+  assert.match(text, /✗ Deploy the app\n\s+wrangler could not deploy app\/dist\/server\/wrangler\.json/);
   assert.equal(text.split('\n').filter((line) => line.includes('✗')).at(-1), '  ✗ Deploy the app', 'its failure, said once, and nothing after');
   assert.match(alternateText(output), /Next, setup gives them to Cloudflare, which never shows them again/);
   assert.ok(!alternateText(output).includes('database URL'), 'the URLs live in Hyperdrive');
@@ -227,7 +229,7 @@ test('a first run: signed in, Hyperdrive, the GitHub App and the files done; the
   const deploys = wrangler.filter(({ args }) => args[0] === 'deploy');
   assert.deepEqual(deploys.map(({ args }) => args), [
     ['deploy', '-c', 'vault/wrangler.jsonc', '--secrets-file', '/dev/stdin'],
-    ['deploy', '-c', 'app/wrangler.jsonc', '--secrets-file', '/dev/stdin'],
+    ['deploy', '-c', 'app/dist/server/wrangler.json', '--secrets-file', '/dev/stdin'],
   ]);
   assert.deepEqual(JSON.parse(deploys[0]!.stdin), { VAULT_KEY: vaultKey });
   // The real wrangler read the same files, and the key from its stdin, which it named and never showed.
@@ -304,7 +306,7 @@ test('a run with everything done: nothing made, nothing shown, both deployed aga
   const wrangler = calls();
   assert.deepEqual(wrangler.filter(({ args }) => args[0] === 'deploy').map(({ args }) => args), [
     ['deploy', '-c', 'vault/wrangler.jsonc'],
-    ['deploy', '-c', 'app/wrangler.jsonc'],
+    ['deploy', '-c', 'app/dist/server/wrangler.json'],
   ]);
   assert.deepEqual(cloudflare.state.configs.get('acc-acme')!.map(({ origin }) => origin.password), before);
   assertKept(output, wrangler);

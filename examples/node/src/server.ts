@@ -11,6 +11,8 @@ function env(name: string): string {
 }
 
 const server = await serve({
+  // The pages: app/, built by `vite build app`.
+  pages: new URL('../app/dist/', import.meta.url),
   port: Number(env('PORT')),
   publicUrl: env('PUBLIC_URL'),
   database: env('DATABASE_URL'),

@@ -4,6 +4,9 @@ Two processes, configured in code:
 
 - `src/server.ts`, the server: the API, sign-in, the pages and a job every
   five minutes, on one port. Put a proxy that terminates TLS in front of it.
+  The pages are `app/`, a TanStack Start app of its own whose router is
+  `@coffre/ui`'s (`app/src/router.tsx`): `pnpm build` builds it with Vite
+  (`app/vite.config.ts`) into `app/dist`, which the server serves.
 - `src/vault.ts`, the vault: the keys, and the members and grants, which it
   keeps in the server's database through a login of its own. It answers
   only the server, on a Unix socket.
@@ -64,7 +67,7 @@ To do the same by hand, see
 
 To upgrade: `coffre update` here, then `pnpm exec coffre migrate` with the
 administrator's URL (at its prompt, or in `COFFRE_MIGRATE_DATABASE_URL`
-with `--yes` in a script), then restart both processes
+with `--yes` in a script), then `pnpm build` and restart both processes
 ([upgrading](https://github.com/erwinkn/coffre/blob/main/docs/deploy.md#upgrading)).
 
 For tests and local development only, both URLs may instead name the same
@@ -76,6 +79,7 @@ has no database logins or separation of privileges.
 ## 3. Run
 
 ```sh
+pnpm build    # the pages, into app/dist
 pnpm vault    # first: the server connects to its socket
 pnpm start
 ```
@@ -95,9 +99,14 @@ follow the [restore runbook](https://github.com/erwinkn/coffre/blob/main/docs/re
 
 `pnpm typecheck` checks the configuration against coffre's types.
 
+The app's React, TanStack Router, Start, Query and Vite are this project's
+own dependencies, pinned at the versions `@coffre/ui` is built with; `pnpm
+build` stops with what to change when one differs, and `coffre update` moves
+them with coffre's packages.
+
 ## Conformance
 
-`pnpm conformance` runs the vault and the server on SQLite in a temporary
+`pnpm conformance` builds the app, runs the vault and the server on SQLite in a temporary
 directory, signs people in through a stand-in GitHub, and checks what coffre
 must never do: show a value to someone without access, act for another site
 with someone's cookie, keep a removed member in, give a value it did not

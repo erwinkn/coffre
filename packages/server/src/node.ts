@@ -5,6 +5,7 @@
  *   import { connectVault } from '@coffre/vault/node';
  *
  *   await serve({
+ *     pages: new URL('../app/dist/', import.meta.url),
  *     port: 3000,
  *     publicUrl: 'https://secrets.acme.example',
  *     database: process.env.DATABASE_URL,
@@ -14,13 +15,16 @@
  *   });
  *
  * One process serves the API, the pages and their static files, and runs
- * the scheduled job itself.
+ * the scheduled job itself. The pages are the deployment's own TanStack
+ * Start app, whose router is `@coffre/ui`'s: `vite build` puts its handler
+ * in `dist/server/server.js` and its static files in `dist/client`.
  */
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { migrateDatabase } from '@coffre/db/migrate';
 
 import { serveWith, type ServeOptions, type Server } from './node-server.ts';
+import type { Ui } from './ui.ts';
 
 export * from './index.ts';
 export type { ServeOptions, Server };
@@ -33,13 +37,22 @@ export function migrate(database: string): Promise<void> {
 }
 
 /** Serve coffre until `close()`. */
-export async function serve(options: ServeOptions): Promise<Server> {
-  // Loaded here rather than at the top, so tests of the rest need no UI build.
-  const { createUi } = await import('@coffre/ui');
-  return serveWith(options, createUi(), uiStaticFiles());
-}
-
-/** Where `@coffre/ui` keeps its static files, next to its server build. */
-function uiStaticFiles(): string {
-  return fileURLToPath(new URL('../client/', import.meta.resolve('@coffre/ui')));
+export async function serve(options: ServeOptions & { pages: URL | string }): Promise<Server> {
+  const { pages, ...rest } = options;
+  if (typeof pages !== 'string' && !(pages instanceof URL)) {
+    throw new Error(
+      "pages is missing: since coffre 0.2 the pages are a TanStack Start app of the deployment's own, app/, built by Vite: pass serve({ pages: new URL('../app/dist/', import.meta.url), … }). Run `npx @coffre/cli@latest update` in the deployment to move it",
+    );
+  }
+  // The app's build: its handler in server/, its static files in client/.
+  const built = new URL(pages instanceof URL ? pages.href : pathToFileURL(pages).href);
+  if (!built.pathname.endsWith('/')) built.pathname += '/';
+  const entry = new URL('server/server.js', built);
+  let handler: Ui;
+  try {
+    handler = ((await import(entry.href)) as { default: Ui }).default;
+  } catch (error) {
+    throw new Error(`no pages at ${fileURLToPath(entry)}: build the deployment's app first, with vite build`, { cause: error });
+  }
+  return serveWith(rest, handler, fileURLToPath(new URL('client/', built)));
 }

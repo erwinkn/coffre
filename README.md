@@ -299,9 +299,10 @@ both colour schemes, following the system's with a manual override.
   market/prod: 9 secrets"), with technical steps and sign-ins hidden until
   asked for.
 
-The pages are TanStack Start, prebuilt as `@coffre/ui`: a handler the server
-calls for every path that is not `/api`, `/auth` or a health check. They
-read and write only through `@coffre/client`.
+The pages are TanStack Start, as `@coffre/ui`: a deployment's app is a Start
+app of its own, built once by Vite, whose router is `@coffre/ui`'s, and the
+server hands it every path that is not `/api`, `/auth` or a health check.
+They read and write only through `@coffre/client`.
 
 ## Layout
 
@@ -311,11 +312,11 @@ packages/vault        @coffre/vault: the vault key, members and grants, its entr
 packages/db           @coffre/db: the schemas, migrations and migrator, the connections
 packages/core         @coffre/core: access rules, encryption, vault keys, the log's format, sign-in, the vault's contract
 packages/client       @coffre/client: the API as typed calls
-packages/ui           @coffre/ui: the pages, prebuilt
+packages/ui           @coffre/ui: the pages, for a deployment's own Start app, and its Vite plugin
 packages/cli          @coffre/cli: `coffre`, from init and login to secrets and the log
 packages/conformance  @coffre/conformance: `coffre-conformance`, and the dev IdP it signs in through
-examples/workers      what `coffre init --workers` writes: two Workers
-examples/node         what `coffre init --node` writes: a server and its vault process
+examples/workers      what `coffre init --workers` writes: two Workers, the app a Start app built by Vite
+examples/node         what `coffre init --node` writes: a server, its pages' Start app, and its vault process
 dev/                  what only `pnpm dev` uses: its deployment, the dev IdP's launcher, the seed
 scripts/              what dev, tests and CI share
 ```

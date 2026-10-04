@@ -1,5 +1,5 @@
 // The dev loop's Node side: the dev IdP's launcher, and the Vite config that
-// runs the deployment. deployment/ has its own, for Workers.
+// runs the deployment. deployment/ has its own, for its Workers.
 {
   "extends": "../tsconfig.base.json",
   "compilerOptions": {
@@ -7,5 +7,5 @@
     // The personas' test imports the seed's config, which is plain JavaScript.
     "allowJs": true
   },
-  "include": ["vite.config.ts", "idp/**/*.ts", "test/**/*.ts"]
+  "include": ["deployment/app/vite.config.ts", "idp/**/*.ts", "test/**/*.ts"]
 }

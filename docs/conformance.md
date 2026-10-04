@@ -50,10 +50,16 @@ the CLI's own entry, so that it is tested in this repository's CI.
 
 ## How it runs a deployment
 
+It first builds the app as it deploys: the deployment's own `vite build
+app`, which on Workers leaves the Worker in `app/dist/server`, for wrangler
+to run as built, and on Node the pages in `app/dist`, which `serve` loads.
+A build that fails, or that puts server code where the browser loads it,
+stops the run there.
+
 The settings go in as the environment the deployment's own files would give
-it: `wrangler dev -c app/wrangler.jsonc -c vault/wrangler.jsonc` with
-Worker secrets from the environment, or `src/vault.ts` and `src/server.ts`
-with what `server.env` and `vault.env` would hold. Three things are the
+it: `wrangler dev -c app/dist/server/wrangler.json -c vault/wrangler.jsonc`
+with Worker secrets from the environment, or `src/vault.ts` and
+`src/server.ts` with what `server.env` and `vault.env` would hold. Three things are the
 run's own: fixed local keys; GitHub's URLs, pointed at the dev IdP
 (`@coffre/conformance/idp`) in the checker's process; and
 `ALLOW_LOOPBACK_ISSUERS_FOR_DEVELOPMENT=true`, so that a trust binding may

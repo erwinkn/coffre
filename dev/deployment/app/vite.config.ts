@@ -1,6 +1,7 @@
 import { fileURLToPath } from 'node:url';
 
 import { cloudflare } from '@cloudflare/vite-plugin';
+import { coffre } from '@coffre/ui/vite';
 import { tanstackStart } from '@tanstack/react-start/plugin/vite';
 import viteReact from '@vitejs/plugin-react';
 import { defaultClientConditions, defaultServerConditions, defineConfig, type Plugin } from 'vite';
@@ -25,16 +26,13 @@ function workspaceSources(): Plugin {
   };
 }
 
-// `vite dev` of a whole deployment of coffre around the pages
-// (deployment/wrangler.jsonc, deployment/app.ts), with its vault beside it
-// (deployment/vault.wrangler.jsonc). It imports the packages' sources rather
-// than their builds, so an edit to the server or the vault reloads like one
-// to a page. packages/ui/vite.config.ts builds the pages alone.
+// `vite dev` of a deployment of coffre shaped like examples/workers: this
+// app, its pages from @coffre/ui, and its vault beside it (../vault). Two
+// things differ, for the loop: the packages' sources rather than their
+// builds, so an edit to the server, the vault or a page reloads; and Start
+// generating the pages' route tree from packages/ui/src/routes, as it does
+// in an app's own src/routes, so a route edited or added reloads too.
 export default defineConfig({
-  // The pages' package, as when it builds itself: TanStack Start finds
-  // src/routes there and writes src/routeTree.gen.ts beside them.
-  root: here('../packages/ui'),
-
   server: {
     // start.sh checks 127.0.0.1 and the seeded links point there, so bind
     // both loopback names rather than only localhost.
@@ -54,15 +52,18 @@ export default defineConfig({
   plugins: [
     cloudflare({
       viteEnvironment: { name: 'ssr' },
-      configPath: here('deployment/wrangler.jsonc'),
-      auxiliaryWorkers: [{ configPath: here('deployment/vault.wrangler.jsonc') }],
+      auxiliaryWorkers: [{ configPath: here('../vault/wrangler.jsonc') }],
       // Where wrangler keeps its local state.
-      persistState: { path: process.env.COFFRE_STATE_DIR ?? here('.wrangler/state') },
+      persistState: { path: process.env.COFFRE_STATE_DIR ?? here('../../.wrangler/state') },
     }),
-    // Generates src/routeTree.gen.ts from src/routes, and wires the SSR
-    // server. Must come before the React plugin.
-    tanstackStart(),
+    tanstackStart({
+      router: {
+        routesDirectory: here('../../../packages/ui/src/routes'),
+        generatedRouteTree: here('../../../packages/ui/src/routeTree.gen.ts'),
+      },
+    }),
     viteReact(),
+    coffre(),
     workspaceSources(),
   ],
 });

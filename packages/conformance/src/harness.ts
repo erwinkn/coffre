@@ -198,10 +198,12 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
     // `coffre migrate`, in its folder, the owner's URL in its environment.
     // A fresh log has no heartbeat: only the scheduled job can make /readyz pass.
     await run(process.execPath, [deploymentCli(dir), 'migrate', '--yes'], { COFFRE_MIGRATE_DATABASE_URL: owner });
+    // The app as it deploys: its Start app, built by its own Vite, which wrangler runs unbundled.
+    await run(bin('vite'), ['build', 'app']);
     const state = join(scratch, 'state');
     start('wrangler', bin('wrangler'), [
       'dev',
-      ...['-c', 'app/wrangler.jsonc', '-c', 'vault/wrangler.jsonc'],
+      ...['-c', 'app/dist/server/wrangler.json', '-c', 'vault/wrangler.jsonc'],
       ...['--ip', '127.0.0.1', '--port', String(port), '--inspector-port', String(port + 2)],
       ...['--persist-to', state, '--show-interactive-dev-session=false'],
       // Not in wrangler.jsonc's vars, so not taken from the environment.
@@ -253,6 +255,8 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       ROOT_ADMINS: ROOT_ADMIN,
     });
     await until('the vault socket', async () => existsSync(socket), 30, alive);
+    // The pages as they run: the deployment's Start app, built by its own Vite.
+    await run(bin('vite'), ['build', 'app']);
     const startServer = () =>
       start('server', process.execPath, ['src/server.ts'], {
         PORT: String(port),

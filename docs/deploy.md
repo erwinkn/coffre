@@ -118,6 +118,12 @@ old schema.
    of its packages gains `@coffre/cli` among its devDependencies, pinned with
    the rest: its pipeline migrates with it.
 
+   It moves the packages the app's Start app builds with to the versions
+   the release's pages are built with, React, TanStack Start and Vite among
+   them, showing each: they must be those exactly, and the app's build stops
+   when one is not. A deployment from before 0.2 also becomes a Start app of
+   its own ([Upgrading to 0.2](#upgrading-to-02)).
+
    It also pins the deployment's pnpm, `packageManager` in its package.json,
    to the one coffre installs with, as `coffre init` writes it: then your
    machine, CI and Workers Builds install with the same pnpm, and each holds
@@ -144,7 +150,7 @@ old schema.
 
    ```sh
    pnpm exec coffre migrate --yes   # COFFRE_MIGRATE_DATABASE_URL: the owner's URL
-   pnpm run deploy                  # on Node: restart both processes
+   pnpm run deploy                  # on Node: pnpm build, then restart both processes
    ```
 3. **Check `/readyz`**, which passes once the new code's scheduled job has
    run on the new schema.
@@ -199,11 +205,20 @@ unset COFFRE_MIGRATE_DATABASE_URL
 
 ```
 acme-secrets/
-  app/src/worker.ts      coffre(env => ({ publicUrl, database, vault, auth, auditChainKey }))
-  app/wrangler.jsonc     HYPERDRIVE, VAULT service binding, Cron, UI assets
+  app/vite.config.ts     the app's build: cloudflare(…), tanstackStart(), viteReact(), coffre()
+  app/src/server.ts      coffre(env => ({ pages, publicUrl, database, vault, auth, auditChainKey }))
+  app/src/router.tsx     export { getRouter } from '@coffre/ui': the pages
+  app/wrangler.jsonc     HYPERDRIVE, VAULT service binding, Cron
   vault/src/worker.ts    vault(env => ({ database, kek, rootAdmins }))
   vault/wrangler.jsonc   VAULT_HYPERDRIVE; no public route
 ```
+
+The app is a TanStack Start app of its own, whose pages are `@coffre/ui`'s
+([the UI](architecture.md#the-ui)). `vite build app` builds it into
+`app/dist`: the Worker and its `wrangler.json`, which `wrangler deploy -c
+app/dist/server/wrangler.json` uploads as it is, and the pages' static files,
+which become the Worker's assets. The vault is a plain Worker, which wrangler
+builds itself.
 
 ### Workers Builds
 
@@ -214,13 +229,44 @@ with the repository connected and the deployment's directory as the root:
 | Worker | Build command | Deploy command | Build variables |
 |---|---|---|---|
 | the vault, `<name>-vault` | `pnpm exec coffre migrate --yes` | `npx wrangler deploy -c vault/wrangler.jsonc` | `COFFRE_MIGRATE_DATABASE_URL`, the database owner's direct URL, as a secret |
-| the app, `<name>` | none | `npx wrangler deploy -c app/wrangler.jsonc` | none |
+| the app, `<name>` | `pnpm exec vite build app` | `npx wrangler deploy -c app/dist/server/wrangler.json` | none |
 
 The owner's URL is the one `coffre setup` asked for. It is a build variable,
 which only the build sees; the Worker never does. A build that cannot
 migrate fails before its deploy, and the vault keeps running the previous
 version. The app may deploy before or after the vault's migration: each
 release runs on the schema before and after its migrations.
+
+### Upgrading to 0.2
+
+Since 0.2 a deployment's app is a TanStack Start app of its own, built by
+Vite, rather than a Worker or a server that imports prebuilt pages. Move it
+with the 0.2 CLI, in the deployment's directory:
+
+```sh
+npx @coffre/cli@0.2.0 update
+```
+
+An older CLI's `coffre update` moves the pins but not the files, and the
+app then says, when it starts, that its `pages` are missing; this command
+moves both. It shows each file it changes, line by line, and asks once:
+
+- on Workers, `app/src/worker.ts` becomes `app/src/server.ts`, with `import
+  pages from '@tanstack/react-start/server-entry'` and `pages` first in
+  `coffre(…)`'s configuration; `app/wrangler.jsonc`'s `main` names it, and
+  its `assets` and `keep_names`, which the build now sets or no longer
+  needs, go;
+- on Node, `src/server.ts` gets `pages: new URL('../app/dist/', import.meta.url)`;
+- both get `app/vite.config.ts` and `app/src/router.tsx`, React, TanStack
+  Start and Vite in `package.json` at the versions `@coffre/ui` is built
+  with, the template's scripts where theirs are the template's, and `dist`
+  in `.gitignore`.
+
+Then `pnpm typecheck`, and deploy: on Workers, set the app's build and
+deploy commands as the table above says, or `pnpm run deploy`; on Node,
+`pnpm build` and restart both processes. An entry changed so far that
+update cannot find `coffre(…)`'s or `serve(…)`'s configuration is left as it
+is, with the steps above to make by hand.
 
 ### Upgrading to 0.1.12
 
@@ -380,8 +426,8 @@ it cannot derive its signing key from it, and needs a third key,
 
 ### 4. Deploy
 
-`pnpm run deploy` deploys the vault, then the app. `pnpm build` bundles
-both without deploying them. Route the app to `PUBLIC_URL`, sign in as a
+`pnpm run deploy` deploys the vault, then builds the app with Vite and
+deploys what it built. `pnpm build` builds both without deploying them. Route the app to `PUBLIC_URL`, sign in as a
 root admin, then try the CLI:
 
 ```sh
@@ -392,8 +438,10 @@ coffre login https://secrets.example.com
 
 ```
 acme-secrets/
-  src/server.ts          serve({ database, vault: connectVault(socket), … })
+  src/server.ts          serve({ pages: app/dist, database, vault: connectVault(socket), … })
   src/vault.ts           serveVault({ socket, database, kek, rootAdmins })
+  app/vite.config.ts     the pages' build: tanstackStart(), viteReact(), coffre()
+  app/src/router.tsx     export { getRouter } from '@coffre/ui'
   server.env.example     app settings
   vault.env.example      vault settings
 ```
@@ -428,6 +476,7 @@ to the same absolute path in a directory they can access. The vault makes
 the socket `0660`; its group must be the shared group.
 
 ```sh
+pnpm build    # the pages, with Vite, into app/dist
 pnpm vault    # first: creates the socket
 pnpm start    # in the server's process
 ```
@@ -462,7 +511,7 @@ On Workers, two rate-limiting bindings in `app/wrangler.jsonc`:
 ],
 ```
 
-and in `app/src/worker.ts`:
+and in `app/src/server.ts`:
 
 ```ts
 auth: signin({

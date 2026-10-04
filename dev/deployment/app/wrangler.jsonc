@@ -1,12 +1,12 @@
-// The app Worker of `vite dev` (app.ts): examples/workers/wrangler.jsonc,
+// The app Worker of `vite dev` (src/server.ts): examples/workers/app/wrangler.jsonc,
 // on loopback. dev/start.sh points Hyperdrive at local Postgres with
 // CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE, and its
 // environment overrides these vars: Wrangler hands the Worker the names
 // declared here, from the shell when it has them, and nothing else.
 {
-  "$schema": "../node_modules/wrangler/config-schema.json",
+  "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "coffre-dev",
-  "main": "app.ts",
+  "main": "src/server.ts",
   "compatibility_date": "2026-08-06",
   "compatibility_flags": ["nodejs_compat"],
   "vars": {

@@ -2,6 +2,43 @@
 
 ## Unreleased
 
+**A deployment's app is a TanStack Start app of its own** (0.2.0). Vite
+builds it once, with `@coffre/ui` and `@coffre/server` as libraries inside
+it, and nothing bundles it again: on Workers, `wrangler deploy` uploads what
+Vite built, so no second pass rewrites what the pages send the browser, as
+wrangler's `keep_names` did in 0.1.17. The app's files:
+
+- `app/vite.config.ts`: `cloudflare(…)` on Workers, `tanstackStart()`,
+  `viteReact()`, and `coffre()` from `@coffre/ui/vite`, which puts the
+  pages' files under `/_coffre/assets/`, checks the versions below, and
+  fails the build if server code reaches what the browser loads;
+- `app/src/router.tsx`: `export { getRouter } from '@coffre/ui'`, the pages;
+- `app/src/server.ts` on Workers (was `app/src/worker.ts`): `coffre(env =>
+  ({ pages, … }))`, `pages` being Start's handler, `import pages from
+  '@tanstack/react-start/server-entry'`. On Node, `src/server.ts` passes
+  `serve({ pages: new URL('../app/dist/', import.meta.url), … })`.
+
+React, TanStack Router, Start, Query and Vite are the deployment's own
+dependencies now, pinned at exactly the versions `@coffre/ui` is built with;
+`coffre update` moves them with coffre's packages. `@coffre/ui` ships its
+pages as ES modules, each route a chunk of its own, so a release that adds a
+page needs no change in the deployment. `keep_names` is gone from
+`app/wrangler.jsonc`: nothing bundles the app again for it to matter.
+
+To upgrade, in the deployment's directory, with the 0.2 CLI:
+
+```sh
+npx @coffre/cli@0.2.0 update
+```
+
+It shows each file it changes and asks once; an older CLI's `coffre update`
+moves the pins without the files, and the app then says its `pages` are
+missing. Then `pnpm typecheck`, and deploy: on Workers Builds, the app's
+build command is now `pnpm exec vite build app` and its deploy command `npx
+wrangler deploy -c app/dist/server/wrangler.json`; `pnpm run deploy` does
+both. On Node, `pnpm build`, then restart both processes.
+[Upgrading to 0.2](docs/deploy.md#upgrading-to-02).
+
 **Workers deployments: signed-in pages no longer go blank.** wrangler bundles
 with esbuild's `keep_names` on, which wraps functions in an `__name` helper
 that only the Worker has; seroval, which streams a page's data, writes its own

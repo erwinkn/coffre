@@ -47,7 +47,6 @@
     "@coffre/client": "workspace:*",
     "@coffre/core": "workspace:*",
     "@coffre/db": "workspace:*",
-    "@coffre/ui": "workspace:*",
     "drizzle-orm": "0.45.2",
     "zod": "4.4.3"
   },

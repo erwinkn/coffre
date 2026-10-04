@@ -26,7 +26,7 @@ database="${COFFRE_DEV_DATABASE:-coffre}"
 state_dir="${COFFRE_STATE_DIR:-$root/dev/.wrangler/state}"
 owner_url="postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/$database"
 
-# What deployment/app.ts, the dev IdP, the seed and the CLI read. The app's
+# What deployment/app/src/server.ts, the dev IdP, the seed and the CLI read. The app's
 # Hyperdrive binding reaches Postgres as the restricted runtime login, and
 # the vault's as its own.
 export COFFRE_PUBLIC_URL="http://127.0.0.1:$port"
@@ -83,7 +83,8 @@ node --conditions=coffre:source dev/idp/server.ts >"$logs/dev-idp.log" 2>&1 &
 sleep 1
 
 log "starting coffre and its vault on :$port"
-./dev/node_modules/.bin/vite dev --config dev/vite.config.ts --port "$port" --strictPort >"$logs/web.log" 2>&1 &
+# The packages' sources, for the Vite config's own imports (@coffre/ui/vite) as for the app's.
+NODE_OPTIONS="--conditions=coffre:source ${NODE_OPTIONS:-}" ./dev/node_modules/.bin/vite dev dev/deployment/app --port "$port" --strictPort >"$logs/web.log" 2>&1 &
 until curl -sf "$COFFRE_PUBLIC_URL/livez" >/dev/null 2>&1; do sleep 1; done
 
 log 'seeding'

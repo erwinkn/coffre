@@ -36,9 +36,21 @@ importers:
       '@coffre/server':
         specifier: workspace:*
         version: link:../packages/server
+      '@coffre/ui':
+        specifier: workspace:*
+        version: link:../packages/ui
       '@coffre/vault':
         specifier: workspace:*
         version: link:../packages/vault
+      '@tanstack/react-query':
+        specifier: 5.103.1
+        version: 5.103.1(react@19.2.7)
+      '@tanstack/react-router':
+        specifier: 1.170.18
+        version: 1.170.18(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+      '@tanstack/react-router-ssr-query':
+        specifier: 1.167.2
+        version: 1.167.2(@tanstack/query-core@5.103.1)(@tanstack/react-query@5.103.1(react@19.2.7))(@tanstack/react-router@1.170.18(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@tanstack/router-core@1.171.15)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       '@tanstack/react-start':
         specifier: 1.168.32
         version: 1.168.32(esbuild@0.28.1)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(rolldown@1.2.9)(vite@8.1.5(@types/node@26.1.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.1))
@@ -69,9 +81,30 @@ importers:
       '@coffre/server':
         specifier: 0.1.18
         version: link:../../packages/server
+      '@coffre/ui':
+        specifier: 0.1.18
+        version: link:../../packages/ui
       '@coffre/vault':
         specifier: 0.1.18
         version: link:../../packages/vault
+      '@tanstack/react-query':
+        specifier: 5.103.1
+        version: 5.103.1(react@19.2.7)
+      '@tanstack/react-router':
+        specifier: 1.170.18
+        version: 1.170.18(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+      '@tanstack/react-router-ssr-query':
+        specifier: 1.167.2
+        version: 1.167.2(@tanstack/query-core@5.103.1)(@tanstack/react-query@5.103.1(react@19.2.7))(@tanstack/react-router@1.170.18(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@tanstack/router-core@1.171.15)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+      '@tanstack/react-start':
+        specifier: 1.168.32
+        version: 1.168.32(esbuild@0.28.1)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(rolldown@1.2.9)(vite@8.1.5(@types/node@26.1.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.1))
+      react:
+        specifier: 19.2.7
+        version: 19.2.7
+      react-dom:
+        specifier: 19.2.7
+        version: 19.2.7(react@19.2.7)
     devDependencies:
       '@coffre/cli':
         specifier: 0.1.18
@@ -82,9 +115,15 @@ importers:
       '@types/node':
         specifier: 26.1.1
         version: 26.1.1
+      '@vitejs/plugin-react':
+        specifier: 6.0.3
+        version: 6.0.3(vite@8.1.5(@types/node@26.1.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.1))
       typescript:
         specifier: 5.9.3
         version: 5.9.3
+      vite:
+        specifier: 8.1.5
+        version: 8.1.5(@types/node@26.1.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.1)
 
   examples/workers:
     dependencies:
@@ -97,7 +136,28 @@ importers:
       '@coffre/vault':
         specifier: 0.1.18
         version: link:../../packages/vault
+      '@tanstack/react-query':
+        specifier: 5.103.1
+        version: 5.103.1(react@19.2.7)
+      '@tanstack/react-router':
+        specifier: 1.170.18
+        version: 1.170.18(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+      '@tanstack/react-router-ssr-query':
+        specifier: 1.167.2
+        version: 1.167.2(@tanstack/query-core@5.103.1)(@tanstack/react-query@5.103.1(react@19.2.7))(@tanstack/react-router@1.170.18(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@tanstack/router-core@1.171.15)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+      '@tanstack/react-start':
+        specifier: 1.168.32
+        version: 1.168.32(esbuild@0.28.1)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(rolldown@1.2.9)(vite@8.1.5(@types/node@26.1.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.1))
+      react:
+        specifier: 19.2.7
+        version: 19.2.7
+      react-dom:
+        specifier: 19.2.7
+        version: 19.2.7(react@19.2.7)
     devDependencies:
+      '@cloudflare/vite-plugin':
+        specifier: 1.50.0
+        version: 1.50.0(vite@8.1.5(@types/node@26.1.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.1))(wrangler@4.118.0(@cloudflare/workers-types@5.20260920.1))
       '@cloudflare/workers-types':
         specifier: 5.20260920.1
         version: 5.20260920.1
@@ -107,9 +167,15 @@ importers:
       '@coffre/conformance':
         specifier: 0.1.18
         version: link:../../packages/conformance
+      '@vitejs/plugin-react':
+        specifier: 6.0.3
+        version: 6.0.3(vite@8.1.5(@types/node@26.1.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.1))
       typescript:
         specifier: 5.9.3
         version: 5.9.3
+      vite:
+        specifier: 8.1.5
+        version: 8.1.5(@types/node@26.1.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.1)
       wrangler:
         specifier: 4.118.0
         version: 4.118.0(@cloudflare/workers-types@5.20260920.1)
@@ -263,9 +329,6 @@ importers:
       '@coffre/db':
         specifier: workspace:*
         version: link:../db
-      '@coffre/ui':
-        specifier: workspace:*
-        version: link:../ui
       drizzle-orm:
         specifier: 0.45.2
         version: 0.45.2(@cloudflare/workers-types@5.20260920.1)(@libsql/client@0.18.0)(@types/pg@8.20.0)(pg@8.16.3)
@@ -300,19 +363,12 @@ importers:
 
   packages/ui:
     dependencies:
-      '@coffre/client':
-        specifier: workspace:*
-        version: link:../client
-    devDependencies:
       '@base-ui/react':
         specifier: 1.8.0
         version: 1.8.0(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
-      '@cloudflare/vite-plugin':
-        specifier: 1.50.0
-        version: 1.50.0(vite@8.1.5(@types/node@26.1.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.1))(wrangler@4.118.0(@cloudflare/workers-types@5.20260920.1))
-      '@cloudflare/workers-types':
-        specifier: 5.20260920.1
-        version: 5.20260920.1
+      '@coffre/client':
+        specifier: workspace:*
+        version: link:../client
       '@coffre/core':
         specifier: workspace:*
         version: link:../core
@@ -322,6 +378,13 @@ importers:
       '@fontsource-variable/jetbrains-mono':
         specifier: 5.3.0
         version: 5.3.0
+      lucide-react:
+        specifier: 1.47.0
+        version: 1.47.0(react@19.2.7)
+      sonner:
+        specifier: 2.0.7
+        version: 2.0.7(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+    devDependencies:
       '@tanstack/react-query':
         specifier: 5.103.1
         version: 5.103.1(react@19.2.7)
@@ -334,6 +397,9 @@ importers:
       '@tanstack/react-start':
         specifier: 1.168.32
         version: 1.168.32(esbuild@0.28.1)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(rolldown@1.2.9)(vite@8.1.5(@types/node@26.1.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.1))
+      '@tanstack/router-plugin':
+        specifier: 1.168.23
+        version: 1.168.23(@tanstack/react-router@1.170.18(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(esbuild@0.28.1)(rolldown@1.2.9)(vite@8.1.5(@types/node@26.1.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.1))
       '@types/node':
         specifier: 26.1.1
         version: 26.1.1
@@ -346,18 +412,12 @@ importers:
       agentation:
         specifier: 3.0.2
         version: 3.0.2(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
-      lucide-react:
-        specifier: 1.47.0
-        version: 1.47.0(react@19.2.7)
       react:
         specifier: 19.2.7
         version: 19.2.7
       react-dom:
         specifier: 19.2.7
         version: 19.2.7(react@19.2.7)
-      sonner:
-        specifier: 2.0.7
-        version: 2.0.7(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       tsdown:
         specifier: 0.23.0
         version: 0.23.0(tsx@4.23.1)(typescript@5.9.3)
@@ -367,9 +427,6 @@ importers:
       vite:
         specifier: 8.1.5
         version: 8.1.5(@types/node@26.1.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.1)
-      wrangler:
-        specifier: 4.118.0
-        version: 4.118.0(@cloudflare/workers-types@5.20260920.1)
 
   packages/vault:
     dependencies:

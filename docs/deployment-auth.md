@@ -204,7 +204,7 @@ defined and tested.
 ## Local development
 
 `pnpm dev` signs in as a deployment does, with `signin(…)`
-(`dev/deployment/app.ts`): the dev IdP (`@coffre/conformance/idp`, which
+(`dev/deployment/app/src/server.ts`): the dev IdP (`@coffre/conformance/idp`, which
 `dev/idp` runs on :8081) stands in for GitHub and for an OpenID Connect
 provider, and its authorize page asks which seeded person you are. Plain
 HTTP is accepted for a provider on loopback only, so no deployment can end

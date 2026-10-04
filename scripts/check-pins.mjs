@@ -68,6 +68,18 @@ for (const manifest of manifests) {
     }
 }
 
+// What a deployment's Start app shares with the pages: one copy of each, at
+// the version @coffre/ui is built with, which each example pins exactly, as
+// `coffre init` writes it and `coffre update` moves it.
+const peers = read('packages/ui/package.json').peerDependencies ?? {};
+for (const manifest of manifests.filter((path) => path.startsWith('examples/'))) {
+    const pkg = read(manifest);
+    for (const [name, wanted] of Object.entries(peers)) {
+        const pin = pkg.dependencies?.[name] ?? pkg.devDependencies?.[name];
+        if (pin !== wanted) problems.push(`${manifest}: ${name} is ${pin ?? 'missing'}, and @coffre/ui is built for ${wanted}`);
+    }
+}
+
 if (problems.length > 0) {
     console.error('Dependency pinning check FAILED:\n');
     for (const problem of problems) console.error(`  ${problem}`);
