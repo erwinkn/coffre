@@ -6,8 +6,8 @@ its queries in `src/db`; `/cloudflare` and `/node` entry
 points), `packages/db` (`@coffre/db`: the Drizzle schemas for Postgres and SQLite, their
 migrations and migrator, the dialect helpers, and the connections, Hyperdrive's
 included), `packages/ui` (`@coffre/ui`: the TanStack
-Start pages as a library, the router a deployment's own Start app re-exports, and
-`@coffre/ui/vite`, the Vite plugin its build adds), `packages/vault` (`@coffre/vault`: keys, grants, members, its
+Start pages as a library, routes in code a deployment's own Start app mounts under its
+root, and `@coffre/ui/vite`, the Vite plugin its build adds), `packages/vault` (`@coffre/vault`: keys, grants, members, its
 entries in the shared log), `packages/client` (the typed API client the CLI and UI call), `packages/cli`
 (`coffre`, including `coffre init`), `packages/conformance` (`@coffre/conformance`:
 `coffre-conformance`, which boots a deployment and holds it to what it must never do,
@@ -16,8 +16,9 @@ GitHub and OIDC), and `packages/core` (`@coffre/core`: access rules, the audit c
 envelope encryption, vault keys, identity and sign-in, and the contract between server and
 vault in `src/vault.ts`). `examples/workers` and `examples/node` are deployments,
 exactly what `coffre init` writes (a test diffs them); each one's `app/` is a TanStack
-Start app of its own, built once by Vite, whose server entry wraps Start's handler
-in `coffre(…)` or hands it to `serve(…)` (`docs/architecture.md`, "The UI"). `dev/` holds what only the dev
+Start app of its own, built once by Vite, which mounts coffre's server routes
+(`@coffre/server/routes`), middleware (`@coffre/server/start`) and pages, and whose
+server entry hands each request coffre as its context (`docs/architecture.md`, "The UI"). `dev/` holds what only the dev
 loop uses and nothing ships: `dev/start.sh` (`pnpm dev`), the deployment it runs, the
 dev IdP's launcher (`dev/idp`) and the seed. `scripts/` holds what dev, tests and CI share. The root `README.md` and the
 `package.json` scripts are the source of truth for commands; this file only adds what
@@ -69,9 +70,8 @@ reservation script is CI-only and does not change a developer's host.
 **Run the stack.** `pnpm dev` brings up Postgres + dev IdP (:8081) + coffre (:3000) +
 seed data. It runs `dev/deployment/`, shaped like `examples/workers` (`app/`, a
 Start app, and `vault/`), under `vite dev`, with the vault as an auxiliary Worker
-beside the app and no port of its own. `dev/deployment/app/vite.config.ts` has Start
-generate the route tree from `packages/ui/src/routes`, as from an app's own, and
-resolves every `@coffre/*` import, the config's own included, to its sources through
+beside the app and no port of its own. `dev/deployment/app/vite.config.ts` resolves
+every `@coffre/*` import, the config's own included, to its sources through
 `coffre:source`, so an edit to any package, a page or a route hot-reloads without a
 build. The vault keeps its members, grants and log entries in the same
 Postgres database, through its own login and Hyperdrive binding, and the
@@ -83,8 +83,8 @@ personas; the seed signs in the same way. CLI: `pnpm coffre <cmd>` (from the roo
 against `.env.dev`); `pnpm coffre login` is a device login, approved in the browser.
 
 **Config is code.** The packages read no environment variable of their own; a
-deployment passes everything to `coffre(env => …)`, `serve({…})`, `vault(env => …)`
-or `serveVault({…})`. The env vars left are the CLI's user-facing ones (`COFFRE_API_URL`,
+deployment passes everything to `createCoffre(…)`, `vault(env => …)` or
+`serveVault({…})`. The env vars left are the CLI's user-facing ones (`COFFRE_API_URL`,
 `COFFRE_TOKEN`, …), `DATABASE_URL` for `coffre-server migrate`, and the dev and test
 tooling's (`COFFRE_DEV_*`, `COFFRE_STATE_DIR`, `COFFRE_TEST_ENGINE`,
 `COFFRE_TEST_DATABASE`). Don't add another to a package.
@@ -164,7 +164,8 @@ fast path. Parse errors or an unsupported diff select full validation.
   `pnpm conformance` (`docs/conformance.md`), on ports 3082 to +2; add `--port <n>`
   for another three. Each first builds the example's app with its own Vite, as it
   deploys; Workers then runs `app/dist/server/wrangler.json`, which wrangler does not
-  bundle again. Workers needs Postgres and makes its own
+  bundle again, behind an entry of the harness's own that reads an unread request
+  body (locally, wrangler fails the next request otherwise; coffre never waits on one). Workers needs Postgres and makes its own
   `coffre_conformance_<hex>` database, dropped after; Node runs on SQLite in a temp
   dir. A check that fails prints what it saw, then the processes' output.
 - `pnpm test:compat [--kind workers|node] [--release <v>] [--schema <v>]` installs
@@ -181,12 +182,13 @@ fast path. Parse errors or an unsupported diff select full validation.
   (every path, script and link the docs name exists) do not need Postgres.
 - `scripts/restore-drill.sh` (after `pnpm build`) backs up a seeded Workers
   stack with `pg_dump`, restores it, and checks it came back, then the
-  wrong-key case, on ports 3400 to 3402 and 8481 (`docs/restore.md`). It
-  drops its databases and stops its processes however it ends.
+  wrong-key case, on ports 3400 to 3402 and 8481 and databases `coffre_drill` and
+  `coffre_drill_restored` (`COFFRE_DEV_PORT`, `COFFRE_DEV_IDP_PORT`,
+  `COFFRE_DRILL_DATABASE`; `docs/restore.md`). It drops its databases and stops its
+  processes however it ends.
 - `pnpm typecheck` covers every package, `dev/deployment` and both examples. It does
   not need Postgres, but on a fresh checkout it fails until `pnpm build` has run:
-  that writes `packages/ui/src/routeTree.gen.ts`, and the `dist/` the deployments
-  typecheck against.
+  that writes the `dist/` the deployments typecheck against.
 - Run an example's scripts from the root, `pnpm --filter coffre-workers <script>`, not
   with `--dir`: each example has its own `pnpm-workspace.yaml` (as `init` output
   needs), so pnpm would treat it as a separate, uninstalled workspace.
@@ -194,14 +196,14 @@ fast path. Parse errors or an unsupported diff select full validation.
 **Dependencies.** `pnpm install` enforces exact pins, `ignore-scripts`, and a 7-day
 `minimumReleaseAge` (`pnpm-workspace.yaml`). Add deps with `pnpm run add:dep`
 (`--save-exact`), never a bare `pnpm add` (it writes caret ranges).
-`packages/ui/src/routeTree.gen.ts` is generated by the UI's `vite build` and by `pnpm dev`, and
-gitignored, so it is absent on a fresh checkout (see the typecheck note above). The
-examples pin `@coffre/*` at the packages' version, and `linkWorkspacePackages` links
+The examples pin `@coffre/*` at the packages' version, and `linkWorkspacePackages` links
 them to the workspace; `pnpm bump` keeps them in step. `@coffre/ui`'s peers (React, react-dom,
 TanStack Router, Start, Query, its SSR integration, and Vite) are exact pins too, and
 each example pins them at exactly those versions: `pnpm check:pins` fails on drift, as
 does a deployment's own build (`@coffre/ui/vite`), and `coffre update` moves them with
-coffre's packages. The same `minimumReleaseAge`
+coffre's packages. `@coffre/server` peers on the same TanStack, and both depend on
+`@tanstack/router-core` at the version react-router does: their declarations import
+it, and a copy of its types would lack react-router's additions (`check:pins`). The same `minimumReleaseAge`
 is in each example's `pnpm-workspace.yaml`, so in every deployment `init` writes,
 with `@coffre/*` exempt so that a coffre fix is not held back a week.
 

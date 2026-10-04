@@ -31,7 +31,7 @@ import {
   type Moved,
 } from './deployment.ts';
 import { templateDir, type Kind } from './init.ts';
-import { applyChanges, needsStartApp, shownChange, startAppMove } from './layout.ts';
+import { applyChanges, shownChange, startAppMove } from './layout.ts';
 import { StepFailed, Steps } from './steps.ts';
 import { Cancelled, listed, openTerminal, type Output, release, style } from './tty.ts';
 import { cliVersion } from './version.ts';
@@ -295,13 +295,14 @@ export async function update(args: string[]): Promise<void> {
         const repin = pnpm !== null && coffrePackageManager(deployment) !== pnpm;
         const was = pinned.length === 1 ? pinned[0]! : listed(pinned, 'and');
         // A deployment from before its app was a Start app of its own becomes one, file by file, as init writes it.
-        const move = needsStartApp(deployment) ? startAppMove(deployment, kind as Kind, template) : [];
-        if (!Array.isArray(move)) {
+        const moving = startAppMove(deployment, kind as Kind, template);
+        if ('problems' in moving) {
           return {
-            text: `This deployment stays as it is, at ${was}: coffre ${latest}'s app is a TanStack Start app of its own, and ${move.problem}`,
-            details: [...details, 'Make the move by hand (docs/deploy.md, Upgrading to 0.2), then run coffre update again'],
+            text: `This deployment stays as it is, at ${was}: coffre ${latest}'s app is a TanStack Start app of its own, and this one cannot be moved to it as it is. Nothing was changed`,
+            details: [...details, ...moving.problems, 'Make the move by hand (docs/deploy.md, "Upgrading to 0.2"), then run coffre update again'],
           };
         }
+        const move = moving.changes;
         // What its Start app builds with, as the release's pages are built with.
         const shared = startPinMoves(deployment, template);
         const current = pinned.length === 1 && pinned[0] === latest;
@@ -385,7 +386,7 @@ export async function update(args: string[]): Promise<void> {
           before = deploymentMigrations(deployment) ?? before;
           if (move.length > 0) {
             applyChanges(deployment, move);
-            details.push(`Made it its own Start app: ${listed(move.map(({ path }) => path), 'and')}. Its app now builds with vite build app`);
+            details.push(`Made it its own Start app: ${listed(move.map(({ path }) => path), 'and')}. Its app now builds with vite build app`, ...moving.notes);
           }
           if (shared.length > 0) {
             movePins(deployment, shared);

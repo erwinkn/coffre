@@ -1,49 +1,64 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { cloudflareHandler, drainUnread, PAGES_MISSING, postgres, type WorkersConfig } from '../src/cloudflare-handler.ts';
+import { signin, github } from '@coffre/core/identity';
 
-/** A body of `size` bytes, in chunks of 64 KiB, that says whether it was cancelled. */
-function body(size: number) {
-  let sent = 0;
-  let cancelled = false;
-  const stream = new ReadableStream<Uint8Array>({
-    pull(controller) {
-      if (sent >= size) return controller.close();
-      const chunk = new Uint8Array(Math.min(65_536, size - sent));
-      sent += chunk.byteLength;
-      controller.enqueue(chunk);
-    },
-    cancel() {
-      cancelled = true;
+import { coffre, createCoffre, postgres, type CoffreContext } from '../src/cloudflare.ts';
+import { api, auth, coffreServerRoutes, livez, readyz } from '../src/routes.ts';
+import { NO_COFFRE, NO_MIDDLEWARE } from '../src/wiring.ts';
+import { testVault } from './api-fixture.ts';
+
+const worker = createCoffre(() => ({
+  publicUrl: 'https://coffre.test',
+  database: postgres({ connectionString: 'postgres://nobody@127.0.0.1:1/none' }),
+  vault: testVault(['admin@acme.example']),
+  auth: signin({ providers: [github({ clientId: 'id', clientSecret: 'secret' })] }),
+  auditChainKey: Buffer.alloc(32, 1).toString('base64'),
+}));
+
+/** Start, as far as these need it: coffre's middleware, then coffre's routes. */
+const start = (request: Request, { coffre }: CoffreContext) => coffre.respond(request, () => coffre.route(request));
+
+test('a refusal answers at once, though its body never ends: nothing waits on what a caller still sends', async () => {
+  const neverEnds = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new Uint8Array([1]));
     },
   });
-  return { stream, sent: () => sent, cancelled: () => cancelled };
-}
-
-test('a body answered unread is read to its end, a mebibyte at most, and then let go', async () => {
-  const small = body(10_000);
-  const request = new Request('https://coffre.example/api/reveals', { method: 'POST', body: small.stream, duplex: 'half' } as RequestInit);
-  await drainUnread(request);
-  assert.equal(small.sent(), 10_000);
-  assert.equal(request.bodyUsed, true);
-
-  const large = body(64 << 20);
-  await drainUnread(new Request('https://coffre.example/api/reveals', { method: 'POST', body: large.stream, duplex: 'half' } as RequestInit));
-  assert.ok(large.sent() <= (1 << 20) + 2 * 65_536, `read ${large.sent()} bytes of 64 MiB`);
-  assert.equal(large.cancelled(), true);
-
-  // Read already, or none: nothing to do.
-  const read = new Request('https://coffre.example/api/x', { method: 'POST', body: 'x' });
-  await read.text();
-  await drainUnread(read);
-  await drainUnread(new Request('https://coffre.example/livez'));
+  const request = new Request('https://coffre.test/livez', { method: 'POST', body: neverEnds, duplex: 'half' } as RequestInit);
+  const answered = await Promise.race([
+    start(request, worker.request({}, { waitUntil: () => {} })),
+    new Promise<'waiting'>((resolve) => setTimeout(() => resolve('waiting'), 250)),
+  ]);
+  assert.notEqual(answered, 'waiting');
+  assert.equal((answered as Response).status, 405);
+  assert.match((answered as Response).headers.get('content-security-policy') ?? '', /script-src 'self' 'nonce-/);
 });
 
-test("an app from before it was its own Start app has no pages, and is told how to move", async () => {
-  const handler = cloudflareHandler(() => ({ database: postgres({ connectionString: 'postgres://x@127.0.0.1/x' }) }) as unknown as WorkersConfig);
-  await assert.rejects(
-    handler.fetch(new Request('https://coffre.example/livez'), {}, { waitUntil: () => {} }),
-    (error: Error) => error.message === PAGES_MISSING && /npx @coffre\/cli@latest update/.test(error.message),
+test("a request's database is closed once coffre's work for it is done, and not before it begins", async () => {
+  const left: Promise<unknown>[] = [];
+  const context = worker.request({}, { waitUntil: (promise) => void left.push(promise) });
+  assert.equal(left.length, 0);
+  const response = await start(new Request('https://coffre.test/livez'), context);
+  assert.equal(response.status, 200);
+  assert.ok(left.length > 0, 'nothing was left to close the database');
+  await Promise.all(left);
+});
+
+test("0.1's coffre(env => …) says how to move, the moment it runs", () => {
+  assert.throws(() => coffre(), /since 0\.2 the app is a TanStack Start app of its own.*npx @coffre\/cli@latest update/);
+});
+
+test("coffre's server routes, without its middleware or without coffre in the context, say which is missing", async () => {
+  const root = { id: '__root__' } as never;
+  for (const route of [...coffreServerRoutes(root), api(root), auth(root), livez(root), readyz(root)]) {
+    const handler = (route.options as unknown as { server: { handlers: { ANY: (ctx: { request: Request; context: unknown }) => unknown } } }).server.handlers.ANY;
+    const request = new Request('https://coffre.test/livez');
+    assert.throws(() => handler({ request, context: {} }), (error: Error) => error.message === NO_MIDDLEWARE);
+    assert.throws(() => handler({ request, context: { coffreMiddleware: true } }), (error: Error) => error.message === NO_COFFRE);
+  }
+  assert.deepEqual(
+    coffreServerRoutes({ id: "__root__" } as never).map((route) => (route.options as unknown as { path: string }).path),
+    ['/api/$', '/auth/$', '/livez', '/readyz'],
   );
 });

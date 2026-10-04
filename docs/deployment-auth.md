@@ -96,13 +96,13 @@ request away before it reaches coffre.
 ## Behind Cloudflare Access
 
 Configure one Cloudflare Access application for the production hostname, then
-give the app Worker (`app/src/worker.ts`) that application instead of
-`signin(…)`:
+give the app's configuration (`app/src/coffre.ts`) that application instead
+of `signin(…)`:
 
 ```ts
-import { cloudflareAccess, coffre, postgres } from '@coffre/server/cloudflare';
+import { cloudflareAccess, createCoffre, postgres } from '@coffre/server/cloudflare';
 
-export default coffre((env: Env) => ({
+export const coffre = createCoffre((env: Env) => ({
   // …
   auth: cloudflareAccess({ teamDomain: 'acme.cloudflareaccess.com', audience: env.ACCESS_AUD }),
 }));
@@ -117,7 +117,7 @@ export default coffre((env: Env) => ({
   `wrangler.jsonc` as a var; it is not a secret.
 
 The GitHub settings and `GITHUB_CLIENT_SECRET` are then unused: drop them
-from `wrangler.jsonc` and the worker's `Env`.
+from `wrangler.jsonc` and the configuration's `Env`.
 
 Cloudflare documents that the origin receives the application token in
 `Cf-Access-Jwt-Assertion`, and recommends validating that header rather than

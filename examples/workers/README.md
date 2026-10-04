@@ -4,10 +4,14 @@ Two Workers, configured in code:
 
 - `app/`, the app: the API, sign-in, the pages and a Cron job every five
   minutes. It is a TanStack Start app of its own, built by Vite
-  (`app/vite.config.ts`): `app/src/server.ts` is its server entry, where
-  coffre is configured, and `app/src/router.tsx` takes the pages from
-  `@coffre/ui`. It reaches Postgres through Hyperdrive, and the vault
-  through a service binding.
+  (`app/vite.config.ts`). coffre is configured in `app/src/coffre.ts`;
+  `app/src/server.ts`, the Worker, hands it each request; `app/src/start.ts`
+  puts coffre's middleware in front of every response; and
+  `app/src/router.tsx` is the app's routes: its root, the document, and
+  coffre's routes under it, which you may mount one by one beside your own
+  ([Your own routes](https://github.com/erwinkn/coffre/blob/main/docs/deploy.md#your-own-routes)).
+  It reaches Postgres through Hyperdrive, and the vault through a service
+  binding.
 - `vault/src/worker.ts`, the vault: the keys, and the members and grants,
   which it keeps in the same database through a login of its own. It has no
   URL of its own.
@@ -117,8 +121,8 @@ follow the [restore runbook](https://github.com/erwinkn/coffre/blob/main/docs/re
 
 ## Locally
 
-`pnpm dev` builds the app and runs both Workers with `wrangler dev`, the app
-as it deploys. Put local secrets in `app/.dev.vars` and `vault/.dev.vars`, and point Hyperdrive at a local
+`pnpm dev` runs both Workers under `vite dev`, the vault beside the app, and
+reloads the app as you edit it. Put local secrets in `app/.dev.vars` and `vault/.dev.vars`, and point Hyperdrive at a local
 database with `CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE`,
 for the app's login, and
 `CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_VAULT_HYPERDRIVE`, for the

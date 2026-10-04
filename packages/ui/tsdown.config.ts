@@ -5,7 +5,7 @@ import { defineConfig } from 'tsdown';
 // must leave alone.
 export default defineConfig([
   {
-    entry: { index: 'src/types.ts' },
+    entry: { index: 'src/index.ts' },
     platform: 'neutral',
     dts: { emitDtsOnly: true },
     clean: false,

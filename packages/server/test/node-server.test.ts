@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { github, signin } from '@coffre/core/identity';
 import { migrateDatabase } from '@coffre/db/migrate';
 
+import { answer } from './start-fixture.ts';
 import { serveWith, type Server } from '../src/node-server.ts';
 import { testVault } from './api-fixture.ts';
 
@@ -44,10 +45,9 @@ test.before(async () => {
       vault: testVault(['admin@acme.example']),
       auth: signin({ providers: [github({ clientId: 'id', clientSecret: 'secret' })] }),
       auditChainKey: Buffer.alloc(32, 1).toString('base64'),
-      port: 0,
-      schedule: false,
     },
-    ui,
+    { port: 0, schedule: false },
+    (request, runtime, sourceIp) => answer(request, runtime, ui, sourceIp),
     statics,
   );
 });

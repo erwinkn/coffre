@@ -1,5 +1,6 @@
-// The Node server behind `serve()`, with the pages passed in: tests bring a
-// stand-in UI and no static files.
+// The Node server behind `serve()`, with what answers each request passed
+// in: the deployment's Start app, or in tests coffre's routes and a stand-in
+// for the pages.
 import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -8,16 +9,20 @@ import { Readable } from 'node:stream';
 
 import { openDatabase } from '@coffre/db/connect';
 
-import { handleRequest, runScheduled } from './app.ts';
+import { runScheduled } from './app.ts';
 import { resolveConfig, type CoffreConfig } from './config.ts';
 import { logged } from './logged.ts';
-import { createRuntime } from './runtime.ts';
+import { createRuntime, type CoffreRuntime } from './runtime.ts';
 import { nodeTransport } from './workloads/node-transport.ts';
-import type { Ui } from './ui.ts';
 
-export type ServeOptions = CoffreConfig & {
+/** coffre's configuration on Node. */
+export type NodeConfig = CoffreConfig & {
   /** `postgres://…`, or `file:coffre.db` for local SQLite. */
   database: string;
+};
+
+/** Where and when the server runs. */
+export type ServeOptions = {
   /** 3000 unless set. */
   port?: number;
   /** Where to listen; 127.0.0.1 unless set, for a proxy in front to terminate TLS. */
@@ -34,14 +39,23 @@ export type Server = {
 
 const SCHEDULE_MINUTES = 5;
 
-/** Serve coffre with these pages until `close()`. */
-export async function serveWith(options: ServeOptions, ui: Ui, staticFiles: string | null): Promise<Server> {
+/** What answers one request, with the server's runtime and the caller's address. */
+export type Answer = (request: Request, runtime: CoffreRuntime, sourceIp: string | null) => Promise<Response>;
+
+/** Check coffre's configuration on Node, failing on the first problem. */
+export function checkNodeConfig(options: NodeConfig) {
   const config = resolveConfig(options);
   if (typeof options.database !== 'string' || options.database.length === 0) {
     throw new Error('database must be a URL: postgres://… or file:…');
   }
-  const database = await openDatabase(options.database);
-  const runtime = createRuntime(config, database.db, options.vault, nodeTransport());
+  return config;
+}
+
+/** Serve coffre, each request answered by `answer`, until `close()`. */
+export async function serveWith(coffre: NodeConfig, options: ServeOptions, answer: Answer, staticFiles: string | null): Promise<Server> {
+  const config = checkNodeConfig(coffre);
+  const database = await openDatabase(coffre.database);
+  const runtime = createRuntime(config, database.db, coffre.vault, nodeTransport());
   const origin = config.publicUrl;
 
   const server = createServer((req, res) => {
@@ -68,7 +82,7 @@ export async function serveWith(options: ServeOptions, ui: Ui, staticFiles: stri
     const aborted = new AbortController();
     res.once('close', () => aborted.abort());
     const request = toRequest(req, url, aborted.signal);
-    const response = await handleRequest(request, runtime, ui, peerAddress(req));
+    const response = await answer(request, runtime, peerAddress(req));
     await send(response, req, res);
   }
 

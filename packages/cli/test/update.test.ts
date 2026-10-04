@@ -237,13 +237,38 @@ test('update --yes makes a Workers deployment of 0.1.18 its own Start app, as in
     let stderr = '';
     child.stderr.setEncoding('utf8').on('data', (chunk: string) => (stderr += chunk));
     assert.equal(await new Promise((resolve) => child.on('close', resolve)), 0, stderr);
-    assert.match(stderr, /Made it its own Start app: app\/vite\.config\.ts, app\/src\/router\.tsx, app\/src\/worker\.ts, app\/src\/server\.ts, app\/wrangler\.jsonc, package\.json and \.gitignore/);
+    assert.match(stderr, /Made it its own Start app: app\/vite\.config\.ts, app\/src\/start\.ts, app\/src\/router\.tsx, app\/src\/server\.ts, app\/src\/coffre\.ts, app\/wrangler\.jsonc, package\.json, tsconfig\.json, \.gitignore, README\.md and app\/src\/worker\.ts/);
     const template = join(examples, 'workers');
-    for (const path of ['app/vite.config.ts', 'app/src/router.tsx', 'app/src/server.ts', 'app/wrangler.jsonc', '.gitignore']) {
+    for (const path of ['app/vite.config.ts', 'app/src/start.ts', 'app/src/router.tsx', 'app/src/server.ts', 'app/src/coffre.ts', 'app/wrangler.jsonc', 'tsconfig.json', '.gitignore', 'README.md']) {
       assert.equal(readFileSync(join(dir, path), 'utf8'), readFileSync(join(template, path), 'utf8'), path);
     }
     assert.equal(existsSync(join(dir, 'app/src/worker.ts')), false);
     assert.ok(Object.values(coffrePins(dir)).every((version) => version === '9.9.9'));
+  } finally {
+    close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("update --yes leaves a deployment it cannot move as it was, byte for byte, and says why and what to do", async () => {
+  const { dir, env, close } = await heldDeployment();
+  try {
+    rmSync(join(dir, 'app'), { recursive: true, force: true });
+    cpSync(fileURLToPath(new URL('fixtures/0.1.18/workers/', import.meta.url)), dir, { recursive: true });
+    writeFileSync(join(dir, 'app/src/server.ts'), 'export const helper = () => 42;\n');
+    writeFileSync(join(dir, '.bin', 'pnpm'), '#!/bin/sh\nexit 0\n');
+    const before = ['package.json', 'app/wrangler.jsonc', 'app/src/worker.ts', 'app/src/server.ts'].map((path) => readFileSync(join(dir, path), 'utf8'));
+    const { spawn } = await import('node:child_process');
+    const child = spawn(process.execPath, ['--conditions=coffre:source', main, 'update', '--yes'], { cwd: dir, env });
+    let stderr = '';
+    child.stderr.setEncoding('utf8').on('data', (chunk: string) => (stderr += chunk));
+    await new Promise((resolve) => child.on('close', resolve));
+    assert.match(stderr, /cannot be moved to it as it is\. Nothing was changed/);
+    assert.match(stderr, /app\/src\/server\.ts is there already, and is not what coffre 0\.2 writes there/);
+    assert.match(stderr, /Make the move by hand \(docs\/deploy\.md, "Upgrading to 0\.2"\), then run coffre update again/);
+    const after = ['package.json', 'app/wrangler.jsonc', 'app/src/worker.ts', 'app/src/server.ts'].map((path) => readFileSync(join(dir, path), 'utf8'));
+    assert.deepEqual(after, before);
+    assert.equal(existsSync(join(dir, 'app/vite.config.ts')), false);
   } finally {
     close();
     rmSync(dir, { recursive: true, force: true });
@@ -257,7 +282,7 @@ test('update --yes makes a Workers deployment of 0.1.18 its own Start app, as in
  */
 async function heldDeployment() {
   const dir = mkdtempSync(join(tmpdir(), 'coffre-held-'));
-  for (const file of ['package.json', 'pnpm-workspace.yaml', 'app/wrangler.jsonc', 'app/vite.config.ts', 'app/src/router.tsx', 'app/src/server.ts', 'vault/wrangler.jsonc']) {
+  for (const file of ['package.json', 'pnpm-workspace.yaml', 'app/wrangler.jsonc', 'app/vite.config.ts', 'app/src/coffre.ts', 'app/src/start.ts', 'app/src/router.tsx', 'app/src/server.ts', 'vault/wrangler.jsonc']) {
     mkdirSync(join(dir, file, '..'), { recursive: true });
     cpSync(join(examples, 'workers', file), join(dir, file));
   }

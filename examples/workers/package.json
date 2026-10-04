@@ -7,7 +7,7 @@
     "node": ">=24"
   },
   "scripts": {
-    "dev": "vite build app && wrangler dev -c app/dist/server/wrangler.json -c vault/wrangler.jsonc",
+    "dev": "vite dev app",
     "typecheck": "tsc --noEmit",
     "build": "wrangler deploy --dry-run -c vault/wrangler.jsonc && vite build app && wrangler deploy --dry-run -c app/dist/server/wrangler.json",
     "deploy": "wrangler deploy -c vault/wrangler.jsonc && vite build app && wrangler deploy -c app/dist/server/wrangler.json",
@@ -29,6 +29,7 @@
     "@cloudflare/workers-types": "5.20260920.1",
     "@coffre/cli": "0.1.18",
     "@coffre/conformance": "0.1.18",
+    "@types/react": "19.2.17",
     "@vitejs/plugin-react": "6.0.3",
     "typescript": "5.9.3",
     "vite": "8.1.5",

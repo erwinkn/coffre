@@ -1,14 +1,18 @@
 // `@coffre/ui/vite`: what a deployment's Vite build needs to carry coffre's
 // pages, beside TanStack Start's and React's own plugins:
 //
-//   plugins: [cloudflare(…), tanstackStart(), viteReact(), coffre()]
+//   plugins: [cloudflare(…), tanstackStart({ router: { enableRouteGeneration: false } }), viteReact(), coffre()]
+//
+// The app's routes are code (its src/router.tsx), so Start's generator, which
+// looks for files in src/routes, is off.
 //
 // It runs in Node, in the deployment's build; nothing here reaches a page.
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-import type { Plugin } from 'vite';
+import { searchForWorkspaceRoot, type Plugin } from 'vite';
 
 /**
  * The schema's tables whose names could appear in no page: those with an
@@ -72,14 +76,50 @@ export function versionDrift(root: string): string[] {
 
 /**
  * The routes manifest Start's server build reads. Its route generator writes
- * it for the routes it finds in the app's own `src/routes`; coffre's come
- * prebuilt from this package, so there are none to find. The root alone
+ * it for the routes it finds in an app's `src/routes`; with the routes in
+ * code, the generator is off and there is none. The root alone
  * carries the client entry, which is all the pages need: each route's code
  * is loaded as the route is.
  */
 function routesManifest(): void {
   const scope = globalThis as { TSS_ROUTES_MANIFEST?: unknown };
   scope.TSS_ROUTES_MANIFEST ??= { __root__: {} };
+}
+
+/** Files the browser runs or reads as text, which the guard reads whatever form the build holds them in. */
+const TEXT = /\.(m?js|css|html|json|svg|txt|wasm\.js)$/;
+
+/** An emitted file's text: a chunk's code, or an asset's source, a string or bytes. */
+function textOf(file: { type: 'chunk'; code: string } | { type: 'asset'; fileName: string; source: string | Uint8Array }): string {
+  if (file.type === 'chunk') return file.code;
+  if (typeof file.source === 'string') return file.source;
+  return TEXT.test(file.fileName) ? new TextDecoder().decode(file.source) : '';
+}
+
+const PRELOADS = 'virtual:coffre/preloads';
+
+/**
+ * Each of coffre's pages, by name, and the files the browser needs to show
+ * it: its chunk and every chunk that one imports. `@coffre/ui` emits each
+ * page as `dist/pages/<name>.js`; the deployment's build makes it a chunk of
+ * its own, which this finds in the client's bundle.
+ */
+function pagePreloads(bundle: Record<string, { type: string; fileName: string; facadeModuleId?: string | null; imports?: string[] }>, base: string) {
+  const chunks = new Map(Object.values(bundle).filter((file) => file.type === 'chunk').map((chunk) => [chunk.fileName, chunk]));
+  const preloads: Record<string, string[]> = {};
+  for (const chunk of chunks.values()) {
+    const page = /[\\/](?:@coffre[\\/]ui|packages[\\/]ui)[\\/]dist[\\/]pages[\\/]([a-z-]+)\.js$/.exec(chunk.facadeModuleId ?? '')?.[1];
+    if (page === undefined) continue;
+    const files = new Set<string>();
+    const visit = (fileName: string) => {
+      if (files.has(fileName)) return;
+      files.add(fileName);
+      for (const imported of chunks.get(fileName)?.imports ?? []) visit(imported);
+    };
+    visit(chunk.fileName);
+    preloads[page] = [...files].map((file) => `${base}${file}`);
+  }
+  return preloads;
 }
 
 /**
@@ -89,11 +129,19 @@ function routesManifest(): void {
  * server in what the browser loads.
  */
 export function coffre(): Plugin {
+  // Found in the client's build, which Start runs first, and read in the server's.
+  let preloads: Record<string, string[]> = {};
+  let base = '/';
   return {
     name: 'coffre',
-    config() {
+    sharedDuringBuild: true,
+    config(config) {
       routesManifest();
       return {
+        // `vite dev` serves coffre's files from this package, wherever it
+        // is: under node_modules, inside the project, as installed; or
+        // linked from elsewhere. Naming it keeps the project's own root.
+        server: { fs: { allow: [searchForWorkspaceRoot(resolve(config.root ?? '')), fileURLToPath(new URL('..', import.meta.url))] } },
         // The server's build holds all it renders with, as a Worker's does:
         // run by Node, it then resolves nothing from node_modules, where
         // pnpm lets a deployment reach only its own dependencies.
@@ -109,7 +157,18 @@ export function coffre(): Plugin {
         },
       };
     },
+    resolveId(id) {
+      return id === PRELOADS ? `\0${PRELOADS}` : null;
+    },
+    // The server renders each page's preloads into its head (routes.ts);
+    // the browser's own navigations preload through the router.
+    load(id) {
+      if (id !== `\0${PRELOADS}`) return null;
+      const known = this.environment.name === 'client' ? {} : preloads;
+      return `export default ${JSON.stringify(known)};`;
+    },
     configResolved(config) {
+      base = config.base;
       if (config.command !== 'build') return;
       const drift = versionDrift(config.root);
       if (drift.length > 0) {
@@ -121,10 +180,8 @@ export function coffre(): Plugin {
     },
     generateBundle(_options, bundle) {
       if (this.environment.name !== 'client') return;
-      const files = Object.values(bundle).map((file) => ({
-        name: file.fileName,
-        code: file.type === 'chunk' ? file.code : typeof file.source === 'string' ? file.source : '',
-      }));
+      preloads = pagePreloads(bundle, base);
+      const files = Object.values(bundle).map((file) => ({ name: file.fileName, code: textOf(file) }));
       const found = serverCodeIn(files);
       if (found.length > 0) {
         this.error(

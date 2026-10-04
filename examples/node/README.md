@@ -4,9 +4,13 @@ Two processes, configured in code:
 
 - `src/server.ts`, the server: the API, sign-in, the pages and a job every
   five minutes, on one port. Put a proxy that terminates TLS in front of it.
-  The pages are `app/`, a TanStack Start app of its own whose router is
-  `@coffre/ui`'s (`app/src/router.tsx`): `pnpm build` builds it with Vite
-  (`app/vite.config.ts`) into `app/dist`, which the server serves.
+  coffre is configured there, and serves `app/`, a TanStack Start app of
+  its own: `app/src/router.tsx` is its routes, its root and coffre's routes
+  under it, which you may mount one by one beside your own
+  ([Your own routes](https://github.com/erwinkn/coffre/blob/main/docs/deploy.md#your-own-routes)),
+  and `app/src/start.ts` puts coffre's middleware in front of every
+  response. `pnpm build` builds it with Vite (`app/vite.config.ts`) into
+  `app/dist`.
 - `src/vault.ts`, the vault: the keys, and the members and grants, which it
   keeps in the server's database through a login of its own. It answers
   only the server, on a Unix socket.

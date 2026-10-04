@@ -205,20 +205,24 @@ unset COFFRE_MIGRATE_DATABASE_URL
 
 ```
 acme-secrets/
-  app/vite.config.ts     the app's build: cloudflare(…), tanstackStart(), viteReact(), coffre()
-  app/src/server.ts      coffre(env => ({ pages, publicUrl, database, vault, auth, auditChainKey }))
-  app/src/router.tsx     export { getRouter } from '@coffre/ui': the pages
+  app/src/coffre.ts      createCoffre(env => ({ publicUrl, database, vault, auth, auditChainKey }))
+  app/src/server.ts      { fetch: Start's handler, coffre.request(env, ctx) its context; scheduled }
+  app/src/start.ts       createStart(() => ({ requestMiddleware: [coffreMiddleware] }))
+  app/src/router.tsx     the root, the document; coffre's server routes and pages under it
+  app/vite.config.ts     cloudflare(…), tanstackStart(…), viteReact(), coffre()
   app/wrangler.jsonc     HYPERDRIVE, VAULT service binding, Cron
   vault/src/worker.ts    vault(env => ({ database, kek, rootAdmins }))
   vault/wrangler.jsonc   VAULT_HYPERDRIVE; no public route
 ```
 
-The app is a TanStack Start app of its own, whose pages are `@coffre/ui`'s
-([the UI](architecture.md#the-ui)). `vite build app` builds it into
+The app is a TanStack Start app of its own, with coffre's routes and
+middleware in it ([Your own routes](#your-own-routes), and
+[the UI](architecture.md#the-ui)). `vite build app` builds it into
 `app/dist`: the Worker and its `wrangler.json`, which `wrangler deploy -c
 app/dist/server/wrangler.json` uploads as it is, and the pages' static files,
 which become the Worker's assets. The vault is a plain Worker, which wrangler
-builds itself.
+builds itself. `pnpm dev` runs both under `vite dev`, the vault beside the
+app.
 
 ### Workers Builds
 
@@ -240,33 +244,123 @@ release runs on the schema before and after its migrations.
 ### Upgrading to 0.2
 
 Since 0.2 a deployment's app is a TanStack Start app of its own, built by
-Vite, rather than a Worker or a server that imports prebuilt pages. Move it
-with the 0.2 CLI, in the deployment's directory:
+Vite, with coffre's routes and middleware in it, rather than a Worker or a
+server that imports prebuilt pages. Move it with the 0.2 CLI, in the
+deployment's directory:
 
 ```sh
 npx @coffre/cli@0.2.0 update
 ```
 
-An older CLI's `coffre update` moves the pins but not the files, and the
-app then says, when it starts, that its `pages` are missing; this command
-moves both. It shows each file it changes, line by line, and asks once:
+It moves the files a release of 0.1 wrote, and only those. It recognises
+each entry, `app/src/worker.ts` or `src/server.ts`, byte for byte, as one of
+the versions 0.1 wrote, and writes its configuration in 0.2's shape as that
+version had it: a deployment of 0.1.2 keeps its `AUDIT_CHAIN_KEY`, one of
+0.1.15 gains no CI sign-in it did not have. It changes `app/wrangler.jsonc`'s
+`main`, `assets` and `keep_names`, and `package.json`'s scripts, only from
+the values 0.1 wrote. It shows each file it changes, line by line, and asks
+once. It changes nothing, and names each file and what to do, when:
 
-- on Workers, `app/src/worker.ts` becomes `app/src/server.ts`, with `import
-  pages from '@tanstack/react-start/server-entry'` and `pages` first in
-  `coffre(…)`'s configuration; `app/wrangler.jsonc`'s `main` names it, and
-  its `assets` and `keep_names`, which the build now sets or no longer
-  needs, go;
-- on Node, `src/server.ts` gets `pages: new URL('../app/dist/', import.meta.url)`;
-- both get `app/vite.config.ts` and `app/src/router.tsx`, React, TanStack
-  Start and Vite in `package.json` at the versions `@coffre/ui` is built
-  with, the template's scripts where theirs are the template's, and `dist`
-  in `.gitignore`.
+- the entry is not as 0.1 wrote it: its configuration is yours;
+- a file 0.2 writes is already there, and is not what 0.2 writes there,
+  such as a helper of yours at `app/src/server.ts`;
+- `main`, `assets` or `keep_names` hold values of yours;
+- a `dev`, `build` or `deploy` script is yours, even one that runs 0.1's:
+  it would still build 0.1's app.
+
+A `tsconfig.json` or `README.md` of yours stays as it is; it says what the
+tsconfig then lacks. The entry changes last, so a move cut short is found
+again, and finished, by the next run. An older CLI's `coffre update` moves
+the pins but not the files, and the app then says, as it starts, to run
+this one.
+
+By hand, on Workers: `app/src/worker.ts` becomes `app/src/coffre.ts`, its
+configuration unchanged but for its first and last lines, and Start's
+server entry, `app/src/server.ts`, hands it to each request:
+
+```diff
+ // app/src/coffre.ts, was app/src/worker.ts
+-import { coffre, github, postgres, signin, type Vault } from '@coffre/server/cloudflare';
++import { createCoffre, github, postgres, signin, type CoffreContext, type Vault } from '@coffre/server/cloudflare';
+
+-type Env = {
++export type Env = {
+   …
+ };
+
+-export default coffre((env: Env) => ({
++export const coffre = createCoffre((env: Env) => ({
+   …
+ }));
++
++// What src/server.ts hands Start with each request, for Start's types.
++declare module '@tanstack/react-router' {
++  interface Register {
++    server: { requestContext: CoffreContext };
++  }
++}
+```
+
+```diff
+ // app/wrangler.jsonc
+-  "main": "src/worker.ts",
++  "main": "src/server.ts",
+-  "keep_names": false,
+-  "assets": { "directory": "../node_modules/@coffre/ui/dist/client" }
+```
+
+```diff
+ // package.json
+-    "dev": "wrangler dev -c app/wrangler.jsonc -c vault/wrangler.jsonc",
++    "dev": "vite dev app",
+-    "build": "wrangler deploy --dry-run -c vault/wrangler.jsonc && wrangler deploy --dry-run -c app/wrangler.jsonc",
++    "build": "wrangler deploy --dry-run -c vault/wrangler.jsonc && vite build app && wrangler deploy --dry-run -c app/dist/server/wrangler.json",
+-    "deploy": "wrangler deploy -c vault/wrangler.jsonc && wrangler deploy -c app/wrangler.jsonc",
++    "deploy": "wrangler deploy -c vault/wrangler.jsonc && vite build app && wrangler deploy -c app/dist/server/wrangler.json",
+```
+
+Then copy [`app/src/server.ts`](../examples/workers/app/src/server.ts),
+[`app/src/start.ts`](../examples/workers/app/src/start.ts),
+[`app/src/router.tsx`](../examples/workers/app/src/router.tsx) and
+[`app/vite.config.ts`](../examples/workers/app/vite.config.ts) from the
+release's `coffre init --workers`; add `"jsx": "react-jsx"` to
+`tsconfig.json`'s `compilerOptions`, and `dist` to `.gitignore`; and add
+the dependencies the release's [package.json](../examples/workers/package.json)
+has that yours lacks, React, TanStack Router, Start, Query, Vite and their
+plugins, at exactly its versions.
+
+By hand, on Node: `src/server.ts` configures coffre, then serves the app
+with it:
+
+```diff
+ // src/server.ts
+-import { github, processLimits, serve, signin } from '@coffre/server/node';
++import { createCoffre, github, processLimits, serve, signin } from '@coffre/server/node';
+ …
+-const server = await serve({
+-  port: Number(env('PORT')),
++const coffre = createCoffre({
+   publicUrl: env('PUBLIC_URL'),
+   …
+   auditChainKey: env('APP_KEY'),
+ });
++
++// app/, built by `vite build app`.
++const server = await serve({ app: new URL('../app/dist/', import.meta.url), coffre, port: Number(env('PORT')) });
+ console.log(`coffre is listening on ${server.url}`);
+```
+
+Then copy [`app/`](../examples/node/app/src/router.tsx) from the release's
+`coffre init --node` (`app/vite.config.ts`, `app/src/start.ts` and
+`app/src/router.tsx`); add `"build": "vite build app"` to `package.json`'s
+scripts, and the dependencies its [package.json](../examples/node/package.json)
+has that yours lacks, at exactly its versions; add `"jsx": "react-jsx"` to
+`tsconfig.json`'s `compilerOptions` and `"app/src"` to its `include`, and
+`dist` to `.gitignore`.
 
 Then `pnpm typecheck`, and deploy: on Workers, set the app's build and
-deploy commands as the table above says, or `pnpm run deploy`; on Node,
-`pnpm build` and restart both processes. An entry changed so far that
-update cannot find `coffre(…)`'s or `serve(…)`'s configuration is left as it
-is, with the steps above to make by hand.
+deploy commands as [Workers Builds](#workers-builds) says, or `pnpm run
+deploy`; on Node, `pnpm build` and restart both processes.
 
 ### Upgrading to 0.1.12
 
@@ -438,13 +532,17 @@ coffre login https://secrets.example.com
 
 ```
 acme-secrets/
-  src/server.ts          serve({ pages: app/dist, database, vault: connectVault(socket), … })
+  src/server.ts          createCoffre({ database, vault: connectVault(socket), … }); serve({ app: app/dist, coffre })
   src/vault.ts           serveVault({ socket, database, kek, rootAdmins })
-  app/vite.config.ts     the pages' build: tanstackStart(), viteReact(), coffre()
-  app/src/router.tsx     export { getRouter } from '@coffre/ui'
+  app/src/start.ts       createStart(() => ({ requestMiddleware: [coffreMiddleware] }))
+  app/src/router.tsx     the root, the document; coffre's server routes and pages under it
+  app/vite.config.ts     tanstackStart(…), viteReact(), coffre()
   server.env.example     app settings
   vault.env.example      vault settings
 ```
+
+The app, `app/`, is a TanStack Start app, as on Workers, which `pnpm build`
+builds; `serve` runs what it built, each request carrying coffre.
 
 Use Node 24 or later. Run `coffre setup` as above, then:
 
@@ -489,6 +587,110 @@ For tests and local development only, both URLs can name the same absolute
 SQLite file (`file:/tmp/coffre-local.db`), migrated once with `pnpm exec
 coffre-server migrate file:/tmp/coffre-local.db`. SQLite has no per-login privileges. The deployed example
 uses Postgres; Node conformance uses SQLite to exercise the local option.
+
+## Your own routes
+
+The app's routes are its `app/src/router.tsx`, the same on Workers and on
+Node. Its root is the app's: the document, `<html>` to `<body>`, with
+coffre's entries in its head and `<CoffreProvider>`, which coffre's pages
+need around them, in its body. Under it, what `coffre init` writes mounts
+all of coffre's routes:
+
+```tsx
+export const root = createRootRouteWithContext<CoffreContext>()({
+  head: () => coffreHead(),
+  shellComponent: ({ children }) => (
+    <html lang="en" suppressHydrationWarning>
+      <head>
+        <HeadContent />
+      </head>
+      <body>
+        <CoffreProvider>{children}</CoffreProvider>
+        <Scripts />
+      </body>
+    </html>
+  ),
+});
+
+export const routeTree = root.addChildren([...coffreServerRoutes(root), ...coffreRoutes(root)]);
+```
+
+`coffreServerRoutes(root)` is `/api/$`, `/auth/$`, `/livez` and `/readyz`,
+answered by coffre's server: mount all four. `coffreRoutes(root)` is coffre's
+pages, and nothing more than its pieces, each a function of its parent;
+mount them one by one to leave a page out or put one of the app's own at its
+path. Here, the audit log is left out, and `/` is the app's own page, which
+lists the projects the signed-in visitor can see:
+
+```tsx
+import { createRoute, Link } from '@tanstack/react-router';
+import { api, auth, livez, readyz } from '@coffre/server/routes';
+import { access, account, coffreShell, coffreSolo, deviceLogin, environment, login, project, projects, settings, token, tokens, unregistered, user, users } from '@coffre/ui';
+
+const shell = coffreShell(root);
+const solo = coffreSolo(root);
+
+const home = createRoute({
+  getParentRoute: () => shell,
+  path: '/',
+  // As the signed-in visitor, with their permissions: in process on the
+  // server, fetch to /api in the browser. A component has it as useCoffre().
+  loader: ({ context }) => context.coffre.projects.list(),
+  component: function Home() {
+    const { projects } = home.useLoaderData();
+    return (
+      <ul>
+        {projects.map(({ slug }) => (
+          <li key={slug}>
+            <Link to="/projects/$project" params={{ project: slug }}>{slug}</Link>
+          </li>
+        ))}
+      </ul>
+    );
+  },
+});
+
+export const routeTree = root.addChildren([
+  api(root),
+  auth(root),
+  livez(root),
+  readyz(root),
+  solo.addChildren([login(solo), unregistered(solo), deviceLogin(solo)]),
+  shell.addChildren([home, projects(shell), project(shell), environment(shell), access(shell), users(shell), user(shell), tokens(shell), token(shell), settings(shell), account(shell)]),
+]);
+```
+
+- **Paths are fixed.** Each of coffre's pages is at its own path, as its
+  links expect; there is no base path. Links, coffre's and the app's, are
+  checked against the app's tree when it typechecks.
+- **What is left out is not offered.** coffre's nav and its command palette
+  show only the pages mounted, and a user or token named on a page links to
+  theirs only if it is. Another link to a page left out, such as a
+  project's, leads to the not-found page.
+- **The shell signs people in.** `coffreShell` is coffre's nav, and lets in
+  only signed-in, registered visitors, sending the rest to sign in; coffre's
+  pages under it rely on that. A page of the app's own under the shell, as
+  `home` above, gets both; under the root, it gets neither, and is public.
+  `coffreSolo` is the bare frame of the sign-in pages.
+- **The app's own server routes** go at paths of their own, not under
+  `/api/` or `/auth/`, whose paths are coffre's. They get coffre's headers,
+  as everything the app answers does, through its middleware. A route's
+  code is in what the browser loads too: TanStack Start strips server code
+  only from routes in files of their own, which coffre's are not. So a
+  handler reaches the server as coffre's do, through what `src/server.ts`
+  hands each request, and imports nothing of the server itself:
+
+  ```ts
+  // app/src/server.ts: fetch hands Start your part beside coffre's
+  handler.fetch(request, { context: { ...coffre.request(env, ctx), hooks: hooks(env) } })
+  // app/src/coffre.ts: requestContext: CoffreContext & { hooks: Hooks }
+  // app/src/router.tsx
+  const deployed = createRoute({
+    getParentRoute: () => root,
+    path: '/hooks/deployed',
+    server: { handlers: { POST: ({ request, context }) => context.hooks.deployed(request) } },
+  });
+  ```
 
 ## CI runs without a stored token
 

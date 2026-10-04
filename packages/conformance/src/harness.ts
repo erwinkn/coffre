@@ -20,6 +20,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 import { postgres, sqlite, using, type Sql } from './database.ts';
 import { KEYS } from './fixtures.ts';
+import { drainingConfig } from './draining.ts';
 import { DevIdp } from './idp/index.ts';
 import { Failure, until } from './report.ts';
 
@@ -203,7 +204,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
     const state = join(scratch, 'state');
     start('wrangler', bin('wrangler'), [
       'dev',
-      ...['-c', 'app/dist/server/wrangler.json', '-c', 'vault/wrangler.jsonc'],
+      ...['-c', drainingConfig(join(dir, 'app/dist/server')), '-c', 'vault/wrangler.jsonc'],
       ...['--ip', '127.0.0.1', '--port', String(port), '--inspector-port', String(port + 2)],
       ...['--persist-to', state, '--show-interactive-dev-session=false'],
       // Not in wrangler.jsonc's vars, so not taken from the environment.

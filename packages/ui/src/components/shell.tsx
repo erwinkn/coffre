@@ -14,6 +14,7 @@ import type { ProjectSummary } from '../shared/models';
 import { pendingMigrations, UPGRADE_DOC } from '../lib/instance';
 import type { UiCapabilities } from '../lib/capabilities';
 import { isActiveAccessibleEnvironment } from '../lib/project-environments';
+import { useMounted } from '../lib/mounted';
 import { AdministrationItems } from './affordances';
 import { CommandPalette } from './command-palette';
 import { ThemeMenuItems } from './theme';
@@ -274,6 +275,7 @@ function Sidebar({
   collapsed?: boolean;
   close?: ReactNode;
 }) {
+  const mounted = useMounted();
   return (
     <>
       <div className="sidebar-head">
@@ -317,6 +319,7 @@ function Sidebar({
       {principal !== null && (
         <div className="sidebar-foot">
           <AccountMenu principal={principal} instanceRole={instanceRole} collapsed={collapsed} />
+{mounted('/account') && (
           <Tip label="Account settings" side={collapsed ? 'right' : undefined}>
             <Link
               className="btn btn-quiet btn-icon sidebar-foot-settings"
@@ -327,6 +330,7 @@ function Sidebar({
               <UserCog size={16} />
             </Link>
           </Tip>
+          )}
         </div>
       )}
     </>
@@ -363,6 +367,9 @@ function NavLink({
   icon: ReactNode;
   collapsed: boolean;
 }) {
+  // A page the deployment left out has no link.
+  const mounted = useMounted();
+  if (!mounted(to)) return null;
   // Matching is by prefix, so Projects stays current inside a project and
   // Audit stays current whatever its filters.
   return (

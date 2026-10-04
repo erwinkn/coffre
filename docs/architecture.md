@@ -7,13 +7,14 @@ deployment.
 
 ## A deployment is a small project
 
-A Workers deployment is two Workers in one small repository of your own:
+A Workers deployment is two Workers in one small repository of your own.
+The app is a TanStack Start app, configured once:
 
 ```ts
-// app/src/worker.ts
-import { coffre, github, postgres, signin } from '@coffre/server/cloudflare';
+// app/src/coffre.ts
+import { createCoffre, github, postgres, signin } from '@coffre/server/cloudflare';
 
-export default coffre((env: Env) => ({
+export const coffre = createCoffre((env: Env) => ({
   publicUrl: env.PUBLIC_URL,
   database: postgres(env.HYPERDRIVE),
   vault: env.VAULT, // a service binding to the Worker below
@@ -23,6 +24,18 @@ export default coffre((env: Env) => ({
   auditChainKey: env.APP_KEY,
 }));
 ```
+
+```ts
+// app/src/server.ts: the Worker, Start's handler with coffre in each request
+export default {
+  fetch: (request: Request, env: Env, ctx: ExecutionContext) => handler.fetch(request, { context: coffre.request(env, ctx) }),
+  scheduled: coffre.scheduled,
+};
+```
+
+with coffre's middleware in its `app/src/start.ts` and coffre's routes in
+its `app/src/router.tsx` ([The UI](#the-ui)). The vault is a Worker of its
+own:
 
 ```ts
 // vault/src/worker.ts
@@ -40,18 +53,20 @@ All configuration is passed to these functions. coffre reads no environment
 variable of its own: a deployment brings values however it likes (Worker
 secrets, a password manager, a file) and hands them over. Settings are typed,
 so a misspelt provider option fails the typecheck rather than a sign-in.
-`coffre(…)` returns the Worker's `{ fetch, scheduled }`, and calls the
-function once for each `env` object Workers hands it: in practice, once per
-isolate.
+`createCoffre(…)` calls the function once for each `env` object Workers
+hands it, in practice once per isolate; `coffre.request(env, ctx)` opens the
+invocation's database client, closed once coffre's work for the request is
+done.
 
 A Node deployment is the same idea, as two processes:
 
 ```ts
 // src/server.ts
-import { github, serve, signin } from '@coffre/server/node';
+import { createCoffre, github, serve, signin } from '@coffre/server/node';
 import { connectVault } from '@coffre/vault/node';
 
-await serve({ port: 3000, publicUrl, database: 'postgres://coffre_runtime:…@db:5432/coffre', vault: connectVault('vault.sock'), auth, auditChainKey });
+const coffre = createCoffre({ publicUrl, database: 'postgres://coffre_runtime:…@db:5432/coffre', vault: connectVault('vault.sock'), auth, auditChainKey });
+await serve({ app: new URL('../app/dist/', import.meta.url), coffre, port: 3000 });
 
 // src/vault.ts
 import { serveVault } from '@coffre/vault/node';
@@ -97,18 +112,19 @@ one package is seen by the others without a build. Builds leave it off.
 
 | Entry point | What a deployment calls |
 |---|---|
-| `@coffre/server/cloudflare` | `coffre(env => ({ pages, …config }))` → `{ fetch, scheduled }`; `postgres(env.HYPERDRIVE)` |
-| `@coffre/server/node` | `serve({ pages, port?, host?, database, …config })` → `{ url, close }`; `migrate(url)` |
+| `@coffre/server/cloudflare` | `createCoffre(env => ({ database, …config }))` → `{ request(env, ctx), scheduled }`; `postgres(env.HYPERDRIVE)` |
+| `@coffre/server/node` | `createCoffre({ database, …config })`; `serve({ app, coffre, port?, host? })` → `{ url, close }`; `migrate(url)` |
+| `@coffre/server/start` | `coffreMiddleware`, for the app's `createStart(() => ({ requestMiddleware: [coffreMiddleware] }))` |
+| `@coffre/server/routes` | `coffreServerRoutes(root)`; or one by one, `api`, `auth`, `livez`, `readyz`, each a function of its parent |
 | `@coffre/server` (both) | `signin`, `github`, `google`, `microsoft`, `oidc`, `cloudflareAccess`, `SigninError`; `githubActions`, `vercel`, `railway`, `cloudflareWorkers`, `SyncConfigError`, `SyncProviderError`; and the config types, `SigninProvider` and `SyncProvider` among them |
 | `@coffre/vault/cloudflare` | `vault(env => config)`, the RPC Worker's default export; `postgres(env.VAULT_HYPERDRIVE)` |
 | `@coffre/vault` (both) | `awsKms`, `KekUnavailableError`, `KekBadClaimError`, and the config types, `KekProvider` among them |
 | `@coffre/vault/node` | `serveVault({ socket, database, …config })`, `connectVault(socket)`, `localVault({ database, …config })` |
-| `@coffre/ui` | `getRouter()`, for the deployment's `src/router.tsx` |
+| `@coffre/ui` | `coffreRoutes(root)`, or `coffreShell`, `coffreSolo` and each page, a function of its parent; `createRouter(routeTree)`; `coffreHead()`, `<CoffreProvider>`, `useCoffre()`; `CoffreContext` |
 | `@coffre/ui/vite` | `coffre()`, the deployment's Vite plugin |
 | `@coffre/client` | `createClient({ url, headers?, transport? })` |
 
 Where `config` is, for the server, `{ publicUrl, vault, auth, auditChainKey }`
-(and `pages`, see [The UI](#the-ui))
 and, for the vault, `{ database, kek, previousKeks?, rootAdmins,
 signingKey?, bulkLimit? }`, a vault key being a local key or `awsKms(…)`
 ([keys.md](keys.md)). The vault derives its signing key from a local vault key;
@@ -133,60 +149,85 @@ database has applied of those.
 ## The UI
 
 The UI is server-rendered TanStack Start, and a deployment's app is a Start
-app of its own: Vite builds it once, with `@coffre/ui` and `@coffre/server`
-as libraries inside it. Its files are few:
+app of its own, which mounts coffre's pieces, as it would an auth SDK's:
+Vite builds it once, with `@coffre/ui` and `@coffre/server` as libraries
+inside it. Its files are few:
 
 ```
-app/vite.config.ts    plugins: [cloudflare(…), tanstackStart(), viteReact(), coffre()]
-app/src/router.tsx    export { getRouter } from '@coffre/ui'
-app/src/server.ts     export default coffre(env => ({ pages, publicUrl, database, … }))
+app/vite.config.ts    plugins: [cloudflare(…), tanstackStart({ router: { enableRouteGeneration: false } }), viteReact(), coffre()]
+app/src/start.ts      createStart(() => ({ requestMiddleware: [coffreMiddleware] }))
+app/src/router.tsx    the root, the document; root.addChildren([...coffreServerRoutes(root), ...coffreRoutes(root)])
+app/src/server.ts     handler.fetch(request, { context: coffre.request(env, ctx) }); scheduled
+app/src/coffre.ts     export const coffre = createCoffre(env => ({ publicUrl, database, … }))
 ```
 
-`pages` is Start's own handler, `import pages from
-'@tanstack/react-start/server-entry'`. `@coffre/server` wraps it: it answers
-`/api`, `/auth/*`, `/livez`, `/readyz` and `scheduled` itself, and hands
-every other path to the pages with the response's nonce and the visitor's
-API client, then sets the security headers on whatever comes back:
+**A request.** The Worker's `fetch` hands Start's handler the request with
+coffre in its context: `coffre.request(env, ctx)`, the invocation's
+database and vault. On Node, `serve({ app, coffre })` does the same for
+each request, and serves the app's static files. Start runs coffre's
+middleware first, for every request: it mints the response's nonce, builds
+the visitor's API client, an in-process call with their credential, and
+passes both on, then sets the security headers, nonce included, on
+whatever comes back: a page Start rendered, a redirect, a not-found, or one
+of coffre's server routes. Those, `/api/$`, `/auth/$`, `/livez` and
+`/readyz`, hand the request to coffre's server, which answers it as before.
+A route or a page rendered without the middleware fails, saying how to add
+it, rather than answer without headers. Nothing coffre answers waits for a
+request body it does not read.
 
-```ts
-type Ui = {
-  fetch(request: Request, options: { context: { cspNonce: string; client: CoffreClient } }): Response | Promise<Response>;
-};
-```
+**Server code stays on the server by construction.** TanStack Start strips
+a route's server handlers from the browser's build only for routes in files
+its generator finds; routes made in code, as coffre's are, keep them. So
+coffre's server routes and middleware import nothing of the server: they
+reach it through the request's context, which only the server entry, and
+what it imports, sets. The browser's build then holds their few lines, and
+none of the database layer, and `coffre()` checks it.
 
-The server mints the nonce, builds the request's client and sets the
-headers; the pages only render. On Node the deployment's app is the same
-Start app, without Cloudflare's plugin, and `serve({ pages: app/dist })`
-loads its handler and serves its static files.
+**Routes in code, each a function of its parent.** The app owns its root,
+the document, with `coffreHead()` in its head and `<CoffreProvider>` in its
+body. `coffreRoutes(root)` is coffre's pages under two layouts:
+`coffreShell`, the nav, which lets in only signed-in, registered visitors,
+and `coffreSolo`, the frame of the sign-in pages. Each layout and page is a
+function of its parent, so the app mounts them all, or one by one, leaving
+any out or putting a page of its own at a path; coffre's nav shows only
+those mounted. A page's component reads its own route's data through the
+match it renders in, so it works wherever it is mounted. The app's router
+registers its tree, so every link, coffre's and the app's, is checked
+against it ([Your own routes](deploy.md#your-own-routes)).
 
-**What `@coffre/ui` ships.** The pages as compiled ES modules, built by Vite
-with TanStack's router plugin: `getRouter`, its route tree generated, and
-each route's component a chunk of its own, loaded as the route is. React,
-the router, Start and Query stay imports, so the deployment's single copy of
-each serves both, and the stylesheet and icons stay imports of the
-package's `src/`, which the deployment's Vite processes, fonts and all. A
-release that adds a page changes nothing in the deployment. Start splits
-only the routes its own generator finds, so the package splits its own; and
-Start's preload hints come from that generator too, so for a route from the
-package the browser fetches its chunk as the route loads, one round trip
-after the page's entry.
+**What `@coffre/ui` ships.** The routes as compiled ES modules, built by
+Vite in library mode, each page's component a chunk of its own,
+`dist/pages/<name>.js`, loaded as the page is. React, the router, Start and
+Query stay imports, so the deployment's single copy of each serves both,
+and the stylesheet and icons stay imports of the package's `src/`, which the
+deployment's Vite processes, fonts and all. A release that adds a page needs
+a line in a deployment that mounts its pages one by one, and none in one
+that mounts `coffreRoutes`. Start's preload hints come from its route
+generator, which finds no file routes here; so `coffre()` finds, in the
+client's build, each page's chunk and every chunk it imports, and each
+page's `head()` names them as `modulepreload` links: the browser fetches a
+page's code beside the app's entry, rather than once the entry has run,
+about a round trip sooner.
 
 **One copy of what the pages share.** `@coffre/ui`'s peers, React,
 react-dom, TanStack Router, Start, Query, the router's Query integration and
 Vite, are pinned exactly, and the deployment pins them itself at those
 versions: `coffre init` writes them, `coffre update` moves them with
 coffre's packages, and the build stops, naming each, when one differs.
-`pnpm check:pins` holds the examples to them.
+`pnpm check:pins` holds the examples to them, and `@coffre/server`'s peers
+to `@coffre/ui`'s.
 
 **`coffre()`, the deployment's Vite plugin.** It puts the static files under
 `/_coffre/assets/`, beside `/api` and `/auth`, and never inlines a font, which
 the Content-Security-Policy would refuse as `data:`. It makes the server's
 build hold everything it renders with (`ssr.noExternal`), as a Worker's
-does, so that Node resolves nothing from `node_modules`. It checks the
-versions above. And it fails the build if what the browser loads holds
-server code: the database layer, a driver, a `COFFRE_*` read or the dev
-toolbar, by strings only those carry. A page that imports across the line
-otherwise just grows by the database layer, with no error.
+does, so that Node resolves nothing from `node_modules`. It gives the
+server the pages' preload hints. It checks the versions above. And it
+fails the build if what the browser loads holds server code: the database
+layer, a driver, a `COFFRE_*` read or the dev toolbar, by strings only those
+carry, in every file the build emits, chunks, stylesheets, workers, and
+scripts Vite emits as bytes. A page that imports across the line otherwise
+just grows by the database layer, with no error.
 
 **On Workers**, `@cloudflare/vite-plugin` builds the app into
 `app/dist/server`, with a `wrangler.json` that says `no_bundle`: `wrangler
@@ -195,16 +236,12 @@ and the client files Vite built are the Worker's static assets, which
 Cloudflare serves before the Worker runs. Nothing bundles the code a second
 time, so nothing rewrites what the pages send the browser: 0.1.17's blank
 pages came from wrangler's esbuild wrapping seroval's functions in
-`__name`, and Vite's build adds no such helper. Locally, a Worker wrangler
-did not bundle runs without wrangler's middleware that drains a request
-body the Worker answered unread, so `@coffre/server` reads such a body
-itself, a mebibyte at most, before answering; this runs in production too.
-
-**Custom pages** are not supported yet, and the door is open: the
-deployment's `src/router.tsx` could build its router from `@coffre/ui`'s
-route tree with routes of its own added, and its Start would code-split
-those as an app's own. What it would need from `@coffre/ui` is the route
-tree as an export and the root route's layout to add to.
+`__name`, and Vite's build adds no such helper. Locally, `wrangler dev` of
+such a build fails every request after one whose body the Worker left
+unread, which `vite dev` and Cloudflare do not; conformance and the restore
+drill, which run the built app under `wrangler dev`, put an entry of their
+own in front of it that reads such a body before answering. coffre itself
+never does.
 
 `@coffre/client` can be in a deployment twice: on Node, the server runs
 from `node_modules` and the pages from their own build. Anything the pages
@@ -396,9 +433,9 @@ them, which starts them over.
   Both components use one SQLite file. Each call's arguments and results
   go through JSON as over RPC, so nothing that only works in-process gets in.
 - **Locally**, `pnpm dev` runs the vault as an auxiliary Worker of the
-  app's `vite dev`, and conformance runs both with
-  `wrangler dev -c app/wrangler.jsonc -c vault/wrangler.jsonc`. Either way
-  the app's `VAULT` binding reaches it as in production.
+  app's `vite dev`, and conformance runs both with `wrangler dev`, the app
+  as Vite built it. Either way the app's `VAULT` binding reaches it as in
+  production.
 
 ### Where each secret lives
 

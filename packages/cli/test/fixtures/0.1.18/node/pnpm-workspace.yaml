@@ -1,0 +1,7 @@
+# Do not install a version published in the last 7 days: most malicious
+# releases are yanked within hours, and a service that holds every credential
+# can wait a week. Coffre's own packages are exempt, so a fix to them lands
+# the day it is published; they depend on nothing newer than this allows.
+minimumReleaseAge: 10080
+minimumReleaseAgeExclude:
+  - '@coffre/*'

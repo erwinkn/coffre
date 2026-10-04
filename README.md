@@ -300,14 +300,16 @@ both colour schemes, following the system's with a manual override.
   asked for.
 
 The pages are TanStack Start, as `@coffre/ui`: a deployment's app is a Start
-app of its own, built once by Vite, whose router is `@coffre/ui`'s, and the
-server hands it every path that is not `/api`, `/auth` or a health check.
-They read and write only through `@coffre/client`.
+app of its own, built once by Vite, which mounts coffre's pages, its server
+routes (`/api`, `/auth`, the health checks) and its middleware, as it would
+an auth SDK's, all of them or one by one, beside pages of its own
+([Your own routes](docs/deploy.md#your-own-routes)). The pages read and
+write only through `@coffre/client`.
 
 ## Layout
 
 ```
-packages/server       @coffre/server: /api, sign-in, the scheduled job; /cloudflare and /node
+packages/server       @coffre/server: /api, sign-in, the scheduled job; /cloudflare, /node, /start and /routes
 packages/vault        @coffre/vault: the vault key, members and grants, its entries in the log; /cloudflare and /node
 packages/db           @coffre/db: the schemas, migrations and migrator, the connections
 packages/core         @coffre/core: access rules, encryption, vault keys, the log's format, sign-in, the vault's contract

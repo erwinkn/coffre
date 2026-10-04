@@ -2,28 +2,48 @@
 
 ## Unreleased
 
-**A deployment's app is a TanStack Start app of its own** (0.2.0). Vite
-builds it once, with `@coffre/ui` and `@coffre/server` as libraries inside
-it, and nothing bundles it again: on Workers, `wrangler deploy` uploads what
+**A deployment's app is a TanStack Start app of its own** (0.2.0), and
+coffre is a set of pieces it mounts, as an auth SDK's are. Vite builds the app
+once, and nothing bundles it again: on Workers, `wrangler deploy` uploads what
 Vite built, so no second pass rewrites what the pages send the browser, as
-wrangler's `keep_names` did in 0.1.17. The app's files:
+wrangler's `keep_names` did in 0.1.17. The app's files, as `coffre init`
+writes them:
 
-- `app/vite.config.ts`: `cloudflare(…)` on Workers, `tanstackStart()`,
-  `viteReact()`, and `coffre()` from `@coffre/ui/vite`, which puts the
-  pages' files under `/_coffre/assets/`, checks the versions below, and
-  fails the build if server code reaches what the browser loads;
-- `app/src/router.tsx`: `export { getRouter } from '@coffre/ui'`, the pages;
-- `app/src/server.ts` on Workers (was `app/src/worker.ts`): `coffre(env =>
-  ({ pages, … }))`, `pages` being Start's handler, `import pages from
-  '@tanstack/react-start/server-entry'`. On Node, `src/server.ts` passes
-  `serve({ pages: new URL('../app/dist/', import.meta.url), … })`.
+- `src/coffre.ts` on Workers: the configuration, once,
+  `export const coffre = createCoffre((env: Env) => ({ … }))`;
+- `src/server.ts`: Start's handler, each request carrying coffre:
+  `handler.fetch(request, { context: coffre.request(env, ctx) })`, and
+  `scheduled: coffre.scheduled`. On Node, `src/server.ts` configures with
+  `createCoffre({ … })` and runs the built app with
+  `serve({ app: new URL('../app/dist/', import.meta.url), coffre })`;
+- `app/src/start.ts`: `createStart(() => ({ requestMiddleware: [coffreMiddleware] }))`.
+  The middleware gives every response coffre's security headers and a fresh
+  CSP nonce, and the pages the visitor's API client. A server route or page
+  rendered without it fails, saying how to add it;
+- `app/src/router.tsx`: the app's own root, its document, with
+  `coffreHead()` and `<CoffreProvider>`, and under it coffre's routes:
+  `root.addChildren([...coffreServerRoutes(root), ...coffreRoutes(root)])`.
+  `/api/$`, `/auth/$`, `/livez` and `/readyz` are server routes, and each
+  page a route of its own, made in code, each a function of its parent:
+  mount them all, or one by one, leaving any out or putting a page of the
+  app's own at a path. coffre's nav offers only the pages mounted. Links are
+  type-checked against the app's tree. A page of the app's own may call the
+  API as the signed-in visitor, `useCoffre()` in a component or
+  `context.coffre` in a loader ([Your own routes](docs/deploy.md#your-own-routes));
+- `app/vite.config.ts`: `cloudflare(…)` on Workers,
+  `tanstackStart({ router: { enableRouteGeneration: false } })`,
+  `viteReact()`, and `coffre()` from `@coffre/ui/vite`, which puts the pages'
+  files under `/_coffre/assets/`, tells the server which files each page
+  needs, for the browser to fetch them beside the app's entry, checks the
+  versions below, and fails the build if server code reaches what the
+  browser loads, in whatever form Vite emits it.
 
 React, TanStack Router, Start, Query and Vite are the deployment's own
 dependencies now, pinned at exactly the versions `@coffre/ui` is built with;
-`coffre update` moves them with coffre's packages. `@coffre/ui` ships its
-pages as ES modules, each route a chunk of its own, so a release that adds a
-page needs no change in the deployment. `keep_names` is gone from
-`app/wrangler.jsonc`: nothing bundles the app again for it to matter.
+`coffre update` moves them with coffre's packages. On Workers, `pnpm dev` is
+now `vite dev app`, the vault beside the app. A refusal no longer waits for
+the request's body: nothing in coffre reads what a caller is still sending
+before answering.
 
 To upgrade, in the deployment's directory, with the 0.2 CLI:
 
@@ -31,13 +51,16 @@ To upgrade, in the deployment's directory, with the 0.2 CLI:
 npx @coffre/cli@0.2.0 update
 ```
 
-It shows each file it changes and asks once; an older CLI's `coffre update`
-moves the pins without the files, and the app then says its `pages` are
-missing. Then `pnpm typecheck`, and deploy: on Workers Builds, the app's
-build command is now `pnpm exec vite build app` and its deploy command `npx
-wrangler deploy -c app/dist/server/wrangler.json`; `pnpm run deploy` does
-both. On Node, `pnpm build`, then restart both processes.
-[Upgrading to 0.2](docs/deploy.md#upgrading-to-02).
+It moves a deployment whose files are as a release of 0.1 wrote them, its
+configuration kept as that release had it, and shows each file it changes
+before asking once. It changes nothing when a file is the deployment's own,
+or one is already where 0.2 puts its own: it names each, and
+[Upgrading to 0.2](docs/deploy.md#upgrading-to-02) shows the move by hand.
+A move cut short is finished by the next run. Then `pnpm typecheck`, and
+deploy: on Workers Builds, the app's build command is now `pnpm exec vite
+build app` and its deploy command `npx wrangler deploy -c
+app/dist/server/wrangler.json`; `pnpm run deploy` does both. On Node,
+`pnpm build`, then restart both processes.
 
 **Workers deployments: signed-in pages no longer go blank.** wrangler bundles
 with esbuild's `keep_names` on, which wraps functions in an `__name` helper

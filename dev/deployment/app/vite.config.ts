@@ -27,11 +27,10 @@ function workspaceSources(): Plugin {
 }
 
 // `vite dev` of a deployment of coffre shaped like examples/workers: this
-// app, its pages from @coffre/ui, and its vault beside it (../vault). Two
-// things differ, for the loop: the packages' sources rather than their
-// builds, so an edit to the server, the vault or a page reloads; and Start
-// generating the pages' route tree from packages/ui/src/routes, as it does
-// in an app's own src/routes, so a route edited or added reloads too.
+// app, its routes and pages from @coffre/server and @coffre/ui, and its vault
+// beside it (../vault). One thing differs, for the loop: the packages'
+// sources rather than their builds, so an edit to the server, the vault, a
+// route or a page reloads.
 export default defineConfig({
   server: {
     // start.sh checks 127.0.0.1 and the seeded links point there, so bind
@@ -56,12 +55,7 @@ export default defineConfig({
       // Where wrangler keeps its local state.
       persistState: { path: process.env.COFFRE_STATE_DIR ?? here('../../.wrangler/state') },
     }),
-    tanstackStart({
-      router: {
-        routesDirectory: here('../../../packages/ui/src/routes'),
-        generatedRouteTree: here('../../../packages/ui/src/routeTree.gen.ts'),
-      },
-    }),
+    tanstackStart({ router: { enableRouteGeneration: false } }),
     viteReact(),
     coffre(),
     workspaceSources(),

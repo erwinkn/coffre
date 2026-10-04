@@ -7,8 +7,10 @@
 #   pnpm build && ./scripts/restore-drill.sh
 #
 # It uses the compose Postgres, the dev IdP for sign-in and .env.dev's keys,
-# on ports 3400 to 3402 and 8481 (COFFRE_DEV_PORT, COFFRE_DEV_IDP_PORT). The
-# two databases, the processes and the dump go when it ends, however it ends.
+# on ports 3400 to 3402 and 8481 (COFFRE_DEV_PORT, COFFRE_DEV_IDP_PORT), over
+# coffre_drill and coffre_drill_restored (COFFRE_DRILL_DATABASE names the
+# first). The two databases, the processes and the dump go when it ends,
+# however it ends.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -21,8 +23,8 @@ set +a
 
 port="${COFFRE_DEV_PORT:-3400}"
 idp_port="${COFFRE_DEV_IDP_PORT:-8481}"
-source_db=coffre_drill
-restored_db=coffre_drill_restored
+source_db="${COFFRE_DRILL_DATABASE:-coffre_drill}"
+restored_db="${source_db}_restored"
 scratch="$(mktemp -d "${TMPDIR:-/tmp}/coffre-drill.XXXXXX")"
 export COFFRE_API_URL="http://127.0.0.1:$port" COFFRE_DEV_IDP_URL="http://127.0.0.1:$idp_port" COFFRE_DEV_IDP_PORT="$idp_port"
 owner_url() { echo "postgresql://coffre_owner:local-dev-only@127.0.0.1:55432/$1"; }
@@ -46,7 +48,9 @@ cleanup() {
 trap cleanup EXIT
 
 # The Workers example, as `coffre init` writes it, over database $1, with
-# the KEK $2: both Workers under wrangler dev, each with its own login.
+# the KEK $2: both Workers under wrangler dev, each with its own login, the
+# app as it builds, behind conformance's entry for wrangler dev.
+app_config=''
 start_coffre() {
     local state="$scratch/state-$1-$RANDOM"
     (
@@ -56,7 +60,7 @@ start_coffre() {
         export APP_KEY="$COFFRE_APP_KEY" VAULT_KEY_ID="$COFFRE_VAULT_KEY_ID" VAULT_KEY="$2"
         export CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE="postgresql://coffre_runtime:local-runtime-only@127.0.0.1:55432/$1"
         export CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_VAULT_HYPERDRIVE="postgresql://coffre_vault_runtime:local-vault-only@127.0.0.1:55432/$1"
-        exec ./node_modules/.bin/wrangler dev -c app/wrangler.jsonc -c vault/wrangler.jsonc \
+        exec ./node_modules/.bin/wrangler dev -c "$app_config" -c vault/wrangler.jsonc \
             --ip 127.0.0.1 --port "$port" --inspector-port "$((port + 2))" --persist-to "$state" \
             --show-interactive-dev-session=false \
             --var "GITHUB_URL:$COFFRE_DEV_IDP_URL/github" --var "GITHUB_API_URL:$COFFRE_DEV_IDP_URL/github/api"
@@ -73,6 +77,10 @@ start_coffre() {
 log 'starting the dev IdP'
 node --conditions=coffre:source dev/idp/server.ts >"$scratch/idp.log" 2>&1 &
 idp=$!
+
+log 'building the app'
+(cd examples/workers && ./node_modules/.bin/vite build app >"$scratch/build.log" 2>&1) || { cat "$scratch/build.log" >&2; exit 1; }
+app_config="$(node packages/conformance/src/draining.ts examples/workers/app/dist/server)"
 
 log "a seeded instance over $source_db"
 node scripts/ensure-database.mjs "$source_db"

@@ -1,3 +1,5 @@
+import type { CoffreClient } from '@coffre/client';
+
 import { ApiError, badRequest } from './api/errors.ts';
 import {
   finishSignin,
@@ -14,9 +16,7 @@ import { errorResponse, jsonResponse, methodNotAllowed } from './http.ts';
 import { logged } from './logged.ts';
 import type { CoffreRuntime } from './runtime.ts';
 import { cspNonce, withSecurityHeaders } from './security-headers.ts';
-import type { Ui } from './ui.ts';
 
-export type { Ui };
 
 type Handler = (request: Request, runtime: CoffreRuntime, sourceIp: string | null) => Promise<Response>;
 
@@ -40,12 +40,11 @@ const ROUTES: Record<string, { method: 'GET' | 'POST'; handler: Handler; browser
 
 const PROVIDER_ROUTE = /^\/auth\/(signin|callback)\/([a-z0-9-]{1,32})$/;
 
-async function route(request: Request, runtime: CoffreRuntime, sourceIp: string | null, ui: Ui, nonce: string) {
-  // Next.js's internal header, which has let requests skip middleware
-  // elsewhere; nothing legitimate sends it here.
-  if (request.headers.has('x-middleware-subrequest')) {
-    return errorResponse(badRequest('x-middleware-subrequest is not accepted'));
-  }
+/**
+ * coffre's own paths: health, sign-in and the API. Null for any other, a
+ * page's, which the deployment's Start app renders.
+ */
+export async function coffreRoute(request: Request, runtime: CoffreRuntime, sourceIp: string | null): Promise<Response | null> {
   const { pathname } = new URL(request.url);
 
   const exact = ROUTES[pathname];
@@ -66,42 +65,41 @@ async function route(request: Request, runtime: CoffreRuntime, sourceIp: string 
       ? startSignin(request, runtime, sourceIp, id)
       : finishSignin(request, runtime, sourceIp, id);
   }
-
-  if (request.method !== 'GET' && request.method !== 'HEAD') return methodNotAllowed(['GET']);
-  return page(request, runtime, sourceIp, ui, nonce);
+  return null;
 }
 
-/**
- * A page, rendered with the visitor's API client. One whose render failed
- * because the API answered it 503, the vault or the database out of reach,
- * is an outage, not a bug: it answers 503, as the API did, with the page
- * the UI rendered for the failure, and a moment to wait before trying again.
- */
-async function page(request: Request, runtime: CoffreRuntime, sourceIp: string | null, ui: Ui, nonce: string): Promise<Response> {
-  let unavailable = false;
-  const client = pageClient(request, runtime, sourceIp, (status) => (unavailable ||= status === 503));
-  const rendered = await ui.fetch(request, { context: { cspNonce: nonce, client } });
-  if (rendered.status !== 500 || !unavailable) return rendered;
-  const headers = new Headers(rendered.headers);
-  headers.set('retry-after', '5');
-  return new Response(rendered.body, { status: 503, statusText: 'Service Unavailable', headers });
-}
+/** What a page renders with: this response's nonce, and the API as the visitor. */
+export type PageContext = { cspNonce: string; client: CoffreClient };
 
 /**
- * One request, on either runtime: health, sign-in, the API, then pages.
- * `sourceIp` is the adapter's to vouch for: Cloudflare's header on Workers,
- * the socket's address on Node.
+ * One request, whatever answers it, a page or one of coffre's routes: it
+ * gets a fresh nonce and the visitor's API client to render with, and
+ * coffre's security headers on whatever comes back. A page whose render
+ * failed because the API answered it 503, the vault or the database out of
+ * reach, is an outage, not a bug: it answers 503, as the API did, with the
+ * page the UI rendered for the failure, and a moment to wait before trying
+ * again. `sourceIp` is the adapter's to vouch for: Cloudflare's header on
+ * Workers, the socket's address on Node.
  */
-export async function handleRequest(
+export async function respond(
   request: Request,
   runtime: CoffreRuntime,
-  ui: Ui,
   sourceIp: string | null,
+  render: (context: PageContext) => Promise<Response>,
 ): Promise<Response> {
   const nonce = cspNonce();
   let response: Response;
   try {
-    response = await route(request, runtime, sourceIp, ui, nonce);
+    // Next.js's internal header, which has let requests skip middleware
+    // elsewhere; nothing legitimate sends it here.
+    if (request.headers.has('x-middleware-subrequest')) {
+      response = errorResponse(badRequest('x-middleware-subrequest is not accepted'));
+    } else {
+      let unavailable = false;
+      const client = pageClient(request, runtime, sourceIp, (status) => (unavailable ||= status === 503));
+      const rendered = await render({ cspNonce: nonce, client });
+      response = rendered.status === 500 && unavailable ? retryLater(rendered) : rendered;
+    }
   } catch (error) {
     response = errorResponse(error);
   }
@@ -111,6 +109,12 @@ export async function handleRequest(
     // Access's logout form posts to Access itself.
     formOrigins: auth.mode === 'cloudflare' ? [auth.access.issuer] : [],
   });
+}
+
+function retryLater(rendered: Response): Response {
+  const headers = new Headers(rendered.headers);
+  headers.set('retry-after', '5');
+  return new Response(rendered.body, { status: 503, statusText: 'Service Unavailable', headers });
 }
 
 /** The scheduled audit heartbeat and checkpoint. Throws so the scheduler reports failures. */

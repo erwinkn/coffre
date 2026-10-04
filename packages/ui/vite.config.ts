@@ -1,7 +1,6 @@
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { tanstackRouter } from '@tanstack/router-plugin/vite';
 import viteReact from '@vitejs/plugin-react';
 import { defineConfig, type Plugin } from 'vite';
 
@@ -35,52 +34,18 @@ function linkedFiles(): Plugin {
   };
 }
 
-/**
- * Dynamic imports as plain `import()`: Vite wraps each in its preload
- * helper, which the deployment's own build adds again, and two helpers of
- * one name in a module do not parse.
- */
-function plainDynamicImports(): Plugin {
-  return {
-    name: 'coffre:plain-dynamic-imports',
-    enforce: 'post',
-    generateBundle(_options, bundle) {
-      for (const [name, chunk] of Object.entries(bundle)) {
-        if (chunk.type !== 'chunk') continue;
-        if (/(^|\/)preload-helper-[^/]*\.js$/.test(name)) {
-          delete bundle[name];
-          continue;
-        }
-        chunk.code = chunk.code
-          .replace(/^import \{ \w+ as __vitePreload \} from "[^"]+";\n/m, '')
-          .replace(/__vitePreload\(\(\) => (import\("[^"]+"\)), (?:\[[^\]]*\]|__VITE_PRELOAD__)\)/g, '$1');
-        if (chunk.code.includes("__vitePreload")) this.error(`${name} still calls __vitePreload: ${chunk.code.split("\n").filter((l) => l.includes("__vitePreload")).slice(0, 3).join(" | ")}`);
-      }
-    },
-  };
-}
-
-// Builds `@coffre/ui` as a library: the pages' route tree and `getRouter`,
-// as ES modules a deployment's own TanStack Start build bundles. Each
-// route's component is a chunk of its own, loaded when the route is, as in
-// an app's own build: the deployment's Start splits only the routes it
-// generates itself. React, the router, Start and Query stay imports, so the
-// deployment's single copy serves both. `pnpm dev` runs the sources instead.
+// Builds `@coffre/ui` as a library: coffre's routes and `createRouter`, as
+// ES modules a deployment's own TanStack Start build bundles. Each page's
+// component is a chunk of its own, imported as its route is loaded, which
+// the deployment's build keeps apart. React, the router, Start and Query
+// stay imports, so the deployment's single copy serves both. `pnpm dev`
+// runs the sources instead.
 export default defineConfig({
   // A production build: `import.meta.env.DEV` is false, which drops the
   // Agentation toolbar (components/agentation.tsx) and its import.
   mode: 'production',
   plugins: [
     linkedFiles(),
-    plainDynamicImports(),
-    // Writes src/routeTree.gen.ts from src/routes, and splits each route.
-    // Before the React plugin, as the router plugin requires.
-    tanstackRouter({
-      target: 'react',
-      autoCodeSplitting: true,
-      routesDirectory: here('src/routes'),
-      generatedRouteTree: here('src/routeTree.gen.ts'),
-    }),
     viteReact(),
   ],
   build: {
@@ -90,16 +55,17 @@ export default defineConfig({
     minify: false,
     sourcemap: true,
     target: 'es2022',
-    lib: false,
+    // Library mode: dynamic imports stay plain `import()`, which the
+    // deployment's build wraps in its own preload helper.
+    lib: { entry: here('src/index.ts'), formats: ['es'], fileName: 'index' },
     rollupOptions: {
-      input: { index: here('src/index.ts') },
-      preserveEntrySignatures: 'strict',
       // Every package stays an import: the deployment installs and bundles it once.
       external: (id) => !id.startsWith('.') && !id.startsWith('/') && !id.startsWith('\0') && !/^[A-Za-z]:/.test(id),
       output: {
         format: 'es',
         entryFileNames: '[name].js',
-        chunkFileNames: 'chunks/[name]-[hash].js',
+        // Each page by its name, which the deployment's build finds its chunk by (src/vite.ts).
+        chunkFileNames: (chunk) => (/[\\/]src[\\/]pages[\\/]/.test(chunk.facadeModuleId ?? '') ? 'pages/[name].js' : 'chunks/[name]-[hash].js'),
       },
     },
   },
