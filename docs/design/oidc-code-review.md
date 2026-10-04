@@ -306,3 +306,40 @@ This was a code review with focused execution, not a full release validation.
 It did not run live GitHub/GitLab jobs, deployed Cloudflare Hyperdrive caching,
 the full build, or the full conformance suite. Temporary probes were removed;
 this PR changes only this review document, with no implementation or design edits.
+
+## Fix responses
+
+All nine are fixed on branch `oidc-review-fixes`, one commit per finding,
+plus migration `0004_live_indexes` for F3 to F5. Each test named below
+fails on the code before its fix, and passes after.
+
+| Finding | Commits | Change | Test |
+| --- | --- | --- | --- |
+| F1 | `ae6a455` | `bindingStands` and `tokenConsumed` read the database clock, as `findCredential` does, so Hyperdrive caches neither. | A Postgres pool modelled on Hyperdrive's documented rule (reads outside transactions without a stable or volatile function are cached; writes never invalidate): after an unbind, the binding and credential rows put back still answer 401, and a replay reaches no vault call. |
+| F2 | `d797b1e` | `credentialId` is the caller's credential, written after the operation's metadata; a credential an operation acts on is `targetCredentialId` (sign-in, `sign_out`, `token.create`, `token.revoke`). | A run's denied and allowed revocations name it, an owner's revocation of a run's credential shows no run, in the entries and on the audit page. |
+| F3 | `f73da5d`, `4873c4c` | An unbind revokes only the binding's unexpired credentials, through `credentials_live_idx`. The members page, member removal and re-admission's sweep read only live credentials too. | 1,000 expired credentials and one live: one credential UPDATE (1,001 before), at most two credential rows read, none on the members page. |
+| F4 | `f73da5d`, `c2120c7` | `service_bindings_live_idx` on `(principal, issuer, generation, created_at, id)` where not revoked. The overflow rejection stays. | EXPLAIN ANALYZE of the candidates query beside 50,000 retired and 5,000 earlier-generation bindings: the new index, at most two binding rows visited. |
+| F5 | `f73da5d`, `04d5085` | `credentials_issued_by_idx` on `(principal, created_by, created_at)`; the count stops at the 60 cap. | EXPLAIN ANALYZE of the count beside 50,000 expired credentials of the binding: the new index, at most two rows visited. |
+| F6 | `9bd639d` | A non-200 response is destroyed, not drained. | On both transports, a 503 streaming 2 MiB: the connection closes before 1 MiB is sent (all 2 MiB before). |
+| F7 | `471f14f` | A key missing from a set this call fetched starts the cooldown and answers 503 without a second fetch; a key missing after a rotation refresh answers 503, not 401. | `workload-keys.test.ts`, with the clock in hand: cold, expired, warm rotated in and not, and two concurrent cold calls, each by its fetch count. |
+| F8 | `b5a8de1` | The migration ledger is read only for a token that verified and matched a binding, just before the spent-token lookup. | The statement-count test adds a forged signature and a valid token with other claims on the bound issuer: one statement each, no vault call (two statements before). |
+| F9 | `5694893` | One predicate, `issuedRefusal` in core, for verification and the commit: `now - iat <= 3600` exactly, and `iat` at most 30 s ahead. `exp` and `nbf` keep the tolerance. | 3,600 against 3,601 seconds, and 30 against 31 ahead; an exchange held two seconds before its commit is refused there past the hour. |
+
+Where the fix differs from the one suggested:
+
+- **F1 keeps a separate query, made uncacheable, rather than a join.**
+  `findCredential` runs on every request, and must work on this release
+  before `coffre migrate` has made `service_bindings`; joining that table
+  would break every sign-in in that window. The binding query runs only for
+  exchanged credentials, which cannot exist before the migration.
+- **F2 leaves `token.exchange`'s `credentialId` as it is.** The credential
+  it issues is the run's own, the request has no credential of its own to
+  record, and `audit_log_exchange_idx` (0003) finds runs by that field.
+- **F3 also bounds the members page and the sweeps of member removal and
+  re-admission.** They read every credential a member ever had, which a CI
+  service runs to thousands, the same history as the unbind.
+
+`0004_live_indexes` only adds indexes, so this release works before it runs,
+on the same queries, more slowly. Like 0002 and 0003, it builds them with a
+plain `CREATE INDEX`, which holds writes to `credentials` and
+`service_bindings` for as long as the build takes.
