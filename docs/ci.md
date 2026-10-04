@@ -14,6 +14,45 @@ token stops future reads. Values already exported to a runner or copied to
 a platform remain there until that job ends or the platform updates them.
 coffre holds no Cloudflare, Vercel or GitHub write credential for this.
 
+## Without a stored token
+
+A CI run can sign in as a service with the ID token its platform signs for
+it, instead of a token kept in the CI's secrets. An owner trusts the
+workflow, on the service's page under "Trusted workloads", or with
+`coffre trust` ([how a binding is checked](design/oidc.md)). Each run then
+trades its ID token for a credential that lasts five minutes, and nothing
+long-lived is stored. The deployment must turn this on
+([deploy.md](deploy.md#ci-runs-without-a-stored-token)).
+
+```sh
+coffre trust api-deploy --github acme/api --workflow deploy.yml --branch main --apply
+```
+
+With the CLI, set `COFFRE_SERVICE` (the service, `token:api-deploy` or
+`api-deploy`) and `COFFRE_API_URL`, and no `COFFRE_TOKEN`. Each run of the
+CLI exchanges a token once:
+
+- **GitHub Actions**: give the job `permissions: id-token: write`. The CLI
+  asks the runner for a fresh ID token, for your instance's URL.
+- **GitLab**: declare an ID token for your instance, and name it to the CLI:
+
+  ```yaml
+  deploy:
+    id_tokens:
+      COFFRE_ID_TOKEN:
+        aud: https://secrets.acme.example
+    script:
+      - coffre run market/prod -- ./deploy
+  ```
+
+  A token is spent once used. A job that runs coffre twice does its work
+  under one `coffre run`, or declares a second ID token and sets
+  `COFFRE_ID_TOKEN` to it for the second run.
+- **Any other issuer** a `custom` binding trusts: `COFFRE_ID_TOKEN`, or
+  `COFFRE_ID_TOKEN_FILE` naming a file that holds it, for your instance's URL.
+
+The credential stays in the CLI's memory, never in `~/.coffre`.
+
 ## GitHub Actions
 
 Use a released tag containing the [Action](../action/action.yml), replacing
@@ -26,6 +65,22 @@ steps:
     with:
       url: https://secrets.acme.example
       token: ${{ secrets.COFFRE_TOKEN }}
+      environment: market/prod
+  - run: ./deploy
+```
+
+Or, without a stored token, with a binding that trusts the workflow:
+
+```yaml
+permissions:
+  id-token: write
+  contents: read
+steps:
+  - uses: actions/checkout@v4
+  - uses: erwinkn/coffre/action@v<version>
+    with:
+      url: https://secrets.acme.example
+      service: token:api-deploy
       environment: market/prod
   - run: ./deploy
 ```
@@ -43,8 +98,8 @@ that key is refused. GitHub's default metadata variables cannot be
 overridden. Other names such as `GITHUB_TOKEN` work.
 [GitHub documents these runner rules](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-commands#setting-an-environment-variable).
 
-The inputs are `url`, `token` and `environment`. `oidc` is coming; it has no
-effect yet, and a service token is still required.
+The inputs are `url`, `environment`, and one of `token` or `service`. With
+`service`, the run's ID token and the credential it buys are masked too.
 
 To use an installed CLI directly inside a step:
 

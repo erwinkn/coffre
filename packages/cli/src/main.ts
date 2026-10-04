@@ -9,6 +9,7 @@
 import { parseArgs } from 'node:util';
 import { execFile, spawn } from 'node:child_process';
 import { appendFileSync, chmodSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, existsSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { homedir, hostname } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -19,6 +20,7 @@ import { dailyNotice, type Checked } from './notice.ts';
 import { style } from './tty.ts';
 import { githubEnvironment, githubMasks } from './github-env.ts';
 import { bindingFrom, describeBindings, describePlan, serviceMember, TRUST_USAGE, type TrustFlags } from './trust.ts';
+import { exchange, idToken } from './workload.ts';
 import { pickCheck, verifyInstance, verifyKeys, VERIFY_USAGE } from './verify/index.ts';
 import {
   credentialHeaders,
@@ -109,7 +111,32 @@ async function cloudflaredToken(origin: string): Promise<string> {
   }
 }
 
+/**
+ * A CI run's credential, and the ID token it was traded for: asked for once
+ * in this process, before its first request, and kept in memory only.
+ */
+let exchanged: Promise<{ credential: string; idToken: string }> | null = null;
+
+function workloadCredential(origin: string, service: string): Promise<{ credential: string; idToken: string }> {
+  exchanged ??= (async () => {
+    const token = await idToken(process.env, origin, { fetch, readFile: (path) => readFile(path, 'utf8') });
+    const issued = await exchange(origin, service, token, fetch);
+    return { credential: issued.token, idToken: token };
+  })().catch((error: unknown) => fail(error instanceof Error ? error.message : String(error)));
+  return exchanged;
+}
+
+/** What GitHub must hide from the job's log, beside the values: the run's ID token and credential, if it used them. */
+async function workloadSecrets(): Promise<[string, string][]> {
+  if (exchanged === null) return [];
+  const { credential, idToken: token } = await exchanged;
+  return [['', token], ['', credential]];
+}
+
 async function headersFor(to: Target): Promise<Record<string, string>> {
+  if (to.credential.kind === 'workload') {
+    return credentialHeaders(to.mode, to.credential, (await workloadCredential(to.origin, to.credential.service)).credential);
+  }
   const access = to.credential.kind === 'cloudflared' ? await cloudflaredToken(to.origin) : undefined;
   return credentialHeaders(to.mode, to.credential, access);
 }
@@ -137,7 +164,7 @@ const QUIET = new Set(['migrate', 'login', 'verify']);
 async function noticePending(to: Target): Promise<void> {
   if (noticed) return;
   noticed = true;
-  if (QUIET.has(command ?? '') || process.env.COFFRE_TOKEN?.trim() || to.credential.kind === 'access-service-token') return;
+  if (QUIET.has(command ?? '') || process.env.COFFRE_TOKEN?.trim() || to.credential.kind === 'access-service-token' || to.credential.kind === 'workload') return;
   const line = await dailyNotice(to.origin, Date.now(), checkedFile, async () => {
     const response = await fetch(`${to.origin}/api/me`, { headers: await headersFor(to), redirect: 'manual' });
     if (!response.ok || !isJsonContentType(response.headers.get('content-type'))) throw new Error('no answer');
@@ -570,7 +597,7 @@ async function exportEnv(args: string[]): Promise<void> {
   if (format === 'github') {
     // All masks precede validation, file I/O and the summary. Never print the
     // environment records, even if the file cannot be written.
-    process.stdout.write(githubMasks(entries));
+    process.stdout.write(githubMasks([...(await workloadSecrets()), ...entries]));
     attempt(() => appendFileSync(githubEnv!, githubEnvironment(entries), { encoding: 'utf8', mode: 0o600 }));
   } else process.stdout.write(
     format === 'json'
@@ -1054,6 +1081,11 @@ const USAGE = `coffre - secrets, with an audit log
   Environment (each overrides the saved session for one command)
     COFFRE_API_URL          which instance to talk to
     COFFRE_TOKEN            a service token (coffre_svc_…), for CI
+    COFFRE_SERVICE          instead of a token: the service a CI run signs in as, by its
+                            ID token, which a trust binding accepts (coffre trust). On GitHub
+                            Actions, with \`permissions: id-token: write\`, nothing else;
+    COFFRE_ID_TOKEN, COFFRE_ID_TOKEN_FILE
+                            elsewhere, the run's ID token, for this instance's URL
     COFFRE_ACCESS_CLIENT_ID, COFFRE_ACCESS_CLIENT_SECRET
                             a Cloudflare Access service token, for CI
     COFFRE_AUTH_MODE        signin or cloudflare; normally detected at login

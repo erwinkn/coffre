@@ -67,3 +67,26 @@ test('the Action refuses an unsupported Node before npx runs, with a clear minim
     assert.match(ran.stderr, /requires Node.js 20 or newer/);
     assert.doesNotMatch(ran.stdout, /npx-must-not-run/);
 });
+
+test('the Action takes one of a token or a service, and a service only with the job\'s ID token', (t) => {
+    const dir = checkout(t);
+    const bin = join(dir, 'bin');
+    mkdirSync(bin);
+    writeFileSync(join(bin, 'node'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    writeFileSync(join(bin, 'npx'), '#!/bin/sh\necho "npx ran with service=$COFFRE_SERVICE"\nexit 0\n', { mode: 0o755 });
+    const text = readFileSync(join(dir, 'action/action.yml'), 'utf8');
+    const shell = text.match(/      run: \|\n((?:        [^\n]*\n?)+)/)[1].replace(/^        /gm, '');
+    const run = (env) => spawnSync('/bin/bash', ['-e', '-c', shell], { encoding: 'utf8', env: { PATH: bin, ...env }, timeout: 10_000 });
+    for (const env of [{}, { COFFRE_TOKEN: 'coffre_svc_x', COFFRE_SERVICE: 'token:api-deploy' }]) {
+        const ran = run(env);
+        assert.equal(ran.status, 1);
+        assert.match(ran.stderr, /needs one of token or service/);
+    }
+    const noIdToken = run({ COFFRE_SERVICE: 'token:api-deploy' });
+    assert.equal(noIdToken.status, 1);
+    assert.match(noIdToken.stderr, /permissions: id-token: write/);
+    const service = run({ COFFRE_SERVICE: 'token:api-deploy', ACTIONS_ID_TOKEN_REQUEST_URL: 'https://runner.example/token' });
+    assert.equal(service.status, 0, service.stderr);
+    assert.match(service.stdout, /npx ran with service=token:api-deploy/);
+    assert.equal(run({ COFFRE_TOKEN: 'coffre_svc_x' }).status, 0);
+});
