@@ -161,10 +161,10 @@ test('a reference the vault did not make is refused: no entry, another one, a fo
   assert.ok((await read(w, BO, via)).ok, 'the genuine reference still reads');
 });
 
-test("a reference ends for good: broken by the source's access manager, or replaced by the holder's writer", async () => {
+test("a reference ends for good: broken by the source's access manager, or replaced or abandoned by the holder's writer", async () => {
   const w = await world();
   const first = await made(w);
-  const end = (principal: string, reason: 'broken' | 'replaced', via: Via) => w.vault.endReferences({ principal, reason, items: [via] });
+  const end = (principal: string, reason: 'broken' | 'replaced' | 'abandoned', via: Via) => w.vault.endReferences({ principal, reason, items: [via] });
   // Max manages market's access: he breaks a reference into it, but replaces nothing in billing.
   assert.deepEqual(await end(MAX, 'replaced', first.via).then((result) => result.ok || result.refusal.code), 'no_grant');
   assert.deepEqual(await end(BO, 'broken', first.via).then((result) => result.ok || result.refusal.code), 'no_grant');
@@ -177,12 +177,18 @@ test("a reference ends for good: broken by the source's access manager, or repla
   const second = await made(w);
   assert.ok((await end(ADA, 'replaced', second.via)).ok);
   assert.deepEqual(await read(w, BO, second.via).then((result) => result.ok || result.refusal.code), 'ended');
+  // A seal its write never stored is abandoned, as replacing: by whoever writes where it is held.
+  const third = await made(w);
+  assert.deepEqual(await end(MAX, 'abandoned', third.via).then((result) => result.ok || result.refusal.code), 'no_grant');
+  assert.ok((await end(ADA, 'abandoned', third.via)).ok);
+  assert.deepEqual(await read(w, BO, third.via).then((result) => result.ok || result.refusal.code), 'ended');
   const ends = (await vaultEntries('reference.end')).filter((entry) => entry.decision === 'allow');
   assert.deepEqual(ends.map((entry) => [entry.actor, Number(entry.relatedSeq), entry.metadata.reason, entry.projectId]), [
     [MAX, first.via.seq, 'broken', w.billing],
     [ADA, second.via.seq, 'replaced', w.billing],
+    [ADA, third.via.seq, 'abandoned', w.billing],
   ]);
   assert.deepEqual(ends[0]!.metadata.also, { projectId: w.market.project, environmentId: w.market.prod, secretId: w.source.secretId });
   // These holders' rows were never written, as when the app's write after the seal fails: no end names a key that is not there.
-  assert.deepEqual(ends.map((entry) => entry.secretId), [null, null]);
+  assert.deepEqual(ends.map((entry) => entry.secretId), [null, null, null]);
 });

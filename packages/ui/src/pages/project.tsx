@@ -353,11 +353,12 @@ function EnvironmentCard({
   const coffre = useCoffre();
   const rename = useChange(renameEnvironment(coffre, project));
   const archive = useChange(archiveEnvironment(coffre, project));
-  // What archiving it would stop, asked once the dialog opens (D41).
+  // What archiving it would stop, asked once the dialog opens (D41); Archive waits for the answer.
   const place = `${project}/${environment.slug}`;
   const archiving = confirming && environment.details?.archivedAt == null;
   const { data: lent } = useQuery({ ...queries.references(coffre, place), enabled: archiving });
   const blockers = archiving && lent?.ok === true ? archiveBlockers(place, lent.references) : [];
+  const asking = archiving && lent === undefined;
   const everyProject = useEveryProject();
   const { status, dismiss } = useChangeStatus(keys.projects);
   const state = status(environmentId(project, environment.slug));
@@ -584,7 +585,7 @@ function EnvironmentCard({
             }
             detail={<ArchiveBlocked references={blockers} />}
             confirmLabel={isArchived ? 'Restore environment' : 'Archive environment'}
-            confirmDisabled={blockers.length > 0}
+            confirmDisabled={asking || blockers.length > 0}
             destructive={!isArchived}
             onConfirm={() => archive({ slug: environment.slug, archived: !isArchived })}
           />
@@ -1040,9 +1041,11 @@ function DangerZone({ project }: { project: ProjectSummary }) {
   const { instanceRole } = useShell();
   const { pending, error, run } = useAction();
   const isArchived = project.archivedAt !== null;
-  // What archiving it would stop, asked once the dialog opens (D41).
-  const { data: lent } = useQuery({ ...queries.references(coffre, project.slug), enabled: confirming && !isArchived });
-  const blockers = confirming && !isArchived && lent?.ok === true ? archiveBlockers(project.slug, lent.references) : [];
+  // What archiving it would stop, asked once the dialog opens (D41); Archive waits for the answer.
+  const archiving = confirming && !isArchived;
+  const { data: lent } = useQuery({ ...queries.references(coffre, project.slug), enabled: archiving });
+  const blockers = archiving && lent?.ok === true ? archiveBlockers(project.slug, lent.references) : [];
+  const asking = archiving && lent === undefined;
   // Deleting is for instance owners, and only once the project is archived.
   const canDelete = isArchived && instanceRole !== 'user';
 
@@ -1128,7 +1131,7 @@ function DangerZone({ project }: { project: ProjectSummary }) {
         }
         detail={<ArchiveBlocked references={blockers} />}
         confirmLabel={isArchived ? `Restore ${project.name}` : `Archive ${project.name}`}
-        confirmDisabled={blockers.length > 0}
+        confirmDisabled={asking || blockers.length > 0}
         destructive={!isArchived}
         onConfirm={() =>
           run(

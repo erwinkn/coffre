@@ -75,6 +75,9 @@ too: environments are made, renamed, archived, restored and deleted, and
 the project is archived, restored, deleted and made again under its old
 slug. `retire-env` and `retire-project` archive and then delete in one
 step: a deletion needs both, and two independent draws rarely line up.
+The root makes ada an instance owner, or takes it back: as one she grants
+and sees every member's grants, and still reads a secret only with a grant
+of her own; removed and brought back, she is no owner.
 Two fixed scenarios cover every operation, removal followed by
 re-admission, a grant on a slug before any environment has it, renames
 across slugs, and slugs used again after a deletion.

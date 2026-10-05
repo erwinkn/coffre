@@ -205,7 +205,7 @@ directly, and its preview lists those keys before anyone confirms.
 
 ### Ending a reference
 
-Two ways, each a vault `reference.end` entry naming the reference's
+Three ways, each a vault `reference.end` entry naming the reference's
 `reference.create` by `related_seq`:
 
 - **Broken, by either side.** Whoever holds `grant.manage` on the
@@ -220,6 +220,16 @@ Two ways, each a vault `reference.end` entry naming the reference's
   app's write. That needs `secret.write` on billing/prod. If the write then
   fails, the key has no value until it is written again: refused, never
   stale.
+- **Abandoned, by the app.** The vault seals a reference before the app
+  writes its row. If that write stores nothing (refused, failed, or
+  prepared again under fresh ids), the app ends the seal at once, as its
+  maker, who writes the holder's environment as replacing needs: `reason:
+  "abandoned"`. Otherwise a row the app's login wrote later, naming the
+  seal, would make it a reference no write stored. Best effort: a crash
+  between the two leaves a seal with no row, which is no reference until
+  such a row names it; reviving it takes the app's login, and yields only
+  a reference its maker was allowed to make, read only by whoever reads
+  its holder.
 
 An ended reference stays ended. Following the source again is a new
 reference, which takes read on it again. Archiving the holder does not end
@@ -234,8 +244,13 @@ the `reference.create` entry the row names, and a row with no such entry
 is no reference.
 
 The vault releases, through a reference, only its source's newest version,
-by the versions' own order and the source's `current_version_id` both: the
-app's login may write the pointer, never a version.
+by the versions' own order and the source's `current_version_id` both. That
+closes the cheap move, pointing `current_version_id` back at an older
+version. It does not stop the app's login writing a version: `set` and
+`restore` insert versions (`setSecrets`, `appendVersion`), so a compromised
+app could insert a copy of an old value as the newest, and a reference
+would release it. Such an app can already act as any reader and read what
+they read, as said above.
 
 ### When the source is gone
 
@@ -248,6 +263,9 @@ references, with Break. Live is the lists' answer, the vault's seal and its
 `reference.end`, so a row the vault never sealed blocks nothing. A
 reference held inside what is archived, in another environment of the same
 project archived whole, does not block: archiving stops no one else's read.
+One held in an environment or project archived before still blocks, on
+purpose: unarchiving its holder brings it back, and it would then read an
+archived source. Break it, from either side, to archive the source.
 The check runs under the log's head, in the archive's own transaction, and
 making a reference checks its source again there, so an archive and a
 reference made at once cannot both land. Restoring is never refused. So a
@@ -319,10 +337,14 @@ billing's. An auditor of either project sees it.
 
 ### Offboarding
 
-A person's references outlive them: they were decisions. Their
-offboarding report (`coffre offboard`, the member's page) lists the
-references they made, live ones first, for review: holder, source, when,
-and how many people read through each. Removing them ends nothing.
+A reference belongs to the environment that holds it, like a value, not
+to the person who made it (D46). Its maker is provenance: the actor of its
+`reference.create` entry. So removing them ends nothing, and their
+offboarding report (`coffre offboard`, the member's page) reads the
+references they made from the log, by that actor, through the log's actor
+index, never from `created_by`, which the app's login can write. It lists
+them live ones first, for review: holder, source, when, and how many
+people read through each.
 
 ### API and CLI
 

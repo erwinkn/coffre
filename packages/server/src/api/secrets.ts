@@ -268,7 +268,10 @@ export async function setSecrets(
         reason: 'replaced',
         items: replaced.map((row) => ({ reference: row.id, seq: Number(row.createdSeq) })),
       });
-      if (!ended.ok) throw vaultRefusal(ctx, ended.refusal, 'secret.write', { ...environment, operationId });
+      if (!ended.ok) {
+        await abandon(ctx, operationId, references, made.seqs);
+        throw vaultRefusal(ctx, ended.refusal, 'secret.write', { ...environment, operationId });
+      }
     }
 
     return audited(ctx, async (tx, log) => {
@@ -340,7 +343,7 @@ export async function setSecrets(
           sourceEnvironmentId: source.environmentId,
           sourceSecretId: source.id,
           createdSeq: BigInt(made.seqs[i]!),
-          // The member, as the vault's entry names them: the offboarding report finds them by it.
+          // The member, as the vault's entry names them. Provenance only: lists and the offboarding report read the maker from the entry.
           createdBy: formatMember(ctx.caller.principal),
         });
         log.push(allowed(ctx, 'secret.reference', {
@@ -353,8 +356,7 @@ export async function setSecrets(
       for (const { key, source } of refs.map((ref) => ({ key: ref.key, source: ref.ref }))) keys[key] ??= { reference: source };
       const archiving = archives.map((key) => byKey.get(key)).filter((secret) => secret !== undefined && secret.archivedAt === null);
       if (archiving.length > 0) {
-        const what = archiving.length === 1 ? `${place.project.slug}/${place.environment!.slug}/${archiving[0]!.key}` : `${archiving.length} keys of ${place.project.slug}/${place.environment!.slug}`;
-        await refuseIfRead(ctx, tx, what, { ...environment, secretIds: archiving.map((secret) => secret!.id) }, 'secret.archive', { ...environment, operationId });
+        await refuseIfRead(ctx, tx, `${place.project.slug}/${place.environment!.slug}`, { ...environment, secretIds: archiving.map((secret) => secret!.id) }, 'secret.archive', { ...environment, operationId });
       }
       for (const key of archives) {
         const secret = byKey.get(key);
@@ -364,9 +366,28 @@ export async function setSecrets(
         log.push(allowed(ctx, 'secret.archive', { ...environment, secretId: secret.id, operationId, metadata: { key } }));
       }
       return { operationId, keys };
+    }).catch(async (error: unknown) => {
+      await abandon(ctx, operationId, references, made.seqs);
+      throw error;
     });
   });
   return result;
+}
+
+/**
+ * End, `abandoned`, the references the vault sealed for a write that stored
+ * none of them: refused, failed, or prepared again under fresh ids. Then a
+ * row written later around the app, naming one, reads nothing. Best effort,
+ * and after the write's own answer: meanwhile a seal no row names is no
+ * reference, and the write's error is the one to answer with.
+ */
+async function abandon(ctx: ApiContext, operationId: string, references: readonly { id: string }[], seqs: readonly number[]): Promise<void> {
+  if (seqs.length === 0) return;
+  await ctx.vault.endReferences({
+    ...asking(ctx, operationId),
+    reason: 'abandoned',
+    items: references.map(({ id }, i) => ({ reference: id, seq: seqs[i]! })),
+  }).catch(() => undefined);
 }
 
 /** Each holder's newest reference's id, from rows oldest first. */
@@ -526,7 +547,7 @@ export async function patchSecret(
     // Under the head, as every write to a place: one deleted since the router found it is not written to, nor filed.
     await checkEnvironment(tx, place, environment);
     if (archiving && archived) {
-      await refuseIfRead(ctx, tx, `${place.project.slug}/${place.environment!.slug}/${secret.key}`, { ...environment, secretIds: [secret.id] }, 'secret.archive', where);
+      await refuseIfRead(ctx, tx, `${place.project.slug}/${place.environment!.slug}`, { ...environment, secretIds: [secret.id] }, 'secret.archive', where);
     }
     if (renaming || archiving) {
       try {

@@ -29,7 +29,7 @@ const kinds = [
   'invite', 'grant', 'revoke', 'set', 'read', 'remove', 'issue', 'revoke-token',
   'create-env', 'rename-env', 'archive-env', 'unarchive-env', 'delete-env',
   'archive-project', 'unarchive-project', 'delete-project', 'create-project', 'retire-env', 'retire-project',
-  'refer', 'break', 'rotate', 'set-holder', 'forge',
+  'refer', 'break', 'rotate', 'set-holder', 'forge', 'owner', 'grant-as-ada',
 ] as const;
 type Operation = {
   kind: typeof kinds[number];
@@ -79,6 +79,8 @@ async function scenario(operations: readonly Operation[]) {
   const root = clientFor(deps, ROOT);
   const model = {
     active: { ada: true, ci: true },
+    /** Whether ada is an instance owner: she manages and sees every grant, and reads a secret only with one of her own. */
+    owner: false,
     // Each member's roles, by what the grant covers: `project:<generation>`, `env:<n>`, `*` or `*/<slug>`.
     grants: { ada: new Map<string, Role>(), ci: new Map<string, Role>() },
     project: null as { generation: number; id: string; archived: boolean } | null,
@@ -135,6 +137,9 @@ async function scenario(operations: readonly Operation[]) {
     return rows.map((row) => row.id);
   }
   const credentials: { member: Member; id: string; token: string; live: boolean }[] = [];
+  const signedIn = (member: Member) => credentials.some((credential) => credential.member === member && credential.live);
+  /** Whether ada manages and sees grants: as an instance owner only, since her roles are viewer and developer. */
+  const adaManages = () => model.owner && model.active.ada && signedIn('ada');
   function may(member: Member, environment: Environment | undefined, write = false): boolean {
     if (!model.active[member] || model.project === null || model.project.archived || environment === undefined || environment.archived) return false;
     const covering = [`project:${model.project.generation}`, `env:${environment.n}`, '*', `*/${environment.slug}`];
@@ -263,6 +268,12 @@ async function scenario(operations: readonly Operation[]) {
     for (const member of members) {
       for (const slug of slugs) await read(member, slug);
     }
+    // An owner sees every member and their grants; anyone else with no grant.manage, none.
+    const directory = await allowed(() => client('ada').members.list(), adaManages());
+    if (directory) {
+      assert.equal(directory.members.find((listed) => listed.member === principal('ada'))?.instanceRole, 'owner');
+      assert.equal(directory.members.some((listed) => listed.member === principal('ci')), model.active.ci, 'an owner sees every member');
+    }
     // Every list shows the places the model has, archived included, and no tombstone.
     const listed = (await root.projects.list()).projects;
     assert.deepEqual(listed.map((project) => project.slug), model.project === null ? ['billing'] : ['billing', 'market'], 'the projects listed are the live ones');
@@ -329,17 +340,21 @@ async function scenario(operations: readonly Operation[]) {
         break;
       }
       case 'grant':
-      case 'revoke': {
+      case 'revoke':
+      case 'grant-as-ada': {
+        // The root grants, or ada, as an instance owner only: her own grants are viewer and developer.
+        const granting = op.kind !== 'revoke';
+        const asAda = op.kind === 'grant-as-ada';
         const where = grantPath(op);
         const key = grantKey(op);
         const previousRole = key === null ? undefined : model.grants[op.member].get(key);
-        const permitted = model.active[op.member] && key !== null;
-        const noOp = permitted && (op.kind === 'grant' ? previousRole === op.role : previousRole === undefined);
+        const permitted = model.active[op.member] && key !== null && (!asAda || adaManages());
+        const noOp = permitted && (granting ? previousRole === op.role : previousRole === undefined);
         const previous = noOp ? await state() : undefined;
-        const result = await allowed(() => root.access.set(principal(op.member), { [where]: op.kind === 'grant' ? op.role : null }), permitted, true);
+        const result = await allowed(() => (asAda ? client('ada') : root).access.set(principal(op.member), { [where]: granting ? op.role : null }), permitted, true);
         if (result) {
-          assert.equal(result.changes[where], noOp ? 'unchanged' : op.kind === 'revoke' ? 'revoked' : previousRole === undefined ? 'created' : 'updated');
-          if (op.kind === 'grant') model.grants[op.member].set(key!, op.role);
+          assert.equal(result.changes[where], noOp ? 'unchanged' : !granting ? 'revoked' : previousRole === undefined ? 'created' : 'updated');
+          if (granting) model.grants[op.member].set(key!, op.role);
           else model.grants[op.member].delete(key!);
         }
         if (previous) {
@@ -364,6 +379,8 @@ async function scenario(operations: readonly Operation[]) {
         if (result) {
           model.active[op.member] = false;
           model.grants[op.member].clear();
+          // Brought back, a member starts over: no grant, and not an owner.
+          if (op.member === 'ada') model.owner = false;
           for (const credential of credentials) if (credential.member === op.member) credential.live = false;
         }
         break;
@@ -442,6 +459,14 @@ async function scenario(operations: readonly Operation[]) {
         else assert.equal((await root.projects.create('market', { name: 'Market' })).created, false);
         break;
       }
+      case 'owner': {
+        // The root makes ada an owner, or takes it back. A member removed is brought back by an invitation, not here.
+        if (!model.active.ada) break;
+        const result = await allowed(() => root.members.add(principal('ada'), { owner: !model.owner }), true);
+        assert.equal(result!.instanceRole, model.owner ? 'user' : 'owner');
+        model.owner = !model.owner;
+        break;
+      }
       case 'refer': {
         // billing/prod/VALUE made a reference to market/<slug>/VALUE, by the root: a live source, or a refusal.
         const live = model.project !== null && !model.project.archived && environment !== undefined && !environment.archived;
@@ -518,7 +543,7 @@ async function scenario(operations: readonly Operation[]) {
   }
 }
 
-test('API operation sequence covers invitation, grants, values, removal, re-admission and token revocation', () => {
+test('API operation sequence covers invitation, grants, values, removal, re-admission, token revocation and an instance owner', () => {
   const base: Operation = { kind: 'read', member: 'ada', environment: 'prod', to: 'qa', scope: 'environment', role: 'viewer', value: 'changed', credential: 0 };
   return scenario([
     { ...base, kind: 'grant' },
@@ -535,6 +560,20 @@ test('API operation sequence covers invitation, grants, values, removal, re-admi
     { ...base, kind: 'invite' },
     { ...base, kind: 'remove', member: 'ci' },
     { ...base, kind: 'invite', member: 'ci' },
+    // An instance owner manages and sees every grant, and reads a secret only with a grant of her own.
+    { ...base, kind: 'grant-as-ada', member: 'ci' },
+    { ...base, kind: 'owner' },
+    base,
+    { ...base, kind: 'grant-as-ada', member: 'ci', scope: 'every', role: 'developer' },
+    { ...base, kind: 'grant-as-ada' },
+    base,
+    { ...base, kind: 'owner' },
+    { ...base, kind: 'grant-as-ada', member: 'ci', scope: 'project' },
+    // Removed, she is no owner when she comes back.
+    { ...base, kind: 'owner' },
+    { ...base, kind: 'remove' },
+    { ...base, kind: 'invite' },
+    { ...base, kind: 'grant-as-ada', member: 'ci', scope: 'project' },
   ]);
 });
 

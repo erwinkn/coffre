@@ -174,15 +174,16 @@ function ConsiderRotating({ report, person }: { report: PrincipalReport; person:
 }
 
 /**
- * References they made: decisions that outlive them, each letting whoever
- * reads its environment read another secret. Listed to review, not ended.
+ * References they made, as the log names them: each belongs to the
+ * environment that holds it, like a value, not to them (D46), so their
+ * leaving ends none. Listed to review.
  */
 function MadeReferences({ report }: { report: PrincipalReport }) {
   return (
     <Card
       labelledBy="made-references"
       title="References they made"
-      description="Each lets whoever reads its environment read another secret, and stays after they leave. Review them; the source's access managers, or whoever writes where one is held, can break it."
+      description="Each belongs to the environment that holds it, like a value, and stays when they leave: whoever reads that environment reads another secret through it. Review them; the source's access managers, or whoever writes where one is held, can break it."
     >
       <div className="dt-wrap">
         <table className="dt stacks">

@@ -97,8 +97,10 @@ export type OffboardingReport = {
   /** Service tokens they issued that still work. */
   issuedTokens: IssuedToken[];
   /**
-   * References they made, live ones first: decisions that outlive them,
-   * listed for review (docs/design/environments.md, "Offboarding").
+   * References they made, live ones first, as the log's `reference.create`
+   * entries name their actor: each belongs to the environment that holds
+   * it, and their leaving ends none. Listed for review
+   * (docs/design/environments.md, "Offboarding").
    */
   references: ReferenceView[];
 };

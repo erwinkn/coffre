@@ -232,7 +232,8 @@ export type ReferenceInput = Correlation & {
 
 export type EndReferencesInput = Correlation & {
   principal: string;
-  reason: 'replaced' | 'broken';
+  /** `abandoned`: sealed for a write that stored nothing, so that no row written later revives it. */
+  reason: 'replaced' | 'broken' | 'abandoned';
   items: Via[];
 };
 
