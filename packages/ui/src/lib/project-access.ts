@@ -1,18 +1,15 @@
+import { ROLES, type Role } from '@coffre/core/access';
+
 import type { GrantRow, ProjectSummary, RoleRow } from '../shared/models';
 
-export type ProjectAccessRole = 'owner' | 'viewer' | 'developer';
+/** The roles the project's access picker offers, a product choice; others show by their names. */
+export type ProjectAccessRole = Extract<Role, 'owner' | 'viewer' | 'developer'>;
 
 export type ProjectAccessOption = {
   value: string;
   role: ProjectAccessRole;
   environmentSlug: string | null;
   label: string;
-};
-
-const LEVEL_LABELS: Record<ProjectAccessRole, string> = {
-  owner: 'Owner',
-  viewer: 'Read',
-  developer: 'Write',
 };
 
 export function projectAccessOptions(
@@ -23,7 +20,7 @@ export function projectAccessOptions(
       value: 'owner:',
       role: 'owner',
       environmentSlug: null,
-      label: 'Owner',
+      label: ROLES.owner.name,
     },
   ];
 
@@ -32,7 +29,7 @@ export function projectAccessOptions(
       value: `${role}:`,
       role,
       environmentSlug: null,
-      label: `${LEVEL_LABELS[role]}: all`,
+      label: `${ROLES[role].name}: all`,
     });
   }
 
@@ -43,7 +40,7 @@ export function projectAccessOptions(
         value: `${role}:${environment.slug}`,
         role,
         environmentSlug: environment.slug,
-        label: `${LEVEL_LABELS[role]}: ${environment.slug}`,
+        label: `${ROLES[role].name}: ${environment.slug}`,
       });
     }
   }
@@ -62,22 +59,13 @@ export function parseProjectAccess(value: string): {
   return { role, environmentSlug: environmentSlug || null };
 }
 
+/** "Owner", "Viewer: all" or "Developer: prod": a grant by its role's name, and where. */
 export function projectAccessLabel(
   grant: Pick<GrantRow, 'role' | 'roleName' | 'environmentSlug'>,
 ): string {
-  const scope =
-    grant.environmentSlug === null ? 'all envs' : grant.environmentSlug;
-
-  if (grant.role === 'owner') return 'Owner';
-  if (grant.role === 'viewer') {
-    return grant.environmentSlug === null ? 'Read: all' : `Read: ${scope}`;
-  }
-  if (grant.role === 'developer') {
-    return grant.environmentSlug === null ? 'Write: all' : `Write: ${scope}`;
-  }
-  // Specialised grants remain legible even though the common access controls
-  // use owner/read/write.
-  return `${grant.roleName}: ${scope}`;
+  const name = Object.hasOwn(ROLES, grant.role) ? ROLES[grant.role as Role].name : grant.roleName;
+  if (grant.role === 'owner') return name;
+  return `${name}: ${grant.environmentSlug ?? 'all'}`;
 }
 
 export function projectAccessRoles(

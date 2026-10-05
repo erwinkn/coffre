@@ -6,6 +6,7 @@ import { ApiError } from './api/errors.ts';
 import type { McpVia } from './api/context.ts';
 import { CredentialUncheckable } from './api/signin.ts';
 import { errorResponse } from './http.ts';
+import { logged } from './logged.ts';
 import type { CoffreRuntime } from './runtime.ts';
 
 /** A verified caller, loaded once with everything they hold. */
@@ -148,7 +149,9 @@ export async function authenticateRequest(
       provenance: exchanged ? credentialId : null,
       via: null,
     };
-  } catch {
+  } catch (error) {
+    // Logged, so a bug of ours is not read as an outage of the vault or the database.
+    console.error('checking who called failed', { requestId, error: logged(error) });
     return errorResponse(new ApiError('unavailable', 'coffre cannot check who you are right now'));
   }
 }

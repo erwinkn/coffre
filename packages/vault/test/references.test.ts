@@ -179,7 +179,9 @@ test("a reference ends for good: broken by the source's access manager, or repla
   assert.deepEqual(await read(w, BO, second.via).then((result) => result.ok || result.refusal.code), 'ended');
   // A seal its write never stored is abandoned, as replacing: by whoever writes where it is held.
   const third = await made(w);
-  assert.deepEqual(await end(MAX, 'abandoned', third.via).then((result) => result.ok || result.refusal.code), 'no_grant');
+  assert.deepEqual(await end(MAX, 'abandoned', third.via).then((result) => result.ok || result.refusal.code), 'not_allowed');
+  // Only its maker abandons it: another who writes billing could replace it or break it, not say it was never stored.
+  assert.deepEqual(await end(ROOT, 'abandoned', third.via).then((result) => result.ok || result.refusal.code), 'not_allowed');
   assert.ok((await end(ADA, 'abandoned', third.via)).ok);
   assert.deepEqual(await read(w, BO, third.via).then((result) => result.ok || result.refusal.code), 'ended');
   const ends = (await vaultEntries('reference.end')).filter((entry) => entry.decision === 'allow');

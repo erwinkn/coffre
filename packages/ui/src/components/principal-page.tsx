@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from 'react';
 import { useSuspenseQueries, useSuspenseQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
+import { ROLES } from '@coffre/core/access';
 import { useShell } from '../lib/use-shell';
 import { toast } from 'sonner';
 import { memberRef, useCoffre } from '../lib/coffre';
@@ -416,9 +417,9 @@ function EditAccess({
                   >
                     {held.level === 'custom' && <option value="custom">Keep as is</option>}
                     <option value="none">No access</option>
-                    <option value="owner">Owner</option>
-                    <option value="viewer">Read: all</option>
-                    <option value="developer">Write: all</option>
+                    <option value="owner">{ROLES.owner.name}</option>
+                    <option value="viewer">{ROLES.viewer.name}: all</option>
+                    <option value="developer">{ROLES.developer.name}: all</option>
                     {environments.length > 0 && <option value="env">Per environment…</option>}
                   </select>
                   {(plan.level === 'owner' ||
@@ -458,8 +459,8 @@ function EditAccess({
                               }}
                             >
                               <option value="">No access</option>
-                              <option value="viewer">Read</option>
-                              <option value="developer">Write</option>
+                              <option value="viewer">{ROLES.viewer.name}</option>
+                              <option value="developer">{ROLES.developer.name}</option>
                             </select>
                             {current !== null && (
                               <ExpiryField

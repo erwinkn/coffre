@@ -17,10 +17,11 @@
 // another path is one the links do not reach.
 import { redirect, type ParsedLocation } from '@tanstack/react-router';
 import type { QueryClient } from '@tanstack/react-query';
-import type { CoffreClient } from '@coffre/client';
+import type { CoffreClient, RouteInput } from '@coffre/client';
 
 import { ShellLayout, SoloLayout } from './layout';
 import { uiResult } from './lib/coffre';
+import { stringsOf } from './lib/search';
 import {
   loadDirectory,
   loadPrincipal,
@@ -129,7 +130,7 @@ export const audit = {
   validateSearch: (search: Record<string, unknown>): AuditSearch => ({
     decision: search.decision === 'deny' ? 'deny' : undefined,
     actorId: typeof search.actorId === 'string' && search.actorId !== '' ? search.actorId : undefined,
-    detail: search.detail === '1' || search.detail === 1 ? '1' : undefined,
+    detail: search.detail === '1' ? '1' : undefined,
   }),
   loaderDeps: ({ search }: { search: AuditSearch }) => search,
   // The entries only: the verification is asked for once the page is up
@@ -265,39 +266,23 @@ export const deviceLogin = {
   },
 };
 
-/** An OAuth authorization request's parameters, the only ones the consent page carries. */
-const AUTHORIZATION_PARAMS = [
-  'client_id',
-  'redirect_uri',
-  'response_type',
-  'code_challenge',
-  'code_challenge_method',
-  'state',
-  'scope',
-  'resource',
-] as const;
-
-type AuthorizationSearch = Partial<Record<(typeof AUTHORIZATION_PARAMS)[number], string>>;
+type AuthorizationSearch = RouteInput<'GET /oauth/authorizations'>;
 
 /**
- * `/oauth/authorize`: an MCP client asking to connect. Its parameters are
- * read from the query string as sent: the router's search parses what looks
- * like JSON, and a `state` of `1e5` must go back as `1e5`.
+ * `/oauth/authorize`: an MCP client asking to connect. Its parameters go to
+ * the API as sent, which says which it takes; the router keeps them strings,
+ * so a `state` of `1e5` goes back as `1e5`.
  */
 export const oauthAuthorize = {
-  loaderDeps: ({ search }: { search: unknown }) => ({ search }),
+  validateSearch: (search: Record<string, unknown>): AuthorizationSearch => stringsOf(search),
+  loaderDeps: ({ search }: { search: AuthorizationSearch }) => ({ request: search }),
   // Its own read, as the device login's: every authorization is checked afresh.
-  loader: async ({ context, location }: Loader) => {
+  loader: async ({ context, deps, location }: Loader & { deps: { request: AuthorizationSearch } }) => {
     const { coffre, queryClient } = coffreOf(context);
     const shell = await loadShell(queryClient, coffre);
     if (shell.registrationRequired) throw redirect({ to: '/unregistered' });
     if (shell.principal === null) throw redirect({ to: '/login', search: { next: location.href } });
-    const query = new URLSearchParams(location.searchStr);
-    const request: AuthorizationSearch = {};
-    for (const name of AUTHORIZATION_PARAMS) {
-      const value = query.get(name);
-      if (value !== null) request[name] = value;
-    }
+    const { request } = deps;
     return { request, email: shell.principal.id, result: await uiResult(() => coffre.oauth.describe(request)) };
   },
 };
