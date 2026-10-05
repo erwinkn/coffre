@@ -353,7 +353,12 @@ token is not, and `/mcp` takes nothing but one. A tool's call is API calls
 in process, as its person, through this same table (`fetchApi`, as a page's
 render): the request carries its connection (`via`), which the router holds
 to a table of the scope each route needs (`ROUTE_SCOPES`), and which every
-entry it writes names, the vault's as their `credentialId`.
+entry it writes names, the vault's as their `credentialId`. A tool that
+changes something makes no change when called: it opens a row in
+`mcp_approvals`, its tool and arguments, and the person decides it on
+`/approvals/<id>`, whose Approve, an ordinary row of the table, makes the
+change there, in process, as the person with the connection attached
+(design/mcp.md, section 7).
 
 The server is one table keyed by method and route, each entry giving its input
 schema, the permission it needs and its handler. `@coffre/client` is typed

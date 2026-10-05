@@ -733,7 +733,7 @@ export type Api = {
       redirectHost: string;
       loopbackOnly: boolean;
       scopes: ("browse" | "manage-access" | "read-values" | "write")[];
-      connected: number;
+      connections: ("browse" | "manage-access" | "read-values" | "write")[][];
       days: number;
     };
   };
@@ -862,11 +862,103 @@ export type Api = {
       };
     };
   };
+  "GET /approvals/:id": {
+    input: undefined;
+    output: {
+      approval: {
+        id: string;
+        status: "approved" | "cancelled" | "denied" | "expired" | "failed" | "pending";
+        client: {
+          name: string;
+          host: string | null;
+          registration: "cimd" | "dcr";
+        };
+        tool: string;
+        summary: string;
+        details: {
+          label: string;
+          value: string;
+          kind?: "mono" | "time";
+        }[];
+        asks: null | {
+          value: {
+            label: string;
+            note: string;
+          };
+        };
+        digest: string;
+        createdAt: string;
+        expiresAt: string;
+        outcome: null | {
+          text: string;
+          result?: {
+            [key: string]: unknown;
+          };
+          error?: string;
+        };
+      };
+    };
+  };
+  "POST /approvals/:id": {
+    input: {
+      approve: boolean;
+      digest: string;
+      value?: string;
+    };
+    output: {
+      status: "approved" | "cancelled" | "denied" | "expired" | "failed" | "pending";
+      outcome: {
+        text: string;
+        result?: {
+          [key: string]: unknown;
+        };
+        error?: string;
+      };
+      shown: {
+        label: string;
+        value: string;
+        kind?: "mono" | "time";
+      }[];
+    };
+  };
 };
 
 export type AccessValue = "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer" | null | {
   role: "access-manager" | "auditor" | "developer" | "maintainer" | "owner" | "viewer";
   until: string | null;
+};
+
+export type ApprovalView = {
+  id: string;
+  status: "approved" | "cancelled" | "denied" | "expired" | "failed" | "pending";
+  client: {
+    name: string;
+    host: string | null;
+    registration: "cimd" | "dcr";
+  };
+  tool: string;
+  summary: string;
+  details: {
+    label: string;
+    value: string;
+    kind?: "mono" | "time";
+  }[];
+  asks: null | {
+    value: {
+      label: string;
+      note: string;
+    };
+  };
+  digest: string;
+  createdAt: string;
+  expiresAt: string;
+  outcome: null | {
+    text: string;
+    result?: {
+      [key: string]: unknown;
+    };
+    error?: string;
+  };
 };
 
 export type AuditEntryView = {
@@ -931,7 +1023,7 @@ export type AuthorizationView = {
   redirectHost: string;
   loopbackOnly: boolean;
   scopes: ("browse" | "manage-access" | "read-values" | "write")[];
-  connected: number;
+  connections: ("browse" | "manage-access" | "read-values" | "write")[][];
   days: number;
 };
 
@@ -990,6 +1082,22 @@ export type Deletion = {
     source: string;
   }[];
   stranded: string[];
+};
+
+export type Decision = {
+  status: "approved" | "cancelled" | "denied" | "expired" | "failed" | "pending";
+  outcome: {
+    text: string;
+    result?: {
+      [key: string]: unknown;
+    };
+    error?: string;
+  };
+  shown: {
+    label: string;
+    value: string;
+    kind?: "mono" | "time";
+  }[];
 };
 
 export type DeletionResult = {

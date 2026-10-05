@@ -8,6 +8,13 @@
       "when": 1791237720902,
       "tag": "0000_baseline",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1791242674488,
+      "tag": "0001_mcp_approvals",
+      "breakpoints": true
     }
   ]
 }

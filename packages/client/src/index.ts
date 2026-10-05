@@ -14,12 +14,14 @@ import type { Api, AuthInfo, BindingPlan, BindingView, DeletionResult, DryRunOut
 export type {
   AccessValue,
   Api,
+  ApprovalView,
   AuditEntryView,
   AuthInfo,
   AuthorizationView,
   BindingPlan,
   BindingView,
   ConnectedApp,
+  Decision,
   Deletion,
   DeletionResult,
   DismissedKey,
@@ -320,6 +322,12 @@ export function createClient(options: ClientOptions) {
     },
 
     /** The MCP clients I connected. */
+    /** A change an MCP client asked for: what it would do, and the person's decision, which makes it. */
+    approvals: {
+      get: (id: string) => call('GET /approvals/:id', { id }),
+      decide: (id: string, input: RouteInput<'POST /approvals/:id'>) => call('POST /approvals/:id', { id }, input),
+    },
+
     apps: {
       list: () => call('GET /apps', {}),
       disconnect: (id: string) => call('DELETE /apps/:id', { id }),

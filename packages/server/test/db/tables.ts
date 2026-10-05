@@ -30,4 +30,5 @@ export const {
   dismissedKeys,
   oauthClients,
   mcpConnections,
+  mcpApprovals,
 } = schema;

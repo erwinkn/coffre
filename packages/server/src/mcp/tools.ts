@@ -2,11 +2,13 @@
 // API calls, as its person, through the same route table, checks and vault
 // as a page's render. A tool can do no more than its person could with the
 // CLI; the scope it declares, and the API's own table (`ROUTE_SCOPES`), hold
-// it to its connection's. Browse, here: what is there, never a value.
+// it to its connection's. Browse, here: what is there, never a value. The
+// tools that change something are in changes.ts, each through an approval.
 import { apiMember, type CoffreClient } from '@coffre/client';
 import type { McpScope } from '@coffre/core/mcp';
 import { z } from 'zod';
 
+import { CHANGE_TOOLS, type Change } from './changes.ts';
 import type { McpConnection } from './service.ts';
 
 /** What a tool answers: its structured result, and the text a model reads. */
@@ -29,8 +31,11 @@ export type Tool<I extends z.ZodObject = z.ZodObject> = {
   output: Record<string, unknown>;
   /** The places and members the call names, for its audit entry: never a value. */
   names: (args: z.infer<I>) => string[];
-  run: (ctx: ToolContext, args: z.infer<I>) => Promise<ToolResult>;
-};
+} & (
+  | { run: (ctx: ToolContext, args: z.infer<I>) => Promise<ToolResult>; change?: undefined }
+  /** A change: asked for when called, made by coffre's page once its person approves. */
+  | { change: Change<I>; run?: undefined }
+);
 
 const environment = z.string().min(1).max(200).describe('An environment, as project/environment: market/prod');
 const secret = z.string().min(1).max(300).describe('A secret, as project/environment/KEY: market/prod/STRIPE_KEY');
@@ -44,7 +49,7 @@ function tool<I extends z.ZodObject>(definition: Tool<I>): Tool {
 }
 
 /** The Browse tools: every one read-only, idempotent, and about this instance only. */
-export const TOOLS: readonly Tool[] = [
+const BROWSE: readonly Tool[] = [
   tool({
     name: 'whoami',
     title: 'Who am I',
@@ -187,6 +192,8 @@ export const TOOLS: readonly Tool[] = [
   }),
 ];
 
+export const TOOLS: readonly Tool[] = [...BROWSE, ...CHANGE_TOOLS];
+
 export const TOOL_BY_NAME = new Map(TOOLS.map((entry) => [entry.name, entry]));
 
 /** A tool as `tools/list` describes it, in either era. */
@@ -210,6 +217,7 @@ export function listed(entry: Tool): Record<string, unknown> {
 /** What clients pass the model about coffre, once. */
 export const INSTRUCTIONS = [
   "coffre keeps this team's secrets. These tools act as the person who connected them, and never beyond their access.",
-  'Never ask the person to paste a secret into the conversation.',
+  'Never ask the person to paste a secret into the conversation: to set one, use request_secret_value, and they type it on coffre.',
+  "Every change waits for the person to approve it on coffre's own page: when a tool answers with an approval link, show it to them, and once they approve, call the tool again with the same arguments for the outcome.",
   'With a shell, give a command its secrets with `coffre run <project>/<environment> -- <command>`: run_with_secrets says how, and no value enters the conversation.',
 ].join(' ');

@@ -6,9 +6,12 @@
 // ends it at the next call, and every step is in the log under the client.
 import { createHash, randomBytes } from 'node:crypto';
 
+import { CoffreError } from '@coffre/client';
+
 import type { Deployment } from '../harness.ts';
 import { expect } from '../report.ts';
-import { DEV, PROD, type Canaries, type People, type Person } from './people.ts';
+
+import { canary, DEV, personaOn, PROD, PROJECT, type Canaries, type People, type Person } from './people.ts';
 
 const NAME = 'Conformance MCP client';
 /** A native client's redirect, on loopback. A custom scheme is left out of a registration (D37). */
@@ -50,7 +53,7 @@ function token(deployment: Deployment, fields: Record<string, string>): Promise<
 }
 
 /** The person approves on the consent page, as its Approve does; the code comes back on the redirect. */
-async function connect(deployment: Deployment, person: Person, clientId: string): Promise<{ code: string; verifier: string }> {
+async function connect(deployment: Deployment, person: Person, clientId: string, scope = 'browse'): Promise<{ code: string; verifier: string }> {
   const verifier = base64url(randomBytes(32));
   const request = {
     client_id: clientId,
@@ -59,14 +62,14 @@ async function connect(deployment: Deployment, person: Person, clientId: string)
     code_challenge: base64url(createHash('sha256').update(verifier).digest()),
     code_challenge_method: 'S256',
     state: STATE,
-    scope: 'browse',
+    scope,
     resource: `${deployment.origin}/mcp`,
   };
   const view = await person.api.oauth.describe(request);
   expect(view.status === 'ready', 'the consent page refused a good request', view);
-  expect(view.client.registration === 'dcr' && view.client.name === NAME && view.scopes.join(' ') === 'browse' && view.loopbackOnly,
+  expect(view.client.registration === 'dcr' && view.client.name === NAME && view.scopes.join(' ') === scope && view.loopbackOnly,
     'the consent page does not show the registered client as it is', view);
-  const { redirect } = await person.api.oauth.decide({ request, approve: true, scopes: [] });
+  const { redirect } = await person.api.oauth.decide({ request, approve: true, scopes: scope.split(' ') });
   const back = new URL(redirect);
   expect(`${back.origin}${back.pathname}` === REDIRECT, `the answer went to ${back.origin}${back.pathname}, not the redirect`, redirect);
   expect(back.searchParams.get('state') === STATE && back.searchParams.get('iss') === deployment.origin,
@@ -208,15 +211,25 @@ export async function mcpConnect(deployment: Deployment, people: People): Promis
   return '401 and both metadata documents; registered, approved, redeemed and discovered; only at /mcp, and only its token there; a reused refresh token, a reused code and a disconnection each end the connection, and the log says so';
 }
 
-/** A 2026-07-28 request as a client sends it: its headers say what its body does. */
-async function modern(deployment: Deployment, access: string, method: string, params: Record<string, unknown> = {}, name?: string) {
+/** A 2026-07-28 request as a client sends it: its headers say what its body does; `capabilities` are the client's. */
+async function modern(deployment: Deployment, access: string, method: string, params: Record<string, unknown> = {}, name?: string, capabilities: Record<string, unknown> = {}) {
   const response = await mcp(deployment, {
     authorization: `Bearer ${access}`,
     'mcp-protocol-version': '2026-07-28',
     'mcp-method': method,
     ...(name === undefined ? {} : { 'mcp-name': name }),
-  }, method, { ...params, _meta: ENVELOPE });
+  }, method, { ...params, _meta: { ...ENVELOPE, 'io.modelcontextprotocol/clientCapabilities': capabilities } });
   return { response, body: await json(response) };
+}
+
+/** A client registered for one check, by the name every check's client has. */
+async function register(deployment: Deployment): Promise<string> {
+  const registered = await json(await fetch(`${deployment.origin}/api/oauth/register`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ client_name: NAME, redirect_uris: [REDIRECT] }),
+  }));
+  return registered.client_id as string;
 }
 
 /**
@@ -227,12 +240,7 @@ async function modern(deployment: Deployment, access: string, method: string, pa
  * client, the API's own entries naming the connection.
  */
 export async function mcpBrowse(deployment: Deployment, people: People, canaries: Canaries): Promise<string> {
-  const registered = await json(await fetch(`${deployment.origin}/api/oauth/register`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ client_name: NAME, redirect_uris: [REDIRECT] }),
-  }));
-  const clientId = registered.client_id as string;
+  const clientId = await register(deployment);
   const { access_token: access } = await redeem(deployment, clientId, await connect(deployment, people.reader, clientId));
   const answers: string[] = [];
 
@@ -296,4 +304,119 @@ export async function mcpBrowse(deployment: Deployment, people: People, canaries
   const shown = (await people.admin.api.audit.list({ actor: people.reader.member, limit: 500 })).entries;
   expect(!shown.some((entry) => entry.action === 'mcp.read'), 'read-only calls are not detail');
   return `on 2026-07-28 and 2025-11-25, the Browse tools as the reader: ${DEV} listed, ${PROD} refused, no value in any answer; headers held to the body; ${reads} reads as detail and the refusal shown, each under the client`;
+}
+
+type ToolAnswer = {
+  resultType?: string;
+  structuredContent?: { status?: string; approval?: { id: string; url: string } };
+  content?: { text?: string }[];
+  isError?: boolean;
+  inputRequests?: { approve?: { method: string; params: { mode: string; url: string; message: string } } };
+  requestState?: string;
+};
+
+/**
+ * Changes, as a client asks for them (design section 14, checks 2 and 3):
+ * Browse cannot ask at all, and with Write nothing changes until the person
+ * approves on coffre's page. A client without URL elicitation gets the link
+ * and calls again; one with it is asked to open the page, and retries with
+ * its requestState, which no other call may use. Only the person decides,
+ * with the digest the page showed; the page makes the change, once, and its
+ * entries name the client and the approval. A value comes from the page.
+ */
+export async function mcpChanges(deployment: Deployment, people: People, canaries: Canaries): Promise<string> {
+  const { admin } = people;
+  const place = `${PROJECT}-mcp/dev`;
+  await admin.api.projects.create(`${PROJECT}-mcp`, { name: 'MCP changes' });
+  await admin.api.environments.create(place, { name: 'Development' });
+  const values = { KEEP: canary(), OLD: canary() };
+  for (const [key, value] of Object.entries(values)) canaries[`${place}/${key}`] = value;
+  await admin.api.secrets.set(place, values);
+  const changer = await personaOn(deployment, admin, 'changer', { [`${PROJECT}-mcp`]: 'maintainer' });
+  const clientId = await register(deployment);
+  const answers: string[] = [];
+  const call = async (access: string, tool: string, args: Record<string, unknown>, more: Record<string, unknown> = {}, capabilities: Record<string, unknown> = {}) => {
+    const { response, body } = await modern(deployment, access, 'tools/call', { name: tool, arguments: args, ...more }, tool, capabilities);
+    answers.push(JSON.stringify(body));
+    return { status: response.status, challenge: response.headers.get('www-authenticate') ?? '', result: body.result as ToolAnswer | undefined, error: body.error as { code?: number } | undefined };
+  };
+  const archived = async (key: string) => (await admin.api.secrets.history(`${place}/${key}`)).archived;
+
+  // Browse cannot ask for a change: 403, and the step-up's scopes; nothing reached the API.
+  const browse = (await redeem(deployment, clientId, await connect(deployment, changer, clientId))).access_token;
+  const stepUp = await call(browse, 'archive_secret', { secret: `${place}/OLD` });
+  expect(stepUp.status === 403 && stepUp.challenge.includes('error="insufficient_scope"') && stepUp.challenge.includes('scope="browse write"'),
+    `archive_secret with Browse answered ${stepUp.status}, not a step-up to Write`, stepUp.challenge);
+  expect(!(await archived('OLD')), 'archive_secret with Browse archived the secret');
+
+  // With Write, and no URL elicitation: the link, and nothing changed.
+  const write = (await redeem(deployment, clientId, await connect(deployment, changer, clientId, 'browse write'))).access_token;
+  const linked = await call(write, 'archive_secret', { secret: `${place}/OLD` });
+  const approval = linked.result?.structuredContent?.approval;
+  expect(linked.status === 200 && linked.result?.structuredContent?.status === 'pending' && approval?.url === `${deployment.origin}/approvals/${approval?.id}`,
+    'a change without URL elicitation was not answered with its approval link', linked.result);
+  expect(linked.result?.content?.[0]?.text?.includes(approval!.url) === true, 'the link is not in the text the model reads', linked.result);
+  expect(!(await archived('OLD')), 'a change was made before its approval');
+
+  // Only its person decides it, and only the change the page showed.
+  const theirs = await people.reader.api.approvals.get(approval!.id).then(() => null, (error: unknown) => error);
+  expect(theirs instanceof CoffreError && theirs.status === 403, "another person opened someone else's approval", theirs);
+  const page = await changer.browser.fetch(`/approvals/${approval!.id}`);
+  expect(page.status === 200, `the approval page answered ${page.status}`);
+  const shown = (await changer.api.approvals.get(approval!.id)).approval;
+  expect(shown.status === 'pending' && shown.summary === `archive ${place}/OLD` && shown.client.name === NAME, 'the approval page does not show the change asked for', shown);
+  const forgedDigest = await changer.api.approvals.decide(approval!.id, { approve: true, digest: '0'.repeat(64) }).then(() => null, (error: unknown) => error);
+  expect(forgedDigest instanceof CoffreError && forgedDigest.status === 409, 'a decision on a change the page did not show was taken', forgedDigest);
+  const forgedSite = await changer.browser.fetch(`/api/approvals/${approval!.id}`, {
+    method: 'POST',
+    headers: { origin: 'https://attacker.example', 'sec-fetch-site': 'cross-site', 'content-type': 'application/json' },
+    body: JSON.stringify({ approve: true, digest: shown.digest }),
+  });
+  expect(forgedSite.status === 403, `another site's approval answered ${forgedSite.status}, not 403`);
+  expect(!(await archived('OLD')), 'a refused decision changed something');
+
+  const decided = await changer.api.approvals.decide(approval!.id, { approve: true, digest: shown.digest });
+  expect(decided.status === 'approved' && (await archived('OLD')), 'Approve did not make the change', decided);
+  const again = await changer.api.approvals.decide(approval!.id, { approve: true, digest: shown.digest }).then(() => null, (error: unknown) => error);
+  expect(again instanceof CoffreError && again.status === 409, 'an approval was decided twice', again);
+  const reported = await call(write, 'archive_secret', { secret: `${place}/OLD` });
+  expect(reported.result?.structuredContent?.status === 'approved' && reported.result.isError !== true, 'calling again does not report the approved change', reported.result);
+
+  // With URL elicitation: asked to open the page, and the retry's requestState is that call's only.
+  const elicits = { elicitation: { url: {} } };
+  const asked = await call(write, 'rename_secret', { secret: `${place}/KEEP`, newKey: 'KEPT' }, {}, elicits);
+  const request = asked.result?.inputRequests?.approve;
+  expect(asked.result?.resultType === 'input_required' && request?.method === 'elicitation/create' && request.params.mode === 'url' && typeof asked.result.requestState === 'string',
+    'a change with URL elicitation was not answered with an input_required URL elicitation', asked.result);
+  const id = request!.params.url.split('/').at(-1)!;
+  const replayed = await call(write, 'rename_secret', { secret: `${place}/KEEP`, newKey: 'OTHER' }, { requestState: asked.result!.requestState, inputResponses: { approve: { action: 'accept' } } }, elicits);
+  expect(replayed.error?.code === -32602, 'a requestState was accepted for another call', replayed);
+  const renamedEarly = await admin.api.secrets.list(place);
+  expect(renamedEarly.keys.some((key) => key.key === 'KEEP'), 'a change was made before its approval', renamedEarly.keys);
+  const second = (await changer.api.approvals.get(id)).approval;
+  expect((await changer.api.approvals.decide(id, { approve: true, digest: second.digest })).status === 'approved', 'the second approval was not made');
+  const retried = await call(write, 'rename_secret', { secret: `${place}/KEEP`, newKey: 'KEPT' }, { requestState: asked.result!.requestState, inputResponses: { approve: { action: 'accept' } } }, elicits);
+  expect(retried.result?.structuredContent?.status === 'approved', 'the retry does not report the approved change', retried.result);
+
+  // A value, from the page only.
+  const typed = canary();
+  canaries[`${place}/TYPED`] = typed;
+  const valueAsked = await call(write, 'request_secret_value', { secret: `${place}/TYPED` });
+  const valueId = valueAsked.result!.structuredContent!.approval!.id;
+  const valuePage = (await changer.api.approvals.get(valueId)).approval;
+  expect(valuePage.asks?.value !== undefined, 'the approval page does not ask for the value');
+  await changer.api.approvals.decide(valueId, { approve: true, digest: valuePage.digest, value: typed });
+  expect((await admin.api.secrets.reveal(`${place}/TYPED`)).values.TYPED === typed, 'the value typed on the page was not written');
+  await call(write, 'request_secret_value', { secret: `${place}/TYPED` });
+
+  // No value in any answer; each change made once, by the person, via the client and its approval.
+  const leaked = Object.entries(canaries).filter(([, value]) => answers.some((answer) => answer.includes(value))).map(([path]) => path);
+  expect(leaked.length === 0, 'a change tool answered with a secret value', leaked);
+  const { entries } = await admin.api.audit.list({ actor: changer.member, limit: 500 });
+  const viaApproval = (action: string) => entries.filter((entry) => entry.action === action && entry.decision === 'allow' && typeof (entry.metadata.via as { approvalId?: unknown } | undefined)?.approvalId === 'string');
+  const made = { archive: viaApproval('secret.archive').length, rename: viaApproval('secret.rename').length, write: viaApproval('secret.write').length };
+  expect(made.archive === 1 && made.rename === 1 && made.write === 1, 'the changes are not each made once, via the client and its approval', made);
+  const decisions = entries.filter((entry) => entry.action === 'mcp.approve').map((entry) => `${entry.decision} ${entry.reason ?? ''}`.trim()).sort();
+  expect(JSON.stringify(decisions) === JSON.stringify(['allow', 'allow', 'allow', 'deny approved', 'deny changed']), 'the decisions, and the two refused, are not in the log', decisions);
+  return `Browse stepped up to Write; with Write, the link without URL elicitation and an elicitation with it; nothing changed until ${changer.email} approved on coffre's page, another person and another site refused, a replayed requestState refused; each change made once, via the client and its approval, and a value typed on the page only`;
 }

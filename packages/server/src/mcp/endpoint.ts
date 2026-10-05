@@ -5,7 +5,7 @@
 // coffre answers without minting a session either. Both serve the same
 // tools, with the same checks. The token is checked first (`mcpCaller`):
 // nothing here runs for a request without a good one.
-import { CoffreError, createClient } from '@coffre/client';
+import { CoffreError, createClient, type CoffreClient } from '@coffre/client';
 import { isMcpScope, scopeString, type McpScope } from '@coffre/core/mcp';
 import { z } from 'zod';
 
@@ -19,7 +19,10 @@ import type { CoffreRuntime } from '../runtime.ts';
 import { COFFRE_VERSION } from '../version.ts';
 import { mcpCaller, resourceMetadataUrl } from './http.ts';
 import { challengeScopes } from './scopes.ts';
+import type { ApprovalRow } from '../db/queries.ts';
+import { callDigest, MAX_PENDING, OUTCOME_SECONDS, statusOf, type Outcome } from './approvals.ts';
 import type { McpConnection } from './service.ts';
+import { openState, sealState } from './tokens.ts';
 import { INSTRUCTIONS, listed, TOOL_BY_NAME, TOOLS, type Tool } from './tools.ts';
 
 /** The revision coffre speaks, stateless. */
@@ -170,7 +173,7 @@ async function modern(
     case 'tools/list':
       return complete({ tools: TOOLS.map(listed), ttlMs: TTL_MS, cacheScope: 'public' });
     case 'tools/call':
-      return call(request, runtime, sourceIp, caller, message, id, (result) => complete(result));
+      return call(request, runtime, sourceIp, caller, message, id, (result) => complete(result), { era: 'modern', elicitsUrl: elicitsUrl(capabilities as Record<string, unknown>) });
     default:
       return failure(id, 404, { code: CODE.methodNotFound, message: `Method not found: ${message.method}` });
   }
@@ -208,7 +211,7 @@ async function legacy(
     case 'tools/list':
       return rpc(id, { result: { tools: TOOLS.map(listed) } });
     case 'tools/call':
-      return call(request, runtime, sourceIp, caller, message, id, (result) => rpc(id, { result }));
+      return call(request, runtime, sourceIp, caller, message, id, (result) => rpc(id, { result }), { era: 'legacy', elicitsUrl: false });
     default:
       return rpc(id, { error: { code: CODE.methodNotFound, message: `Method not found: ${message.method}` } });
   }
@@ -216,13 +219,28 @@ async function legacy(
 
 // --- tools/call ---------------------------------------------------------------
 
-const CallParams = z.object({ name: z.string().max(64), arguments: z.record(z.string(), z.unknown()).optional() }).passthrough();
+const CallParams = z
+  .object({ name: z.string().max(64), arguments: z.record(z.string(), z.unknown()).optional(), requestState: z.string().max(512).optional(), inputResponses: z.record(z.string(), z.unknown()).optional() })
+  .passthrough();
+
+/** What coffre knows of a client from its request: its era, and whether it can open a URL for its person. */
+type ClientSays = { era: 'modern' | 'legacy'; elicitsUrl: boolean };
+
+/** Whether a 2026-07-28 client declared URL-mode elicitation, which opens coffre's approval page for its person. */
+function elicitsUrl(capabilities: Record<string, unknown>): boolean {
+  const elicitation = capabilities.elicitation;
+  return typeof elicitation === 'object' && elicitation !== null && typeof (elicitation as Record<string, unknown>).url === 'object';
+}
+
+/** How long a retry waits on its approval before answering that it still waits: well inside every client's timeout. */
+const WAIT_MS = 25_000;
 
 /**
  * One tool's call: admitted against its connection's limit, held to its
  * scopes, run as API calls in its person's name, and logged with the client.
  * A refusal the API gives is the tool's result, an error the model reads; a
- * scope the connection lacks is a 403 that starts the client's step-up.
+ * scope the connection lacks is a 403 that starts the client's step-up. A
+ * change goes through its approval instead (`change`).
  */
 async function call(
   request: Request,
@@ -232,6 +250,7 @@ async function call(
   message: Message,
   id: JsonRpcId,
   answer: (result: Record<string, unknown>) => Response,
+  client: ClientSays,
 ): Promise<Response> {
   const mcp = runtime.mcp!;
   const requestId = crypto.randomUUID();
@@ -256,11 +275,11 @@ async function call(
     });
   const metadata = { tool: tool.name, names };
   // A read-only tool's call that went through is detail, as a sign-in is; everything else shows.
-  const done = (decision: 'allow' | 'deny', reason?: string) =>
+  const done = (decision: 'allow' | 'deny', reason?: string, more: Record<string, unknown> = {}) =>
     log(
       decision === 'allow'
-        ? allowed(writer, tool.readOnly ? 'mcp.read' : 'mcp.call', { metadata })
-        : denied(writer, 'mcp.call', reason ?? 'refused', { metadata }),
+        ? allowed(writer, tool.readOnly ? 'mcp.read' : 'mcp.call', { metadata: { ...metadata, ...more } })
+        : denied(writer, 'mcp.call', reason ?? 'refused', { metadata: { ...metadata, ...more } }),
     );
 
   if (!connection.scopes.includes(tool.scope)) {
@@ -285,6 +304,9 @@ async function call(
     transport: (inner) => fetchApi(inner, runtime, { sourceIp, authenticate: async () => identity }),
   });
   try {
+    if (tool.change !== undefined) {
+      return await change(runtime, connection, tool, args.data, params.data, { api, answer, client, done, id });
+    }
     const result = await tool.run({ api, connection, publicUrl: runtime.publicUrl }, args.data as never);
     await done('allow');
     return answer({
@@ -299,6 +321,104 @@ async function call(
     if (refused.code === 'insufficient_scope') return insufficientScope(runtime, connection, tool, id, refused.reason !== undefined && isMcpScope(refused.reason) ? refused.reason : tool.scope);
     return answer(toolError(refused.message));
   }
+}
+
+type ChangeCall = {
+  api: CoffreClient;
+  answer: (result: Record<string, unknown>) => Response;
+  client: ClientSays;
+  done: (decision: 'allow' | 'deny', reason?: string, more?: Record<string, unknown>) => Promise<void>;
+  id: JsonRpcId;
+};
+
+/**
+ * A change's call (docs/design/mcp.md, section 7). Nothing changes here: the
+ * first call opens an approval, or rejoins the one the same call opened, and
+ * the person decides it on coffre's page, which makes the change. A client
+ * that can open a URL is asked to, by an elicitation, and retries with the
+ * `requestState` coffre gave it; any other gets the link in the result, to
+ * show its person, and calls again with the same arguments. Either way the
+ * retry only reads the outcome, waiting up to 25 seconds for it.
+ */
+async function change(
+  runtime: CoffreRuntime,
+  connection: McpConnection,
+  tool: Tool,
+  args: unknown,
+  params: z.infer<typeof CallParams>,
+  { api, answer, client, done, id }: ChangeCall,
+): Promise<Response> {
+  const { approvals } = runtime.mcp!;
+  const prompt = (row: ApprovalRow, ask: boolean) =>
+    answer({
+      resultType: 'input_required',
+      ...(ask
+        ? { inputRequests: { approve: { method: 'elicitation/create', params: { mode: 'url', url: approvals.url(row.id), message: `Approve on coffre: ${tool.change!.summary(args as never)}` } } } }
+        : {}),
+      requestState: sealState(runtime.chainKey, {
+        approvalId: row.id,
+        connectionId: connection.id,
+        digest: row.digest.toString('hex'),
+        expiresAt: new Date(row.createdAt.getTime() + OUTCOME_SECONDS * 1000),
+      }),
+    });
+
+  let row: ApprovalRow & { now?: Date };
+  if (params.requestState !== undefined) {
+    const state = client.era === 'modern' ? openState(runtime.chainKey, params.requestState) : null;
+    // The state names the approval, its connection and its call: another call, or another connection's, gets nothing from it.
+    if (state === null || state.connectionId !== connection.id || state.digest !== callDigest(tool.name, args)) {
+      await done('deny', 'request_state');
+      return rpc(id, { error: { code: CODE.invalidParams, message: 'Invalid params: this requestState is not for this call' } });
+    }
+    const found = state.expiresAt.getTime() > Date.now() ? await approvals.find(state.approvalId) : null;
+    if (found === null) return answer(toolError(`This approval has expired: call ${tool.name} again to ask the person anew.`));
+    const response = params.inputResponses?.approve as { action?: unknown } | undefined;
+    // Declined: the person said no to opening the page, and the approval ends. Cancelled: the prompt was
+    // dismissed, or a client that cannot ask anyone (Claude Code with -p) answered it, so the link goes to the model instead.
+    if (response?.action === 'decline') await approvals.cancel(found.id);
+    if (response?.action === 'cancel' && found.status === 'pending') return answer(pending(approvals.url(found.id), found, tool, false));
+    row = found;
+  } else {
+    await tool.change!.check?.({ api, connection, publicUrl: runtime.publicUrl }, args as never);
+    const asked = await approvals.ask(connection, tool, args);
+    if ('full' in asked) {
+      await done('deny', 'too_many_approvals');
+      return answer(toolError(`${MAX_PENDING} changes are waiting for the person already: ask them to decide those on coffre first.`));
+    }
+    row = asked.row;
+    if (!asked.joined) await done('allow', undefined, { approvalId: row.id });
+    if (row.status === 'pending' && (!asked.joined || client.elicitsUrl)) {
+      return client.elicitsUrl ? prompt(row, true) : answer(pending(approvals.url(row.id), row, tool, false));
+    }
+  }
+
+  const settled = await approvals.settle(row.id, Date.now() + (runtime.mcp!.approvalWaitMs ?? WAIT_MS));
+  const status = statusOf(settled, settled.now);
+  if (status === 'pending' || (status === 'approved' && settled.outcome === null)) {
+    return client.elicitsUrl ? prompt(settled, false) : answer(pending(approvals.url(settled.id), settled, tool, true));
+  }
+  await approvals.reported(settled.id);
+  const outcome: Outcome = settled.outcome === null ? { text: `This approval ${status === 'expired' ? 'expired before the person decided it' : `is ${status}`}: nothing changed.` } : (JSON.parse(settled.outcome) as Outcome);
+  const structured = {
+    status,
+    message: outcome.text,
+    approval: { id: settled.id, url: approvals.url(settled.id), expiresAt: settled.expiresAt.toISOString() },
+    ...(outcome.result === undefined ? {} : { result: outcome.result }),
+  };
+  return answer({ content: [{ type: 'text', text: outcome.text }], structuredContent: structured, ...(status === 'approved' ? {} : { isError: true }) });
+}
+
+/** What a client that cannot open a URL is told while its change waits: the link, for its person. */
+function pending(url: string, row: ApprovalRow, tool: Tool, again: boolean): Record<string, unknown> {
+  const expires = row.expiresAt.toISOString().replace(/\.\d+Z$/, 'Z');
+  const lead = again ? 'The person has not decided yet. Nothing has changed.' : 'Nothing has changed yet: coffre asks the person to approve this on its own page.';
+  const next = `Once they have approved or denied it, call ${tool.name} again with the same arguments: it answers what became of it.`;
+  return {
+    content: [{ type: 'text', text: [lead, `Show them this link, to open signed in to coffre (it expires at ${expires}):`, '', `  ${url}`, '', next].join('\n') }],
+    // Some clients give the model this rather than the text: it says the same.
+    structuredContent: { status: 'pending', message: `${lead} Show the person the approval's url, to open signed in to coffre. ${next}`, approval: { id: row.id, url, expiresAt: row.expiresAt.toISOString() } },
+  };
 }
 
 /** What the API answered a tool's call with, when it refused it, or could not answer; null for a bug. */

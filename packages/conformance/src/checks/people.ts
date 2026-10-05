@@ -130,17 +130,20 @@ export function valuesIn(canaries: Canaries, environment: string): Record<string
   );
 }
 
+/** A person the admin admits with this access, signed in in a browser of their own. */
+export async function personaOn(deployment: Deployment, admin: Person, name: string, access: Record<string, 'viewer' | 'developer' | 'maintainer'>): Promise<Person> {
+  const email = `${name}@conformance.example`;
+  const member = `user:${email}`;
+  await admin.api.members.add(member);
+  await admin.api.access.set(member, access);
+  const browser = new Browser(deployment.origin);
+  const signed = await signIn(deployment, browser, email);
+  expect(signed.ok, `${email} was refused: ${'error' in signed ? signed.error : ''}`);
+  return { email, member, browser, api: browser.client() };
+}
+
 export async function personas(deployment: Deployment, admin: Person) {
-  async function person(name: string, access: Record<string, 'viewer' | 'developer'>): Promise<Person> {
-    const email = `${name}@conformance.example`;
-    const member = `user:${email}`;
-    await admin.api.members.add(member);
-    await admin.api.access.set(member, access);
-    const browser = new Browser(deployment.origin);
-    const signed = await signIn(deployment, browser, email);
-    expect(signed.ok, `${email} was refused: ${'error' in signed ? signed.error : ''}`);
-    return { email, member, browser, api: browser.client() };
-  }
+  const person = (name: string, access: Record<string, 'viewer' | 'developer'>) => personaOn(deployment, admin, name, access);
 
   const reader = await person('reader', { [DEV]: 'viewer' });
   const leaver = await person('leaver', { [DEV]: 'developer' });

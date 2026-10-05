@@ -1021,6 +1021,27 @@ export async function findOauthClient(db: Queryable, chainKey: Buffer, id: strin
   return row !== undefined && row.revokedAt === null && checkAuthRow(chainKey, 'oauth_clients', row) ? row : null;
 }
 
+/**
+ * Revoke up to `limit` registrations made before `before` that no
+ * connection names: a client that registered and never connected. Nothing
+ * is deleted, as nowhere in coffre; a revoked registration connects no more.
+ * Returns how many were revoked.
+ */
+export async function sweepOauthClients(db: Queryable, chainKey: Buffer, before: Date, limit: number): Promise<number> {
+  const { oauthClients, mcpConnections } = tablesOf(db);
+  const unused = await db
+    .select({ id: oauthClients.id })
+    .from(oauthClients)
+    .where(and(
+      isNull(oauthClients.revokedAt),
+      lt(oauthClients.createdAt, before),
+      sql`NOT EXISTS (SELECT 1 FROM ${mcpConnections} WHERE ${mcpConnections.clientId} = CAST(${oauthClients.id} AS TEXT))`,
+    ))
+    .limit(limit);
+  if (unused.length === 0) return 0;
+  return updateAuth(db, chainKey, oauthClients, { id: unused.map((row) => row.id), revokedAt: null }, { revokedAt: new Date() });
+}
+
 export async function insertConnection(db: Queryable, chainKey: Buffer, row: Omit<NewRow<Tables['mcpConnections']>, 'authMac'> & {
   id: string; principal: string; generation: number; clientId: string; clientName: string; clientHost: string | null; registration: string;
   scopes: string; redirectUri: string; codeHash: Buffer; codeChallenge: string; codeExpiresAt: Date; expiresAt: Date;
@@ -1066,6 +1087,30 @@ export async function liveConnections(db: Queryable, chainKey: Buffer, principal
     .where(and(eq(mcpConnections.principal, principal), isNull(mcpConnections.revokedAt), gt(mcpConnections.expiresAt, at)))
     .orderBy(desc(mcpConnections.createdAt));
   return rows.filter((row) => checkAuthRow(chainKey, 'mcp_connections', row));
+}
+
+export type ApprovalRow = Tables['mcpApprovals']['$inferSelect'];
+
+export async function insertApproval(db: Queryable, row: NewRow<Tables['mcpApprovals']> & { id: string; expiresAt: Date }): Promise<void> {
+  await insert(db, tablesOf(db).mcpApprovals, row);
+}
+
+/** An approval by its ID, with the database's clock, which its expiry is read against. */
+export async function findApproval(db: Queryable, id: string): Promise<(ApprovalRow & { now: Date }) | null> {
+  const { mcpApprovals } = tablesOf(db);
+  const [row] = await db.select({ approval: mcpApprovals, now: clockMillis(db) }).from(mcpApprovals).where(eq(mcpApprovals.id, id)).limit(1);
+  return row === undefined ? null : { ...row.approval, now: new Date(row.now) };
+}
+
+/** A connection's approvals whose end its client has not heard yet, newest first, with the database's clock. */
+export async function openApprovals(db: Queryable, connectionId: string): Promise<{ rows: ApprovalRow[]; now: Date }> {
+  const { mcpApprovals } = tablesOf(db);
+  const rows = await db
+    .select({ approval: mcpApprovals, now: clockMillis(db) })
+    .from(mcpApprovals)
+    .where(and(eq(mcpApprovals.connectionId, connectionId), isNull(mcpApprovals.reportedAt)))
+    .orderBy(desc(mcpApprovals.createdAt));
+  return { rows: rows.map((row) => row.approval), now: new Date(rows[0]?.now ?? Date.now()) };
 }
 
 /** Device authorizations: one by either of its codes, or every one still waiting for a decision. */

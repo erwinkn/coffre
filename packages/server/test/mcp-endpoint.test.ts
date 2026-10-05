@@ -2,72 +2,20 @@
 // client connects in both eras and calls the Browse tools, which act as
 // their person and no further; the wire's checks, the scope gates in the
 // endpoint and in the API, and every call's entry in the log.
-import test, { after, before, beforeEach } from 'node:test';
+import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 
-import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
-import { github, signin, type RateLimiter } from '@coffre/core/identity';
-import { eq } from 'drizzle-orm';
+import { z } from 'zod';
 
-import { SigninService } from '../src/api/signin.ts';
 import { serveApi } from '../src/api/router.ts';
-import { coffreRoute } from '../src/app.ts';
-import { McpService } from '../src/mcp/service.ts';
 import { decodeHeaderValue } from '../src/mcp/endpoint.ts';
 import { TOOL_BY_NAME, type Tool } from '../src/mcp/tools.ts';
-import { z } from 'zod';
-import type { CoffreRuntime } from '../src/runtime.ts';
-import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
-import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor } from './api-fixture.ts';
 import { auditLog } from './db/tables.ts';
+import { calls, CLAUDE_CODE, client, connect, db, deps, DEV, entries, envelope, ORIGIN, raw, type Result, ROOT, route, sent, useMcp } from './mcp-fixture.ts';
 
-const ORIGIN = 'https://secrets.acme.example';
-const RESOURCE = `${ORIGIN}/mcp`;
-const ROOT = 'admin@acme.example';
-const DEV = 'dev@acme.example';
-const CLAUDE_CODE = 'https://claude.ai/oauth/claude-code-client-metadata';
-const REDIRECT = 'http://localhost:51234/callback';
-
-const transport: WorkloadTransport = {
-  json: async (url) => {
-    if (url.href !== CLAUDE_CODE) throw new FetchRefused(url, 'answered 404');
-    return { client_id: CLAUDE_CODE, client_name: 'Claude Code', redirect_uris: ['http://localhost/callback'], token_endpoint_auth_method: 'none' };
-  },
-};
-const calls: { open: boolean | 'broken' } = { open: true };
-const limiter = (which: 'other' | 'connection'): RateLimiter => ({
-  limit: async () => {
-    if (which === 'connection' && calls.open === 'broken') throw new Error('rate limiter unreachable');
-    return { success: which === 'other' || calls.open === true };
-  },
-});
-const auth = signin({
-  providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })],
-  mcp: { limits: { perSource: limiter('other'), perConnection: limiter('connection'), total: limiter('other') } },
-}).resolve(ORIGIN);
-
-let db: Awaited<ReturnType<typeof openTestDatabase>>;
-let deps: FixtureDeps;
-let runtime: CoffreRuntime;
-
-before(async () => {
-  db = await openTestDatabase();
-  deps = testDeps(db.runtime, [ROOT]);
-  if (auth.mode !== 'signin') throw new Error('unreachable');
-  const service = new SigninService({ ...deps, signin: auth.signin });
-  const mcp = new McpService({ ...deps, config: auth.signin.mcp!, signin: auth.signin, publicUrl: ORIGIN, transport });
-  runtime = { db: deps.db, vault: deps.vault, chainKey: deps.chainKey, signin: service, workloads: null, mcp, auth, publicUrl: ORIGIN, verifier: service, waitUntil, schema: { migrated: true } };
-});
-
-after(async () => {
-  await resetDatabase(db.owner);
-  await db.close();
-});
-
-beforeEach(async () => {
-  await resetDatabase(db.owner);
-  calls.open = true;
+useMcp(async () => {
   const root = clientFor(deps, ROOT);
   await root.members.add(`user:${DEV}`);
   for (const project of ['market', 'billing']) {
@@ -78,71 +26,20 @@ beforeEach(async () => {
   await root.access.set(`user:${DEV}`, { 'market/prod': 'viewer' });
 });
 
-function route(path: string, init: RequestInit = {}): Promise<Response> {
-  return coffreRoute(new Request(`${ORIGIN}${path}`, init), runtime, '203.0.113.7').then((response) => response!);
-}
-
-/** Consent and the code exchanged, as Claude Code does it: the access token. */
-async function connect(email = DEV, scope = 'browse'): Promise<string> {
-  const service = runtime.signin!;
-  const started = await service.startDevice({ clientLabel: 'laptop', sourceIp: null });
-  await service.decideDevice(await contextFor(deps, email), started.userCode, true);
-  const polled = await service.pollDevice(started.deviceCode, { requestId: randomUUID(), sourceIp: null });
-  if (polled.status !== 'approved') throw new Error('not approved');
-  const verifier = randomBytes(32).toString('base64url');
-  const request = {
-    client_id: CLAUDE_CODE, redirect_uri: REDIRECT, response_type: 'code', scope, resource: RESOURCE,
-    code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256',
-  };
-  const decided = await route('/api/oauth/authorizations', {
-    method: 'POST',
-    headers: { authorization: `Bearer ${polled.credential.token}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ request, approve: true, scopes: scope.split(' ') }),
-  });
-  const code = new URL(((await decided.json()) as { redirect: string }).redirect).searchParams.get('code')!;
-  const tokens = await route('/api/oauth/token', {
-    method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ grant_type: 'authorization_code', code, code_verifier: verifier, redirect_uri: REDIRECT, client_id: CLAUDE_CODE }).toString(),
-  });
-  return ((await tokens.json()) as { access_token: string }).access_token;
-}
-
-/** What the official client sent, by method and version header, request by request. */
-let sent: string[] = [];
-
-/** The official client, connected in an era, every request answered by coffre in process. */
-async function client(token: string, mode: 'modern' | 'legacy'): Promise<Client> {
-  const mcp = new Client({ name: 'coffre-tests', version: '1.0.0' }, mode === 'modern' ? { versionNegotiation: { mode: { pin: '2026-07-28' } } } : {});
-  await mcp.connect(
-    new StreamableHTTPClientTransport(new URL(RESOURCE), {
-      requestInit: { headers: { authorization: `Bearer ${token}` } },
-      fetch: async (input, init) => {
-        const request = new Request(input, init);
-        const body = request.method === 'POST' ? ((await request.clone().json()) as { method?: string }) : {};
-        sent.push(`${request.method} ${body.method ?? '-'} ${request.headers.get('mcp-protocol-version') ?? '-'}`);
-        return (await coffreRoute(request, runtime, '203.0.113.7'))!;
-      },
-    }),
-  );
-  return mcp;
-}
-
-type Result = { structuredContent?: Record<string, unknown>; content: { type: string; text?: string }[]; isError?: boolean };
-
-async function entries(action: string) {
-  const rows = await db.owner.select().from(auditLog).where(eq(auditLog.action, action)).orderBy(auditLog.seq);
-  return rows.map((row) => ({ ...row, metadata: JSON.parse(row.metadata) as Record<string, unknown> }));
-}
-
 for (const mode of ['modern', 'legacy'] as const) {
   test(`the official client connects on ${mode === 'modern' ? '2026-07-28' : '2025-11-25'}, lists the Browse tools and calls them as its person`, async () => {
-    sent = [];
+    sent.length = 0;
     const mcp = await client(await connect(), mode);
     try {
       const { tools } = await mcp.listTools();
-      assert.deepEqual(tools.map((tool) => tool.name), ['whoami', 'list_projects', 'list_secrets', 'secret_history', 'list_access', 'describe_member', 'read_audit_log', 'run_with_secrets']);
-      assert.ok(tools.every((tool) => tool.annotations?.readOnlyHint === true && tool.annotations.openWorldHint === false));
+      const browse = ['whoami', 'list_projects', 'list_secrets', 'secret_history', 'list_access', 'describe_member', 'read_audit_log', 'run_with_secrets'];
+      assert.deepEqual(tools.slice(0, browse.length).map((tool) => tool.name), browse);
+      assert.ok(tools.slice(0, browse.length).every((tool) => tool.annotations?.readOnlyHint === true));
+      // The changes are listed to every token, as the spec allows: a client steps up when it needs one.
+      assert.ok(tools.slice(browse.length).length > 0 && tools.slice(browse.length).every((tool) => tool.annotations?.readOnlyHint === false));
+      assert.ok(tools.every((tool) => tool.annotations?.openWorldHint === false));
+      // No tool takes a value: an agent cannot supply one.
+      assert.ok(tools.every((tool) => !JSON.stringify(tool.inputSchema).includes('"value"')), 'no input named value');
 
       const projects = (await mcp.callTool({ name: 'list_projects', arguments: {} })) as Result;
       assert.deepEqual((projects.structuredContent!.projects as { slug: string }[]).map((project) => project.slug), ['market'], 'only what the person reaches');
@@ -196,39 +93,21 @@ test('a tool beyond the API scope table is refused by the API itself, whatever t
   assert.equal(listed.status, 200);
 });
 
-/** A raw 2026-07-28 request, with the headers the client would send, each overridable. */
-function raw(token: string, body: Record<string, unknown>, headers: Record<string, string | null> = {}) {
-  const base: Record<string, string> = {
-    authorization: `Bearer ${token}`,
-    'content-type': 'application/json',
-    accept: 'application/json, text/event-stream',
-    'mcp-protocol-version': '2026-07-28',
-    'mcp-method': String(body.method),
-  };
-  for (const [name, value] of Object.entries(headers)) {
-    if (value === null) delete base[name];
-    else base[name] = value;
-  }
-  return route('/mcp', { method: 'POST', headers: base, body: JSON.stringify({ jsonrpc: '2.0', id: 7, ...body }) });
-}
-
-const envelope = { 'io.modelcontextprotocol/protocolVersion': '2026-07-28', 'io.modelcontextprotocol/clientCapabilities': {} };
-
 test('the headers must say what the body does, or -32020; an unknown revision -32022; another method 404', async () => {
   const token = await connect();
   const code = async (response: Response) => [response.status, ((await response.json()) as { error?: { code: number } }).error?.code];
-  const call = { method: 'tools/call', params: { name: 'whoami', arguments: {}, _meta: envelope } };
+  const call = { method: 'tools/call', params: { name: 'whoami', arguments: {}, _meta: envelope() } };
   assert.deepEqual(await code(await raw(token, call, { 'mcp-name': 'whoami' })), [200, undefined]);
   assert.deepEqual(await code(await raw(token, call, { 'mcp-name': '=?base64?d2hvYW1p?=' })), [200, undefined], 'Mcp-Name in its base64 form');
   assert.deepEqual(await code(await raw(token, call, { 'mcp-name': 'list_projects' })), [400, -32020]);
   assert.deepEqual(await code(await raw(token, call, {})), [400, -32020], 'Mcp-Name is required for tools/call');
   assert.deepEqual(await code(await raw(token, call, { 'mcp-name': 'whoami', 'mcp-method': 'tools/list' })), [400, -32020]);
   assert.deepEqual(await code(await raw(token, call, { 'mcp-name': 'whoami', 'mcp-protocol-version': null })), [400, -32020]);
-  const later = { method: 'server/discover', params: { _meta: { ...envelope, 'io.modelcontextprotocol/protocolVersion': '2027-01-01' } } };
+  const later = { method: 'server/discover', params: { _meta: { ...envelope(), 'io.modelcontextprotocol/protocolVersion': '2027-01-01' } } };
   assert.deepEqual(await code(await raw(token, later, { 'mcp-protocol-version': '2027-01-01' })), [400, -32022]);
   const noCapabilities = { method: 'server/discover', params: { _meta: { 'io.modelcontextprotocol/protocolVersion': '2026-07-28' } } };
   assert.deepEqual(await code(await raw(token, noCapabilities)), [400, -32602]);
-  assert.deepEqual(await code(await raw(token, { method: 'resources/list', params: { _meta: envelope } })), [404, -32601]);
+  assert.deepEqual(await code(await raw(token, { method: 'resources/list', params: { _meta: envelope() } })), [404, -32601]);
   // A notification is answered with nothing.
   const note = await route('/mcp', { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) });
   assert.equal(note.status, 202);
@@ -242,17 +121,17 @@ test('the headers must say what the body does, or -32020; an unknown revision -3
 test("a connection's calls pass its own limit", async () => {
   const token = await connect();
   calls.open = false;
-  const limited = await raw(token, { method: 'tools/call', params: { name: 'whoami', arguments: {}, _meta: envelope } }, { 'mcp-name': 'whoami' });
+  const limited = await raw(token, { method: 'tools/call', params: { name: 'whoami', arguments: {}, _meta: envelope() } }, { 'mcp-name': 'whoami' });
   assert.equal(limited.status, 429);
   assert.equal(limited.headers.get('retry-after'), '60');
-  assert.equal((await raw(token, { method: 'tools/list', params: { _meta: envelope } })).status, 200, 'listing is not a call');
+  assert.equal((await raw(token, { method: 'tools/list', params: { _meta: envelope() } })).status, 200, 'listing is not a call');
 });
 
 test("a connection's limiter that fails refuses the call, and the log says so with the request's id", async (t) => {
   const token = await connect();
   const report = t.mock.method(console, 'error', () => {});
   calls.open = 'broken';
-  const refused = await raw(token, { method: 'tools/call', params: { name: 'whoami', arguments: {}, _meta: envelope } }, { 'mcp-name': 'whoami' });
+  const refused = await raw(token, { method: 'tools/call', params: { name: 'whoami', arguments: {}, _meta: envelope() } }, { 'mcp-name': 'whoami' });
   assert.equal(refused.status, 429);
   const [message, detail] = report.mock.calls.at(-1)!.arguments as [string, { requestId: string; connectionId: string; error: { message: string } }];
   assert.equal(message, 'mcp limiter failed');
@@ -262,11 +141,11 @@ test("a connection's limiter that fails refuses the call, and the log says so wi
 
 test("bad arguments are the tool's error, not a crash; an unknown tool is invalid params", async () => {
   const token = await connect();
-  const bad = await raw(token, { method: 'tools/call', params: { name: 'list_secrets', arguments: { environment: 42 }, _meta: envelope } }, { 'mcp-name': 'list_secrets' });
+  const bad = await raw(token, { method: 'tools/call', params: { name: 'list_secrets', arguments: { environment: 42 }, _meta: envelope() } }, { 'mcp-name': 'list_secrets' });
   const body = (await bad.json()) as { result: Result };
   assert.equal(body.result.isError, true);
   assert.match(body.result.content[0]!.text!, /environment/);
-  const unknown = await raw(token, { method: 'tools/call', params: { name: 'drop_everything', arguments: {}, _meta: envelope } }, { 'mcp-name': 'drop_everything' });
+  const unknown = await raw(token, { method: 'tools/call', params: { name: 'drop_everything', arguments: {}, _meta: envelope() } }, { 'mcp-name': 'drop_everything' });
   assert.equal(((await unknown.json()) as { error: { code: number } }).error.code, -32602);
 });
 
@@ -282,7 +161,7 @@ test("a tool beyond the connection's scopes answers 403 insufficient_scope, nami
   TOOL_BY_NAME.set('test_sneaky', reveal('test_sneaky', 'browse'));
   try {
     for (const name of ['test_reveal', 'test_sneaky']) {
-      const response = await raw(token, { method: 'tools/call', params: { name, arguments: {}, _meta: envelope } }, { 'mcp-name': name });
+      const response = await raw(token, { method: 'tools/call', params: { name, arguments: {}, _meta: envelope() } }, { 'mcp-name': name });
       assert.equal(response.status, 403, name);
       const challenge = response.headers.get('www-authenticate') ?? '';
       assert.match(challenge, /^Bearer error="insufficient_scope", scope="browse read-values", resource_metadata="https:\/\/secrets\.acme\.example\/\.well-known\/oauth-protected-resource\/mcp"/, name);

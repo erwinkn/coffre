@@ -641,6 +641,48 @@ export const mcpConnections = pgTable(
 );
 
 /**
+ * A change an MCP client asked for, waiting for its person on coffre's own
+ * page (docs/design/mcp.md, section 7). It holds the tool and its arguments,
+ * never a value: the page shows what they would do and, on Approve, does it,
+ * once, as the person, through the connection. Its digest is of the tool
+ * and arguments, which the page sends back with the decision, so what runs
+ * is what the person read. Not MACed: a row changes nothing by itself.
+ */
+export const mcpApprovals = pgTable(
+  'mcp_approvals',
+  {
+    id: uuid().primaryKey(),
+    connectionId: uuid('connection_id').notNull(),
+    tool: text().notNull(),
+    // JSON: the tool's arguments, as checked when it was called.
+    arguments: text().notNull(),
+    // SHA-256 of the canonical JSON of the tool and its arguments.
+    digest: bytea().notNull(),
+    // pending, approved, denied, cancelled or failed; a pending one past its expiry has expired.
+    status: text().notNull().default('pending'),
+    // JSON: what the change answered, or why it failed. Never a value.
+    outcome: text(),
+    createdAt: createdAt(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    decidedAt: timestamp('decided_at', { withTimezone: true }),
+    // When the client read the outcome: an identical call after that asks again.
+    reportedAt: timestamp('reported_at', { withTimezone: true }),
+  },
+  (table) => [
+    check('mcp_approvals_status_check', sql`${table.status} IN ('pending', 'approved', 'denied', 'cancelled', 'failed')`),
+    check('mcp_approvals_digest_check', sql`octet_length(${table.digest}) = 32`),
+    check('mcp_approvals_arguments_check', sql`${table.arguments}::jsonb IS NOT NULL`),
+    foreignKey({
+      name: 'mcp_approvals_connection_fkey',
+      columns: [table.connectionId],
+      foreignColumns: [mcpConnections.id],
+    }).onDelete('restrict'),
+    // A connection's approvals its client has not yet heard the end of: the ones a call rejoins, and the five it may wait on.
+    index('mcp_approvals_open_idx').on(table.connectionId, table.digest).where(sql`${table.reportedAt} IS NULL`),
+  ],
+);
+
+/**
  * Bearer credentials coffre issues itself: browser sessions, CLI sessions and
  * service tokens.
  *

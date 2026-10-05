@@ -386,7 +386,8 @@ $$;
 
 -- 20. A registered client's redirects, and what a connection was approved
 -- for, never change; a connection only moves through its code, refresh
--- token, use and revocation, and neither is ever deleted.
+-- token, use and revocation, and neither is ever deleted. An approval's
+-- change is what its person is shown: only what became of it is written.
 DO $$
 DECLARE
     statement text;
@@ -407,7 +408,15 @@ BEGIN
         'UPDATE mcp_connections SET code_hash = code_hash',
         'UPDATE mcp_connections SET id = id',
         'DELETE FROM mcp_connections',
-        'TRUNCATE mcp_connections'
+        'TRUNCATE mcp_connections',
+        'UPDATE mcp_approvals SET connection_id = connection_id',
+        'UPDATE mcp_approvals SET tool = tool',
+        'UPDATE mcp_approvals SET arguments = arguments',
+        'UPDATE mcp_approvals SET digest = digest',
+        'UPDATE mcp_approvals SET expires_at = expires_at',
+        'UPDATE mcp_approvals SET id = id',
+        'DELETE FROM mcp_approvals',
+        'TRUNCATE mcp_approvals'
     ] LOOP
         BEGIN
             EXECUTE statement;
@@ -420,7 +429,8 @@ BEGIN
     UPDATE mcp_connections SET code_challenge = code_challenge, code_expires_at = code_expires_at,
         refresh_hash = refresh_hash, refresh_previous_hash = refresh_previous_hash, last_used_at = last_used_at,
         last_used_ip = last_used_ip, revoked_at = revoked_at, revoked_by = revoked_by, auth_mac = auth_mac;
-    RAISE NOTICE 'PASS: coffre_app changes clients and connections only where their MACs allow, and never deletes one';
+    UPDATE mcp_approvals SET status = status, outcome = outcome, decided_at = decided_at, reported_at = reported_at;
+    RAISE NOTICE 'PASS: coffre_app changes clients and connections only where their MACs allow, approvals only in what became of them, and never deletes one';
 END
 $$;
 

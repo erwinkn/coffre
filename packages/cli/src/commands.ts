@@ -341,6 +341,10 @@ export const PARITY: { [K in RouteKey]: Reach } = {
     browser: 'an MCP client opens the consent page in a browser signed in to coffre, which shows what it asks for: a CLI approving an app would vouch for it',
   },
   'POST /oauth/authorizations': { browser: 'approving an MCP client, on that page, as above' },
+  'GET /approvals/:id': {
+    browser: "an MCP client's change waits for its person on coffre's own page, signed in as them: a terminal deciding it would be the agent's own",
+  },
+  'POST /approvals/:id': { browser: 'approving or denying that change, on that page, as above' },
   'GET /apps': { commands: ['apps'] },
   'DELETE /apps/:id': { commands: ['apps revoke'] },
   'GET /audit': { commands: ['audit'] },

@@ -144,6 +144,8 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
   'POST /device-logins/:code': { ui: [{ does: 'that page › Approve, Deny', in: 'pages/device-login.tsx', call: 'deviceLogins.decide' }] },
   'GET /oauth/authorizations': { ui: [{ does: 'the page an MCP client opens to connect: what it asks for', in: 'pages/oauth-authorize.tsx', call: 'oauth.describe' }] },
   'POST /oauth/authorizations': { ui: [{ does: 'that page › Approve, Deny', in: 'pages/oauth-authorize.tsx', call: 'oauth.decide' }] },
+  'GET /approvals/:id': { ui: [{ does: 'the page an MCP client sends you to, to decide a change it asked for', in: 'pages/approval.tsx', call: 'approvals.get' }] },
+  'POST /approvals/:id': { ui: [{ does: 'that page › Approve, Deny', in: 'pages/approval.tsx', call: 'approvals.decide' }] },
   'GET /apps': { ui: [{ does: 'Account › Connected apps', in: 'pages/account.tsx', call: 'apps.list' }] },
   'DELETE /apps/:id': { ui: [{ does: 'Account › a connected app › Disconnect', in: 'pages/account.tsx', call: 'apps.disconnect' }] },
   'GET /audit': {

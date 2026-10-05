@@ -10,6 +10,7 @@ export { createRouter } from './router.tsx';
 export {
   access,
   account,
+  approval,
   audit,
   deviceLogin,
   environment,

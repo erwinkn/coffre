@@ -61,9 +61,42 @@ A connected client can browse, as you:
   only, so no value enters the conversation. Claude Code runs it itself;
   in a chat without a shell, you do.
 
+With **Write**, it can ask to change secrets and places:
+`request_secret_value`, `rename_secret`, `archive_secret`,
+`unarchive_secret`, `restore_secret_version`, `create_project` and
+`create_environment`. With **Manage access**: `set_access`, `admit_member`,
+`offboard_member`, `issue_service_token`, `revoke_service_token`,
+`trust_workload` and `untrust_workload`.
+
 Each tool is coffre's API called as you, so a tool can do no more than you
-could with the CLI. Changing secrets, and reading values, come with later
-releases.
+could with the CLI. Reading values comes with a later release.
+
+## Every change is approved on coffre
+
+A client never changes anything itself. When it asks to, coffre opens an
+approval, and the change waits for you on coffre's own page,
+`/approvals/<id>`, signed in as you: it shows the app, the change, and what
+it replaces, read as the page opens. **Approve** makes the change there and
+then, as you, and the app only hears what became of it; **Deny** changes
+nothing. Nobody else can decide your approvals, and each expires after five
+minutes.
+
+- **Claude Code**, and any client on MCP 2026-07-28 that can open a URL,
+  asks you to open the page, and picks up the outcome by itself.
+- **claude.ai and Claude Desktop**, and any client that can't, gets the
+  link in the tool's answer: Claude shows it to you, you open it, and once
+  you have decided, Claude asks again for the outcome.
+- **Clients on a 2025 revision** of MCP get the link too.
+
+A client never types a secret value. `request_secret_value` asks you to
+type it on the approval page, and it goes to coffre only. A service token
+`issue_service_token` makes is shown to you on the page, once, and never to
+the app. A connection may have five changes waiting at once.
+
+When a client needs a scope it doesn't hold, coffre's consent page opens
+again, asking for it. The new connection replaces the client's earlier one
+that it grants all of and more; one with the same scopes, on a second
+laptop say, stays.
 
 ## Connected apps
 

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { AuthorizationView, RouteInput } from '@coffre/client';
-import { MCP_SCOPE_INFO, type McpScope } from '@coffre/core/mcp';
+import { MCP_SCOPE_INFO, supersedes, type McpScope } from '@coffre/core/mcp';
 
 import { failureMessage, statusOf, useCoffre } from '../lib/coffre';
 import { ClosedDoor } from '../components/page';
@@ -97,6 +97,10 @@ function Approve({
   const [error, setError] = useState<string | null>(null);
   const { client } = view;
   const unverified = client.registration === 'dcr';
+  // A step-up: the connections this one grants all of and more end once the app has its new one.
+  const granted = view.scopes.filter((scope) => chosen.has(scope));
+  const replaced = view.connections.filter((held) => supersedes(granted, held)).length;
+  const kept = view.connections.length - replaced;
 
   async function decide(approve: boolean) {
     setPending(approve ? 'approve' : 'deny');
@@ -199,9 +203,15 @@ function Approve({
             Any program running here could be it: approve only if you just started {client.name} yourself.
           </Notice>
         )}
-        {view.connected > 0 && (
+        {replaced > 0 && (
           <Notice tone="info">
-            You have connected {client.name} {view.connected === 1 ? 'once' : `${view.connected} times`} already.
+            This replaces your earlier connection{replaced === 1 ? '' : 's'} of {client.name}, with fewer scopes: {replaced === 1 ? 'it ends' : 'they end'} once
+            the app has this one.
+          </Notice>
+        )}
+        {kept > 0 && (
+          <Notice tone="info">
+            You have connected {client.name} {kept === 1 ? 'once' : `${kept} times`} already.
             This adds another connection; your account page lists them.
           </Notice>
         )}

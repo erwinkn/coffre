@@ -1,7 +1,8 @@
 # An MCP server for coffre
 
-A proposal, written on 2026-10-05, for Erwin's decision D31. There is no code
-yet. It targets MCP revision **2026-07-28**, final since 28 July 2026, and
+A proposal, written on 2026-10-05, for Erwin's decision D31, and built
+since (#150, #151 and the pull requests after them); where building it
+settled a detail, this says what the code does. It targets MCP revision **2026-07-28**, final since 28 July 2026, and
 serves 2025-era clients too (section 2).
 
 People connect an MCP client, Claude among them, to their coffre instance.
@@ -101,13 +102,15 @@ coffre does:
 - It answers `initialize` with the version the client asked for, mints no
   session ID, and serves `tools/list` and `tools/call` with the same tools
   and the same checks.
-- What it can't do there is confirm a change. 2025-11-25's equivalent is
-  the `-32042` error, which carries a URL. A stateless server can't know
+- What it can't do there is elicit. 2025-11-25's equivalent is the
+  `-32042` error, which carries a URL. A stateless server can't know
   whether the client declared URL elicitation, because that declaration
   happened in an `initialize` request it no longer remembers.
-- So legacy clients get **Browse** and **Read values**. Anything that needs
-  coffre's page (changes, and showing a value to the person) answers a tool
-  error: this client must speak MCP 2026-07-28 with URL elicitation.
+- So a legacy client confirms changes, and sees values on coffre's page,
+  through the approval link, as any 2026-07-28 client without URL
+  elicitation does (section 7; Erwin's D62, which replaced answer 3). No
+  client is read-only for its protocol version; only its connection's
+  scopes limit it.
 
 Requests from a client older than 2025-06-18, with no
 `MCP-Protocol-Version` header, are refused.
@@ -434,7 +437,17 @@ An **approval** is a row in `mcp_approvals`. It holds:
 - a status (`pending`, `approved`, `denied`, `cancelled`, `failed` or
   `expired`);
 - a result without values;
-- an expiry 10 minutes out.
+- an expiry 5 minutes out, answer 1's bound, for every client; the client
+  may read the outcome for 10 minutes after it asked;
+- when the client heard the outcome. Until then, the same call (same
+  connection, same digest) rejoins the approval, and reads its outcome; after,
+  it asks afresh.
+
+The row stores the tool and its arguments, never the API request: the page's
+preview and the change itself are both made from them, by the tool's own
+code (`packages/server/src/mcp/changes.ts`). The page sends back the digest
+it showed, and the server recomputes it from the stored arguments, so what
+runs is what the person read.
 
 **On the wire (2026-07-28).** The first call:
 
@@ -442,7 +455,7 @@ An **approval** is a row in `mcp_approvals`. It holds:
 { "resultType": "input_required",
   "inputRequests": { "approve": { "method": "elicitation/create", "params": {
       "mode": "url",
-      "url": "https://secrets.acme.example/approvals/7QF2M9XKD4TR8H6B",
+      "url": "https://secrets.acme.example/approvals/0b9e5c1a-…",
       "message": "Approve on coffre: set market/staging/SESSION_SECRET to a new random value" } } },
   "requestState": "<MACed: approval id, connection id, call digest, expiry>" }
 ```
@@ -465,7 +478,11 @@ The client asks the person, opens the URL, then retries with
    The official client SDK, which Claude Code's v2 runtime is built on,
    retries ten rounds by default: about four minutes. claude.ai allows 240
    seconds per tool call.
-3. treats `decline` or `cancel` from the client as cancelling the approval.
+3. treats `decline` from the client as cancelling the approval. A `cancel`
+   means the prompt was dismissed, or that a client with no one to ask
+   answered it (Claude Code run with `-p` does, as the live check found):
+   the approval stays pending, and the result carries its link, as for a
+   client without URL elicitation.
 
 A call identical to a pending one (same connection, same digest) rejoins
 that approval rather than opening another. A connection may hold at most
@@ -502,11 +519,25 @@ they saw and clicked, whether or not the client ever comes back. The
 client's retry only reads the outcome. It also covers changes that only the
 page can carry: a value typed by the person, or a token shown once.
 
-**Without URL elicitation.** On 2026-07-28, a client that didn't declare
-`elicitation.url` gets `-32021 MissingRequiredClientCapability` (`400`) for
-these tools, as the spec requires. Legacy clients get a tool error (section
-2). Either way coffre does nothing and logs the refusal. Open question 1 is
-about the alternative.
+**Without URL elicitation** (answer 1). A 2026-07-28 client that didn't
+declare `elicitation.url`, claude.ai's among them, gets the approval link in
+the tool's result, as text for the model to show the person:
+
+```text
+Nothing has changed yet: coffre asks the person to approve this on its own page.
+Show them this link, to open signed in to coffre (it expires at 14:08:00Z):
+
+  https://secrets.acme.example/approvals/0b9e5c1a-…
+
+Once they have approved or denied it, call archive_secret again with the same arguments: it answers what became of it.
+```
+
+with `structuredContent: { status: "pending", approval: { id, url,
+expiresAt } }`. The same call again rejoins the approval: it waits up to 25
+seconds for the person, then answers the outcome, or the link again. The
+person still confirms the exact change on coffre's page, signed in as
+themselves, so what coffre enforces is unchanged. Legacy clients get the
+same link (section 2, D62).
 
 ### Setting a value
 
@@ -658,15 +689,21 @@ one client ID, Anthropic's CIMD, so coffre's Connected apps shows "Claude
 | Surface | Protocol | URL elicitation | What coffre allows |
 |---|---|---|---|
 | Claude Code, v2 runtime (on by default from v2.1.232 where it fetches flags, v2.1.274 elsewhere) | 2026-07-28, which it asks for | yes: it declares `elicitation: {form: {}, url: {}}` and opens the browser | everything, with approvals |
-| Claude Code, v1 runtime | 2025-era | documented only on 2026-07-28 connections | Browse, Read values |
-| claude.ai, Desktop, mobile, Cowork (custom connector, personal or org-wide) | not stated beyond the 2025 authorization specs | elicitation isn't in the documented feature list ("tools, prompts, and resources") | everything, changes through an approval link, if it speaks 2026-07-28 (to be checked); read-only on a 2025 revision |
+| Claude Code, v1 runtime | 2025-era | documented only on 2026-07-28 connections | everything, changes through the approval link |
+| claude.ai, Desktop, mobile, Cowork (custom connector, personal or org-wide) | 2026-07-28 for its tool calls; its connector-setup probe sends a 2025-11-25 `initialize` | declares none | everything, changes through the approval link |
 
 Without URL elicitation, a claude.ai connector makes changes through an
 approval link in the tool result, which the person opens on coffre (section
 16, answer 1). When claude.ai supports URL elicitation, it uses that
 instead, with no change to coffre: coffre reads the capability from each
-request. Which protocol revision claude.ai speaks decides whether answer 3
-applies to it, which PR 3 settles first.
+request.
+
+What claude.ai speaks was checked on 2026-10-05 from servers that logged it
+on 2026-09-26 and 2026-10-04: its user-facing client sends `server/discover`,
+`tools/list` and `tools/call` on 2026-07-28 with no session and no
+elicitation capability, and only its connector-setup probe opens with a
+2025-11-25 `initialize`, which coffre answers. A live check from claude.ai
+needs an instance it can reach.
 
 **Reachability.** The hosted apps call coffre from Anthropic's servers,
 `160.79.104.0/21`. They reach `/mcp`, `/.well-known/…`, `/api/oauth/token`
@@ -739,7 +776,13 @@ One migration, adding three tables on both engines. It expands only:
 - **`mcp_approvals`**: as in section 7. Not MACed: approving runs nothing
   by itself. A changed row can only make the client report a false
   outcome, or show the person a different change, which they then read
-  before approving.
+  before approving: the page's Approve carries the digest of what it
+  showed, recomputed from the stored arguments on the server.
+
+A registration no connection names is revoked a week after it was made,
+ten at a time, by later registrations, and connects no more. Nothing is
+deleted, as nowhere in coffre (schema guarantee 3): the rows stay, at the
+pace the registration limits allow.
 
 Access tokens and `requestState` have no rows: both are MACed and checked
 against a connection. Last use is written once per five minutes at most,
@@ -802,6 +845,10 @@ did before theirs.
 - **Approval fatigue.** At most five pending approvals per connection. An
   identical call rejoins its approval. Each approval is shown alone, never
   in bulk.
+- **Step-up.** A consent that grants all an earlier connection of the same
+  client holds and more supersedes it: the earlier one ends when the new
+  one's code is redeemed, logged as `mcp.disconnect`, `superseded`, and the
+  consent page says so. One with the same scopes, a second laptop, stays.
 - **Workers.** No isolate keeps a pending promise: a CIMD document or a
   limiter answer is kept only once it has settled. No app transaction
   stays open across a vault call. A held retry polls with plain queries
@@ -876,15 +923,16 @@ and he tests its flows by hand.
 
 - **1: the approval link**, with the cheap bounds; a passkey step-up on
   Approve is the follow-up.
-- **3: older protocol versions are read-only.**
+- **3: replaced by D62.** Older protocol versions are not read-only: a
+  2025-era client makes changes through answer 1's link, as any client
+  without URL elicitation does. Only a connection's scopes make it
+  read-only.
 - **4: read-only calls are detail**, under Show details (`mcp.read`; a
   refusal is `mcp.call`, shown).
 
-Still to settle in PR 3, where it first matters: if claude.ai's connectors
-speak a 2025 revision (section 10 could not tell), answer 3 would leave them
-read-only although the link of answer 1 works in any revision. That would cut
-against Claude supporting every feature, so PR 3 checks which revision
-claude.ai speaks first, and asks if it is a 2025 one.
+PR 3 checked what claude.ai speaks (section 10): 2026-07-28, without
+elicitation. So it makes changes through answer 1's link. Since the link
+works in any revision, Erwin then extended it to 2025-era clients (D62).
 
 1. **Clients that can't elicit, claude.ai today.**
    - **Default (D31):** refuse changes and showing values, so a claude.ai
@@ -945,7 +993,8 @@ claude.ai speaks first, and asks if it is a 2025 one.
    `com.example.app:/cb`), declared in a CIMD document and matched exactly,
    with a warning on the consent page. Never through DCR, and never a
    one-word scheme.
-3. **2025-era clients: reads only.** The full `-32042` path would let them
+3. **2025-era clients: reads only.** *Superseded by D62: they get the
+   approval link.* The full `-32042` path would let them
    make changes. It needs a session ID that carries the client's declared
    capabilities under a MAC. Claude Code's 2025 runtime doesn't declare URL
    elicitation, and the hosted apps don't document it, so it would buy
@@ -992,9 +1041,8 @@ This becomes `docs/mcp.md` with the fifth pull request.
 > exactly. Leave the OAuth client on "Use Claude's published identity". On
 > Team and Enterprise plans, an Owner adds it once under Organization
 > settings, Connectors, and each person then clicks **Connect** and signs in
-> as themselves. Claude's apps can't open coffre's approval page yet, so
-> through them a connection can browse, and read values with Read values,
-> but can't change anything.
+> as themselves. Claude's apps can't open coffre's approval page
+> themselves, so Claude shows you its link, and you open it.
 >
 > **Reaching your instance.** claude.ai and Desktop connect from
 > Anthropic's servers (`160.79.104.0/21`). An instance behind an IP

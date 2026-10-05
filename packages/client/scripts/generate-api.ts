@@ -22,6 +22,7 @@ const target = fileURLToPath(new URL('../src/api.ts', import.meta.url));
  */
 const NAMED = {
   AccessValue: 'api/access.ts',
+  ApprovalView: 'mcp/approvals.ts',
   AuditEntryView: 'api/audit.ts',
   AuthInfo: 'fetch-api.ts',
   AuthorizationView: 'mcp/service.ts',
@@ -29,6 +30,7 @@ const NAMED = {
   BindingView: 'api/workloads.ts',
   ConnectedApp: 'mcp/service.ts',
   Deletion: 'api/projects.ts',
+  Decision: 'mcp/approvals.ts',
   DeletionResult: 'api/projects.ts',
   WorkloadIds: 'api/workloads.ts',
   DismissedKey: 'api/missing.ts',
