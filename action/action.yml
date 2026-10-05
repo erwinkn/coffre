@@ -47,7 +47,7 @@ runs:
         # npx keeps its cache where it was.
         home="$(mktemp -d)"
         trap 'rm -rf "$home"' EXIT
-        coffre() { npm_config_cache="${npm_config_cache:-$HOME/.npm}" HOME="$home" npx -y @coffre/cli@0.3.0 "$@"; }
+        coffre() { npm_config_cache="${npm_config_cache:-$HOME/.npm}" HOME="$home" npx -y @coffre/cli@0.4.0 "$@"; }
         if [ -n "$INPUT_SERVICE" ]; then
           # Nothing more than its name, and the runner's ID token.
           coffre --url "$INPUT_URL" --service "$INPUT_SERVICE" export --format github "$INPUT_ENVIRONMENT"
