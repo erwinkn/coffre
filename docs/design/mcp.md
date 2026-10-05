@@ -659,12 +659,14 @@ one client ID, Anthropic's CIMD, so coffre's Connected apps shows "Claude
 |---|---|---|---|
 | Claude Code, v2 runtime (on by default from v2.1.232 where it fetches flags, v2.1.274 elsewhere) | 2026-07-28, which it asks for | yes: it declares `elicitation: {form: {}, url: {}}` and opens the browser | everything, with approvals |
 | Claude Code, v1 runtime | 2025-era | documented only on 2026-07-28 connections | Browse, Read values |
-| claude.ai, Desktop, mobile, Cowork (custom connector, personal or org-wide) | not stated beyond the 2025 authorization specs | elicitation isn't in the documented feature list ("tools, prompts, and resources") | Browse, Read values; changes and showing a value to the person are refused |
+| claude.ai, Desktop, mobile, Cowork (custom connector, personal or org-wide) | not stated beyond the 2025 authorization specs | elicitation isn't in the documented feature list ("tools, prompts, and resources") | everything, changes through an approval link, if it speaks 2026-07-28 (to be checked); read-only on a 2025 revision |
 
-So by default, a claude.ai connector can browse and, with Read values, read.
-It can't change anything until claude.ai supports URL elicitation. coffre
-needs no change on that day: it reads the capability from each request.
-Open question 1 proposes a way to allow changes before then.
+Without URL elicitation, a claude.ai connector makes changes through an
+approval link in the tool result, which the person opens on coffre (section
+16, answer 1). When claude.ai supports URL elicitation, it uses that
+instead, with no change to coffre: coffre reads the capability from each
+request. Which protocol revision claude.ai speaks decides whether answer 3
+applies to it, which PR 3 settles first.
 
 **Reachability.** The hosted apps call coffre from Anthropic's servers,
 `160.79.104.0/21`. They reach `/mcp`, `/.well-known/…`, `/api/oauth/token`
@@ -868,7 +870,21 @@ parity as they merge.
 
 ## 16. Open questions for Erwin
 
-Question 2 is settled; 1, 3 and 4 wait for Erwin.
+All four are settled. Erwin answered 1, 3 and 4 as recommended (D44): Claude,
+in claude.ai's connectors and in Claude Code, is to support every feature,
+and he tests its flows by hand.
+
+- **1: the approval link**, with the cheap bounds; a passkey step-up on
+  Approve is the follow-up.
+- **3: older protocol versions are read-only.**
+- **4: read-only calls are detail**, under Show details (`mcp.read`; a
+  refusal is `mcp.call`, shown).
+
+Still to settle in PR 3, where it first matters: if claude.ai's connectors
+speak a 2025 revision (section 10 could not tell), answer 3 would leave them
+read-only although the link of answer 1 works in any revision. That would cut
+against Claude supporting every feature, so PR 3 checks which revision
+claude.ai speaks first, and asks if it is a 2025 one.
 
 1. **Clients that can't elicit, claude.ai today.**
    - **Default (D31):** refuse changes and showing values, so a claude.ai
