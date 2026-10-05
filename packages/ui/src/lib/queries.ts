@@ -424,6 +424,12 @@ export const affects = {
     keys.projects,
     keys.me,
   ],
+  /**
+   * Someone's access on every project changed: every project's grants, which
+   * list it where it reaches, the list of them, their report, and what you
+   * can see, as it may be your own.
+   */
+  everyProject: (member: string): QueryKey[] => [['grants'], keys.projects, keys.report(member), keys.me],
   /** Someone let in: the directory. */
   admission: (): QueryKey[] => [keys.directory],
   /**
@@ -431,8 +437,8 @@ export const affects = {
    * your own, what you can see and do.
    */
   role: (member: string): QueryKey[] => [keys.directory, keys.report(member), keys.me, keys.projects],
-  /** Someone removed: the directory, their report, and every project's grants, which removal ends. */
-  removal: (member: string): QueryKey[] => [keys.directory, keys.report(member), ['grants']],
+  /** Someone removed: the directory, their report, and every grant, which removal ends, those on every project too. */
+  removal: (member: string): QueryKey[] => [keys.directory, keys.report(member), ['grants'], keys.projects],
   credentials: (member: string): QueryKey[] => [keys.credentials(member)],
   bindings: (member: string): QueryKey[] => [keys.bindings(member)],
   /** Unlinking an account also ends the sessions it signed in. */

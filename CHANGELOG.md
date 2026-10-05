@@ -54,9 +54,13 @@ coffre access '*'                                           # who holds them
   brings it in. Making a project or an environment, or giving one a new slug,
   answers with who reaches it through them (`inherited`), and the CLI and
   the dialogs say so before you confirm.
-- The member page shows "All projects · Developer" or "dev in every
-  project · Developer", and a project's access list shows who reaches it
-  through them.
+- A person's or a service account's Access tab lists theirs, "All projects
+  · Developer" or "dev in every project · Developer", and an owner grants
+  and revokes them there: "Grant on every project" takes a role, an
+  environment name or none, and an end date. A project's access list shows
+  who reaches it through them. Each is shown to those who see the grants of
+  a project it reaches, owners and that project's access managers, and no
+  one else.
 - One migration, `0005_instance_grants`: a column on `vault_grants`, and its
   checks loosened to allow these. 0.3.0 runs on the new schema, and this
   release on the old one, where it answers 503 to a grant on every project

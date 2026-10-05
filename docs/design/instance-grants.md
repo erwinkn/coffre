@@ -77,6 +77,13 @@ the vault call. A grant now covers a place when:
 Grants add up: someone with `viewer` on `*` and `developer` on `market`
 writes in `market` and reads everywhere else. There is no deny.
 
+A grant is on every project only when it names no place at all
+(`grantKind` in core). Anything else that lacks a field covers nothing:
+an environment grant read back without its project, as one whose
+environment row were gone would read, is never taken for `*`. The vault
+seals, keys and logs such a row as its environment, which a foreign key
+keeps from happening anyway.
+
 To match `*/dev`, the decision needs the environment's slug, not just its
 id. The vault reads it itself, from the `environments` table, in the
 decision's transaction, rather than trust the path the app sends; and only
@@ -160,18 +167,24 @@ previews includes them. Adding them back starts from nothing, as now.
 - **Making a project or an environment, or renaming an environment,**
   answers with who reaches it through them:
   `inherited: [{ member, place: "*/dev", role, roleName, expiresAt }]`.
-  `GET /api/projects` lists them all as `everyProject`, for owners and for
-  whoever manages environments or access somewhere, so that a dialog can say
-  so before anything is made.
+  `GET /api/projects` lists them as `everyProject`, so that a dialog can say
+  so before anything is made. Both show a grant on every project to exactly
+  those who see the grants of a project it reaches: owners, and that
+  project's access managers (`grant.manage`), as its access list does. A
+  maintainer, who does not see a project's grants, sees none of these
+  either.
 - **The CLI.** `coffre grant '*' <member> --role <role> [--env <name>]`,
   `coffre revoke '*' <member> [--env <name>]`, `coffre access '*'`, and
   `coffre access <project>` marks them "(dev in every project)". `projects
   create`, `environments create`, and `environments rename` to a new slug
   print who reaches the place. A `*` the shell expanded into file names is
   answered with "quote it: '*'".
-- **The UI.** The member page shows "All projects · Developer" or "dev in
-  every project · Developer" above its project access. A project's access
-  list shows them where they reach, marked "every project", with no revoke:
-  owners change them with the CLI or the API. The dialogs that make a
+- **The UI.** A person's or a service account's Access tab lists theirs
+  under "Every project", "All projects · Developer" or "dev in every
+  project · Developer", after their project access. Owners revoke each one
+  there, and add one with "Grant on every project": a role, an environment
+  name or none (which narrows the roles to those an environment can hold),
+  and an end date. Others see them only. A project's access list shows
+  them where they reach, marked "every project". The dialogs that make a
   project or an environment, or rename an environment, say who it is
   reachable by before you confirm.
