@@ -34,7 +34,8 @@ DeletionGrants == {[who |-> "ada", at |-> "env"]}
 
 -----------------------------------------------------------------------------
 (* Reads during a deletion: a place is archived, then deleted, while members
-   holding each kind of grant, and a root admin, read and write there. *)
+   holding each kind of grant, and a root admin, read and write there, and an
+   owner adds an environment or renames a key. *)
 
 ReadingMembers == {"ada", "olga", "root", "sam"}
 ReadingRank == [m \in ReadingMembers |-> AllRanks[m]]
@@ -43,7 +44,8 @@ ReadingRoots == {"root"}
 ReadingProcs == {"reader", "archiver", "deleter"}
 ReadingOps == [p \in ReadingProcs |->
     CASE p = "reader" -> {Op("read", "root", "root", "env"), Op("read", "sam", "sam", "env"),
-                          Op("read", "ada", "ada", "env"), Op("write", "sam", "sam", "env")}
+                          Op("read", "ada", "ada", "env"), Op("write", "sam", "sam", "env"),
+                          Op("addenv", "olga", None, "proj"), Op("renamekey", "olga", None, "env")}
       [] p = "archiver" -> {Op("archive", "olga", None, "proj"), Op("archive", "olga", None, "env")}
       [] p = "deleter" -> {Op("delete", "olga", None, "proj"), Op("delete", "olga", None, "env")}]
 ReadingBudget == [p \in ReadingProcs |-> IF p = "reader" THEN 2 ELSE 1]

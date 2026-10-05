@@ -28,6 +28,9 @@ coffre environments delete market/old --apply # an environment alone
   where it used to give the tombstone a live slug back. And a read the
   vault had checked just before the place was deleted is refused as
   `deleted`, where it used to release the key after the deletion.
+  Adding an environment, or renaming, archiving or restoring a key, under
+  a place deleted since the request found it is refused with a 404 too:
+  nothing is written to a deleted place.
 - What stays is a tombstone of names: the place, its keys and its versions'
   numbers, authors and times, which the audit log names. It is renamed
   `market~deleted-2026-10-05`, so `market` is free for a new project that

@@ -166,5 +166,5 @@ for (const step of trace.slice(1)) {
   const who = Object.keys(state.pc).find((p) => ['pc', 'l', 'op'].some((v) => !same(before[v][p], state[v][p]))) ?? '';
   const doing = who === '' ? '' : describe(state.op[who]);
   const label = who === '' ? '' : state.pc[who];
-  console.log(`${String(step.n).padStart(3)}. ${who.padEnd(9)} ${step.action.padEnd(15)} ${doing.padEnd(26)} -> ${label.padEnd(15)} ${lines.join('; ')}`.trimEnd());
+  console.log(`${String(step.n).padStart(3)}. ${who.padEnd(9)} ${step.action.padEnd(17)} ${doing.padEnd(26)} -> ${label.padEnd(15)} ${lines.join('; ')}`.trimEnd());
 }
