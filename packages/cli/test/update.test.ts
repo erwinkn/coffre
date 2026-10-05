@@ -276,6 +276,23 @@ test("update --yes leaves a deployment it cannot move as it was, byte for byte, 
   }
 });
 
+test('update without a terminal, and without --yes, says plainly to pass --yes, and changes nothing', async () => {
+  const { dir, env, close } = await heldDeployment();
+  try {
+    const before = readFileSync(join(dir, 'package.json'), 'utf8');
+    const { spawn } = await import('node:child_process');
+    const child = spawn(process.execPath, ['--conditions=coffre:source', main, 'update'], { cwd: dir, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stderr = '';
+    child.stderr.setEncoding('utf8').on('data', (chunk: string) => (stderr += chunk));
+    assert.notEqual(await new Promise((resolve) => child.on('close', resolve)), 0);
+    assert.match(stderr, /Not a terminal, so nothing to confirm on: pass --yes to update without asking\./);
+    assert.equal(readFileSync(join(dir, 'package.json'), 'utf8'), before);
+  } finally {
+    close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 /**
  * A Workers deployment at 0.0.1, a registry whose latest coffre is 9.9.9,
  * and a pnpm that holds pg-protocol back until the deployment lets it

@@ -18,7 +18,7 @@ import type { Instance } from './migrate.ts';
 import { dailyNotice, type Checked } from './notice.ts';
 import { hiddenLine, style } from './tty.ts';
 import { githubEnvironment, githubMasks } from './github-env.ts';
-import { bindingFrom, describeBindings, describePlan, serviceMember, TRUST_USAGE, type TrustFlags } from './trust.ts';
+import { bindingsFrom, describeBindings, describeEvents, describePlan, serviceMember, TRUST_USAGE, type TrustArgs } from './trust.ts';
 import { exchange, idToken } from './workload.ts';
 import { commandLine, readSession, removedVariables } from './flags.ts';
 import { readSecret } from './secret.ts';
@@ -151,12 +151,16 @@ async function headersFor(to: Target): Promise<Record<string, string>> {
 /** What to do next, for a refusal a command expects: its status and message, to a line, or null. */
 type Hint = (status: number, detail: string) => string | null;
 
-/** The API, for one instance. */
-function client(to: Target = target(), hint?: Hint): CoffreClient {
+/**
+ * The API, for one instance. A refusal of a status in `handled` comes back
+ * to the command, as a CoffreError, for it to say what to do; any other
+ * ends the CLI, said in `send`'s words.
+ */
+function client(to: Target = target(), hint?: Hint, handled: readonly number[] = []): CoffreClient {
   return createClient({
     url: to.origin,
     headers: () => headersFor(to),
-    transport: (request) => send(request, to, hint),
+    transport: (request) => send(request, to, hint, handled),
   });
 }
 
@@ -208,7 +212,7 @@ const checkedFile = {
 };
 
 /** One request; every way it can fail is explained in terms of what to do next. */
-async function send(request: Request, to: Target, hint?: Hint): Promise<Response> {
+async function send(request: Request, to: Target, hint?: Hint, handled: readonly number[] = []): Promise<Response> {
   await noticePending(to);
   let response: Response;
   try {
@@ -226,6 +230,7 @@ async function send(request: Request, to: Target, hint?: Hint): Promise<Response
     fail(`${to.origin} redirected to ${response.headers.get('location') ?? 'elsewhere'}; is that the right address?`);
   }
   if (response.status === 401) fail(refused(to));
+  if (handled.includes(response.status)) return response;
   const json = isJsonContentType(response.headers.get('content-type'));
   if (!response.ok) {
     const body = json ? ((await response.json().catch(() => ({}))) as { error?: unknown; message?: unknown }) : {};
@@ -911,12 +916,12 @@ async function trust(args: string[]): Promise<void> {
       'any-repository': { type: 'boolean' },
       gitlab: { type: 'string' },
       'gitlab-url': { type: 'string' },
-      source: { type: 'string' },
+      source: { type: 'string', multiple: true },
       issuer: { type: 'string' },
       claim: { type: 'string', multiple: true },
       branch: { type: 'string' },
       tag: { type: 'string' },
-      event: { type: 'string' },
+      event: { type: 'string', multiple: true },
       'repository-id': { type: 'string' },
       'owner-id': { type: 'string' },
       'project-id': { type: 'string' },
@@ -928,7 +933,13 @@ async function trust(args: string[]): Promise<void> {
     allowPositionals: true,
   });
   const [service] = positionals;
-  if (!service || positionals.length > 1) fail(TRUST_USAGE);
+  // `coffre trust` alone says how, as `coffre help` says it does.
+  if (positionals.length === 0 && Object.values(values).every((value) => value === undefined || value === false)) {
+    process.stdout.write(`${TRUST_USAGE}\n`);
+    return;
+  }
+  if (!service) throw new UsageError('name the service: coffre trust <service> …');
+  if (positionals.length > 1) throw new UsageError(`too many arguments: ${positionals.slice(1).join(' ')}`);
   const member = serviceMember(service);
   const coffre = client();
   const { label, replace, apply, ...flags } = values;
@@ -936,17 +947,27 @@ async function trust(args: string[]): Promise<void> {
     process.stdout.write(describeBindings(member, (await coffre.bindings.list(member)).bindings));
     return;
   }
-  const binding = await bindingFrom(flags as TrustFlags, (input) => coffre.bindings.lookup(input)).catch((error: unknown) =>
+  // A repository or project the lookup cannot see comes back here, for bindingsFrom to say how to give its IDs.
+  const lookup = client(target(), undefined, [400, 404]);
+  const bindings = await bindingsFrom(flags as TrustArgs, (input) => lookup.bindings.lookup(input)).catch((error: unknown) =>
     fail(error instanceof Error ? error.message : String(error)),
   );
-  const input = { ...binding, label: label ?? null, replaces: replace ?? [] };
-  const plan = await coffre.bindings.preview(member, input);
+  if (replace !== undefined && bindings.length > 1) fail('--replace goes with one binding at a time: name one --event or --source');
+  const inputs = bindings.map((binding) => ({ ...binding, label: label ?? null, replaces: replace ?? [] }));
+  const plans = [];
+  for (const input of inputs) plans.push(await coffre.bindings.preview(member, input));
+  const events = describeEvents(plans);
   if (!apply) {
-    process.stdout.write(describePlan(member, plan, null));
+    for (const plan of plans) process.stdout.write(describePlan(member, plan, null));
+    if (events !== null) process.stdout.write(`${events}\n`);
+    process.stdout.write(`Run it again with --apply to save ${plans.length === 1 ? 'it' : 'them'}.\n`);
     return;
   }
-  const saved = await coffre.bindings.create(member, input);
-  process.stdout.write(describePlan(member, plan, saved.binding));
+  for (const [i, input] of inputs.entries()) {
+    const saved = await coffre.bindings.create(member, input);
+    process.stdout.write(describePlan(member, plans[i]!, saved.binding));
+  }
+  if (events !== null) process.stdout.write(`${events}\n`);
 }
 
 async function offboard(args: string[]): Promise<void> {

@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+**`coffre trust` from first use.**
+- A binding matches one event, and trusting a workflow that also runs by
+  hand or on a schedule took one `coffre trust` for each. Now `--event` (and
+  GitLab's `--source`) takes several, `--event
+  push,workflow_dispatch,schedule`, a binding each, in one go. `push` is
+  still the only default.
+- The preview says which events the bindings accept, and names the flag
+  that adds the others the ref allows: "Accepts runs started by push. Not
+  by workflow_dispatch or schedule: add them with --event, as --event
+  push,workflow_dispatch,schedule."
+- For a private repository, whose IDs coffre cannot look up, it said only
+  "not found". Now it says why in a line, then gives the command that gets
+  the IDs and the flags to add:
+  `gh api repos/OWNER/REPO --jq '"--repository-id \(.id) --owner-id \(.owner.id)"'`,
+  and `glab api … | jq …` for a GitLab project.
+- `coffre trust` alone prints its usage and exits 0, as `coffre help` says
+  it does. A test now holds every command's `--help`, `-h` and `help
+  <command>` to exit 0.
+
+`coffre update` and `coffre migrate` without a terminal and without `--yes`
+now say "Not a terminal, so nothing to confirm on: pass --yes to update
+without asking."
+
 **`coffre untrust` shows what it would end, and ends it with `--apply`**, as
 every other command that ends something for good does. The preview names
 the binding, its claims, and the CI runs that would lose sign-in, in a

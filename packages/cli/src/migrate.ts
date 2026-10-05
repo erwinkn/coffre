@@ -147,7 +147,7 @@ export async function migrate(args: string[], connect: () => Instance, session: 
       return;
     }
     if (!yes && terminal === null) {
-      throw new MigrateError('nothing here to confirm on: run coffre migrate on a terminal, or pass --yes to apply without asking');
+      throw new MigrateError('Not a terminal, so nothing to confirm on: pass --yes to migrate without asking.');
     }
 
     if (s.ansi) out.write(`\n  ${s.bold('coffre migrate')}  ${s.dim(`${instance.origin}, coffre ${me.instance.version}`)}\n\n`);
@@ -215,7 +215,7 @@ async function migrateDeployment(
     return;
   }
   if (!options.yes && terminal === null) {
-    throw new MigrateError('nothing here to confirm on: run coffre migrate on a terminal, or pass --yes to apply without asking');
+    throw new MigrateError('Not a terminal, so nothing to confirm on: pass --yes to migrate without asking.');
   }
   out.write(`  ${count(pending.length, 'migration')} to apply to ${where}, for coffre ${deployment.version}: ${listed(pending, 'and')}\n\n`);
   const steps = new Steps(out, [`Apply ${listed(pending, 'and')}`], () => terminal?.keys ?? null, clean);

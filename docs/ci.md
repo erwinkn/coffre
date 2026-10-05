@@ -54,6 +54,41 @@ older one turns it on ([deploy.md](deploy.md#ci-runs-without-a-stored-token)).
 coffre trust api-deploy --github acme/api --workflow deploy.yml --branch main --apply
 ```
 
+A binding matches one event: the one that started the run. By default that
+is `push`, and the preview says which events the bindings accept and how to
+add others. A workflow a person can start by hand and that runs on a
+schedule as well:
+
+```yaml
+# .github/workflows/deploy.yml
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: '17 6 * * *'
+```
+
+is trusted with a binding for each, made in one go:
+
+```sh
+coffre trust api-deploy --github acme/api --workflow deploy.yml --branch main --event push,workflow_dispatch,schedule --apply
+```
+
+A schedule runs on a branch, and a release at a tag (`--tag v1 --event
+release`). On GitLab, `--source push,web,schedule` does the same for the
+pipeline's source.
+
+coffre looks up a repository's or project's IDs, which a binding keeps, so
+that a name passed on to someone else trusts nothing. GitHub and GitLab
+show a private one only to those signed in to it, so for one coffre says
+so and gives the command that gets them, whose output is the two flags to
+add:
+
+```sh
+gh api repos/acme/website --jq '"--repository-id \(.id) --owner-id \(.owner.id)"'
+```
+
 With the CLI:
 
 - **GitHub Actions**: give the job `permissions: id-token: write`, and

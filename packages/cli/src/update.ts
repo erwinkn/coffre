@@ -235,7 +235,7 @@ export async function update(args: string[]): Promise<void> {
   const keys = () => terminal?.keys ?? null;
   const ask = async (question: string, step: { ask(question: string): Promise<boolean> }) => {
     if (yes) return true;
-    if (keys() === null) throw new Error('nothing here to confirm on: run coffre update on a terminal, or pass --yes');
+    if (keys() === null) throw new Error('Not a terminal, so nothing to confirm on: pass --yes to update without asking.');
     return step.ask(question);
   };
 

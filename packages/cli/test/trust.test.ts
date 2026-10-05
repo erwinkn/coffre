@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import { CoffreError } from '@coffre/client';
 import { checkBinding } from '@coffre/core/workloads';
 
-import { bindingFrom, describeBindings, describePlan, type Lookup, runsOf, serviceMember, type TrustFlags } from '../src/trust.ts';
+import { bindingFrom, bindingsFrom, describeBindings, describeEvents, describePlan, type Lookup, runsOf, serviceMember, type TrustFlags } from '../src/trust.ts';
 
 const SHA = 'b'.repeat(40);
 
@@ -11,7 +12,8 @@ const SHA = 'b'.repeat(40);
 const lookup: Lookup = async (input) => {
   if (input.github === 'acme/api') return { github: 'acme/api', repositoryId: '41532', ownerId: '9919' };
   if (input.gitlab === 'acme/api' && input.gitlabUrl === undefined) return { gitlab: 'acme/api', projectId: '345', namespaceId: '12' };
-  throw new Error('not found: a private one\'s IDs are typed in');
+  // As the server answers, through a client that hands a 404 back to the command.
+  throw new CoffreError(404, 'not_found', 'api.github.com did not find it: a private one\'s IDs are typed in');
 };
 
 /** Each binding the flags build is one the server accepts. */
@@ -113,7 +115,6 @@ test('a plan and a list show every claim in full', () => {
       '  claims   event_name  push',
       '           ref         refs/heads/main',
       '  replaces old: the issuer moved its keys',
-      'Run it again with --apply to save it.',
       '',
     ].join('\n'),
   );
@@ -149,5 +150,89 @@ test('a binding says, in a sentence, which CI runs it lets sign in: platform, re
   assert.equal(
     runsOf({ profile: 'custom', issuer: 'https://accounts.google.com', claims: { sub: '1040' } }),
     'runs whose ID token, from https://accounts.google.com, says sub=1040',
+  );
+});
+
+test('a private repository or project: said in a line, then the command that gets its IDs, then the flags to add', async () => {
+  await assert.rejects(bindingFrom({ github: 'erwinkn/website', workflow: 'deploy.yml', branch: 'main' }, lookup), {
+    message:
+      'GitHub shows coffre nothing of erwinkn/website: it is private, or not there. Get its IDs with\n' +
+      '  gh api repos/erwinkn/website --jq \'"--repository-id \\(.id) --owner-id \\(.owner.id)"\'\n' +
+      'and add the two flags it prints, --repository-id <n> --owner-id <n>, to this coffre trust.',
+  });
+  await assert.rejects(
+    bindingFrom({ gitlab: 'acme/private', branch: 'main', 'gitlab-url': 'https://gitlab.acme.example' }, lookup),
+    /^Error: GitLab shows coffre nothing of acme\/private: it is private, or not there\. Get its IDs with\n  glab api --hostname gitlab\.acme\.example projects\/acme%2Fprivate \| jq -r '"--project-id \\\(\.id\) --namespace-id \\\(\.namespace\.id\)"'\n/,
+  );
+  // Any other refusal is said as it is, with no hint that would not help.
+  const malformed: Lookup = async () => { throw new CoffreError(400, 'bad_request', 'a GitHub repository is <owner>/<name>'); };
+  await assert.rejects(bindingFrom({ github: 'nope', workflow: 'deploy.yml', branch: 'main' }, malformed), { message: 'a GitHub repository is <owner>/<name>' });
+});
+
+test('one binding for each event or pipeline source named, push unless told; the IDs looked up once', async () => {
+  let asked = 0;
+  const counting: Lookup = async (input) => (asked++, lookup(input));
+  const three = await bindingsFrom({ github: 'acme/api', workflow: 'deploy.yml', branch: 'main', event: ['push,workflow_dispatch', 'schedule'] }, counting);
+  assert.deepEqual(three.map(({ claims }) => claims.event_name), ['push', 'workflow_dispatch', 'schedule']);
+  assert.equal(asked, 1);
+  for (const binding of three) checkBinding(binding);
+  assert.deepEqual((await bindingsFrom({ github: 'acme/api', workflow: 'deploy.yml', branch: 'main' }, lookup)).map(({ claims }) => claims.event_name), ['push']);
+  assert.deepEqual((await bindingsFrom({ gitlab: 'acme/api', branch: 'main', source: ['web', 'schedule'] }, lookup)).map(({ claims }) => claims.pipeline_source), ['web', 'schedule']);
+  await assert.rejects(bindingsFrom({ github: 'acme/api', workflow: 'deploy.yml', branch: 'main', event: ['pull_request'] }, lookup), /--event takes push, workflow_dispatch, schedule, release, not pull_request/);
+  await assert.rejects(bindingsFrom({ gitlab: 'acme/api', branch: 'main', event: ['push'] }, lookup), /--event is a GitHub run's/);
+});
+
+test('the preview says which events the bindings accept, and the flag that adds those the ref allows', async () => {
+  const push = await bindingsFrom({ github: 'acme/api', workflow: 'deploy.yml', branch: 'main' }, lookup);
+  assert.equal(
+    describeEvents(push),
+    'Accepts runs started by push. Not by workflow_dispatch or schedule: add them with --event, as --event push,workflow_dispatch,schedule.',
+  );
+  // At a tag, a release runs, and a schedule never does.
+  const tag = await bindingsFrom({ github: 'acme/api', workflow: 'ship.yml', tag: 'v1', event: ['push', 'release'] }, lookup);
+  assert.equal(describeEvents(tag), 'Accepts runs started by push and release, a binding each. Not by workflow_dispatch: add them with --event, as --event push,release,workflow_dispatch.');
+  const all = await bindingsFrom({ github: 'acme/api', workflow: 'deploy.yml', branch: 'main', event: ['push,workflow_dispatch,schedule'] }, lookup);
+  assert.equal(describeEvents(all), 'Accepts runs started by push, workflow_dispatch and schedule, a binding each.');
+  assert.equal(
+    describeEvents(await bindingsFrom({ gitlab: 'acme/api', branch: 'main' }, lookup)),
+    'Accepts pipelines started by push. Not by web or schedule: add them with --source, as --source push,web,schedule.',
+  );
+  assert.equal(describeEvents(await bindingsFrom({ issuer: 'https://accounts.google.com', claim: ['sub=1'] }, lookup)), null);
+});
+
+test('the CLI hands a refused lookup back to trust, which says how to give the IDs, rather than ending on "not found"', async (t) => {
+  const { createServer } = await import('node:http');
+  const { once } = await import('node:events');
+  const { spawn } = await import('node:child_process');
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { signedInWithToken } = await import('./fakes.ts');
+  const server = createServer((request, response) =>
+    response.writeHead(request.url!.startsWith('/api/workloads/lookup') ? 404 : 500, { 'content-type': 'application/json' })
+      .end(JSON.stringify({ error: 'not_found', message: "api.github.com did not find it: a private one's IDs are typed in" })),
+  );
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => server.close());
+  const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  const home = mkdtempSync(join(tmpdir(), 'coffre-trust-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  signedInWithToken(home, origin, 'coffre_cli_owner');
+  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('COFFRE_')));
+  const main = new URL('../src/main.ts', import.meta.url).pathname;
+  const child = spawn(process.execPath, ['--conditions=coffre:source', main, 'trust', 'website-deploy', '--github', 'erwinkn/website', '--workflow', 'deploy.yml', '--branch', 'main'], {
+    env: { ...env, HOME: home },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stderr = '';
+  child.stderr.setEncoding('utf8').on('data', (chunk: string) => (stderr += chunk));
+  const [code] = (await once(child, 'close')) as [number];
+  assert.equal(code, 1);
+  assert.equal(
+    stderr,
+    'coffre: GitHub shows coffre nothing of erwinkn/website: it is private, or not there. Get its IDs with\n' +
+      '  gh api repos/erwinkn/website --jq \'"--repository-id \\(.id) --owner-id \\(.owner.id)"\'\n' +
+      'and add the two flags it prints, --repository-id <n> --owner-id <n>, to this coffre trust.\n',
   );
 });

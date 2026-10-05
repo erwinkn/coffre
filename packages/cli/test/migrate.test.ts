@@ -253,7 +253,7 @@ test("in a deployment's folder, its pipeline migrates before the deploy, asking 
     // Without a terminal, only with --yes.
     const asked = await migrateIn(dir, url, []);
     assert.equal(asked.code, 1);
-    assert.match(asked.output, /nothing here to confirm on: run coffre migrate on a terminal, or pass --yes/);
+    assert.match(asked.output, /Not a terminal, so nothing to confirm on: pass --yes to migrate without asking\./);
     assert.deepEqual(await schema(url), { applied: 1, syncs: true });
 
     const run = await migrateIn(dir, url);

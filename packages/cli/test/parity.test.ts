@@ -73,13 +73,19 @@ test("a command's own flag named like a session flag reaches it: grant --service
   }
 });
 
-test('every command says how it is used, with --help, and is run by the CLI', async () => {
-  const runs = await each(COMMANDS, (command) => coffre([...command.split(' '), '--help']));
-  COMMANDS.forEach((command, i) => {
+test('every command says how it is used, with --help, -h or help <command>, exit 0, and is run by the CLI', async () => {
+  const asks = COMMANDS.flatMap((command) => [[...command.split(' '), '--help'], [...command.split(' '), '-h'], ['help', ...command.split(' ')]]);
+  const runs = await each(asks, (args) => coffre(args));
+  asks.forEach((args, i) => {
     const run = runs[i]!;
-    assert.equal(run.code, 0, `coffre ${command} --help: ${run.stderr}`);
-    assert.ok(run.stdout.includes(`coffre ${command}`), `coffre ${command} --help shows its usage:\n${run.stdout}`);
+    const command = args.filter((arg) => arg !== 'help' && !arg.startsWith('-')).join(' ');
+    assert.equal(run.code, 0, `coffre ${args.join(' ')}: ${run.stderr}`);
+    assert.ok(run.stdout.includes(`coffre ${command}`), `coffre ${args.join(' ')} shows its usage:\n${run.stdout}`);
   });
+  // `coffre trust` alone says how, as coffre help says it does.
+  const trust = await coffre(['trust']);
+  assert.equal(trust.code, 0, trust.stderr);
+  assert.match(trust.stdout, /^usage: coffre trust <service>/);
 });
 
 test('a flag a command does not take is refused in a line and the usage, never a stack trace', async () => {
