@@ -26,6 +26,7 @@ import {
   loadPrincipal,
   loadProject,
   loadServiceDirectory,
+  loadSettings,
   loadShell,
   queries,
   type AuditSearch,
@@ -173,12 +174,12 @@ export const token = {
 
 /** `/settings`. */
 export const settings = {
-  // Instance facts come from the directory, which only owners may list.
-  // Asking on everyone's behalf would write a refusal to the audit log for
-  // every user who opens the page, so it is only asked for them.
+  // Instance facts come from the directory and the key checks, which only
+  // owners may read. Asking on everyone's behalf would write a refusal to the
+  // audit log for every user who opens the page, so they are only asked for them.
   loader: ({ context }: Loader) => {
     const { coffre, queryClient } = coffreOf(context);
-    return loadDirectory(queryClient, coffre);
+    return loadSettings(queryClient, coffre);
   },
 };
 

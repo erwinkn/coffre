@@ -88,7 +88,21 @@ export function TrustedWorkloads({ serviceId, bindings }: { serviceId: string; b
                                 </button>
                               }
                               title={<>Stop trusting {binding.label ?? title}?</>}
-                              body="Its runs are refused from their next sign-in, and credentials they hold stop working. A binding removed is never trusted again; to trust the runs again, add a new one."
+                              body={
+                                <>
+                                  Runs of <strong>{title}</strong> ({detail}) can no longer sign in as{' '}
+                                  <span className="mono">service:{serviceId}</span>, and credentials they hold stop
+                                  working at once.{' '}
+                                  {binding.lastUsedAt === null ? (
+                                    'It was never used.'
+                                  ) : (
+                                    <>
+                                      It was last used <Timestamp iso={binding.lastUsedAt} display="relative" />.
+                                    </>
+                                  )}{' '}
+                                  A binding removed is never trusted again; to trust the runs again, add a new one.
+                                </>
+                              }
                               confirmLabel="Remove binding"
                               onConfirm={() => remove(binding)}
                             />

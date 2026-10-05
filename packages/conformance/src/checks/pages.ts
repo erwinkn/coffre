@@ -16,6 +16,21 @@ const PAGES = [
   ['/audit', 'Audit'],
 ] as const;
 
+/**
+ * A menu item's dialog opened as a person would: the menu by its button,
+ * then the item, by its words. Base UI's menu opens on a pointer press, not
+ * a bare click.
+ */
+const openFromMenu = (menu: string, item: string) => `(async () => {
+  const press = { bubbles: true, cancelable: true, pointerType: 'mouse', button: 0 };
+  const trigger = document.querySelector(${JSON.stringify(menu)});
+  for (const [Kind, type] of [[PointerEvent, 'pointerdown'], [MouseEvent, 'mousedown'], [PointerEvent, 'pointerup'], [MouseEvent, 'mouseup'], [MouseEvent, 'click']]) {
+    trigger?.dispatchEvent(new Kind(type, press));
+  }
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  [...document.querySelectorAll('[role=menuitem]')].find((entry) => entry.textContent.includes(${JSON.stringify(item)}))?.click();
+})()`;
+
 /** A service account of the pages' own, whose page shows how it signs in. */
 const SERVICE = 'token:conformance-pages';
 
@@ -31,11 +46,13 @@ export async function pagesInBrowser(deployment: Deployment, admin: Person, brow
   await admin.api.members.add(SERVICE);
   const name = SERVICE.slice('token:'.length);
   // A service account is service:<name> to people; the API and the log keep token:<name>.
-  const pages = [...PAGES, ['/tokens', 'Service accounts'], [`/tokens/${name}`, `service:${name}`]] as const;
+  const pages = [...PAGES, ['/settings', 'Settings'], ['/tokens', 'Service accounts'], [`/tokens/${name}`, `service:${name}`]] as const;
   const chrome = await Chrome.open(executable);
   try {
     for (const [path, heading] of pages) {
-      const loaded = await chrome.load(new URL(path, deployment.origin).href, admin.browser.cookies());
+      // On the service account's page, its removal is opened, and not confirmed: the dialog says first what it would revoke.
+      const then = path === `/tokens/${name}` ? openFromMenu('button[aria-label^="Actions for"]', 'Remove') : undefined;
+      const loaded = await chrome.load(new URL(path, deployment.origin).href, admin.browser.cookies(), undefined, then);
       expect(loaded.errors.length === 0, `${path}, signed in, reported errors in the browser`, loaded.errors.join('\n'));
       // The heading, then what may follow it in the h1, such as a project's slug.
       expect(loaded.heading?.startsWith(heading), `${path}, signed in, shows ${JSON.stringify(loaded.heading)}, not the heading ${JSON.stringify(heading)}`);
@@ -43,12 +60,14 @@ export async function pagesInBrowser(deployment: Deployment, admin: Person, brow
       if (path === `/tokens/${name}`) {
         const ways = loaded.cards.filter((title) => title === 'Sign in with OIDC' || title === 'Bearer tokens');
         expect(ways.join(' then ') === 'Sign in with OIDC then Bearer tokens', `${path} does not show OIDC, then bearer tokens`, loaded.cards);
+        expect(loaded.dialog?.includes('Removing revokes 0 grants, 0 bearer tokens') === true, `${path}: Remove… does not preview what it would revoke`, loaded.dialog);
       }
+      if (path === '/settings') expect(loaded.cards.includes('Keys'), '/settings does not show what the keys are checked against', loaded.cards);
     }
   } finally {
     await chrome.close();
   }
-  return `${pages.map(([path]) => path).join(', ')}, signed in, in Chrome: each rendered, no error from their scripts; a service account shown as service:${name}, OIDC then bearer tokens`;
+  return `${pages.map(([path]) => path).join(', ')}, signed in, in Chrome: each rendered, no error from their scripts; a service account shown as service:${name}, OIDC then bearer tokens, its removal previewed; the keys' checks in Settings`;
 }
 
 /**

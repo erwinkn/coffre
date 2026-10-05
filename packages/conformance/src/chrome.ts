@@ -16,6 +16,8 @@ export type Loaded = {
   text: string;
   /** The address it ends at, once its scripts have run: a notice read once is taken out of it. */
   href: string;
+  /** The text of the dialog open at the end, as after `then` opened one; null for none. */
+  dialog: string | null;
   errors: string[];
 };
 
@@ -124,9 +126,11 @@ export class Chrome {
   /**
    * `url` in a tab of its own, with `cookies` for its origin: the heading it
    * shows once its scripts have run and settled, and every uncaught error,
-   * console error and failed load along the way.
+   * console error and failed load along the way. `then`, a script run once
+   * the page settles, does what a person would next, such as open a dialog,
+   * whose text is read with the rest.
    */
-  async load(url: string, cookies: [string, string][], settle = 2_000): Promise<Loaded> {
+  async load(url: string, cookies: [string, string][], settle = 2_000, then?: string): Promise<Loaded> {
     const { targetId } = (await this.#send('Target.createTarget', { url: 'about:blank' })) as { targetId: string };
     const { sessionId } = (await this.#send('Target.attachToTarget', { targetId, flatten: true })) as { sessionId: string };
     const errors: string[] = [];
@@ -156,15 +160,21 @@ export class Chrome {
       await Promise.race([load, new Promise((resolve) => setTimeout(resolve, 30_000))]);
       // What streams in after the load, and hydration, have their time: the page may render, then fail.
       await new Promise((resolve) => setTimeout(resolve, settle));
+      if (then !== undefined) {
+        await this.#send('Runtime.evaluate', { expression: then, awaitPromise: true }, sessionId);
+        // What it asked of the server has its time to come back.
+        await new Promise((resolve) => setTimeout(resolve, settle));
+      }
       // The heading, the cards' titles in order, all the text a person reads, and where the page ended.
       const expression = `({
         heading: document.querySelector('h1')?.textContent?.trim() || null,
         cards: [...document.querySelectorAll('h2.card-title')].map((title) => title.textContent.trim()),
         text: document.body.innerText,
         href: location.href,
+        dialog: document.querySelector('[role=alertdialog], [role=dialog]')?.innerText ?? null,
       })`;
       const { result } = (await this.#send('Runtime.evaluate', { expression, returnByValue: true }, sessionId)) as {
-        result: { value: { heading: string | null; cards: string[]; text: string; href: string } };
+        result: { value: { heading: string | null; cards: string[]; text: string; href: string; dialog: string | null } };
       };
       return { ...result.value, errors };
     } finally {

@@ -20,6 +20,16 @@ How coffre's pages place and word things. The styles they name are in
 - **On the whole page: in the page header.** Few belong there: a principal's
   menu, Sign out, the audit log's seal.
 
+## Everything the API does
+
+- Every route of the API is done somewhere in the pages, as in the CLI
+  (D29). `src/parity.ts` names, for each, the control and its file, or why
+  no page does it, or the work in flight that brings it;
+  `test/parity.test.ts` checks the call sends that route.
+- What the CLI previews before `--apply` (offboarding, revoking a token,
+  removing a trust binding, ending a session, unlinking an account), a
+  confirm dialog shows first, with the same facts.
+
 ## Sections
 
 - A page with several sections shows them as tabs, `PageTabs` in

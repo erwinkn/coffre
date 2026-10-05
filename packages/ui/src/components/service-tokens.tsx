@@ -97,7 +97,21 @@ export function ServiceTokens({ serviceId, tokens }: { serviceId: string; tokens
                                   Revoke <span className="mono">{token.hint}</span>?
                                 </>
                               }
-                              body="Whatever uses it is refused from its next request. Issue a new token first if the service should keep working."
+                              body={
+                                <>
+                                  {token.label ?? 'Unlabelled'},{' '}
+                                  {token.lastUsedAt === null ? (
+                                    'never used'
+                                  ) : (
+                                    <>
+                                      last used <Timestamp iso={token.lastUsedAt} display="relative" />
+                                    </>
+                                  )}
+                                  .{' '}
+                                  Whatever uses it is refused from its next request. Issue a new token first if the
+                                  service account should keep working.
+                                </>
+                              }
                               confirmLabel="Revoke token"
                               onConfirm={() => revoke(token)}
                             />

@@ -414,24 +414,55 @@ export function PrincipalActions({
             Remove <span className="mono">{principal.principalId}</span>?
           </>
         }
-        body={
-          principal.principalType === 'user' ? (
-            <>
-              They are signed out everywhere, and their CLI logins, linked sign-in accounts and
-              project permissions are revoked at once. Their past actions stay in the audit log,
-              and their page then lists the values they saw, to rotate.
-            </>
-          ) : (
-            <>
-              Its bearer tokens and trust bindings stop working and its project permissions are
-              revoked at once, including for anything running as it right now. Its past actions stay in
-              the audit log, and its page then lists the values it read, to rotate.
-            </>
-          )
-        }
+        body={<RemovalPreview principal={principal} open={confirming} />}
         confirmLabel={`Remove ${kind}`}
         onConfirm={() => remove(principal)}
       />
+    </>
+  );
+}
+
+const plural = (count: number, one: string) => `${count} ${one}${count === 1 ? '' : 's'}`;
+
+/**
+ * What removing someone would do, read when its dialog opens, as `coffre
+ * offboard` previews it before `--apply`: every way in it revokes, and what
+ * they leave behind to rotate.
+ */
+function RemovalPreview({ principal, open }: { principal: DirectoryPrincipal; open: boolean }) {
+  const { capabilities } = useShell();
+  const person = principal.principalType === 'user';
+  const { data, isPending } = useQuery({
+    ...queries.report(useCoffre(), memberOf(principal), capabilities.canManageGrants),
+    enabled: open,
+  });
+  const report = data?.ok === true ? data.report : null;
+  if (isPending) {
+    return (
+      <>
+        <Spinner size={13} /> Reading what {person ? 'they hold' : 'it holds'}…
+      </>
+    );
+  }
+  if (report === null) {
+    return person
+      ? 'They are signed out everywhere, and their sign-in accounts and project access are revoked at once.'
+      : 'Its bearer tokens and trust bindings stop working, and its project access is revoked at once.';
+  }
+  const { live } = report;
+  const revokes = person
+    ? [plural(live.grants, 'grant'), plural(live.sessions, 'session'), plural(live.identities, 'linked sign-in account')]
+    : [plural(live.grants, 'grant'), plural(live.tokens, 'bearer token')];
+  return (
+    <>
+      Removing revokes {revokes.join(', ')} at once
+      {person ? '' : ', and its trust bindings, including for anything running as it now'}.{' '}
+      {report.exposed.length === 0
+        ? `No value ${person ? 'they' : 'it'} saw is still current.`
+        : `${plural(report.exposed.length, 'value')} ${person ? 'they' : 'it'} saw ${report.exposed.length === 1 ? 'is' : 'are'} still current: ${person ? 'their' : 'its'} page lists them, to rotate.`}
+      {report.issuedTokens.length > 0 &&
+        ` ${plural(report.issuedTokens.length, 'bearer token')} ${person ? 'they' : 'it'} issued still ${report.issuedTokens.length === 1 ? 'works' : 'work'}.`}{' '}
+      {person ? 'Their' : 'Its'} past actions stay in the audit log.
     </>
   );
 }
