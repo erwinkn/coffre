@@ -1,5 +1,5 @@
-// The app Worker `pnpm dev` runs: Start's handler, with coffre in each
-// request's context, and coffre's scheduled job.
+// The app Worker, and its Start app's server entry: Start's handler, with
+// coffre in each request's context, and coffre's scheduled job.
 import handler from '@tanstack/react-start/server-entry';
 
 import { coffre, type Env } from './coffre';

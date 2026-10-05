@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -216,6 +216,20 @@ test('update --yes leaves a deployment from before the clean break as it was, by
   try {
     bumpPins(dir, '0.3.0');
     writeFileSync(join(dir, '.bin', 'pnpm'), '#!/bin/sh\nexit 0\n');
+    // This CLI as npm's global, updated in step 1 to one whose migrations add one: what the tail would have said.
+    const updated = join(dir, 'updated-cli');
+    mkdirSync(join(updated, 'dist', 'migrations', 'postgres', 'meta'), { recursive: true });
+    writeFileSync(join(updated, 'dist', 'migrations', 'postgres', 'meta', '_journal.json'), JSON.stringify({ entries: [{ tag: '0000_baseline' }, { tag: '0001_later' }] }));
+    const cli = realpathSync(fileURLToPath(new URL('..', import.meta.url)));
+    writeFileSync(
+      join(dir, '.bin', 'npm'),
+      `#!/bin/sh
+[ "$1" = ls ] || exit 0
+if [ -e '${dir}/npm-asked' ]; then at='${updated}'; else at='${cli}'; touch '${dir}/npm-asked'; fi
+printf '{"dependencies":{"@coffre/cli":{"path":"%s"}}}' "$at"
+`,
+    );
+    chmodSync(join(dir, '.bin', 'npm'), 0o755);
     const before = readFileSync(join(dir, 'package.json'), 'utf8');
     const { spawn } = await import('node:child_process');
     const child = spawn(process.execPath, ['--conditions=coffre:source', main, 'update', '--yes'], { cwd: dir, env });
@@ -224,6 +238,8 @@ test('update --yes leaves a deployment from before the clean break as it was, by
     await new Promise((resolve) => child.on('close', resolve));
     assert.match(stderr, /This deployment stays as it is, at 0\.3\.0: coffre 0\.4\.0 was a clean break, and moves no deployment from before it\. Nothing was changed/);
     assert.match(stderr, /Deploy coffre 9\.9\.9 afresh, with coffre init/);
+    assert.match(stderr, /Updated this CLI from \S+ to 9\.9\.9, with npm/);
+    assert.doesNotMatch(stderr, /adds \d+ migration|coffre migrate|Deploy it as you do/, 'no migration step for a deployment deployed afresh');
     assert.equal(readFileSync(join(dir, 'package.json'), 'utf8'), before);
   } finally {
     close();

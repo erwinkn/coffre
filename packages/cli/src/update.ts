@@ -289,6 +289,8 @@ export async function update(args: string[]): Promise<void> {
         const was = pinned.length === 1 ? pinned[0]! : listed(pinned, 'and');
         // A deployment from before the clean break is deployed afresh, not moved.
         if (pinned.some((version) => later(CLEAN_BREAK, version))) {
+          // Nothing to migrate either: what the new CLI's migrations add is no step for a deployment deployed afresh.
+          after = null;
           return {
             text: `This deployment stays as it is, at ${was}: coffre ${CLEAN_BREAK} was a clean break, and moves no deployment from before it. Nothing was changed`,
             details: [`Deploy coffre ${latest} afresh, with coffre init (docs/deploy.md, "From a release before ${CLEAN_BREAK}")`],
