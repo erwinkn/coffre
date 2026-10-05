@@ -31,7 +31,7 @@ import {
   type Moved,
 } from './deployment.ts';
 import { templateDir, type Kind } from './init.ts';
-import { applyChanges, pageMove, shownChange, startAppMove } from './layout.ts';
+import { after as later, applyChanges, CLEAN_BREAK, pageMove, shownChange } from './layout.ts';
 import { StepFailed, Steps } from './steps.ts';
 import { Cancelled, listed, openTerminal, type Output, release, style } from './tty.ts';
 import { cliVersion } from './version.ts';
@@ -286,6 +286,14 @@ export async function update(args: string[]): Promise<void> {
     });
     if (deployment !== null) {
       await steps.run(2, async (step) => {
+        const was = pinned.length === 1 ? pinned[0]! : listed(pinned, 'and');
+        // A deployment from before the clean break is deployed afresh, not moved.
+        if (pinned.some((version) => later(CLEAN_BREAK, version))) {
+          return {
+            text: `This deployment stays as it is, at ${was}: coffre ${CLEAN_BREAK} was a clean break, and moves no deployment from before it. Nothing was changed`,
+            details: [`Deploy coffre ${latest} afresh, with coffre init (docs/deploy.md, "From a release before ${CLEAN_BREAK}")`],
+          };
+        }
         const details: string[] = [];
         // Exclusions an earlier run wrote, whose packages have cleared since: gone first.
         const cleared = removeCleared(deployment, new Date());
@@ -293,25 +301,15 @@ export async function update(args: string[]): Promise<void> {
         const template = templateDir(kind as Kind);
         const pnpm = templatePackageManager(kind as Kind);
         const repin = pnpm !== null && coffrePackageManager(deployment) !== pnpm;
-        const was = pinned.length === 1 ? pinned[0]! : listed(pinned, 'and');
-        // A deployment from before its app was a Start app of its own becomes one, file by file, as init writes it.
-        const moving = startAppMove(deployment, kind as Kind, template);
-        if ('problems' in moving) {
-          return {
-            text: `This deployment stays as it is, at ${was}: coffre ${latest}'s app is a TanStack Start app of its own, and this one cannot be moved to it as it is. Nothing was changed`,
-            details: [...details, ...moving.problems, 'Make the move by hand (docs/deploy.md, "Upgrading to 0.2"), then run coffre update again'],
-          };
-        }
-        // A deployment moved already gains the pages coffre has added since its release, and loses those it retired.
-        const pages = moving.changes.length > 0 || pinned.length !== 1 ? { changes: [], notes: [] } : pageMove(deployment, template, pinned[0]!);
+        // The deployment gains the pages coffre has added since its release, and loses those it retired.
+        const pages = pinned.length !== 1 ? { changes: [] } : pageMove(deployment, template, pinned[0]!);
         if ('problems' in pages) {
           return {
             text: `This deployment stays as it is, at ${was}: coffre ${latest}'s pages are not all where this one's are. Nothing was changed`,
             details: [...details, ...pages.problems],
           };
         }
-        const move = [...moving.changes, ...pages.changes];
-        const as = moving.changes.length > 0 ? 'as its own Start app' : "with coffre's pages";
+        const move = pages.changes;
         // What its Start app builds with, as the release's pages are built with.
         const shared = startPinMoves(deployment, template);
         const current = pinned.length === 1 && pinned[0] === latest;
@@ -321,13 +319,11 @@ export async function update(args: string[]): Promise<void> {
         const on = pnpm?.replace('@', ' ');
         const question = current
           ? move.length > 0
-            ? moving.changes.length > 0
-              ? 'Make this deployment its own Start app, as above, and install it?'
-              : "Change coffre's page files, as above, and install it?"
+            ? "Change coffre's page files, as above, and install it?"
             : repin
               ? `Pin this deployment to ${on}, as coffre installs with, and install it?`
               : `Move its Start app's packages to the versions coffre ${latest} is built with, and install it?`
-          : `Move this deployment from ${was} to ${latest}${move.length > 0 ? `, ${as} as above,` : ''}${repin ? ` on ${on},` : ''} and install it?`;
+          : `Move this deployment from ${was} to ${latest}${move.length > 0 ? ", with coffre's pages as above," : ''}${repin ? ` on ${on},` : ''} and install it?`;
         step.under([...move.flatMap((change) => shownChange(change)), ...shared.map(({ name, from, to }) => `~ ${name} ${from} → ${to}`)]);
         const accepted = await ask(question, step);
         step.under([]);
@@ -397,13 +393,7 @@ export async function update(args: string[]): Promise<void> {
           before = deploymentMigrations(deployment) ?? before;
           if (move.length > 0) {
             applyChanges(deployment, move);
-            details.push(
-              moving.changes.length > 0
-                ? `Made it its own Start app, as coffre init writes one: ${moving.changes.length} files, as shown. Its app now builds with vite build app`
-                : `Changed coffre's page files: ${listed(move.map(({ path }) => path), 'and')}`,
-              ...moving.notes,
-              ...pages.notes,
-            );
+            details.push(`Changed coffre's page files: ${listed(move.map(({ path }) => path), 'and')}`);
           }
           if (shared.length > 0) {
             movePins(deployment, shared);

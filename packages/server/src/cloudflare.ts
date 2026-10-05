@@ -40,18 +40,3 @@ export {
 } from './cloudflare-handler.ts';
 export type { CoffreContext, CoffreRequest, PageContext, Preferences } from './scope.ts';
 export * from './index.ts';
-
-/**
- * 0.1's app Worker, which wrapped prebuilt pages. Since 0.2 the app is a
- * Start app of its own: this says so, the moment a deployment that has not
- * moved starts.
- *
- * @deprecated Since 0.2, `createCoffre(env => …)`: run `npx @coffre/cli@latest update`, or see docs/deploy.md, "Upgrading to 0.2".
- */
-export function coffre(..._configure: unknown[]): never {
-  throw new Error(
-    'coffre(env => …) is from coffre 0.1: since 0.2 the app is a TanStack Start app of its own, configured with ' +
-      'createCoffre(env => …). Run `npx @coffre/cli@latest update` in the deployment to move it, or see ' +
-      'docs/deploy.md, "Upgrading to 0.2"',
-  );
-}

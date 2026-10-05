@@ -112,9 +112,7 @@ export function coffrePins(dir: string): Record<string, string> {
 
 /**
  * Every `@coffre/*` pin in `dir`'s package.json, moved to `version`; the
- * rest left as it is. `@coffre/cli` joins the devDependencies when it is
- * not there yet: the deployment's pipeline migrates with it, `pnpm exec
- * coffre migrate`. What `pnpm bump` does to the examples, which `coffre
+ * rest left as it is. What `pnpm bump` does to the examples, which `coffre
  * init` copies, and `coffre update` to a deployment.
  */
 export function bumpPins(dir: string, version: string): void {
@@ -124,11 +122,6 @@ export function bumpPins(dir: string, version: string): void {
     for (const name of Object.keys(manifest[field] ?? {})) {
       if (name.startsWith('@coffre/')) manifest[field]![name] = version;
     }
-  }
-  if (manifest.dependencies?.['@coffre/cli'] === undefined && manifest.devDependencies?.['@coffre/cli'] === undefined) {
-    manifest.devDependencies = Object.fromEntries(
-      Object.entries({ ...manifest.devDependencies, '@coffre/cli': version }).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
-    );
   }
   writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`);
 }
@@ -336,16 +329,6 @@ export function readWorker(dir: string, path: string): WorkerConfig {
     route: typeof route === 'string' ? route : (route?.pattern ?? null),
   };
 }
-
-/**
- * Why 0.1.18's app Worker kept no function names, as its template said
- * above `keep_names`: its move to a Start app takes the line out.
- */
-export const KEEP_NAMES_WHY = [
-  '// Off: seroval writes its own functions into each signed-in page as source,',
-  "// and keep_names would wrap them in an __name that only the Worker has, so",
-  '// the page would render, then go blank. coffre needs no function\'s name.',
-];
 
 /**
  * What a deployment's Start app builds with and shares with coffre's pages:

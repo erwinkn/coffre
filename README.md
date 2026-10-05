@@ -420,7 +420,7 @@ Two traps, both noted in `pnpm-workspace.yaml`:
   writes caret ranges. Add dependencies with `pnpm run add:dep`, and
   `pnpm check:pins` catches any that slip through.
 
-**Releasing.** `pnpm bump 0.2.0`, merged, then a pushed tag, `v0.2.0`: the
+**Releasing.** `pnpm bump 0.4.1`, merged, then a pushed tag, `v0.4.1`: the
 release workflow publishes all eight packages with npm's trusted publishing
 (the workflow's OIDC token, no stored token) and provenance, so each version
 on npm names the commit and run that built it.

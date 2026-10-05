@@ -93,8 +93,7 @@ before the command (`coffre --url … --service … export …`), say which inst
 for a CI run's ID token, which service. A secret is never a flag or an argument: the
 command asks for it at a hidden prompt, or reads it from stdin when that is no
 terminal (`packages/cli/src/secret.ts`); a CI run signs in with `coffre login <url>
---token` and the like, which save its session. A variable an earlier CLI read stops
-the command that read it, saying what to do instead (`packages/cli/src/flags.ts`). The env vars left are `DATABASE_URL` for `coffre-server
+--token` and the like, which save its session. The env vars left are `DATABASE_URL` for `coffre-server
 migrate`, the platforms' own the CLI uses (GitHub's `ACTIONS_ID_TOKEN_REQUEST_*`,
 `GITHUB_ENV`), and the dev and test tooling's (`COFFRE_DEV_*`, `COFFRE_STATE_DIR`,
 `COFFRE_TEST_ENGINE`, `COFFRE_TEST_DATABASE`). Don't add another to a package or the

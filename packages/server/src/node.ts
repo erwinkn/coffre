@@ -106,18 +106,3 @@ function checkNodeConfig(options: NodeConfig) {
   }
   return config;
 }
-
-/**
- * 0.1's server, which served prebuilt pages. Since 0.2 the app is a Start
- * app of its own, coffre configured with `createCoffre({ … })` in its
- * `app/src/coffre.ts`: this says so, the moment a deployment that has not
- * moved starts.
- *
- * @deprecated Since 0.2, `createCoffre({ … })` in the app: run `npx @coffre/cli@latest update`, or see docs/deploy.md, "Upgrading to 0.2".
- */
-export function serve(..._options: unknown[]): never {
-  throw new Error(
-    "serve({ … }) is from coffre 0.1: since 0.2 the app is a TanStack Start app of its own, configured with createCoffre({ … }) " +
-      'in app/src/coffre.ts. Run `npx @coffre/cli@latest update` in the deployment to move it, or see docs/deploy.md, "Upgrading to 0.2"',
-  );
-}

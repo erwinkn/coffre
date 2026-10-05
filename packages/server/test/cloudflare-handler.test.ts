@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import { signin, github } from '@coffre/core/identity';
 
-import { coffre, createCoffre, postgres, type CoffreContext } from '../src/cloudflare.ts';
+import { createCoffre, postgres, type CoffreContext } from '../src/cloudflare.ts';
 import { api, auth, livez, readyz } from '../src/routes.ts';
 import { NO_COFFRE, NO_MIDDLEWARE } from '../src/wiring.ts';
 import { testVault } from './api-fixture.ts';
@@ -43,10 +43,6 @@ test("a request's database is closed once coffre's work for it is done, and not 
   assert.equal(response.status, 200);
   assert.ok(left.length > 0, 'nothing was left to close the database');
   await Promise.all(left);
-});
-
-test("0.1's coffre(env => …) says how to move, the moment it runs", () => {
-  assert.throws(() => coffre(), /since 0\.2 the app is a TanStack Start app of its own.*npx @coffre\/cli@latest update/);
 });
 
 test("coffre's server routes, without its middleware or without coffre in the context, say which is missing", async () => {

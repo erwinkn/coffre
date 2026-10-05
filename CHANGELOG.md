@@ -27,6 +27,13 @@ serves with migrations pending, and `GET /api/me` no longer reports the
 instance's version and migrations. `pnpm test:compat` is off in CI for
 0.4.0 and returns for 0.5.0, against 0.4.0.
 
+**No code for releases before 0.4.0.** `coffre update` moves deployments
+from 0.4.0 on, and leaves an older one as it was, saying to deploy afresh;
+its 0.1-to-0.2 move to a Start app of its own is gone, with the 0.1 entry
+points `coffre(env => …)` and `serve({ … })`, which threw to say so. The CLI
+no longer refuses the `COFFRE_*` variables earlier CLIs read: it reads no
+variable at all, as before, and says nothing of them.
+
 **Folder commands.** `coffre folders` lists the folders of projects and
 what is in each, and `coffre folders market/prod` an environment's key
 folders, both with `--json`. `coffre folders rename Clients Customers`
@@ -491,7 +498,7 @@ It moves a deployment whose files are as a release of 0.1 wrote them, its
 configuration kept as that release had it, and shows each file it changes
 before asking once. It changes nothing when a file is the deployment's own,
 or one is already where 0.2 puts its own: it names each, and
-[Upgrading to 0.2](docs/deploy.md#upgrading-to-02) shows the move by hand.
+Upgrading to 0.2 (deploy.md for 0.2.0) shows the move by hand.
 A move cut short is finished by the next run. Then `pnpm typecheck`, and
 deploy: on Workers Builds, the app's build command is now `pnpm exec vite
 build app` and its deploy command `npx wrangler deploy -c

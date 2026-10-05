@@ -16,7 +16,7 @@
 #
 #   --release  the release to hold; by default the newest on npm
 #   --schema   a published version's migrations instead of this checkout's,
-#              to check past releases: --release 0.1.11 --schema 0.1.12
+#              to check past releases: --release 0.4.0 --schema 0.4.1
 #
 # Temporary directories are removed on success and kept on failure.
 set -euo pipefail
@@ -108,21 +108,18 @@ quietly "installing @coffre/cli@$release" "$work/cli.log" \
 # migrates with $against and leaves a mark, so that a release migrating some
 # other way fails here rather than passing unchecked:
 #
-# - its coffre-server bin, which it runs as `coffre-server migrate <url>`:
-#   every kind up to 0.1.16, and Node's after;
+# - its coffre-server bin, which Node's runs as `coffre-server migrate <url>`;
 # - its CLI's entry, which its Workers conformance runs with node, as
-#   `coffre migrate --yes`, from 0.1.17 on: found from the deployment's
-#   folder, as that conformance finds it. Every other command of the CLI
-#   runs as the release's own, in the same process.
+#   `coffre migrate --yes`: found from the deployment's folder, as that
+#   conformance finds it. Every other command of the CLI runs as the
+#   release's own, in the same process.
 #
 # Each replaced file moves aside and a new one takes its place, never written
-# through: pnpm links them from its store. Its children get no COFFRE_* of
-# the shell's, so all a shim needs is written into it. The owner's URL comes
-# as the release gives it: an argument, piped in, or, in the releases before
-# 0.3, COFFRE_MIGRATE_DATABASE_URL.
+# through: pnpm links them from its store. All a shim needs is written into
+# it. The owner's URL comes as the release gives it: an argument, or piped in.
 migration() {
     cat <<EOF
-url="\${COFFRE_MIGRATE_DATABASE_URL:-\${DATABASE_URL:-}}"
+url="\${DATABASE_URL:-}"
 for arg in "\$@"; do case "\$arg" in postgres*|file:*) url="\$arg" ;; esac; done
 if [ -z "\$url" ] && [ ! -t 0 ]; then url="\$(cat)"; fi
 $migrator "\$url"
