@@ -134,16 +134,31 @@ coffre history  market/dev/DATABASE_URL
 coffre rollback market/dev/DATABASE_URL 2   # restores version 2 as a new version
 coffre import   market/dev --file .env      # previews; --apply writes
 coffre rename   market/dev/DB_URL DATABASE_URL   # the key, with its versions
-coffre archive  market/dev/OLD_KEY          # unarchive brings it back
-coffre move     market/dev/STRIPE_KEY stripe # a folder, to arrange the list; --none takes it out
+coffre archive  market/dev/OLD_KEY          # out of reads, runs and exports; its versions kept
+coffre unarchive market/dev/OLD_KEY         # back, as it was
 coffre missing  market/dev                  # keys its sibling environments have and it lacks; missing dismiss, restore
 
+coffre move     market/dev/STRIPE_KEY stripe   # into a folder, to arrange the list; --none takes it out
+coffre move     market Clients              # a project into a folder of projects
+coffre folders                              # the projects' folders, and what is in each
+coffre folders  market/dev                  # an environment's key folders
+coffre folders rename Clients Customers     # every project in it re-filed; market/dev stripe payments, its keys
+coffre folders remove market/dev stripe     # every key out of it, each staying where it is; previews, --apply
+                                            # a folder is a label: there while something is in it, made by move
+
 coffre projects
-coffre projects create market               # projects rename and archive, and the same for
-coffre environments create market/dev       # environments
+coffre projects create market
+coffre projects rename market --name "Market place"   # --slug changes its path
+coffre projects archive market              # every environment out of reach, nothing deleted
+coffre projects unarchive market
 coffre projects delete market               # an archived one, for good: previews; --apply deletes
+coffre environments create market/dev
+coffre environments rename market/dev --slug development
+coffre environments archive market/dev
+coffre environments unarchive market/dev
 coffre fork     market/prod staging         # a new environment, each key a copy of prod's value, no history; --reference follows prod
-coffre roles
+coffre roles                                # the built-in roles and each one's permissions: viewer, developer,
+                                            # maintainer, access-manager, auditor and owner (see Roles below)
 coffre access                               # who holds what, where you manage access
 coffre admit alice@acme.example             # a member first, then their grants
 coffre grant market alice@acme.example --role developer --env dev

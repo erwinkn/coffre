@@ -12,12 +12,13 @@ import { breakReference, listReferences } from './references.ts';
 import { missingKeys, setDismissals } from './missing.ts';
 import { parseGrantee, parseMember, parsePath, type ResolvedPath } from './paths.ts';
 import { forkEnvironment, type Forked } from './forks.ts';
-import { deletePlace, listProjects, me, patchEnvironment, patchProject, putEnvironment, putProject, type InheritedGrant, type PlaceView } from './projects.ts';
+import { deletePlace, listProjects, me, patchEnvironment, patchProject, putEnvironment, putProject, refileProjects, type InheritedGrant, type PlaceView } from './projects.ts';
 import {
   dryRunSecrets,
   listSecrets,
   listVersions,
   patchSecret,
+  refileSecrets,
   reveal,
   restoreVersion,
   setSecrets,
@@ -233,6 +234,29 @@ export const routes = {
   ...route('DELETE /secrets/:project/:environment/:key/reference', {
     run: (ctx, { place }) => breakReference(ctx, place),
   }),
+  // Folders: a folder is a label, which exists while something is filed under it. Renaming one
+  // re-files all of it; removing one takes all of it out, each project or key staying where it is.
+  ...route('PATCH /folders/:folder', {
+    input: z.object({ name: folderName }).strict(),
+    action: 'project.move',
+    run: (ctx, { params, input }) => refileProjects(ctx, params.folder, input.name),
+  }),
+  ...route('DELETE /folders/:folder', {
+    action: 'project.move',
+    run: (ctx, { params }) => refileProjects(ctx, params.folder, null),
+  }),
+  ...route('PATCH /folders/:project/:environment/:folder', {
+    input: z.object({ name: folderName }).strict(),
+    needs: 'secret.write',
+    action: 'secret.move',
+    run: (ctx, { params, place, input }) => refileSecrets(ctx, place, params.folder, input.name),
+  }),
+  ...route('DELETE /folders/:project/:environment/:folder', {
+    needs: 'secret.write',
+    action: 'secret.move',
+    run: (ctx, { params, place }) => refileSecrets(ctx, place, params.folder, null),
+  }),
+
   ...route('GET /references', {
     input: z.object({ path: z.string().max(400) }),
     run: (ctx, { input }) => listReferences(ctx, parsePath(input.path, [1, 2, 3]), (places) => readersAt(ctx, places)),

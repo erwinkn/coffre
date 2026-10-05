@@ -355,6 +355,81 @@ export async function move(connect: () => CoffreClient, args: string[], io: Io =
   io.out.write(folder === null ? `${project} is in no folder now\n` : `${project} is in ${folder}/ now\n`);
 }
 
+// --- folders -----------------------------------------------------------------
+
+/**
+ * What a folder command is about: the projects' folders, or, when its first
+ * argument is a `<project>/<environment>`, that environment's key folders.
+ * A folder's name has no `/`, so the two cannot be mistaken.
+ */
+function folderScope(positionals: string[], folders: number): { environment: string | null; names: string[] } {
+  const environment = positionals.length > folders ? positionals[0]! : null;
+  if (environment !== null) place(environment, true);
+  const names = positionals.slice(environment === null ? 0 : 1);
+  for (const name of names) {
+    if (name.includes('/')) {
+      throw new UsageError(`a folder's name has no /, so "${name}" is none: an environment's key folders are \`coffre folders <project>/<environment> …\``);
+    }
+  }
+  return { environment, names };
+}
+
+/** Each folder and what is filed in it, by name: the projects', or an environment's keys. */
+async function foldersIn(api: CoffreClient, environment: string | null): Promise<{ folder: string; items: string[] }[]> {
+  const filed = environment === null
+    ? (await api.projects.list()).projects.map((project) => ({ name: project.slug, folder: project.folder }))
+    : (await api.secrets.list(environment)).keys.map((key) => ({ name: key.key, folder: key.folder }));
+  const folders = new Map<string, string[]>();
+  for (const { name, folder } of filed) if (folder !== null) folders.set(folder, [...(folders.get(folder) ?? []), name]);
+  return [...folders].sort(([a], [b]) => a.localeCompare(b)).map(([folder, items]) => ({ folder, items }));
+}
+
+/** `coffre folders [<project>/<environment>]`: each folder, and what is in it. */
+export async function folders(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
+  const { values, positionals } = parse(args, json, ['<project>/<environment>'], 1);
+  const { environment } = folderScope(positionals, 0);
+  const listed = await foldersIn(connect(), environment);
+  if (values.json) return asJson(io, listed.map(({ folder, items }) => (environment === null ? { folder, projects: items } : { folder, keys: items })));
+  if (listed.length === 0) {
+    io.out.write(environment === null
+      ? 'No project is in a folder. `coffre move <project> <folder>` files one, and makes the folder.\n'
+      : `No key of ${environment} is in a folder. \`coffre move ${environment}/<KEY> <folder>\` files one, and makes the folder.\n`);
+    return;
+  }
+  const width = Math.max(...listed.map(({ folder }) => folder.length)) + 1;
+  for (const { folder, items } of listed) io.out.write(`${`${folder}/`.padEnd(width)}  ${items.join(', ')}\n`);
+}
+
+/** `coffre folders rename [<project>/<environment>] <folder> <new-folder>`: everything in it, re-filed. */
+export async function foldersRename(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
+  const { positionals } = parse(args, {}, ['<project>/<environment>', '<folder>', '<new-folder>'], 1);
+  const { environment, names } = folderScope(positionals, 2);
+  const [folder, name] = names as [string, string];
+  const api = connect();
+  const { moved } = environment === null ? await api.folders.rename(folder, name) : await api.folders.renameKeys(environment, folder, name);
+  io.out.write(`${folder}/ is ${name}/ now${environment === null ? '' : ` in ${environment}`}: ${moved.join(', ')}\n`);
+}
+
+/**
+ * `coffre folders remove [<project>/<environment>] <folder> [--apply]`:
+ * everything out of it, each staying where it is, in no folder. More than
+ * one item is shown first; --apply does it.
+ */
+export async function foldersRemove(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
+  const { values, positionals } = parse(args, { apply: { type: 'boolean', default: false } }, ['<project>/<environment>', '<folder>'], 1);
+  const { environment, names } = folderScope(positionals, 1);
+  const folder = names[0]!;
+  const api = connect();
+  const items = (await foldersIn(api, environment)).find((each) => each.folder === folder)?.items ?? [];
+  const what = environment === null ? 'project' : 'key';
+  if (items.length > 1 && !values.apply) {
+    io.out.write(`would take ${items.length} ${what}s out of ${folder}/${environment === null ? '' : ` in ${environment}`}: ${items.join(', ')}. Each stays where it is, in no folder.\nNothing changed. Re-run with --apply to remove it.\n`);
+    return;
+  }
+  const { moved } = environment === null ? await api.folders.remove(folder) : await api.folders.removeKeys(environment, folder);
+  io.out.write(`${moved.join(', ')} ${moved.length === 1 ? 'is' : 'are'} in no folder now; ${folder}/ is gone\n`);
+}
+
 // --- members -----------------------------------------------------------------
 
 /** A name that says it is a service account's: `service:deploy`, or `token:deploy` as before. */

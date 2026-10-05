@@ -362,6 +362,44 @@ test('apps lists the MCP clients you connected, unverified ones said so, and app
   await assert.rejects(manage.appsRevoke(fixture(() => listed).connect, ['c0nn-9'], list.io), /you have no connected app c0nn-9: `coffre apps` lists them/);
 });
 
+test('folders lists the projects\' folders, or an environment\'s with its path; rename and remove send the folder, never a key path', async () => {
+  const projects = { projects: [{ slug: 'acme', folder: 'Clients' }, { slug: 'globex', folder: 'Clients' }, { slug: 'market', folder: null }] };
+  const keys = { permissions: [], keys: [{ key: 'DATABASE_URL', folder: 'database' }, { key: 'PORT', folder: null }] };
+  const answer = ({ method, path }: Call) => {
+    if (method === 'GET') return path.startsWith('/projects') ? projects : keys;
+    return { folder: method === 'DELETE' ? null : 'Customers', moved: path.includes('/market/') ? ['DATABASE_URL'] : ['acme', 'globex'] };
+  };
+  const list = fixture(answer);
+  await manage.folders(list.connect, [], list.io);
+  assert.equal(list.written.out, 'Clients/  acme, globex\n');
+  await manage.folders(list.connect, ['market/prod', '--json'], list.io);
+  assert.deepEqual(JSON.parse(list.written.out.slice(list.written.out.indexOf('['))), [{ folder: 'database', keys: ['DATABASE_URL'] }]);
+
+  const rename = fixture(answer);
+  await manage.foldersRename(rename.connect, ['Clients', 'Customers'], rename.io);
+  await manage.foldersRename(rename.connect, ['market/prod', 'database', 'db'], rename.io);
+  assert.deepEqual(rename.calls.map(({ method, path, body }) => [method, path, body]), [
+    ['PATCH', '/folders/Clients', { name: 'Customers' }],
+    ['PATCH', '/folders/market/prod/database', { name: 'db' }],
+  ]);
+  assert.match(rename.written.out, /^Clients\/ is Customers\/ now: acme, globex\ndatabase\/ is db\/ now in market\/prod: DATABASE_URL\n$/);
+
+  // More than one project out of a folder is shown first.
+  const preview = fixture(answer);
+  await manage.foldersRemove(preview.connect, ['Clients'], preview.io);
+  assert.deepEqual(preview.calls.map(({ method }) => method), ['GET']);
+  assert.match(preview.written.out, /^would take 2 projects out of Clients\/: acme, globex\. Each stays where it is, in no folder\.\nNothing changed/);
+  const removed = fixture(answer);
+  await manage.foldersRemove(removed.connect, ['Clients', '--apply'], removed.io);
+  await manage.foldersRemove(removed.connect, ['market/prod', 'database'], removed.io);
+  assert.deepEqual(removed.calls.filter(({ method }) => method === 'DELETE').map(({ path }) => path), ['/folders/Clients', '/folders/market/prod/database']);
+  assert.match(removed.written.out, /acme, globex are in no folder now; Clients\/ is gone\nDATABASE_URL is in no folder now; database\/ is gone\n/);
+
+  // A folder's name has no slash: what has one is an environment, or a mistake.
+  await assert.rejects(manage.foldersRename(rename.connect, ['market/prod/database', 'db'], rename.io), /a folder's name has no \//);
+  await assert.rejects(manage.foldersRemove(rename.connect, ['market', 'database'], rename.io), /expected <project>\/<environment>, not "market"/);
+});
+
 test('a command reads its arguments before it asks for a session', async () => {
   const connect = () => assert.fail('no session is asked for');
   await assert.rejects(manage.tokens(connect, [], fixture(() => null).io), /name <service>/);

@@ -26,7 +26,10 @@ A folder never grants, hides or changes anything else.
   and `export` inject `DATABASE_URL`, never `database/DATABASE_URL`.
 
 A folder is a name, not a row of its own: it exists while something is
-in it, and there is nothing to create or delete.
+in it, and there is nothing to create or delete. Moving something into a
+name makes the folder; renaming one re-files everything in it, and onto a
+name in use merges the two; removing one takes everything out, each item
+staying where it is, in no folder.
 
 **Tables beside `projects` and `secrets`, not columns on them.** Drizzle
 names every column of a table in each insert, and in each select of a
@@ -42,8 +45,18 @@ no `/`, no control character, and no space at either end.
 | move a project | `PATCH /api/projects/acme {"folder": "Clients"}` (`project.manage`) | `coffre move acme Clients` |
 | move a secret | `PATCH /api/secrets/market/prod/STRIPE_KEY {"folder": "stripe"}` (`secret.write`) | `coffre move market/prod/STRIPE_KEY stripe` |
 | out of its folder | `{"folder": null}` | `coffre move market/prod/STRIPE_KEY --none` |
+| the folders, and what is in each | `GET /api/projects`, `GET /api/secrets/market/prod` (each item's `folder`) | `coffre folders`, `coffre folders market/prod` |
+| rename a folder of projects | `PATCH /api/folders/Clients {"name": "Customers"}` (`project.manage` on every project in it) | `coffre folders rename Clients Customers` |
+| rename a key folder | `PATCH /api/folders/market/prod/stripe {"name": "payments"}` (`secret.write`) | `coffre folders rename market/prod stripe payments` |
+| remove a folder | `DELETE /api/folders/Clients`, `DELETE /api/folders/market/prod/stripe` | `coffre folders remove Clients`, `… market/prod stripe`; more than one item previews, `--apply` |
 
-Both are logged by the app (`project.move`, `secret.move`), like a rename.
+Both are logged by the app (`project.move`, `secret.move`), like a rename;
+renaming or removing a folder logs one per item, under one operation, in
+one transaction under the log's head. Folders get their own `/api/folders`
+paths, not a segment under `/api/secrets`, where a folder named `reference`
+or `versions` would read as a route. A folder of projects is renamed only
+by who manages every project in it, whole or not at all: a folder half
+renamed would be two folders.
 `coffre list` and `coffre projects` print the groups. In the UI, each
 folder is a heading in the list, foldable, with "Move to folder…" in a
 row's menu and a folder picker on a new secret's row.

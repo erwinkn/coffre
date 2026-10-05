@@ -319,6 +319,38 @@ export type Api = {
       };
     };
   };
+  "PATCH /folders/:folder": {
+    input: {
+      name: string;
+    };
+    output: {
+      folder: string | null;
+      moved: string[];
+    };
+  };
+  "DELETE /folders/:folder": {
+    input: undefined;
+    output: {
+      folder: string | null;
+      moved: string[];
+    };
+  };
+  "PATCH /folders/:project/:environment/:folder": {
+    input: {
+      name: string;
+    };
+    output: {
+      folder: string | null;
+      moved: string[];
+    };
+  };
+  "DELETE /folders/:project/:environment/:folder": {
+    input: undefined;
+    output: {
+      folder: string | null;
+      moved: string[];
+    };
+  };
   "GET /references": {
     input: {
       path: string;

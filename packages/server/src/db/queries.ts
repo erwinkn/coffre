@@ -2,7 +2,7 @@ import type { GrantPlace } from '@coffre/core/access';
 import type { Author } from '@coffre/core/audit';
 import { ACCESS_ACTIONS, type Checkpoint } from '@coffre/core/vault';
 import type { Envelope } from '@coffre/core/envelope';
-import { tombstoneOf } from '@coffre/core/schemas';
+import { isTombstone, tombstoneOf } from '@coffre/core/schemas';
 import { own, tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import { readGrants } from '@coffre/db/grants';
 import * as dialect from '@coffre/db/dialect';
@@ -258,6 +258,38 @@ export async function projectFolderOf(db: Queryable): Promise<Map<string, string
   const { projectFolders } = tablesOf(db);
   const rows = await db.select({ projectId: projectFolders.projectId, folder: projectFolders.folder }).from(projectFolders);
   return new Map(rows.flatMap((row) => (row.folder === null ? [] : [[row.projectId, row.folder]])));
+}
+
+/**
+ * The projects filed in `folder`, deleted ones left out, each with its
+ * environments, as seeing a project is decided: what renaming or removing
+ * the folder moves.
+ */
+export async function projectsInFolder(db: Queryable, folder: string): Promise<{ id: string; slug: string; environments: { id: string; slug: string }[] }[]> {
+  const { projectFolders, projects, environments } = tablesOf(db);
+  const rows = (await db
+    .select({ id: projects.id, slug: projects.slug })
+    .from(projectFolders)
+    .innerJoin(projects, eq(projects.id, projectFolders.projectId))
+    .where(eq(projectFolders.folder, folder))
+    .orderBy(asc(projects.slug))).filter((row) => !isTombstone(row.slug));
+  if (rows.length === 0) return [];
+  const places = await db
+    .select({ id: environments.id, slug: environments.slug, projectId: environments.projectId })
+    .from(environments)
+    .where(inArray(environments.projectId, rows.map((row) => row.id)));
+  return rows.map((row) => ({ ...row, environments: places.filter((place) => place.projectId === row.id && !isTombstone(place.slug)) }));
+}
+
+/** An environment's secrets filed in `folder`, archived ones too, by key. */
+export async function secretsInFolder(db: Queryable, environmentId: string, folder: string): Promise<{ id: string; key: string }[]> {
+  const { secretFolders, secrets } = tablesOf(db);
+  return db
+    .select({ id: secrets.id, key: secrets.key })
+    .from(secretFolders)
+    .innerJoin(secrets, eq(secrets.id, secretFolders.secretId))
+    .where(and(eq(secrets.environmentId, environmentId), eq(secretFolders.folder, folder)))
+    .orderBy(asc(secrets.key));
 }
 
 /** The folder each of an environment's secrets is listed in, for those in one. */

@@ -15,6 +15,7 @@ import {
   everyProjectGrants,
   insert,
   places,
+  projectsInFolder,
   resolvePath,
   tombstoneSlug,
   update,
@@ -26,7 +27,7 @@ import { everyProjectReaches, seesGrantsIn } from './members.ts';
 import { COFFRE_VERSION } from '../version.ts';
 import { can, canAnywhere, permissionsAt, placeOf, seesProject } from './caller.ts';
 import { allowed, audited, denied, Refusal, requireOwner, withRefusals, type ApiContext } from './context.ts';
-import { ApiError, conflict, notFound, vaultRefused } from './errors.ts';
+import { ApiError, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { formatMember } from './paths.ts';
 import { fileProject, projectFoldersOf, requireFolders } from './folders.ts';
 import { endReferences, referencesAt, refuseIfRead } from './references.ts';
@@ -401,6 +402,40 @@ export async function putEnvironment(
     return { environment: { slug, name: input.name, archivedAt: null }, created: true };
   });
   return { ...put, inherited: await inheritedGrants(ctx, project.id, slug) };
+}
+
+/** What renaming or removing a folder did: the folder they are in now, none for a removal, and what moved. */
+export type Refiled = { folder: string | null; moved: string[] };
+
+/**
+ * Rename a folder of projects, or take every project out of it (`to`
+ * null): one transaction under the log's head, one `project.move` per
+ * project. A folder is only a label, so renaming onto one that exists
+ * merges the two. It takes `project.manage` on every project filed there;
+ * refused otherwise, since a folder half renamed would be two folders.
+ */
+export async function refileProjects(ctx: ApiContext, folder: string, to: string | null): Promise<Refiled> {
+  await requireFolders(ctx.db);
+  const operationId = randomUUID();
+  return audited(ctx, async (tx, log) => {
+    const filed = await projectsInFolder(tx, folder);
+    // A folder none of whose projects the caller sees is, to them, no folder.
+    const seen = filed.filter((project) => seesProject(ctx.caller, project));
+    if (seen.length === 0) throw notFound(`no folder "${folder}" among your projects`);
+    if (filed.some((project) => !can(ctx.caller, 'project.manage', { projectId: project.id }))) {
+      throw new Refusal(
+        forbidden(`renaming or removing the folder "${folder}" takes project.manage on every project in it`),
+        denied(ctx, 'project.move', 'missing_project_manage', { operationId, metadata: { folder, to } }),
+      );
+    }
+    if (to !== folder) {
+      for (const project of filed) {
+        await fileProject(tx, project.id, to, ctx.caller.principal.id);
+        log.push(allowed(ctx, 'project.move', { projectId: project.id, operationId, metadata: { slug: project.slug, from: folder, to } }));
+      }
+    }
+    return { folder: to, moved: filed.map((project) => project.slug) };
+  });
 }
 
 /**

@@ -17,6 +17,7 @@ import {
   resolvePath,
   secretHeads,
   secretPlaces,
+  secretsInFolder,
   secretHistory,
   update,
   type ResolvedPath,
@@ -556,6 +557,31 @@ export async function patchSecret(
     return { key: renaming ? nextKey : secret.key, archived, folder };
   });
   return result;
+}
+
+/**
+ * Rename one of an environment's key folders, or take every key out of it
+ * (`to` null): one transaction under the log's head, one `secret.move` per
+ * key, archived keys too. Renaming onto a folder that exists merges the
+ * two: a folder is only a label. The router checked `secret.write` here.
+ */
+export async function refileSecrets(ctx: ApiContext, place: ResolvedPath, folder: string, to: string | null): Promise<{ folder: string | null; moved: string[] }> {
+  const environment = requireLive(place);
+  await requireFolders(ctx.db);
+  const operationId = randomUUID();
+  return audited(ctx, async (tx, log) => {
+    // Under the head, as every write to a place: one archived or deleted since the router found it takes none.
+    await checkEnvironment(tx, place, environment);
+    const filed = await secretsInFolder(tx, environment.environmentId, folder);
+    if (filed.length === 0) throw notFound(`no folder "${folder}" in ${place.project.slug}/${place.environment!.slug}`);
+    if (to !== folder) {
+      await fileSecrets(tx, filed.map((secret) => ({ secretId: secret.id, folder: to })), ctx.caller.principal.id);
+      for (const secret of filed) {
+        log.push(allowed(ctx, 'secret.move', { ...environment, secretId: secret.id, operationId, metadata: { key: secret.key, from: folder, to } }));
+      }
+    }
+    return { folder: to, moved: filed.map((secret) => secret.key) };
+  });
 }
 
 /**

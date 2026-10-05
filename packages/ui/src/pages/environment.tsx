@@ -51,7 +51,7 @@ import {
 } from '../components/ui';
 import { Card, ClosedDoor, PageHeader } from '../components/page';
 import { SecretReadOnly } from '../components/affordances';
-import { FolderRow, MoveToFolder } from '../components/folders';
+import { FolderMenu, FolderRow, MoveToFolder } from '../components/folders';
 import { MissingKeys } from '../components/missing';
 import { ArchiveBlocked, archiveBlockers, LentReferences, MakeReference, ReferenceValue } from '../components/references';
 import { isActiveAccessibleEnvironment } from '../lib/project-environments';
@@ -178,6 +178,28 @@ function EnvironmentLedger({
   // Listed by folder: those in none first, then each folder by name.
   const active = byFolder(keys.filter((entry) => !entry.archived)).flatMap(([, entries]) => entries);
   const folders = foldersOf(active);
+  // Renaming or removing a folder: everything in it at once, the keys staying where they are.
+  const refile = useAction();
+  const place = `${project}/${environment}`;
+  const folderMenu = (folder: string, count: number) =>
+    canWrite && (
+      <FolderMenu
+        folder={folder}
+        count={count}
+        what="key"
+        folders={folders}
+        onRename={(name) =>
+          void refile.run(() => coffre.folders.renameKeys(place, folder, name), {
+            affects: affects.secrets({ project, environment }),
+            onSuccess: () => toast.success(`${folder}/ is ${name}/ now`),
+          })}
+        onRemove={() =>
+          void refile.run(() => coffre.folders.removeKeys(place, folder), {
+            affects: affects.secrets({ project, environment }),
+            onSuccess: () => toast.success(`${folder}/ removed: its keys are in no folder`),
+          })}
+      />
+    );
   const archived = keys.filter((entry) => entry.archived);
   const existing = new Set(keys.map((entry) => entry.key));
 
@@ -423,6 +445,7 @@ function EnvironmentLedger({
         onAdd={(key) => setDrafts((rows) => [...rows, { id: nextDraftId.current++, key, value: '' }])}
       />
 
+      {refile.error !== null && <ErrorLine error={refile.error} />}
       <section className="card card-wide" aria-label="Secrets">
         {active.length === 0 && drafts.length === 0 ? (
           <EmptyState title="No secrets yet">
@@ -468,7 +491,7 @@ function EnvironmentLedger({
               </thead>
               <tbody>
                 {byFolder(listed).flatMap(([folder, entries]) => [
-                  ...(folder === null ? [] : [<FolderRow key={`folder:${folder}`} folder={folder} count={entries.length} columns={columns} />]),
+                  ...(folder === null ? [] : [<FolderRow key={`folder:${folder}`} folder={folder} count={entries.length} columns={columns} actions={folderMenu(folder, entries.length)} />]),
                   ...entries.map((entry) => {
                   const change = secretChangeFor(changes, entry.key);
                   const state = status(entry.key);

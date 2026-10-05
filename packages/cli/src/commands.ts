@@ -109,6 +109,13 @@ export const SECTIONS = [
       { command: 'unarchive', usage: [`unarchive ${P}/<KEY>`] },
       { command: 'move', usage: [`move      ${P}/<KEY> (<folder> | --none)`], about: ['into a folder, to arrange the list; nothing else changes'] },
       {
+        command: 'folders',
+        usage: [`folders   ${P} [--json]`],
+        about: ['its key folders, and the keys in each: a folder is a label,', 'there while something is in it, made by move'],
+      },
+      { command: 'folders rename', usage: [`folders rename ${P} <folder> <new-folder>`], about: ['every key in it re-filed; onto a folder that exists, one folder'] },
+      { command: 'folders remove', usage: [`folders remove ${P} <folder> [--apply]`], about: ['every key out of it, each staying, in no folder; more than', 'one shown first'] },
+      {
         command: 'missing',
         usage: [`missing   ${P} [--dismissed] [--json]`],
         about: ["keys its sibling environments have and it lacks, of those you", 'read; --dismissed, those its team decided it does not need'],
@@ -131,6 +138,13 @@ export const SECTIONS = [
         about: ['an archived one, for good: what it erases and revokes;', '--apply deletes it, and frees its name'],
       },
       { command: 'move', usage: ['move <project> (<folder> | --none)'], about: ['into a folder of projects'] },
+      { command: 'folders', usage: ['folders [--json]'], about: ['the folders of projects, and the projects in each'] },
+      {
+        command: 'folders rename',
+        usage: ['folders rename <folder> <new-folder>'],
+        about: ['every project in it re-filed; takes managing each of them'],
+      },
+      { command: 'folders remove', usage: ['folders remove <folder> [--apply]'], about: ['every project out of it, each staying where it is'] },
       { command: 'environments create', usage: [`environments create ${P} [--name <name>]`] },
       {
         command: 'fork',
@@ -295,6 +309,10 @@ export const PARITY: { [K in RouteKey]: Reach } = {
   'GET /secrets/:project/:environment': { commands: ['list'] },
   'PATCH /secrets/:project/:environment': { commands: ['set', 'import'] },
   'DELETE /secrets/:project/:environment/:key/reference': { commands: ['references break'] },
+  'PATCH /folders/:folder': { commands: ['folders rename'] },
+  'DELETE /folders/:folder': { commands: ['folders remove'] },
+  'PATCH /folders/:project/:environment/:folder': { commands: ['folders rename'] },
+  'DELETE /folders/:project/:environment/:folder': { commands: ['folders remove'] },
   'GET /references': { commands: ['references', 'access'] },
   'PATCH /secrets/:project/:environment/:key': { commands: ['rename', 'archive', 'unarchive', 'move'] },
   'GET /secrets/:project/:environment/:key/versions': { commands: ['history'] },
