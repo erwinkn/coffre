@@ -97,9 +97,10 @@ Archiving what a live reference reads, the key, its environment or its
 project, is refused (409) until the reference is broken, so archiving
 never silently breaks another project's runs; the refusal names each
 reference and who can break it, and the archive dialogs list them with
-Break. A reference held inside what is archived does not block it; one
-held in an archived environment or project does, since unarchiving it
-brings the reference back. A reference belongs to the environment that
+Break. A reference held inside what is archived does not block it, nor
+does one held in a key, environment or project archived already (D58):
+nobody reads through it, and if its holder is unarchived later, its key
+shows "Source archived" and reads refuse saying how to fix it. A reference belongs to the environment that
 holds it, like a value, not to whoever made it: removing them ends none,
 and their offboarding report lists the references they made, read from the
 log. A reference the vault sealed for a write that then stored nothing is

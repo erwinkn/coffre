@@ -267,13 +267,13 @@ export function ReferencesInto({ project }: { project: string }) {
 
 /**
  * The references that archiving `path` would stop, a project, an
- * environment or a key: those reading a secret in it, held outside it.
- * Archiving is refused while any read (D41); the server decides, and this
- * shows the dialog what it will say.
+ * environment or a key: those reading a secret in it, held outside it in a
+ * place not archived itself (D58). Archiving is refused while any read
+ * (D41); the server decides, and this shows the dialog what it will say.
  */
 export function archiveBlockers(path: string, references: readonly ListedReference[]): ListedReference[] {
   const within = (secret: string) => secret === path || secret.startsWith(`${path}/`);
-  return references.filter((reference) => reference.state === 'live' && within(reference.source) && !within(reference.holder));
+  return references.filter((reference) => reference.state === 'live' && !reference.holderArchived && within(reference.source) && !within(reference.holder));
 }
 
 /**

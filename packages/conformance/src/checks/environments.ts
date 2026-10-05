@@ -116,6 +116,19 @@ export async function references(deployment: Deployment, { admin, reader, leaver
       expect(refusal instanceof CoffreError && refusal.status === 409 && refusal.message.includes(`${DEV}/${HELD} reads ${source}`),
         `${what} was archived, or refused without naming the reference, while a reference read it`, refusal instanceof Error ? refusal.message : refusal);
     }
+    // Unless what holds it is archived (D58): nobody reads through it then, so its source archives. Restored,
+    // the holder reads nothing through it until its source is back, and says so.
+    await admin.api.secrets.update(`${DEV}/${HELD}`, { archived: true });
+    const underArchived = await outcome(admin.api.secrets.update(source, { archived: true })).finally(() => admin.api.secrets.update(`${DEV}/${HELD}`, { archived: false }));
+    try {
+      expect(underArchived === 'let through', `${source} could not be archived while only an archived key referred to it: ${underArchived}`);
+      const restored = await outcome(reader.api.secrets.reveal(`${DEV}/${HELD}`));
+      expect(restored.startsWith('409 '), `a reference read a source archived while its holder was: ${restored}`);
+    } finally {
+      if (underArchived === 'let through') await admin.api.secrets.update(source, { archived: false });
+    }
+    const back = await reader.api.secrets.reveal(`${DEV}/${HELD}`);
+    expect(back.values[HELD] === canaries[source], 'a reference did not read its source again once both were restored');
 
     // A row the vault never sealed: a reference to prod, held in dev, pointing at a vault entry about something else.
     const forged = await using(deployment.database(), async (sql) => {
@@ -148,7 +161,7 @@ export async function references(deployment: Deployment, { admin, reader, leaver
   } finally {
     await admin.api.secrets.update(`${DEV}/${HELD}`, { archived: true });
   }
-  return "a viewer on dev reads prod's value through a reference, logged in both; prod and its key cannot be archived while it reads them; a forged row is refused, a broken one reads no more, and none is made without read on the source";
+  return "a viewer on dev reads prod's value through a reference, logged in both; prod and its key cannot be archived while it reads them, but can once its holder is archived, which then reads nothing until they are back; a forged row is refused, a broken one reads no more, and none is made without read on the source";
 }
 
 /** A key prod has and dev does not, for the missing-keys check; archived once checked. */

@@ -29,7 +29,7 @@ const kinds = [
   'invite', 'grant', 'revoke', 'set', 'read', 'remove', 'issue', 'revoke-token',
   'create-env', 'rename-env', 'archive-env', 'unarchive-env', 'delete-env',
   'archive-project', 'unarchive-project', 'delete-project', 'create-project', 'retire-env', 'retire-project',
-  'refer', 'break', 'rotate', 'set-holder', 'forge', 'owner', 'grant-as-ada',
+  'refer', 'break', 'rotate', 'set-holder', 'forge', 'owner', 'grant-as-ada', 'archive-holder',
 ] as const;
 type Operation = {
   kind: typeof kinds[number];
@@ -86,7 +86,7 @@ async function scenario(operations: readonly Operation[]) {
     project: null as { generation: number; id: string; archived: boolean } | null,
     environments: [] as Environment[],
     // billing/prod/VALUE, in a project of its own that stays: a value, or a reference to market/<slug>/VALUE by its source's `n`.
-    billing: { projectId: '', value: 'initial billing', reference: null as { source: number; live: boolean } | null },
+    billing: { projectId: '', value: 'initial billing', reference: null as { source: number; live: boolean } | null, archived: false },
     /** billing/prod/FORGED: a reference row the database's owner wrote, which the vault never sealed. */
     forged: false,
   };
@@ -150,6 +150,7 @@ async function scenario(operations: readonly Operation[]) {
   }
   /** Whether `member` reads billing/prod/VALUE: a grant on billing/prod, or on prod in every project, and a value or a live reference to a live source. */
   function mayBilling(member: Member | 'root'): boolean {
+    if (model.billing.archived) return false;
     if (member !== 'root' && (!model.active[member] || !['billing:prod', '*', '*/prod'].some((key) => model.grants[member].has(key)))) return false;
     const { reference } = model.billing;
     if (reference === null) return true;
@@ -158,12 +159,13 @@ async function scenario(operations: readonly Operation[]) {
   }
   /**
    * Whether billing's reference reads `environment` now, or anything in
-   * market when none is named: live, its source and project not archived.
-   * Archiving what it reads is refused (D41); restoring never is.
+   * market when none is named: live, its source and project not archived,
+   * and billing/prod, which holds it, not archived either (D58). Archiving
+   * what it reads is refused (D41); restoring never is.
    */
   function readThrough(environment?: Environment): boolean {
     const { reference } = model.billing;
-    if (reference === null || !reference.live || model.project === null || model.project.archived) return false;
+    if (reference === null || !reference.live || model.billing.archived || model.project === null || model.project.archived) return false;
     const source = model.environments.find((each) => each.n === reference.source);
     return source !== undefined && !source.archived && (environment === undefined || environment === source);
   }
@@ -470,7 +472,7 @@ async function scenario(operations: readonly Operation[]) {
       case 'refer': {
         // billing/prod/VALUE made a reference to market/<slug>/VALUE, by the root: a live source, or a refusal.
         const live = model.project !== null && !model.project.archived && environment !== undefined && !environment.archived;
-        const result = await allowed(() => root.secrets.set('billing/prod', { VALUE: { ref: `market/${op.environment}/VALUE` } }), live, true, 404);
+        const result = await allowed(() => root.secrets.set('billing/prod', { VALUE: { ref: `market/${op.environment}/VALUE` } }), live && !model.billing.archived, true, model.billing.archived ? undefined : 404);
         if (result) model.billing.reference = { source: environment!.n, live: true };
         break;
       }
@@ -488,10 +490,16 @@ async function scenario(operations: readonly Operation[]) {
         break;
       }
       case 'set-holder': {
-        // A value of billing's own: it ends the reference, replaced.
-        await root.secrets.set('billing/prod', { VALUE: op.value });
+        // A value of billing's own: it ends the reference, replaced. Archived, billing/prod takes no write.
+        if (!await allowed(() => root.secrets.set('billing/prod', { VALUE: op.value }), !model.billing.archived, true)) break;
         model.billing.reference = null;
         model.billing.value = op.value;
+        break;
+      }
+      case 'archive-holder': {
+        // billing/prod, which holds the reference, archived or restored: archived, it blocks no archive of its source (D58).
+        await root.environments.update('billing/prod', { archived: !model.billing.archived });
+        model.billing.archived = !model.billing.archived;
         break;
       }
       case 'forge': {
@@ -623,6 +631,12 @@ test('API operation sequence covers references: made, read in both projects, rot
     // What the reference reads cannot be archived, nor its project (D41): break it first.
     { ...base, kind: 'archive-env' },
     { ...base, kind: 'archive-project' },
+    // Unless what holds it is archived (D58): then the source archives, and the holder, restored, reads nothing until it is back.
+    { ...base, kind: 'archive-holder' },
+    { ...base, kind: 'set-holder', value: 'refused' },
+    { ...base, kind: 'archive-env' },
+    { ...base, kind: 'archive-holder' },
+    { ...base, kind: 'unarchive-env' },
     { ...base, kind: 'retire-env' },
     { ...base, kind: 'rename-env', to: 'qa' },
     { ...base, kind: 'rotate', environment: 'qa', value: 'after the rename' },
@@ -650,6 +664,10 @@ test('API operation sequence covers references: made, read in both projects, rot
     { ...base, kind: 'create-project' },
     { ...base, kind: 'create-env', environment: 'prod', value: 'a new market' },
     { ...base, kind: 'refer' },
+    // Archived, its holder's side still breaks it.
+    { ...base, kind: 'archive-holder' },
+    { ...base, kind: 'break' },
+    { ...base, kind: 'archive-holder' },
   ]);
 });
 
