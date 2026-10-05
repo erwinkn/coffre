@@ -229,6 +229,7 @@ const MESSAGES: Record<RefusalCode, string> = {
   expired: 'the grant that covered this has expired',
   bulk_limit: 'too many secrets read in too short a time',
   bad_claim: 'the key does not belong to this secret',
+  deleted: 'this project or environment was deleted',
   not_allowed: 'not allowed to change this',
   root_admin: 'root admins are set in the vault configuration',
   invalid: 'not something the rules allow',
@@ -675,7 +676,7 @@ class VaultService implements Vault {
     const sameSecret = (secret: SecretRef, source: SecretRef) =>
       secret.projectId === source.projectId && secret.environmentId === source.environmentId && secret.secretId === source.secretId;
     if (items.some((item, i) => !sameSecret(item.secret, loaded.versions[i].secret))) {
-      return this.#badVersions(principal, loaded.versions.map((source) => ({
+      return this.#refuseVersions(principal, 'bad_claim', loaded.versions.map((source) => ({
         ...keyEntry('key.rewrap', principal, source.secret, 'deny', 'bad_claim', input), secretVersionId: source.id,
       })));
     }
@@ -702,7 +703,7 @@ class VaultService implements Vault {
     );
   }
 
-  /** Immutable versions need no lock; their ids determine the whole batch before any key call. */
+  /** Versions need no lock: they change only by being erased, once their place is archived, and their ids determine the whole batch before any key call. */
   async #versions(
     input: Correlation & { principal: string; items: { secretVersionId: string }[] },
     action: KeyAction,
@@ -717,8 +718,13 @@ class VaultService implements Vault {
       }
     }
     const found = new Map((await store.versions(this.#db, ids)).map((version) => [version.id, version]));
+    if ([...found.values()].some((version) => version.deleted)) {
+      return this.#refuseVersions(input.principal, 'deleted', [...found.values()].map((version) => ({
+        ...keyEntry(action, input.principal, version.secret, 'deny', 'deleted', input, detail), secretVersionId: version.id,
+      })));
+    }
     if (ids.some((id) => !found.has(id))) {
-      return this.#badVersions(input.principal, ids.map((id) => {
+      return this.#refuseVersions(input.principal, 'bad_claim', ids.map((id) => {
         const version = found.get(id);
         if (version === undefined) return {
           actor: input.principal, action, decision: 'deny', code: 'bad_claim',
@@ -731,10 +737,10 @@ class VaultService implements Vault {
     return { ok: true, versions: ids.map((id) => found.get(id)!) };
   }
 
-  async #badVersions(principal: string, entries: NewEntry[]): Promise<Outcome<never>> {
+  async #refuseVersions(principal: string, code: 'bad_claim' | 'deleted', entries: NewEntry[]): Promise<Outcome<never>> {
     if (this.#isRootAdmin(principal)) await this.#rootRow(principal);
     return this.#decide([principal], async () => {
-      throw new Refused(refusal('bad_claim', MESSAGES.bad_claim), entries);
+      throw new Refused(refusal(code, MESSAGES[code]), entries);
     });
   }
 
@@ -789,10 +795,11 @@ class VaultService implements Vault {
     if (this.#isRootAdmin(principal)) await this.#rootRow(principal);
     const check = async (d: Decision) => {
       const reader = await this.#standing(d.tx, principal, d.members.get(principal), d.at, d.reports);
-      // A grant on one slug in every project matches the environment's slug as the store has it, not the path the app sent.
-      const bySlug = reader.all.grants.some((grant) => grant.environmentSlug !== null);
-      const environments = bySlug ? await store.environmentsById(d.tx, secrets.map((secret) => secret.environmentId)) : new Map();
-      const codes = secrets.map((secret) => refuses(reader, call.permission, placeOfSecret(secret, environments)));
+      // One read of the secrets' environments, as the store has them, not as the app sent them: a
+      // grant on one slug in every project matches the slug there, and a deleted place opens for none.
+      const environments = await store.environmentsById(d.tx, secrets.map((secret) => secret.environmentId));
+      const codes = secrets.map((secret) =>
+        refuses(reader, call.permission, placeOfSecret(secret, environments), environments.get(secret.environmentId)?.deleted ?? false));
       let first = codes.find((code) => code !== null) ?? null;
       if (first === null && action === 'secret.read' && (await this.#overBulkLimit(d, principal, secrets.length))) first = 'bulk_limit';
       if (first !== null) {
@@ -1056,7 +1063,7 @@ class VaultService implements Vault {
         ...where.ids,
       }]);
     };
-    const onProjects = changes.flatMap(({ projectId, environmentId }) => (projectId === null ? [] : [{ projectId, environmentId }]));
+    const onProjects = changes.flatMap(({ projectId, environmentId, role }) => (projectId === null ? [] : [{ projectId, environmentId, role }]));
     return this.#decide([actor, principal], async (d) => {
       validateCorrelation(input);
       if (!LIVE_PRINCIPAL.test(principal)) throw refused('invalid', `not a principal: ${principal}`);
@@ -1080,15 +1087,22 @@ class VaultService implements Vault {
       if (changes.some((change) => grantKind(change) === 'every-project') && !(await store.canGrantEveryProject(d.tx))) {
         throw refused('invalid', "grants on every project need this release's database migration: an owner runs `coffre migrate`");
       }
-      // Every project is always there; a project or an environment must be.
+      // Every project is always there; a project or an environment must be,
+      // and to be granted, not deleted. Read under the log's head, which a
+      // deletion holds while it renames the place, so the place is as it commits.
+      if (onProjects.length > 0) await lockLogHead(d.tx);
       const known = await store.places(
         d.tx,
         onProjects.map((change) => change.projectId),
         onProjects.flatMap((change) => (change.environmentId === null ? [] : [change.environmentId])),
       );
-      for (const { projectId, environmentId } of onProjects) {
+      for (const { projectId, environmentId, role } of onProjects) {
         if (!known.projects.has(projectId) || (environmentId !== null && known.environments.get(environmentId) !== projectId)) {
           throw refused('invalid', `no such place: ${environmentId === null ? projectId : `${projectId}/${environmentId}`}`);
+        }
+        // A grant there is refused; a revocation, as a deletion makes, is not.
+        if (role !== null && (known.deleted.has(projectId) || (environmentId !== null && known.deleted.has(environmentId)))) {
+          throw refused('deleted');
         }
       }
       const acting = await this.#standing(d.tx, actor, d.members.get(actor), d.at, d.reports);
@@ -1781,11 +1795,16 @@ function placeOfSecret(secret: SecretRef, environments: ReadonlyMap<string, { pr
   return { projectId: secret.projectId, environmentId: secret.environmentId, environmentSlug: slug };
 }
 
-/** Why `reader` may not do `permission` at `where`, or null if they may. */
-function refuses(reader: Standing, permission: Permission, where: Place): RefusalCode | null {
+/**
+ * Why `reader` may not do `permission` at `where`, or null if they may. A
+ * deleted place is refused before any grant is asked, so no kind of grant,
+ * on the project, the environment or every project, can reach into one.
+ */
+function refuses(reader: Standing, permission: Permission, where: Place, deleted: boolean): RefusalCode | null {
   if (reader.status === 'tampered') return 'tampered';
   if (reader.status === 'removed') return 'removed';
   if (reader.status === 'unknown') return 'not_a_member';
+  if (deleted) return 'deleted';
   if (allows(reader.live, permission, where)) return null;
   // Would a grant that has lapsed have covered it?
   return allows(reader.all, permission, where) ? 'expired' : 'no_grant';

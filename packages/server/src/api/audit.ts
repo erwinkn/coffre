@@ -185,7 +185,8 @@ export async function listAudit(
     filter.within = { projectIds, environmentIds };
   }
   if (query.path !== undefined) {
-    const place = await resolvePath(ctx.db, query.path);
+    // A deleted place's entries stay readable by its tombstone's slug.
+    const place = await resolvePath(ctx.db, query.path, { tombstones: true });
     if (place === null) throw notFound('no such project');
     filter.projectId = place.project.id;
     if (query.path.environment !== undefined) {
@@ -378,7 +379,7 @@ async function named(ctx: ApiContext, verification: LogVerification): Promise<Va
   if (verification.ok) return verification;
   const { fault, ...verdict } = verification;
   if (fault === undefined) return verdict;
-  const known = await places(ctx.db);
+  const known = await places(ctx.db, { tombstones: true });
   const reason = describeAccessFault(fault, {
     principal: principalName,
     place: (projectId, environmentId) => {

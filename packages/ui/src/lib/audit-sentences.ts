@@ -120,6 +120,8 @@ const placeTemplates = (kind: 'project' | 'environment'): Record<string, Templat
     [`${kind}.update`]: { did: 'changed', tried: 'change', what },
     [`${kind}.archive`]: { did: 'archived', tried: 'archive', what },
     [`${kind}.restore`]: { did: 'restored', tried: 'restore', what },
+    // Named by its tombstone from then on, `market~deleted-2026-10-05`, as every entry about it is.
+    [`${kind}.delete`]: { did: 'deleted', tried: 'delete', what },
   };
 };
 
@@ -323,11 +325,13 @@ const REASONS: Record<string, string> = {
   not_registered: 'not invited',
   tampered: 'their record was tampered with',
   bad_claim: 'the key did not match the secret',
+  deleted: 'the place was deleted',
   not_allowed: 'not allowed',
   root_admin: 'root admins are set by the deployment',
   unknown_environment: 'no such environment',
   unknown_secret: 'no such secret',
   unknown_project: 'no such project',
+  not_archived: 'it was not archived',
   unusable_credential: 'its token is not a secret they can read',
   duplicate_destination: 'already synced from elsewhere',
   cannot_grant_sync: 'cannot grant the sync its reads',

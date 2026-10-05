@@ -92,6 +92,25 @@ export type Api = {
       };
     };
   };
+  "DELETE /projects/:project": {
+    input: undefined;
+    output: {
+      dryRun: boolean;
+      deletion: {
+        path: string;
+        tombstone: string;
+        environments: string[];
+        keys: number;
+        versions: number;
+        grants: {
+          member: string;
+          place: string;
+          role: string;
+        }[];
+        stranded: string[];
+      };
+    };
+  };
   "PUT /projects/:project/:environment": {
     input: {
       name: string;
@@ -131,6 +150,25 @@ export type Api = {
         roleName: string;
         expiresAt: string | null;
       }[];
+    };
+  };
+  "DELETE /projects/:project/:environment": {
+    input: undefined;
+    output: {
+      dryRun: boolean;
+      deletion: {
+        path: string;
+        tombstone: string;
+        environments: string[];
+        keys: number;
+        versions: number;
+        grants: {
+          member: string;
+          place: string;
+          role: string;
+        }[];
+        stranded: string[];
+      };
     };
   };
   "GET /secrets/:project/:environment": {
@@ -672,6 +710,37 @@ export type BindingView = {
   createdAt: string;
   createdBy: string;
   lastUsedAt: string | null;
+};
+
+export type Deletion = {
+  path: string;
+  tombstone: string;
+  environments: string[];
+  keys: number;
+  versions: number;
+  grants: {
+    member: string;
+    place: string;
+    role: string;
+  }[];
+  stranded: string[];
+};
+
+export type DeletionResult = {
+  dryRun: boolean;
+  deletion: {
+    path: string;
+    tombstone: string;
+    environments: string[];
+    keys: number;
+    versions: number;
+    grants: {
+      member: string;
+      place: string;
+      role: string;
+    }[];
+    stranded: string[];
+  };
 };
 
 export type WorkloadIds = {

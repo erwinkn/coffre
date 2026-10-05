@@ -1,0 +1,1838 @@
+{
+  "version": "6",
+  "dialect": "sqlite",
+  "id": "ab94c578-a8e7-4868-8c5d-10391d50d47b",
+  "prevId": "2bb3670a-8149-452a-9cf7-d203693bee79",
+  "tables": {
+    "audit_chain_head": {
+      "name": "audit_chain_head",
+      "columns": {
+        "only_row": {
+          "name": "only_row",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false,
+          "default": true
+        },
+        "next_seq": {
+          "name": "next_seq",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "0"
+        },
+        "head_hash": {
+          "name": "head_hash",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "audit_chain_head_only_row_check": {
+          "name": "audit_chain_head_only_row_check",
+          "value": "\"audit_chain_head\".\"only_row\""
+        },
+        "audit_chain_head_next_seq_check": {
+          "name": "audit_chain_head_next_seq_check",
+          "value": "\"audit_chain_head\".\"next_seq\" >= 0"
+        },
+        "audit_chain_head_head_hash_check": {
+          "name": "audit_chain_head_head_hash_check",
+          "value": "octet_length(\"audit_chain_head\".\"head_hash\") = 32"
+        }
+      }
+    },
+    "audit_log": {
+      "name": "audit_log",
+      "columns": {
+        "seq": {
+          "name": "seq",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "author": {
+          "name": "author",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "key_id": {
+          "name": "key_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "occurred_at": {
+          "name": "occurred_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "actor": {
+          "name": "actor",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "action": {
+          "name": "action",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "decision": {
+          "name": "decision",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "code": {
+          "name": "code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "subject_principal": {
+          "name": "subject_principal",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "project_id": {
+          "name": "project_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "environment_id": {
+          "name": "environment_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "secret_id": {
+          "name": "secret_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "secret_version_id": {
+          "name": "secret_version_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "operation_id": {
+          "name": "operation_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "request_id": {
+          "name": "request_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "source_ip": {
+          "name": "source_ip",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "related_seq": {
+          "name": "related_seq",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "metadata": {
+          "name": "metadata",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'{}'"
+        },
+        "prev_hash": {
+          "name": "prev_hash",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "mac": {
+          "name": "mac",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "hash": {
+          "name": "hash",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "audit_log_project_idx": {
+          "name": "audit_log_project_idx",
+          "columns": [
+            "project_id",
+            "seq"
+          ],
+          "isUnique": false
+        },
+        "audit_log_environment_idx": {
+          "name": "audit_log_environment_idx",
+          "columns": [
+            "environment_id",
+            "seq"
+          ],
+          "isUnique": false
+        },
+        "audit_log_secret_idx": {
+          "name": "audit_log_secret_idx",
+          "columns": [
+            "secret_id",
+            "seq"
+          ],
+          "isUnique": false
+        },
+        "audit_log_actor_idx": {
+          "name": "audit_log_actor_idx",
+          "columns": [
+            "actor",
+            "seq"
+          ],
+          "isUnique": false
+        },
+        "audit_log_operation_idx": {
+          "name": "audit_log_operation_idx",
+          "columns": [
+            "operation_id",
+            "seq"
+          ],
+          "isUnique": false
+        },
+        "audit_log_action_idx": {
+          "name": "audit_log_action_idx",
+          "columns": [
+            "author",
+            "action",
+            "seq"
+          ],
+          "isUnique": false
+        },
+        "audit_log_releases_idx": {
+          "name": "audit_log_releases_idx",
+          "columns": [
+            "author",
+            "actor",
+            "action",
+            "decision",
+            "occurred_at"
+          ],
+          "isUnique": false
+        },
+        "audit_log_subject_idx": {
+          "name": "audit_log_subject_idx",
+          "columns": [
+            "author",
+            "subject_principal",
+            "seq"
+          ],
+          "isUnique": false
+        },
+        "audit_log_unbind_idx": {
+          "name": "audit_log_unbind_idx",
+          "columns": [
+            "json_extract(\"metadata\", '$.bindingId')"
+          ],
+          "isUnique": false,
+          "where": "\"audit_log\".\"author\" = 'app' AND \"audit_log\".\"action\" = 'token.unbind' AND \"audit_log\".\"decision\" = 'allow'"
+        },
+        "audit_log_exchange_idx": {
+          "name": "audit_log_exchange_idx",
+          "columns": [
+            "json_extract(\"metadata\", '$.credentialId')"
+          ],
+          "isUnique": false,
+          "where": "\"audit_log\".\"author\" = 'app' AND \"audit_log\".\"action\" = 'token.exchange' AND \"audit_log\".\"decision\" = 'allow'"
+        }
+      },
+      "foreignKeys": {
+        "audit_log_project_id_fkey": {
+          "name": "audit_log_project_id_fkey",
+          "tableFrom": "audit_log",
+          "tableTo": "projects",
+          "columnsFrom": [
+            "project_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "audit_log_environment_id_fkey": {
+          "name": "audit_log_environment_id_fkey",
+          "tableFrom": "audit_log",
+          "tableTo": "environments",
+          "columnsFrom": [
+            "environment_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "audit_log_secret_id_fkey": {
+          "name": "audit_log_secret_id_fkey",
+          "tableFrom": "audit_log",
+          "tableTo": "secrets",
+          "columnsFrom": [
+            "secret_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "audit_log_secret_version_id_fkey": {
+          "name": "audit_log_secret_version_id_fkey",
+          "tableFrom": "audit_log",
+          "tableTo": "secret_versions",
+          "columnsFrom": [
+            "secret_version_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "audit_log_related_seq_fkey": {
+          "name": "audit_log_related_seq_fkey",
+          "tableFrom": "audit_log",
+          "tableTo": "audit_log",
+          "columnsFrom": [
+            "related_seq"
+          ],
+          "columnsTo": [
+            "seq"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "audit_log_author_check": {
+          "name": "audit_log_author_check",
+          "value": "\"audit_log\".\"author\" IN ('app', 'vault')"
+        },
+        "audit_log_actor_check": {
+          "name": "audit_log_actor_check",
+          "value": "\"audit_log\".\"actor\" GLOB 'user:?*' OR \"audit_log\".\"actor\" GLOB 'token:?*' OR \"audit_log\".\"actor\" GLOB 'sync:?*' OR \"audit_log\".\"actor\" GLOB 'system:?*'"
+        },
+        "audit_log_decision_check": {
+          "name": "audit_log_decision_check",
+          "value": "\"audit_log\".\"decision\" IN ('allow', 'deny')"
+        },
+        "audit_log_metadata_check": {
+          "name": "audit_log_metadata_check",
+          "value": "json_valid(\"audit_log\".\"metadata\")"
+        },
+        "audit_log_prev_hash_check": {
+          "name": "audit_log_prev_hash_check",
+          "value": "octet_length(\"audit_log\".\"prev_hash\") = 32"
+        },
+        "audit_log_mac_check": {
+          "name": "audit_log_mac_check",
+          "value": "octet_length(\"audit_log\".\"mac\") = 32"
+        },
+        "audit_log_hash_check": {
+          "name": "audit_log_hash_check",
+          "value": "octet_length(\"audit_log\".\"hash\") = 32"
+        }
+      }
+    },
+    "consumed_tokens": {
+      "name": "consumed_tokens",
+      "columns": {
+        "hash": {
+          "name": "hash",
+          "type": "blob",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "consumed_at": {
+          "name": "consumed_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(CAST(unixepoch('subsec') * 1000 AS INTEGER))"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "consumed_tokens_hash_check": {
+          "name": "consumed_tokens_hash_check",
+          "value": "octet_length(\"consumed_tokens\".\"hash\") = 32"
+        }
+      }
+    },
+    "credentials": {
+      "name": "credentials",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "auth_mac": {
+          "name": "auth_mac",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "token_hash": {
+          "name": "token_hash",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "token_hint": {
+          "name": "token_hint",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "generation": {
+          "name": "generation",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "principal": {
+          "name": "principal",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "identity_id": {
+          "name": "identity_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "label": {
+          "name": "label",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(CAST(unixepoch('subsec') * 1000 AS INTEGER))"
+        },
+        "created_by": {
+          "name": "created_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "last_used_at": {
+          "name": "last_used_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "last_used_ip": {
+          "name": "last_used_ip",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "revoked_at": {
+          "name": "revoked_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "revoked_by": {
+          "name": "revoked_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "credentials_principal_idx": {
+          "name": "credentials_principal_idx",
+          "columns": [
+            "principal",
+            "generation"
+          ],
+          "isUnique": false
+        },
+        "credentials_live_idx": {
+          "name": "credentials_live_idx",
+          "columns": [
+            "principal",
+            "expires_at"
+          ],
+          "isUnique": false,
+          "where": "\"credentials\".\"revoked_at\" IS NULL"
+        },
+        "credentials_issued_by_idx": {
+          "name": "credentials_issued_by_idx",
+          "columns": [
+            "principal",
+            "created_by",
+            "created_at"
+          ],
+          "isUnique": false
+        },
+        "credentials_token_hash_key": {
+          "name": "credentials_token_hash_key",
+          "columns": [
+            "token_hash"
+          ],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {
+        "credentials_principal_fkey": {
+          "name": "credentials_principal_fkey",
+          "tableFrom": "credentials",
+          "tableTo": "vault_members",
+          "columnsFrom": [
+            "principal"
+          ],
+          "columnsTo": [
+            "principal"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "credentials_identity_id_fkey": {
+          "name": "credentials_identity_id_fkey",
+          "tableFrom": "credentials",
+          "tableTo": "identities",
+          "columnsFrom": [
+            "identity_id",
+            "principal",
+            "generation"
+          ],
+          "columnsTo": [
+            "id",
+            "principal",
+            "generation"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "credentials_kind_check": {
+          "name": "credentials_kind_check",
+          "value": "\"credentials\".\"kind\" IN ('browser', 'cli', 'service')"
+        },
+        "credentials_principal_check": {
+          "name": "credentials_principal_check",
+          "value": "\"credentials\".\"principal\" LIKE 'user:%' OR \"credentials\".\"principal\" LIKE 'token:%'"
+        },
+        "credentials_kind_matches_principal": {
+          "name": "credentials_kind_matches_principal",
+          "value": "(\"credentials\".\"kind\" = 'service') = (\"credentials\".\"principal\" LIKE 'token:%')"
+        },
+        "credentials_token_hash_check": {
+          "name": "credentials_token_hash_check",
+          "value": "octet_length(\"credentials\".\"token_hash\") = 32"
+        },
+        "credentials_auth_mac_check": {
+          "name": "credentials_auth_mac_check",
+          "value": "octet_length(\"credentials\".\"auth_mac\") = 32"
+        }
+      }
+    },
+    "device_authorizations": {
+      "name": "device_authorizations",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "device_code_hash": {
+          "name": "device_code_hash",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "auth_mac": {
+          "name": "auth_mac",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "user_code": {
+          "name": "user_code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "client_label": {
+          "name": "client_label",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "client_ip": {
+          "name": "client_ip",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(CAST(unixepoch('subsec') * 1000 AS INTEGER))"
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "decided_at": {
+          "name": "decided_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "decision": {
+          "name": "decision",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "generation": {
+          "name": "generation",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "principal": {
+          "name": "principal",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "consumed_at": {
+          "name": "consumed_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "device_authorizations_device_code_hash_key": {
+          "name": "device_authorizations_device_code_hash_key",
+          "columns": [
+            "device_code_hash"
+          ],
+          "isUnique": true
+        },
+        "device_authorizations_user_code_key": {
+          "name": "device_authorizations_user_code_key",
+          "columns": [
+            "user_code"
+          ],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {
+        "device_authorizations_principal_fkey": {
+          "name": "device_authorizations_principal_fkey",
+          "tableFrom": "device_authorizations",
+          "tableTo": "vault_members",
+          "columnsFrom": [
+            "principal"
+          ],
+          "columnsTo": [
+            "principal"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "device_authorizations_auth_mac_check": {
+          "name": "device_authorizations_auth_mac_check",
+          "value": "octet_length(\"device_authorizations\".\"auth_mac\") = 32"
+        },
+        "device_authorizations_decision_check": {
+          "name": "device_authorizations_decision_check",
+          "value": "\"device_authorizations\".\"decision\" IS NULL OR \"device_authorizations\".\"decision\" IN ('approved', 'denied')"
+        },
+        "device_authorizations_approval_names_principal": {
+          "name": "device_authorizations_approval_names_principal",
+          "value": "(\"device_authorizations\".\"decision\" IS NULL AND \"device_authorizations\".\"decided_at\" IS NULL AND \"device_authorizations\".\"principal\" IS NULL AND \"device_authorizations\".\"generation\" = 0 AND \"device_authorizations\".\"consumed_at\" IS NULL)\n        OR (\"device_authorizations\".\"decision\" IS NOT NULL AND \"device_authorizations\".\"decided_at\" IS NOT NULL AND (\n          (\"device_authorizations\".\"decision\" = 'denied' AND \"device_authorizations\".\"principal\" IS NULL AND \"device_authorizations\".\"generation\" = 0 AND \"device_authorizations\".\"consumed_at\" IS NULL)\n          OR (\"device_authorizations\".\"decision\" = 'approved' AND \"device_authorizations\".\"principal\" IS NOT NULL AND \"device_authorizations\".\"principal\" LIKE 'user:%')\n        ))"
+        }
+      }
+    },
+    "environments": {
+      "name": "environments",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "project_id": {
+          "name": "project_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "slug": {
+          "name": "slug",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(CAST(unixepoch('subsec') * 1000 AS INTEGER))"
+        },
+        "archived_at": {
+          "name": "archived_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "environments_project_id_slug_key": {
+          "name": "environments_project_id_slug_key",
+          "columns": [
+            "project_id",
+            "slug"
+          ],
+          "isUnique": true
+        },
+        "environments_project_scoped": {
+          "name": "environments_project_scoped",
+          "columns": [
+            "id",
+            "project_id"
+          ],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {
+        "environments_project_id_fkey": {
+          "name": "environments_project_id_fkey",
+          "tableFrom": "environments",
+          "tableTo": "projects",
+          "columnsFrom": [
+            "project_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "environments_slug_check": {
+          "name": "environments_slug_check",
+          "value": "(length(\"environments\".\"slug\") BETWEEN 1 AND 63 AND \"environments\".\"slug\" GLOB '[a-z0-9]*' AND \"environments\".\"slug\" NOT GLOB '*[^a-z0-9-]*') OR (instr(\"environments\".\"slug\", '~') BETWEEN 2 AND 64 AND substr(\"environments\".\"slug\", 1, instr(\"environments\".\"slug\", '~') - 1) GLOB '[a-z0-9]*' AND substr(\"environments\".\"slug\", 1, instr(\"environments\".\"slug\", '~') - 1) NOT GLOB '*[^a-z0-9-]*' AND length(substr(\"environments\".\"slug\", instr(\"environments\".\"slug\", '~') + 1)) BETWEEN 1 AND 40 AND substr(\"environments\".\"slug\", instr(\"environments\".\"slug\", '~') + 1) NOT GLOB '*[^a-z0-9-]*')"
+        }
+      }
+    },
+    "identities": {
+      "name": "identities",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "provider": {
+          "name": "provider",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "auth_mac": {
+          "name": "auth_mac",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "subject": {
+          "name": "subject",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "issuer_hash": {
+          "name": "issuer_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "generation": {
+          "name": "generation",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "principal": {
+          "name": "principal",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "email": {
+          "name": "email",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(CAST(unixepoch('subsec') * 1000 AS INTEGER))"
+        },
+        "created_by": {
+          "name": "created_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "last_sign_in_at": {
+          "name": "last_sign_in_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "revoked_at": {
+          "name": "revoked_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "revoked_by": {
+          "name": "revoked_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "active_subject": {
+          "name": "active_subject",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false,
+          "generated": {
+            "as": "(CASE WHEN revoked_at IS NULL THEN subject END)",
+            "type": "stored"
+          }
+        }
+      },
+      "indexes": {
+        "identities_active_subject": {
+          "name": "identities_active_subject",
+          "columns": [
+            "provider",
+            "issuer_hash",
+            "active_subject"
+          ],
+          "isUnique": true
+        },
+        "identities_principal_idx": {
+          "name": "identities_principal_idx",
+          "columns": [
+            "principal",
+            "generation"
+          ],
+          "isUnique": false
+        },
+        "identities_member_generation_key": {
+          "name": "identities_member_generation_key",
+          "columns": [
+            "id",
+            "principal",
+            "generation"
+          ],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {
+        "identities_principal_fkey": {
+          "name": "identities_principal_fkey",
+          "tableFrom": "identities",
+          "tableTo": "vault_members",
+          "columnsFrom": [
+            "principal"
+          ],
+          "columnsTo": [
+            "principal"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "identities_principal_check": {
+          "name": "identities_principal_check",
+          "value": "\"identities\".\"principal\" LIKE 'user:%'"
+        },
+        "identities_provider_check": {
+          "name": "identities_provider_check",
+          "value": "length(\"identities\".\"provider\") BETWEEN 1 AND 32 AND \"identities\".\"provider\" GLOB '[a-z0-9]*' AND \"identities\".\"provider\" NOT GLOB '*[^a-z0-9-]*'"
+        },
+        "identities_auth_mac_check": {
+          "name": "identities_auth_mac_check",
+          "value": "octet_length(\"identities\".\"auth_mac\") = 32"
+        }
+      }
+    },
+    "projects": {
+      "name": "projects",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "slug": {
+          "name": "slug",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(CAST(unixepoch('subsec') * 1000 AS INTEGER))"
+        },
+        "archived_at": {
+          "name": "archived_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "projects_slug_key": {
+          "name": "projects_slug_key",
+          "columns": [
+            "slug"
+          ],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "projects_slug_check": {
+          "name": "projects_slug_check",
+          "value": "(length(\"projects\".\"slug\") BETWEEN 1 AND 63 AND \"projects\".\"slug\" GLOB '[a-z0-9]*' AND \"projects\".\"slug\" NOT GLOB '*[^a-z0-9-]*') OR (instr(\"projects\".\"slug\", '~') BETWEEN 2 AND 64 AND substr(\"projects\".\"slug\", 1, instr(\"projects\".\"slug\", '~') - 1) GLOB '[a-z0-9]*' AND substr(\"projects\".\"slug\", 1, instr(\"projects\".\"slug\", '~') - 1) NOT GLOB '*[^a-z0-9-]*' AND length(substr(\"projects\".\"slug\", instr(\"projects\".\"slug\", '~') + 1)) BETWEEN 1 AND 40 AND substr(\"projects\".\"slug\", instr(\"projects\".\"slug\", '~') + 1) NOT GLOB '*[^a-z0-9-]*')"
+        }
+      }
+    },
+    "secret_versions": {
+      "name": "secret_versions",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "secret_id": {
+          "name": "secret_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "envelope_version": {
+          "name": "envelope_version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "ciphertext": {
+          "name": "ciphertext",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "iv": {
+          "name": "iv",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "auth_tag": {
+          "name": "auth_tag",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "wrapped_dek": {
+          "name": "wrapped_dek",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "kek_provider": {
+          "name": "kek_provider",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "kek_id": {
+          "name": "kek_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "kek_version": {
+          "name": "kek_version",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(CAST(unixepoch('subsec') * 1000 AS INTEGER))"
+        },
+        "created_by": {
+          "name": "created_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "secret_versions_secret_idx": {
+          "name": "secret_versions_secret_idx",
+          "columns": [
+            "secret_id",
+            "version"
+          ],
+          "isUnique": false
+        },
+        "secret_versions_secret_id_version_key": {
+          "name": "secret_versions_secret_id_version_key",
+          "columns": [
+            "secret_id",
+            "version"
+          ],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {
+        "secret_versions_secret_id_fkey": {
+          "name": "secret_versions_secret_id_fkey",
+          "tableFrom": "secret_versions",
+          "tableTo": "secrets",
+          "columnsFrom": [
+            "secret_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "secret_versions_version_check": {
+          "name": "secret_versions_version_check",
+          "value": "\"secret_versions\".\"version\" > 0"
+        },
+        "secret_versions_iv_check": {
+          "name": "secret_versions_iv_check",
+          "value": "octet_length(\"secret_versions\".\"iv\") = 12"
+        },
+        "secret_versions_auth_tag_check": {
+          "name": "secret_versions_auth_tag_check",
+          "value": "octet_length(\"secret_versions\".\"auth_tag\") = 16"
+        }
+      }
+    },
+    "secrets": {
+      "name": "secrets",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "project_id": {
+          "name": "project_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "environment_id": {
+          "name": "environment_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "key": {
+          "name": "key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(CAST(unixepoch('subsec') * 1000 AS INTEGER))"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(CAST(unixepoch('subsec') * 1000 AS INTEGER))"
+        },
+        "current_version_id": {
+          "name": "current_version_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "current_version": {
+          "name": "current_version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "archived_at": {
+          "name": "archived_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "secrets_lookup_idx": {
+          "name": "secrets_lookup_idx",
+          "columns": [
+            "project_id",
+            "environment_id",
+            "key"
+          ],
+          "isUnique": false
+        },
+        "secrets_project_id_environment_id_key_key": {
+          "name": "secrets_project_id_environment_id_key_key",
+          "columns": [
+            "project_id",
+            "environment_id",
+            "key"
+          ],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {
+        "secrets_current_version_id_secret_versions_id_fk": {
+          "name": "secrets_current_version_id_secret_versions_id_fk",
+          "tableFrom": "secrets",
+          "tableTo": "secret_versions",
+          "columnsFrom": [
+            "current_version_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "secrets_project_id_fkey": {
+          "name": "secrets_project_id_fkey",
+          "tableFrom": "secrets",
+          "tableTo": "projects",
+          "columnsFrom": [
+            "project_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "secrets_environment_id_fkey": {
+          "name": "secrets_environment_id_fkey",
+          "tableFrom": "secrets",
+          "tableTo": "environments",
+          "columnsFrom": [
+            "environment_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "secrets_environment_in_project": {
+          "name": "secrets_environment_in_project",
+          "tableFrom": "secrets",
+          "tableTo": "environments",
+          "columnsFrom": [
+            "environment_id",
+            "project_id"
+          ],
+          "columnsTo": [
+            "id",
+            "project_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "secrets_key_check": {
+          "name": "secrets_key_check",
+          "value": "length(\"secrets\".\"key\") BETWEEN 1 AND 128 AND \"secrets\".\"key\" GLOB '[A-Za-z_]*' AND \"secrets\".\"key\" NOT GLOB '*[^A-Za-z0-9_]*'"
+        }
+      }
+    },
+    "service_bindings": {
+      "name": "service_bindings",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "auth_mac": {
+          "name": "auth_mac",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "principal": {
+          "name": "principal",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "generation": {
+          "name": "generation",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "profile": {
+          "name": "profile",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "issuer": {
+          "name": "issuer",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "jwks_uri": {
+          "name": "jwks_uri",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "claims": {
+          "name": "claims",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "label": {
+          "name": "label",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(CAST(unixepoch('subsec') * 1000 AS INTEGER))"
+        },
+        "created_by": {
+          "name": "created_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "last_used_at": {
+          "name": "last_used_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "revoked_at": {
+          "name": "revoked_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "revoked_by": {
+          "name": "revoked_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "service_bindings_principal_idx": {
+          "name": "service_bindings_principal_idx",
+          "columns": [
+            "principal",
+            "issuer"
+          ],
+          "isUnique": false
+        },
+        "service_bindings_live_idx": {
+          "name": "service_bindings_live_idx",
+          "columns": [
+            "principal",
+            "issuer",
+            "generation",
+            "created_at",
+            "id"
+          ],
+          "isUnique": false,
+          "where": "\"service_bindings\".\"revoked_at\" IS NULL"
+        }
+      },
+      "foreignKeys": {
+        "service_bindings_principal_fkey": {
+          "name": "service_bindings_principal_fkey",
+          "tableFrom": "service_bindings",
+          "tableTo": "vault_members",
+          "columnsFrom": [
+            "principal"
+          ],
+          "columnsTo": [
+            "principal"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "service_bindings_principal_check": {
+          "name": "service_bindings_principal_check",
+          "value": "\"service_bindings\".\"principal\" LIKE 'token:%'"
+        },
+        "service_bindings_auth_mac_check": {
+          "name": "service_bindings_auth_mac_check",
+          "value": "octet_length(\"service_bindings\".\"auth_mac\") = 32"
+        },
+        "service_bindings_claims_check": {
+          "name": "service_bindings_claims_check",
+          "value": "json_valid(\"service_bindings\".\"claims\")"
+        }
+      }
+    },
+    "vault_grants": {
+      "name": "vault_grants",
+      "columns": {
+        "principal": {
+          "name": "principal",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "project_id": {
+          "name": "project_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "environment_id": {
+          "name": "environment_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "environment_slug": {
+          "name": "environment_slug",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "role": {
+          "name": "role",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "granted_at": {
+          "name": "granted_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "granted_by": {
+          "name": "granted_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "vault_grants_on_every_project": {
+          "name": "vault_grants_on_every_project",
+          "columns": [
+            "principal"
+          ],
+          "isUnique": true,
+          "where": "\"vault_grants\".\"project_id\" IS NULL AND \"vault_grants\".\"environment_id\" IS NULL AND \"vault_grants\".\"environment_slug\" IS NULL"
+        },
+        "vault_grants_on_project": {
+          "name": "vault_grants_on_project",
+          "columns": [
+            "principal",
+            "project_id"
+          ],
+          "isUnique": true
+        },
+        "vault_grants_on_environment": {
+          "name": "vault_grants_on_environment",
+          "columns": [
+            "principal",
+            "environment_id"
+          ],
+          "isUnique": true
+        },
+        "vault_grants_on_environment_slug": {
+          "name": "vault_grants_on_environment_slug",
+          "columns": [
+            "principal",
+            "environment_slug"
+          ],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {
+        "vault_grants_principal_fkey": {
+          "name": "vault_grants_principal_fkey",
+          "tableFrom": "vault_grants",
+          "tableTo": "vault_members",
+          "columnsFrom": [
+            "principal"
+          ],
+          "columnsTo": [
+            "principal"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "vault_grants_project_id_fkey": {
+          "name": "vault_grants_project_id_fkey",
+          "tableFrom": "vault_grants",
+          "tableTo": "projects",
+          "columnsFrom": [
+            "project_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "vault_grants_environment_id_fkey": {
+          "name": "vault_grants_environment_id_fkey",
+          "tableFrom": "vault_grants",
+          "tableTo": "environments",
+          "columnsFrom": [
+            "environment_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "vault_grants_one_place": {
+          "name": "vault_grants_one_place",
+          "value": "((\"vault_grants\".\"project_id\" IS NULL) <> (\"vault_grants\".\"environment_id\" IS NULL) AND \"vault_grants\".\"environment_slug\" IS NULL) OR (\"vault_grants\".\"project_id\" IS NULL AND \"vault_grants\".\"environment_id\" IS NULL)"
+        },
+        "vault_grants_environment_slug_check": {
+          "name": "vault_grants_environment_slug_check",
+          "value": "\"vault_grants\".\"environment_slug\" IS NULL OR (length(\"vault_grants\".\"environment_slug\") BETWEEN 1 AND 63 AND \"vault_grants\".\"environment_slug\" GLOB '[a-z0-9]*' AND \"vault_grants\".\"environment_slug\" NOT GLOB '*[^a-z0-9-]*')"
+        },
+        "vault_grants_role_check": {
+          "name": "vault_grants_role_check",
+          "value": "\"vault_grants\".\"role\" IN ('viewer', 'developer', 'maintainer', 'access-manager', 'auditor', 'owner')"
+        },
+        "vault_grants_environment_role_check": {
+          "name": "vault_grants_environment_role_check",
+          "value": "(\"vault_grants\".\"environment_id\" IS NULL AND \"vault_grants\".\"environment_slug\" IS NULL) OR \"vault_grants\".\"role\" IN ('viewer', 'developer', 'auditor')"
+        }
+      }
+    },
+    "vault_members": {
+      "name": "vault_members",
+      "columns": {
+        "principal": {
+          "name": "principal",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "owner": {
+          "name": "owner",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": false
+        },
+        "generation": {
+          "name": "generation",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_by": {
+          "name": "created_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "status_changed_at": {
+          "name": "status_changed_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "status_changed_by": {
+          "name": "status_changed_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "access_seq": {
+          "name": "access_seq",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "mac": {
+          "name": "mac",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "vault_members_mac_check": {
+          "name": "vault_members_mac_check",
+          "value": "octet_length(\"vault_members\".\"mac\") = 32"
+        },
+        "vault_members_principal_check": {
+          "name": "vault_members_principal_check",
+          "value": "(\"vault_members\".\"principal\" GLOB 'user:?*' OR \"vault_members\".\"principal\" GLOB 'token:?*' OR \"vault_members\".\"principal\" GLOB 'sync:?*')\n        AND substr(\"vault_members\".\"principal\", instr(\"vault_members\".\"principal\", ':') + 1, 1) <> ':'\n        AND instr(\"vault_members\".\"principal\", ' ') = 0 AND instr(\"vault_members\".\"principal\", char(9)) = 0\n        AND instr(\"vault_members\".\"principal\", char(10)) = 0 AND instr(\"vault_members\".\"principal\", char(13)) = 0"
+        },
+        "vault_members_user_lowercase": {
+          "name": "vault_members_user_lowercase",
+          "value": "\"vault_members\".\"principal\" NOT LIKE 'user:%' OR \"vault_members\".\"principal\" = lower(\"vault_members\".\"principal\")"
+        },
+        "vault_members_status_check": {
+          "name": "vault_members_status_check",
+          "value": "\"vault_members\".\"status\" IN ('active', 'removed')"
+        },
+        "vault_members_owner_check": {
+          "name": "vault_members_owner_check",
+          "value": "NOT \"vault_members\".\"owner\" OR (\"vault_members\".\"status\" = 'active' AND \"vault_members\".\"principal\" LIKE 'user:%')"
+        },
+        "vault_members_generation_check": {
+          "name": "vault_members_generation_check",
+          "value": "\"vault_members\".\"generation\" >= 0"
+        }
+      }
+    }
+  },
+  "views": {},
+  "enums": {},
+  "_meta": {
+    "schemas": {},
+    "tables": {},
+    "columns": {}
+  },
+  "internal": {
+    "indexes": {
+      "audit_log_unbind_idx": {
+        "columns": {
+          "json_extract(\"metadata\", '$.bindingId')": {
+            "isExpression": true
+          }
+        }
+      },
+      "audit_log_exchange_idx": {
+        "columns": {
+          "json_extract(\"metadata\", '$.credentialId')": {
+            "isExpression": true
+          }
+        }
+      }
+    }
+  }
+}

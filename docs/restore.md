@@ -37,6 +37,12 @@ the tables of one database at one point in time: members and grants, the log
 that records them, the versions it names. Never restore some tables, or two
 databases to different moments.
 
+A backup taken before a project or environment was [deleted for
+good](architecture.md#deleting-for-good) still holds its encrypted values,
+and restoring it brings them back, readable with the vault key. Deleting
+frees the live database, not its copies: expire backups as your retention
+policy says.
+
 Stop traffic first. An instance left running against the old database keeps
 writing to it, and one pointed at the restored database while still running
 refuses to append behind the log head it remembers (`LogRewound`), which is

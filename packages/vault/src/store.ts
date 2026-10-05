@@ -2,9 +2,9 @@ import type { GrantPlace } from '@coffre/core/access';
 import type { Author, StoredEntry } from '@coffre/core/audit';
 import { ACCESS_ACTIONS, type SecretRef, type WrappedKey } from '@coffre/core/vault';
 import { tablesOf, type Queryable, type Transaction } from '@coffre/db';
-import { clockMillis, engineOf, forUpdate } from '@coffre/db/dialect';
+import { clockMillis, engineOf, forUpdate, tombstone, truth } from '@coffre/db/dialect';
 import { readGrants, type GrantRow } from '@coffre/db/grants';
-import { and, asc, count, desc, eq, gt, gte, inArray, isNull, lt, lte, sql } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gt, gte, inArray, isNull, lt, lte, or, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 
 /**
  * Every query the vault makes, and the only code in it that holds them.
@@ -150,16 +150,27 @@ function at(db: Queryable, place: Place) {
   );
 }
 
-/** Each of these environments that exists, by id, with its project and its slug: what grants on one slug in every project match. */
+/**
+ * Each of these environments that exists, by id, with its project, its
+ * slug, what grants on one slug in every project match, and whether it was
+ * deleted, alone or with its project: then no key under it opens, or is
+ * wrapped, whatever grant would cover it.
+ */
 export async function environmentsById(
   db: Queryable,
   ids: readonly string[],
-): Promise<Map<string, { projectId: string; slug: string }>> {
+): Promise<Map<string, { projectId: string; slug: string; deleted: boolean }>> {
   if (ids.length === 0) return new Map();
-  const { environments } = tablesOf(db);
+  const { environments, projects } = tablesOf(db);
   const rows = await db
-    .select({ id: environments.id, projectId: environments.projectId, slug: environments.slug })
+    .select({
+      id: environments.id,
+      projectId: environments.projectId,
+      slug: environments.slug,
+      deleted: truth(or(tombstone(environments.slug), tombstone(projects.slug))!),
+    })
     .from(environments)
+    .innerJoin(projects, eq(projects.id, environments.projectId))
     .where(inArray(environments.id, [...new Set(ids)]));
   return new Map(rows.map(({ id, ...environment }) => [id, environment]));
 }
@@ -194,7 +205,7 @@ export async function wrappedUnder(db: Queryable, provider: string, keyId: strin
     })
     .from(secretVersions)
     .innerJoin(secrets, eq(secrets.id, secretVersions.secretId))
-    .where(and(eq(secretVersions.kekProvider, provider), eq(secretVersions.kekId, keyId)))
+    .where(and(eq(secretVersions.kekProvider, provider), eq(secretVersions.kekId, keyId), sealed(secretVersions.wrappedDek)))
     .orderBy(desc(secretVersions.createdAt))
     .limit(limit);
   return rows.map((row) => ({ ...row, bytes: Buffer.from(row.bytes) }));
@@ -205,20 +216,25 @@ export async function places(
   db: Queryable,
   projectIds: readonly string[],
   environmentIds: readonly string[],
-): Promise<{ projects: Set<string>; environments: Map<string, string> }> {
+): Promise<{ projects: Set<string>; environments: Map<string, string>; deleted: Set<string> }> {
   const { projects, environments } = tablesOf(db);
   const [foundProjects, foundEnvironments] = await Promise.all([
-    projectIds.length === 0 ? [] : db.select({ id: projects.id }).from(projects).where(inArray(projects.id, [...projectIds])),
+    projectIds.length === 0
+      ? []
+      : db.select({ id: projects.id, deleted: truth(tombstone(projects.slug)) }).from(projects).where(inArray(projects.id, [...projectIds])),
     environmentIds.length === 0
       ? []
       : db
-          .select({ id: environments.id, projectId: environments.projectId })
+          .select({ id: environments.id, projectId: environments.projectId, deleted: truth(or(tombstone(environments.slug), tombstone(projects.slug))!) })
           .from(environments)
+          .innerJoin(projects, eq(projects.id, environments.projectId))
           .where(inArray(environments.id, [...environmentIds])),
   ]);
   return {
     projects: new Set(foundProjects.map((row) => row.id)),
     environments: new Map(foundEnvironments.map((row) => [row.id, row.projectId])),
+    // The projects and environments among them that were deleted, alone or with their project.
+    deleted: new Set([...foundProjects, ...foundEnvironments].filter((row) => row.deleted).map((row) => row.id)),
   };
 }
 
@@ -433,8 +449,21 @@ export async function vaultEntriesOf(
   return stored(rows);
 }
 
-/** A stored version and the binding and key the vault reads for itself. */
-export type SecretVersion = { id: string; secret: SecretRef; wrapped: WrappedKey };
+/**
+ * A version that still holds its wrapped key. A deleted place's versions are
+ * erased, their keys emptied: there is nothing left to open, or to try a
+ * vault key on.
+ */
+function sealed(wrappedDek: SQLWrapper): SQL {
+  return sql`length(${wrappedDek}) > 0`;
+}
+
+
+/**
+ * A stored version and the binding and key the vault reads for itself, and
+ * whether its place was deleted. An erased version outside one is no version.
+ */
+export type SecretVersion = { id: string; secret: SecretRef; wrapped: WrappedKey; deleted: boolean };
 
 export async function versions(db: Queryable, ids: readonly string[]): Promise<SecretVersion[]> {
   if (ids.length === 0) return [];
@@ -453,14 +482,16 @@ export async function versions(db: Queryable, ids: readonly string[]): Promise<S
       kekId: secretVersions.kekId,
       kekVersion: secretVersions.kekVersion,
       wrappedDek: secretVersions.wrappedDek,
+      deleted: truth(or(tombstone(environments.slug), tombstone(projects.slug))!),
     })
     .from(secretVersions)
     .innerJoin(secrets, eq(secrets.id, secretVersions.secretId))
     .innerJoin(environments, eq(environments.id, secrets.environmentId))
     .innerJoin(projects, eq(projects.id, secrets.projectId))
-    .where(inArray(secretVersions.id, [...new Set(ids)]));
+    .where(and(inArray(secretVersions.id, [...new Set(ids)]), or(sealed(secretVersions.wrappedDek), tombstone(environments.slug), tombstone(projects.slug))));
   return rows.map((row) => ({
     id: row.id,
+    deleted: row.deleted,
     secret: {
       projectId: row.projectId,
       environmentId: row.environmentId,

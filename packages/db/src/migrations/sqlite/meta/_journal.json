@@ -43,6 +43,13 @@
       "when": 1791191062832,
       "tag": "0005_instance_grants",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1791203047923,
+      "tag": "0006_deletions",
+      "breakpoints": true
     }
   ]
 }

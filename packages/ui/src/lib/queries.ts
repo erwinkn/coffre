@@ -236,6 +236,20 @@ export const queries = {
    */
   auditChain: (client: CoffreClient) =>
     queryOptions({ queryKey: [...keys.audit, 'chain'], staleTime: 0, queryFn: () => verifyChain(client) }),
+  /** What deleting `market` or `market/prod` would take, asked afresh each time it is shown. */
+  deletion: (client: CoffreClient, path: string) =>
+    queryOptions({
+      queryKey: ['deletion', path],
+      staleTime: 0,
+      gcTime: 0,
+      queryFn: () =>
+        uiResult(async () => {
+          const { deletion } = path.includes('/')
+            ? await client.environments.previewDelete(path)
+            : await client.projects.previewDelete(path);
+          return { deletion };
+        }),
+    }),
 };
 
 /**

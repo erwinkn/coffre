@@ -7,7 +7,7 @@
 import { openSync, closeSync, writeSync, rmSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 
-import { apiMember, serviceName, shownMember, type CoffreClient, type InheritedGrant } from '@coffre/client';
+import { apiMember, serviceName, shownMember, type CoffreClient, type Deletion, type InheritedGrant } from '@coffre/client';
 
 import { describeRemoval, serviceMember } from './trust.ts';
 
@@ -163,6 +163,45 @@ export async function environmentsArchive(connect: () => CoffreClient, args: str
   const api = connect();
   await api.environments.update(path, { archived });
   io.out.write(archived ? `archived ${path}: \`coffre environments unarchive ${path}\` brings it back\n` : `unarchived ${path}\n`);
+}
+
+/**
+ * An archived project or environment deleted for good: first shown, what it
+ * would erase and revoke, then, with --apply, deleted. Asked again after a
+ * deletion cut off partway, it finishes it.
+ */
+export async function placeDelete(connect: () => CoffreClient, args: string[], environment: boolean, io: Io = STDIO): Promise<void> {
+  const { values, positionals } = parse(args, { apply: { type: 'boolean', default: false } }, [environment ? '<project>/<environment>' : '<project>']);
+  const where = place(positionals[0]!, environment);
+  const path = environment ? `${where.project}/${where.environment}` : where.project;
+  const api = connect();
+  const places = environment ? api.environments : api.projects;
+  if (!values.apply) {
+    io.out.write(describeDeletion((await places.previewDelete(path)).deletion, false));
+    return;
+  }
+  io.out.write(describeDeletion((await places.delete(path)).deletion, true));
+}
+
+/** What a deletion takes, before or after: what it erases, revokes and keeps. */
+export function describeDeletion(deletion: Deletion, done: boolean): string {
+  const { path, tombstone, environments, keys, versions, grants, stranded } = deletion;
+  const count = (n: number, one: string) => `${n} ${one}${n === 1 ? '' : 's'}`;
+  const where = environments.length === 0 ? '' : `, in ${environments.join(', ')}`;
+  const revoked = grants.map((grant) => `${shownMember(grant.member)} (${grant.role} on ${grant.place})`);
+  const lines = [
+    done ? `deleted ${path}, for good:` : `would delete ${path}, for good:`,
+    `  erased: ${count(versions, 'version')}, each one's ciphertext and wrapped data key${where}`,
+    `  revoked: ${count(grants.length, 'grant')}${revoked.length === 0 ? '' : `, ${revoked.join(', ')}`}`,
+    `  kept, names only: ${tombstone} and its ${count(keys, 'key')}, which the audit log names`,
+    `  ${path.split('/').at(-1)} ${done ? 'is' : 'would be'} free to use again`,
+  ];
+  for (const member of stranded) {
+    const offboard = member.startsWith('token:') ? `coffre offboard ${serviceName(member)} --service` : `coffre offboard ${member.slice('user:'.length)}`;
+    lines.push(`  ${shownMember(member)} ${done ? 'holds' : 'would hold'} nothing anywhere: \`${offboard}\` removes them`);
+  }
+  if (!done) lines.push('Backups taken before the deletion still hold the encrypted values.', 'Nothing changed. Re-run with --apply to delete it.');
+  return `${lines.join('\n')}\n`;
 }
 
 // --- a secret's key -----------------------------------------------------------

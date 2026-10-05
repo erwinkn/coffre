@@ -3584,6 +3584,18 @@ a.env-card-name:hover {
   margin-top: 1.125rem;
 }
 
+.dialog-body + .dialog-body {
+  margin-top: 0.875rem;
+}
+
+/* What a deletion takes, before it is confirmed: one line per kind. */
+.deletion-summary {
+  margin: 0;
+  padding-left: 1.125rem;
+  display: grid;
+  gap: 0.375rem;
+}
+
 .dialog-actions {
   display: flex;
   justify-content: flex-end;

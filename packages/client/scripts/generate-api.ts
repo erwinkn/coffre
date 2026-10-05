@@ -26,6 +26,8 @@ const NAMED = {
   AuthInfo: 'fetch-api.ts',
   BindingPlan: 'api/workloads.ts',
   BindingView: 'api/workloads.ts',
+  Deletion: 'api/projects.ts',
+  DeletionResult: 'api/projects.ts',
   WorkloadIds: 'api/workloads.ts',
   DryRunOutcome: 'api/secrets.ts',
   DryRunResult: 'api/secrets.ts',
