@@ -159,8 +159,12 @@ async function optimistic<T>(ctx: ApiContext, work: () => Promise<T>): Promise<T
   });
 }
 
-/** The audit head is already held, so an archive cannot commit until we do. */
-async function checkEnvironment(tx: Transaction, place: ResolvedPath, expected: Environment): Promise<void> {
+/**
+ * The place as it is under the log's head, which every write to a place
+ * takes first: archived or deleted since the router found it, it takes no
+ * write. The head is held, so an archive or a deletion cannot commit until we do.
+ */
+export async function checkEnvironment(tx: Transaction, place: ResolvedPath, expected: Environment): Promise<void> {
   const current = await resolvePath(tx, { project: place.project.slug, environment: place.environment!.slug });
   if (current === null) throw notFound('unknown project or environment');
   const live = requireLive(current);

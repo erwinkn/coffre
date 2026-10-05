@@ -126,6 +126,23 @@ export async function environmentsCreate(connect: () => CoffreClient, args: stri
   io.out.write(reachedBy('who reaches it already:', made.inherited));
 }
 
+/**
+ * `coffre fork market/prod staging`: a new environment beside it, with each
+ * live key's value and folder, and none of its history. Copying is a read,
+ * logged as one; running it again fills the environment if it stopped
+ * half way.
+ */
+export async function fork(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
+  const { values, positionals } = parse(args, naming, ['<project>/<environment>', '<new-environment>']);
+  const { project, environment: from } = place(positionals[0]!, true);
+  const slug = positionals[1]!;
+  if (slug.includes('/')) throw new UsageError(`name the new environment alone, as in staging, not "${slug}": it goes in ${project}`);
+  const api = connect();
+  const made = await api.environments.create(`${project}/${slug}`, { name: values.name ?? slug, from: from! });
+  const keys = made.forked?.keys ?? 0;
+  io.out.write(`${made.created ? 'created' : 'filled'} ${project}/${made.environment.slug} from ${project}/${from}: ${keys} key${keys === 1 ? '' : 's'}, values copied, no history\n`);
+}
+
 /** The patch `--name` and `--slug` make: one of them at least. */
 function renamed(values: { name?: string; slug?: string }): { name?: string; slug?: string } {
   if (values.name === undefined && values.slug === undefined) throw new UsageError('give it a new --name, a new --slug, or both');

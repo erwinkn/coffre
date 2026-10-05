@@ -106,6 +106,7 @@ const READ_VERBS: Record<string, [did: string, tried: string]> = {
   reveal: ['revealed', 'reveal'],
   run: ['ran', 'run'],
   compare: ['compared', 'compare'],
+  copy: ['copied', 'copy'],
   sync: ['read', 'read'],
 };
 
@@ -116,7 +117,13 @@ function readVerb({ entry }: Facts): [string, string] {
 const placeTemplates = (kind: 'project' | 'environment'): Record<string, Template> => {
   const what = (facts: Facts): Part[] => [`${kind} `, ...(kind === 'project' ? place({ ...facts.entry, environment: null, key: null }) : environmentOf(facts.entry))];
   return {
-    [`${kind}.create`]: { did: 'created', tried: 'create', what },
+    [`${kind}.create`]: {
+      did: 'created',
+      tried: 'create',
+      what,
+      // A fork names the environment it copied.
+      then: ({ entry }) => (text(entry.metadata.from) === null ? [] : [`, a fork of ${text(entry.metadata.from)}`]),
+    },
     [`${kind}.update`]: { did: 'changed', tried: 'change', what },
     [`${kind}.archive`]: { did: 'archived', tried: 'archive', what },
     [`${kind}.restore`]: { did: 'restored', tried: 'restore', what },
@@ -166,6 +173,11 @@ const TEMPLATES: Record<string, Template> = {
     then: ({ entry }) => intoFolder(entry),
   },
   ...placeTemplates('environment'),
+  'environment.fork': {
+    did: 'forked',
+    tried: 'fork',
+    what: ({ entry }) => [...environmentOf(entry), ...(text(entry.metadata.slug) === null ? [] : [` into ${text(entry.metadata.slug)}`])],
+  },
   'access.grant': {
     did: 'gave',
     tried: 'give',

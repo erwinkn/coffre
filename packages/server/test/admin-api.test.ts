@@ -104,6 +104,7 @@ test('creating a project or environment that exists changes nothing and logs not
     environment: { slug: 'prod', name: 'Production', archivedAt: null },
     created: false,
     inherited: [],
+    forked: null,
   });
   assert.equal(await auditCount(), logged);
 });
@@ -155,6 +156,7 @@ test('project owners create environments; environment-scoped grants do not', asy
     environment: { slug: 'staging', name: 'Staging', archivedAt: null },
     created: true,
     inherited: [],
+    forked: null,
   });
   await root.access.set(READER, { 'market/prod': 'developer' });
   await assert.rejects(reader.environments.create('market/nope', { name: 'Nope' }), { status: 403 });

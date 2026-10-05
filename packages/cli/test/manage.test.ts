@@ -256,6 +256,15 @@ test('move files a project or a secret in a folder, or takes it out with --none'
   await assert.rejects(manage.move(connect, ['market/prod', 'x'], io), /expected <project>\/<environment>\/<KEY>/);
 });
 
+test('fork makes the new environment from its sibling, and says how many keys it copied', async () => {
+  const { connect, calls, written, io } = fixture(() => ({ environment: { slug: 'staging', name: 'Staging', archivedAt: null }, created: true, forked: { from: 'prod', keys: 3 } }));
+  await manage.fork(connect, ['market/prod', 'staging'], io);
+  assert.deepEqual(calls, [{ method: 'PUT', path: '/projects/market/staging', body: { name: 'staging', from: 'prod' } }]);
+  assert.equal(written.out, 'created market/staging from market/prod: 3 keys, values copied, no history\n');
+  await assert.rejects(manage.fork(connect, ['market/prod', 'other/staging'], io), /name the new environment alone/);
+  await assert.rejects(manage.fork(connect, ['market', 'staging'], io), /expected <project>\/<environment>/);
+});
+
 test('lists group by folder: the unfiled first, then each folder by name, each in its own order', () => {
   const rows = [{ key: 'B', folder: 'stripe' }, { key: 'A', folder: null }, { key: 'C', folder: 'database' }, { key: 'D', folder: 'stripe' }];
   assert.deepEqual(byFolder(rows).map(([folder, keys]) => [folder, keys.map((row) => row.key)]), [

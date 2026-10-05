@@ -9,7 +9,8 @@ import type { ApiContext } from './context.ts';
 import { notFound } from './errors.ts';
 import { listMembers, memberReport, putMember, removeMember } from './members.ts';
 import { parseGrantee, parseMember, parsePath, type ResolvedPath } from './paths.ts';
-import { deletePlace, listProjects, me, patchEnvironment, patchProject, putEnvironment, putProject } from './projects.ts';
+import { forkEnvironment, type Forked } from './forks.ts';
+import { deletePlace, listProjects, me, patchEnvironment, patchProject, putEnvironment, putProject, type InheritedGrant, type PlaceView } from './projects.ts';
 import {
   dryRunSecrets,
   listSecrets,
@@ -126,11 +127,15 @@ export const routes = {
     run: (ctx, { place, query }) => deletePlace(ctx, place, { dryRun: query.dryRun !== undefined }),
   }),
   ...route('PUT /projects/:project/:environment', {
-    input: z.object({ name: displayName }),
+    // `from` forks a sibling: its keys, values and folders, without history.
+    input: z.object({ name: displayName, from: slug.optional() }),
     needs: { permission: 'environment.manage', on: 'project' },
     action: 'environment.create',
     creates: true,
-    run: (ctx, { params, place, input }) => putEnvironment(ctx, place, params.environment, input),
+    run: async (ctx, { params, place, input }): Promise<{ environment: PlaceView; created: boolean; inherited: InheritedGrant[]; forked: Forked | null }> =>
+      input.from === undefined
+        ? { ...(await putEnvironment(ctx, place, params.environment, input)), forked: null }
+        : forkEnvironment(ctx, place, params.environment, { name: input.name, from: input.from }),
   }),
   ...route('PATCH /projects/:project/:environment', {
     input: placePatch,

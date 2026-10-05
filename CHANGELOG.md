@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+**Forks.** `coffre fork market/prod staging` makes `market/staging`, with
+each of prod's live keys, its current value and its folder, and none of its
+history. Copying is reading: it needs read on prod, and the vault logs one
+`secret.read` per key with the purpose `copy`, then a write per key. The
+UI's "Add environment" offers "Start from: a copy of prod". If a fork stops
+half way, the environment stays, and forking into it again, as long as it
+has no live secret, fills it. `PUT /api/projects/market/staging {"name":
+"Staging", "from": "prod"}` (docs/design/environments.md).
+
 **Folders.** Projects, and the secrets of an environment, can be filed in
 folders, one level deep: `Clients / acme`, `database/`, `stripe/`. A folder
 arranges a list and does nothing else: it grants, hides and renames

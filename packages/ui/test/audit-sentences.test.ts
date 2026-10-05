@@ -174,6 +174,8 @@ test('every other action has a sentence', () => {
     [{ action: 'secret.unarchive', ...prod, key: 'OLD' }, 'brought back market/prod/OLD'],
     [{ action: 'secret.move', ...prod, key: 'STRIPE_KEY', metadata: { from: null, to: 'stripe' } }, 'moved market/prod/STRIPE_KEY to the folder stripe'],
     [{ action: 'secret.move', ...prod, key: 'STRIPE_KEY', metadata: { from: 'stripe', to: null } }, 'moved market/prod/STRIPE_KEY out of its folder'],
+    [{ action: 'environment.create', project: 'market', environment: 'staging', metadata: { slug: 'staging', from: 'prod' } }, 'created environment market/staging, a fork of prod'],
+    [{ action: 'environment.fork', ...prod, decision: 'deny', reason: 'missing_secret_read', metadata: { from: 'prod', slug: 'staging' } }, 'tried to fork market/prod into staging: no grant to read it'],
     [{ action: 'project.move', project: 'acme', metadata: { from: null, to: 'Clients' } }, 'moved project acme to the folder Clients'],
     [{ action: 'member.add', subject: 'user:eve@acme.example' }, 'added eve@acme.example'],
     [{ action: 'member.restore', subject: 'user:eve@acme.example' }, 'brought back eve@acme.example'],

@@ -20,6 +20,7 @@ import { useAction } from '../lib/use-action';
 import type { GrantRow, ProjectSummary } from '../shared/models';
 import {
   hasEnvironmentDetails,
+  isActiveAccessibleEnvironment,
   type ProjectEnvironment,
 } from '../lib/project-environments';
 import { folderProblem, slugProblem } from '../lib/validation';
@@ -266,7 +267,10 @@ function EnvironmentsPanel({
 
       {canManage && (
         <div className="table-actions">
-          <NewEnvironment project={project.slug} />
+          <NewEnvironment
+            project={project.slug}
+            sources={current.filter(isActiveAccessibleEnvironment).map((environment) => environment.slug)}
+          />
         </div>
       )}
 
@@ -593,10 +597,16 @@ function EnvironmentCard({
   );
 }
 
-function NewEnvironment({ project }: { project: string }) {
+/**
+ * A new environment, empty, or forked from one you can read: each of its
+ * keys copied, value and folder, without history. Copying is a read, and
+ * logged as one.
+ */
+function NewEnvironment({ project, sources }: { project: string; sources: string[] }) {
   const [open, setOpen] = useState(false);
   const [slug, setSlug] = useState('');
   const [name, setName] = useState('');
+  const [from, setFrom] = useState('');
   const create = useChange(createEnvironment(useCoffre(), project));
   const slugError = slug === '' ? null : slugProblem(slug);
   const reachedBy = reaching(useEveryProject(), slugError === null && slug !== '' ? slug : null);
@@ -626,9 +636,10 @@ function NewEnvironment({ project }: { project: string }) {
           onSubmit={(event) => {
             event.preventDefault();
             // Listed at once, as saving; the list says if the server refuses.
-            create({ slug, name: name.trim() });
+            create({ slug, name: name.trim(), ...(from === '' ? {} : { from }) });
             setSlug('');
             setName('');
+            setFrom('');
             close();
           }}
         >
@@ -665,6 +676,24 @@ function NewEnvironment({ project }: { project: string }) {
               onChange={(event) => setName(event.target.value)}
             />
           </label>
+          {sources.length > 0 && (
+            <label className="field">
+              <span className="label">Start from</span>
+              <select className="select" value={from} onChange={(event) => setFrom(event.target.value)}>
+                <option value="">Empty</option>
+                {sources.map((source) => (
+                  <option key={source} value={source}>
+                    A copy of {source}
+                  </option>
+                ))}
+              </select>
+              <span className="hint">
+                {from === ''
+                  ? 'No secrets yet.'
+                  : `Each of ${from}'s keys, with its current value and folder, without history. Copying reads them, in your name.`}
+              </span>
+            </label>
+          )}
 
           <ReachedBy grants={reachedBy} lead="As soon as it exists, it is reached by" />
 
