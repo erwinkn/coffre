@@ -201,11 +201,14 @@ test("a deployment pins coffre's pnpm, beside \"private\", whatever it had", () 
   }
 });
 
-test("the Start app's packages update moves are @coffre/ui's peers, and Vite's plugins for them", () => {
+test("the Start app's packages update moves are @coffre/ui's peers, Vite's plugins for them, and what Cloudflare's peers on", () => {
   const { peerDependencies } = JSON.parse(readFileSync(join(examples, '..', 'packages', 'ui', 'package.json'), 'utf8')) as {
     peerDependencies: Record<string, string>;
   };
-  assert.deepEqual([...START_PACKAGES].sort(), [...Object.keys(peerDependencies), '@vitejs/plugin-react', '@cloudflare/vite-plugin'].sort());
+  assert.deepEqual(
+    [...START_PACKAGES].sort(),
+    [...Object.keys(peerDependencies), '@vitejs/plugin-react', '@cloudflare/vite-plugin', 'wrangler', '@cloudflare/workers-types'].sort(),
+  );
 });
 
 test("a deployment's Start app packages move to the template's versions, and nothing else does", () => {

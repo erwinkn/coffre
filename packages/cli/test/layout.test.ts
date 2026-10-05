@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { bumpPins, coffrePins } from '../src/deployment.ts';
+import { bumpPins, coffrePins, movePins, startPinMoves } from '../src/deployment.ts';
 import { templateDir, templateFiles, type Kind } from '../src/init.ts';
 import { after, applyChanges, blob, lineDiff, NODE_ENTRIES, pageMove, ROUTE_FILES, shownChange, startAppMove, undo, WORKERS_ENTRIES, type Move } from '../src/layout.ts';
 
@@ -50,8 +50,9 @@ for (const kind of ['workers', 'node'] as const) {
     try {
       const template = templateDir(kind);
       applyChanges(dir, changesOf(startAppMove(dir, kind, template)));
-      // What update does next: the pins, to the release.
+      // What update does next: the pins, to the release, and the Start app's packages, to the template's.
       bumpPins(dir, Object.values(coffrePins(template))[0]!);
+      movePins(dir, startPinMoves(dir, template));
       for (const path of templateFiles(template)) {
         assert.equal(readFileSync(join(dir, path), 'utf8'), readFileSync(join(template, path), 'utf8'), path);
       }

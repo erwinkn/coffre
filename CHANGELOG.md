@@ -10,6 +10,16 @@ branch main, by push would no longer sign in as token:api-deploy, and the
 credentials they hold would end at once." A script that ran `coffre
 untrust <service> <id>` adds `--apply`.
 
+**wrangler 4.142, and `wrangler dev` stays up.** The Workers deployment's
+wrangler moves from 4.118.0 to 4.142.0, with Cloudflare's Vite plugin
+(1.50.0 to 1.61.0, which pins it) and the Workers types (5.20260926.1).
+Under `wrangler dev` before 4.131, one request that met an idle internal
+connection as it closed, about five seconds after the last, or a client
+gone mid-upload, ended the whole dev server with an empty `✘ [ERROR]`
+(cloudflare/workers-sdk#15203 and #14641, fixed by #15252): a local run, or
+`pnpm conformance`, would stop partway. `coffre update` now moves wrangler
+and the Workers types with the plugin.
+
 **Everything the API does, the CLI does.** The commands that were the
 browser's alone:
 
