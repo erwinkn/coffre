@@ -1889,12 +1889,14 @@ a.crumb-link:hover {
    before. Stacked rows, on a phone, have the room. */
 @media (min-width: 44.0625rem) {
   .grants td.col-actions,
-  .directory td.col-actions {
+  .directory td.col-actions,
+  .secrets td.col-actions {
     position: relative;
   }
 
   .grants .col-actions > .row-pending,
-  .directory .col-actions > .row-pending {
+  .directory .col-actions > .row-pending,
+  .secrets .col-actions > .row-pending {
     position: absolute;
     top: 50%;
     right: 0.375rem;
@@ -1966,9 +1968,27 @@ a.crumb-link:hover {
   width: 12rem;
 }
 
-/* Three square actions at most (reveal, edit, more), and the cell's padding. */
+/* One square action, the row's menu, and the cell's padding. */
 .secrets .col-actions {
-  width: calc(3 * 1.75rem + 2 * 0.125rem + 0.75rem);
+  width: calc(1.75rem + 0.75rem);
+}
+
+/* A value and what acts on it: Copy, Reveal and Edit, or Save and Cancel,
+   at the cell's right. */
+.value-cell {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.value-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.value-acts {
+  flex: none;
 }
 
 .secrets-archived .col-key {
@@ -2057,20 +2077,7 @@ a.crumb-link:hover {
   padding: 0.125rem 0 0.375rem;
 }
 
-.revealed-line {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.25rem;
-}
-
-.revealed-line .act {
-  flex: none;
-  margin-top: -0.25rem;
-}
-
 .revealed-value {
-  flex: 1;
-  min-width: 0;
   font-family: var(--font-mono);
   font-size: 0.8125rem;
   font-variant-ligatures: none;

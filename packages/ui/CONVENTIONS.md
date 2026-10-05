@@ -11,7 +11,12 @@ How coffre's pages place and word things. The styles they name are in
   token. A row it adds appears last, next to the button.
 - **On one card: in that card.** A form's Save sits under its fields,
   bottom-left; a form that is the page's only business needs no card.
-- **On one row: in that row,** in its last column.
+- **On a cell's content: in that cell,** at its right: a secret's Copy,
+  Reveal and Edit sit in its Value cell, and while it is edited, Save and
+  Cancel take their place.
+- **On one row: in that row,** in its last column: one "⋯" menu for the
+  rest (history, rename, archive), the column as narrow as its button.
+- **Unsaved changes show on their row** until they are saved or dropped.
 - **On the whole page: in the page header.** Few belong there: a principal's
   menu, Sign out, the audit log's seal.
 
