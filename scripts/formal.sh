@@ -30,6 +30,11 @@ REMOVALS=(
   "Reading SecretPatchRecheckUnderHead DeletedStaysUnreachable"
   "Members MemberRecheckInSignin CredentialsAtCurrentGeneration"
   "Locks SortedMemberLocks NoWaitCycle"
+  "Members ReaderRowLocked NothingReleasedAfterRevocation"
+  "References EndRecheckUnderHead NothingReleasedThroughEndedReference"
+  "Referencing SourceRecheckInReference ReferencedSourcesStayLive"
+  "Referencing ArchiveRefusedWhileRead ReferencedSourcesStayLive"
+  "Referencing ReferenceRereadInDeletion EveryReferenceBreakable"
 )
 
 root="$(cd "$(dirname "$0")/.." && pwd)"

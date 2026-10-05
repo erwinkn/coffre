@@ -44,23 +44,28 @@ counterexamples is printed in CI's log.
 | Renaming, archiving or restoring a key resolves its environment again under the head (`patchSecret`, `checkEnvironment`) | a key renamed in a deleted place, its tombstone's names changed (`DeletedStaysUnreachable`) | reported with #147, fixed in #149 |
 | Sign-in re-reads the member's generation under the head (`#stillMember`) | a credential issued at a generation a removal had moved past (`CredentialsAtCurrentGeneration`) | |
 | Member rows are locked in principal order (`lockMembers`) | two decisions waiting on each other (`NoWaitCycle`) | |
+| A read decides under the reader's row, which a revocation or a removal locks too (`#keys`, through `#decide`) | a value released to a member after their removal committed (`NothingReleasedAfterRevocation`) | |
+| A read through a reference checks again, under the head, that it has not ended (`unwrap`'s `vet`, run again in `underLock`) | a value read through a reference after it was broken (`NothingReleasedThroughEndedReference`) | |
+| Making a reference checks its source again under the head (`secrets.ts`, `setSecrets`) | a reference made to a source archived or deleted meanwhile (`ReferencedSourcesStayLive`) | #152 |
+| Archiving is refused while a live reference from elsewhere reads the place (`references.ts`, `refuseIfRead`) | a live reference reading an archived source (`ReferencedSourcesStayLive`) | #152 |
+| A deletion re-reads the references into and out of the place under the head (`projects.ts`, `referenced_meanwhile`) | a reference held in a deleted place, which no path can break, and whose source can never be archived (`EveryReferenceBreakable`) | this model, fixed in #155 |
 
 Here is #134's first race, as `scripts/formal.sh` prints it, with the grant
 re-read turned off:
 
 - Olga deletes the archived project. Her scope read finds Ada's grant on
-  the environment, and the vault revokes it (steps 4 to 12).
-- Omar then grants Ada the project (14 to 20).
+  the environment, and the vault revokes it (steps 4 to 11).
+- Omar then grants Ada the project (13 to 20).
 - Olga's transaction commits the deletion (22).
 - Ada's grant on the project outlives it, and no path can name the place to
   revoke it.
 
 ```
   4. deleter   DeleteScope     delete proj by olga     -> delete.next
- 12. deleter   CallCommit      delete proj by olga     -> delete.next     grants -ada@env; head deleter -> none
- 13. deleter   DeleteNext      delete proj by olga     -> delete.head
+ 11. deleter   CallCommit      delete proj by olga     -> delete.next     grants -ada@env; log +access.revoke ada@env (deleter); head deleter -> none
+ 12. deleter   DeleteNext      delete proj by olga     -> delete.head
  14. admin     GrantResolve    grant ada@proj by omar  -> call.lock
- 20. admin     CallCommit      grant ada@proj by omar  -> idle            log +access.grant proj (admin); grants +ada@proj
+ 20. admin     CallCommit      grant ada@proj by omar  -> idle            log +access.grant ada@proj (admin); grants +ada@proj
  21. deleter   DeleteHead      delete proj by olga     -> delete.commit   head none -> deleter
  22. deleter   DeleteCommit    delete proj by olga     -> idle            log +delete proj (deleter); slug[proj] s1 -> tomb; held true -> false
 ```
@@ -74,6 +79,22 @@ deletion erases a live project.
  16. admin     PatchCommit     unarchive proj by omar  -> idle            archived[proj] true -> false
  17. deleter   DeleteHead      delete proj by olga     -> delete.commit   head none -> deleter
  18. deleter   DeleteCommit    delete proj by olga     -> idle            log +delete proj (deleter); slug[proj] s1 -> tomb; held true -> false
+```
+
+And the race this model found in references, with the re-read turned
+off. Olga deletes the archived holder's environment, and her scope read
+finds no reference (steps 7 to 9). Meanwhile it is restored, its key is
+made a reference to the secret, and it is archived again (10 to 25). The
+deletion commits (27), and the reference is still live, held in a
+tombstone: no path names its holder to break it, and archiving its source
+is refused while it reads it.
+
+```
+  8. deleter   DeleteScope       delete hold by olga        -> delete.next
+ 14. admin     PatchCommit       unarchive hold by olga     -> idle            head admin -> none; archived[hold] true -> false
+ 23. maker     ReferCommit       refer hold by olga         -> idle            ref none -> maker; head maker -> none
+ 25. admin     PatchCommit       archive hold by olga       -> idle            head admin -> none; archived[hold] false -> true
+ 27. deleter   DeleteCommit      delete hold by olga        -> idle            head deleter -> none; slug[hold] s1 -> tomb; log +delete hold (deleter)
 ```
 
 Each line is one step:
@@ -98,6 +119,10 @@ Traces are shortened here; the script prints every step.
 | `TombstonesKeepTheirSlug`, `TombstonesStayArchived` | A deleted place stays deleted, and archived |
 | `AuditBeforeRelease` | A value reaches its caller only once its `secret.read` entry has committed |
 | `CredentialsAtCurrentGeneration` | A credential is issued to an active member, at the generation they hold when it commits |
+| `NothingReleasedAfterRevocation` | No `secret.read` for a member follows the `access.revoke` or `member.remove` that took their last grant covering where it was decided, unless an `access.grant` covering it again comes between |
+| `NothingReleasedThroughEndedReference` | No `secret.read` through a reference follows its `reference.end`, or the deletion of its source's place or its holder's, in the log |
+| `EveryReferenceBreakable` | A reference that has not ended is held in a standing place, where the API can name its holder, and so break it |
+| `ReferencedSourcesStayLive` | And its source is neither archived nor deleted |
 
 ## The model
 
@@ -119,7 +144,8 @@ Traces are shortened here; the script prints every step.
   - add an environment, or rename, archive or restore a key;
   - sign in;
   - remove a member;
-  - rotate the vault's key.
+  - rotate the vault's key;
+  - make a reference, or break one.
 - **Each operation** follows its code path. For example, a read takes these
   steps:
   - the app resolves the path outside any transaction;
@@ -128,22 +154,34 @@ Traces are shortened here; the script prints every step.
   - it takes the head, appends `secret.read` and commits;
   - the app decrypts.
 
-  A deletion reads its scope, revokes through `setAccess` (the same steps
-  as a grant), then takes the head and re-checks, erases and renames in
-  one transaction.
+  A read through a reference takes the same steps. The reader's grants on
+  the holder decide, and both places, and whether the reference ended, are
+  checked under the row and again under the head.
+
+  A deletion reads its scope and the references into and out of the
+  place. It revokes through `setAccess` (the same steps as a grant), ends
+  the references through the vault's `endReferences`, then takes the head
+  and re-checks, erases and renames in one transaction.
+
+  Making a reference: the app checks both places, the vault seals it with
+  `reference.create` under the maker's row and the head, the reference it
+  replaces is ended, then the app writes its row under the head.
 
 ### The scenarios
 
 | Scenario | Who runs what | States |
 |---|---|---|
-| `Deletion` | One owner deletes a project or an environment, twice. Another grants, revokes, restores or renames, twice | 19 thousand |
-| `Reading` | A place is archived, then deleted. Meanwhile a root admin, a holder of a grant on every project and a holder of a project grant read and write there, and an owner adds an environment or renames a key, twice | 14 thousand |
-| `Members` | A member signs in, reads and writes, while an owner removes them or changes their grants, and the vault rotates its key | 214 thousand |
-| `Locks` | Two owners change each other's grants and remove a member, while the vault rotates its key, which locks every member's row | 12 thousand |
-| `Mixed` | Two owners run nearly every operation on places and grants, while a member reads, writes, signs in or rotates | 951 thousand |
+| `Deletion` | One owner deletes a project or an environment, twice. Another grants, revokes, restores or renames, twice | 22 thousand |
+| `Reading` | A place is archived, then deleted. Meanwhile a root admin, a holder of a grant on every project and a holder of a project grant read and write there, and an owner adds an environment or renames a key, twice | 19 thousand |
+| `Members` | A member signs in, reads and writes, while an owner removes them or changes their grants, and the vault rotates its key | 249 thousand |
+| `Locks` | Two owners change each other's grants and remove a member, while the vault rotates its key, which locks every member's row | 15 thousand |
+| `Mixed` | Two owners run nearly every operation on places and grants, while a member reads, writes, signs in or rotates | 1 million |
+| `References` | A member reads through a reference while an owner breaks it, makes it again, or revokes or removes the reader, and either place is archived, then deleted | 113 thousand |
+| `Referencing` | An owner makes a reference while another archives, restores and archives again either place, and a third deletes one | 13 thousand |
 
 Every scenario starts from one project and its one environment, holding one
-secret.
+secret. A third environment, in another project, holds a key that is a
+reference to that secret in `References`, and none yet elsewhere.
 
 ## What it abstracts
 
@@ -165,17 +203,31 @@ secret.
   the model it ends. A deletion asked again is a second operation.
 - **Admission and restoring a member**, checkpoints, sessions beyond their
   generation, and lapsed grants.
+- **References, to their shape.**
+  - There is one holder and one source, in different projects. A holder
+    inside what is archived, which doesn't block the archive, is left out.
+  - A holder given a value of its own ends its reference with the same
+    vault call as making another, so only the latter is modelled. Making
+    it again to the source it already reads replaces it in the model,
+    where the code leaves it unchanged.
+  - A reference whose write stored no row is ended as `abandoned`
+    afterwards. In the model such a reference has no row, so nothing reads
+    through it either way, and the end is left out.
+  - Left out because they decide nothing about locks or ends: a source
+    that is itself a reference, archiving a single key, and a read refused
+    because the source's version moved.
 
 ## What it does not prove
 
 - **That the code is the model.** The model was written from the code, and
   each step names the function it stands for. Nothing checks that they stay
   alike. A change to the order of locks or re-checks in `vault.ts`,
-  `projects.ts`, `secrets.ts` or `signin.ts` should change `Coffre.tla` in
-  the same pull request.
-- **Beyond the bounds.** The bounds are two places, a few members, and three
-  or four requests of one or two operations each. Races that need more are
-  not explored. The races found so far needed two requests.
+  `projects.ts`, `secrets.ts`, `references.ts` or `signin.ts` should change
+  `Coffre.tla` in the same pull request.
+- **Beyond the bounds.** The bounds are three places, a few members, and three
+  or four requests of one to three operations each. Races that need more are
+  not explored. The races found so far needed two requests, or three for
+  the one in references.
 - **Liveness.** It checks that nothing bad happens, not that every request
   finishes. A deadlock does show, since every run is finite.
 - **Postgres itself.** It assumes Postgres's row locks and READ COMMITTED
