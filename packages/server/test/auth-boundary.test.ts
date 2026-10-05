@@ -254,7 +254,7 @@ test('an unregistered non-root identity is marked for the closed-door boundary',
     requestId: 'unregistered-request',
     sourceIp: null,
     credentialId: null,
-    provenance: null,
+    provenance: null, via: null,
   });
 });
 
@@ -316,7 +316,7 @@ test('an active registered identity receives an auditable request context', asyn
       requestId: 'registered-request',
       sourceIp: null,
       credentialId: null,
-      provenance: null,
+      provenance: null, via: null,
     });
   }
 });

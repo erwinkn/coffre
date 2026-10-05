@@ -15,8 +15,17 @@ tokens rotate, and one presented again, like a code redeemed twice, ends
 the connection. The account page's Connected apps, and `coffre apps` and
 `coffre apps revoke`, list and disconnect them; an owner may disconnect
 anyone's. Each connection, token and disconnection is in the log under the
-client's name, tokens as detail. In this release `/mcp` answers
-`server/discover`; its tools come next. `coffre init` turns it on with
+client's name, tokens as detail. `/mcp` speaks MCP 2026-07-28, stateless,
+and answers a 2025-11-25 or 2025-06-18 client's `initialize` without a
+session. Its tools browse: `whoami`, `list_projects`, `list_secrets`,
+`secret_history`, `list_access`, `describe_member`, `read_audit_log`, and
+`run_with_secrets`, which says how to give a command its secrets with
+`coffre run` and puts no value in the conversation. Each tool is API calls
+as its person, so it can do no more than they could; a call through MCP
+reaches only the API routes its connection's scopes allow, and none of a
+person's own sign-in. Every call is logged under the client (`mcp.read` for
+a read that went through, as detail; `mcp.call` for a refusal), and the
+API's own entries name the connection. `coffre init` turns it on with
 `signin({ mcp })` and three limits: on Workers, the rate-limiting bindings
 `MCP_PER_SOURCE`, `MCP_PER_CONNECTION` and `MCP_TOTAL`; on Node,
 `processLimits()`, which now takes `perConnection` too. `coffre update`

@@ -96,6 +96,7 @@ export function apiContext(runtime: CoffreRuntime, identity: AuthenticatedIdenti
     sourceIp: identity.sourceIp,
     credentialId: identity.credentialId,
     provenance: identity.provenance,
+    via: identity.via,
   };
 }
 

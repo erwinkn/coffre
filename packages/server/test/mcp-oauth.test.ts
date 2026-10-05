@@ -142,7 +142,13 @@ async function connect(email = DEV, client = CLAUDE_CODE, redirect = 'http://loc
 function discover(token: string | null, headers: Record<string, string> = {}): Promise<Response> {
   return route('/mcp', {
     method: 'POST',
-    headers: { 'content-type': 'application/json', ...(token === null ? {} : { authorization: `Bearer ${token}` }), ...headers },
+    headers: {
+      'content-type': 'application/json',
+      'mcp-protocol-version': '2026-07-28',
+      'mcp-method': 'server/discover',
+      ...(token === null ? {} : { authorization: `Bearer ${token}` }),
+      ...headers,
+    },
     body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'server/discover', params: { _meta: { 'io.modelcontextprotocol/protocolVersion': '2026-07-28', 'io.modelcontextprotocol/clientCapabilities': {} } } }),
   });
 }

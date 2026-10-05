@@ -1,3 +1,4 @@
+import { scopeString } from '@coffre/core/mcp';
 import { secretKey, slug } from '@coffre/core/schemas';
 import { z } from 'zod';
 
@@ -7,6 +8,7 @@ import { can, placeOf } from './caller.ts';
 import { denied, missing, refuse, Refusal, type ApiContext } from './context.ts';
 import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
 import { formatPath } from './paths.ts';
+import { challengeScopes, ROUTE_SCOPES } from '../mcp/scopes.ts';
 import { routes, type Check, type Route } from './routes.ts';
 
 type AnyRoute = Route<string, z.ZodType | undefined, unknown, z.ZodType | undefined>;
@@ -137,6 +139,14 @@ export async function serveApi(request: Request, ctx: ApiContext): Promise<Respo
     }
     const { route } = found;
     const { def } = route;
+    if (ctx.via !== null) {
+      // Through MCP, a route is the connection's only within its scopes, whatever the person may do.
+      const needed = ROUTE_SCOPES[`${route.method} ${route.shape}` as keyof typeof ROUTE_SCOPES];
+      if (needed === null || needed === undefined) throw new ApiError('forbidden', 'apps connected through MCP cannot do this: it is for people, in coffre itself');
+      if (!ctx.via.scopes.includes(needed)) {
+        throw new ApiError('insufficient_scope', `this needs the ${needed} scope: connect the app again with it (${scopeString(challengeScopes(ctx.via.scopes, needed))})`, needed);
+      }
+    }
 
     for (const [name, value] of Object.entries(found.params)) {
       if (PARAMS[name] !== undefined && !PARAMS[name].safeParse(value).success) {

@@ -1,4 +1,5 @@
 import type { Permission } from '@coffre/core/access';
+import type { McpScope } from '@coffre/core/mcp';
 import type { Refusal as VaultRefusal, Vault } from '@coffre/core/vault';
 import type { Database, Transaction } from '@coffre/db';
 import { lockLogHead } from '@coffre/db/log';
@@ -11,6 +12,9 @@ import { formatMember } from './paths.ts';
 import type { SigninService } from './signin.ts';
 import type { WorkloadService } from './workloads.ts';
 import type { McpService } from '../mcp/service.ts';
+
+/** A request made through MCP: the connection it came in on, its client, and the scopes its token holds. */
+export type McpVia = { connectionId: string; clientId: string; clientName: string; scopes: readonly McpScope[] };
 
 /** What every handler works with: the stores, and who is asking. */
 export type ApiContext = {
@@ -37,6 +41,12 @@ export type ApiContext = {
    * correlation, so that each leads back to the run (`token.exchange`).
    */
   provenance: string | null;
+  /**
+   * The MCP connection the request came through, for a tool's call: its
+   * entries name it, and the routes it may reach are its scopes' (`ROUTE_SCOPES`).
+   * Its `provenance` is the connection, which the vault's entries carry.
+   */
+  via: McpVia | null;
 };
 
 /** The fields of an audit entry that are the same for everything one request does. */
@@ -53,17 +63,19 @@ export function actor(
 
 type EntryFields = Omit<AuditEntry, 'actorType' | 'actorId' | 'requestId' | 'sourceIp' | 'action' | 'decision'>;
 
-type Writer = Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp'> & { provenance?: string | null };
+type Writer = Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp'> & { provenance?: string | null; via?: McpVia | null };
 
 /**
  * What an entry's metadata adds for a request that came in on a credential
  * a trust binding issued: `credentialId`, the caller's, written last so that
  * nothing the operation says can stand in for it. A credential the operation
- * acts on is its `targetCredentialId`.
+ * acts on is its `targetCredentialId`. Through MCP, the credential is the
+ * connection, and `via` names it and its client, for "ada via Claude".
  */
 function traced(ctx: Writer, metadata: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
   if (ctx.provenance == null) return metadata;
-  return { ...metadata, credentialId: ctx.provenance };
+  const via = ctx.via == null ? {} : { via: { connectionId: ctx.via.connectionId, clientId: ctx.via.clientId, clientName: ctx.via.clientName } };
+  return { ...metadata, ...via, credentialId: ctx.provenance };
 }
 
 export function allowed(

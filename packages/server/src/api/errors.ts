@@ -13,6 +13,7 @@ import { logged } from '../logged.ts';
  *   403 cross_origin       a change sent with a browser cookie, from another site
  *   403 vault_refused      the vault said no; `reason` is its code (`no_grant`, `removed`, ...)
  *   403 bulk_limit         the vault said no: too many secrets read in too short a time
+ *   403 insufficient_scope a request through MCP whose connection lacks the scope the route needs
  *   404 not_found          no such project, environment, secret or member
  *   405 method_not_allowed
  *   409 conflict           the request is valid but the current state refuses it
@@ -29,6 +30,7 @@ export const ERROR_STATUS = {
   cross_origin: 403,
   vault_refused: 403,
   bulk_limit: 403,
+  insufficient_scope: 403,
   not_found: 404,
   method_not_allowed: 405,
   conflict: 409,
