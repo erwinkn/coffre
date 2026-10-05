@@ -5,7 +5,6 @@ import type { Envelope } from '@coffre/core/envelope';
 import { isTombstone } from '@coffre/core/schemas';
 import type { SecretRef, Via } from '@coffre/core/vault';
 import type { Queryable } from '@coffre/db';
-import { applied } from '@coffre/db/schema-version';
 
 import {
   environmentSecrets,
@@ -26,21 +25,8 @@ import { formatMember, type Path } from './paths.ts';
  * References: a secret whose value is another's, read live through it by
  * whoever reads the holder's environment (docs/design/environments.md). The
  * vault makes each one, as its `reference.create` entry, and checks that
- * entry at every read; `secret_references` only points at it. They live in
- * a table this release's migration adds: until it runs, no secret is a
- * reference and making one answers 503.
+ * entry at every read; `secret_references` only points at it.
  */
-export const REFERENCES_MIGRATION = '0008_references';
-
-export function referencesReady(db: Queryable): Promise<boolean> {
-  return applied(db, REFERENCES_MIGRATION);
-}
-
-export async function requireReferences(db: Queryable): Promise<void> {
-  if (!(await referencesReady(db))) {
-    throw new ApiError('unavailable', "references need this release's database migration: an owner runs `coffre migrate`");
-  }
-}
 
 /**
  * Whether a holder reads through its reference now, and if not, why:
@@ -140,22 +126,21 @@ async function currentRows(db: Queryable, secretIds: readonly string[]): Promise
   return newest;
 }
 
-/** The reference each of these holders is now, resolved, keyed by holder; none before the migration. */
+/** The reference each of these holders is now, resolved, keyed by holder. */
 export async function currentReferences(db: Queryable, secretIds: readonly string[]): Promise<Map<string, Resolved>> {
-  if (secretIds.length === 0 || !(await referencesReady(db))) return new Map();
+  if (secretIds.length === 0) return new Map();
   const resolved = await resolveReferences(db, [...(await currentRows(db, secretIds)).values()]);
   return new Map(resolved.map((reference) => [reference.row.holder.secretId, reference]));
 }
 
-/** The references `member` made, `user:ada@acme.example`, each resolved; none before the migration. */
+/** The references `member` made, `user:ada@acme.example`, each resolved. */
 export async function referencesBy(db: Queryable, member: string): Promise<Resolved[]> {
-  if (!(await referencesReady(db))) return [];
   return resolveReferences(db, await referenceRows(db, { createdBy: member }));
 }
 
 /** Live references whose source is one of these secrets: what reads them from elsewhere. */
 export async function readersOf(db: Queryable, secretIds: readonly string[]): Promise<Resolved[]> {
-  if (secretIds.length === 0 || !(await referencesReady(db))) return [];
+  if (secretIds.length === 0) return [];
   const rows = (await referenceRows(db, { sourceSecretIds: [...secretIds] })).filter((row) => row.ended === null);
   const current = await currentRows(db, rows.map((row) => row.holder.secretId));
   return resolveReferences(db, rows.filter((row) => current.get(row.holder.secretId)?.id === row.id));
@@ -176,7 +161,6 @@ export type ArchivedPlace = { projectId: string; environmentId?: string; secretI
  * made, and no holder restored, meanwhile.
  */
 export async function archiveBlockers(db: Queryable, place: ArchivedPlace): Promise<Resolved[]> {
-  if (!(await referencesReady(db))) return [];
   const within = (end: ReferenceRow['holder']) =>
     end.projectId === place.projectId
     && (place.environmentId === undefined || end.environmentId === place.environmentId)
@@ -347,7 +331,6 @@ export async function listReferences(
   if (place === null || (path.environment !== undefined && place.environment === null) || (path.key !== undefined && place.secret === null)) {
     throw notFound('no such project, environment or secret');
   }
-  if (!(await referencesReady(ctx.db))) return { references: [] };
   const rows = (await referenceRows(ctx.db, { projectId: place.project.id })).filter((row) => row.ended === null);
   const current = await currentRows(ctx.db, rows.map((row) => row.holder.secretId));
   const at = (end: ReferenceRow['holder']) =>
@@ -375,7 +358,6 @@ export async function listReferences(
  * from elsewhere, and what it reads. Deleting the place ends them.
  */
 export async function referencesAt(db: Queryable, place: { projectId: string; environmentId: string | null }): Promise<Resolved[]> {
-  if (!(await referencesReady(db))) return [];
   const within = (end: ReferenceRow['holder']) =>
     end.projectId === place.projectId && (place.environmentId === null || end.environmentId === place.environmentId);
   const rows = (await referenceRows(db, { projectId: place.projectId }))
@@ -401,7 +383,6 @@ export async function endReferences(ctx: ApiContext, references: readonly Resolv
  * To anyone else, there is no such reference.
  */
 export async function breakReference(ctx: ApiContext, place: ResolvedPath): Promise<{ reference: ReferenceView }> {
-  await requireReferences(ctx.db);
   const secret = place.secret;
   const reference = secret === null || place.environment === null ? undefined : (await currentReferences(ctx.db, [secret.id])).get(secret.id);
   const { caller } = ctx;

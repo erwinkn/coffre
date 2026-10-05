@@ -222,10 +222,9 @@ test('appendAudit refuses to write nothing', async () => {
 });
 
 test('actors read back as the API shows them', () => {
-  for (const [type, id] of [['user', 'ada@acme.example'], ['service', 'ci-deploy'], ['system', 'coffre-scheduler'], ['system', 'sync:7f3c']] as const) {
+  for (const [type, id] of [['user', 'ada@acme.example'], ['service', 'ci-deploy'], ['system', 'coffre-scheduler']] as const) {
     assert.deepEqual(actorParts(actorOf(type, id)), { actorType: type, actorId: id });
   }
-  assert.equal(actorOf('system', 'sync:7f3c'), 'sync:7f3c');
 });
 
 test('timestamps read as text render as UTC with microseconds, whatever shape the database returns', () => {

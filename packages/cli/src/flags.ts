@@ -33,6 +33,7 @@ const TAKES: Record<string, readonly SessionName[]> = {
   keys: [],
   setup: [],
   update: [],
+  migrate: [],
   use: [],
   roles: [],
   help: [],

@@ -67,13 +67,8 @@ export function appLogKey(chainKey: Buffer): LogKey {
 
 const ACTOR_PREFIX = { user: 'user', service: 'token', system: 'system' } as const;
 
-/**
- * An entry's actor as the log stores it: `user:<email>`, `token:<id>`,
- * `sync:<id>` or `system:<name>`. A sync acts as the system with its own
- * principal as its id, which is already the canonical form.
- */
+/** An entry's actor as the log stores it: `user:<email>`, `token:<id>` or `system:<name>`. */
 export function actorOf(type: AuditEntry['actorType'], id: string): string {
-  if (type === 'system' && id.startsWith('sync:')) return id;
   return `${ACTOR_PREFIX[type]}:${id}`;
 }
 
@@ -83,6 +78,5 @@ export function actorParts(actor: string): { actorType: AuditEntry['actorType'];
   const [prefix, rest] = [actor.slice(0, colon), actor.slice(colon + 1)];
   if (prefix === 'user') return { actorType: 'user', actorId: rest };
   if (prefix === 'token') return { actorType: 'service', actorId: rest };
-  if (prefix === 'sync') return { actorType: 'system', actorId: actor };
   return { actorType: 'system', actorId: rest };
 }

@@ -27,7 +27,12 @@ export type CoffreRuntime = {
   verifier: IdentityVerifier;
   /** Background work that must outlive the response, that is explicitly scheduled. */
   waitUntil: (promise: Promise<unknown>) => void;
+  /** What is known of the database's schema, for as long as the configuration lives: the isolate's, or the process's. */
+  schema: { migrated: boolean };
 };
+
+/** Per configuration: a settled value, never a pending read (AGENTS.md, "What an isolate keeps"). */
+const schemas = new WeakMap<ResolvedConfig, { migrated: boolean }>();
 
 /**
  * The application's services around a database: once per invocation on
@@ -78,7 +83,17 @@ export function createRuntime(
     publicUrl: config.publicUrl,
     verifier,
     waitUntil,
+    schema: schemaOf(config),
   };
+}
+
+function schemaOf(config: ResolvedConfig): { migrated: boolean } {
+  let schema = schemas.get(config);
+  if (schema === undefined) {
+    schema = { migrated: false };
+    schemas.set(config, schema);
+  }
+  return schema;
 }
 
 /** What a handler gets: the runtime's stores and the request's caller. */

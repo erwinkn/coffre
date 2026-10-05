@@ -1,23 +1,19 @@
 import { randomUUID } from 'node:crypto';
 
 import { dismissedKeys } from '@coffre/db/schema';
-import { applied } from '@coffre/db/schema-version';
 
-import { dismissalsIn, environmentSecrets, liveKeysIn, places, update, upsert, type ResolvedPath } from '../db/queries.ts';
+import { dismissalsIn, environmentSecrets, liveKeysIn, places, secretFolderOf, update, upsert, type ResolvedPath } from '../db/queries.ts';
 import { can, placeOf } from './caller.ts';
 import { allowed, audited, type ApiContext } from './context.ts';
 import { ApiError, notFound } from './errors.ts';
-import { secretFoldersIn } from './folders.ts';
 import { checkEnvironment } from './secrets.ts';
 
 /**
  * Missing keys: those the project's other environments have and this one
  * does not, with Add and Dismiss (docs/design/environments.md). Key names
  * are metadata, so only environments the caller reads are compared.
- * Dismissals are the team's, stored in a table this release's migration
- * adds: until it runs, nothing is dismissed and dismissing answers 503.
+ * Dismissals are the team's.
  */
-export const DISMISSALS_MIGRATION = '0009_dismissals';
 
 /** A key missing here: the environments that have it, and its folder there, when they agree. */
 export type MissingKey = { key: string; in: string[]; folder: string | null };
@@ -46,10 +42,10 @@ export async function missingKeys(ctx: ApiContext, place: ResolvedPath): Promise
   const [present, elsewhere, dismissals] = await Promise.all([
     environmentSecrets(ctx.db, here.environmentId),
     liveKeysIn(ctx.db, others.map((environment) => environment.id)),
-    (async () => ((await applied(ctx.db, DISMISSALS_MIGRATION)) ? dismissalsIn(ctx.db, here.environmentId) : []))(),
+    dismissalsIn(ctx.db, here.environmentId),
   ]);
   const folders = new Map<string, string>();
-  for (const environment of others) for (const [id, folder] of await secretFoldersIn(ctx.db, environment.id)) folders.set(id, folder);
+  for (const environment of others) for (const [id, folder] of await secretFolderOf(ctx.db, environment.id)) folders.set(id, folder);
   const slugOf = new Map(others.map((environment) => [environment.id, environment.slug]));
   const has = new Set(present.map((secret) => secret.key));
   const found = new Map<string, { in: string[]; folders: Set<string | null> }>();
@@ -88,9 +84,6 @@ export async function setDismissals(
   patch: Record<string, true | null>,
 ): Promise<{ operationId: string; keys: Record<string, DismissalOutcome> }> {
   const here = live(place);
-  if (!(await applied(ctx.db, DISMISSALS_MIGRATION))) {
-    throw new ApiError('unavailable', "dismissing keys needs this release's database migration: an owner runs `coffre migrate`");
-  }
   const operationId = randomUUID();
   return audited(ctx, async (tx, log) => {
     // Under the head, as every write to a place: one archived or deleted since the router found it takes no dismissal.

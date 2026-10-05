@@ -33,12 +33,18 @@ CREATE TABLE "audit_log" (
 	"mac" "bytea" NOT NULL,
 	"hash" "bytea" NOT NULL,
 	CONSTRAINT "audit_log_author_check" CHECK ("audit_log"."author" IN ('app', 'vault')),
-	CONSTRAINT "audit_log_actor_check" CHECK ("audit_log"."actor" ~ '^(user|token|sync|system):.+$'),
+	CONSTRAINT "audit_log_actor_check" CHECK ("audit_log"."actor" ~ '^(user|token|system):.+$'),
 	CONSTRAINT "audit_log_decision_check" CHECK ("audit_log"."decision" IN ('allow', 'deny')),
 	CONSTRAINT "audit_log_metadata_check" CHECK ("audit_log"."metadata"::jsonb IS NOT NULL),
 	CONSTRAINT "audit_log_prev_hash_check" CHECK (octet_length("audit_log"."prev_hash") = 32),
 	CONSTRAINT "audit_log_mac_check" CHECK (octet_length("audit_log"."mac") = 32),
 	CONSTRAINT "audit_log_hash_check" CHECK (octet_length("audit_log"."hash") = 32)
+);
+--> statement-breakpoint
+CREATE TABLE "consumed_tokens" (
+	"hash" "bytea" PRIMARY KEY NOT NULL,
+	"consumed_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "consumed_tokens_hash_check" CHECK (octet_length("consumed_tokens"."hash") = 32)
 );
 --> statement-breakpoint
 CREATE TABLE "credentials" (
@@ -91,6 +97,17 @@ CREATE TABLE "device_authorizations" (
         )))
 );
 --> statement-breakpoint
+CREATE TABLE "dismissed_keys" (
+	"environment_id" uuid NOT NULL,
+	"key" text NOT NULL,
+	"dismissed_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"dismissed_by" text NOT NULL,
+	"restored_at" timestamp with time zone,
+	"restored_by" text,
+	CONSTRAINT "dismissed_keys_pkey" PRIMARY KEY("environment_id","key"),
+	CONSTRAINT "dismissed_keys_key_check" CHECK ("dismissed_keys"."key" ~ '^[A-Za-z_][A-Za-z0-9_]{0,127}$')
+);
+--> statement-breakpoint
 CREATE TABLE "environments" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"project_id" uuid NOT NULL,
@@ -100,7 +117,7 @@ CREATE TABLE "environments" (
 	"archived_at" timestamp with time zone,
 	CONSTRAINT "environments_project_id_slug_key" UNIQUE("project_id","slug"),
 	CONSTRAINT "environments_project_scoped" UNIQUE("id","project_id"),
-	CONSTRAINT "environments_slug_check" CHECK ("environments"."slug" ~ '^[a-z0-9][a-z0-9-]{0,62}$')
+	CONSTRAINT "environments_slug_check" CHECK ("environments"."slug" ~ '^[a-z0-9][a-z0-9-]{0,62}(~[a-z0-9-]{1,40})?$')
 );
 --> statement-breakpoint
 CREATE TABLE "identities" (
@@ -124,14 +141,73 @@ CREATE TABLE "identities" (
 	CONSTRAINT "identities_auth_mac_check" CHECK (octet_length("identities"."auth_mac") = 32)
 );
 --> statement-breakpoint
+CREATE TABLE "mcp_connections" (
+	"id" uuid PRIMARY KEY NOT NULL,
+	"auth_mac" "bytea" NOT NULL,
+	"principal" text NOT NULL,
+	"generation" integer NOT NULL,
+	"client_id" text NOT NULL,
+	"client_name" text NOT NULL,
+	"client_host" text,
+	"registration" text NOT NULL,
+	"scopes" text NOT NULL,
+	"redirect_uri" text NOT NULL,
+	"code_hash" "bytea",
+	"code_challenge" text,
+	"code_expires_at" timestamp with time zone,
+	"refresh_hash" "bytea",
+	"refresh_previous_hash" "bytea",
+	"expires_at" timestamp with time zone NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"last_used_at" timestamp with time zone,
+	"last_used_ip" text,
+	"revoked_at" timestamp with time zone,
+	"revoked_by" text,
+	CONSTRAINT "mcp_connections_code_hash_key" UNIQUE("code_hash"),
+	CONSTRAINT "mcp_connections_refresh_hash_key" UNIQUE("refresh_hash"),
+	CONSTRAINT "mcp_connections_principal_check" CHECK ("mcp_connections"."principal" LIKE 'user:%'),
+	CONSTRAINT "mcp_connections_registration_check" CHECK ("mcp_connections"."registration" IN ('cimd', 'dcr')),
+	CONSTRAINT "mcp_connections_auth_mac_check" CHECK (octet_length("mcp_connections"."auth_mac") = 32),
+	CONSTRAINT "mcp_connections_code_hash_check" CHECK ("mcp_connections"."code_hash" IS NULL OR octet_length("mcp_connections"."code_hash") = 32),
+	CONSTRAINT "mcp_connections_refresh_hash_check" CHECK ("mcp_connections"."refresh_hash" IS NULL OR octet_length("mcp_connections"."refresh_hash") = 32)
+);
+--> statement-breakpoint
+CREATE TABLE "oauth_clients" (
+	"id" uuid PRIMARY KEY NOT NULL,
+	"auth_mac" "bytea" NOT NULL,
+	"name" text NOT NULL,
+	"redirect_uris" text NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"created_ip" text,
+	"revoked_at" timestamp with time zone,
+	CONSTRAINT "oauth_clients_auth_mac_check" CHECK (octet_length("oauth_clients"."auth_mac") = 32),
+	CONSTRAINT "oauth_clients_redirect_uris_check" CHECK ("oauth_clients"."redirect_uris"::jsonb IS NOT NULL)
+);
+--> statement-breakpoint
 CREATE TABLE "projects" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"slug" text NOT NULL,
 	"name" text NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"archived_at" timestamp with time zone,
+	"folder" text,
 	CONSTRAINT "projects_slug_key" UNIQUE("slug"),
-	CONSTRAINT "projects_slug_check" CHECK ("projects"."slug" ~ '^[a-z0-9][a-z0-9-]{0,62}$')
+	CONSTRAINT "projects_slug_check" CHECK ("projects"."slug" ~ '^[a-z0-9][a-z0-9-]{0,62}(~[a-z0-9-]{1,40})?$'),
+	CONSTRAINT "projects_folder_check" CHECK ("projects"."folder" IS NULL OR (char_length("projects"."folder") BETWEEN 1 AND 64 AND "projects"."folder" !~ '[/[:cntrl:]]' AND "projects"."folder" = btrim("projects"."folder")))
+);
+--> statement-breakpoint
+CREATE TABLE "secret_references" (
+	"id" uuid PRIMARY KEY NOT NULL,
+	"project_id" uuid NOT NULL,
+	"environment_id" uuid NOT NULL,
+	"secret_id" uuid NOT NULL,
+	"source_project_id" uuid NOT NULL,
+	"source_environment_id" uuid NOT NULL,
+	"source_secret_id" uuid NOT NULL,
+	"created_seq" bigint NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"created_by" text NOT NULL,
+	CONSTRAINT "secret_references_created_seq_key" UNIQUE("created_seq")
 );
 --> statement-breakpoint
 CREATE TABLE "secret_versions" (
@@ -164,51 +240,48 @@ CREATE TABLE "secrets" (
 	"current_version_id" uuid,
 	"current_version" integer DEFAULT 0 NOT NULL,
 	"archived_at" timestamp with time zone,
+	"folder" text,
 	CONSTRAINT "secrets_project_id_environment_id_key_key" UNIQUE("project_id","environment_id","key"),
-	CONSTRAINT "secrets_key_check" CHECK ("secrets"."key" ~ '^[A-Za-z_][A-Za-z0-9_]{0,127}$')
+	CONSTRAINT "secrets_key_check" CHECK ("secrets"."key" ~ '^[A-Za-z_][A-Za-z0-9_]{0,127}$'),
+	CONSTRAINT "secrets_folder_check" CHECK ("secrets"."folder" IS NULL OR (char_length("secrets"."folder") BETWEEN 1 AND 64 AND "secrets"."folder" !~ '[/[:cntrl:]]' AND "secrets"."folder" = btrim("secrets"."folder")))
 );
 --> statement-breakpoint
-CREATE TABLE "sync_keys" (
-	"sync_id" uuid NOT NULL,
-	"key" text NOT NULL,
-	"secret_version_id" uuid,
-	"pushed_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"removed_at" timestamp with time zone,
-	CONSTRAINT "sync_keys_pkey" PRIMARY KEY("sync_id","key")
-);
---> statement-breakpoint
-CREATE TABLE "syncs" (
-	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
-	"project_id" uuid NOT NULL,
-	"environment_id" uuid NOT NULL,
-	"provider" text NOT NULL,
-	"config" text NOT NULL,
-	"credential_secret_id" uuid NOT NULL,
+CREATE TABLE "service_bindings" (
+	"id" uuid PRIMARY KEY NOT NULL,
+	"auth_mac" "bytea" NOT NULL,
+	"principal" text NOT NULL,
+	"generation" integer NOT NULL,
+	"profile" text NOT NULL,
+	"issuer" text NOT NULL,
+	"jwks_uri" text NOT NULL,
+	"claims" text NOT NULL,
+	"label" text,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"created_by" text NOT NULL,
-	"paused_at" timestamp with time zone,
-	"archived_at" timestamp with time zone,
-	"lease_until" timestamp with time zone,
-	"last_run_at" timestamp with time zone,
-	"last_status" text,
-	"last_error" text,
-	CONSTRAINT "syncs_config_check" CHECK ("syncs"."config"::jsonb IS NOT NULL),
-	CONSTRAINT "syncs_last_status_check" CHECK ("syncs"."last_status" IS NULL OR "syncs"."last_status" IN ('ok', 'partial', 'failed'))
+	"last_used_at" timestamp with time zone,
+	"revoked_at" timestamp with time zone,
+	"revoked_by" text,
+	CONSTRAINT "service_bindings_principal_check" CHECK ("service_bindings"."principal" LIKE 'token:%'),
+	CONSTRAINT "service_bindings_auth_mac_check" CHECK (octet_length("service_bindings"."auth_mac") = 32),
+	CONSTRAINT "service_bindings_claims_check" CHECK ("service_bindings"."claims"::jsonb IS NOT NULL)
 );
 --> statement-breakpoint
 CREATE TABLE "vault_grants" (
 	"principal" text NOT NULL,
 	"project_id" uuid,
 	"environment_id" uuid,
+	"environment_slug" text,
 	"role" text NOT NULL,
 	"expires_at" bigint,
 	"granted_at" bigint NOT NULL,
 	"granted_by" text NOT NULL,
 	CONSTRAINT "vault_grants_on_project" UNIQUE("principal","project_id"),
 	CONSTRAINT "vault_grants_on_environment" UNIQUE("principal","environment_id"),
-	CONSTRAINT "vault_grants_one_place" CHECK (("vault_grants"."project_id" IS NULL) <> ("vault_grants"."environment_id" IS NULL)),
+	CONSTRAINT "vault_grants_on_environment_slug" UNIQUE("principal","environment_slug"),
+	CONSTRAINT "vault_grants_one_place" CHECK ((("vault_grants"."project_id" IS NULL) <> ("vault_grants"."environment_id" IS NULL) AND "vault_grants"."environment_slug" IS NULL) OR ("vault_grants"."project_id" IS NULL AND "vault_grants"."environment_id" IS NULL)),
+	CONSTRAINT "vault_grants_environment_slug_check" CHECK ("vault_grants"."environment_slug" IS NULL OR "vault_grants"."environment_slug" ~ '^[a-z0-9][a-z0-9-]{0,62}$'),
 	CONSTRAINT "vault_grants_role_check" CHECK ("vault_grants"."role" IN ('viewer', 'developer', 'maintainer', 'access-manager', 'auditor', 'owner')),
-	CONSTRAINT "vault_grants_environment_role_check" CHECK ("vault_grants"."environment_id" IS NULL OR "vault_grants"."role" IN ('viewer', 'developer', 'auditor'))
+	CONSTRAINT "vault_grants_environment_role_check" CHECK (("vault_grants"."environment_id" IS NULL AND "vault_grants"."environment_slug" IS NULL) OR "vault_grants"."role" IN ('viewer', 'developer', 'auditor'))
 );
 --> statement-breakpoint
 CREATE TABLE "vault_members" (
@@ -223,7 +296,7 @@ CREATE TABLE "vault_members" (
 	"access_seq" bigint NOT NULL,
 	"mac" "bytea" NOT NULL,
 	CONSTRAINT "vault_members_mac_check" CHECK (octet_length("vault_members"."mac") = 32),
-	CONSTRAINT "vault_members_principal_check" CHECK ("vault_members"."principal" ~ '^(user|token|sync):[^[:space:]:][^[:space:]]*$'),
+	CONSTRAINT "vault_members_principal_check" CHECK ("vault_members"."principal" ~ '^(user|token):[^[:space:]:][^[:space:]]*$'),
 	CONSTRAINT "vault_members_user_lowercase" CHECK ("vault_members"."principal" NOT LIKE 'user:%' OR "vault_members"."principal" = lower("vault_members"."principal")),
 	CONSTRAINT "vault_members_status_check" CHECK ("vault_members"."status" IN ('active', 'removed')),
 	CONSTRAINT "vault_members_owner_check" CHECK (NOT "vault_members"."owner" OR ("vault_members"."status" = 'active' AND "vault_members"."principal" LIKE 'user:%')),
@@ -238,17 +311,19 @@ ALTER TABLE "audit_log" ADD CONSTRAINT "audit_log_related_seq_fkey" FOREIGN KEY 
 ALTER TABLE "credentials" ADD CONSTRAINT "credentials_principal_fkey" FOREIGN KEY ("principal") REFERENCES "public"."vault_members"("principal") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "credentials" ADD CONSTRAINT "credentials_identity_id_fkey" FOREIGN KEY ("identity_id","principal","generation") REFERENCES "public"."identities"("id","principal","generation") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "device_authorizations" ADD CONSTRAINT "device_authorizations_principal_fkey" FOREIGN KEY ("principal") REFERENCES "public"."vault_members"("principal") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "dismissed_keys" ADD CONSTRAINT "dismissed_keys_environment_id_fkey" FOREIGN KEY ("environment_id") REFERENCES "public"."environments"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "environments" ADD CONSTRAINT "environments_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "identities" ADD CONSTRAINT "identities_principal_fkey" FOREIGN KEY ("principal") REFERENCES "public"."vault_members"("principal") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "mcp_connections" ADD CONSTRAINT "mcp_connections_principal_fkey" FOREIGN KEY ("principal") REFERENCES "public"."vault_members"("principal") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "secret_references" ADD CONSTRAINT "secret_references_secret_id_fkey" FOREIGN KEY ("secret_id") REFERENCES "public"."secrets"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "secret_references" ADD CONSTRAINT "secret_references_source_secret_id_fkey" FOREIGN KEY ("source_secret_id") REFERENCES "public"."secrets"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "secret_references" ADD CONSTRAINT "secret_references_created_seq_fkey" FOREIGN KEY ("created_seq") REFERENCES "public"."audit_log"("seq") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "secret_versions" ADD CONSTRAINT "secret_versions_secret_id_fkey" FOREIGN KEY ("secret_id") REFERENCES "public"."secrets"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "secrets" ADD CONSTRAINT "secrets_current_version_id_secret_versions_id_fk" FOREIGN KEY ("current_version_id") REFERENCES "public"."secret_versions"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "secrets" ADD CONSTRAINT "secrets_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "secrets" ADD CONSTRAINT "secrets_environment_id_fkey" FOREIGN KEY ("environment_id") REFERENCES "public"."environments"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "secrets" ADD CONSTRAINT "secrets_environment_in_project" FOREIGN KEY ("environment_id","project_id") REFERENCES "public"."environments"("id","project_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "sync_keys" ADD CONSTRAINT "sync_keys_sync_id_fkey" FOREIGN KEY ("sync_id") REFERENCES "public"."syncs"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "sync_keys" ADD CONSTRAINT "sync_keys_secret_version_id_fkey" FOREIGN KEY ("secret_version_id") REFERENCES "public"."secret_versions"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "syncs" ADD CONSTRAINT "syncs_environment_in_project" FOREIGN KEY ("environment_id","project_id") REFERENCES "public"."environments"("id","project_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "syncs" ADD CONSTRAINT "syncs_credential_secret_id_fkey" FOREIGN KEY ("credential_secret_id") REFERENCES "public"."secrets"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "service_bindings" ADD CONSTRAINT "service_bindings_principal_fkey" FOREIGN KEY ("principal") REFERENCES "public"."vault_members"("principal") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "vault_grants" ADD CONSTRAINT "vault_grants_principal_fkey" FOREIGN KEY ("principal") REFERENCES "public"."vault_members"("principal") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "vault_grants" ADD CONSTRAINT "vault_grants_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "vault_grants" ADD CONSTRAINT "vault_grants_environment_id_fkey" FOREIGN KEY ("environment_id") REFERENCES "public"."environments"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
@@ -260,12 +335,29 @@ CREATE INDEX "audit_log_operation_idx" ON "audit_log" USING btree ("operation_id
 CREATE INDEX "audit_log_action_idx" ON "audit_log" USING btree ("author","action","seq");--> statement-breakpoint
 CREATE INDEX "audit_log_releases_idx" ON "audit_log" USING btree ("author","actor","action","decision","occurred_at");--> statement-breakpoint
 CREATE INDEX "audit_log_subject_idx" ON "audit_log" USING btree ("author","subject_principal","seq");--> statement-breakpoint
+CREATE INDEX "audit_log_unbind_idx" ON "audit_log" USING btree ((("metadata")::jsonb ->> 'bindingId')) WHERE "audit_log"."author" = 'app' AND "audit_log"."action" = 'token.unbind' AND "audit_log"."decision" = 'allow';--> statement-breakpoint
+CREATE INDEX "audit_log_exchange_idx" ON "audit_log" USING btree ((("metadata")::jsonb ->> 'credentialId')) WHERE "audit_log"."author" = 'app' AND "audit_log"."action" = 'token.exchange' AND "audit_log"."decision" = 'allow';--> statement-breakpoint
+CREATE INDEX "audit_log_reference_end_idx" ON "audit_log" USING btree ("related_seq") WHERE "audit_log"."author" = 'vault' AND "audit_log"."action" = 'reference.end' AND "audit_log"."decision" = 'allow';--> statement-breakpoint
+CREATE INDEX "audit_log_also_project_idx" ON "audit_log" USING btree (((("metadata")::jsonb -> 'also') ->> 'projectId'),"seq") WHERE (("audit_log"."metadata")::jsonb -> 'also') IS NOT NULL;--> statement-breakpoint
+CREATE INDEX "audit_log_also_environment_idx" ON "audit_log" USING btree (((("metadata")::jsonb -> 'also') ->> 'environmentId'),"seq") WHERE (("audit_log"."metadata")::jsonb -> 'also') IS NOT NULL;--> statement-breakpoint
+CREATE INDEX "audit_log_also_secret_idx" ON "audit_log" USING btree (((("metadata")::jsonb -> 'also') ->> 'secretId'),"seq") WHERE (("audit_log"."metadata")::jsonb -> 'also') IS NOT NULL;--> statement-breakpoint
 CREATE INDEX "credentials_principal_idx" ON "credentials" USING btree ("principal","generation");--> statement-breakpoint
+CREATE INDEX "credentials_live_idx" ON "credentials" USING btree ("principal","expires_at") WHERE "credentials"."revoked_at" IS NULL;--> statement-breakpoint
+CREATE INDEX "credentials_issued_by_idx" ON "credentials" USING btree ("principal","created_by","created_at");--> statement-breakpoint
 CREATE UNIQUE INDEX "identities_active_subject" ON "identities" USING btree ("provider","issuer_hash","active_subject");--> statement-breakpoint
 CREATE INDEX "identities_principal_idx" ON "identities" USING btree ("principal","generation");--> statement-breakpoint
+CREATE INDEX "mcp_connections_refresh_previous_idx" ON "mcp_connections" USING btree ("refresh_previous_hash");--> statement-breakpoint
+CREATE INDEX "mcp_connections_live_idx" ON "mcp_connections" USING btree ("principal","expires_at") WHERE "mcp_connections"."revoked_at" IS NULL;--> statement-breakpoint
+CREATE INDEX "secret_references_holder_idx" ON "secret_references" USING btree ("secret_id","created_seq");--> statement-breakpoint
+CREATE INDEX "secret_references_source_idx" ON "secret_references" USING btree ("source_secret_id");--> statement-breakpoint
+CREATE INDEX "secret_references_project_idx" ON "secret_references" USING btree ("project_id");--> statement-breakpoint
+CREATE INDEX "secret_references_source_project_idx" ON "secret_references" USING btree ("source_project_id");--> statement-breakpoint
+CREATE INDEX "secret_references_created_by_idx" ON "secret_references" USING btree ("created_by");--> statement-breakpoint
 CREATE INDEX "secret_versions_secret_idx" ON "secret_versions" USING btree ("secret_id","version" DESC NULLS LAST);--> statement-breakpoint
 CREATE INDEX "secrets_lookup_idx" ON "secrets" USING btree ("project_id","environment_id","key");--> statement-breakpoint
-CREATE INDEX "syncs_environment_idx" ON "syncs" USING btree ("environment_id");--> statement-breakpoint
+CREATE INDEX "service_bindings_principal_idx" ON "service_bindings" USING btree ("principal","issuer");--> statement-breakpoint
+CREATE INDEX "service_bindings_live_idx" ON "service_bindings" USING btree ("principal","issuer","generation","created_at","id") WHERE "service_bindings"."revoked_at" IS NULL;--> statement-breakpoint
+CREATE UNIQUE INDEX "vault_grants_on_every_project" ON "vault_grants" USING btree ("principal") WHERE "vault_grants"."project_id" IS NULL AND "vault_grants"."environment_id" IS NULL AND "vault_grants"."environment_slug" IS NULL;--> statement-breakpoint
 
 -- The chain starts at sequence 0 from 32 zero bytes.
 INSERT INTO audit_chain_head (only_row, next_seq, head_hash)
@@ -290,13 +382,35 @@ CREATE TRIGGER audit_log_no_truncate BEFORE TRUNCATE ON audit_log
     FOR EACH STATEMENT EXECUTE FUNCTION audit_log_append_only();
 --> statement-breakpoint
 
+-- A secret version is never rewritten in place, only erased: a deleted
+-- project or environment stays as a tombstone the log's entries name, and
+-- its versions with it, their ciphertext and wrapped data key emptied. That
+-- is the one change a version takes, for every login.
+CREATE FUNCTION secret_versions_erase_only() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF octet_length(NEW.ciphertext) <> 0 OR octet_length(NEW.wrapped_dek) <> 0
+       OR (NEW.id, NEW.secret_id, NEW.version, NEW.envelope_version, NEW.iv, NEW.auth_tag,
+           NEW.kek_provider, NEW.kek_id, NEW.kek_version, NEW.created_at, NEW.created_by)
+          IS DISTINCT FROM
+          (OLD.id, OLD.secret_id, OLD.version, OLD.envelope_version, OLD.iv, OLD.auth_tag,
+           OLD.kek_provider, OLD.kek_id, OLD.kek_version, OLD.created_at, OLD.created_by) THEN
+        RAISE EXCEPTION 'a secret version is only ever erased' USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    RETURN NEW;
+END
+$$;
+--> statement-breakpoint
+CREATE TRIGGER secret_versions_erase_only BEFORE UPDATE ON secret_versions
+    FOR EACH ROW EXECUTE FUNCTION secret_versions_erase_only();
+--> statement-breakpoint
+
 -- Two logins, provisioned outside coffre (their passwords are never ours),
 -- each with only the rights of its group:
 --
 --   coffre_runtime        the server, through coffre_app: read and insert,
 --                         UPDATE on named columns only, and never DELETE. A
---                         revoked session, a used device code and a removed
---                         sync key are rows that say so, not gaps.
+--                         revoked session, a used device code and a spent
+--                         token are rows that say so, not gaps.
 --   coffre_vault_runtime  the vault, through coffre_vault: its members and
 --                         grants, and reading what it decides on.
 --
@@ -378,6 +492,10 @@ GRANT USAGE ON SCHEMA drizzle TO coffre_app, coffre_vault;
 GRANT SELECT ON drizzle.__drizzle_migrations TO coffre_app, coffre_vault;
 --> statement-breakpoint
 
+-- The app reads and adds; it never deletes. A binding, a registered client
+-- and a connection change only in what their MAC allows to change in place;
+-- a spent token and a reference never change at all, and the vault's log
+-- says which references have ended.
 GRANT SELECT, INSERT ON
     projects,
     environments,
@@ -387,8 +505,12 @@ GRANT SELECT, INSERT ON
     identities,
     credentials,
     device_authorizations,
-    syncs,
-    sync_keys
+    service_bindings,
+    consumed_tokens,
+    secret_references,
+    dismissed_keys,
+    oauth_clients,
+    mcp_connections
 TO coffre_app;
 --> statement-breakpoint
 
@@ -399,11 +521,11 @@ GRANT SELECT ON
 TO coffre_app;
 --> statement-breakpoint
 
-GRANT UPDATE (slug, name, archived_at) ON projects TO coffre_app;
+GRANT UPDATE (slug, name, archived_at, folder) ON projects TO coffre_app;
 --> statement-breakpoint
 GRANT UPDATE (slug, name, archived_at) ON environments TO coffre_app;
 --> statement-breakpoint
-GRANT UPDATE (key, current_version_id, current_version, updated_at, archived_at) ON secrets TO coffre_app;
+GRANT UPDATE (key, current_version_id, current_version, updated_at, archived_at, folder) ON secrets TO coffre_app;
 --> statement-breakpoint
 GRANT UPDATE (next_seq, head_hash) ON audit_chain_head TO coffre_app;
 --> statement-breakpoint
@@ -414,11 +536,14 @@ GRANT UPDATE (last_used_at, last_used_ip, revoked_at, revoked_by, auth_mac) ON c
 GRANT UPDATE (decided_at, decision, generation, principal, consumed_at, auth_mac)
     ON device_authorizations TO coffre_app;
 --> statement-breakpoint
-GRANT UPDATE (config, credential_secret_id, paused_at, archived_at, lease_until,
-              last_run_at, last_status, last_error)
-    ON syncs TO coffre_app;
+GRANT UPDATE (label, last_used_at, revoked_at, revoked_by, auth_mac) ON service_bindings TO coffre_app;
 --> statement-breakpoint
-GRANT UPDATE (secret_version_id, pushed_at, removed_at) ON sync_keys TO coffre_app;
+GRANT UPDATE (dismissed_at, dismissed_by, restored_at, restored_by) ON dismissed_keys TO coffre_app;
+--> statement-breakpoint
+GRANT UPDATE (revoked_at, auth_mac) ON oauth_clients TO coffre_app;
+--> statement-breakpoint
+GRANT UPDATE (code_challenge, code_expires_at, refresh_hash, refresh_previous_hash, last_used_at, last_used_ip, revoked_at, revoked_by, auth_mac)
+    ON mcp_connections TO coffre_app;
 --> statement-breakpoint
 
 -- The vault reads what it decides on and the log it chains to, and writes
@@ -446,6 +571,9 @@ REVOKE DELETE, TRUNCATE ON ALL TABLES IN SCHEMA public FROM coffre_app;
 REVOKE TRUNCATE ON ALL TABLES IN SCHEMA public FROM coffre_vault;
 --> statement-breakpoint
 REVOKE UPDATE ON audit_log, secret_versions FROM coffre_app, coffre_vault;
+--> statement-breakpoint
+-- What erasing a version empties, and nothing else: the trigger above holds every login to it.
+GRANT UPDATE (ciphertext, wrapped_dek) ON secret_versions TO coffre_app;
 --> statement-breakpoint
 REVOKE CREATE ON SCHEMA public FROM PUBLIC, coffre_app, coffre_runtime, coffre_vault, coffre_vault_runtime;
 --> statement-breakpoint

@@ -5,10 +5,8 @@ import type { Transaction } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
 import { environments, projects } from '@coffre/db/schema';
 
-import { knownMigrations } from '@coffre/db/schema-version';
 
 import {
-  appliedMigrations,
   deletionScope,
   distinctSecretCounts,
   eraseVersions,
@@ -22,6 +20,8 @@ import {
   type Doomed,
   type EveryProjectGrant,
   type ResolvedPath,
+  fileProject,
+  projectFolderOf,
 } from '../db/queries.ts';
 import { everyProjectReaches, seesGrantsIn } from './members.ts';
 import { COFFRE_VERSION } from '../version.ts';
@@ -29,7 +29,6 @@ import { can, canAnywhere, permissionsAt, placeOf, seesProject } from './caller.
 import { allowed, audited, denied, Refusal, requireOwner, withRefusals, type ApiContext } from './context.ts';
 import { ApiError, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { formatMember } from './paths.ts';
-import { fileProject, projectFoldersOf, requireFolders } from './folders.ts';
 import { endReferences, referencesAt, refuseIfRead } from './references.ts';
 
 export type Me = {
@@ -52,16 +51,7 @@ export type Me = {
   features: { mcp: boolean; workloads: boolean };
   /** Every live environment the caller holds something in, and what. */
   environments: { project: string; environment: string; permissions: Permission[] }[];
-  /**
-   * The deployment, for owners and root admins only, who upgrade it: the
-   * version of coffre it runs, and its database's migrations, the first
-   * `applied` of `known`, which are this version's. Null for anyone else:
-   * versions tell an attacker what to try.
-   */
-  instance: InstanceState | null;
 };
-
-export type InstanceState = { version: string; migrations: { applied: number; known: string[] } };
 
 export type ProjectEnvironmentSummary = {
   slug: string;
@@ -148,15 +138,6 @@ export async function me(ctx: ApiContext): Promise<Me> {
     canReadAudit: caller.isOwner || canAnywhere(caller, 'audit.read'),
     features: { mcp: ctx.mcp !== null, workloads: ctx.workloads !== null },
     environments: reachable,
-    instance: caller.isOwner || caller.isRootAdmin ? await instanceState(ctx) : null,
-  };
-}
-
-/** The version this server runs, and how far its database's migrations are (`appliedMigrations`, as readiness counts them). */
-async function instanceState(ctx: ApiContext): Promise<InstanceState> {
-  return {
-    version: COFFRE_VERSION,
-    migrations: { applied: await appliedMigrations(ctx.db), known: [...knownMigrations(ctx.db)] },
   };
 }
 
@@ -176,7 +157,7 @@ export async function listProjects(ctx: ApiContext): Promise<{ projects: Project
   const summaries: ProjectSummary[] = [];
   // The projects whose secrets the caller may count, and where they may.
   const counted: { summary: ProjectSummary; projectId: string; environmentIds: string[] }[] = [];
-  const [known, folders] = await Promise.all([places(ctx.db), projectFoldersOf(ctx.db)]);
+  const [known, folders] = await Promise.all([places(ctx.db), projectFolderOf(ctx.db)]);
   for (const project of known) {
     if (!seesProject(caller, project)) continue;
     const scope = { projectId: project.id };
@@ -319,8 +300,7 @@ export async function patchProject(
   const { project } = place;
   const { renames, archivedAt } = placeChanges(project, patch);
   const renamed = Object.keys(renames).length > 0;
-  if (patch.folder !== undefined) await requireFolders(ctx.db);
-  const before = patch.folder === undefined ? null : (await projectFoldersOf(ctx.db)).get(project.id) ?? null;
+  const before = patch.folder === undefined ? null : (await projectFolderOf(ctx.db)).get(project.id) ?? null;
   const moving = patch.folder !== undefined && patch.folder !== before;
   return audited(ctx, async (tx, log) => {
     await stillThere(tx, place);
@@ -349,7 +329,7 @@ export async function patchProject(
       }));
     }
     if (moving) {
-      await fileProject(tx, project.id, patch.folder!, ctx.caller.principal.id);
+      await fileProject(tx, project.id, patch.folder!);
       log.push(allowed(ctx, 'project.move', {
         projectId: project.id,
         metadata: { slug: renames.slug ?? project.slug, from: before, to: patch.folder },
@@ -422,7 +402,6 @@ export type Refiled = { folder: string | null; moved: string[] };
  * refused otherwise, since a folder half renamed would be two folders.
  */
 export async function refileProjects(ctx: ApiContext, folder: string, to: string | null): Promise<Refiled> {
-  await requireFolders(ctx.db);
   const operationId = randomUUID();
   return audited(ctx, async (tx, log) => {
     const filed = await projectsInFolder(tx, folder);
@@ -437,7 +416,7 @@ export async function refileProjects(ctx: ApiContext, folder: string, to: string
     }
     if (to !== folder) {
       for (const project of filed) {
-        await fileProject(tx, project.id, to, ctx.caller.principal.id);
+        await fileProject(tx, project.id, to);
         log.push(allowed(ctx, 'project.move', { projectId: project.id, operationId, metadata: { slug: project.slug, from: folder, to } }));
       }
     }
@@ -519,9 +498,6 @@ export type Deletion = {
 
 export type DeletionResult = { dryRun: boolean; deletion: Deletion };
 
-/** The migration that lets a slug name a tombstone and a version be erased: until it runs, nothing can be deleted. */
-const DELETIONS_MIGRATION = '0006_deletions';
-
 /**
  * Delete an archived project, or an archived environment, for good. Every
  * secret version under it is erased, its ciphertext and wrapped data key
@@ -559,10 +535,6 @@ export async function deletePlace(ctx: ApiContext, place: ResolvedPath, { dryRun
   return withRefusals(ctx, async () => {
     requireOwner(ctx, action, fields);
     if (!archived(place)) throw notArchived();
-    const needed = knownMigrations(ctx.db).indexOf(DELETIONS_MIGRATION) + 1;
-    if ((await appliedMigrations(ctx.db)) < needed) {
-      throw new ApiError('unavailable', 'deleting needs this release\'s database migration: an owner runs `coffre migrate`');
-    }
 
     const [scope, references] = await Promise.all([deletionScope(ctx.db, doomed), referencesAt(ctx.db, doomed)]);
     const deletion = (tombstone: string, versions = scope.versions): Deletion => ({

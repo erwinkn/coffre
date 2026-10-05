@@ -62,8 +62,6 @@ await pool.query('DELETE FROM consumed_tokens');
 await pool.query('DELETE FROM vault_grants');
 await pool.query('DELETE FROM vault_members');
 await pool.query('DELETE FROM dismissed_keys');
-await pool.query('DELETE FROM secret_folders');
-await pool.query('DELETE FROM project_folders');
 await pool.query('UPDATE secrets SET current_version_id = NULL');
 await pool.query('DELETE FROM secret_versions');
 await pool.query('DELETE FROM secrets');

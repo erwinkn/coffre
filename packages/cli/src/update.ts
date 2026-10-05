@@ -1,7 +1,7 @@
 // `coffre update`: this CLI, to coffre's latest release, the way it was
 // installed; and, run in a deployment, its coffre packages too. Then what
 // the release changes for the database: the migrations it adds, which
-// `coffre migrate` applies once the new version is deployed.
+// `coffre migrate` applies before the new version is deployed.
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -113,7 +113,7 @@ export function migrationsAdded(from: string, to: string, before: readonly strin
   if (added.length === 0) return `coffre ${to} adds no migration to ${from}'s: deploying it is all.`;
   return (
     `coffre ${to} adds ${added.length === 1 ? '1 migration' : `${added.length} migrations`} to ${from}'s ` +
-    `(${listed(added, 'and')}): after deploying, run \`coffre migrate\`.`
+    `(${listed(added, 'and')}): run \`pnpm exec coffre migrate\` here first, then deploy.`
   );
 }
 
@@ -463,7 +463,7 @@ export async function update(args: string[]): Promise<void> {
   if (after !== null) {
     out.write(`  ${migrationsAdded(from, latest, before, after)}\n`);
     if (deployment !== null) {
-      const deploy = kind === 'workers' ? '`pnpm run deploy`, or a push for Workers Builds' : 'restarting the server';
+      const deploy = kind === 'workers' ? '`pnpm run deploy`, or a push for Workers Builds, whose builds migrate first' : 'restarting the server';
       out.write(`  ${s.dim(`Deploy it as you do: ${deploy}.`)}\n`);
     }
     out.write('\n');

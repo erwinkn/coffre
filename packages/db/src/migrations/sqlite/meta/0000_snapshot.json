@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "6de9e286-f9d7-4c08-ac7d-e963092320c1",
+  "id": "77ab1ca5-1c82-4f95-a295-592dbe7c56e1",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "audit_chain_head": {
@@ -271,6 +271,57 @@
             "seq"
           ],
           "isUnique": false
+        },
+        "audit_log_unbind_idx": {
+          "name": "audit_log_unbind_idx",
+          "columns": [
+            "json_extract(\"metadata\", '$.bindingId')"
+          ],
+          "isUnique": false,
+          "where": "\"audit_log\".\"author\" = 'app' AND \"audit_log\".\"action\" = 'token.unbind' AND \"audit_log\".\"decision\" = 'allow'"
+        },
+        "audit_log_exchange_idx": {
+          "name": "audit_log_exchange_idx",
+          "columns": [
+            "json_extract(\"metadata\", '$.credentialId')"
+          ],
+          "isUnique": false,
+          "where": "\"audit_log\".\"author\" = 'app' AND \"audit_log\".\"action\" = 'token.exchange' AND \"audit_log\".\"decision\" = 'allow'"
+        },
+        "audit_log_reference_end_idx": {
+          "name": "audit_log_reference_end_idx",
+          "columns": [
+            "related_seq"
+          ],
+          "isUnique": false,
+          "where": "\"audit_log\".\"author\" = 'vault' AND \"audit_log\".\"action\" = 'reference.end' AND \"audit_log\".\"decision\" = 'allow'"
+        },
+        "audit_log_also_project_idx": {
+          "name": "audit_log_also_project_idx",
+          "columns": [
+            "json_extract(\"metadata\", '$.also.projectId')",
+            "seq"
+          ],
+          "isUnique": false,
+          "where": "json_extract(\"audit_log\".\"metadata\", '$.also') IS NOT NULL"
+        },
+        "audit_log_also_environment_idx": {
+          "name": "audit_log_also_environment_idx",
+          "columns": [
+            "json_extract(\"metadata\", '$.also.environmentId')",
+            "seq"
+          ],
+          "isUnique": false,
+          "where": "json_extract(\"audit_log\".\"metadata\", '$.also') IS NOT NULL"
+        },
+        "audit_log_also_secret_idx": {
+          "name": "audit_log_also_secret_idx",
+          "columns": [
+            "json_extract(\"metadata\", '$.also.secretId')",
+            "seq"
+          ],
+          "isUnique": false,
+          "where": "json_extract(\"audit_log\".\"metadata\", '$.also') IS NOT NULL"
         }
       },
       "foreignKeys": {
@@ -349,7 +400,7 @@
         },
         "audit_log_actor_check": {
           "name": "audit_log_actor_check",
-          "value": "\"audit_log\".\"actor\" GLOB 'user:?*' OR \"audit_log\".\"actor\" GLOB 'token:?*' OR \"audit_log\".\"actor\" GLOB 'sync:?*' OR \"audit_log\".\"actor\" GLOB 'system:?*'"
+          "value": "\"audit_log\".\"actor\" GLOB 'user:?*' OR \"audit_log\".\"actor\" GLOB 'token:?*' OR \"audit_log\".\"actor\" GLOB 'system:?*'"
         },
         "audit_log_decision_check": {
           "name": "audit_log_decision_check",
@@ -370,6 +421,36 @@
         "audit_log_hash_check": {
           "name": "audit_log_hash_check",
           "value": "octet_length(\"audit_log\".\"hash\") = 32"
+        }
+      }
+    },
+    "consumed_tokens": {
+      "name": "consumed_tokens",
+      "columns": {
+        "hash": {
+          "name": "hash",
+          "type": "blob",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "consumed_at": {
+          "name": "consumed_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(CAST(unixepoch('subsec') * 1000 AS INTEGER))"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "consumed_tokens_hash_check": {
+          "name": "consumed_tokens_hash_check",
+          "value": "octet_length(\"consumed_tokens\".\"hash\") = 32"
         }
       }
     },
@@ -496,6 +577,24 @@
           "columns": [
             "principal",
             "generation"
+          ],
+          "isUnique": false
+        },
+        "credentials_live_idx": {
+          "name": "credentials_live_idx",
+          "columns": [
+            "principal",
+            "expires_at"
+          ],
+          "isUnique": false,
+          "where": "\"credentials\".\"revoked_at\" IS NULL"
+        },
+        "credentials_issued_by_idx": {
+          "name": "credentials_issued_by_idx",
+          "columns": [
+            "principal",
+            "created_by",
+            "created_at"
           ],
           "isUnique": false
         },
@@ -709,6 +808,86 @@
         }
       }
     },
+    "dismissed_keys": {
+      "name": "dismissed_keys",
+      "columns": {
+        "environment_id": {
+          "name": "environment_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "key": {
+          "name": "key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "dismissed_at": {
+          "name": "dismissed_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(CAST(unixepoch('subsec') * 1000 AS INTEGER))"
+        },
+        "dismissed_by": {
+          "name": "dismissed_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "restored_at": {
+          "name": "restored_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "restored_by": {
+          "name": "restored_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "dismissed_keys_environment_id_fkey": {
+          "name": "dismissed_keys_environment_id_fkey",
+          "tableFrom": "dismissed_keys",
+          "tableTo": "environments",
+          "columnsFrom": [
+            "environment_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "dismissed_keys_pkey": {
+          "columns": [
+            "environment_id",
+            "key"
+          ],
+          "name": "dismissed_keys_pkey"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "dismissed_keys_key_check": {
+          "name": "dismissed_keys_key_check",
+          "value": "length(\"dismissed_keys\".\"key\") BETWEEN 1 AND 128 AND \"dismissed_keys\".\"key\" GLOB '[A-Za-z_]*' AND \"dismissed_keys\".\"key\" NOT GLOB '*[^A-Za-z0-9_]*'"
+        }
+      }
+    },
     "environments": {
       "name": "environments",
       "columns": {
@@ -794,7 +973,7 @@
       "checkConstraints": {
         "environments_slug_check": {
           "name": "environments_slug_check",
-          "value": "length(\"environments\".\"slug\") BETWEEN 1 AND 63 AND \"environments\".\"slug\" GLOB '[a-z0-9]*' AND \"environments\".\"slug\" NOT GLOB '*[^a-z0-9-]*'"
+          "value": "(length(\"environments\".\"slug\") BETWEEN 1 AND 63 AND \"environments\".\"slug\" GLOB '[a-z0-9]*' AND \"environments\".\"slug\" NOT GLOB '*[^a-z0-9-]*') OR (instr(\"environments\".\"slug\", '~') BETWEEN 2 AND 64 AND substr(\"environments\".\"slug\", 1, instr(\"environments\".\"slug\", '~') - 1) GLOB '[a-z0-9]*' AND substr(\"environments\".\"slug\", 1, instr(\"environments\".\"slug\", '~') - 1) NOT GLOB '*[^a-z0-9-]*' AND length(substr(\"environments\".\"slug\", instr(\"environments\".\"slug\", '~') + 1)) BETWEEN 1 AND 40 AND substr(\"environments\".\"slug\", instr(\"environments\".\"slug\", '~') + 1) NOT GLOB '*[^a-z0-9-]*')"
         }
       }
     },
@@ -965,6 +1144,299 @@
         }
       }
     },
+    "mcp_connections": {
+      "name": "mcp_connections",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "auth_mac": {
+          "name": "auth_mac",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "principal": {
+          "name": "principal",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "generation": {
+          "name": "generation",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "client_id": {
+          "name": "client_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "client_name": {
+          "name": "client_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "client_host": {
+          "name": "client_host",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "registration": {
+          "name": "registration",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "scopes": {
+          "name": "scopes",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "redirect_uri": {
+          "name": "redirect_uri",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "code_hash": {
+          "name": "code_hash",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "code_challenge": {
+          "name": "code_challenge",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "code_expires_at": {
+          "name": "code_expires_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "refresh_hash": {
+          "name": "refresh_hash",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "refresh_previous_hash": {
+          "name": "refresh_previous_hash",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(CAST(unixepoch('subsec') * 1000 AS INTEGER))"
+        },
+        "last_used_at": {
+          "name": "last_used_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "last_used_ip": {
+          "name": "last_used_ip",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "revoked_at": {
+          "name": "revoked_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "revoked_by": {
+          "name": "revoked_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "mcp_connections_refresh_previous_idx": {
+          "name": "mcp_connections_refresh_previous_idx",
+          "columns": [
+            "refresh_previous_hash"
+          ],
+          "isUnique": false
+        },
+        "mcp_connections_live_idx": {
+          "name": "mcp_connections_live_idx",
+          "columns": [
+            "principal",
+            "expires_at"
+          ],
+          "isUnique": false,
+          "where": "\"mcp_connections\".\"revoked_at\" IS NULL"
+        },
+        "mcp_connections_code_hash_key": {
+          "name": "mcp_connections_code_hash_key",
+          "columns": [
+            "code_hash"
+          ],
+          "isUnique": true
+        },
+        "mcp_connections_refresh_hash_key": {
+          "name": "mcp_connections_refresh_hash_key",
+          "columns": [
+            "refresh_hash"
+          ],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {
+        "mcp_connections_principal_fkey": {
+          "name": "mcp_connections_principal_fkey",
+          "tableFrom": "mcp_connections",
+          "tableTo": "vault_members",
+          "columnsFrom": [
+            "principal"
+          ],
+          "columnsTo": [
+            "principal"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "mcp_connections_principal_check": {
+          "name": "mcp_connections_principal_check",
+          "value": "\"mcp_connections\".\"principal\" LIKE 'user:%'"
+        },
+        "mcp_connections_registration_check": {
+          "name": "mcp_connections_registration_check",
+          "value": "\"mcp_connections\".\"registration\" IN ('cimd', 'dcr')"
+        },
+        "mcp_connections_auth_mac_check": {
+          "name": "mcp_connections_auth_mac_check",
+          "value": "octet_length(\"mcp_connections\".\"auth_mac\") = 32"
+        },
+        "mcp_connections_code_hash_check": {
+          "name": "mcp_connections_code_hash_check",
+          "value": "\"mcp_connections\".\"code_hash\" IS NULL OR octet_length(\"mcp_connections\".\"code_hash\") = 32"
+        },
+        "mcp_connections_refresh_hash_check": {
+          "name": "mcp_connections_refresh_hash_check",
+          "value": "\"mcp_connections\".\"refresh_hash\" IS NULL OR octet_length(\"mcp_connections\".\"refresh_hash\") = 32"
+        }
+      }
+    },
+    "oauth_clients": {
+      "name": "oauth_clients",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "auth_mac": {
+          "name": "auth_mac",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "redirect_uris": {
+          "name": "redirect_uris",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(CAST(unixepoch('subsec') * 1000 AS INTEGER))"
+        },
+        "created_ip": {
+          "name": "created_ip",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "revoked_at": {
+          "name": "revoked_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "oauth_clients_auth_mac_check": {
+          "name": "oauth_clients_auth_mac_check",
+          "value": "octet_length(\"oauth_clients\".\"auth_mac\") = 32"
+        },
+        "oauth_clients_redirect_uris_check": {
+          "name": "oauth_clients_redirect_uris_check",
+          "value": "json_valid(\"oauth_clients\".\"redirect_uris\")"
+        }
+      }
+    },
     "projects": {
       "name": "projects",
       "columns": {
@@ -1003,6 +1475,13 @@
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
+        },
+        "folder": {
+          "name": "folder",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
         }
       },
       "indexes": {
@@ -1020,9 +1499,178 @@
       "checkConstraints": {
         "projects_slug_check": {
           "name": "projects_slug_check",
-          "value": "length(\"projects\".\"slug\") BETWEEN 1 AND 63 AND \"projects\".\"slug\" GLOB '[a-z0-9]*' AND \"projects\".\"slug\" NOT GLOB '*[^a-z0-9-]*'"
+          "value": "(length(\"projects\".\"slug\") BETWEEN 1 AND 63 AND \"projects\".\"slug\" GLOB '[a-z0-9]*' AND \"projects\".\"slug\" NOT GLOB '*[^a-z0-9-]*') OR (instr(\"projects\".\"slug\", '~') BETWEEN 2 AND 64 AND substr(\"projects\".\"slug\", 1, instr(\"projects\".\"slug\", '~') - 1) GLOB '[a-z0-9]*' AND substr(\"projects\".\"slug\", 1, instr(\"projects\".\"slug\", '~') - 1) NOT GLOB '*[^a-z0-9-]*' AND length(substr(\"projects\".\"slug\", instr(\"projects\".\"slug\", '~') + 1)) BETWEEN 1 AND 40 AND substr(\"projects\".\"slug\", instr(\"projects\".\"slug\", '~') + 1) NOT GLOB '*[^a-z0-9-]*')"
+        },
+        "projects_folder_check": {
+          "name": "projects_folder_check",
+          "value": "\"projects\".\"folder\" IS NULL OR (length(\"projects\".\"folder\") BETWEEN 1 AND 64 AND \"projects\".\"folder\" NOT GLOB '*/*' AND \"projects\".\"folder\" = trim(\"projects\".\"folder\"))"
         }
       }
+    },
+    "secret_references": {
+      "name": "secret_references",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "project_id": {
+          "name": "project_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "environment_id": {
+          "name": "environment_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "secret_id": {
+          "name": "secret_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "source_project_id": {
+          "name": "source_project_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "source_environment_id": {
+          "name": "source_environment_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "source_secret_id": {
+          "name": "source_secret_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_seq": {
+          "name": "created_seq",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(CAST(unixepoch('subsec') * 1000 AS INTEGER))"
+        },
+        "created_by": {
+          "name": "created_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "secret_references_holder_idx": {
+          "name": "secret_references_holder_idx",
+          "columns": [
+            "secret_id",
+            "created_seq"
+          ],
+          "isUnique": false
+        },
+        "secret_references_source_idx": {
+          "name": "secret_references_source_idx",
+          "columns": [
+            "source_secret_id"
+          ],
+          "isUnique": false
+        },
+        "secret_references_project_idx": {
+          "name": "secret_references_project_idx",
+          "columns": [
+            "project_id"
+          ],
+          "isUnique": false
+        },
+        "secret_references_source_project_idx": {
+          "name": "secret_references_source_project_idx",
+          "columns": [
+            "source_project_id"
+          ],
+          "isUnique": false
+        },
+        "secret_references_created_by_idx": {
+          "name": "secret_references_created_by_idx",
+          "columns": [
+            "created_by"
+          ],
+          "isUnique": false
+        },
+        "secret_references_created_seq_key": {
+          "name": "secret_references_created_seq_key",
+          "columns": [
+            "created_seq"
+          ],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {
+        "secret_references_secret_id_fkey": {
+          "name": "secret_references_secret_id_fkey",
+          "tableFrom": "secret_references",
+          "tableTo": "secrets",
+          "columnsFrom": [
+            "secret_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "secret_references_source_secret_id_fkey": {
+          "name": "secret_references_source_secret_id_fkey",
+          "tableFrom": "secret_references",
+          "tableTo": "secrets",
+          "columnsFrom": [
+            "source_secret_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "secret_references_created_seq_fkey": {
+          "name": "secret_references_created_seq_fkey",
+          "tableFrom": "secret_references",
+          "tableTo": "audit_log",
+          "columnsFrom": [
+            "created_seq"
+          ],
+          "columnsTo": [
+            "seq"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
     },
     "secret_versions": {
       "name": "secret_versions",
@@ -1238,6 +1886,13 @@
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
+        },
+        "folder": {
+          "name": "folder",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
         }
       },
       "indexes": {
@@ -1322,92 +1977,15 @@
         "secrets_key_check": {
           "name": "secrets_key_check",
           "value": "length(\"secrets\".\"key\") BETWEEN 1 AND 128 AND \"secrets\".\"key\" GLOB '[A-Za-z_]*' AND \"secrets\".\"key\" NOT GLOB '*[^A-Za-z0-9_]*'"
+        },
+        "secrets_folder_check": {
+          "name": "secrets_folder_check",
+          "value": "\"secrets\".\"folder\" IS NULL OR (length(\"secrets\".\"folder\") BETWEEN 1 AND 64 AND \"secrets\".\"folder\" NOT GLOB '*/*' AND \"secrets\".\"folder\" = trim(\"secrets\".\"folder\"))"
         }
       }
     },
-    "sync_keys": {
-      "name": "sync_keys",
-      "columns": {
-        "sync_id": {
-          "name": "sync_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "key": {
-          "name": "key",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "secret_version_id": {
-          "name": "secret_version_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "pushed_at": {
-          "name": "pushed_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "(CAST(unixepoch('subsec') * 1000 AS INTEGER))"
-        },
-        "removed_at": {
-          "name": "removed_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "sync_keys_sync_id_fkey": {
-          "name": "sync_keys_sync_id_fkey",
-          "tableFrom": "sync_keys",
-          "tableTo": "syncs",
-          "columnsFrom": [
-            "sync_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
-        },
-        "sync_keys_secret_version_id_fkey": {
-          "name": "sync_keys_secret_version_id_fkey",
-          "tableFrom": "sync_keys",
-          "tableTo": "secret_versions",
-          "columnsFrom": [
-            "secret_version_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {
-        "sync_keys_pkey": {
-          "columns": [
-            "sync_id",
-            "key"
-          ],
-          "name": "sync_keys_pkey"
-        }
-      },
-      "uniqueConstraints": {},
-      "checkConstraints": {}
-    },
-    "syncs": {
-      "name": "syncs",
+    "service_bindings": {
+      "name": "service_bindings",
       "columns": {
         "id": {
           "name": "id",
@@ -1416,39 +1994,60 @@
           "notNull": true,
           "autoincrement": false
         },
-        "project_id": {
-          "name": "project_id",
+        "auth_mac": {
+          "name": "auth_mac",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "principal": {
+          "name": "principal",
           "type": "text",
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
         },
-        "environment_id": {
-          "name": "environment_id",
+        "generation": {
+          "name": "generation",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "profile": {
+          "name": "profile",
           "type": "text",
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
         },
-        "provider": {
-          "name": "provider",
+        "issuer": {
+          "name": "issuer",
           "type": "text",
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
         },
-        "config": {
-          "name": "config",
+        "jwks_uri": {
+          "name": "jwks_uri",
           "type": "text",
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
         },
-        "credential_secret_id": {
-          "name": "credential_secret_id",
+        "claims": {
+          "name": "claims",
           "type": "text",
           "primaryKey": false,
           "notNull": true,
+          "autoincrement": false
+        },
+        "label": {
+          "name": "label",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
           "autoincrement": false
         },
         "created_at": {
@@ -1466,43 +2065,22 @@
           "notNull": true,
           "autoincrement": false
         },
-        "paused_at": {
-          "name": "paused_at",
+        "last_used_at": {
+          "name": "last_used_at",
           "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
         },
-        "archived_at": {
-          "name": "archived_at",
+        "revoked_at": {
+          "name": "revoked_at",
           "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
         },
-        "lease_until": {
-          "name": "lease_until",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "last_run_at": {
-          "name": "last_run_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "last_status": {
-          "name": "last_status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "last_error": {
-          "name": "last_error",
+        "revoked_by": {
+          "name": "revoked_by",
           "type": "text",
           "primaryKey": false,
           "notNull": false,
@@ -1510,39 +2088,37 @@
         }
       },
       "indexes": {
-        "syncs_environment_idx": {
-          "name": "syncs_environment_idx",
+        "service_bindings_principal_idx": {
+          "name": "service_bindings_principal_idx",
           "columns": [
-            "environment_id"
+            "principal",
+            "issuer"
           ],
           "isUnique": false
+        },
+        "service_bindings_live_idx": {
+          "name": "service_bindings_live_idx",
+          "columns": [
+            "principal",
+            "issuer",
+            "generation",
+            "created_at",
+            "id"
+          ],
+          "isUnique": false,
+          "where": "\"service_bindings\".\"revoked_at\" IS NULL"
         }
       },
       "foreignKeys": {
-        "syncs_environment_in_project": {
-          "name": "syncs_environment_in_project",
-          "tableFrom": "syncs",
-          "tableTo": "environments",
+        "service_bindings_principal_fkey": {
+          "name": "service_bindings_principal_fkey",
+          "tableFrom": "service_bindings",
+          "tableTo": "vault_members",
           "columnsFrom": [
-            "environment_id",
-            "project_id"
+            "principal"
           ],
           "columnsTo": [
-            "id",
-            "project_id"
-          ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
-        },
-        "syncs_credential_secret_id_fkey": {
-          "name": "syncs_credential_secret_id_fkey",
-          "tableFrom": "syncs",
-          "tableTo": "secrets",
-          "columnsFrom": [
-            "credential_secret_id"
-          ],
-          "columnsTo": [
-            "id"
+            "principal"
           ],
           "onDelete": "restrict",
           "onUpdate": "no action"
@@ -1551,13 +2127,17 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {
-        "syncs_config_check": {
-          "name": "syncs_config_check",
-          "value": "json_valid(\"syncs\".\"config\")"
+        "service_bindings_principal_check": {
+          "name": "service_bindings_principal_check",
+          "value": "\"service_bindings\".\"principal\" LIKE 'token:%'"
         },
-        "syncs_last_status_check": {
-          "name": "syncs_last_status_check",
-          "value": "\"syncs\".\"last_status\" IS NULL OR \"syncs\".\"last_status\" IN ('ok', 'partial', 'failed')"
+        "service_bindings_auth_mac_check": {
+          "name": "service_bindings_auth_mac_check",
+          "value": "octet_length(\"service_bindings\".\"auth_mac\") = 32"
+        },
+        "service_bindings_claims_check": {
+          "name": "service_bindings_claims_check",
+          "value": "json_valid(\"service_bindings\".\"claims\")"
         }
       }
     },
@@ -1580,6 +2160,13 @@
         },
         "environment_id": {
           "name": "environment_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "environment_slug": {
+          "name": "environment_slug",
           "type": "text",
           "primaryKey": false,
           "notNull": false,
@@ -1615,6 +2202,14 @@
         }
       },
       "indexes": {
+        "vault_grants_on_every_project": {
+          "name": "vault_grants_on_every_project",
+          "columns": [
+            "principal"
+          ],
+          "isUnique": true,
+          "where": "\"vault_grants\".\"project_id\" IS NULL AND \"vault_grants\".\"environment_id\" IS NULL AND \"vault_grants\".\"environment_slug\" IS NULL"
+        },
         "vault_grants_on_project": {
           "name": "vault_grants_on_project",
           "columns": [
@@ -1628,6 +2223,14 @@
           "columns": [
             "principal",
             "environment_id"
+          ],
+          "isUnique": true
+        },
+        "vault_grants_on_environment_slug": {
+          "name": "vault_grants_on_environment_slug",
+          "columns": [
+            "principal",
+            "environment_slug"
           ],
           "isUnique": true
         }
@@ -1678,7 +2281,11 @@
       "checkConstraints": {
         "vault_grants_one_place": {
           "name": "vault_grants_one_place",
-          "value": "(\"vault_grants\".\"project_id\" IS NULL) <> (\"vault_grants\".\"environment_id\" IS NULL)"
+          "value": "((\"vault_grants\".\"project_id\" IS NULL) <> (\"vault_grants\".\"environment_id\" IS NULL) AND \"vault_grants\".\"environment_slug\" IS NULL) OR (\"vault_grants\".\"project_id\" IS NULL AND \"vault_grants\".\"environment_id\" IS NULL)"
+        },
+        "vault_grants_environment_slug_check": {
+          "name": "vault_grants_environment_slug_check",
+          "value": "\"vault_grants\".\"environment_slug\" IS NULL OR (length(\"vault_grants\".\"environment_slug\") BETWEEN 1 AND 63 AND \"vault_grants\".\"environment_slug\" GLOB '[a-z0-9]*' AND \"vault_grants\".\"environment_slug\" NOT GLOB '*[^a-z0-9-]*')"
         },
         "vault_grants_role_check": {
           "name": "vault_grants_role_check",
@@ -1686,7 +2293,7 @@
         },
         "vault_grants_environment_role_check": {
           "name": "vault_grants_environment_role_check",
-          "value": "\"vault_grants\".\"environment_id\" IS NULL OR \"vault_grants\".\"role\" IN ('viewer', 'developer', 'auditor')"
+          "value": "(\"vault_grants\".\"environment_id\" IS NULL AND \"vault_grants\".\"environment_slug\" IS NULL) OR \"vault_grants\".\"role\" IN ('viewer', 'developer', 'auditor')"
         }
       }
     },
@@ -1777,7 +2384,7 @@
         },
         "vault_members_principal_check": {
           "name": "vault_members_principal_check",
-          "value": "(\"vault_members\".\"principal\" GLOB 'user:?*' OR \"vault_members\".\"principal\" GLOB 'token:?*' OR \"vault_members\".\"principal\" GLOB 'sync:?*')\n        AND substr(\"vault_members\".\"principal\", instr(\"vault_members\".\"principal\", ':') + 1, 1) <> ':'\n        AND instr(\"vault_members\".\"principal\", ' ') = 0 AND instr(\"vault_members\".\"principal\", char(9)) = 0\n        AND instr(\"vault_members\".\"principal\", char(10)) = 0 AND instr(\"vault_members\".\"principal\", char(13)) = 0"
+          "value": "(\"vault_members\".\"principal\" GLOB 'user:?*' OR \"vault_members\".\"principal\" GLOB 'token:?*')\n        AND substr(\"vault_members\".\"principal\", instr(\"vault_members\".\"principal\", ':') + 1, 1) <> ':'\n        AND instr(\"vault_members\".\"principal\", ' ') = 0 AND instr(\"vault_members\".\"principal\", char(9)) = 0\n        AND instr(\"vault_members\".\"principal\", char(10)) = 0 AND instr(\"vault_members\".\"principal\", char(13)) = 0"
         },
         "vault_members_user_lowercase": {
           "name": "vault_members_user_lowercase",
@@ -1806,6 +2413,42 @@
     "columns": {}
   },
   "internal": {
-    "indexes": {}
+    "indexes": {
+      "audit_log_unbind_idx": {
+        "columns": {
+          "json_extract(\"metadata\", '$.bindingId')": {
+            "isExpression": true
+          }
+        }
+      },
+      "audit_log_exchange_idx": {
+        "columns": {
+          "json_extract(\"metadata\", '$.credentialId')": {
+            "isExpression": true
+          }
+        }
+      },
+      "audit_log_also_project_idx": {
+        "columns": {
+          "json_extract(\"metadata\", '$.also.projectId')": {
+            "isExpression": true
+          }
+        }
+      },
+      "audit_log_also_environment_idx": {
+        "columns": {
+          "json_extract(\"metadata\", '$.also.environmentId')": {
+            "isExpression": true
+          }
+        }
+      },
+      "audit_log_also_secret_idx": {
+        "columns": {
+          "json_extract(\"metadata\", '$.also.secretId')": {
+            "isExpression": true
+          }
+        }
+      }
+    }
   }
 }

@@ -38,7 +38,7 @@ CREATE TABLE `audit_log` (
 	FOREIGN KEY (`secret_version_id`) REFERENCES `secret_versions`(`id`) ON UPDATE no action ON DELETE restrict,
 	FOREIGN KEY (`related_seq`) REFERENCES `audit_log`(`seq`) ON UPDATE no action ON DELETE restrict,
 	CONSTRAINT "audit_log_author_check" CHECK("audit_log"."author" IN ('app', 'vault')),
-	CONSTRAINT "audit_log_actor_check" CHECK("audit_log"."actor" GLOB 'user:?*' OR "audit_log"."actor" GLOB 'token:?*' OR "audit_log"."actor" GLOB 'sync:?*' OR "audit_log"."actor" GLOB 'system:?*'),
+	CONSTRAINT "audit_log_actor_check" CHECK("audit_log"."actor" GLOB 'user:?*' OR "audit_log"."actor" GLOB 'token:?*' OR "audit_log"."actor" GLOB 'system:?*'),
 	CONSTRAINT "audit_log_decision_check" CHECK("audit_log"."decision" IN ('allow', 'deny')),
 	CONSTRAINT "audit_log_metadata_check" CHECK(json_valid("audit_log"."metadata")),
 	CONSTRAINT "audit_log_prev_hash_check" CHECK(octet_length("audit_log"."prev_hash") = 32),
@@ -54,6 +54,18 @@ CREATE INDEX `audit_log_operation_idx` ON `audit_log` (`operation_id`,`seq`);-->
 CREATE INDEX `audit_log_action_idx` ON `audit_log` (`author`,`action`,`seq`);--> statement-breakpoint
 CREATE INDEX `audit_log_releases_idx` ON `audit_log` (`author`,`actor`,`action`,`decision`,`occurred_at`);--> statement-breakpoint
 CREATE INDEX `audit_log_subject_idx` ON `audit_log` (`author`,`subject_principal`,`seq`);--> statement-breakpoint
+CREATE INDEX `audit_log_unbind_idx` ON `audit_log` (json_extract("metadata", '$.bindingId')) WHERE "audit_log"."author" = 'app' AND "audit_log"."action" = 'token.unbind' AND "audit_log"."decision" = 'allow';--> statement-breakpoint
+CREATE INDEX `audit_log_exchange_idx` ON `audit_log` (json_extract("metadata", '$.credentialId')) WHERE "audit_log"."author" = 'app' AND "audit_log"."action" = 'token.exchange' AND "audit_log"."decision" = 'allow';--> statement-breakpoint
+CREATE INDEX `audit_log_reference_end_idx` ON `audit_log` (`related_seq`) WHERE "audit_log"."author" = 'vault' AND "audit_log"."action" = 'reference.end' AND "audit_log"."decision" = 'allow';--> statement-breakpoint
+CREATE INDEX `audit_log_also_project_idx` ON `audit_log` (json_extract("metadata", '$.also.projectId'),`seq`) WHERE json_extract("audit_log"."metadata", '$.also') IS NOT NULL;--> statement-breakpoint
+CREATE INDEX `audit_log_also_environment_idx` ON `audit_log` (json_extract("metadata", '$.also.environmentId'),`seq`) WHERE json_extract("audit_log"."metadata", '$.also') IS NOT NULL;--> statement-breakpoint
+CREATE INDEX `audit_log_also_secret_idx` ON `audit_log` (json_extract("metadata", '$.also.secretId'),`seq`) WHERE json_extract("audit_log"."metadata", '$.also') IS NOT NULL;--> statement-breakpoint
+CREATE TABLE `consumed_tokens` (
+	`hash` blob PRIMARY KEY NOT NULL,
+	`consumed_at` integer DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER)) NOT NULL,
+	CONSTRAINT "consumed_tokens_hash_check" CHECK(octet_length("consumed_tokens"."hash") = 32)
+);
+--> statement-breakpoint
 CREATE TABLE `credentials` (
 	`id` text PRIMARY KEY NOT NULL,
 	`kind` text NOT NULL,
@@ -81,6 +93,8 @@ CREATE TABLE `credentials` (
 );
 --> statement-breakpoint
 CREATE INDEX `credentials_principal_idx` ON `credentials` (`principal`,`generation`);--> statement-breakpoint
+CREATE INDEX `credentials_live_idx` ON `credentials` (`principal`,`expires_at`) WHERE "credentials"."revoked_at" IS NULL;--> statement-breakpoint
+CREATE INDEX `credentials_issued_by_idx` ON `credentials` (`principal`,`created_by`,`created_at`);--> statement-breakpoint
 CREATE UNIQUE INDEX `credentials_token_hash_key` ON `credentials` (`token_hash`);--> statement-breakpoint
 CREATE TABLE `device_authorizations` (
 	`id` text PRIMARY KEY NOT NULL,
@@ -108,6 +122,18 @@ CREATE TABLE `device_authorizations` (
 --> statement-breakpoint
 CREATE UNIQUE INDEX `device_authorizations_device_code_hash_key` ON `device_authorizations` (`device_code_hash`);--> statement-breakpoint
 CREATE UNIQUE INDEX `device_authorizations_user_code_key` ON `device_authorizations` (`user_code`);--> statement-breakpoint
+CREATE TABLE `dismissed_keys` (
+	`environment_id` text NOT NULL,
+	`key` text NOT NULL,
+	`dismissed_at` integer DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER)) NOT NULL,
+	`dismissed_by` text NOT NULL,
+	`restored_at` integer,
+	`restored_by` text,
+	PRIMARY KEY(`environment_id`, `key`),
+	FOREIGN KEY (`environment_id`) REFERENCES `environments`(`id`) ON UPDATE no action ON DELETE restrict,
+	CONSTRAINT "dismissed_keys_key_check" CHECK(length("dismissed_keys"."key") BETWEEN 1 AND 128 AND "dismissed_keys"."key" GLOB '[A-Za-z_]*' AND "dismissed_keys"."key" NOT GLOB '*[^A-Za-z0-9_]*')
+);
+--> statement-breakpoint
 CREATE TABLE `environments` (
 	`id` text PRIMARY KEY NOT NULL,
 	`project_id` text NOT NULL,
@@ -116,7 +142,7 @@ CREATE TABLE `environments` (
 	`created_at` integer DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER)) NOT NULL,
 	`archived_at` integer,
 	FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON UPDATE no action ON DELETE restrict,
-	CONSTRAINT "environments_slug_check" CHECK(length("environments"."slug") BETWEEN 1 AND 63 AND "environments"."slug" GLOB '[a-z0-9]*' AND "environments"."slug" NOT GLOB '*[^a-z0-9-]*')
+	CONSTRAINT "environments_slug_check" CHECK((length("environments"."slug") BETWEEN 1 AND 63 AND "environments"."slug" GLOB '[a-z0-9]*' AND "environments"."slug" NOT GLOB '*[^a-z0-9-]*') OR (instr("environments"."slug", '~') BETWEEN 2 AND 64 AND substr("environments"."slug", 1, instr("environments"."slug", '~') - 1) GLOB '[a-z0-9]*' AND substr("environments"."slug", 1, instr("environments"."slug", '~') - 1) NOT GLOB '*[^a-z0-9-]*' AND length(substr("environments"."slug", instr("environments"."slug", '~') + 1)) BETWEEN 1 AND 40 AND substr("environments"."slug", instr("environments"."slug", '~') + 1) NOT GLOB '*[^a-z0-9-]*'))
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `environments_project_id_slug_key` ON `environments` (`project_id`,`slug`);--> statement-breakpoint
@@ -145,16 +171,86 @@ CREATE TABLE `identities` (
 CREATE UNIQUE INDEX `identities_active_subject` ON `identities` (`provider`,`issuer_hash`,`active_subject`);--> statement-breakpoint
 CREATE INDEX `identities_principal_idx` ON `identities` (`principal`,`generation`);--> statement-breakpoint
 CREATE UNIQUE INDEX `identities_member_generation_key` ON `identities` (`id`,`principal`,`generation`);--> statement-breakpoint
+CREATE TABLE `mcp_connections` (
+	`id` text PRIMARY KEY NOT NULL,
+	`auth_mac` blob NOT NULL,
+	`principal` text NOT NULL,
+	`generation` integer NOT NULL,
+	`client_id` text NOT NULL,
+	`client_name` text NOT NULL,
+	`client_host` text,
+	`registration` text NOT NULL,
+	`scopes` text NOT NULL,
+	`redirect_uri` text NOT NULL,
+	`code_hash` blob,
+	`code_challenge` text,
+	`code_expires_at` integer,
+	`refresh_hash` blob,
+	`refresh_previous_hash` blob,
+	`expires_at` integer NOT NULL,
+	`created_at` integer DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER)) NOT NULL,
+	`last_used_at` integer,
+	`last_used_ip` text,
+	`revoked_at` integer,
+	`revoked_by` text,
+	FOREIGN KEY (`principal`) REFERENCES `vault_members`(`principal`) ON UPDATE no action ON DELETE restrict,
+	CONSTRAINT "mcp_connections_principal_check" CHECK("mcp_connections"."principal" LIKE 'user:%'),
+	CONSTRAINT "mcp_connections_registration_check" CHECK("mcp_connections"."registration" IN ('cimd', 'dcr')),
+	CONSTRAINT "mcp_connections_auth_mac_check" CHECK(octet_length("mcp_connections"."auth_mac") = 32),
+	CONSTRAINT "mcp_connections_code_hash_check" CHECK("mcp_connections"."code_hash" IS NULL OR octet_length("mcp_connections"."code_hash") = 32),
+	CONSTRAINT "mcp_connections_refresh_hash_check" CHECK("mcp_connections"."refresh_hash" IS NULL OR octet_length("mcp_connections"."refresh_hash") = 32)
+);
+--> statement-breakpoint
+CREATE INDEX `mcp_connections_refresh_previous_idx` ON `mcp_connections` (`refresh_previous_hash`);--> statement-breakpoint
+CREATE INDEX `mcp_connections_live_idx` ON `mcp_connections` (`principal`,`expires_at`) WHERE "mcp_connections"."revoked_at" IS NULL;--> statement-breakpoint
+CREATE UNIQUE INDEX `mcp_connections_code_hash_key` ON `mcp_connections` (`code_hash`);--> statement-breakpoint
+CREATE UNIQUE INDEX `mcp_connections_refresh_hash_key` ON `mcp_connections` (`refresh_hash`);--> statement-breakpoint
+CREATE TABLE `oauth_clients` (
+	`id` text PRIMARY KEY NOT NULL,
+	`auth_mac` blob NOT NULL,
+	`name` text NOT NULL,
+	`redirect_uris` text NOT NULL,
+	`created_at` integer DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER)) NOT NULL,
+	`created_ip` text,
+	`revoked_at` integer,
+	CONSTRAINT "oauth_clients_auth_mac_check" CHECK(octet_length("oauth_clients"."auth_mac") = 32),
+	CONSTRAINT "oauth_clients_redirect_uris_check" CHECK(json_valid("oauth_clients"."redirect_uris"))
+);
+--> statement-breakpoint
 CREATE TABLE `projects` (
 	`id` text PRIMARY KEY NOT NULL,
 	`slug` text NOT NULL,
 	`name` text NOT NULL,
 	`created_at` integer DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER)) NOT NULL,
 	`archived_at` integer,
-	CONSTRAINT "projects_slug_check" CHECK(length("projects"."slug") BETWEEN 1 AND 63 AND "projects"."slug" GLOB '[a-z0-9]*' AND "projects"."slug" NOT GLOB '*[^a-z0-9-]*')
+	`folder` text,
+	CONSTRAINT "projects_slug_check" CHECK((length("projects"."slug") BETWEEN 1 AND 63 AND "projects"."slug" GLOB '[a-z0-9]*' AND "projects"."slug" NOT GLOB '*[^a-z0-9-]*') OR (instr("projects"."slug", '~') BETWEEN 2 AND 64 AND substr("projects"."slug", 1, instr("projects"."slug", '~') - 1) GLOB '[a-z0-9]*' AND substr("projects"."slug", 1, instr("projects"."slug", '~') - 1) NOT GLOB '*[^a-z0-9-]*' AND length(substr("projects"."slug", instr("projects"."slug", '~') + 1)) BETWEEN 1 AND 40 AND substr("projects"."slug", instr("projects"."slug", '~') + 1) NOT GLOB '*[^a-z0-9-]*')),
+	CONSTRAINT "projects_folder_check" CHECK("projects"."folder" IS NULL OR (length("projects"."folder") BETWEEN 1 AND 64 AND "projects"."folder" NOT GLOB '*/*' AND "projects"."folder" = trim("projects"."folder")))
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `projects_slug_key` ON `projects` (`slug`);--> statement-breakpoint
+CREATE TABLE `secret_references` (
+	`id` text PRIMARY KEY NOT NULL,
+	`project_id` text NOT NULL,
+	`environment_id` text NOT NULL,
+	`secret_id` text NOT NULL,
+	`source_project_id` text NOT NULL,
+	`source_environment_id` text NOT NULL,
+	`source_secret_id` text NOT NULL,
+	`created_seq` integer NOT NULL,
+	`created_at` integer DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER)) NOT NULL,
+	`created_by` text NOT NULL,
+	FOREIGN KEY (`secret_id`) REFERENCES `secrets`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`source_secret_id`) REFERENCES `secrets`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`created_seq`) REFERENCES `audit_log`(`seq`) ON UPDATE no action ON DELETE restrict
+);
+--> statement-breakpoint
+CREATE INDEX `secret_references_holder_idx` ON `secret_references` (`secret_id`,`created_seq`);--> statement-breakpoint
+CREATE INDEX `secret_references_source_idx` ON `secret_references` (`source_secret_id`);--> statement-breakpoint
+CREATE INDEX `secret_references_project_idx` ON `secret_references` (`project_id`);--> statement-breakpoint
+CREATE INDEX `secret_references_source_project_idx` ON `secret_references` (`source_project_id`);--> statement-breakpoint
+CREATE INDEX `secret_references_created_by_idx` ON `secret_references` (`created_by`);--> statement-breakpoint
+CREATE UNIQUE INDEX `secret_references_created_seq_key` ON `secret_references` (`created_seq`);--> statement-breakpoint
 CREATE TABLE `secret_versions` (
 	`id` text PRIMARY KEY NOT NULL,
 	`secret_id` text NOT NULL,
@@ -187,52 +283,45 @@ CREATE TABLE `secrets` (
 	`current_version_id` text,
 	`current_version` integer DEFAULT 0 NOT NULL,
 	`archived_at` integer,
+	`folder` text,
 	FOREIGN KEY (`current_version_id`) REFERENCES `secret_versions`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON UPDATE no action ON DELETE restrict,
 	FOREIGN KEY (`environment_id`) REFERENCES `environments`(`id`) ON UPDATE no action ON DELETE restrict,
 	FOREIGN KEY (`environment_id`,`project_id`) REFERENCES `environments`(`id`,`project_id`) ON UPDATE no action ON DELETE no action,
-	CONSTRAINT "secrets_key_check" CHECK(length("secrets"."key") BETWEEN 1 AND 128 AND "secrets"."key" GLOB '[A-Za-z_]*' AND "secrets"."key" NOT GLOB '*[^A-Za-z0-9_]*')
+	CONSTRAINT "secrets_key_check" CHECK(length("secrets"."key") BETWEEN 1 AND 128 AND "secrets"."key" GLOB '[A-Za-z_]*' AND "secrets"."key" NOT GLOB '*[^A-Za-z0-9_]*'),
+	CONSTRAINT "secrets_folder_check" CHECK("secrets"."folder" IS NULL OR (length("secrets"."folder") BETWEEN 1 AND 64 AND "secrets"."folder" NOT GLOB '*/*' AND "secrets"."folder" = trim("secrets"."folder")))
 );
 --> statement-breakpoint
 CREATE INDEX `secrets_lookup_idx` ON `secrets` (`project_id`,`environment_id`,`key`);--> statement-breakpoint
 CREATE UNIQUE INDEX `secrets_project_id_environment_id_key_key` ON `secrets` (`project_id`,`environment_id`,`key`);--> statement-breakpoint
-CREATE TABLE `sync_keys` (
-	`sync_id` text NOT NULL,
-	`key` text NOT NULL,
-	`secret_version_id` text,
-	`pushed_at` integer DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER)) NOT NULL,
-	`removed_at` integer,
-	PRIMARY KEY(`sync_id`, `key`),
-	FOREIGN KEY (`sync_id`) REFERENCES `syncs`(`id`) ON UPDATE no action ON DELETE restrict,
-	FOREIGN KEY (`secret_version_id`) REFERENCES `secret_versions`(`id`) ON UPDATE no action ON DELETE restrict
-);
---> statement-breakpoint
-CREATE TABLE `syncs` (
+CREATE TABLE `service_bindings` (
 	`id` text PRIMARY KEY NOT NULL,
-	`project_id` text NOT NULL,
-	`environment_id` text NOT NULL,
-	`provider` text NOT NULL,
-	`config` text NOT NULL,
-	`credential_secret_id` text NOT NULL,
+	`auth_mac` blob NOT NULL,
+	`principal` text NOT NULL,
+	`generation` integer NOT NULL,
+	`profile` text NOT NULL,
+	`issuer` text NOT NULL,
+	`jwks_uri` text NOT NULL,
+	`claims` text NOT NULL,
+	`label` text,
 	`created_at` integer DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER)) NOT NULL,
 	`created_by` text NOT NULL,
-	`paused_at` integer,
-	`archived_at` integer,
-	`lease_until` integer,
-	`last_run_at` integer,
-	`last_status` text,
-	`last_error` text,
-	FOREIGN KEY (`environment_id`,`project_id`) REFERENCES `environments`(`id`,`project_id`) ON UPDATE no action ON DELETE restrict,
-	FOREIGN KEY (`credential_secret_id`) REFERENCES `secrets`(`id`) ON UPDATE no action ON DELETE restrict,
-	CONSTRAINT "syncs_config_check" CHECK(json_valid("syncs"."config")),
-	CONSTRAINT "syncs_last_status_check" CHECK("syncs"."last_status" IS NULL OR "syncs"."last_status" IN ('ok', 'partial', 'failed'))
+	`last_used_at` integer,
+	`revoked_at` integer,
+	`revoked_by` text,
+	FOREIGN KEY (`principal`) REFERENCES `vault_members`(`principal`) ON UPDATE no action ON DELETE restrict,
+	CONSTRAINT "service_bindings_principal_check" CHECK("service_bindings"."principal" LIKE 'token:%'),
+	CONSTRAINT "service_bindings_auth_mac_check" CHECK(octet_length("service_bindings"."auth_mac") = 32),
+	CONSTRAINT "service_bindings_claims_check" CHECK(json_valid("service_bindings"."claims"))
 );
 --> statement-breakpoint
-CREATE INDEX `syncs_environment_idx` ON `syncs` (`environment_id`);--> statement-breakpoint
+CREATE INDEX `service_bindings_principal_idx` ON `service_bindings` (`principal`,`issuer`);--> statement-breakpoint
+CREATE INDEX `service_bindings_live_idx` ON `service_bindings` (`principal`,`issuer`,`generation`,`created_at`,`id`) WHERE "service_bindings"."revoked_at" IS NULL;--> statement-breakpoint
 CREATE TABLE `vault_grants` (
 	`principal` text NOT NULL,
 	`project_id` text,
 	`environment_id` text,
+	`environment_slug` text,
 	`role` text NOT NULL,
 	`expires_at` integer,
 	`granted_at` integer NOT NULL,
@@ -240,13 +329,16 @@ CREATE TABLE `vault_grants` (
 	FOREIGN KEY (`principal`) REFERENCES `vault_members`(`principal`) ON UPDATE no action ON DELETE restrict,
 	FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON UPDATE no action ON DELETE restrict,
 	FOREIGN KEY (`environment_id`) REFERENCES `environments`(`id`) ON UPDATE no action ON DELETE restrict,
-	CONSTRAINT "vault_grants_one_place" CHECK(("vault_grants"."project_id" IS NULL) <> ("vault_grants"."environment_id" IS NULL)),
+	CONSTRAINT "vault_grants_one_place" CHECK((("vault_grants"."project_id" IS NULL) <> ("vault_grants"."environment_id" IS NULL) AND "vault_grants"."environment_slug" IS NULL) OR ("vault_grants"."project_id" IS NULL AND "vault_grants"."environment_id" IS NULL)),
+	CONSTRAINT "vault_grants_environment_slug_check" CHECK("vault_grants"."environment_slug" IS NULL OR (length("vault_grants"."environment_slug") BETWEEN 1 AND 63 AND "vault_grants"."environment_slug" GLOB '[a-z0-9]*' AND "vault_grants"."environment_slug" NOT GLOB '*[^a-z0-9-]*')),
 	CONSTRAINT "vault_grants_role_check" CHECK("vault_grants"."role" IN ('viewer', 'developer', 'maintainer', 'access-manager', 'auditor', 'owner')),
-	CONSTRAINT "vault_grants_environment_role_check" CHECK("vault_grants"."environment_id" IS NULL OR "vault_grants"."role" IN ('viewer', 'developer', 'auditor'))
+	CONSTRAINT "vault_grants_environment_role_check" CHECK(("vault_grants"."environment_id" IS NULL AND "vault_grants"."environment_slug" IS NULL) OR "vault_grants"."role" IN ('viewer', 'developer', 'auditor'))
 );
 --> statement-breakpoint
+CREATE UNIQUE INDEX `vault_grants_on_every_project` ON `vault_grants` (`principal`) WHERE "vault_grants"."project_id" IS NULL AND "vault_grants"."environment_id" IS NULL AND "vault_grants"."environment_slug" IS NULL;--> statement-breakpoint
 CREATE UNIQUE INDEX `vault_grants_on_project` ON `vault_grants` (`principal`,`project_id`);--> statement-breakpoint
 CREATE UNIQUE INDEX `vault_grants_on_environment` ON `vault_grants` (`principal`,`environment_id`);--> statement-breakpoint
+CREATE UNIQUE INDEX `vault_grants_on_environment_slug` ON `vault_grants` (`principal`,`environment_slug`);--> statement-breakpoint
 CREATE TABLE `vault_members` (
 	`principal` text PRIMARY KEY NOT NULL,
 	`status` text NOT NULL,
@@ -259,7 +351,7 @@ CREATE TABLE `vault_members` (
 	`access_seq` integer NOT NULL,
 	`mac` blob NOT NULL,
 	CONSTRAINT "vault_members_mac_check" CHECK(octet_length("vault_members"."mac") = 32),
-	CONSTRAINT "vault_members_principal_check" CHECK(("vault_members"."principal" GLOB 'user:?*' OR "vault_members"."principal" GLOB 'token:?*' OR "vault_members"."principal" GLOB 'sync:?*')
+	CONSTRAINT "vault_members_principal_check" CHECK(("vault_members"."principal" GLOB 'user:?*' OR "vault_members"."principal" GLOB 'token:?*')
         AND substr("vault_members"."principal", instr("vault_members"."principal", ':') + 1, 1) <> ':'
         AND instr("vault_members"."principal", ' ') = 0 AND instr("vault_members"."principal", char(9)) = 0
         AND instr("vault_members"."principal", char(10)) = 0 AND instr("vault_members"."principal", char(13)) = 0),
@@ -290,4 +382,19 @@ END;
 CREATE TRIGGER `audit_log_no_delete` BEFORE DELETE ON `audit_log`
 BEGIN
     SELECT RAISE(ABORT, 'audit_log is append-only');
+END;
+--> statement-breakpoint
+
+-- A secret version is never rewritten in place, only erased: a deleted
+-- project or environment stays as a tombstone the log's entries name, and
+-- its versions with it, their ciphertext and wrapped data key emptied. That
+-- is the one change a version takes.
+CREATE TRIGGER `secret_versions_erase_only` BEFORE UPDATE ON `secret_versions`
+WHEN length(NEW.`ciphertext`) <> 0 OR length(NEW.`wrapped_dek`) <> 0
+    OR NEW.`id` IS NOT OLD.`id` OR NEW.`secret_id` IS NOT OLD.`secret_id` OR NEW.`version` IS NOT OLD.`version`
+    OR NEW.`envelope_version` IS NOT OLD.`envelope_version` OR NEW.`iv` IS NOT OLD.`iv` OR NEW.`auth_tag` IS NOT OLD.`auth_tag`
+    OR NEW.`kek_provider` IS NOT OLD.`kek_provider` OR NEW.`kek_id` IS NOT OLD.`kek_id` OR NEW.`kek_version` IS NOT OLD.`kek_version`
+    OR NEW.`created_at` IS NOT OLD.`created_at` OR NEW.`created_by` IS NOT OLD.`created_by`
+BEGIN
+    SELECT RAISE(ABORT, 'a secret version is only ever erased');
 END;

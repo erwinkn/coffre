@@ -84,11 +84,11 @@ pnpm exec wrangler secret put GITHUB_CLIENT_SECRET -c app/wrangler.jsonc
 ```
 
 To upgrade: `coffre update` here, then migrate and deploy: commit and push
-for Workers Builds, whose vault build runs `printenv DATABASE_OWNER_URL |
-pnpm exec coffre migrate --yes`, with the
-administrator's URL as its secret build variable `DATABASE_OWNER_URL`; or
-here, `pnpm exec coffre migrate`, then
-`pnpm run deploy`
+for Workers Builds, where both Workers' builds start with `printenv
+DATABASE_OWNER_URL | pnpm exec coffre migrate --yes`, with the
+administrator's URL as their secret build variable `DATABASE_OWNER_URL`; or
+here, `pnpm exec coffre migrate`, then `pnpm run deploy`. Until the
+migration has run, the new version answers 503, `migrating`
 ([upgrading](https://github.com/erwinkn/coffre/blob/main/docs/deploy.md#upgrading),
 [Workers Builds](https://github.com/erwinkn/coffre/blob/main/docs/deploy.md#workers-builds)).
 

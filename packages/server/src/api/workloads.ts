@@ -19,12 +19,10 @@ import {
 import { shownMember } from '@coffre/core/schemas';
 import type { Access, Vault } from '@coffre/core/vault';
 import type { Database, Transaction } from '@coffre/db';
-import { knownMigrations } from '@coffre/db/schema-version';
 import { serviceBindings } from '@coffre/db/schema';
 
 import { issuedBy } from '../auth-rows.ts';
 import {
-  appliedMigrations,
   bindingStands,
   consumeToken,
   exchangeCandidates,
@@ -76,8 +74,7 @@ export type ExchangeReason =
   | 'audience'
   | 'replayed'
   | 'busy'
-  | 'issuer_unavailable'
-  | 'migration_pending';
+  | 'issuer_unavailable';
 
 /**
  * A refused exchange: 401 with its reason, 429 when too many come at once,
@@ -160,10 +157,6 @@ export type WorkloadIds =
 const GITHUB_REPOSITORY = /^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/;
 const GITLAB_PROJECT = /^[A-Za-z0-9_.-]+(\/[A-Za-z0-9_.-]+){1,20}$/;
 
-/** The migrations that add bindings, and spent tokens: until they run, this release works without them. */
-const BINDINGS_MIGRATION = '0002_service_bindings';
-const EXCHANGE_MIGRATION = '0003_exchanges';
-
 /**
  * Trust bindings: which CI runs may sign in as a service by the ID token
  * their platform signs (docs/design/oidc.md). Owners make and remove them;
@@ -190,7 +183,6 @@ export class WorkloadService {
     const { principal } = ctx.caller;
     const self = principal.type === 'service' && principal.id === serviceId;
     if (!self && !ctx.caller.isOwner) throw forbidden('only owners may see trust bindings');
-    await this.#migrated();
     const member = `token:${serviceId}`;
     const standing = await memberStanding(this.#deps.db, member);
     if (standing === null) throw notFound('unknown service');
@@ -212,7 +204,6 @@ export class WorkloadService {
       if (!ctx.caller.isOwner) {
         throw new Refusal(forbidden('only owners may trust workloads'), denied(ctx, 'token.bind', 'requires_instance_owner', { metadata: details }));
       }
-      await this.#migrated();
       const standing = await this.#deps.vault.access(member);
       const unknown = () => new Refusal(notFound('unknown service'), denied(ctx, 'token.bind', 'unknown_principal', { metadata: details }));
       if (standing.status !== 'active') throw unknown();
@@ -289,7 +280,6 @@ export class WorkloadService {
         // Logged as a denial, which no tombstone check counts.
         throw new Refusal(forbidden('only owners may remove trust bindings'), denied(ctx, 'token.unbind', 'requires_instance_owner', { metadata }));
       }
-      await this.#migrated();
       return audited(this.#deps, async (tx, log) => {
         const row = await findBinding(tx, this.#deps.chainKey, member, bindingId);
         const live = row !== null && row.revokedAt === null
@@ -398,20 +388,9 @@ export class WorkloadService {
     const member = request.service;
     const unbound = () => new ExchangeRefused('no_match', `no binding of ${shownMember(member)} trusts tokens from ${issuer}`);
     if (!/^token:[a-z0-9][a-z0-9._-]{0,99}$/.test(member)) throw unbound();
-    const pending = () => new ExchangeRefused('migration_pending', 'exchanges need this release\'s database migrations: an owner runs `coffre migrate`', 503);
 
-    // The bindings first, so that a token none can take costs this one read:
-    // the migrations are asked of a read that failed, or of a token that
-    // verified and matched a binding.
-    let candidates: BindingRow[];
-    try {
-      candidates = await exchangeCandidates(db, chainKey, member, issuer, MAX_BINDINGS);
-    } catch (error) {
-      await this.#migrated(BINDINGS_MIGRATION).catch(() => {
-        throw pending();
-      });
-      throw error;
-    }
+    // The bindings first, so that a token none can take costs this one read.
+    const candidates = await exchangeCandidates(db, chainKey, member, issuer, MAX_BINDINGS);
     if (candidates.length === 0) throw unbound();
     // A service's bindings on one issuer share its keys' URL; one made after the keys moved replaced the rest.
     const jwksUri = candidates[candidates.length - 1]!.jwksUri;
@@ -424,10 +403,6 @@ export class WorkloadService {
     }
     const binding = matching(candidates.filter((candidate) => candidate.jwksUri === jwksUri), claims, member);
 
-    // Only now, for a token a binding takes, whether spent tokens have their table.
-    await this.#migrated(EXCHANGE_MIGRATION).catch(() => {
-      throw pending();
-    });
     if (await tokenConsumed(db, decoded.signingInputHash)) throw new ExchangeRefused('replayed', 'this token was exchanged already: ask your CI for a fresh one');
     const standing = await vault.access(member);
     if (standing.status !== 'active' || standing.generation !== binding.generation) throw unbound();
@@ -464,14 +439,6 @@ export class WorkloadService {
       }));
       return { token: credential.token, expiresAt: credential.expiresAt };
     });
-  }
-
-  /** Bindings, and spent tokens, live in tables this release's migrations add; until they run, coffre works without them. */
-  async #migrated(tag = BINDINGS_MIGRATION): Promise<void> {
-    const needed = knownMigrations(this.#deps.db).indexOf(tag) + 1;
-    if ((await appliedMigrations(this.#deps.db)) < needed) {
-      throw new ApiError('unavailable', 'trust bindings need this release\'s database migration: an owner runs `coffre migrate`');
-    }
   }
 }
 

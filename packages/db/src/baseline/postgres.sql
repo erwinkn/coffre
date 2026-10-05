@@ -26,13 +26,35 @@ CREATE TRIGGER audit_log_no_truncate BEFORE TRUNCATE ON audit_log
     FOR EACH STATEMENT EXECUTE FUNCTION audit_log_append_only();
 --> statement-breakpoint
 
+-- A secret version is never rewritten in place, only erased: a deleted
+-- project or environment stays as a tombstone the log's entries name, and
+-- its versions with it, their ciphertext and wrapped data key emptied. That
+-- is the one change a version takes, for every login.
+CREATE FUNCTION secret_versions_erase_only() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF octet_length(NEW.ciphertext) <> 0 OR octet_length(NEW.wrapped_dek) <> 0
+       OR (NEW.id, NEW.secret_id, NEW.version, NEW.envelope_version, NEW.iv, NEW.auth_tag,
+           NEW.kek_provider, NEW.kek_id, NEW.kek_version, NEW.created_at, NEW.created_by)
+          IS DISTINCT FROM
+          (OLD.id, OLD.secret_id, OLD.version, OLD.envelope_version, OLD.iv, OLD.auth_tag,
+           OLD.kek_provider, OLD.kek_id, OLD.kek_version, OLD.created_at, OLD.created_by) THEN
+        RAISE EXCEPTION 'a secret version is only ever erased' USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    RETURN NEW;
+END
+$$;
+--> statement-breakpoint
+CREATE TRIGGER secret_versions_erase_only BEFORE UPDATE ON secret_versions
+    FOR EACH ROW EXECUTE FUNCTION secret_versions_erase_only();
+--> statement-breakpoint
+
 -- Two logins, provisioned outside coffre (their passwords are never ours),
 -- each with only the rights of its group:
 --
 --   coffre_runtime        the server, through coffre_app: read and insert,
 --                         UPDATE on named columns only, and never DELETE. A
---                         revoked session, a used device code and a removed
---                         sync key are rows that say so, not gaps.
+--                         revoked session, a used device code and a spent
+--                         token are rows that say so, not gaps.
 --   coffre_vault_runtime  the vault, through coffre_vault: its members and
 --                         grants, and reading what it decides on.
 --
@@ -114,6 +136,10 @@ GRANT USAGE ON SCHEMA drizzle TO coffre_app, coffre_vault;
 GRANT SELECT ON drizzle.__drizzle_migrations TO coffre_app, coffre_vault;
 --> statement-breakpoint
 
+-- The app reads and adds; it never deletes. A binding, a registered client
+-- and a connection change only in what their MAC allows to change in place;
+-- a spent token and a reference never change at all, and the vault's log
+-- says which references have ended.
 GRANT SELECT, INSERT ON
     projects,
     environments,
@@ -123,8 +149,12 @@ GRANT SELECT, INSERT ON
     identities,
     credentials,
     device_authorizations,
-    syncs,
-    sync_keys
+    service_bindings,
+    consumed_tokens,
+    secret_references,
+    dismissed_keys,
+    oauth_clients,
+    mcp_connections
 TO coffre_app;
 --> statement-breakpoint
 
@@ -135,11 +165,11 @@ GRANT SELECT ON
 TO coffre_app;
 --> statement-breakpoint
 
-GRANT UPDATE (slug, name, archived_at) ON projects TO coffre_app;
+GRANT UPDATE (slug, name, archived_at, folder) ON projects TO coffre_app;
 --> statement-breakpoint
 GRANT UPDATE (slug, name, archived_at) ON environments TO coffre_app;
 --> statement-breakpoint
-GRANT UPDATE (key, current_version_id, current_version, updated_at, archived_at) ON secrets TO coffre_app;
+GRANT UPDATE (key, current_version_id, current_version, updated_at, archived_at, folder) ON secrets TO coffre_app;
 --> statement-breakpoint
 GRANT UPDATE (next_seq, head_hash) ON audit_chain_head TO coffre_app;
 --> statement-breakpoint
@@ -150,11 +180,14 @@ GRANT UPDATE (last_used_at, last_used_ip, revoked_at, revoked_by, auth_mac) ON c
 GRANT UPDATE (decided_at, decision, generation, principal, consumed_at, auth_mac)
     ON device_authorizations TO coffre_app;
 --> statement-breakpoint
-GRANT UPDATE (config, credential_secret_id, paused_at, archived_at, lease_until,
-              last_run_at, last_status, last_error)
-    ON syncs TO coffre_app;
+GRANT UPDATE (label, last_used_at, revoked_at, revoked_by, auth_mac) ON service_bindings TO coffre_app;
 --> statement-breakpoint
-GRANT UPDATE (secret_version_id, pushed_at, removed_at) ON sync_keys TO coffre_app;
+GRANT UPDATE (dismissed_at, dismissed_by, restored_at, restored_by) ON dismissed_keys TO coffre_app;
+--> statement-breakpoint
+GRANT UPDATE (revoked_at, auth_mac) ON oauth_clients TO coffre_app;
+--> statement-breakpoint
+GRANT UPDATE (code_challenge, code_expires_at, refresh_hash, refresh_previous_hash, last_used_at, last_used_ip, revoked_at, revoked_by, auth_mac)
+    ON mcp_connections TO coffre_app;
 --> statement-breakpoint
 
 -- The vault reads what it decides on and the log it chains to, and writes
@@ -182,6 +215,9 @@ REVOKE DELETE, TRUNCATE ON ALL TABLES IN SCHEMA public FROM coffre_app;
 REVOKE TRUNCATE ON ALL TABLES IN SCHEMA public FROM coffre_vault;
 --> statement-breakpoint
 REVOKE UPDATE ON audit_log, secret_versions FROM coffre_app, coffre_vault;
+--> statement-breakpoint
+-- What erasing a version empties, and nothing else: the trigger above holds every login to it.
+GRANT UPDATE (ciphertext, wrapped_dek) ON secret_versions TO coffre_app;
 --> statement-breakpoint
 REVOKE CREATE ON SCHEMA public FROM PUBLIC, coffre_app, coffre_runtime, coffre_vault, coffre_vault_runtime;
 --> statement-breakpoint

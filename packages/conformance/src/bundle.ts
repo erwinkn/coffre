@@ -20,8 +20,6 @@ export const SERVER_TABLES = [
   'dismissed_keys',
   'mcp_connections',
   'oauth_clients',
-  'project_folders',
-  'secret_folders',
   'secret_references',
   'secret_versions',
   'service_bindings',

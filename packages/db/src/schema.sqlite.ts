@@ -55,6 +55,10 @@ const isPlaceSlug = (column: AnySQLiteColumn) => {
   return sql`(${isSlug(column, 63)}) OR (instr(${column}, '~') BETWEEN 2 AND 64 AND ${base} GLOB '[a-z0-9]*' AND ${base} NOT GLOB '*[^a-z0-9-]*' AND length(${suffix}) BETWEEN 1 AND 40 AND ${suffix} NOT GLOB '*[^a-z0-9-]*')`;
 };
 
+/** A folder's name; the app also refuses control characters, which GLOB has no class for. */
+const folderCheck = (name: string, column: AnySQLiteColumn) =>
+  check(name, sql`${column} IS NULL OR (length(${column}) BETWEEN 1 AND 64 AND ${column} NOT GLOB '*/*' AND ${column} = trim(${column}))`);
+
 export const projects = sqliteTable(
   'projects',
   {
@@ -63,10 +67,12 @@ export const projects = sqliteTable(
     name: text().notNull(),
     createdAt: createdAt(),
     archivedAt: time('archived_at'),
+    folder: text(),
   },
   (table) => [
     unique('projects_slug_key').on(table.slug),
     check('projects_slug_check', isPlaceSlug(table.slug)),
+    folderCheck('projects_folder_check', table.folder),
   ],
 );
 
@@ -106,6 +112,7 @@ export const secrets = sqliteTable(
     }),
     currentVersion: integer('current_version').notNull().default(0),
     archivedAt: time('archived_at'),
+    folder: text(),
   },
   (table) => [
     unique('secrets_project_id_environment_id_key_key').on(table.projectId, table.environmentId, table.key),
@@ -113,6 +120,7 @@ export const secrets = sqliteTable(
       'secrets_key_check',
       sql`length(${table.key}) BETWEEN 1 AND 128 AND ${table.key} GLOB '[A-Za-z_]*' AND ${table.key} NOT GLOB '*[^A-Za-z0-9_]*'`,
     ),
+    folderCheck('secrets_folder_check', table.folder),
     foreignKey({
       name: 'secrets_project_id_fkey',
       columns: [table.projectId],
@@ -163,46 +171,6 @@ export const secretVersions = sqliteTable(
   ],
 );
 
-/** A folder's name; the app also refuses control characters, which GLOB has no class for. */
-const folderCheck = (name: string, column: AnySQLiteColumn) =>
-  check(name, sql`${column} IS NULL OR (length(${column}) BETWEEN 1 AND 64 AND ${column} NOT GLOB '*/*' AND ${column} = trim(${column}))`);
-
-export const projectFolders = sqliteTable(
-  'project_folders',
-  {
-    projectId: text('project_id').primaryKey(),
-    folder: text(),
-    movedAt: time('moved_at').notNull().default(now),
-    movedBy: text('moved_by').notNull(),
-  },
-  (table) => [
-    folderCheck('project_folders_folder_check', table.folder),
-    foreignKey({
-      name: 'project_folders_project_id_fkey',
-      columns: [table.projectId],
-      foreignColumns: [projects.id],
-    }).onDelete('restrict'),
-  ],
-);
-
-export const secretFolders = sqliteTable(
-  'secret_folders',
-  {
-    secretId: text('secret_id').primaryKey(),
-    folder: text(),
-    movedAt: time('moved_at').notNull().default(now),
-    movedBy: text('moved_by').notNull(),
-  },
-  (table) => [
-    folderCheck('secret_folders_folder_check', table.folder),
-    foreignKey({
-      name: 'secret_folders_secret_id_fkey',
-      columns: [table.secretId],
-      foreignColumns: [secrets.id],
-    }).onDelete('restrict'),
-  ],
-);
-
 export const dismissedKeys = sqliteTable(
   'dismissed_keys',
   {
@@ -246,10 +214,10 @@ export const vaultMembers = sqliteTable(
   },
   (table) => [
     check('vault_members_mac_check', sql`octet_length(${table.mac}) = 32`),
-    // `^(user|token|sync):[^[:space:]:][^[:space:]]*$`, without regular expressions.
+    // `^(user|token):[^[:space:]:][^[:space:]]*$`, without regular expressions.
     check(
       'vault_members_principal_check',
-      sql`(${table.principal} GLOB 'user:?*' OR ${table.principal} GLOB 'token:?*' OR ${table.principal} GLOB 'sync:?*')
+      sql`(${table.principal} GLOB 'user:?*' OR ${table.principal} GLOB 'token:?*')
         AND substr(${table.principal}, instr(${table.principal}, ':') + 1, 1) <> ':'
         AND instr(${table.principal}, ' ') = 0 AND instr(${table.principal}, char(9)) = 0
         AND instr(${table.principal}, char(10)) = 0 AND instr(${table.principal}, char(13)) = 0`,
@@ -319,7 +287,7 @@ export const auditLog = sqliteTable(
     // Milliseconds since the epoch, from the database's clock, read after the
     // append took the head's lock.
     occurredAt: integer('occurred_at', { mode: 'number' }).notNull(),
-    // Who acted: `user:<email>`, `token:<id>`, `sync:<id>` or `system:<name>`.
+    // Who acted: `user:<email>`, `token:<id>` or `system:<name>`.
     actor: text().notNull(),
     action: text().notNull(),
     decision: text().notNull(),
@@ -345,7 +313,7 @@ export const auditLog = sqliteTable(
     check('audit_log_author_check', sql`${table.author} IN ('app', 'vault')`),
     check(
       'audit_log_actor_check',
-      sql`${table.actor} GLOB 'user:?*' OR ${table.actor} GLOB 'token:?*' OR ${table.actor} GLOB 'sync:?*' OR ${table.actor} GLOB 'system:?*'`,
+      sql`${table.actor} GLOB 'user:?*' OR ${table.actor} GLOB 'token:?*' OR ${table.actor} GLOB 'system:?*'`,
     ),
     check('audit_log_decision_check', sql`${table.decision} IN ('allow', 'deny')`),
     check('audit_log_metadata_check', sql`json_valid(${table.metadata})`),

@@ -579,7 +579,7 @@ export function summary(result: SetupResult, out: Output): string {
     `    ${s.bold('Next')}`,
     row(out, s, 'Workers', `${workers.join('; ')}${fresh ? '; then pnpm run deploy' : ', which needs no redeploy'}.`),
     row(out, s, 'Node', fresh ? '.env and vault.env, then pnpm vault and pnpm start.' : 'each DATABASE_URL updated, then both processes restarted.'),
-    s.dim(paragraph(out, 'After every upgrade of coffre, pnpm exec coffre migrate --yes here, then the deploy or the restart. docs/deploy.md has each step.', 4)),
+    s.dim(paragraph(out, 'After every upgrade of coffre, pnpm exec coffre migrate --yes here first, then the deploy or the restart: until it runs, the new version serves nothing. docs/deploy.md has each step.', 4)),
     '',
     '',
   ].join('\n');

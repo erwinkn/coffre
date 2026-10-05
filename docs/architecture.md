@@ -748,15 +748,11 @@ read, whatever became of the credential's row, and the audit page shows the
 run under the actor ("acme/api run 7001 at 3f2a9c1"): what the issuer
 asserted, not proof of which run sent the request.
 
-Bindings come with migration `0002_service_bindings` and spent tokens with
-`0003_exchanges`. This release runs on the schema before them. Until
-an owner runs `coffre migrate`, the bindings routes and the exchange answer
-503. `0004_live_indexes` keeps what CI leaves behind out of the way: every
-run leaves an expired credential, and every replaced binding a retired one.
-Indexes on the live bindings, on a member's live credentials and on what a
-binding issued lately bound the exchange's first read, its rate count, a
-binding's removal and the members page by what is live, not by history.
-Before it runs, the same queries work, more slowly.
+Indexes keep what CI leaves behind out of the way: every run leaves an
+expired credential, and every replaced binding a retired one. Indexes on
+the live bindings, on a member's live credentials and on what a binding
+issued lately bound the exchange's first read, its rate count, a binding's
+removal and the members page by what is live, not by history.
 
 ## Deleting for good
 
@@ -812,11 +808,10 @@ one predicate, `isTombstone` in `@coffre/core/schemas`, and `tombstone()` in
 before still hold the encrypted values, and restoring one brings them back
 with the vault key ([restore.md](restore.md)).
 
-A version is immutable but for this. `0006_deletions` grants the app
-`UPDATE` on `ciphertext` and `wrapped_dek` alone, and a trigger refuses any
-change to a version but emptying both, for every login, so no value is
-rewritten in place. It also widens the slug checks to admit a tombstone's.
-Until it runs, deleting answers 503; nothing else reads it.
+A version is immutable but for this. The app has `UPDATE` on `ciphertext`
+and `wrapped_dek` alone, and a trigger refuses any change to a version but
+emptying both, for every login, so no value is rewritten in place. The slug
+checks admit a tombstone's.
 
 ## Databases
 
@@ -889,33 +884,35 @@ Workers use Postgres.
 ### Expand, then contract
 
 A deployment migrates in its pipeline, before it deploys
-([deploy.md](deploy.md)). Until the deploy is done, and for good if it
-fails, the previous release runs on the new schema; a deploy that runs
-before its migration has the new release on the old one. So every
-migration works with both, and the order does not matter:
+([deploy.md](deploy.md#upgrading)); with Workers Builds, each Worker's build
+does. Until the deploy is done, and for good if it fails, the previous
+release runs on the new schema. The new release never runs on the old one:
+the app checks, once per isolate or process until it holds, that the
+database has every migration the release ships (`@coffre/db/schema-version`,
+`migrated`), and below that answers everything but `/livez` and `/readyz`
+with 503 `migrating`, at one door, `respond` in `app.ts`, which every request
+Start answers goes through. `/readyz` is red until then. So code never asks
+whether a table or a column is there; a migration only has to keep the
+previous release working:
 
 - **A migration expands.** It adds tables, columns that are nullable or have
-  a default, indexes and grants. The code that uses them works without them
-  too, until the migration runs: the trust bindings answer 503 until
-  `0002_service_bindings`, the exchange until `0003_exchanges`, and grants
-  on every project until `0005_instance_grants`. Where Drizzle would name a
-  new column in every select and insert, the code reads `*` and names the
-  column only when it has a value for it (`@coffre/db/grants`).
+  a default, indexes and grants, which the previous release does not know
+  and does not mind: Drizzle names only the columns its schema has.
 - **What contracts waits a release.** Dropping or renaming a table or a
   column, NOT NULL on an existing column, a narrower check or type, or a
   unique or foreign key the old code may break, ships one release after the
   code stops using what it changes. Retiring a column: release n stops
-  reading and writing it, and release n+1 drops it. `0001_remove_syncs` did
-  both in one, and 0.1.11 broke on its schema: its member pages still read
-  the sync tables.
+  reading and writing it, and release n+1 drops it.
 
-`pnpm test:compat`, in CI for both engines, holds the newest release to
-the schema of the change under review. It installs that release from npm
-as `coffre init` writes a deployment, and lets its own conformance boot it,
-with the database migrated by the change's migrations instead of the
-release's. A synthetic destructive migration on top must then fail it, so
-that the check is known to be able to. Run against 0.1.12's migrations,
-0.1.11 fails ten checks; 0.1.15 on `0002` to `0004` passes.
+0.4.0 began again from one baseline per engine, for new databases only
+([deploy.md](deploy.md#from-a-release-before-040)): `coffre migrate` refuses
+a database an earlier release made. `pnpm test:compat` holds the newest
+release to the schema of the change under review: it installs that release
+from npm as `coffre init` writes a deployment, and lets its own conformance
+boot it, with the database migrated by the change's migrations instead of
+the release's. A synthetic destructive migration on top must then fail it,
+so that the check is known to be able to. It is off for 0.4.0, which has no
+earlier release on its schema, and holds 0.4.0 to the next release's.
 
 ## Limits
 

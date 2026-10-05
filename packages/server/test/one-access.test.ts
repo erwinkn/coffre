@@ -51,6 +51,7 @@ before(async () => {
     publicUrl: ORIGIN,
     verifier: service,
     waitUntil,
+    schema: { migrated: true },
   };
 });
 

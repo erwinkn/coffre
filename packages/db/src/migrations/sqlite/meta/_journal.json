@@ -5,78 +5,8 @@
     {
       "idx": 0,
       "version": "6",
-      "when": 1790874462505,
+      "when": 1791237724735,
       "tag": "0000_baseline",
-      "breakpoints": true
-    },
-    {
-      "idx": 1,
-      "version": "6",
-      "when": 1791062293531,
-      "tag": "0001_remove_syncs",
-      "breakpoints": true
-    },
-    {
-      "idx": 2,
-      "version": "6",
-      "when": 1791069305749,
-      "tag": "0002_service_bindings",
-      "breakpoints": true
-    },
-    {
-      "idx": 3,
-      "version": "6",
-      "when": 1791072337548,
-      "tag": "0003_exchanges",
-      "breakpoints": true
-    },
-    {
-      "idx": 4,
-      "version": "6",
-      "when": 1791084355588,
-      "tag": "0004_live_indexes",
-      "breakpoints": true
-    },
-    {
-      "idx": 5,
-      "version": "6",
-      "when": 1791191062832,
-      "tag": "0005_instance_grants",
-      "breakpoints": true
-    },
-    {
-      "idx": 6,
-      "version": "6",
-      "when": 1791203047923,
-      "tag": "0006_deletions",
-      "breakpoints": true
-    },
-    {
-      "idx": 7,
-      "version": "6",
-      "when": 1791206155629,
-      "tag": "0007_folders",
-      "breakpoints": true
-    },
-    {
-      "idx": 8,
-      "version": "6",
-      "when": 1791206847270,
-      "tag": "0008_references",
-      "breakpoints": true
-    },
-    {
-      "idx": 9,
-      "version": "6",
-      "when": 1791207605561,
-      "tag": "0009_dismissals",
-      "breakpoints": true
-    },
-    {
-      "idx": 10,
-      "version": "6",
-      "when": 1791213876830,
-      "tag": "0010_mcp_connections",
       "breakpoints": true
     }
   ]

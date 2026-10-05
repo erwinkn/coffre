@@ -84,13 +84,13 @@ export function CoffreProvider({ children }: { children: ReactNode }) {
 
 /** coffre's shell: the nav, around the signed-in pages. */
 export function ShellLayout() {
-  const { principal, instanceRole, projects, capabilities, instance } = useShell();
+  const { principal, instanceRole, projects, capabilities } = useShell();
   return (
     <>
       <a className="skip-link" href="#content">
         Skip to content
       </a>
-      <Shell projects={projects} principal={principal} instanceRole={instanceRole} capabilities={capabilities} instance={instance}>
+      <Shell projects={projects} principal={principal} instanceRole={instanceRole} capabilities={capabilities}>
         <Outlet />
       </Shell>
     </>

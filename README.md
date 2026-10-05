@@ -401,7 +401,11 @@ the others by name only. The GitHub Action's CLI pin moves with them.
 
 ## Supply chain and releases
 
-See the [release notes](CHANGELOG.md) before upgrading.
+See the [release notes](CHANGELOG.md) before upgrading. 0.4.0 is a clean
+break: no upgrade from 0.3 or earlier, which is deployed afresh, on a new
+database ([deploy.md](docs/deploy.md#from-a-release-before-040)). From
+0.4.0 on, each release migrates before it deploys, and serves nothing until
+its migrations have run.
 
 Install scripts are off, every dependency is pinned exactly, and a version
 must be seven days old before it can be installed. That last rule blocked
