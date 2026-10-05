@@ -60,27 +60,50 @@ without running that script or compiling Koffi.
 
 `pnpm test:properties:server` runs the real server properties against its own
 random scratch Postgres database. `pnpm test:properties:server --long --seed=42`
-runs 40 generated sequences instead of the normal four. Set the existing
+runs 40 generated sequences instead of the normal four. A normal run takes
+about 15 seconds; a long one, about a minute and a half. Set the existing
 `COFFRE_TEST_ENGINE=sqlite` to run that command on SQLite. Normal `pnpm test`
 and `pnpm test:sqlite` include the file with their usual private database
 clone or copy. The standalone command removes its scratch data on exit.
 
 The operation list is drawn before execution, so Hegel can shrink its length
-and parameters. It includes invitations, project and environment grants,
-revocation, writes, reads, member removal and service token issue/revocation.
-A fixed scenario also covers every operation and removal followed by
-re-admission. After every step, the model checks that old credentials stay
-refused, live granted readers obtain the current values, refused reads
-release nothing, each allowed value read has exactly one audit entry, and
-the real app/vault log verifies. Read requests use the real sign-in verifier
-and API, including the credential's generation.
+and parameters: four to fourteen operations. It includes invitations, member
+removal, service token issue and revocation, writes and reads, and grants and
+revocations at four scopes: the project, one environment, every project
+(`*`) and one environment slug in every project (`*/qa`). Places change
+too: environments are made, renamed, archived, restored and deleted, and
+the project is archived, restored, deleted and made again under its old
+slug. `retire-env` and `retire-project` archive and then delete in one
+step: a deletion needs both, and two independent draws rarely line up.
+Two fixed scenarios cover every operation, removal followed by
+re-admission, a grant on a slug before any environment has it, renames
+across slugs, and slugs used again after a deletion.
 
-The model has one person and one service, two environments and one secret
-in each. Both viewer and developer grants can be project-wide or scoped to
-one environment. This is a bounded state model, not every API route or every
-role: core's properties cover the complete role/permission table. Deployment
-keys are fixed test keys; product-generated IDs and data keys do not decide
-the modeled outcomes. Clock-sensitive expiry is outside these sequences.
+After every step, the model checks that:
+
+- old credentials stay refused;
+- a read is allowed exactly when the model's grants cover the place, with
+  an environment's grant following it through a rename and a `*/<slug>`
+  grant following the slug;
+- a granted reader gets the current value, and an allowed read has exactly
+  one audit entry, while a refused read releases nothing and logs none;
+- the root's lists show exactly the live project and environments,
+  archived ones included, and no tombstone;
+- every deleted place stays unreachable: its tombstone's path is refused
+  for a grant and a read, and at the vault, a grant on its ids and an
+  unwrap of each version it had are refused as `deleted`;
+- the real app/vault log verifies.
+
+Read requests use the real sign-in verifier and API, including the
+credential's generation.
+
+The model has one person and one service, one project and the environment
+slugs `dev`, `prod` and `qa`, with one secret in each environment. Viewer
+and developer grants can be at any of the four scopes. This is a bounded
+state model, not every API route or every role: core's properties cover
+the complete role/permission table. Deployment keys are fixed test keys;
+product-generated IDs and data keys do not decide the modeled outcomes.
+Clock-sensitive expiry is outside these sequences.
 
 Removing an absent member or revoking a revoked token is refused with 404,
 without changing members, grants, credentials or identities, or adding an
@@ -92,3 +115,12 @@ these semantics after PM review of the shrunk repeated-removal case.
 Key rotation is omitted because the API fixture offers no rotation
 operation: its vault keys are deployment configuration. The existing key
 rotation tests remain in the full suite.
+
+## Every night
+
+`.github/workflows/properties.yml` runs `pnpm test:properties --long` and
+`pnpm test:properties:server --long`, on Postgres and on SQLite, each night
+on a fresh seed, and on demand with a seed to replay (Actions, Nightly
+properties, Run workflow). The seed is printed first as a notice, and a
+failure ends with an error naming it and the command that replays it
+locally; Hegel's shrunk operations are in the step's log.
