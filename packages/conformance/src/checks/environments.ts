@@ -68,7 +68,7 @@ export async function forks({ admin, reader }: People, canaries: Canaries): Prom
 const HELD = 'CONFORMANCE_REFERENCE';
 const FORGED = 'CONFORMANCE_FORGED';
 
-/** The status a call failed with, and the vault's reason, or the value it gave. */
+/** The status a call failed with and its reason, the vault's or the app's, or that it went through. */
 async function outcome(call: Promise<unknown>): Promise<string> {
   try {
     await call;
@@ -93,7 +93,7 @@ export async function references(deployment: Deployment, { admin, reader, leaver
   expect(sourceKey !== undefined, 'prod holds no secret to refer to');
   const source = `${PROD}/${sourceKey}`;
   await refused('a viewer on dev read prod directly', reader.api.secrets.reveal(source));
-  expect(await outcome(leaver.api.secrets.set(DEV, { [HELD]: { ref: source } })) === '403 forbidden',
+  expect(await outcome(leaver.api.secrets.set(DEV, { [HELD]: { ref: source } })) === '403 missing_secret_read',
     "a developer on dev who cannot read prod made a reference to prod's secret");
 
   await admin.api.secrets.set(DEV, { [HELD]: { ref: source } });
@@ -134,7 +134,7 @@ export async function references(deployment: Deployment, { admin, reader, leaver
     try {
       const forgedRead = await outcome(reader.api.secrets.reveal(`${DEV}/${FORGED}`));
       // Read from its seal, the row is no reference at all, and its key holds no value; the vault would refuse it anyway.
-      expect(['404 not_found', '403 bad_claim'].includes(forgedRead), `a reference row the vault never made was read: ${forgedRead}`);
+      expect(['404 no_value', '404 not_found', '403 bad_claim'].includes(forgedRead), `a reference row the vault never made was read: ${forgedRead}`);
     } finally {
       await using(deployment.database(), async (sql) => {
         await query(sql, 'DELETE FROM secret_references WHERE secret_id = $1', [forged]);
@@ -144,7 +144,7 @@ export async function references(deployment: Deployment, { admin, reader, leaver
 
     await admin.api.references.break(`${DEV}/${HELD}`);
     const after = await outcome(reader.api.secrets.reveal(`${DEV}/${HELD}`));
-    expect(after === '409 conflict', `a broken reference still read: ${after}`);
+    expect(after.startsWith('409 '), `a broken reference still read: ${after}`);
   } finally {
     await admin.api.secrets.update(`${DEV}/${HELD}`, { archived: true });
   }

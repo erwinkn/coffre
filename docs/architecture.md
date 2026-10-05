@@ -289,7 +289,7 @@ and `apiMember`). The URL names the thing and the HTTP method is the verb:
 | Call | HTTP |
 |---|---|
 | how this instance signs people in (public) | `GET /api/auth` |
-| who I am, and everything I can reach | `GET /api/me` |
+| who I am, everything I can reach, and what this deployment turns on (`features`: MCP, trust bindings) | `GET /api/me` |
 | list, create, rename or archive a project | `GET /api/projects`, `PUT` / `PATCH /api/projects/market` |
 | the same for an environment | `PUT` / `PATCH /api/projects/market/prod` |
 | delete an archived project or environment for good, owners only (`?dryRun=1` says what it would take) | `DELETE /api/projects/market`, `DELETE /api/projects/market/prod` |
@@ -634,8 +634,8 @@ purpose `coffre/signin-rows/v1`. The message is a JSON tuple beginning with
 | `credentials` | id, token hash, kind, principal type and id, generation, identity id, expires at, revoked at |
 | `device_authorizations` | id, device code hash, user code, decision, decided at, principal type and id, generation, expires at, consumed at |
 | `service_bindings` | id, principal, generation, profile, issuer, JWKS URL, claims, revoked at |
-| `oauth_clients` | id, redirect URIs, revoked at |
-| `mcp_connections` | id, principal, generation, client id, scopes, redirect URI, code hash, code challenge, code expires at, refresh hash, previous refresh hash, expires at, revoked at |
+| `oauth_clients` | id, name, redirect URIs, revoked at |
+| `mcp_connections` | id, principal, generation, client id, client name, client host, registration, scopes, redirect URI, code hash, code challenge, code expires at, refresh hash, previous refresh hash, expires at, revoked at |
 
 Dates are integer milliseconds, bytes are hex, and null is distinct from
 any value. Row IDs and the device's short user code bind the MAC to the

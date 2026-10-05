@@ -6,7 +6,7 @@ import { lockLogHead } from '@coffre/db/log';
 
 import { appendAudit, type AuditEntry } from '../db/audit.ts';
 import { can, type Caller, type Place } from './caller.ts';
-import { forbidden, vaultRefused, type ApiError } from './errors.ts';
+import { ApiError, forbidden, vaultRefused } from './errors.ts';
 import type { Asking } from './keys.ts';
 import { formatMember } from './paths.ts';
 import type { SigninService } from './signin.ts';
@@ -232,5 +232,16 @@ export function requireOwner(ctx: ApiContext, action: string, fields: EntryField
 /** Log a refusal on its own and throw its error, for checks made outside any transaction. */
 export async function refuse(ctx: Pick<ApiContext, 'db' | 'chainKey'>, refusal: Refusal): Promise<never> {
   await ctx.db.transaction((tx) => appendAudit(tx, ctx.chainKey, [refusal.entry]));
-  throw refusal.error;
+  throw answered(refusal);
+}
+
+/**
+ * The error a refusal answers with, carrying the reason its entry logs
+ * (`principal_not_registered`, `referenced`, …): what a client branches on,
+ * never the message's words.
+ */
+function answered({ error, entry }: Refusal): ApiError | Error {
+  const reason = entry.metadata?.reason;
+  if (!(error instanceof ApiError) || error.reason !== undefined || typeof reason !== 'string') return error;
+  return new ApiError(error.code, error.message, reason);
 }

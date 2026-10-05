@@ -20,6 +20,22 @@ README's CLI section shows archive, unarchive and rename for keys,
 environments and projects on lines of their own, and what `coffre roles`
 prints.
 
+**Settings read, not inferred.** `GET /api/me` reports what the
+deployment's configuration turns on, `features: { mcp, workloads }`, and
+the account page (Connected apps), a service account's page and the
+directory (trust bindings), conformance and `coffre whoami` read it: a 404
+from a feature's route is an ordinary error again. `coffre apps` says when
+MCP is off on an instance. Every refusal the app logs now answers with its
+reason too (`principal_not_registered`, `missing_secret_read`, …), which
+the CLI's hints branch on, and the server's messages name a service account
+`service:<name>` themselves. The consent page's describe call, asked with a
+browser cookie, must come from coffre's own page, as a change must, so
+another site cannot make coffre fetch an app's document, whatever the
+path's spelling (`/api//oauth/authorizations/`); the page's own render
+still reads it, when it is opened on its own rather than embedded in
+another site. An MCP connection's client name, host and kind, and
+a registration's name, are under their rows' MACs.
+
 **MCP clients connect.** coffre is now an OAuth authorization server for
 MCP clients such as Claude, which connect at `<PUBLIC_URL>/mcp` as the
 people who approve them (docs/mcp.md). A client is known by its metadata

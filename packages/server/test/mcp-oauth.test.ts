@@ -10,13 +10,14 @@ import { eq } from 'drizzle-orm';
 
 import { SigninService } from '../src/api/signin.ts';
 import { coffreRoute } from '../src/app.ts';
+import { pageClient } from '../src/fetch-api.ts';
 import { updateAuth } from '../src/db/queries.ts';
 import { forgetDocuments } from '../src/mcp/clients.ts';
 import { McpService } from '../src/mcp/service.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
-import { auditLog, mcpConnections } from './db/tables.ts';
+import { auditLog, mcpConnections, oauthClients } from './db/tables.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const RESOURCE = `${ORIGIN}/mcp`;
@@ -477,4 +478,63 @@ test('a consent abandoned before its code was redeemed does not count against th
     await updateAuth(db.owner, deps.chainKey, mcpConnections, { id: row.id }, { codeExpiresAt: new Date(Date.now() - 1000) });
   }
   await consent();
+});
+
+test("the consent page's describe, asked with a cookie from another site, is refused before any client's document is fetched; the page's own render reads it", async () => {
+  const token = await session(DEV);
+  const { challenge } = pkce();
+  const ask = request(CLAUDE_CODE, 'http://localhost:5000/callback', challenge);
+  // The path as the router reads it: a trailing slash, a doubled one, a letter percent-encoded.
+  for (const path of ['/api/oauth/authorizations', '/api/oauth/authorizations/', '/api//oauth/authorizations', '/api/%6Fauth/authorizations']) {
+    const crossSite = await route(`${path}?${new URLSearchParams(ask)}`, {
+      headers: { cookie: `__Host-coffre_session=${token}`, 'sec-fetch-site': 'cross-site' },
+    });
+    assert.equal(crossSite.status, 403, path);
+    assert.equal(((await crossSite.json()) as { error: string }).error, 'cross_origin', path);
+  }
+  assert.deepEqual(fetched, [], "another site's page made coffre fetch nothing");
+  // The consent page embedded in another site, as an iframe or an image, renders without describing.
+  for (const dest of ['iframe', 'image']) {
+    const embedded = pageClient(new Request(`${ORIGIN}/oauth/authorize`, { headers: { cookie: `__Host-coffre_session=${token}`, 'sec-fetch-dest': dest } }), runtime, null);
+    await assert.rejects(embedded.oauth.describe(ask), (error: Error & { code?: string }) => error.code === 'cross_origin', dest);
+  }
+  assert.deepEqual(fetched, []);
+  // The consent page's render, a top-level navigation in process with the cookie the browser sent it, is coffre itself.
+  for (const headers of [{}, { 'sec-fetch-dest': 'document' }] as Record<string, string>[]) {
+    const page = pageClient(new Request(`${ORIGIN}/oauth/authorize`, { headers: { cookie: `__Host-coffre_session=${token}`, ...headers } }), runtime, null);
+    assert.equal((await page.oauth.describe(ask)).status, 'ready');
+  }
+  assert.deepEqual(fetched, [CLAUDE_CODE], 'fetched once, then kept');
+});
+
+test("a client's name, host and kind are under their rows' MACs: edited in the database, the row is refused", async () => {
+  for (const [column, value] of [['client_name', 'Claude'], ['client_host', 'claude.ai'], ['registration', 'cimd']] as const) {
+    await resetDatabase(db.owner);
+    const root = clientFor(deps, ROOT);
+    await root.members.add(`user:${DEV}`);
+    const { access_token } = await connect();
+    assert.equal((await discover(access_token)).status, 200);
+    await db.owner.update(mcpConnections).set({ [column === 'client_name' ? 'clientName' : column === 'client_host' ? 'clientHost' : 'registration']: value === 'cimd' ? 'dcr' : `${value}-forged` });
+    assert.equal((await discover(access_token)).status, 401, `${column} edited: the connection is refused`);
+    const listed = await route('/api/apps', { headers: { authorization: `Bearer ${await session(DEV)}` } });
+    assert.deepEqual(((await listed.json()) as { apps: unknown[] }).apps, [], `${column} edited: Connected apps does not show it`);
+  }
+  // A registration's name too.
+  const registered = (await (await route('/api/oauth/register', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ client_name: 'Cursor', redirect_uris: ['http://localhost:4000/cb'] }),
+  })).json()) as { client_id: string };
+  const ask = request(registered.client_id, 'http://localhost:4000/cb', pkce().challenge);
+  const token = await session(DEV);
+  assert.equal((await describe(token, ask)).status, 'ready');
+  await db.owner.update(oauthClients).set({ name: 'Claude' });
+  assert.equal((await describe(token, ask)).status, 'invalid', 'a registration renamed in the database is no client');
+});
+
+test('GET /me says what the deployment turns on, read from its configuration, not from a route answering 404', async () => {
+  const token = await session(DEV);
+  const me = (on: CoffreRuntime) => route('/api/me', { headers: { authorization: `Bearer ${token}` } }, on).then((response) => response.json() as Promise<{ features: unknown }>);
+  assert.deepEqual((await me(runtime)).features, { mcp: true, workloads: false });
+  assert.deepEqual((await me(off)).features, { mcp: false, workloads: false });
 });

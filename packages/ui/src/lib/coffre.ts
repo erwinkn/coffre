@@ -1,4 +1,4 @@
-import { CoffreError, shownText, type CoffreClient } from '@coffre/client';
+import { CoffreError, type CoffreClient } from '@coffre/client';
 import { useRouter } from '@tanstack/react-router';
 
 import type { CoffreContext } from '../options';
@@ -36,9 +36,9 @@ export function failureMessage(error: unknown): string {
   }
   if (error.status === 404) return 'Not found. It may have been renamed or archived.';
   // A 400 or 409 carries a sentence written for the person, such as which
-  // field of a request is wrong, its service accounts as people read them,
-  // service:<name>. Anything unexpected stays generic.
-  if (error.status === 400 || error.status === 409) return shownText(error.message);
+  // field of a request is wrong, which names a service account as people
+  // do, service:<name>. Anything unexpected stays generic.
+  if (error.status === 400 || error.status === 409) return error.message;
   return 'coffre is unavailable. Nothing was read or written.';
 }
 

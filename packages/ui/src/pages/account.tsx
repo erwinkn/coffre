@@ -31,7 +31,7 @@ type Search = { linked?: string; error?: string };
  */
 
 export function AccountPage() {
-  const { principal, instanceRole, auth } = useShell();
+  const { principal, instanceRole, auth, features } = useShell();
 
   return (
     <>
@@ -70,7 +70,7 @@ export function AccountPage() {
         <SignIn email={principal.id} providers={auth.signin.providers} />
       )}
 
-      {auth.signin !== null && principal?.type === 'user' && <ConnectedApps />}
+      {features.mcp && principal?.type === 'user' && <ConnectedApps />}
     </>
   );
 }
@@ -381,7 +381,6 @@ function ConnectedApps() {
   const change = disconnectApp(client);
   const disconnect = useChange(change);
   const { status, dismiss } = useChangeStatus(change.list.queryKey);
-  if (apps.ok && apps.off) return null;
 
   return (
     <Card

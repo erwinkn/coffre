@@ -2,7 +2,7 @@ import { createClient, type CoffreClient } from '@coffre/client';
 import { ACCESS_JWT_HEADER, type AuthConfig, type SigninBrand } from '@coffre/core/identity';
 
 import { ApiError } from './api/errors.ts';
-import { serveApi } from './api/router.ts';
+import { routeParts, serveApi } from './api/router.ts';
 import {
   authenticateRequest,
   bearerToken,
@@ -50,6 +50,25 @@ export function apiCredential(request: Request, auth: AuthConfig): ApiCredential
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
 /**
+ * Reads only coffre's own pages make, which do work for the asking: the
+ * consent page's describes a client, fetching its metadata document. Asked
+ * with a cookie, they take the same-origin rule a change does, so another
+ * site's `<img>` cannot make coffre fetch a URL in a signed-in person's name.
+ * By their route, as the router reads a path: `/api//oauth/authorizations/`
+ * is the same read.
+ */
+const PAGE_READS = new Set(['oauth/authorizations']);
+
+function isPageRead(request: Request): boolean {
+  try {
+    return PAGE_READS.has(routeParts(new URL(request.url).pathname).join('/'));
+  } catch {
+    // A path that does not decode is no route: the router answers 400, and reads nothing.
+    return false;
+  }
+}
+
+/**
  * Whether the browser vouches that a page of this origin sent the request.
  * Every current browser sends `Sec-Fetch-Site`; older ones at least send
  * `Origin` on a POST. A request with neither is not from a page we can
@@ -66,20 +85,24 @@ export function isSameOrigin(request: Request, publicUrl: string): boolean {
  * made with a cookie must come from one of coffre's own pages: otherwise any
  * site the person visits could make it in their name (CSRF). Headers need no
  * such check, since another site's page cannot make the browser send them.
- * `authenticate` checks the credential; a page's render passes one that
- * checks it once for all its calls (`pageClient`).
+ * The few reads that do work for the asking (`PAGE_READS`) take the rule
+ * too. `authenticate` checks the credential; a page's render passes one that
+ * checks it once for all its calls, and is `inProcess` (`pageClient`).
  */
 export async function apiCaller(
   request: Request,
   runtime: CoffreRuntime,
   sourceIp: string | null,
   authenticate: Authenticate = (token) => authenticateRequest(request, runtime, crypto.randomUUID(), token, sourceIp),
+  inProcess = false,
 ): Promise<AuthenticatedIdentity | Response> {
   const credential = apiCredential(request, runtime.auth);
   if (credential === null) return unauthenticated(runtime.auth);
-  if (credential.ambient && !SAFE_METHODS.has(request.method) && !isSameOrigin(request, runtime.publicUrl)) {
+  // A change, always; a page's read, unless it is the page's own render, in process, which is coffre itself.
+  const checked = !SAFE_METHODS.has(request.method) || (isPageRead(request) && !inProcess);
+  if (credential.ambient && checked && !isSameOrigin(request, runtime.publicUrl)) {
     return errorResponse(
-      new ApiError('cross_origin', 'a change sent with a browser session must come from coffre itself'),
+      new ApiError('cross_origin', SAFE_METHODS.has(request.method) ? 'this, asked with a browser session, must come from coffre itself' : 'a change sent with a browser session must come from coffre itself'),
     );
   }
   return authenticate(credential.token);
@@ -125,14 +148,15 @@ function authInfo(request: Request, runtime: CoffreRuntime): AuthInfo {
 export async function fetchApi(
   request: Request,
   runtime: CoffreRuntime,
-  options: { sourceIp: string | null; authenticate?: Authenticate },
+  /** `inProcess`: a page's render (`pageClient`), whose cookie the browser sent to coffre's own page. */
+  options: { sourceIp: string | null; authenticate?: Authenticate; inProcess?: boolean },
 ): Promise<Response> {
   try {
     const { pathname } = new URL(request.url);
     if (pathname === '/api/auth') {
       return request.method === 'GET' ? jsonResponse(authInfo(request, runtime)) : methodNotAllowed(['GET']);
     }
-    const identity = await apiCaller(request, runtime, options.sourceIp, options.authenticate);
+    const identity = await apiCaller(request, runtime, options.sourceIp, options.authenticate, options.inProcess);
     if (identity instanceof Response) return identity;
     if (!identity.registered && !(request.method === 'GET' && pathname === '/api/me')) {
       return identity.caller.tampered ? accessTampered() : registrationRequired();
@@ -176,6 +200,11 @@ export function pageClient(
   sourceIp: string | null,
 ): CoffreClient {
   const credential = pageCredential(page, runtime.auth);
+  // A page is rendered for a top-level navigation, or for a caller that is no
+  // browser. One embedded in another site, an iframe or an image, makes none
+  // of the reads that do work for the asking, whatever its credential.
+  const dest = page.headers.get('sec-fetch-dest');
+  const embedded = dest !== null && dest !== 'document';
   let checked: Promise<AuthenticatedIdentity | Response> | undefined;
   const authenticate: Authenticate = async (token) => {
     checked ??= authenticateRequest(page, runtime, crypto.randomUUID(), token, sourceIp);
@@ -186,6 +215,9 @@ export function pageClient(
   return createClient({
     url: new URL(page.url).origin,
     headers: () => credential,
-    transport: (request) => fetchApi(request, runtime, { sourceIp, authenticate }),
+    transport: async (request) =>
+      embedded && isPageRead(request)
+        ? errorResponse(new ApiError('cross_origin', 'this is read only by a page opened on its own, not one embedded in another site'))
+        : fetchApi(request, runtime, { sourceIp, authenticate, inProcess: true }),
   });
 }

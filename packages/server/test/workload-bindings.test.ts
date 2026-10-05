@@ -169,7 +169,7 @@ test('a binding is never edited: a change replaces it, and an issuer that moved 
   const { binding: changed, replaced } = await bind({ ...DEPLOY, event_name: 'workflow_dispatch' }, { replaces: [first.id] });
   assert.deepEqual(replaced, [first.id]);
   assert.deepEqual((await live()).map((row) => row.id), [second.id, changed.id]);
-  await assert.rejects(bind(DEPLOY, { replaces: [first.id] }), /no live binding of token:api-deploy's is/);
+  await assert.rejects(bind(DEPLOY, { replaces: [first.id] }), /no live binding of service:api-deploy's is/);
 
   // GitHub moves its keys: a binding made now names the new URL, and the others, which would fail anyway, go.
   documents.set(`${GITHUB}/.well-known/openid-configuration`, { issuer: GITHUB, jwks_uri: `${GITHUB}/keys/v2` });

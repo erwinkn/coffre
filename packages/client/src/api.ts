@@ -16,6 +16,10 @@ export type Api = {
       instanceRole: "owner" | "root-admin" | "user";
       isRootAdmin: boolean;
       canReadAudit: boolean;
+      features: {
+        mcp: boolean;
+        workloads: boolean;
+      };
       environments: {
         project: string;
         environment: string;
@@ -1076,6 +1080,10 @@ export type Me = {
   instanceRole: "owner" | "root-admin" | "user";
   isRootAdmin: boolean;
   canReadAudit: boolean;
+  features: {
+    mcp: boolean;
+    workloads: boolean;
+  };
   environments: {
     project: string;
     environment: string;

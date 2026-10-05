@@ -25,6 +25,15 @@ export const folderName = z.string().min(1).max(64)
   .refine((name) => name === name.trim(), 'a folder name cannot start or end with a space')
   .refine((name) => !/[/\p{Cc}]/u.test(name), 'a folder name cannot hold "/" or a control character');
 export const secretKey = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/);
+/**
+ * A member as people read it, in a message or on a page: a service account
+ * as `service:<name>`, though the API, the vault and the log keep the
+ * `token:<name>` their signed entries hold.
+ */
+export function shownMember(member: string): string {
+  return member.startsWith('token:') ? `service:${member.slice('token:'.length)}` : member;
+}
+
 export const principalType = z.enum(['user', 'service']);
 export const principalId = z.string().trim().min(1).max(320);
 export const instanceRole = z.enum(['user', 'owner']);

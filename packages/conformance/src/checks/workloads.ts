@@ -68,14 +68,10 @@ function twin(jwt: string): string {
 
 /** A viewer on dev, and a binding that trusts deploy.yml pushed to main of acme/api. */
 export async function trustRun(deployment: Deployment, admin: Person) {
+  if (!(await admin.api.me()).features.workloads) throw new Skip("this deployment trusts no workloads: its signin({ workloads }) is off");
   await admin.api.members.add(RUNNER);
   await admin.api.access.set(RUNNER, { [DEV]: 'viewer' });
-  const made = await admin.api.bindings
-    .create(RUNNER, { profile: 'github', issuer: deployment.idp.workloads.issuer, claims: DEPLOY, label: 'conformance' })
-    .catch((error: { status?: number; message?: string }) => {
-      if (error.status === 404) throw new Skip(`this deployment trusts no workloads: ${error.message}`);
-      throw error;
-    });
+  const made = await admin.api.bindings.create(RUNNER, { profile: 'github', issuer: deployment.idp.workloads.issuer, claims: DEPLOY, label: 'conformance' });
   return { detail: `${RUNNER}, viewer on ${DEV}, trusts deploy.yml pushed to main of acme/api, from the dev IdP`, value: made.binding.id };
 }
 

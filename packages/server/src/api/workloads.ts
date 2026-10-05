@@ -16,6 +16,7 @@ import {
   type WorkloadProfile,
   type WorkloadsConfig,
 } from '@coffre/core/identity';
+import { shownMember } from '@coffre/core/schemas';
 import type { Access, Vault } from '@coffre/core/vault';
 import type { Database, Transaction } from '@coffre/db';
 import { knownMigrations } from '@coffre/db/schema-version';
@@ -225,7 +226,7 @@ export class WorkloadService {
       const plan = (live: BindingRow[]): BindingPlan => {
         const asked = new Set(input.replaces);
         const unknownReplaced = input.replaces.filter((id) => !live.some((row) => row.id === id));
-        if (unknownReplaced.length > 0) throw conflict(`no live binding of ${member}'s is ${unknownReplaced.join(', ')}`);
+        if (unknownReplaced.length > 0) throw conflict(`no live binding of ${shownMember(member)}'s is ${unknownReplaced.join(', ')}`);
         const replaces = live.flatMap((row): BindingPlan['replaces'] => {
           if (asked.has(row.id)) return [{ id: row.id, why: 'asked' }];
           return row.issuer === policy.issuer && row.jwksUri !== jwksUri ? [{ id: row.id, why: 'keys_moved' }] : [];
@@ -395,7 +396,7 @@ export class WorkloadService {
     }
     const issuer = decoded.claims.iss;
     const member = request.service;
-    const unbound = () => new ExchangeRefused('no_match', `no binding of ${member} trusts tokens from ${issuer}`);
+    const unbound = () => new ExchangeRefused('no_match', `no binding of ${shownMember(member)} trusts tokens from ${issuer}`);
     if (!/^token:[a-z0-9][a-z0-9._-]{0,99}$/.test(member)) throw unbound();
     const pending = () => new ExchangeRefused('migration_pending', 'exchanges need this release\'s database migrations: an owner runs `coffre migrate`', 503);
 
@@ -493,7 +494,7 @@ function matching(bindings: BindingRow[], claims: Record<string, unknown>, membe
     if (differ.length === 0) return binding;
     if (closest === null || differ.length < closest.length) closest = differ;
   }
-  throw new ExchangeRefused('no_match', `no binding of ${member} trusts these claims: ${(closest ?? []).join(', ')} differ`);
+  throw new ExchangeRefused('no_match', `no binding of ${shownMember(member)} trusts these claims: ${(closest ?? []).join(', ')} differ`);
 }
 
 /** The run's claims, as the issuer stated them: those that say which run, each bounded. */

@@ -45,7 +45,7 @@ export type {
 } from './api.ts';
 
 export { byFolder, foldersOf } from './folders.ts';
-export { apiMember, serviceName, shownMember, shownText } from './members.ts';
+export { apiMember, serviceName, shownMember } from './members.ts';
 
 export type RouteKey = keyof Api;
 /** What a caller sends: the body, or the query string for a GET. */

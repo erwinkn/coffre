@@ -35,7 +35,7 @@ for (const linked of [false, true]) {
           interval: 1, expires_in: 60,
         }
         : req.url === '/api/auth/device/token' ? { access_token: token, expires_at: '2099-01-01T00:00:00Z' }
-        : { principal: { type: 'user', id: 'admin@acme.example' }, registered: true, environments: [] };
+        : { principal: { type: 'user', id: 'admin@acme.example' }, registered: true, features: { mcp: false, workloads: true }, environments: [] };
       res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(body));
     });
     server.listen(0, '127.0.0.1');
@@ -78,7 +78,7 @@ async function ciInstance(t: test.TestContext) {
       req.headers.authorization === 'Bearer coffre_svc_ci' ||
       req.headers.authorization === 'Bearer coffre_svc_run' ||
       (req.headers['cf-access-client-id'] === 'id.access' && req.headers['cf-access-client-secret'] === 'shh');
-    if (req.url === '/api/me' && known) return send(200, { principal: { type: 'service', id: 'deploy' }, registered: true, environments: [] });
+    if (req.url === '/api/me' && known) return send(200, { principal: { type: 'service', id: 'deploy' }, registered: true, features: { mcp: false, workloads: true }, environments: [] });
     if (req.method === 'PATCH' && req.url === '/api/secrets/app/prod' && known) return send(200, { operationId: 'op', keys: { KEY: { version: 1 } } });
     send(401, { error: 'unauthenticated', message: 'that credential is unknown, expired or revoked' });
   });
@@ -127,6 +127,7 @@ test('a CI run signs in with what login asks it for, piped in, and later command
     const whoami = await cli(home, ['whoami'], '');
     assert.equal(whoami.status, 0, whoami.stderr);
     assert.match(whoami.stdout, /^service:deploy \(service account\) on .*, via (a bearer token|an Access service token|the run's ID token)/);
+    assert.match(whoami.stdout, /\n {2}here, MCP clients are off, and CI runs signing in by their ID tokens on\n/, 'whoami says what the deployment turns on');
     // Signing out forgets it here, and revokes nothing: the token is the service's.
     const before = seen.length;
     const logout = await cli(home, ['logout'], '');
