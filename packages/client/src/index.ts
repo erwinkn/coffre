@@ -21,6 +21,7 @@ export type {
   DryRunOutcome,
   DryRunResult,
   IdentityRow,
+  InheritedGrant,
   InstanceState,
   Me,
   Member,

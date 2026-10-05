@@ -67,6 +67,11 @@
       "types": "./dist/log.d.ts",
       "default": "./dist/log.js"
     },
+    "./grants": {
+      "coffre:source": "./src/grants.ts",
+      "types": "./dist/grants.d.ts",
+      "default": "./dist/grants.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {

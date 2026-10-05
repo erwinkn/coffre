@@ -110,7 +110,11 @@ export const SECTIONS = [
     title: 'Access',
     entries: [
       { command: 'roles', usage: ['roles'] },
-      { command: 'access', usage: ['access [<project>[/<environment>]] [--json]'], about: ['the members, or those who reach a place'] },
+      {
+        command: 'access',
+        usage: ['access [<project>[/<environment>]] [--json]'],
+        about: ["the members, or those who reach a place; '*' lists the grants", 'on every project'],
+      },
       {
         command: 'admit',
         usage: ['admit <principal> [--service] [--owner | --no-owner]'],
@@ -119,9 +123,12 @@ export const SECTIONS = [
       {
         command: 'grant',
         usage: ['grant <project> <principal> --role <role> [--env <env>] [--service]', '      [--expires YYYY-MM-DD]'],
-        about: ['a member, admitted first'],
+        about: [
+          "a member, admitted first. '*' for every project, the ones made later",
+          'too, and with --env, the environment of that name in each: owners only',
+        ],
       },
-      { command: 'revoke', usage: ['revoke <project> <principal> [--env <env>] [--service]'], about: ['their grant there'] },
+      { command: 'revoke', usage: ['revoke <project> <principal> [--env <env>] [--service]'], about: ["their grant there, '*' too"] },
       {
         command: 'offboard',
         usage: ['offboard <principal> [--service] [--apply]'],

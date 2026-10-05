@@ -1,7 +1,9 @@
+import type { GrantPlace } from '@coffre/core/access';
 import type { Author } from '@coffre/core/audit';
 import { ACCESS_ACTIONS, type Checkpoint } from '@coffre/core/vault';
 import type { Envelope } from '@coffre/core/envelope';
 import { own, tablesOf, type Queryable, type Transaction } from '@coffre/db';
+import { readGrants } from '@coffre/db/grants';
 import * as dialect from '@coffre/db/dialect';
 import { canonicalTimestamp, changedRows, clock, clockMillis, forUpdate, migrationLedger, truth, type Table } from '@coffre/db/dialect';
 import type * as schema from '@coffre/db/schema';
@@ -278,8 +280,41 @@ export async function memberStanding(db: Queryable, principal: string): Promise<
   return row ?? null;
 }
 
-/** A grant as `vault_grants` holds it: on a project, or one of its environments. */
-export type StoredGrant = { projectId: string; environmentId: string | null; role: string; expiresAt: number | null };
+/**
+ * A grant as `vault_grants` holds it: on a project, one of its environments
+ * (with its project), every project (`projectId` null), or one environment
+ * slug in every project.
+ */
+export type StoredGrant = GrantPlace & { role: string; expiresAt: number | null };
+
+/** A live grant on every project, of an active member: `environmentSlug` is the one slug it covers, or null for all. */
+export type EveryProjectGrant = { principal: string; environmentSlug: string | null; role: string; expiresAt: number | null };
+
+/**
+ * The live grants on every project that active members hold, as stored,
+ * but those of members the vault has found changed around it, as lists
+ * leave them out: who reaches a project or an environment the moment it is
+ * made. A display, as lists are; the vault decides.
+ */
+export async function everyProjectGrants(db: Queryable, now: Date): Promise<EveryProjectGrant[]> {
+  const { vaultMembers } = tablesOf(db);
+  const grants = await readGrants(db, { everyProject: true, liveAt: now.getTime() });
+  if (grants.length === 0) return [];
+  const [rows, tampered] = await Promise.all([
+    db
+      .select({ principal: vaultMembers.principal })
+      .from(vaultMembers)
+      .where(and(inArray(vaultMembers.principal, [...new Set(grants.map((grant) => grant.principal))]), eq(vaultMembers.status, 'active'))),
+    tamperedMembers(db),
+  ]);
+  const active = new Set(rows.map((row) => row.principal));
+  return grants
+    .filter((grant) => active.has(grant.principal) && !tampered.has(grant.principal))
+    .map(({ principal, environmentSlug, role, expiresAt }) => ({ principal, environmentSlug, role, expiresAt }))
+    .sort((a, b) => compareText(a.principal, b.principal) || compareText(a.environmentSlug ?? '', b.environmentSlug ?? ''));
+}
+
+const compareText = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
 export type MemberRow = {
   type: 'user' | 'service';
@@ -394,11 +429,9 @@ export async function members(
   filter: { member?: { type: string; id: string } },
   now: Date,
 ): Promise<MemberRow[]> {
-  const { vaultMembers, vaultGrants, environments, credentials, identities } = tablesOf(db);
+  const { vaultMembers, credentials, identities } = tablesOf(db);
   const principal = filter.member === undefined ? undefined : principalOf(filter.member);
-  const of = (
-    column: typeof vaultMembers.principal | typeof vaultGrants.principal | typeof credentials.principal | typeof identities.principal,
-  ) =>
+  const of = (column: typeof vaultMembers.principal | typeof credentials.principal | typeof identities.principal) =>
     principal === undefined ? undefined : eq(column, principal);
   // Read binary columns directly. Relational JSON encodes bytea on Postgres
   // and cannot hold blobs on SQLite, so it cannot carry these MACs unchanged.
@@ -420,18 +453,7 @@ export async function members(
     // Live ones only, through `credentials_live_idx`: a CI service leaves an expired one behind each run.
     db.select().from(credentials).where(and(of(credentials.principal), isNull(credentials.revokedAt), gt(credentials.expiresAt, now))),
     db.select().from(identities).where(of(identities.principal)),
-    db
-      .select({
-        principal: vaultGrants.principal,
-        // An environment's grant names only the environment.
-        projectId: sql<string>`coalesce(${vaultGrants.projectId}, ${environments.projectId})`,
-        environmentId: vaultGrants.environmentId,
-        role: vaultGrants.role,
-        expiresAt: vaultGrants.expiresAt,
-      })
-      .from(vaultGrants)
-      .leftJoin(environments, eq(environments.id, vaultGrants.environmentId))
-      .where(and(of(vaultGrants.principal), or(isNull(vaultGrants.expiresAt), gt(vaultGrants.expiresAt, now.getTime())))),
+    readGrants(db, { ...(principal === undefined ? {} : { principal }), liveAt: now.getTime() }),
     tamperedMembers(db, principal),
   ]);
   const validIdentities = bound.filter((row) => checkAuthRow(chainKey, 'identities', row));
@@ -449,7 +471,7 @@ export async function members(
     statusChangedBy: row.statusChangedBy,
     grants: granted
       .filter((grant) => grant.principal === row.principal)
-      .map(({ projectId, environmentId, role, expiresAt }) => ({ projectId, environmentId, role, expiresAt })),
+      .map(({ projectId, environmentId, environmentSlug, role, expiresAt }) => ({ projectId, environmentId, environmentSlug, role, expiresAt })),
     tampered: tampered.has(row.principal),
     credentials: validCredentials.filter((credential) => credential.principal === row.principal
       && credential.revokedAt === null && credential.expiresAt > now)

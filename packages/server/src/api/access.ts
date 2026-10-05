@@ -1,11 +1,13 @@
 import { randomUUID } from 'node:crypto';
 
-import { assignableToEnvironment, type Role } from '@coffre/core/access';
+import { assignableToEnvironment, EVERY_PROJECT, type Role } from '@coffre/core/access';
+import { slug } from '@coffre/core/schemas';
 import type { AccessChange } from '@coffre/core/vault';
+import { canGrantEveryProject } from '@coffre/db/grants';
 
 import { memberStanding, places } from '../db/queries.ts';
-import { denied, need, Refusal, withRefusals, type ApiContext } from './context.ts';
-import { badRequest, conflict, notFound, vaultRefused } from './errors.ts';
+import { denied, need, Refusal, requireOwner, withRefusals, type ApiContext } from './context.ts';
+import { ApiError, badRequest, conflict, notFound, vaultRefused } from './errors.ts';
 import { formatGrantee, formatMember, formatPath, parsePath, type GranteeRef } from './paths.ts';
 
 /** A role, a role until a date, or `null` to take access away. */
@@ -31,13 +33,16 @@ function parseUntil(until: string, now: Date): Date {
 
 /**
  * Set what one member holds, declaratively: each path names a project or an
- * environment, and says which role they should have there, or `null` for
- * none. Places left out are left alone. One vault call: all of it or none.
+ * environment, or every project (`*`) or one environment slug in every
+ * project (`*` and the slug), and says which role they should have there, or
+ * `null` for none. Places left out are left alone. One vault call: all of it
+ * or none.
  *
- *   { "api": "developer", "api/prod": { "role": "viewer", "until": "2026-12-31" }, "web": null }
+ *   { "api": "developer", "api/prod": { "role": "viewer", "until": "2026-12-31" }, "web": null, "*": "viewer" }
  *
- * Each place needs `grant.manage` on its project. A member holds at most one
- * role per place, so naming a new role replaces the old one.
+ * Each place needs `grant.manage` on its project; every project, an instance
+ * owner. A member holds at most one role per place, so naming a new role
+ * replaces the old one.
  *
  * The app checks first, to answer in its own words; the vault holds the
  * grants and checks again, so a bug here cannot grant what the rules forbid.
@@ -71,33 +76,39 @@ export async function setAccess(
   return withRefusals(ctx, async () => {
     const known = await places(ctx.db);
     const located = wanted.map((want) => {
+      if (want.project === EVERY_PROJECT) {
+        if (want.environment !== undefined && !slug.safeParse(want.environment).success) {
+          throw badRequest(`"${want.environment}" is not an environment slug`);
+        }
+        return { ...want, projectId: null, environmentId: null, environmentSlug: want.environment ?? null };
+      }
       const project = known.find((place) => place.slug === want.project);
       if (project === undefined) throw notFound(`no project "${want.project}"`);
-      if (want.environment === undefined) return { ...want, projectId: project.id, environmentId: null };
+      if (want.environment === undefined) return { ...want, projectId: project.id, environmentId: null, environmentSlug: null };
       const environment = project.environments.find((place) => place.slug === want.environment);
       if (environment === undefined) throw notFound(`no environment "${want.path}"`);
-      return { ...want, projectId: project.id, environmentId: environment.id };
+      return { ...want, projectId: project.id, environmentId: environment.id, environmentSlug: null };
     });
 
     const subject = { principalType: grantee.type, principalId: grantee.id };
-    const scoped = (want: (typeof located)[number]) => ({
-      projectId: want.projectId,
-      environmentId: want.environmentId,
-    });
+    // Every project is no place a log entry can name by id: its path says it.
+    const scoped = (want: (typeof located)[number]) =>
+      want.projectId === null
+        ? { metadata: { ...subject, role: want.role, place: want.path } }
+        : { projectId: want.projectId, environmentId: want.environmentId, metadata: { ...subject, role: want.role } };
     for (const want of located) {
-      need(ctx, 'grant.manage', { projectId: want.projectId }, want.role === null ? 'access.revoke' : 'access.grant', {
-        ...scoped(want),
-        metadata: { ...subject, role: want.role },
-      });
+      const action = want.role === null ? 'access.revoke' : 'access.grant';
+      if (want.projectId === null) requireOwner(ctx, action, scoped(want));
+      else need(ctx, 'grant.manage', { projectId: want.projectId }, action, scoped(want));
+    }
+    if (located.some((want) => want.projectId === null) && !(await canGrantEveryProject(ctx.db))) {
+      throw new ApiError('unavailable', "grants on every project need this release's database migration: an owner runs `coffre migrate`");
     }
 
     // As the row says, to answer in the app's words; the vault decides.
     const standing = await memberStanding(ctx.db, principal);
     const refuse = (want: (typeof located)[number], message: string, reason: string) =>
-      new Refusal(
-        conflict(message),
-        denied(ctx, 'access.grant', reason, { ...scoped(want), metadata: { ...subject, role: want.role } }),
-      );
+      new Refusal(conflict(message), denied(ctx, 'access.grant', reason, scoped(want)));
     for (const want of located) {
       if (want.role === null) continue;
       // Members are admitted before they can be granted access.
@@ -107,7 +118,7 @@ export async function setAccess(
       if (standing?.status === 'removed') {
         throw refuse(want, 'they were removed; add them as a member again before granting access', 'principal_inactive');
       }
-      if (want.environmentId !== null && !assignableToEnvironment(want.role)) {
+      if ((want.environmentId !== null || want.environmentSlug !== null) && !assignableToEnvironment(want.role)) {
         throw refuse(
           want,
           `${want.role} includes permissions that only make sense on a whole project; grant it on "${want.project}"`,
@@ -123,7 +134,9 @@ export async function setAccess(
       operationId: randomUUID(),
       credentialId: ctx.provenance,
       changes: located.map((want) => ({
-        ...scoped(want),
+        projectId: want.projectId,
+        environmentId: want.environmentId,
+        environmentSlug: want.environmentSlug,
         role: want.role,
         expiresAt: want.expiresAt?.toISOString() ?? null,
       })),

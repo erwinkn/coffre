@@ -3,7 +3,7 @@
 // which leaves the audit log broken for good.
 import type { Deployment } from './harness.ts';
 import { Report } from './report.ts';
-import { bulkLimit, crossSite, grantScoping, membersOnly, offboarding } from './checks/access.ts';
+import { bulkLimit, crossSite, everyProject, grantScoping, membersOnly, offboarding } from './checks/access.ts';
 import { checkpoints, deletedTail, forgedVaultEntry, missingEntry, noAuditNoValue, revealAudited, rewrittenEntry, verification, writesAgree } from './checks/audit.ts';
 import { earlierCheckpoint } from './checks/checkpoints.ts';
 import { appLogin, vaultLogin } from './checks/logins.ts';
@@ -58,6 +58,7 @@ export async function conform(deployment: Deployment, options: { bulkLimit: numb
     for (const cli of clis) cli.remove();
   }
   await report.check('offboarding', all, ({ people, canaries }) => offboarding(deployment, people, canaries));
+  await report.check('grants on every project', all, ({ people, canaries }) => everyProject(deployment, people, canaries));
   await report.check('bulk limit', { people }, ({ people }) => bulkLimit(people, options.bulkLimit));
   // A CI run signing in with its ID token, through a binding. The limit
   // comes last of these: it spends this address's exchanges for the minute.

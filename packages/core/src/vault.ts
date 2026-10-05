@@ -1,5 +1,5 @@
 import type { AccessFault } from './access-fault.ts';
-import type { Role } from './access.ts';
+import type { GrantPlace, Role } from './access.ts';
 
 export { checkpointMessage, checkpointVerifier, verifyCheckpoint } from './checkpoint.ts';
 export { describeAccessFault, type AccessFault, type FaultGrant, type FaultNames } from './access-fault.ts';
@@ -199,10 +199,12 @@ export type RewrapInput = Correlation & {
   items: { secret: SecretRef; secretVersionId: string }[];
 };
 
-export type Grant = {
-  projectId: string;
-  /** Null for the whole project. */
-  environmentId: string | null;
+/**
+ * A grant: on a project, one of its environments (`projectId` is the
+ * environment's project), every project, or one environment slug in every
+ * project (`GrantPlace` in @coffre/core/access).
+ */
+export type Grant = GrantPlace & {
   role: Role;
   /** ISO 8601, or null for no end. */
   expiresAt: string | null;
@@ -230,10 +232,13 @@ export type Access = {
   by: string | null;
 };
 
-/** One place: a role to hold there, with an optional end, or null for none. */
-export type GrantChange = {
-  projectId: string;
-  environmentId: string | null;
+/**
+ * One place: a role to hold there, with an optional end, or null for none.
+ * An environment's place names its project too; `environmentSlug` left out
+ * is null.
+ */
+export type GrantChange = Omit<GrantPlace, 'environmentSlug'> & {
+  environmentSlug?: string | null;
   role: Role | null;
   expiresAt: string | null;
 };

@@ -3,7 +3,7 @@ import { z } from 'zod';
 
 import { resolvePath, type ResolvedPath } from '../db/queries.ts';
 import { errorResponse, jsonResponse, readJson } from '../http.ts';
-import { can } from './caller.ts';
+import { can, placeOf } from './caller.ts';
 import { denied, missing, refuse, Refusal, type ApiContext } from './context.ts';
 import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
 import { formatPath } from './paths.ts';
@@ -153,10 +153,7 @@ export async function serveApi(request: Request, ctx: ApiContext): Promise<Respo
     const place = await locate(ctx, def, found.params);
     for (const check of checks(def, input, query)) {
       const permission = typeof check === 'string' ? check : check.permission;
-      const scope = {
-        projectId: place!.project.id,
-        environmentId: typeof check === 'string' ? (place!.environment?.id ?? null) : null,
-      };
+      const scope = placeOf(place!.project, typeof check === 'string' ? place!.environment : null);
       if (can(ctx.caller, permission, scope)) continue;
       const path = formatPath({ project: found.params.project, environment: found.params.environment, key: found.params.key });
       await refuse(

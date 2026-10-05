@@ -172,8 +172,9 @@ test('a change refetches what is off screen on its next use, not before', async 
   await refresh(queryClient, affects.removal('user:dev@acme.example'));
   assert.deepEqual(calls, []);
 
+  // The projects too: they list the grants on every project, which removal ends.
   await navigate.users(queryClient, client);
-  assert.deepEqual(calls, ['GET /members']);
+  assert.deepEqual(calls, ['GET /projects', 'GET /members']);
   assert.ok(queryClient.getQueryState([...keys.directory, { owner: true }])?.isInvalidated === false);
 });
 

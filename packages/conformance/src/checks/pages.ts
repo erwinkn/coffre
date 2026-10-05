@@ -64,10 +64,22 @@ export async function pagesInBrowser(deployment: Deployment, admin: Person, brow
       }
       if (path === '/settings') expect(loaded.cards.includes('Keys'), '/settings does not show what the keys are checked against', loaded.cards);
     }
+    // Its access on every project, which an owner grants and revokes on its Access tab.
+    const access = `/tokens/${name}?tab=access`;
+    await admin.api.access.set(SERVICE, { '*/dev': 'viewer' });
+    try {
+      const loaded = await chrome.load(new URL(access, deployment.origin).href, admin.browser.cookies());
+      expect(loaded.errors.length === 0, `${access} reported errors in the browser`, loaded.errors.join('\n'));
+      for (const shown of ['dev in every project', 'Grant on every project']) {
+        expect(loaded.text.includes(shown), `${access}, to an owner, does not show "${shown}"`, loaded.text);
+      }
+    } finally {
+      await admin.api.access.set(SERVICE, { '*/dev': null });
+    }
   } finally {
     await chrome.close();
   }
-  return `${pages.map(([path]) => path).join(', ')}, signed in, in Chrome: each rendered, no error from their scripts; a service account shown as service:${name}, OIDC then bearer tokens, its removal previewed; the keys' checks in Settings`;
+  return `${pages.map(([path]) => path).join(', ')}, signed in, in Chrome: each rendered, no error from their scripts; a service account shown as service:${name}, OIDC then bearer tokens, its removal previewed; the keys' checks in Settings; its grant on dev in every project with an owner's grant button`;
 }
 
 /**

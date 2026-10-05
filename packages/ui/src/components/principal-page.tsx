@@ -26,6 +26,8 @@ import type { DirectoryPrincipal, GrantRow, ProjectSummary } from '../shared/mod
 import { ClosedDoor, PageHeader } from './page';
 import { EmptyState, ErrorLine, Modal, Notice, Spinner } from './ui';
 import { GrantRowView, GrantsTable } from './grants';
+import { EveryProjectGrants } from './every-project';
+import { ExpiryField } from './expiry-field';
 import { InstanceRole, KIND, PrincipalActions } from './directory';
 import { PrincipalReportCards, RemovedNotice } from './offboarding';
 import { PrincipalAvatar } from './principal';
@@ -57,9 +59,13 @@ function usePrincipalPage(principalType: PrincipalType, principalId: string) {
     const result = grants[index]!.data;
     return {
       project,
+      // Grants on every project show once, above: not again in each project they reach.
       grants: result.ok
         ? result.grants.filter(
-            (grant) => grant.principalType === principalType && grant.principalId === principalId,
+            (grant) =>
+              grant.principalType === principalType &&
+              grant.principalId === principalId &&
+              grant.scope !== 'every-project',
           )
         : [],
       grantsError: result.ok ? null : result.error,
@@ -214,7 +220,6 @@ export function PrincipalPage({
       {/* Removal ends every grant, so there is no access left to show. */}
       {tab === 'access' && !removed && (
         <>
-
           {errors.map(({ project, grantsError }) => (
             <div key={project.slug} style={{ marginBottom: '0.75rem' }}>
               <Notice tone="bad">
@@ -278,6 +283,8 @@ export function PrincipalPage({
               Only projects where you manage access are listed.
             </p>
           )}
+
+          <EveryProjectGrants principalType={principalType} principalId={principalId} />
         </>
       )}
 
@@ -507,46 +514,6 @@ function EditAccess({
         </form>
       </Modal>
     </>
-  );
-}
-
-/**
- * When one grant ends, as a date: access lasts through that day, UTC. Blank
- * reads "Never" where the browser lets the empty field be restyled.
- */
-function ExpiryField({
-  label,
-  expiresAt,
-  onChange,
-}: {
-  label: string;
-  expiresAt: string | null;
-  onChange: (expiresAt: string | null) => void;
-}) {
-  const date = dateFromExpiry(expiresAt);
-  return (
-    <span className={`expiry${date === '' ? ' is-never' : ''}`}>
-      <input
-        className="input select-sm"
-        type="date"
-        aria-label={label}
-        min={new Date().toISOString().slice(0, 10)}
-        value={date}
-        onChange={(event) => onChange(expiryFromDate(event.target.value))}
-      />
-      <span className="expiry-never" aria-hidden="true">
-        Never
-      </span>
-      <button
-        className="btn btn-quiet btn-sm btn-icon"
-        type="button"
-        aria-label={`${label}: never`}
-        title="Never expires"
-        onClick={() => onChange(null)}
-      >
-        <X size={12} />
-      </button>
-    </span>
   );
 }
 

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { ROLES, type Permission, type Role } from '@coffre/core/access';
+import { EVERY_PROJECT, grantKind, ROLES, type Permission, type Role } from '@coffre/core/access';
 import type { Queryable } from '@coffre/db';
 import { credentials, identities } from '@coffre/db/schema';
 
@@ -13,9 +13,10 @@ import {
   places,
   updateAuth,
   type MemberRow,
+  type PlaceRow,
   type StoredGrant,
 } from '../db/queries.ts';
-import { can } from './caller.ts';
+import { can, canAnywhere, type Caller } from './caller.ts';
 import { audited, denied, Refusal, requireOwner, withRefusals, type ApiContext } from './context.ts';
 import { conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { formatMember, parseGrantee, type MemberRef, type Path } from './paths.ts';
@@ -23,8 +24,9 @@ import { formatMember, parseGrantee, type MemberRef, type Path } from './paths.t
 export type MemberGrant = {
   /** Its member and place, `user:ada@acme.example/market/prod`: one grant per member per place. */
   id: string;
+  /** `*` for a grant on every project, the ones created later too. */
   project: string;
-  /** Null for a grant on the whole project. */
+  /** Null for a grant on the whole project; on every project, the environment slug it covers in each, or null for all. */
   environment: string | null;
   role: Role;
   roleName: string;
@@ -103,13 +105,13 @@ export type RemovedMember = {
   toRotate: number;
 };
 
-/** A stored grant, placed by slug. */
-type PlacedGrant = { project: string; environment: string | null; projectId: string; role: Role; expiresAt: string | null };
+/** A stored grant, placed by slug; `project` is `*`, and `projectId` null, on every project. */
+type PlacedGrant = { project: string; environment: string | null; projectId: string | null; role: Role; expiresAt: string | null };
 
 /** The slugs of every project and environment, by id: grants name places only by id. */
-async function slugs(db: Queryable): Promise<Map<string, string>> {
+function slugs(known: PlaceRow[]): Map<string, string> {
   return new Map(
-    (await places(db)).flatMap((project) => [
+    known.flatMap((project) => [
       [project.id, project.slug] as const,
       ...project.environments.map((environment) => [environment.id, environment.slug] as const),
     ]),
@@ -117,7 +119,14 @@ async function slugs(db: Queryable): Promise<Map<string, string>> {
 }
 
 function placed(grants: StoredGrant[], names: Map<string, string>): PlacedGrant[] {
-  return grants.flatMap((grant) => {
+  return grants.flatMap((grant): PlacedGrant[] => {
+    const expiresAt = grant.expiresAt === null ? null : new Date(grant.expiresAt).toISOString();
+    const kind = grantKind(grant);
+    if (kind === 'every-project') {
+      return [{ project: EVERY_PROJECT, environment: grant.environmentSlug, projectId: null, role: grant.role as Role, expiresAt }];
+    }
+    // A grant whose fields name no coherent place reaches nothing, and is not listed.
+    if (kind === null || grant.projectId === null) return [];
     const project = names.get(grant.projectId);
     const environment = grant.environmentId === null ? null : names.get(grant.environmentId);
     // A grant on a place that is gone names nothing anyone can reach.
@@ -127,9 +136,32 @@ function placed(grants: StoredGrant[], names: Map<string, string>): PlacedGrant[
       environment,
       projectId: grant.projectId,
       role: grant.role as Role,
-      expiresAt: grant.expiresAt === null ? null : new Date(grant.expiresAt).toISOString(),
+      expiresAt,
     }];
   });
+}
+
+/**
+ * The projects a grant reaches, as they are now: its own, or, on every
+ * project, each one, or each one with an environment of its slug.
+ */
+function reached(grant: PlacedGrant, known: PlaceRow[]): PlaceRow[] {
+  if (grant.projectId !== null) return known.filter((project) => project.id === grant.projectId);
+  return known.filter((project) => everyProjectReaches(grant.environment, project));
+}
+
+/** Whether a grant on every project, on this slug or on all (null), reaches the project as it is now. */
+export function everyProjectReaches(environmentSlug: string | null, project: PlaceRow): boolean {
+  return environmentSlug === null || project.environments.some((environment) => environment.slug === environmentSlug);
+}
+
+/**
+ * Whether the caller sees who holds what in a project: owners, and members
+ * with `grant.manage` on it. A grant on every project is shown to whoever
+ * sees the grants of a project it reaches, by this one check.
+ */
+export function seesGrantsIn(caller: Caller, projectId: string): boolean {
+  return caller.isOwner || can(caller, 'grant.manage', { projectId });
 }
 
 /** Someone in the directory, as the rows and the vault's findings say. */
@@ -170,7 +202,7 @@ function instanceRole(listed: Listed): Member['instanceRole'] {
   return listed.isRootAdmin ? 'root-admin' : listed.row?.owner === true && listed.status === 'active' ? 'owner' : 'user';
 }
 
-/** By project, then environment, with the project-wide grant after its environments. */
+/** By project, then environment, with the project-wide grant after its environments; every project's, `*`, first. */
 function byPlace(a: PlacedGrant, b: PlacedGrant): number {
   if (a.project !== b.project) return a.project < b.project ? -1 : 1;
   if (a.environment === b.environment) return 0;
@@ -181,30 +213,39 @@ function byPlace(a: PlacedGrant, b: PlacedGrant): number {
 
 /**
  * Members and their live grants. Owners see everyone; anyone else sees the
- * grants in the projects where they hold `grant.manage`, and the members
- * those grants belong to. `path` narrows it to one project or environment.
+ * grants in the projects where they hold `grant.manage`, and the grants on
+ * every project that reach those, and the members those grants belong to.
+ * `path` narrows it to who reaches one project or environment, or to the
+ * grants on every project (`*`, or `*` and a slug).
  */
 export async function listMembers(
   ctx: ApiContext,
   query: { path?: Path },
 ): Promise<{ members: Member[]; removed: RemovedMember[] }> {
   const { caller } = ctx;
-  const manages = (projectId: string) => can(caller, 'grant.manage', { projectId });
-  if (!caller.isOwner && !caller.grants.some((grant) => manages(grant.projectId))) {
+  const manages = (projectId: string) => seesGrantsIn(caller, projectId);
+  if (!caller.isOwner && !canAnywhere(caller, 'grant.manage')) {
     throw forbidden('only owners, and members with grant.manage on a project, can list members');
   }
   const everyone = query.path === undefined && caller.isOwner;
-  const inPath = (grant: PlacedGrant) =>
-    query.path === undefined ||
-    (grant.project === query.path.project &&
-      (query.path.environment === undefined || grant.environment === query.path.environment));
+  const [all, known] = await Promise.all([directory(ctx, new Date()), places(ctx.db)]);
+  const names = slugs(known);
+  const path = query.path;
+  const inPath = (grant: PlacedGrant): boolean => {
+    if (path === undefined) return true;
+    const environmentIn = (environment: string | null) => path.environment === undefined || environment === path.environment;
+    if (path.project === EVERY_PROJECT) return grant.projectId === null && environmentIn(grant.environment);
+    if (grant.projectId !== null) return grant.project === path.project && environmentIn(grant.environment);
+    // A grant on every project, where it reaches the path's project, and its environment if it names one.
+    const project = reached(grant, known).find((place) => place.slug === path.project);
+    return project !== undefined && (grant.environment === null || environmentIn(grant.environment));
+  };
 
-  const [all, names] = await Promise.all([directory(ctx, new Date()), slugs(ctx.db)]);
   const members: Member[] = [];
   for (const listed of all) {
     if (listed.status === 'removed') continue;
     const visible = placed(listed.grants, names)
-      .filter((grant) => (caller.isOwner || manages(grant.projectId)) && inPath(grant))
+      .filter((grant) => (caller.isOwner || reached(grant, known).some((project) => manages(project.id))) && inPath(grant))
       .sort(byPlace);
     if (!everyone && visible.length === 0) continue;
     const ref = listed.member;

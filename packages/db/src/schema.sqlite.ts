@@ -196,17 +196,29 @@ export const vaultGrants = sqliteTable(
     principal: text().notNull(),
     projectId: text('project_id'),
     environmentId: text('environment_id'),
+    environmentSlug: text('environment_slug'),
     role: text().notNull(),
     expiresAt: integer('expires_at', { mode: 'number' }),
     grantedAt: integer('granted_at', { mode: 'number' }).notNull(),
     grantedBy: text('granted_by').notNull(),
   },
   (table) => [
-    check('vault_grants_one_place', sql`(${table.projectId} IS NULL) <> (${table.environmentId} IS NULL)`),
+    check(
+      'vault_grants_one_place',
+      sql`((${table.projectId} IS NULL) <> (${table.environmentId} IS NULL) AND ${table.environmentSlug} IS NULL) OR (${table.projectId} IS NULL AND ${table.environmentId} IS NULL)`,
+    ),
+    check('vault_grants_environment_slug_check', sql`${table.environmentSlug} IS NULL OR (${isSlug(table.environmentSlug, 63)})`),
     check('vault_grants_role_check', sql`${table.role} IN (${ROLES})`),
-    check('vault_grants_environment_role_check', sql`${table.environmentId} IS NULL OR ${table.role} IN (${ENVIRONMENT_ROLES})`),
+    check(
+      'vault_grants_environment_role_check',
+      sql`(${table.environmentId} IS NULL AND ${table.environmentSlug} IS NULL) OR ${table.role} IN (${ENVIRONMENT_ROLES})`,
+    ),
     unique('vault_grants_on_project').on(table.principal, table.projectId),
     unique('vault_grants_on_environment').on(table.principal, table.environmentId),
+    unique('vault_grants_on_environment_slug').on(table.principal, table.environmentSlug),
+    uniqueIndex('vault_grants_on_every_project')
+      .on(table.principal)
+      .where(sql`${table.projectId} IS NULL AND ${table.environmentId} IS NULL AND ${table.environmentSlug} IS NULL`),
     foreignKey({
       name: 'vault_grants_principal_fkey',
       columns: [table.principal],

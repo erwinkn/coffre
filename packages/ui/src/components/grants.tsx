@@ -3,6 +3,7 @@ import { grantId, revokeGrant, type GrantVars } from '../lib/changes';
 import type { FailedAdd } from '../lib/optimistic';
 import { useCoffre } from '../lib/coffre';
 import { projectAccessLabel } from '../lib/project-access';
+import { everyProjectPlace } from './every-project';
 import { keys } from '../lib/queries';
 import { useChange, useChangeStatus } from '../lib/use-change';
 import type { GrantRow } from '../shared/models';
@@ -64,7 +65,9 @@ export function GrantRowView({
   const revoke = useChange(revokeGrant(useCoffre(), project));
   const { status, dismiss } = useChangeStatus(keys.grants(project));
   const state = status(grantId(grant));
-  const label = projectAccessLabel(grant);
+  // A grant on every project is shown where it reaches, and changed only by owners, with the CLI.
+  const everywhere = grant.scope === 'every-project';
+  const label = everywhere ? `${everyProjectPlace(grant.environmentSlug)} · ${grant.roleName}` : projectAccessLabel(grant);
   const expired = grant.expiresAt !== null && new Date(grant.expiresAt).getTime() < Date.now();
 
   return (
@@ -99,6 +102,10 @@ export function GrantRowView({
         <td className="col-actions">
           {state.state === 'pending' ? (
             <RowPending status={state} />
+          ) : everywhere ? (
+            <span className="cell-muted every-project-note" title="Owners change grants on every project with coffre grant '*' and coffre revoke '*'">
+              every project
+            </span>
           ) : (
             <ConfirmButton
               trigger={<button className="act act-danger">Revoke</button>}

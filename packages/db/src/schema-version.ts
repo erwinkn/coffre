@@ -1,5 +1,7 @@
+import { count } from 'drizzle-orm';
+
 import type { Queryable } from './database.ts';
-import { engineOf, type Engine } from './dialect.ts';
+import { engineOf, migrationLedger, type Engine } from './dialect.ts';
 import postgresJournal from './migrations/postgres/meta/_journal.json' with { type: 'json' };
 import sqliteJournal from './migrations/sqlite/meta/_journal.json' with { type: 'json' };
 
@@ -29,4 +31,16 @@ export const KNOWN_MIGRATIONS: Record<Engine, readonly string[]> = {
 
 export function knownMigrations(db: Queryable): readonly string[] {
   return KNOWN_MIGRATIONS[engineOf(db)];
+}
+
+/**
+ * Whether the database has applied the migration `tag`, one this version
+ * ships: what code asks before it uses what that migration adds, which a
+ * database it runs on before `coffre migrate` does not have yet.
+ */
+export async function applied(db: Queryable, tag: string): Promise<boolean> {
+  const needed = knownMigrations(db).indexOf(tag) + 1;
+  if (needed === 0) throw new Error(`no migration ${tag} in this version`);
+  const [ledger] = await db.select({ n: count() }).from(migrationLedger(db));
+  return (ledger?.n ?? 0) >= needed;
 }

@@ -38,6 +38,7 @@ import { PageTabs, type TabItem } from '../components/tabs';
 import { GrantRowView, GrantsTable, RefusedGrants, useRefusedGrants } from '../components/grants';
 import { KIND } from '../components/directory';
 import { PrincipalAvatar, PrincipalLink } from '../components/principal';
+import { ReachedBy, reaching, useEveryProject } from '../components/every-project';
 import { PrincipalPicker } from '../components/principal-picker';
 import {
   parseProjectAccess,
@@ -340,6 +341,7 @@ function EnvironmentCard({
   const coffre = useCoffre();
   const rename = useChange(renameEnvironment(coffre, project));
   const archive = useChange(archiveEnvironment(coffre, project));
+  const everyProject = useEveryProject();
   const { status, dismiss } = useChangeStatus(keys.projects);
   const state = status(environmentId(project, environment.slug));
   const pending = state.state === 'pending';
@@ -351,6 +353,11 @@ function EnvironmentCard({
   const slugError = slug === '' ? null : slugProblem(slug);
   const lastChange = useLastChange(project, environment.slug, opens);
   const holders = holdersOf(grants, environment.slug);
+  // A new slug brings in whoever holds it in every project: said before the rename is saved.
+  const gainedBy =
+    slug === environment.slug || slugError !== null
+      ? []
+      : reaching(everyProject, slug).filter((grant) => grant.place !== '*');
 
   return (
     <div
@@ -498,6 +505,8 @@ function EnvironmentCard({
                 />
               </label>
 
+              <ReachedBy grants={gainedBy} lead={`As ${project}/${slug}, it is reached by`} />
+
               <div className="dialog-actions">
                 <button className="btn" type="button" onClick={() => setRenaming(false)}>
                   Cancel
@@ -569,6 +578,7 @@ function NewEnvironment({ project }: { project: string }) {
   const [name, setName] = useState('');
   const create = useChange(createEnvironment(useCoffre(), project));
   const slugError = slug === '' ? null : slugProblem(slug);
+  const reachedBy = reaching(useEveryProject(), slugError === null && slug !== '' ? slug : null);
 
   function close() {
     setOpen(false);
@@ -634,6 +644,8 @@ function NewEnvironment({ project }: { project: string }) {
               onChange={(event) => setName(event.target.value)}
             />
           </label>
+
+          <ReachedBy grants={reachedBy} lead="As soon as it exists, it is reached by" />
 
           <div className="dialog-actions">
             <button className="btn" type="button" onClick={close}>

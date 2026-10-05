@@ -1,3 +1,4 @@
+import { everyProjectPath } from '@coffre/core/access';
 import type { StoredEntry } from '@coffre/core/audit';
 import type { AccessFault, FaultGrant } from '@coffre/core/vault';
 
@@ -51,7 +52,7 @@ export type Replayed = { members: Map<string, LoggedMember>; held: Map<string, M
 export function apply(state: Replayed, row: StoredEntry): AccessFault | null {
   const principal = row.subjectPrincipal!;
   const detail = JSON.parse(row.metadata) as Record<string, unknown>;
-  const place: Place = { projectId: row.projectId!, environmentId: row.environmentId };
+  const place = placeOf(row, detail);
   const grantsOf = state.held.get(principal) ?? new Map<string, GrantRow>();
   state.held.set(principal, grantsOf);
   const before = state.members.get(principal);
@@ -114,9 +115,21 @@ const MEMBER_FIELDS = [
   ['accessSeq', 'access_seq'],
 ] as const satisfies readonly (readonly [keyof LoggedMember, string])[];
 
-/** A grant's place: its environment, or its project when it has none. */
+/**
+ * The place an access entry is about: its project and environment, or, with
+ * neither, every project, which it names as a path (`*`, or `*` and a slug).
+ */
+function placeOf(row: StoredEntry, detail: Record<string, unknown>): Place {
+  if (row.projectId !== null || row.environmentId !== null) {
+    return { projectId: row.projectId, environmentId: row.environmentId, environmentSlug: null };
+  }
+  const slug = typeof detail.place === 'string' ? detail.place.split('/')[1] : undefined;
+  return { projectId: null, environmentId: null, environmentSlug: slug ?? null };
+}
+
+/** A grant's place: its environment, or its project when it has none, or every project's path. */
 function placeKey(place: Place): string {
-  return place.environmentId ?? place.projectId;
+  return place.environmentId ?? place.projectId ?? everyProjectPath(place.environmentSlug);
 }
 
 function grantKey(grant: GrantRow): string {
@@ -124,6 +137,7 @@ function grantKey(grant: GrantRow): string {
     grant.principal,
     grant.projectId,
     grant.environmentId,
+    grant.environmentSlug,
     grant.role,
     grant.expiresAt,
     grant.grantedAt,
@@ -132,6 +146,6 @@ function grantKey(grant: GrantRow): string {
 }
 
 function faultGrant(key: string): FaultGrant {
-  const [principal, projectId, environmentId, role] = JSON.parse(key) as [string, string, string | null, string];
-  return { principal, projectId, environmentId, role };
+  const [principal, projectId, environmentId, environmentSlug, role] = JSON.parse(key) as [string, string | null, string | null, string | null, string];
+  return { principal, projectId, environmentId, environmentSlug, role };
 }

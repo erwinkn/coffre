@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { getTableColumns, sql, type SQL } from 'drizzle-orm';
+import { getTableColumns, sql, type AnyColumn, type SQL } from 'drizzle-orm';
 import pg from 'pg';
 import { createDatabase, tablesOf, type Database } from '@coffre/db';
 import { openDatabase } from '@coffre/db/connect';
@@ -35,12 +35,19 @@ async function history(db: Database) {
   await withLogUnlocked(db, async (tx) => {
     for (const name of ['projects', 'environments', 'vaultMembers', 'vaultGrants', 'auditLog', 'auditChainHead'] as const) {
       const table = tables[name];
-      const columns = getTableColumns(table) as Record<string, { dataType: string }>;
-      const rows = data[name].map((row: Record<string, unknown>) => Object.fromEntries(Object.entries(row).map(([key, value]) =>
-        [key, value !== null && columns[key]?.dataType === 'date' ? new Date(value as string) : value],
-      )));
+      const columns = getTableColumns(table) as Record<string, AnyColumn>;
       if (name === 'auditChainHead') await tx.delete(table);
-      await tx.insert(table).values(rows);
+      // The fixture's columns only: the tables are the baseline's, before later migrations added any.
+      for (const row of data[name] as Record<string, unknown>[]) {
+        const keys = Object.keys(row);
+        const values = keys.map((key) => {
+          const value = row[key] !== null && columns[key].dataType === 'date' ? new Date(row[key] as string) : row[key];
+          return sql.param(value, columns[key]);
+        });
+        const insert = sql`INSERT INTO ${table} (${sql.join(keys.map((key) => sql.identifier(columns[key].name)), sql`, `)}) VALUES (${sql.join(values, sql`, `)})`;
+        if (TEST_ENGINE === 'postgres') await tx.execute(insert);
+        else await (tx as unknown as { run(query: SQL): Promise<unknown> }).run(insert);
+      }
     }
   });
 }
@@ -129,6 +136,13 @@ test('the upgrade refuses populated syncs atomically, then preserves the old log
   assert.equal(await writeAuditHeartbeat(appDb, chainKey, vault, { warn: () => {} }), true);
   assert.equal((await auditReadiness(appDb, vault)).ok, true, '0000 is ready: deploy before migrating');
   assert.equal((await vault.access(SYNC)).status, 'unknown');
+  // Grants on every project need a column of a later migration: refused, in words, until it runs.
+  await root.members.add('user:ada@acme.example');
+  await assert.rejects(root.access.set('user:ada@acme.example', { '*': 'viewer' }), { status: 503, message: /coffre migrate/ });
+  const early = await vault.setAccess({
+    actor: `user:${ROOT}`, principal: 'user:ada@acme.example', changes: [{ projectId: null, environmentId: null, role: 'viewer', expiresAt: null }],
+  });
+  assert.match(!early.ok ? early.refusal.message : '', /coffre migrate/, 'the vault refuses it too');
   const original = await db.select().from(tablesOf(db).auditLog).orderBy(tablesOf(db).auditLog.seq);
   await assert.rejects(migrateDatabase(databaseUrl), /syncs.*(?:removed|cleared)/);
   assert.deepEqual(await db.select().from(tablesOf(db).auditLog).orderBy(tablesOf(db).auditLog.seq), original);

@@ -25,7 +25,8 @@ export type GrantRow = {
   role: string;
   roleName: string;
   permissions: Permission[];
-  scope: 'project' | 'environment';
+  /** `every-project`: held on every project, or on `environmentSlug` in every project; only owners change it, elsewhere. */
+  scope: 'project' | 'environment' | 'every-project';
   environmentSlug: string | null;
   expiresAt: string | null;
 };

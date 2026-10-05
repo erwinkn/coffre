@@ -1,7 +1,9 @@
 import {
   allows,
+  covers,
   PERMISSIONS,
   roleGrants,
+  type GrantPlace,
   type Permission,
   type Place,
   type Role,
@@ -14,11 +16,11 @@ export type { Place };
 
 export type PrincipalRef = { type: 'user' | 'service'; id: string };
 
-export type CallerGrant = {
-  /** The project the grant is in, also for a grant on one of its environments. */
-  projectId: string;
-  /** Null for a grant on the whole project. */
-  environmentId: string | null;
+/**
+ * A grant: `projectId` is the project it is in, also for a grant on one of
+ * its environments, and null for one on every project (`GrantPlace`).
+ */
+export type CallerGrant = GrantPlace & {
   role: Role;
   expiresAt: Date | null;
 };
@@ -62,6 +64,7 @@ export function callerFrom(principal: PrincipalRef, access: Access): Caller {
     grants: access.grants.map((grant) => ({
       projectId: grant.projectId,
       environmentId: grant.environmentId,
+      environmentSlug: grant.environmentSlug,
       role: grant.role,
       expiresAt: grant.expiresAt === null ? null : new Date(grant.expiresAt),
     })),
@@ -72,8 +75,8 @@ export function callerFrom(principal: PrincipalRef, access: Access): Caller {
  * Whether the caller may do `permission` at `place`: the rule the vault
  * applies too, from core.
  *
- *   on a project       its project grant; owners also manage every project
- *   on an environment  its environment grant or its project's grant
+ *   on a project       its project grant, or one on every project; owners also manage every project
+ *   on an environment  its environment grant, its project's grant, or one on every project or on its slug
  */
 export function can(caller: Caller, permission: Permission, place: Place): boolean {
   return allows(caller, permission, place);
@@ -84,9 +87,22 @@ export function permissionsAt(caller: Caller, place: Place): Permission[] {
   return PERMISSIONS.filter((permission) => can(caller, permission, place));
 }
 
-/** Whether the caller holds anything anywhere in a project, which is what lets them see it. */
-export function seesProject(caller: Caller, projectId: string): boolean {
-  return caller.isOwner || caller.grants.some((grant) => grant.projectId === projectId);
+/** A project, or one of its environments, as a permission check names it. */
+export function placeOf(project: { id: string }, environment: { id: string; slug: string } | null): Place {
+  return environment === null
+    ? { projectId: project.id }
+    : { projectId: project.id, environmentId: environment.id, environmentSlug: environment.slug };
+}
+
+/**
+ * Whether the caller holds anything anywhere in a project, which is what
+ * lets them see it: a grant on it, in it, on every project, or on the slug
+ * of one of its environments.
+ */
+export function seesProject(caller: Caller, project: { id: string; environments: { id: string; slug: string }[] }): boolean {
+  if (caller.isOwner) return true;
+  const places = [placeOf(project, null), ...project.environments.map((environment) => placeOf(project, environment))];
+  return caller.grants.some((grant) => places.some((place) => covers(grant, place)));
 }
 
 /** Whether the caller holds `permission` anywhere at all. */

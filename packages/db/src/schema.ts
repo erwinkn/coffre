@@ -184,9 +184,11 @@ export const vaultMembers = pgTable(
 );
 
 /**
- * One role per member per place: a project, or one of its environments,
- * never both. A revoked grant is deleted; an expired one stays until its
- * place is granted again, so the members page can say it lapsed.
+ * One role per member per place: a project, one of its environments, every
+ * project (`*`, neither id), or the environment of one slug in every project
+ * (neither id, and `environment_slug`). A revoked grant is deleted; an
+ * expired one stays until its place is granted again, so the members page
+ * can say it lapsed.
  */
 export const vaultGrants = pgTable(
   'vault_grants',
@@ -194,17 +196,29 @@ export const vaultGrants = pgTable(
     principal: text().notNull(),
     projectId: uuid('project_id'),
     environmentId: uuid('environment_id'),
+    environmentSlug: text('environment_slug'),
     role: text().notNull(),
     expiresAt: bigint('expires_at', { mode: 'number' }),
     grantedAt: bigint('granted_at', { mode: 'number' }).notNull(),
     grantedBy: text('granted_by').notNull(),
   },
   (table) => [
-    check('vault_grants_one_place', sql`(${table.projectId} IS NULL) <> (${table.environmentId} IS NULL)`),
+    check(
+      'vault_grants_one_place',
+      sql`((${table.projectId} IS NULL) <> (${table.environmentId} IS NULL) AND ${table.environmentSlug} IS NULL) OR (${table.projectId} IS NULL AND ${table.environmentId} IS NULL)`,
+    ),
+    check('vault_grants_environment_slug_check', sql`${table.environmentSlug} IS NULL OR ${table.environmentSlug} ~ '^[a-z0-9][a-z0-9-]{0,62}$'`),
     check('vault_grants_role_check', sql`${table.role} IN (${ROLES})`),
-    check('vault_grants_environment_role_check', sql`${table.environmentId} IS NULL OR ${table.role} IN (${ENVIRONMENT_ROLES})`),
+    check(
+      'vault_grants_environment_role_check',
+      sql`(${table.environmentId} IS NULL AND ${table.environmentSlug} IS NULL) OR ${table.role} IN (${ENVIRONMENT_ROLES})`,
+    ),
     unique('vault_grants_on_project').on(table.principal, table.projectId),
     unique('vault_grants_on_environment').on(table.principal, table.environmentId),
+    unique('vault_grants_on_environment_slug').on(table.principal, table.environmentSlug),
+    uniqueIndex('vault_grants_on_every_project')
+      .on(table.principal)
+      .where(sql`${table.projectId} IS NULL AND ${table.environmentId} IS NULL AND ${table.environmentSlug} IS NULL`),
     foreignKey({
       name: 'vault_grants_principal_fkey',
       columns: [table.principal],

@@ -1,14 +1,15 @@
 import { randomUUID } from 'node:crypto';
 
-import type { Permission } from '@coffre/core/access';
+import { covers, everyProjectPath, ROLES, type Permission, type Role } from '@coffre/core/access';
 import { isUniqueViolation } from '@coffre/db/dialect';
 import { environments, projects } from '@coffre/db/schema';
 
 import { knownMigrations } from '@coffre/db/schema-version';
 
-import { appliedMigrations, distinctSecretCounts, insert, places, update, type ResolvedPath } from '../db/queries.ts';
+import { appliedMigrations, distinctSecretCounts, everyProjectGrants, insert, places, update, type EveryProjectGrant, type ResolvedPath } from '../db/queries.ts';
+import { everyProjectReaches, seesGrantsIn } from './members.ts';
 import { COFFRE_VERSION } from '../version.ts';
-import { can, canAnywhere, permissionsAt, seesProject } from './caller.ts';
+import { can, canAnywhere, permissionsAt, placeOf, seesProject } from './caller.ts';
 import { allowed, audited, denied, Refusal, requireOwner, type ApiContext } from './context.ts';
 import { conflict, notFound } from './errors.ts';
 
@@ -63,6 +64,37 @@ export type ProjectSummary = {
 
 const iso = (value: Date | null) => value?.toISOString() ?? null;
 
+/**
+ * Someone who reaches a place through a grant on every project, the ones
+ * made later too: the member, where the grant is (`*`, or `*` and the
+ * environment slug it covers in each), and its role.
+ */
+export type InheritedGrant = { member: string; place: string; role: Role; roleName: string; expiresAt: string | null };
+
+/**
+ * The live grants on every project that reach a place, for a caller who sees
+ * that project's grants (`seesGrantsIn`), and nothing for anyone else: a
+ * project as a whole (`environment` null), which only grants on all of every
+ * project reach, or an environment by its slug.
+ */
+async function inheritedGrants(ctx: ApiContext, projectId: string, environment: string | null): Promise<InheritedGrant[]> {
+  if (!seesGrantsIn(ctx.caller, projectId)) return [];
+  const grants = await everyProjectGrants(ctx.db, new Date());
+  return grants
+    .filter((grant) => grant.environmentSlug === null || grant.environmentSlug === environment)
+    .map(inherited);
+}
+
+function inherited(grant: EveryProjectGrant): InheritedGrant {
+  return {
+      member: grant.principal,
+      place: everyProjectPath(grant.environmentSlug),
+      role: grant.role as Role,
+      roleName: ROLES[grant.role as Role].name,
+    expiresAt: grant.expiresAt === null ? null : new Date(grant.expiresAt).toISOString(),
+  };
+}
+
 export async function me(ctx: ApiContext): Promise<Me> {
   const { caller } = ctx;
   const reachable: Me['environments'] = [];
@@ -70,12 +102,8 @@ export async function me(ctx: ApiContext): Promise<Me> {
     if (project.archivedAt !== null) continue;
     for (const environment of project.environments) {
       if (environment.archivedAt !== null) continue;
-      const place = { projectId: project.id, environmentId: environment.id };
-      const holds = caller.isRootAdmin || caller.grants.some(
-        (grant) =>
-          grant.projectId === project.id &&
-          (grant.environmentId === null || grant.environmentId === environment.id),
-      );
+      const place = placeOf(project, environment);
+      const holds = caller.isRootAdmin || caller.grants.some((grant) => covers(grant, place));
       if (!holds) continue;
       reachable.push({
         project: project.slug,
@@ -110,14 +138,19 @@ async function instanceState(ctx: ApiContext): Promise<InstanceState> {
  * authority over it, so `permissions` are the project-scope ones, and the
  * caller learns the names of environments they hold nothing in, not their
  * contents.
+ *
+ * `everyProject` is the grants on every project, for those who make
+ * projects or environments, which a new one is reached by at once, and
+ * for those who manage access.
  */
-export async function listProjects(ctx: ApiContext): Promise<{ projects: ProjectSummary[] }> {
+export async function listProjects(ctx: ApiContext): Promise<{ projects: ProjectSummary[]; everyProject: InheritedGrant[] }> {
   const { caller } = ctx;
   const summaries: ProjectSummary[] = [];
   // The projects whose secrets the caller may count, and where they may.
   const counted: { summary: ProjectSummary; projectId: string; environmentIds: string[] }[] = [];
-  for (const project of await places(ctx.db)) {
-    if (!seesProject(caller, project.id)) continue;
+  const known = await places(ctx.db);
+  for (const project of known) {
+    if (!seesProject(caller, project)) continue;
     const scope = { projectId: project.id };
     if (project.archivedAt !== null && !caller.isOwner && !can(caller, 'project.manage', scope)) {
       continue;
@@ -132,10 +165,7 @@ export async function listProjects(ctx: ApiContext): Promise<{ projects: Project
       permissions: permissionsAt(caller, scope),
       environments: project.environments.map((environment) => {
         // Every role that writes or archives also reads, so read is the test.
-        const secretAccess = can(caller, 'secret.read', {
-          projectId: project.id,
-          environmentId: environment.id,
-        });
+        const secretAccess = can(caller, 'secret.read', placeOf(project, environment));
         if (!manages && !secretAccess) {
           return { slug: environment.slug, name: environment.name, accessible: false, details: null };
         }
@@ -157,7 +187,7 @@ export async function listProjects(ctx: ApiContext): Promise<{ projects: Project
       .filter(
         (environment) =>
           environment.archivedAt === null &&
-          can(caller, 'secret.read', { projectId: project.id, environmentId: environment.id }),
+          can(caller, 'secret.read', placeOf(project, environment)),
       )
       .map((environment) => environment.id);
     if (project.archivedAt === null && environmentIds.length > 0) {
@@ -168,7 +198,13 @@ export async function listProjects(ctx: ApiContext): Promise<{ projects: Project
   // One query counts every project, rather than one list per environment.
   const counts = await distinctSecretCounts(ctx.db, counted.flatMap((entry) => entry.environmentIds));
   for (const { summary, projectId } of counted) summary.secretCount = counts.get(projectId) ?? 0;
-  return { projects: summaries };
+  // Each grant on every project, to whoever sees the grants of a project it reaches: as `listMembers` shows them.
+  const everyProject = !caller.isOwner && !canAnywhere(caller, 'grant.manage')
+    ? []
+    : (await everyProjectGrants(ctx.db, new Date()))
+        .filter((grant) => caller.isOwner || known.some((project) => everyProjectReaches(grant.environmentSlug, project) && seesGrantsIn(caller, project.id)))
+        .map(inherited);
+  return { projects: summaries, everyProject };
 }
 
 export type PlaceView = { slug: string; name: string; archivedAt: string | null };
@@ -186,12 +222,12 @@ export async function putProject(
   place: ResolvedPath | null,
   slug: string,
   input: { name: string },
-): Promise<{ project: PlaceView; created: boolean }> {
-  return audited(ctx, async (tx, log) => {
+): Promise<{ project: PlaceView; created: boolean; inherited: InheritedGrant[] }> {
+  const put = await audited(ctx, async (tx, log) => {
     requireOwner(ctx, 'project.create', { metadata: { slug } });
     if (place !== null) {
       const { project } = place;
-      return { project: { slug, name: project.name, archivedAt: iso(project.archivedAt) }, created: false };
+      return { id: project.id, project: { slug, name: project.name, archivedAt: iso(project.archivedAt) }, created: false };
     }
     const id = randomUUID();
     try {
@@ -201,8 +237,11 @@ export async function putProject(
       throw error;
     }
     log.push(allowed(ctx, 'project.create', { projectId: id, metadata: { slug, name: input.name } }));
-    return { project: { slug, name: input.name, archivedAt: null }, created: true };
+    return { id, project: { slug, name: input.name, archivedAt: null }, created: true };
   });
+  // Grants on every project reach it as a whole; one on a slug, only an environment of it, which it has none of yet.
+  const { id, ...made } = put;
+  return { ...made, inherited: await inheritedGrants(ctx, id, null) };
 }
 
 type PlacePatch = { name?: string; slug?: string; archived?: boolean };
@@ -273,12 +312,13 @@ export async function putEnvironment(
   place: ResolvedPath,
   slug: string,
   input: { name: string },
-): Promise<{ environment: PlaceView; created: boolean }> {
+): Promise<{ environment: PlaceView; created: boolean; inherited: InheritedGrant[] }> {
   const { project, environment } = place;
   if (environment !== null) {
-    return { environment: { slug, name: environment.name, archivedAt: iso(environment.archivedAt) }, created: false };
+    const existing = { slug, name: environment.name, archivedAt: iso(environment.archivedAt) };
+    return { environment: existing, created: false, inherited: await inheritedGrants(ctx, project.id, slug) };
   }
-  return audited(ctx, async (tx, log) => {
+  const put = await audited(ctx, async (tx, log) => {
     if (project.archivedAt !== null) {
       throw new Refusal(
         conflict(`${project.slug} is archived; restore it before adding environments`),
@@ -302,19 +342,25 @@ export async function putEnvironment(
     }));
     return { environment: { slug, name: input.name, archivedAt: null }, created: true };
   });
+  return { ...put, inherited: await inheritedGrants(ctx, project.id, slug) };
 }
 
+/**
+ * Rename, re-slug, archive or restore an environment. `inherited` is who
+ * reaches it through grants on every project under its slug now: a new
+ * slug can bring in those who hold it in every project.
+ */
 export async function patchEnvironment(
   ctx: ApiContext,
   place: ResolvedPath,
   patch: PlacePatch,
-): Promise<{ environment: PlaceView }> {
+): Promise<{ environment: PlaceView; inherited: InheritedGrant[] }> {
   const { project, environment } = place;
   if (environment === null) throw notFound('no such environment');
   const { renames, archivedAt } = placeChanges(environment, patch);
   const renamed = Object.keys(renames).length > 0;
   const scope = { projectId: project.id, environmentId: environment.id };
-  return audited(ctx, async (tx, log) => {
+  const patched = await audited(ctx, async (tx, log) => {
     if (renamed || archivedAt !== undefined) {
       try {
         await update(tx, environments, { id: environment.id }, { ...renames, archivedAt });
@@ -346,4 +392,5 @@ export async function patchEnvironment(
       },
     };
   });
+  return { ...patched, inherited: await inheritedGrants(ctx, project.id, patched.environment.slug) };
 }

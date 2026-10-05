@@ -119,15 +119,54 @@ test('revoke takes a grant away, and says when there was none', async () => {
   assert.equal(none.written.out, 'user:ada@acme.example held no grant on market: nothing changed\n');
 });
 
+test("revoke takes a grant on every project too, and asks for '*' quoted when the shell expanded it", async () => {
+  const { connect, calls, written, io } = fixture(() => ({ changes: { '*/dev': 'revoked' } }));
+  await manage.revoke(connect, ['*', 'ada@acme.example', '--env', 'dev'], io);
+  assert.deepEqual(calls, [{ method: 'PATCH', path: '/access/user:ada@acme.example', body: { '*/dev': null } }]);
+  assert.equal(written.out, "revoked user:ada@acme.example's grant on dev in every project\n");
+  await assert.rejects(manage.revoke(connect, ['README.md', 'package.json', 'ada@acme.example'], io), /too many arguments: ada@acme.example; to name every project, quote it: '\*'/);
+  await assert.rejects(manage.revoke(connect, ['market'], io), /name <principal>/);
+});
+
+test('making a place, or giving an environment a new slug, says who reaches it through grants on every project', async () => {
+  const inherited = [
+    { member: 'user:ada@acme.example', place: '*', role: 'auditor', roleName: 'Auditor', expiresAt: null },
+    { member: 'token:ci', place: '*/dev', role: 'viewer', roleName: 'Viewer', expiresAt: '2027-01-31T23:59:59.999Z' },
+  ];
+  const { connect, written, io } = fixture(({ method, path }) =>
+    path.split('/').length === 4
+      ? method === 'PUT'
+        ? { environment: { slug: 'dev', name: 'dev', archivedAt: null }, created: true, inherited }
+        : { environment: { slug: 'dev', name: 'dev', archivedAt: null }, inherited }
+      : { project: { slug: 'slides', name: 'slides', archivedAt: null }, created: true, inherited: inherited.slice(0, 1) },
+  );
+  await manage.projectsCreate(connect, ['slides'], io);
+  await manage.environmentsCreate(connect, ['slides/dev'], io);
+  await manage.environmentsRename(connect, ['slides/staging', '--slug', 'dev'], io);
+  assert.equal(written.out, [
+    'created slides, "slides"',
+    'who reaches it already:',
+    '  user:ada@acme.example as auditor, through every project',
+    'created slides/dev, "dev"',
+    'who reaches it already:',
+    '  user:ada@acme.example as auditor, through every project',
+    '  service:ci as viewer, through dev in every project until 2027-01-31',
+    'slides/staging is now slides/dev, "dev"',
+    'who reaches it now by its new slug:',
+    '  service:ci as viewer, through dev in every project until 2027-01-31',
+    '',
+  ].join('\n'));
+});
+
 test('projects and environments: create, rename and archive, each one request', async () => {
   const project = { slug: 'slides', name: 'Slides', archivedAt: null };
   const { connect, calls, written, io } = fixture(({ method, path }) =>
     path.split('/').length === 4
       ? method === 'PUT'
-        ? { environment: { slug: 'prod', name: 'prod', archivedAt: null }, created: true }
-        : { environment: { slug: 'production', name: 'Production', archivedAt: null } }
+        ? { environment: { slug: 'prod', name: 'prod', archivedAt: null }, created: true, inherited: [] }
+        : { environment: { slug: 'production', name: 'Production', archivedAt: null }, inherited: [] }
       : method === 'PUT'
-        ? { project, created: true }
+        ? { project, created: true, inherited: [] }
         : { project: { ...project, slug: 'deck' } },
   );
   await manage.projectsCreate(connect, ['slides', '--name', 'Slides'], io);

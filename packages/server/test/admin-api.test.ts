@@ -73,10 +73,12 @@ test('root admins and instance owners create projects without implicit secret gr
   assert.deepEqual(await root.projects.create('market', { name: 'Market' }), {
     project: { slug: 'market', name: 'Market', archivedAt: null },
     created: true,
+    inherited: [],
   });
   assert.deepEqual(await owner.projects.create('operations', { name: 'Operations' }), {
     project: { slug: 'operations', name: 'Operations', archivedAt: null },
     created: true,
+    inherited: [],
   });
   await assert.rejects(outsider.projects.create('sneaky', { name: 'Sneaky' }), { status: 403 });
   assert.deepEqual((await auditActions()).slice(-4), [
@@ -96,10 +98,12 @@ test('creating a project or environment that exists changes nothing and logs not
   assert.deepEqual(await root.projects.create('market', { name: 'Again' }), {
     project: { slug: 'market', name: 'Market', archivedAt: null },
     created: false,
+    inherited: [],
   });
   assert.deepEqual(await root.environments.create('market/prod', { name: 'Again' }), {
     environment: { slug: 'prod', name: 'Production', archivedAt: null },
     created: false,
+    inherited: [],
   });
   assert.equal(await auditCount(), logged);
 });
@@ -150,6 +154,7 @@ test('project owners create environments; environment-scoped grants do not', asy
   assert.deepEqual(await lead.environments.create('market/staging', { name: 'Staging' }), {
     environment: { slug: 'staging', name: 'Staging', archivedAt: null },
     created: true,
+    inherited: [],
   });
   await root.access.set(READER, { 'market/prod': 'developer' });
   await assert.rejects(reader.environments.create('market/nope', { name: 'Nope' }), { status: 403 });

@@ -1836,6 +1836,13 @@ a.crumb-link:hover {
   width: 4.75rem;
 }
 
+/* Where a revoke would be, for a grant on every project: lined up with one. */
+.grants .every-project-note {
+  padding: 0 0.5rem;
+  font-size: 0.8125rem;
+  white-space: nowrap;
+}
+
 .grants td {
   overflow-wrap: anywhere;
 }
@@ -2688,6 +2695,26 @@ span.env-link {
 
 .section-foot {
   margin-top: 0.75rem;
+}
+
+/* A member's grants on every project, above their access project by project. */
+.every-project-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.every-project-list li {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.every-project .hint {
+  margin-top: 0.5rem;
 }
 
 /* Environments as cards in a grid: each one a door into its secrets. */
