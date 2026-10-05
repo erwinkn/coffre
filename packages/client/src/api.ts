@@ -877,7 +877,6 @@ export type AuthInfo = {
       label: string;
       brand: "github" | "google" | "microsoft" | "oidc";
     }[];
-    mcp: boolean;
   };
   access: null | {
     assertion: boolean;
