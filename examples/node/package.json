@@ -14,9 +14,9 @@
     "conformance": "coffre-conformance node"
   },
   "dependencies": {
-    "@coffre/server": "0.2.0",
-    "@coffre/ui": "0.2.0",
-    "@coffre/vault": "0.2.0",
+    "@coffre/server": "0.3.0",
+    "@coffre/ui": "0.3.0",
+    "@coffre/vault": "0.3.0",
     "@libsql/client": "0.18.0",
     "@tanstack/react-query": "5.103.1",
     "@tanstack/react-router": "1.170.18",
@@ -27,8 +27,8 @@
     "srvx": "0.11.22"
   },
   "devDependencies": {
-    "@coffre/cli": "0.2.0",
-    "@coffre/conformance": "0.2.0",
+    "@coffre/cli": "0.3.0",
+    "@coffre/conformance": "0.3.0",
     "@types/node": "26.1.1",
     "@types/react": "19.2.17",
     "@vitejs/plugin-react": "6.0.3",
