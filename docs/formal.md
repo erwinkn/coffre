@@ -210,6 +210,9 @@ reference to that secret in `References`, and none yet elsewhere.
     vault call as making another, so only the latter is modelled. Making
     it again to the source it already reads replaces it in the model,
     where the code leaves it unchanged.
+  - A reference whose write stored no row is ended as `abandoned`
+    afterwards. In the model such a reference has no row, so nothing reads
+    through it either way, and the end is left out.
   - Left out because they decide nothing about locks or ends: a source
     that is itself a reference, archiving a single key, and a read refused
     because the source's version moved.
