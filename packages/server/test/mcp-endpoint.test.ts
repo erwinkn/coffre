@@ -35,8 +35,13 @@ const transport: WorkloadTransport = {
     return { client_id: CLAUDE_CODE, client_name: 'Claude Code', redirect_uris: ['http://localhost/callback'], token_endpoint_auth_method: 'none' };
   },
 };
-const calls = { open: true };
-const limiter = (which: 'other' | 'connection'): RateLimiter => ({ limit: async () => ({ success: which === 'other' || calls.open }) });
+const calls: { open: boolean | 'broken' } = { open: true };
+const limiter = (which: 'other' | 'connection'): RateLimiter => ({
+  limit: async () => {
+    if (which === 'connection' && calls.open === 'broken') throw new Error('rate limiter unreachable');
+    return { success: which === 'other' || calls.open === true };
+  },
+});
 const auth = signin({
   providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })],
   mcp: { limits: { perSource: limiter('other'), perConnection: limiter('connection'), total: limiter('other') } },
@@ -241,6 +246,18 @@ test("a connection's calls pass its own limit", async () => {
   assert.equal(limited.status, 429);
   assert.equal(limited.headers.get('retry-after'), '60');
   assert.equal((await raw(token, { method: 'tools/list', params: { _meta: envelope } })).status, 200, 'listing is not a call');
+});
+
+test("a connection's limiter that fails refuses the call, and the log says so with the request's id", async (t) => {
+  const token = await connect();
+  const report = t.mock.method(console, 'error', () => {});
+  calls.open = 'broken';
+  const refused = await raw(token, { method: 'tools/call', params: { name: 'whoami', arguments: {}, _meta: envelope } }, { 'mcp-name': 'whoami' });
+  assert.equal(refused.status, 429);
+  const [message, detail] = report.mock.calls.at(-1)!.arguments as [string, { requestId: string; connectionId: string; error: { message: string } }];
+  assert.equal(message, 'mcp limiter failed');
+  assert.match(detail.requestId, /^[0-9a-f-]{36}$/);
+  assert.match(detail.error.message, /rate limiter unreachable/);
 });
 
 test("bad arguments are the tool's error, not a crash; an unknown tool is invalid params", async () => {

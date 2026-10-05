@@ -35,6 +35,7 @@ import {
   updateAuth,
   type ConnectionRow,
 } from '../db/queries.ts';
+import { logged } from '../logged.ts';
 import type { WorkloadTransport } from '../workloads/transport.ts';
 import { resolveClient, wouldFetch } from './clients.ts';
 import {
@@ -593,10 +594,12 @@ export class McpService {
   }
 
   /** A connection's tool calls, against its own limit. */
-  async admitCall(connectionId: string): Promise<boolean> {
+  async admitCall(connectionId: string, requestId: string): Promise<boolean> {
     try {
       return (await this.#deps.config.limits.perConnection.limit({ key: `connection:${connectionId}` })).success;
-    } catch {
+    } catch (error) {
+      // Refused all the same, and logged: a limiter that fails is not a client calling too often.
+      console.error('mcp limiter failed', { requestId, connectionId, error: logged(error) });
       return false;
     }
   }

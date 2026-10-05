@@ -234,7 +234,8 @@ async function call(
   answer: (result: Record<string, unknown>) => Response,
 ): Promise<Response> {
   const mcp = runtime.mcp!;
-  if (!(await mcp.admitCall(connection.id))) {
+  const requestId = crypto.randomUUID();
+  if (!(await mcp.admitCall(connection.id, requestId))) {
     return failure(id, 429, { code: CODE.internal, message: 'Too many calls: try again in a minute' }, { 'retry-after': '60' });
   }
   const params = CallParams.safeParse(message.params ?? {});
@@ -246,7 +247,6 @@ async function call(
     return answer(toolError(`The arguments do not fit ${tool.name}: ${args.error.issues.map((issue) => `${issue.path.join('.') || 'arguments'}: ${issue.message}`).join('; ')}`));
   }
 
-  const requestId = crypto.randomUUID();
   const via: McpVia = { connectionId: connection.id, clientId: connection.clientId, clientName: connection.clientName, scopes: connection.scopes };
   const writer = { caller: connection.caller, requestId, sourceIp, provenance: connection.id, via };
   const names = tool.names(args.data as never);
