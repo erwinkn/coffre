@@ -48,7 +48,8 @@ async function serve(readyFile: string, environmentFile: string): Promise<void> 
     // The foreground setup step forwards this command from the fixture log.
     // Only the credential is masked here; the Action must mask all values.
     console.log(`::add-mask::${token}`);
-    appendFileSync(environmentFile, `COFFRE_API_URL=${deployment.origin}\nCOFFRE_TOKEN=${token}\n`);
+    // Not COFFRE_*: the CLI refuses the variables it no longer reads, and the Action's step inherits these.
+    appendFileSync(environmentFile, `ACTION_TEST_URL=${deployment.origin}\nACTION_TEST_TOKEN=${token}\n`);
     writeFileSync(readyFile, String(process.pid), { mode: 0o600 });
     await stopped;
   } finally {

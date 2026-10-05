@@ -29,9 +29,6 @@ import { Cancelled, type Keyboard, listed, openTerminal, type Output, paragraph,
 import { cliVersion } from './version.ts';
 import { Cloudflare, deployedSummary } from './workers.ts';
 
-/** Where the administrator's connection string comes from, when not from a hidden prompt. */
-const URL_VARIABLE = 'COFFRE_SETUP_DATABASE_URL';
-
 /** The two runtime roles, as the migration names them, and the Hyperdrive config each gets on Workers. */
 const ROLES = { app: 'coffre_runtime', vault: 'coffre_vault_runtime' } as const;
 const HYPERDRIVE = { app: 'coffre', vault: 'coffre-vault' } as const;
@@ -126,7 +123,6 @@ export async function setup(args: string[]): Promise<void> {
     if (s.ansi) out.write(`\n  ${s.bold('coffre setup')}  ${s.dim(about)}\n\n`);
     if (kind === 'empty' && terminal !== null) kind = await scaffold(dir, terminal.keys, out, clean);
     const { url: administrator, secrets: typed } = await readDatabaseUrl(out, s, {
-      variable: URL_VARIABLE,
       question: "The database administrator's connection string",
       hint: "Hidden as you type. Your host's admin URL, such as PlanetScale's Connect page gives.",
       command: 'coffre setup',
@@ -187,8 +183,8 @@ function parseOptions(args: string[]): { resetPasswords: boolean; json: boolean 
     // The error would quote the argument, which may be the connection string itself.
     const leaked = args.some((arg) => /postgres(ql)?:|@/i.test(arg));
     throw new SetupError(
-      `coffre setup takes only --reset-passwords and --json. It reads the administrator's connection string from a hidden prompt, ` +
-        `${URL_VARIABLE} or stdin, never from the command line, where the shell's history and other users can read it.` +
+      `coffre setup takes only --reset-passwords and --json. It asks for the administrator's connection string, at a hidden prompt or on stdin, ` +
+        `never from the command line, where the shell's history and other users can read it.` +
         (leaked ? ' One of the arguments looks like one: change that password, which is in your shell history now.' : ''),
     );
   }

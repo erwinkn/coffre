@@ -35,8 +35,8 @@ npx @coffre/cli setup
 Run it with the CLI you ran `coffre init` with: it migrates with the
 migrations it was built with, which are those of the `@coffre/server` of the
 same version. It asks for the connection string at a hidden prompt; a script
-can pipe it in, or set `COFFRE_SETUP_DATABASE_URL`. It never takes it as an
-argument, where the shell's history and other users could read it. Then:
+pipes it in, or redirects a file to it. It never takes it as an argument or a
+flag, where the shell's history and other users could read it. Then:
 
 1. It makes the two runtime logins, `coffre_runtime` for the app and
    `coffre_vault_runtime` for the vault, each with a fresh password that
@@ -149,7 +149,7 @@ old schema.
    directory:
 
    ```sh
-   pnpm exec coffre migrate --yes   # COFFRE_MIGRATE_DATABASE_URL: the owner's URL
+   printenv DATABASE_OWNER_URL | pnpm exec coffre migrate --yes   # the owner's URL, piped in
    pnpm run deploy                  # on Node: pnpm build, then restart both processes
    ```
 3. **Check `/readyz`**, which passes once the new code's scheduled job has
@@ -170,9 +170,9 @@ runs the previous version, by design. It stops unless:
   changed. Deploy that version, or restore the database from before it
   ([restore.md](restore.md)).
 
-It reads the **database owner's direct Postgres URL** from
-`COFFRE_MIGRATE_DATABASE_URL`, from stdin, or at a hidden prompt; never from
-the command line, and never prints it. Use the login that owns the tables,
+It asks for the **database owner's direct Postgres URL**, at a hidden
+prompt, or reads it from stdin when that is no terminal; never from the
+command line, and never prints it. Use the login that owns the tables,
 not `coffre_runtime` or `coffre_vault_runtime`, and not a Hyperdrive
 connection. It shows what it will apply, and asks, on a terminal; without
 one, it applies only with `--yes`. It applies it under the migration lock,
@@ -185,7 +185,7 @@ instance instead: it asks the instance which version it runs and which of
 that version's migrations its database lacks, stops unless the CLI is that
 version, checks that the database lacks what the instance says it lacks, and
 after applying, that the instance sees the new schema and `/readyz` passes.
-`--url` picks an instance other than the current one.
+`coffre --url <url> migrate` picks an instance other than the current one.
 
 Until the database is migrated, owners and root admins see "Database
 migrations pending" above every page, and any CLI command they run against
@@ -194,11 +194,10 @@ the instance says so on stderr, once a day.
 A script that asks for the URL itself:
 
 ```sh
-read -rs -p 'Database owner URL: ' COFFRE_MIGRATE_DATABASE_URL
+read -rs -p 'Database owner URL: ' owner_url
 printf '\n'
-export COFFRE_MIGRATE_DATABASE_URL
-pnpm exec coffre migrate --yes
-unset COFFRE_MIGRATE_DATABASE_URL
+printf '%s' "$owner_url" | pnpm exec coffre migrate --yes
+unset owner_url
 ```
 
 ## On Workers
@@ -236,11 +235,16 @@ with the repository connected and the deployment's directory as the root:
 
 | Worker | Build command | Deploy command | Build variables |
 |---|---|---|---|
-| the vault, `<name>-vault` | `pnpm exec coffre migrate --yes` | `npx wrangler deploy -c vault/wrangler.jsonc` | `COFFRE_MIGRATE_DATABASE_URL`, the database owner's direct URL, as a secret |
+| the vault, `<name>-vault` | `printenv DATABASE_OWNER_URL \| pnpm exec coffre migrate --yes` | `npx wrangler deploy -c vault/wrangler.jsonc` | `DATABASE_OWNER_URL`, the database owner's direct URL, as a secret |
 | the app, `<name>` | `pnpm exec vite build app` | `npx wrangler deploy -c app/dist/server/wrangler.json` | none |
 
 The owner's URL is the one `coffre setup` asked for. It is a build variable,
-which only the build sees; the Worker never does. A build that cannot
+which only the build sees; the Worker never does. Workers Builds hands it to
+the build command in its environment, and `printenv` passes it to the CLI
+on stdin, never as an argument. The CLI reads no variable itself: a vault
+set up by a release before 0.3 named this one `COFFRE_MIGRATE_DATABASE_URL` and built
+with `pnpm exec coffre migrate --yes`, which the CLI now refuses, saying
+so; rename the variable and change the build command as above. A build that cannot
 migrate fails before its deploy, and the vault keeps running the previous
 version. The app may deploy before or after the vault's migration: each
 release runs on the schema before and after its migrations.
@@ -799,8 +803,8 @@ owner's, with the login's name and password.
 ## Not configured by coffre
 
 The environment variable names above belong to the examples. Packages take
-typed configuration and read no deployment environment variables themselves.
-The exceptions are the CLI's user settings, `COFFRE_SETUP_DATABASE_URL`
-and `COFFRE_MIGRATE_DATABASE_URL` among them, and the `DATABASE_URL`
-fallback for `coffre-server migrate`, which tests and local SQLite use, when
-no URL is given.
+typed configuration and read no deployment environment variables themselves,
+and the CLI reads none either: it takes flags, and secrets in the files they
+name (`coffre help`). The exception is the `DATABASE_URL` fallback for
+`coffre-server migrate`, which tests and local SQLite use, when no URL is
+given.

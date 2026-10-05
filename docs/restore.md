@@ -131,7 +131,7 @@ Restore:
    URL for the restored database:
 
    ```sh
-   COFFRE_MIGRATE_DATABASE_URL="$OWNER_URL_OF_COFFRE_RESTORED" pnpm exec coffre migrate --yes
+   printf '%s' "$OWNER_URL_OF_COFFRE_RESTORED" | pnpm exec coffre migrate --yes
    ```
 
    Besides applying missing migrations, every run revokes `CREATE` and

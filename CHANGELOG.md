@@ -2,6 +2,68 @@
 
 ## Unreleased
 
+**The CLI reads no environment variable, and takes no secret as a flag or an
+argument.** `COFFRE_TOKEN`, `COFFRE_API_URL` and the rest used to override the
+saved session where no one could see it, and a secret in a variable reaches
+every process the shell starts. Now flags configure, and a command that
+needs a secret asks for it: at a hidden prompt, with a label (`Database
+owner URL`), or, when stdin is no terminal, from stdin, which is where a
+pipeline pipes it and a file is redirected. A CI run signs in as a person
+does, with `coffre login`, and the commands after it use the session it
+saves:
+
+```sh
+printf '%s' "$TOKEN" | coffre login https://secrets.acme.example --token
+coffre run market/prod -- ./deploy
+```
+
+The session flags, before the command, pick another instance than the
+current one, `--url`, or sign one command in as a service by its ID token,
+`--service`, which on GitHub Actions needs nothing else. A variable an
+earlier CLI read, still set, stops the command that read it, in one line
+saying what to do instead, rather than leaving the run to go elsewhere, or
+as someone else, unseen:
+
+```
+coffre: COFFRE_TOKEN is no longer read: unset it; instead, run `coffre login <url> --token` and paste the token, or pipe it in
+```
+
+| Before | Now |
+|---|---|
+| `COFFRE_API_URL` | `--url <url>`, or `coffre login <url>` once |
+| `COFFRE_TOKEN` | `coffre login <url> --token`, the token pasted or piped in |
+| `COFFRE_ACCESS_CLIENT_ID`, `COFFRE_ACCESS_CLIENT_SECRET` | `coffre login <url> --access-client-id <id>`, the secret pasted or piped in |
+| `COFFRE_SERVICE` | `--service <name>`; on GitHub Actions, still nothing else |
+| `COFFRE_ID_TOKEN`, `COFFRE_ID_TOKEN_FILE` | `coffre login <url> --service <name> --id-token`, the ID token piped in |
+| `COFFRE_AUTH_MODE` | `--auth-mode signin\|cloudflare` |
+| `COFFRE_MIGRATE_DATABASE_URL` | `coffre migrate` asks, or the URL piped in: `printenv DATABASE_OWNER_URL \| coffre migrate --yes` |
+| `COFFRE_SETUP_DATABASE_URL` | `coffre setup` asks, or the URL piped in |
+| `COFFRE_VAULT_KEY`, `COFFRE_APP_KEY` | `coffre verify keys` asks, or both piped in, the vault key's line first |
+| `COFFRE_VAULT_KEY_ID` | `coffre verify keys --vault-id <id>`, as before |
+| `COFFRE_CONFORMANCE_CANARY` | `coffre verify instance --canary <path>` asks for the value, or it is piped in |
+| `coffre set <path> <value>` | `coffre set <path>`, the value asked for or piped in |
+| `coffre verify instance --canary <path>=<value>` | the same, the value asked for or piped in |
+| `coffre migrate --url <url>` | `coffre --url <url> migrate` |
+
+`coffre logout` forgets a service token's or an Access service token's
+session there, and revokes nothing: the token is the service's. A machine
+sign-in never replaces a person's session unseen: they sign out first, or
+the run signs in from a home of its own. `coffre set` refuses an empty
+value, which an unset variable piped in would be, and takes one as it is,
+at the prompt or piped, less exactly one final line break. An empty
+session flag, which is what an unset variable expands to, an instance named
+both as an argument and as `--url`, a session flag after the command, and
+one a command has no use for are refused. When the instance does not know
+the session saved for it, as after it was reset at the same address, the
+CLI says so and names `coffre login <url>`. The GitHub Action's inputs are
+as they were; it pipes the token to `coffre login --token`, the CLI in a
+home of the step's own, removed when the step ends. On Workers Builds, rename the vault's
+build variable `COFFRE_MIGRATE_DATABASE_URL` to `DATABASE_OWNER_URL`, and
+its build command to `printenv DATABASE_OWNER_URL | pnpm exec coffre migrate
+--yes` ([Workers Builds](docs/deploy.md#workers-builds)). On GitLab, name the
+ID token anything but `COFFRE_ID_TOKEN`, and pipe it to `coffre login
+--service <name> --id-token` ([docs/ci.md](docs/ci.md#without-a-stored-token)).
+
 **A deployment's app is a TanStack Start app of its own** (0.2.0), a
 conventional one, and coffre is a set of pieces it mounts, as an auth SDK's
 are. Vite builds the app once, and nothing bundles it again: on Workers,

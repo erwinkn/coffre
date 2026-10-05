@@ -91,53 +91,55 @@ test('signing out of the current instance falls back to another one', () => {
 
 // --- resolution ---------------------------------------------------------------
 
-test('with no environment, the current instance and its session are used', () => {
+test('with no session flags, the current instance and its session are used', () => {
   assert.deepEqual(resolveTarget({}, storeWith(), NOW), {
     origin: OURS,
     mode: 'signin',
+    by: 'person',
     credential: { kind: 'token', token: 'coffre_cli_ours' },
   });
 });
 
-test('COFFRE_API_URL picks another saved instance, with that instance’s mode', () => {
-  assert.deepEqual(resolveTarget({ COFFRE_API_URL: 'coffre.acme.example' }, storeWith(), NOW), {
+test('--url picks another saved instance, with that instance’s mode', () => {
+  assert.deepEqual(resolveTarget({ url: 'coffre.acme.example' }, storeWith(), NOW), {
     origin: THEIRS,
     mode: 'cloudflare',
+    by: 'person',
     credential: { kind: 'cloudflared' },
   });
 });
 
-test('a service token in COFFRE_TOKEN works with nothing saved, as in CI', () => {
-  assert.deepEqual(
-    resolveTarget({ COFFRE_API_URL: OURS, COFFRE_TOKEN: 'coffre_svc_ci' }, emptyStore(), NOW),
-    { origin: OURS, mode: 'signin', credential: { kind: 'token', token: 'coffre_svc_ci' } },
-  );
-});
-
-test('a Cloudflare Access service token implies Cloudflare mode', () => {
-  const target = resolveTarget(
-    {
-      COFFRE_API_URL: THEIRS,
-      COFFRE_ACCESS_CLIENT_ID: 'id.access',
-      COFFRE_ACCESS_CLIENT_SECRET: 'shh',
-    },
-    emptyStore(),
-    NOW,
-  );
-  assert.deepEqual(target, {
+test('a CI run signs in with `coffre login`, and its session is used as a person’s is', () => {
+  const token = withSession(emptyStore(), OURS, { mode: 'signin', kind: 'token', token: 'coffre_svc_ci', expiresAt: null, obtainedAt: '2026-09-26T00:00:00Z' });
+  assert.deepEqual(resolveTarget({}, token, NOW), { origin: OURS, mode: 'signin', by: 'token', credential: { kind: 'token', token: 'coffre_svc_ci' } });
+  const access = withSession(emptyStore(), THEIRS, { mode: 'cloudflare', kind: 'access', clientId: 'id.access', clientSecret: 'shh', obtainedAt: '2026-09-26T00:00:00Z' });
+  assert.deepEqual(resolveTarget({}, access, NOW), {
     origin: THEIRS,
     mode: 'cloudflare',
+    by: 'access',
     credential: { kind: 'access-service-token', clientId: 'id.access', clientSecret: 'shh' },
   });
+  // A run's credential lasts five minutes, and says how to get another.
+  const run = withSession(emptyStore(), OURS, {
+    mode: 'signin',
+    kind: 'run',
+    token: 'coffre_svc_run',
+    principal: { type: 'service', id: 'token:api-deploy' },
+    expiresAt: '2026-09-26T12:05:00Z',
+    obtainedAt: '2026-09-26T12:00:00Z',
+  });
+  assert.equal(resolveTarget({}, run, NOW).by, 'run');
   assert.throws(
-    () => resolveTarget({ COFFRE_API_URL: THEIRS, COFFRE_ACCESS_CLIENT_ID: 'id' }, emptyStore(), NOW),
-    /COFFRE_ACCESS_CLIENT_SECRET is not/,
+    () => resolveTarget({}, run, new Date('2026-09-26T12:06:00Z')),
+    /lasted until 12:05:00: sign in again, `coffre login https:\/\/coffre\.example\.com --service token:api-deploy`/,
   );
+  // An unknown kind, from a later CLI say, is no session at all.
+  assert.deepEqual(parseStore(JSON.stringify({ version: 2, current: OURS, instances: { [OURS]: { mode: 'signin', kind: 'robot', token: 't' } } })), emptyStore());
 });
 
 test('an instance with no saved session asks for a login there', () => {
   assert.throws(
-    () => resolveTarget({ COFFRE_API_URL: 'https://other.example.com' }, storeWith(), NOW),
+    () => resolveTarget({ url: 'https://other.example.com' }, storeWith(), NOW),
     /not signed in to https:\/\/other\.example\.com: run `coffre login https:\/\/other\.example\.com`/,
   );
   assert.throws(() => resolveTarget({}, emptyStore(), NOW), /coffre login <url>/);
@@ -145,10 +147,10 @@ test('an instance with no saved session asks for a login there', () => {
 
 test('a saved token is not sent to the same origin under a different mode', () => {
   assert.throws(
-    () => resolveTarget({ COFFRE_AUTH_MODE: 'cloudflare' }, storeWith(), NOW),
+    () => resolveTarget({ authMode: 'cloudflare' }, storeWith(), NOW),
     /not signed in to https:\/\/coffre\.example\.com/,
   );
-  assert.throws(() => resolveTarget({ COFFRE_AUTH_MODE: 'dev' }, storeWith(), NOW), /must be one of signin, cloudflare/);
+  assert.throws(() => resolveTarget({ authMode: 'dev' }, storeWith(), NOW), /--auth-mode must be one of signin, cloudflare/);
 });
 
 test('an expired session is refused locally with the date it ended', () => {
@@ -183,7 +185,7 @@ test('login signs in the way GET /api/auth says, or the way Access turns it away
   assert.equal(loginMode(OURS, 200, signin), 'signin');
   assert.equal(loginMode(THEIRS, 200, { signin: null, access: { assertion: false } }), 'cloudflare');
   assert.equal(loginMode(THEIRS, 302, undefined), 'cloudflare');
-  assert.throws(() => loginMode(THEIRS, 403, undefined), /COFFRE_AUTH_MODE=cloudflare coffre login https:\/\/coffre\.acme\.example/);
+  assert.throws(() => loginMode(THEIRS, 403, undefined), /coffre --auth-mode cloudflare login https:\/\/coffre\.acme\.example/);
   assert.throws(() => loginMode(OURS, 404, undefined), /does not look like coffre: GET \/api\/auth answered 404/);
   assert.throws(() => loginMode(OURS, 200, { hello: 'world' }), /does not look like coffre/);
 });

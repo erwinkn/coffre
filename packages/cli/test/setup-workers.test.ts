@@ -19,7 +19,7 @@ import { editWorker, readWorker } from '../src/deployment.ts';
 import { templateDir } from '../src/init.ts';
 import { asSuperuser, CLUSTER, connects, database, emptyCluster, needsCluster, OTHER_CLUSTER } from './cluster.ts';
 import { fakeCloudflare, fakeGitHub, fakeOpener, fakeVite, fakeWrangler, realWrangler, submitManifest } from './fakes.ts';
-import { ENTER_ALT, inTerminal, ptySkip, screens, type Session, visible } from './pty.ts';
+import { ENTER_ALT, inTerminal, ptySkip, screens, type Session, typingUrl, visible } from './pty.ts';
 
 const skip = needsCluster.skip || ptySkip;
 const TOKEN = `cf-oauth-${'t'.repeat(40)}`;
@@ -30,6 +30,8 @@ let cloudflare: Awaited<ReturnType<typeof fakeCloudflare>>;
 let github: Awaited<ReturnType<typeof fakeGitHub>>;
 let live: ReturnType<typeof createServer>;
 let env: NodeJS.ProcessEnv;
+/** The database owner's URL setup is given, typed at its prompt. */
+let url: string;
 
 before(async () => {
   if (skip) return;
@@ -61,10 +63,10 @@ globalThis.fetch = (input, init) => {
   fakeWrangler(deployment, join(dir, 'wrangler'), TOKEN, realWrangler());
   fakeVite(deployment);
   fakeOpener(join(dir, 'bin'));
+  url = await database('setup_workers', 'owner');
   env = {
     PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
     HOME: dir,
-    COFFRE_SETUP_DATABASE_URL: await database('setup_workers', 'owner'),
     CLOUDFLARE_API_BASE_URL: cloudflare.url,
     NODE_OPTIONS: `--import=${join(dir, 'network.mjs')}`,
   };
@@ -101,8 +103,8 @@ function another(name: string): string {
 
 const deployment = () => join(dir, 'deployment');
 
-function setup(play: (terminal: Session) => Promise<void>, where = deployment(), more: NodeJS.ProcessEnv = {}) {
-  return inTerminal(['setup'], { ...env, ...more }, play, { columns: 160, rows: 48 }, where);
+function setup(play: (terminal: Session) => Promise<void>, where = deployment(), databaseUrl = url) {
+  return inTerminal(['setup'], env, typingUrl(databaseUrl, play), { columns: 160, rows: 48 }, where);
 }
 
 /** What the real wrangler said, in its dry run of a Worker's last deploy. */
@@ -165,7 +167,7 @@ const keysIn = (output: string) => [...new Set(alternateText(output).match(/[A-Z
 
 test('a first run: signed in, Hyperdrive, the GitHub App and the files done; the keys shown, then the app deploy fails', { skip }, async () => {
   writeFileSync(join(dir, 'wrangler', 'fail-coffre'), '');
-  secrets.add(new URL(env.COFFRE_SETUP_DATABASE_URL!).password).add(TOKEN);
+  secrets.add(new URL(url).password).add(TOKEN);
   const { output, code } = await setup(async (terminal) => {
     await terminal.waitFor('Set Cloudflare up too?');
     terminal.send('\r');
@@ -353,7 +355,7 @@ test("a second deployment on the same account: it takes names of its own, and th
       await terminal.waitFor('coffre is at', 60_000);
     },
     second,
-    { COFFRE_SETUP_DATABASE_URL: `${OTHER_CLUSTER}/setup_workers_two` },
+    `${OTHER_CLUSTER}/setup_workers_two`,
   );
   const text = mainText(output);
   assert.equal(code, 0, text);
@@ -404,7 +406,7 @@ test("a deployment on another's database server: setup stops before giving their
       terminal.send('\r');
     },
     third,
-    { COFFRE_SETUP_DATABASE_URL: `${CLUSTER}/setup_workers_three` },
+    `${CLUSTER}/setup_workers_three`,
   );
   const text = mainText(output);
   assert.equal(code, 1, text);
@@ -415,7 +417,6 @@ test("a deployment on another's database server: setup stops before giving their
 });
 
 test('a Worker without its key over a database in use: setup stops before changing anything', { skip }, async () => {
-  const url = env.COFFRE_SETUP_DATABASE_URL!;
   const client = new pg.Client({ connectionString: url });
   await client.connect();
   try {

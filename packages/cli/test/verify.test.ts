@@ -158,19 +158,20 @@ test('coffre verify keys reads what the keys are checked against, and sends noth
   const instance = await fakeInstance(t, (method, path) => (method === 'GET' && path === '/api/audit/keys' ? material : undefined));
   const { home } = signedInHome(t, instance.origin);
 
+  // On stdin, as a script pipes them: the vault key's line, then the app key's.
   const right = await coffre(['verify', 'keys'], home, `${b64(keys.current)}\n${b64(keys.app)}\n`);
   assert.equal(right.code, 0, right.stderr);
   assert.match(right.stdout, /✓ vault key +the current one, vault ID vault-2026-10-03-bbbbbb \(from stdin\)/);
   assert.match(right.stdout, /✓ app key +the one the app signs with now \(from stdin\)/);
   assert.match(right.stdout, new RegExp(`Both keys are ${instance.origin}'s\\.`));
 
-  const previous = await coffre(['verify', 'keys'], home, '', { COFFRE_VAULT_KEY: b64(keys.previous), COFFRE_APP_KEY: b64(randomBytes(32)) });
+  const previous = await coffre(['verify', 'keys'], home, `${b64(keys.previous)}\n${b64(randomBytes(32))}\n`);
   assert.equal(previous.code, 1);
-  assert.match(previous.stdout, /✗ vault key +this is a previous vault key \(vault ID vault-2025-01-10-aaaaaa\), not the current one: .* \(from COFFRE_VAULT_KEY\)/);
-  assert.match(previous.stdout, /✗ app key +not this instance's app key: the app signs with another \(from COFFRE_APP_KEY\)/);
+  assert.match(previous.stdout, /✗ vault key +this is a previous vault key \(vault ID vault-2025-01-10-aaaaaa\), not the current one: .* \(from stdin\)/);
+  assert.match(previous.stdout, /✗ app key +not this instance's app key: the app signs with another \(from stdin\)/);
   assert.match(previous.stdout, /Neither key is /);
 
-  // One key alone: the other skipped, not failed.
+  // One key alone, a blank line for the other: that one skipped, not failed.
   const one = await coffre(['verify', 'keys'], home, `\n${b64(keys.app)}\n`);
   assert.equal(one.code, 0);
   assert.match(one.stdout, /– vault key +not given: not checked/);

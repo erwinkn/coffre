@@ -14,10 +14,12 @@
  *     }
  *   }
  *
- * Environment variables override the file for one command, which is how CI
- * uses the CLI: `COFFRE_API_URL` picks the instance, `COFFRE_TOKEN` (a
- * service token) or `COFFRE_ACCESS_CLIENT_ID`/`_SECRET` (a Cloudflare Access
- * service token) authenticates, and nothing is written to disk.
+ * A CI run signs in the same way, with what `coffre login` asks it for: a
+ * service token (`--token`), an Access service token's secret
+ * (`--access-client-id`), or the credential its ID token buys
+ * (`--service`); each saved as the instance's session. The session flags
+ * pick another instance than the current one, `--url`, or sign one command
+ * in as a service by its ID token, `--service` (`flags.ts`).
  */
 
 import type { AuthInfo } from '@coffre/client';
@@ -25,10 +27,22 @@ import type { AuthInfo } from '@coffre/client';
 /** Who vouches for you there: coffre's own sign-in, or Cloudflare Access in front of it. */
 export type AuthMode = 'signin' | 'cloudflare';
 
+/**
+ * Whose a saved session is, besides a person's by a device login or
+ * cloudflared: a service token's, an Access service token's, or a CI run's,
+ * the five-minute credential its ID token bought.
+ */
+export type SessionKind = 'token' | 'access' | 'run';
+
 export type Session = {
   mode: AuthMode;
-  /** Absent for Cloudflare Access, whose token cloudflared keeps and refreshes. */
+  /** A person's, when absent. */
+  kind?: SessionKind;
+  /** Absent for Cloudflare Access, whose token cloudflared keeps and refreshes, or a service token's id and secret. */
   token?: string;
+  /** An Access service token, `kind: 'access'`. */
+  clientId?: string;
+  clientSecret?: string;
   principal?: { type: string; id: string };
   expiresAt?: string | null;
   obtainedAt: string;
@@ -45,14 +59,29 @@ export type Credential =
   | { kind: 'access-service-token'; clientId: string; clientSecret: string }
   /** Ask `cloudflared access token -app=<origin>` at request time. */
   | { kind: 'cloudflared' }
-  /** A CI run's ID token, traded for a five-minute credential of `service` before the first request (`workload.ts`). */
+  /**
+   * A CI run's ID token, a fresh one from GitHub's runner, traded for a
+   * five-minute credential of `service` before the first request
+   * (`workload.ts`).
+   */
   | { kind: 'workload'; service: string };
 
-export type Target = { origin: string; mode: AuthMode; credential: Credential };
+/**
+ * Where a request goes, what it carries, and whose it is: a person's saved
+ * session, a saved service token, Access service token or run's credential,
+ * or `--service`, this command's own.
+ */
+export type Target = { origin: string; mode: AuthMode; by: 'person' | SessionKind | 'service'; credential: Credential };
 
-type Environment = Readonly<Record<string, string | undefined>>;
+/** What the session flags say (`flags.ts`). */
+export type SessionFlags = {
+  url?: string;
+  service?: string;
+  authMode?: string;
+};
 
 const MODES: readonly AuthMode[] = ['signin', 'cloudflare'];
+const KINDS: readonly SessionKind[] = ['token', 'access', 'run'];
 
 export function emptyStore(): Store {
   return { version: 2, current: null, instances: {} };
@@ -77,7 +106,7 @@ export function parseStore(text: string): Store {
   }
   const instances: Record<string, Session> = {};
   for (const [origin, session] of Object.entries(candidate.instances)) {
-    if (typeof session === 'object' && session !== null && MODES.includes(session.mode)) {
+    if (typeof session === 'object' && session !== null && MODES.includes(session.mode) && (session.kind === undefined || KINDS.includes(session.kind))) {
       instances[origin] = session;
     }
   }
@@ -89,12 +118,11 @@ export function parseStore(text: string): Store {
 }
 
 export function parseMode(raw: string | undefined): AuthMode | undefined {
-  const value = raw?.trim();
-  if (value === undefined || value === '') return undefined;
-  if (!(MODES as readonly string[]).includes(value)) {
-    throw new Error(`COFFRE_AUTH_MODE must be one of ${MODES.join(', ')}, not "${value}"`);
+  if (raw === undefined) return undefined;
+  if (!(MODES as readonly string[]).includes(raw)) {
+    throw new Error(`--auth-mode must be one of ${MODES.join(', ')}, not "${raw}"`);
   }
-  return value as AuthMode;
+  return raw as AuthMode;
 }
 
 function isLoopback(hostname: string): boolean {
@@ -164,7 +192,7 @@ export function loginMode(origin: string, status: number, body: unknown): AuthMo
     // 401 or 403 rather than a redirect.
     throw new Error(
       `${origin} turned the CLI away (status ${status}). If it is behind Cloudflare Access,\n` +
-        `  run \`COFFRE_AUTH_MODE=cloudflare coffre login ${origin}\``,
+        `  run \`coffre --auth-mode cloudflare login ${origin}\``,
     );
   }
   throw new Error(`${origin} does not look like coffre: GET /api/auth answered ${status}`);
@@ -172,63 +200,45 @@ export function loginMode(origin: string, status: number, body: unknown): AuthMo
 
 /**
  * Decide where the next request goes and what it carries, or explain why it
- * cannot be sent. Pure, so every precedence rule is testable.
+ * cannot be sent. Pure, so every precedence rule is testable. A flag given
+ * is given: `readSession` refused an empty one, which falling back to the
+ * saved session would have taken for none.
  */
-export function resolveTarget(env: Environment, store: Store, now: Date = new Date()): Target {
-  const explicitMode = parseMode(env.COFFRE_AUTH_MODE);
-  const requested = env.COFFRE_API_URL?.trim() || store.current;
+export function resolveTarget(flags: SessionFlags, store: Store, now: Date = new Date()): Target {
+  const explicitMode = parseMode(flags.authMode);
+  const requested = flags.url ?? store.current;
   if (!requested) {
     throw new Error('not signed in anywhere yet: run `coffre login <url>`');
   }
-
-  const session = lookupSession(store, requested);
-  const accessClientId = env.COFFRE_ACCESS_CLIENT_ID?.trim();
-  const mode: AuthMode =
-    explicitMode ?? session?.mode ?? (accessClientId ? 'cloudflare' : 'signin');
   const origin = instanceOrigin(requested);
 
-  const token = env.COFFRE_TOKEN?.trim();
-  if (token) return { origin, mode, credential: { kind: 'token', token } };
-
-  const service = env.COFFRE_SERVICE?.trim();
-  if (service) {
-    if (mode === 'cloudflare') {
-      throw new Error("COFFRE_SERVICE signs a CI run in with its ID token, which coffre's own sign-in takes: behind Cloudflare Access, use an Access service token");
+  if (flags.service !== undefined) {
+    if (explicitMode === 'cloudflare') {
+      throw new Error("--service signs a CI run in with its ID token, which coffre's own sign-in takes: behind Cloudflare Access, use an Access service token");
     }
-    return { origin, mode, credential: { kind: 'workload', service: service.startsWith('token:') ? service : `token:${service}` } };
-  }
-
-  if (mode === 'cloudflare' && accessClientId) {
-    const clientSecret = env.COFFRE_ACCESS_CLIENT_SECRET?.trim();
-    if (!clientSecret) {
-      throw new Error('COFFRE_ACCESS_CLIENT_ID is set but COFFRE_ACCESS_CLIENT_SECRET is not');
-    }
-    return { origin, mode, credential: { kind: 'access-service-token', clientId: accessClientId, clientSecret } };
+    const service = flags.service.startsWith('token:') ? flags.service : `token:${flags.service}`;
+    return { origin, mode: 'signin', by: 'service', credential: { kind: 'workload', service } };
   }
 
   const stored = store.instances[origin];
-  if (stored === undefined || stored.mode !== mode) {
-    throw new Error(`not signed in to ${origin}: run \`coffre login ${origin}\``);
+  const mode: AuthMode = explicitMode ?? stored?.mode ?? 'signin';
+  const relogin = `run \`coffre login ${origin}\``;
+  if (stored === undefined || stored.mode !== mode) throw new Error(`not signed in to ${origin}: ${relogin}`);
+  const by = stored.kind ?? 'person';
+  if (mode === 'cloudflare') {
+    if (by !== 'access') return { origin, mode, by, credential: { kind: 'cloudflared' } };
+    if (!stored.clientId || !stored.clientSecret) throw new Error(`not signed in to ${origin}: ${relogin}`);
+    return { origin, mode, by, credential: { kind: 'access-service-token', clientId: stored.clientId, clientSecret: stored.clientSecret } };
   }
-  if (mode === 'cloudflare') return { origin, mode, credential: { kind: 'cloudflared' } };
-  if (!stored.token) {
-    throw new Error(`not signed in to ${origin}: run \`coffre login ${origin}\``);
-  }
+  if (!stored.token) throw new Error(`not signed in to ${origin}: ${relogin}`);
   if (stored.expiresAt && Date.parse(stored.expiresAt) <= now.getTime()) {
     throw new Error(
-      `your session on ${origin} ended on ${stored.expiresAt.slice(0, 10)}: run \`coffre login ${origin}\``,
+      by === 'run'
+        ? `the credential this run's ID token bought on ${origin} lasted until ${stored.expiresAt.slice(11, 19)}: sign in again, \`coffre login ${origin} --service ${stored.principal?.id ?? '<name>'}\``
+        : `your session on ${origin} ended on ${stored.expiresAt.slice(0, 10)}: ${relogin}`,
     );
   }
-  return { origin, mode, credential: { kind: 'token', token: stored.token } };
-}
-
-/** The stored session for an address, however it was typed. */
-function lookupSession(store: Store, requested: string): Session | undefined {
-  try {
-    return store.instances[instanceOrigin(requested)];
-  } catch {
-    return undefined;
-  }
+  return { origin, mode, by, credential: { kind: 'token', token: stored.token } };
 }
 
 /**

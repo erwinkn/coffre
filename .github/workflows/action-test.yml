@@ -106,8 +106,8 @@ jobs:
           # already-published package at the same version.
           npm_config_offline: 'true'
         with:
-          url: ${{ env.COFFRE_API_URL }}
-          token: ${{ env.COFFRE_TOKEN }}
+          url: ${{ env.ACTION_TEST_URL }}
+          token: ${{ env.ACTION_TEST_TOKEN }}
           environment: action-test/ci
       - name: Assert values and exercise runner masking
         env:

@@ -96,9 +96,9 @@ and is named as such: "this is a previous vault key (vault ID …), not the
 current one". With AWS KMS there is no vault key to paste; a local key it
 replaced still checks as previous.
 
-In a script, the keys come in `COFFRE_VAULT_KEY` and `COFFRE_APP_KEY`, or on
-stdin, the vault key on the first line and the app key on the second; never
-as arguments. It exits 1 unless every key given is the instance's.
+In a script, the keys are piped in, the vault key on the first line and
+the app key on the second, a blank line skipping one; never as arguments.
+It exits 1 unless every key given is the instance's.
 
 ## AWS KMS
 

@@ -5,14 +5,14 @@
 // and the id the log records for the app key, a fingerprint of it. The vault
 // key is right if it opens the check of the key the vault wraps under now;
 // the app key, if it makes the same fingerprint. Neither key is sent, shown
-// or written down: they come from hidden prompts, stdin or the environment,
-// never the command line.
+// or written down: they come from hidden prompts or stdin, never the
+// command line.
 import { parseArgs } from 'node:util';
 
 import type { CoffreClient, RouteOutput } from '@coffre/client';
 import { appLogKeyId, opensKeyCheck } from '@coffre/core/kek';
 
-import { hiddenLine, openTerminal, release, style, type Output } from '../tty.ts';
+import { hiddenLine, style, type Output } from '../tty.ts';
 import { Checks, Failure, Skip, stop } from './checks.ts';
 
 export const KEYS_USAGE = `usage:
@@ -22,12 +22,12 @@ Asks for the vault key, then the app key, without showing them, and checks
 each against the current instance, on this machine: neither is sent. Enter
 alone skips one. As an owner or a root admin.
 
-  --vault-id   the vault ID kept with the vault key, to check as well; or in
-               COFFRE_VAULT_KEY_ID. It is shown either way
+  --vault-id   the vault ID kept with the vault key, to check as well. It
+               is shown either way
 
-In a script: the keys in COFFRE_VAULT_KEY and COFFRE_APP_KEY, or on stdin,
-the vault key on the first line and the app key on the second, never as
-arguments. Exits 1 when a key is not the instance's.`;
+In a script, the keys come on stdin, the vault key on the first line and
+the app key on the second, a blank line skipping one; never as arguments.
+Exits 1 when a key is not the instance's.`;
 
 /** What the keys are checked against, as the instance gives it. */
 export type KeyMaterial = RouteOutput<'GET /audit/keys'>;
@@ -101,52 +101,43 @@ export function appKeyVerdict(text: string, material: KeyMaterial['app']): strin
 type Source = { text: string; from: string };
 
 /**
- * The two keys, from where they are: each one's environment variable, then
- * stdin's lines in order when it is piped, or hidden prompts on a terminal.
+ * The two keys: stdin's lines in order when it is piped, or hidden prompts
+ * on a terminal.
  */
-async function readKeys(env: NodeJS.ProcessEnv): Promise<{ vault: Source; app: Source }> {
-  const given = { vault: env.COFFRE_VAULT_KEY?.trim(), app: env.COFFRE_APP_KEY?.trim() };
-  const missing = (['vault', 'app'] as const).filter((which) => !given[which]);
+async function readKeys(): Promise<{ vault: Source; app: Source }> {
+  const missing = ['vault', 'app'] as const;
   const asked: Partial<Record<'vault' | 'app', Source>> = {};
-  if (missing.length > 0 && !process.stdin.isTTY) {
+  if (!process.stdin.isTTY) {
     let text = '';
     for await (const chunk of process.stdin) text += String(chunk);
     const lines = text.split(/\r?\n/);
     missing.forEach((which, i) => (asked[which] = { text: lines[i]?.trim() ?? '', from: 'stdin' }));
-  } else if (missing.length > 0) {
-    const terminal = openTerminal();
-    if (terminal === null) {
-      stop(2, 'coffre: no terminal to ask for the keys on: pass them in COFFRE_VAULT_KEY and COFFRE_APP_KEY, or on stdin, the vault key first');
-    }
-    const s = style(terminal.out);
-    try {
-      for (const which of missing) {
-        const name = which === 'vault' ? 'Vault key' : 'App key';
-        const text = await hiddenLine(terminal.keys, terminal.out, s, `${name}?`, 'Paste it: it stays hidden, and on this machine. Enter alone skips it.');
-        asked[which] = { text, from: 'the prompt' };
-      }
-    } finally {
-      release(terminal.keys);
+  } else {
+    // On the terminal stdin is, as every prompt: stdout may be a pipe, as `coffre verify keys | tee report`.
+    const s = style(process.stderr);
+    for (const which of missing) {
+      const name = which === 'vault' ? 'Vault key' : 'App key';
+      const text = await hiddenLine(process.stdin, process.stderr, s, `${name}?`, 'Paste it: it stays hidden, and on this machine. Enter alone skips it.');
+      asked[which] = { text, from: 'the prompt' };
     }
   }
-  const source = (which: 'vault' | 'app', variable: string): Source => (given[which] ? { text: given[which], from: variable } : asked[which]!);
-  return { vault: source('vault', 'COFFRE_VAULT_KEY'), app: source('app', 'COFFRE_APP_KEY') };
+  return { vault: asked.vault!, app: asked.app! };
 }
 
-export async function verifyKeys(args: string[], api: CoffreClient, origin: string, env: NodeJS.ProcessEnv, out: Output = process.stdout): Promise<void> {
+export async function verifyKeys(args: string[], api: CoffreClient, origin: string, out: Output = process.stdout): Promise<void> {
   const { values } = parseArgs({
     args,
     allowPositionals: false,
     options: { 'vault-id': { type: 'string' }, help: { type: 'boolean', short: 'h' } },
   });
   if (values.help) stop(0, KEYS_USAGE);
-  const vaultId = values['vault-id'] ?? (env.COFFRE_VAULT_KEY_ID?.trim() || undefined);
+  const vaultId = values['vault-id']?.trim() || undefined;
   // What they are checked against comes first: someone who may not read it is told before pasting a key.
   const material = await api.audit.keys();
   const s = style(out);
   out.write(`${s.bold(`Checking your keys against ${origin}`)}\n`);
   out.write(s.dim("  On this machine: what they're checked against was read from the instance, and the keys go nowhere.\n\n"));
-  const keys = await readKeys(env);
+  const keys = await readKeys();
   const report = new Checks(out);
   await report.check('vault key', {}, () => said(keys.vault, () => vaultKeyVerdict(keys.vault.text, material.vault, vaultId)));
   await report.check('app key', {}, () => said(keys.app, () => appKeyVerdict(keys.app.text, material.app)));
@@ -162,7 +153,7 @@ export async function verifyKeys(args: string[], api: CoffreClient, origin: stri
   process.exitCode = failed.length > 0 || right.length === 0 ? 1 : 0;
 }
 
-/** A key's verdict, and where the key came from when not a prompt: so that a script's run says which variable it read. */
+/** A key's verdict, and where the key came from when not a prompt: so that a script's run says it read stdin. */
 async function said(source: Source, verdict: () => string | Promise<string>): Promise<string> {
   const where = source.from === 'the prompt' ? '' : ` (from ${source.from})`;
   try {

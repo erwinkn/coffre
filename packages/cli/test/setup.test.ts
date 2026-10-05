@@ -13,19 +13,19 @@ import { asJson, hyperdriveCommand, loginFor, loginUrl, scramVerifier, setupScre
 import { templateDir } from '../src/init.ts';
 import { asSuperuser, CLUSTER, connects, database, emptyCluster, needsCluster } from './cluster.ts';
 import { fakeOpener, fakeWrangler } from './fakes.ts';
-import { inTerminal, ptySkip, screens, visible } from './pty.ts';
+import { inTerminal, ptySkip, screens, typingUrl, visible } from './pty.ts';
 
 const main = fileURLToPath(new URL('../src/main.ts', import.meta.url));
 
 type Run = { status: number | null; stdout: string; stderr: string };
 
-/** `coffre setup` as an operator runs it, in an empty directory with no home: the URL from the environment, or piped in. */
-function setup(args: string[], how: { env?: string; stdin?: string }): Run {
+/** `coffre setup` as an operator runs it, in an empty directory with no home: the URL piped in. */
+function setup(args: string[], how: { stdin?: string }): Run {
   const dir = mkdtempSync(join(tmpdir(), 'coffre-setup-'));
   try {
     const result = spawnSync(process.execPath, ['--conditions=coffre:source', main, 'setup', ...args], {
       cwd: dir,
-      env: { PATH: process.env.PATH, HOME: dir, ...(how.env === undefined ? {} : { COFFRE_SETUP_DATABASE_URL: how.env }) },
+      env: { PATH: process.env.PATH, HOME: dir },
       input: how.stdin ?? '',
       encoding: 'utf8',
     });
@@ -35,6 +35,7 @@ function setup(args: string[], how: { env?: string; stdin?: string }): Run {
     rmSync(dir, { recursive: true, force: true });
   }
 }
+
 
 function json(run: Run) {
   assert.equal(run.status, 0, run.stderr);
@@ -83,7 +84,7 @@ test('a SCRAM verifier is what Postgres stores, never the password: it checks RF
 
 test('the connection string is refused on the command line, without quoting it', () => {
   const url = 'postgresql://postgres:hunter2-secret@db.example.com:5432/coffre';
-  for (const args of [[url], [`--url=${url}`]]) {
+  for (const args of [[url], [`--url=${url}`], ['--database-url-file', url]]) {
     const run = setup(args, {});
     assert.equal(run.status, 1);
     assert.match(run.stderr, /never from the command line/);
@@ -192,8 +193,9 @@ function freshClone(refusing?: string) {
       : `#!/bin/sh\necho '${refusing}' >&2\nexit 1\n`,
   );
   chmodSync(join(bin, 'pnpm'), 0o755);
-  const env = { PATH: `${bin}:${process.env.PATH}`, HOME: dir, COFFRE_SETUP_DATABASE_URL: 'postgresql://postgres:unused@127.0.0.1:1/coffre' };
-  return { dir, deployment, state, env, remove: () => rmSync(dir, { recursive: true, force: true }) };
+  const env = { PATH: `${bin}:${process.env.PATH}`, HOME: dir };
+  const url = 'postgresql://postgres:unused@127.0.0.1:1/coffre';
+  return { dir, deployment, state, env, url, remove: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
 test("a fresh clone of a Workers deployment: setup installs it as its lockfile says, then signs in with its own wrangler", { skip: ptySkip }, async () => {
@@ -202,13 +204,13 @@ test("a fresh clone of a Workers deployment: setup installs it as its lockfile s
     const { output } = await inTerminal(
       ['setup'],
       clone.env,
-      async (terminal) => {
+      typingUrl(clone.url, async (terminal) => {
         await terminal.waitFor('Set Cloudflare up too?');
         terminal.send('\r');
         // wrangler's login, waiting for its address: the deployment's wrangler ran.
         await terminal.waitFor('paste that address here');
         terminal.send('\x03');
-      },
+      }),
       { columns: 160, rows: 48 },
       clone.deployment,
     );
@@ -234,10 +236,10 @@ test('when its install fails, setup says why in a sentence, and runs nothing of 
     const { output, code } = await inTerminal(
       ['setup'],
       clone.env,
-      async (terminal) => {
+      typingUrl(clone.url, async (terminal) => {
         await terminal.waitFor('Set Cloudflare up too?');
         terminal.send('\r');
-      },
+      }),
       { columns: 160, rows: 48 },
       clone.deployment,
     );
@@ -260,7 +262,7 @@ beforeEach(async () => {
 for (const as of ['superuser', 'owner'] as const) {
   test(`as ${as === 'owner' ? 'an owner' : 'a superuser'}: makes the logins, migrates, checks the boundary, and shows every value once`, needsCluster, async () => {
     const url = await database(`setup_${as}`, as);
-    const first = setup(['--json'], { env: url });
+    const first = setup(['--json'], { stdin: `${url}\n` });
     const shown = json(first);
     assertNoAdministrator(first, url);
     assert.match(first.stderr, /✓ Created coffre_runtime and coffre_vault_runtime\n/);
@@ -311,7 +313,7 @@ for (const as of ['superuser', 'owner'] as const) {
     assert.ok(await connects(shown.app.DATABASE_URL!), 'the first passwords still work');
 
     // With --reset-passwords: new ones, and the old stop working. The database is still unused, so new keys come with them.
-    const reset = json(setup(['--reset-passwords', '--json'], { env: url }));
+    const reset = json(setup(['--reset-passwords', '--json'], { stdin: `${url}\n` }));
     assert.equal(reset.logins.coffre_runtime!.password, 'reset');
     assert.ok(await connects(reset.app.DATABASE_URL!));
     assert.ok(await connects(reset.vault.DATABASE_URL!));
@@ -322,13 +324,13 @@ for (const as of ['superuser', 'owner'] as const) {
 
 test('a database that holds data gets new passwords but no keys: its keys are the ones it was set up with', needsCluster, async () => {
   const url = await database('setup_used', 'superuser');
-  const first = json(setup(['--json'], { env: url }));
+  const first = json(setup(['--json'], { stdin: `${url}\n` }));
   const vault = new pg.Client({ connectionString: first.vault.DATABASE_URL });
   await vault.connect();
   await vault.query(`INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, metadata, prev_hash, mac, hash)
     VALUES (0, 'vault', 'vault:probe', 0, 'system:vault', 'key.check', 'allow', '{}', decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'))`);
   await vault.end();
-  const after = json(setup(['--reset-passwords', '--json'], { env: url }));
+  const after = json(setup(['--reset-passwords', '--json'], { stdin: `${url}\n` }));
   assert.deepEqual(Object.keys(after.app), ['DATABASE_URL']);
   assert.deepEqual(Object.keys(after.vault), ['DATABASE_URL']);
   assert.ok(await connects(after.vault.DATABASE_URL!));
@@ -336,10 +338,10 @@ test('a database that holds data gets new passwords but no keys: its keys are th
 
 test('a boundary that is not what coffre needs fails, and shows nothing', needsCluster, async () => {
   const url = await database('setup_loose', 'superuser');
-  json(setup(['--json'], { env: url }));
+  json(setup(['--json'], { stdin: `${url}\n` }));
   await asSuperuser('setup_loose', (client) => client.query('GRANT INSERT ON vault_members TO coffre_app'));
   for (const args of [['--reset-passwords', '--json'], ['--json']]) {
-    const run = setup(args, { env: url });
+    const run = setup(args, { stdin: `${url}\n` });
     assert.equal(run.status, 1);
     assert.match(run.stderr, /✗ Check each login's rights\n\s+coffre_runtime can write members: the database's privileges are not what coffre needs/);
     assert.equal(run.stdout, '');
@@ -351,7 +353,7 @@ test('a wrong password, or a login that cannot create roles, is refused without 
   const url = await database('setup_wrong', 'superuser');
   const wrong = new URL(url);
   wrong.password = 'not-the-password';
-  const refused = setup(['--json'], { env: wrong.href });
+  const refused = setup(['--json'], { stdin: `${wrong.href}\n` });
   assert.equal(refused.status, 1);
   assert.match(refused.stderr, /✗ Connect to 127\.0\.0\.1\/setup_wrong\n\s+password authentication failed/);
   assertNoAdministrator(refused, wrong.href);
@@ -360,7 +362,7 @@ test('a wrong password, or a login that cannot create roles, is refused without 
   const plain = new URL(url);
   plain.username = 'setup_owner';
   plain.password = 'owner-only-p4ss';
-  const weak = setup(['--json'], { env: plain.href });
+  const weak = setup(['--json'], { stdin: `${plain.href}\n` });
   assert.equal(weak.status, 1);
   assert.match(weak.stderr, /✗ Check setup_owner can create roles\n\s+setup_owner cannot create roles/);
   assertNoAdministrator(weak, plain.href);
@@ -368,7 +370,7 @@ test('a wrong password, or a login that cannot create roles, is refused without 
 
 test('on a terminal: the steps on the main screen, the values on the alternate screen alone, and working', { skip: needsCluster.skip || ptySkip }, async () => {
   const url = await database('setup_terminal', 'owner');
-  const { output, code } = await inTerminal(['setup'], { PATH: process.env.PATH, HOME: tmpdir(), COFFRE_SETUP_DATABASE_URL: url }, async (terminal) => {
+  const { output, code } = await inTerminal(['setup'], { PATH: process.env.PATH, HOME: tmpdir() }, typingUrl(url, async (terminal) => {
     await terminal.waitFor('reveal all');
     terminal.send('R');
     await terminal.waitFor('Vault database URL');
@@ -376,7 +378,7 @@ test('on a terminal: the steps on the main screen, the values on the alternate s
     await terminal.waitFor('Have you saved all five values?');
     terminal.send('y');
     await terminal.waitFor('were shown once');
-  });
+  }));
   assert.equal(code, 0);
   const { main, alternate } = screens(output);
   assert.match(visible(main), /✓ Each login holds only its rights/);

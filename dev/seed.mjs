@@ -128,4 +128,4 @@ await fetch(`${API}/auth/signout`, {
 });
 await pool.end();
 
-console.log(`\nSeeded. As ci-deploy, which reads market/prod:\n  COFFRE_TOKEN=${ci.token}`);
+console.log(`\nSeeded. ci-deploy, which reads market/prod, holds this token, for \`coffre login ${API} --token\`\n(from a home of its own: it replaces the session saved there):\n  ${ci.token}`);

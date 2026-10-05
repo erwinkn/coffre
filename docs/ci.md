@@ -2,12 +2,30 @@
 
 Give each pipeline a service member and a token, with a `viewer` grant on
 only the environments it reads. Create the member and token in coffre's
-Access page. Store the token in your CI provider's secret store as
-`COFFRE_TOKEN`, and set `COFFRE_API_URL` to your instance's URL. A service
-token works without an interactive login. The runner must be able to reach
-your instance; a Cloudflare Access gate also needs its own service token,
-passed as `COFFRE_ACCESS_CLIENT_ID` and `COFFRE_ACCESS_CLIENT_SECRET` in the
-job's environment. See the [deployment settings](deploy.md#1-settings).
+Access page, and store the token in your CI provider's secret store. The
+CLI reads no environment variable, and a secret is never a flag or an
+argument, which `ps`, the shell's history and CI logs would show: the job
+pipes the token to `coffre login --token`, which saves the session the
+commands after it use.
+
+```sh
+printf '%s' "$TOKEN" | coffre login https://secrets.acme.example --token
+coffre run market/prod -- ./deploy
+```
+
+The session lives in the job's home, `~/.coffre`, one per instance. On a
+runner that several jobs share under one user, a self-hosted runner or a
+GitLab shell executor, give each job a home of its own, so that no other
+job signs in over it or reads with it: `export HOME="$(mktemp -d)"` before
+`coffre login`, removed when the job ends. `coffre logout` forgets the
+token there too, and revokes nothing.
+
+A service token works without an interactive login. The runner must be
+able to reach your instance; behind Cloudflare Access, the job signs in
+with an Access service token instead, its secret piped in the same way:
+`coffre login <url> --access-client-id <id>`
+([deployment-auth.md](deployment-auth.md)). See the
+[deployment settings](deploy.md#1-settings).
 
 Each value read is audited before it reaches the pipeline. Revoking the
 token stops future reads. Values already exported to a runner or copied to
@@ -28,30 +46,37 @@ older one turns it on ([deploy.md](deploy.md#ci-runs-without-a-stored-token)).
 coffre trust api-deploy --github acme/api --workflow deploy.yml --branch main --apply
 ```
 
-With the CLI, set `COFFRE_SERVICE` (the service, `token:api-deploy` or
-`api-deploy`) and `COFFRE_API_URL`, and no `COFFRE_TOKEN`. Each run of the
-CLI exchanges a token once:
+With the CLI:
 
-- **GitHub Actions**: give the job `permissions: id-token: write`. The CLI
-  asks the runner for a fresh ID token, for your instance's URL.
-- **GitLab**: declare an ID token for your instance, and name it to the CLI:
+- **GitHub Actions**: give the job `permissions: id-token: write`, and
+  pass `--service` (the service, `token:api-deploy` or `api-deploy`) and
+  `--url`, nothing else. Each command asks the runner for a fresh ID token,
+  for your instance's URL, and keeps the credential it buys in memory:
+
+  ```sh
+  coffre --url https://secrets.acme.example --service api-deploy run market/prod -- ./deploy
+  ```
+- **GitLab**: declare an ID token for your instance, and pipe it to
+  `coffre login --service --id-token`, which trades it for the credential
+  and saves it as the session the commands after it use, for its five
+  minutes:
 
   ```yaml
   deploy:
     id_tokens:
-      COFFRE_ID_TOKEN:
+      ID_TOKEN:
         aud: https://secrets.acme.example
     script:
+      - export HOME="$(mktemp -d)"   # on a shell executor, a home of the job's own
+      - printf '%s' "$ID_TOKEN" | coffre login https://secrets.acme.example --service api-deploy --id-token
       - coffre run market/prod -- ./deploy
   ```
 
-  A token is spent once used. A job that runs coffre twice does its work
-  under one `coffre run`, or declares a second ID token and sets
-  `COFFRE_ID_TOKEN` to it for the second run.
-- **Any other issuer** a `custom` binding trusts: `COFFRE_ID_TOKEN`, or
-  `COFFRE_ID_TOKEN_FILE` naming a file that holds it, for your instance's URL.
-
-The credential stays in the CLI's memory, never in `~/.coffre`.
+  A token is spent once used: a job that runs past five minutes signs in
+  again with a second ID token.
+- **Any other issuer** a `custom` binding trusts: the same, its ID token
+  for your instance's URL piped to `coffre login --service <name>
+  --id-token`.
 
 ## GitHub Actions
 
@@ -87,8 +112,9 @@ steps:
 
 The Action uses your job's existing Node, which must be version 20 or newer,
 and runs `@coffre/cli` at the same exact version as the tag. It leaves your
-toolchain and `PATH` unchanged. It passes the token through the environment,
-never command arguments. The secrets become environment variables in subsequent steps
+toolchain and `PATH` unchanged. It pipes the token to `coffre login --token`,
+never in a command argument, with the CLI in a home of the step's own,
+removed when the step ends: no other job on the runner sees the session. The secrets become environment variables in subsequent steps
 of the same job. Their values, and each line of multiline values, are
 masked before being written to `GITHUB_ENV`. Newlines, quotes, `=` and `%`
 are kept intact. Empty values are exported too.
@@ -104,7 +130,7 @@ The inputs are `url`, `environment`, and one of `token` or `service`. With
 To use an installed CLI directly inside a step:
 
 ```sh
-coffre export market/prod --format github
+coffre --url https://secrets.acme.example --service api-deploy export market/prod --format github
 ```
 
 It requires `GITHUB_ENV`. The `json`, `dotenv` and `shell` formats write to

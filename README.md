@@ -109,8 +109,9 @@ other's sources.
 
 ## The CLI
 
-`pnpm coffre <command>` runs the CLI from this checkout against the local
-stack. A deployed instance needs only its address:
+`pnpm coffre <command>` runs the CLI from this checkout; `pnpm coffre login
+http://127.0.0.1:3000` signs it in to the local stack. A deployed instance
+needs only its address:
 
 ```sh
 coffre setup                                # a new deployment's logins, migrations and keys, and on Workers, Cloudflare (docs/deploy.md)
@@ -121,7 +122,7 @@ coffre use                                  # the instances you are signed in to
 
 coffre list     market/dev
 coffre get      market/dev/DATABASE_URL
-coffre set      market/dev/DATABASE_URL     # reads the value from stdin
+coffre set      market/dev/DATABASE_URL     # asks for the value, or reads it piped in
 coffre run      market/dev -- printenv
 coffre export   market/dev --format dotenv  # or json, shell, github
 coffre history  market/dev/DATABASE_URL
@@ -157,10 +158,18 @@ use `--format shell`, which quotes values literally, including quotes and
 newlines, or use `coffre run` to pass them directly to a child process.
 
 A session lasts 30 days, is kept per instance in `~/.coffre/credentials.json`
-(mode 0600), and can be revoked from the account page. CI stores nothing: it
-sets `COFFRE_API_URL` and `COFFRE_TOKEN`, a service token from the Tokens
-page, or `COFFRE_ACCESS_CLIENT_ID` and `COFFRE_ACCESS_CLIENT_SECRET` behind
-Access ([docs/deployment-auth.md](docs/deployment-auth.md)).
+(mode 0600), and can be revoked from the account page. The CLI reads no
+environment variable, and a secret is never a flag or an argument: a command
+asks for it at a hidden prompt, or reads it from stdin. CI signs in the same
+way, with a service token from the Tokens page, piped to `coffre login
+--token`; or as a service by its ID token, `--service`
+([docs/ci.md](docs/ci.md)); or with an Access service token
+([docs/deployment-auth.md](docs/deployment-auth.md)):
+
+```sh
+printf '%s' "$TOKEN" | coffre login https://secrets.acme.example --token
+coffre run market/prod -- ./deploy
+```
 
 ## The API
 

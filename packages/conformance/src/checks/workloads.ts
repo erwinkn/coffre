@@ -149,28 +149,30 @@ export async function runsRefused(deployment: Deployment, admin: Person): Promis
 }
 
 /**
- * The CLI, as a CI job runs it: on GitHub Actions, with the runner's
- * token endpoint and nothing else; elsewhere, with the token in
- * COFFRE_ID_TOKEN. It keeps the credential in memory, and prints neither.
+ * The CLI, as a CI job runs it, as a service by its ID token: on GitHub
+ * Actions, `--service` and the runner's token endpoint, nothing else and
+ * nothing kept; elsewhere, the token piped to `coffre login --service
+ * --id-token`, whose credential the next command uses. No token printed.
  */
 export async function cliSignsIn(deployment: Deployment, canaries: Canaries): Promise<string> {
   const issuer = deployment.idp.workloads;
   const cli = new Cli(deployment.origin);
   try {
-    const base = { COFFRE_API_URL: deployment.origin, COFFRE_SERVICE: RUNNER };
-    const given = await mint(deployment);
-    const runs = {
-      'on GitHub Actions': { ...base, ACTIONS_ID_TOKEN_REQUEST_URL: issuer.requestUrl, ACTIONS_ID_TOKEN_REQUEST_TOKEN: issuer.requestToken },
-      'with COFFRE_ID_TOKEN': { ...base, COFFRE_ID_TOKEN: given },
-    };
-    for (const [where, env] of Object.entries(runs)) {
-      const run = await cli.run(['get', `${DEV}/API_KEY`], env);
+    const read = async (where: string, args: string[], env: Record<string, string>, secrets: string[]) => {
+      const run = await cli.run([...args, 'get', `${DEV}/API_KEY`], env);
       expect(run.code === 0, `coffre get ${where} exited ${run.code}`, run.output);
       expect(run.output.trim() === canaries[`${DEV}/API_KEY`], `coffre get ${where} did not print the value`);
-      expect(!run.output.includes(given) && !run.output.includes(issuer.requestToken) && !/coffre_svc_/.test(run.output), `coffre get ${where} printed a token`);
-    }
-    expect(!existsSync(join(cli.home, '.coffre', 'credentials.json')), 'the CLI kept a credential on disk');
-    return `\`coffre get\` as ${RUNNER}, on GitHub Actions and with COFFRE_ID_TOKEN; no token printed, nothing written`;
+      expect(!secrets.some((secret) => run.output.includes(secret)) && !/coffre_svc_/.test(run.output), `coffre get ${where} printed a token`);
+    };
+    await read('on GitHub Actions', ['--url', deployment.origin, '--service', RUNNER], { ACTIONS_ID_TOKEN_REQUEST_URL: issuer.requestUrl, ACTIONS_ID_TOKEN_REQUEST_TOKEN: issuer.requestToken }, [issuer.requestToken]);
+    expect(!existsSync(join(cli.home, '.coffre', 'credentials.json')), 'the CLI kept a credential on disk, for one command');
+
+    const given = await mint(deployment);
+    const login = await cli.run(['login', deployment.origin, '--service', RUNNER, '--id-token'], {}, `${given}\n`);
+    expect(login.code === 0, `coffre login --service --id-token exited ${login.code}`, login.output);
+    expect(!login.output.includes(given) && !/coffre_svc_/.test(login.output), 'coffre login --service printed a token');
+    await read('after coffre login --service --id-token', [], {}, [given]);
+    return `\`coffre --service ${RUNNER} get\` on GitHub Actions, nothing kept; \`coffre login --service --id-token\` with the token piped in, then \`coffre get\`; no token printed`;
   } finally {
     cli.remove();
   }

@@ -11,10 +11,10 @@
 // only when it is that same version, and asks it afterwards whether it sees
 // the new schema and is ready.
 //
-// Either way it reads the database owner's direct URL from
-// COFFRE_MIGRATE_DATABASE_URL, stdin or a hidden prompt, never the command
-// line; shows what it will apply; and applies it under the migration lock,
-// with the privileges reasserted. Without a terminal, only with --yes.
+// Either way it asks for the database owner's direct URL, at a hidden prompt
+// or on stdin, never the command line; shows what it will apply; and applies
+// it under the migration lock, with the privileges reasserted. Without a
+// terminal, only with --yes.
 import { parseArgs } from 'node:util';
 
 import type { InstanceState } from '@coffre/client';
@@ -25,9 +25,6 @@ import { coffrePins, deploymentKind } from './deployment.ts';
 import { type Step, StepFailed, Steps } from './steps.ts';
 import { Cancelled, type Keyboard, listed, openTerminal, type Output, release, style } from './tty.ts';
 import { cliVersion } from './version.ts';
-
-/** Where the owner's connection string comes from, when not from a hidden prompt. */
-export const URL_VARIABLE = 'COFFRE_MIGRATE_DATABASE_URL';
 
 /** What `coffre migrate` asks of the instance. */
 export type Instance = {
@@ -108,11 +105,17 @@ export function migrationFailure(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** `connect` reaches the instance: the current one, or the one `--url` names, with your session there. */
-export async function migrate(args: string[], connect: (url: string | undefined) => Instance): Promise<void> {
+type Options = { yes: boolean };
+
+/**
+ * `connect` reaches the instance: the current one, or the one `--url` names,
+ * with your session there. `session` names the session flags given, which
+ * a deployment's folder has no use for.
+ */
+export async function migrate(args: string[], connect: () => Instance, session: string[]): Promise<void> {
   const secrets: string[] = [];
   const clean = (error: unknown) => redact(error instanceof Error ? error.message : String(error), secrets);
-  let options: { yes: boolean; url: string | undefined };
+  let options: Options;
   try {
     options = parseOptions(args);
   } catch (error) {
@@ -125,10 +128,10 @@ export async function migrate(args: string[], connect: (url: string | undefined)
   try {
     const deployment = deploymentAt(process.cwd());
     if (deployment !== null) {
-      await migrateDeployment(deployment, options, out, terminal, secrets, clean);
+      await migrateDeployment(deployment, options, session, out, terminal, secrets, clean);
       return;
     }
-    const instance = connect(options.url);
+    const instance = connect();
     // Before anything is asked: whether there is anything to do, and whether this CLI may do it.
     const me = await instance.me();
     if (me.instance === null) {
@@ -150,7 +153,6 @@ export async function migrate(args: string[], connect: (url: string | undefined)
     if (s.ansi) out.write(`\n  ${s.bold('coffre migrate')}  ${s.dim(`${instance.origin}, coffre ${me.instance.version}`)}\n\n`);
     out.write(`  ${count(pending.length, 'migration')} to apply: ${listed(pending, 'and')}\n\n`);
     const { url, secrets: typed } = await readDatabaseUrl(out, s, {
-      variable: URL_VARIABLE,
       question: "The database owner's connection string",
       hint: "Hidden as you type. The login that owns coffre's tables, direct: not a runtime login, not Hyperdrive.",
       command: 'coffre migrate',
@@ -172,16 +174,18 @@ export async function migrate(args: string[], connect: (url: string | undefined)
  */
 async function migrateDeployment(
   deployment: Deployment,
-  options: { yes: boolean; url: string | undefined },
+  options: Options,
+  session: string[],
   out: Output,
   terminal: { keys: Keyboard } | null,
   secrets: string[],
   clean: (error: unknown) => string,
 ): Promise<void> {
   const s = style(out);
-  if (options.url !== undefined) {
+  if (session.length > 0) {
     throw new MigrateError(
-      `--url names an instance, and in a deployment's folder coffre migrate asks none: it migrates the database with ${deployment.dir}'s own migrations, before the deploy`,
+      `${listed(session, 'and')} ${session.length === 1 ? 'says' : 'say'} which instance to ask and how, and in a deployment's folder coffre migrate asks none: ` +
+        `it migrates the database with ${deployment.dir}'s own migrations, before the deploy`,
     );
   }
   const problem = pinProblem(cliVersion(), deployment.version);
@@ -189,7 +193,6 @@ async function migrateDeployment(
 
   if (s.ansi) out.write(`\n  ${s.bold('coffre migrate')}  ${s.dim(`this deployment, coffre ${deployment.version}`)}\n\n`);
   const { url, secrets: typed } = await readDatabaseUrl(out, s, {
-    variable: URL_VARIABLE,
     question: "The database owner's connection string",
     hint: "Hidden as you type. The login that owns coffre's tables, direct: not a runtime login, not Hyperdrive.",
     command: 'coffre migrate',
@@ -302,21 +305,21 @@ async function run(
   }
 }
 
-function parseOptions(args: string[]): { yes: boolean; url: string | undefined } {
+function parseOptions(args: string[]): Options {
   try {
     const { values } = parseArgs({
       args,
-      options: { yes: { type: 'boolean', default: false }, url: { type: 'string' } },
+      options: { yes: { type: 'boolean', default: false } },
       strict: true,
     });
-    if (values.url !== undefined && /^postgres(ql)?:/i.test(values.url)) throw new Error('a database URL');
-    return { yes: values.yes, url: values.url };
+    return { yes: values.yes };
   } catch {
     // The error would quote the argument, which may be the connection string itself.
     const leaked = args.some((arg) => /postgres(ql)?:|@/i.test(arg));
     throw new MigrateError(
-      `coffre migrate takes only --yes and --url. It reads the database owner's connection string from a hidden prompt, ` +
-        `${URL_VARIABLE} or stdin, never from the command line, where the shell's history and other users can read it.` +
+      'coffre migrate takes only --yes; the session flags, --url among them, go before it: coffre --url <url> migrate. ' +
+        `It asks for the database owner's connection string, at a hidden prompt or on stdin, ` +
+        `never from the command line, where the shell's history and other users can read it.` +
         (leaked ? ' One of the arguments looks like one: change that password, which is in your shell history now.' : ''),
     );
   }

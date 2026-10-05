@@ -561,8 +561,8 @@ export function deployedSummary(cloudflare: Cloudflare, out: Output): string {
       out,
       s,
       'Builds',
-      'With Workers Builds, the vault Worker builds with pnpm exec coffre migrate --yes, and its secret build variable ' +
-        'COFFRE_MIGRATE_DATABASE_URL is the database URL you gave setup; the app builds with pnpm exec vite build app, ' +
+      'With Workers Builds, the vault Worker builds with printenv DATABASE_OWNER_URL | pnpm exec coffre migrate --yes, ' +
+        'and its secret build variable DATABASE_OWNER_URL is the database URL you gave setup; the app builds with pnpm exec vite build app, ' +
         'and deploys with npx wrangler deploy -c app/dist/server/wrangler.json.',
     ),
     s.dim(paragraph(out, 'After every upgrade of coffre, pnpm exec coffre migrate --yes, then pnpm run deploy, or a push to Workers Builds. docs/deploy.md has each step.', 4)),

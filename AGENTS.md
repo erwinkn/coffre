@@ -82,15 +82,23 @@ seed starts them over with everything else. `COFFRE_DEV_PORT`, `COFFRE_DEV_IDP_P
 second stack beside the first (see `dev/start.sh`). Sign in at
 `http://127.0.0.1:3000/login`, through either button (the dev IdP plays GitHub and
 an OIDC provider), as `admin@acme.example` (root admin) or any of the seeded
-personas; the seed signs in the same way. CLI: `pnpm coffre <cmd>` (from the root,
-against `.env.dev`); `pnpm coffre login` is a device login, approved in the browser.
+personas; the seed signs in the same way. CLI: `pnpm coffre <cmd>` from the root;
+`pnpm coffre login http://127.0.0.1:3000` once, a device login approved in the
+browser, and its session is the default after.
 
 **Config is code.** The packages read no environment variable of their own; a
 deployment passes everything to `createCoffre(…)`, `vault(env => …)` or
-`serveVault({…})`. The env vars left are the CLI's user-facing ones (`COFFRE_API_URL`,
-`COFFRE_TOKEN`, …), `DATABASE_URL` for `coffre-server migrate`, and the dev and test
-tooling's (`COFFRE_DEV_*`, `COFFRE_STATE_DIR`, `COFFRE_TEST_ENGINE`,
-`COFFRE_TEST_DATABASE`). Don't add another to a package.
+`serveVault({…})`. The CLI reads none either. Flags configure: the session flags,
+before the command (`coffre --url … --service … export …`), say which instance and,
+for a CI run's ID token, which service. A secret is never a flag or an argument: the
+command asks for it at a hidden prompt, or reads it from stdin when that is no
+terminal (`packages/cli/src/secret.ts`); a CI run signs in with `coffre login <url>
+--token` and the like, which save its session. A variable an earlier CLI read stops
+the command that read it, saying what to do instead (`packages/cli/src/flags.ts`). The env vars left are `DATABASE_URL` for `coffre-server
+migrate`, the platforms' own the CLI uses (GitHub's `ACTIONS_ID_TOKEN_REQUEST_*`,
+`GITHUB_ENV`), and the dev and test tooling's (`COFFRE_DEV_*`, `COFFRE_STATE_DIR`,
+`COFFRE_TEST_ENGINE`, `COFFRE_TEST_DATABASE`). Don't add another to a package or the
+CLI.
 
 **Migrations: expand, then contract.** A deployment runs `coffre migrate` in
 its pipeline, before it deploys, so each migration first meets the previous

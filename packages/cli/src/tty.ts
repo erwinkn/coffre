@@ -284,7 +284,8 @@ export class Cancelled extends Error {
  * shows it arrived. The question, its hint and the bullets go once it is
  * given. Ctrl-C cancels.
  */
-export async function hiddenLine(keys: Keyboard, out: Output, s: Style, question: string, hint: string): Promise<string> {
+/** A line typed without echo; trimmed, unless `exact`, for a value whose outer spaces are its own. */
+export async function hiddenLine(keys: Keyboard, out: Output, s: Style, question: string, hint: string, exact = false): Promise<string> {
   const columns = Math.max(20, (out.columns || 80) - 1);
   let typed = '';
   const draw = () => {
@@ -307,7 +308,7 @@ export async function hiddenLine(keys: Keyboard, out: Output, s: Style, question
   await typedIn;
   out.write('\r\x1b[2K\x1b[1A\x1b[2K\x1b[1A\x1b[2K');
   if (cancelled) throw new Cancelled();
-  return typed.trim();
+  return exact ? typed : typed.trim();
 }
 
 /** One key: y for yes, anything else for no. Ctrl-C cancels. */

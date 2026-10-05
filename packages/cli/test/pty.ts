@@ -90,3 +90,13 @@ export function screens(output: string): { main: string; alternate: string } {
 export function visible(output: string): string {
   return output.replace(/\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07/g, '');
 }
+
+/** On a terminal, the URL typed at setup's hidden prompt, then the rest as `play` goes. */
+export function typingUrl(url: string, play: (terminal: Session) => Promise<void>): (terminal: Session) => Promise<void> {
+  return async (terminal) => {
+    // The first thing the CLI shows, after it starts: on a loaded host, that can take a while.
+    await terminal.waitFor('connection string', 60_000);
+    terminal.send(`${url}\r`);
+    await play(terminal);
+  };
+}

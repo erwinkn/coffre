@@ -15,6 +15,7 @@ import { migrationsFolder } from '@coffre/db/migrate';
 import { migrationFailure, pendingOf, pinProblem, versionProblem } from '../src/migrate.ts';
 import { cliVersion } from '../src/version.ts';
 import { database, emptyCluster, needsCluster } from './cluster.ts';
+import { signedInWithToken } from './fakes.ts';
 
 const main = fileURLToPath(new URL('../src/main.ts', import.meta.url));
 const ORIGIN = 'https://coffre.example';
@@ -91,20 +92,17 @@ async function instance(version: string, url: string | null): Promise<{ origin: 
   return { origin: `http://127.0.0.1:${address.port}`, server };
 }
 
-/** `coffre migrate`, as a script runs it: no terminal, the URL in the environment. */
+/** `coffre migrate`, as a script runs it: no terminal, signed in with a service token, the URL piped in. */
 function migrate(origin: string, url: string | null, args: string[] = ['--yes']): Promise<{ code: number | null; output: string }> {
   const home = mkdtempSync(join(tmpdir(), 'coffre-migrate-'));
+  signedInWithToken(home, origin, 'coffre_svc_test');
   const child = spawn(process.execPath, ['--conditions=coffre:source', main, 'migrate', ...args], {
-    env: {
-      PATH: process.env.PATH,
-      HOME: home,
-      COFFRE_API_URL: origin,
-      COFFRE_AUTH_MODE: 'signin',
-      COFFRE_TOKEN: 'coffre_svc_test',
-      ...(url === null ? {} : { COFFRE_MIGRATE_DATABASE_URL: url }),
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { PATH: process.env.PATH, HOME: home },
+    stdio: ['pipe', 'pipe', 'pipe'],
   });
+  // A run that stops before reading stdin closes it: not this test's failure.
+  child.stdin.on('error', () => {});
+  child.stdin.end(url ?? '');
   let output = '';
   child.stdout.setEncoding('utf8').on('data', (chunk: string) => (output += chunk));
   child.stderr.setEncoding('utf8').on('data', (chunk: string) => (output += chunk));
@@ -142,14 +140,17 @@ function deploymentFolder(pins: Record<string, string>): string {
 
 const pinnedAt = (version: string) => ({ '@coffre/server': version, '@coffre/vault': version, '@coffre/cli': version });
 
-/** `coffre migrate`, as a deployment's pipeline runs it in its folder: no terminal, no session, the URL in the environment. */
-function migrateIn(dir: string, url: string | null, args: string[] = ['--yes']): Promise<{ code: number | null; output: string }> {
+/** `coffre migrate`, as a deployment's pipeline runs it in its folder: no terminal, no session, the URL on stdin. */
+function migrateIn(dir: string, url: string | null, args: string[] = ['--yes'], session: string[] = []): Promise<{ code: number | null; output: string }> {
   const home = mkdtempSync(join(tmpdir(), 'coffre-migrate-'));
-  const child = spawn(process.execPath, ['--conditions=coffre:source', main, 'migrate', ...args], {
+  const child = spawn(process.execPath, ['--conditions=coffre:source', main, ...session, 'migrate', ...args], {
     cwd: dir,
-    env: { PATH: process.env.PATH, HOME: home, ...(url === null ? {} : { COFFRE_MIGRATE_DATABASE_URL: url }) },
-    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { PATH: process.env.PATH, HOME: home },
+    stdio: ['pipe', 'pipe', 'pipe'],
   });
+  // A run that stops before reading stdin closes it: not this test's failure.
+  child.stdin.on('error', () => {});
+  child.stdin.end(url ?? '');
   let output = '';
   child.stdout.setEncoding('utf8').on('data', (chunk: string) => (output += chunk));
   child.stderr.setEncoding('utf8').on('data', (chunk: string) => (output += chunk));
@@ -173,9 +174,9 @@ test("in a deployment's folder, a CLI that is not the version it pins refuses, b
     assert.equal(mixed.code, 1);
     assert.match(mixed.output, /pinned at .* and 0\.0\.1, not one: `coffre update` moves them together/);
     // An instance is not what it migrates there.
-    const named = await migrateIn(deploymentFolder(pinnedAt(cliVersion())), null, ['--yes', '--url', ORIGIN]);
+    const named = await migrateIn(deploymentFolder(pinnedAt(cliVersion())), null, ['--yes'], ['--url', ORIGIN]);
     assert.equal(named.code, 1);
-    assert.match(named.output, /--url names an instance, and in a deployment's folder coffre migrate asks none/);
+    assert.match(named.output, /--url says which instance to ask and how, and in a deployment's folder coffre migrate asks none/);
   } finally {
     for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
   }

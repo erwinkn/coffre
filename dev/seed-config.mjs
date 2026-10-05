@@ -66,7 +66,7 @@ const LOCAL_TARGETS = Object.freeze({
 export function loadLocalSeedConfig(env) {
     const resolved = {
         databaseUrl: env.DATABASE_URL ?? LOCAL_SEED_CONFIG.databaseUrl,
-        apiUrl: env.COFFRE_API_URL ?? LOCAL_SEED_CONFIG.apiUrl,
+        apiUrl: env.COFFRE_DEV_URL ?? LOCAL_SEED_CONFIG.apiUrl,
         idpUrl: env.COFFRE_DEV_IDP_URL ?? LOCAL_SEED_CONFIG.idpUrl,
         rootAdmin: env.COFFRE_ROOT_ADMINS ?? LOCAL_SEED_CONFIG.rootAdmin,
     };

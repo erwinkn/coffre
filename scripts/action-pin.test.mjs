@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
@@ -31,7 +31,7 @@ test('bump moves the Action with the packages and examples; check:pins rejects d
     const dir = checkout(t);
     const bumped = run(dir, 'bump.mjs', '9.8.7-test.1');
     assert.equal(bumped.status, 0, bumped.stderr);
-    assert.match(readFileSync(join(dir, 'action/action.yml'), 'utf8'), /npx -y @coffre\/cli@9\.8\.7-test\.1 export/);
+    assert.match(readFileSync(join(dir, 'action/action.yml'), 'utf8'), /npx -y @coffre\/cli@9\.8\.7-test\.1 "\$@"/);
     assert.equal(run(dir, 'check-pins.mjs').status, 0);
     for (const pin of ['9.8.6', '^9.8.7-test.1']) {
         const path = join(dir, 'action/action.yml');
@@ -68,25 +68,45 @@ test('the Action refuses an unsupported Node before npx runs, with a clear minim
     assert.doesNotMatch(ran.stdout, /npx-must-not-run/);
 });
 
-test('the Action takes one of a token or a service, and a service only with the job\'s ID token', (t) => {
+test('the Action takes one of a token or a service, and a service only with the job\'s ID token; the token goes on stdin', (t) => {
     const dir = checkout(t);
     const bin = join(dir, 'bin');
     mkdirSync(bin);
     writeFileSync(join(bin, 'node'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
-    writeFileSync(join(bin, 'npx'), '#!/bin/sh\necho "npx ran with service=$COFFRE_SERVICE"\nexit 0\n', { mode: 0o755 });
+    // It says where its home is, and leaves a mark there, which must go with the step.
+    writeFileSync(join(bin, 'npx'), `#!/bin/sh\necho "$HOME" >> '${join(dir, 'homes')}'\ntouch "$HOME/session"\necho "npx ran with: $*"\necho "stdin: $(cat)"\nexit 0\n`, { mode: 0o755 });
+    // The shell's own tools, beside the fakes: cat, for the fake npx.
+    const path = `${bin}:/usr/bin:/bin`;
     const text = readFileSync(join(dir, 'action/action.yml'), 'utf8');
     const shell = text.match(/      run: \|\n((?:        [^\n]*\n?)+)/)[1].replace(/^        /gm, '');
-    const run = (env) => spawnSync('/bin/bash', ['-e', '-c', shell], { encoding: 'utf8', env: { PATH: bin, ...env }, timeout: 10_000 });
-    for (const env of [{}, { COFFRE_TOKEN: 'coffre_svc_x', COFFRE_SERVICE: 'token:api-deploy' }]) {
+    const inputs = { INPUT_URL: 'https://coffre.example.com', INPUT_ENVIRONMENT: 'app/ci' };
+    const cli = `-y @coffre/cli@${text.match(/@coffre\/cli@(\S+)/)[1]}`;
+    const run = (env) => spawnSync('/bin/bash', ['-e', '-c', shell], { encoding: 'utf8', env: { PATH: path, ...inputs, ...env }, timeout: 10_000 });
+    for (const env of [{}, { INPUT_TOKEN: 'coffre_svc_x', INPUT_SERVICE: 'token:api-deploy' }]) {
         const ran = run(env);
         assert.equal(ran.status, 1);
         assert.match(ran.stderr, /needs one of token or service/);
     }
-    const noIdToken = run({ COFFRE_SERVICE: 'token:api-deploy' });
+    const noIdToken = run({ INPUT_SERVICE: 'token:api-deploy' });
     assert.equal(noIdToken.status, 1);
     assert.match(noIdToken.stderr, /permissions: id-token: write/);
-    const service = run({ COFFRE_SERVICE: 'token:api-deploy', ACTIONS_ID_TOKEN_REQUEST_URL: 'https://runner.example/token' });
+    const service = run({ INPUT_SERVICE: 'token:api-deploy', ACTIONS_ID_TOKEN_REQUEST_URL: 'https://runner.example/token' });
     assert.equal(service.status, 0, service.stderr);
-    assert.match(service.stdout, /npx ran with service=token:api-deploy/);
-    assert.equal(run({ COFFRE_TOKEN: 'coffre_svc_x' }).status, 0);
+    assert.equal(service.stdout, `npx ran with: ${cli} --url https://coffre.example.com --service token:api-deploy export --format github app/ci\nstdin: \n`);
+    const token = run({ INPUT_TOKEN: 'coffre_svc_x' });
+    assert.equal(token.status, 0, token.stderr);
+    // The token piped to login, never an argument; the export as that session; and the session forgotten after.
+    assert.equal(
+        token.stdout,
+        `npx ran with: ${cli} login https://coffre.example.com --token\nstdin: coffre_svc_x\n` +
+            `npx ran with: ${cli} --url https://coffre.example.com export --format github app/ci\nstdin: \n`,
+    );
+    assert.ok(!token.stderr.includes('coffre_svc_x'));
+    // Each step's CLI had a home of its own, not the runner user's, and it went with the step.
+    const homes = readFileSync(join(dir, 'homes'), 'utf8').trim().split('\n');
+    assert.equal(new Set(homes).size, 2, 'one home per step, shared by its commands');
+    for (const home of homes) {
+        assert.notEqual(home, process.env.HOME);
+        assert.equal(existsSync(home), false, `${home} outlived the step`);
+    }
 });
