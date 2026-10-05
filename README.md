@@ -149,7 +149,7 @@ coffre tokens issue api-deploy --output-file token   # a new 0600 file; or trust
 coffre trust api-deploy --github acme/api --workflow deploy.yml --branch main
                                             # the CI runs trusted to sign in as token:api-deploy;
                                             # previews the claims, --apply saves (docs/design/oidc.md)
-coffre untrust api-deploy <binding-id>
+coffre untrust api-deploy <binding-id>      # the CI runs it would cut off; --apply removes it
 
 coffre audit --denied
 coffre verify                               # asks which: instance, keys or log; owners only

@@ -46,7 +46,7 @@ export const TRUST_USAGE = `usage: coffre trust <service>                       
          IDs, when the lookup cannot see a private repository or project:
                     [--repository-id <n> --owner-id <n>] [--project-id <n> --namespace-id <n>]
          [--label <text>] [--replace <binding-id>] [--apply]
-       coffre untrust <service> <binding-id>`;
+       coffre untrust <service> <binding-id> [--apply]   shows the CI runs it would cut off; --apply removes it`;
 
 /** The service as a member: `api-deploy` or `token:api-deploy`. */
 export function serviceMember(value: string): string {
@@ -155,6 +155,61 @@ export function describePlan(member: string, plan: BindingPlan, applied: Binding
   }
   if (applied === null) lines.push('Run it again with --apply to save it.');
   return `${lines.join('\n')}\n`;
+}
+
+/** `refs/heads/main` as `branch main`, `refs/tags/v1` as `tag v1`; anything else as it is. */
+function refName(ref: string): string {
+  const [, kind, name] = /^refs\/(heads|tags)\/(.+)$/.exec(ref) ?? [];
+  return kind === undefined ? ref : `${kind === 'heads' ? 'branch' : 'tag'} ${name}`;
+}
+
+/**
+ * The CI runs a binding lets sign in, in a sentence, from its claims: the
+ * platform, the repository or project, the workflow, the ref. Bindings keep
+ * IDs where a name could change hands; a name is shown where a claim has one.
+ */
+export function runsOf(binding: Pick<BindingView, 'profile' | 'issuer' | 'claims'>): string {
+  const claims = binding.claims;
+  const on = (ref: string | undefined, how: string | undefined) => [ref === undefined ? null : `on ${refName(ref)}`, how === undefined ? null : `by ${how}`].filter(Boolean).join(', ');
+  /** `acme/api/.github/workflows/deploy.yml@refs/heads/main` as its repository and workflow file. */
+  const workflow = (ref: string) => /^([^/]+\/[^/]+)\/(?:\.github\/workflows\/)?(.+)@/.exec(ref);
+  switch (binding.profile) {
+    case 'github': {
+      const [, repository, file] = workflow(claims.workflow_ref ?? '') ?? [];
+      return `GitHub Actions runs of ${repository ?? `repository ${claims.repository_id}`}'s workflow ${file ?? '(any)'}, ${on(claims.ref, claims.event_name)}`;
+    }
+    case 'github-reusable':
+    case 'github-reusable-organization': {
+      const [, repository, file] = workflow(claims.workflow_ref ?? '') ?? [];
+      const callers =
+        binding.profile === 'github-reusable-organization'
+          ? `any repository of owner ${claims.repository_owner_id}`
+          : repository === undefined ? `repository ${claims.repository_id}` : `${repository}'s workflow ${file}`;
+      const sha = claims.job_workflow_sha === undefined ? '' : ` at commit ${claims.job_workflow_sha.slice(0, 12)}`;
+      return `GitHub Actions runs of ${callers} that call the reusable workflow ${claims.job_workflow_ref}${sha}, ${on(claims.ref, claims.event_name)}`;
+    }
+    case 'gitlab': {
+      const ref = claims.ref === undefined ? undefined : `${claims.ref_type === 'tag' ? 'refs/tags' : 'refs/heads'}/${claims.ref}`;
+      const where = binding.issuer === 'https://gitlab.com' ? '' : ` on ${binding.issuer}`;
+      return `GitLab pipelines of project ${claims.project_id} (namespace ${claims.namespace_id})${where}, ${on(ref, claims.pipeline_source)}`;
+    }
+    case 'custom':
+      return `runs whose ID token, from ${binding.issuer}, says ${Object.entries(claims).map(([name, value]) => `${name}=${value}`).join(', ')}`;
+  }
+}
+
+/** What `coffre untrust` shows: the binding, the runs it would cut off, and, unless done, how to do it. */
+export function describeRemoval(member: string, binding: BindingView, removed: boolean): string {
+  const used = binding.lastUsedAt === null ? 'never used' : `last used ${binding.lastUsedAt.slice(0, 16).replace('T', ' ')}`;
+  const head = `${binding.id}${binding.label === null ? '' : `  ${binding.label}`}  (added by ${binding.createdBy} ${binding.createdAt.slice(0, 10)}, ${used})`;
+  const runs = runsOf(binding);
+  return [
+    removed ? `Removed ${member}'s trust binding ${head}` : `Would remove ${member}'s trust binding ${head}`,
+    ...describeBinding(binding),
+    removed
+      ? `${runs.charAt(0).toUpperCase()}${runs.slice(1)} can no longer sign in as ${member}, and the credentials they hold have ended.`
+      : `${runs.charAt(0).toUpperCase()}${runs.slice(1)} would no longer sign in as ${member}, and the credentials they hold would end at once.\nNothing changed. Re-run with --apply to remove it.`,
+  ].join('\n') + '\n';
 }
 
 export function describeBindings(member: string, bindings: BindingView[]): string {

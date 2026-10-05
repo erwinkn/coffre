@@ -144,7 +144,7 @@ export const SECTIONS = [
         usage: ['trust <service> [--github … | --gitlab … | --issuer …] [--apply]'],
         about: ['the CI runs that may sign in as a service, by their', "platform's ID token; `coffre trust` alone says how"],
       },
-      { command: 'untrust', usage: ['untrust <service> <binding-id>'] },
+      { command: 'untrust', usage: ['untrust <service> <binding-id> [--apply]'], about: ['the CI runs it would cut off; --apply removes it'] },
     ],
   },
   {

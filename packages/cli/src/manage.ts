@@ -9,7 +9,7 @@ import { parseArgs } from 'node:util';
 
 import type { CoffreClient } from '@coffre/client';
 
-import { serviceMember } from './trust.ts';
+import { describeRemoval, serviceMember } from './trust.ts';
 
 /** Where a command writes: what it answers on `out`, what it tells a person on `err`. */
 export type Io = {
@@ -291,6 +291,25 @@ export async function tokensRevoke(connect: () => CoffreClient, args: string[], 
   }
   await api.tokens.revoke(service, id);
   io.out.write(`revoked ${what}\n`);
+}
+
+/**
+ * A trust binding removed: first shown, with the CI runs it would cut off,
+ * then, with --apply, removed. The credentials it issued end with it.
+ */
+export async function untrust(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
+  const { values, positionals } = parse(args, { apply: { type: 'boolean', default: false } }, ['<service>', '<binding-id>']);
+  const service = serviceMember(positionals[0]!);
+  const id = positionals[1]!;
+  const api = connect();
+  const binding = (await api.bindings.list(service)).bindings.find((entry) => entry.id === id);
+  if (binding === undefined) throw new Error(`${service} has no trust binding ${id}: \`coffre trust ${service.slice('token:'.length)}\` lists them`);
+  if (!values.apply) {
+    io.out.write(describeRemoval(service, binding, false));
+    return;
+  }
+  await api.bindings.remove(service, id);
+  io.out.write(describeRemoval(service, binding, true));
 }
 
 // --- your own sessions and accounts -------------------------------------------
