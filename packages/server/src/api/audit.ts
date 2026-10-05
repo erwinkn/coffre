@@ -73,6 +73,8 @@ export const DETAIL_ACTIONS = [
   'token.revoke',
   'device.approve',
   'device.deny',
+  // An MCP client's code redeemed, or its tokens refreshed: every hour of its use.
+  'mcp.token',
   'account.link',
   'account.unlink',
   'key.wrap',

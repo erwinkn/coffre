@@ -34,6 +34,30 @@ const openFromMenu = (menu: string, item: string) => `(async () => {
 /** A service account of the pages' own, whose page shows how it signs in. */
 const SERVICE = 'token:conformance-pages';
 
+const CONSENT_CLIENT = 'Conformance pages client';
+
+/** A registered client's authorization request, as the consent page receives it. */
+async function consentUrl(deployment: Deployment): Promise<string> {
+  const redirect = 'http://127.0.0.1:33419/callback';
+  const registered = await fetch(`${deployment.origin}/api/oauth/register`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ client_name: CONSENT_CLIENT, redirect_uris: [redirect] }),
+  });
+  const { client_id: clientId } = (await registered.json()) as { client_id?: string };
+  expect(registered.status === 201 && clientId !== undefined, `registering an MCP client answered ${registered.status}`);
+  const request = new URLSearchParams({
+    client_id: clientId,
+    redirect_uri: redirect,
+    response_type: 'code',
+    code_challenge: 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM',
+    code_challenge_method: 'S256',
+    state: 'pages',
+    scope: 'browse write',
+  });
+  return `${deployment.origin}/oauth/authorize?${request}`;
+}
+
 /** The Chrome to run, the one given or the one found; skips the check when there is none. */
 function chromeOrSkip(browser: string | null): string {
   const executable = browser ?? findChrome();
@@ -76,10 +100,18 @@ export async function pagesInBrowser(deployment: Deployment, admin: Person, brow
     } finally {
       await admin.api.access.set(SERVICE, { '*/dev': null });
     }
+    // The page an MCP client sends a person to: who asks, where the answer goes, and what it may do.
+    const consent = await consentUrl(deployment);
+    const loaded = await chrome.load(consent, admin.browser.cookies());
+    expect(loaded.errors.length === 0, '/oauth/authorize reported errors in the browser', loaded.errors.join('\n'));
+    expect(loaded.heading === `Connect ${CONSENT_CLIENT} to coffre?`, `/oauth/authorize shows ${JSON.stringify(loaded.heading)}`);
+    for (const shown of ['Unverified', 'localhost', admin.email, 'Browse', 'Approve', 'Deny']) {
+      expect(loaded.text.includes(shown), `/oauth/authorize does not show "${shown}"`, loaded.text);
+    }
   } finally {
     await chrome.close();
   }
-  return `${pages.map(([path]) => path).join(', ')}, signed in, in Chrome: each rendered, no error from their scripts; a service account shown as service:${name}, OIDC then bearer tokens, its removal previewed; the keys' checks in Settings; its grant on dev in every project with an owner's grant button`;
+  return `${pages.map(([path]) => path).join(', ')}, signed in, in Chrome: each rendered, no error from their scripts; a service account shown as service:${name}, OIDC then bearer tokens, its removal previewed; the keys' checks in Settings; its grant on dev in every project with an owner's grant button; the MCP consent page, a registered client shown as unverified`;
 }
 
 /**

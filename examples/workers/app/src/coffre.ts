@@ -19,6 +19,10 @@ export type Env = {
   WORKLOADS_TOTAL: RateLimit;
   /** Set by conformance only: a binding's issuer may then be plain HTTP on loopback. Refused unless PUBLIC_URL is loopback too. */
   ALLOW_LOOPBACK_ISSUERS_FOR_DEVELOPMENT?: string;
+  /** What MCP clients' OAuth requests pass first, and each connection's tool calls: the same file's bindings. */
+  MCP_PER_SOURCE: RateLimit;
+  MCP_PER_CONNECTION: RateLimit;
+  MCP_TOTAL: RateLimit;
 };
 
 export const coffre = createCoffre((env: Env) => ({
@@ -39,6 +43,11 @@ export const coffre = createCoffre((env: Env) => ({
     workloads: {
       limits: { perSource: env.WORKLOADS_PER_SOURCE, total: env.WORKLOADS_TOTAL },
       allowLoopbackIssuersForDevelopment: env.ALLOW_LOOPBACK_ISSUERS_FOR_DEVELOPMENT === 'true',
+    },
+    // MCP clients, Claude among them, may connect at <PUBLIC_URL>/mcp as the
+    // people who approve them (docs/mcp.md). Remove this to turn it off.
+    mcp: {
+      limits: { perSource: env.MCP_PER_SOURCE, perConnection: env.MCP_PER_CONNECTION, total: env.MCP_TOTAL },
     },
   }),
   auditChainKey: env.APP_KEY,

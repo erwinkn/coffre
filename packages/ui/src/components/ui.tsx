@@ -166,6 +166,7 @@ const NOTICE_ICON = {
   info: Info,
   good: Check,
   bad: AlertTriangle,
+  warn: AlertTriangle,
   neutral: Info,
 } as const;
 

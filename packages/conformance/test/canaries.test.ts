@@ -86,8 +86,8 @@ test('the HTTP scan waits for every reply and finds a leak in its final answer',
   const value = canary();
   let calls = 0;
   let active = 0;
-  // 29 GET calls as eight callers, and 20 pages as six browser callers.
-  const answers = 29 * 8 + 20 * 6;
+  // 31 GET calls as eight callers, and 21 pages as six browser callers.
+  const answers = 31 * 8 + 21 * 6;
   t.mock.method(globalThis, 'fetch', async () => {
     const call = ++calls;
     active++;

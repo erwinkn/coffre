@@ -218,6 +218,7 @@ test('defineSignin needs a provider, and each needs a client id and secret', () 
       browserSessionHours: 4,
       cliSessionDays: 30,
       workloads: null,
+      mcp: null,
     },
   );
 });

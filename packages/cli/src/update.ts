@@ -402,6 +402,7 @@ export async function update(args: string[]): Promise<void> {
                 ? `Made it its own Start app, as coffre init writes one: ${moving.changes.length} files, as shown. Its app now builds with vite build app`
                 : `Changed coffre's page files: ${listed(move.map(({ path }) => path), 'and')}`,
               ...moving.notes,
+              ...pages.notes,
             );
           }
           if (shared.length > 0) {

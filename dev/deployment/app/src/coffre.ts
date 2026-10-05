@@ -15,6 +15,9 @@ export type Env = {
   COFFRE_APP_KEY: string;
   WORKLOADS_PER_SOURCE: RateLimiter;
   WORKLOADS_TOTAL: RateLimiter;
+  MCP_PER_SOURCE: RateLimiter;
+  MCP_PER_CONNECTION: RateLimiter;
+  MCP_TOTAL: RateLimiter;
 };
 
 export const coffre = createCoffre((env: Env) => {
@@ -32,6 +35,11 @@ export const coffre = createCoffre((env: Env) => {
       note: 'Local development. Both buttons lead to the dev IdP.',
       // CI runs signing in as services; the dev IdP is plain HTTP on loopback.
       workloads: { limits: { perSource: env.WORKLOADS_PER_SOURCE, total: env.WORKLOADS_TOTAL }, allowLoopbackIssuersForDevelopment: true },
+      // MCP clients at /mcp; a client's metadata document may be plain HTTP on loopback here.
+      mcp: {
+        limits: { perSource: env.MCP_PER_SOURCE, perConnection: env.MCP_PER_CONNECTION, total: env.MCP_TOTAL },
+        allowLoopbackClientsForDevelopment: true,
+      },
     }),
     auditChainKey: env.COFFRE_APP_KEY,
   };

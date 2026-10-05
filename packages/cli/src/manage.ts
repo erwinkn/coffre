@@ -548,6 +548,35 @@ export async function sessionsRevoke(connect: () => CoffreClient, args: string[]
   io.out.write(`signed out ${what}${current}\n`);
 }
 
+/** The MCP clients you connected: Account › Connected apps. */
+export async function apps(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
+  const { values } = parse(args, json, []);
+  const api = connect();
+  const { apps: list } = await api.apps.list();
+  if (values.json) return asJson(io, list);
+  for (const app of list) {
+    const name = `${app.name}${app.registration === 'dcr' ? ' (unverified)' : ''}`;
+    io.out.write(
+      `${app.id}  ${name.padEnd(28)}  ${(app.host ?? '-').padEnd(24)}  ${app.scopes.join(' ').padEnd(16)}  last used ${day(app.lastUsedAt)}  ends ${day(app.expiresAt)}\n`,
+    );
+  }
+}
+
+export async function appsRevoke(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
+  const { values, positionals } = parse(args, { apply: { type: 'boolean', default: false } }, ['<id>']);
+  const id = positionals[0]!;
+  const api = connect();
+  const app = (await api.apps.list()).apps.find((entry) => entry.id === id);
+  if (app === undefined) throw new Error(`you have no connected app ${id}: \`coffre apps\` lists them`);
+  const what = `${app.name}${app.host === null ? '' : ` (${app.host})`}, connected ${day(app.createdAt)}, last used ${day(app.lastUsedAt)}`;
+  if (!values.apply) {
+    io.out.write(`would disconnect ${what}: its tokens would stop at its next request.\nNothing changed. Re-run with --apply to disconnect it.\n`);
+    return;
+  }
+  await api.apps.disconnect(id);
+  io.out.write(`disconnected ${what}\n`);
+}
+
 export async function identities(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
   const { values } = parse(args, json, []);
   const api = connect();

@@ -214,6 +214,8 @@ BEGIN
         'SELECT * FROM secret_references',
         'SELECT * FROM dismissed_keys',
         'UPDATE secret_folders SET folder = folder',
+        'SELECT * FROM oauth_clients',
+        'SELECT * FROM mcp_connections',
             'DELETE FROM identities',
         'DELETE FROM device_authorizations',
         'TRUNCATE vault_members',

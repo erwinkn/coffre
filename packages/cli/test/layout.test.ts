@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 import { bumpPins, coffrePins, movePins, startPinMoves } from '../src/deployment.ts';
 import { templateDir, templateFiles, type Kind } from '../src/init.ts';
-import { after, applyChanges, blob, lineDiff, NODE_ENTRIES, pageMove, ROUTE_FILES, shownChange, startAppMove, undo, WORKERS_ENTRIES, type Move } from '../src/layout.ts';
+import { after, applyChanges, blob, lineDiff, NODE_ENTRIES, pageMove, ROUTE_FILES, shownChange, SINCE_0_1, startAppMove, undo, WORKERS_ENTRIES, type Move } from '../src/layout.ts';
 
 const fixtures = fileURLToPath(new URL('fixtures/', import.meta.url));
 const ENTRY: Record<Kind, string> = { workers: 'app/src/worker.ts', node: 'src/server.ts' };
@@ -53,9 +53,14 @@ for (const kind of ['workers', 'node'] as const) {
       // What update does next: the pins, to the release, and the Start app's packages, to the template's.
       bumpPins(dir, Object.values(coffrePins(template))[0]!);
       movePins(dir, startPinMoves(dir, template));
-      for (const path of templateFiles(template)) {
-        assert.equal(readFileSync(join(dir, path), 'utf8'), readFileSync(join(template, path), 'utf8'), path);
-      }
+      // As init writes it, but MCP, which 0.1 had not: its configuration, and its Worker's bindings.
+      const written = (path: string) => {
+        const text = readFileSync(join(template, path), 'utf8');
+        if (path === CONFIG[kind]) return undo(text, SINCE_0_1[kind]);
+        if (path === 'app/wrangler.jsonc') return text.replace(/,\n\s*\/\/ MCP:[^]*"MCP_TOTAL"[^\n]*\n/, '\n');
+        return text;
+      };
+      for (const path of templateFiles(template)) assert.equal(readFileSync(join(dir, path), 'utf8'), written(path), path);
       assert.equal(existsSync(join(dir, 'app/src/worker.ts')), false);
       assert.deepEqual(startAppMove(dir, kind, template), { changes: [], notes: [] }, 'moved once, there is nothing left to move');
     } finally {
@@ -107,7 +112,8 @@ test("each entry 0.1 wrote is known by its blob, and what it differs by from 0.1
     assert.equal(blob(text), known.blob, `${kind} ${known.releases}`);
     const latest = readFileSync(join(fixtures, '0.1.18', kind, ENTRY[kind]), 'utf8');
     assert.equal(code(undo(latest, known.differences)!), code(text), `${kind} ${known.releases}, from 0.1.18's`);
-    assert.notEqual(undo(readFileSync(join(templateDir(kind), CONFIG[kind]), 'utf8'), known.differences), null, `${kind} ${known.releases}, on 0.2's`);
+    const template = readFileSync(join(templateDir(kind), CONFIG[kind]), 'utf8');
+    assert.notEqual(undo(template, [...SINCE_0_1[kind], ...known.differences]), null, `${kind} ${known.releases}, on the template's`);
   }
 });
 
@@ -282,6 +288,22 @@ test("a page a later release adds is a file the deployment gains; one it had lef
     // A retired page the deployment changed is its own.
     writeFileSync(join(dir, retired), '// ours\n');
     assert.match(problemsOf(pageMove(dir, template, '0.2.1', files('0.2.1'))), /audit\.tsx is a page coffre 0\.3\.0 no longer has, and is not as coffre wrote it/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a deployment from 0.3 gains MCP's route files, and is told that turning MCP on is its own to do", () => {
+  const dir = deployment('workers');
+  try {
+    applyChanges(dir, changesOf(startAppMove(dir, 'workers', templateDir('workers'))));
+    const mcp = ['app/src/routes/mcp.ts', 'app/src/routes/[.]well-known.$.ts', 'app/src/routes/_solo/oauth.authorize.tsx'];
+    for (const path of mcp) rmSync(join(dir, path));
+    const move = pageMove(dir, templateDir('workers'), '0.3.0');
+    assert.deepEqual(changesOf(move).map(({ path }) => path).sort(), [...mcp].sort());
+    assert.match('notes' in move ? move.notes.join('\n') : '', /signin\(\{ mcp: \{ limits \} \}\)/);
+    // From the release that wrote them, they were there to be had.
+    assert.deepEqual(pageMove(dir, templateDir('workers'), '0.4.0'), { changes: [], notes: [] });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

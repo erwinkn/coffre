@@ -46,6 +46,7 @@ before(async () => {
 
     signin: service,
     workloads: null,
+    mcp: null,
     auth,
     publicUrl: ORIGIN,
     verifier: service,

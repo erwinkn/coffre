@@ -1,5 +1,6 @@
-import type { IdentityRow, SessionRow } from '@coffre/client';
-import { useSuspenseQueries } from '@tanstack/react-query';
+import type { ConnectedApp, IdentityRow, SessionRow } from '@coffre/client';
+import { MCP_SCOPE_INFO } from '@coffre/core/mcp';
+import { useSuspenseQueries, useSuspenseQuery } from '@tanstack/react-query';
 
 import { Fragment } from 'react';
 import { useShell } from '../lib/use-shell';
@@ -7,11 +8,11 @@ import { Card, Fact, PageHeader } from '../components/page';
 import { ThemeCards } from '../components/theme';
 import { InstanceRole } from '../components/directory';
 import { ConfirmButton, EmptyState, ErrorLine, Notice, Timestamp } from '../components/ui';
-import { Monitor, ProviderMark, SignOut, Terminal, X } from '../components/icons';
+import { Link as LinkIcon, Monitor, ProviderMark, SignOut, Terminal, X } from '../components/icons';
 import { signinErrorMessage } from '../lib/signin-errors';
 import { useOneTime } from '../lib/one-time';
 import { useCoffre } from '../lib/coffre';
-import { endSession, unlinkIdentity } from '../lib/changes';
+import { disconnectApp, endSession, unlinkIdentity } from '../lib/changes';
 import { queries } from '../lib/queries';
 import { useChange, useChangeStatus } from '../lib/use-change';
 import { RowFailure, RowPending, rowClass } from '../components/row-state';
@@ -24,8 +25,8 @@ type Search = { linked?: string; error?: string };
 
 /**
  * Your own settings: how coffre looks here, who it takes you for and, when
- * coffre runs its own sign-in, which accounts you sign in with and where you
- * are signed in. The sidebar's Settings is the instance's; this page is
+ * coffre runs its own sign-in, which accounts you sign in with, where you
+ * are signed in, and the MCP clients you connected. The sidebar's Settings is the instance's; this page is
  * reached from your account at the sidebar's foot.
  */
 
@@ -68,6 +69,8 @@ export function AccountPage() {
       {auth.signin !== null && principal?.type === 'user' && (
         <SignIn email={principal.id} providers={auth.signin.providers} />
       )}
+
+      {auth.signin !== null && principal?.type === 'user' && <ConnectedApps />}
     </>
   );
 }
@@ -369,4 +372,126 @@ function Sessions({
       )}
     </Card>
   );
+}
+
+/** The MCP clients you connected, such as Claude: each acts as you until it is disconnected or expires. */
+function ConnectedApps() {
+  const client = useCoffre();
+  const { data: apps } = useSuspenseQuery(queries.apps(client));
+  const change = disconnectApp(client);
+  const disconnect = useChange(change);
+  const { status, dismiss } = useChangeStatus(change.list.queryKey);
+  if (apps.ok && apps.off) return null;
+
+  return (
+    <Card
+      labelledBy="apps"
+      title="Connected apps"
+      description="AI assistants and other MCP clients you connected. Each acts as you, never beyond your access, and every call it makes is in the audit log. Disconnecting one stops it at its next request."
+    >
+      {!apps.ok ? (
+        <div className="card-body">
+          <ErrorLine error={apps.error} />
+        </div>
+      ) : apps.apps.length === 0 ? (
+        <EmptyState title="No connected apps">
+          An app such as Claude connects through coffre's MCP endpoint, at{' '}
+          <span className="mono">/mcp</span>, after you approve it here.
+        </EmptyState>
+      ) : (
+        <div className="dt-wrap">
+          <table className="dt stacks stacks-inline">
+            <thead>
+              <tr>
+                <th>App</th>
+                <th>May</th>
+                <th className="col-shrink">Last used</th>
+                <th className="col-shrink">Expires</th>
+                <th className="col-actions">
+                  <span className="visually-hidden">Actions</span>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {apps.apps.map((app) => {
+                const state = status(app.id);
+                return (
+                  <Fragment key={app.id}>
+                    <tr className={rowClass(state)}>
+                      <td>
+                        <span className="cell-account">
+                          <LinkIcon size={15} />
+                          <span className="cell-stack">
+                            <span>
+                              {app.name}{' '}
+                              {app.registration === 'dcr' && (
+                                <span className="tag tag-amber" title="It registered itself: its name is its own claim">
+                                  Unverified
+                                </span>
+                              )}
+                            </span>
+                            <small>
+                              {app.host === null ? 'no website' : <span className="mono">{app.host}</span>}
+                              {' · connected '}
+                              <Timestamp iso={app.createdAt} display="relative" />
+                            </small>
+                          </span>
+                        </span>
+                      </td>
+                      <td data-label="May">{scopeLabels(app)}</td>
+                      <td className="nowrap cell-muted" data-label="Last used">
+                        {app.lastUsedAt === null ? 'Never' : <Timestamp iso={app.lastUsedAt} display="relative" />}
+                      </td>
+                      <td className="nowrap cell-muted" data-label="Expires">
+                        <Timestamp iso={app.expiresAt} display="relative" />
+                      </td>
+                      <td className="col-actions">
+                        {state.state === 'pending' ? (
+                          <RowPending status={state} />
+                        ) : (
+                          <ConfirmButton
+                            trigger={
+                              <button className="act">
+                                <X size={13} />
+                                Disconnect
+                              </button>
+                            }
+                            title={`Disconnect ${app.name}?`}
+                            body={
+                              <>
+                                {app.name}
+                                {app.host !== null && (
+                                  <>
+                                    {' '}at <span className="mono">{app.host}</span>
+                                  </>
+                                )}
+                                , last used{' '}
+                                {app.lastUsedAt === null ? 'never' : <Timestamp iso={app.lastUsedAt} display="relative" />},
+                                stops at its next request. To use it again, connect it again.
+                              </>
+                            }
+                            confirmLabel="Disconnect"
+                            onConfirm={() => disconnect(app)}
+                          />
+                        )}
+                      </td>
+                    </tr>
+                    <RowFailure
+                      status={state}
+                      columns={5}
+                      onDismiss={() => state.state === 'failed' && dismiss(state.mutationId)}
+                    />
+                  </Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function scopeLabels(app: ConnectedApp): string {
+  return app.scopes.map((scope) => MCP_SCOPE_INFO[scope].label).join(', ');
 }

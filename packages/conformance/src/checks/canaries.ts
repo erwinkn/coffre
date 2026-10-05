@@ -34,6 +34,7 @@ function pages(people: People): string[] {
     '/audit',
     '/settings',
     '/auth/device',
+    '/oauth/authorize',
     '/projects',
     `/projects/${PROJECT}`,
     ...[DEV, PROD, BULK].map((path) => `/projects/${path}`),

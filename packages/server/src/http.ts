@@ -25,10 +25,10 @@ export function methodNotAllowed(allowed: readonly string[]): Response {
 }
 
 /**
- * A JSON body of at most `max` bytes, read as it streams: past the limit
- * the rest is never read. For a route anyone may call.
+ * A body of at most `max` bytes, as UTF-8, read as it streams: past the
+ * limit the rest is never read. For a route anyone may call.
  */
-export async function readLimitedJson(request: Request, max: number): Promise<unknown> {
+export async function readLimitedText(request: Request, max: number): Promise<string> {
   const reader = request.body?.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
@@ -47,7 +47,17 @@ export async function readLimitedJson(request: Request, max: number): Promise<un
     }
   }
   try {
-    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)));
+    return new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks));
+  } catch {
+    throw badRequest('the body is not UTF-8');
+  }
+}
+
+/** A JSON body of at most `max` bytes, as `readLimitedText` reads it. */
+export async function readLimitedJson(request: Request, max: number): Promise<unknown> {
+  const text = await readLimitedText(request, max);
+  try {
+    return JSON.parse(text);
   } catch {
     throw badRequest('the body is not JSON');
   }

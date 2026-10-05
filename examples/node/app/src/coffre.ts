@@ -36,6 +36,9 @@ export const coffre = createCoffre({
       // loopback. Refused unless PUBLIC_URL is loopback too.
       allowLoopbackIssuersForDevelopment: process.env.ALLOW_LOOPBACK_ISSUERS_FOR_DEVELOPMENT === 'true',
     },
+    // MCP clients, Claude among them, may connect at <PUBLIC_URL>/mcp as the
+    // people who approve them (docs/mcp.md). Remove this to turn it off.
+    mcp: { limits: processLimits({ perSource: 30, perConnection: 120, total: 300 }) },
   }),
   auditChainKey: env('APP_KEY'),
 });

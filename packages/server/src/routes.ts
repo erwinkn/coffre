@@ -34,3 +34,7 @@ export const auth = route;
 export const livez = route;
 /** `/readyz`: whether coffre can take writes, the audit log's heartbeat and checkpoint. */
 export const readyz = route;
+/** `/mcp`: the MCP endpoint, for clients a person connected (docs/mcp.md). */
+export const mcp = route;
+/** `/.well-known/$`: the OAuth metadata MCP clients read first: the protected resource's and the authorization server's. */
+export const wellKnown = route;

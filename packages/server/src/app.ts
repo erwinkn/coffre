@@ -16,6 +16,8 @@ import { fetchApi, isSameOrigin, pageClient } from './fetch-api.ts';
 import { auditReadiness, writeAuditHeartbeat } from './heartbeat.ts';
 import { errorResponse, jsonResponse, methodNotAllowed } from './http.ts';
 import { logged } from './logged.ts';
+import { mcpEndpoint } from './mcp/endpoint.ts';
+import { authorizationServer, oauthRegister, oauthRevoke, oauthToken, protectedResource } from './mcp/http.ts';
 import type { CoffreRuntime } from './runtime.ts';
 import { cspNonce, setSecurityHeaders } from './security-headers.ts';
 
@@ -36,6 +38,14 @@ const ROUTES: Record<string, { method: 'GET' | 'POST'; handler: Handler; browser
   '/api/auth/device/token': { method: 'POST', handler: pollDevice },
   '/api/auth/logout': { method: 'POST', handler: logout },
   '/api/auth/oidc': { method: 'POST', handler: exchangeWorkloadToken },
+  // MCP clients' OAuth (docs/design/mcp.md, section 4), and the endpoint its tokens are for.
+  '/api/oauth/token': { method: 'POST', handler: oauthToken },
+  '/api/oauth/register': { method: 'POST', handler: oauthRegister },
+  '/api/oauth/revoke': { method: 'POST', handler: oauthRevoke },
+  '/.well-known/oauth-protected-resource': { method: 'GET', handler: protectedResource },
+  '/.well-known/oauth-protected-resource/mcp': { method: 'GET', handler: protectedResource },
+  '/.well-known/oauth-authorization-server': { method: 'GET', handler: authorizationServer },
+  '/mcp': { method: 'POST', handler: mcpEndpoint },
   // Posted by coffre's own pages, with the browser's cookies.
   '/auth/signout': { method: 'POST', handler: signOut, browserForm: true },
 };

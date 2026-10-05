@@ -189,6 +189,7 @@ test('a removed member stays out despite a live session, until the vault admits 
 
     signin: null,
     workloads: null,
+    mcp: null,
     auth: signin({ providers: [github({ clientId: 'id', clientSecret: 'secret' })] }).resolve('https://coffre.test'),
     publicUrl: 'https://coffre.test',
     // Every token is simply the email of whoever holds it, and never expires.

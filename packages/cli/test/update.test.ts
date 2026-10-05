@@ -24,6 +24,7 @@ import {
   startPinMoves,
 } from '../src/deployment.ts';
 import { templateFiles } from '../src/init.ts';
+import { SINCE_0_1, undo } from '../src/layout.ts';
 import { registry } from './registry.ts';
 import { inTerminal, ptySkip } from './pty.ts';
 import { deploymentMigrations, globalCli, installOf, migrationsAdded, movedLines, notUpdated } from '../src/update.ts';
@@ -242,10 +243,14 @@ test('update --yes makes a Workers deployment of 0.1.18 its own Start app, as in
     child.stderr.setEncoding('utf8').on('data', (chunk: string) => (stderr += chunk));
     assert.equal(await new Promise((resolve) => child.on('close', resolve)), 0, stderr);
     assert.match(stderr, /Made it its own Start app, as coffre init writes one: \d+ files, as shown\. Its app now builds with vite build app/);
+    assert.match(stderr, /MCP endpoint, \/mcp, answers 404 until app\/src\/coffre\.ts turns it on/);
     const template = join(examples, 'workers');
-    for (const path of ['app/vite.config.ts', 'app/src/start.ts', 'app/src/router.tsx', 'app/src/server.ts', 'app/src/coffre.ts', 'app/src/routes/__root.tsx', 'app/src/routes/_coffre/projects.index.tsx', 'app/wrangler.jsonc', 'tsconfig.json', '.gitignore', 'README.md']) {
+    for (const path of ['app/vite.config.ts', 'app/src/start.ts', 'app/src/router.tsx', 'app/src/server.ts', 'app/src/routes/__root.tsx', 'app/src/routes/_coffre/projects.index.tsx', 'app/src/routes/mcp.ts', 'tsconfig.json', '.gitignore', 'README.md']) {
       assert.equal(readFileSync(join(dir, path), 'utf8'), readFileSync(join(template, path), 'utf8'), path);
     }
+    // Its configuration as init writes it, but MCP, which 0.1 had not and its Worker has no bindings for.
+    assert.equal(readFileSync(join(dir, 'app/src/coffre.ts'), 'utf8'), undo(readFileSync(join(template, 'app/src/coffre.ts'), 'utf8'), SINCE_0_1.workers));
+    assert.doesNotMatch(readFileSync(join(dir, 'app/wrangler.jsonc'), 'utf8'), /MCP_/);
     assert.equal(existsSync(join(dir, 'app/src/worker.ts')), false);
     assert.ok(Object.values(coffrePins(dir)).every((version) => version === '9.9.9'));
   } finally {

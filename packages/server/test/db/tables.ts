@@ -30,4 +30,6 @@ export const {
   secretFolders,
   secretReferences,
   dismissedKeys,
+  oauthClients,
+  mcpConnections,
 } = schema;

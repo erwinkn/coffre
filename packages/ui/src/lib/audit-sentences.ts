@@ -82,6 +82,18 @@ function subject(entry: AuditEntry): Part[] {
   return [{ member: `${entry.metadata.principalType === 'service' ? 'token' : 'user'}:${id}` }];
 }
 
+/** An MCP client, by the name it connected under. */
+function app(entry: AuditEntry): Part[] {
+  return [text(entry.metadata.clientName) ?? 'an app'];
+}
+
+/** Why coffre itself ended a connection, said after it. */
+const DISCONNECTED: Record<string, string> = {
+  code_reused: ': its sign-in code was used twice',
+  refresh_reused: ': a refresh token it had replaced was used again',
+  revocation_endpoint: ', at its own request',
+};
+
 function plural(count: number, one: string, many = `${one}s`): string {
   return `${count} ${count === 1 ? one : many}`;
 }
@@ -322,6 +334,14 @@ const TEMPLATES: Record<string, Template> = {
     ],
   },
   'key.rotate': { did: 'rotated its key', tried: 'rotate its key', what: () => [] },
+  // An MCP client a person connected, such as Claude: named as the consent page showed it.
+  'mcp.connect': { did: 'connected', tried: 'connect', what: ({ entry }) => app(entry) },
+  'mcp.disconnect': {
+    did: 'disconnected',
+    tried: 'disconnect',
+    what: ({ entry }) => [...app(entry), ...(entry.metadata.principalId === undefined ? [] : [' of ', ...subject(entry)])],
+    then: ({ entry }) => [DISCONNECTED[text(entry.metadata.reason) ?? ''] ?? ''],
+  },
 
   // Detail, hidden unless asked for.
   sign_in: {
@@ -334,6 +354,11 @@ const TEMPLATES: Record<string, Template> = {
   'token.revoke': { did: 'revoked a bearer token of', tried: 'revoke a bearer token of', what: (facts) => subject(facts.entry) },
   'device.approve': { did: 'approved a CLI sign-in', tried: 'approve a CLI sign-in', what: () => [] },
   'device.deny': { did: 'turned down a CLI sign-in', tried: 'turn down a CLI sign-in', what: () => [] },
+  'mcp.token': {
+    did: ({ entry }) => (entry.metadata.grant === 'refresh_token' ? 'refreshed the tokens of' : 'gave its first tokens to'),
+    tried: 'give tokens to',
+    what: ({ entry }) => app(entry),
+  },
   'account.link': {
     did: 'linked',
     tried: 'link',
@@ -417,6 +442,9 @@ const REASONS: Record<string, string> = {
   cannot_grant_sync: 'cannot grant the sync its reads',
   kms_unavailable: 'KMS did not answer',
   wrong_kek: "the vault's key is not the one that wrapped the data",
+  person_denied: 'they said no',
+  too_many_connections: 'too many connected apps',
+  unknown_connection: 'no such connected app',
 };
 
 /** What a missing permission meant, from the app's `missing_<permission>`. */

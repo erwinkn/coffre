@@ -9,6 +9,7 @@ import { earlierCheckpoint } from './checks/checkpoints.ts';
 import { deletion } from './checks/deletion.ts';
 import { folders, forks, missingKeys, references } from './checks/environments.ts';
 import { appLogin, vaultLogin } from './checks/logins.ts';
+import { mcpConnect } from './checks/mcp.ts';
 import { accessAuthorship, memberTampering, noAuditNoAccess, sealingRace } from './checks/members.ts';
 import { refusedCheckpoint, missingCheckpoint, middleCut } from './checks/readiness.ts';
 import { editedGeneration, forgedCredential, forgedIdentity, forgedApproval } from './checks/signin.ts';
@@ -39,6 +40,8 @@ export async function conform(deployment: Deployment, options: { bulkLimit: numb
   await report.check('forks', all, ({ people, canaries }) => forks(people, canaries));
   await report.check('references', all, ({ people, canaries }) => references(deployment, people, canaries));
   await report.check('missing keys', { people }, ({ people }) => missingKeys(people));
+  // Before offboarding: the leaver's CLI session is one of the credentials /mcp must refuse.
+  await report.check('MCP connect', { people }, ({ people }) => mcpConnect(deployment, people));
   await report.check('reveals audited', all, ({ people, canaries }) => revealAudited(deployment, people, canaries, 'reveal'));
   await report.check('runs audited', all, ({ people, canaries }) => revealAudited(deployment, people, canaries, 'run'));
   await report.check('cross-site', all, ({ people, canaries }) => crossSite(people, canaries));

@@ -15,6 +15,7 @@ export {
   environment,
   home,
   login,
+  oauthAuthorize,
   project,
   projects,
   settings,

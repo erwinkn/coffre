@@ -1241,6 +1241,8 @@ const COMMANDS: Record<Command, (args: string[]) => unknown> = {
   use,
   sessions: (args) => manage.sessions(connect, args),
   'sessions revoke': (args) => manage.sessionsRevoke(connect, args),
+  apps: (args) => manage.apps(connect, args),
+  'apps revoke': (args) => manage.appsRevoke(connect, args),
   identities: (args) => manage.identities(connect, args),
   'identities unlink': (args) => manage.identitiesUnlink(connect, args),
   list,
