@@ -1,24 +1,34 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
 import { deriveKey } from '@coffre/core/identity';
-import type { credentials, deviceAuthorizations, identities, serviceBindings } from '@coffre/db/schema';
+import type { credentials, deviceAuthorizations, identities, mcpConnections, oauthClients, serviceBindings } from '@coffre/db/schema';
 
 type Rows = {
   identities: typeof identities.$inferSelect;
   credentials: typeof credentials.$inferSelect;
   device_authorizations: typeof deviceAuthorizations.$inferSelect;
   service_bindings: typeof serviceBindings.$inferSelect;
+  oauth_clients: typeof oauthClients.$inferSelect;
+  mcp_connections: typeof mcpConnections.$inferSelect;
 };
 export type AuthTable = keyof Rows;
 
 // IDs and userCode bind a MAC to the row an approval or revocation selects.
 // decidedAt also matters: clearing it would make a device decidable again.
-// A binding's policy is all of it but its label and last use.
+// A binding's policy is all of it but its label and last use. A registered
+// client is its redirects; a connection, everything that grants or proves
+// something: who, which client, what scopes, where codes go, its code and
+// refresh token, and how long it lasts.
 const FIELDS = {
   identities: ['id', 'provider', 'issuerHash', 'subject', 'principal', 'generation', 'revokedAt'],
   credentials: ['id', 'tokenHash', 'kind', 'principal', 'generation', 'identityId', 'expiresAt', 'revokedAt'],
   device_authorizations: ['id', 'deviceCodeHash', 'userCode', 'decision', 'decidedAt', 'principal', 'generation', 'expiresAt', 'consumedAt'],
   service_bindings: ['id', 'principal', 'generation', 'profile', 'issuer', 'jwksUri', 'claims', 'revokedAt'],
+  oauth_clients: ['id', 'redirectUris', 'revokedAt'],
+  mcp_connections: [
+    'id', 'principal', 'generation', 'clientId', 'scopes', 'redirectUri', 'codeHash', 'codeChallenge', 'codeExpiresAt',
+    'refreshHash', 'refreshPreviousHash', 'expiresAt', 'revokedAt',
+  ],
 } as const satisfies { [K in AuthTable]: readonly (keyof Rows[K])[] };
 
 type Fields = { [K in AuthTable]: Pick<Rows[K], Extract<typeof FIELDS[K][number], keyof Rows[K]>> };

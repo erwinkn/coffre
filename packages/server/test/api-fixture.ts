@@ -121,6 +121,7 @@ export async function contextFor(
     },
     signin: deps.signin ?? null,
     workloads: deps.workloads ?? null,
+    mcp: null,
     caller: await loadCaller(deps.vault, { type, id }),
     requestId: randomUUID(),
     sourceIp: null,
@@ -175,9 +176,13 @@ export async function resetDatabase(owner: Database): Promise<void> {
     secretVersions,
     serviceBindings,
     consumedTokens,
+    mcpConnections,
+    oauthClients,
     vaultGrants,
     vaultMembers,
   } = tablesOf(owner);
+  await owner.delete(mcpConnections);
+  await owner.delete(oauthClients);
   await owner.delete(credentials);
   await owner.delete(serviceBindings);
   await owner.delete(consumedTokens);

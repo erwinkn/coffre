@@ -295,4 +295,42 @@ BEGIN
 END
 $$;
 
+-- 17. A registered client's redirects, and what a connection was approved
+-- for, never change; a connection only moves through its code, refresh
+-- token, use and revocation, and neither is ever deleted.
+DO $$
+DECLARE
+    statement text;
+BEGIN
+    FOREACH statement IN ARRAY ARRAY[
+        'UPDATE oauth_clients SET redirect_uris = redirect_uris',
+        'UPDATE oauth_clients SET id = id',
+        'UPDATE oauth_clients SET name = name',
+        'DELETE FROM oauth_clients',
+        'TRUNCATE oauth_clients',
+        'UPDATE mcp_connections SET principal = principal',
+        'UPDATE mcp_connections SET generation = generation',
+        'UPDATE mcp_connections SET client_id = client_id',
+        'UPDATE mcp_connections SET scopes = scopes',
+        'UPDATE mcp_connections SET redirect_uri = redirect_uri',
+        'UPDATE mcp_connections SET expires_at = expires_at',
+        'UPDATE mcp_connections SET id = id',
+        'DELETE FROM mcp_connections',
+        'TRUNCATE mcp_connections'
+    ] LOOP
+        BEGIN
+            EXECUTE statement;
+            RAISE EXCEPTION 'FAIL: coffre_app was able to run: %', statement;
+        EXCEPTION
+            WHEN insufficient_privilege THEN NULL;
+        END;
+    END LOOP;
+    UPDATE oauth_clients SET revoked_at = revoked_at, auth_mac = auth_mac;
+    UPDATE mcp_connections SET code_hash = code_hash, code_challenge = code_challenge, code_expires_at = code_expires_at,
+        refresh_hash = refresh_hash, refresh_previous_hash = refresh_previous_hash, last_used_at = last_used_at,
+        last_used_ip = last_used_ip, revoked_at = revoked_at, revoked_by = revoked_by, auth_mac = auth_mac;
+    RAISE NOTICE 'PASS: coffre_app changes clients and connections only where their MACs allow, and never deletes one';
+END
+$$;
+
 \echo '--- all schema guarantees held ---'

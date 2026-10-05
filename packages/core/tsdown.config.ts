@@ -9,6 +9,8 @@ export default defineConfig({
     envelope: 'src/envelope.ts',
     identity: 'src/identity/index.ts',
     kek: 'src/kek/index.ts',
+    // MCP's scopes and client rules, for the server and the consent page.
+    mcp: 'src/mcp.ts',
     pages: 'src/pages.ts',
     schemas: 'src/schemas.ts',
     vault: 'src/vault.ts',

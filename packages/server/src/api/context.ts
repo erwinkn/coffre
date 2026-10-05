@@ -10,6 +10,7 @@ import type { Asking } from './keys.ts';
 import { formatMember } from './paths.ts';
 import type { SigninService } from './signin.ts';
 import type { WorkloadService } from './workloads.ts';
+import type { McpService } from '../mcp/service.ts';
 
 /** What every handler works with: the stores, and who is asking. */
 export type ApiContext = {
@@ -23,6 +24,8 @@ export type ApiContext = {
   signin: SigninService | null;
   /** Trust bindings for CI runs, when sign-in turns them on (`signin({ workloads })`); null otherwise. */
   workloads: WorkloadService | null;
+  /** MCP clients' consent and connections, when sign-in turns them on (`signin({ mcp })`); null otherwise. */
+  mcp: McpService | null;
   caller: Caller;
   requestId: string;
   sourceIp: string | null;

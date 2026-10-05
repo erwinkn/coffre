@@ -164,6 +164,8 @@ BEGIN
         'SELECT * FROM device_authorizations',
         'SELECT * FROM service_bindings',
         'SELECT * FROM consumed_tokens',
+        'SELECT * FROM oauth_clients',
+        'SELECT * FROM mcp_connections',
             'DELETE FROM identities',
         'DELETE FROM device_authorizations',
         'TRUNCATE vault_members',

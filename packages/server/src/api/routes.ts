@@ -83,6 +83,24 @@ function signin(ctx: ApiContext) {
   return ctx.signin;
 }
 
+/** MCP clients' consent: on when the deployment's sign-in says so (`signin({ mcp })`). */
+function mcp(ctx: ApiContext) {
+  if (ctx.mcp === null) throw notFound("this instance serves no MCP: the deployment's signin({ mcp }) turns it on");
+  return ctx.mcp;
+}
+
+/** An OAuth authorization request's parameters, as the consent page carries them: each optional here, checked by the service. */
+const authorizationRequest = z.object({
+  client_id: z.string().max(2048).optional(),
+  redirect_uri: z.string().max(2048).optional(),
+  response_type: z.string().max(64).optional(),
+  code_challenge: z.string().max(256).optional(),
+  code_challenge_method: z.string().max(16).optional(),
+  state: z.string().max(2048).optional(),
+  scope: z.string().max(512).optional(),
+  resource: z.string().max(2048).optional(),
+});
+
 /** Trust bindings for CI runs: on when the deployment's sign-in says so. */
 function workloads(ctx: ApiContext) {
   if (ctx.workloads === null) throw notFound("this instance trusts no workloads: the deployment's signin({ workloads }) turns them on");
@@ -278,6 +296,20 @@ export const routes = {
   ...route('POST /device-logins/:code', {
     input: z.object({ approve: z.boolean() }).strict(),
     run: (ctx, { params, input }) => signin(ctx).decideDevice(ctx, params.code, input.approve),
+  }),
+
+  // Connecting an MCP client: what the consent page shows, and the person's answer.
+  ...route('GET /oauth/authorizations', {
+    input: authorizationRequest,
+    run: (ctx, { input }) => mcp(ctx).describe(ctx, input),
+  }),
+  ...route('POST /oauth/authorizations', {
+    input: z.object({
+      request: authorizationRequest,
+      approve: z.boolean(),
+      scopes: z.array(z.string().max(32)).max(16).default([]),
+    }).strict(),
+    run: (ctx, { input }) => mcp(ctx).decide(ctx, input.request, { approve: input.approve, scopes: input.scopes }),
   }),
 
   // The log

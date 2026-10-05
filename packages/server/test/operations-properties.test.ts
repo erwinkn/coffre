@@ -55,7 +55,7 @@ async function scenario(operations: readonly Operation[]) {
   const signin = new SigninService({ ...deps, signin: signinConfig });
   deps.signin = signin;
   const runtime: CoffreRuntime = {
-    ...deps, signin, workloads: null,
+    ...deps, signin, workloads: null, mcp: null,
 
     auth: { mode: 'signin', signin: signinConfig },
     publicUrl: 'https://coffre.test', verifier: signin, waitUntil,

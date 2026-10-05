@@ -41,6 +41,7 @@ function runtimeFor(auth: AuthConfig): CoffreRuntime {
 
     signin: null,
     workloads: null,
+    mcp: null,
     auth,
     publicUrl: ORIGIN,
     verifier: { verify: async (token: string): Promise<Principal> => ({ type: 'user', id: token, email: token, subject: token }) },
