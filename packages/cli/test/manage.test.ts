@@ -297,6 +297,19 @@ test('fork --reference makes references, and names the keys it copied instead', 
   assert.equal(written.out, 'created market/qa from market/staging: 3 keys, 2 references, and 1 copied: STRIPE_KEY, whose source you read only through staging\n  whoever reads market/qa reads those values through them, as they change\n');
 });
 
+test('missing lists what siblings have, and dismiss --all dismisses each in one call', async () => {
+  const listing = { missing: [{ key: 'SENTRY_DSN', in: ['prod', 'staging'], folder: null }, { key: 'STRIPE_KEY', in: ['staging'], folder: 'stripe' }], dismissed: [] };
+  const { connect, calls, written, io } = fixture(({ method, body }) =>
+    method === 'GET' ? listing : { operationId: 'op', keys: Object.fromEntries(Object.keys(body as object).map((key) => [key, 'dismissed'])) });
+  await manage.missing(connect, ['market/dev'], io);
+  assert.match(written.out, /^SENTRY_DSN\s+in prod, staging\nSTRIPE_KEY\s+in staging\n\n`coffre set market\/dev\/<KEY>` adds one/);
+  await manage.missingDismiss(connect, ['market/dev', '--all'], true, io);
+  assert.deepEqual(calls.at(-1), { method: 'PATCH', path: '/projects/market/dev/dismissals', body: { SENTRY_DSN: true, STRIPE_KEY: true } });
+  await manage.missingDismiss(connect, ['market/dev/SENTRY_DSN'], false, io);
+  assert.deepEqual(calls.at(-1)!.body, { SENTRY_DSN: null });
+  await assert.rejects(manage.missingDismiss(connect, ['market/dev'], true, io), /expected <project>\/<environment>\/<KEY>/);
+});
+
 test('lists group by folder: the unfiled first, then each folder by name, each in its own order', () => {
   const rows = [{ key: 'B', folder: 'stripe' }, { key: 'A', folder: null }, { key: 'C', folder: 'database' }, { key: 'D', folder: 'stripe' }];
   assert.deepEqual(byFolder(rows).map(([folder, keys]) => [folder, keys.map((row) => row.key)]), [

@@ -9,6 +9,7 @@ import type { ApiContext } from './context.ts';
 import { notFound } from './errors.ts';
 import { listMembers, memberReport, putMember, readersAt, removeMember } from './members.ts';
 import { breakReference, listReferences } from './references.ts';
+import { missingKeys, setDismissals } from './missing.ts';
 import { parseGrantee, parseMember, parsePath, type ResolvedPath } from './paths.ts';
 import { forkEnvironment, type Forked } from './forks.ts';
 import { deletePlace, listProjects, me, patchEnvironment, patchProject, putEnvironment, putProject, type InheritedGrant, type PlaceView } from './projects.ts';
@@ -148,6 +149,20 @@ export const routes = {
   ...route('DELETE /projects/:project/:environment', {
     query: dryRunFlag,
     run: (ctx, { place, query }) => deletePlace(ctx, place, { dryRun: query.dryRun !== undefined }),
+  }),
+
+  // What an environment lacks of its siblings' keys, and what its team dismissed.
+  ...route('GET /projects/:project/:environment/missing', {
+    needs: 'secret.read',
+    action: 'missing.list',
+    run: (ctx, { place }) => missingKeys(ctx, place),
+  }),
+  ...route('PATCH /projects/:project/:environment/dismissals', {
+    // `true` dismisses a missing key, `null` restores it.
+    input: z.record(secretKey, z.literal(true).nullable()),
+    needs: 'secret.write',
+    action: 'missing.dismiss',
+    run: (ctx, { place, input }) => setDismissals(ctx, place, input),
   }),
 
   // Secrets

@@ -1108,6 +1108,27 @@ export async function secretHistory(
 }
 
 
+// --- missing keys ---------------------------------------------------------------
+
+/** An environment's dismissed keys, those not restored since. */
+export async function dismissalsIn(db: Queryable, environmentId: string) {
+  const { dismissedKeys } = tablesOf(db);
+  return db
+    .select({ key: dismissedKeys.key, dismissedAt: dismissedKeys.dismissedAt, dismissedBy: dismissedKeys.dismissedBy })
+    .from(dismissedKeys)
+    .where(and(eq(dismissedKeys.environmentId, environmentId), isNull(dismissedKeys.restoredAt)));
+}
+
+/** The live keys of these environments, with each secret's id. */
+export async function liveKeysIn(db: Queryable, environmentIds: readonly string[]) {
+  if (environmentIds.length === 0) return [];
+  const { secrets } = tablesOf(db);
+  return db
+    .select({ id: secrets.id, environmentId: secrets.environmentId, key: secrets.key })
+    .from(secrets)
+    .where(and(inArray(secrets.environmentId, [...environmentIds]), isNull(secrets.archivedAt)));
+}
+
 // --- references -----------------------------------------------------------------
 
 /**

@@ -359,9 +359,10 @@ have. The environment's page shows a strip above its secrets:
 - **Only environments the viewer can read are compared.** Key names are
   metadata, and listing an environment's keys takes `secret.read`. Bo,
   reading only `market/dev`, sees no strip at all.
-- **Add** opens a new row with the key's name, empty, in the folder the
-  key has elsewhere if they agree. Copying a value from another
-  environment is a separate, deliberate reveal.
+- **Add** opens a new row with the key's name, empty; the strip says which
+  folder the key is in elsewhere, when they agree, and moving it there is a
+  step of its own. Copying a value from another environment is a separate,
+  deliberate reveal.
 - **Dismiss** is shared: stored, logged, and listed under "Dismissed",
   each with who and when, and a Restore. A dismissed key the viewer cannot
   see elsewhere is not listed to them either. Archived keys are not

@@ -378,4 +378,27 @@ BEGIN
 END
 $$;
 
+-- 19. A dismissal changes only who dismissed or restored it, and when: its key and environment stay, and none is deleted.
+DO $$
+DECLARE
+    statement text;
+BEGIN
+    FOREACH statement IN ARRAY ARRAY[
+        'UPDATE dismissed_keys SET key = key',
+        'UPDATE dismissed_keys SET environment_id = environment_id',
+        'DELETE FROM dismissed_keys',
+        'TRUNCATE dismissed_keys'
+    ] LOOP
+        BEGIN
+            EXECUTE statement;
+            RAISE EXCEPTION 'FAIL: coffre_app was able to run: %', statement;
+        EXCEPTION
+            WHEN insufficient_privilege THEN NULL;
+        END;
+    END LOOP;
+    UPDATE dismissed_keys SET dismissed_at = dismissed_at, dismissed_by = dismissed_by, restored_at = restored_at, restored_by = restored_by;
+    RAISE NOTICE 'PASS: coffre_app dismisses and restores keys, and deletes none';
+END
+$$;
+
 \echo '--- all schema guarantees held ---'

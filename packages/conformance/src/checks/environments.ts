@@ -8,7 +8,7 @@ import { CoffreError } from '@coffre/client';
 import { using } from '../database.ts';
 import type { Deployment } from '../harness.ts';
 import { expect, refused } from '../report.ts';
-import { DEV, PROD, PROJECT, valuesIn, type Canaries, type People } from './people.ts';
+import { canary, DEV, PROD, PROJECT, valuesIn, type Canaries, type People } from './people.ts';
 import { query } from './storage.ts';
 
 /** Where the fork check copies dev to; archived once checked. */
@@ -136,4 +136,32 @@ export async function references(deployment: Deployment, { admin, reader, leaver
     await admin.api.secrets.update(`${DEV}/${HELD}`, { archived: true });
   }
   return "a viewer on dev reads prod's value through a reference, logged in both; a forged row is refused, a broken one reads no more, and none is made without read on the source";
+}
+
+/** A key prod has and dev does not, for the missing-keys check; archived once checked. */
+const PROD_ONLY = 'CONFORMANCE_PROD_ONLY';
+
+/**
+ * Key names are metadata: what dev is missing is compared only with the
+ * environments the viewer reads. The admin sees prod's key missing from dev;
+ * the reader, a viewer on dev alone, sees nothing of prod, and dismisses
+ * nothing. A dismissal is the team's, and restoring undoes it.
+ */
+export async function missingKeys({ admin, reader }: People): Promise<string> {
+  await admin.api.secrets.set(PROD, { [PROD_ONLY]: canary() });
+  try {
+    const seen = await admin.api.environments.missing(DEV);
+    expect(seen.missing.some((key) => key.key === PROD_ONLY), "the admin was not told dev lacks prod's key", seen);
+    const hidden = await reader.api.environments.missing(DEV);
+    expect(![...hidden.missing, ...hidden.dismissed].some((key) => key.key === PROD_ONLY), "a viewer on dev learned a key name from prod, which they cannot read", hidden);
+    await refused('a viewer dismissed a missing key', reader.api.environments.dismiss(DEV, { [PROD_ONLY]: true }));
+    await admin.api.environments.dismiss(DEV, { [PROD_ONLY]: true });
+    const dismissed = await admin.api.environments.missing(DEV);
+    expect(dismissed.dismissed.some((key) => key.key === PROD_ONLY) && !dismissed.missing.some((key) => key.key === PROD_ONLY), 'a dismissed key was still listed as missing', dismissed);
+    await admin.api.environments.dismiss(DEV, { [PROD_ONLY]: null });
+    expect((await admin.api.environments.missing(DEV)).missing.some((key) => key.key === PROD_ONLY), 'a restored key was not missing again');
+  } finally {
+    await admin.api.secrets.update(`${PROD}/${PROD_ONLY}`, { archived: true });
+  }
+  return "only who reads prod learns what dev lacks of it; a viewer dismisses nothing; a dismissal is listed, and restored";
 }

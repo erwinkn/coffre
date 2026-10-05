@@ -7,7 +7,7 @@ import { bulkLimit, crossSite, everyProject, grantScoping, membersOnly, offboard
 import { checkpoints, deletedTail, forgedVaultEntry, missingEntry, noAuditNoValue, revealAudited, rewrittenEntry, verification, writesAgree } from './checks/audit.ts';
 import { earlierCheckpoint } from './checks/checkpoints.ts';
 import { deletion } from './checks/deletion.ts';
-import { folders, forks, references } from './checks/environments.ts';
+import { folders, forks, missingKeys, references } from './checks/environments.ts';
 import { appLogin, vaultLogin } from './checks/logins.ts';
 import { accessAuthorship, memberTampering, noAuditNoAccess, sealingRace } from './checks/members.ts';
 import { refusedCheckpoint, missingCheckpoint, middleCut } from './checks/readiness.ts';
@@ -38,6 +38,7 @@ export async function conform(deployment: Deployment, options: { bulkLimit: numb
   await report.check('folders', all, ({ people, canaries }) => folders(people, canaries));
   await report.check('forks', all, ({ people, canaries }) => forks(people, canaries));
   await report.check('references', all, ({ people, canaries }) => references(deployment, people, canaries));
+  await report.check('missing keys', { people }, ({ people }) => missingKeys(people));
   await report.check('reveals audited', all, ({ people, canaries }) => revealAudited(deployment, people, canaries, 'reveal'));
   await report.check('runs audited', all, ({ people, canaries }) => revealAudited(deployment, people, canaries, 'run'));
   await report.check('cross-site', all, ({ people, canaries }) => crossSite(people, canaries));

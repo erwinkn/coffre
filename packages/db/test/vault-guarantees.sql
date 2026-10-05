@@ -212,6 +212,7 @@ BEGIN
         'SELECT * FROM consumed_tokens',
         'SELECT * FROM project_folders',
         'SELECT * FROM secret_references',
+        'SELECT * FROM dismissed_keys',
         'UPDATE secret_folders SET folder = folder',
             'DELETE FROM identities',
         'DELETE FROM device_authorizations',

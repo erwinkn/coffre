@@ -190,6 +190,34 @@ export type Api = {
       };
     };
   };
+  "GET /projects/:project/:environment/missing": {
+    input: undefined;
+    output: {
+      missing: {
+        key: string;
+        in: string[];
+        folder: string | null;
+      }[];
+      dismissed: {
+        key: string;
+        in: string[];
+        folder: string | null;
+        dismissedBy: string;
+        dismissedAt: string;
+      }[];
+    };
+  };
+  "PATCH /projects/:project/:environment/dismissals": {
+    input: {
+      [key: string]: null | true;
+    };
+    output: {
+      operationId: string;
+      keys: {
+        [key: string]: "dismissed" | "restored" | "unchanged";
+      };
+    };
+  };
   "GET /secrets/:project/:environment": {
     input: undefined;
     output: {
@@ -857,6 +885,14 @@ export type WorkloadIds = {
   namespaceId: string;
 };
 
+export type DismissedKey = {
+  key: string;
+  in: string[];
+  folder: string | null;
+  dismissedBy: string;
+  dismissedAt: string;
+};
+
 export type DryRunOutcome = "added" | "archived" | "changed" | "unchanged";
 
 export type DryRunResult = {
@@ -930,6 +966,12 @@ export type Member = {
     permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.write")[];
     expiresAt: string | null;
   }[];
+};
+
+export type MissingKey = {
+  key: string;
+  in: string[];
+  folder: string | null;
 };
 
 export type OffboardingReport = {
