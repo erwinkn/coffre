@@ -22,7 +22,11 @@ import { bindingFrom, describeBindings, describePlan, serviceMember, TRUST_USAGE
 import { exchange, idToken } from './workload.ts';
 import { commandLine, readSession, removedVariables } from './flags.ts';
 import { readSecret } from './secret.ts';
-import { pickCheck, verifyInstance, verifyKeys, VERIFY_USAGE } from './verify/index.ts';
+import { help, named, usage } from './commands.ts';
+import * as manage from './manage.ts';
+import { parse, UsageError } from './manage.ts';
+import { cliVersion } from './version.ts';
+import { KEYS_USAGE, INSTANCE_USAGE, pickCheck, verifyInstance, verifyKeys, VERIFY_USAGE } from './verify/index.ts';
 import {
   credentialHeaders,
   emptyStore,
@@ -144,12 +148,15 @@ async function headersFor(to: Target): Promise<Record<string, string>> {
   return credentialHeaders(to.mode, to.credential, access);
 }
 
+/** What to do next, for a refusal a command expects: its status and message, to a line, or null. */
+type Hint = (status: number, detail: string) => string | null;
+
 /** The API, for one instance. */
-function client(to: Target = target()): CoffreClient {
+function client(to: Target = target(), hint?: Hint): CoffreClient {
   return createClient({
     url: to.origin,
     headers: () => headersFor(to),
-    transport: (request) => send(request, to),
+    transport: (request) => send(request, to, hint),
   });
 }
 
@@ -201,7 +208,7 @@ const checkedFile = {
 };
 
 /** One request; every way it can fail is explained in terms of what to do next. */
-async function send(request: Request, to: Target): Promise<Response> {
+async function send(request: Request, to: Target, hint?: Hint): Promise<Response> {
   await noticePending(to);
   let response: Response;
   try {
@@ -223,6 +230,8 @@ async function send(request: Request, to: Target): Promise<Response> {
   if (!response.ok) {
     const body = json ? ((await response.json().catch(() => ({}))) as { error?: unknown; message?: unknown }) : {};
     const detail = typeof body.message === 'string' && body.message.length > 0 ? body.message : null;
+    const next = detail === null ? null : (hint?.(response.status, detail) ?? null);
+    if (next !== null) fail(`${detail}: ${next}`);
     if (response.status === 403) fail(`forbidden: ${detail ?? 'you do not have a grant for that environment'}`);
     if (response.status === 404) fail(detail === null ? 'not found' : `not found: ${detail}`);
     const status = `request failed with status ${response.status}`;
@@ -541,6 +550,7 @@ async function accessLogin(origin: string): Promise<void> {
  * service's, for other runs too, and its credential ends by itself.
  */
 async function logout(args: string[]): Promise<void> {
+  parse(args, {}, ['<url>'], 1);
   const store = readStore();
   const requested = attempt(() => oneUrl(args[0], 'logout')) ?? store.current;
   if (!requested) fail('not signed in anywhere');
@@ -572,9 +582,14 @@ async function logout(args: string[]): Promise<void> {
   }
 }
 
-async function whoami(): Promise<void> {
+async function whoami(args: string[]): Promise<void> {
+  const { values } = parse(args, { json: { type: 'boolean', default: false } }, []);
   const to = target();
   const me = await client(to).me();
+  if (values.json) {
+    process.stdout.write(`${JSON.stringify({ origin: to.origin, ...me }, null, 2)}\n`);
+    return;
+  }
   const session = readStore().instances[to.origin];
   const via = {
     person: { signin: 'coffre sign-in', cloudflare: 'Cloudflare Access' }[to.mode],
@@ -593,6 +608,7 @@ async function whoami(): Promise<void> {
 
 /** Switch the current instance, or list them. */
 function use(args: string[]): void {
+  parse(args, {}, ['<url>'], 1);
   const store = readStore();
   if (args[0] === undefined) {
     const origins = Object.keys(store.instances);
@@ -611,8 +627,7 @@ function use(args: string[]): void {
 }
 
 async function get(args: string[]): Promise<void> {
-  const target = args[0];
-  if (!target) fail('usage: coffre get <project>/<environment>/<KEY>');
+  const [target] = parse(args, {}, ['<project>/<environment>/<KEY>']).positionals as [string];
 
   const { project, environment, key } = parsePath(target);
   if (!key) fail('usage: coffre get <project>/<environment>/<KEY>');
@@ -624,11 +639,13 @@ async function get(args: string[]): Promise<void> {
 }
 
 async function list(args: string[]): Promise<void> {
-  const target = args[0];
-  if (!target) fail('usage: coffre list <project>/<environment>');
-
-  const { project, environment } = parsePath(target);
+  const { values, positionals } = parse(args, { json: { type: 'boolean', default: false } }, ['<project>/<environment>']);
+  const { project, environment } = parsePath(positionals[0]!);
   const result = await client().secrets.list(`${project}/${environment}`);
+  if (values.json) {
+    process.stdout.write(`${JSON.stringify(result.keys, null, 2)}\n`);
+    return;
+  }
 
   // Listing keys is not a read of any value, and is not logged as one.
   for (const entry of result.keys) {
@@ -638,10 +655,9 @@ async function list(args: string[]): Promise<void> {
 }
 
 async function set(args: string[]): Promise<void> {
-  const [target, ...more] = args;
-  if (!target) fail('usage: coffre set <project>/<environment>/<KEY>');
+  const [target, given] = parse(args, {}, ['<project>/<environment>/<KEY>', '[value]'], 1).positionals as [string, string | undefined];
   // A value on the command line is in the shell's history and `ps`: it is asked for.
-  if (more.length > 0) fail('coffre set asks for the value: paste it, or pipe it in, never as an argument');
+  if (given !== undefined) fail('coffre set asks for the value: paste it, or pipe it in, never as an argument');
 
   const { project, environment, key } = parsePath(target);
   if (!key) fail('usage: coffre set <project>/<environment>/<KEY>');
@@ -676,8 +692,7 @@ async function run(args: string[]): Promise<void> {
     fail('usage: coffre run <project>/<environment> -- <command> [args...]');
   }
 
-  const target = args.slice(0, separator)[0];
-  if (!target) fail('usage: coffre run <project>/<environment> -- <command> [args...]');
+  const [target] = parse(args.slice(0, separator), {}, ['<project>/<environment>']).positionals as [string];
 
   const { project, environment } = parsePath(target);
   const command = args.slice(separator + 1);
@@ -740,13 +755,15 @@ async function exportEnv(args: string[]): Promise<void> {
 }
 
 async function history(args: string[]): Promise<void> {
-  const target = args[0];
-  if (!target) fail('usage: coffre history <project>/<environment>/<KEY>');
-
-  const { project, environment, key } = parsePath(target);
-  if (!key) fail('usage: coffre history <project>/<environment>/<KEY>');
+  const { values, positionals } = parse(args, { json: { type: 'boolean', default: false } }, ['<project>/<environment>/<KEY>']);
+  const { project, environment, key } = parsePath(positionals[0]!);
+  if (!key) throw new UsageError('name a secret: <project>/<environment>/<KEY>');
 
   const result = await client().secrets.history(`${project}/${environment}/${key}`);
+  if (values.json) {
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
 
   for (const version of result.versions) {
     process.stdout.write(
@@ -756,10 +773,7 @@ async function history(args: string[]): Promise<void> {
 }
 
 async function rollback(args: string[]): Promise<void> {
-  const [target, version] = args;
-  if (!target || !version) {
-    fail('usage: coffre rollback <project>/<environment>/<KEY> <version>');
-  }
+  const [target, version] = parse(args, {}, ['<project>/<environment>/<KEY>', '<version>']).positionals as [string, string];
 
   const { project, environment, key } = parsePath(target);
   if (!key) fail('usage: coffre rollback <project>/<environment>/<KEY> <version>');
@@ -815,25 +829,13 @@ async function importEnv(args: string[]): Promise<void> {
   }
 }
 
-async function projects(): Promise<void> {
-  const result = await client().projects.list();
-
-  for (const project of result.projects) {
-    const archived = project.archivedAt === null ? '' : ' (archived)';
-    process.stdout.write(`${project.slug}${archived}  ${project.name}\n`);
-    for (const environment of project.environments) {
-      // Environments the caller may only know by name come without details.
-      if (environment.details?.archivedAt) continue;
-      const count = environment.details?.secretCount;
-      process.stdout.write(
-        `  ${environment.slug.padEnd(16)} ${count === null || count === undefined ? '' : `${count} secrets`}\n`,
-      );
-    }
+async function whoHasAccess(args: string[]): Promise<void> {
+  const { values, positionals } = parse(args, { json: { type: 'boolean', default: false } }, ['<project>[/<environment>]'], 1);
+  const result = await client().members.list(positionals[0]);
+  if (values.json) {
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
   }
-}
-
-async function whoHasAccess(): Promise<void> {
-  const result = await client().members.list();
 
   for (const member of result.members) {
     const root = member.isRootAdmin ? '  [root admin]' : '';
@@ -860,15 +862,17 @@ async function grantAccess(args: string[]): Promise<void> {
   });
 
   const [project, principalId] = positionals;
-  if (!project || !principalId || !values.role) {
-    fail('usage: coffre grant <project> <principal> --role <role> [--env <env>] [--service] [--expires YYYY-MM-DD]');
-  }
+  if (!project || !principalId || positionals.length > 2) throw new UsageError('name the project and the principal');
+  if (!values.role) throw new UsageError('name the role: --role <role>');
 
   const role = values.role;
   if (!isRole(role)) fail(`no role "${role}": \`coffre roles\` lists them`);
   const scope = values.env ? `${project}/${values.env}` : project;
+  // A member is admitted before they hold anything: grant does not make one.
+  const admit = `coffre admit ${principalId}${values.service ? ' --service' : ''}`;
+  const hint: Hint = (status, detail) => (status === 409 && /add them as a member/.test(detail) ? `admit them first, \`${admit}\`` : null);
   // Declarative: this place gets this role, replacing any other role there.
-  await client().access.set(`${values.service ? 'token' : 'user'}:${principalId}`, {
+  await client(target(), hint).access.set(`${values.service ? 'token' : 'user'}:${principalId}`, {
     [scope]: values.expires ? { role, until: values.expires } : role,
   });
 
@@ -1014,7 +1018,8 @@ async function offboard(args: string[]): Promise<void> {
   }
 }
 
-function roles(): void {
+function roles(args: string[]): void {
+  parse(args, {}, []);
   for (const [slug, role] of Object.entries(ROLES)) {
     const scope = assignableToEnvironment(slug as Role) ? 'project or env' : 'project only';
     process.stdout.write(`${slug.padEnd(16)} [${scope}]  ${role.permissions.join(', ')}\n`);
@@ -1030,6 +1035,7 @@ async function audit(args: string[]): Promise<void> {
       denied: { type: 'boolean', default: false },
       // Sign-ins, tokens and the vault's key operations, which are left out unless asked for.
       detail: { type: 'boolean', default: false },
+      json: { type: 'boolean', default: false },
     },
     allowPositionals: false,
   });
@@ -1042,6 +1048,10 @@ async function audit(args: string[]): Promise<void> {
     decision: values.denied ? 'deny' : undefined,
     detail: values.detail ? '1' : undefined,
   });
+  if (values.json) {
+    process.stdout.write(`${JSON.stringify(result.entries, null, 2)}\n`);
+    return;
+  }
 
   for (const entry of result.entries.reverse()) {
     const place = [entry.project, entry.environment, entry.key].filter((part) => part !== null).join('/') || '-';
@@ -1150,81 +1160,6 @@ function migrateTarget(): Instance {
   };
 }
 
-const USAGE = `coffre - secrets, with an audit log
-
-  New deployment
-    coffre init --workers [<dir>]           two Cloudflare Workers: the app and its vault
-    coffre init --node [<dir>]              a Node server, and its vault beside it
-    coffre setup [--reset-passwords] [--json]
-                                            its database logins, migrations and keys in one go,
-                                            shown once on a screen of their own; on Workers,
-                                            Cloudflare too, and in an empty directory, the deployment
-    coffre keys [--json]                    the app key, vault key and vault ID alone, shown the same way
-
-  Upgrade
-    coffre update [--yes]                   this CLI, and in a deployment, its coffre packages
-    coffre migrate [--yes]                  the instance's database, to the schema its version ships,
-                                            with the owner's connection string, asked for hidden;
-                                            in a deployment's folder, as its pipeline runs it before
-                                            the deploy: to its pinned version's, with no instance
-                                            (piped in, and --yes, without a terminal)
-
-  Session
-    coffre login [<url>] [--no-browser]     sign in, and make <url> the current instance
-    coffre login <url> --token              a CI run's sign-in: a service token, asked for or piped in
-    coffre login <url> --access-client-id <id>
-                                            the same, behind Cloudflare Access: its secret asked for
-    coffre login <url> --service <name> [--id-token]
-                                            the same, as a service, by the run's ID token: GitHub's
-                                            runner gives it; elsewhere, --id-token asks for it
-    coffre logout [<url>]
-    coffre whoami
-    coffre use [<url>]                      list instances, or switch the current one
-
-  Secrets
-    coffre list     <project>/<environment>
-    coffre get      <project>/<environment>/<KEY>
-    coffre set      <project>/<environment>/<KEY>   (the value asked for, or piped in)
-    coffre run      <project>/<environment> -- <command>
-    coffre export   <project>/<environment> [--format dotenv|json|shell|github]
-    coffre history  <project>/<environment>/<KEY>
-    coffre rollback <project>/<environment>/<KEY> <version>
-    coffre import   <project>/<environment> [--file .env] [--apply]
-
-  Access
-    coffre projects
-    coffre roles
-    coffre access
-    coffre grant <project> <principal> --role <role> [--env <env>] [--service]
-                 [--expires YYYY-MM-DD]
-    coffre offboard <principal> [--service] [--apply]
-                                            what removing them revokes, and what to rotate
-    coffre trust <service> [--github … | --gitlab … | --issuer …] [--apply]
-                                            the CI runs that may sign in as a service, by their
-                                            platform's ID token; \`coffre trust\` alone says how
-    coffre untrust <service> <binding-id>
-
-
-  Audit
-    coffre audit [--limit N] [--actor <id>] [--denied] [--detail]
-
-  Verify (coffre verify alone asks which, on a terminal)
-    coffre verify instance [<url>]          the instance from outside: as no one, then as you, an owner
-    coffre verify keys [--vault-id <id>]    the vault key and app key you keep, checked on this machine
-    coffre verify log                       the whole audit log, as an owner
-
-  Session flags, before the command: coffre [flags] <command>, for that command alone
-    --url <url>                     which instance to talk to; else the current one
-    --service <name>                the service a CI run signs in as, by its ID token, which a
-                                    trust binding accepts (coffre trust); on GitHub Actions, with
-                                    \`permissions: id-token: write\`, nothing else
-    --auth-mode signin|cloudflare   normally detected at login
-    Without them, the session \`coffre login\` saved.
-
-  A secret is asked for, at a hidden prompt, or piped in; never a flag or an argument:
-    printf '%s' "$TOKEN" | coffre login https://coffre.example.com --token
-`;
-
 const line = attempt(() => commandLine(process.argv.slice(2)));
 const { command, rest } = line;
 if (command !== undefined && !command.startsWith('-')) {
@@ -1234,88 +1169,119 @@ if (command !== undefined && !command.startsWith('-')) {
 /** What the session flags say, their files read before any command runs: a file that is not there stops it first. */
 const sessionFlags = attempt(() => readSession(line.session));
 
-switch (command) {
-  case 'init':
-    initProject(rest);
-    break;
-  case 'keys':
-    await keys(rest);
-    break;
-  case 'setup':
-    // Its own chunk: the database driver and the migrations load only for it.
-    await (await import('./setup.ts')).setup(rest);
-    break;
-  case 'update':
-    await (await import('./update.ts')).update(rest);
-    break;
-  case 'migrate':
-    // As setup: the database driver and the migrations load only for it.
-    await (await import('./migrate.ts')).migrate(rest, migrateTarget, Object.keys(line.session).map((name) => `--${name}`));
-    break;
-  case 'login':
-    await login(rest);
-    break;
-  case 'logout':
-    await logout(rest);
-    break;
-  case 'whoami':
-    await whoami();
-    break;
-  case 'use':
-    use(rest);
-    break;
-  case 'export':
-    await exportEnv(rest);
-    break;
-  case 'list':
-    await list(rest);
-    break;
-  case 'get':
-    await get(rest);
-    break;
-  case 'set':
-    await set(rest);
-    break;
-  case 'run':
-    await run(rest);
-    break;
-  case 'history':
-    await history(rest);
-    break;
-  case 'rollback':
-    await rollback(rest);
-    break;
-  case 'import':
-    await importEnv(rest);
-    break;
-  case 'projects':
-    await projects();
-    break;
-  case 'roles':
-    roles();
-    break;
-  case 'access':
-    await whoHasAccess();
-    break;
-  case 'grant':
-    await grantAccess(rest);
-    break;
-  case 'offboard':
-    await offboard(rest);
-    break;
-  case 'trust':
-    await trust(rest);
-    break;
-  case 'untrust':
-    await untrust(rest);
-    break;
-  case 'audit':
-    await audit(rest);
-    break;
-  case 'verify':
-    await verify(rest);
-    break;
-  default:
-    process.stdout.write(USAGE);
-    process.exit(command === undefined || command === '--help' ? 0 : 1);
+/** The API of the instance the session names, asked for once a command has read its arguments. */
+const connect = () => client();
+
+/** Each command, by the words that name it (`commands.ts`). */
+const COMMANDS: Record<string, (args: string[]) => unknown> = {
+  init: initProject,
+  keys,
+  // Their own chunks: the database driver and the migrations load only for them.
+  setup: async (args) => (await import('./setup.ts')).setup(args),
+  update: async (args) => (await import('./update.ts')).update(args),
+  migrate: async (args) => (await import('./migrate.ts')).migrate(args, migrateTarget, Object.keys(line.session).map((name) => `--${name}`)),
+  login,
+  logout,
+  whoami,
+  use,
+  sessions: (args) => manage.sessions(connect, args),
+  'sessions revoke': (args) => manage.sessionsRevoke(connect, args),
+  identities: (args) => manage.identities(connect, args),
+  'identities unlink': (args) => manage.identitiesUnlink(connect, args),
+  list,
+  get,
+  set,
+  run,
+  export: exportEnv,
+  history,
+  rollback,
+  import: importEnv,
+  rename: (args) => manage.renameSecret(connect, args),
+  archive: (args) => manage.archiveSecret(connect, args, true),
+  unarchive: (args) => manage.archiveSecret(connect, args, false),
+  projects: (args) => manage.projects(connect, args),
+  'projects create': (args) => manage.projectsCreate(connect, args),
+  'projects rename': (args) => manage.projectsRename(connect, args),
+  'projects archive': (args) => manage.projectsArchive(connect, args, true),
+  'projects unarchive': (args) => manage.projectsArchive(connect, args, false),
+  'environments create': (args) => manage.environmentsCreate(connect, args),
+  'environments rename': (args) => manage.environmentsRename(connect, args),
+  'environments archive': (args) => manage.environmentsArchive(connect, args, true),
+  'environments unarchive': (args) => manage.environmentsArchive(connect, args, false),
+  roles,
+  access: whoHasAccess,
+  admit: (args) => manage.admit(connect, args),
+  grant: grantAccess,
+  revoke: (args) => manage.revoke(connect, args),
+  offboard,
+  tokens: (args) => manage.tokens(connect, args),
+  'tokens issue': (args) => manage.tokensIssue(connect, args),
+  'tokens revoke': (args) => manage.tokensRevoke(connect, args),
+  trust,
+  untrust,
+  audit,
+  verify,
+};
+
+/** The commands whose --help says more than their line in `coffre help`. */
+const HELP: Record<string, string> = {
+  trust: TRUST_USAGE,
+  verify: VERIFY_USAGE,
+  'verify instance': INSTANCE_USAGE,
+  'verify keys': KEYS_USAGE,
+};
+
+/** A command's help, on `out`. */
+function helpText(words: string): string {
+  return HELP[words] === undefined ? help(words) : `${HELP[words]}\n`;
+}
+
+/** A parse error's first sentence, without Node's advice: `unknown option '--bogus'`. */
+function parseError(error: unknown): string | null {
+  const code = (error as { code?: unknown } | null)?.code;
+  if (error instanceof UsageError) return error.message;
+  if (typeof code !== 'string' || !code.startsWith('ERR_PARSE_ARGS')) return null;
+  const message = (error as Error).message.split(/\.(\s|$)/)[0]!;
+  return message.charAt(0).toLowerCase() + message.slice(1);
+}
+
+if (command === '--version' || command === '-v') {
+  process.stdout.write(`${cliVersion()}\n`);
+  process.exit(0);
+}
+if (command === undefined || command === '--help' || command === '-h' || command === 'help') {
+  const about = command === 'help' && rest.length > 0 ? named(rest) : null;
+  if (command === 'help' && rest.length > 0 && about === null) {
+    process.stderr.write(`coffre: no command ${rest.join(' ')}\n${usage()}`);
+    process.exit(2);
+  }
+  process.stdout.write(about === null ? usage() : helpText(about));
+  process.exit(0);
+}
+
+const words = named([command, ...rest]);
+const two = rest[0] === undefined ? null : `${command} ${rest[0]}`;
+const [key, args] = two !== null && two in COMMANDS ? [two, rest.slice(1)] : [command, rest];
+const end = args.indexOf('--');
+if ((end === -1 ? args : args.slice(0, end)).some((arg) => arg === '--help' || arg === '-h')) {
+  // verify's own commands say the most about themselves.
+  process.stdout.write(helpText(key === 'verify' && words !== null ? words : (words ?? key)));
+  process.exit(0);
+}
+if (!(key in COMMANDS)) {
+  // `coffre tokens` alone has commands under it; `coffre nope` is none.
+  if (words !== null) {
+    process.stderr.write(`coffre: ${command} needs a command after it\n${helpText(words)}`);
+    process.exit(2);
+  }
+  process.stderr.write(`coffre: no command ${command}\n\n${usage()}`);
+  process.exit(1);
+}
+try {
+  await COMMANDS[key]!(args);
+} catch (error) {
+  const misuse = parseError(error);
+  if (misuse === null) fail(error instanceof Error ? error.message : String(error));
+  process.stderr.write(`coffre: ${misuse}\n${helpText(words ?? key)}`);
+  process.exit(2);
 }

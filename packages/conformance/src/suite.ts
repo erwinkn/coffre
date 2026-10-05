@@ -11,7 +11,7 @@ import { accessAuthorship, memberTampering, noAuditNoAccess, sealingRace } from 
 import { refusedCheckpoint, missingCheckpoint, middleCut } from './checks/readiness.ts';
 import { editedGeneration, forgedCredential, forgedIdentity, forgedApproval } from './checks/signin.ts';
 import { canaryScan } from './checks/canaries.ts';
-import { Cli, cliLogin, verifyAsOwner, verifyAsUser, verifyInterrupted, verifyKeys, verifyLeftovers, verifyWithToken } from './checks/cli.ts';
+import { Cli, cliLogin, manageByCli, verifyAsOwner, verifyAsUser, verifyInterrupted, verifyKeys, verifyLeftovers, verifyWithToken } from './checks/cli.ts';
 import { pageLoad, personas, setUp, setUpLive, signInAdmin } from './checks/people.ts';
 import { pagesInBrowser } from './checks/pages.ts';
 import { browserBundle, headers, health } from './checks/surface.ts';
@@ -52,6 +52,7 @@ export async function conform(deployment: Deployment, options: { bulkLimit: numb
       verifyLeftovers(owner, admin, [first, second], before, live.canary),
     );
     await report.check('verify keys', { owner }, ({ owner }) => verifyKeys(owner));
+    await report.check('manage by CLI', { owner }, ({ owner }) => manageByCli(owner));
   } finally {
     for (const cli of clis) cli.remove();
   }
