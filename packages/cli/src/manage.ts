@@ -1,5 +1,5 @@
 // The commands that manage an instance, beside its secrets: projects and
-// environments, members, service tokens, a secret's key, and your own
+// environments, members, bearer tokens, a secret's key, and your own
 // sessions and accounts. Each takes the API and where to write, so a test
 // drives it with a client of its own; each reads its arguments before it
 // asks for one, so a mistyped command needs no session to be told so. A refusal says what to type instead;
@@ -7,7 +7,7 @@
 import { openSync, closeSync, writeSync, rmSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 
-import type { CoffreClient } from '@coffre/client';
+import { apiMember, serviceName, shownMember, type CoffreClient } from '@coffre/client';
 
 import { describeRemoval, serviceMember } from './trust.ts';
 
@@ -161,8 +161,15 @@ export async function archiveSecret(connect: () => CoffreClient, args: string[],
 
 // --- members -----------------------------------------------------------------
 
-/** `user:ada@acme.example` or `token:deploy`, from a name and --service. */
-function member(name: string, service: boolean): string {
+/** A name that says it is a service account's: `service:deploy`, or `token:deploy` as before. */
+const SERVICE = /^(?:service|token):/;
+
+/**
+ * A member as the API names it, `user:ada@acme.example` or `token:deploy`,
+ * from what was typed: a `service:` name, or --service, is a service account.
+ */
+export function memberOf(name: string, service: boolean): string {
+  if (SERVICE.test(name)) return apiMember(name);
   return service ? serviceMember(name) : name.startsWith('user:') ? name : `user:${name}`;
 }
 
@@ -173,20 +180,22 @@ export async function admit(connect: () => CoffreClient, args: string[], io: Io 
     ['<principal>'],
   );
   if (values.owner && values['no-owner']) throw new UsageError('--owner or --no-owner, not both');
-  if (values.service && values.owner) throw new UsageError('a service cannot own the instance: drop --owner');
   const name = positionals[0]!;
-  if (name.startsWith('token:') && !values.service) throw new UsageError(`${name} names a service: coffre admit ${name.slice('token:'.length)} --service`);
-  const who = member(name, values.service);
+  const service = values.service || SERVICE.test(name);
+  if (service && values.owner) throw new UsageError('a service account cannot own the instance: drop --owner');
+  const who = memberOf(name, service);
   const owner = values.owner ? true : values['no-owner'] ? false : undefined;
   const api = connect();
   const result = await api.members.add(who, owner === undefined ? {} : { owner });
   const role = result.instanceRole === 'owner' ? ', an owner of the instance' : '';
-  io.out.write(result.created ? `admitted ${result.member}${role}\n` : `${result.member} is a member${role}${owner === undefined ? ' already' : ' now'}\n`);
-  if (values.service && result.created) {
-    const bare = who.slice('token:'.length);
+  const shown = shownMember(result.member);
+  io.out.write(result.created ? `admitted ${shown}${role}\n` : `${shown} is a member${role}${owner === undefined ? ' already' : ' now'}\n`);
+  if (service && result.created) {
+    const bare = serviceName(who);
     io.out.write(
       `  next: coffre grant <project> ${bare} --role viewer [--env <env>] --service,\n` +
-        `        then coffre trust ${bare} --github … --apply, or coffre tokens issue ${bare}\n`,
+        `        then let its CI sign in by OIDC, coffre trust ${bare} --github … --apply,\n` +
+        `        or, for CI without OIDC, give it a bearer token, coffre tokens issue ${bare}\n`,
     );
   }
 }
@@ -195,13 +204,13 @@ export async function revoke(connect: () => CoffreClient, args: string[], io: Io
   const { values, positionals } = parse(args, { env: { type: 'string' }, service: { type: 'boolean', default: false } }, ['<project>', '<principal>']);
   const [project, name] = positionals as [string, string];
   const scope = values.env === undefined ? project : `${project}/${values.env}`;
-  const who = member(name, values.service);
+  const who = memberOf(name, values.service);
   const api = connect();
   const { changes } = await api.access.set(who, { [scope]: null });
-  io.out.write(changes[scope] === 'revoked' ? `revoked ${who}'s grant on ${scope}\n` : `${who} held no grant on ${scope}: nothing changed\n`);
+  io.out.write(changes[scope] === 'revoked' ? `revoked ${shownMember(who)}'s grant on ${scope}\n` : `${shownMember(who)} held no grant on ${scope}: nothing changed\n`);
 }
 
-// --- service tokens ----------------------------------------------------------
+// --- bearer tokens ----------------------------------------------------------
 
 export async function tokens(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
   const { values, positionals } = parse(args, json, ['<service>']);
@@ -209,7 +218,7 @@ export async function tokens(connect: () => CoffreClient, args: string[], io: Io
   const api = connect();
   const { tokens: list } = await api.tokens.list(service);
   if (values.json) return asJson(io, list);
-  if (list.length === 0) io.out.write(`${service} holds no token: coffre tokens issue ${service.slice('token:'.length)}\n`);
+  if (list.length === 0) io.out.write(`${shownMember(service)} holds no bearer token: coffre tokens issue ${serviceName(service)}\n`);
   for (const token of list) {
     io.out.write(
       `${token.id}  …${token.hint}  ${(token.label ?? '-').padEnd(16)}  expires ${day(token.expiresAt)}  last used ${day(token.lastUsedAt)}\n`,
@@ -266,7 +275,7 @@ export async function tokensIssue(connect: () => CoffreClient, args: string[], i
   } finally {
     process.off('exit', unmake);
   }
-  const about = `${service}'s token ${issued.id}, until ${day(issued.expiresAt)}`;
+  const about = `${shownMember(service)}'s bearer token ${issued.id}, until ${day(issued.expiresAt)}`;
   if (fd !== null) {
     writeSync(fd, `${issued.token}\n`);
     closeSync(fd);
@@ -283,8 +292,8 @@ export async function tokensRevoke(connect: () => CoffreClient, args: string[], 
   const id = positionals[1]!;
   const api = connect();
   const token = (await api.tokens.list(service)).tokens.find((entry) => entry.id === id);
-  if (token === undefined) throw new Error(`${service} holds no token ${id}: \`coffre tokens ${service.slice('token:'.length)}\` lists them`);
-  const what = `${service}'s token ${id}, …${token.hint}${token.label === null ? '' : ` "${token.label}"`}, last used ${day(token.lastUsedAt)}`;
+  if (token === undefined) throw new Error(`${shownMember(service)} holds no bearer token ${id}: \`coffre tokens ${serviceName(service)}\` lists them`);
+  const what = `${shownMember(service)}'s bearer token ${id}, …${token.hint}${token.label === null ? '' : ` "${token.label}"`}, last used ${day(token.lastUsedAt)}`;
   if (!values.apply) {
     io.out.write(`would revoke ${what}: whatever uses it stops at once.\nNothing changed. Re-run with --apply to revoke it.\n`);
     return;
@@ -303,7 +312,7 @@ export async function untrust(connect: () => CoffreClient, args: string[], io: I
   const id = positionals[1]!;
   const api = connect();
   const binding = (await api.bindings.list(service)).bindings.find((entry) => entry.id === id);
-  if (binding === undefined) throw new Error(`${service} has no trust binding ${id}: \`coffre trust ${service.slice('token:'.length)}\` lists them`);
+  if (binding === undefined) throw new Error(`${shownMember(service)} has no trust binding ${id}: \`coffre trust ${serviceName(service)}\` lists them`);
   if (!values.apply) {
     io.out.write(describeRemoval(service, binding, false));
     return;

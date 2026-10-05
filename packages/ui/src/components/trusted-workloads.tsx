@@ -26,13 +26,13 @@ export function TrustedWorkloads({ serviceId, bindings }: { serviceId: string; b
   return (
     <Card
       labelledBy="trusted-workloads"
-      title="Trusted workloads"
-      description="CI runs that may sign in as this service with the ID token their platform signs, when every claim of a binding matches. Nothing long-lived is stored."
+      title="Sign in with OIDC"
+      description="The way with nothing to store: CI runs sign in as this service account with the ID token their platform signs, when every claim of a trust binding matches. Recommended wherever the CI signs one."
       actions={<TrustWorkload serviceId={serviceId} />}
     >
       {bindings.length === 0 ? (
-        <EmptyState title="No trusted workloads">
-          CI can still use a token. Trust a workflow to let its runs sign in without one.
+        <EmptyState title="No trust bindings">
+          Trust a CI workflow to let its runs sign in as this service account with no stored secret. Until then, CI needs a bearer token.
         </EmptyState>
       ) : (
         <div className="dt-wrap">

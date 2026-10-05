@@ -52,7 +52,7 @@ export function SettingsPage() {
                   </Link>
                   {' · '}
                   <Link to="/tokens">
-                    {tokens} token{tokens === 1 ? '' : 's'}
+                    {tokens} service account{tokens === 1 ? '' : 's'}
                   </Link>
                 </span>
               </Fact>

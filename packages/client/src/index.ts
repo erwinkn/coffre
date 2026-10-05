@@ -35,6 +35,8 @@ export type {
   WorkloadIds,
 } from './api.ts';
 
+export { apiMember, serviceName, shownMember, shownText } from './members.ts';
+
 export type RouteKey = keyof Api;
 /** What a caller sends: the body, or the query string for a GET. */
 export type RouteInput<K extends RouteKey> = Api[K]['input'];

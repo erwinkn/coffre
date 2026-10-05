@@ -1,6 +1,7 @@
 /**
  * `coffre trust` and `coffre untrust`: which CI runs may sign in as a
- * service, by the ID token their platform signs (docs/design/oidc.md).
+ * service account by OIDC, the ID token their platform signs
+ * (docs/design/oidc.md).
  *
  *   coffre trust api-deploy --github acme/api --workflow deploy.yml --branch main
  *
@@ -8,7 +9,7 @@
  * not given, and shows what the server would save: the claims in full, the
  * issuer and the keys it names. `--apply` saves it.
  */
-import { CoffreError, type BindingPlan, type BindingView, type WorkloadIds } from '@coffre/client';
+import { apiMember, CoffreError, shownMember, type BindingPlan, type BindingView, type WorkloadIds } from '@coffre/client';
 import { fullRef, GITHUB_EVENTS, GITLAB_PIPELINE_SOURCES, githubReusable, githubWorkflow, gitlabProject, type BindingClaims } from '@coffre/core/workloads';
 
 export type TrustFlags = {
@@ -47,11 +48,14 @@ export const TRUST_USAGE = `usage: coffre trust <service>                       
                     [--repository-id <n> --owner-id <n>] [--project-id <n> --namespace-id <n>]
          [--label <text>] [--replace <binding-id>] [--apply]
          --event and --source take one or more, each a binding of its own; push alone unless told
-       coffre untrust <service> <binding-id> [--apply]   shows the CI runs it would cut off; --apply removes it`;
+       coffre untrust <service> <binding-id> [--apply]   shows the CI runs it would cut off; --apply removes it
+A service account, service:<name>, signs in by OIDC this way, its CI's ID token matched by a trust
+binding, with no stored secret; or, for CI without OIDC, with a bearer token: coffre tokens issue <service>.`;
 
-/** The service as a member: `api-deploy` or `token:api-deploy`. */
+/** A service account as the API names it, `token:api-deploy`, from `api-deploy`, `service:api-deploy` or `token:api-deploy`. */
 export function serviceMember(value: string): string {
-  return value.startsWith('token:') ? value : `token:${value}`;
+  const member = apiMember(value);
+  return member.startsWith('token:') ? member : `token:${member}`;
 }
 
 /** The binding the flags describe, its IDs looked up where they were not given. Throws a sentence. */
@@ -212,7 +216,7 @@ export function describeBinding(binding: Pick<BindingPlan, 'profile' | 'issuer' 
 }
 
 export function describePlan(member: string, plan: BindingPlan, applied: BindingView | null): string {
-  const lines = [applied === null ? `Would trust CI runs to sign in as ${member}:` : `Trusted CI runs to sign in as ${member}, binding ${applied.id}:`];
+  const lines = [applied === null ? `Would trust CI runs to sign in as ${shownMember(member)}, by OIDC:` : `Trusted CI runs to sign in as ${shownMember(member)}, by OIDC, binding ${applied.id}:`];
   lines.push(...describeBinding(plan));
   for (const replaced of plan.replaces) {
     lines.push(`  replaces ${replaced.id}${replaced.why === 'keys_moved' ? ': the issuer moved its keys' : ''}`);
@@ -262,7 +266,8 @@ export function runsOf(binding: Pick<BindingView, 'profile' | 'issuer' | 'claims
 }
 
 /** What `coffre untrust` shows: the binding, the runs it would cut off, and, unless done, how to do it. */
-export function describeRemoval(member: string, binding: BindingView, removed: boolean): string {
+export function describeRemoval(service: string, binding: BindingView, removed: boolean): string {
+  const member = shownMember(service);
   const used = binding.lastUsedAt === null ? 'never used' : `last used ${binding.lastUsedAt.slice(0, 16).replace('T', ' ')}`;
   const head = `${binding.id}${binding.label === null ? '' : `  ${binding.label}`}  (added by ${binding.createdBy} ${binding.createdAt.slice(0, 10)}, ${used})`;
   const runs = runsOf(binding);
@@ -276,7 +281,7 @@ export function describeRemoval(member: string, binding: BindingView, removed: b
 }
 
 export function describeBindings(member: string, bindings: BindingView[]): string {
-  if (bindings.length === 0) return `${member} trusts no CI runs\n`;
+  if (bindings.length === 0) return `${shownMember(member)} trusts no CI runs: none signs in as it by OIDC\n`;
   const blocks = bindings.map((binding) => {
     const used = binding.lastUsedAt === null ? 'never used' : `last used ${binding.lastUsedAt.slice(0, 16).replace('T', ' ')}`;
     const head = `${binding.id}${binding.label === null ? '' : `  ${binding.label}`}  (added by ${binding.createdBy} ${binding.createdAt.slice(0, 10)}, ${used})`;

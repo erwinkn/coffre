@@ -24,7 +24,7 @@ import { commandLine, readSession, removedVariables } from './flags.ts';
 import { readSecret } from './secret.ts';
 import { help, lookup, usage, type Command } from './commands.ts';
 import * as manage from './manage.ts';
-import { parse, UsageError } from './manage.ts';
+import { memberOf, parse, UsageError } from './manage.ts';
 import { cliVersion } from './version.ts';
 import { KEYS_USAGE, INSTANCE_USAGE, pickCheck, verifyInstance, verifyKeys, VERIFY_USAGE } from './verify/index.ts';
 import {
@@ -46,6 +46,10 @@ import {
 import {
   createClient,
   planImport,
+  apiMember,
+  serviceName,
+  shownMember,
+  shownText,
   type CoffreClient,
 } from '@coffre/client';
 import { assignableToEnvironment, isRole, ROLES, type Role } from '@coffre/core/access';
@@ -234,7 +238,8 @@ async function send(request: Request, to: Target, hint?: Hint, handled: readonly
   const json = isJsonContentType(response.headers.get('content-type'));
   if (!response.ok) {
     const body = json ? ((await response.json().catch(() => ({}))) as { error?: unknown; message?: unknown }) : {};
-    const detail = typeof body.message === 'string' && body.message.length > 0 ? body.message : null;
+    // Its service accounts as people read them: the API says token:<name>, people service:<name>.
+    const detail = typeof body.message === 'string' && body.message.length > 0 ? shownText(body.message) : null;
     const next = detail === null ? null : (hint?.(response.status, detail) ?? null);
     if (next !== null) fail(`${detail}: ${next}`);
     if (response.status === 403) fail(`forbidden: ${detail ?? 'you do not have a grant for that environment'}`);
@@ -262,7 +267,7 @@ function refused(to: Target): string {
     case 'run':
       return `${to.origin} does not know the credential this run's ID token bought: it lasts five minutes. Sign in again, \`coffre login ${to.origin} --service <name>\``;
     case 'token':
-      return `${to.origin} does not know this service token: it is unknown, expired or revoked`;
+      return `${to.origin} does not know this bearer token: it is unknown, expired or revoked`;
     case 'access':
       return `${to.origin} refused the Access service token's sign-in: is its service still a member?`;
     case 'person':
@@ -278,6 +283,11 @@ function oneUrl(given: string | undefined, command: string): string | undefined 
     throw new Error(`name the instance once: coffre ${command} <url>, or coffre --url <url> ${command}`);
   }
   return given ?? sessionFlags.url;
+}
+
+/** A member as `coffre access` and `whoami` show one: `service:deploy (service account)`, `ada@acme.example (user)`. */
+function named(type: string, id: string): string {
+  return type === 'service' ? `service:${id} (service account)` : `${id} (user)`;
 }
 
 /** Parse `project/environment/KEY` or `project/environment`. */
@@ -330,7 +340,7 @@ async function login(args: string[]): Promise<void> {
   if (machine.length > 1) fail(`${machine.map((name) => `--${name}`).join(' and ')} are two ways to sign in: give one`);
   if (values['id-token'] && values.service === undefined) fail('--id-token goes with --service <name>: the ID token signs a CI run in as that service');
   if (machine.length > 0 && values['no-browser']) fail('--no-browser is for a person\'s sign-in, in a browser');
-  // Each machine sign-in implies its mode: a service token and an ID token are coffre's own, an Access service token Access's.
+  // Each machine sign-in implies its mode: a bearer token and an ID token are coffre's own, an Access service token Access's.
   if (machine.length > 0 && sessionFlags.authMode !== undefined) fail(`--auth-mode is for a person's sign-in: --${machine[0]} says which`);
   for (const name of ['access-client-id', 'service'] as const) {
     if (values[name]?.trim() === '') fail(`--${name} is empty: an unset variable, perhaps`);
@@ -483,9 +493,9 @@ async function saveRun(to: Target, session: Omit<Session, 'principal' | 'obtaine
   printMe(me);
 }
 
-/** `coffre login <url> --token`: a service token, asked for, and kept as the session. */
+/** `coffre login <url> --token`: a bearer token, asked for, and kept as the session. */
 async function tokenLogin(origin: string): Promise<void> {
-  const token = await readSecret({ label: 'Service token', hint: 'coffre_svc_…, from `coffre tokens issue` or the service\'s page. Hidden as you type.' }).catch((error: unknown) =>
+  const token = await readSecret({ label: 'Bearer token', hint: 'coffre_svc_…, from `coffre tokens issue` or the service\'s page. Hidden as you type.' }).catch((error: unknown) =>
     fail((error as Error).message),
   );
   await saveRun({ origin, mode: 'signin', by: 'token', credential: { kind: 'token', token } }, { mode: 'signin', kind: 'token', token, expiresAt: null });
@@ -551,7 +561,7 @@ async function accessLogin(origin: string): Promise<void> {
 
 /**
  * End a person's session on the server, then forget it here. A CI run's
- * is only forgotten: its service token or Access service token is the
+ * is only forgotten: its bearer token or Access service token is the
  * service's, for other runs too, and its credential ends by itself.
  */
 async function logout(args: string[]): Promise<void> {
@@ -581,7 +591,7 @@ async function logout(args: string[]): Promise<void> {
   writeStore(withoutSession(store, origin));
   process.stdout.write(`Signed out of ${origin}\n`);
   if (session.kind === 'token' || session.kind === 'access') {
-    process.stdout.write(`  The ${session.kind === 'token' ? 'service token' : 'Access service token'} is forgotten here, and works elsewhere until it is revoked.\n`);
+    process.stdout.write(`  The ${session.kind === 'token' ? 'bearer token' : 'Access service token'} is forgotten here, and works elsewhere until it is revoked.\n`);
   } else if (session.mode === 'cloudflare' && session.kind === undefined) {
     process.stdout.write('  cloudflared still holds its Access token until it expires.\n');
   }
@@ -598,12 +608,12 @@ async function whoami(args: string[]): Promise<void> {
   const session = readStore().instances[to.origin];
   const via = {
     person: { signin: 'coffre sign-in', cloudflare: 'Cloudflare Access' }[to.mode],
-    token: 'a service token, from coffre login --token',
+    token: 'a bearer token, from coffre login --token',
     access: 'an Access service token, from coffre login --access-client-id',
     run: "the run's ID token, from coffre login --service",
     service: "the run's ID token, as --service",
   }[to.by];
-  process.stdout.write(`${me.principal.id} (${me.principal.type}) on ${to.origin}, via ${via}\n`);
+  process.stdout.write(`${named(me.principal.type, me.principal.id)} on ${to.origin}, via ${via}\n`);
   if (to.by === 'person' && session?.expiresAt) {
     const days = Math.round((Date.parse(session.expiresAt) - Date.now()) / 86_400_000);
     process.stdout.write(`  session ends ${session.expiresAt.slice(0, 10)} (in ${days} day${days === 1 ? '' : 's'})\n`);
@@ -845,7 +855,7 @@ async function whoHasAccess(args: string[]): Promise<void> {
   for (const member of result.members) {
     const root = member.isRootAdmin ? '  [root admin]' : '';
     const tampered = member.tampered ? '  [record failed its integrity check: remove to start over]' : '';
-    process.stdout.write(`${member.principalId} (${member.principalType})${root}${tampered}\n`);
+    process.stdout.write(`${named(member.principalType, member.principalId)}${root}${tampered}\n`);
     for (const g of member.grants) {
       const place = g.environment === null ? g.project : `${g.project}/${g.environment}`;
       const until = g.expiresAt === null ? '' : ` until ${g.expiresAt.slice(0, 10)}`;
@@ -873,15 +883,16 @@ async function grantAccess(args: string[]): Promise<void> {
   const role = values.role;
   if (!isRole(role)) fail(`no role "${role}": \`coffre roles\` lists them`);
   const scope = values.env ? `${project}/${values.env}` : project;
+  const who = memberOf(principalId, values.service);
   // A member is admitted before they hold anything: grant does not make one.
-  const admit = `coffre admit ${principalId}${values.service ? ' --service' : ''}`;
+  const admit = `coffre admit ${shownMember(who).replace(/^user:/, '')}`;
   const hint: Hint = (status, detail) => (status === 409 && /add them as a member/.test(detail) ? `admit them first, \`${admit}\`` : null);
   // Declarative: this place gets this role, replacing any other role there.
-  await client(target(), hint).access.set(`${values.service ? 'token' : 'user'}:${principalId}`, {
+  await client(target(), hint).access.set(who, {
     [scope]: values.expires ? { role, until: values.expires } : role,
   });
 
-  process.stdout.write(`granted ${values.role} on ${scope} to ${principalId}\n`);
+  process.stdout.write(`granted ${values.role} on ${scope} to ${shownMember(who).replace(/^user:/, '')}\n`);
 }
 
 function plural(count: number, word: string): string {
@@ -982,7 +993,8 @@ async function offboard(args: string[]): Promise<void> {
 
   const principalId = positionals[0];
   if (!principalId) fail('usage: coffre offboard <principal> [--service] [--apply]');
-  const member = `${values.service ? 'token' : 'user'}:${principalId}`;
+  const member = memberOf(principalId, values.service);
+  const shown = shownMember(member).replace(/^user:/, '');
   const coffre = client();
 
   let report = await coffre.members.get(member);
@@ -990,16 +1002,16 @@ async function offboard(args: string[]): Promise<void> {
 
   if (report.status === 'active' && values.apply) {
     const removed = await coffre.members.remove(member);
-    process.stdout.write(`removed ${principalId}: revoked ${waysIn(report.principalType, removed.revoked)}\n`);
+    process.stdout.write(`removed ${shown}: revoked ${waysIn(report.principalType, removed.revoked)}\n`);
     report = removed.report;
   } else if (report.status === 'active') {
     process.stdout.write(
-      `${principalId} is active; removing would revoke ${waysIn(report.principalType, report.live)}\n`,
+      `${shown} is active; removing would revoke ${waysIn(report.principalType, report.live)}\n`,
     );
   } else {
     const by = report.removedBy === null ? '' : ` by ${report.removedBy}`;
     const at = report.removedAt === null ? '' : ` on ${report.removedAt.slice(0, 16).replace('T', ' ')}`;
-    process.stdout.write(`${principalId} was removed${by}${at}\n`);
+    process.stdout.write(`${shown} was removed${by}${at}\n`);
   }
 
   const rotated = report.rotated > 0 ? `, ${report.rotated} already rotated` : '';
@@ -1017,17 +1029,17 @@ async function offboard(args: string[]): Promise<void> {
   });
 
   if (report.issuedTokens.length > 0) {
-    process.stdout.write(`\nService tokens ${they} issued, which still work\n`);
+    process.stdout.write(`\nBearer tokens ${they} issued to service accounts, which still work\n`);
     for (const token of report.issuedTokens) {
       const label = token.label === null ? '' : ` "${token.label}"`;
       process.stdout.write(
-        `  ${token.service}${label} ${token.hint}, expires ${token.expiresAt.slice(0, 10)}\n`,
+        `  service:${serviceName(token.service)}${label} ${token.hint}, expires ${token.expiresAt.slice(0, 10)}\n`,
       );
     }
   }
 
   if (report.status === 'active' && !values.apply) {
-    process.stdout.write(`\nNothing changed. Re-run with --apply to remove ${principalId}.\n`);
+    process.stdout.write(`\nNothing changed. Re-run with --apply to remove ${shown}.\n`);
   }
 }
 
@@ -1057,7 +1069,8 @@ async function audit(args: string[]): Promise<void> {
   if (!Number.isInteger(limit) || limit < 1) fail(`--limit takes a positive number, not "${values.limit}"`);
   const result = await client().audit.list({
     limit,
-    actor: values.actor,
+    // `service:deploy` as people write it, `token:deploy` as the log keeps it.
+    actor: values.actor === undefined ? undefined : apiMember(values.actor),
     decision: values.denied ? 'deny' : undefined,
     detail: values.detail ? '1' : undefined,
   });
@@ -1069,7 +1082,7 @@ async function audit(args: string[]): Promise<void> {
   for (const entry of result.entries.reverse()) {
     const place = [entry.project, entry.environment, entry.key].filter((part) => part !== null).join('/') || '-';
     process.stdout.write(
-      `${entry.occurredAt}  ${entry.decision.padEnd(5)}  ${entry.actorId.padEnd(28)}  ${entry.action.padEnd(16)}  ${place}\n`,
+      `${entry.occurredAt}  ${entry.decision.padEnd(5)}  ${(entry.actorType === 'service' ? `service:${entry.actorId}` : entry.actorId).padEnd(28)}  ${entry.action.padEnd(16)}  ${place}\n`,
     );
   }
 }

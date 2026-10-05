@@ -15,21 +15,21 @@
  *   }
  *
  * A CI run signs in the same way, with what `coffre login` asks it for: a
- * service token (`--token`), an Access service token's secret
+ * bearer token (`--token`), an Access service token's secret
  * (`--access-client-id`), or the credential its ID token buys
  * (`--service`); each saved as the instance's session. The session flags
  * pick another instance than the current one, `--url`, or sign one command
  * in as a service by its ID token, `--service` (`flags.ts`).
  */
 
-import type { AuthInfo } from '@coffre/client';
+import { apiMember, type AuthInfo } from '@coffre/client';
 
 /** Who vouches for you there: coffre's own sign-in, or Cloudflare Access in front of it. */
 export type AuthMode = 'signin' | 'cloudflare';
 
 /**
  * Whose a saved session is, besides a person's by a device login or
- * cloudflared: a service token's, an Access service token's, or a CI run's,
+ * cloudflared: a bearer token's, an Access service token's, or a CI run's,
  * the five-minute credential its ID token bought.
  */
 export type SessionKind = 'token' | 'access' | 'run';
@@ -38,7 +38,7 @@ export type Session = {
   mode: AuthMode;
   /** A person's, when absent. */
   kind?: SessionKind;
-  /** Absent for Cloudflare Access, whose token cloudflared keeps and refreshes, or a service token's id and secret. */
+  /** Absent for Cloudflare Access, whose token cloudflared keeps and refreshes, or a bearer token's id and secret. */
   token?: string;
   /** An Access service token, `kind: 'access'`. */
   clientId?: string;
@@ -68,7 +68,7 @@ export type Credential =
 
 /**
  * Where a request goes, what it carries, and whose it is: a person's saved
- * session, a saved service token, Access service token or run's credential,
+ * session, a saved bearer token, Access service token or run's credential,
  * or `--service`, this command's own.
  */
 export type Target = { origin: string; mode: AuthMode; by: 'person' | SessionKind | 'service'; credential: Credential };
@@ -216,7 +216,9 @@ export function resolveTarget(flags: SessionFlags, store: Store, now: Date = new
     if (explicitMode === 'cloudflare') {
       throw new Error("--service signs a CI run in with its ID token, which coffre's own sign-in takes: behind Cloudflare Access, use an Access service token");
     }
-    const service = flags.service.startsWith('token:') ? flags.service : `token:${flags.service}`;
+    // `deploy`, `service:deploy` or `token:deploy`: the API's token:deploy.
+    const named = apiMember(flags.service);
+    const service = named.startsWith('token:') ? named : `token:${named}`;
     return { origin, mode: 'signin', by: 'service', credential: { kind: 'workload', service } };
   }
 

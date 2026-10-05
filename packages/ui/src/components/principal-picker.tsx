@@ -13,7 +13,7 @@ import { Check, Search } from './icons';
 type PrincipalType = DirectoryPrincipal['principalType'];
 
 /**
- * Who a grant is for: picked from the registered users or tokens, each shown
+ * Who a grant is for: picked from the registered users or service accounts, each shown
  * with what it already holds on this project, or typed when the list is not
  * yours to read.
  *
@@ -21,7 +21,7 @@ type PrincipalType = DirectoryPrincipal['principalType'];
  * would write a refusal to the audit log in their name, so they get a text
  * field and the server's answer instead. The list is asked for when the
  * dialog opens rather than with the page, since most visits never open it,
- * and shared with the Users and Tokens pages through the cache.
+ * and shared with the Users and Service accounts pages through the cache.
  */
 export function PrincipalPicker({
   principalType,
@@ -49,7 +49,7 @@ export function PrincipalPicker({
     return (
       <label className="field">
         <span className="label">
-          {principalType === 'user' ? 'Email' : 'Service token common name'}
+          {principalType === 'user' ? 'Email' : 'Service account name'}
         </span>
         <input
           className="input input-mono"
@@ -61,7 +61,7 @@ export function PrincipalPicker({
           onChange={(event) => onChange(event.target.value)}
         />
         <span className="hint">
-          The {kind} must already be registered under {principalType === 'user' ? 'Users' : 'Tokens'}.
+          The {kind} must already be registered under {principalType === 'user' ? 'Users' : 'Service accounts'}.
         </span>
       </label>
     );

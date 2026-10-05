@@ -1,7 +1,7 @@
 // Whether an instance's database is behind the code it runs, said once a
 // day per instance, on stderr, by any command that talks to it. Only owners
 // and root admins are told an instance's version (`/me`), and only they can
-// migrate it; for anyone else, and for service tokens, this says nothing.
+// migrate it; for anyone else, and for bearer tokens, this says nothing.
 import type { InstanceState } from '@coffre/client';
 
 export const DAY_MS = 24 * 60 * 60 * 1000;

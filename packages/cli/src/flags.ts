@@ -7,7 +7,7 @@
  *   coffre --url https://coffre.example.com --service api-deploy export app/prod
  *
  * The credential itself is the session `coffre login` saved: a person's,
- * or a CI run's, with a service token or an Access service token it asked
+ * or a CI run's, with a bearer token or an Access service token it asked
  * for, or an ID token traded for a credential.
  */
 import { parseArgs } from 'node:util';

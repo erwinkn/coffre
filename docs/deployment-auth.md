@@ -10,7 +10,7 @@ A deployment says who vouches for people with its `auth`, one of two:
 
 Either way, coffre decides who is a member: signing in proves who someone
 is, not that they may enter. With `signin`, the sessions, the CLI's device
-logins and service tokens are coffre's too. Behind Access, Access keeps the
+logins and service accounts' bearer tokens are coffre's too. Behind Access, Access keeps the
 browser's session, `cloudflared` the CLI's, and CI uses Access service
 tokens. Neither runs a password flow.
 
@@ -186,7 +186,7 @@ rootAdmins: ['first.admin@example.com'],
 Each value must be an email, and match what the first person signs in with:
 a verified address of their GitHub or OIDC account, or the `email` claim
 Cloudflare Access emits (who must then be allowed by the Access policy).
-Service tokens cannot be root admins. Root admins are the
+Service accounts cannot be root admins. Root admins are the
 configuration-owned bootstrap principals that can create the first project and
 grant; an empty or malformed list makes a new instance unadministrable, so the
 vault refuses to start with one.

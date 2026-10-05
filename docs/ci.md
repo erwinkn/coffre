@@ -1,16 +1,25 @@
 # Secrets in CI and deploys
 
-Give each pipeline a service member and a token, with a `viewer` grant on
-only the environments it reads, in coffre's Access page or with the CLI:
+Give each pipeline a service account, a machine identity, `service:<name>`,
+with a `viewer` grant on only the environments it reads. It signs in one of
+two ways:
+
+- **by OIDC**: its CI's ID token, matched by a trust binding, with nothing to
+  store or rotate. Use it wherever the CI signs one, as GitHub Actions and
+  GitLab do ([Without a stored token](#without-a-stored-token));
+- **with a bearer token**, kept in the CI's secrets, for CI without OIDC.
+
+On coffre's Service accounts page, or with the CLI:
 
 ```sh
 coffre admit api-deploy --service
 coffre grant market api-deploy --role viewer --env prod --service
-coffre tokens issue api-deploy --output-file api-deploy.token   # a new 0600 file, never shown again
+coffre trust api-deploy --github acme/api --workflow deploy.yml --branch main --apply   # OIDC
+coffre tokens issue api-deploy --output-file api-deploy.token   # or a bearer token, in a new 0600 file
 ```
 
 A member is admitted before it holds anything: `coffre grant` does not make
-one, and says so. Store the token in your CI provider's secret store. The
+one, and says so. With a bearer token, store it in your CI provider's secret store. The
 CLI reads no environment variable, and a secret is never a flag or an
 argument, which `ps`, the shell's history and CI logs would show: the job
 pipes the token to `coffre login --token`, which saves the session the
@@ -28,7 +37,7 @@ job signs in over it or reads with it: `export HOME="$(mktemp -d)"` before
 `coffre login`, removed when the job ends. `coffre logout` forgets the
 token there too, and revokes nothing.
 
-A service token works without an interactive login. The runner must be
+A bearer token works without an interactive login. The runner must be
 able to reach your instance; behind Cloudflare Access, the job signs in
 with an Access service token instead, its secret piped in the same way:
 `coffre login <url> --access-client-id <id>`
@@ -42,9 +51,10 @@ coffre holds no Cloudflare, Vercel or GitHub write credential for this.
 
 ## Without a stored token
 
-A CI run can sign in as a service with the ID token its platform signs for
-it, instead of a token kept in the CI's secrets. An owner trusts the
-workflow, on the service's page under "Trusted workloads", or with
+A CI run can sign in as a service account by OIDC, with the ID token its
+platform signs for it, instead of a bearer token kept in the CI's secrets. An
+owner trusts the workflow, on the service account's page under "Sign in with
+OIDC", or with
 `coffre trust` ([how a binding is checked](design/oidc.md)). Each run then
 trades its ID token for a credential that lasts five minutes, and nothing
 long-lived is stored. A deployment `coffre init` writes has this on; an
@@ -92,7 +102,7 @@ gh api repos/acme/website --jq '"--repository-id \(.id) --owner-id \(.owner.id)"
 With the CLI:
 
 - **GitHub Actions**: give the job `permissions: id-token: write`, and
-  pass `--service` (the service, `token:api-deploy` or `api-deploy`) and
+  pass `--service` (the service account, `api-deploy` or `service:api-deploy`) and
   `--url`, nothing else. Each command asks the runner for a fresh ID token,
   for your instance's URL, and keeps the credential it buys in memory:
 

@@ -281,8 +281,10 @@ checks. The nonce-based Content-Security-Policy stays as it is.
 
 The API is small and addressed by path: `market` is a project, `market/prod`
 an environment, `market/prod/DATABASE_URL` a secret, and `user:ada@acme.example`
-or `token:ci-deploy` a member. The URL names the thing and the HTTP method is
-the verb:
+or `token:ci-deploy` a member. A service account is `token:<name>` here, in the
+vault and in the audit log, whose signed entries hold it; the CLI and the UI
+show it as `service:<name>`, and take either (`@coffre/client`'s `shownMember`
+and `apiMember`). The URL names the thing and the HTTP method is the verb:
 
 | Call | HTTP |
 |---|---|

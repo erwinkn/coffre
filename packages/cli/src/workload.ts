@@ -1,6 +1,6 @@
 /**
  * A CI run signing in as a service, with the ID token its platform signs
- * for it (docs/design/oidc.md), and no service token: `coffre --service
+ * for it (docs/design/oidc.md), and no bearer token: `coffre --service
  * api-deploy …` for one command, or `coffre login <url> --service
  * api-deploy` for the commands after it. The CLI takes the run's ID token,
  * trades it at `POST /api/auth/oidc` for a credential that lasts five

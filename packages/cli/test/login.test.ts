@@ -126,7 +126,7 @@ test('a CI run signs in with what login asks it for, piped in, and later command
     // The next command, signed in as the run.
     const whoami = await cli(home, ['whoami'], '');
     assert.equal(whoami.status, 0, whoami.stderr);
-    assert.match(whoami.stdout, /^deploy \(service\) on .*, via (a service token|an Access service token|the run's ID token)/);
+    assert.match(whoami.stdout, /^service:deploy \(service account\) on .*, via (a bearer token|an Access service token|the run's ID token)/);
     // Signing out forgets it here, and revokes nothing: the token is the service's.
     const before = seen.length;
     const logout = await cli(home, ['logout'], '');

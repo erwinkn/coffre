@@ -1,5 +1,5 @@
 // `coffre verify instance`: an instance checked from outside. First as
-// anyone on the network sees it; then with a service token that reads one
+// anyone on the network sees it; then with a bearer token that reads one
 // canary. The token is the operator's, from CI, with its canary; or, with
 // this CLI signed in as an owner or a root admin, one the run issues itself:
 // it finds or makes its own place, writes a fresh canary, runs the token's
@@ -13,7 +13,7 @@
 import { randomBytes } from 'node:crypto';
 import { parseArgs } from 'node:util';
 
-import { CoffreError, createClient, type CoffreClient } from '@coffre/client';
+import { CoffreError, createClient, shownMember, type CoffreClient } from '@coffre/client';
 
 import { readSecret } from '../secret.ts';
 import { credentialHeaders, instanceOrigin, resolveTarget, type SessionFlags, type Store } from '../instance.ts';
@@ -33,7 +33,7 @@ export const PROBE = {
 
 export const INSTANCE_USAGE = `usage:
   coffre verify instance [<url>]
-  coffre verify instance [<url>] --canary <project>/<environment>/<KEY>, signed in with a service token
+  coffre verify instance [<url>] --canary <project>/<environment>/<KEY>, signed in with a bearer token
 
 Checks an instance from outside, the current one unless <url> names another:
 
@@ -41,11 +41,11 @@ Checks an instance from outside, the current one unless <url> names another:
                    another site refused, /api/auth, nothing like a value shown
   as an owner      with your \`coffre login\` session, as an owner or a root
                    admin: finds or makes conformance/live and
-                   token:conformance-probe, issues it a credential, writes a
+                   service:conformance-probe, issues it a credential, writes a
                    fresh canary, runs the token's checks below, then verifies
                    the whole audit log as you. The credential is revoked
                    however the run ends, and your session stays signed in
-  with a token     signed in with a service token, \`coffre login <url> --token\`,
+  with a token     signed in with a bearer token, \`coffre login <url> --token\`,
                    as CI is: one that reads the canary's environment and
                    holds auditor on its project. Its value nowhere but its
                    reveal, the reveal audited, nothing else in reach
@@ -71,11 +71,11 @@ export async function verifyInstance(args: string[], store: Store, session: Sess
   if (positionals[0] !== undefined && session.url !== undefined) {
     stop(2, 'coffre: name the instance once: coffre verify instance <url>, or coffre --url <url> verify instance');
   }
-  // As no one, then with a service token, or as you: never as a CI run's ID token.
+  // As no one, then with a bearer token, or as you: never as a CI run's ID token.
   if (session.service !== undefined) {
     stop(
       2,
-      'coffre: verify instance checks as no one, then with a service token `coffre login --token` saved, or as you with the session `coffre login` saved: ' +
+      'coffre: verify instance checks as no one, then with a bearer token `coffre login --token` saved, or as you with the session `coffre login` saved: ' +
         '--service is for other commands',
     );
   }
@@ -91,7 +91,7 @@ export async function verifyInstance(args: string[], store: Store, session: Sess
   const report = new Checks(out);
   const saved = store.instances[origin];
   if (saved?.kind === 'access' || saved?.kind === 'run') {
-    stop(2, `coffre: verify instance checks as no one, then with a service token, or as you: the session saved for ${origin} is ${saved.kind === 'access' ? 'an Access service token' : "a run's ID token"}`);
+    stop(2, `coffre: verify instance checks as no one, then with a bearer token, or as you: the session saved for ${origin} is ${saved.kind === 'access' ? 'an Access service token' : "a run's ID token"}`);
   }
 
   if (saved?.kind === 'token' && saved.token !== undefined) {
@@ -106,14 +106,14 @@ export async function verifyInstance(args: string[], store: Store, session: Sess
     } catch (error) {
       stop(2, `coffre: ${error instanceof Error ? error.message : String(error)}`);
     }
-    out.write(`${s.bold(`Checking ${origin}`)}, as no one and with the service token \`coffre login --token\` saved\n`);
+    out.write(`${s.bold(`Checking ${origin}`)}, as no one and with the bearer token \`coffre login --token\` saved\n`);
     out.write(s.dim("  The token's reads add a few entries to the instance's audit log, for good.\n\n"));
     await anonymousChecks(report, origin);
     await tokenChecks(report, origin, { token, canary });
     return finish(out, report);
   }
   if (values.canary !== undefined) {
-    stop(2, 'coffre: --canary goes with a service token, `coffre login <url> --token`; as an owner, the run writes a canary of its own');
+    stop(2, 'coffre: --canary goes with a bearer token, `coffre login <url> --token`; as an owner, the run writes a canary of its own');
   }
 
   // The session `coffre login` made, and none other: no second sign-in.
@@ -135,7 +135,7 @@ export async function verifyInstance(args: string[], store: Store, session: Sess
   out.write(`${s.bold(`Checking ${origin}`)}, as no one, then as you\n`);
   out.write(
     s.dim(
-      `  It keeps ${PROBE.project}/${PROBE.environment} and ${PROBE.service} for the next run, and its reads stay in the audit log, for good.\n\n`,
+      `  It keeps ${PROBE.project}/${PROBE.environment} and ${shownMember(PROBE.service)} for the next run, and its reads stay in the audit log, for good.\n\n`,
     ),
   );
   await anonymousChecks(report, origin);
@@ -185,7 +185,7 @@ async function signedIn(api: CoffreClient, origin: string): Promise<{ detail: st
   }
   const who = me.principal.id;
   if (me.instanceRole === 'user') {
-    throw new Failure(`${who} is neither an owner nor a root admin of ${origin}: nothing was made. Sign in as one, or with a service token, \`coffre login ${origin} --token\`, and name its --canary`);
+    throw new Failure(`${who} is neither an owner nor a root admin of ${origin}: nothing was made. Sign in as one, or with a bearer token, \`coffre login ${origin} --token\`, and name its --canary`);
   }
   return { detail: `${who}, ${me.instanceRole === 'owner' ? 'an owner' : 'a root admin'}, with this CLI's session`, value: who };
 }
@@ -207,7 +207,7 @@ async function setUp(api: CoffreClient, issued: Issued[]): Promise<{ detail: str
     await api.environments.create(place, { name: 'Live' });
     made.push(`the environment ${place}`);
   }
-  if ((await api.members.add(PROBE.service)).created) made.push(`the service ${PROBE.service}`);
+  if ((await api.members.add(PROBE.service)).created) made.push(`the service account ${shownMember(PROBE.service)}`);
   const { changes } = await api.access.set(PROBE.service, { [place]: 'viewer', [PROBE.project]: 'auditor' });
   const granted = Object.entries(changes).filter(([, change]) => change !== 'unchanged');
   if (granted.length > 0) made.push(`its grants on ${granted.map(([where]) => where).join(' and ')}`);
@@ -216,7 +216,7 @@ async function setUp(api: CoffreClient, issued: Issued[]): Promise<{ detail: str
   const credential = await api.tokens.issue(PROBE.service, { label: 'coffre verify instance, one run', expiresInDays: 1 });
   issued.push({ member: PROBE.service, id: credential.id });
   return {
-    detail: `${made.length === 0 ? 'all found' : `made ${made.join(', ')}`}; a fresh ${place}/${PROBE.key} and a fresh credential for ${PROBE.service}`,
+    detail: `${made.length === 0 ? 'all found' : `made ${made.join(', ')}`}; a fresh ${place}/${PROBE.key} and a fresh credential for ${shownMember(PROBE.service)}`,
     value: { token: credential.token, canary: { project: PROBE.project, environment: PROBE.environment, key: PROBE.key, value } },
   };
 }
@@ -235,7 +235,7 @@ async function cleanUp(api: CoffreClient, issued: Issued[]): Promise<string> {
   const others = tokens.length === 0 ? 'no working credential' : `${tokens.length} credential${tokens.length === 1 ? '' : 's'} this run did not issue, left as they are`;
   return (
     `${issued.length === 0 ? 'nothing issued' : 'the credential revoked'}; your session stays. Staying: ${PROBE.project}/${PROBE.environment} and its ` +
-    `${PROBE.key}, ${PROBE.service} with ${others}, and this run's entries in the audit log`
+    `${PROBE.key}, ${shownMember(PROBE.service)} with ${others}, and this run's entries in the audit log`
   );
 }
 
