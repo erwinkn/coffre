@@ -7,7 +7,7 @@ import { readGrants } from '@coffre/db/grants';
 import * as dialect from '@coffre/db/dialect';
 import { canonicalTimestamp, changedRows, clock, clockMillis, forUpdate, migrationLedger, truth, type Table } from '@coffre/db/dialect';
 import type * as schema from '@coffre/db/schema';
-import { and, asc, count, countDistinct, desc, eq, getTableColumns, getTableName, gt, gte, inArray, isNull, lt, notInArray, or, sql, type SQL } from 'drizzle-orm';
+import { and, asc, count, countDistinct, desc, eq, getTableColumns, getTableName, gt, gte, inArray, isNull, like, lt, notInArray, notLike, or, sql, type AnyColumn, type SQL } from 'drizzle-orm';
 
 import { authMac, checkAuthRow, issuingBinding, verifyAuthRow, type AuthRow, type AuthTable } from '../auth-rows.ts';
 
@@ -147,14 +147,28 @@ export type ResolvedPath = {
 const none = sql`1 = 0`;
 
 /**
+ * A deleted project or environment: its tombstone keeps the row, which the
+ * log names, under a slug no live place holds, `market~deleted-2026-10-05`.
+ */
+const TOMBSTONE = '~deleted-';
+
+function standing(slug: AnyColumn): SQL {
+  return notLike(slug, '%~%');
+}
+
+/**
  * A path's project, environment and secret. Null when the project does not
  * exist; a missing environment or secret comes back as null in its place.
+ * A deleted place is missing too, unless asked for its `tombstones`, by
+ * which the log is still read: `market~deleted-2026-10-05`.
  */
 export async function resolvePath(
   db: Queryable,
   path: { project: string; environment?: string; key?: string },
+  { tombstones = false }: { tombstones?: boolean } = {},
 ): Promise<ResolvedPath | null> {
   const { projects, environments, secrets } = tablesOf(db);
+  const alive = (slug: AnyColumn) => (tombstones ? undefined : standing(slug));
   const [row] = await db
     .select({ project: projects, environment: environments, secret: secrets })
     .from(projects)
@@ -162,13 +176,13 @@ export async function resolvePath(
       environments,
       path.environment === undefined
         ? none
-        : and(eq(environments.projectId, projects.id), eq(environments.slug, path.environment)),
+        : and(eq(environments.projectId, projects.id), eq(environments.slug, path.environment), alive(environments.slug)),
     )
     .leftJoin(
       secrets,
       path.key === undefined ? none : and(eq(secrets.environmentId, environments.id), eq(secrets.key, path.key)),
     )
-    .where(eq(projects.slug, path.project))
+    .where(and(eq(projects.slug, path.project), alive(projects.slug)))
     .limit(1);
   if (row === undefined) return null;
   const { project, environment, secret } = row;
@@ -199,9 +213,14 @@ export type PlaceRow = {
   environments: { id: string; slug: string; name: string; archivedAt: Date | null; secretCount: number }[];
 };
 
-/** Every project with its environments and their live secret counts, by slug. */
-export async function places(db: Queryable): Promise<PlaceRow[]> {
+/**
+ * Every project with its environments and their live secret counts, by
+ * slug. Deleted ones are left out, unless asked for their `tombstones`, to
+ * name an id the log holds.
+ */
+export async function places(db: Queryable, { tombstones = false }: { tombstones?: boolean } = {}): Promise<PlaceRow[]> {
   const { projects, environments, secrets } = tablesOf(db);
+  const alive = (slug: AnyColumn) => (tombstones ? undefined : standing(slug));
   const rows = await db
     .select({
       project: projects,
@@ -209,8 +228,9 @@ export async function places(db: Queryable): Promise<PlaceRow[]> {
       secretCount: count(secrets.id),
     })
     .from(projects)
-    .leftJoin(environments, eq(environments.projectId, projects.id))
+    .leftJoin(environments, and(eq(environments.projectId, projects.id), alive(environments.slug)))
     .leftJoin(secrets, and(eq(secrets.environmentId, environments.id), isNull(secrets.archivedAt)))
+    .where(alive(projects.slug))
     .groupBy(projects.id, environments.id)
     .orderBy(asc(projects.slug), asc(environments.slug));
 
@@ -246,6 +266,109 @@ export async function distinctSecretCounts(db: Queryable, environmentIds: string
     .where(and(inArray(secrets.environmentId, environmentIds), isNull(secrets.archivedAt)))
     .groupBy(secrets.projectId);
   return new Map(rows.map((row) => [row.projectId, Number(row.count)]));
+}
+
+// --- deleting a place ----------------------------------------------------------
+
+/** A project, or one of its environments: what a deletion takes. */
+export type Doomed = { projectId: string; environmentId: string | null };
+
+/** A grant, lapsed or live, on a place being deleted: an environment's names its project too, as the vault's changes do. */
+export type DoomedGrant = { principal: string; projectId: string; environmentId: string | null; role: string; expiresAt: number | null };
+
+/**
+ * What deleting a place would take: how many keys it names, how many of
+ * their versions still hold a value, and every grant on it, lapsed ones
+ * too, with who would hold nothing else afterwards. The grants are the
+ * vault's to revoke; a list of them is a read (`members` reads them too).
+ */
+export async function deletionScope(db: Queryable, place: Doomed): Promise<{
+  /** The environments it takes, by slug: a project's every live one, or the one. */
+  environments: { id: string; slug: string }[];
+  keys: number;
+  versions: number;
+  grants: DoomedGrant[];
+  /** Members, not owners, whose every live grant is among `grants`. */
+  stranded: string[];
+}> {
+  const { secrets, secretVersions, vaultGrants, vaultMembers, environments } = tablesOf(db);
+  const under = secretsUnder(secrets, place);
+  // Every grant on the instance, the place's and all others: few rows, and what tells who is left holding nothing.
+  const [going, [keys], [versions], held] = await Promise.all([
+    db.select({ id: environments.id, slug: environments.slug }).from(environments).where(and(
+      eq(environments.projectId, place.projectId),
+      place.environmentId === null ? standing(environments.slug) : eq(environments.id, place.environmentId),
+    )).orderBy(asc(environments.slug)),
+    db.select({ n: count() }).from(secrets).where(under),
+    db.select({ n: count() }).from(secretVersions).innerJoin(secrets, eq(secrets.id, secretVersions.secretId))
+      .where(and(under, holdsValue(secretVersions))),
+    db.select({
+      principal: vaultGrants.principal,
+      projectId: sql<string>`coalesce(${vaultGrants.projectId}, ${environments.projectId})`,
+      environmentId: vaultGrants.environmentId,
+      role: vaultGrants.role,
+      expiresAt: vaultGrants.expiresAt,
+      owner: vaultMembers.owner,
+    })
+      .from(vaultGrants)
+      .innerJoin(vaultMembers, eq(vaultMembers.principal, vaultGrants.principal))
+      .leftJoin(environments, eq(environments.id, vaultGrants.environmentId))
+      .orderBy(asc(vaultGrants.principal)),
+  ]);
+  const doomed = (grant: (typeof held)[number]) =>
+    place.environmentId === null ? grant.projectId === place.projectId : grant.environmentId === place.environmentId;
+  const grants = held.filter(doomed).map(({ owner: _, ...grant }) => grant);
+  const now = Date.now();
+  const stranded = [...new Set(grants.map((grant) => grant.principal))].filter((principal) =>
+    held.every((grant) => grant.principal !== principal
+      || (!grant.owner && (doomed(grant) || (grant.expiresAt !== null && grant.expiresAt <= now)))));
+  return { environments: going, keys: Number(keys.n), versions: Number(versions.n), grants, stranded };
+}
+
+function secretsUnder(secrets: Tables['secrets'], place: Doomed): SQL {
+  return and(
+    eq(secrets.projectId, place.projectId),
+    place.environmentId === null ? undefined : eq(secrets.environmentId, place.environmentId),
+  )!;
+}
+
+/** A version that still holds its value: an erased one has an empty ciphertext and wrapped key. */
+function holdsValue(secretVersions: Tables['secretVersions']): SQL {
+  return or(sql`length(${secretVersions.ciphertext}) > 0`, sql`length(${secretVersions.wrappedDek}) > 0`)!;
+}
+
+/**
+ * Empty the ciphertext and wrapped data key of every version under a place:
+ * the one change a version takes (`secret_versions_erase_only`). Its row
+ * stays, which the log names. Returns how many still held a value.
+ */
+export async function eraseVersions(tx: Transaction, place: Doomed): Promise<number> {
+  const { secrets, secretVersions } = tablesOf(tx);
+  const under = tx.select({ id: secrets.id }).from(secrets).where(secretsUnder(secrets, place));
+  const empty = Buffer.alloc(0);
+  return changedRows(await tx.update(secretVersions)
+    .set({ ciphertext: empty, wrappedDek: empty })
+    .where(and(inArray(secretVersions.secretId, under), holdsValue(secretVersions))));
+}
+
+/**
+ * The slug a deleted place keeps, `market~deleted-2026-10-05`, or
+ * `market~deleted-2026-10-05-2` for the second that day: one that no
+ * tombstone beside it holds yet. A deletion reads it under the log's
+ * head, which every change of a slug takes first, so no other can claim it
+ * before it commits.
+ */
+export async function tombstoneSlug(db: Queryable, slug: string, day: Date, within: { projectId: string } | null): Promise<string> {
+  const { projects, environments } = tablesOf(db);
+  const base = `${slug}${TOMBSTONE}${day.toISOString().slice(0, 10)}`;
+  const rows = within === null
+    ? await db.select({ slug: projects.slug }).from(projects).where(like(projects.slug, `${base}%`))
+    : await db.select({ slug: environments.slug }).from(environments)
+      .where(and(eq(environments.projectId, within.projectId), like(environments.slug, `${base}%`)));
+  const taken = new Set(rows.map((row) => row.slug));
+  let candidate = base;
+  for (let n = 2; taken.has(candidate); n += 1) candidate = `${base}-${n}`;
+  return candidate;
 }
 
 // --- members and sign-in ------------------------------------------------------

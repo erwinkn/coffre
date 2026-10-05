@@ -6,6 +6,7 @@ import { Report } from './report.ts';
 import { bulkLimit, crossSite, everyProject, grantScoping, membersOnly, offboarding } from './checks/access.ts';
 import { checkpoints, deletedTail, forgedVaultEntry, missingEntry, noAuditNoValue, revealAudited, rewrittenEntry, verification, writesAgree } from './checks/audit.ts';
 import { earlierCheckpoint } from './checks/checkpoints.ts';
+import { deletion } from './checks/deletion.ts';
 import { appLogin, vaultLogin } from './checks/logins.ts';
 import { accessAuthorship, memberTampering, noAuditNoAccess, sealingRace } from './checks/members.ts';
 import { refusedCheckpoint, missingCheckpoint, middleCut } from './checks/readiness.ts';
@@ -54,6 +55,7 @@ export async function conform(deployment: Deployment, options: { bulkLimit: numb
     );
     await report.check('verify keys', { owner }, ({ owner }) => verifyKeys(owner));
     await report.check('manage by CLI', { owner }, ({ owner }) => manageByCli(owner));
+    await report.check('delete by CLI', { owner, admin }, ({ owner, admin }) => deletion(deployment, owner, admin));
   } finally {
     for (const cli of clis) cli.remove();
   }

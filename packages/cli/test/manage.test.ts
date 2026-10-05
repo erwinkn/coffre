@@ -18,7 +18,7 @@ function fixture(answer: (call: Call) => unknown) {
     transport: async (request) => {
       const url = new URL(request.url);
       const text = await request.text();
-      const call = { method: request.method, path: decodeURIComponent(url.pathname.slice('/api'.length)), body: text === '' ? undefined : JSON.parse(text) };
+      const call = { method: request.method, path: decodeURIComponent(url.pathname.slice('/api'.length)) + url.search, body: text === '' ? undefined : JSON.parse(text) };
       calls.push(call);
       const body = answer(call);
       return body instanceof Response ? body : Response.json(body);
@@ -190,6 +190,43 @@ test('projects and environments: create, rename and archive, each one request', 
   );
   await assert.rejects(manage.projectsRename(connect, ['deck'], io), /give it a new --name, a new --slug, or both/);
   await assert.rejects(manage.environmentsCreate(connect, ['deck'], io), /expected <project>\/<environment>, not "deck"/);
+});
+
+test('projects delete and environments delete show what they would take, and delete only with --apply', async () => {
+  const deletion = (path: string, dryRun: boolean) => ({
+    dryRun,
+    deletion: {
+      path,
+      tombstone: `${path.split('/').at(-1)}~deleted-2026-10-05`,
+      environments: path.includes('/') ? ['prod'] : ['dev', 'prod'],
+      keys: 3,
+      versions: 1,
+      grants: [{ member: 'token:ci-deploy', place: 'slides/prod', role: 'viewer' }],
+      stranded: ['token:ci-deploy'],
+    },
+  });
+  const { connect, calls, written, io } = fixture(({ path }) =>
+    deletion(path.replace(/^\/projects\//, '').replace(/\?.*$/, ''), path.endsWith('?dryRun=1')),
+  );
+  await manage.placeDelete(connect, ['slides'], false, io);
+  assert.equal(
+    written.out,
+    'would delete slides, for good:\n' +
+      "  erased: 1 version, each one's ciphertext and wrapped data key, in dev, prod\n" +
+      '  revoked: 1 grant, service:ci-deploy (viewer on slides/prod)\n' +
+      '  kept, names only: slides~deleted-2026-10-05 and its 3 keys, which the audit log names\n' +
+      '  slides would be free to use again\n' +
+      '  service:ci-deploy would hold nothing anywhere: `coffre offboard ci-deploy --service` removes them\n' +
+      'Backups taken before the deletion still hold the encrypted values.\n' +
+      'Nothing changed. Re-run with --apply to delete it.\n',
+  );
+  written.out = '';
+  await manage.placeDelete(connect, ['slides/prod', '--apply'], true, io);
+  assert.match(written.out, /^deleted slides\/prod, for good:\n/);
+  assert.match(written.out, /  prod is free to use again\n/);
+  assert.doesNotMatch(written.out, /Re-run/);
+  assert.deepEqual(calls.map(({ method, path }) => `${method} ${path}`), ['DELETE /projects/slides?dryRun=1', 'DELETE /projects/slides/prod']);
+  await assert.rejects(manage.placeDelete(connect, ['slides'], true, io), /expected <project>\/<environment>, not "slides"/);
 });
 
 test("a secret's key: renamed with its versions, archived and back", async () => {

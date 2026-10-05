@@ -60,14 +60,49 @@ EXCEPTION
 END
 $$;
 
--- 5. Secret versions are immutable: no UPDATE, no DELETE.
+-- 5. Secret versions are immutable but for being erased: their ciphertext and
+-- wrapped key emptied, nothing else. Each block writes a version of its own and
+-- rolls it back, so the checks below see the fixture as it was.
 DO $$
+DECLARE
+    version_id uuid := gen_random_uuid();
+    secret_id uuid := gen_random_uuid();
+    attempt text;
 BEGIN
-    UPDATE secret_versions SET ciphertext = '\x00'::bytea;
-    RAISE EXCEPTION 'FAIL: coffre_app was able to UPDATE secret_versions';
-EXCEPTION
-    WHEN insufficient_privilege THEN
-        RAISE NOTICE 'PASS: coffre_app cannot UPDATE secret_versions';
+    FOREACH attempt IN ARRAY ARRAY[
+        'UPDATE secret_versions SET ciphertext = ''\x00''::bytea WHERE id = $1',
+        'UPDATE secret_versions SET ciphertext = ''''::bytea, wrapped_dek = ''\x01''::bytea WHERE id = $1',
+        'UPDATE secret_versions SET iv = iv WHERE id = $1',
+        'UPDATE secret_versions SET version = 2 WHERE id = $1'
+    ] LOOP
+        BEGIN
+            INSERT INTO secrets (id, project_id, environment_id, key)
+            VALUES (secret_id, '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', 'ERASE_PROBE');
+            INSERT INTO secret_versions (id, secret_id, version, envelope_version, ciphertext, iv, auth_tag, wrapped_dek,
+                                         kek_provider, kek_id, kek_version, created_by)
+            VALUES (version_id, secret_id, 1, 1, '\x00', decode(repeat('00', 12), 'hex'), decode(repeat('00', 16), 'hex'),
+                    '\x00', 'local', 'k', '1', 'user:admin@acme.example');
+            EXECUTE attempt USING version_id;
+            RAISE EXCEPTION 'FAIL: coffre_app could %', attempt;
+        EXCEPTION
+            WHEN insufficient_privilege THEN NULL;
+        END;
+    END LOOP;
+    RAISE NOTICE 'PASS: coffre_app cannot rewrite a secret version';
+
+    BEGIN
+        INSERT INTO secrets (id, project_id, environment_id, key)
+        VALUES (secret_id, '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', 'ERASE_PROBE');
+        INSERT INTO secret_versions (id, secret_id, version, envelope_version, ciphertext, iv, auth_tag, wrapped_dek,
+                                     kek_provider, kek_id, kek_version, created_by)
+        VALUES (version_id, secret_id, 1, 1, '\x00', decode(repeat('00', 12), 'hex'), decode(repeat('00', 16), 'hex'),
+                '\x00', 'local', 'k', '1', 'user:admin@acme.example');
+        UPDATE secret_versions SET ciphertext = ''::bytea, wrapped_dek = ''::bytea WHERE id = version_id;
+        RAISE EXCEPTION 'erased' USING ERRCODE = 'raise_exception';
+    EXCEPTION
+        WHEN raise_exception THEN
+            RAISE NOTICE 'PASS: coffre_app can erase a secret version';
+    END;
 END
 $$;
 

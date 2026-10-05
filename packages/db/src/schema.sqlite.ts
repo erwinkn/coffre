@@ -48,6 +48,13 @@ const flag = (name: string) => integer(name, { mode: 'boolean' });
 const isSlug = (column: AnySQLiteColumn, max: number) =>
   sql`length(${column}) BETWEEN 1 AND ${sql.raw(String(max))} AND ${column} GLOB '[a-z0-9]*' AND ${column} NOT GLOB '*[^a-z0-9-]*'`;
 
+/** A slug, or a tombstone's, `market~deleted-2026-10-05`: schema.ts's `PLACE_SLUG`, in GLOB. */
+const isPlaceSlug = (column: AnySQLiteColumn) => {
+  const base = sql`substr(${column}, 1, instr(${column}, '~') - 1)`;
+  const suffix = sql`substr(${column}, instr(${column}, '~') + 1)`;
+  return sql`(${isSlug(column, 63)}) OR (instr(${column}, '~') BETWEEN 2 AND 64 AND ${base} GLOB '[a-z0-9]*' AND ${base} NOT GLOB '*[^a-z0-9-]*' AND length(${suffix}) BETWEEN 1 AND 40 AND ${suffix} NOT GLOB '*[^a-z0-9-]*')`;
+};
+
 export const projects = sqliteTable(
   'projects',
   {
@@ -59,7 +66,7 @@ export const projects = sqliteTable(
   },
   (table) => [
     unique('projects_slug_key').on(table.slug),
-    check('projects_slug_check', isSlug(table.slug, 63)),
+    check('projects_slug_check', isPlaceSlug(table.slug)),
   ],
 );
 
@@ -76,7 +83,7 @@ export const environments = sqliteTable(
   (table) => [
     unique('environments_project_id_slug_key').on(table.projectId, table.slug),
     unique('environments_project_scoped').on(table.id, table.projectId),
-    check('environments_slug_check', isSlug(table.slug, 63)),
+    check('environments_slug_check', isPlaceSlug(table.slug)),
     foreignKey({
       name: 'environments_project_id_fkey',
       columns: [table.projectId],

@@ -41,6 +41,7 @@ import {
   ShieldCheck as ShieldCheckGlyph,
   Sun as SunGlyph,
   Terminal as TerminalGlyph,
+  Trash2,
   TriangleAlert,
   Upload as UploadGlyph,
   User as UserGlyph,
@@ -155,6 +156,7 @@ export const EyeOff = lucide(EyeOffGlyph);
 export const Copy = lucide(CopyGlyph);
 export const Pencil = lucide(PencilGlyph);
 export const Archive = lucide(ArchiveGlyph);
+export const Trash = lucide(Trash2);
 export const History = lucide(HistoryGlyph);
 export const RotateBack = lucide(RotateCcw);
 export const Upload = lucide(UploadGlyph);

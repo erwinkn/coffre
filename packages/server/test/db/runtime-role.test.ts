@@ -35,6 +35,9 @@ const EXPECTED_UPDATE_COLUMNS = [
   'projects.archived_at',
   'projects.name',
   'projects.slug',
+  // A deleted place's versions are erased, and that is all a version ever takes.
+  'secret_versions.ciphertext',
+  'secret_versions.wrapped_dek',
   'secrets.archived_at',
   'secrets.current_version',
   'secrets.current_version_id',
@@ -58,7 +61,7 @@ test(
       const migrations = await owner.query<{ count: number }>(
         'SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations',
       );
-      assert.equal(migrations.rows[0].count, 6);
+      assert.equal(migrations.rows[0].count, 7);
 
       const identity = await runtime.query<{
         current_user: string;

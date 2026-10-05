@@ -9,7 +9,7 @@
  * else: the web app hands requests straight to its router, and the CLI adds
  * its own handling of Cloudflare Access redirects.
  */
-import type { Api, AuthInfo, BindingPlan, BindingView, DryRunOutcome, DryRunResult, SetResult } from './api.ts';
+import type { Api, AuthInfo, BindingPlan, BindingView, DeletionResult, DryRunOutcome, DryRunResult, SetResult } from './api.ts';
 
 export type {
   AccessValue,
@@ -18,6 +18,8 @@ export type {
   AuthInfo,
   BindingPlan,
   BindingView,
+  Deletion,
+  DeletionResult,
   DryRunOutcome,
   DryRunResult,
   IdentityRow,
@@ -154,6 +156,13 @@ export function createClient(options: ClientOptions) {
         call('PUT /projects/:project', { project }, input),
       update: (project: string, patch: RouteInput<'PATCH /projects/:project'>) =>
         call('PATCH /projects/:project', { project }, patch),
+      /** What deleting an archived project would erase and revoke; changes nothing. */
+      previewDelete: (project: string) => {
+        const [method, route] = address('DELETE /projects/:project', { project });
+        return send(method, `${route}?dryRun=1`, undefined) as Promise<DeletionResult>;
+      },
+      /** Delete an archived project for good: its values erased, its grants revoked, its slug free. Owners only. */
+      delete: (project: string) => call('DELETE /projects/:project', { project }),
     },
 
     environments: {
@@ -161,6 +170,13 @@ export function createClient(options: ClientOptions) {
         call('PUT /projects/:project/:environment', place(path), input),
       update: (path: string, patch: RouteInput<'PATCH /projects/:project/:environment'>) =>
         call('PATCH /projects/:project/:environment', place(path), patch),
+      /** What deleting an archived environment would erase and revoke; changes nothing. */
+      previewDelete: (path: string) => {
+        const [method, route] = address('DELETE /projects/:project/:environment', place(path));
+        return send(method, `${route}?dryRun=1`, undefined) as Promise<DeletionResult>;
+      },
+      /** Delete an archived environment for good, as a project is. Owners only. */
+      delete: (path: string) => call('DELETE /projects/:project/:environment', place(path)),
     },
 
     secrets: {

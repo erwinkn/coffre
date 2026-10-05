@@ -26,6 +26,13 @@ const bytea = customType<{ data: Buffer }>({
 
 const createdAt = () => timestamp('created_at', { withTimezone: true }).notNull().defaultNow();
 
+/**
+ * A project's or environment's slug: `market`, or once deleted, its
+ * tombstone's, `market~deleted-2026-10-05`. No live slug holds a `~`, so a
+ * tombstone frees its slug and is never mistaken for what takes it next.
+ */
+const PLACE_SLUG = sql.raw(`'^[a-z0-9][a-z0-9-]{0,62}(~[a-z0-9-]{1,40})?$'`);
+
 export const projects = pgTable(
   'projects',
   {
@@ -37,7 +44,7 @@ export const projects = pgTable(
   },
   (table) => [
     unique('projects_slug_key').on(table.slug),
-    check('projects_slug_check', sql`${table.slug} ~ '^[a-z0-9][a-z0-9-]{0,62}$'`),
+    check('projects_slug_check', sql`${table.slug} ~ ${PLACE_SLUG}`),
   ],
 );
 
@@ -54,7 +61,7 @@ export const environments = pgTable(
   (table) => [
     unique('environments_project_id_slug_key').on(table.projectId, table.slug),
     unique('environments_project_scoped').on(table.id, table.projectId),
-    check('environments_slug_check', sql`${table.slug} ~ '^[a-z0-9][a-z0-9-]{0,62}$'`),
+    check('environments_slug_check', sql`${table.slug} ~ ${PLACE_SLUG}`),
     foreignKey({
       name: 'environments_project_id_fkey',
       columns: [table.projectId],

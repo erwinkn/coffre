@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+**An archived project, or environment, can be deleted for good.** Archiving
+hides a place and keeps every value; deleting frees the space and hides it
+for good. Instance owners only, and only once it is archived:
+
+```sh
+coffre projects delete market                 # what it would erase and revoke; nothing changes
+coffre projects delete market --apply         # deleted
+coffre environments delete market/old --apply # an environment alone
+```
+
+- Every version's ciphertext and wrapped data key is erased, in place, and
+  the vault revokes every grant there, lapsed ones too. The preview counts
+  the versions and names the grants, and the members left holding nothing,
+  a CI service perhaps, with the `coffre offboard` that removes them.
+- The vault refuses any key operation in a deleted place, as `deleted`,
+  before it asks of any grant, so no grant of any kind reaches into one.
+- What stays is a tombstone of names: the place, its keys and its versions'
+  numbers, authors and times, which the audit log names. It is renamed
+  `market~deleted-2026-10-05`, so `market` is free for a new project that
+  the log never confuses with it, and it is gone from every list, archived
+  ones included. `coffre audit` still reads its entries by that name, and
+  `coffre verify log` passes after.
+- The project's Settings, under Danger zone, and an archived environment's
+  menu offer it in the browser, asking you to type the place's path first.
+  Backups taken before the deletion still hold the encrypted values, which
+  the dialog, the preview and [restore.md](docs/restore.md) say.
+- `DELETE /api/projects/market` and `DELETE /api/projects/market/prod`,
+  `?dryRun=1` to preview, logged as `project.delete` and
+  `environment.delete`. A deletion cut off partway finishes when asked
+  again.
+- Migration `0006_deletions` widens the slug checks to admit a tombstone's,
+  and lets the app empty a version's ciphertext and wrapped key, which a
+  trigger makes the only change a version ever takes. It only adds: 0.3.0
+  runs on it. Until it runs, deleting answers 503.
 **A service account is an identity, not a token.** The CLI and the UI showed
 a service as `token:deploy-slides`, so its OIDC trust bindings looked set
 "on a token", though OIDC is the way to need no token at all. Now a service

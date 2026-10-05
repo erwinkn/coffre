@@ -147,7 +147,8 @@ ends. Passkeys would make a good recent sign-in for revealing.
 - **The current-version pointer**, a
   schema tidy-up from the storage review
   ([design, plan step 11](design/single-database.md#implementation-plan)).
-- A retention policy: the only sanctioned way to destroy data.
+- A retention policy, beside [deleting](architecture.md#deleting-for-good) an
+  archived project or environment by hand: values erased on a schedule.
 - Import from other secret managers such as Infisical, after settling how
   nested folders map to coffre's flat `project/environment/key` model.
 - An external-secrets `webhook` provider for Kubernetes.

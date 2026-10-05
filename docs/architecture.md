@@ -292,6 +292,7 @@ and `apiMember`). The URL names the thing and the HTTP method is the verb:
 | who I am, and everything I can reach | `GET /api/me` |
 | list, create, rename or archive a project | `GET /api/projects`, `PUT` / `PATCH /api/projects/market` |
 | the same for an environment | `PUT` / `PATCH /api/projects/market/prod` |
+| delete an archived project or environment for good, owners only (`?dryRun=1` says what it would take) | `DELETE /api/projects/market`, `DELETE /api/projects/market/prod` |
 | list an environment's secrets, never their values | `GET /api/secrets/market/prod` |
 | set, add or archive secrets, one or many, in one transaction | `PATCH /api/secrets/market/prod {"DATABASE_URL": "…", "OLD_KEY": null}` |
 | what that write would do, per key, without values and without writing | `PATCH /api/secrets/market/prod?dryRun=1 {…}` → `{"dryRun": true, "keys": {"DATABASE_URL": "changed", "OLD_KEY": "archived"}}` |
@@ -731,6 +732,49 @@ Indexes on the live bindings, on a member's live credentials and on what a
 binding issued lately bound the exchange's first read, its rate count, a
 binding's removal and the members page by what is live, not by history.
 Before it runs, the same queries work, more slowly.
+
+## Deleting for good
+
+Archiving hides a project or an environment and changes nothing stored.
+Deleting an archived one, which only an instance owner may do, frees the
+space its values take and hides it for good. `coffre projects delete market`
+shows what it would take; with `--apply` it deletes:
+
+- **Erased:** every version's ciphertext and wrapped data key, emptied in
+  place. Without its wrapped key a value opens for no vault key, and the
+  vault skips an erased version when it tries a new vault key on stored
+  keys.
+- **Refused:** the vault reads, in each key decision, whether the place's
+  slug or its project's is a tombstone's, and refuses it as `deleted` before
+  any grant is asked: an unwrap, a wrap or a rewrap, whoever asks and
+  whatever grant, on the project, the environment or the instance, would
+  cover it. The rule holds even for a value the erase had missed.
+- **Revoked:** every grant on the place, lapsed ones too, by the vault, one
+  `setAccess` per member, each an `access.revoke` under the deletion's
+  operation id.
+- **Kept, names only:** the place's row, its keys' rows and its versions'
+  rows (number, author, time, the vault key's id), because the log names
+  them, and its entries reference them `ON DELETE RESTRICT`. The place is
+  renamed `market~deleted-2026-10-05` (then `-2`, `-3` the same day): no
+  live slug has a `~`, so the old one is free, a new `market` is never taken
+  for the old one in the log, and every listing, archived ones included,
+  leaves out a slug with a `~`. `GET /api/audit?path=market~deleted-2026-10-05`
+  still reads its entries.
+- **Logged:** the app's `project.delete` or `environment.delete`, with what it
+  erased and revoked. The log verifies after, as before.
+
+The vault's revocations commit first, outside any app transaction, then
+the app erases, renames and logs in one transaction under the log's head,
+checking the place is still archived. Each step does only what is left, so
+a deletion cut off between them finishes when asked again. Backups taken
+before still hold the encrypted values, and restoring one brings them back
+with the vault key ([restore.md](restore.md)).
+
+A version is immutable but for this. `0006_deletions` grants the app
+`UPDATE` on `ciphertext` and `wrapped_dek` alone, and a trigger refuses any
+change to a version but emptying both, for every login, so no value is
+rewritten in place. It also widens the slug checks to admit a tombstone's.
+Until it runs, deleting answers 503; nothing else reads it.
 
 ## Databases
 

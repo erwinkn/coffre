@@ -9,7 +9,7 @@ import type { ApiContext } from './context.ts';
 import { notFound } from './errors.ts';
 import { listMembers, memberReport, putMember, removeMember } from './members.ts';
 import { parseGrantee, parseMember, parsePath, type ResolvedPath } from './paths.ts';
-import { listProjects, me, patchEnvironment, patchProject, putEnvironment, putProject } from './projects.ts';
+import { deletePlace, listProjects, me, patchEnvironment, patchProject, putEnvironment, putProject } from './projects.ts';
 import {
   dryRunSecrets,
   listSecrets,
@@ -70,6 +70,9 @@ const placePatch = z
   .partial()
   .strict();
 
+/** `?dryRun=1`: what the call would do, without doing it. Any other query is refused, not ignored. */
+const dryRunFlag = z.object({ dryRun: z.enum(['1', 'true']).optional() }).strict();
+
 const secretValue = z
   .string()
   .max(64 * 1024)
@@ -116,6 +119,12 @@ export const routes = {
     action: 'project.update',
     run: (ctx, { place, input }) => patchProject(ctx, place, input),
   }),
+  // Deleting an archived place for good, instance owners only. `?dryRun=1`
+  // says what it would erase and revoke, and changes nothing.
+  ...route('DELETE /projects/:project', {
+    query: dryRunFlag,
+    run: (ctx, { place, query }) => deletePlace(ctx, place, { dryRun: query.dryRun !== undefined }),
+  }),
   ...route('PUT /projects/:project/:environment', {
     input: z.object({ name: displayName }),
     needs: { permission: 'environment.manage', on: 'project' },
@@ -129,6 +138,10 @@ export const routes = {
     action: 'environment.update',
     run: (ctx, { place, input }) => patchEnvironment(ctx, place, input),
   }),
+  ...route('DELETE /projects/:project/:environment', {
+    query: dryRunFlag,
+    run: (ctx, { place, query }) => deletePlace(ctx, place, { dryRun: query.dryRun !== undefined }),
+  }),
 
   // Secrets
   ...route('GET /secrets/:project/:environment', {
@@ -140,7 +153,7 @@ export const routes = {
     input: z.record(secretKey, secretValue.nullable()),
     // `?dryRun=1` answers what the patch would do and writes nothing. Any
     // other query is refused, not ignored: a mistyped flag must not write.
-    query: z.object({ dryRun: z.enum(['1', 'true']).optional() }).strict(),
+    query: dryRunFlag,
     // Each key is checked against its own permission: archiving needs more
     // than writing. A dry run is a read, which it checks and logs itself.
     needs: (patch, { dryRun }) =>
@@ -231,7 +244,7 @@ export const routes = {
       replaces: z.array(z.string().uuid()).max(MAX_BINDINGS).default([]),
     }).strict(),
     // `?dryRun=1` checks the binding and asks its issuer where its keys are, and writes nothing.
-    query: z.object({ dryRun: z.enum(['1', 'true']).optional() }).strict(),
+    query: dryRunFlag,
     run: (ctx, { params, input, query }) =>
       workloads(ctx).bind(ctx, serviceId(params.member), input, { dryRun: query.dryRun !== undefined }),
   }),

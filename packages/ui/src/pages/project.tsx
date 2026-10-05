@@ -35,6 +35,7 @@ import {
 } from '../components/ui';
 import { Card, ClosedDoor, PageHeader } from '../components/page';
 import { PageTabs, type TabItem } from '../components/tabs';
+import { DeletePlaceDialog } from '../components/delete-place';
 import { GrantRowView, GrantsTable, RefusedGrants, useRefusedGrants } from '../components/grants';
 import { KIND } from '../components/directory';
 import { PrincipalAvatar, PrincipalLink } from '../components/principal';
@@ -55,6 +56,7 @@ import {
   Plus,
   RotateBack,
   Settings,
+  Trash,
   User,
   Users,
 } from '../components/icons';
@@ -336,6 +338,8 @@ function EnvironmentCard({
 }) {
   const [renaming, setRenaming] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const { instanceRole } = useShell();
   const [slug, setSlug] = useState(environment.slug);
   const [name, setName] = useState(environment.name);
   const coffre = useCoffre();
@@ -350,6 +354,8 @@ function EnvironmentCard({
   const secretCount = details?.secretCount ?? null;
   const opens = details !== null && !isArchived && environment.accessible && !pending;
   const manageable = isAdmin && details !== null;
+  // Deleting is for instance owners, and only once the environment is archived.
+  const deletable = manageable && isArchived && instanceRole !== 'user';
   const slugError = slug === '' ? null : slugProblem(slug);
   const lastChange = useLastChange(project, environment.slug, opens);
   const holders = holdersOf(grants, environment.slug);
@@ -454,6 +460,12 @@ function EnvironmentCard({
               {isArchived ? <RotateBack size={14} /> : <Archive size={14} />}
               {isArchived ? 'Restore' : 'Archive…'}
             </Menu.Item>
+            {deletable && (
+              <Menu.Item className="menu-item menu-item-danger" onClick={() => setDeleting(true)}>
+                <Trash size={14} />
+                Delete…
+              </Menu.Item>
+            )}
           </MenuPopup>
         </Menu.Root>
       )}
@@ -562,6 +574,15 @@ function EnvironmentCard({
             onConfirm={() => archive({ slug: environment.slug, archived: !isArchived })}
           />
         </>
+      )}
+
+      {deletable && (
+        <DeletePlaceDialog
+          path={`${project}/${environment.slug}`}
+          open={deleting}
+          onOpenChange={setDeleting}
+          onDeleted={() => toast.success(`${project}/${environment.slug} deleted, and its name is free`)}
+        />
       )}
 
       <ItemFailure
@@ -930,9 +951,14 @@ function GeneralSettings({ project }: { project: ProjectSummary }) {
 
 function DangerZone({ project }: { project: ProjectSummary }) {
   const [confirming, setConfirming] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const coffre = useCoffre();
+  const router = useRouter();
+  const { instanceRole } = useShell();
   const { pending, error, run } = useAction();
   const isArchived = project.archivedAt !== null;
+  // Deleting is for instance owners, and only once the project is archived.
+  const canDelete = isArchived && instanceRole !== 'user';
 
   return (
     <Card labelledBy="danger-zone" title="Danger zone" tone="danger">
@@ -964,6 +990,32 @@ function DangerZone({ project }: { project: ProjectSummary }) {
           {isArchived ? `Restore ${project.name}` : `Archive ${project.name}…`}
         </button>
       </div>
+
+      {canDelete && (
+        <div className="card-row">
+          <div>
+            <p className="card-row-title">Delete project</p>
+            <p className="card-row-desc">
+              Erases its values for good and frees its name; only names stay, for the audit log.
+            </p>
+          </div>
+          <button className="btn btn-danger-outline" onClick={() => setDeleting(true)}>
+            <Trash size={14} />
+            {`Delete ${project.name}…`}
+          </button>
+        </div>
+      )}
+      {canDelete && (
+        <DeletePlaceDialog
+          path={project.slug}
+          open={deleting}
+          onOpenChange={setDeleting}
+          onDeleted={async () => {
+            toast.success(`${project.slug} deleted, and its name is free`);
+            await router.navigate({ to: '/projects' });
+          }}
+        />
+      )}
 
       <ConfirmDialog
         open={confirming}

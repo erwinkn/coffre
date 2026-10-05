@@ -11,7 +11,7 @@ import {
   secrets,
   secretVersions,
 } from './db/tables.ts';
-import { postgresOnly, withLogUnlocked } from './db/engine.ts';
+import { postgresOnly, withLogUnlocked, withTriggersLifted } from './db/engine.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 import { actorParts } from '../src/db/audit.ts';
 
@@ -306,7 +306,9 @@ test('ciphertext relocated between environments cannot be decrypted', async () =
   const [dev] = await current('dev');
   const [prod] = await current('prod');
   const { id: _, ...envelope } = dev;
-  await db.owner.update(secretVersions).set(envelope).where(eq(secretVersions.id, prod.id));
+  // A version changes only by being erased; the owner lifts that to play someone who moves one.
+  await withTriggersLifted(db.owner, 'secret_versions', (owner) =>
+    owner.update(secretVersions).set(envelope).where(eq(secretVersions.id, prod.id)));
   // The vault unwraps a key only as the secret it was wrapped for: dev's key is not prod's.
   await assert.rejects(root.secrets.reveal('market/prod/DATABASE_URL'), { status: 403, code: 'vault_refused', reason: 'bad_claim' });
 });

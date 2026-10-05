@@ -114,6 +114,11 @@ export type RefusalCode =
   | 'bulk_limit'
   /** The wrapped key does not belong to the secret it was presented as. */
   | 'bad_claim'
+  /**
+   * The project or environment was deleted for good: nothing under it is
+   * opened or wrapped again, whatever grant would cover it.
+   */
+  | 'deleted'
   /** Not allowed to manage access, members or the log. */
   | 'not_allowed'
   /** Root admins come from the vault's configuration and cannot be changed. */

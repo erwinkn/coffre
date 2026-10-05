@@ -136,6 +136,7 @@ coffre archive  market/dev/OLD_KEY          # unarchive brings it back
 coffre projects
 coffre projects create market               # projects rename and archive, and the same for
 coffre environments create market/dev       # environments
+coffre projects delete market               # an archived one, for good: previews; --apply deletes
 coffre roles
 coffre access                               # who holds what, where you manage access
 coffre admit alice@acme.example             # a member first, then their grants
@@ -291,12 +292,17 @@ data key. `packages/core/test/envelope-aad-isolation.test.ts` exists because
 the obvious test passes at the wrapping layer and would miss the other one
 regressing.
 
-**History is never deleted.** The log references projects, environments and
-secrets with `ON DELETE RESTRICT`, so anything ever read or written cannot be
-removed. "Delete" is *archive*: hidden from listings, refused to readers,
-reversible, and every row still there. Archiving a rotated-out secret also
-stops `coffre run` injecting it. Destroying data belongs to a retention
-policy, a decision written down and applied deliberately, not a button.
+**History is never deleted; values can be.** The log references projects,
+environments, secrets and their versions with `ON DELETE RESTRICT`, so
+nothing ever read or written leaves the database. Archiving hides a place
+or a secret: refused to readers, reversible, every row still there.
+Archiving a rotated-out secret also stops `coffre run` injecting it.
+Deleting an archived project or environment is for good, and for instance
+owners only: every version's ciphertext and wrapped data key is erased, the
+vault revokes every grant there, and it leaves every list. A tombstone of
+names stays, renamed `market~deleted-2026-10-05`, so the log still reads and
+verifies, and `market` is free for a new project. Backups taken before still
+hold the encrypted values ([Deleting for good](docs/architecture.md#deleting-for-good)).
 
 **Append-only by grant, not by convention.** Neither login may change or
 delete a log entry; each may append only as itself; only the vault's login

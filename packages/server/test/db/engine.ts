@@ -79,21 +79,30 @@ export function postgresOnly(reason: string): { skip: string | false } {
 /**
  * `work`, as the owner, with the audit log's append-only triggers lifted:
  * what a test does to empty the log between cases, or to play someone who
- * rewrites it. Postgres disables them for one transaction; SQLite has no such
- * switch, so they are dropped and made again.
+ * rewrites it.
  */
-export async function withLogUnlocked<T>(owner: Database, work: (db: Queryable) => Promise<T>): Promise<T> {
+export function withLogUnlocked<T>(owner: Database, work: (db: Queryable) => Promise<T>): Promise<T> {
+  return withTriggersLifted(owner, 'audit_log', work);
+}
+
+/**
+ * `work`, as the owner, with a table's own triggers lifted: the log's, or
+ * `secret_versions`', which lets a version only be erased. Postgres disables
+ * them for one transaction; SQLite has no such switch, so they are dropped
+ * and made again.
+ */
+export async function withTriggersLifted<T>(owner: Database, table: 'audit_log' | 'secret_versions', work: (db: Queryable) => Promise<T>): Promise<T> {
   if (TEST_ENGINE === 'postgres') {
     return owner.transaction(async (tx) => {
-      await tx.execute(sql`ALTER TABLE audit_log DISABLE TRIGGER USER`);
+      await tx.execute(sql.raw(`ALTER TABLE ${table} DISABLE TRIGGER USER`));
       const result = await work(tx);
-      await tx.execute(sql`ALTER TABLE audit_log ENABLE TRIGGER USER`);
+      await tx.execute(sql.raw(`ALTER TABLE ${table} ENABLE TRIGGER USER`));
       return result;
     });
   }
   const sqlite = owner as unknown as { all<Row>(query: SQL): Promise<Row[]>; run(query: SQL): Promise<unknown> };
   const triggers = await sqlite.all<{ name: string; sql: string }>(
-    sql`SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'audit_log'`,
+    sql`SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ${table}`,
   );
   for (const trigger of triggers) await sqlite.run(sql.raw(`DROP TRIGGER ${trigger.name}`));
   try {
