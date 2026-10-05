@@ -19,6 +19,21 @@ bindings) or with bearer tokens.
   changes; `@coffre/client` shows and takes the names at the edge
   (`shownMember`, `apiMember`).
 
+**A sign-in error is said once, and a reload is a clean retry.** The page
+coffre sends a refused sign-in back to, `/login?error=…`, renders the
+error on the server, then takes it out of the address once its scripts
+run, so a reload, or a link to the page, starts over. The same goes for
+`/account?linked=…` and `/account?error=…`. Without scripts, a reload
+still shows it.
+
+**"Your email already signs in with a different account" names it.** It
+now says "Your email already signs in with GitHub. Sign in with GitHub,
+then link this account from your account page.", lists several when
+there are, and says "another GitHub account" when the address signs in
+with a different account at the same provider. Only the providers are
+named, never another email or account name, and only to a visitor whose
+provider has just verified that the address is theirs.
+
 **`coffre trust` from first use.**
 - A binding matches one event, and trusting a workflow that also runs by
   hand or on a schedule took one `coffre trust` for each. Now `--event` (and

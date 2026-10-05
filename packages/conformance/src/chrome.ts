@@ -14,6 +14,8 @@ export type Loaded = {
   cards: string[];
   /** What a person reads on it. */
   text: string;
+  /** The address it ends at, once its scripts have run: a notice read once is taken out of it. */
+  href: string;
   errors: string[];
 };
 
@@ -154,14 +156,15 @@ export class Chrome {
       await Promise.race([load, new Promise((resolve) => setTimeout(resolve, 30_000))]);
       // What streams in after the load, and hydration, have their time: the page may render, then fail.
       await new Promise((resolve) => setTimeout(resolve, settle));
-      // The heading, the cards' titles in order, and all the text a person reads.
+      // The heading, the cards' titles in order, all the text a person reads, and where the page ended.
       const expression = `({
         heading: document.querySelector('h1')?.textContent?.trim() || null,
         cards: [...document.querySelectorAll('h2.card-title')].map((title) => title.textContent.trim()),
         text: document.body.innerText,
+        href: location.href,
       })`;
       const { result } = (await this.#send('Runtime.evaluate', { expression, returnByValue: true }, sessionId)) as {
-        result: { value: { heading: string | null; cards: string[]; text: string } };
+        result: { value: { heading: string | null; cards: string[]; text: string; href: string } };
       };
       return { ...result.value, errors };
     } finally {

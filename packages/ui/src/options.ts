@@ -23,6 +23,7 @@ import { ShellLayout, SoloLayout } from './layout';
 import { uiResult } from './lib/coffre';
 import { loadDirectory, loadPrincipal, loadProject, loadShell, queries, type AuditSearch } from './lib/queries';
 import type { ProjectTab } from './pages/project';
+import { loginSearch } from './lib/signin-errors';
 
 /**
  * What coffre's routes read through the router: the API as the visitor
@@ -191,15 +192,8 @@ export const account = {
 
 /** `/login`. */
 export const login = {
-  // Where to resume after signing in. Same-origin paths only: an absolute URL
-  // accepted here would make the sign-in page an open redirect.
-  validateSearch: (search: Record<string, unknown>): { next?: string; error?: string } => {
-    const out: { next?: string; error?: string } = {};
-    const { next, error } = search;
-    if (typeof next === 'string' && next.startsWith('/') && !next.startsWith('//')) out.next = next;
-    if (typeof error === 'string' && /^[a-z_]{1,40}$/.test(error)) out.error = error;
-    return out;
-  },
+  // Where to resume after signing in, and the sign-in's error, shown once (`loginSearch`).
+  validateSearch: loginSearch,
   loader: async ({ context }: Loader) => {
     const { coffre, queryClient } = coffreOf(context);
     const shell = await loadShell(queryClient, coffre);

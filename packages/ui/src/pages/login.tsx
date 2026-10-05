@@ -2,6 +2,7 @@ import { useState } from 'react';
 
 import { useShell } from '../lib/use-shell';
 import { signinErrorMessage } from '../lib/signin-errors';
+import { useOneTime } from '../lib/one-time';
 import { ErrorLine, Spinner } from '../components/ui';
 import { ClosedDoor } from '../components/page';
 import { Lock, ProviderMark, ShieldCheck } from '../components/icons';
@@ -67,8 +68,13 @@ function ProviderLoginPage({
   note: string | null;
   providers: { id: string; label: string; brand: string }[];
 }) {
-  const { next, error } = Route.useSearch();
-  const message = signinErrorMessage(error);
+  const search = Route.useSearch();
+  const { next } = search;
+  // Shown once: a reload is a clean retry.
+  const once = useOneTime(search, ['error', 'with', 'via']);
+  const label = (id: string) => providers.find((provider) => provider.id === id)?.label;
+  const already = (once.with ?? '').split(',').map(label).filter((name): name is string => name !== undefined);
+  const message = signinErrorMessage(once.error, { providers: already, via: once.via === undefined ? undefined : label(once.via) });
   const [leaving, setLeaving] = useState<string | null>(null);
   const query = next === undefined ? '' : `?next=${encodeURIComponent(next)}`;
 

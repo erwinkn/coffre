@@ -6,29 +6,31 @@ import { Chrome, findChrome } from '../src/chrome.ts';
 
 const chrome = findChrome();
 
-test("a page's heading, its cards' titles, its text, and what its scripts throw, as Chrome reports them", { skip: chrome === null && 'no Chrome or Chromium here' }, async () => {
+test("a page's heading, its cards' titles, its text and address, and what its scripts throw, as Chrome reports them", { skip: chrome === null && 'no Chrome or Chromium here' }, async () => {
   const pages: Record<string, string> = {
+    // Read once, the notice is taken out of the address, as coffre's pages do.
     '/fine':
       '<!doctype html><title>t</title><h1> Projects </h1>' +
       '<section><h2 class="card-title"> Sign in with OIDC </h2></section><section><h2 class="card-title">Bearer tokens</h2></section>' +
-      '<script>document.title = document.cookie</script>',
+      '<script>history.replaceState(null, "", location.pathname)</script>',
     // What a signed-in page did under wrangler's keep_names: a helper only the bundle had.
     '/broken': '<!doctype html><h1>Projects</h1><script>const f = __name(() => {}, "f")</script>',
     // A failed load is an error too: the icon the browser asks for is here.
     '/favicon.ico': '',
   };
   const server = createServer((request, response) => {
-    const page = pages[request.url ?? ''];
+    const page = pages[new URL(request.url ?? '/', 'http://x').pathname];
     response.writeHead(page === undefined ? 404 : 200, { 'content-type': 'text/html' }).end(page ?? '');
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   const browser = await Chrome.open(chrome!);
   try {
-    assert.deepEqual(await browser.load(`${origin}/fine`, [['session', 's3cret']], 200), {
+    assert.deepEqual(await browser.load(`${origin}/fine?linked=github`, [['session', 's3cret']], 200), {
       heading: 'Projects',
       cards: ['Sign in with OIDC', 'Bearer tokens'],
       text: 'Projects\nSign in with OIDC\nBearer tokens',
+      href: `${origin}/fine`,
       errors: [],
     });
     const broken = await browser.load(`${origin}/broken`, [], 200);

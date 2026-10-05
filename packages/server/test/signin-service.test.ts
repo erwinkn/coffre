@@ -375,15 +375,16 @@ test('once bound, the account signs in as its person whatever its email says', a
 test('another account with the same email is refused while one is bound', async () => {
   await signedIn(profile('github', '101', [DEV]));
 
-  // A second GitHub account claiming the address, e.g. after it was recycled.
+  // A second GitHub account claiming the address, e.g. after it was recycled:
+  // told which provider the address already signs in with, by its id, and nothing more.
   assert.deepEqual(
     await signin.completeSignin(profile('github', '202', [DEV]), meta()),
-    { ok: false, reason: 'account_mismatch' },
+    { ok: false, reason: 'account_mismatch', providers: ['github'] },
   );
   // Another provider is linked from the account page, not by email.
   assert.deepEqual(
     await signin.completeSignin(profile('google', 'g-1', [DEV]), meta()),
-    { ok: false, reason: 'account_mismatch' },
+    { ok: false, reason: 'account_mismatch', providers: ['github'] },
   );
 
   const rows = await auditRows();
@@ -403,11 +404,13 @@ test('racing first sign-ins bind one account per person', async () => {
     signin.completeSignin(profile('google', 'g-dev', [DEV]), meta()),
   ]);
   assert.equal(raced.filter((result) => result.ok).length, 1);
+  // The losers are told the winner's provider, whichever won.
+  const winner = ['github', 'github', 'google'][raced.findIndex((result) => result.ok)];
   assert.deepEqual(
     raced.filter((result) => !result.ok),
     [
-      { ok: false, reason: 'account_mismatch' },
-      { ok: false, reason: 'account_mismatch' },
+      { ok: false, reason: 'account_mismatch', providers: [winner] },
+      { ok: false, reason: 'account_mismatch', providers: [winner] },
     ],
   );
 
@@ -701,7 +704,7 @@ test('unlinking an account ends the sessions it opened, and no others', async ()
   // Google one is bound, and cannot be unlinked twice.
   assert.deepEqual(
     await signin.completeSignin(profile('github', '101', [DEV]), meta()),
-    { ok: false, reason: 'account_mismatch' },
+    { ok: false, reason: 'account_mismatch', providers: ['google'] },
   );
   await assert.rejects(signin.unlinkIdentity(dev, githubIdentity.id), { status: 404 });
 });
@@ -1167,8 +1170,9 @@ test('replacing an issuer requires an explicit re-link and invalidates its brows
   await signin.linkIdentity(dev, profile('github', 'backup', [DEV]));
   const backup = await signedIn(profile('github', 'backup', [DEV]));
   signin = atIssuer('https://new-idp.example');
+  // The account at the old issuer counts as another Company account.
   assert.deepEqual(await signin.completeSignin(profile('company', 'same-subject', [DEV]), meta()),
-    { ok: false, reason: 'account_mismatch' });
+    { ok: false, reason: 'account_mismatch', providers: ['github', 'company'] });
   await assert.rejects(signin.verify(old.credential.token), /unknown, expired or revoked/);
   assert.equal((await signin.verify(backup.credential.token)).id, DEV);
   assert.deepEqual(await signin.linkIdentity(dev, profile('company', 'same-subject', [])), { ok: true });
