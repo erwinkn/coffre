@@ -2081,6 +2081,34 @@ a.crumb-link:hover {
   font-size: 0.8125rem;
 }
 
+.archive-blocked {
+  display: grid;
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
+.archive-blockers {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  list-style: none;
+  font-size: 0.8125rem;
+}
+
+.archive-blockers li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.5rem 0.75rem;
+}
+
+.archive-blockers li + li {
+  border-top: 1px solid var(--border);
+}
+
 .lent-references li {
   display: flex;
   align-items: center;

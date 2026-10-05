@@ -104,6 +104,19 @@ export async function references(deployment: Deployment, { admin, reader, leaver
       .filter((entry) => entry.action === 'secret.read' && entry.actorId === reader.email && entry.metadata.via !== undefined).length;
     expect(await logged(PROD) >= 1 && await logged(DEV) >= 1, "the read through the reference is not in both the source's log and the holder's");
 
+    // What it reads cannot be archived while it reads it (D41): not the key, nor its environment. Its
+    // project could be, since the reference is held there too, and archiving it stops no one else's read.
+    const archives: [string, (archived: boolean) => Promise<unknown>][] = [
+      [source, (archived) => admin.api.secrets.update(source, { archived })],
+      [PROD, (archived) => admin.api.environments.update(PROD, { archived })],
+    ];
+    for (const [what, archive] of archives) {
+      const refusal = await archive(true).then(() => null, (error: unknown) => error);
+      if (refusal === null) await archive(false);
+      expect(refusal instanceof CoffreError && refusal.status === 409 && refusal.message.includes(`${DEV}/${HELD} reads ${source}`),
+        `${what} was archived, or refused without naming the reference, while a reference read it`, refusal instanceof Error ? refusal.message : refusal);
+    }
+
     // A row the vault never sealed: a reference to prod, held in dev, pointing at a vault entry about something else.
     const forged = await using(deployment.database(), async (sql) => {
       const [holder] = await query<{ id: string; project_id: string; environment_id: string }>(sql,
@@ -135,7 +148,7 @@ export async function references(deployment: Deployment, { admin, reader, leaver
   } finally {
     await admin.api.secrets.update(`${DEV}/${HELD}`, { archived: true });
   }
-  return "a viewer on dev reads prod's value through a reference, logged in both; a forged row is refused, a broken one reads no more, and none is made without read on the source";
+  return "a viewer on dev reads prod's value through a reference, logged in both; prod and its key cannot be archived while it reads them; a forged row is refused, a broken one reads no more, and none is made without read on the source";
 }
 
 /** A key prod has and dev does not, for the missing-keys check; archived once checked. */

@@ -186,7 +186,9 @@ test('deleting a project ends the references into it and out of it, and its prev
   // web reads market's key; market reads web's.
   await root.secrets.set('web/prod', { API_KEY: { ref: 'market/prod/API_KEY' } });
   await root.secrets.set('market/dev', { OTHER: { ref: 'web/prod/OTHER' } });
-  await root.projects.update('market', { archived: true });
+  // Archiving market is refused while web reads it (D41); archived before that rule, as data from then is:
+  await assert.rejects(root.projects.update('market', { archived: true }), { status: 409 });
+  await db.owner.update(projects).set({ archivedAt: new Date() }).where(eq(projects.slug, 'market'));
 
   const { deletion: planned } = await root.projects.previewDelete('market');
   assert.deepEqual(planned.references, [

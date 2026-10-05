@@ -9,7 +9,7 @@ import { useAction } from '../lib/use-action';
 import { secretKeyProblem } from '../lib/validation';
 import { ArrowRight } from './icons';
 import { Card } from './page';
-import { ConfirmDialog, ErrorLine, Modal, Timestamp } from './ui';
+import { ConfirmDialog, ErrorLine, Modal, Notice, Timestamp } from './ui';
 
 /**
  * References: a secret read live through another (docs/design/environments.md).
@@ -262,5 +262,62 @@ export function ReferencesInto({ project }: { project: string }) {
         }}
       />
     </Card>
+  );
+}
+
+/**
+ * The references that archiving `path` would stop, a project, an
+ * environment or a key: those reading a secret in it, held outside it.
+ * Archiving is refused while any read (D41); the server decides, and this
+ * shows the dialog what it will say.
+ */
+export function archiveBlockers(path: string, references: readonly ListedReference[]): ListedReference[] {
+  const within = (secret: string) => secret === path || secret.startsWith(`${path}/`);
+  return references.filter((reference) => reference.state === 'live' && within(reference.source) && !within(reference.holder));
+}
+
+/**
+ * What an archive dialog shows while references read what it would
+ * archive: each, and Break for those who may break it. Archive waits until
+ * none is left.
+ */
+export function ArchiveBlocked({ references }: { references: readonly ListedReference[] }) {
+  const coffre = useCoffre();
+  const { run, error, pending } = useAction();
+  if (references.length === 0) return null;
+  const many = references.length > 1;
+  return (
+    <div className="archive-blocked">
+      <Notice tone="bad">
+        {many ? `${references.length} references read it` : 'A reference reads it'} from elsewhere. Break{' '}
+        {many ? 'them' : 'it'} first: archiving would stop {many ? 'those reads' : 'that read'}.
+      </Notice>
+      <ul className="archive-blockers" aria-label="References that read it">
+        {references.map((reference) => (
+          <li key={reference.id}>
+            <span className="cell-stack">
+              <span className="mono">{reference.holder}</span>
+              <small>
+                reads <span className="mono">{reference.source}</span>
+              </small>
+            </span>
+            {reference.canBreak ? (
+              <button
+                type="button"
+                className="btn btn-sm btn-danger-outline"
+                disabled={pending}
+                onClick={() => void run(() => coffre.references.break(reference.holder), { affects: [['references'], ['secrets']] })}
+              >
+                Break
+              </button>
+            ) : (
+              <small className="cell-muted">{`${reference.source.split('/')[0]}'s access managers, or whoever writes ${reference.holder.split('/').slice(0, 2).join('/')}, can break it`}</small>
+            )}
+          </li>
+        ))}
+      </ul>
+      <p className="hint">Once broken, a run where it is held refuses until that key gets a value of its own.</p>
+      {error !== null && <ErrorLine error={error} />}
+    </div>
   );
 }

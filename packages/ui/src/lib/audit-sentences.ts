@@ -452,6 +452,7 @@ const REASONS: Record<string, string> = {
   no_value: 'it holds no value',
   unknown_project: 'no such project',
   not_archived: 'it was not archived',
+  referenced: 'references read it',
   unusable_credential: 'its token is not a secret they can read',
   duplicate_destination: 'already synced from elsewhere',
   cannot_grant_sync: 'cannot grant the sync its reads',

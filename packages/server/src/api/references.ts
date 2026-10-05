@@ -18,7 +18,7 @@ import {
   type SecretPlaceRow,
 } from '../db/queries.ts';
 import { can } from './caller.ts';
-import { asking, type ApiContext } from './context.ts';
+import { asking, denied, Refusal, type ApiContext } from './context.ts';
 import { ApiError, conflict, notFound, vaultRefused } from './errors.ts';
 import { formatMember, type Path } from './paths.ts';
 
@@ -156,6 +156,66 @@ export async function readersOf(db: Queryable, secretIds: readonly string[]): Pr
   const rows = (await referenceRows(db, { sourceSecretIds: [...secretIds] })).filter((row) => row.ended === null);
   const current = await currentRows(db, rows.map((row) => row.holder.secretId));
   return resolveReferences(db, rows.filter((row) => current.get(row.holder.secretId)?.id === row.id));
+}
+
+/** What an archive takes: a project, one of its environments, or keys in one. */
+export type ArchivedPlace = { projectId: string; environmentId?: string; secretIds?: readonly string[] };
+
+/**
+ * The live references that read a secret in `place` from outside it: what
+ * archiving it would break, which it is refused while any read (D41). Live
+ * as the lists decide, by the vault's seal and its `reference.end`: a row
+ * without a seal is no reference, and blocks nothing. One held inside the
+ * place is archived with it, and breaks nobody's run. Asked under the log's
+ * head, with the archive's own write, so that none is made meanwhile.
+ */
+export async function archiveBlockers(db: Queryable, place: ArchivedPlace): Promise<Resolved[]> {
+  if (!(await referencesReady(db))) return [];
+  const within = (end: ReferenceRow['holder']) =>
+    end.projectId === place.projectId
+    && (place.environmentId === undefined || end.environmentId === place.environmentId)
+    && (place.secretIds === undefined || place.secretIds.includes(end.secretId));
+  const rows = (await referenceRows(db, place.secretIds === undefined ? { projectId: place.projectId } : { sourceSecretIds: [...place.secretIds] }))
+    .filter((row) => row.ended === null && within(row.source) && !within(row.holder));
+  const current = await currentRows(db, rows.map((row) => row.holder.secretId));
+  const resolved = await resolveReferences(db, rows.filter((row) => current.get(row.holder.secretId)?.id === row.id));
+  return resolved.filter((reference) => reference.state === 'live');
+}
+
+/** How many references an archive's refusal names, before "and N more". */
+const NAMED = 10;
+
+/**
+ * Why `what` cannot be archived: the references that read it, and who can
+ * break each, as the refusal to make a reference into a held key says it.
+ */
+export function archiveRefused(what: string, readers: readonly Resolved[]): string {
+  const n = readers.length;
+  const named = readers.slice(0, NAMED).map((reference) => `${reference.view.holder} reads ${reference.view.source}`);
+  const more = n > NAMED ? `, and ${n - NAMED} more` : '';
+  const projects = [...new Set(readers.map((reference) => reference.source!.project))];
+  return `${n === 1 ? '1 reference reads' : `${n} references read`} ${what}: ${named.join('; ')}${more}. Archiving it would stop ${n === 1 ? 'that read' : 'those reads'}, so break ${n === 1 ? 'it' : 'them'} first: ${projects.join(' and ')}'s owners and access managers can, or whoever writes the environment that holds ${n === 1 ? 'it' : 'each'} (\`coffre references break ${n === 1 ? readers[0]!.view.holder : '<holder>'} --apply\`)`;
+}
+
+/**
+ * Refuse to archive what live references read from elsewhere (D41): under
+ * the log's head, in the archive's own transaction, so that none is made
+ * meanwhile. Restoring is never refused.
+ */
+export async function refuseIfRead(
+  ctx: ApiContext,
+  tx: Queryable,
+  what: string,
+  place: ArchivedPlace,
+  action: string,
+  fields: Omit<NonNullable<Parameters<typeof denied>[3]>, 'metadata'>,
+): Promise<void> {
+  const readers = await archiveBlockers(tx, place);
+  if (readers.length === 0) return;
+  throw new Refusal(
+    conflict(archiveRefused(what, readers)),
+    denied(ctx, action, 'referenced', { ...fields, metadata: { path: what, references: readers.map((reference) => reference.row.id) } }),
+  );
 }
 
 /**

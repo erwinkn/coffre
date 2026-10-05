@@ -53,7 +53,7 @@ import { Card, ClosedDoor, PageHeader } from '../components/page';
 import { SecretReadOnly } from '../components/affordances';
 import { FolderRow, MoveToFolder } from '../components/folders';
 import { MissingKeys } from '../components/missing';
-import { LentReferences, MakeReference, ReferenceValue } from '../components/references';
+import { ArchiveBlocked, archiveBlockers, LentReferences, MakeReference, ReferenceValue } from '../components/references';
 import { isActiveAccessibleEnvironment } from '../lib/project-environments';
 import {
   AlertCircle,
@@ -865,6 +865,9 @@ function SecretRow({
   const [referring, setReferring] = useState(false);
   const [breaking, setBreaking] = useState<string | null>(null);
   const [lentOpen, setLentOpen] = useState(false);
+  // Archiving a key others read through references waits until they are broken (D41).
+  const [archiveBlocked, setArchiveBlocked] = useState(false);
+  const blockers = archiveBlockers(`${project}/${environment}/${entry.key}`, lent);
   // Making or breaking a reference: its refusal shows under the row, as a reveal's does.
   const { run: act, error: actError } = useAction();
   const { reference } = entry;
@@ -1184,7 +1187,8 @@ function SecretRow({
                         className="menu-item menu-item-danger"
                         onClick={() => {
                           setReveal(null);
-                          onMarkArchive();
+                          if (blockers.length > 0) setArchiveBlocked(true);
+                          else onMarkArchive();
                         }}
                       >
                         <Archive size={14} />
@@ -1214,6 +1218,21 @@ function SecretRow({
           }
         />
       )}
+
+      <ConfirmDialog
+        open={archiveBlocked}
+        onOpenChange={setArchiveBlocked}
+        title={
+          <>
+            Archive <span className="mono">{entry.key}</span>?
+          </>
+        }
+        body={`It is marked to archive when you save: ${project}/${environment} stops serving it, and its versions stay.`}
+        detail={<ArchiveBlocked references={blockers} />}
+        confirmLabel="Archive on save"
+        confirmDisabled={blockers.length > 0}
+        onConfirm={onMarkArchive}
+      />
 
       <ConfirmDialog
         open={breaking !== null}

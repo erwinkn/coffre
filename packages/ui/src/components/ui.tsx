@@ -301,12 +301,16 @@ export function CopyButton({
 type ConfirmProps = {
   title: ReactNode;
   body: ReactNode;
+  /** What the body's sentence cannot hold, such as a list: after it, outside its paragraph. */
+  detail?: ReactNode;
   confirmLabel: string;
   destructive?: boolean;
+  /** While something must happen first, which `detail` says. */
+  confirmDisabled?: boolean;
   onConfirm: () => void;
 };
 
-function ConfirmContent({ title, body, confirmLabel, destructive, onConfirm }: ConfirmProps) {
+function ConfirmContent({ title, body, detail, confirmLabel, destructive, confirmDisabled, onConfirm }: ConfirmProps) {
   const { portal } = usePreferences();
   return (
     <AlertDialog.Portal container={portal}>
@@ -314,11 +318,13 @@ function ConfirmContent({ title, body, confirmLabel, destructive, onConfirm }: C
       <AlertDialog.Popup className="dialog dialog-confirm">
         <AlertDialog.Title className="dialog-title">{title}</AlertDialog.Title>
         <AlertDialog.Description className="dialog-body">{body}</AlertDialog.Description>
+        {detail}
         <div className="dialog-actions">
           <AlertDialog.Close className="btn">Cancel</AlertDialog.Close>
           <AlertDialog.Close
             className={`btn ${destructive === false ? 'btn-primary' : 'btn-danger'}`}
             onClick={onConfirm}
+            disabled={confirmDisabled}
           >
             {confirmLabel}
           </AlertDialog.Close>

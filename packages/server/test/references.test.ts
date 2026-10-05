@@ -163,10 +163,85 @@ test("the source's access manager breaks it, and a run of the holder stops, sayi
 
 test('an archived source refuses reads through it until it is back, and never reads as empty', async () => {
   await ada.secrets.set('billing/prod', { DATABASE_URL: ref('market/prod/DATABASE_URL') });
-  await caro.secrets.update('market/prod/DATABASE_URL', { archived: true });
+  // Archived before archiving a read source was refused (D41): as data from then has it.
+  await db.owner.update(secrets).set({ archivedAt: new Date() }).where(eq(secrets.key, 'DATABASE_URL'));
+  await db.owner.update(secrets).set({ archivedAt: null }).where(and(eq(secrets.key, 'DATABASE_URL'), eq(secrets.environmentId, (await holderEnvironment())!)));
   assert.match(await refusal(bo.secrets.reveal('billing/prod')), /409: .*which is archived: market\/prod's maintainers can unarchive it, or set a value for DATABASE_URL/);
   await caro.secrets.update('market/prod/DATABASE_URL', { archived: false });
   assert.deepEqual((await bo.secrets.reveal('billing/prod')).values.DATABASE_URL, 'postgres://v1');
+});
+
+/** The environment billing/prod's references are held in. */
+async function holderEnvironment(): Promise<string | undefined> {
+  const [row] = await db.owner.select({ environmentId: secretReferences.environmentId }).from(secretReferences);
+  return row?.environmentId;
+}
+
+test('archiving what live references read is refused, naming them and who can break them; restoring never is (D41)', async () => {
+  await ada.secrets.set('billing/prod', { DATABASE_URL: ref('market/prod/DATABASE_URL') });
+  const named = /409: 1 reference reads market\/prod(\/DATABASE_URL)?: billing\/prod\/DATABASE_URL reads market\/prod\/DATABASE_URL\. Archiving it would stop that read, so break it first: market's owners and access managers can, or whoever writes the environment that holds it \(`coffre references break billing\/prod\/DATABASE_URL --apply`\)$/;
+  assert.match(await refusal(caro.secrets.update('market/prod/DATABASE_URL', { archived: true })), named, 'the key');
+  assert.match(await refusal(caro.secrets.set('market/prod', { DATABASE_URL: null })), named, 'the key, archived by a write');
+  assert.match(await refusal(root.environments.update('market/prod', { archived: true })), named, 'its environment');
+  assert.match(await refusal(root.projects.update('market', { archived: true })), /409: 1 reference reads market: billing\/prod\/DATABASE_URL reads market\/prod\/DATABASE_URL/, 'its project');
+  // What nothing reads is archived as before; and the refusals are logged, naming the references.
+  await caro.secrets.update('market/prod/STRIPE_KEY', { archived: true });
+  await caro.secrets.update('market/prod/STRIPE_KEY', { archived: false });
+  const refused = (await db.owner.select({ action: auditLog.action, metadata: auditLog.metadata }).from(auditLog)
+    .where(eq(auditLog.decision, 'deny')).orderBy(asc(auditLog.seq)))
+    .filter((row) => (JSON.parse(row.metadata) as { reason?: string }).reason === 'referenced');
+  assert.deepEqual(refused.map((row) => row.action), ['secret.archive', 'secret.archive', 'environment.archive', 'project.archive']);
+
+  // The holder's own place archives freely: archiving it stops no one else's read.
+  await root.environments.update('billing/prod', { archived: true });
+  await root.environments.update('billing/prod', { archived: false });
+  // Broken, it blocks nothing: the source archives, and restores.
+  await max.references.break('billing/prod/DATABASE_URL');
+  await caro.secrets.update('market/prod/DATABASE_URL', { archived: true });
+  await caro.secrets.update('market/prod/DATABASE_URL', { archived: false });
+  await root.projects.update('market', { archived: true });
+  await root.projects.update('market', { archived: false });
+});
+
+test("a reference held in the place being archived blocks nothing; a forged row blocks nothing", async () => {
+  await root.environments.create('market/dev', { name: 'dev' });
+  await root.access.set(`user:${ADA}`, { 'market/prod': 'viewer', 'market/dev': 'developer', billing: 'developer' });
+  await ada.secrets.set('market/dev', { DATABASE_URL: ref('market/prod/DATABASE_URL') });
+  assert.match(await refusal(root.environments.update('market/prod', { archived: true })), /409: 1 reference reads market\/prod: market\/dev\/DATABASE_URL reads/, 'another environment of the project reads it');
+  await root.projects.update('market', { archived: true });
+  await root.projects.update('market', { archived: false });
+
+  // A row the vault never sealed, written by the database's owner, is no reference.
+  const [source] = await db.owner.select({ id: secrets.id, projectId: secrets.projectId, environmentId: secrets.environmentId }).from(secrets).where(eq(secrets.key, 'STRIPE_KEY'));
+  const [billing] = await db.owner.select({ id: secrets.id, projectId: secrets.projectId, environmentId: secrets.environmentId }).from(secrets).where(eq(secrets.key, 'PORT'));
+  await db.owner.insert(secretReferences).values({
+    id: crypto.randomUUID(), projectId: billing!.projectId, environmentId: billing!.environmentId, secretId: billing!.id,
+    sourceProjectId: source!.projectId, sourceEnvironmentId: source!.environmentId, sourceSecretId: source!.id,
+    createdSeq: firstSeq, createdBy: `user:${ADA}`,
+  });
+  await caro.secrets.update('market/prod/STRIPE_KEY', { archived: true });
+});
+
+test('an archive that commits between the vault sealing a reference and its row refuses the reference: no live reference reads an archived source', async () => {
+  // The other order, a reference made first, is the refusal above.
+  const original = deps.vault.reference.bind(deps.vault);
+  let archived = false;
+  deps.vault.reference = async (input) => {
+    const made = await original(input);
+    // Between the seal and the row: the archive takes the head, finds no row, and commits.
+    await caro.secrets.update('market/prod/DATABASE_URL', { archived: true });
+    archived = true;
+    return made;
+  };
+  try {
+    assert.match(await refusal(ada.secrets.set('billing/prod', { DATABASE_URL: ref('market/prod/DATABASE_URL') })),
+      /404: market\/prod\/DATABASE_URL was archived or deleted meanwhile: it is no live secret to refer to/);
+  } finally {
+    deps.vault.reference = original;
+  }
+  assert.ok(archived);
+  assert.deepEqual(await db.owner.select().from(secretReferences), [], 'no reference row');
+  assert.equal((await ada.secrets.list('billing/prod')).keys.find((key) => key.key === 'DATABASE_URL'), undefined, 'no key holds it');
 });
 
 test("the source's side sees who reads through its references, and the reads are in both projects' logs", async () => {
