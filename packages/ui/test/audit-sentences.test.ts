@@ -207,6 +207,7 @@ test('every other action has a sentence', () => {
     [{ action: 'mcp.token', metadata: { clientName: 'Claude', grant: 'refresh_token' } }, 'refreshed the tokens of Claude'],
     [{ action: 'mcp.disconnect', metadata: { clientName: 'Claude', reason: 'refresh_reused' } }, 'disconnected Claude: a refresh token it had replaced was used again'],
     [{ action: 'mcp.disconnect', metadata: { clientName: 'Claude', reason: 'owner', principalType: 'user', principalId: 'ada@acme.example' } }, 'disconnected Claude of ada@acme.example'],
+    [{ action: 'environment.archive', project: 'market', environment: 'prod', decision: 'deny', reason: 'referenced' }, 'tried to archive environment market/prod: references read it'],
     [{ action: 'account.link', metadata: { provider: 'github' } }, 'linked a github account'],
     [{ action: 'key.wrap', ...prod, key: 'DATABASE_URL', version: 5 }, 'sealed the key of market/prod/DATABASE_URL, version 5'],
     [{ action: 'key.check', metadata: { kekProvider: 'local', kekId: 'kek-1' } }, 'recorded the check value of the vault key kek-1'],

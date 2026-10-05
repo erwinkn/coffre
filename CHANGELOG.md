@@ -59,6 +59,11 @@ A read through a reference is market's read, in market's log and its
 offboarding report, and billing's too. A reference that cannot be read,
 broken, or its source archived or deleted, stops the whole `run` or
 `export`, saying why and who can fix it, rather than run without it.
+Archiving what a live reference reads, the key, its environment or its
+project, is refused (409) until the reference is broken, so archiving
+never silently breaks another project's runs; the refusal names each
+reference and who can break it, and the archive dialogs list them with
+Break. A reference held inside what is archived does not block it.
 Someone's offboarding report lists the references they made. `coffre fork
 --reference` makes each key a reference to its parent's. Migration
 `0008_references` adds one app table and indexes on the log; until it runs,

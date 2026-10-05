@@ -151,6 +151,17 @@ async function scenario(operations: readonly Operation[]) {
     const source = model.environments.find((each) => each.n === reference.source);
     return reference.live && source !== undefined && !source.archived && model.project !== null && !model.project.archived;
   }
+  /**
+   * Whether billing's reference reads `environment` now, or anything in
+   * market when none is named: live, its source and project not archived.
+   * Archiving what it reads is refused (D41); restoring never is.
+   */
+  function readThrough(environment?: Environment): boolean {
+    const { reference } = model.billing;
+    if (reference === null || !reference.live || model.project === null || model.project.archived) return false;
+    const source = model.environments.find((each) => each.n === reference.source);
+    return source !== undefined && !source.archived && (environment === undefined || environment === source);
+  }
   const billingValue = () => {
     const { reference } = model.billing;
     return reference === null ? model.billing.value : model.environments.find((each) => each.n === reference.source)!.value;
@@ -382,13 +393,17 @@ async function scenario(operations: readonly Operation[]) {
       }
       case 'archive-env':
       case 'unarchive-env': {
-        const result = await allowed(() => root.environments.update(`market/${op.environment}`, { archived: op.kind === 'archive-env' }), environment !== undefined, true, 404);
+        const refused = op.kind === 'archive-env' && environment !== undefined && readThrough(environment);
+        const result = await allowed(() => root.environments.update(`market/${op.environment}`, { archived: op.kind === 'archive-env' }), environment !== undefined && !refused, true,
+          environment === undefined ? 404 : 409);
         if (result) environment!.archived = op.kind === 'archive-env';
         break;
       }
       case 'archive-project':
       case 'unarchive-project': {
-        const result = await allowed(() => root.projects.update('market', { archived: op.kind === 'archive-project' }), model.project !== null, true, 404);
+        const refused = op.kind === 'archive-project' && readThrough();
+        const result = await allowed(() => root.projects.update('market', { archived: op.kind === 'archive-project' }), model.project !== null && !refused, true,
+          model.project === null ? 404 : 409);
         if (result) model.project!.archived = op.kind === 'archive-project';
         break;
       }
@@ -560,19 +575,23 @@ test('API operation sequence covers every project, renames, archiving, deletion 
   ]);
 });
 
-test('API operation sequence covers references: made, read in both projects, rotated, broken, replaced, deleted with their source, and forged', () => {
+test('API operation sequence covers references: made, read in both projects, rotated, broken, replaced, archiving refused while read, deleted once broken, and forged', () => {
   const base: Operation = { kind: 'refer', member: 'ada', environment: 'prod', to: 'qa', scope: 'every-env', role: 'viewer', value: 'rotated', credential: 0 };
   return scenario([
     base,
     { ...base, kind: 'rotate' },
     { ...base, kind: 'refer' },
-    // The source archived, then back: the reference with it.
+    // What the reference reads cannot be archived, nor its project (D41): break it first.
     { ...base, kind: 'archive-env' },
-    { ...base, kind: 'unarchive-env' },
+    { ...base, kind: 'archive-project' },
+    { ...base, kind: 'retire-env' },
     { ...base, kind: 'rename-env', to: 'qa' },
     { ...base, kind: 'rotate', environment: 'qa', value: 'after the rename' },
     { ...base, kind: 'break' },
     { ...base, kind: 'break' },
+    // Broken, it blocks nothing: the source archives, and comes back.
+    { ...base, kind: 'archive-env', environment: 'qa' },
+    { ...base, kind: 'unarchive-env', environment: 'qa' },
     { ...base, kind: 'refer', environment: 'dev' },
     { ...base, kind: 'set-holder', value: 'billing of its own' },
     { ...base, kind: 'break' },
@@ -581,9 +600,13 @@ test('API operation sequence covers references: made, read in both projects, rot
     { ...base, kind: 'revoke', scope: 'environment' },
     { ...base, kind: 'grant', member: 'ci', scope: 'every-env', environment: 'prod' },
     { ...base, kind: 'forge', environment: 'dev' },
-    // Its source deleted: the reference ends, and the deletion says so.
+    // Its source deleted only once the reference is broken.
+    { ...base, kind: 'retire-env', environment: 'dev' },
+    { ...base, kind: 'break' },
     { ...base, kind: 'retire-env', environment: 'dev' },
     { ...base, kind: 'refer', environment: 'qa' },
+    { ...base, kind: 'retire-project' },
+    { ...base, kind: 'break' },
     { ...base, kind: 'retire-project' },
     { ...base, kind: 'create-project' },
     { ...base, kind: 'create-env', environment: 'prod', value: 'a new market' },

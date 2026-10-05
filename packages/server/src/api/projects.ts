@@ -29,7 +29,7 @@ import { allowed, audited, denied, Refusal, requireOwner, withRefusals, type Api
 import { ApiError, conflict, notFound, vaultRefused } from './errors.ts';
 import { formatMember } from './paths.ts';
 import { fileProject, projectFoldersOf, requireFolders } from './folders.ts';
-import { endReferences, referencesAt } from './references.ts';
+import { endReferences, referencesAt, refuseIfRead } from './references.ts';
 
 export type Me = {
   principal: { type: 'user' | 'service'; id: string };
@@ -316,6 +316,7 @@ export async function patchProject(
   const moving = patch.folder !== undefined && patch.folder !== before;
   return audited(ctx, async (tx, log) => {
     await stillThere(tx, place);
+    if (archivedAt != null) await refuseIfRead(ctx, tx, project.slug, { projectId: project.id }, 'project.archive', { projectId: project.id });
     if (renamed || archivedAt !== undefined) {
       try {
         await update(tx, projects, { id: project.id }, { ...renames, archivedAt });
@@ -419,6 +420,7 @@ export async function patchEnvironment(
   const scope = { projectId: project.id, environmentId: environment.id };
   const patched = await audited(ctx, async (tx, log) => {
     await stillThere(tx, place);
+    if (archivedAt != null) await refuseIfRead(ctx, tx, `${project.slug}/${environment.slug}`, scope, 'environment.archive', scope);
     if (renamed || archivedAt !== undefined) {
       try {
         await update(tx, environments, { id: environment.id }, { ...renames, archivedAt });

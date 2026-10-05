@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import type { Permission } from '@coffre/core/access';
 import type { Envelope } from '@coffre/core/envelope';
+import { isTombstone } from '@coffre/core/schemas';
 import type { HolderRef, SecretRef } from '@coffre/core/vault';
 import type { Queryable, Transaction } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
@@ -27,7 +28,7 @@ import { conflict, notFound, vaultRefused } from './errors.ts';
 import { fileSecrets, requireFolders, secretFoldersIn } from './folders.ts';
 import { openValues, rewrapValue, sealValues } from './keys.ts';
 import { formatMember, formatPath, type Path } from './paths.ts';
-import { currentReferences, placeOfRow, readableValues, readersOf, referencesReady, requireReferences, type ReferenceView, type Resolved } from './references.ts';
+import { currentReferences, placeOfRow, readableValues, readersOf, referencesReady, refuseIfRead, requireReferences, type ReferenceView, type Resolved } from './references.ts';
 
 export type SecretKey = {
   key: string;
@@ -272,6 +273,19 @@ export async function setSecrets(
 
     return audited(ctx, async (tx, log) => {
       await checkEnvironment(tx, place, environment);
+      // Each source again under the head: archived or deleted since it was checked, it is no source (D41).
+      if (references.length > 0) {
+        const sources = await secretPlaces(tx, references.map((item) => item.source.id));
+        for (const { key, source } of references) {
+          const now = sources.get(source.id);
+          if (now !== undefined && now.archivedAt === null && now.environmentArchivedAt === null && now.projectArchivedAt === null
+            && !isTombstone(now.project) && !isTombstone(now.environment)) continue;
+          throw new Refusal(
+            notFound(`${sourcePath(source)} was archived or deleted meanwhile: it is no live secret to refer to`),
+            denied(ctx, 'secret.reference', 'source_archived', { ...environment, operationId, metadata: { key, source: sourcePath(source) } }),
+          );
+        }
+      }
       await insertIfAbsent(tx, secrets, [
         ...items.map(({ key, secret }) => ({ key, id: secret.secretId })),
         ...references.map(({ key, holder }) => ({ key, id: holder.secretId })),
@@ -337,6 +351,11 @@ export async function setSecrets(
         keys[key] = { reference: sourcePath(source) };
       }
       for (const { key, source } of refs.map((ref) => ({ key: ref.key, source: ref.ref }))) keys[key] ??= { reference: source };
+      const archiving = archives.map((key) => byKey.get(key)).filter((secret) => secret !== undefined && secret.archivedAt === null);
+      if (archiving.length > 0) {
+        const what = archiving.length === 1 ? `${place.project.slug}/${place.environment!.slug}/${archiving[0]!.key}` : `${archiving.length} keys of ${place.project.slug}/${place.environment!.slug}`;
+        await refuseIfRead(ctx, tx, what, { ...environment, secretIds: archiving.map((secret) => secret!.id) }, 'secret.archive', { ...environment, operationId });
+      }
       for (const key of archives) {
         const secret = byKey.get(key);
         keys[key] = { archived: true };
@@ -506,6 +525,9 @@ export async function patchSecret(
   const result = await audited(ctx, async (tx, log) => {
     // Under the head, as every write to a place: one deleted since the router found it is not written to, nor filed.
     await checkEnvironment(tx, place, environment);
+    if (archiving && archived) {
+      await refuseIfRead(ctx, tx, `${place.project.slug}/${place.environment!.slug}/${secret.key}`, { ...environment, secretIds: [secret.id] }, 'secret.archive', where);
+    }
     if (renaming || archiving) {
       try {
         await update(tx, secrets, { id: secret.id }, {

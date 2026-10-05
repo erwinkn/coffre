@@ -264,3 +264,57 @@ export function ReferencesInto({ project }: { project: string }) {
     </Card>
   );
 }
+
+/**
+ * The references that archiving `path` would stop, a project, an
+ * environment or a key: those reading a secret in it, held outside it.
+ * Archiving is refused while any read (D41); the server decides, and this
+ * shows the dialog what it will say.
+ */
+export function archiveBlockers(path: string, references: readonly ListedReference[]): ListedReference[] {
+  const within = (secret: string) => secret === path || secret.startsWith(`${path}/`);
+  return references.filter((reference) => reference.state === 'live' && within(reference.source) && !within(reference.holder));
+}
+
+/**
+ * What an archive dialog shows while references read what it would
+ * archive: each, and Break for those who may break it. Archive waits until
+ * none is left.
+ */
+export function ArchiveBlocked({ references }: { references: readonly ListedReference[] }) {
+  const coffre = useCoffre();
+  const { run, error, pending } = useAction();
+  if (references.length === 0) return null;
+  const many = references.length > 1;
+  return (
+    <div className="archive-blocked">
+      <p className="dialog-body">
+        {many ? `${references.length} references read it` : 'A reference reads it'} from elsewhere. Archiving it would stop{' '}
+        {many ? 'those reads' : 'that read'}, so break {many ? 'them' : 'it'} first: a run where{' '}
+        {many ? 'each is' : 'it is'} held then refuses until that key gets a value.
+      </p>
+      <ul className="lent-references" aria-label="References that read it">
+        {references.map((reference) => (
+          <li key={reference.id}>
+            <span>
+              <span className="mono">{reference.holder}</span> reads <span className="mono">{reference.source}</span>
+            </span>
+            {reference.canBreak ? (
+              <button
+                type="button"
+                className="btn btn-sm btn-danger-outline"
+                disabled={pending}
+                onClick={() => void run(() => coffre.references.break(reference.holder), { affects: [['references'], ['secrets']] })}
+              >
+                Break
+              </button>
+            ) : (
+              <span className="cell-muted">{`${reference.source.split('/')[0]}'s access managers can break it, or whoever writes ${reference.holder.split('/').slice(0, 2).join('/')}`}</span>
+            )}
+          </li>
+        ))}
+      </ul>
+      {error !== null && <ErrorLine error={error} />}
+    </div>
+  );
+}

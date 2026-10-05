@@ -83,10 +83,14 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
     ui: [
       { does: "a reference's row › ⋯ › Break reference…, or the Read elsewhere list's Break", in: 'pages/environment.tsx', call: 'references.break' },
       { does: "a project's references › Break", in: 'components/references.tsx', call: 'references.break' },
+      { does: 'Archive a project, an environment or a key, while references read it › Break, in the dialog', in: 'components/references.tsx', call: 'references.break' },
     ],
   },
   'GET /references': {
-    ui: [{ does: "an environment: what reads its secrets from elsewhere; a project's references", in: 'lib/queries.ts', call: 'references.list' }],
+    ui: [
+      { does: "an environment: what reads its secrets from elsewhere; a project's references", in: 'lib/queries.ts', call: 'references.list' },
+      { does: 'Archive a project or an environment: the references that would stop reading it', in: 'pages/project.tsx', call: 'references.list' },
+    ],
   },
   'POST /reveals': { ui: [{ does: 'a secret › Reveal, and Edit, which starts from the value', in: 'pages/environment.tsx', call: 'secrets.reveal' }] },
   'GET /members': {
