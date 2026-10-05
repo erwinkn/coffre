@@ -11,6 +11,7 @@ import {
   startSignin,
 } from './auth-routes.ts';
 import { preferencesIn, type Preferences } from '@coffre/core/pages';
+import { isUnreachable } from '@coffre/db/dialect';
 import { migrated } from '@coffre/db/schema-version';
 
 import { fetchApi, isSameOrigin, pageClient } from './fetch-api.ts';
@@ -132,16 +133,19 @@ const SERVED_WHILE_MIGRATING = new Set(['/livez', '/readyz']);
  * Whether the database has every migration this version ships. Each
  * deployment migrates before it deploys (`coffre migrate`), so a new app
  * never serves on a schema it does not have: until then, everything but
- * health answers 503 `migrating`. Asked until it holds, then known. A
- * database that cannot answer lets the request through, to meet the outage
- * as it would anyway: a page shows its error state, the API answers 503.
+ * health answers 503 `migrating`; a database never migrated has no ledger,
+ * and is below them too. Asked until it holds, then known. A database that
+ * cannot be reached lets the request through, to meet the outage as it would
+ * anyway: a page shows its error state, the API answers 503. Any other
+ * failure of the question fails the request.
  */
 async function schemaReady(runtime: CoffreRuntime): Promise<boolean> {
   if (!runtime.schema.migrated) {
     try {
       runtime.schema.migrated = await migrated(runtime.db);
-    } catch {
-      return true;
+    } catch (error) {
+      if (isUnreachable(error)) return true;
+      throw error;
     }
   }
   return runtime.schema.migrated;

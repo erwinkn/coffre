@@ -2,7 +2,7 @@ import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { github, signin, type Principal } from '@coffre/core/identity';
-import { migrationLedger } from '@coffre/db/dialect';
+import { isUnreachable, migrationLedger } from '@coffre/db/dialect';
 import { sql, type SQL } from 'drizzle-orm';
 
 import { coffreRoute, respond, runScheduled } from '../src/app.ts';
@@ -52,7 +52,20 @@ async function ask(runtime: CoffreRuntime, path: string, accept = 'application/j
   return { status: response.status, type: response.headers.get('content-type') ?? '', body: await response.text(), rendered };
 }
 
-/** The ledger's rows forgotten while `work` runs, as on a database the new version was deployed to before `coffre migrate`. */
+/** No ledger at all while `work` runs, as on a database never migrated: the table moved aside, its grants with it. */
+async function neverMigrated(work: () => Promise<void>): Promise<void> {
+  const [away, back] = TEST_ENGINE === 'sqlite'
+    ? [sql`ALTER TABLE __drizzle_migrations RENAME TO __drizzle_migrations_away`, sql`ALTER TABLE __drizzle_migrations_away RENAME TO __drizzle_migrations`]
+    : [sql`ALTER TABLE drizzle.__drizzle_migrations RENAME TO __drizzle_migrations_away`, sql`ALTER TABLE drizzle.__drizzle_migrations_away RENAME TO __drizzle_migrations`];
+  await run(away);
+  try {
+    await work();
+  } finally {
+    await run(back);
+  }
+}
+
+/** The ledger's rows forgotten while `work` runs, as on a database migrated by an earlier release. */
 async function unmigrated(work: () => Promise<void>): Promise<void> {
   const ledger = migrationLedger(db.owner);
   const entries = await rows(sql`SELECT * FROM ${ledger}`);
@@ -83,6 +96,13 @@ test('below its migrations, the app serves nothing but its health: the API and t
     assert.equal((JSON.parse((await ask(runtime, '/readyz')).body) as { ok: boolean }).ok, false);
     await assert.rejects(runScheduled(runtime), /lacks this version's migrations/);
   });
+  // A database never migrated has no ledger: below the migrations too, not an outage.
+  await neverMigrated(async () => {
+    const api = await ask(freshRuntime(), '/api/me');
+    assert.deepEqual([api.status, api.rendered, (JSON.parse(api.body) as { error: string }).error], [503, false, 'migrating']);
+    const page = await ask(freshRuntime(), '/auth/signin/github', 'text/html');
+    assert.deepEqual([page.status, page.rendered], [503, false]);
+  });
   // Migrated, it serves; and once it has seen so, it stays so, asking no more.
   const page = await ask(runtime, '/projects', 'text/html');
   assert.deepEqual([page.status, page.rendered], [200, true]);
@@ -102,3 +122,13 @@ async function run(query: SQL): Promise<void> {
   if (TEST_ENGINE === 'sqlite') await (db.owner as unknown as { run: (q: SQL) => Promise<unknown> }).run(query);
   else await (db.owner as unknown as { execute: (q: SQL) => Promise<unknown> }).execute(query);
 }
+
+test('only a database that cannot be reached is an outage the door lets through; any other failure is not', () => {
+  assert.equal(isUnreachable(Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:1'), { code: 'ECONNREFUSED' })), true);
+  assert.equal(isUnreachable(new Error('query failed', { cause: Object.assign(new Error('the database system is shutting down'), { code: '57P03' }) })), true);
+  assert.equal(isUnreachable(Object.assign(new Error('connection failure'), { code: '08006' })), true);
+  assert.equal(isUnreachable(new Error('Connection terminated unexpectedly')), true);
+  assert.equal(isUnreachable(Object.assign(new Error('relation "drizzle.__drizzle_migrations" does not exist'), { code: '42P01' })), false);
+  assert.equal(isUnreachable(Object.assign(new Error('permission denied for schema drizzle'), { code: '42501' })), false);
+  assert.equal(isUnreachable(new Error('no such table: __drizzle_migrations')), false);
+});
