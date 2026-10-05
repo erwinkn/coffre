@@ -372,6 +372,7 @@ export type Api = {
         endedAt: string | null;
         readers: null | string[];
         canBreak: boolean;
+        holderArchived: boolean;
       }[];
     };
   };
@@ -1178,6 +1179,7 @@ export type ListedReference = {
   endedAt: string | null;
   readers: null | string[];
   canBreak: boolean;
+  holderArchived: boolean;
 };
 
 export type ProjectSummary = {

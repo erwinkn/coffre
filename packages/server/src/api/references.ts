@@ -75,6 +75,9 @@ const path = (place: SecretPlaceRow) => `${place.project}/${place.environment}/$
 /** A place deleted for good, alone or with its project: a tombstone's slug (`@coffre/core/schemas`). */
 const deleted = (place: SecretPlaceRow) => isTombstone(place.project) || isTombstone(place.environment);
 
+/** Whether a secret is archived, itself or with its environment or project: nothing reads it. */
+const archived = (place: SecretPlaceRow) => place.archivedAt !== null || place.environmentArchivedAt !== null || place.projectArchivedAt !== null;
+
 /** Where a secret is, as grants match it: its environment by id and by slug. */
 export function placeOfRow(place: SecretPlaceRow): Place {
   return { projectId: place.projectId, environmentId: place.environmentId, environmentSlug: place.environment };
@@ -115,7 +118,7 @@ export async function resolveReferences(db: Queryable, rows: readonly ReferenceR
 function stateOf(row: ReferenceRow, source: SecretPlaceRow | null, sourceIsReference: boolean): ReferenceState {
   if (row.ended !== null) return row.ended.reason === 'replaced' ? 'replaced' : 'broken';
   if (source === null || deleted(source)) return 'source_deleted';
-  if (source.archivedAt !== null || source.environmentArchivedAt !== null || source.projectArchivedAt !== null) return 'source_archived';
+  if (archived(source)) return 'source_archived';
   if (sourceIsReference) return 'source_is_reference';
   if (source.currentVersionId === null) return 'source_empty';
   return 'live';
@@ -166,8 +169,11 @@ export type ArchivedPlace = { projectId: string; environmentId?: string; secretI
  * archiving it would break, which it is refused while any read (D41). Live
  * as the lists decide, by the vault's seal and its `reference.end`: a row
  * without a seal is no reference, and blocks nothing. One held inside the
- * place is archived with it, and breaks nobody's run. Asked under the log's
- * head, with the archive's own write, so that none is made meanwhile.
+ * place is archived with it, and breaks nobody's run; nor does one held in
+ * a key, environment or project archived already (D58): if its holder is
+ * restored later, it shows its source archived, and reads refuse saying so.
+ * Asked under the log's head, with the archive's own write, so that none is
+ * made, and no holder restored, meanwhile.
  */
 export async function archiveBlockers(db: Queryable, place: ArchivedPlace): Promise<Resolved[]> {
   if (!(await referencesReady(db))) return [];
@@ -179,8 +185,9 @@ export async function archiveBlockers(db: Queryable, place: ArchivedPlace): Prom
     .filter((row) => row.ended === null && within(row.source) && !within(row.holder));
   const current = await currentRows(db, rows.map((row) => row.holder.secretId));
   const resolved = await resolveReferences(db, rows.filter((row) => current.get(row.holder.secretId)?.id === row.id));
-  return resolved.filter((reference) => reference.state === 'live');
+  return resolved.filter((reference) => reference.state === 'live' && !archived(reference.holder));
 }
+
 
 /** How many references an archive's refusal names, before "and N more". */
 const NAMED = 10;
@@ -321,6 +328,8 @@ export type ListedReference = ReferenceView & {
   readers: string[] | null;
   /** Whether the caller may break it: writing its holder, or managing its source's project's access. */
   canBreak: boolean;
+  /** Whether its holder is archived, itself or with its environment or project: it reads nothing, and blocks no archive of its source (D58). */
+  holderArchived: boolean;
 };
 
 /**
@@ -356,6 +365,7 @@ export async function listReferences(
       ...reference.view,
       readers: shown.includes(reference) ? readers[shown.indexOf(reference)]! : null,
       canBreak: can(caller, 'secret.write', reference.row.holder) || can(caller, 'grant.manage', { projectId: reference.row.source.projectId }),
+      holderArchived: archived(reference.holder),
     })),
   };
 }

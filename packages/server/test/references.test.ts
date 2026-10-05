@@ -256,6 +256,40 @@ test("a reference held in the place being archived blocks nothing; a forged row 
   await caro.secrets.update('market/prod/STRIPE_KEY', { archived: true });
 });
 
+test('a reference held in an archived place blocks nothing; its holder restored, it shows its source archived, and reads refuse saying so (D58)', async () => {
+  await ada.secrets.set('billing/prod', { DATABASE_URL: ref('market/prod/DATABASE_URL'), STRIPE_KEY: ref('market/prod/STRIPE_KEY') });
+  const archivedSource = /^409: billing\/prod\/DATABASE_URL is a reference to market\/prod\/DATABASE_URL, which is archived: market\/prod's maintainers can unarchive it, or set a value for DATABASE_URL$/;
+
+  // Its environment archived, nobody reads through it: the source's environment archives.
+  await root.environments.update('billing/prod', { archived: true });
+  await root.environments.update('market/prod', { archived: true });
+  assert.deepEqual((await root.references.list('market/prod')).references.map((reference) => [reference.holder, reference.state, reference.holderArchived]), [
+    ['billing/prod/DATABASE_URL', 'source_archived', true],
+    ['billing/prod/STRIPE_KEY', 'source_archived', true],
+  ]);
+  // Restored, the holder reads nothing through it, and says why and how to fix it; a run or an export of the environment stops at it.
+  await root.environments.update('billing/prod', { archived: false });
+  assert.equal((await bo.secrets.list('billing/prod')).keys.find((key) => key.key === 'DATABASE_URL')!.reference?.state, 'source_archived');
+  assert.match(await refusal(bo.secrets.reveal('billing/prod/DATABASE_URL')), archivedSource);
+  assert.match(await refusal(bo.secrets.reveal('billing/prod')), /^409: billing\/prod\/DATABASE_URL is a reference to market\/prod\/DATABASE_URL, which is archived/);
+  // The source back, it reads again: archiving never ended it.
+  await root.environments.update('market/prod', { archived: false });
+  assert.deepEqual((await bo.secrets.reveal('billing/prod/DATABASE_URL')).values, { DATABASE_URL: 'postgres://v1' });
+
+  // The same for its project, and for the key alone.
+  await root.projects.update('billing', { archived: true });
+  await caro.secrets.update('market/prod/DATABASE_URL', { archived: true });
+  await root.projects.update('billing', { archived: false });
+  assert.match(await refusal(bo.secrets.reveal('billing/prod/DATABASE_URL')), archivedSource);
+  await caro.secrets.update('market/prod/DATABASE_URL', { archived: false });
+  await root.secrets.update('billing/prod/DATABASE_URL', { archived: true });
+  await caro.secrets.update('market/prod/DATABASE_URL', { archived: true });
+  // While the other key's reference, held in a live place, still blocks.
+  assert.match(await refusal(caro.secrets.update('market/prod/STRIPE_KEY', { archived: true })), /^409: 1 reference reads market\/prod\/STRIPE_KEY/);
+  await root.secrets.update('billing/prod/DATABASE_URL', { archived: false });
+  assert.match(await refusal(bo.secrets.reveal('billing/prod/DATABASE_URL')), archivedSource);
+});
+
 test('an archive that commits between the vault sealing a reference and its row refuses the reference: no live reference reads an archived source', async () => {
   // The other order, a reference made first, is the refusal above.
   const original = deps.vault.reference.bind(deps.vault);

@@ -249,8 +249,8 @@ Three ways, each a vault `reference.end` entry naming the reference's
 An ended reference stays ended. Following the source again is a new
 reference, which takes read on it again. Archiving the holder does not end
 it: archiving is reversible, and unarchiving brings the reference back.
-Archiving the source is refused while a reference reads it (D41), as the
-next section says.
+Archiving the source is refused while a reference held in a live place
+reads it (D41, D58), as the next section says.
 
 `secret_references` is insert-only: whether a reference is live comes from
 the log, so a list shows what the vault decides, whatever the row says.
@@ -278,14 +278,17 @@ references, with Break. Live is the lists' answer, the vault's seal and its
 `reference.end`, so a row the vault never sealed blocks nothing. A
 reference held inside what is archived, in another environment of the same
 project archived whole, does not block: archiving stops no one else's read.
-One held in an environment or project archived before still blocks, on
-purpose: unarchiving its holder brings it back, and it would then read an
-archived source. Break it, from either side, to archive the source.
-The check runs under the log's head, in the archive's own transaction, and
-making a reference checks its source again there, so an archive and a
-reference made at once cannot both land. Restoring is never refused. So a
-source is archived, or deleted, only once nothing reads it; the states
-below stay for data made before this rule.
+Nor does one held in a key, environment or project archived already
+(D58): nobody reads through it now. If its holder is unarchived later, the
+key shows "Source archived", and `get`, `run` and `export` refuse naming it
+and how to fix it, as for any reference that cannot be read: unarchive the
+source, or set a value. The check runs under the log's head, in the
+archive's own transaction, and making a reference checks its source again
+there, so an archive and a reference made at once cannot both land; nor
+can an archive and a holder's unarchiving, which takes the head too.
+Restoring is never refused. So a source is archived, or deleted, only once
+nothing live reads it; a holder restored after its source was archived,
+and data made before this rule, take the states below.
 
 Live resolution reads the source's current version at each read. A key
 whose source cannot be read shows why, and is never read as an empty value:
@@ -307,7 +310,8 @@ the reference again", or "…whose source was archived: market's
 maintainers can unarchive it, or set a value here". The UI marks the row
 the same way. Permanent deletion ends the references to and from what it
 deletes, and its confirmation lists them; since deleting needs archiving
-first, the references into it are already broken, or from before D41.
+first, the references into it are broken, held in archived places, or
+from before D41.
 
 ### Who sees what
 
