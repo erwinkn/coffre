@@ -15,6 +15,10 @@ test("a page's heading, its cards' titles, its text and address, and what its sc
       '<script>history.replaceState(null, "", location.pathname)</script>',
     // What a signed-in page did under wrangler's keep_names: a helper only the bundle had.
     '/broken': '<!doctype html><h1>Projects</h1><script>const f = __name(() => {}, "f")</script>',
+    // A button that opens a confirmation, as a person would next.
+    '/remove':
+      '<!doctype html><h1>Projects</h1><button id="remove">Remove</button>' +
+      '<script>remove.onclick = () => document.body.insertAdjacentHTML("beforeend", "<div role=alertdialog>Removing revokes 2 grants</div>")</script>',
     // A failed load is an error too: the icon the browser asks for is here.
     '/favicon.ico': '',
   };
@@ -31,8 +35,11 @@ test("a page's heading, its cards' titles, its text and address, and what its sc
       cards: ['Sign in with OIDC', 'Bearer tokens'],
       text: 'Projects\nSign in with OIDC\nBearer tokens',
       href: `${origin}/fine`,
+      dialog: null,
       errors: [],
     });
+    const removing = await browser.load(`${origin}/remove`, [], 200, 'document.getElementById("remove").click()');
+    assert.equal(removing.dialog, 'Removing revokes 2 grants', 'the dialog a step opened is read');
     const broken = await browser.load(`${origin}/broken`, [], 200);
     assert.equal(broken.heading, 'Projects');
     assert.equal(broken.errors.length, 1);

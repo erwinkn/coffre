@@ -328,10 +328,30 @@ function Sessions({
                         ) : state.state === 'pending' ? (
                           <RowPending status={state} />
                         ) : (
-                          <button className="act" onClick={() => end(session)}>
-                            <X size={13} />
-                            End
-                          </button>
+                          <ConfirmButton
+                            trigger={
+                              <button className="act">
+                                <X size={13} />
+                                End
+                              </button>
+                            }
+                            title={`End this ${session.kind === 'cli' ? 'command line' : 'browser'} session?`}
+                            body={
+                              <>
+                                {session.label ?? (session.kind === 'cli' ? 'The command line' : 'The browser')}
+                                {session.lastUsedIp !== null && (
+                                  <>
+                                    {' '}at <span className="mono">{session.lastUsedIp}</span>
+                                  </>
+                                )}
+                                , last active{' '}
+                                <Timestamp iso={session.lastUsedAt ?? session.createdAt} display="relative" />, is
+                                signed out at its next request.
+                              </>
+                            }
+                            confirmLabel="End session"
+                            onConfirm={() => end(session)}
+                          />
                         )}
                       </td>
                     </tr>

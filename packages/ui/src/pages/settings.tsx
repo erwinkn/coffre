@@ -1,3 +1,4 @@
+import type { RouteOutput } from '@coffre/client';
 import { useSuspenseQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useCoffre } from '../lib/coffre';
@@ -11,7 +12,9 @@ import { Info } from '../components/icons';
 
 export function SettingsPage() {
   const { auth, capabilities } = useShell();
-  const { data: directory } = useSuspenseQuery(queries.directory(useCoffre(), capabilities.canManageGrants));
+  const client = useCoffre();
+  const { data: directory } = useSuspenseQuery(queries.directory(client, capabilities.canManageGrants));
+  const { data: keys } = useSuspenseQuery(queries.auditKeys(client, capabilities.canManageGrants));
   const providers = auth?.signin?.providers.map((provider) => provider.label) ?? [];
 
   const principals = directory?.ok === true ? directory.principals : null;
@@ -71,6 +74,46 @@ export function SettingsPage() {
           )}
         </dl>
       </Card>
+
+      {keys?.ok === true && <Keys keys={keys} />}
     </>
   );
 }
+
+/**
+ * What the keys you keep are checked against: no secret, so shown. The keys
+ * themselves are checked by `coffre verify keys`, on your machine: a vault
+ * key typed into a web page would be within reach of everything running in it.
+ */
+function Keys({ keys }: { keys: RouteOutput<'GET /audit/keys'> }) {
+  const { current, checks } = keys.vault;
+  const replaced = new Set(checks.map((check) => check.vaultId).filter((id) => id !== current.vaultId)).size;
+  return (
+    <Card
+      labelledBy="keys"
+      title="Keys"
+      description={
+        <>
+          What the vault key and app key you keep are checked against. Check the keys themselves
+          with <code>coffre verify keys</code>, which reads them on your machine and sends neither.
+        </>
+      }
+    >
+      <dl className="facts">
+        <Fact label="Vault ID">
+          <span className="mono">{current.vaultId}</span>
+        </Fact>
+        <Fact label="Vault key">
+          <span>
+            Held by <span className="mono">{current.provider}</span>
+            {replaced > 0 && `; ${replaced} earlier vault key${replaced === 1 ? '' : 's'} still checkable`}
+          </span>
+        </Fact>
+        <Fact label="App key">
+          <span className="mono">{keys.app.keyId}</span>
+        </Fact>
+      </dl>
+    </Card>
+  );
+}
+

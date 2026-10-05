@@ -54,6 +54,7 @@ export const keys = {
   identities: ['identities'],
   sessions: ['sessions'],
   audit: ['audit'],
+  auditKeys: ['audit', 'keys'],
 } satisfies Record<string, QueryKey | ((...args: never[]) => QueryKey)>;
 
 /** One member's grants, as rows. */
@@ -200,6 +201,17 @@ export const queries = {
   sessions: (client: CoffreClient) =>
     queryOptions({ queryKey: keys.sessions, queryFn: () => uiResult(() => client.sessions.list()) }),
 
+  /**
+   * What the keys an operator keeps are checked against: the vault's ID and
+   * the app key's fingerprint, no secret. Null for anyone but owners and root
+   * admins, who alone may ask.
+   */
+  auditKeys: (client: CoffreClient, allowed: boolean) =>
+    queryOptions({
+      queryKey: [...keys.auditKeys, { allowed }],
+      queryFn: () => (allowed ? uiResult(() => client.audit.keys()) : Promise.resolve(null)),
+    }),
+
   /** A page of the log, as filtered: always read fresh. */
   auditEntries: (client: CoffreClient, search: AuditSearch) =>
     queryOptions({
@@ -324,6 +336,15 @@ export async function loadProject(queryClient: QueryClient, client: CoffreClient
 export async function loadDirectory(queryClient: QueryClient, client: CoffreClient) {
   const shell = await loadShell(queryClient, client);
   return queryClient.fetchQuery(queries.directory(client, shell.capabilities.canManageGrants));
+}
+
+/** The instance's settings: the directory's counts, and what its keys are checked against. */
+export async function loadSettings(queryClient: QueryClient, client: CoffreClient) {
+  const shell = await loadShell(queryClient, client);
+  await Promise.all([
+    loadDirectory(queryClient, client),
+    queryClient.fetchQuery(queries.auditKeys(client, shell.capabilities.canManageGrants)),
+  ]);
 }
 
 /**
