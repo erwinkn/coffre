@@ -300,6 +300,7 @@ test('a tombstone is refused by the rule, not by its emptied keys: values left i
   });
   assert.equal(wrapped.ok ? null : wrapped.refusal.code, 'deleted');
   const refusals = await db.owner.select({ action: auditLog.action }).from(auditLog)
-    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.decision, 'deny'), eq(auditLog.code, 'deleted')));
+    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.decision, 'deny'), eq(auditLog.code, 'deleted')))
+    .orderBy(asc(auditLog.seq));
   assert.deepEqual(refusals.map((row) => row.action), ['secret.read', 'secret.read', 'key.wrap']);
 });
