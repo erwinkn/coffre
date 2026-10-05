@@ -1,4 +1,4 @@
-import { CoffreError, planImport, type CoffreClient } from '@coffre/client';
+import { byFolder, CoffreError, foldersOf, planImport, type CoffreClient } from '@coffre/client';
 import { parseDotenv } from '@coffre/core/dotenv';
 import {
   useEffect,
@@ -13,7 +13,7 @@ import { useShell } from '../lib/use-shell';
 import { Menu } from '@base-ui/react/menu';
 import { toast } from 'sonner';
 import { failureMessage, useCoffre } from '../lib/coffre';
-import { archiveSecret, restoreSecret, saveSecrets, UnsavedEdits } from '../lib/changes';
+import { archiveSecret, moveSecret, restoreSecret, saveSecrets, UnsavedEdits } from '../lib/changes';
 import type { ItemStatus } from '../lib/optimistic';
 import { affects, keys as queryKeys, queries } from '../lib/queries';
 import { useChange, useChangeStatus } from '../lib/use-change';
@@ -50,6 +50,7 @@ import {
 } from '../components/ui';
 import { Card, ClosedDoor, PageHeader } from '../components/page';
 import { SecretReadOnly } from '../components/affordances';
+import { FolderRow, MoveToFolder } from '../components/folders';
 import {
   AlertCircle,
   Archive,
@@ -57,6 +58,7 @@ import {
   Clock,
   Eye,
   EyeOff,
+  Folder,
   Hash,
   History,
   Key,
@@ -141,6 +143,7 @@ function EnvironmentLedger({
   const save = useChange(saveSecrets(coffre, { project, environment }, principal?.id ?? null));
   const restore = useChange(restoreSecret(coffre, { project, environment }));
   const archive = useChange(archiveSecret(coffre, { project, environment }));
+  const move = useChange(moveSecret(coffre, { project, environment }));
   const { status, dismiss } = useChangeStatus(queryKeys.secrets({ project, environment }));
   const [drafts, setDrafts] = useState<SecretDraft[]>([]);
   const [changes, setChanges] = useState<Record<string, SecretChange>>({});
@@ -155,7 +158,9 @@ function EnvironmentLedger({
   const canArchive = permissions.includes('secret.archive');
   const canReveal = canRevealSecrets(permissions);
 
-  const active = keys.filter((entry) => !entry.archived);
+  // Listed by folder: those in none first, then each folder by name.
+  const active = byFolder(keys.filter((entry) => !entry.archived)).flatMap(([, entries]) => entries);
+  const folders = foldersOf(active);
   const archived = keys.filter((entry) => entry.archived);
   const existing = new Set(keys.map((entry) => entry.key));
 
@@ -438,7 +443,9 @@ function EnvironmentLedger({
                 </tr>
               </thead>
               <tbody>
-                {listed.map((entry) => {
+                {byFolder(listed).flatMap(([folder, entries]) => [
+                  ...(folder === null ? [] : [<FolderRow key={`folder:${folder}`} folder={folder} count={entries.length} columns={columns} />]),
+                  ...entries.map((entry) => {
                   const change = secretChangeFor(changes, entry.key);
                   const state = status(entry.key);
                   return (
@@ -456,6 +463,8 @@ function EnvironmentLedger({
                       canWrite={canWrite}
                       canArchive={canArchive}
                       canReveal={canReveal}
+                      folders={folders}
+                      onMove={(folder) => move({ key: entry.key, folder })}
                       status={state}
                       // Not while its save is on its way.
                       disabled={state.state === 'pending'}
@@ -480,7 +489,8 @@ function EnvironmentLedger({
                       }}
                     />
                   );
-                })}
+                  }),
+                ])}
 
                 {listed.length === 0 && active.length > 0 && (
                   <tr>
@@ -779,6 +789,8 @@ function SecretRow({
   canWrite,
   canArchive,
   canReveal,
+  folders,
+  onMove,
   status,
   disabled,
   columns,
@@ -798,6 +810,9 @@ function SecretRow({
   canWrite: boolean;
   canArchive: boolean;
   canReveal: boolean;
+  /** The folders in use in this environment, offered when moving it. */
+  folders: readonly string[];
+  onMove: (folder: string | null) => void;
   /** A save of this row on its way, or refused. */
   status: ItemStatus;
   disabled: boolean;
@@ -814,6 +829,7 @@ function SecretRow({
   const coffre = useCoffre();
   const [revealing, setRevealing] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [moving, setMoving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // The current value, loaded on request as the starting point for an edit.
   // It is not a change until it is edited: saving it untouched would append a
@@ -1083,6 +1099,12 @@ function SecretRow({
                       Rename
                     </Menu.Item>
                   )}
+                  {canWrite && !editing && !leaving && (
+                    <Menu.Item className="menu-item" onClick={() => setMoving(true)}>
+                      <Folder size={14} />
+                      Move to folder…
+                    </Menu.Item>
+                  )}
                   {canArchive && !leaving && (
                     <>
                       {(canReveal || canWrite) && <Menu.Separator className="menu-sep" />}
@@ -1105,6 +1127,17 @@ function SecretRow({
           )}
         </td>
       </tr>
+
+      {canWrite && (
+        <MoveToFolder
+          open={moving}
+          onOpenChange={setMoving}
+          what={entry.key}
+          current={entry.folder}
+          folders={folders}
+          onMove={onMove}
+        />
+      )}
 
       {historyOpen && canReveal && (
         <tr className="detail-row">

@@ -7,7 +7,7 @@
 import { openSync, closeSync, writeSync, rmSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 
-import { apiMember, serviceName, shownMember, type CoffreClient, type Deletion, type InheritedGrant } from '@coffre/client';
+import { apiMember, byFolder, serviceName, shownMember, type CoffreClient, type Deletion, type InheritedGrant } from '@coffre/client';
 
 import { describeRemoval, serviceMember } from './trust.ts';
 
@@ -88,14 +88,18 @@ export async function projects(connect: () => CoffreClient, args: string[], io: 
   const api = connect();
   const { projects: list } = await api.projects.list();
   if (values.json) return asJson(io, list);
-  for (const project of list) {
-    const archived = project.archivedAt === null ? '' : ' (archived)';
-    io.out.write(`${project.slug}${archived}  ${project.name}\n`);
-    for (const environment of project.environments) {
-      // Environments the caller may only know by name come without details.
-      if (environment.details?.archivedAt) continue;
-      const count = environment.details?.secretCount;
-      io.out.write(`  ${environment.slug.padEnd(16)} ${count === null || count === undefined ? '' : `${count} secrets`}\n`);
+  for (const [folder, inFolder] of byFolder(list)) {
+    const indent = folder === null ? '' : '  ';
+    if (folder !== null) io.out.write(`${folder}/\n`);
+    for (const project of inFolder) {
+      const archived = project.archivedAt === null ? '' : ' (archived)';
+      io.out.write(`${indent}${project.slug}${archived}  ${project.name}\n`);
+      for (const environment of project.environments) {
+        // Environments the caller may only know by name come without details.
+        if (environment.details?.archivedAt) continue;
+        const count = environment.details?.secretCount;
+        io.out.write(`${indent}  ${environment.slug.padEnd(16)} ${count === null || count === undefined ? '' : `${count} secrets`}\n`);
+      }
     }
   }
 }
@@ -220,6 +224,26 @@ export async function archiveSecret(connect: () => CoffreClient, args: string[],
   const api = connect();
   await api.secrets.update(path, { archived });
   io.out.write(archived ? `archived ${path}: \`coffre unarchive ${path}\` brings it back\n` : `unarchived ${path}\n`);
+}
+
+// --- folders -----------------------------------------------------------------
+
+/** `coffre move acme Clients`, `coffre move market/prod/STRIPE_KEY stripe`, or `--none` for out of its folder. */
+export async function move(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
+  const { values, positionals } = parse(args, { none: { type: 'boolean', default: false } }, ['<project> | <project>/<environment>/<KEY>', '<folder>'], 1);
+  const [target, given] = positionals as [string, string | undefined];
+  if (values.none === (given !== undefined)) throw new UsageError(values.none ? 'a folder, or --none, not both' : 'name a folder, or --none for out of its folder');
+  const folder = given ?? null;
+  const api = connect();
+  if (target.includes('/')) {
+    const path = secret(target);
+    await api.secrets.update(path, { folder });
+    io.out.write(folder === null ? `${path} is in no folder now\n` : `${path} is in ${folder}/ now\n`);
+    return;
+  }
+  const { project } = place(target, false);
+  await api.projects.update(project, { folder });
+  io.out.write(folder === null ? `${project} is in no folder now\n` : `${project} is in ${folder}/ now\n`);
 }
 
 // --- members -----------------------------------------------------------------

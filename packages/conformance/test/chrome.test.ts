@@ -6,7 +6,8 @@ import { Chrome, findChrome } from '../src/chrome.ts';
 
 const chrome = findChrome();
 
-test("a page's heading, its cards' titles, its text and address, and what its scripts throw, as Chrome reports them", { skip: chrome === null && 'no Chrome or Chromium here' }, async () => {
+// Chrome fails a call it does not answer (chrome.ts); a test that still stalls, on a loaded host, fails here rather than hang the run.
+test("a page's heading, its cards' titles, its text and address, and what its scripts throw, as Chrome reports them", { skip: chrome === null && 'no Chrome or Chromium here', timeout: 180_000 }, async () => {
   const pages: Record<string, string> = {
     // Read once, the notice is taken out of the address, as coffre's pages do.
     '/fine':

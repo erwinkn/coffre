@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import pg from 'pg';
 
 import { migrateDatabase } from '@coffre/db/migrate';
+import { KNOWN_MIGRATIONS } from '@coffre/db/schema-version';
 
 import {
   TEST_OWNER_DATABASE_URL,
@@ -32,9 +33,15 @@ const EXPECTED_UPDATE_COLUMNS = [
   'identities.last_sign_in_at',
   'identities.revoked_at',
   'identities.revoked_by',
+  'project_folders.folder',
+  'project_folders.moved_at',
+  'project_folders.moved_by',
   'projects.archived_at',
   'projects.name',
   'projects.slug',
+  'secret_folders.folder',
+  'secret_folders.moved_at',
+  'secret_folders.moved_by',
   // A deleted place's versions are erased, and that is all a version ever takes.
   'secret_versions.ciphertext',
   'secret_versions.wrapped_dek',
@@ -61,7 +68,7 @@ test(
       const migrations = await owner.query<{ count: number }>(
         'SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations',
       );
-      assert.equal(migrations.rows[0].count, 7);
+      assert.equal(migrations.rows[0].count, KNOWN_MIGRATIONS.postgres.length);
 
       const identity = await runtime.query<{
         current_user: string;

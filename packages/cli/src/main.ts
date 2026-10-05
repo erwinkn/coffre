@@ -44,6 +44,7 @@ import {
   type Target,
 } from './instance.ts';
 import {
+  byFolder,
   createClient,
   planImport,
   apiMember,
@@ -663,9 +664,13 @@ async function list(args: string[]): Promise<void> {
   }
 
   // Listing keys is not a read of any value, and is not logged as one.
-  for (const entry of result.keys) {
-    const archived = entry.archived ? '  (archived)' : '';
-    process.stdout.write(`${entry.key}\tv${entry.version ?? '-'}\t${entry.updatedBy ?? '-'}${archived}\n`);
+  for (const [folder, keys] of byFolder(result.keys)) {
+    const indent = folder === null ? '' : '  ';
+    if (folder !== null) process.stdout.write(`${folder}/\n`);
+    for (const entry of keys) {
+      const archived = entry.archived ? '  (archived)' : '';
+      process.stdout.write(`${indent}${entry.key}\tv${entry.version ?? '-'}\t${entry.updatedBy ?? '-'}${archived}\n`);
+    }
   }
 }
 
@@ -1214,6 +1219,7 @@ const COMMANDS: Record<Command, (args: string[]) => unknown> = {
   rename: (args) => manage.renameSecret(connect, args),
   archive: (args) => manage.archiveSecret(connect, args, true),
   unarchive: (args) => manage.archiveSecret(connect, args, false),
+  move: (args) => manage.move(connect, args),
   projects: (args) => manage.projects(connect, args),
   'projects create': (args) => manage.projectsCreate(connect, args),
   'projects rename': (args) => manage.projectsRename(connect, args),

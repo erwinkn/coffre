@@ -1,6 +1,6 @@
 import { ROLE_NAMES, type Permission } from '@coffre/core/access';
 import { MAX_BINDINGS, MAX_CLAIMS, WORKLOAD_PROFILES } from '@coffre/core/identity';
-import { displayName, secretKey, slug } from '@coffre/core/schemas';
+import { displayName, folderName, secretKey, slug } from '@coffre/core/schemas';
 import { z } from 'zod';
 
 import { setAccess } from './access.ts';
@@ -114,7 +114,7 @@ export const routes = {
     run: (ctx, { params, place, input }) => putProject(ctx, place, params.project, input),
   }),
   ...route('PATCH /projects/:project', {
-    input: placePatch,
+    input: placePatch.extend({ folder: folderName.nullable().optional() }).strict(),
     needs: 'project.manage',
     action: 'project.update',
     run: (ctx, { place, input }) => patchProject(ctx, place, input),
@@ -168,10 +168,11 @@ export const routes = {
       query.dryRun !== undefined ? dryRunSecrets(ctx, place, input) : setSecrets(ctx, place, input),
   }),
   ...route('PATCH /secrets/:project/:environment/:key', {
-    input: z.object({ key: secretKey, archived: z.boolean() }).partial().strict()
-      .refine((patch) => patch.key !== undefined || patch.archived !== undefined, 'provide a key or archived flag'),
+    input: z.object({ key: secretKey, archived: z.boolean(), folder: folderName.nullable() }).partial().strict()
+      .refine((patch) => patch.key !== undefined || patch.archived !== undefined || patch.folder !== undefined,
+        'provide a key, an archived flag or a folder'),
     needs: (patch) => [
-      ...(patch.key !== undefined ? ['secret.write' as const] : []),
+      ...(patch.key !== undefined || patch.folder !== undefined ? ['secret.write' as const] : []),
       ...(patch.archived !== undefined ? ['secret.archive' as const] : []),
     ],
     action: 'secret.update',

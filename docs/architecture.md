@@ -297,6 +297,7 @@ and `apiMember`). The URL names the thing and the HTTP method is the verb:
 | set, add or archive secrets, one or many, in one transaction | `PATCH /api/secrets/market/prod {"DATABASE_URL": "…", "OLD_KEY": null}` |
 | what that write would do, per key, without values and without writing | `PATCH /api/secrets/market/prod?dryRun=1 {…}` → `{"dryRun": true, "keys": {"DATABASE_URL": "changed", "OLD_KEY": "archived"}}` |
 | rename a secret | `PATCH /api/secrets/market/prod/DB_URL {"key": "DATABASE_URL"}` |
+| file a secret or a project in a folder, or in none | `PATCH /api/secrets/market/prod/STRIPE_KEY {"folder": "stripe"}`, `PATCH /api/projects/acme {"folder": null}` |
 | a secret's versions | `GET /api/secrets/market/prod/DATABASE_URL/versions` |
 | restore a version, as a new version | `POST /api/secrets/market/prod/DATABASE_URL/restore {"version": 3}` |
 | decrypt a secret or a whole environment | `POST /api/reveals {"path": "market/prod"}` |

@@ -21,6 +21,9 @@ export type Loaded = {
   errors: string[];
 };
 
+/** How long one DevTools call may take: a Chrome stalled on a loaded host fails the call rather than hang whoever waits on it. */
+const ANSWER_MS = 60_000;
+
 const NAMES = ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser', 'chrome'];
 const MAC = ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/Applications/Chromium.app/Contents/MacOS/Chromium'];
 
@@ -118,7 +121,15 @@ export class Chrome {
   #send(method: string, params: Record<string, unknown> = {}, sessionId?: string): Promise<Record<string, unknown>> {
     const id = ++this.#next;
     return new Promise((resolve, reject) => {
-      this.#pending.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        this.#pending.delete(id);
+        reject(new Error(`Chrome did not answer ${method} within ${ANSWER_MS / 1000} s`));
+      }, ANSWER_MS);
+      const settled = <T>(then: (value: T) => void) => (value: T) => {
+        clearTimeout(timer);
+        then(value);
+      };
+      this.#pending.set(id, { resolve: settled(resolve), reject: settled(reject) });
       this.#socket.send(JSON.stringify({ id, method, params, sessionId }));
     });
   }

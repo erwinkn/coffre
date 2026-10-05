@@ -1727,6 +1727,18 @@ a.crumb-link:hover {
   color: var(--ink-3);
 }
 
+/* A folder's heading: the rows below it, up to the next one, are filed in it. */
+.dt .folder-row th {
+  height: 2.25rem;
+  border-right: 0;
+  font-weight: 600;
+}
+
+.dt .folder-row .count {
+  color: var(--ink-3);
+  font-weight: 500;
+}
+
 .dt .col-shrink {
   width: 1%;
   white-space: nowrap;
@@ -4162,6 +4174,16 @@ a.env-card-name:hover {
 
   .dt.stacks td.n {
     display: none;
+  }
+
+  .dt.stacks .folder-row {
+    display: block;
+    padding: 0;
+  }
+
+  .dt.stacks .folder-row th {
+    display: flex;
+    align-items: center;
   }
 
   .dt.stacks td.col-actions {

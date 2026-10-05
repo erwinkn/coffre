@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { secretKey, slug } from '@coffre/core/schemas';
+import { folderName, secretKey, slug } from '@coffre/core/schemas';
 
-import { secretKeyProblem, slugProblem } from '../src/lib/validation.ts';
+import { folderProblem, secretKeyProblem, slugProblem } from '../src/lib/validation.ts';
 
 // The form hints are a copy of the server's rules. If the two ever disagree, a
 // form either blocks a valid name or waves through one the server refuses.
@@ -47,5 +47,13 @@ test('slug hints agree with the server schema', () => {
 test('secret key hints agree with the server schema', () => {
   for (const value of KEYS) {
     assert.equal(secretKeyProblem(value) === null, secretKey.safeParse(value).success, value);
+  }
+});
+
+const FOLDERS = ['stripe', 'Clients', 'Clients · EU', 'a'.repeat(64), 'a'.repeat(65), 'a/b', ' padded', 'padded ', 'tab\there', 'line\nbreak', 'x'];
+
+test('folder hints agree with the server schema, for any name a form sends', () => {
+  for (const value of FOLDERS) {
+    assert.equal(folderProblem(value) === null, folderName.safeParse(value).success, value);
   }
 });

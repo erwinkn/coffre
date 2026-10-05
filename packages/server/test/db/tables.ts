@@ -26,4 +26,6 @@ export const {
   deviceAuthorizations,
   serviceBindings,
   consumedTokens,
+  projectFolders,
+  secretFolders,
 } = schema;

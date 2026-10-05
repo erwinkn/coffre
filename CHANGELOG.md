@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+**Folders.** Projects, and the secrets of an environment, can be filed in
+folders, one level deep: `Clients / acme`, `database/`, `stripe/`. A folder
+arranges a list and does nothing else: it grants, hides and renames
+nothing, and `run` and `export` inject a key by its own name wherever it is
+filed. `coffre move market/prod/STRIPE_KEY stripe`, `coffre move acme
+Clients`, `--none` to take one out; `coffre list` and `coffre projects`
+group by folder; `PATCH` takes `{"folder": …}`. Migration `0007_folders`
+adds two tables, so this release runs on the schema before it, listing
+everything in no folder and refusing to move until an owner runs
+`coffre migrate` (docs/design/environments.md).
+
 **An archived project, or environment, can be deleted for good.** Archiving
 hides a place and keeps every value; deleting frees the space and hides it
 for good. Instance owners only, and only once it is archived:

@@ -21,11 +21,14 @@ import {
 import { permissionsAt, placeOf } from './caller.ts';
 import { allowed, asking, audited, denied, need, recorded, Refusal, vaultRefusal, withRefusals, type ApiContext } from './context.ts';
 import { conflict, notFound, vaultRefused } from './errors.ts';
+import { fileSecrets, requireFolders, secretFoldersIn } from './folders.ts';
 import { openValues, rewrapValue, sealValues } from './keys.ts';
 import { formatPath, type Path } from './paths.ts';
 
 export type SecretKey = {
   key: string;
+  /** The folder it is listed in within this environment, or null for none. */
+  folder: string | null;
   archived: boolean;
   version: number | null;
   updatedAt: string | null;
@@ -106,11 +109,15 @@ export async function listSecrets(
   place: ResolvedPath,
 ): Promise<{ permissions: Permission[]; keys: SecretKey[] }> {
   const environment = requireLive(place);
-  const rows = await environmentSecrets(ctx.db, environment.environmentId);
+  const [rows, folders] = await Promise.all([
+    environmentSecrets(ctx.db, environment.environmentId),
+    secretFoldersIn(ctx.db, environment.environmentId),
+  ]);
   return {
     permissions: permissionsAt(ctx.caller, placeOf(place.project, place.environment)),
     keys: rows.map((row) => ({
       key: row.key,
+      folder: folders.get(row.id) ?? null,
       archived: row.archivedAt !== null,
       version: row.current?.version ?? null,
       updatedAt: row.current?.createdAt.toISOString() ?? null,
@@ -300,12 +307,12 @@ export async function dryRunSecrets(
   });
 }
 
-/** Rename a secret, or archive or unarchive it. Its versions are untouched. */
+/** Rename a secret, archive or unarchive it, or move it to a folder. Its versions are untouched. */
 export async function patchSecret(
   ctx: ApiContext,
   place: ResolvedPath,
-  patch: { key?: string; archived?: boolean },
-): Promise<{ key: string; archived: boolean }> {
+  patch: { key?: string; archived?: boolean; folder?: string | null },
+): Promise<{ key: string; archived: boolean; folder: string | null }> {
   const environment = requireLive(place);
   const secret = place.secret;
   if (secret === null) throw notFound('unknown secret');
@@ -317,22 +324,29 @@ export async function patchSecret(
   if (renaming && archived) {
     throw conflict(`${secret.key} is archived; unarchive it before renaming it`);
   }
-  if (!renaming && !archiving) return { key: secret.key, archived };
+  if (patch.folder !== undefined) await requireFolders(ctx.db);
+  const before = (await secretFoldersIn(ctx.db, environment.environmentId)).get(secret.id) ?? null;
+  const moving = patch.folder !== undefined && patch.folder !== before;
+  const folder = moving ? patch.folder! : before;
+  if (!renaming && !archiving && !moving) return { key: secret.key, archived, folder };
 
   const nextKey = patch.key!;
   const result = await audited(ctx, async (tx, log) => {
+    // Under the head, as every write to a place: one deleted since the router found it is not written to, nor filed.
     await checkEnvironment(tx, place, environment);
-    try {
-      await update(tx, secrets, { id: secret.id }, {
-        ...(archiving ? { archivedAt: archived ? new Date() : null } : {}),
-        ...(renaming ? { key: nextKey, updatedAt: new Date() } : {}),
-      });
-    } catch (error) {
-      if (!renaming || !isUniqueViolation(error)) throw error;
-      throw new Refusal(
-        conflict(`a secret named "${nextKey}" already exists`),
-        denied(ctx, 'secret.rename', 'duplicate_key', { ...where, metadata: { key: secret.key, nextKey } }),
-      );
+    if (renaming || archiving) {
+      try {
+        await update(tx, secrets, { id: secret.id }, {
+          ...(archiving ? { archivedAt: archived ? new Date() : null } : {}),
+          ...(renaming ? { key: nextKey, updatedAt: new Date() } : {}),
+        });
+      } catch (error) {
+        if (!renaming || !isUniqueViolation(error)) throw error;
+        throw new Refusal(
+          conflict(`a secret named "${nextKey}" already exists`),
+          denied(ctx, 'secret.rename', 'duplicate_key', { ...where, metadata: { key: secret.key, nextKey } }),
+        );
+      }
     }
     if (archiving) {
       log.push(allowed(ctx, archived ? 'secret.archive' : 'secret.unarchive', {
@@ -341,7 +355,11 @@ export async function patchSecret(
       }));
     }
     if (renaming) log.push(allowed(ctx, 'secret.rename', { ...where, metadata: { key: secret.key, nextKey } }));
-    return { key: renaming ? nextKey : secret.key, archived };
+    if (moving) {
+      await fileSecrets(tx, [{ secretId: secret.id, folder }], ctx.caller.principal.id);
+      log.push(allowed(ctx, 'secret.move', { ...where, metadata: { key: renaming ? nextKey : secret.key, from: before, to: folder } }));
+    }
+    return { key: renaming ? nextKey : secret.key, archived, folder };
   });
   return result;
 }

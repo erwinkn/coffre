@@ -17,6 +17,8 @@ export const SERVER_TABLES = [
   'audit_log',
   'consumed_tokens',
   'device_authorizations',
+  'project_folders',
+  'secret_folders',
   'secret_versions',
   'service_bindings',
   'vault_grants',

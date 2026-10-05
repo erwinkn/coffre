@@ -204,7 +204,7 @@ test('concurrent writes allocate one ordered version sequence', async () => {
 test('renaming preserves value, versions, and immutable identity', async () => {
   await root.secrets.set('market/dev', { OLD_KEY: 'still-secret' });
   const [before] = await db.owner.select({ id: secrets.id }).from(secrets).where(eq(secrets.key, 'OLD_KEY'));
-  assert.deepEqual(await root.secrets.rename('market/dev/OLD_KEY', 'NEW_KEY'), { key: 'NEW_KEY', archived: false });
+  assert.deepEqual(await root.secrets.rename('market/dev/OLD_KEY', 'NEW_KEY'), { key: 'NEW_KEY', archived: false, folder: null });
   assert.equal((await root.secrets.reveal('market/dev/NEW_KEY')).values.NEW_KEY, 'still-secret');
   const [after] = await db.owner.select({ id: secrets.id }).from(secrets).where(eq(secrets.key, 'NEW_KEY'));
   assert.equal(after.id, before.id);
@@ -376,7 +376,7 @@ test('an empty secret patch is refused before it can disclose another environmen
   await root.secrets.update('market/prod/HIDDEN', { archived: true });
   await assert.rejects(reader.secrets.update('market/prod/HIDDEN', {}), { status: 400 });
   await assert.rejects(root.secrets.update('market/prod/HIDDEN', {}), { status: 400 });
-  assert.deepEqual(await root.secrets.update('market/prod/HIDDEN', { archived: false }), { key: 'HIDDEN', archived: false });
+  assert.deepEqual(await root.secrets.update('market/prod/HIDDEN', { archived: false }), { key: 'HIDDEN', archived: false, folder: null });
 });
 
 test('a competing first write discards the provisional ID and wraps the next version afresh', async (t) => {

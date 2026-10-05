@@ -50,6 +50,13 @@
       "when": 1791203047923,
       "tag": "0006_deletions",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1791206155629,
+      "tag": "0007_folders",
+      "breakpoints": true
     }
   ]
 }

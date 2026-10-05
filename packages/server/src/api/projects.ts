@@ -28,6 +28,7 @@ import { can, canAnywhere, permissionsAt, placeOf, seesProject } from './caller.
 import { allowed, audited, denied, Refusal, requireOwner, withRefusals, type ApiContext } from './context.ts';
 import { ApiError, conflict, notFound, vaultRefused } from './errors.ts';
 import { formatMember } from './paths.ts';
+import { fileProject, projectFoldersOf, requireFolders } from './folders.ts';
 
 export type Me = {
   principal: { type: 'user' | 'service'; id: string };
@@ -67,6 +68,8 @@ export type ProjectSummary = {
   slug: string;
   name: string;
   archivedAt: string | null;
+  /** The folder it is listed in, or null for none. */
+  folder: string | null;
   /** What the caller may do at project scope. */
   permissions: Permission[];
   environments: ProjectEnvironmentSummary[];
@@ -164,7 +167,7 @@ export async function listProjects(ctx: ApiContext): Promise<{ projects: Project
   const summaries: ProjectSummary[] = [];
   // The projects whose secrets the caller may count, and where they may.
   const counted: { summary: ProjectSummary; projectId: string; environmentIds: string[] }[] = [];
-  const known = await places(ctx.db);
+  const [known, folders] = await Promise.all([places(ctx.db), projectFoldersOf(ctx.db)]);
   for (const project of known) {
     if (!seesProject(caller, project)) continue;
     const scope = { projectId: project.id };
@@ -178,6 +181,7 @@ export async function listProjects(ctx: ApiContext): Promise<{ projects: Project
       slug: project.slug,
       name: project.name,
       archivedAt: iso(project.archivedAt),
+      folder: folders.get(project.id) ?? null,
       permissions: permissionsAt(caller, scope),
       environments: project.environments.map((environment) => {
         // Every role that writes or archives also reads, so read is the test.
@@ -224,6 +228,7 @@ export async function listProjects(ctx: ApiContext): Promise<{ projects: Project
 }
 
 export type PlaceView = { slug: string; name: string; archivedAt: string | null };
+export type ProjectView = PlaceView & { folder: string | null };
 
 function slugTaken(what: 'project' | 'environment', slug: string): Error {
   return conflict(`a ${what} named "${slug}" already exists`);
@@ -261,6 +266,7 @@ export async function putProject(
 }
 
 type PlacePatch = { name?: string; slug?: string; archived?: boolean };
+type ProjectPatch = PlacePatch & { folder?: string | null };
 
 /**
  * What a patch changes on a project or environment: its name and slug, and
@@ -295,15 +301,18 @@ async function stillThere(tx: Transaction, place: ResolvedPath): Promise<Resolve
   return now;
 }
 
-/** Rename, re-slug, archive or restore a project. */
+/** Rename, re-slug, archive or restore a project, or move it to a folder. */
 export async function patchProject(
   ctx: ApiContext,
   place: ResolvedPath,
-  patch: PlacePatch,
-): Promise<{ project: PlaceView }> {
+  patch: ProjectPatch,
+): Promise<{ project: ProjectView }> {
   const { project } = place;
   const { renames, archivedAt } = placeChanges(project, patch);
   const renamed = Object.keys(renames).length > 0;
+  if (patch.folder !== undefined) await requireFolders(ctx.db);
+  const before = patch.folder === undefined ? null : (await projectFoldersOf(ctx.db)).get(project.id) ?? null;
+  const moving = patch.folder !== undefined && patch.folder !== before;
   return audited(ctx, async (tx, log) => {
     await stillThere(tx, place);
     if (renamed || archivedAt !== undefined) {
@@ -329,11 +338,19 @@ export async function patchProject(
         metadata: { slug: renames.slug ?? project.slug },
       }));
     }
+    if (moving) {
+      await fileProject(tx, project.id, patch.folder!, ctx.caller.principal.id);
+      log.push(allowed(ctx, 'project.move', {
+        projectId: project.id,
+        metadata: { slug: renames.slug ?? project.slug, from: before, to: patch.folder },
+      }));
+    }
     return {
       project: {
         slug: renames.slug ?? project.slug,
         name: renames.name ?? project.name,
         archivedAt: iso(archivedAt === undefined ? project.archivedAt : archivedAt),
+        folder: patch.folder === undefined ? before : patch.folder,
       },
     };
   });

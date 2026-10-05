@@ -330,4 +330,30 @@ BEGIN
 END
 $$;
 
+-- 17. A folder only moves: what it files stays what it is, and no row is deleted.
+DO $$
+DECLARE
+    statement text;
+BEGIN
+    FOREACH statement IN ARRAY ARRAY[
+        'UPDATE project_folders SET project_id = project_id',
+        'UPDATE secret_folders SET secret_id = secret_id',
+        'DELETE FROM project_folders',
+        'DELETE FROM secret_folders',
+        'TRUNCATE project_folders',
+        'TRUNCATE secret_folders'
+    ] LOOP
+        BEGIN
+            EXECUTE statement;
+            RAISE EXCEPTION 'FAIL: coffre_app was able to run: %', statement;
+        EXCEPTION
+            WHEN insufficient_privilege THEN NULL;
+        END;
+    END LOOP;
+    UPDATE project_folders SET folder = folder, moved_at = moved_at, moved_by = moved_by;
+    UPDATE secret_folders SET folder = folder, moved_at = moved_at, moved_by = moved_by;
+    RAISE NOTICE 'PASS: coffre_app moves projects and secrets between folders, and nothing else';
+END
+$$;
+
 \echo '--- all schema guarantees held ---'

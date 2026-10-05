@@ -38,6 +38,7 @@ export type {
   WorkloadIds,
 } from './api.ts';
 
+export { byFolder, foldersOf } from './folders.ts';
 export { apiMember, serviceName, shownMember, shownText } from './members.ts';
 
 export type RouteKey = keyof Api;

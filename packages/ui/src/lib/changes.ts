@@ -260,6 +260,7 @@ export function createProject(client: CoffreClient): Change<Projects, ProjectSum
         slug: vars.slug,
         name: vars.name,
         archivedAt: null,
+        folder: null,
         // You become its owner.
         permissions: ['project.manage', 'environment.manage', 'grant.manage'],
         environments: [],
@@ -278,6 +279,18 @@ export function createProject(client: CoffreClient): Change<Projects, ProjectSum
 type Environment = ProjectSummary['environments'][number];
 
 /** One project's environments, held in the project list. */
+/** File a project in a folder, or in none: shown at once, under its new heading. */
+export function moveProject(client: CoffreClient): Change<Projects, ProjectSummary, { slug: string; folder: string | null }, unknown> {
+  return {
+    list: projectsList,
+    label: (vars) => `project ${vars.slug}`,
+    targets: (vars) => [saving(vars.slug)],
+    apply: (projects, vars) => projects.map((project) => (project.slug === vars.slug ? { ...project, folder: vars.folder } : project)),
+    affects: () => affects.places(),
+    run: (vars) => client.projects.update(vars.slug, { folder: vars.folder }),
+  };
+}
+
 export function environmentsList(project: string): ListShape<Projects, Environment> {
   const environmentsOf = (data: Projects) =>
     data.ok ? (data.projects.find((entry) => entry.slug === project)?.environments ?? []) : [];
@@ -432,6 +445,8 @@ export function saveSecrets(
       const now = new Date().toISOString();
       const bumped = (entry: SecretKey | undefined, key: string): SecretKey => ({
         key,
+        // A rename keeps its folder; a new secret is in none.
+        folder: entry?.folder ?? null,
         archived: false,
         version: (entry?.version ?? 0) + 1,
         updatedAt: now,
@@ -479,6 +494,21 @@ export function saveSecrets(
       if (outcome.error !== null) throw new UnsavedEdits(outcome);
       return outcome.applied;
     },
+  };
+}
+
+/** File a secret in a folder, or in none: shown at once, under its new heading. */
+export function moveSecret(
+  client: CoffreClient,
+  place: { project: string; environment: string },
+): Change<Secrets, SecretKey, { key: string; folder: string | null }, unknown> {
+  return {
+    list: secretsList(place),
+    label: (vars) => vars.key,
+    targets: (vars) => [saving(vars.key)],
+    apply: (entries, vars) => entries.map((entry) => (entry.key === vars.key ? { ...entry, folder: vars.folder } : entry)),
+    affects: () => affects.secrets(place),
+    run: (vars) => client.secrets.update(`${place.project}/${place.environment}/${vars.key}`, { folder: vars.folder }),
   };
 }
 

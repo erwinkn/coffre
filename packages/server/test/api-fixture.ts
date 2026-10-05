@@ -175,6 +175,8 @@ export async function resetDatabase(owner: Database): Promise<void> {
     secretVersions,
     serviceBindings,
     consumedTokens,
+    secretFolders,
+    projectFolders,
     vaultGrants,
     vaultMembers,
   } = tablesOf(owner);
@@ -186,6 +188,8 @@ export async function resetDatabase(owner: Database): Promise<void> {
   await emptyLog(owner);
   await owner.delete(vaultGrants);
   await owner.delete(vaultMembers);
+  await owner.delete(secretFolders);
+  await owner.delete(projectFolders);
   await owner.update(secrets).set({ currentVersionId: null });
   await owner.delete(secretVersions);
   await owner.delete(secrets);
