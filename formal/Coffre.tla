@@ -125,12 +125,13 @@ VARIABLES
     \* history, for the invariants
     revealed,       \* ids of reads whose value reached the caller
     deletions,      \* a record per deletion that committed
-    everDeleted     \* everDeleted[x]: a deletion of x committed
+    everDeleted,    \* everDeleted[x]: a deletion of x committed
+    excused         \* the reference whose holder was archived when its source last was
 
 rows == <<slug, archived, held, version, status, gen, grants, refRow>>
 locks == <<memberLock, head>>
 procs == <<pc, op, l, left>>
-history == <<revealed, deletions, everDeleted>>
+history == <<revealed, deletions, everDeleted, excused>>
 vars == <<rows, log, creds, locks, procs, history>>
 
 -----------------------------------------------------------------------------
@@ -181,8 +182,9 @@ RefAt(x) ==
 
 \* Archiving x would stop a live reference held outside it from reading
 \* (server api/references.ts, archiveBlockers). One held inside is
-\* archived with it, and stops nobody's read.
-ReadFromOutside(x) == LiveRef /\ "env" \in Scope(x) /\ "hold" \notin Scope(x)
+\* archived with it, and one held in an archived place serves nobody's
+\* run: neither stops nobody's read.
+ReadFromOutside(x) == LiveRef /\ ~Archived("hold") /\ "env" \in Scope(x) /\ "hold" \notin Scope(x)
 
 -----------------------------------------------------------------------------
 (* Members *)
@@ -375,7 +377,7 @@ ReadAnswer(p) ==
     /\ pc[p] = "read.answer"
     /\ revealed' = revealed \cup {l[p].id}
     /\ Goto(p, "idle")
-    /\ UNCHANGED <<rows, log, creds, locks, op, l, left, deletions, everDeleted>>
+    /\ UNCHANGED <<rows, log, creds, locks, op, l, left, deletions, everDeleted, excused>>
 
 -----------------------------------------------------------------------------
 (***************************************************************************)
@@ -552,7 +554,7 @@ DeleteCommit(p) ==
               /\ everDeleted' = [everDeleted EXCEPT ![x] = TRUE]
               /\ Release(p)
               /\ Goto(p, "idle")
-              /\ UNCHANGED <<refRow, archived, version, status, gen, grants, creds, op, l, left, revealed>>
+              /\ UNCHANGED <<refRow, archived, version, status, gen, grants, creds, op, l, left, revealed, excused>>
 
 -----------------------------------------------------------------------------
 (***************************************************************************)
@@ -584,9 +586,14 @@ PatchCommit(p) ==
               /\ slug' = IF k = "rename"
                            THEN [slug EXCEPT ![x] = IF l[p].named[x] = "s1" THEN "s2" ELSE "s1"]
                            ELSE slug
+              \* The archive that takes the source out of service excuses the
+              \* reference whose holder it finds archived.
+              /\ excused' = IF k = "archive" /\ "env" \in Scope(x) /\ Live("env")
+                               THEN IF refRow # NoRef /\ ~Ended(refRow) /\ Archived("hold") THEN {refRow} ELSE {}
+                               ELSE excused
               /\ Release(p)
               /\ Goto(p, "idle")
-              /\ UNCHANGED <<refRow, held, version, status, gen, grants, log, creds, op, l, left, history>>
+              /\ UNCHANGED <<refRow, held, version, status, gen, grants, log, creds, op, l, left, revealed, deletions, everDeleted>>
 
 -----------------------------------------------------------------------------
 (***************************************************************************)
@@ -835,6 +842,7 @@ Init ==
     /\ revealed = {}
     /\ deletions = {}
     /\ everDeleted = [x \in Places |-> FALSE]
+    /\ excused = {}
 
 Step(p) ==
     \/ Begin(p)
@@ -965,8 +973,12 @@ NothingReleasedThroughEndedReference ==
 \* keep its source from being archived, with no path left to break it.
 EveryReferenceBreakable == (refRow # NoRef /\ ~Ended(refRow)) => ~Gone("hold")
 
-\* And its source is live: a reference is made only to a live source, and
-\* archiving one is refused while a reference from elsewhere reads it.
-ReferencedSourcesStayLive == (refRow # NoRef /\ ~Ended(refRow)) => Live("env")
+\* And one held in a live place reads a live source: a reference is made
+\* only to a live source, and archiving one is refused while a reference
+\* held in a live place elsewhere reads it. Unless its holder was archived
+\* when the source was, and was restored since: then it reads an archived
+\* source, and its reads refuse, as any broken reference's.
+ReferencedSourcesStayLive ==
+    (refRow # NoRef /\ ~Ended(refRow) /\ Live("hold") /\ refRow \notin excused) => Live("env")
 
 =============================================================================
