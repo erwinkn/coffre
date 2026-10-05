@@ -79,6 +79,19 @@ jobs:
       - name: Database schema
         run: pnpm test:schema
 
+  formal:
+    needs: changes
+    if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.version_only != 'true') }}
+    name: Formal model
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out the selected revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Model-check the locking protocol
+        # TLC, pinned by its checksum in the script, on the runner's Java (docs/formal.md).
+        run: scripts/formal.sh --workers 4
+
   workers:
     needs: changes
     if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.version_only != 'true') }}
@@ -151,7 +164,7 @@ jobs:
   validate:
     name: Validate
     runs-on: ubuntu-24.04
-    needs: [changes, checks, tests, schema, workers, node, consumer, compat]
+    needs: [changes, checks, tests, schema, formal, workers, node, consumer, compat]
     if: always()
     steps:
       - name: Require full validation or a proven version-only bump

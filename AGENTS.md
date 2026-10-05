@@ -192,6 +192,11 @@ fast path. Parse errors or an unsupported diff select full validation.
   `init` for both kinds outside the workspace, diffs them against the examples,
   installs the tarballs (pnpm overrides, no workspace links), then typechecks,
   builds and runs conformance on each. It needs network for third-party packages.
+- `pnpm formal` model-checks the locking protocol, `formal/Coffre.tla`, with
+  TLC (`docs/formal.md`): every scenario must hold, and each again without one
+  of the code's protections must fail. It needs Java 11+, and downloads TLC's
+  jar once, checked against its pinned SHA-256. A change to the locks a flow
+  takes, or what it re-checks under the head, changes the model too.
 - `pnpm lint`, `pnpm check:pins`, `pnpm check:contrast` and `pnpm check:docs`
   (every path, script and link the docs name exists) do not need Postgres.
 - `scripts/restore-drill.sh` (after `pnpm build`) backs up a seeded Workers
