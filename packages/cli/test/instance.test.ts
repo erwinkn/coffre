@@ -60,13 +60,13 @@ test('addresses with a path, query, or embedded password are refused', () => {
 
 // --- the credentials file -----------------------------------------------------
 
-test('the single-token file older CLIs wrote reads as signed out, not as a session', () => {
+test('a file in another shape reads as signed out, not as a session', () => {
   assert.deepEqual(parseStore('{"token":"eyJ…","obtainedAt":"2026-01-01"}'), emptyStore());
   assert.deepEqual(parseStore('not json'), emptyStore());
   assert.deepEqual(parseStore('null'), emptyStore());
 });
 
-test('unknown modes, like the dev mode older CLIs saved, and a dangling current are dropped on read', () => {
+test('unknown modes and a dangling current are dropped on read', () => {
   const store = parseStore(
     JSON.stringify({
       version: 2,

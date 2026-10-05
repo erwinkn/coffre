@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { commandLine, readSession, removedVariables } from '../src/flags.ts';
+import { commandLine, readSession } from '../src/flags.ts';
 
 const main = fileURLToPath(new URL('../src/main.ts', import.meta.url));
 
@@ -44,30 +44,6 @@ test('a session flag a command has no use for is refused, not ignored', () => {
   assert.deepEqual(commandLine(['--url', 'u', '--auth-mode', 'cloudflare', 'login']).session, { url: 'u', 'auth-mode': 'cloudflare' });
 });
 
-test('a variable an earlier CLI read stops the command that read it, in one line saying what to do instead', () => {
-  assert.equal(removedVariables({ HOME: '/home/a' }, ['get']), null);
-  assert.equal(
-    removedVariables({ COFFRE_TOKEN: 'coffre_svc_x' }, ['get']),
-    'COFFRE_TOKEN is no longer read: unset it; instead, run `coffre login <url> --token` and paste the token, or pipe it in',
-  );
-  assert.equal(
-    removedVariables({ COFFRE_API_URL: 'https://coffre.example.com', COFFRE_ACCESS_CLIENT_ID: 'a', COFFRE_ACCESS_CLIENT_SECRET: 's' }, ['export', 'app/prod']),
-    'COFFRE_API_URL, COFFRE_ACCESS_CLIENT_ID and COFFRE_ACCESS_CLIENT_SECRET are no longer read: unset them; instead, ' +
-      'pass --url <url>, or `coffre login <url>` once; run `coffre login <url> --access-client-id <id>` and paste the secret, or pipe it in',
-  );
-  // A command's own input matters only to that command; an empty variable never did anything.
-  assert.equal(removedVariables({ COFFRE_APP_KEY: 'k', COFFRE_TOKEN: ' ' }, ['get']), null);
-  assert.equal(removedVariables({ COFFRE_APP_KEY: 'k' }, ['verify', 'instance']), null);
-  assert.match(removedVariables({ COFFRE_APP_KEY: 'k' }, ['verify', 'keys']) ?? '', /paste the keys when coffre verify keys asks, or pipe them in, the vault key first$/);
-  assert.match(removedVariables({ COFFRE_MIGRATE_DATABASE_URL: 'postgresql://o@h/d' }, ['migrate', '--yes']) ?? '', /paste the URL when coffre migrate asks, or pipe it in$/);
-  // A command that talks to no instance never read the session's.
-  assert.equal(removedVariables({ COFFRE_TOKEN: 'coffre_svc_x', COFFRE_API_URL: 'https://coffre.example.com' }, ['init', '--node']), null);
-  assert.equal(
-    removedVariables({ COFFRE_SETUP_DATABASE_URL: 'postgresql://o@h/d', COFFRE_TOKEN: 'x' }, ['setup']),
-    'COFFRE_SETUP_DATABASE_URL is no longer read: unset it; instead, paste the URL when coffre setup asks, or pipe it in',
-  );
-});
-
 test('an empty session flag is refused, never taken for one left out', () => {
   // What an unset variable expands to: left out, it would mean the saved session's instance, or its person.
   assert.throws(() => readSession({ url: '' }), /^Error: --url is empty: an unset variable, perhaps$/);
@@ -90,13 +66,6 @@ function coffre(args: string[], env: Record<string, string> = {}, input = '') {
     rmSync(home, { recursive: true, force: true });
   }
 }
-
-test('the CLI refuses a removed variable before anything else, in one line, where it was read', () => {
-  const run = coffre(['whoami'], { COFFRE_TOKEN: 'coffre_svc_x' });
-  assert.equal(run.status, 1);
-  assert.equal(run.stderr, 'coffre: COFFRE_TOKEN is no longer read: unset it; instead, run `coffre login <url> --token` and paste the token, or pipe it in\n');
-  assert.equal(coffre(['roles'], { COFFRE_TOKEN: 'coffre_svc_x' }).status, 0);
-});
 
 test('with an empty --url or --service, the CLI stops before sending anything, saved session or not', () => {
   for (const session of [['--url', ''], ['--url', 'http://127.0.0.1:9', '--service', '']]) {

@@ -18,7 +18,7 @@ import { hiddenLine, style } from './tty.ts';
 import { githubEnvironment, githubMasks } from './github-env.ts';
 import { bindingsFrom, describeBindings, describeEvents, describePlan, serviceMember, TRUST_USAGE, type TrustArgs } from './trust.ts';
 import { exchange, idToken } from './workload.ts';
-import { commandLine, readSession, removedVariables } from './flags.ts';
+import { commandLine, readSession } from './flags.ts';
 import { readSecret } from './secret.ts';
 import { help, lookup, usage, type Command } from './commands.ts';
 import * as manage from './manage.ts';
@@ -1148,10 +1148,6 @@ function initProject(args: string[]): void {
 
 const line = attempt(() => commandLine(process.argv.slice(2)));
 const { command, rest } = line;
-if (command !== undefined && !command.startsWith('-')) {
-  const removed = removedVariables(process.env, [command, ...rest]);
-  if (removed !== null) fail(removed);
-}
 /** What the session flags say, their files read before any command runs: a file that is not there stops it first. */
 const sessionFlags = attempt(() => readSession(line.session));
 

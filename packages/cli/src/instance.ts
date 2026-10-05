@@ -88,9 +88,8 @@ export function emptyStore(): Store {
 }
 
 /**
- * Read the credentials file. Anything unrecognised, including the single-token
- * file older CLIs wrote, reads as empty: the worst case is one extra login,
- * never a token sent to the wrong place.
+ * Read the credentials file. Anything unrecognised reads as empty: the worst
+ * case is one extra login, never a token sent to the wrong place.
  */
 export function parseStore(text: string): Store {
   let raw: unknown;

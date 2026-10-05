@@ -24,7 +24,7 @@ import {
   startPinMoves,
 } from '../src/deployment.ts';
 import { templateFiles } from '../src/init.ts';
-import { SINCE_0_1, undo } from '../src/layout.ts';
+import { CLEAN_BREAK } from '../src/layout.ts';
 import { registry } from './registry.ts';
 import { inTerminal, ptySkip } from './pty.ts';
 import { deploymentMigrations, globalCli, installOf, migrationsAdded, movedLines, notUpdated } from '../src/update.ts';
@@ -49,25 +49,6 @@ test('update moves every @coffre/* pin of a deployment, and nothing else', () =>
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  }
-});
-
-test('a deployment from before its CLI was one of its packages gains it, pinned with the rest', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'coffre-update-cli-'));
-  try {
-    const manifest = JSON.parse(readFileSync(join(examples, 'workers', 'package.json'), 'utf8')) as Record<string, Record<string, string>>;
-    delete manifest.devDependencies!['@coffre/cli'];
-    writeFileSync(join(dir, 'package.json'), JSON.stringify(manifest, null, 2));
-    bumpPins(dir, '9.9.9');
-    const after = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as Record<string, Record<string, string>>;
-    assert.equal(after.devDependencies!['@coffre/cli'], '9.9.9');
-    assert.deepEqual(Object.keys(after.devDependencies!), Object.keys(after.devDependencies!).sort(), 'in order, as pnpm keeps them');
-    // Pinned once: bumping again moves it, and adds nothing.
-    bumpPins(dir, '9.9.10');
-    assert.equal(Object.keys(coffrePins(dir)).filter((name) => name === '@coffre/cli').length, 1);
-    assert.equal(coffrePins(dir)['@coffre/cli'], '9.9.10');
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
   }
 });
 
@@ -230,54 +211,20 @@ test("a deployment's Start app packages move to the template's versions, and not
   }
 });
 
-test('update --yes makes a Workers deployment of 0.1.18 its own Start app, as init writes it, and says so', async () => {
+test('update --yes leaves a deployment from before the clean break as it was, byte for byte, and says to deploy afresh', async () => {
   const { dir, env, close } = await heldDeployment();
   try {
-    // 0.1.18's files where this release's are, and a pnpm that installs whatever it is given.
-    rmSync(join(dir, 'app'), { recursive: true, force: true });
-    cpSync(fileURLToPath(new URL('fixtures/0.1.18/workers/', import.meta.url)), dir, { recursive: true });
+    bumpPins(dir, '0.3.0');
     writeFileSync(join(dir, '.bin', 'pnpm'), '#!/bin/sh\nexit 0\n');
-    const { spawn } = await import('node:child_process');
-    const child = spawn(process.execPath, ['--conditions=coffre:source', main, 'update', '--yes'], { cwd: dir, env });
-    let stderr = '';
-    child.stderr.setEncoding('utf8').on('data', (chunk: string) => (stderr += chunk));
-    assert.equal(await new Promise((resolve) => child.on('close', resolve)), 0, stderr);
-    assert.match(stderr, /Made it its own Start app, as coffre init writes one: \d+ files, as shown\. Its app now builds with vite build app/);
-    assert.match(stderr, /MCP endpoint, \/mcp, answers 404 until app\/src\/coffre\.ts turns it on/);
-    const template = join(examples, 'workers');
-    for (const path of ['app/vite.config.ts', 'app/src/start.ts', 'app/src/router.tsx', 'app/src/server.ts', 'app/src/routes/__root.tsx', 'app/src/routes/_coffre/projects.index.tsx', 'app/src/routes/mcp.ts', 'tsconfig.json', '.gitignore', 'README.md']) {
-      assert.equal(readFileSync(join(dir, path), 'utf8'), readFileSync(join(template, path), 'utf8'), path);
-    }
-    // Its configuration as init writes it, but MCP, which 0.1 had not and its Worker has no bindings for.
-    assert.equal(readFileSync(join(dir, 'app/src/coffre.ts'), 'utf8'), undo(readFileSync(join(template, 'app/src/coffre.ts'), 'utf8'), SINCE_0_1.workers));
-    assert.doesNotMatch(readFileSync(join(dir, 'app/wrangler.jsonc'), 'utf8'), /MCP_/);
-    assert.equal(existsSync(join(dir, 'app/src/worker.ts')), false);
-    assert.ok(Object.values(coffrePins(dir)).every((version) => version === '9.9.9'));
-  } finally {
-    close();
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("update --yes leaves a deployment it cannot move as it was, byte for byte, and says why and what to do", async () => {
-  const { dir, env, close } = await heldDeployment();
-  try {
-    rmSync(join(dir, 'app'), { recursive: true, force: true });
-    cpSync(fileURLToPath(new URL('fixtures/0.1.18/workers/', import.meta.url)), dir, { recursive: true });
-    writeFileSync(join(dir, 'app/src/server.ts'), 'export const helper = () => 42;\n');
-    writeFileSync(join(dir, '.bin', 'pnpm'), '#!/bin/sh\nexit 0\n');
-    const before = ['package.json', 'app/wrangler.jsonc', 'app/src/worker.ts', 'app/src/server.ts'].map((path) => readFileSync(join(dir, path), 'utf8'));
+    const before = readFileSync(join(dir, 'package.json'), 'utf8');
     const { spawn } = await import('node:child_process');
     const child = spawn(process.execPath, ['--conditions=coffre:source', main, 'update', '--yes'], { cwd: dir, env });
     let stderr = '';
     child.stderr.setEncoding('utf8').on('data', (chunk: string) => (stderr += chunk));
     await new Promise((resolve) => child.on('close', resolve));
-    assert.match(stderr, /cannot be moved to it as it is\. Nothing was changed/);
-    assert.match(stderr, /app\/src\/server\.ts is there already, and is not what coffre 0\.2 writes there/);
-    assert.match(stderr, /Make the move by hand \(docs\/deploy\.md, "Upgrading to 0\.2"\), then run coffre update again/);
-    const after = ['package.json', 'app/wrangler.jsonc', 'app/src/worker.ts', 'app/src/server.ts'].map((path) => readFileSync(join(dir, path), 'utf8'));
-    assert.deepEqual(after, before);
-    assert.equal(existsSync(join(dir, 'app/vite.config.ts')), false);
+    assert.match(stderr, /This deployment stays as it is, at 0\.3\.0: coffre 0\.4\.0 was a clean break, and moves no deployment from before it\. Nothing was changed/);
+    assert.match(stderr, /Deploy coffre 9\.9\.9 afresh, with coffre init/);
+    assert.equal(readFileSync(join(dir, 'package.json'), 'utf8'), before);
   } finally {
     close();
     rmSync(dir, { recursive: true, force: true });
@@ -302,18 +249,18 @@ test('update without a terminal, and without --yes, says plainly to pass --yes, 
 });
 
 /**
- * A Workers deployment at 0.0.1, a registry whose latest coffre is 9.9.9,
+ * A Workers deployment at the clean break's release, a registry whose latest coffre is 9.9.9,
  * and a pnpm that holds pg-protocol back until the deployment lets it
  * through by name.
  */
 async function heldDeployment() {
   const dir = mkdtempSync(join(tmpdir(), 'coffre-held-'));
-  // The template's every file, as a deployment moved to 0.2 has them.
+  // The template's every file, as coffre init writes them.
   for (const file of templateFiles(join(examples, 'workers'))) {
     mkdirSync(join(dir, file, '..'), { recursive: true });
     cpSync(join(examples, 'workers', file), join(dir, file));
   }
-  bumpPins(dir, '0.0.1');
+  bumpPins(dir, CLEAN_BREAK);
   const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as Record<string, unknown>;
   delete manifest.packageManager;
   writeFileSync(join(dir, 'package.json'), `${JSON.stringify(manifest, null, 2)}\n`);

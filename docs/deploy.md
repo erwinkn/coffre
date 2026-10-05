@@ -118,15 +118,15 @@ every migration lets it ([expand, then contract](architecture.md#expand-then-con
    ends with what the release asks of the database: the migrations it adds,
    by name, to run before the deploy. The deployment's `minimumReleaseAge`
    exempts `@coffre/*`, so a fix installs the day it is published; your
-   other packages still wait a week. A deployment from before its CLI was one
-   of its packages gains `@coffre/cli` among its devDependencies, pinned with
-   the rest: its pipeline migrates with it.
+   other packages still wait a week. A deployment pinned before 0.4.0 is
+   left as it was, and told to deploy afresh
+   ([From a release before 0.4.0](#from-a-release-before-040)).
 
    It moves the packages the app's Start app builds with to the versions
    the release's pages are built with, React, TanStack Start and Vite among
    them, showing each: they must be those exactly, and the app's build stops
-   when one is not. A deployment from before 0.2 also becomes a Start app of
-   its own ([Upgrading to 0.2](#upgrading-to-02)).
+   when one is not. It adds the page files a release adds, and removes those
+   it retires, where they are as coffre wrote them.
 
    It also pins the deployment's pnpm, `packageManager` in its package.json,
    to the one coffre installs with, as `coffre init` writes it: then your
@@ -206,7 +206,8 @@ earlier releases. A deployment of 0.3 or earlier is not moved; make a new
 one beside it, with `coffre init` and `coffre setup`, on a new database,
 and bring over what you keep: `coffre export` reads an environment's values
 from the old instance. On an old database, 0.4.0's `coffre migrate` says it
-was made before 0.4.0 and changes nothing.
+was made before 0.4.0 and changes nothing, and in an old deployment's
+folder, `coffre update` says so too.
 
 ## On Workers
 
@@ -255,149 +256,6 @@ builds migrate the same database; the second finds nothing left to do, as
 the migration lock keeps one waiting for the other. A build that cannot
 migrate fails before its deploy, and its Worker keeps running the previous
 version, which runs on the new schema too.
-
-### Upgrading to 0.2
-
-Since 0.2 a deployment's app is a TanStack Start app of its own, built by
-Vite, with coffre's routes and middleware in it, rather than a Worker or a
-server that imports prebuilt pages. Move it with the 0.2 CLI, in the
-deployment's directory:
-
-```sh
-npx @coffre/cli@0.2.0 update
-```
-
-It moves the files a release of 0.1 wrote, and only those, to the layout
-`coffre init` writes ([On Workers](#on-workers), [On Node](#on-node)). It
-recognises each entry, `app/src/worker.ts` or `src/server.ts`, byte for
-byte, as one of the versions 0.1 wrote, and writes its configuration, in
-`app/src/coffre.ts`, as that version had it: a deployment of 0.1.2 keeps its `AUDIT_CHAIN_KEY`, one of
-0.1.15 gains no CI sign-in it did not have. It changes `app/wrangler.jsonc`'s
-`main`, `assets` and `keep_names`, and `package.json`'s scripts, only from
-the values 0.1 wrote. It shows each file it changes, line by line, and asks
-once. It changes nothing, and names each file and what to do, when:
-
-- the entry is not as 0.1 wrote it: its configuration is yours;
-- a file 0.2 writes is already there, and is not what 0.2 writes there,
-  such as a helper of yours at `app/src/server.ts`;
-- `main`, `assets` or `keep_names` hold values of yours;
-- a `dev`, `build`, `deploy` or, on Node, `start` script is yours, even
-  one that runs 0.1's: it would still run 0.1's app.
-
-A `tsconfig.json` or `README.md` of yours stays as it is; it says what the
-tsconfig then lacks. The entry changes last, so a move cut short is found
-again, and finished, by the next run. An older CLI's `coffre update` moves
-the pins but not the files, and the app then says, as it starts, to run
-this one.
-
-By hand, on Workers: `app/src/worker.ts` becomes `app/src/coffre.ts`, its
-configuration unchanged but for its first and last lines, and Start's
-server entry, `app/src/server.ts`, hands it to each request:
-
-```diff
- // app/src/coffre.ts, was app/src/worker.ts
--import { coffre, github, postgres, signin, type Vault } from '@coffre/server/cloudflare';
-+import { createCoffre, github, postgres, signin, type CoffreContext, type Vault } from '@coffre/server/cloudflare';
-
--type Env = {
-+export type Env = {
-   …
- };
-
--export default coffre((env: Env) => ({
-+export const coffre = createCoffre((env: Env) => ({
-   …
- }));
-+
-+// What src/server.ts hands Start with each request, for Start's types.
-+declare module '@tanstack/react-router' {
-+  interface Register {
-+    server: { requestContext: CoffreContext };
-+  }
-+}
-```
-
-```diff
- // app/wrangler.jsonc
--  "main": "src/worker.ts",
-+  "main": "src/server.ts",
--  "keep_names": false,
--  "assets": { "directory": "../node_modules/@coffre/ui/dist/client" }
-```
-
-```diff
- // package.json
--    "dev": "wrangler dev -c app/wrangler.jsonc -c vault/wrangler.jsonc",
-+    "dev": "vite dev app",
--    "build": "wrangler deploy --dry-run -c vault/wrangler.jsonc && wrangler deploy --dry-run -c app/wrangler.jsonc",
-+    "build": "wrangler deploy --dry-run -c vault/wrangler.jsonc && vite build app && wrangler deploy --dry-run -c app/dist/server/wrangler.json",
--    "deploy": "wrangler deploy -c vault/wrangler.jsonc && wrangler deploy -c app/wrangler.jsonc",
-+    "deploy": "wrangler deploy -c vault/wrangler.jsonc && vite build app && wrangler deploy -c app/dist/server/wrangler.json",
-```
-
-Then copy the rest of `app/` from the release's `coffre init --workers`:
-[`app/src/server.ts`](../examples/workers/app/src/server.ts),
-[`app/src/start.ts`](../examples/workers/app/src/start.ts),
-[`app/src/router.tsx`](../examples/workers/app/src/router.tsx),
-[`app/src/routes/`](../examples/workers/app/src/routes/__root.tsx) and
-`app/src/routeTree.gen.ts`, and
-[`app/vite.config.ts`](../examples/workers/app/vite.config.ts); add
-`"jsx": "react-jsx"` to `tsconfig.json`'s `compilerOptions` and
-`"vite/client"` to its `types`, and `dist` to `.gitignore`; and add the
-dependencies the release's [package.json](../examples/workers/package.json)
-has that yours lacks, React, TanStack Router, Start, Query, Vite and their
-plugins, at exactly its versions.
-
-By hand, on Node: `src/server.ts` becomes `app/src/coffre.ts`, its
-configuration unchanged but for its first lines and its last, and Start's
-server entry, `app/src/server.ts`, hands it to each request:
-
-```diff
- // app/src/coffre.ts, was src/server.ts
--import { github, processLimits, serve, signin } from '@coffre/server/node';
-+import { createCoffre, github, processLimits, signin, type CoffreContext } from '@coffre/server/node';
- …
--const server = await serve({
--  port: Number(env('PORT')),
-+export const coffre = createCoffre({
-   publicUrl: env('PUBLIC_URL'),
-   …
-   auditChainKey: env('APP_KEY'),
- });
--console.log(`coffre is listening on ${server.url}`);
--
--for (const signal of ['SIGINT', 'SIGTERM'] as const) {
--  process.once(signal, () => void server.close().then(() => process.exit(0)));
--}
-+
-+// What src/server.ts hands Start with each request, for Start's types.
-+declare module '@tanstack/react-router' {
-+  interface Register {
-+    server: { requestContext: CoffreContext };
-+  }
-+}
-```
-
-```diff
- // package.json
-+    "build": "vite build app",
--    "start": "node --env-file=server.env src/server.ts",
-+    "start": "srvx --prod --host=127.0.0.1 app/dist/server/server.js",
-```
-
-Then copy the rest of `app/` from the release's `coffre init --node`, as
-on Workers ([`app/`](../examples/node/app/src/server.ts)); add the
-dependencies its [package.json](../examples/node/package.json) has that
-yours lacks, `srvx` and `@libsql/client` among them, at exactly its
-versions; add `"jsx": "react-jsx"` to `tsconfig.json`'s `compilerOptions`,
-`"vite/client"` to its `types` and `"app/src"` to its `include`, set its
-`moduleResolution` to `"bundler"`, and add `dist` to `.gitignore`. srvx
-reads the server's settings from `.env`: rename `server.env` to `.env`, and
-`server.env.example` to `.env.example`.
-
-Then `pnpm typecheck`, and deploy: on Workers, set the app's build and
-deploy commands as [Workers Builds](#workers-builds) says, or `pnpm run
-deploy`; on Node, `pnpm build` and restart both processes.
 
 ### Setup does Cloudflare too
 

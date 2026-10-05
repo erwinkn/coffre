@@ -102,39 +102,3 @@ export function readSession(args: SessionArgs): SessionFlags {
   }
   return { url: args.url?.trim(), service: args.service?.trim(), authMode: args['auth-mode']?.trim() };
 }
-
-/** The variables earlier CLIs read, and what took each one's place; `command` when only that one read it. */
-export const REMOVED: readonly { variable: string; instead: string; command?: readonly string[] }[] = [
-  { variable: 'COFFRE_API_URL', instead: 'pass --url <url>, or `coffre login <url>` once' },
-  { variable: 'COFFRE_TOKEN', instead: 'run `coffre login <url> --token` and paste the token, or pipe it in' },
-  { variable: 'COFFRE_SERVICE', instead: 'pass --service <name>' },
-  { variable: 'COFFRE_ID_TOKEN', instead: 'pipe the ID token to `coffre login <url> --service <name> --id-token`' },
-  { variable: 'COFFRE_ID_TOKEN_FILE', instead: 'redirect the file to `coffre login <url> --service <name> --id-token`' },
-  { variable: 'COFFRE_ACCESS_CLIENT_ID', instead: 'run `coffre login <url> --access-client-id <id>` and paste the secret, or pipe it in' },
-  { variable: 'COFFRE_ACCESS_CLIENT_SECRET', instead: 'run `coffre login <url> --access-client-id <id>` and paste the secret, or pipe it in' },
-  { variable: 'COFFRE_AUTH_MODE', instead: 'pass --auth-mode signin|cloudflare' },
-  { variable: 'COFFRE_MIGRATE_DATABASE_URL', instead: 'paste the URL when coffre migrate asks, or pipe it in', command: ['migrate'] },
-  { variable: 'COFFRE_SETUP_DATABASE_URL', instead: 'paste the URL when coffre setup asks, or pipe it in', command: ['setup'] },
-  { variable: 'COFFRE_VAULT_KEY', instead: 'paste the keys when coffre verify keys asks, or pipe them in, the vault key first', command: ['verify', 'keys'] },
-  { variable: 'COFFRE_APP_KEY', instead: 'paste the keys when coffre verify keys asks, or pipe them in, the vault key first', command: ['verify', 'keys'] },
-  { variable: 'COFFRE_VAULT_KEY_ID', instead: 'pass coffre verify keys --vault-id <id>', command: ['verify', 'keys'] },
-  { variable: 'COFFRE_CONFORMANCE_CANARY', instead: 'paste the value when coffre verify instance asks, or pipe it in', command: ['verify', 'instance'] },
-];
-
-/**
- * Why the command `words` start with will not run while a variable an
- * earlier CLI read for it is set, in one line; null when none is. A
- * command that talks to no instance never read the session's. A variable
- * left from before would otherwise do nothing, silently: the run would go
- * elsewhere, or as someone else, than its author meant.
- */
-export function removedVariables(env: Readonly<Record<string, string | undefined>>, words: readonly string[]): string | null {
-  // The session's variables, for a command that talks to an instance; another's, for that command alone.
-  const local = TAKES[words[0] ?? '']?.length === 0;
-  const reads = (only: readonly string[] | undefined) => (only === undefined ? !local : only.every((word, i) => words[i] === word));
-  const set = REMOVED.filter(({ variable, command }) => reads(command) && env[variable]?.trim());
-  if (set.length === 0) return null;
-  const instead = [...new Set(set.map(({ instead }) => instead))];
-  const [them, are] = set.length === 1 ? ['it', 'is'] : ['them', 'are'];
-  return `${listed(set.map(({ variable }) => variable), 'and')} ${are} no longer read: unset ${them}; instead, ${instead.join('; ')}`;
-}
