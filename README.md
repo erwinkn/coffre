@@ -126,6 +126,8 @@ coffre identities                           # the accounts you sign in with
 coffre list     market/dev
 coffre get      market/dev/DATABASE_URL
 coffre set      market/dev/DATABASE_URL     # asks for the value, or reads it piped in
+coffre set      billing/prod/DATABASE_URL --ref market/prod/DATABASE_URL   # a reference: billing reads market's, live
+coffre references market/prod               # what reads it through references; references break ends one
 coffre run      market/dev -- printenv
 coffre export   market/dev --format dotenv  # or json, shell, github
 coffre history  market/dev/DATABASE_URL
@@ -139,7 +141,7 @@ coffre projects
 coffre projects create market               # projects rename and archive, and the same for
 coffre environments create market/dev       # environments
 coffre projects delete market               # an archived one, for good: previews; --apply deletes
-coffre fork     market/prod staging         # a new environment, each key a copy of prod's value, no history
+coffre fork     market/prod staging         # a new environment, each key a copy of prod's value, no history; --reference follows prod
 coffre roles
 coffre access                               # who holds what, where you manage access
 coffre admit alice@acme.example             # a member first, then their grants

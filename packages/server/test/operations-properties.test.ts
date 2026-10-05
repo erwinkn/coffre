@@ -5,12 +5,12 @@ import * as hegel from '@hegeldev/hegel';
 import * as gs from '@hegeldev/hegel/generators';
 import { createClient, CoffreError } from '@coffre/client';
 import { defineSignin, github } from '@coffre/core/identity';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, ne } from 'drizzle-orm';
 
 import { propertySettings } from '../../../scripts/property-settings.ts';
 import { clientFor, openTestDatabase, resetDatabase, testVault, waitUntil, type FixtureDeps } from './api-fixture.ts';
 import { drainBackgroundTasks } from './background-tasks.ts';
-import { auditLog, vaultMembers, vaultGrants, credentials as storedCredentials, identities, environments as storedEnvironments, projects as storedProjects, secrets as storedSecrets, secretVersions } from './db/tables.ts';
+import { auditLog, vaultMembers, vaultGrants, credentials as storedCredentials, identities, environments as storedEnvironments, projects as storedProjects, secrets as storedSecrets, secretReferences, secretVersions } from './db/tables.ts';
 import { SigninService } from '../src/api/signin.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
@@ -29,6 +29,7 @@ const kinds = [
   'invite', 'grant', 'revoke', 'set', 'read', 'remove', 'issue', 'revoke-token',
   'create-env', 'rename-env', 'archive-env', 'unarchive-env', 'delete-env',
   'archive-project', 'unarchive-project', 'delete-project', 'create-project', 'retire-env', 'retire-project',
+  'refer', 'break', 'rotate', 'set-holder', 'forge',
 ] as const;
 type Operation = {
   kind: typeof kinds[number];
@@ -82,6 +83,10 @@ async function scenario(operations: readonly Operation[]) {
     grants: { ada: new Map<string, Role>(), ci: new Map<string, Role>() },
     project: null as { generation: number; id: string; archived: boolean } | null,
     environments: [] as Environment[],
+    // billing/prod/VALUE, in a project of its own that stays: a value, or a reference to market/<slug>/VALUE by its source's `n`.
+    billing: { projectId: '', value: 'initial billing', reference: null as { source: number; live: boolean } | null },
+    /** billing/prod/FORGED: a reference row the database's owner wrote, which the vault never sealed. */
+    forged: false,
   };
   let generation = 0;
   let made = 0;
@@ -101,6 +106,13 @@ async function scenario(operations: readonly Operation[]) {
   }
   const grantPath = (op: Pick<Operation, 'scope' | 'environment'>) =>
     ({ project: 'market', environment: `market/${op.environment}`, every: '*', 'every-env': `*/${op.environment}` })[op.scope];
+  /** A deletion of these environments ends billing's live reference into one of them, and says so. */
+  function ends(references: readonly { holder: string; source: string }[], deleted: readonly Environment[]) {
+    const { reference } = model.billing;
+    const into = reference?.live === true ? deleted.find((each) => each.n === reference.source) : undefined;
+    assert.deepEqual(references, into === undefined ? [] : [{ holder: 'billing/prod/VALUE', source: `market/${into.slug}/VALUE` }], 'a deletion ends, and names, the references into what it deletes');
+    if (into !== undefined) reference!.live = false;
+  }
   function forget(keys: (key: string) => boolean) {
     for (const member of members) for (const key of [...model.grants[member].keys()]) if (keys(key)) model.grants[member].delete(key);
   }
@@ -131,6 +143,18 @@ async function scenario(operations: readonly Operation[]) {
       return write ? role === 'developer' : role !== undefined;
     });
   }
+  /** Whether `member` reads billing/prod/VALUE: a grant on billing/prod, or on prod in every project, and a value or a live reference to a live source. */
+  function mayBilling(member: Member | 'root'): boolean {
+    if (member !== 'root' && (!model.active[member] || !['billing:prod', '*', '*/prod'].some((key) => model.grants[member].has(key)))) return false;
+    const { reference } = model.billing;
+    if (reference === null) return true;
+    const source = model.environments.find((each) => each.n === reference.source);
+    return reference.live && source !== undefined && !source.archived && model.project !== null && !model.project.archived;
+  }
+  const billingValue = () => {
+    const { reference } = model.billing;
+    return reference === null ? model.billing.value : model.environments.find((each) => each.n === reference.source)!.value;
+  };
   async function session() {
     const signed = await signin.completeSignin({ provider: 'github', subject: 'ada-account', emails: [ADA], name: null }, { requestId: randomUUID(), sourceIp: null, label: 'property' });
     assert.ok(signed.ok);
@@ -180,6 +204,43 @@ async function scenario(operations: readonly Operation[]) {
       assert.equal(current.at(-1)!.author, 'vault');
     }
   }
+  async function readBilling(member: Member | 'root', key: 'VALUE') {
+    const previous = await reads();
+    const live = member === 'root' || credentials.some((credential) => credential.member === member && credential.live);
+    // The root reads whatever has a value, or a live reference to a live source; a member needs a grant there too.
+    const expected = key === 'VALUE' && (member === 'root' ? mayBilling('root') : mayBilling(member) && live);
+    const result = await allowed(() => (member === 'root' ? root : client(member)).secrets.reveal(`billing/prod/${key}`), expected);
+    const current = await reads();
+    assert.equal(current.length - previous.length, result ? 1 : 0, 'exactly one allowed audit entry per value read, and none for a refused read');
+    if (!result) return;
+    assert.equal(result.values[key], billingValue(), 'billing reads its value, or its live source\'s current one');
+    if (model.billing.reference !== null) {
+      // Through a reference, a read of the source, in the source's project and, by `also`, in the holder's.
+      const entry = current.at(-1)!;
+      assert.equal(entry.projectId, model.project!.id, 'a read through a reference is logged as a read of its source');
+      assert.equal((JSON.parse(entry.metadata) as { also?: { projectId?: string } }).also?.projectId, model.billing.projectId, '…and in the holder\'s project');
+      for (const path of ['market', 'billing']) {
+        const { entries } = await root.audit.list({ path, limit: 5 });
+        assert.ok(entries.some((listed) => listed.seq === Number(entry.seq)), `the read through the reference is in ${path}'s log`);
+      }
+    }
+  }
+  /**
+   * A row the vault never sealed is no reference: a read of its key, allowed
+   * or refused, releases no value, and the vault logs no read of a key (the
+   * app may log an empty read, which names no secret).
+   */
+  async function readForged(member: Member | 'root') {
+    const released = async () => (await reads()).filter((entry) => entry.author === 'vault');
+    const previous = await released();
+    const values = await (member === 'root' ? root : client(member)).secrets.reveal('billing/prod/FORGED')
+      .then((result) => result.values, (error: unknown) => {
+        if (!(error instanceof CoffreError) || error.status >= 500) throw error;
+        return {};
+      });
+    assert.deepEqual(values, {}, 'an unsealed reference row releases nothing');
+    assert.equal((await released()).length, previous.length, 'and the vault opens no key for it');
+  }
   async function reads() {
     return database.owner.select().from(auditLog).where(and(eq(auditLog.action, 'secret.read'), eq(auditLog.decision, 'allow'))).orderBy(auditLog.seq);
   }
@@ -193,9 +254,14 @@ async function scenario(operations: readonly Operation[]) {
     }
     // Every list shows the places the model has, archived included, and no tombstone.
     const listed = (await root.projects.list()).projects;
-    assert.deepEqual(listed.map((project) => project.slug), model.project === null ? [] : ['market'], 'the projects listed are the live ones');
+    assert.deepEqual(listed.map((project) => project.slug), model.project === null ? ['billing'] : ['billing', 'market'], 'the projects listed are the live ones');
+    for (const member of members) await readBilling(member, 'VALUE');
+    await readBilling('root', 'VALUE');
+    if (model.forged) {
+      for (const member of [...members, 'root'] as const) await readForged(member);
+    }
     assert.deepEqual(
-      (listed[0]?.environments ?? []).map((environment) => environment.slug).sort(),
+      (listed.find((project) => project.slug === 'market')?.environments ?? []).map((environment) => environment.slug).sort(),
       model.environments.map((environment) => environment.slug).sort(),
       'the environments listed are the live ones',
     );
@@ -229,6 +295,14 @@ async function scenario(operations: readonly Operation[]) {
   model.grants.ada.set(`env:${environmentAt('dev')!.n}`, 'viewer');
   await root.access.set(principal('ci'), { 'market/prod': 'developer' });
   model.grants.ci.set(`env:${environmentAt('prod')!.n}`, 'developer');
+  await root.projects.create('billing', { name: 'Billing' });
+  await root.environments.create('billing/prod', { name: 'prod' });
+  await root.secrets.set('billing/prod', { VALUE: model.billing.value });
+  model.billing.projectId = (await database.owner.select({ id: storedProjects.id }).from(storedProjects).where(eq(storedProjects.slug, 'billing')))[0]!.id;
+  for (const member of members) {
+    await root.access.set(principal(member), { 'billing/prod': 'viewer' });
+    model.grants[member].set('billing:prod', 'viewer');
+  }
   await allowed(() => root.members.remove('user:never-admitted@acme.example'), false, true, 404);
   await allowed(() => root.tokens.revoke('token:ci', '00000000-0000-4000-8000-000000000001'), false, true, 404);
   await invariants();
@@ -325,6 +399,7 @@ async function scenario(operations: readonly Operation[]) {
           environment === undefined ? 404 : environment.archived ? undefined : 409);
         if (result) {
           tombstones.push({ path: `market/${result.deletion.tombstone}`, projectId: model.project!.id, environmentId: environment!.id, versionIds });
+          ends(result.deletion.references, [environment!]);
           model.environments = model.environments.filter((each) => each !== environment);
           forget((key) => key === `env:${environment!.n}`);
         }
@@ -340,6 +415,7 @@ async function scenario(operations: readonly Operation[]) {
           for (const { each, versionIds } of going) {
             tombstones.push({ path: `${result.deletion.tombstone}/${each.slug}`, projectId: id, environmentId: each.id, versionIds });
           }
+          ends(result.deletion.references, going.map(({ each }) => each));
           forget((key) => key === `project:${gone}` || going.some(({ each }) => key === `env:${each.n}`));
           model.project = null;
           model.environments = [];
@@ -349,6 +425,62 @@ async function scenario(operations: readonly Operation[]) {
       case 'create-project': {
         if (model.project === null) await createProject();
         else assert.equal((await root.projects.create('market', { name: 'Market' })).created, false);
+        break;
+      }
+      case 'refer': {
+        // billing/prod/VALUE made a reference to market/<slug>/VALUE, by the root: a live source, or a refusal.
+        const live = model.project !== null && !model.project.archived && environment !== undefined && !environment.archived;
+        const result = await allowed(() => root.secrets.set('billing/prod', { VALUE: { ref: `market/${op.environment}/VALUE` } }), live, true, 404);
+        if (result) model.billing.reference = { source: environment!.n, live: true };
+        break;
+      }
+      case 'break': {
+        const { reference } = model.billing;
+        const result = await allowed(() => root.references.break('billing/prod/VALUE'), reference?.live === true, true, reference === null ? 404 : 409);
+        if (result) reference!.live = false;
+        break;
+      }
+      case 'rotate': {
+        // The source's side writes a new value; a live reference reads it next.
+        const writable = model.project !== null && !model.project.archived && environment !== undefined && !environment.archived;
+        const result = await allowed(() => root.secrets.set(`market/${op.environment}`, { VALUE: op.value }), writable);
+        if (result) environment!.value = op.value;
+        break;
+      }
+      case 'set-holder': {
+        // A value of billing's own: it ends the reference, replaced.
+        await root.secrets.set('billing/prod', { VALUE: op.value });
+        model.billing.reference = null;
+        model.billing.value = op.value;
+        break;
+      }
+      case 'forge': {
+        // The database's owner writes a reference row the vault never sealed: its seq is an entry, but no reference.create.
+        const source = model.environments.find((each) => each.slug === op.environment) ?? model.environments[0];
+        if (model.forged || source === undefined) break;
+        const [billing] = await database.owner.select({ environmentId: storedEnvironments.id }).from(storedEnvironments)
+          .where(and(eq(storedEnvironments.projectId, model.billing.projectId), eq(storedEnvironments.slug, 'prod')));
+        const [sourceSecret] = await database.owner.select({ id: storedSecrets.id }).from(storedSecrets)
+          .where(and(eq(storedSecrets.environmentId, source.id), eq(storedSecrets.key, 'VALUE')));
+        const [unsealed] = await database.owner.select({ seq: auditLog.seq }).from(auditLog).where(eq(auditLog.action, 'project.create')).limit(1);
+        const holder = randomUUID();
+        await database.owner.insert(storedSecrets).values({ id: holder, projectId: model.billing.projectId, environmentId: billing!.environmentId, key: 'FORGED' });
+        await database.owner.insert(secretReferences).values({
+          id: randomUUID(), projectId: model.billing.projectId, environmentId: billing!.environmentId, secretId: holder,
+          sourceProjectId: model.project!.id, sourceEnvironmentId: source.id, sourceSecretId: sourceSecret!.id,
+          createdSeq: unsealed!.seq, createdBy: 'user:mallory@acme.example',
+        });
+        model.forged = true;
+        // And the genuine row, if billing follows one, edited to name another source: what it reads, and where it shows, stay the seal's.
+        const { reference } = model.billing;
+        const other = model.environments.find((each) => each.n !== reference?.source);
+        if (reference?.live === true && other !== undefined) {
+          const [otherSecret] = await database.owner.select({ id: storedSecrets.id }).from(storedSecrets)
+            .where(and(eq(storedSecrets.environmentId, other.id), eq(storedSecrets.key, 'VALUE')));
+          await database.owner.update(secretReferences)
+            .set({ sourceEnvironmentId: other.id, sourceSecretId: otherSecret!.id })
+            .where(and(eq(secretReferences.projectId, model.billing.projectId), eq(secretReferences.sourceProjectId, model.project!.id), ne(secretReferences.secretId, holder)));
+        }
         break;
       }
       // Archived, then deleted, as one step: so random sequences reach deletions, which need both.
@@ -425,6 +557,37 @@ test('API operation sequence covers every project, renames, archiving, deletion 
     { ...base, kind: 'revoke', scope: 'every-env' },
     { ...base, kind: 'revoke', member: 'ci', scope: 'every' },
     { ...base, kind: 'remove', member: 'ci' },
+  ]);
+});
+
+test('API operation sequence covers references: made, read in both projects, rotated, broken, replaced, deleted with their source, and forged', () => {
+  const base: Operation = { kind: 'refer', member: 'ada', environment: 'prod', to: 'qa', scope: 'every-env', role: 'viewer', value: 'rotated', credential: 0 };
+  return scenario([
+    base,
+    { ...base, kind: 'rotate' },
+    { ...base, kind: 'refer' },
+    // The source archived, then back: the reference with it.
+    { ...base, kind: 'archive-env' },
+    { ...base, kind: 'unarchive-env' },
+    { ...base, kind: 'rename-env', to: 'qa' },
+    { ...base, kind: 'rotate', environment: 'qa', value: 'after the rename' },
+    { ...base, kind: 'break' },
+    { ...base, kind: 'break' },
+    { ...base, kind: 'refer', environment: 'dev' },
+    { ...base, kind: 'set-holder', value: 'billing of its own' },
+    { ...base, kind: 'break' },
+    { ...base, kind: 'refer', environment: 'dev' },
+    // prod in every project reaches billing/prod, and so its reference.
+    { ...base, kind: 'revoke', scope: 'environment' },
+    { ...base, kind: 'grant', member: 'ci', scope: 'every-env', environment: 'prod' },
+    { ...base, kind: 'forge', environment: 'dev' },
+    // Its source deleted: the reference ends, and the deletion says so.
+    { ...base, kind: 'retire-env', environment: 'dev' },
+    { ...base, kind: 'refer', environment: 'qa' },
+    { ...base, kind: 'retire-project' },
+    { ...base, kind: 'create-project' },
+    { ...base, kind: 'create-env', environment: 'prod', value: 'a new market' },
+    { ...base, kind: 'refer' },
   ]);
 });
 

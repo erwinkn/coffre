@@ -57,6 +57,13 @@
       "when": 1791206154748,
       "tag": "0007_folders",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1791206846131,
+      "tag": "0008_references",
+      "breakpoints": true
     }
   ]
 }

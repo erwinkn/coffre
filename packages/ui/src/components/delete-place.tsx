@@ -144,6 +144,20 @@ function DeletionSummary({ deletion, what }: { deletion: Deletion; what: 'projec
         )}
         .
       </li>
+      {deletion.references.length > 0 && (
+        <li>
+          <strong>Ended:</strong> {count(deletion.references.length, 'reference')}, which read it from
+          elsewhere or which it reads:{' '}
+          {deletion.references.map((reference, index) => (
+            <span key={`${reference.holder} ${reference.source}`}>
+              {index > 0 && ', '}
+              <span className="mono">{reference.holder}</span> from{' '}
+              <span className="mono">{reference.source}</span>
+            </span>
+          ))}
+          .
+        </li>
+      )}
       <li>
         <strong>Kept, names only:</strong> the {what} and its {count(deletion.keys, 'key')}, as{' '}
         <span className="mono">{deletion.tombstone}</span>, so the audit log still reads. Its

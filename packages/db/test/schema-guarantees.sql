@@ -356,4 +356,26 @@ BEGIN
 END
 $$;
 
+-- 18. A reference is only ever added: its end is the vault's to log.
+DO $$
+DECLARE
+    statement text;
+BEGIN
+    FOREACH statement IN ARRAY ARRAY[
+        'UPDATE secret_references SET source_secret_id = source_secret_id',
+        'UPDATE secret_references SET created_seq = created_seq',
+        'DELETE FROM secret_references',
+        'TRUNCATE secret_references'
+    ] LOOP
+        BEGIN
+            EXECUTE statement;
+            RAISE EXCEPTION 'FAIL: coffre_app was able to run: %', statement;
+        EXCEPTION
+            WHEN insufficient_privilege THEN NULL;
+        END;
+    END LOOP;
+    RAISE NOTICE 'PASS: coffre_app adds references and never changes or removes one';
+END
+$$;
+
 \echo '--- all schema guarantees held ---'

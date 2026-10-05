@@ -380,6 +380,61 @@ export async function firstVaultEntryUnder(db: Queryable, keyId: string): Promis
   return row?.seq;
 }
 
+/** The entries at these seqs, any author, by seq: what a reference names as its seal. */
+export async function entriesAt(db: Queryable, seqs: readonly bigint[]): Promise<Map<bigint, StoredEntry>> {
+  if (seqs.length === 0) return new Map();
+  const { auditLog } = tablesOf(db);
+  const rows = stored(await db.select(entryColumns(db)).from(auditLog).where(inArray(auditLog.seq, [...new Set(seqs)])));
+  return new Map(rows.map((row) => [row.seq, row]));
+}
+
+/**
+ * Which of these `reference.create` entries a `reference.end` of the
+ * vault's names, allowed: one read through `audit_log_reference_end_idx`.
+ * An end that fails its MAC still ends: putting a reference back takes
+ * more than a forged end can undo, and refusing is the safe side.
+ */
+export async function endedReferences(db: Queryable, seqs: readonly bigint[]): Promise<Set<bigint>> {
+  if (seqs.length === 0) return new Set();
+  const { auditLog } = tablesOf(db);
+  const rows = await db
+    .select({ relatedSeq: auditLog.relatedSeq })
+    .from(auditLog)
+    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, 'reference.end'), eq(auditLog.decision, 'allow'), inArray(auditLog.relatedSeq, [...new Set(seqs)])));
+  return new Set(rows.map((row) => row.relatedSeq!));
+}
+
+/** The project each environment is in: a holder's ids, checked against each other. */
+export async function projectsOfEnvironments(db: Queryable, ids: readonly string[]): Promise<Map<string, string>> {
+  if (ids.length === 0) return new Map();
+  const { environments } = tablesOf(db);
+  const rows = await db.select({ id: environments.id, projectId: environments.projectId }).from(environments).where(inArray(environments.id, [...new Set(ids)]));
+  return new Map(rows.map((row) => [row.id, row.projectId]));
+}
+
+/** A secret as the vault reads it to make a reference to it: where it is, its path, and its current version. */
+export type SecretPlace = { secretId: string; projectId: string; environmentId: string; path: string; currentVersionId: string | null };
+
+export async function secretsByIds(db: Queryable, ids: readonly string[]): Promise<Map<string, SecretPlace>> {
+  if (ids.length === 0) return new Map();
+  const { secrets, environments, projects } = tablesOf(db);
+  const rows = await db
+    .select({
+      secretId: secrets.id,
+      projectId: secrets.projectId,
+      environmentId: secrets.environmentId,
+      project: projects.slug,
+      environment: environments.slug,
+      key: secrets.key,
+      currentVersionId: secrets.currentVersionId,
+    })
+    .from(secrets)
+    .innerJoin(environments, eq(environments.id, secrets.environmentId))
+    .innerJoin(projects, eq(projects.id, secrets.projectId))
+    .where(inArray(secrets.id, [...new Set(ids)]));
+  return new Map(rows.map(({ project, environment, key, ...row }) => [row.secretId, { ...row, path: `${project}/${environment}/${key}` }]));
+}
+
 /** The vault's newest entry of any of these actions, allowed, or undefined. */
 export async function latestVaultEntry(db: Queryable, actions: readonly string[]): Promise<StoredEntry | undefined> {
   const { auditLog } = tablesOf(db);
@@ -458,12 +513,13 @@ function sealed(wrappedDek: SQLWrapper): SQL {
   return sql`length(${wrappedDek}) > 0`;
 }
 
-
 /**
- * A stored version and the binding and key the vault reads for itself, and
- * whether its place was deleted. An erased version outside one is no version.
+ * A stored version and the binding and key the vault reads for itself;
+ * whether its place was deleted, and whether it is its secret's current
+ * one, as a read through a reference needs. An erased version outside a
+ * deleted place is no version.
  */
-export type SecretVersion = { id: string; secret: SecretRef; wrapped: WrappedKey; deleted: boolean };
+export type SecretVersion = { id: string; secret: SecretRef; wrapped: WrappedKey; deleted: boolean; current: boolean };
 
 export async function versions(db: Queryable, ids: readonly string[]): Promise<SecretVersion[]> {
   if (ids.length === 0) return [];
@@ -483,6 +539,9 @@ export async function versions(db: Queryable, ids: readonly string[]): Promise<S
       kekVersion: secretVersions.kekVersion,
       wrappedDek: secretVersions.wrappedDek,
       deleted: truth(or(tombstone(environments.slug), tombstone(projects.slug))!),
+      currentVersionId: secrets.currentVersionId,
+      // The newest by the versions' own order: the app may write `current_version_id`, never a version.
+      newest: sql<number | string>`(SELECT max(newest.version) FROM secret_versions newest WHERE newest.secret_id = ${secretVersions.secretId})`,
     })
     .from(secretVersions)
     .innerJoin(secrets, eq(secrets.id, secretVersions.secretId))
@@ -505,5 +564,6 @@ export async function versions(db: Queryable, ids: readonly string[]): Promise<S
       kekVersion: row.kekVersion,
       bytes: row.wrappedDek.toString('base64'),
     },
+    current: row.currentVersionId === row.id && Number(row.newest) === row.version,
   }));
 }

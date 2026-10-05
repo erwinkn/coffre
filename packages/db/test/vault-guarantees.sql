@@ -211,6 +211,7 @@ BEGIN
         'SELECT * FROM service_bindings',
         'SELECT * FROM consumed_tokens',
         'SELECT * FROM project_folders',
+        'SELECT * FROM secret_references',
         'UPDATE secret_folders SET folder = folder',
             'DELETE FROM identities',
         'DELETE FROM device_authorizations',

@@ -133,14 +133,18 @@ export async function environmentsCreate(connect: () => CoffreClient, args: stri
  * half way.
  */
 export async function fork(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
-  const { values, positionals } = parse(args, naming, ['<project>/<environment>', '<new-environment>']);
+  const { values, positionals } = parse(args, { ...naming, reference: { type: 'boolean', default: false } }, ['<project>/<environment>', '<new-environment>']);
   const { project, environment: from } = place(positionals[0]!, true);
   const slug = positionals[1]!;
   if (slug.includes('/')) throw new UsageError(`name the new environment alone, as in staging, not "${slug}": it goes in ${project}`);
   const api = connect();
-  const made = await api.environments.create(`${project}/${slug}`, { name: values.name ?? slug, from: from! });
-  const keys = made.forked?.keys ?? 0;
-  io.out.write(`${made.created ? 'created' : 'filled'} ${project}/${made.environment.slug} from ${project}/${from}: ${keys} key${keys === 1 ? '' : 's'}, values copied, no history\n`);
+  const made = await api.environments.create(`${project}/${slug}`, { name: values.name ?? slug, from: from!, ...(values.reference ? { references: true } : {}) });
+  const { keys = 0, references = 0, copied = [] } = made.forked ?? {};
+  const what = values.reference
+    ? `${references} reference${references === 1 ? '' : 's'}${copied.length === 0 ? '' : `, and ${copied.length} copied: ${copied.join(', ')}, whose source you read only through ${from}`}`
+    : 'values copied, no history';
+  io.out.write(`${made.created ? 'created' : 'filled'} ${project}/${made.environment.slug} from ${project}/${from}: ${keys} key${keys === 1 ? '' : 's'}, ${what}\n`);
+  if (values.reference && references > 0) io.out.write(`  whoever reads ${project}/${made.environment.slug} reads those values through them, as they change\n`);
 }
 
 /** The patch `--name` and `--slug` make: one of them at least. */
@@ -214,6 +218,9 @@ export function describeDeletion(deletion: Deletion, done: boolean): string {
     done ? `deleted ${path}, for good:` : `would delete ${path}, for good:`,
     `  erased: ${count(versions, 'version')}, each one's ciphertext and wrapped data key${where}`,
     `  revoked: ${count(grants.length, 'grant')}${revoked.length === 0 ? '' : `, ${revoked.join(', ')}`}`,
+    ...(deletion.references.length === 0
+      ? []
+      : [`  ended: ${count(deletion.references.length, 'reference')}, ${deletion.references.map((reference) => `${reference.holder} → ${reference.source}`).join(', ')}`]),
     `  kept, names only: ${tombstone} and its ${count(keys, 'key')}, which the audit log names`,
     `  ${path.split('/').at(-1)} ${done ? 'is' : 'would be'} free to use again`,
   ];
@@ -241,6 +248,47 @@ export async function archiveSecret(connect: () => CoffreClient, args: string[],
   const api = connect();
   await api.secrets.update(path, { archived });
   io.out.write(archived ? `archived ${path}: \`coffre unarchive ${path}\` brings it back\n` : `unarchived ${path}\n`);
+}
+
+// --- references --------------------------------------------------------------
+
+/** `coffre references market/prod`: what it lends and what it holds, and who reads through each. */
+export async function references(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
+  const { values, positionals } = parse(args, json, ['<project>[/<environment>[/<KEY>]]']);
+  const api = connect();
+  const { references: list } = await api.references.list(positionals[0]!);
+  if (values.json) return asJson(io, list);
+  if (list.length === 0) return void io.out.write(`no reference into or out of ${positionals[0]}\n`);
+  for (const reference of list) {
+    const state = reference.state === 'live' ? '' : `  (${reference.state.replace('_', ' ')})`;
+    io.out.write(`${reference.holder} → ${reference.source}${state}\n`);
+    io.out.write(`  made by ${shownMember(reference.createdBy).replace(/^user:/, '')} on ${reference.createdAt.slice(0, 10)}\n`);
+    if (reference.readers !== null) {
+      io.out.write(`  read through by ${reference.readers.length === 0 ? 'no one by a grant' : reference.readers.map((reader) => shownMember(reader).replace(/^user:/, '')).join(', ')}\n`);
+    }
+  }
+}
+
+/**
+ * `coffre references break billing/prod/DATABASE_URL`: who would stop
+ * reading the source through it, and with --apply, the break. Whoever writes
+ * the holder may, and whoever manages the source's project's access.
+ */
+export async function referencesBreak(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
+  const { values, positionals } = parse(args, { apply: { type: 'boolean', default: false } }, ['<project>/<environment>/<KEY>']);
+  const path = secret(positionals[0]!);
+  const api = connect();
+  if (!values.apply) {
+    const [reference] = (await api.references.list(path)).references.filter((each) => each.holder === path);
+    if (reference === undefined) return void io.out.write(`${path} is no reference you can see\n`);
+    const readers = reference.readers === null ? 'whoever reads its environment' : reference.readers.map((reader) => shownMember(reader).replace(/^user:/, '')).join(', ') || 'no one by a grant';
+    io.out.write(`${path} reads ${reference.source}, made by ${shownMember(reference.createdBy).replace(/^user:/, '')} on ${reference.createdAt.slice(0, 10)}\n`);
+    io.out.write(`breaking it stops ${readers} reading it there, and a run of its environment refuses until ${path.split('/')[2]} gets a value\n`);
+    io.out.write('Nothing changed. Re-run with --apply to break it.\n');
+    return;
+  }
+  const { reference } = await api.references.break(path);
+  io.out.write(`broke ${reference.holder}: it no longer reads ${reference.source}\n`);
 }
 
 // --- folders -----------------------------------------------------------------

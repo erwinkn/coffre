@@ -87,9 +87,38 @@ function plural(count: number, one: string, many = `${one}s`): string {
 }
 
 /** A batch reads as its environment and a count; one entry as its secret. */
+/**
+ * The secrets a read or write was about. A read through a reference is a
+ * read of its source, "market/prod/DATABASE_URL through
+ * billing/prod/DATABASE_URL"; a run that read some that way is a run of
+ * the environment that holds them.
+ */
 function secrets(facts: Facts): Part[] {
-  if (facts.batch.length === 1) return place(facts.entry);
-  return [...environmentOf(facts.entry), facts.refused ? ', ' : ': ', plural(facts.count, 'secret')];
+  const through = (entry: AuditEntry) => text((entry.metadata.via as { path?: unknown } | undefined)?.path);
+  if (facts.batch.length === 1) {
+    const held = through(facts.entry);
+    return held === null ? place(facts.entry) : [...place(facts.entry), ' through ', { place: held }];
+  }
+  const own = facts.batch.find((entry) => through(entry) === null);
+  const held = facts.batch.map(through).filter((path): path is string => path !== null);
+  const where = own !== undefined ? environmentOf(own) : [{ place: held[0]!.split('/').slice(0, 2).join('/') }];
+  return [
+    ...where,
+    facts.refused ? ', ' : ': ',
+    plural(facts.count, 'secret'),
+    ...(held.length === 0 ? [] : [`, ${held.length} through ${held.length === 1 ? 'a reference' : 'references'}`]),
+  ];
+}
+
+/** "billing/prod/DATABASE_URL a reference to market/prod/DATABASE_URL", from either author's entry. */
+function referenceTo(entry: AuditEntry): Part[] {
+  const holder = text(entry.metadata.subject);
+  const key = text(entry.metadata.key);
+  const source = text(entry.metadata.source) ?? text((entry.metadata.source as { path?: unknown } | undefined)?.path);
+  return [
+    ...(holder !== null ? [{ place: holder }] : key !== null ? place(entry) : environmentOf(entry)),
+    ...(source === null ? [] : [' a reference to ', { place: source }]),
+  ];
 }
 
 /** " to acme/market", when the entry names where a sync pushes. */
@@ -163,6 +192,18 @@ const TEMPLATES: Record<string, Template> = {
     what: ({ entry }) => [...place(entry), ...(text(entry.metadata.nextKey) === null ? [] : [` to ${text(entry.metadata.nextKey)}`])],
   },
   'secret.archive': { did: 'archived', tried: 'archive', what: (facts) => place(facts.entry) },
+  'secret.reference': { did: 'made', tried: 'make', what: ({ entry }) => referenceTo(entry) },
+  'reference.create': { did: 'made', tried: 'make', what: ({ entry }) => referenceTo(entry) },
+  'reference.end': {
+    did: ({ entry }) => (entry.metadata.reason === 'replaced' ? 'gave a value of its own to' : 'broke'),
+    tried: ({ entry }) => (entry.metadata.reason === 'replaced' ? 'replace' : 'break'),
+    what: ({ entry }) => {
+      const source = text((entry.metadata.source as { path?: unknown } | undefined)?.path);
+      const holder = text(entry.metadata.subject);
+      if (entry.metadata.reason === 'replaced') return [...(holder === null ? ['a reference'] : [{ place: holder }]), ...(source === null ? [] : [', no longer a reference to ', { place: source }])];
+      return ['the reference ', ...(holder === null ? [] : [{ place: holder }]), ...(source === null ? [] : [' to ', { place: source }])];
+    },
+  },
   'secret.unarchive': { did: 'brought back', tried: 'bring back', what: (facts) => place(facts.entry) },
   'secret.move': { did: 'moved', tried: 'move', what: (facts) => place(facts.entry), then: ({ entry }) => intoFolder(entry) },
   ...placeTemplates('project'),
@@ -355,6 +396,7 @@ const REASONS: Record<string, string> = {
   root_admin: 'root admins are set by the deployment',
   unknown_environment: 'no such environment',
   unknown_secret: 'no such secret',
+  no_value: 'it holds no value',
   unknown_project: 'no such project',
   not_archived: 'it was not archived',
   unusable_credential: 'its token is not a secret they can read',

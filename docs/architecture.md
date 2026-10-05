@@ -302,6 +302,8 @@ and `apiMember`). The URL names the thing and the HTTP method is the verb:
 | a secret's versions | `GET /api/secrets/market/prod/DATABASE_URL/versions` |
 | restore a version, as a new version | `POST /api/secrets/market/prod/DATABASE_URL/restore {"version": 3}` |
 | decrypt a secret or a whole environment | `POST /api/reveals {"path": "market/prod"}` |
+| make a key a reference to another secret, read live through it | `PATCH /api/secrets/billing/prod {"DATABASE_URL": {"ref": "market/prod/DATABASE_URL"}}` |
+| the references into and out of a place, and who reads through them; break one | `GET /api/references?path=market/prod`, `DELETE /api/secrets/billing/prod/DATABASE_URL/reference` |
 | list, add or offboard members | `GET /api/members`, `PUT` / `DELETE /api/members/user:ada@acme.example` |
 | what a member holds and has seen, before offboarding | `GET /api/members/user:ada@acme.example` |
 | list, issue or revoke a token's credentials | `GET` / `POST /api/members/token:ci-deploy/tokens`, `DELETE …/tokens/:id` |
@@ -388,7 +390,8 @@ and membership generations. The interface:
 
 | Call | Does |
 |---|---|
-| `unwrap`, `wrap`, `rewrap` | data keys, for a principal whose grants cover the secret |
+| `unwrap`, `wrap`, `rewrap` | data keys, for a principal whose grants cover the secret, or, `via` a reference, the holder's environment |
+| `reference`, `endReferences` | make references, each a `reference.create` entry of its own, which every read through one is checked against; end them, each a `reference.end` naming it ([design](design/environments.md#references)) |
 | `access(principal)` | one principal's status, owner flag and grants, their rows checked; the app asks once per request |
 | `setAccess` | several places for one principal, all or nothing (`PATCH /api/access/<member>`) |
 | `admit`, `remove` | add or restore a member, or remove one and revoke every grant; both answer the member's generation |
@@ -756,6 +759,9 @@ shows what it would take; with `--apply` it deletes:
 - **Revoked:** every grant on the place, lapsed ones too, by the vault, one
   `setAccess` per member, each an `access.revoke` under the deletion's
   operation id.
+- **Ended:** every live reference into the place from elsewhere, and out of
+  it, by the vault, as `broken`: nothing reads through a tombstone, or
+  holds one. The preview names them.
 - **Kept, names only:** the place's row, its keys' rows and its versions'
   rows (number, author, time, the vault key's id), because the log names
   them, and its entries reference them `ON DELETE RESTRICT`. The place is

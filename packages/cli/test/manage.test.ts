@@ -202,6 +202,7 @@ test('projects delete and environments delete show what they would take, and del
       keys: 3,
       versions: 1,
       grants: [{ member: 'token:ci-deploy', place: 'slides/prod', role: 'viewer' }],
+      references: [{ holder: 'deck/prod/API_KEY', source: 'slides/prod/API_KEY' }],
       stranded: ['token:ci-deploy'],
     },
   });
@@ -214,6 +215,7 @@ test('projects delete and environments delete show what they would take, and del
     'would delete slides, for good:\n' +
       "  erased: 1 version, each one's ciphertext and wrapped data key, in dev, prod\n" +
       '  revoked: 1 grant, service:ci-deploy (viewer on slides/prod)\n' +
+      '  ended: 1 reference, deck/prod/API_KEY → slides/prod/API_KEY\n' +
       '  kept, names only: slides~deleted-2026-10-05 and its 3 keys, which the audit log names\n' +
       '  slides would be free to use again\n' +
       '  service:ci-deploy would hold nothing anywhere: `coffre offboard ci-deploy --service` removes them\n' +
@@ -263,6 +265,36 @@ test('fork makes the new environment from its sibling, and says how many keys it
   assert.equal(written.out, 'created market/staging from market/prod: 3 keys, values copied, no history\n');
   await assert.rejects(manage.fork(connect, ['market/prod', 'other/staging'], io), /name the new environment alone/);
   await assert.rejects(manage.fork(connect, ['market', 'staging'], io), /expected <project>\/<environment>/);
+});
+
+test('references lists what a place lends and holds, and who reads through each', async () => {
+  const listed = {
+    id: 'r1', holder: 'billing/prod/DATABASE_URL', source: 'market/prod/DATABASE_URL', state: 'live', version: 3,
+    createdBy: 'user:ada@acme.example', createdAt: '2026-10-05T09:00:00.000Z', endedBy: null, endedAt: null,
+    readers: ['user:bo@acme.example', 'token:deploy'], canBreak: true,
+  };
+  const { connect, calls, written, io } = fixture(() => ({ references: [listed] }));
+  await manage.references(connect, ['market/prod'], io);
+  assert.deepEqual(calls, [{ method: 'GET', path: '/references?path=market%2Fprod', body: undefined }]);
+  assert.equal(written.out, 'billing/prod/DATABASE_URL → market/prod/DATABASE_URL\n  made by ada@acme.example on 2026-10-05\n  read through by bo@acme.example, service:deploy\n');
+
+  // Breaking shows who stops reading, and breaks only with --apply.
+  const breaking = fixture(({ method }) => (method === 'GET' ? { references: [listed] } : { reference: { ...listed, state: 'broken' } }));
+  await manage.referencesBreak(breaking.connect, ['billing/prod/DATABASE_URL'], breaking.io);
+  assert.match(breaking.written.out, /breaking it stops bo@acme\.example, service:deploy reading it there[\s\S]*Re-run with --apply to break it/);
+  assert.deepEqual(breaking.calls.map((call) => call.method), ['GET']);
+  await manage.referencesBreak(breaking.connect, ['billing/prod/DATABASE_URL', '--apply'], breaking.io);
+  assert.deepEqual(breaking.calls.at(-1), { method: 'DELETE', path: '/secrets/billing/prod/DATABASE_URL/reference', body: undefined });
+  assert.match(breaking.written.out, /broke billing\/prod\/DATABASE_URL: it no longer reads market\/prod\/DATABASE_URL\n$/);
+});
+
+test('fork --reference makes references, and names the keys it copied instead', async () => {
+  const { connect, calls, written, io } = fixture(() => ({
+    environment: { slug: 'qa', name: 'qa', archivedAt: null }, created: true, forked: { from: 'staging', keys: 3, references: 2, copied: ['STRIPE_KEY'] },
+  }));
+  await manage.fork(connect, ['market/staging', 'qa', '--reference'], io);
+  assert.deepEqual(calls[0]!.body, { name: 'qa', from: 'staging', references: true });
+  assert.equal(written.out, 'created market/qa from market/staging: 3 keys, 2 references, and 1 copied: STRIPE_KEY, whose source you read only through staging\n  whoever reads market/qa reads those values through them, as they change\n');
 });
 
 test('lists group by folder: the unfiled first, then each folder by name, each in its own order', () => {

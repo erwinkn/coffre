@@ -37,6 +37,25 @@ export interface Vault {
   rewrap(input: RewrapInput): Promise<Outcome<{ wrapped: WrappedKey[]; seqs: number[] }>>;
 
   /**
+   * Make secrets references to others: whoever can read the holder's
+   * environment reads the source through it (docs/design/environments.md).
+   * The vault checks that `principal` reads each source and writes each
+   * holder, by their own grants, and logs a `reference.create` per item:
+   * that entry, under the vault's MAC, is the reference. `seqs` are the
+   * entries, which the app stores beside each reference and names when it
+   * reads through one (`UnwrapInput`'s `via`). All, or none.
+   */
+  reference(input: ReferenceInput): Promise<Outcome<{ seqs: number[] }>>;
+  /**
+   * End references, each with a `reference.end` naming its creation:
+   * `replaced` when the holder gets a value of its own, which takes write on
+   * the holder; `broken` otherwise, which takes write on the holder, or
+   * managing the source's project's access. An ended reference reads no
+   * more, whatever any row says. All, or none.
+   */
+  endReferences(input: EndReferencesInput): Promise<Outcome<{ seqs: number[] }>>;
+
+  /**
    * What one principal holds right now: the app asks once per request. A
    * decision, its rows checked: lists of who holds what read the rows
    * themselves, and need not ask.
@@ -112,13 +131,15 @@ export type RefusalCode =
   | 'expired'
   /** Too many unwraps in the window; see `BulkLimit`. */
   | 'bulk_limit'
-  /** The wrapped key does not belong to the secret it was presented as. */
+  /** The wrapped key does not belong to the secret it was presented as, or a reference is not the vault's. */
   | 'bad_claim'
   /**
    * The project or environment was deleted for good: nothing under it is
    * opened or wrapped again, whatever grant would cover it.
    */
   | 'deleted'
+  /** The reference read through was ended: broken, or replaced by a value. */
+  | 'ended'
   /** Not allowed to manage access, members or the log. */
   | 'not_allowed'
   /** Root admins come from the vault's configuration and cannot be changed. */
@@ -189,7 +210,30 @@ type Correlation = {
 export type UnwrapInput = Correlation & {
   principal: string;
   purpose: Purpose;
-  items: { secretVersionId: string }[];
+  /**
+   * `via` reads a source's current version through a reference: the vault
+   * checks the reader's grants on the holder's environment, as its
+   * `reference.create` entry names it, not on the source's.
+   */
+  items: { secretVersionId: string; via?: Via }[];
+};
+
+/** A reference, as a read names it: its id, and the seq of the vault's `reference.create` entry. */
+export type Via = { reference: string; seq: number };
+
+/** Where a reference is held: the holder's ids, and its path for the log. A new holder's row may not exist yet. */
+export type HolderRef = { projectId: string; environmentId: string; secretId: string; path: string };
+
+export type ReferenceInput = Correlation & {
+  principal: string;
+  /** `id` is the reference's, a fresh UUID; the vault reads the source by its id. */
+  items: { id: string; holder: HolderRef; source: { secretId: string } }[];
+};
+
+export type EndReferencesInput = Correlation & {
+  principal: string;
+  reason: 'replaced' | 'broken';
+  items: Via[];
 };
 
 export type WrapInput = Correlation & {

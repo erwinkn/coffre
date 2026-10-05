@@ -7,7 +7,8 @@ import { setAccess } from './access.ts';
 import { auditKeys, listAudit, verifyAudit } from './audit.ts';
 import type { ApiContext } from './context.ts';
 import { notFound } from './errors.ts';
-import { listMembers, memberReport, putMember, removeMember } from './members.ts';
+import { listMembers, memberReport, putMember, readersAt, removeMember } from './members.ts';
+import { breakReference, listReferences } from './references.ts';
 import { parseGrantee, parseMember, parsePath, type ResolvedPath } from './paths.ts';
 import { forkEnvironment, type Forked } from './forks.ts';
 import { deletePlace, listProjects, me, patchEnvironment, patchProject, putEnvironment, putProject, type InheritedGrant, type PlaceView } from './projects.ts';
@@ -128,14 +129,15 @@ export const routes = {
   }),
   ...route('PUT /projects/:project/:environment', {
     // `from` forks a sibling: its keys, values and folders, without history.
-    input: z.object({ name: displayName, from: slug.optional() }),
+    // With `references`, each key a reference to its parent's instead of a copy.
+    input: z.object({ name: displayName, from: slug.optional(), references: z.boolean().optional() }),
     needs: { permission: 'environment.manage', on: 'project' },
     action: 'environment.create',
     creates: true,
     run: async (ctx, { params, place, input }): Promise<{ environment: PlaceView; created: boolean; inherited: InheritedGrant[]; forked: Forked | null }> =>
       input.from === undefined
         ? { ...(await putEnvironment(ctx, place, params.environment, input)), forked: null }
-        : forkEnvironment(ctx, place, params.environment, { name: input.name, from: input.from }),
+        : forkEnvironment(ctx, place, params.environment, { name: input.name, from: input.from, references: input.references === true }),
   }),
   ...route('PATCH /projects/:project/:environment', {
     input: placePatch,
@@ -155,7 +157,8 @@ export const routes = {
     run: (ctx, { place }) => listSecrets(ctx, place),
   }),
   ...route('PATCH /secrets/:project/:environment', {
-    input: z.record(secretKey, secretValue.nullable()),
+    // A string is a value; `{ "ref": "market/prod/KEY" }` makes the key a reference to that secret.
+    input: z.record(secretKey, z.union([secretValue, z.object({ ref: z.string().max(400) }).strict()]).nullable()),
     // `?dryRun=1` answers what the patch would do and writes nothing. Any
     // other query is refused, not ignored: a mistyped flag must not write.
     query: dryRunFlag,
@@ -193,6 +196,13 @@ export const routes = {
     needs: 'secret.write',
     action: 'secret.restore',
     run: (ctx, { place, input }) => restoreVersion(ctx, place, input.version),
+  }),
+  ...route('DELETE /secrets/:project/:environment/:key/reference', {
+    run: (ctx, { place }) => breakReference(ctx, place),
+  }),
+  ...route('GET /references', {
+    input: z.object({ path: z.string().max(400) }),
+    run: (ctx, { input }) => listReferences(ctx, parsePath(input.path, [1, 2, 3]), (places) => readersAt(ctx, places)),
   }),
   ...route('POST /reveals', {
     input: z.object({ path: z.string().max(400) }),

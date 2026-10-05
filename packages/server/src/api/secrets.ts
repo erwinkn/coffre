@@ -2,31 +2,40 @@ import { randomUUID } from 'node:crypto';
 
 import type { Permission } from '@coffre/core/access';
 import type { Envelope } from '@coffre/core/envelope';
-import type { SecretRef } from '@coffre/core/vault';
+import type { HolderRef, SecretRef } from '@coffre/core/vault';
 import type { Queryable, Transaction } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
-import { secrets, secretVersions } from '@coffre/db/schema';
+import { secretReferences, secrets, secretVersions } from '@coffre/db/schema';
 
 import {
   environmentSecrets,
   insert,
   insertIfAbsent,
   lock,
+  referenceRows,
   resolvePath,
   secretHeads,
+  secretPlaces,
   secretHistory,
   update,
   type ResolvedPath,
+  type SecretPlaceRow,
 } from '../db/queries.ts';
-import { permissionsAt, placeOf } from './caller.ts';
+import { can, permissionsAt, placeOf } from './caller.ts';
 import { allowed, asking, audited, denied, need, recorded, Refusal, vaultRefusal, withRefusals, type ApiContext } from './context.ts';
 import { conflict, notFound, vaultRefused } from './errors.ts';
 import { fileSecrets, requireFolders, secretFoldersIn } from './folders.ts';
 import { openValues, rewrapValue, sealValues } from './keys.ts';
-import { formatPath, type Path } from './paths.ts';
+import { formatMember, formatPath, type Path } from './paths.ts';
+import { currentReferences, placeOfRow, readableValues, readersOf, referencesReady, requireReferences, type ReferenceView, type Resolved } from './references.ts';
 
 export type SecretKey = {
   key: string;
+  /**
+   * The reference it is, when it has no value of its own: what it reads,
+   * whether it does, and whether you could open its source where it is.
+   */
+  reference: (ReferenceView & { canOpenSource: boolean }) | null;
   /** The folder it is listed in within this environment, or null for none. */
   folder: string | null;
   archived: boolean;
@@ -44,7 +53,10 @@ export type SecretVersion = {
 };
 
 /** What `PATCH /secrets/:project/:environment` did to each key it named. */
-export type SetOutcome = { version: number } | { archived: true };
+/** A value, or a reference to another secret by path. */
+export type SecretValue = string | { ref: string };
+
+export type SetOutcome = { version: number } | { archived: true } | { reference: string };
 export type SetResult = { operationId: string; keys: Record<string, SetOutcome> };
 
 type Environment = { projectId: string; environmentId: string };
@@ -113,10 +125,19 @@ export async function listSecrets(
     environmentSecrets(ctx.db, environment.environmentId),
     secretFoldersIn(ctx.db, environment.environmentId),
   ]);
+  const references = await currentReferences(ctx.db, rows.filter((row) => row.current === null).map((row) => row.id));
+  const referenceOf = (secretId: string): SecretKey['reference'] => {
+    const reference = references.get(secretId);
+    if (reference === undefined) return null;
+    const { source } = reference;
+    const canOpenSource = source !== null && can(ctx.caller, 'secret.read', placeOfRow(source));
+    return { ...reference.view, canOpenSource };
+  };
   return {
     permissions: permissionsAt(ctx.caller, placeOf(place.project, place.environment)),
     keys: rows.map((row) => ({
       key: row.key,
+      reference: referenceOf(row.id),
       folder: folders.get(row.id) ?? null,
       archived: row.archivedAt !== null,
       version: row.current?.version ?? null,
@@ -172,9 +193,16 @@ export async function checkEnvironment(tx: Transaction, place: ResolvedPath, exp
 }
 
 /**
- * The only way to write. A string sets a key, adding it if it is new; `null`
- * archives it. One transaction, one version and one audit entry per key, so
- * fifty keys from an `.env` file land together or not at all.
+ * The only way to write. A string sets a key, adding it if it is new;
+ * `{ ref }` makes it a reference to another secret, by path; `null`
+ * archives it. One transaction, one version or reference and one audit
+ * entry per key, so fifty keys from an `.env` file land together or not at
+ * all.
+ *
+ * A key that is a reference stops being one when it gets a value or
+ * another reference: the vault ends it first, `replaced`, before anything
+ * is written, so a write that then fails leaves a key with no value, never
+ * one still reading the source it was moved off.
  *
  * The operation id is drawn inside the retried preparation: an attempt that
  * prepares again leaves the vault's `key.wrap` entries for keys nothing
@@ -183,38 +211,78 @@ export async function checkEnvironment(tx: Transaction, place: ResolvedPath, exp
 export async function setSecrets(
   ctx: ApiContext,
   place: ResolvedPath,
-  patch: Record<string, string | null>,
+  patch: Record<string, SecretValue | null>,
 ): Promise<SetResult> {
   const environment = requireLive(place);
-  const writes = Object.entries(patch).filter((entry): entry is [string, string] => entry[1] !== null);
-  const archives = Object.keys(patch).filter((key) => patch[key] === null);
+  const keysIn = Object.keys(patch);
+  const writes = Object.entries(patch).filter((entry): entry is [string, string] => typeof entry[1] === 'string');
+  const refs = Object.entries(patch).flatMap(([key, value]) => (value !== null && typeof value === 'object' ? [{ key, ref: value.ref }] : []));
+  const archives = keysIn.filter((key) => patch[key] === null);
+  if (refs.length > 0) await requireReferences(ctx.db);
   const result = await optimistic(ctx, async () => {
     const operationId = randomUUID();
-    const prepared = new Map((await secretHeads(ctx.db, environment.environmentId, { keys: Object.keys(patch) })).map((row) => [row.key, row]));
-    const items = writes.map(([key, value]) => {
+    const heads = await secretHeads(ctx.db, environment.environmentId, { keys: keysIn });
+    const prepared = new Map(heads.map((row) => [row.key, row]));
+    const ready = await referencesReady(ctx.db);
+    const currently = await currentReferences(ctx.db, heads.filter((row) => row.currentVersionId === null).map((row) => row.id));
+    // Each key's newest reference, which the transaction checks no write replaced meanwhile.
+    const newestBefore = ready ? newestReferences(await referenceRows(ctx.db, { holderSecretIds: heads.map((row) => row.id) })) : new Map<string, string>();
+    const archived = (key: string) => {
       const row = prepared.get(key);
-      if (row?.archivedAt != null) {
-        throw new Refusal(
-          conflict(`${key} is archived; unarchive it before writing a new version`),
-          denied(ctx, 'secret.write', 'secret_archived', { ...environment, secretId: row.id, operationId, metadata: { key } }),
-        );
-      }
+      if (row?.archivedAt == null) return;
+      throw new Refusal(
+        conflict(`${key} is archived; unarchive it before writing a new version`),
+        denied(ctx, 'secret.write', 'secret_archived', { ...environment, secretId: row.id, operationId, metadata: { key } }),
+      );
+    };
+    const items = writes.map(([key, value]) => {
+      archived(key);
+      const row = prepared.get(key);
       const secret = { id: row?.id ?? randomUUID(), key };
       return { key, secret: secretRef(place, environment, secret, (row?.currentVersion ?? 0) + 1), value };
     });
+    const references = (await referenceTargets(ctx, place, environment, refs, prepared, currently, operationId)).filter((item) => {
+      archived(item.key);
+      return !item.unchanged;
+    });
+    // What gets a value or another reference stops being the reference it is.
+    const replaced = [...items.map((item) => item.secret.secretId), ...references.map((item) => item.holder.secretId)]
+      .flatMap((secretId) => {
+        const reference = currently.get(secretId);
+        return reference === undefined || reference.row.ended !== null ? [] : [reference.row];
+      });
+
     // IDs and versions are provisional until the transaction checks them.
     const sealed = await sealValues(ctx.vault, asking(ctx, operationId), items);
     if (!sealed.ok) throw vaultRefusal(ctx, sealed.refusal, 'secret.write', { ...environment, operationId });
+    // Vault calls only for what there is: most writes make and end no reference.
+    const made = references.length === 0 ? { ok: true as const, seqs: [] } : await ctx.vault.reference({
+      ...asking(ctx, operationId),
+      items: references.map(({ id, holder, source }) => ({ id, holder, source: { secretId: source.id } })),
+    });
+    if (!made.ok) throw vaultRefusal(ctx, made.refusal, 'secret.reference', { ...environment, operationId });
+    if (replaced.length > 0) {
+      const ended = await ctx.vault.endReferences({
+        ...asking(ctx, operationId),
+        reason: 'replaced',
+        items: replaced.map((row) => ({ reference: row.id, seq: Number(row.createdSeq) })),
+      });
+      if (!ended.ok) throw vaultRefusal(ctx, ended.refusal, 'secret.write', { ...environment, operationId });
+    }
 
     return audited(ctx, async (tx, log) => {
       await checkEnvironment(tx, place, environment);
-      await insertIfAbsent(tx, secrets, items.filter(({ key }) => !prepared.has(key)).map(({ key, secret }) => ({
-        id: secret.secretId, ...environment, key,
-      })));
-      const rows = await lock(tx, secrets, { environmentId: environment.environmentId, key: Object.keys(patch) });
+      await insertIfAbsent(tx, secrets, [
+        ...items.map(({ key, secret }) => ({ key, id: secret.secretId })),
+        ...references.map(({ key, holder }) => ({ key, id: holder.secretId })),
+      ].filter(({ key }) => !prepared.has(key)).map(({ key, id }) => ({ id, ...environment, key })));
+      const rows = await lock(tx, secrets, { environmentId: environment.environmentId, key: keysIn });
       const byKey = new Map(rows.map((row) => [row.key, row]));
-      const created = new Map(items.map((item) => [item.key, item.secret.secretId]));
-      for (const key of Object.keys(patch)) {
+      const created = new Map([
+        ...items.map((item) => [item.key, item.secret.secretId] as const),
+        ...references.map((item) => [item.key, item.holder.secretId] as const),
+      ]);
+      for (const key of keysIn) {
         const before = prepared.get(key);
         const current = byKey.get(key);
         if (before === undefined) {
@@ -223,9 +291,15 @@ export async function setSecrets(
           }
         } else if (current === undefined || current.id !== before.id
           || current.currentVersion !== before.currentVersion
+          || current.currentVersionId !== before.currentVersionId
           || current.archivedAt?.getTime() !== before.archivedAt?.getTime()) {
           throw new PrepareAgain();
         }
+      }
+      // A reference made meanwhile, to a key this write prepared without it.
+      if (ready) {
+        const newest = newestReferences(await referenceRows(tx, { holderSecretIds: rows.map((row) => row.id) }));
+        if (rows.some((row) => newest.get(row.id) !== newestBefore.get(row.id))) throw new PrepareAgain();
       }
 
       const keys: Record<string, SetOutcome> = {};
@@ -241,6 +315,28 @@ export async function setSecrets(
       for (const { id, secretId, version } of versions) {
         await update(tx, secrets, { id: secretId }, { currentVersionId: id, currentVersion: version, updatedAt: now });
       }
+      for (const [i, { key, id, holder, source }] of references.entries()) {
+        await update(tx, secrets, { id: holder.secretId }, { currentVersionId: null, updatedAt: now });
+        await insert(tx, secretReferences, {
+          id,
+          projectId: holder.projectId,
+          environmentId: holder.environmentId,
+          secretId: holder.secretId,
+          sourceProjectId: source.projectId,
+          sourceEnvironmentId: source.environmentId,
+          sourceSecretId: source.id,
+          createdSeq: BigInt(made.seqs[i]!),
+          // The member, as the vault's entry names them: the offboarding report finds them by it.
+          createdBy: formatMember(ctx.caller.principal),
+        });
+        log.push(allowed(ctx, 'secret.reference', {
+          ...environment, secretId: holder.secretId, operationId, relatedSeq: made.seqs[i], metadata: {
+            key, source: sourcePath(source), also: { projectId: source.projectId, environmentId: source.environmentId, secretId: source.id },
+          },
+        }));
+        keys[key] = { reference: sourcePath(source) };
+      }
+      for (const { key, source } of refs.map((ref) => ({ key: ref.key, source: ref.ref }))) keys[key] ??= { reference: source };
       for (const key of archives) {
         const secret = byKey.get(key);
         keys[key] = { archived: true };
@@ -252,6 +348,73 @@ export async function setSecrets(
     });
   });
   return result;
+}
+
+/** Each holder's newest reference's id, from rows oldest first. */
+function newestReferences(rows: readonly { id: string; holder: { secretId: string } }[]): Map<string, string> {
+  return new Map(rows.map((row) => [row.holder.secretId, row.id]));
+}
+
+const sourcePath = (source: SecretPlaceRow) => `${source.project}/${source.environment}/${source.key}`;
+
+/** A reference a write makes: its id, holder and source; `unchanged` when the key already reads that source. */
+type ReferenceTarget = { key: string; id: string; holder: HolderRef; source: SecretPlaceRow; unchanged: boolean };
+
+/**
+ * The references a patch makes, checked: each source a live secret the
+ * caller reads by their own grants, not the holder, and not itself a
+ * reference (one hop); and no holder a source others read through, since
+ * they would then read through two. The vault checks the grants again, and
+ * reads only the source its entry names, whatever the app decided.
+ */
+async function referenceTargets(
+  ctx: ApiContext,
+  place: ResolvedPath,
+  environment: Environment,
+  refs: { key: string; ref: string }[],
+  prepared: Map<string, { id: string; key: string }>,
+  currently: Map<string, Resolved>,
+  operationId: string,
+): Promise<ReferenceTarget[]> {
+  if (refs.length === 0) return [];
+  const refused = (key: string, message: string, reason: string) =>
+    new Refusal(conflict(message), denied(ctx, 'secret.reference', reason, { ...environment, operationId, metadata: { key } }));
+  const resolved = await Promise.all(refs.map(async ({ key, ref }) => {
+    const parts = ref.split('/');
+    const found = parts.length === 3 ? await resolvePath(ctx.db, { project: parts[0]!, environment: parts[1]!, key: parts[2]! }) : null;
+    if (found?.environment == null || found.secret === null || found.project.archivedAt !== null || found.environment.archivedAt !== null || found.secret.archivedAt !== null) {
+      throw new Refusal(notFound(`${ref} is no live secret to refer to`), denied(ctx, 'secret.reference', 'unknown_source', { ...environment, operationId, metadata: { key, source: ref } }));
+    }
+    need(ctx, 'secret.read', placeOf(found.project, found.environment), 'secret.reference', { operationId, metadata: { key, source: ref } });
+    return { key, secretId: found.secret.id };
+  }));
+  const holders = refs.map(({ key }) => prepared.get(key)?.id ?? randomUUID());
+  const [sources, sourceReferences, readers] = await Promise.all([
+    secretPlaces(ctx.db, resolved.map((source) => source.secretId)),
+    currentReferences(ctx.db, resolved.map((source) => source.secretId)),
+    readersOf(ctx.db, holders),
+  ]);
+  return refs.map(({ key }, i) => {
+    const source = sources.get(resolved[i]!.secretId)!;
+    const holderId = holders[i]!;
+    if (source.id === holderId) throw refused(key, `${key} cannot be a reference to itself`, 'reference_to_itself');
+    if (sourceReferences.has(source.id)) {
+      const via = sourceReferences.get(source.id);
+      throw refused(key, `${sourcePath(source)} is itself a reference${via === undefined ? '' : ` to ${via.view.source}`}: point ${key} at its source instead`, 'reference_to_reference');
+    }
+    const pointing = readers.filter((reader) => reader.row.source.secretId === holderId);
+    if (pointing.length > 0) {
+      throw refused(key, `${pointing.length} reference${pointing.length === 1 ? '' : 's'} read ${key} (${pointing.map((reader) => reader.view.holder).join(', ')}): a reference cannot point at a reference, so break ${pointing.length === 1 ? 'it' : 'them'} first`, 'referenced_holder');
+    }
+    const now = currently.get(holderId);
+    return {
+      key,
+      id: randomUUID(),
+      holder: { ...environment, secretId: holderId, path: `${place.project.slug}/${place.environment!.slug}/${key}` },
+      source,
+      unchanged: now !== undefined && now.row.ended === null && now.row.source.secretId === source.id,
+    };
+  });
 }
 
 /** What a merge patch would do to a key: the answer to `?dryRun=1`. */
@@ -271,7 +434,7 @@ export type DryRunResult = { dryRun: true; keys: Record<string, DryRunOutcome> }
 export async function dryRunSecrets(
   ctx: ApiContext,
   place: ResolvedPath,
-  patch: Record<string, string | null>,
+  patch: Record<string, SecretValue | null>,
 ): Promise<DryRunResult> {
   const environment = requireLive(place);
   const operationId = randomUUID();
@@ -295,8 +458,13 @@ export async function dryRunSecrets(
         keys[key] = secret === undefined || secret.archivedAt !== null ? 'unchanged' : 'archived';
         continue;
       }
-      if (secret === undefined || secret.current === null) {
+      if (secret === undefined) {
         keys[key] = 'added';
+        continue;
+      }
+      // A reference, or a value over a reference: what it is now is not a value to compare.
+      if (typeof value !== 'string' || secret.current === null) {
+        keys[key] = 'changed';
         continue;
       }
       const { version, envelope } = secret.current;
@@ -428,10 +596,18 @@ export async function restoreVersion(
     if (!rewrapped.ok) {
       throw vaultRefusal(ctx, rewrapped.refusal, 'secret.restore', { ...where, operationId, metadata: { key: prepared.key, from: toVersion } });
     }
+    // An old value brought back ends the reference the key is now.
+    const reference = prepared.currentVersionId === null ? (await currentReferences(ctx.db, [secret.id])).get(secret.id) : undefined;
+    if (reference !== undefined && reference.row.ended === null) {
+      const ended = await ctx.vault.endReferences({
+        ...asking(ctx, operationId), reason: 'replaced', items: [{ reference: reference.row.id, seq: Number(reference.row.createdSeq) }],
+      });
+      if (!ended.ok) throw vaultRefusal(ctx, ended.refusal, 'secret.restore', { ...where, operationId, metadata: { key: prepared.key, from: toVersion } });
+    }
     return audited(ctx, async (tx, log) => {
       await checkEnvironment(tx, place, environment);
       const [current] = await lock(tx, secrets, { id: secret.id });
-      if (current === undefined || current.currentVersion !== fromVersion
+      if (current === undefined || current.currentVersion !== fromVersion || current.currentVersionId !== prepared.currentVersionId
         || current.archivedAt !== null || current.key !== prepared.key) throw new PrepareAgain();
       await appendVersion(tx, secret.id, version, rewrapped.values[0], ctx.caller.principal.id);
       log.push(allowed(ctx, 'secret.restore', {
@@ -480,16 +656,22 @@ export async function reveal(
       );
     }
 
-    const rows = await currentEnvelopes(ctx.db, environment.environmentId, place.secret?.id);
-    const opened = await openValues(
-      ctx.vault,
-      { ...asking(ctx, operationId), purpose: path.key === undefined ? 'run' : 'reveal' },
-      rows.map((row) => ({
-        secretVersionId: row.secretVersionId,
-        secret: secretRef(place, environment, { id: row.secretId, key: row.key }, row.version),
-        envelope: row.envelope,
-      })),
-    );
+    const { items: rows, unreadable } = await readableValues(ctx.db, place, environment, place.secret?.id);
+    // A reference that cannot be read stops the whole read, saying why, rather than run without it.
+    if (unreadable.length > 0) {
+      throw new Refusal(
+        conflict(unreadable.join('; ')),
+        denied(ctx, 'secret.read', 'reference_unreadable', { ...environment, operationId, metadata: { references: unreadable.length } }),
+      );
+    }
+    // A key with nothing to read, no version of its own and no reference the vault sealed, as a row written around it: no value.
+    if (path.key !== undefined && rows.length === 0) {
+      throw new Refusal(
+        notFound(`${formatPath(path)} holds no value`),
+        denied(ctx, 'secret.read', 'no_value', { ...environment, operationId, metadata: { key: path.key } }),
+      );
+    }
+    const opened = await openValues(ctx.vault, { ...asking(ctx, operationId), purpose: path.key === undefined ? 'run' : 'reveal' }, rows);
     if (!opened.ok) throw vaultRefused(opened.refusal);
     // A null-prototype record: a key named __proto__ is a key like any other.
     const values: Record<string, string> = Object.create(null);
