@@ -9,7 +9,7 @@ import { earlierCheckpoint } from './checks/checkpoints.ts';
 import { deletion } from './checks/deletion.ts';
 import { folders, forks, missingKeys, references } from './checks/environments.ts';
 import { appLogin, vaultLogin } from './checks/logins.ts';
-import { mcpBrowse, mcpChanges, mcpConnect } from './checks/mcp.ts';
+import { mcpBrowse, mcpChanges, mcpConnect, mcpValues } from './checks/mcp.ts';
 import { accessAuthorship, memberTampering, noAuditNoAccess, sealingRace } from './checks/members.ts';
 import { refusedCheckpoint, missingCheckpoint, middleCut } from './checks/readiness.ts';
 import { editedGeneration, forgedCredential, forgedIdentity, forgedApproval } from './checks/signin.ts';
@@ -44,6 +44,7 @@ export async function conform(deployment: Deployment, options: { bulkLimit: numb
   await report.check('MCP connect', { people }, ({ people }) => mcpConnect(deployment, people));
   await report.check('MCP browse', all, ({ people, canaries }) => mcpBrowse(deployment, people, canaries));
   await report.check('MCP changes', all, ({ people, canaries }) => mcpChanges(deployment, people, canaries));
+  await report.check('MCP values', all, ({ people, canaries }) => mcpValues(deployment, people, canaries));
   await report.check('reveals audited', all, ({ people, canaries }) => revealAudited(deployment, people, canaries, 'reveal'));
   await report.check('runs audited', all, ({ people, canaries }) => revealAudited(deployment, people, canaries, 'run'));
   await report.check('cross-site', all, ({ people, canaries }) => crossSite(people, canaries));

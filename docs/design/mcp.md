@@ -557,7 +557,10 @@ The agent never supplies a value. There are two tools:
 - **To the person (Browse):** `show_secret_value` opens the approval page.
   The value shows only when the person clicks **Reveal**, a `POST` logged
   as a reveal, requested by the client. The model gets "shown to
-  ada@acme.example at 14:03" and no value.
+  ada@acme.example at 14:03" and no value. It is an approval like a
+  change's: its Reveal reads the value as the person, with the connection
+  attached, and is the one call through MCP that may reach `POST /reveals`
+  without Read values, since the value goes to the page alone.
 - **To the model (Read values):** `read_secret_values` returns values in its
   result, with no page. It is a read, so it needs no approval. The vault
   logs it as a `reveal` under the access token's credential ID, and the

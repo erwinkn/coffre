@@ -886,6 +886,7 @@ export type Api = {
             note: string;
           };
         };
+        kind: "change" | "reveal";
         digest: string;
         createdAt: string;
         expiresAt: string;
@@ -949,6 +950,7 @@ export type ApprovalView = {
       note: string;
     };
   };
+  kind: "change" | "reveal";
   digest: string;
   createdAt: string;
   expiresAt: string;

@@ -34,6 +34,16 @@ points `coffre(env => …)` and `serve({ … })`, which threw to say so. The CLI
 no longer refuses the `COFFRE_*` variables earlier CLIs read: it reads no
 variable at all, as before, and says nothing of them.
 
+**MCP and values.** `read_secret_values`, with the Read values scope only,
+sends a secret's or an environment's values to the client, its answer
+warning first that they are now part of the conversation; the vault logs
+the reveal under the connection. `show_secret_value`, with Browse, shows the
+person a value on coffre's approval page when they press Reveal, and never
+sends it to the client. `generate_secret_value`, with Write, has coffre make
+a random value on its own server when the person approves (base64url, hex
+or alphanumeric, 16 to 128 characters; 32 bytes in base64url unless asked),
+which nobody sees.
+
 **MCP changes, each approved on coffre.** A client with the Write scope
 can ask to set a secret to a value the person types (`request_secret_value`),
 rename, archive, unarchive and restore secrets, and create projects and

@@ -11,7 +11,7 @@ import { CoffreError } from '@coffre/client';
 import type { Deployment } from '../harness.ts';
 import { expect } from '../report.ts';
 
-import { canary, DEV, personaOn, PROD, PROJECT, type Canaries, type People, type Person } from './people.ts';
+import { canary, DEV, personaOn, PROD, PROJECT, valuesIn, type Canaries, type People, type Person } from './people.ts';
 
 const NAME = 'Conformance MCP client';
 /** A native client's redirect, on loopback. A custom scheme is left out of a registration (D37). */
@@ -409,14 +409,67 @@ export async function mcpChanges(deployment: Deployment, people: People, canarie
   expect((await admin.api.secrets.reveal(`${place}/TYPED`)).values.TYPED === typed, 'the value typed on the page was not written');
   await call(write, 'request_secret_value', { secret: `${place}/TYPED` });
 
+  // A value coffre makes, approved by the person, reaches nobody.
+  const generating = await call(write, 'generate_secret_value', { secret: `${place}/GENERATED`, alphabet: 'hex' });
+  const generatedId = generating.result!.structuredContent!.approval!.id;
+  const generatedPage = (await changer.api.approvals.get(generatedId)).approval;
+  const generated = await changer.api.approvals.decide(generatedId, { approve: true, digest: generatedPage.digest });
+  const made = (await admin.api.secrets.reveal(`${place}/GENERATED`)).values.GENERATED ?? '';
+  canaries[`${place}/GENERATED`] = made;
+  expect(/^[0-9a-f]{64}$/.test(made) && generated.shown.length === 0 && !JSON.stringify(generated).includes(made), 'generate_secret_value did not make a 64-character hex value, shown to no one');
+  await call(write, 'generate_secret_value', { secret: `${place}/GENERATED`, alphabet: 'hex' });
+
   // No value in any answer; each change made once, by the person, via the client and its approval.
   const leaked = Object.entries(canaries).filter(([, value]) => answers.some((answer) => answer.includes(value))).map(([path]) => path);
   expect(leaked.length === 0, 'a change tool answered with a secret value', leaked);
   const { entries } = await admin.api.audit.list({ actor: changer.member, limit: 500 });
   const viaApproval = (action: string) => entries.filter((entry) => entry.action === action && entry.decision === 'allow' && typeof (entry.metadata.via as { approvalId?: unknown } | undefined)?.approvalId === 'string');
-  const made = { archive: viaApproval('secret.archive').length, rename: viaApproval('secret.rename').length, write: viaApproval('secret.write').length };
-  expect(made.archive === 1 && made.rename === 1 && made.write === 1, 'the changes are not each made once, via the client and its approval', made);
+  const once = { archive: viaApproval('secret.archive').length, rename: viaApproval('secret.rename').length, write: viaApproval('secret.write').length };
+  expect(once.archive === 1 && once.rename === 1 && once.write === 2, 'the changes are not each made once, via the client and its approval', once);
   const decisions = entries.filter((entry) => entry.action === 'mcp.approve').map((entry) => `${entry.decision} ${entry.reason ?? ''}`.trim()).sort();
-  expect(JSON.stringify(decisions) === JSON.stringify(['allow', 'allow', 'allow', 'deny approved', 'deny changed']), 'the decisions, and the two refused, are not in the log', decisions);
-  return `Browse stepped up to Write; with Write, the link without URL elicitation and an elicitation with it; nothing changed until ${changer.email} approved on coffre's page, another person and another site refused, a replayed requestState refused; each change made once, via the client and its approval, and a value typed on the page only`;
+  expect(JSON.stringify(decisions) === JSON.stringify(['allow', 'allow', 'allow', 'allow', 'deny approved', 'deny changed']), 'the decisions, and the two refused, are not in the log', decisions);
+  return `Browse stepped up to Write; with Write, the link without URL elicitation and an elicitation with it; nothing changed until ${changer.email} approved on coffre's page, another person and another site refused, a replayed requestState refused; each change made once, via the client and its approval; a value typed on the page only, and one coffre made reaching no one`;
+}
+
+/**
+ * Values (design section 14, checks 2 and 4): Browse cannot read one, Read
+ * values reads what the person may, a value shown on coffre's page goes to
+ * the person and not the client, and one a client asks coffre to make
+ * reaches no one.
+ */
+export async function mcpValues(deployment: Deployment, people: People, canaries: Canaries): Promise<string> {
+  const { reader } = people;
+  const clientId = await register(deployment);
+  const answers: string[] = [];
+  const call = async (access: string, tool: string, args: Record<string, unknown>) => {
+    const { response, body } = await modern(deployment, access, 'tools/call', { name: tool, arguments: args }, tool);
+    answers.push(JSON.stringify(body));
+    return { status: response.status, challenge: response.headers.get('www-authenticate') ?? '', result: body.result as ToolAnswer & { structuredContent?: { values?: Record<string, string> } } | undefined };
+  };
+  const dev = valuesIn(canaries, DEV);
+
+  // Browse: no value to the model, but one shown to the person on coffre's page.
+  const browse = (await redeem(deployment, clientId, await connect(deployment, reader, clientId))).access_token;
+  const stepUp = await call(browse, 'read_secret_values', { path: DEV });
+  expect(stepUp.status === 403 && stepUp.challenge.includes('scope="browse read-values"'), `read_secret_values with Browse answered ${stepUp.status}, not a step-up`, stepUp.challenge);
+  const show = await call(browse, 'show_secret_value', { secret: `${DEV}/API_KEY` });
+  const id = show.result?.structuredContent?.approval?.id;
+  expect(show.result?.structuredContent?.status === 'pending' && id !== undefined, 'show_secret_value did not open an approval', show.result);
+  const page = (await reader.api.approvals.get(id!)).approval;
+  expect(page.kind === 'reveal', 'the approval page does not say it shows a value', page);
+  const shown = await reader.api.approvals.decide(id!, { approve: true, digest: page.digest });
+  expect(shown.shown.some((line) => line.value === dev.API_KEY), 'Reveal did not show the person the value');
+  const told = await call(browse, 'show_secret_value', { secret: `${DEV}/API_KEY` });
+  expect(told.result?.structuredContent?.status === 'approved', 'show_secret_value does not report the value as shown', told.result);
+  const browseLeaks = Object.entries(canaries).filter(([, value]) => answers.some((answer) => answer.includes(value))).map(([path]) => path);
+  expect(browseLeaks.length === 0, 'a Browse answer held a value', browseLeaks);
+
+  // Read values: the values the person may read, and no others.
+  const reading = (await redeem(deployment, clientId, await connect(deployment, reader, clientId, 'browse read-values'))).access_token;
+  const read = await call(reading, 'read_secret_values', { path: DEV });
+  expect(JSON.stringify(read.result?.structuredContent?.values) === JSON.stringify(dev), `read_secret_values on ${DEV} did not answer its values`);
+  expect(read.result?.content?.[0]?.text?.startsWith('These values are now part of this conversation') === true, 'read_secret_values does not warn first', read.result?.content);
+  const prod = await call(reading, 'read_secret_values', { path: PROD });
+  expect(prod.result?.isError === true && !JSON.stringify(prod.result).includes(canaries[`${PROD}/API_KEY`]!), `the reader read ${PROD} through MCP`, prod.result);
+  return `Browse stepped up for values and showed ${DEV}/API_KEY to ${reader.email} on coffre's page only; Read values answered ${DEV}'s values, warning first, and refused ${PROD}`;
 }

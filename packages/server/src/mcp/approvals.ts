@@ -48,6 +48,8 @@ export type ApprovalView = {
   details: Detail[];
   /** What the person types besides deciding: the value, for `request_secret_value`. */
   asks: { value: { label: string; note: string } } | null;
+  /** A change, or a value shown to the person on Reveal, which never goes to the client. */
+  kind: 'change' | 'reveal';
   /** Of the tool and its arguments: sent back with the decision, so what runs is what was shown. */
   digest: string;
   createdAt: string;
@@ -174,6 +176,7 @@ export class McpApprovals {
       summary: tool.change!.summary(args),
       details,
       asks: tool.change!.asks ?? null,
+      kind: tool.change!.reveal === true ? 'reveal' : 'change',
       digest: row.digest.toString('hex'),
       createdAt: row.createdAt.toISOString(),
       expiresAt: row.expiresAt.toISOString(),
@@ -222,7 +225,9 @@ export class McpApprovals {
     }
 
     // The change, after the decision committed and outside any transaction: the API makes it as it would for the person.
-    const via: McpVia = { connectionId: connection.id, clientId: connection.clientId, clientName: connection.clientName, scopes: parseScopes(connection.scopes).scopes, approvalId: row.id };
+    // A reveal reads the value for the page alone, so its call may reach Read values' route whatever the connection holds.
+    const scopes = [...parseScopes(connection.scopes).scopes, ...(tool.change!.reveal === true ? (['read-values'] as const) : [])];
+    const via: McpVia = { connectionId: connection.id, clientId: connection.clientId, clientName: connection.clientName, scopes, approvalId: row.id };
     try {
       const applied = await tool.change!.apply(this.#client({ ...ctx, via, provenance: connection.id }), args as never, { value: input.value });
       const outcome: Outcome = { text: applied.text, result: applied.result };

@@ -20,7 +20,7 @@ export function ApprovalPage() {
   const loaded = Route.useLoaderData();
   const [decided, setDecided] = useState<Decision | null>(null);
 
-  if (decided !== null) return <Decided decision={decided} />;
+  if (decided !== null) return <Decided decision={decided} reveal={loaded.ok && loaded.approval.kind === 'reveal'} />;
   if (!loaded.ok) {
     return (
       <ClosedDoor icon={<SlashCircle size={18} />} label="Approve a change" title="This approval can't be shown">
@@ -57,18 +57,18 @@ function Settled({ view }: { view: ApprovalView }) {
   );
 }
 
-function Decided({ decision }: { decision: Decision }) {
+function Decided({ decision, reveal }: { decision: Decision; reveal: boolean }) {
   const done = decision.status === 'approved';
   return (
     <ClosedDoor
       icon={done ? <CheckCircle size={18} /> : <SlashCircle size={18} />}
-      label="Approve a change"
-      title={done ? 'Done' : decision.status === 'denied' ? 'Denied' : 'The change failed'}
+      label={reveal ? 'Show a value' : 'Approve a change'}
+      title={done ? (reveal ? 'The value' : 'Done') : decision.status === 'denied' ? 'Denied' : reveal ? 'It could not be shown' : 'The change failed'}
     >
-      <p>{decision.outcome.text}</p>
+      {!(reveal && done) && <p>{decision.outcome.text}</p>}
       {decision.shown.length > 0 && (
         <>
-          <Notice tone="warn">Shown once, here only: copy it now. The app does not get it.</Notice>
+          <Notice tone="warn">{reveal ? 'Shown here only, and logged as your reveal: the app does not get it.' : 'Shown once, here only: copy it now. The app does not get it.'}</Notice>
           <dl className="facts device-facts">
             {decision.shown.map((line) => (
               <div className="fact" key={line.label}>
@@ -94,6 +94,7 @@ function Approve({ view, onDecided }: { view: ApprovalView; onDecided: (decision
   const [error, setError] = useState<string | null>(null);
   const { client } = view;
   const asksValue = view.asks?.value ?? null;
+  const reveal = view.kind === 'reveal';
 
   async function decide(approve: boolean) {
     setPending(approve ? 'approve' : 'deny');
@@ -115,11 +116,13 @@ function Approve({ view, onDecided }: { view: ApprovalView; onDecided: (decision
     <section className="card signin" aria-labelledby="approval-title">
       <div className="signin-head">
         <h1 className="signin-title" id="approval-title">
-          Approve this change?
+          {reveal ? 'Show this value?' : 'Approve this change?'}
         </h1>
         <p className="signin-lede">
-          {client.name} asks to <strong>{view.summary}</strong>. Read what it does: nothing changes until you
-          approve, and then coffre makes it, as you.
+          {client.name} asks to <strong>{view.summary}</strong>.{' '}
+          {reveal
+            ? 'Reveal shows it here, to you, logged as your reveal; it is never sent to the app.'
+            : 'Read what it does: nothing changes until you approve, and then coffre makes it, as you.'}
         </p>
       </div>
 
@@ -186,7 +189,7 @@ function Approve({ view, onDecided }: { view: ApprovalView; onDecided: (decision
           onClick={() => void decide(true)}
         >
           {pending === 'approve' && <Spinner />}
-          Approve
+          {reveal ? 'Reveal' : 'Approve'}
         </button>
       </div>
     </section>
