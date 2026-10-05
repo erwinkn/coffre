@@ -1836,6 +1836,13 @@ a.crumb-link:hover {
   width: 4.75rem;
 }
 
+/* Where a revoke would be, for a grant on every project: lined up with one. */
+.grants .every-project-note {
+  padding: 0 0.5rem;
+  font-size: 0.8125rem;
+  white-space: nowrap;
+}
+
 .grants td {
   overflow-wrap: anywhere;
 }

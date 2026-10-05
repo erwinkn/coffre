@@ -310,7 +310,7 @@ function NewProject() {
             />
           </label>
 
-          <ReachedBy grants={reachedBy} lead="Through grants on every project, it is reachable at once by" />
+          <ReachedBy grants={reachedBy} lead="As soon as it exists, it is reached by" />
 
           <div className="dialog-actions">
             <button className="btn" type="button" onClick={close}>

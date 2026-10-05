@@ -103,7 +103,7 @@ export function GrantRowView({
           {state.state === 'pending' ? (
             <RowPending status={state} />
           ) : everywhere ? (
-            <span className="cell-muted" title="Owners change grants on every project with coffre grant '*' and coffre revoke '*'">
+            <span className="cell-muted every-project-note" title="Owners change grants on every project with coffre grant '*' and coffre revoke '*'">
               every project
             </span>
           ) : (
