@@ -60,6 +60,13 @@ CONSTANTS
     \* A key decision checks again, under the head, that its place was not
     \* deleted while it decided (vault vault.ts, #keys). #147.
     KeyPlaceRecheckUnderHead,
+    \* Adding an environment resolves its project again under the head, and
+    \* reads whether it is archived there (server api/projects.ts,
+    \* putEnvironment, stillThere).
+    EnvCreateRecheckUnderHead,
+    \* Renaming, archiving or restoring a key resolves its environment again
+    \* under the head (server api/secrets.ts, patchSecret, checkEnvironment).
+    SecretPatchRecheckUnderHead,
     \* Sign-in reads the member's generation again under the head (server
     \* api/signin.ts, #stillMember).
     MemberRecheckInSignin,
@@ -229,6 +236,8 @@ FirstLabel(kind) ==
       [] kind = "archive"   -> "patch.resolve"
       [] kind = "unarchive" -> "patch.resolve"
       [] kind = "rename"    -> "patch.resolve"
+      [] kind = "addenv"    -> "addenv.resolve"
+      [] kind = "renamekey" -> "renamekey.resolve"
       [] kind = "signin"    -> "signin.access"
       [] kind = "remove"    -> "remove.lock"
       [] kind = "rotate"    -> "rotate.read"
@@ -501,6 +510,50 @@ PatchCommit(p) ==
 
 -----------------------------------------------------------------------------
 (***************************************************************************)
+(* Adding an environment (server api/projects.ts, putEnvironment), and     *)
+(* renaming, archiving or restoring a key (server api/secrets.ts,          *)
+(* patchSecret). Each writes under a place the router resolved before its  *)
+(* transaction, under the head. A new environment is a log entry here: the *)
+(* model's places are fixed, and the entry is what the invariant reads.    *)
+(***************************************************************************)
+
+AddEnvResolve(p) ==
+    /\ pc[p] = "addenv.resolve"
+    /\ IF Resolves("proj", Named) /\ ~archived["proj"]
+         THEN Read(p, "addenv.head", [l[p] EXCEPT !.named = Named])
+         ELSE Refuse(p)
+
+AddEnvHead(p) == pc[p] = "addenv.head" /\ TakeHead(p, "addenv.commit")
+
+\* Without the recheck, the project as the router saw it: not archived.
+AddEnvCommit(p) ==
+    /\ pc[p] = "addenv.commit"
+    /\ IF EnvCreateRecheckUnderHead /\ (~Resolves("proj", l[p].named) \/ archived["proj"])
+         THEN Refuse(p)
+         ELSE /\ log' = Append(log, Entry("environment.create", "proj", p))
+              /\ Release(p)
+              /\ Goto(p, "idle")
+              /\ UNCHANGED <<rows, creds, op, l, left, history>>
+
+RenameKeyResolve(p) ==
+    /\ pc[p] = "renamekey.resolve"
+    /\ IF AppLive
+         THEN Read(p, "renamekey.head", [l[p] EXCEPT !.named = Named])
+         ELSE Refuse(p)
+
+RenameKeyHead(p) == pc[p] = "renamekey.head" /\ TakeHead(p, "renamekey.commit")
+
+RenameKeyCommit(p) ==
+    /\ pc[p] = "renamekey.commit"
+    /\ IF SecretPatchRecheckUnderHead /\ ~(Resolves("env", l[p].named) /\ AppLive)
+         THEN Refuse(p)
+         ELSE /\ log' = Append(log, Entry("secret.rename", "env", p))
+              /\ Release(p)
+              /\ Goto(p, "idle")
+              /\ UNCHANGED <<rows, creds, op, l, left, history>>
+
+-----------------------------------------------------------------------------
+(***************************************************************************)
 (* Signing in (server api/signin.ts): the member's standing from the vault,*)
 (* unlocked, then one app transaction under the head that issues a         *)
 (* credential at that generation.                                          *)
@@ -604,6 +657,8 @@ Step(p) ==
     \/ CallHead(p) \/ CallCommit(p)
     \/ DeleteResolve(p) \/ DeleteScope(p) \/ DeleteNext(p) \/ DeleteHead(p) \/ DeleteCommit(p)
     \/ PatchResolve(p) \/ PatchHead(p) \/ PatchCommit(p)
+    \/ AddEnvResolve(p) \/ AddEnvHead(p) \/ AddEnvCommit(p)
+    \/ RenameKeyResolve(p) \/ RenameKeyHead(p) \/ RenameKeyCommit(p)
     \/ SigninAccess(p) \/ SigninHead(p) \/ SigninCommit(p)
     \/ RemoveLock(p) \/ RemoveCheck(p) \/ RemoveHead(p) \/ RemoveCommit(p)
     \/ RotateRead(p) \/ RotateLock(p) \/ RotateHead(p) \/ RotateCommit(p)
@@ -633,7 +688,8 @@ TypeOK ==
 \* The process p waits for: the holder of the lock its next step takes.
 LockLabels == {"read.lock", "write.lock", "call.lock", "remove.lock", "rotate.lock"}
 HeadLabels == {"read.head", "write.head", "write.tx", "call.headfirst", "call.head",
-               "delete.head", "patch.head", "signin.head", "remove.head", "rotate.head"}
+               "delete.head", "patch.head", "addenv.head", "renamekey.head",
+               "signin.head", "remove.head", "rotate.head"}
 WaitsFor(p) ==
     IF pc[p] \in LockLabels /\ l[p].toLock # <<>> /\ memberLock[Head(l[p].toLock)] \notin {None, p}
       THEN {memberLock[Head(l[p].toLock)]}
@@ -657,8 +713,9 @@ NothingReleasedAfterDeletion ==
     \A i, j \in 1..Len(log) :
         (i < j /\ log[i].kind = "delete" /\ log[j].kind = "secret.read") => ~Covers(log[i].at, log[j].at)
 
-\* Nor does anything after it read, wrap, write or grant there.
-Reaches == {"secret.read", "key.wrap", "secret.write", "access.grant"}
+\* Nor does anything after it read, wrap, write or grant there, add an
+\* environment to it, or rename, archive or restore a key in it.
+Reaches == {"secret.read", "key.wrap", "secret.write", "access.grant", "environment.create", "secret.rename"}
 DeletedStaysUnreachable ==
     \A i, j \in 1..Len(log) :
         (i < j /\ log[i].kind = "delete" /\ log[j].kind \in Reaches) => ~Covers(log[i].at, log[j].at)

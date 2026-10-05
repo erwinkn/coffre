@@ -363,6 +363,33 @@ test('a restore or a rename that resolved its place before the place was deleted
   assert.equal((await root.audit.verify()).ok, true);
 });
 
+test('a key renamed in an environment deleted since its path was found is refused, and the tombstone keeps its names', async () => {
+  await seedMarket();
+  const { environmentId: devId } = await currentVersion('dev', 'DATABASE_URL');
+  const rename = lateBy(async () => {
+    await root.environments.update('market/dev', { archived: true });
+    await root.environments.delete('market/dev');
+  });
+  await assert.rejects(rename.secrets.update('market/dev/DATABASE_URL', { key: 'DB_URL' }), { status: 404 });
+  const keys = await db.owner.select({ key: secrets.key }).from(secrets).where(eq(secrets.environmentId, devId));
+  assert.deepEqual(keys, [{ key: 'DATABASE_URL' }]);
+  assert.equal((await root.audit.verify()).ok, true);
+});
+
+test('an environment added to a project deleted since its path was found is refused, and nothing is added', async () => {
+  await seedMarket();
+  const id = await projectId('market');
+  const add = lateBy(async () => {
+    await root.projects.update('market', { archived: true });
+    await root.projects.delete('market');
+  });
+  await assert.rejects(add.environments.create('market/staging', { name: 'Staging' }), { status: 404, message: /no project "market"/ });
+  const under = await db.owner.select({ slug: environments.slug }).from(environments).where(eq(environments.projectId, id));
+  assert.deepEqual(under.filter(({ slug }) => slug === 'staging'), []);
+  assert.deepEqual(await entries('environment.create').then((all) => all.filter((entry) => entry.metadata.slug === 'staging')), []);
+  assert.equal((await root.audit.verify()).ok, true);
+});
+
 test('a key decided on before its place is deleted, and released after, is refused as deleted', postgresOnly('on SQLite a decision holds the whole file, so no deletion commits inside one'), async () => {
   await seedMarket();
   await root.environments.update('market/dev', { archived: true });

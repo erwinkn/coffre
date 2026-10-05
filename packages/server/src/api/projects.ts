@@ -285,13 +285,14 @@ function placeChanges(
  * transaction: one deleted since, or re-slugged, is no longer at that path,
  * and a change by its id would undo the deletion's tombstone.
  */
-async function stillThere(tx: Transaction, place: ResolvedPath): Promise<void> {
+async function stillThere(tx: Transaction, place: ResolvedPath): Promise<ResolvedPath> {
   const { project, environment } = place;
   const now = await resolvePath(tx, { project: project.slug, environment: environment?.slug });
   if (now === null || now.project.id !== project.id) throw notFound(`no project "${project.slug}"`);
   if (environment !== null && now.environment?.id !== environment.id) {
     throw notFound(`no environment "${project.slug}/${environment.slug}"`);
   }
+  return now;
 }
 
 /** Rename, re-slug, archive or restore a project. */
@@ -351,7 +352,8 @@ export async function putEnvironment(
     return { environment: existing, created: false, inherited: await inheritedGrants(ctx, project.id, slug) };
   }
   const put = await audited(ctx, async (tx, log) => {
-    if (project.archivedAt !== null) {
+    // The project as it is under the head: archived, or deleted, since the router found it, it takes nothing new.
+    if ((await stillThere(tx, place)).project.archivedAt !== null) {
       throw new Refusal(
         conflict(`${project.slug} is archived; restore it before adding environments`),
         denied(ctx, 'environment.create', 'project_archived', {

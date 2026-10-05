@@ -321,6 +321,7 @@ export async function patchSecret(
 
   const nextKey = patch.key!;
   const result = await audited(ctx, async (tx, log) => {
+    await checkEnvironment(tx, place, environment);
     try {
       await update(tx, secrets, { id: secret.id }, {
         ...(archiving ? { archivedAt: archived ? new Date() : null } : {}),

@@ -26,6 +26,8 @@ REMOVALS=(
   "Deletion PatchRecheckUnderHead TombstonesStayArchived"
   "Reading KeyPlaceRecheckUnderHead NothingReleasedAfterDeletion"
   "Reading KeyPlaceRecheckUnderHead DeletedStaysUnreachable"
+  "Reading EnvCreateRecheckUnderHead DeletedStaysUnreachable"
+  "Reading SecretPatchRecheckUnderHead DeletedStaysUnreachable"
   "Members MemberRecheckInSignin CredentialsAtCurrentGeneration"
   "Locks SortedMemberLocks NoWaitCycle"
 )
