@@ -101,12 +101,19 @@ function states(output) {
   return found.map((state) => ({ ...state, vars: Object.fromEntries(Object.entries(state.vars).map(([k, v]) => [k, parse(v)])) }));
 }
 
+/** A reference, named by the operation that made it, or the one a scenario starts with. */
+const reference = (id) => (id[0] === 'none' ? 'none' : id[0]);
+
 const show = (value) => {
   if (Array.isArray(value)) return `<<${value.map(show).join(', ')}>>`;
   if (value !== null && typeof value === 'object') {
     if ('set' in value) return `{${value.set.map(show).join(', ')}}`;
     if ('who' in value && 'at' in value && Object.keys(value).length === 2) return `${value.who}@${value.at}`;
-    if ('kind' in value && 'at' in value && 'id' in value) return `${value.kind} ${value.at} (${value.id[0]})`;
+    if ('kind' in value && 'at' in value && 'id' in value) {
+      const via = value.via === undefined || value.via[0] === 'none' ? '' : ` via ${reference(value.via)}`;
+      const reader = value.kind === 'secret.read' ? ` as ${value.who}${value.granted ? '' : ', ungranted'}` : '';
+      return `${value.kind} ${value.at} (${value.id[0]})${via}${reader}`;
+    }
     return `[${Object.entries(value).map(([k, v]) => `${k} ${show(v)}`).join(', ')}]`;
   }
   return String(value);
@@ -129,10 +136,11 @@ function change(name, before, after) {
       .filter((key) => !same(before[key], after[key]))
       .map((key) => `${name}[${key}] ${show(before[key])} -> ${show(after[key])}`);
   }
+  if (name === 'refRow') return [`ref ${reference(before)} -> ${reference(after)}`];
   return [`${name} ${show(before)} -> ${show(after)}`];
 }
 
-const SHOWN = ['slug', 'archived', 'held', 'version', 'grants', 'status', 'gen', 'memberLock', 'head', 'log', 'creds'];
+const SHOWN = ['slug', 'archived', 'held', 'version', 'grants', 'refRow', 'status', 'gen', 'memberLock', 'head', 'log', 'creds'];
 
 function describe(op) {
   switch (op.kind) {

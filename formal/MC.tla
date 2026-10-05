@@ -105,4 +105,42 @@ MixedOps == [p \in MixedProcs |->
 MixedBudget == [p \in MixedProcs |-> IF p = "owner1" THEN 2 ELSE 1]
 MixedGrants == {[who |-> "ada", at |-> "proj"], [who |-> "sam", at |-> "*"]}
 
+-----------------------------------------------------------------------------
+(* References: a member reads the source through the holder while an owner
+   breaks the reference, makes it again, or revokes or removes the reader,
+   and the holder's or the source's place is archived, then deleted. *)
+
+R0 == <<"r0", 0>>
+ReferencesMembers == {"ada", "olga"}
+ReferencesRank == [m \in ReferencesMembers |-> AllRanks[m]]
+ReferencesOwners == {"olga"}
+ReferencesProcs == {"reader", "owner", "placer"}
+ReferencesOps == [p \in ReferencesProcs |->
+    CASE p = "reader" -> {Op("read", "ada", "ada", "hold")}
+      [] p = "owner" -> {Op("break", "olga", None, "hold"), Op("refer", "olga", None, "hold"),
+                         Op("revoke", "olga", "ada", "hold"), Op("remove", "olga", "ada", None)}
+      [] p = "placer" -> {Op("archive", "olga", None, "hold"), Op("archive", "olga", None, "env"),
+                          Op("delete", "olga", None, "hold"), Op("delete", "olga", None, "env")}]
+ReferencesBudget == [p \in ReferencesProcs |-> IF p = "reader" THEN 1 ELSE 2]
+ReferencesGrants == {[who |-> "ada", at |-> "hold"], [who |-> "olga", at |-> "*"]}
+
+-----------------------------------------------------------------------------
+(* Making a reference while the places are archived, restored, archived
+   again and deleted: an owner makes the holder's key a reference to the
+   secret, while another archives and restores either place, and a third
+   deletes one. A reference made inside a deletion's window, on either
+   side, is here. *)
+
+ReferencingMembers == {"olga"}
+ReferencingRank == [m \in ReferencingMembers |-> AllRanks[m]]
+ReferencingOwners == {"olga"}
+ReferencingProcs == {"maker", "admin", "deleter"}
+ReferencingOps == [p \in ReferencingProcs |->
+    CASE p = "maker" -> {Op("refer", "olga", None, "hold")}
+      [] p = "admin" -> {Op("unarchive", "olga", None, "env"), Op("archive", "olga", None, "env"),
+                         Op("unarchive", "olga", None, "hold"), Op("archive", "olga", None, "hold")}
+      [] p = "deleter" -> {Op("delete", "olga", None, "env"), Op("delete", "olga", None, "hold")}]
+ReferencingBudget == [p \in ReferencingProcs |-> IF p = "admin" THEN 3 ELSE 1]
+ReferencingGrants == {[who |-> "olga", at |-> "*"]}
+
 =============================================================================

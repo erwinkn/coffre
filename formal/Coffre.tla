@@ -20,9 +20,11 @@
 (* context.ts, audited), so they never decide who waits and are left out.  *)
 (*                                                                         *)
 (* The places are one project and its one environment, which holds one    *)
-(* secret. A grant is on the project, the environment, or every project    *)
-(* ("*"). A place is deleted when its slug, or its project's, is a         *)
-(* tombstone's: "tomb" here, `market~deleted-2026-10-05` in coffre.        *)
+(* secret, and a third environment, in another project, whose one key is a *)
+(* reference to that secret: the holder. A grant is on the project, either *)
+(* environment, or every project ("*"). A place is deleted when its slug,  *)
+(* or its project's, is a tombstone's: "tomb" here,                        *)
+(* `market~deleted-2026-10-05` in coffre.                                  *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
@@ -35,7 +37,8 @@ CONSTANTS
     Ops,            \* Ops[p]: the operations process p may run
     Budget,         \* Budget[p]: how many it runs, one after another
     InitArchived,   \* the places archived at the start
-    InitGrants      \* the grants at the start
+    InitGrants,     \* the grants at the start
+    InitRef         \* the holder's reference at the start, or NoRef
 
 (***************************************************************************)
 (* The protections the code has, each a switch, so a run with one turned   *)
@@ -72,10 +75,31 @@ CONSTANTS
     MemberRecheckInSignin,
     \* Members' rows are locked in principal order (vault store.ts,
     \* lockMembers, `ORDER BY principal`), not in the order a call names them.
-    SortedMemberLocks
+    SortedMemberLocks,
+    \* A read decides under the reader's row, which a change to their grants
+    \* or their removal locks too (vault vault.ts, #keys through #decide).
+    ReaderRowLocked,
+    \* A read through a reference checks again, under the head, that no
+    \* `reference.end` committed since it decided (vault vault.ts, unwrap's
+    \* `vet`, run again in #keys' `underLock`).
+    EndRecheckUnderHead,
+    \* Making a reference checks its source again under the head, where the
+    \* app writes its row: archived or deleted since, it is no source
+    \* (server api/secrets.ts, setSecrets). #152.
+    SourceRecheckInReference,
+    \* Archiving a place is refused while a live reference from elsewhere
+    \* reads it (server api/references.ts, refuseIfRead). #152.
+    ArchiveRefusedWhileRead,
+    \* deletePlace reads the references into and out of the place again under
+    \* the head, and refuses if one is live (server api/projects.ts,
+    \* `referenced_meanwhile`).
+    ReferenceRereadInDeletion
 
 None == "none"
-Places == {"proj", "env"}
+\* No reference. A reference is named by the operation that made it, as
+\* entries are, or is the one a scenario starts with.
+NoRef == <<None, 0>>
+Places == {"proj", "env", "hold"}
 GrantPlaces == Places \cup {"*"}
 Slugs == {"s1", "s2", "tomb"}
 
@@ -89,6 +113,7 @@ VARIABLES
     status,         \* status[m]: "active" or "removed"
     gen,            \* gen[m]: the member's generation
     grants,         \* a set of [who, at]
+    refRow,         \* the holder's newest reference row (secret_references), or NoRef
     \* both
     log,            \* the audit log, in seq order: the entries the invariants read
     creds,          \* credentials sign-in issued
@@ -102,7 +127,7 @@ VARIABLES
     deletions,      \* a record per deletion that committed
     everDeleted     \* everDeleted[x]: a deletion of x committed
 
-rows == <<slug, archived, held, version, status, gen, grants>>
+rows == <<slug, archived, held, version, status, gen, grants, refRow>>
 locks == <<memberLock, head>>
 procs == <<pc, op, l, left>>
 history == <<revealed, deletions, everDeleted>>
@@ -111,32 +136,53 @@ vars == <<rows, log, creds, locks, procs, history>>
 -----------------------------------------------------------------------------
 (* Places *)
 
-\* Whether a place is deleted: its slug, or for the environment its
+\* The rows a path to x goes through: the environment's project, then it.
+\* The holder's project is left out: nothing in the model changes it.
+Path(x) == CASE x = "proj" -> {"proj"} [] x = "env" -> {"proj", "env"} [] x = "hold" -> {"hold"} [] x = "*" -> {}
+
+\* Whether a place is deleted: its slug, or for an environment its
 \* project's, is a tombstone's (vault store.ts, environmentsById and places).
-Gone(x) ==
-    CASE x = "*"    -> FALSE
-      [] x = "proj" -> slug["proj"] = "tomb"
-      [] x = "env"  -> slug["env"] = "tomb" \/ slug["proj"] = "tomb"
+Gone(x) == \E y \in Path(x) : slug[y] = "tomb"
+
+\* Whether it is archived, itself or with its project.
+Archived(x) == \E y \in Path(x) : archived[y]
 
 \* A grant at g covers place x (core access.ts, covers).
 Covers(g, x) == g = "*" \/ g = x \/ (g = "proj" /\ x = "env")
 
 \* The places a deletion of x takes, whose grants it revokes (server
 \* db/queries.ts, deletionScope): a project's environments go with it.
-Scope(x) == IF x = "proj" THEN {"proj", "env"} ELSE {"env"}
+Scope(x) == CASE x = "proj" -> {"proj", "env"} [] x = "env" -> {"env"} [] x = "hold" -> {"hold"}
 
 \* The slugs a request named, which it resolves again later by.
 Named == [x \in Places |-> slug[x]]
 
 \* A path to x resolves to the same place it named: the slugs are the ones
 \* it named, and none is a tombstone's (server db/queries.ts, resolvePath).
-Resolves(x, named) ==
-    /\ slug["proj"] = named["proj"] /\ slug["proj"] # "tomb"
-    /\ x = "env" => (slug["env"] = named["env"] /\ slug["env"] # "tomb")
+Resolves(x, named) == \A y \in Path(x) : slug[y] = named[y] /\ slug[y] # "tomb"
 
-\* The secret's environment serves secrets: neither it nor its project is
-\* archived or deleted (server api/secrets.ts, liveEnvironment).
-AppLive == ~Gone("env") /\ ~archived["proj"] /\ ~archived["env"]
+\* An environment serves secrets: neither it nor its project is archived or
+\* deleted (server api/secrets.ts, liveEnvironment).
+Live(x) == ~Gone(x) /\ ~Archived(x)
+AppLive == Live("env")
+
+\* A reference is ended once its `reference.end` is in the log (vault
+\* store.ts, endedReferences; server db/queries.ts, referenceRows).
+Ended(r) == \E i \in 1..Len(log) : log[i].kind = "reference.end" /\ log[i].via = r
+
+\* The holder's reference, while it reads: not ended, its source live and
+\* holding a value (server api/references.ts, stateOf).
+LiveRef == refRow # NoRef /\ ~Ended(refRow) /\ Live("env") /\ held
+
+\* The holder's reference, not ended, if it goes into or out of the
+\* places a deletion of x takes (server api/references.ts, referencesAt).
+RefAt(x) ==
+    IF refRow # NoRef /\ ~Ended(refRow) /\ {"env", "hold"} \cap Scope(x) # {} THEN refRow ELSE NoRef
+
+\* Archiving x would stop a live reference held outside it from reading
+\* (server api/references.ts, archiveBlockers). One held inside is
+\* archived with it, and stops nobody's read.
+ReadFromOutside(x) == LiveRef /\ "env" \in Scope(x) /\ "hold" \notin Scope(x)
 
 -----------------------------------------------------------------------------
 (* Members *)
@@ -153,13 +199,13 @@ LockOrder(actor, who) ==
 
 Active(m) == m \in Roots \/ status[m] = "active"
 
-\* Whether m may read or write the secret (core access.ts, allows): root
+\* Whether m may read or write secrets at x (core access.ts, allows): root
 \* admins always, others by a grant that covers the environment. Roles are
 \* left out: which role grants what is a pure function, which the property
 \* tests hold to its rules.
-MayUseSecret(m) ==
+MayUse(m, x) ==
     \/ m \in Roots
-    \/ status[m] = "active" /\ \E g \in grants : g.who = m /\ Covers(g.at, "env")
+    \/ status[m] = "active" /\ \E g \in grants : g.who = m /\ Covers(g.at, x)
 
 \* Whether `actor` may manage grants, as an owner (core access.ts, mayManageAccess).
 MayManage(actor) == (actor \in Owners /\ status[actor] = "active") \/ actor \in Roots
@@ -180,6 +226,8 @@ L0 == [id |-> <<None, 0>>,
        queue |-> <<>>,        \* the members a deletion still has to revoke
        scope |-> {},          \* the grants a deletion read
        call |-> NoCall,       \* the setAccess call in progress
+       ref |-> NoRef,         \* the reference a read goes through, or a new one replaces
+       end |-> NoRef,         \* the reference an endReferences call ends
        ret |-> "idle",        \* where it returns
        ok |-> TRUE]           \* whether it was allowed
 
@@ -222,7 +270,10 @@ Refuse(p) ==
     /\ Goto(p, "idle")
     /\ UNCHANGED <<rows, log, creds, op, l, left, history>>
 
-Entry(kind, at, p) == [kind |-> kind, at |-> at, id |-> l[p].id]
+\* A log entry: what it is, where, the operation that wrote it, whom it
+\* is about. A read's names the reference it went through, and whether its
+\* reader held a grant there as it committed.
+Entry(kind, at, p) == [kind |-> kind, at |-> at, id |-> l[p].id, who |-> op[p].who, via |-> NoRef, granted |-> TRUE]
 
 -----------------------------------------------------------------------------
 (* Starting an operation *)
@@ -241,6 +292,8 @@ FirstLabel(kind) ==
       [] kind = "signin"    -> "signin.access"
       [] kind = "remove"    -> "remove.lock"
       [] kind = "rotate"    -> "rotate.read"
+      [] kind = "refer"     -> "refer.resolve"
+      [] kind = "break"     -> "break.resolve"
 
 Begin(p) ==
     /\ pc[p] = "idle"
@@ -248,8 +301,9 @@ Begin(p) ==
     /\ \E o \in Ops[p] :
          /\ op' = [op EXCEPT ![p] = o]
          /\ l' = [l EXCEPT ![p] = [L0 EXCEPT !.id = <<p, left[p]>>,
-                                             !.toLock = IF o.kind \in {"read", "write", "remove"}
-                                                          THEN LockOrder(o.actor, o.who) ELSE <<>>]]
+                                             !.toLock = CASE o.kind \in {"read", "write", "remove"} -> LockOrder(o.actor, o.who)
+                                                           [] o.kind = "refer" -> <<o.actor>>
+                                                           [] OTHER -> <<>>]]
          /\ Goto(p, FirstLabel(o.kind))
     /\ left' = [left EXCEPT ![p] = @ - 1]
     /\ UNCHANGED <<rows, log, creds, locks, history>>
@@ -257,46 +311,63 @@ Begin(p) ==
 -----------------------------------------------------------------------------
 (***************************************************************************)
 (* Reading a value (server api/secrets.ts and keys.ts, openValues; vault   *)
-(* vault.ts, unwrap, #versions and #keys).                                 *)
+(* vault.ts, unwrap, #versions and #keys). A read of the environment opens *)
+(* its secret's value; a read of the holder opens the source's value       *)
+(* through the reference (server api/references.ts, readableValues), and   *)
+(* the reader's grants on the holder decide.                               *)
 (***************************************************************************)
 
 \* The app resolves the path and reads the ciphertext, outside any
-\* transaction; an archived or deleted place serves nothing.
+\* transaction; an archived or deleted place serves nothing. Through the
+\* reference, the holder serves, and the reference reads.
 ReadResolve(p) ==
     /\ pc[p] = "read.resolve"
-    /\ IF AppLive /\ held
-         THEN Read(p, "read.versions", l[p])
-         ELSE Refuse(p)
+    /\ IF op[p].at = "env"
+         THEN IF AppLive /\ held
+                THEN Read(p, "read.versions", l[p])
+                ELSE Refuse(p)
+         ELSE IF Live("hold") /\ LiveRef
+                THEN Read(p, "read.versions", [l[p] EXCEPT !.ref = refRow])
+                ELSE Refuse(p)
 
 \* The vault reads the version and its wrapped key, unlocked (#versions):
 \* a deleted place's is refused as `deleted`, an erased one is no version.
+\* Then, unlocked too, the reference's `reference.create` (#referencesAt).
 ReadVersions(p) ==
     /\ pc[p] = "read.versions"
     /\ IF ~Gone("env") /\ held
-         THEN Read(p, "read.lock", l[p])
+         THEN Read(p, IF ReaderRowLocked THEN "read.lock" ELSE "read.check", l[p])
          ELSE Refuse(p)
 
 ReadLock(p) == pc[p] = "read.lock" /\ LockNext(p, "read.check")
 
-\* Under the reader's row: their standing and grants, and whether the place
-\* was deleted (environmentsById), then the bulk limit and the key service.
+\* Under the reader's row: their standing and grants where they read, and
+\* whether either place was deleted (environmentsById); through a
+\* reference, whether it ended (`vet`). Then the bulk limit and the key
+\* service. Without the row's lock, a revocation or a removal can commit
+\* between this check and the entry.
 ReadCheck(p) ==
     /\ pc[p] = "read.check"
-    /\ IF MayUseSecret(op[p].who) /\ ~Gone("env")
+    /\ IF /\ MayUse(op[p].who, op[p].at)
+          /\ ~Gone("env") /\ ~Gone(op[p].at)
+          /\ l[p].ref # NoRef => ~Ended(l[p].ref)
          THEN Read(p, "read.head", l[p])
          ELSE Refuse(p)
 
 ReadHead(p) == pc[p] = "read.head" /\ TakeHead(p, "read.commit")
 
-\* Under the head: the place again, which a deletion renames under the
-\* same lock, then append `secret.read` and commit; then the key leaves the
-\* vault. Without the recheck, a place deleted since the check above is
+\* Under the head: both places again, which a deletion renames under the
+\* same lock, and the reference's end again (`underLock`), then append
+\* `secret.read` and commit; then the key leaves the vault. Without the
+\* rechecks, a place deleted or a reference ended since the check above is
 \* read all the same.
 ReadCommit(p) ==
     /\ pc[p] = "read.commit"
-    /\ IF KeyPlaceRecheckUnderHead /\ Gone("env")
+    /\ IF \/ KeyPlaceRecheckUnderHead /\ (Gone("env") \/ Gone(op[p].at))
+          \/ EndRecheckUnderHead /\ l[p].ref # NoRef /\ Ended(l[p].ref)
          THEN Refuse(p)
-         ELSE /\ log' = Append(log, Entry("secret.read", "env", p))
+         ELSE /\ log' = Append(log, [Entry("secret.read", "env", p) EXCEPT !.via = l[p].ref,
+                                                                    !.granted = MayUse(op[p].who, op[p].at)])
               /\ Release(p)
               /\ Goto(p, "read.answer")
               /\ UNCHANGED <<rows, creds, op, l, left, history>>
@@ -324,7 +395,7 @@ WriteLock(p) == pc[p] = "write.lock" /\ LockNext(p, "write.check")
 
 WriteCheck(p) ==
     /\ pc[p] = "write.check"
-    /\ IF MayUseSecret(op[p].who) /\ ~Gone("env")
+    /\ IF MayUse(op[p].who, "env") /\ ~Gone("env")
          THEN Read(p, "write.head", l[p])
          ELSE Refuse(p)
 
@@ -353,7 +424,7 @@ WriteStore(p) ==
               /\ log' = Append(log, Entry("secret.write", "env", p))
               /\ Release(p)
               /\ Goto(p, "idle")
-              /\ UNCHANGED <<slug, archived, status, gen, grants, creds, op, l, left, history>>
+              /\ UNCHANGED <<refRow, slug, archived, status, gen, grants, creds, op, l, left, history>>
          ELSE Refuse(p)
 
 -----------------------------------------------------------------------------
@@ -417,13 +488,14 @@ CallCommit(p) ==
                 THEN Append(log, Entry("access.grant", CHOOSE x \in changed : TRUE, p))
                 ELSE log
     /\ Return(p, TRUE)
-    /\ UNCHANGED <<slug, archived, held, version, status, gen, creds, op, left, history>>
+    /\ UNCHANGED <<refRow, slug, archived, held, version, status, gen, creds, op, left, history>>
 
 -----------------------------------------------------------------------------
 (***************************************************************************)
 (* Deleting an archived place for good (server api/projects.ts,            *)
-(* deletePlace): its scope read, one vault revocation per member, then one *)
-(* app transaction under the head that erases and renames.                 *)
+(* deletePlace): its scope read, one vault revocation per member, the      *)
+(* references into and out of it ended, then one app transaction under    *)
+(* the head that erases and renames.                                       *)
 (***************************************************************************)
 
 DeleteResolve(p) ==
@@ -433,19 +505,24 @@ DeleteResolve(p) ==
          THEN Read(p, "delete.scope", [l[p] EXCEPT !.named = Named])
          ELSE Refuse(p)
 
-\* deletionScope, unlocked: the grants on the place, lapsed ones too.
+\* deletionScope and referencesAt, unlocked: the grants on the place, lapsed
+\* ones too, and the references into and out of it.
 DeleteScope(p) ==
     LET doomed == {g \in grants : g.at \in Scope(op[p].at)} IN
     /\ pc[p] = "delete.scope"
     /\ Read(p, "delete.next", [l[p] EXCEPT !.scope = doomed,
-                                           !.queue = Sorted({g.who : g \in doomed})])
+                                           !.queue = Sorted({g.who : g \in doomed}),
+                                           !.end = RefAt(op[p].at)])
 
-\* The next member's revocation, or the transaction once none is left.
+\* The next member's revocation, then the references' end, then the
+\* transaction once nothing is left.
 DeleteNext(p) ==
     LET m == Head(l[p].queue) IN
     /\ pc[p] = "delete.next"
     /\ IF ~l[p].ok
          THEN Refuse(p)
+         ELSE IF l[p].queue = <<>> /\ l[p].end # NoRef
+         THEN Read(p, "end.lock", [l[p] EXCEPT !.toLock = <<op[p].actor>>, !.ret = "delete.next"])
          ELSE IF l[p].queue = <<>>
          THEN Read(p, "delete.head", l[p])
          ELSE Read(p, "call.lock",
@@ -458,29 +535,32 @@ DeleteNext(p) ==
 
 DeleteHead(p) == pc[p] = "delete.head" /\ TakeHead(p, "delete.commit")
 
-\* Under the head: the path again; still archived; no grant left there.
-\* Then erase every version, rename to the tombstone, log, commit.
+\* Under the head: the path again; still archived; no grant left there, nor
+\* a live reference. Then erase every version, rename to the tombstone,
+\* log, commit.
 DeleteCommit(p) ==
     LET x == op[p].at IN
     /\ pc[p] = "delete.commit"
     /\ IF \/ ~Resolves(x, l[p].named)
           \/ ArchivedRecheckInDeletion /\ ~archived[x]
           \/ GrantRereadInDeletion /\ \E g \in grants : g.at \in Scope(x)
+          \/ ReferenceRereadInDeletion /\ RefAt(x) # NoRef
          THEN Refuse(p)
          ELSE /\ slug' = [slug EXCEPT ![x] = "tomb"]
-              /\ held' = FALSE
+              /\ held' = IF "env" \in Scope(x) THEN FALSE ELSE held
               /\ log' = Append(log, Entry("delete", x, p))
               /\ deletions' = deletions \cup {[at |-> x, archived |-> archived[x]]}
               /\ everDeleted' = [everDeleted EXCEPT ![x] = TRUE]
               /\ Release(p)
               /\ Goto(p, "idle")
-              /\ UNCHANGED <<archived, version, status, gen, grants, creds, op, l, left, revealed>>
+              /\ UNCHANGED <<refRow, archived, version, status, gen, grants, creds, op, l, left, revealed>>
 
 -----------------------------------------------------------------------------
 (***************************************************************************)
 (* Archiving, restoring and renaming a place (server api/projects.ts,      *)
 (* patchProject and patchEnvironment): the router resolves the path before *)
-(* the transaction; the update is by id, under the head.                   *)
+(* the transaction; the update is by id, under the head. Archiving is      *)
+(* refused while a live reference from elsewhere reads the place.          *)
 (***************************************************************************)
 
 PatchResolve(p) ==
@@ -496,7 +576,8 @@ PatchCommit(p) ==
         k == op[p].kind
     IN
     /\ pc[p] = "patch.commit"
-    /\ IF PatchRecheckUnderHead /\ ~Resolves(x, l[p].named)
+    /\ IF \/ PatchRecheckUnderHead /\ ~Resolves(x, l[p].named)
+          \/ ArchiveRefusedWhileRead /\ k = "archive" /\ ReadFromOutside(x)
          THEN Refuse(p)
          ELSE /\ archived' = IF k = "archive" THEN [archived EXCEPT ![x] = TRUE]
                              ELSE IF k = "unarchive" THEN [archived EXCEPT ![x] = FALSE]
@@ -506,7 +587,7 @@ PatchCommit(p) ==
                            ELSE slug
               /\ Release(p)
               /\ Goto(p, "idle")
-              /\ UNCHANGED <<held, version, status, gen, grants, log, creds, op, l, left, history>>
+              /\ UNCHANGED <<refRow, held, version, status, gen, grants, log, creds, op, l, left, history>>
 
 -----------------------------------------------------------------------------
 (***************************************************************************)
@@ -551,6 +632,113 @@ RenameKeyCommit(p) ==
               /\ Release(p)
               /\ Goto(p, "idle")
               /\ UNCHANGED <<rows, creds, op, l, left, history>>
+
+-----------------------------------------------------------------------------
+(***************************************************************************)
+(* Making the holder's key a reference to the secret (server               *)
+(* api/secrets.ts, setSecrets with `{ ref }`): the app checks both sides,  *)
+(* the vault seals the reference with its `reference.create` (vault        *)
+(* vault.ts, reference), ends the one it replaces, if live, as `replaced`, *)
+(* then one app transaction under the head writes the row.                 *)
+(***************************************************************************)
+
+\* referenceTargets, outside any transaction: the holder's environment and
+\* the source live; the holder's newest reference, which the transaction
+\* checks no other write replaced meanwhile.
+ReferResolve(p) ==
+    /\ pc[p] = "refer.resolve"
+    /\ IF Live("hold") /\ Live("env")
+         THEN Read(p, "refer.lock", [l[p] EXCEPT !.named = Named, !.ref = refRow,
+                                                 !.end = IF refRow # NoRef /\ ~Ended(refRow) THEN refRow ELSE NoRef])
+         ELSE Refuse(p)
+
+ReferLock(p) == pc[p] = "refer.lock" /\ LockNext(p, "refer.check")
+
+\* Under the maker's row: they write the holder and read the source, and
+\* neither side is deleted.
+ReferCheck(p) ==
+    /\ pc[p] = "refer.check"
+    /\ IF MayUse(op[p].actor, "hold") /\ MayUse(op[p].actor, "env") /\ ~Gone("hold") /\ ~Gone("env")
+         THEN Read(p, "refer.head", l[p])
+         ELSE Refuse(p)
+
+ReferHead(p) == pc[p] = "refer.head" /\ TakeHead(p, "refer.seal")
+
+\* Under the head (`underLock`): neither side deleted since. Append
+\* `reference.create`, which is the reference, and commit.
+ReferSeal(p) ==
+    /\ pc[p] = "refer.seal"
+    /\ IF Gone("hold") \/ Gone("env")
+         THEN Refuse(p)
+         ELSE /\ log' = Append(log, [Entry("reference.create", "hold", p) EXCEPT !.via = l[p].id])
+              /\ Release(p)
+              /\ Goto(p, IF l[p].end # NoRef THEN "end.lock" ELSE "refer.tx")
+              /\ l' = [l EXCEPT ![p].toLock = <<op[p].actor>>, ![p].ret = "refer.tx"]
+              /\ UNCHANGED <<rows, creds, op, left, history>>
+
+ReferTx(p) ==
+    /\ pc[p] = "refer.tx"
+    /\ IF l[p].ok
+         THEN TakeHead(p, "refer.commit")
+         ELSE Refuse(p)
+
+\* Under the head: the holder's environment still live (checkEnvironment),
+\* the source still live, no reference made there meanwhile; then the row,
+\* which points at the vault's entry. Without the source's recheck, a source
+\* archived since, and deleted next, is read by a row nothing ends.
+ReferCommit(p) ==
+    /\ pc[p] = "refer.commit"
+    /\ IF \/ ~(Resolves("hold", l[p].named) /\ Live("hold"))
+          \/ SourceRecheckInReference /\ ~Live("env")
+          \/ refRow # l[p].ref
+         THEN Refuse(p)
+         ELSE /\ refRow' = l[p].id
+              /\ Release(p)
+              /\ Goto(p, "idle")
+              /\ UNCHANGED <<slug, archived, held, version, status, gen, grants, log, creds, op, l, left, history>>
+
+-----------------------------------------------------------------------------
+(***************************************************************************)
+(* Breaking the reference (server api/references.ts, breakReference): the  *)
+(* app resolves the holder and its reference, then the vault ends it.      *)
+(***************************************************************************)
+
+BreakResolve(p) ==
+    /\ pc[p] = "break.resolve"
+    /\ IF Resolves("hold", Named) /\ refRow # NoRef /\ ~Ended(refRow)
+         THEN Read(p, "end.lock", [l[p] EXCEPT !.end = refRow, !.toLock = <<op[p].actor>>, !.ret = "idle"])
+         ELSE Refuse(p)
+
+-----------------------------------------------------------------------------
+(***************************************************************************)
+(* Ending a reference (vault vault.ts, endReferences): one decision under  *)
+(* the actor's row. Breaking, replacing and deleting call it.              *)
+(***************************************************************************)
+
+EndLock(p) == pc[p] = "end.lock" /\ LockNext(p, "end.check")
+
+\* The actor writes the holder or manages access, and the reference has not
+\* ended. Ending is allowed in a deleted place.
+EndCheck(p) ==
+    /\ pc[p] = "end.check"
+    /\ IF (MayManage(op[p].actor) \/ MayUse(op[p].actor, "hold")) /\ ~Ended(l[p].end)
+         THEN Read(p, "end.head", l[p])
+         ELSE /\ Return(p, FALSE)
+              /\ UNCHANGED <<rows, log, creds, op, left, history>>
+
+EndHead(p) == pc[p] = "end.head" /\ TakeHead(p, "end.commit")
+
+\* Under the head: not ended meanwhile, by another end; then `reference.end`.
+EndCommit(p) ==
+    /\ pc[p] = "end.commit"
+    /\ IF Ended(l[p].end)
+         THEN /\ Return(p, FALSE)
+              /\ UNCHANGED <<rows, log, creds, op, left, history>>
+         ELSE /\ log' = Append(log, [Entry("reference.end", "hold", p) EXCEPT !.via = l[p].end])
+              /\ Release(p)
+              /\ l' = [l EXCEPT ![p].ok = TRUE, ![p].end = NoRef]
+              /\ Goto(p, l[p].ret)
+              /\ UNCHANGED <<rows, creds, op, left, history>>
 
 -----------------------------------------------------------------------------
 (***************************************************************************)
@@ -603,7 +791,7 @@ RemoveCommit(p) ==
     /\ gen' = [gen EXCEPT ![m] = @ + 1]
     /\ Release(p)
     /\ Goto(p, "idle")
-    /\ UNCHANGED <<slug, archived, held, version, log, creds, op, l, left, history>>
+    /\ UNCHANGED <<refRow, slug, archived, held, version, log, creds, op, l, left, history>>
 
 -----------------------------------------------------------------------------
 (***************************************************************************)
@@ -635,6 +823,7 @@ Init ==
     /\ status = [m \in Members |-> "active"]
     /\ gen = [m \in Members |-> 0]
     /\ grants = InitGrants
+    /\ refRow = InitRef
     /\ log = <<>>
     /\ creds = {}
     /\ memberLock = [m \in Members |-> None]
@@ -662,6 +851,9 @@ Step(p) ==
     \/ SigninAccess(p) \/ SigninHead(p) \/ SigninCommit(p)
     \/ RemoveLock(p) \/ RemoveCheck(p) \/ RemoveHead(p) \/ RemoveCommit(p)
     \/ RotateRead(p) \/ RotateLock(p) \/ RotateHead(p) \/ RotateCommit(p)
+    \/ ReferResolve(p) \/ ReferLock(p) \/ ReferCheck(p) \/ ReferHead(p) \/ ReferSeal(p)
+    \/ ReferTx(p) \/ ReferCommit(p)
+    \/ BreakResolve(p) \/ EndLock(p) \/ EndCheck(p) \/ EndHead(p) \/ EndCommit(p)
 
 \* Every process has run its operations: the run is over. Without this
 \* step a finished run would look like a deadlock to TLC.
@@ -686,10 +878,10 @@ TypeOK ==
     /\ head \in Procs \cup {None}
 
 \* The process p waits for: the holder of the lock its next step takes.
-LockLabels == {"read.lock", "write.lock", "call.lock", "remove.lock", "rotate.lock"}
+LockLabels == {"read.lock", "write.lock", "call.lock", "remove.lock", "rotate.lock", "refer.lock", "end.lock"}
 HeadLabels == {"read.head", "write.head", "write.tx", "call.headfirst", "call.head",
                "delete.head", "patch.head", "addenv.head", "renamekey.head",
-               "signin.head", "remove.head", "rotate.head"}
+               "signin.head", "remove.head", "rotate.head", "refer.head", "refer.tx", "end.head"}
 WaitsFor(p) ==
     IF pc[p] \in LockLabels /\ l[p].toLock # <<>> /\ memberLock[Head(l[p].toLock)] \notin {None, p}
       THEN {memberLock[Head(l[p].toLock)]}
@@ -736,5 +928,29 @@ AuditBeforeRelease == \A id \in revealed : \E i \in 1..Len(log) : log[i].kind = 
 \* Every credential was issued at the member's generation as it was when
 \* the credential committed, to an active member.
 CredentialsAtCurrentGeneration == \A c \in creds : c.current
+
+\* A `secret.read` commits only while its reader still holds a grant that
+\* covers where it was decided. Grants change only under the head, which
+\* the read holds as it commits: so once a revocation or a removal has
+\* committed, nothing more is released to them there, until a grant that
+\* covers it again has committed.
+NothingReleasedAfterRevocation == \A i \in 1..Len(log) : log[i].kind = "secret.read" => log[i].granted
+
+\* No `secret.read` through a reference follows its `reference.end`, or the
+\* deletion of its source's place or its holder's, in the log.
+NothingReleasedThroughEndedReference ==
+    \A i, j \in 1..Len(log) :
+        (i < j /\ log[j].kind = "secret.read" /\ log[j].via # NoRef) =>
+            ~(\/ log[i].kind = "reference.end" /\ log[i].via = log[j].via
+              \/ log[i].kind = "delete" /\ (Covers(log[i].at, "env") \/ Covers(log[i].at, "hold")))
+
+\* A reference that has not ended is between standing places, where the API
+\* can name its holder, and so break it. One held in a deleted place would
+\* keep its source from being archived, with no path left to break it.
+EveryReferenceBreakable == (refRow # NoRef /\ ~Ended(refRow)) => ~Gone("env") /\ ~Gone("hold")
+
+\* And its source is live: a reference is made only to a live source, and
+\* archiving one is refused while a reference from elsewhere reads it.
+ReferencedSourcesStayLive == (refRow # NoRef /\ ~Ended(refRow)) => Live("env")
 
 =============================================================================
