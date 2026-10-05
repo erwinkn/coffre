@@ -291,6 +291,50 @@ export async function referencesBreak(connect: () => CoffreClient, args: string[
   io.out.write(`broke ${reference.holder}: it no longer reads ${reference.source}\n`);
 }
 
+// --- missing keys ------------------------------------------------------------
+
+/** `coffre missing market/dev`: the keys its siblings have and it lacks, of those you read. */
+export async function missing(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
+  const { values, positionals } = parse(args, { ...json, dismissed: { type: 'boolean', default: false } }, ['<project>/<environment>']);
+  const { project, environment } = place(positionals[0]!, true);
+  const path = `${project}/${environment}`;
+  const api = connect();
+  const result = await api.environments.missing(path);
+  if (values.json) return asJson(io, values.dismissed ? result.dismissed : result.missing);
+  if (values.dismissed) {
+    if (result.dismissed.length === 0) return void io.out.write(`nothing dismissed in ${path}\n`);
+    for (const key of result.dismissed) {
+      io.out.write(`${key.key.padEnd(28)} in ${key.in.join(', ')}; dismissed by ${key.dismissedBy} on ${key.dismissedAt.slice(0, 10)}\n`);
+    }
+    return;
+  }
+  if (result.missing.length === 0) {
+    io.out.write(`${path} has every key its environments you read have${result.dismissed.length === 0 ? '' : `, but ${result.dismissed.length} dismissed: --dismissed lists them`}\n`);
+    return;
+  }
+  for (const key of result.missing) io.out.write(`${key.key.padEnd(28)} in ${key.in.join(', ')}\n`);
+  io.out.write(`\n\`coffre set ${path}/<KEY>\` adds one; \`coffre missing dismiss ${path}/<KEY>\`, or --all, says it is not needed\n`);
+}
+
+/** `coffre missing dismiss market/dev/KEY` (or `market/dev --all`), and `restore`: for the whole team, logged. */
+export async function missingDismiss(connect: () => CoffreClient, args: string[], dismiss: boolean, io: Io = STDIO): Promise<void> {
+  const { values, positionals } = parse(args, dismiss ? { all: { type: 'boolean', default: false } } : {}, ['<project>/<environment>[/<KEY>]']);
+  const parts = positionals[0]!.split('/');
+  const all = (values as { all?: boolean }).all === true;
+  if (parts.length !== (all ? 2 : 3) || parts.some((part) => part === '')) {
+    throw new UsageError(all ? `--all takes <project>/<environment>, not "${positionals[0]}"` : `expected <project>/<environment>/<KEY>, not "${positionals[0]}"`);
+  }
+  const path = parts.slice(0, 2).join('/');
+  const api = connect();
+  const keys = all ? (await api.environments.missing(path)).missing.map((key) => key.key) : [parts[2]!];
+  if (keys.length === 0) return void io.out.write(`nothing missing from ${path} to dismiss\n`);
+  const { keys: outcomes } = await api.environments.dismiss(path, Object.fromEntries(keys.map((key) => [key, dismiss ? true : null])));
+  for (const key of keys) {
+    const outcome = outcomes[key];
+    io.out.write(outcome === 'unchanged' ? `${key} was ${dismiss ? 'dismissed' : 'not dismissed'} already\n` : `${outcome} ${key} in ${path}\n`);
+  }
+}
+
 // --- folders -----------------------------------------------------------------
 
 /** `coffre move acme Clients`, `coffre move market/prod/STRIPE_KEY stripe`, or `--none` for out of its folder. */

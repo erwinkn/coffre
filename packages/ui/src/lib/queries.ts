@@ -48,6 +48,7 @@ export const keys = {
   grants: (project: string) => ['grants', project],
   secrets: ({ project, environment }: Place) => ['secrets', project, environment],
   references: (path: string) => ['references', path],
+  missing: ({ project, environment }: Place) => ['missing', project, environment],
   directory: ['directory'],
   report: (member: string) => ['report', member],
   credentials: (member: string) => ['credentials', member],
@@ -134,6 +135,13 @@ export const queries = {
     queryOptions({
       queryKey: keys.secrets(place),
       queryFn: () => uiResult(() => client.secrets.list(`${place.project}/${place.environment}`)),
+    }),
+
+  /** What an environment lacks of its siblings' keys, those you read, and what its team dismissed. */
+  missing: (client: CoffreClient, place: Place) =>
+    queryOptions({
+      queryKey: keys.missing(place),
+      queryFn: () => uiResult(() => client.environments.missing(`${place.project}/${place.environment}`)),
     }),
 
   /** The live references into and out of a place, and who reads through them, for whoever manages its access. */
@@ -435,7 +443,7 @@ export const affects = {
   /** A project or environment made, renamed or archived: the tree, and where you hold access. */
   places: (): QueryKey[] => [keys.projects, keys.me],
   /** Secrets written, renamed, restored or archived: the environment and the counts. */
-  secrets: (place: Place): QueryKey[] => [keys.secrets(place), keys.projects, ['references']],
+  secrets: (place: Place): QueryKey[] => [keys.secrets(place), keys.projects, ['references'], ['missing']],
   /**
    * Someone's access in a project changed: its grants, their report, and, as
    * it may be your own, what you can see.

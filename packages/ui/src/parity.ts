@@ -54,6 +54,12 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
       { does: 'the same dialog: what deleting would erase and revoke', in: 'lib/queries.ts', call: 'environments.previewDelete' },
     ],
   },
+  'GET /projects/:project/:environment/missing': {
+    ui: [{ does: "an environment: the keys its siblings you read have and it lacks", in: 'lib/queries.ts', call: 'environments.missing' }],
+  },
+  'PATCH /projects/:project/:environment/dismissals': {
+    ui: [{ does: 'an environment › Missing keys › Dismiss, Dismiss all, Restore', in: 'components/missing.tsx', call: 'environments.dismiss' }],
+  },
   'GET /secrets/:project/:environment': { ui: [{ does: 'an environment: its secrets', in: 'pages/environment.tsx', call: 'secrets.list' }] },
   'PATCH /secrets/:project/:environment': {
     ui: [

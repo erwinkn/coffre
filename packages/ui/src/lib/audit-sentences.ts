@@ -110,6 +110,12 @@ function secrets(facts: Facts): Part[] {
   ];
 }
 
+/** "SENTRY_DSN in market/dev", or "3 keys in market/dev" for a Dismiss all. */
+function missingKeys(facts: Facts): Part[] {
+  const key = text(facts.entry.metadata.key);
+  return [facts.batch.length === 1 && key !== null ? key : plural(facts.count, 'key'), ' in ', ...environmentOf(facts.entry)];
+}
+
 /** "billing/prod/DATABASE_URL a reference to market/prod/DATABASE_URL", from either author's entry. */
 function referenceTo(entry: AuditEntry): Part[] {
   const holder = text(entry.metadata.subject);
@@ -192,6 +198,13 @@ const TEMPLATES: Record<string, Template> = {
     what: ({ entry }) => [...place(entry), ...(text(entry.metadata.nextKey) === null ? [] : [` to ${text(entry.metadata.nextKey)}`])],
   },
   'secret.archive': { did: 'archived', tried: 'archive', what: (facts) => place(facts.entry) },
+  'missing.dismiss': {
+    did: 'dismissed',
+    tried: 'dismiss',
+    what: (facts) => missingKeys(facts),
+    then: () => [' as not needed'],
+  },
+  'missing.restore': { did: 'restored', tried: 'restore', what: (facts) => missingKeys(facts), then: () => [' to the missing keys'] },
   'secret.reference': { did: 'made', tried: 'make', what: ({ entry }) => referenceTo(entry) },
   'reference.create': { did: 'made', tried: 'make', what: ({ entry }) => referenceTo(entry) },
   'reference.end': {

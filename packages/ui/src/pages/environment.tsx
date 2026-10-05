@@ -52,6 +52,7 @@ import {
 import { Card, ClosedDoor, PageHeader } from '../components/page';
 import { SecretReadOnly } from '../components/affordances';
 import { FolderRow, MoveToFolder } from '../components/folders';
+import { MissingKeys } from '../components/missing';
 import { LentReferences, MakeReference, ReferenceValue } from '../components/references';
 import { isActiveAccessibleEnvironment } from '../lib/project-environments';
 import {
@@ -414,6 +415,13 @@ function EnvironmentLedger({
           </div>
         </div>
       )}
+
+      <MissingKeys
+        project={project}
+        environment={environment}
+        canWrite={canWrite}
+        onAdd={(key) => setDrafts((rows) => [...rows, { id: nextDraftId.current++, key, value: '' }])}
+      />
 
       <section className="card card-wide" aria-label="Secrets">
         {active.length === 0 && drafts.length === 0 ? (

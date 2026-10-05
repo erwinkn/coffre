@@ -29,4 +29,5 @@ export const {
   projectFolders,
   secretFolders,
   secretReferences,
+  dismissedKeys,
 } = schema;

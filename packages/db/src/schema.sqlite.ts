@@ -203,6 +203,30 @@ export const secretFolders = sqliteTable(
   ],
 );
 
+export const dismissedKeys = sqliteTable(
+  'dismissed_keys',
+  {
+    environmentId: text('environment_id').notNull(),
+    key: text().notNull(),
+    dismissedAt: time('dismissed_at').notNull().default(now),
+    dismissedBy: text('dismissed_by').notNull(),
+    restoredAt: time('restored_at'),
+    restoredBy: text('restored_by'),
+  },
+  (table) => [
+    primaryKey({ name: 'dismissed_keys_pkey', columns: [table.environmentId, table.key] }),
+    check(
+      'dismissed_keys_key_check',
+      sql`length(${table.key}) BETWEEN 1 AND 128 AND ${table.key} GLOB '[A-Za-z_]*' AND ${table.key} NOT GLOB '*[^A-Za-z0-9_]*'`,
+    ),
+    foreignKey({
+      name: 'dismissed_keys_environment_id_fkey',
+      columns: [table.environmentId],
+      foreignColumns: [environments.id],
+    }).onDelete('restrict'),
+  ],
+);
+
 const ROLES = sql.raw(ROLE_NAMES.map((role) => `'${role}'`).join(', '));
 const ENVIRONMENT_ROLES = sql.raw(ROLE_NAMES.filter(assignableToEnvironment).map((role) => `'${role}'`).join(', '));
 

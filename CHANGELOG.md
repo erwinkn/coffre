@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+**Missing keys.** An environment's page lists the keys its sibling
+environments have and it lacks, compared only with those you can read: key
+names are metadata. Each has Add, a new row with its name, and Dismiss,
+plus Dismiss all; a dismissal is the team's, logged, and listed under
+Dismissed with Restore. `coffre missing market/dev`, `coffre missing dismiss
+market/dev/KEY` (or `--all`), `coffre missing restore`. Migration
+`0009_dismissals` adds their table; until it runs, nothing is dismissed and
+dismissing answers 503.
+
 **References.** A secret can be a reference to another, in another
 environment or project: `coffre set billing/prod/DATABASE_URL --ref
 market/prod/DATABASE_URL`. Whoever reads `billing/prod` reads market's

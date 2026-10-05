@@ -195,6 +195,34 @@ export const secretFolders = pgTable(
   ],
 );
 
+/**
+ * Keys an environment is missing, which its team decided it does not need:
+ * the project's other environments have them, and its missing-keys list
+ * leaves them out until someone restores them (docs/design/environments.md).
+ * One row per environment and key, updated in place: restoring sets
+ * `restored_at`, dismissing again clears it.
+ */
+export const dismissedKeys = pgTable(
+  'dismissed_keys',
+  {
+    environmentId: uuid('environment_id').notNull(),
+    key: text().notNull(),
+    dismissedAt: timestamp('dismissed_at', { withTimezone: true }).notNull().defaultNow(),
+    dismissedBy: text('dismissed_by').notNull(),
+    restoredAt: timestamp('restored_at', { withTimezone: true }),
+    restoredBy: text('restored_by'),
+  },
+  (table) => [
+    primaryKey({ name: 'dismissed_keys_pkey', columns: [table.environmentId, table.key] }),
+    check('dismissed_keys_key_check', sql`${table.key} ~ '^[A-Za-z_][A-Za-z0-9_]{0,127}$'`),
+    foreignKey({
+      name: 'dismissed_keys_environment_id_fkey',
+      columns: [table.environmentId],
+      foreignColumns: [environments.id],
+    }).onDelete('restrict'),
+  ],
+);
+
 /** The role catalogue, as SQL: every role, and those an environment may be granted. */
 const ROLES = sql.raw(ROLE_NAMES.map((role) => `'${role}'`).join(', '));
 const ENVIRONMENT_ROLES = sql.raw(ROLE_NAMES.filter(assignableToEnvironment).map((role) => `'${role}'`).join(', '));

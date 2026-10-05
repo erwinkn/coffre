@@ -176,6 +176,8 @@ test('every other action has a sentence', () => {
     [{ action: 'secret.move', ...prod, key: 'STRIPE_KEY', metadata: { from: 'stripe', to: null } }, 'moved market/prod/STRIPE_KEY out of its folder'],
     [{ action: 'environment.create', project: 'market', environment: 'staging', metadata: { slug: 'staging', from: 'prod' } }, 'created environment market/staging, a fork of prod'],
     [{ action: 'environment.fork', ...prod, decision: 'deny', reason: 'missing_secret_read', metadata: { from: 'prod', slug: 'staging' } }, 'tried to fork market/prod into staging: no grant to read it'],
+    [{ action: 'missing.dismiss', ...prod, metadata: { key: 'SENTRY_DSN' } }, 'dismissed SENTRY_DSN in market/prod as not needed'],
+    [{ action: 'missing.restore', ...prod, metadata: { key: 'SENTRY_DSN' } }, 'restored SENTRY_DSN in market/prod to the missing keys'],
     [{ action: 'secret.reference', project: 'billing', environment: 'prod', key: 'DATABASE_URL', metadata: { key: 'DATABASE_URL', source: 'market/prod/DATABASE_URL' } }, 'made billing/prod/DATABASE_URL a reference to market/prod/DATABASE_URL'],
     [{ action: 'reference.end', project: 'billing', environment: 'prod', metadata: { reason: 'broken', subject: 'billing/prod/DATABASE_URL', source: { path: 'market/prod/DATABASE_URL' } } }, 'broke the reference billing/prod/DATABASE_URL to market/prod/DATABASE_URL'],
     [{ action: 'reference.end', project: 'billing', environment: 'prod', metadata: { reason: 'replaced', subject: 'billing/prod/DATABASE_URL', source: { path: 'market/prod/DATABASE_URL' } } }, 'gave a value of its own to billing/prod/DATABASE_URL, no longer a reference to market/prod/DATABASE_URL'],

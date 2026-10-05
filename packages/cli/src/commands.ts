@@ -106,6 +106,13 @@ export const SECTIONS = [
       { command: 'archive', usage: [`archive   ${P}/<KEY>`], about: ['out of reads, runs and exports; its versions kept'] },
       { command: 'unarchive', usage: [`unarchive ${P}/<KEY>`] },
       { command: 'move', usage: [`move      ${P}/<KEY> (<folder> | --none)`], about: ['into a folder, to arrange the list; nothing else changes'] },
+      {
+        command: 'missing',
+        usage: [`missing   ${P} [--dismissed] [--json]`],
+        about: ["keys its sibling environments have and it lacks, of those you", 'read; --dismissed, those its team decided it does not need'],
+      },
+      { command: 'missing dismiss', usage: [`missing dismiss ${P}/<KEY>`, `missing dismiss ${P} --all`], about: ['for the whole team, logged; restore brings it back'] },
+      { command: 'missing restore', usage: [`missing restore ${P}/<KEY>`] },
     ],
   },
   {
@@ -279,6 +286,8 @@ export const PARITY: { [K in RouteKey]: Reach } = {
   'PATCH /projects/:project': { commands: ['projects rename', 'projects archive', 'projects unarchive', 'move'] },
   'DELETE /projects/:project': { commands: ['projects delete'] },
   'PUT /projects/:project/:environment': { commands: ['environments create', 'fork'] },
+  'GET /projects/:project/:environment/missing': { commands: ['missing'] },
+  'PATCH /projects/:project/:environment/dismissals': { commands: ['missing dismiss', 'missing restore'] },
   'PATCH /projects/:project/:environment': { commands: ['environments rename', 'environments archive', 'environments unarchive'] },
   'DELETE /projects/:project/:environment': { commands: ['environments delete'] },
   'GET /secrets/:project/:environment': { commands: ['list'] },
