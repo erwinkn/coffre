@@ -1060,7 +1060,7 @@ class VaultService implements Vault {
     const { principal, reason } = input;
     validateText(principal);
     validateCorrelation(input);
-    if (reason !== 'replaced' && reason !== 'broken') throw new Error('a reference ends replaced or broken');
+    if (reason !== 'replaced' && reason !== 'broken' && reason !== 'abandoned') throw new Error('a reference ends replaced, broken or abandoned');
     const vias = input.items.map((item) => validateVia(item)!);
     if (vias.some((via) => via === null) || new Set(vias.map((via) => via.seq)).size !== vias.length) throw new Error('each reference to end, once');
     if (vias.length === 0) return { ok: true, seqs: [] };
@@ -1110,7 +1110,8 @@ class VaultService implements Vault {
       const environments = await store.environmentsById(d.tx, seals.map((seal) => seal.holder.environmentId));
       const codes: (RefusalCode | null)[] = seals.map((seal) => {
         const holder = refuses(actor, 'secret.write', placeIn(seal.holder, environments), false);
-        if (holder === null || reason === 'replaced') return holder;
+        // Replacing or abandoning is the holder's side: write where it is held.
+        if (holder === null || reason !== 'broken') return holder;
         return refuses(actor, 'grant.manage', { projectId: seal.source.projectId }, false) === null ? null : holder;
       });
       if (!codes.some((code) => code !== null)) (await ended(d.tx)).forEach((code, i) => (codes[i] = code));

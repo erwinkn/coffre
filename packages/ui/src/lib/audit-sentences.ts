@@ -134,6 +134,13 @@ function secrets(facts: Facts): Part[] {
   ];
 }
 
+/** "market/prod/OLD", or "OLD and STALE in market/prod" for an archive of several keys refused. */
+function archivedKeys(entry: AuditEntry): Part[] {
+  const keys = Array.isArray(entry.metadata.keys) ? entry.metadata.keys.filter((key): key is string => text(key) !== null) : [];
+  if (entry.key !== null || keys.length === 0) return place(entry);
+  return [keys.length === 1 ? keys[0]! : `${keys.slice(0, -1).join(', ')} and ${keys.at(-1)!}`, ' in ', ...environmentOf(entry)];
+}
+
 /** "SENTRY_DSN in market/dev", or "3 keys in market/dev" for a Dismiss all. */
 function missingKeys(facts: Facts): Part[] {
   const key = text(facts.entry.metadata.key);
@@ -221,7 +228,7 @@ const TEMPLATES: Record<string, Template> = {
     tried: 'rename',
     what: ({ entry }) => [...place(entry), ...(text(entry.metadata.nextKey) === null ? [] : [` to ${text(entry.metadata.nextKey)}`])],
   },
-  'secret.archive': { did: 'archived', tried: 'archive', what: (facts) => place(facts.entry) },
+  'secret.archive': { did: 'archived', tried: 'archive', what: ({ entry }) => archivedKeys(entry) },
   'missing.dismiss': {
     did: 'dismissed',
     tried: 'dismiss',
@@ -232,14 +239,15 @@ const TEMPLATES: Record<string, Template> = {
   'secret.reference': { did: 'made', tried: 'make', what: ({ entry }) => referenceTo(entry) },
   'reference.create': { did: 'made', tried: 'make', what: ({ entry }) => referenceTo(entry) },
   'reference.end': {
-    did: ({ entry }) => (entry.metadata.reason === 'replaced' ? 'gave a value of its own to' : 'broke'),
-    tried: ({ entry }) => (entry.metadata.reason === 'replaced' ? 'replace' : 'break'),
+    did: ({ entry }) => (entry.metadata.reason === 'replaced' ? 'gave a value of its own to' : entry.metadata.reason === 'abandoned' ? 'abandoned' : 'broke'),
+    tried: ({ entry }) => (entry.metadata.reason === 'replaced' ? 'replace' : entry.metadata.reason === 'abandoned' ? 'abandon' : 'break'),
     what: ({ entry }) => {
       const source = text((entry.metadata.source as { path?: unknown } | undefined)?.path);
       const holder = text(entry.metadata.subject);
       if (entry.metadata.reason === 'replaced') return [...(holder === null ? ['a reference'] : [{ place: holder }]), ...(source === null ? [] : [', no longer a reference to ', { place: source }])];
       return ['the reference ', ...(holder === null ? [] : [{ place: holder }]), ...(source === null ? [] : [' to ', { place: source }])];
     },
+    then: ({ entry }) => (entry.metadata.reason === 'abandoned' ? [', which its write never stored'] : []),
   },
   'secret.unarchive': { did: 'brought back', tried: 'bring back', what: (facts) => place(facts.entry) },
   'secret.move': { did: 'moved', tried: 'move', what: (facts) => place(facts.entry), then: ({ entry }) => intoFolder(entry) },

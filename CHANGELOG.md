@@ -81,8 +81,13 @@ Archiving what a live reference reads, the key, its environment or its
 project, is refused (409) until the reference is broken, so archiving
 never silently breaks another project's runs; the refusal names each
 reference and who can break it, and the archive dialogs list them with
-Break. A reference held inside what is archived does not block it.
-Someone's offboarding report lists the references they made. `coffre fork
+Break. A reference held inside what is archived does not block it; one
+held in an archived environment or project does, since unarchiving it
+brings the reference back. A reference belongs to the environment that
+holds it, like a value, not to whoever made it: removing them ends none,
+and their offboarding report lists the references they made, read from the
+log. A reference the vault sealed for a write that then stored nothing is
+ended at once, `abandoned`, so no row written later can revive it. `coffre fork
 --reference` makes each key a reference to its parent's. Migration
 `0008_references` adds one app table and indexes on the log; until it runs,
 making a reference answers 503 (docs/design/environments.md). It builds

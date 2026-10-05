@@ -1263,7 +1263,8 @@ async function environmentSlugs(db: Queryable, ids: readonly string[]): Promise<
  * with no such entry, or one about another reference, is no reference.
  * Looked up by project or source, the seals are found first, through the
  * log's `also` indexes, so that a row edited to name other places still
- * shows where its seal says.
+ * shows where its seal says; by maker, through its actor index
+ * (`audit_log_actor_idx`), since the maker is the seal's actor (D46).
  */
 export async function referenceRows(
   db: Queryable,
@@ -1272,12 +1273,13 @@ export async function referenceRows(
   const { secretReferences, auditLog } = tablesOf(db);
   if (where.holderSecretIds?.length === 0 || where.sourceSecretIds?.length === 0) return [];
   const sealing = and(eq(auditLog.author, 'vault'), eq(auditLog.action, 'reference.create'), eq(auditLog.decision, 'allow'));
-  const byPlace = where.projectId !== undefined || where.sourceSecretIds !== undefined;
-  const sealedSeqs = byPlace
+  const bySeal = where.projectId !== undefined || where.sourceSecretIds !== undefined || where.createdBy !== undefined;
+  const sealedSeqs = bySeal
     ? (await db.select({ seq: auditLog.seq }).from(auditLog).where(and(
         sealing,
         where.projectId === undefined ? undefined : or(eq(auditLog.projectId, where.projectId), also(db, 'projectId', [where.projectId])),
         where.sourceSecretIds === undefined ? undefined : also(db, 'secretId', where.sourceSecretIds),
+        where.createdBy === undefined ? undefined : eq(auditLog.actor, where.createdBy),
       ))).map((row) => row.seq)
     : null;
   if (sealedSeqs?.length === 0) return [];
@@ -1316,7 +1318,6 @@ export async function referenceRows(
     if (detail.reference !== row.id || !text(detail.secretId) || !text(source.projectId) || !text(source.environmentId) || !text(source.secretId)) return [];
     const holder = { projectId: seal.projectId, environmentId: seal.environmentId, secretId: detail.secretId };
     if (where.holderSecretIds !== undefined && !where.holderSecretIds.includes(holder.secretId)) return [];
-    if (where.createdBy !== undefined && seal.actor !== where.createdBy) return [];
     return [{
       id: row.id,
       createdSeq: row.createdSeq,

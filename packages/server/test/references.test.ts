@@ -179,7 +179,7 @@ async function holderEnvironment(): Promise<string | undefined> {
 
 test('archiving what live references read is refused, naming them and who can break them; restoring never is (D41)', async () => {
   await ada.secrets.set('billing/prod', { DATABASE_URL: ref('market/prod/DATABASE_URL') });
-  const named = /409: 1 reference reads market\/prod(\/DATABASE_URL)?: billing\/prod\/DATABASE_URL reads market\/prod\/DATABASE_URL\. Archiving it would stop that read, so break it first: market's owners and access managers can, or whoever writes the environment that holds it \(`coffre references break billing\/prod\/DATABASE_URL --apply`\)$/;
+  const named = /409: 1 reference reads market\/prod(\/DATABASE_URL)?: billing\/prod\/DATABASE_URL reads market\/prod\/DATABASE_URL\. Archiving would stop that read, so break it first: market's owners and access managers can, or whoever writes the environment that holds it \(`coffre references break billing\/prod\/DATABASE_URL --apply`\)$/;
   assert.match(await refusal(caro.secrets.update('market/prod/DATABASE_URL', { archived: true })), named, 'the key');
   assert.match(await refusal(caro.secrets.set('market/prod', { DATABASE_URL: null })), named, 'the key, archived by a write');
   assert.match(await refusal(root.environments.update('market/prod', { archived: true })), named, 'its environment');
@@ -201,6 +201,22 @@ test('archiving what live references read is refused, naming them and who can br
   await caro.secrets.update('market/prod/DATABASE_URL', { archived: false });
   await root.projects.update('market', { archived: true });
   await root.projects.update('market', { archived: false });
+});
+
+test('a write archiving several keys names the keys references read, in its refusal and in its entry', async () => {
+  await ada.secrets.set('billing/prod', { DATABASE_URL: ref('market/prod/DATABASE_URL') });
+  const archiveBoth = () => refusal(caro.secrets.set('market/prod', { DATABASE_URL: null, STRIPE_KEY: null }));
+  assert.match(await archiveBoth(), /^409: 1 reference reads market\/prod\/DATABASE_URL: billing\/prod\/DATABASE_URL reads market\/prod\/DATABASE_URL\. Archiving would stop that read, so break it first/);
+  await ada.secrets.set('billing/prod', { STRIPE_KEY: ref('market/prod/STRIPE_KEY') });
+  assert.match(await archiveBoth(), /^409: 2 references read 2 keys of market\/prod: billing\/prod\/DATABASE_URL reads market\/prod\/DATABASE_URL; billing\/prod\/STRIPE_KEY reads market\/prod\/STRIPE_KEY\. Archiving would stop those reads, so break them first/);
+  // The audit page names the key, as for a PATCH, or lists the keys.
+  const refused = (await root.audit.list({ path: 'market/prod', limit: 50 })).entries
+    .filter((entry) => entry.action === 'secret.archive' && entry.decision === 'deny')
+    .sort((a, b) => a.seq - b.seq);
+  assert.deepEqual(refused.map((entry) => [entry.key, entry.metadata.path, entry.metadata.keys ?? null]), [
+    ['DATABASE_URL', 'market/prod/DATABASE_URL', null],
+    [null, '2 keys of market/prod', ['DATABASE_URL', 'STRIPE_KEY']],
+  ]);
 });
 
 test("a reference held in the place being archived blocks nothing; a forged row blocks nothing", async () => {
@@ -242,6 +258,23 @@ test('an archive that commits between the vault sealing a reference and its row 
   assert.ok(archived);
   assert.deepEqual(await db.owner.select().from(secretReferences), [], 'no reference row');
   assert.equal((await ada.secrets.list('billing/prod')).keys.find((key) => key.key === 'DATABASE_URL'), undefined, 'no key holds it');
+
+  // The seal the write never stored is ended, abandoned, by its maker.
+  const [seal] = await entries('vault', 'reference.create');
+  assert.deepEqual((await entries('vault', 'reference.end')).map((entry) => [entry.actor, entry.relatedSeq, entry.metadata.reason]), [
+    [`user:${ADA}`, seal!.seq, 'abandoned'],
+  ]);
+  // So a holder and a row written later around the app, naming it, read nothing, the source back or not.
+  await caro.secrets.update('market/prod/DATABASE_URL', { archived: false });
+  const sealed = seal!.metadata as { reference: string; secretId: string; also: { projectId: string; environmentId: string; secretId: string } };
+  const [billing] = await db.owner.select({ projectId: secrets.projectId, environmentId: secrets.environmentId }).from(secrets).where(eq(secrets.key, 'PORT'));
+  await db.owner.insert(secrets).values({ id: sealed.secretId, ...billing!, key: 'DATABASE_URL' });
+  await db.owner.insert(secretReferences).values({
+    id: sealed.reference, ...billing!, secretId: sealed.secretId,
+    sourceProjectId: sealed.also.projectId, sourceEnvironmentId: sealed.also.environmentId, sourceSecretId: sealed.also.secretId,
+    createdSeq: seal!.seq, createdBy: `user:${ADA}`,
+  });
+  assert.match(await refusal(bo.secrets.reveal('billing/prod/DATABASE_URL')), /^409: billing\/prod\/DATABASE_URL is a reference to market\/prod\/DATABASE_URL, which ada@acme.example broke/);
 });
 
 test("the source's side sees who reads through its references, and the reads are in both projects' logs", async () => {
@@ -267,13 +300,18 @@ test("the source's side sees who reads through its references, and the reads are
   assert.deepEqual([await inLog('market'), await inLog('market/prod'), await inLog('billing'), await inLog('billing/prod')], [1, 1, 1, 1]);
 });
 
-test("an offboarding report lists the references someone made, which outlive them", async () => {
+test("an offboarding report lists the references someone made, by their seals' actor; removing them ends none (D46)", async () => {
   await ada.secrets.set('billing/prod', { DATABASE_URL: ref('market/prod/DATABASE_URL'), STRIPE_KEY: ref('market/prod/STRIPE_KEY') });
   await max.references.break('billing/prod/STRIPE_KEY');
+  // The root's, its row's maker rewritten to Ada: the seal says who made it, not the row.
+  await root.secrets.set('billing/prod', { LEDGER_KEY: ref('market/prod/STRIPE_KEY') });
+  await db.owner.update(secretReferences).set({ createdBy: `user:${ADA}` });
   const report = await root.members.get(`user:${ADA}`);
   assert.deepEqual(report.references.map((reference) => [reference.holder, reference.state]), [
     ['billing/prod/DATABASE_URL', 'live'], ['billing/prod/STRIPE_KEY', 'broken'],
   ]);
+  assert.deepEqual((await root.members.get(`user:${ROOT}`)).references.map((reference) => reference.holder), ['billing/prod/LEDGER_KEY']);
+  assert.deepEqual((await root.members.get(`user:${BO}`)).references, []);
   await root.members.remove(`user:${ADA}`);
   assert.deepEqual((await bo.secrets.reveal('billing/prod/DATABASE_URL')).values, { DATABASE_URL: 'postgres://v1' });
 });
@@ -298,7 +336,7 @@ test('a fork as references points at the original sources, one hop, and copies w
 /** One author's entries of `action` since the setup. */
 async function entries(author: 'app' | 'vault', action: string) {
   const rows = await db.owner
-    .select({ seq: auditLog.seq, actor: auditLog.actor, decision: auditLog.decision, metadata: auditLog.metadata })
+    .select({ seq: auditLog.seq, actor: auditLog.actor, decision: auditLog.decision, relatedSeq: auditLog.relatedSeq, metadata: auditLog.metadata })
     .from(auditLog)
     .where(and(eq(auditLog.author, author), eq(auditLog.action, action), gte(auditLog.seq, firstSeq)))
     .orderBy(asc(auditLog.seq));

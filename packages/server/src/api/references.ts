@@ -194,13 +194,15 @@ export function archiveRefused(what: string, readers: readonly Resolved[]): stri
   const named = readers.slice(0, NAMED).map((reference) => `${reference.view.holder} reads ${reference.view.source}`);
   const more = n > NAMED ? `, and ${n - NAMED} more` : '';
   const projects = [...new Set(readers.map((reference) => reference.source!.project))];
-  return `${n === 1 ? '1 reference reads' : `${n} references read`} ${what}: ${named.join('; ')}${more}. Archiving it would stop ${n === 1 ? 'that read' : 'those reads'}, so break ${n === 1 ? 'it' : 'them'} first: ${projects.join(' and ')}'s owners and access managers can, or whoever writes the environment that holds ${n === 1 ? 'it' : 'each'} (\`coffre references break ${n === 1 ? readers[0]!.view.holder : '<holder>'} --apply\`)`;
+  return `${n === 1 ? '1 reference reads' : `${n} references read`} ${what}: ${named.join('; ')}${more}. Archiving would stop ${n === 1 ? 'that read' : 'those reads'}, so break ${n === 1 ? 'it' : 'them'} first: ${projects.join(' and ')}'s owners and access managers can, or whoever writes the environment that holds ${n === 1 ? 'it' : 'each'} (\`coffre references break ${n === 1 ? readers[0]!.view.holder : '<holder>'} --apply\`)`;
 }
 
 /**
  * Refuse to archive what live references read from elsewhere (D41): under
  * the log's head, in the archive's own transaction, so that none is made
- * meanwhile. Restoring is never refused.
+ * meanwhile. Restoring is never refused. `what` is the project's or the
+ * environment's path; archiving keys, the refusal names those read, as its
+ * message and its entry: `market/prod/DATABASE_URL`, or `2 keys of market/prod`.
  */
 export async function refuseIfRead(
   ctx: ApiContext,
@@ -212,9 +214,19 @@ export async function refuseIfRead(
 ): Promise<void> {
   const readers = await archiveBlockers(tx, place);
   if (readers.length === 0) return;
+  const read = place.secretIds === undefined ? [] : [...new Map(readers.map(({ source }) => [source!.id, source!])).values()]
+    .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  const [one] = read.length === 1 ? read : [];
+  const named = one !== undefined ? path(one) : read.length > 1 ? `${read.length} keys of ${what}` : what;
+  // One key's refusal is in that key's own log; several are listed.
+  const about = one !== undefined ? { key: one.key } : read.length > 1 ? { keys: read.map((secret) => secret.key) } : {};
   throw new Refusal(
-    conflict(archiveRefused(what, readers)),
-    denied(ctx, action, 'referenced', { ...fields, metadata: { path: what, references: readers.map((reference) => reference.row.id) } }),
+    conflict(archiveRefused(named, readers)),
+    denied(ctx, action, 'referenced', {
+      ...fields,
+      ...(one === undefined ? {} : { secretId: one.id }),
+      metadata: { path: named, ...about, references: readers.map((reference) => reference.row.id) },
+    }),
   );
 }
 
