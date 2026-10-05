@@ -1730,6 +1730,8 @@ a.crumb-link:hover {
 /* A folder's heading: the rows below it, up to the next one, are filed in it. */
 .dt .folder-row th {
   height: 2.25rem;
+  /* Its menu, at the right, lines up with the rows' menus below it. */
+  padding-right: 0.375rem;
   border-right: 0;
   font-weight: 600;
 }

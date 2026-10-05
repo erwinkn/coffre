@@ -64,8 +64,8 @@ export function FolderMenu({
   return (
     <>
       <Menu.Root>
-        <Menu.Trigger className="act act-quiet folder-row-menu" aria-label={`Actions for the folder ${folder}`}>
-          <MoreHorizontal size={15} />
+        <Menu.Trigger className="act act-icon act-quiet folder-row-menu" aria-label={`Actions for the folder ${folder}`}>
+          <MoreHorizontal size={16} />
         </Menu.Trigger>
         <MenuPopup align="end">
           <Menu.Item className="menu-item" onClick={() => setRenaming(true)}>
