@@ -11,9 +11,10 @@ import { join, resolve } from 'node:path';
  * The built app as `wrangler dev` can run it: its own build, behind an entry
  * that, once the app has answered, reads whatever the request still sends
  * before passing the answer on. Locally, and only there, a Worker built
- * unbundled with static assets fails every request after one whose body it
- * left unread, which every refusal does, and reading it later, after the
- * answer, is too late; deployed, Cloudflare discards such a body, as
+ * unbundled with static assets may fail the request after one whose body it
+ * left unread, which every refusal does: wrangler retries a GET, not a POST
+ * (cloudflare/workers-sdk#15203). Reading it later, after the answer, is too
+ * late; deployed, Cloudflare discards such a body, as
  * `vite dev` and `vite preview` do. The app itself must never wait so on what
  * a caller sends; this harness sends only bodies that end. The entry and its
  * config are written beside the build, which the next `vite build`

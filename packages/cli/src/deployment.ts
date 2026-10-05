@@ -350,8 +350,10 @@ export const KEEP_NAMES_WHY = [
 /**
  * What a deployment's Start app builds with and shares with coffre's pages:
  * @coffre/ui's peers, which it must have at exactly the versions the pages
- * are built with, and Vite's plugins for them. `coffre update` moves them
- * with coffre's own packages; a test holds the list to @coffre/ui's peers.
+ * are built with, and Vite's plugins for them; with Cloudflare's, the
+ * wrangler it peers on, and the Workers types that wrangler does. `coffre
+ * update` moves them with coffre's own packages; a test holds the list to
+ * @coffre/ui's peers.
  */
 export const START_PACKAGES = [
   'react',
@@ -363,6 +365,8 @@ export const START_PACKAGES = [
   'vite',
   '@vitejs/plugin-react',
   '@cloudflare/vite-plugin',
+  'wrangler',
+  '@cloudflare/workers-types',
 ];
 
 /** A pin to move: a package, at the version a deployment has, and the one it gets. */
