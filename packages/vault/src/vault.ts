@@ -1063,7 +1063,7 @@ class VaultService implements Vault {
         ...where.ids,
       }]);
     };
-    const onProjects = changes.flatMap(({ projectId, environmentId }) => (projectId === null ? [] : [{ projectId, environmentId }]));
+    const onProjects = changes.flatMap(({ projectId, environmentId, role }) => (projectId === null ? [] : [{ projectId, environmentId, role }]));
     return this.#decide([actor, principal], async (d) => {
       validateCorrelation(input);
       if (!LIVE_PRINCIPAL.test(principal)) throw refused('invalid', `not a principal: ${principal}`);
@@ -1087,15 +1087,22 @@ class VaultService implements Vault {
       if (changes.some((change) => grantKind(change) === 'every-project') && !(await store.canGrantEveryProject(d.tx))) {
         throw refused('invalid', "grants on every project need this release's database migration: an owner runs `coffre migrate`");
       }
-      // Every project is always there; a project or an environment must be.
+      // Every project is always there; a project or an environment must be,
+      // and to be granted, not deleted. Read under the log's head, which a
+      // deletion holds while it renames the place, so the place is as it commits.
+      if (onProjects.length > 0) await lockLogHead(d.tx);
       const known = await store.places(
         d.tx,
         onProjects.map((change) => change.projectId),
         onProjects.flatMap((change) => (change.environmentId === null ? [] : [change.environmentId])),
       );
-      for (const { projectId, environmentId } of onProjects) {
+      for (const { projectId, environmentId, role } of onProjects) {
         if (!known.projects.has(projectId) || (environmentId !== null && known.environments.get(environmentId) !== projectId)) {
           throw refused('invalid', `no such place: ${environmentId === null ? projectId : `${projectId}/${environmentId}`}`);
+        }
+        // A grant there is refused; a revocation, as a deletion makes, is not.
+        if (role !== null && (known.deleted.has(projectId) || (environmentId !== null && known.deleted.has(environmentId)))) {
+          throw refused('deleted');
         }
       }
       const acting = await this.#standing(d.tx, actor, d.members.get(actor), d.at, d.reports);

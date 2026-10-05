@@ -269,6 +269,81 @@ async function currentVersion(environment: string, key: string) {
 const unwrapAs = (principal: string, secretVersionId: string) =>
   deps.vault.unwrap({ principal, purpose: 'reveal', requestId: 'r', operationId: crypto.randomUUID(), items: [{ secretVersionId }] });
 
+/**
+ * The root admin's client, whose vault runs `meanwhile` once, after its first
+ * revocation: something another owner does between a deletion's vault calls
+ * and its transaction.
+ */
+function racedBy(meanwhile: () => Promise<unknown>): CoffreClient {
+  let done = false;
+  const vault = { ...deps.vault, setAccess: async (input: Parameters<typeof deps.vault.setAccess>[0]) => {
+    const outcome = await deps.vault.setAccess(input);
+    if (!done) {
+      done = true;
+      await meanwhile();
+    }
+    return outcome;
+  } };
+  return clientFor({ ...deps, vault }, ROOT);
+}
+
+test('a grant set while a deletion runs is refused with a 409, and revoked when it is asked again', async () => {
+  await seedMarket();
+  await root.projects.update('market', { archived: true });
+  const id = await projectId('market');
+  // The service's grant is revoked first, then given back before the app's transaction.
+  const raced = racedBy(() => root.access.set(CI, { 'market/prod': 'viewer' }));
+  await assert.rejects(raced.projects.delete('market'), { status: 409, message: /granted while it was being deleted/ });
+  assert.equal((await projectRow(id)).slug, 'market');
+  assert.ok((await versionsOf(id)).every((version) => version.sealed));
+  assert.deepEqual((await deps.vault.access(CI)).grants.map((grant) => grant.role), ['viewer']);
+  assert.deepEqual((await entries('project.delete')).map((entry) => [entry.decision, entry.metadata.reason]), [['deny', 'granted_meanwhile']]);
+
+  const { deletion } = await root.projects.delete('market');
+  assert.deepEqual(deletion.grants.map((grant) => grant.member), [CI]);
+  assert.deepEqual((await deps.vault.access(CI)).grants, []);
+  assert.equal((await projectRow(id)).slug, `market~deleted-${today()}`);
+  assert.equal((await root.audit.verify()).ok, true);
+});
+
+test('a project restored while it is being deleted stays, unerased, and the deletion is refused', async () => {
+  await seedMarket();
+  await root.projects.update('market', { archived: true });
+  const id = await projectId('market');
+  const raced = racedBy(() => root.projects.update('market', { archived: false }));
+  await assert.rejects(raced.projects.delete('market'), { status: 409, message: /restored while it was being deleted: nothing was erased/ });
+  const row = await projectRow(id);
+  assert.equal(row.slug, 'market');
+  assert.equal(row.archivedAt, null);
+  assert.ok((await versionsOf(id)).every((version) => version.sealed));
+  assert.equal((await root.secrets.reveal('market/dev/DATABASE_URL')).values.DATABASE_URL, 'postgres://dev');
+  assert.deepEqual((await entries('project.delete')).map((entry) => entry.metadata.reason), ['restored']);
+});
+
+test('an environment is deleted only once it is archived itself, whatever its project is', async () => {
+  await seedMarket();
+  await root.projects.update('market', { archived: true });
+  await assert.rejects(root.environments.delete('market/prod'), { status: 409, message: /market\/prod is not archived/ });
+  await root.environments.update('market/prod', { archived: true });
+  assert.equal((await root.environments.delete('market/prod')).deletion.tombstone, `prod~deleted-${today()}`);
+});
+
+test('the vault grants nothing on a deleted place, and still revokes there', async () => {
+  await seedMarket();
+  const version = await currentVersion('prod', 'API_KEY');
+  await db.owner.update(projects).set({ slug: `market~deleted-${today()}` }).where(eq(projects.id, version.projectId));
+  const change = (role: 'viewer' | null, environmentId: string | null) => deps.vault.setAccess({
+    actor: `user:${ROOT}`, principal: CI, requestId: 'r', operationId: crypto.randomUUID(),
+    changes: [{ projectId: version.projectId, environmentId, role, expiresAt: null }],
+  });
+  for (const environmentId of [null, version.environmentId]) {
+    const outcome = await change('viewer', environmentId);
+    assert.equal(outcome.ok ? null : outcome.refusal.code, 'deleted');
+  }
+  const revoked = await change(null, version.environmentId);
+  assert.deepEqual(revoked.ok ? revoked.changes : revoked.refusal, ['revoked']);
+});
+
 test('the vault refuses a deleted place as deleted, its erased versions included', async () => {
   await seedMarket();
   const version = await currentVersion('prod', 'API_KEY');

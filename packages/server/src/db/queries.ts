@@ -2,12 +2,13 @@ import type { GrantPlace } from '@coffre/core/access';
 import type { Author } from '@coffre/core/audit';
 import { ACCESS_ACTIONS, type Checkpoint } from '@coffre/core/vault';
 import type { Envelope } from '@coffre/core/envelope';
+import { tombstoneOf } from '@coffre/core/schemas';
 import { own, tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import { readGrants } from '@coffre/db/grants';
 import * as dialect from '@coffre/db/dialect';
-import { canonicalTimestamp, changedRows, clock, clockMillis, forUpdate, migrationLedger, truth, type Table } from '@coffre/db/dialect';
+import { canonicalTimestamp, changedRows, clock, clockMillis, forUpdate, migrationLedger, tombstone, truth, type Table } from '@coffre/db/dialect';
 import type * as schema from '@coffre/db/schema';
-import { and, asc, count, countDistinct, desc, eq, getTableColumns, getTableName, gt, gte, inArray, isNull, like, lt, notInArray, notLike, or, sql, type AnyColumn, type SQL } from 'drizzle-orm';
+import { and, asc, count, countDistinct, desc, eq, getTableColumns, getTableName, gt, gte, inArray, isNull, like, lt, not, notInArray, or, sql, type AnyColumn, type SQL } from 'drizzle-orm';
 
 import { authMac, checkAuthRow, issuingBinding, verifyAuthRow, type AuthRow, type AuthTable } from '../auth-rows.ts';
 
@@ -146,14 +147,9 @@ export type ResolvedPath = {
 
 const none = sql`1 = 0`;
 
-/**
- * A deleted project or environment: its tombstone keeps the row, which the
- * log names, under a slug no live place holds, `market~deleted-2026-10-05`.
- */
-const TOMBSTONE = '~deleted-';
-
+/** A place that is not deleted: its slug is no tombstone's (`@coffre/core/schemas`). */
 function standing(slug: AnyColumn): SQL {
-  return notLike(slug, '%~%');
+  return not(tombstone(slug));
 }
 
 /**
@@ -360,15 +356,15 @@ export async function eraseVersions(tx: Transaction, place: Doomed): Promise<num
  */
 export async function tombstoneSlug(db: Queryable, slug: string, day: Date, within: { projectId: string } | null): Promise<string> {
   const { projects, environments } = tablesOf(db);
-  const base = `${slug}${TOMBSTONE}${day.toISOString().slice(0, 10)}`;
+  const base = tombstoneOf(slug, day);
   const rows = within === null
     ? await db.select({ slug: projects.slug }).from(projects).where(like(projects.slug, `${base}%`))
     : await db.select({ slug: environments.slug }).from(environments)
       .where(and(eq(environments.projectId, within.projectId), like(environments.slug, `${base}%`)));
   const taken = new Set(rows.map((row) => row.slug));
-  let candidate = base;
-  for (let n = 2; taken.has(candidate); n += 1) candidate = `${base}-${n}`;
-  return candidate;
+  let n = 1;
+  while (taken.has(tombstoneOf(slug, day, n))) n += 1;
+  return tombstoneOf(slug, day, n);
 }
 
 // --- members and sign-in ------------------------------------------------------

@@ -1,4 +1,5 @@
-import { entityKind, getTableColumns, sql, type SQL } from 'drizzle-orm';
+import { TOMBSTONE } from '@coffre/core/schemas';
+import { entityKind, getTableColumns, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 
 import type { Queryable } from './database.ts';
@@ -72,6 +73,11 @@ export async function upsert<T extends Table>(
     target: target.map((name) => all[name as string]) as never,
     set: set as never,
   });
+}
+
+/** A tombstone's slug, `@coffre/core/schemas`'s `isTombstone` in SQL. No LIKE wildcard is a `~`. */
+export function tombstone(slug: SQLWrapper): SQL {
+  return sql`${slug} LIKE ${`%${TOMBSTONE}%`}`;
 }
 
 /** A condition read as a boolean: Postgres returns true or false, SQLite 1 or 0. */

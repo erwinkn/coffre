@@ -445,9 +445,12 @@ const DELETIONS_MIGRATION = '0006_deletions';
  * says what it would take and changes nothing.
  *
  * The vault revokes the grants first, one call per member, and the app then
- * erases and renames in one transaction with its entry. Each step finds
- * only what is left, so a deletion cut off between them finishes when
- * asked again.
+ * erases and renames in one transaction with its entry, under the log's
+ * head: there it finds the place still archived and holding no grant, or
+ * refuses with a 409, a place restored meanwhile kept, a grant set
+ * meanwhile left for the next attempt to revoke. Each step finds only what
+ * is left, so a deletion cut off or refused between them finishes when
+ * asked again. Once it commits, the vault grants nothing there.
  */
 export async function deletePlace(ctx: ApiContext, place: ResolvedPath, { dryRun }: { dryRun: boolean }): Promise<DeletionResult> {
   const { project, environment } = place;
@@ -460,7 +463,8 @@ export async function deletePlace(ctx: ApiContext, place: ResolvedPath, { dryRun
     conflict(`${path} is not archived: \`coffre ${what === 'project' ? 'projects' : 'environments'} archive ${path}\` first`),
     denied(ctx, action, 'not_archived', fields),
   );
-  const archived = (at: ResolvedPath) => at.project.archivedAt !== null || (at.environment?.archivedAt ?? null) !== null;
+  // The place itself: an environment under an archived project is archived only once it is.
+  const archived = (at: ResolvedPath) => (environment === null ? at.project.archivedAt : (at.environment?.archivedAt ?? null)) !== null;
 
   return withRefusals(ctx, async () => {
     requireOwner(ctx, action, fields);
@@ -513,7 +517,19 @@ export async function deletePlace(ctx: ApiContext, place: ResolvedPath, { dryRun
       if (now === null || now.project.id !== project.id || (environment !== null && now.environment?.id !== environment.id)) {
         throw conflict(`${path} changed while it was being deleted: look again, and ask again`);
       }
-      if (!archived(now)) throw notArchived();
+      if (!archived(now)) {
+        throw new Refusal(
+          conflict(`${path} was restored while it was being deleted: nothing was erased, but the grants on it were revoked`),
+          denied(ctx, action, 'restored', fields),
+        );
+      }
+      // A grant set there since the vault revoked them would outlive the place, named by no path that could revoke it.
+      if ((await deletionScope(tx, doomed)).grants.length > 0) {
+        throw new Refusal(
+          conflict(`${path} was granted while it was being deleted: ask again, and that grant is revoked too`),
+          denied(ctx, action, 'granted_meanwhile', fields),
+        );
+      }
       const tombstone = await tombstoneSlug(tx, slug, new Date(), within);
       const versions = await eraseVersions(tx, doomed);
       if (environment === null) await update(tx, projects, { id: project.id }, { slug: tombstone });

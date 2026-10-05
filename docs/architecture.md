@@ -737,7 +737,9 @@ Before it runs, the same queries work, more slowly.
 
 Archiving hides a project or an environment and changes nothing stored.
 Deleting an archived one, which only an instance owner may do, frees the
-space its values take and hides it for good. `coffre projects delete market`
+space its values take and hides it for good. The place itself must be
+archived: an environment under an archived project is deleted alone only
+once it is archived too. `coffre projects delete market`
 shows what it would take; with `--apply` it deletes:
 
 - **Erased:** every version's ciphertext and wrapped data key, emptied in
@@ -764,9 +766,16 @@ shows what it would take; with `--apply` it deletes:
   erased and revoked. The log verifies after, as before.
 
 The vault's revocations commit first, outside any app transaction, then
-the app erases, renames and logs in one transaction under the log's head,
-checking the place is still archived. Each step does only what is left, so
-a deletion cut off between them finishes when asked again. Backups taken
+the app erases, renames and logs in one transaction under the log's head.
+There it checks the place is still archived and holds no grant: a place
+restored meanwhile is kept, unerased, and a grant set meanwhile is left
+for the next attempt, each refused with a 409. Each step does only what is
+left, so a deletion cut off or refused between them finishes when asked
+again. Once it commits, the vault grants nothing there: `setAccess` reads
+the place under the same head and refuses a grant on a tombstone as
+`deleted`, though not a revocation. The rule itself, a `~` in the slug, is
+one predicate, `isTombstone` in `@coffre/core/schemas`, and `tombstone()` in
+`@coffre/db/dialect` for SQL. Backups taken
 before still hold the encrypted values, and restoring one brings them back
 with the vault key ([restore.md](restore.md)).
 

@@ -2,7 +2,6 @@
 -- name, under a slug no live place can take: `market~deleted-2026-10-05`.
 -- SQLite changes a check by rebuilding its table; libSQL runs a migration
 -- with foreign keys off, so the rebuild drops nothing that refers to it.
-PRAGMA foreign_keys=OFF;--> statement-breakpoint
 CREATE TABLE `__new_environments` (
 	`id` text PRIMARY KEY NOT NULL,
 	`project_id` text NOT NULL,
@@ -17,7 +16,6 @@ CREATE TABLE `__new_environments` (
 INSERT INTO `__new_environments`("id", "project_id", "slug", "name", "created_at", "archived_at") SELECT "id", "project_id", "slug", "name", "created_at", "archived_at" FROM `environments`;--> statement-breakpoint
 DROP TABLE `environments`;--> statement-breakpoint
 ALTER TABLE `__new_environments` RENAME TO `environments`;--> statement-breakpoint
-PRAGMA foreign_keys=ON;--> statement-breakpoint
 CREATE UNIQUE INDEX `environments_project_id_slug_key` ON `environments` (`project_id`,`slug`);--> statement-breakpoint
 CREATE UNIQUE INDEX `environments_project_scoped` ON `environments` (`id`,`project_id`);--> statement-breakpoint
 CREATE TABLE `__new_projects` (
@@ -32,7 +30,7 @@ CREATE TABLE `__new_projects` (
 INSERT INTO `__new_projects`("id", "slug", "name", "created_at", "archived_at") SELECT "id", "slug", "name", "created_at", "archived_at" FROM `projects`;--> statement-breakpoint
 DROP TABLE `projects`;--> statement-breakpoint
 ALTER TABLE `__new_projects` RENAME TO `projects`;--> statement-breakpoint
-CREATE UNIQUE INDEX `projects_slug_key` ON `projects` (`slug`);;--> statement-breakpoint
+CREATE UNIQUE INDEX `projects_slug_key` ON `projects` (`slug`);--> statement-breakpoint
 -- Its versions stay too, and lose what they sealed: the app empties their
 -- ciphertext and wrapped data key. That is the one change a version takes:
 -- a value is never rewritten in place, only erased.
