@@ -47,6 +47,7 @@ export const keys = {
   projects: ['projects'],
   grants: (project: string) => ['grants', project],
   secrets: ({ project, environment }: Place) => ['secrets', project, environment],
+  references: (path: string) => ['references', path],
   directory: ['directory'],
   report: (member: string) => ['report', member],
   credentials: (member: string) => ['credentials', member],
@@ -133,6 +134,13 @@ export const queries = {
     queryOptions({
       queryKey: keys.secrets(place),
       queryFn: () => uiResult(() => client.secrets.list(`${place.project}/${place.environment}`)),
+    }),
+
+  /** The live references into and out of a place, and who reads through them, for whoever manages its access. */
+  references: (client: CoffreClient, path: string) =>
+    queryOptions({
+      queryKey: keys.references(path),
+      queryFn: () => uiResult(() => client.references.list(path)),
     }),
 
   /**
@@ -427,7 +435,7 @@ export const affects = {
   /** A project or environment made, renamed or archived: the tree, and where you hold access. */
   places: (): QueryKey[] => [keys.projects, keys.me],
   /** Secrets written, renamed, restored or archived: the environment and the counts. */
-  secrets: (place: Place): QueryKey[] => [keys.secrets(place), keys.projects],
+  secrets: (place: Place): QueryKey[] => [keys.secrets(place), keys.projects, ['references']],
   /**
    * Someone's access in a project changed: its grants, their report, and, as
    * it may be your own, what you can see.

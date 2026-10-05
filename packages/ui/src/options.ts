@@ -90,9 +90,14 @@ export const project = {
   validateSearch: (search: Record<string, unknown>): { tab?: Exclude<ProjectTab, 'environments'> } => ({
     tab: search.tab === 'users' || search.tab === 'tokens' || search.tab === 'settings' ? search.tab : undefined,
   }),
-  loader: ({ context, params }: Loader<{ project: string }>) => {
+  loader: async ({ context, params }: Loader<{ project: string }>) => {
     const { coffre, queryClient } = coffreOf(context);
-    return loadProject(queryClient, coffre, params.project);
+    // What others read of it through references, which its access tab shows beside the grants.
+    const [project] = await Promise.all([
+      loadProject(queryClient, coffre, params.project),
+      queryClient.fetchQuery(queries.references(coffre, params.project)),
+    ]);
+    return project;
   },
 };
 
@@ -102,9 +107,14 @@ export const environment = {
   validateSearch: (search: Record<string, unknown>): { filter?: string } => ({
     filter: typeof search.filter === 'string' && search.filter !== '' ? search.filter : undefined,
   }),
-  loader: ({ context, params }: Loader<{ project: string; environment: string }>) => {
+  loader: async ({ context, params }: Loader<{ project: string; environment: string }>) => {
     const { coffre, queryClient } = coffreOf(context);
-    return queryClient.fetchQuery(queries.secrets(coffre, params));
+    // The references that read its secrets from elsewhere, rendered with them.
+    const [secrets] = await Promise.all([
+      queryClient.fetchQuery(queries.secrets(coffre, params)),
+      queryClient.fetchQuery(queries.references(coffre, `${params.project}/${params.environment}`)),
+    ]);
+    return secrets;
   },
 };
 

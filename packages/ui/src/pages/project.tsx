@@ -18,6 +18,7 @@ import { useChange, useChangeStatus } from '../lib/use-change';
 import { ItemFailure, RowPending, rowClass } from '../components/row-state';
 import { useAction } from '../lib/use-action';
 import type { GrantRow, ProjectSummary } from '../shared/models';
+import { ReferencesInto } from '../components/references';
 import {
   hasEnvironmentDetails,
   isActiveAccessibleEnvironment,
@@ -185,12 +186,15 @@ function ProjectView({
         (grantsError !== null ? (
           <Notice tone="bad">{grantsError}</Notice>
         ) : (
-          <AccessPanel
-            principalType={principalType}
-            project={project.slug}
-            environments={project.environments}
-            grants={grants}
-          />
+          <>
+            <AccessPanel
+              principalType={principalType}
+              project={project.slug}
+              environments={project.environments}
+              grants={grants}
+            />
+            {tab === 'users' && <ReferencesInto project={project.slug} />}
+          </>
         ))}
 
       {tab === 'settings' && (
@@ -606,8 +610,16 @@ function NewEnvironment({ project, sources }: { project: string; sources: string
   const [open, setOpen] = useState(false);
   const [slug, setSlug] = useState('');
   const [name, setName] = useState('');
-  const [from, setFrom] = useState('');
-  const create = useChange(createEnvironment(useCoffre(), project));
+  // '' for empty, 'copy:prod' for a copy, 'ref:prod' for references to prod.
+  const [start, setStart] = useState('');
+  const [how, from] = start === '' ? ['', ''] : (start.split(':') as ['copy' | 'ref', string]);
+  const coffre = useCoffre();
+  // A fork as references copies the keys whose source you read only through their parent: said before you confirm.
+  const { data: parent } = useQuery({ ...queries.secrets(coffre, { project, environment: from }), enabled: how === 'ref' });
+  const copied = how === 'ref' && parent?.ok === true
+    ? parent.keys.filter((key) => !key.archived && key.reference !== null && !key.reference.canOpenSource).map((key) => key.key)
+    : [];
+  const create = useChange(createEnvironment(coffre, project));
   const slugError = slug === '' ? null : slugProblem(slug);
   const reachedBy = reaching(useEveryProject(), slugError === null && slug !== '' ? slug : null);
 
@@ -636,10 +648,10 @@ function NewEnvironment({ project, sources }: { project: string; sources: string
           onSubmit={(event) => {
             event.preventDefault();
             // Listed at once, as saving; the list says if the server refuses.
-            create({ slug, name: name.trim(), ...(from === '' ? {} : { from }) });
+            create({ slug, name: name.trim(), ...(from === '' ? {} : { from }), ...(how === 'ref' ? { references: true } : {}) });
             setSlug('');
             setName('');
-            setFrom('');
+            setStart('');
             close();
           }}
         >
@@ -679,19 +691,31 @@ function NewEnvironment({ project, sources }: { project: string; sources: string
           {sources.length > 0 && (
             <label className="field">
               <span className="label">Start from</span>
-              <select className="select" value={from} onChange={(event) => setFrom(event.target.value)}>
+              <select className="select" value={start} onChange={(event) => setStart(event.target.value)}>
                 <option value="">Empty</option>
                 {sources.map((source) => (
-                  <option key={source} value={source}>
+                  <option key={`copy:${source}`} value={`copy:${source}`}>
                     A copy of {source}
+                  </option>
+                ))}
+                {sources.map((source) => (
+                  <option key={`ref:${source}`} value={`ref:${source}`}>
+                    References to {source}
                   </option>
                 ))}
               </select>
               <span className="hint">
-                {from === ''
+                {how === ''
                   ? 'No secrets yet.'
-                  : `Each of ${from}'s keys, with its current value and folder, without history. Copying reads them, in your name.`}
+                  : how === 'copy'
+                    ? `Each of ${from}'s keys, with its current value and folder, without history. Copying reads them, in your name.`
+                    : `Each key follows ${from}'s until it gets a value of its own. Whoever can read ${slug === '' ? 'the new environment' : slug} will read ${from}'s values through them, even without access to ${from}.`}
               </span>
+              {copied.length > 0 && (
+                <span className="hint">
+                  Copied instead, since you read their source only through {from}: <span className="mono">{copied.join(', ')}</span>.
+                </span>
+              )}
             </label>
           )}
 

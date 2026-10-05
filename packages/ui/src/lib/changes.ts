@@ -311,7 +311,7 @@ export function environmentId(project: string, environment: string): string {
 }
 
 /** A new environment, empty or, `from` a sibling, forked: each of its keys copied. */
-export function createEnvironment(client: CoffreClient, project: string): Change<Projects, Environment, { slug: string; name: string; from?: string }, void> {
+export function createEnvironment(client: CoffreClient, project: string): Change<Projects, Environment, { slug: string; name: string; from?: string; references?: boolean }, void> {
   return {
     list: environmentsList(project),
     label: (vars) => `environment ${vars.slug}`,
@@ -325,6 +325,7 @@ export function createEnvironment(client: CoffreClient, project: string): Change
       const { created } = await client.environments.create(`${project}/${vars.slug}`, {
         name: vars.name,
         ...(vars.from === undefined ? {} : { from: vars.from }),
+        ...(vars.references === true ? { references: true } : {}),
       });
       if (!created) throw new Refusal(`An environment named "${vars.slug}" already exists.`);
     },

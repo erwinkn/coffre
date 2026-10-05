@@ -3,6 +3,7 @@ import type { PrincipalReport, RemovedPrincipal } from '../shared/models';
 import { Card } from './page';
 import { EmptyState, Notice, Timestamp } from './ui';
 import { PrincipalLink } from './principal';
+import { referenceProblem } from './references';
 import { ChevronRight, Key, User } from './icons';
 import { serviceName } from '@coffre/client';
 
@@ -17,6 +18,7 @@ export function PrincipalReportCards({ report }: { report: PrincipalReport }) {
     <>
       {report.status === 'removed' && <ConsiderRotating report={report} person={person} />}
       {report.issuedTokens.length > 0 && <IssuedTokens report={report} />}
+      {report.references.length > 0 && <MadeReferences report={report} />}
     </>
   );
 }
@@ -167,6 +169,46 @@ function ConsiderRotating({ report, person }: { report: PrincipalReport; person:
           </table>
         </div>
       )}
+    </Card>
+  );
+}
+
+/**
+ * References they made: decisions that outlive them, each letting whoever
+ * reads its environment read another secret. Listed to review, not ended.
+ */
+function MadeReferences({ report }: { report: PrincipalReport }) {
+  return (
+    <Card
+      labelledBy="made-references"
+      title="References they made"
+      description="Each lets whoever reads its environment read another secret, and stays after they leave. Review them; the source's access managers, or whoever writes where one is held, can break it."
+    >
+      <div className="dt-wrap">
+        <table className="dt stacks">
+          <thead>
+            <tr>
+              <th>Reference</th>
+              <th>Reads</th>
+              <th className="col-shrink">Made</th>
+            </tr>
+          </thead>
+          <tbody>
+            {report.references.map((reference) => (
+              <tr key={reference.id}>
+                <td className="mono" data-label="Reference">{reference.holder}</td>
+                <td data-label="Reads">
+                  <span className="mono">{reference.source}</span>
+                  {reference.state !== 'live' && <span className="cell-muted"> · {referenceProblem(reference.state)}</span>}
+                </td>
+                <td className="col-shrink nowrap" data-label="Made">
+                  <Timestamp iso={reference.createdAt} display="relative" />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </Card>
   );
 }
