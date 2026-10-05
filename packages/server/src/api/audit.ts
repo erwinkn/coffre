@@ -28,7 +28,6 @@ export type AuditEntryView = {
   author: 'app' | 'vault';
   occurredAt: string;
   actorType: 'user' | 'service' | 'system';
-  /** A sync acts as the system, with `sync:<id>` as its id. */
   actorId: string;
   /** What was done; `ACTIONS` below, and `DETAIL_ACTIONS` for the hidden ones. */
   action: string;
@@ -37,7 +36,7 @@ export type AuditEntryView = {
   reason: string | null;
   /** A technical step or a sign-in: left out unless asked for. */
   detail: boolean;
-  /** The member an access or membership entry is about: `user:ada@acme.example`, `token:ci`, `sync:…`. */
+  /** The member an access or membership entry is about: `user:ada@acme.example`, `token:ci`. */
   subject: string | null;
   project: string | null;
   environment: string | null;
@@ -85,7 +84,6 @@ export const DETAIL_ACTIONS = [
   'reference.create',
   'key.intent',
   'key.check',
-  'sync.run',
   'audit.heartbeat',
   'audit.checkpoint',
 ] as const;
@@ -140,7 +138,7 @@ export type VaultVerification =
 
 export type AuditQuery = {
   path?: Path;
-  /** `user:ada@acme.example`, `token:ci-deploy`, or a raw actor id such as `sync:…`. */
+  /** `user:ada@acme.example`, `token:ci-deploy`, or a system actor's name. */
   actor?: string;
   decision?: 'allow' | 'deny';
   /** Include the detail entries, `DETAIL_ACTIONS`. */
@@ -207,7 +205,7 @@ export async function listAudit(
   if (query.actor !== undefined) {
     filter.actors = /^(user|token):/.test(query.actor)
       ? [formatMember(parseMember(query.actor))]
-      : ['user', 'token', 'sync', 'system'].map((prefix) => `${prefix}:${query.actor}`).concat(query.actor);
+      : ['user', 'token', 'system'].map((prefix) => `${prefix}:${query.actor}`).concat(query.actor);
   }
   if (query.before !== undefined) filter.beforeSeq = BigInt(query.before);
 

@@ -1,13 +1,12 @@
 import { randomUUID } from 'node:crypto';
 
-import { environmentSecrets, resolvePath, type ResolvedPath } from '../db/queries.ts';
+import { environmentSecrets, fileSecrets, resolvePath, secretFolderOf, type ResolvedPath } from '../db/queries.ts';
 import { can, placeOf } from './caller.ts';
 import { asking, audited, need, withRefusals, type ApiContext } from './context.ts';
 import { conflict, notFound, vaultRefused } from './errors.ts';
-import { fileSecrets, secretFoldersIn } from './folders.ts';
 import { openValues } from './keys.ts';
 import { putEnvironment, type InheritedGrant, type PlaceView } from './projects.ts';
-import { currentReferences, placeOfRow, readableValues, requireReferences } from './references.ts';
+import { currentReferences, placeOfRow, readableValues } from './references.ts';
 import { checkEnvironment, setSecrets, type SecretValue } from './secrets.ts';
 
 /**
@@ -49,7 +48,6 @@ export async function forkEnvironment(
     if (source?.environment == null || source.project.archivedAt !== null || source.environment.archivedAt !== null) {
       throw notFound(`${project.slug} has no environment ${from} to fork`);
     }
-    if (input.references) await requireReferences(ctx.db);
     const sourcePlace = { projectId: project.id, environmentId: source.environment.id };
     need(ctx, 'secret.read', placeOf(project, source.environment), 'environment.fork', { metadata: { from, slug } });
     if (place.environment !== null) {
@@ -79,7 +77,7 @@ export async function forkEnvironment(
 
     // Each key keeps its folder.
     const sourceRows = await environmentSecrets(ctx.db, source.environment.id);
-    const folders = await secretFoldersIn(ctx.db, source.environment.id);
+    const folders = await secretFolderOf(ctx.db, source.environment.id);
     const filed = sourceRows.flatMap((row) => {
       const folder = folders.get(row.id);
       return folder === undefined || !(row.key in patch) ? [] : [{ key: row.key, folder }];
@@ -89,7 +87,7 @@ export async function forkEnvironment(
       await audited(ctx, async (tx) => {
         // Under the head, as every write to a place: the new environment may have gone since the copy.
         await checkEnvironment(tx, target, { projectId: project.id, environmentId: target.environment!.id });
-        await fileSecrets(tx, filed.map(({ key, folder }) => ({ secretId: ids.get(key)!, folder })), ctx.caller.principal.id);
+        await fileSecrets(tx, filed.map(({ key, folder }) => ({ secretId: ids.get(key)!, folder })));
       });
     }
     return { environment, created, inherited, forked };

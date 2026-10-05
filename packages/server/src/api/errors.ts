@@ -18,6 +18,8 @@ import { logged } from '../logged.ts';
  *   405 method_not_allowed
  *   409 conflict           the request is valid but the current state refuses it
  *   429 too_many_requests  too many sign-ins waiting; try again later
+ *   503 unavailable        something coffre needs is not answering
+ *   503 migrating          the database lacks this version's migrations: nothing is served until `coffre migrate`
  *   500 internal_error     a bug; the details are in the server log only
  *
  * The message is written for a person and is safe to show them.
@@ -36,6 +38,7 @@ export const ERROR_STATUS = {
   conflict: 409,
   too_many_requests: 429,
   unavailable: 503,
+  migrating: 503,
   internal_error: 500,
 } as const;
 

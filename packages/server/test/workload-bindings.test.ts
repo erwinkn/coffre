@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 
 import { defineSignin, github, MAX_BINDINGS, signin as signinAuth, type BindingClaims } from '@coffre/core/identity';
 import type { Database } from '@coffre/db';
-import { migrationLedger } from '@coffre/db/dialect';
 import { asc, eq, sql, type SQL } from 'drizzle-orm';
 
 import { auditLog, serviceBindings } from './db/tables.ts';
@@ -231,26 +230,6 @@ test('removing the service ends its bindings, and admitting it again does not br
   assert.deepEqual((await live()).map((row) => row.id), [binding.id]);
 });
 
-test('without the migration that adds bindings, the routes say so and everything else works', async () => {
-  // Forget every migration after 0001 in the ledger, as on a database deployed to before `coffre migrate`.
-  // SQLite's ledger has no IDs: entries are in order of time, and their hashes name them.
-  const ledger = migrationLedger(db.owner);
-  const later = (await rows(sql`SELECT * FROM ${ledger} ORDER BY created_at`)).slice(2);
-  for (const entry of later) await run(sql`DELETE FROM ${ledger} WHERE hash = ${entry.hash}`);
-  try {
-    await assert.rejects(bind(), /trust bindings need this release's database migration/);
-    await assert.rejects(as(LEAD).bindings.list(MEMBER), /trust bindings need this release's database migration/);
-    assert.ok((await as(LEAD).members.list()).members.some((member) => member.member === MEMBER));
-  } finally {
-    for (const entry of later) {
-      const columns = Object.keys(entry);
-      await run(sql`INSERT INTO ${ledger} (${sql.join(columns.map((column) => sql.identifier(column)), sql`, `)})
-        VALUES (${sql.join(columns.map((column) => sql`${entry[column]}`), sql`, `)})`);
-    }
-  }
-  await bind();
-});
-
 test('with workloads off, the routes say how to turn them on', async () => {
   delete deps.workloads;
   await assert.rejects(bind(), /this instance trusts no workloads: the deployment's signin\(\{ workloads \}\) turns them on/);
@@ -278,17 +257,6 @@ test('loopback issuers are for development: an instance off loopback refuses to 
   const local = auth.resolve('http://127.0.0.1:3082');
   assert.equal(local.mode === 'signin' && local.signin.workloads?.allowLoopback, true);
 });
-
-/** Raw SQL as the owner, on either engine. */
-async function rows(query: SQL): Promise<Record<string, unknown>[]> {
-  if (TEST_ENGINE === 'sqlite') return (db.owner as unknown as { all: (q: SQL) => Promise<Record<string, unknown>[]> }).all(query);
-  return ((await (db.owner as unknown as { execute: (q: SQL) => Promise<{ rows: Record<string, unknown>[] }> }).execute(query)).rows);
-}
-
-async function run(query: SQL): Promise<void> {
-  if (TEST_ENGINE === 'sqlite') await (db.owner as unknown as { run: (q: SQL) => Promise<unknown> }).run(query);
-  else await (db.owner as unknown as { execute: (q: SQL) => Promise<unknown> }).execute(query);
-}
 
 test("an owner looks up a public repository's or project's IDs; a private one is not found, and its IDs are typed in", async () => {
   documents.set('https://api.github.com/repos/acme/api', { id: 41532, owner: { id: 9919 } });

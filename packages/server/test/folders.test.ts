@@ -2,14 +2,10 @@ import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import type { CoffreClient } from '@coffre/client';
-import { migrationLedger } from '@coffre/db/dialect';
-import { and, asc, eq, gte, sql, type SQL } from 'drizzle-orm';
+import { and, asc, eq, gte } from 'drizzle-orm';
 
 import { auditChainHead, auditLog } from './db/tables.ts';
-import { TEST_ENGINE } from './db/engine.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
-import { FOLDERS_MIGRATION } from '../src/api/folders.ts';
-import { KNOWN_MIGRATIONS } from '@coffre/db/schema-version';
 
 const ROOT = 'admin@acme.example';
 const DEVELOPER = 'developer@acme.example';
@@ -170,42 +166,3 @@ test('a folder is a plain name: no slash, no control character, no space at eith
   }
   assert.equal((await root.projects.update('acme', { folder: 'Clients · EU' })).project.folder, 'Clients · EU');
 });
-
-test('before its migration, this release lists everything in no folder, writes secrets as before, and refuses to move', async () => {
-  await root.projects.update('acme', { folder: 'Clients' });
-  // A database deployed to before `coffre migrate`: no folder tables, and the ledger without them.
-  const ledger = migrationLedger(db.owner);
-  const later = (await rows(sql`SELECT * FROM ${ledger} ORDER BY created_at`)).slice(KNOWN_MIGRATIONS.postgres.indexOf(FOLDERS_MIGRATION));
-  for (const entry of later) await run(sql`DELETE FROM ${ledger} WHERE hash = ${entry.hash}`);
-  await run(sql`ALTER TABLE project_folders RENAME TO project_folders_away`);
-  await run(sql`ALTER TABLE secret_folders RENAME TO secret_folders_away`);
-  try {
-    assert.equal(await folderOf(root, 'acme'), null);
-    await developer.secrets.set('market/prod', { NEW_KEY: 'new' });
-    assert.deepEqual((await reader.secrets.list('market/prod')).keys.map((key) => key.folder), [null, null, null, null]);
-    assert.equal((await reader.secrets.reveal('market/prod/NEW_KEY')).values.NEW_KEY, 'new');
-    await developer.secrets.rename('market/prod/NEW_KEY', 'NEWER_KEY');
-    await assert.rejects(root.projects.update('acme', { folder: 'Other' }), { status: 503 });
-    await assert.rejects(developer.secrets.update('market/prod/PORT', { folder: 'web' }), { status: 503 });
-  } finally {
-    await run(sql`ALTER TABLE project_folders_away RENAME TO project_folders`);
-    await run(sql`ALTER TABLE secret_folders_away RENAME TO secret_folders`);
-    for (const entry of later) {
-      const columns = Object.keys(entry);
-      await run(sql`INSERT INTO ${ledger} (${sql.join(columns.map((column) => sql.identifier(column)), sql`, `)})
-        VALUES (${sql.join(columns.map((column) => sql`${entry[column]}`), sql`, `)})`);
-    }
-  }
-  assert.equal(await folderOf(root, 'acme'), 'Clients');
-});
-
-/** Raw SQL as the owner, on either engine. */
-async function rows(query: SQL): Promise<Record<string, unknown>[]> {
-  if (TEST_ENGINE === 'sqlite') return (db.owner as unknown as { all: (q: SQL) => Promise<Record<string, unknown>[]> }).all(query);
-  return (await (db.owner as unknown as { execute: (q: SQL) => Promise<{ rows: Record<string, unknown>[] }> }).execute(query)).rows;
-}
-
-async function run(query: SQL): Promise<void> {
-  if (TEST_ENGINE === 'sqlite') await (db.owner as unknown as { run: (q: SQL) => Promise<unknown> }).run(query);
-  else await (db.owner as unknown as { execute: (q: SQL) => Promise<unknown> }).execute(query);
-}

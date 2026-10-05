@@ -1,9 +1,9 @@
 import { verifyCheckpoint, type Vault } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
-import { requiredMigrations } from '@coffre/db/schema-version';
+import { migrated } from '@coffre/db/schema-version';
 
 import { appendAudit } from './db/audit.ts';
-import { appliedMigrations, readiness } from './db/queries.ts';
+import { readiness } from './db/queries.ts';
 
 export type HeartbeatLogger = {
   warn: (obj: unknown, msg: string) => void;
@@ -85,7 +85,7 @@ export type Readiness = {
 export async function auditReadiness(db: Database, vault: Vault): Promise<Readiness> {
   const unready: Readiness = { ok: false, heartbeatAgeSeconds: null, checkpointed: false };
   try {
-    if ((await appliedMigrations(db)) < requiredMigrations(db)) return unready;
+    if (!(await migrated(db))) return unready;
     const { beat, checkpoint } = await readiness(db);
     if (beat === null) return unready;
     // Asked each time: after a rotation, the key the vault signed with until then counts only for what came before.

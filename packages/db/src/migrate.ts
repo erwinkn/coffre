@@ -122,6 +122,9 @@ export class DatabaseAhead extends Error {
   }
 }
 
+/** The release whose baseline every database since was made from. */
+const CLEAN_BREAK = '0.4.0';
+
 function verifyHistory(
   expected: ExpectedMigration[],
   applied: AppliedMigration[] | null,
@@ -131,6 +134,8 @@ function verifyHistory(
   rows.slice(0, expected.length).forEach((row, index) => {
     const local = expected[index]!;
     if (row.created_at !== local.createdAt || row.hash !== local.hash) {
+      // 0.4.0 began again from one baseline: a database from before it is not upgraded, but made afresh.
+      if (index === 0) throw new Error(`the database was made by a coffre before ${CLEAN_BREAK}, which is a clean break: deploy afresh, on a new database (docs/deploy.md)`);
       throw new Error(
         `migration history diverged at ${local.tag}; applied migrations must never be edited`,
       );

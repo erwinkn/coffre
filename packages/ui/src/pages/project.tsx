@@ -956,7 +956,7 @@ function GeneralSettings({ project }: { project: ProjectSummary }) {
             () => coffre.projects.update(project.slug, {
               slug,
               name,
-              // Only when it moves: before the migration that makes folders, moving answers 503.
+              // Only when it moves: a move is logged, as `project.move`.
               ...(nextFolder === project.folder ? {} : { folder: nextFolder }),
             }),
             {

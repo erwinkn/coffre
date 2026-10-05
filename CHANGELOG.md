@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+**0.4.0 is a clean break.** There is no upgrade from 0.3 or earlier: deploy
+0.4.0 afresh, on a new database, and bring over what you keep with
+`coffre export` ([deploy.md](docs/deploy.md#from-a-release-before-040)).
+The schema starts again from one baseline per engine, which only a new
+database takes; `coffre migrate` refuses a database an earlier release
+made, saying so. Folders are a `folder` column on projects and secrets, and
+the last of 0.1's syncs is gone from the schema, the vault and the audit
+page.
+
+**Migrate, then deploy; never the other way.** Below the migrations its
+release ships, the app answers everything but `/livez` and `/readyz` with
+503 `migrating` (an HTML page for a browser), `/readyz` stays red, and the
+scheduled job reports the same; it checks once per isolate or process,
+until it holds. The per-feature checks that let a release run on the schema
+before its migrations are gone, with the 503s they answered. With Workers
+Builds, both Workers' builds now start with `printenv DATABASE_OWNER_URL |
+pnpm exec coffre migrate --yes`, the app's too, each with the
+`DATABASE_OWNER_URL` build variable ([Workers Builds](docs/deploy.md#workers-builds));
+`coffre setup` says so. `coffre migrate` runs only in a deployment's
+folder: its instance mode, the CLI's daily "migrations pending" line and
+the pages' "Database migrations pending" banner are gone, as nothing
+serves with migrations pending, and `GET /api/me` no longer reports the
+instance's version and migrations. `pnpm test:compat` is off in CI for
+0.4.0 and returns for 0.5.0, against 0.4.0.
+
 **Folder commands.** `coffre folders` lists the folders of projects and
 what is in each, and `coffre folders market/prod` an environment's key
 folders, both with `--json`. `coffre folders rename Clients Customers`
@@ -246,7 +271,7 @@ coffre access '*'                                           # who holds them
 - **Revoke grants on every project before rolling back past this release.**
   An older vault does not know them, and refuses everyone who holds one, as
   a member whose record was changed around it, until an owner removes them
-  ([deploy.md](docs/deploy.md#rolling-back-past-grants-on-every-project)).
+  (deploy.md for 0.3.0, "Rolling back past grants on every project").
 
 **`coffre trust` from first use.**
 - A binding matches one event, and trusting a workflow that also runs by
@@ -543,7 +568,7 @@ they work with the old schema. Once old versions have stopped receiving
 requests and scheduled events, have the database owner clear `sync_keys`
 and then `syncs` after the destinations have been migrated, and run
 `pnpm migrate` with the owner URL. An old app can create new syncs; do not
-restart it. [Workers upgrade steps](docs/deploy.md#upgrading-to-0112-with-workers-builds)
+restart it. Workers upgrade steps (deploy.md for 0.1.12, "Upgrading to 0.1.12")
 include the exact command and login.
 Remove unneeded third-party tokens stored as ordinary coffre secrets and
 revoke those tokens with their issuers. Removing a sync never revoked copies

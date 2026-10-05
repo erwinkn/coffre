@@ -195,6 +195,7 @@ test('a removed member stays out despite a live session, until the vault admits 
     // Every token is simply the email of whoever holds it, and never expires.
     verifier: { verify: async (token: string): Promise<Principal> => ({ type: 'user', id: token, email: token, subject: token }) },
     waitUntil,
+    schema: { migrated: true },
   };
   const reveal = () =>
     fetchApi(

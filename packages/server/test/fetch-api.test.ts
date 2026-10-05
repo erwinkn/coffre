@@ -46,6 +46,7 @@ function runtimeFor(auth: AuthConfig): CoffreRuntime {
     publicUrl: ORIGIN,
     verifier: { verify: async (token: string): Promise<Principal> => ({ type: 'user', id: token, email: token, subject: token }) },
     waitUntil,
+    schema: { migrated: true },
   };
 }
 

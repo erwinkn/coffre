@@ -25,13 +25,6 @@ export type Api = {
         environment: string;
         permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.write")[];
       }[];
-      instance: null | {
-        version: string;
-        migrations: {
-          applied: number;
-          known: string[];
-        };
-      };
     };
   };
   "GET /projects": {
@@ -1063,14 +1056,6 @@ export type InheritedGrant = {
   expiresAt: string | null;
 };
 
-export type InstanceState = {
-  version: string;
-  migrations: {
-    applied: number;
-    known: string[];
-  };
-};
-
 export type Me = {
   principal: {
     type: "service" | "user";
@@ -1090,13 +1075,6 @@ export type Me = {
     environment: string;
     permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.write")[];
   }[];
-  instance: null | {
-    version: string;
-    migrations: {
-      applied: number;
-      known: string[];
-    };
-  };
 };
 
 export type Member = {

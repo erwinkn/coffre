@@ -42,9 +42,9 @@ export { ACCESS_ACTIONS };
  */
 export type Place = GrantPlace;
 
-/** A grant as stored; `@coffre/db/grants` reads and writes them on any schema since the baseline. */
+/** A grant as stored, which `@coffre/db/grants` reads and writes. */
 export type { GrantRow };
-export { canGrantEveryProject, insertGrant } from '@coffre/db/grants';
+export { insertGrant } from '@coffre/db/grants';
 
 /**
  * On Postgres, fail a lock wait in this transaction after `ms`, rather than

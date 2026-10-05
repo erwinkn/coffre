@@ -103,6 +103,24 @@ export function isUniqueViolation(error: unknown): boolean {
   return false;
 }
 
+/** The network's codes for a server that is not there, and Postgres's for one that will not take the connection. */
+const UNREACHABLE = new Set(['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH', 'EPIPE', '57P01', '57P02', '57P03']);
+
+/**
+ * Whether a query failed because the database could not be reached or
+ * dropped the connection: an outage, not an answer. Postgres's connection
+ * exceptions are class 08; pg and Workers' sockets say so in words.
+ */
+export function isUnreachable(error: unknown): boolean {
+  for (let cause = error; typeof cause === 'object' && cause !== null; ) {
+    const { code, message } = cause as { code?: unknown; message?: unknown };
+    if (typeof code === 'string' && (UNREACHABLE.has(code) || /^08[0-9A-Z]{3}$/.test(code))) return true;
+    if (typeof message === 'string' && /connection terminated|network connection lost|connect(ion)? timeout/i.test(message)) return true;
+    cause = (cause as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
 /**
  * A consistent read of several statements that cannot write, such as
  * verifying the chain. SQLite ignores it: its transactions already see one

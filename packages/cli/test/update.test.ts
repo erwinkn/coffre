@@ -113,12 +113,12 @@ test("when coffre can't tell how its CLI was installed, it says so, where it run
 
 test('update ends with what the release asks of the database', () => {
   assert.equal(
-    migrationsAdded('0.1.11', '0.1.12', ['0000_baseline'], ['0000_baseline', '0001_remove_syncs']),
-    "coffre 0.1.12 adds 1 migration to 0.1.11's (0001_remove_syncs): after deploying, run `coffre migrate`.",
+    migrationsAdded('0.4.0', '0.5.0', ['0000_baseline'], ['0000_baseline', '0001_tags']),
+    "coffre 0.5.0 adds 1 migration to 0.4.0's (0001_tags): run `pnpm exec coffre migrate` here first, then deploy.",
   );
   assert.equal(
-    migrationsAdded('0.1.12', '0.1.13', ['0000_baseline', '0001_remove_syncs'], ['0000_baseline', '0001_remove_syncs']),
-    "coffre 0.1.13 adds no migration to 0.1.12's: deploying it is all.",
+    migrationsAdded('0.4.0', '0.4.1', ['0000_baseline'], ['0000_baseline']),
+    "coffre 0.4.1 adds no migration to 0.4.0's: deploying it is all.",
   );
 });
 

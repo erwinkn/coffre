@@ -99,20 +99,24 @@ component as the owner or give the runtime logins additional roles.
 
 ## Upgrading
 
+0.4.0 is a clean break: a deployment of 0.3 or earlier is not upgraded, but
+deployed afresh ([From a release before 0.4.0](#from-a-release-before-040)).
+From 0.4.0 on:
+
 The database migrates before the deploy, in the deployment's own pipeline:
-Workers Builds, CI, or a script before a restart. Every migration keeps the
-previous release working, and every release runs on the schema before its
-migrations ([expand, then contract](architecture.md#expand-then-contract)),
-so either order works; migrating first means the new code never meets the
-old schema.
+Workers Builds, CI, or a script before a restart. The new version never
+serves on a schema it does not have: below its migrations, everything but
+`/livez` and `/readyz` answers 503 `migrating`, and `/readyz` stays red.
+The previous version keeps serving on the new schema until the deploy, as
+every migration lets it ([expand, then contract](architecture.md#expand-then-contract)).
 
 1. **`coffre update`**, in the deployment's directory. It updates the CLI
    the way it was installed (an npm or pnpm global, as each lists its
    globals; npx needs nothing; when neither claims it, it says so and what
    each would run), moves
    the deployment's `@coffre/*` pins to the release and installs them, and
-   ends with what the release asks of the database: "coffre 0.1.12 adds 1
-   migration (0001_remove_syncs)". The deployment's `minimumReleaseAge`
+   ends with what the release asks of the database: the migrations it adds,
+   by name, to run before the deploy. The deployment's `minimumReleaseAge`
    exempts `@coffre/*`, so a fix installs the day it is published; your
    other packages still wait a week. A deployment from before its CLI was one
    of its packages gains `@coffre/cli` among its devDependencies, pinned with
@@ -161,6 +165,9 @@ migrations, which the deployment's CLI carries; `pnpm exec` runs that CLI.
 It needs no session, and asks no instance: until the deploy, the instance
 runs the previous version, by design. It stops unless:
 
+- **the database was made by coffre 0.4.0 or later.** One an earlier
+  release made is refused: 0.4.0 began its schema again from one baseline
+  ([From a release before 0.4.0](#from-a-release-before-040)).
 - **the CLI is the version the deployment pins.** A global `coffre` of
   another version says to run `pnpm exec coffre migrate`, after `pnpm
   install`.
@@ -179,17 +186,8 @@ one, it applies only with `--yes`. It applies it under the migration lock,
 with the database's privileges reasserted, and writes plain lines to a CI
 log: no colours, no spinner.
 
-From a laptop, run it in the deployment's directory as well. Anywhere else,
-`coffre migrate`, signed in as an owner or a root admin, works on an
-instance instead: it asks the instance which version it runs and which of
-that version's migrations its database lacks, stops unless the CLI is that
-version, checks that the database lacks what the instance says it lacks, and
-after applying, that the instance sees the new schema and `/readyz` passes.
-`coffre --url <url> migrate` picks an instance other than the current one.
-
-Until the database is migrated, owners and root admins see "Database
-migrations pending" above every page, and any CLI command they run against
-the instance says so on stderr, once a day.
+From a laptop, run it in the deployment's directory as well: anywhere else,
+it says where it runs, and asks for nothing.
 
 A script that asks for the URL itself:
 
@@ -199,6 +197,16 @@ printf '\n'
 printf '%s' "$owner_url" | pnpm exec coffre migrate --yes
 unset owner_url
 ```
+
+### From a release before 0.4.0
+
+0.4.0 starts over: its schema is one migration per engine, which only a new
+database takes, and it carries no code for the files, variables or data of
+earlier releases. A deployment of 0.3 or earlier is not moved; make a new
+one beside it, with `coffre init` and `coffre setup`, on a new database,
+and bring over what you keep: `coffre export` reads an environment's values
+from the old instance. On an old database, 0.4.0's `coffre migrate` says it
+was made before 0.4.0 and changes nothing.
 
 ## On Workers
 
@@ -229,25 +237,24 @@ app.
 
 ### Workers Builds
 
-Workers Builds builds and deploys both Workers on every push, the vault's
-build migrating the database first. In each Worker's **Settings > Build**,
-with the repository connected and the deployment's directory as the root:
+Workers Builds builds and deploys both Workers on every push, each build
+migrating the database first: whichever Worker deploys first, it finds its
+schema. In each Worker's **Settings > Build**, with the repository connected
+and the deployment's directory as the root:
 
 | Worker | Build command | Deploy command | Build variables |
 |---|---|---|---|
 | the vault, `<name>-vault` | `printenv DATABASE_OWNER_URL \| pnpm exec coffre migrate --yes` | `npx wrangler deploy -c vault/wrangler.jsonc` | `DATABASE_OWNER_URL`, the database owner's direct URL, as a secret |
-| the app, `<name>` | `pnpm exec vite build app` | `npx wrangler deploy -c app/dist/server/wrangler.json` | none |
+| the app, `<name>` | `printenv DATABASE_OWNER_URL \| pnpm exec coffre migrate --yes && pnpm exec vite build app` | `npx wrangler deploy -c app/dist/server/wrangler.json` | `DATABASE_OWNER_URL`, as for the vault |
 
 The owner's URL is the one `coffre setup` asked for. It is a build variable,
 which only the build sees; the Worker never does. Workers Builds hands it to
 the build command in its environment, and `printenv` passes it to the CLI
-on stdin, never as an argument. The CLI reads no variable itself: a vault
-set up by a release before 0.3 named this one `COFFRE_MIGRATE_DATABASE_URL` and built
-with `pnpm exec coffre migrate --yes`, which the CLI now refuses, saying
-so; rename the variable and change the build command as above. A build that cannot
-migrate fails before its deploy, and the vault keeps running the previous
-version. The app may deploy before or after the vault's migration: each
-release runs on the schema before and after its migrations.
+on stdin, never as an argument; the CLI reads no variable itself. The two
+builds migrate the same database; the second finds nothing left to do, as
+the migration lock keeps one waiting for the other. A build that cannot
+migrate fails before its deploy, and its Worker keeps running the previous
+version, which runs on the new schema too.
 
 ### Upgrading to 0.2
 
@@ -391,48 +398,6 @@ reads the server's settings from `.env`: rename `server.env` to `.env`, and
 Then `pnpm typecheck`, and deploy: on Workers, set the app's build and
 deploy commands as [Workers Builds](#workers-builds) says, or `pnpm run
 deploy`; on Node, `pnpm build` and restart both processes.
-
-### Rolling back past grants on every project
-
-Revoke every grant on every project before rolling a deployment back to
-0.3.0 or earlier: `coffre access '*'` lists them, and `coffre revoke '*'
-<member> [--env <env>]` takes each. An older vault does not know them: it
-reads one as a grant on no project, which fails the MAC it seals each
-member's grants under, so it refuses everyone who holds one, as a member
-whose record was changed around it, until an owner removes them and adds
-them back. Their schema change, `0005_instance_grants`, needs no undoing:
-0.3.0 runs on it.
-
-### Upgrading to 0.1.12
-
-Deploy the new code first, then migrate: `0001_remove_syncs`, from before
-[expand, then contract](architecture.md#expand-then-contract), drops tables
-0.1.11 still reads, so a pipeline that migrates first would break the
-running 0.1.11. Version 0.1.12 works with both `0000` and
-`0001_remove_syncs`: it ignores the old sync tables and refuses legacy sync
-principals. `/readyz` accepts either schema prefix, subject to its usual
-audit heartbeat and checkpoint checks. A database with no baseline still
-fails readiness. Upgrade from 0.1.11 to 0.1.12 first, before setting the
-vault's build command.
-
-1. [Check for syncs](../CHANGELOG.md), including archived destinations, and
-   move each destination into your deploy pipeline. Back up the database.
-2. In the deployment's directory, run `coffre update`: it moves the
-   deployment's coffre packages to 0.1.12 and installs them. Deploy the
-   vault, then the app; the example's `pnpm deploy` does both in this
-   order. With Workers Builds, wait until both deployments finish and the
-   old versions have stopped receiving requests and scheduled events before
-   dropping their tables.
-3. Run `pnpm exec coffre migrate`, with the **database owner's direct
-   Postgres URL** and its existing TLS parameters ([Upgrading](#upgrading)). If either sync table still has rows, it refuses
-   without changing the schema: "syncs are removed: migrate destinations to
-   service tokens, back up and clear syncs and sync_keys before upgrading".
-   After moving the destinations and stopping old versions, have the owner
-   clear `sync_keys`, then `syncs`, as described in the release notes, and
-   run it again.
-4. Check `/readyz` and verify the audit log. Past sync entries still verify
-   and render on the audit page. After `0001` drops the tables, rolling back
-   to code that still uses syncs requires restoring the pre-upgrade database.
 
 ### Setup does Cloudflare too
 

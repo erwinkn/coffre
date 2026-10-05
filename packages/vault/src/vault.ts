@@ -156,9 +156,8 @@ const KEY_BUDGET_MS = 5_000;
 /** How long a decision waits for a lock: above the key budget, so a removal outwaits a read in flight. */
 const LOCK_TIMEOUT_MS = 15_000;
 
-// Historical principals remain valid audit subjects and sealed rows.
-const PRINCIPAL = /^(user|token|sync):[^\s:][^\s]*$/;
-const LIVE_PRINCIPAL = /^(user|token):[^\s:][^\s]*$/;
+/** A member: `user:<email>` or `token:<name>`. */
+const PRINCIPAL = /^(user|token):[^\s:][^\s]*$/;
 
 /** Who acts for the vault itself, as when it gives a root admin a member row. */
 const VAULT_ACTOR = 'system:vault';
@@ -1216,7 +1215,7 @@ class VaultService implements Vault {
     const grants = row === undefined ? [] : await store.grants(db, principal);
     const fault = await this.#integrity(db, principal, row, grants, reports);
     if (fault !== null) return { principal, status: 'tampered', live: none, all: none, fault, stored: grants };
-    if (!LIVE_PRINCIPAL.test(principal)) return { principal, status: 'unknown', live: none, all: none, fault, stored: grants };
+    if (!PRINCIPAL.test(principal)) return { principal, status: 'unknown', live: none, all: none, fault, stored: grants };
     if (row?.status !== 'active') return { principal, status: row?.status ?? 'unknown', live: none, all: none, fault, stored: grants };
     const held = grants.map((grant) => ({ ...grant, role: grant.role as Role }));
     const isOwner = row.owner && principal.startsWith('user:');
@@ -1234,10 +1233,10 @@ class VaultService implements Vault {
     if (this.#isRootAdmin(principal)) {
       return { principal, status: 'active', generation: row?.generation ?? 0, isRootAdmin: true, isOwner: true, grants: [], since: null, by: null };
     }
-    const active = LIVE_PRINCIPAL.test(principal) && !tampered && row?.status === 'active';
+    const active = PRINCIPAL.test(principal) && !tampered && row?.status === 'active';
     return {
       principal,
-      status: tampered ? 'tampered' : !LIVE_PRINCIPAL.test(principal) ? 'unknown' : (row?.status ?? 'unknown'),
+      status: tampered ? 'tampered' : !PRINCIPAL.test(principal) ? 'unknown' : (row?.status ?? 'unknown'),
       generation: row?.generation ?? 0,
       isRootAdmin: false,
       isOwner: active && row.owner && principal.startsWith('user:'),
@@ -1317,7 +1316,7 @@ class VaultService implements Vault {
     const onProjects = changes.flatMap(({ projectId, environmentId, role }) => (projectId === null ? [] : [{ projectId, environmentId, role }]));
     return this.#decide([actor, principal], async (d) => {
       validateCorrelation(input);
-      if (!LIVE_PRINCIPAL.test(principal)) throw refused('invalid', `not a principal: ${principal}`);
+      if (!PRINCIPAL.test(principal)) throw refused('invalid', `not a principal: ${principal}`);
       if (this.#isRootAdmin(principal)) throw refused('root_admin');
       const places = new Set<string>();
       for (const change of changes) {
@@ -1334,9 +1333,6 @@ class VaultService implements Vault {
         if (Number.isNaN(expiresAt) || (expiresAt !== null && expiresAt <= d.at)) {
           throw refused('invalid', 'an end date must be in the future');
         }
-      }
-      if (changes.some((change) => grantKind(change) === 'every-project') && !(await store.canGrantEveryProject(d.tx))) {
-        throw refused('invalid', "grants on every project need this release's database migration: an owner runs `coffre migrate`");
       }
       // Every project is always there; a project or an environment must be,
       // and to be granted, not deleted. Read under the log's head, which a
@@ -1436,7 +1432,7 @@ class VaultService implements Vault {
       const acting = await this.#standing(d.tx, actor, d.members.get(actor), d.at, d.reports);
       if (acting.status === 'tampered') throw refused('tampered');
       if (!acting.live.isOwner) throw refused('not_allowed', 'only owners may add or restore members');
-      if (!LIVE_PRINCIPAL.test(principal)) throw refused('invalid', `not a member: ${shownMember(principal)}`);
+      if (!PRINCIPAL.test(principal)) throw refused('invalid', `not a member: ${shownMember(principal)}`);
       if (this.#isRootAdmin(principal)) throw refused('root_admin');
       if (input.owner === true && !principal.startsWith('user:')) {
         throw refused('invalid', 'service accounts cannot be owners');
@@ -1488,7 +1484,7 @@ class VaultService implements Vault {
       new Refused(refusal(code, message), [accessEntry(actor, 'member.remove', principal, 'deny', input, {}, code)]);
     return this.#decide([actor, principal], async (d) => {
       validateCorrelation(input);
-      if (!LIVE_PRINCIPAL.test(principal)) throw refused('invalid', `not a member: ${shownMember(principal)}`);
+      if (!PRINCIPAL.test(principal)) throw refused('invalid', `not a member: ${shownMember(principal)}`);
       if (this.#isRootAdmin(principal)) throw refused('root_admin');
       const row = d.members.get(principal);
       const acting = await this.#standing(d.tx, actor, d.members.get(actor), d.at, d.reports);

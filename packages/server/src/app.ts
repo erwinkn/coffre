@@ -11,6 +11,8 @@ import {
   startSignin,
 } from './auth-routes.ts';
 import { preferencesIn, type Preferences } from '@coffre/core/pages';
+import { isUnreachable } from '@coffre/db/dialect';
+import { migrated } from '@coffre/db/schema-version';
 
 import { fetchApi, isSameOrigin, pageClient } from './fetch-api.ts';
 import { auditReadiness, writeAuditHeartbeat } from './heartbeat.ts';
@@ -101,7 +103,11 @@ export async function respond(
   const nonce = cspNonce();
   let response: Response;
   try {
-    response = await render({ cspNonce: nonce, client: pageClient(request, runtime, sourceIp), preferences: preferencesIn(request.headers.get('cookie')) });
+    const { pathname } = new URL(request.url);
+    response =
+      SERVED_WHILE_MIGRATING.has(pathname) || (await schemaReady(runtime))
+        ? await render({ cspNonce: nonce, client: pageClient(request, runtime, sourceIp), preferences: preferencesIn(request.headers.get('cookie')) })
+        : migrating(request);
   } catch (error) {
     response = errorResponse(error);
   }
@@ -120,8 +126,45 @@ export async function respond(
   }
 }
 
+/** What answers below this version's migrations: liveness, and readiness, which is red until they run. */
+const SERVED_WHILE_MIGRATING = new Set(['/livez', '/readyz']);
+
+/**
+ * Whether the database has every migration this version ships. Each
+ * deployment migrates before it deploys (`coffre migrate`), so a new app
+ * never serves on a schema it does not have: until then, everything but
+ * health answers 503 `migrating`; a database never migrated has no ledger,
+ * and is below them too. Asked until it holds, then known. A database that
+ * cannot be reached lets the request through, to meet the outage as it would
+ * anyway: a page shows its error state, the API answers 503. Any other
+ * failure of the question fails the request.
+ */
+async function schemaReady(runtime: CoffreRuntime): Promise<boolean> {
+  if (!runtime.schema.migrated) {
+    try {
+      runtime.schema.migrated = await migrated(runtime.db);
+    } catch (error) {
+      if (isUnreachable(error)) return true;
+      throw error;
+    }
+  }
+  return runtime.schema.migrated;
+}
+
+const MIGRATING = "coffre's database lacks this version's migrations: an owner runs `coffre migrate`, as every deploy does first";
+
+/** The answer below the migrations: the API's error, or for a browser's page, a page that says it in words. */
+function migrating(request: Request): Response {
+  if (!(request.headers.get('accept') ?? '').includes('text/html')) return errorResponse(new ApiError('migrating', MIGRATING), { 'retry-after': '30' });
+  const page =
+    '<!doctype html><html lang="en"><meta charset="utf-8"><title>coffre is migrating</title>' +
+    "<p>coffre's database lacks this version's migrations. An owner runs <code>coffre migrate</code>, as every deploy does first; this page works once it has.</p></html>";
+  return new Response(page, { status: 503, headers: { 'content-type': 'text/html; charset=utf-8', 'retry-after': '30' } });
+}
+
 /** The scheduled audit heartbeat and checkpoint. Throws so the scheduler reports failures. */
 export async function runScheduled(runtime: CoffreRuntime): Promise<void> {
+  if (!(await schemaReady(runtime))) throw new Error(MIGRATING);
   const ok = await writeAuditHeartbeat(runtime.db, runtime.chainKey, runtime.vault, {
     warn: (value, message) => console.warn(message, value),
   });

@@ -41,7 +41,7 @@ const root: Principal = {
   subject: 'root-subject',
 };
 
-/** The app with nothing behind it: health and routing need no database. */
+/** The app with nothing behind it, its database migrated: health and routing need no database. */
 function appRuntime(auth: AuthConfig) {
   return {
     auth,
@@ -50,6 +50,7 @@ function appRuntime(auth: AuthConfig) {
     verifier: { verify: async () => root },
     vault: vaultKnowing({}),
     db: null,
+    schema: { migrated: true },
   } as never;
 }
 

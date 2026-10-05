@@ -158,22 +158,11 @@ function referenceTo(entry: AuditEntry): Part[] {
   ];
 }
 
-/** " to acme/market", when the entry names where a sync pushes. */
-function toDestination(entry: AuditEntry): string {
-  const where = text(entry.metadata.destination);
-  return where === null ? '' : ` to ${where}`;
-}
-
-function destination(entry: AuditEntry): string {
-  return text(entry.metadata.destination) ?? 'its destination';
-}
-
 const READ_VERBS: Record<string, [did: string, tried: string]> = {
   reveal: ['revealed', 'reveal'],
   run: ['ran', 'run'],
   compare: ['compared', 'compare'],
   copy: ['copied', 'copy'],
-  sync: ['read', 'read'],
 };
 
 function readVerb({ entry }: Facts): [string, string] {
@@ -303,37 +292,6 @@ const TEMPLATES: Record<string, Template> = {
     tried: ({ entry }) => (entry.metadata.owner === false ? 'take owner from' : 'make'),
     what: ({ entry }) => [...subject(entry), ...(entry.metadata.owner === false ? [] : [' an owner'])],
   },
-  'sync.create': {
-    did: 'set up a sync of',
-    tried: 'set up a sync of',
-    what: ({ entry }) => [...environmentOf(entry), toDestination(entry)],
-  },
-  'sync.update': {
-    did: ({ entry }) => (entry.metadata.paused === true ? 'paused the sync of' : entry.metadata.paused === false ? 'resumed the sync of' : 'changed the sync of'),
-    tried: 'change the sync of',
-    what: ({ entry }) => [...environmentOf(entry), toDestination(entry)],
-  },
-  'sync.delete': {
-    did: 'removed the sync of',
-    tried: 'remove the sync of',
-    what: ({ entry }) => [...environmentOf(entry), toDestination(entry)],
-  },
-  'sync.push': {
-    did: 'pushed',
-    tried: 'push',
-    what: (facts) =>
-      facts.batch.length === 1
-        ? [...place(facts.entry), ` to ${destination(facts.entry)}`]
-        : [...environmentOf(facts.entry), ` to ${destination(facts.entry)}: ${plural(facts.count, 'secret')}`],
-  },
-  'sync.remove': {
-    did: 'removed',
-    tried: 'remove',
-    what: (facts) =>
-      facts.batch.length === 1
-        ? [...place(facts.entry), ` from ${destination(facts.entry)}`]
-        : [plural(facts.count, 'secret'), ' of ', ...environmentOf(facts.entry), ` from ${destination(facts.entry)}`],
-  },
   // A binding trusts CI runs to sign in as a service; removing one is its tombstone.
   'token.bind': {
     did: 'trusted CI runs to sign in as',
@@ -400,11 +358,6 @@ const TEMPLATES: Record<string, Template> = {
     tried: 'check',
     what: ({ entry }) => [['the', text(entry.metadata.kekProvider) === 'local' ? null : text(entry.metadata.kekProvider), 'vault key', text(entry.metadata.kekId)].filter((word) => word !== null).join(' ')],
   },
-  'sync.run': {
-    did: 'ran the sync of',
-    tried: 'run the sync of',
-    what: ({ entry }) => [...environmentOf(entry), toDestination(entry)],
-  },
   'audit.heartbeat': { did: 'checked in', tried: 'check in', what: () => [] },
   'audit.checkpoint': {
     did: 'signed the log',
@@ -416,7 +369,6 @@ const TEMPLATES: Record<string, Template> = {
   'secret.list': { did: 'listed', tried: 'list', what: ({ entry }) => environmentOf(entry) },
   'secret.history': { did: 'read the history of', tried: 'read the history of', what: (facts) => place(facts.entry) },
   'secret.update': { did: 'changed', tried: 'change', what: (facts) => place(facts.entry) },
-  'sync.list': { did: 'listed the syncs of', tried: 'list the syncs of', what: ({ entry }) => environmentOf(entry) },
 };
 
 /** " to the folder stripe", or " out of its folder". */
@@ -461,9 +413,6 @@ const REASONS: Record<string, string> = {
   unknown_project: 'no such project',
   not_archived: 'it was not archived',
   referenced: 'references read it',
-  unusable_credential: 'its token is not a secret they can read',
-  duplicate_destination: 'already synced from elsewhere',
-  cannot_grant_sync: 'cannot grant the sync its reads',
   kms_unavailable: 'KMS did not answer',
   wrong_kek: "the vault's key is not the one that wrapped the data",
   person_denied: 'they said no',
@@ -490,8 +439,8 @@ export function reasonInWords(reason: string | null): string {
 
 // --- lines ----------------------------------------------------------------------
 
-/** In a batch of mixed actions, the one the line is named for: a sync's push, not its reads. */
-const LEAD = ['sync.push', 'sync.remove', 'secret.write', 'secret.read'];
+/** In a batch of mixed actions, the one the line is named for: a write, not its reads. */
+const LEAD = ['secret.write', 'secret.read'];
 
 export function leadOf(batch: AuditEntry[]): AuditEntry {
   for (const action of LEAD) {
@@ -526,29 +475,12 @@ export function describe(batch: AuditEntry[]): Sentence {
   return { parts: [say(template.did), ...gap, ...what, ...(template.then?.(facts) ?? []), ...partly], refused };
 }
 
-/**
- * Who acted, as a part: a member links to their page; a sync or coffre
- * itself is text. A sync is named for where it pushes, which any entry of
- * its batch may say.
- */
-export function who(batch: Pick<AuditEntry, 'actorType' | 'actorId' | 'metadata'>[]): string | { member: string } {
-  const entry = batch[0]!;
+/** Who acted, as a part: a member links to their page; coffre itself is text. */
+export function who(entry: Pick<AuditEntry, 'actorType' | 'actorId'>): string | { member: string } {
   if (entry.actorType === 'user') return { member: `user:${entry.actorId}` };
   if (entry.actorType === 'service') return { member: `token:${entry.actorId}` };
-  if (entry.actorId.startsWith('sync:')) {
-    const id = batch.map((other) => text(other.metadata.provider)).find((provider) => provider !== null);
-    const provider = id === undefined ? undefined : (PROVIDERS[id!] ?? id!);
-    return provider === undefined ? 'a sync' : `sync to ${provider}`;
-  }
   return SYSTEM[entry.actorId] ?? entry.actorId;
 }
-
-const PROVIDERS: Record<string, string> = {
-  'github-actions': 'GitHub',
-  vercel: 'Vercel',
-  railway: 'Railway',
-  'cloudflare-workers': 'Cloudflare',
-};
 
 const SYSTEM: Record<string, string> = {
   scheduler: 'the scheduler',

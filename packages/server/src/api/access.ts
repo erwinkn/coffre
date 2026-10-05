@@ -3,7 +3,6 @@ import { randomUUID } from 'node:crypto';
 import { assignableToEnvironment, EVERY_PROJECT, type Role } from '@coffre/core/access';
 import { slug } from '@coffre/core/schemas';
 import type { AccessChange } from '@coffre/core/vault';
-import { canGrantEveryProject } from '@coffre/db/grants';
 
 import { memberStanding, places } from '../db/queries.ts';
 import { denied, need, Refusal, requireOwner, withRefusals, type ApiContext } from './context.ts';
@@ -100,9 +99,6 @@ export async function setAccess(
       const action = want.role === null ? 'access.revoke' : 'access.grant';
       if (want.projectId === null) requireOwner(ctx, action, scoped(want));
       else need(ctx, 'grant.manage', { projectId: want.projectId }, action, scoped(want));
-    }
-    if (located.some((want) => want.projectId === null) && !(await canGrantEveryProject(ctx.db))) {
-      throw new ApiError('unavailable', "grants on every project need this release's database migration: an owner runs `coffre migrate`");
     }
 
     // As the row says, to answer in the app's words; the vault decides.

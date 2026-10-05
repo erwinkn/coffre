@@ -25,3 +25,18 @@ CREATE TRIGGER `audit_log_no_delete` BEFORE DELETE ON `audit_log`
 BEGIN
     SELECT RAISE(ABORT, 'audit_log is append-only');
 END;
+--> statement-breakpoint
+
+-- A secret version is never rewritten in place, only erased: a deleted
+-- project or environment stays as a tombstone the log's entries name, and
+-- its versions with it, their ciphertext and wrapped data key emptied. That
+-- is the one change a version takes.
+CREATE TRIGGER `secret_versions_erase_only` BEFORE UPDATE ON `secret_versions`
+WHEN length(NEW.`ciphertext`) <> 0 OR length(NEW.`wrapped_dek`) <> 0
+    OR NEW.`id` IS NOT OLD.`id` OR NEW.`secret_id` IS NOT OLD.`secret_id` OR NEW.`version` IS NOT OLD.`version`
+    OR NEW.`envelope_version` IS NOT OLD.`envelope_version` OR NEW.`iv` IS NOT OLD.`iv` OR NEW.`auth_tag` IS NOT OLD.`auth_tag`
+    OR NEW.`kek_provider` IS NOT OLD.`kek_provider` OR NEW.`kek_id` IS NOT OLD.`kek_id` OR NEW.`kek_version` IS NOT OLD.`kek_version`
+    OR NEW.`created_at` IS NOT OLD.`created_at` OR NEW.`created_by` IS NOT OLD.`created_by`
+BEGIN
+    SELECT RAISE(ABORT, 'a secret version is only ever erased');
+END;

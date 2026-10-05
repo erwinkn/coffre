@@ -14,8 +14,6 @@ import { join, dirname, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { init, KINDS, type Kind } from './init.ts';
 import { keys } from './keys.ts';
-import type { Instance } from './migrate.ts';
-import { dailyNotice, type Checked } from './notice.ts';
 import { hiddenLine, style } from './tty.ts';
 import { githubEnvironment, githubMasks } from './github-env.ts';
 import { bindingsFrom, describeBindings, describeEvents, describePlan, serviceMember, TRUST_USAGE, type TrustArgs } from './trust.ts';
@@ -169,56 +167,8 @@ function client(to: Target = target(), hint?: Hint, handled: readonly number[] =
   });
 }
 
-/** Whether this run has asked about pending migrations yet: once, before its first request. */
-let noticed = false;
-
-/** The commands that say nothing of pending migrations: migrate says as much itself; login has no session yet; verify sends only what it checks. */
-const QUIET = new Set(['migrate', 'login', 'verify']);
-
-/**
- * A line on stderr, at most once a day per instance, when its database is
- * behind the code it runs (`notice.ts`). Not for a machine's credential:
- * only owners are told. Whatever goes wrong here, the command goes on.
- */
-async function noticePending(to: Target): Promise<void> {
-  if (noticed) return;
-  noticed = true;
-  if (QUIET.has(command ?? '') || to.by !== 'person') return;
-  const line = await dailyNotice(to.origin, Date.now(), checkedFile, async () => {
-    const response = await fetch(`${to.origin}/api/me`, { headers: await headersFor(to), redirect: 'manual' });
-    if (!response.ok || !isJsonContentType(response.headers.get('content-type'))) throw new Error('no answer');
-    return (await response.json()) as Me;
-  }).catch(() => null);
-  if (line !== null) {
-    const s = style(process.stderr);
-    process.stderr.write(`${s.dim(`coffre: ${line}`)}\n`);
-  }
-}
-
-const CHECKED_PATH = join(homedir(), '.coffre', 'checked.json');
-
-/** When each instance was last asked about its migrations: nothing secret, beside the credentials. */
-const checkedFile = {
-  read(): Checked {
-    try {
-      return JSON.parse(readFileSync(CHECKED_PATH, 'utf8')) as Checked;
-    } catch {
-      return {};
-    }
-  },
-  write(checked: Checked): void {
-    try {
-      mkdirSync(dirname(CHECKED_PATH), { recursive: true, mode: 0o700 });
-      writeFileSync(CHECKED_PATH, `${JSON.stringify(checked)}\n`, { mode: 0o600 });
-    } catch {
-      // Not kept: the next command asks again, which is all it costs.
-    }
-  },
-};
-
 /** One request; every way it can fail is explained in terms of what to do next. */
 async function send(request: Request, to: Target, hint?: Hint, handled: readonly number[] = []): Promise<Response> {
-  await noticePending(to);
   let response: Response;
   try {
     // Cloudflare Access redirects rejected non-browser clients to its login
@@ -1196,28 +1146,6 @@ function initProject(args: string[]): void {
   );
 }
 
-/**
- * The instance `coffre migrate` works on: the current one, or the one
- * `--url` names, with the session saved for it.
- */
-function migrateTarget(): Instance {
-  const to = target();
-  const api = client(to);
-  return {
-    origin: to.origin,
-    me: () => api.me(),
-    // Outside Access and sign-in alike: what a monitor reads.
-    ready: async () => {
-      try {
-        const response = await fetch(`${to.origin}/readyz`, { redirect: 'manual' });
-        return (await response.json()) as Awaited<ReturnType<Instance['ready']>>;
-      } catch {
-        return { ok: false, heartbeatAgeSeconds: null, checkpointed: false };
-      }
-    },
-  };
-}
-
 const line = attempt(() => commandLine(process.argv.slice(2)));
 const { command, rest } = line;
 if (command !== undefined && !command.startsWith('-')) {
@@ -1237,7 +1165,7 @@ const COMMANDS: Record<Command, (args: string[]) => unknown> = {
   // Their own chunks: the database driver and the migrations load only for them.
   setup: async (args) => (await import('./setup.ts')).setup(args),
   update: async (args) => (await import('./update.ts')).update(args),
-  migrate: async (args) => (await import('./migrate.ts')).migrate(args, migrateTarget, Object.keys(line.session).map((name) => `--${name}`)),
+  migrate: async (args) => (await import('./migrate.ts')).migrate(args),
   login,
   logout,
   whoami,

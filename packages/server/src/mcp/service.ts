@@ -17,7 +17,6 @@ import {
 import type { Access, Vault } from '@coffre/core/vault';
 import type { Database, Transaction } from '@coffre/db';
 import { mcpConnections } from '@coffre/db/schema';
-import { knownMigrations } from '@coffre/db/schema-version';
 
 import { callerFrom, type Caller } from '../api/caller.ts';
 import { allowed, audited, denied, Refusal, type ApiContext } from '../api/context.ts';
@@ -25,7 +24,6 @@ import { ApiError, conflict, forbidden, notFound } from '../api/errors.ts';
 import { AuthRowTampered } from '../auth-rows.ts';
 import type { AuditEntry } from '../db/audit.ts';
 import {
-  appliedMigrations,
   findConnection,
   insertConnection,
   insertOauthClient,
@@ -50,8 +48,6 @@ import {
   secret,
 } from './tokens.ts';
 
-/** The migration that adds clients and connections: until it runs, MCP answers 503. */
-const MCP_MIGRATION = '0010_mcp_connections';
 /** How long a code waits for its client: long enough for a redirect, and no longer. */
 const CODE_SECONDS = 60;
 /** Connections a person may hold at once, before Connected apps has to lose one. */
@@ -187,7 +183,6 @@ export class McpService {
 
   /** What the consent page shows for an authorization request, every parameter checked. */
   async describe(asker: Asker, request: AuthorizationRequest): Promise<AuthorizationView> {
-    await this.#migrated();
     if (asker.caller.principal.type !== 'user') throw forbidden('only people connect apps');
     const checked = await this.#check(request, asker.sourceIp);
     if (checked.status !== 'ready') return checked;
@@ -211,7 +206,6 @@ export class McpService {
    * checked again: nothing is kept between the page and this.
    */
   async decide(asker: Asker, request: AuthorizationRequest, answer: { approve: boolean; scopes: string[] }): Promise<{ redirect: string }> {
-    await this.#migrated();
     const { principal } = asker.caller;
     if (principal.type !== 'user') throw forbidden('only people connect apps');
     const checked = await this.#check(request, asker.sourceIp);
@@ -336,7 +330,6 @@ export class McpService {
 
   /** The person's connected apps, newest first: those whose client redeemed its code. */
   async apps(asker: Asker): Promise<ConnectedApp[]> {
-    await this.#migrated();
     const live = await liveConnections(this.#deps.db, this.#deps.chainKey, principalOf(asker.caller.principal), new Date());
     return live
       .filter((row) => row.refreshHash !== null)
@@ -358,7 +351,6 @@ export class McpService {
    * Its refresh token and every access token under it stop at once.
    */
   async disconnect(asker: Asker, id: string): Promise<{ disconnected: true }> {
-    await this.#migrated();
     const { principal } = asker.caller;
     const unknown = () =>
       new Refusal(notFound('unknown connected app'), denied(asker, 'mcp.disconnect', 'unknown_connection', { metadata: { connectionId: id } }));
@@ -401,7 +393,6 @@ export class McpService {
 
   /** `POST /api/oauth/token`: a code for the connection's first tokens, or a refresh token for the next. */
   async token(form: URLSearchParams, meta: Meta): Promise<TokenAnswer> {
-    await this.#migrated();
     const resource = form.get('resource');
     if (resource !== null && !this.#isResource(resource)) throw new OAuthError('invalid_target', `coffre issues tokens for ${this.resource} only`);
     const clientId = required(form, 'client_id');
@@ -498,7 +489,6 @@ export class McpService {
 
   /** `POST /api/oauth/revoke` (RFC 7009): either token ends its connection. Anything unknown is a quiet no-op. */
   async revoke(form: URLSearchParams, meta: Meta): Promise<void> {
-    await this.#migrated();
     const token = required(form, 'token');
     const clientId = form.get('client_id');
     let row: Awaited<ReturnType<typeof findConnection>> = null;
@@ -556,7 +546,6 @@ export class McpService {
    * the others left out.
    */
   async register(body: unknown, meta: Meta): Promise<Record<string, unknown>> {
-    await this.#migrated();
     if (typeof body !== 'object' || body === null || Array.isArray(body)) throw new OAuthError('invalid_client_metadata', 'the registration is not a JSON object');
     const fields = body as Record<string, unknown>;
     const method = fields.token_endpoint_auth_method;
@@ -657,13 +646,6 @@ export class McpService {
       sourceIp: meta.sourceIp,
       metadata: { connectionId: row.id, clientId: row.clientId, clientName: row.clientName, ...metadata },
     };
-  }
-
-  async #migrated(): Promise<void> {
-    const needed = knownMigrations(this.#deps.db).indexOf(MCP_MIGRATION) + 1;
-    if ((await appliedMigrations(this.#deps.db)) < needed) {
-      throw new ApiError('unavailable', "MCP needs this release's database migration: an owner runs `coffre migrate`");
-    }
   }
 }
 

@@ -221,7 +221,6 @@ function Line({
         detail={detail}
         breaks={breaksInside && !grouped}
         marked={breaksInside}
-        batch={batch}
         toggle={
           grouped ? (
             <button
@@ -272,7 +271,6 @@ function Row({
   marked,
   toggle,
   child = false,
-  batch,
 }: {
   entry: Entry;
   seq: string;
@@ -287,10 +285,8 @@ function Row({
   marked: boolean;
   toggle?: ReactNode;
   child?: boolean;
-  /** The batch a line stands for, to name a sync by any of its entries. */
-  batch?: Entry[];
 }) {
-  const actor = who(batch ?? [entry]);
+  const actor = who(entry);
   const classes = [
     refused && 'is-denied',
     (breaks || marked) && 'is-break',

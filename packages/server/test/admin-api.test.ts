@@ -1,4 +1,3 @@
-import { readFileSync } from 'node:fs';
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -309,23 +308,6 @@ test('environment grants expose only the listed names of inaccessible siblings',
     accessible: false,
     details: null,
   });
-});
-
-test('an instance tells owners and root admins its version and migrations, and nobody else', async () => {
-  const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
-  const journal = JSON.parse(
-    readFileSync(new URL(`../../db/src/migrations/${process.env.COFFRE_TEST_ENGINE ?? 'postgres'}/meta/_journal.json`, import.meta.url), 'utf8'),
-  ) as { entries: { tag: string }[] };
-  const instance = (await root.me()).instance;
-  assert.deepEqual(instance, {
-    version: manifest.version,
-    migrations: { applied: journal.entries.length, known: journal.entries.map((entry) => entry.tag) },
-  });
-
-  await root.members.add(OWNER, { owner: true });
-  assert.deepEqual((await owner.me()).instance, instance);
-  assert.equal((await reader.me()).instance, null);
-  assert.equal((await lead.me()).instance, null);
 });
 
 test('a project counts each secret name once, across the environments the caller can open', async () => {

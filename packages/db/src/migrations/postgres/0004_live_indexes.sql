@@ -1,3 +1,0 @@
-CREATE INDEX "credentials_live_idx" ON "credentials" USING btree ("principal","expires_at") WHERE "credentials"."revoked_at" IS NULL;--> statement-breakpoint
-CREATE INDEX "credentials_issued_by_idx" ON "credentials" USING btree ("principal","created_by","created_at");--> statement-breakpoint
-CREATE INDEX "service_bindings_live_idx" ON "service_bindings" USING btree ("principal","issuer","generation","created_at","id") WHERE "service_bindings"."revoked_at" IS NULL;

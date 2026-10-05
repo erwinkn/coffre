@@ -16,10 +16,10 @@ The examples use two projects. `market` holds `market/prod/DATABASE_URL`.
 One level, for projects and for secrets, and only for arranging lists.
 A folder never grants, hides or changes anything else.
 
-- **A project's folder** is a row of `project_folders`. The projects page
+- **A project's folder** is its `folder` column. The projects page
   groups by it: `Clients / acme`, `Clients / globex`, then the projects
   in no folder.
-- **A secret's folder** is a row of `secret_folders`, per secret, so each
+- **A secret's folder** is its `folder` column, per secret, so each
   environment's keys are arranged on their own: `database/` holds
   `DATABASE_URL` and `DATABASE_POOL`, `stripe/` holds `STRIPE_KEY`.
   Key names stay unique per environment whatever their folder, so `run`
@@ -31,13 +31,11 @@ name makes the folder; renaming one re-files everything in it, and onto a
 name in use merges the two; removing one takes everything out, each item
 staying where it is, in no folder.
 
-**Tables beside `projects` and `secrets`, not columns on them.** Drizzle
-names every column of a table in each insert, and in each select of a
-whole row. A `folder` column on `secrets` would make this release fail
-every write on a database its migration has not reached yet, and a release
-must run on the schema before its own migration. So folders live in
-tables of their own, read only once `0007_folders` has run. Before
-that, everything lists in no folder, and moving answers 503. A name is 1 to 64 characters, with
+**Columns on `projects` and `secrets`** (D57, in 0.4.0). They began as
+tables beside them, since a release then had to run on the schema before
+its own migration, and Drizzle names every column of a table in each
+insert; since 0.4.0 an app never serves on a schema it does not have, and
+a nullable column is all a folder needs. A name is 1 to 64 characters, with
 no `/`, no control character, and no space at either end.
 
 | | API | CLI |
@@ -448,7 +446,7 @@ Four, each in the PR that needs it, each only adding:
 
 | Migration | Adds | Grants |
 |---|---|---|
-| folders | `project_folders`, `secret_folders`: a folder per project or secret, nullable, with its check | app: `SELECT, INSERT, UPDATE (folder, moved_at, moved_by)` |
+| folders | `project_folders`, `secret_folders`: a folder per project or secret, nullable, with its check; since 0.4.0, a `folder` column on each (D57) | app: `SELECT, INSERT, UPDATE (folder, moved_at, moved_by)`; since 0.4.0, `UPDATE (folder)` |
 | references | `secret_references`, its indexes and foreign keys; on `audit_log`, an index on `related_seq` for `reference.end`, and the `also` indexes | app: `SELECT, INSERT`; vault: `SELECT` |
 | missing keys | `dismissed_keys` | app: `SELECT, INSERT, UPDATE` on its four columns |
 | forks | none | |

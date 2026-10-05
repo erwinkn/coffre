@@ -101,17 +101,22 @@ migrate`, the platforms' own the CLI uses (GitHub's `ACTIONS_ID_TOKEN_REQUEST_*`
 CLI.
 
 **Migrations: expand, then contract.** A deployment runs `coffre migrate` in
-its pipeline, before it deploys, so each migration first meets the previous
-release's code, and must work with it as well as with the code it ships:
-the old code on the new schema, and the new code on the old schema until it
-runs. Then the order of migrating and deploying does not matter. So a
-migration adds: tables, columns that are nullable or have a default,
-indexes, grants. What removes or tightens (dropping or renaming a table or a
-column, NOT NULL on an existing column, a narrower check or type, a unique
-or foreign key the old code may break) ships one release after the code
-stops using it. `pnpm test:compat` holds the newest release to this
-checkout's schema, through that release's own conformance; it would have
-caught `0001_remove_syncs`, which dropped tables 0.1.11 still read.
+its pipeline, before it deploys (with Workers Builds, both Workers' builds
+do), so each migration first meets the previous release's code, and must
+work with it: the old code serves on the new schema until the deploy. The
+new code never meets the old schema: below its migrations, the app answers
+everything but `/livez` and `/readyz` with 503 `migrating`, at one door
+(`respond` in `packages/server/src/app.ts`), so no code checks whether a
+migration has run. So a migration adds: tables, columns that are nullable
+or have a default, indexes, grants. What removes or tightens (dropping or
+renaming a table or a column, NOT NULL on an existing column, a narrower
+check or type, a unique or foreign key the old code may break) ships one
+release after the code stops using it. 0.4.0 is a clean break: one baseline
+per engine, for new databases only, and no code for earlier releases'
+deployments or data. `pnpm test:compat` holds the newest release to this
+checkout's schema, through that release's own conformance; it is off for
+0.4.0, which has no earlier release on its schema, and returns for 0.5.0,
+against 0.4.0.
 
 **Transactions and the vault.** No app database transaction may stay open across
 any vault call. Prepare outside SQL; commit app writes and their audit together,
@@ -187,7 +192,7 @@ fast path. Parse errors or an unsupported diff select full validation.
   migrate with this checkout's migrations, and requires it conformant; then
   requires a synthetic destructive migration to fail it. `--schema` applies a
   published version's migrations instead, to check past releases. It needs
-  network and Postgres.
+  network and Postgres. Off in CI for 0.4.0 (see Migrations); back for 0.5.0.
 - `pnpm test:consumer [<dir>]` packs the eight packages, runs the packed CLI's
   `init` for both kinds outside the workspace, diffs them against the examples,
   installs the tarballs (pnpm overrides, no workspace links), then typechecks,

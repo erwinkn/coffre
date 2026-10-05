@@ -26,8 +26,6 @@ export const {
   deviceAuthorizations,
   serviceBindings,
   consumedTokens,
-  projectFolders,
-  secretFolders,
   secretReferences,
   dismissedKeys,
   oauthClients,

@@ -113,19 +113,6 @@ test('a reveal, and a refused one with its reason', () => {
   assert.equal(describe([refused]).refused, true);
 });
 
-test("a sync's run reads as its push, decided by both", () => {
-  const sync = { actorType: 'system' as const, actorId: 'sync:7f0c', ...prod, operationId: 'op-sync' };
-  const run = [
-    ...['A', 'B', 'C'].map((key) => entry({ ...sync, action: 'secret.read', author: 'vault', key, metadata: { purpose: 'sync', provider: 'github-actions' } })),
-    ...['A', 'B', 'C'].map((key) =>
-      entry({ ...sync, action: 'sync.push', key, metadata: { destination: 'acme/market', provider: 'github-actions' } }),
-    ),
-  ];
-  assert.equal(said(...run), 'pushed market/prod to acme/market: 3 secrets');
-  assert.equal(decidedBy(run), 'vault, app');
-  assert.equal(who(run), 'sync to GitHub');
-});
-
 test('a removal counts the grants it took', () => {
   assert.equal(
     said(entry({ action: 'member.remove', author: 'vault', subject: 'user:dave@acme.example', metadata: { revoked: 2, generation: 3 } })),
@@ -146,7 +133,7 @@ test('a refused batch keeps its size, and says why', () => {
   });
   assert.equal(said(...run), 'tried to run market/prod, 50 secrets: bulk limit');
   // The member as the log keeps it; shownMember says it as people read it, service:ci-deploy, where it is shown.
-  assert.deepEqual(who(run), { member: 'token:ci-deploy' });
+  assert.deepEqual(who(run[0]!), { member: 'token:ci-deploy' });
 });
 
 test('a batch partly refused says how much was', () => {
@@ -187,10 +174,6 @@ test('every other action has a sentence', () => {
     [{ action: 'member.restore', subject: 'user:eve@acme.example' }, 'brought back eve@acme.example'],
     [{ action: 'member.owner', subject: 'user:eve@acme.example', metadata: { owner: true } }, 'made eve@acme.example an owner'],
     [{ action: 'member.owner', subject: 'user:eve@acme.example', metadata: { owner: false } }, 'took owner from eve@acme.example'],
-    [{ action: 'sync.create', ...prod, metadata: { destination: 'acme/market' } }, 'set up a sync of market/prod to acme/market'],
-    [{ action: 'sync.update', ...prod, metadata: { paused: true } }, 'paused the sync of market/prod'],
-    [{ action: 'sync.delete', ...prod, metadata: { destination: 'acme/market' } }, 'removed the sync of market/prod to acme/market'],
-    [{ action: 'sync.remove', ...prod, key: 'OLD', metadata: { destination: 'acme/market' } }, 'removed market/prod/OLD from acme/market'],
     [{ action: 'vault.tampered', subject: 'user:eve@acme.example', reason: 'mac' }, "found eve@acme.example's record tampered with: it does not carry the vault's seal"],
     [{ action: 'key.rotate', metadata: { from: 'vault:1a2b3c4d' } }, 'rotated its key'],
     [{ action: 'sign_in', metadata: { kind: 'cli' } }, 'signed in to the CLI'],
@@ -215,11 +198,9 @@ test('every other action has a sentence', () => {
     [{ action: 'key.wrap', ...prod, key: 'DATABASE_URL', version: 5 }, 'sealed the key of market/prod/DATABASE_URL, version 5'],
     [{ action: 'key.check', metadata: { kekProvider: 'local', kekId: 'kek-1' } }, 'recorded the check value of the vault key kek-1'],
     [{ action: 'secret.read', ...prod, key: 'API_KEY', decision: 'deny', reason: 'wrong_kek' }, "tried to reveal market/prod/API_KEY: the vault's key is not the one that wrapped the data"],
-    [{ action: 'sync.run', ...prod, metadata: { destination: 'acme/market' } }, 'ran the sync of market/prod to acme/market'],
     [{ action: 'audit.heartbeat' }, 'checked in'],
     [{ action: 'audit.checkpoint', metadata: { seq: 5170 } }, 'signed the log through entry 5170'],
     [{ action: 'secret.list', ...prod, decision: 'deny', reason: 'no_grant' }, 'tried to list market/prod: no grant'],
-    [{ action: 'sync.list', ...prod, decision: 'deny', reason: 'no_grant' }, 'tried to list the syncs of market/prod: no grant'],
     [{ action: 'something.new', ...prod }, 'something.new market/prod'],
   ];
   for (const [fields, sentence] of cases) assert.equal(said(entry(fields)), sentence, fields.action);
@@ -237,7 +218,7 @@ test("the app's missing permissions are said as the grant that was missing", () 
 });
 
 test('the scheduler and the vault are named; an unknown reason is spelled out', () => {
-  assert.equal(who([{ actorType: 'system', actorId: 'scheduler', metadata: {} }]), 'the scheduler');
+  assert.equal(who({ actorType: 'system', actorId: 'scheduler' }), 'the scheduler');
   assert.equal(
     said(entry({ action: 'secret.read', ...prod, key: 'K', decision: 'deny', reason: 'some_new_code', metadata: { purpose: 'reveal' } })),
     'tried to reveal market/prod/K: some new code',
@@ -253,22 +234,6 @@ test('lines group a batch at its newest entry', () => {
   assert.deepEqual(lines(entries).map((line) => line.length), [1, 3, 1]);
 });
 
-
-// These templates remain part of the stored log's vocabulary after sync removal.
-test('every historical sync action still renders as a human sentence', () => {
-  const cases = {
-    'sync.create': 'set up a sync of market/prod to acme/market',
-    'sync.update': 'paused the sync of market/prod to acme/market',
-    'sync.delete': 'removed the sync of market/prod to acme/market',
-    'sync.push': 'pushed market/prod to acme/market',
-    'sync.remove': 'removed market/prod from acme/market',
-    'sync.run': 'ran the sync of market/prod to acme/market',
-    'sync.list': 'listed the syncs of market/prod',
-  };
-  for (const [action, sentence] of Object.entries(cases)) {
-    assert.equal(said(entry({ action, ...prod, metadata: { destination: 'acme/market', paused: true } })), sentence, action);
-  }
-});
 
 test('an entry a CI run wrote reads with its run, as its issuer stated it', () => {
   assert.equal(runLabel(null), null);

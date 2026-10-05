@@ -33,6 +33,15 @@ const createdAt = () => timestamp('created_at', { withTimezone: true }).notNull(
  */
 const PLACE_SLUG = sql.raw(`'^[a-z0-9][a-z0-9-]{0,62}(~[a-z0-9-]{1,40})?$'`);
 
+/**
+ * The folder a project or a secret is listed in: a folder lists rows
+ * together and does nothing else; it grants, hides and renames nothing. A
+ * name, not a row of its own: 1 to 64 characters, no `/`, no control
+ * character, no space at either end. Null is no folder.
+ */
+const folderCheck = (name: string, column: AnyPgColumn) =>
+  check(name, sql`${column} IS NULL OR (char_length(${column}) BETWEEN 1 AND 64 AND ${column} !~ '[/[:cntrl:]]' AND ${column} = btrim(${column}))`);
+
 export const projects = pgTable(
   'projects',
   {
@@ -41,10 +50,12 @@ export const projects = pgTable(
     name: text().notNull(),
     createdAt: createdAt(),
     archivedAt: timestamp('archived_at', { withTimezone: true }),
+    folder: text(),
   },
   (table) => [
     unique('projects_slug_key').on(table.slug),
     check('projects_slug_check', sql`${table.slug} ~ ${PLACE_SLUG}`),
+    folderCheck('projects_folder_check', table.folder),
   ],
 );
 
@@ -87,6 +98,8 @@ export const secrets = pgTable(
     // append, so it is also the highest: the next one is this plus one.
     currentVersion: integer('current_version').notNull().default(0),
     archivedAt: timestamp('archived_at', { withTimezone: true }),
+    // Within its environment: the same key elsewhere has its own.
+    folder: text(),
   },
   (table) => [
     unique('secrets_project_id_environment_id_key_key').on(
@@ -95,6 +108,7 @@ export const secrets = pgTable(
       table.key,
     ),
     check('secrets_key_check', sql`${table.key} ~ '^[A-Za-z_][A-Za-z0-9_]{0,127}$'`),
+    folderCheck('secrets_folder_check', table.folder),
     foreignKey({
       name: 'secrets_project_id_fkey',
       columns: [table.projectId],
@@ -146,56 +160,6 @@ export const secretVersions = pgTable(
 );
 
 /**
- * A folder lists rows together and does nothing else: it grants, hides and
- * renames nothing. A name, not a row of its own: 1 to 64 characters, no
- * `/`, no control character, no space at either end. Null is no folder.
- *
- * A table beside the one it arranges, not a column on it: Drizzle names
- * every column of a table in its inserts, so a new column on `secrets`
- * would break a release on the schema before its migration.
- */
-const folderCheck = (name: string, column: AnyPgColumn) =>
-  check(name, sql`${column} IS NULL OR (char_length(${column}) BETWEEN 1 AND 64 AND ${column} !~ '[/[:cntrl:]]' AND ${column} = btrim(${column}))`);
-
-/** The folder a project is listed in. */
-export const projectFolders = pgTable(
-  'project_folders',
-  {
-    projectId: uuid('project_id').primaryKey(),
-    folder: text(),
-    movedAt: timestamp('moved_at', { withTimezone: true }).notNull().defaultNow(),
-    movedBy: text('moved_by').notNull(),
-  },
-  (table) => [
-    folderCheck('project_folders_folder_check', table.folder),
-    foreignKey({
-      name: 'project_folders_project_id_fkey',
-      columns: [table.projectId],
-      foreignColumns: [projects.id],
-    }).onDelete('restrict'),
-  ],
-);
-
-/** The folder a secret is listed in, within its environment: the same key elsewhere has its own. */
-export const secretFolders = pgTable(
-  'secret_folders',
-  {
-    secretId: uuid('secret_id').primaryKey(),
-    folder: text(),
-    movedAt: timestamp('moved_at', { withTimezone: true }).notNull().defaultNow(),
-    movedBy: text('moved_by').notNull(),
-  },
-  (table) => [
-    folderCheck('secret_folders_folder_check', table.folder),
-    foreignKey({
-      name: 'secret_folders_secret_id_fkey',
-      columns: [table.secretId],
-      foreignColumns: [secrets.id],
-    }).onDelete('restrict'),
-  ],
-);
-
-/**
  * Keys an environment is missing, which its team decided it does not need:
  * the project's other environments have them, and its missing-keys list
  * leaves them out until someone restores them (docs/design/environments.md).
@@ -231,7 +195,7 @@ const ENVIRONMENT_ROLES = sql.raw(ROLE_NAMES.filter(assignableToEnvironment).map
  * The vault's member directory: everyone it has admitted, written by the
  * vault alone, read by both. A principal with no row is no member.
  * Principals are the strings coffre uses at its edges: `user:<email>`,
- * `token:<id>`, `sync:<id>`. Times are milliseconds since the epoch, each
+ * `token:<id>`. Times are milliseconds since the epoch, each
  * the time of the vault's log entry that set it, so the log replays to
  * these rows exactly.
  */
@@ -259,7 +223,7 @@ export const vaultMembers = pgTable(
   },
   (table) => [
     check('vault_members_mac_check', sql`octet_length(${table.mac}) = 32`),
-    check('vault_members_principal_check', sql`${table.principal} ~ '^(user|token|sync):[^[:space:]:][^[:space:]]*$'`),
+    check('vault_members_principal_check', sql`${table.principal} ~ '^(user|token):[^[:space:]:][^[:space:]]*$'`),
     // A person is their email address, lowercased, as in sign-in.
     check('vault_members_user_lowercase', sql`${table.principal} NOT LIKE 'user:%' OR ${table.principal} = lower(${table.principal})`),
     check('vault_members_status_check', sql`${table.status} IN ('active', 'removed')`),
@@ -333,7 +297,7 @@ export const auditLog = pgTable(
     // Milliseconds since the epoch, from the database's clock, read after the
     // append took the head's lock.
     occurredAt: bigint('occurred_at', { mode: 'number' }).notNull(),
-    // Who acted: `user:<email>`, `token:<id>`, `sync:<id>` or `system:<name>`.
+    // Who acted: `user:<email>`, `token:<id>` or `system:<name>`.
     actor: text().notNull(),
     action: text().notNull(),
     decision: text().notNull(),
@@ -357,7 +321,7 @@ export const auditLog = pgTable(
   },
   (table) => [
     check('audit_log_author_check', sql`${table.author} IN ('app', 'vault')`),
-    check('audit_log_actor_check', sql`${table.actor} ~ '^(user|token|sync|system):.+$'`),
+    check('audit_log_actor_check', sql`${table.actor} ~ '^(user|token|system):.+$'`),
     check('audit_log_decision_check', sql`${table.decision} IN ('allow', 'deny')`),
     check('audit_log_metadata_check', sql`${table.metadata}::jsonb IS NOT NULL`),
     check('audit_log_prev_hash_check', sql`octet_length(${table.prevHash}) = 32`),

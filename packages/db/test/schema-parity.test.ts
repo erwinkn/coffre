@@ -6,7 +6,7 @@ import { getTableConfig as postgresConfig } from 'drizzle-orm/pg-core';
 import { getTableConfig as sqliteConfig } from 'drizzle-orm/sqlite-core';
 
 import { ENGINES, journal, staleness } from '../src/baseline.ts';
-import { REQUIRED_MIGRATIONS } from '../src/schema-version.ts';
+import { KNOWN_MIGRATIONS } from '../src/schema-version.ts';
 import * as postgres from '../src/schema.ts';
 import * as sqlite from '../src/schema.sqlite.ts';
 
@@ -66,20 +66,18 @@ function shapes(schema: Record<string, unknown>, config: (table: never) => unkno
 
 test('the SQLite schema has the Postgres tables, columns, nullability and keys', () => {
   const expected = shapes(postgres, postgresConfig);
-  assert.deepEqual(Object.keys(expected), ['audit_chain_head', 'audit_log', 'consumed_tokens', 'credentials', 'device_authorizations', 'dismissed_keys', 'environments', 'identities', 'mcp_connections', 'oauth_clients', 'project_folders', 'projects', 'secret_folders', 'secret_references', 'secret_versions', 'secrets', 'service_bindings', 'vault_grants', 'vault_members']);
+  assert.deepEqual(Object.keys(expected), ['audit_chain_head', 'audit_log', 'consumed_tokens', 'credentials', 'device_authorizations', 'dismissed_keys', 'environments', 'identities', 'mcp_connections', 'oauth_clients', 'projects', 'secret_references', 'secret_versions', 'secrets', 'service_bindings', 'vault_grants', 'vault_members']);
   assert.deepEqual(shapes(sqlite, sqliteConfig), expected);
 });
 
-test('each migration tree ends at its schema and preserves its original baseline', async () => {
+test('each migration tree ends at its schema and starts at its baseline', async () => {
   const stale = Object.fromEntries(await Promise.all(ENGINES.map(async (engine) => [engine, await staleness(engine)])));
   // Anything listed here needs `pnpm db:generate`.
   assert.deepEqual(stale, { postgres: [], sqlite: [] });
 });
 
-test('the runtime requires a nonempty prefix that exists in each migration tree', async () => {
+test('the app knows every migration in each tree, by its journal, as a Worker without files does', async () => {
   for (const engine of ENGINES) {
-    const required = REQUIRED_MIGRATIONS[engine];
-    assert.ok(Number.isSafeInteger(required) && required > 0, engine);
-    assert.ok(required <= (await journal(engine)).length, engine);
+    assert.deepEqual(KNOWN_MIGRATIONS[engine], (await journal(engine)).map((entry) => entry.tag), engine);
   }
 });

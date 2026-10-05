@@ -95,5 +95,4 @@ calls. `coffre init` writes it on:
   120, total: 300 }) }`, counted in the process.
 
 Without `mcp`, `/mcp` and its metadata answer 404, and the account page has
-no Connected apps. Migration `0010_mcp_connections` adds the clients' and
-connections' tables; until it runs, connecting answers 503.
+no Connected apps.

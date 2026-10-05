@@ -9,7 +9,6 @@ import { shownMember } from '@coffre/core/schemas';
 import { github, signin, type BindingClaims, type RateLimiter, type WorkloadProfile } from '@coffre/core/identity';
 import { createDatabase, type Database } from '@coffre/db';
 import { asc, eq, sql, type SQL } from 'drizzle-orm';
-import { migrationLedger } from '@coffre/db/dialect';
 
 import { auditLog, credentials, serviceBindings } from './db/tables.ts';
 import { answer, type Pages } from './start-fixture.ts';
@@ -272,6 +271,8 @@ test('a token no binding can take costs its admission and one indexed read: no o
   const seen: Statement[] = [];
   try {
     const stranger = createRuntime(config, createDatabase(counted(pool, seen)), deps.vault, transport);
+    // The door's read of the migrations is the isolate's, once, not an exchange's (app.ts).
+    stranger.schema.migrated = true;
     /** What one exchange cost: the statements it sent, its vault calls and its fetches. */
     const ask = async (service: string, jwt: string) => {
       seen.length = 0;
@@ -653,31 +654,7 @@ test('a binding issues at most 60 credentials a minute', async () => {
   assert.deepEqual([outcomes.filter((status) => status === 200).length, outcomes.at(-1)], [60, 429]);
 });
 
-test('before the migration that records spent tokens, an exchange says so, and nothing is issued', async () => {
-  // Forget 0003_exchanges and every migration after it, as on a database deployed to before `coffre migrate`.
-  const ledger = migrationLedger(db.owner);
-  const later = (await rows(sql`SELECT * FROM ${ledger} ORDER BY created_at`)).slice(3);
-  for (const entry of later) await run(sql`DELETE FROM ${ledger} WHERE hash = ${entry.hash}`);
-  try {
-    const refused = await trade(token(rsa));
-    assert.deepEqual([refused.status, refused.body.reason], [503, 'migration_pending']);
-    assert.deepEqual(await db.owner.select().from(credentials), []);
-  } finally {
-    for (const entry of later) {
-      const columns = Object.keys(entry);
-      await run(sql`INSERT INTO ${ledger} (${sql.join(columns.map((column) => sql.identifier(column)), sql`, `)})
-        VALUES (${sql.join(columns.map((column) => sql`${entry[column]}`), sql`, `)})`);
-    }
-  }
-  assert.equal((await trade(token(rsa))).status, 200);
-});
-
 /** Raw SQL as the owner, on either engine. */
-async function rows(query: SQL): Promise<Record<string, unknown>[]> {
-  if (TEST_ENGINE === 'sqlite') return (db.owner as unknown as { all: (q: SQL) => Promise<Record<string, unknown>[]> }).all(query);
-  return ((await (db.owner as unknown as { execute: (q: SQL) => Promise<{ rows: Record<string, unknown>[] }> }).execute(query)).rows);
-}
-
 async function run(query: SQL): Promise<void> {
   if (TEST_ENGINE === 'sqlite') await (db.owner as unknown as { run: (q: SQL) => Promise<unknown> }).run(query);
   else await (db.owner as unknown as { execute: (q: SQL) => Promise<unknown> }).execute(query);

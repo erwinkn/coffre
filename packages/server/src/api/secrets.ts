@@ -22,14 +22,15 @@ import {
   update,
   type ResolvedPath,
   type SecretPlaceRow,
+  fileSecrets,
+  secretFolderOf,
 } from '../db/queries.ts';
 import { can, permissionsAt, placeOf } from './caller.ts';
 import { allowed, asking, audited, denied, need, recorded, Refusal, vaultRefusal, withRefusals, type ApiContext } from './context.ts';
 import { conflict, notFound, vaultRefused } from './errors.ts';
-import { fileSecrets, requireFolders, secretFoldersIn } from './folders.ts';
 import { openValues, rewrapValue, sealValues } from './keys.ts';
 import { formatMember, formatPath, type Path } from './paths.ts';
-import { currentReferences, placeOfRow, readableValues, readersOf, referencesReady, refuseIfRead, requireReferences, type ReferenceView, type Resolved } from './references.ts';
+import { currentReferences, placeOfRow, readableValues, readersOf, refuseIfRead, type ReferenceView, type Resolved } from './references.ts';
 
 export type SecretKey = {
   key: string;
@@ -125,7 +126,7 @@ export async function listSecrets(
   const environment = requireLive(place);
   const [rows, folders] = await Promise.all([
     environmentSecrets(ctx.db, environment.environmentId),
-    secretFoldersIn(ctx.db, environment.environmentId),
+    secretFolderOf(ctx.db, environment.environmentId),
   ]);
   const references = await currentReferences(ctx.db, rows.filter((row) => row.current === null).map((row) => row.id));
   const referenceOf = (secretId: string): SecretKey['reference'] => {
@@ -220,15 +221,13 @@ export async function setSecrets(
   const writes = Object.entries(patch).filter((entry): entry is [string, string] => typeof entry[1] === 'string');
   const refs = Object.entries(patch).flatMap(([key, value]) => (value !== null && typeof value === 'object' ? [{ key, ref: value.ref }] : []));
   const archives = keysIn.filter((key) => patch[key] === null);
-  if (refs.length > 0) await requireReferences(ctx.db);
   const result = await optimistic(ctx, async () => {
     const operationId = randomUUID();
     const heads = await secretHeads(ctx.db, environment.environmentId, { keys: keysIn });
     const prepared = new Map(heads.map((row) => [row.key, row]));
-    const ready = await referencesReady(ctx.db);
     const currently = await currentReferences(ctx.db, heads.filter((row) => row.currentVersionId === null).map((row) => row.id));
     // Each key's newest reference, which the transaction checks no write replaced meanwhile.
-    const newestBefore = ready ? newestReferences(await referenceRows(ctx.db, { holderSecretIds: heads.map((row) => row.id) })) : new Map<string, string>();
+    const newestBefore = newestReferences(await referenceRows(ctx.db, { holderSecretIds: heads.map((row) => row.id) }));
     const archived = (key: string) => {
       const row = prepared.get(key);
       if (row?.archivedAt == null) return;
@@ -318,10 +317,8 @@ export async function setSecrets(
         }
       }
       // A reference made meanwhile, to a key this write prepared without it.
-      if (ready) {
-        const newest = newestReferences(await referenceRows(tx, { holderSecretIds: rows.map((row) => row.id) }));
-        if (rows.some((row) => newest.get(row.id) !== newestBefore.get(row.id))) throw new PrepareAgain();
-      }
+      const newest = newestReferences(await referenceRows(tx, { holderSecretIds: rows.map((row) => row.id) }));
+      if (rows.some((row) => newest.get(row.id) !== newestBefore.get(row.id))) throw new PrepareAgain();
 
       const keys: Record<string, SetOutcome> = {};
       const versions = items.map(({ key, secret }, i) => {
@@ -540,8 +537,7 @@ export async function patchSecret(
   if (renaming && archived) {
     throw conflict(`${secret.key} is archived; unarchive it before renaming it`);
   }
-  if (patch.folder !== undefined) await requireFolders(ctx.db);
-  const before = (await secretFoldersIn(ctx.db, environment.environmentId)).get(secret.id) ?? null;
+  const before = (await secretFolderOf(ctx.db, environment.environmentId)).get(secret.id) ?? null;
   const moving = patch.folder !== undefined && patch.folder !== before;
   const folder = moving ? patch.folder! : before;
   if (!renaming && !archiving && !moving) return { key: secret.key, archived, folder };
@@ -575,7 +571,7 @@ export async function patchSecret(
     }
     if (renaming) log.push(allowed(ctx, 'secret.rename', { ...where, metadata: { key: secret.key, nextKey } }));
     if (moving) {
-      await fileSecrets(tx, [{ secretId: secret.id, folder }], ctx.caller.principal.id);
+      await fileSecrets(tx, [{ secretId: secret.id, folder }]);
       log.push(allowed(ctx, 'secret.move', { ...where, metadata: { key: renaming ? nextKey : secret.key, from: before, to: folder } }));
     }
     return { key: renaming ? nextKey : secret.key, archived, folder };
@@ -591,7 +587,6 @@ export async function patchSecret(
  */
 export async function refileSecrets(ctx: ApiContext, place: ResolvedPath, folder: string, to: string | null): Promise<{ folder: string | null; moved: string[] }> {
   const environment = requireLive(place);
-  await requireFolders(ctx.db);
   const operationId = randomUUID();
   return audited(ctx, async (tx, log) => {
     // Under the head, as every write to a place: one archived or deleted since the router found it takes none.
@@ -599,7 +594,7 @@ export async function refileSecrets(ctx: ApiContext, place: ResolvedPath, folder
     const filed = await secretsInFolder(tx, environment.environmentId, folder);
     if (filed.length === 0) throw notFound(`no folder "${folder}" in ${place.project.slug}/${place.environment!.slug}`);
     if (to !== folder) {
-      await fileSecrets(tx, filed.map((secret) => ({ secretId: secret.id, folder: to })), ctx.caller.principal.id);
+      await fileSecrets(tx, filed.map((secret) => ({ secretId: secret.id, folder: to })));
       for (const secret of filed) {
         log.push(allowed(ctx, 'secret.move', { ...environment, secretId: secret.id, operationId, metadata: { key: secret.key, from: folder, to } }));
       }

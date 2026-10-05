@@ -8,7 +8,7 @@ import { readGrants } from '@coffre/db/grants';
 import * as dialect from '@coffre/db/dialect';
 import { canonicalTimestamp, changedRows, clock, clockMillis, forUpdate, migrationLedger, tombstone, truth, type Table } from '@coffre/db/dialect';
 import type * as schema from '@coffre/db/schema';
-import { and, asc, count, countDistinct, desc, eq, getTableColumns, getTableName, gt, gte, inArray, isNull, like, lt, not, notInArray, or, sql, type AnyColumn, type SQL } from 'drizzle-orm';
+import { and, asc, count, countDistinct, desc, eq, getTableColumns, getTableName, gt, gte, inArray, isNotNull, isNull, like, lt, not, notInArray, or, sql, type AnyColumn, type SQL } from 'drizzle-orm';
 
 import { authMac, checkAuthRow, issuingBinding, verifyAuthRow, type AuthRow, type AuthTable } from '../auth-rows.ts';
 
@@ -37,7 +37,7 @@ type NewRow<T extends Table> = T['$inferInsert'];
 
 /**
  * Which rows: each named column equals its value, is null, or is one of a
- * list. `{ syncId, key: ['A', 'B'], removedAt: null }`.
+ * list. `{ environmentId, key: ['A', 'B'], archivedAt: null }`.
  */
 export type Match<T extends Table> = {
   [K in keyof Row<T>]?: Row<T>[K] | NonNullable<Row<T>[K]>[];
@@ -252,12 +252,14 @@ export async function places(db: Queryable, { tombstones = false }: { tombstones
 }
 
 // --- folders --------------------------------------------------------------------
+// One level, for projects and for an environment's secrets, which arrange
+// lists and do nothing else (docs/design/environments.md): a column on each.
 
 /** The folder each project is listed in, for those in one. */
 export async function projectFolderOf(db: Queryable): Promise<Map<string, string>> {
-  const { projectFolders } = tablesOf(db);
-  const rows = await db.select({ projectId: projectFolders.projectId, folder: projectFolders.folder }).from(projectFolders);
-  return new Map(rows.flatMap((row) => (row.folder === null ? [] : [[row.projectId, row.folder]])));
+  const { projects } = tablesOf(db);
+  const rows = await db.select({ id: projects.id, folder: projects.folder }).from(projects).where(isNotNull(projects.folder));
+  return new Map(rows.map((row) => [row.id, row.folder!]));
 }
 
 /**
@@ -266,12 +268,11 @@ export async function projectFolderOf(db: Queryable): Promise<Map<string, string
  * the folder moves.
  */
 export async function projectsInFolder(db: Queryable, folder: string): Promise<{ id: string; slug: string; environments: { id: string; slug: string }[] }[]> {
-  const { projectFolders, projects, environments } = tablesOf(db);
+  const { projects, environments } = tablesOf(db);
   const rows = (await db
     .select({ id: projects.id, slug: projects.slug })
-    .from(projectFolders)
-    .innerJoin(projects, eq(projects.id, projectFolders.projectId))
-    .where(eq(projectFolders.folder, folder))
+    .from(projects)
+    .where(eq(projects.folder, folder))
     .orderBy(asc(projects.slug))).filter((row) => !isTombstone(row.slug));
   if (rows.length === 0) return [];
   const places = await db
@@ -283,24 +284,37 @@ export async function projectsInFolder(db: Queryable, folder: string): Promise<{
 
 /** An environment's secrets filed in `folder`, archived ones too, by key. */
 export async function secretsInFolder(db: Queryable, environmentId: string, folder: string): Promise<{ id: string; key: string }[]> {
-  const { secretFolders, secrets } = tablesOf(db);
+  const { secrets } = tablesOf(db);
   return db
     .select({ id: secrets.id, key: secrets.key })
-    .from(secretFolders)
-    .innerJoin(secrets, eq(secrets.id, secretFolders.secretId))
-    .where(and(eq(secrets.environmentId, environmentId), eq(secretFolders.folder, folder)))
+    .from(secrets)
+    .where(and(eq(secrets.environmentId, environmentId), eq(secrets.folder, folder)))
     .orderBy(asc(secrets.key));
 }
 
 /** The folder each of an environment's secrets is listed in, for those in one. */
 export async function secretFolderOf(db: Queryable, environmentId: string): Promise<Map<string, string>> {
-  const { secretFolders, secrets } = tablesOf(db);
+  const { secrets } = tablesOf(db);
   const rows = await db
-    .select({ secretId: secretFolders.secretId, folder: secretFolders.folder })
-    .from(secretFolders)
-    .innerJoin(secrets, eq(secrets.id, secretFolders.secretId))
-    .where(eq(secrets.environmentId, environmentId));
-  return new Map(rows.flatMap((row) => (row.folder === null ? [] : [[row.secretId, row.folder]])));
+    .select({ id: secrets.id, folder: secrets.folder })
+    .from(secrets)
+    .where(and(eq(secrets.environmentId, environmentId), isNotNull(secrets.folder)));
+  return new Map(rows.map((row) => [row.id, row.folder!]));
+}
+
+/** File a project in `folder`, or in none. */
+export async function fileProject(tx: Transaction, projectId: string, folder: string | null): Promise<void> {
+  const { projects } = tablesOf(tx);
+  await tx.update(projects).set({ folder }).where(eq(projects.id, projectId));
+}
+
+/** File secrets in folders, or in none: one update per folder. */
+export async function fileSecrets(tx: Transaction, rows: { secretId: string; folder: string | null }[]): Promise<void> {
+  const { secrets } = tablesOf(tx);
+  for (const folder of new Set(rows.map((row) => row.folder))) {
+    const ids = rows.filter((row) => row.folder === folder).map((row) => row.secretId);
+    await tx.update(secrets).set({ folder }).where(inArray(secrets.id, ids));
+  }
 }
 
 /**
@@ -439,7 +453,7 @@ export function memberOf(principal: string): { type: 'user' | 'service'; id: str
 
 /**
  * A member's status and generation as the vault last committed them, or
- * null for no member: `user:…`, `token:…` or `sync:…`. Read without a lock:
+ * null for no member: `user:…` or `token:…`. Read without a lock:
  * a member's row is the vault's to lock. Inside a transaction that holds
  * the log's head, any change the vault is making waits for it, so what this
  * reads holds until it commits.
@@ -620,8 +634,7 @@ export async function members(
         statusChangedBy: vaultMembers.statusChangedBy,
       })
       .from(vaultMembers)
-      // A sync is a member too, but signs nothing in.
-      .where(and(of(vaultMembers.principal), or(sql`${vaultMembers.principal} LIKE 'user:%'`, sql`${vaultMembers.principal} LIKE 'token:%'`)))
+      .where(of(vaultMembers.principal))
       .orderBy(asc(vaultMembers.principal)),
     // Live ones only, through `credentials_live_idx`: a CI service leaves an expired one behind each run.
     db.select().from(credentials).where(and(of(credentials.principal), isNull(credentials.revokedAt), gt(credentials.expiresAt, now))),
@@ -868,8 +881,8 @@ export async function exchangeCandidates(db: Queryable, chainKey: Buffer, princi
  * database clock, as `findCredential` does, so that Hyperdrive never
  * answers it from its cache: a cached "no tombstone" would let a credential
  * whose rows were put back after its binding was removed sign in again. A
- * query of its own, not a join in `findCredential`, which every request
- * runs and which must work before the migration that made bindings.
+ * query of its own, not a join in `findCredential`: only a credential a
+ * binding issued asks it, and the exchange asks it under its transaction.
  */
 export async function bindingStands(db: Queryable, chainKey: Buffer, bindingId: string, principal: string, generation: number): Promise<boolean> {
   const { serviceBindings } = tablesOf(db);
@@ -1576,10 +1589,4 @@ export async function readiness(db: Queryable): Promise<{
 }> {
   const [[beat], checkpoint] = await Promise.all([newestEntry(db, 'app', 'audit.heartbeat'), latestCheckpoint(db)]);
   return { beat: beat === undefined ? null : { seq: beat.seq, ageSeconds: (beat.now - beat.occurredAt) / 1000 }, checkpoint };
-}
-
-/** How many migrations the database has applied. */
-export async function appliedMigrations(db: Queryable): Promise<number> {
-  const [applied] = await db.select({ n: count() }).from(migrationLedger(db));
-  return applied?.n ?? 0;
 }

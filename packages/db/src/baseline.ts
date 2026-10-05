@@ -20,8 +20,11 @@ import * as sqlite from './schema.sqlite.ts';
  *
  * A baseline is baseline/<engine>.sql with its `-- @schema` line replaced by
  * the tables drizzle-kit generates from that engine's schema. The template
- * holds what a schema cannot say: the audit chain's first rows, and the
- * Postgres runtime role and its grants.
+ * holds what a schema cannot say: the audit chain's first rows, the audit
+ * log's append-only and the secret versions' erase-only triggers, and the
+ * Postgres runtime roles and their grants. Since 0.4.0, every database starts
+ * from this one baseline; an expression index's SQL is written by hand in it,
+ * as drizzle-kit splits one at its comma on SQLite.
  *
  * `pnpm db:generate` runs this file and appends pending schema changes.
  */
@@ -79,7 +82,8 @@ function generate(engine: Engine): void {
   execFileSync(
     `${packageRoot}node_modules/.bin/drizzle-kit`,
     ['generate', '--config', `drizzle.${engine}.config.ts`, '--name', process.argv[2] ?? 'schema'],
-    { cwd: here, stdio: 'inherit' },
+    // drizzle-kit loads the schema, which imports the workspace's other packages by their sources.
+    { cwd: here, stdio: 'inherit', env: { ...process.env, NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --conditions=coffre:source`.trim() } },
   );
 }
 
