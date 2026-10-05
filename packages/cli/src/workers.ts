@@ -31,12 +31,12 @@ import {
 } from './cloudflare.ts';
 import { BUILT_APP, buildApp, editWorker, placeholder, readWorker, type Change, type WorkerConfig } from './deployment.ts';
 import { createGitHubApp, GITHUB, type GitHub } from './github-app.ts';
-import { recordLines, recordsToAdd, saasZone, type Served, serveThrough, standing, waitForRecords, zoneOf } from './hostname.ts';
+import { recordLines, recordsToAdd, Refused, saasZone, type Served, serveThrough, standing, tokenNeeded, waitForRecords, zoneOf } from './hostname.ts';
 import { generateKeys, keyValues, type Keys } from './keys.ts';
 import type { Screen } from './secrets.ts';
 import type { Login } from './setup.ts';
 import { type Outcome, type Step, Steps } from './steps.ts';
-import { type Keyboard, listed, type Output, paragraph, row, select, style, textLine } from './tty.ts';
+import { hiddenLine, type Keyboard, listed, type Output, paragraph, row, select, style, textLine } from './tty.ts';
 
 export type Component = 'app' | 'vault';
 const COMPONENTS = ['app', 'vault'] as const;
@@ -185,6 +185,8 @@ export class Cloudflare {
   #missing: Record<Component, boolean> = { app: false, vault: false };
   /** The GitHub App's client secret, when this run has it to install. */
   #clientSecret: string | null = null;
+  /** The Cloudflare API token setup was given, for what wrangler's login was refused: its wranglers deploy under it. */
+  readonly #token: string | null;
   /** What this run changed in each wrangler.jsonc, in a few words each. */
   readonly #wrote: Record<Component, Set<string>> = { app: new Set(), vault: new Set() };
 
@@ -194,7 +196,7 @@ export class Cloudflare {
     workers: Record<Component, WorkerConfig>,
     found: Found,
     administrator: URL,
-    answers: { address: string; rootAdmins: string; serving: Serving },
+    answers: { address: string; rootAdmins: string; serving: Serving; token: string | null },
     secrets: string[],
   ) {
     this.#dir = dir;
@@ -206,6 +208,7 @@ export class Cloudflare {
     this.rootAdmins = answers.rootAdmins;
     this.serving = answers.serving;
     this.#secrets = secrets;
+    this.#token = answers.token;
     const vars = workers.app.vars;
     this.#github = { web: vars.GITHUB_URL ?? GITHUB.web, api: vars.GITHUB_API_URL ?? GITHUB.api };
   }
@@ -282,7 +285,7 @@ export class Cloudflare {
         );
         kind = 'saas';
       } else {
-        kind = await noDomain(api, account, address, workers.app.name, ownSubdomain, out, keys);
+        kind = await noDomain(api, account, address, workers.app.name, ownSubdomain, out, keys, secrets);
       }
     }
     if (found.others.length > 0) {
@@ -320,8 +323,8 @@ export class Cloudflare {
       .map((email) => email.trim())
       .join(',');
     out.write('\n');
-    const serving: Serving = kind === 'saas' ? await serveElsewhere(found, active, address, out, keys, describe) : { kind };
-    return new Cloudflare(dir, wrangler, workers, found, administrator, { address, rootAdmins, serving }, secrets);
+    const { serving, token } = kind === 'saas' ? await serveElsewhere(found, active, address, out, keys, describe, secrets) : { serving: { kind }, token: null };
+    return new Cloudflare(dir, wrangler, workers, found, administrator, { address, rootAdmins, serving, token }, secrets);
   }
 
   /** A Worker's Hyperdrive config, when there is one of this deployment's (`ourConfig`). */
@@ -564,7 +567,7 @@ export class Cloudflare {
     try {
       await steps.run(0, async () => {
         const secrets: Record<string, string> = this.#missing.vault ? { VAULT_KEY: this.keys!.VAULT_KEY } : {};
-        await deployWorker(this.#wrangler, this.workers.vault.path, account, secrets);
+        await deployWorker(this.#wrangler, this.workers.vault.path, account, secrets, this.#token);
         return `Deployed the vault, ${this.workers.vault.name}${this.#missing.vault ? ', with its key' : ''}`;
       });
       await steps.run(1, async (step) => {
@@ -576,7 +579,7 @@ export class Cloudflare {
           ...(this.#missing.app ? { APP_KEY: this.keys!.APP_KEY } : {}),
           ...(this.#clientSecret === null ? {} : { GITHUB_CLIENT_SECRET: this.#clientSecret }),
         };
-        await deployWorker(this.#wrangler, BUILT_APP, account, secrets);
+        await deployWorker(this.#wrangler, BUILT_APP, account, secrets, this.#token);
         const what = [...(this.#missing.app ? ['its key'] : []), ...(this.#clientSecret === null ? [] : ["GitHub's secret"])];
         return `Deployed the app, ${this.workers.app.name}${what.length === 0 ? '' : `, with ${listed(what, 'and')}`}`;
       });
@@ -641,6 +644,7 @@ async function noDomain(
   ownSubdomain: () => Promise<string | null>,
   out: Output,
   keys: Keyboard,
+  secrets: string[],
 ): Promise<'workers.dev'> {
   const s = style(out);
   const domain = domainOf(address);
@@ -667,29 +671,73 @@ async function noDomain(
     return 'workers.dev';
   }
   const chosen = addressOf(await textLine(keys, out, s, 'The domain to add', 'the one you registered', { initial: domain, check: (answer) => addressProblem(addressOf(answer)) }));
-  let zone: Zone;
-  try {
-    zone = await api.createZone(account.id, chosen);
-  } catch (error) {
-    if (!denied(error)) throw error;
-    throw new Error(
-      `This Cloudflare login may not add a domain. Add ${chosen} on Cloudflare's dashboard, https://dash.cloudflare.com, under Add a domain; ` +
-        'or set CLOUDFLARE_API_TOKEN to a token that also has Zone: Zone Edit. Then run setup again.',
-    );
+  // Refused, as wrangler's login is: a token that may, asked for, and the domain added under it.
+  let zone: Zone | null = null;
+  let refused = false;
+  while (zone === null) {
+    try {
+      zone = await api.createZone(account.id, chosen);
+      break;
+    } catch (error) {
+      if (!denied(error)) throw error;
+    }
+    const why = refused
+      ? 'Cloudflare refused that token as well.'
+      : `Cloudflare refused this login adding ${chosen}: wrangler's login may not. Make a token at https://dash.cloudflare.com/profile/api-tokens ` +
+        "with Zone: Zone Edit, for all zones of the account. Or stop here, add it on Cloudflare's dashboard, under Add a domain, and run setup again.";
+    out.write(`${s.dim(paragraph(out, why, 2))}\n`);
+    refused = true;
+    const token = await hiddenLine(keys, out, s, 'Cloudflare API token', 'Hidden as you paste it. Ctrl-C stops here.');
+    secrets.push(token);
+    api.use(token);
   }
   throw new Later(nameservers(out, zone, 'is on this Cloudflare account now'));
 }
 
-/** Serve an address whose DNS is elsewhere through one of the account's domains, and show the records to add there. */
-async function serveElsewhere(found: Found, zones: readonly Zone[], address: string, out: Output, keys: Keyboard, describe: (error: unknown) => string): Promise<Serving> {
+/**
+ * Serve an address whose DNS is elsewhere through one of the account's
+ * domains, and show the records to add there. Refused, as wrangler's login
+ * may be, it asks for a token that may, and goes on under it: so does
+ * every wrangler it runs after.
+ */
+async function serveElsewhere(
+  found: Found,
+  zones: readonly Zone[],
+  address: string,
+  out: Output,
+  keys: Keyboard,
+  describe: (error: unknown) => string,
+  secrets: string[],
+): Promise<{ serving: Serving; token: string | null }> {
   const steps = new Steps(out, [`Serve ${address} through ${zones.length === 1 ? zones[0]!.name : 'one of your domains'}`], () => keys, describe);
   let served!: Served;
+  let token: string | null = null;
   try {
     await steps.run(0, async (step) => {
-      const zone = await saasZone(found.api, found.account.id, zones, address, (question, options) => step.choose(question, options));
-      const { details, ...rest } = await serveThrough(found.api, zone, address);
-      served = rest;
-      return { text: `${address} is a custom hostname of ${zone.name}`, details };
+      // Chosen once: a run of the rest under a token asks no second time.
+      let zone: Zone | undefined;
+      for (;;) {
+        try {
+          zone ??= await saasZone(found.api, found.account.id, zones, address, (question, options) => step.choose(question, options));
+          const { details, ...rest } = await serveThrough(found.api, zone, address);
+          served = rest;
+          return { text: `${address} is a custom hostname of ${zone.name}`, details };
+        } catch (error) {
+          if (!(error instanceof Refused)) throw error;
+          steps.aside(token === null ? tokenNeeded(error.zones) : 'Cloudflare refused that token as well: it needs the permissions above.');
+        }
+        await step.paste(
+          'Paste a Cloudflare API token, hidden as you paste it:',
+          async (text) => {
+            if (!/^\S{20,}$/.test(text)) return 'that is not a Cloudflare API token: copy it whole';
+            token = text;
+            secrets.push(text);
+            found.api.use(text);
+            return null;
+          },
+          new AbortController().signal,
+        );
+      }
     });
     // Once Cloudflare has seen them, a run after has none to show.
     if (!standing(served.hostname).done) {
@@ -700,7 +748,7 @@ async function serveElsewhere(found: Found, zones: readonly Zone[], address: str
     steps.end();
   }
   out.write('\n');
-  return { kind: 'saas', ...served };
+  return { serving: { kind: 'saas', ...served }, token };
 }
 
 /** Whether `url` answers 200 within ANSWER_WITHIN_MS, asking every few seconds. */

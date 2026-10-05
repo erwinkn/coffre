@@ -490,19 +490,24 @@ the app Worker serves it through a route on that domain
 Cloudflare for SaaS is on the Free plan, the first 100 custom hostnames
 free ([plans](https://developers.cloudflare.com/cloudflare-for-platforms/cloudflare-for-saas/plans/)).
 
-Two things only you can do, before setup:
+**Enable Cloudflare for SaaS** first, on the domain it goes through, on
+its dashboard page *SSL/TLS, Custom Hostnames*: only the dashboard can, and
+it asks for a payment method, even on the Free plan. Setup says so, with
+the link, when it is off.
 
-- **Enable Cloudflare for SaaS** on the domain it goes through, on its
-  dashboard page *SSL/TLS, Custom Hostnames*. Cloudflare asks for a payment
-  method there, even on the Free plan. Setup says so, with the link, when it
-  is off.
-- **Give setup a token.** wrangler's login may not manage custom hostnames
-  or DNS records. Make one at
-  [dash.cloudflare.com/profile/api-tokens](https://dash.cloudflare.com/profile/api-tokens)
-  with Account: *Workers Scripts Edit*, *Hyperdrive Edit* and *Account
-  Settings Read*; and Zone, for that domain: *Zone Read*, *Workers Routes
-  Edit*, *SSL and Certificates Edit* and *DNS Edit*. Run setup with
-  `CLOUDFLARE_API_TOKEN` set to it.
+**A token, when wrangler's login is refused.** wrangler's login has no scope
+for DNS records, and may not manage custom hostnames. When Cloudflare
+refuses it one of these calls, setup says which permissions a token needs
+and asks for one, hidden as you paste it: make it at
+[dash.cloudflare.com/profile/api-tokens](https://dash.cloudflare.com/profile/api-tokens)
+with Account: *Workers Scripts Edit*, *Hyperdrive Edit* and *Account
+Settings Read*; and Zone, for that domain: *Zone Read*, *Workers Routes
+Edit*, *SSL and Certificates Edit* and *DNS Edit*. Setup tries it at once,
+asks again if Cloudflare refuses it too, and goes on under it for the rest
+of the run: each wrangler it runs gets it as its `CLOUDFLARE_API_TOKEN`.
+Setup never reads that variable itself, and leaves the wranglers' as it is
+until you give it a token. A run that needs no refused call, such as one on
+a domain whose fallback origin is set, asks for nothing.
 
 Then setup, with several domains on the account, asks which one serves the
 address. It keeps the domain's fallback origin when it has one, else makes
@@ -518,13 +523,26 @@ Add these records where secrets.example.org's DNS is:
   TXT    _acme-challenge.secrets.example.org      "Kq0w…"
 ```
 
+Cloudflare validates the certificate over HTTP too, once the CNAME points
+to the domain, even with TXT chosen: with the CNAME in, the `_acme-challenge`
+record is optional, and the certificate's renewals need nothing from you.
+The TXT records let it all go through before the CNAME moves traffic over.
+
 The rest of setup carries on meanwhile. After the deploy, it shows the
 records still missing and asks Cloudflare every 10 seconds until it has seen
 them and issued the certificate, then waits for coffre to answer. Ctrl-C
 stops the wait, with everything else done: run setup again once the records
 are in, and it finds the custom hostname, asks nothing about the domain,
 and waits for what is left. When Cloudflare gave up waiting for the
-certificate's records, a run after asks it to check them again.
+records, the hostname *moved* or its certificate timed out, a run after
+asks it to validate again.
+
+If the address's DNS is on another Cloudflare account, the CNAME there must
+be DNS only, not proxied, for the custom hostname to get the traffic. And
+if the address's own domain joins this account later, the next run makes
+the address a custom domain, and leaves the custom hostname behind:
+Cloudflare marks it *moved* once the CNAME goes, and deletes it a week
+after.
 
 `app/wrangler.jsonc` records the route, on the domain's zone by its id:
 
@@ -539,8 +557,10 @@ neither unless you choose it:
   nameservers to set at your registrar. Once Cloudflare sees them, often
   within the hour, run setup again: the address is under one of the
   account's domains then, as a custom domain. A run before that shows the
-  nameservers again. Adding a domain needs a token with Zone: *Zone Edit*
-  too; with wrangler's login, setup says to add it on the dashboard instead.
+  nameservers again. Adding a domain needs Zone: *Zone Edit*, for all zones
+  of the account, which wrangler's login may not have: refused, setup asks
+  for a token that has it, or you stop there and add the domain on the
+  dashboard.
 - **Use the workers.dev address for now**, `<name>.<subdomain>.workers.dev`,
   once the account has a workers.dev subdomain. Run setup again with your
   own address later: it moves the app there, and says to change the GitHub

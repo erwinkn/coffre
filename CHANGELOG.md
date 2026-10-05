@@ -114,8 +114,9 @@ DNS provider, and, after the deploy, waits for Cloudflare to see them. A
 run stopped there picks up where it left off. With no domain on the
 account, setup offers to add one, showing its nameservers, or the Worker's
 workers.dev address for now. This needs Cloudflare for SaaS enabled on the
-domain, and a token that may manage its custom hostnames and DNS records,
-which wrangler's login may not ([deploy.md](docs/deploy.md#a-domain-whose-dns-is-elsewhere)).
+domain. When Cloudflare refuses wrangler's login a call this needs, setup
+asks for an API token, hidden, saying which permissions it needs, and its
+wranglers deploy under it ([deploy.md](docs/deploy.md#a-domain-whose-dns-is-elsewhere)).
 
 **A deployment's app is a TanStack Start app of its own** (0.2.0), a
 conventional one, and coffre is a set of pieces it mounts, as an auth SDK's

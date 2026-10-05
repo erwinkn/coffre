@@ -19,10 +19,12 @@ import { editWorker } from '../src/deployment.ts';
 import { templateDir } from '../src/init.ts';
 import { asSuperuser, CLUSTER, database, emptyCluster, needsCluster } from './cluster.ts';
 import { fakeCloudflare, fakeGitHub, fakeOpener, fakeVite, fakeWrangler, realWrangler, submitManifest } from './fakes.ts';
-import { inTerminal, ptySkip, screens, type Session, visible } from './pty.ts';
+import { inTerminal, ptySkip, screens, type Session, typingUrl, visible } from './pty.ts';
 
 const skip = needsCluster.skip || ptySkip;
-const TOKEN = `cf-api-${'t'.repeat(40)}`;
+const TOKEN = `cf-oauth-${'t'.repeat(40)}`;
+/** A token made on the dashboard, which may do what wrangler's login may not. */
+const API_TOKEN = `cf-dashboard-${'d'.repeat(40)}`;
 const ADDRESS = 'secrets.example.org';
 const DOWN = '\x1b[B';
 
@@ -31,6 +33,8 @@ let cloudflare: Awaited<ReturnType<typeof fakeCloudflare>>;
 let github: Awaited<ReturnType<typeof fakeGitHub>>;
 let live: ReturnType<typeof createServer>;
 let env: NodeJS.ProcessEnv;
+/** The database owner's URL setup is given, typed at its prompt. */
+let url: string;
 
 before(async () => {
   if (skip) return;
@@ -43,6 +47,7 @@ before(async () => {
     { id: 'zone-2', name: 'acme.dev', status: 'active' },
   ];
   cloudflare.state.saas.add('zone-1').add('zone-2');
+  cloudflare.state.apiTokens.add(API_TOKEN);
   github = await fakeGitHub();
   live = createServer((request, response) => response.writeHead(request.url === '/livez' ? 200 : 404).end('{"ok":true}'));
   await new Promise<void>((resolve) => live.listen(0, '127.0.0.1', resolve));
@@ -57,14 +62,14 @@ globalThis.fetch = (input, init) => {
 };\n`,
   );
   fakeOpener(join(dir, 'bin'));
+  url = await database('setup_domain', 'superuser');
   env = {
     PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
     HOME: dir,
-    COFFRE_SETUP_DATABASE_URL: await database('setup_domain', 'superuser'),
     CLOUDFLARE_API_BASE_URL: cloudflare.url,
     NODE_OPTIONS: `--import=${join(dir, 'network.mjs')}`,
   };
-  // Signed in already, as with CLOUDFLARE_API_TOKEN: wrangler gives its token.
+  // Signed in already: wrangler gives its login's token.
   deployment('first');
   writeFileSync(join(dir, 'wrangler', 'token'), TOKEN);
 });
@@ -91,8 +96,24 @@ function deployment(name: string): string {
   return where;
 }
 
-function setup(where: string, play: (terminal: Session) => Promise<void>, more: NodeJS.ProcessEnv = {}) {
-  return inTerminal(['setup'], { ...env, ...more }, play, { columns: 160, rows: 48 }, join(dir, where));
+function setup(where: string, play: (terminal: Session) => Promise<void>, databaseUrl = url) {
+  return inTerminal(['setup'], env, typingUrl(databaseUrl, play), { columns: 160, rows: 48 }, join(dir, where));
+}
+
+/** Each wrangler deploy since the last read: the token in its environment, if setup gave it one. */
+function deploys(): { config: string; apiToken: string | null }[] {
+  const path = join(dir, 'wrangler', 'calls.jsonl');
+  let lines: string[] = [];
+  try {
+    lines = readFileSync(path, 'utf8').trim().split('\n');
+  } catch {
+    return [];
+  }
+  rmSync(path, { force: true });
+  return lines
+    .map((line) => JSON.parse(line) as { args: string[]; apiToken: string | null })
+    .filter(({ args }) => args[0] === 'deploy')
+    .map(({ args, apiToken }) => ({ config: args[2]!, apiToken }));
 }
 
 const mainText = (output: string) => visible(screens(output).main).replace(/\r\n/g, '\n');
@@ -138,11 +159,21 @@ async function opened(prefix: string, seen: number): Promise<string> {
   }
 }
 
-test('DNS elsewhere, two domains on the account: setup asks which, serves the address through it, shows the records, and waits; Ctrl-C there', { skip }, async () => {
+test("DNS elsewhere, two domains on the account, wrangler's login refused: setup asks for a token, asks which domain, serves the address through it, shows the records, and waits; Ctrl-C there", { skip }, async () => {
+  // wrangler's login, as Cloudflare may answer it: no custom hostnames, no DNS records.
+  cloudflare.state.denied.add('ssl').add('dns');
   const { output, code } = await setup('first', async (terminal) => {
     await start(terminal, ADDRESS);
     await terminal.waitFor('Root admins');
     terminal.send('\r');
+    // Not a token, then one Cloudflare refuses, then the one made on the dashboard.
+    await terminal.waitFor('Paste a Cloudflare API token, hidden as you paste it');
+    terminal.send('short\r');
+    await terminal.waitFor('that is not a Cloudflare API token');
+    terminal.send(`cf-wrong-${'w'.repeat(40)}\r`);
+    await terminal.waitFor('Cloudflare refused that token as well');
+    await terminal.waitFor('Paste a Cloudflare API token');
+    terminal.send(`${API_TOKEN}\r`);
     await terminal.waitFor(`Which of your domains serves ${ADDRESS}?`);
     terminal.send(`${DOWN}\r`);
     await githubAndKeys(terminal, 0);
@@ -153,21 +184,26 @@ test('DNS elsewhere, two domains on the account: setup asks which, serves the ad
   const text = mainText(output);
   assert.equal(code, 130, text);
   assert.match(text, /secrets\.example\.org's DNS isn't on this Cloudflare account\.\s+Setup serves it through one of your domains, with Cloudflare for SaaS/);
+  assert.match(
+    text,
+    /Cloudflare refused this login the custom hostnames of\s+acme\.test\s+and\s+acme\.dev:\s+wrangler's\s+login\s+may\s+not\s+manage\s+them,\s+and\s+has\s+no\s+scope\s+for\s+DNS\s+records/,
+  );
+  assert.ok(!output.includes(API_TOKEN), 'the token, never shown');
+  // Both Workers deployed under the token given; never wrangler's login.
+  assert.deepEqual(deploys(), [
+    { config: 'vault/wrangler.jsonc', apiToken: API_TOKEN },
+    { config: 'app/dist/server/wrangler.json', apiToken: API_TOKEN },
+  ]);
   assert.match(text, /✓ secrets\.example\.org is a custom hostname of acme\.dev\n\s+fallback origin {2}coffre-fallback\.acme\.dev, made\n\s+custom hostname {2}secrets\.example\.org, made/);
   const hostname = cloudflare.state.hostnames.get('zone-2')![0]!;
-  // Shown once made, before the certificate's records are known; then again at the wait, with them.
+  // Shown whole once made, the certificate's records with the rest; then again at the wait.
+  const all = [
+    `CNAME  ${ADDRESS}                      →  coffre-fallback.acme.dev`,
+    `TXT    _cf-custom-hostname.${ADDRESS}  "${hostname.ownership_verification.value}"`,
+    ...hostname.ssl.validation_records!.map(({ txt_value }) => `TXT    _acme-challenge.${ADDRESS}      "${txt_value}"`),
+  ];
   const shown = [...text.matchAll(/Add these records where secrets\.example\.org's DNS is:\n((?:\s{4}(?:CNAME|TXT) .*\n)+)/g)].map((match) => match[1]!.trim().split(/\n\s*/));
-  assert.deepEqual(shown, [
-    [
-      `CNAME  ${ADDRESS}                      →  coffre-fallback.acme.dev`,
-      `TXT    _cf-custom-hostname.${ADDRESS}  "${hostname.ownership_verification.value}"`,
-    ],
-    [
-      `CNAME  ${ADDRESS}                      →  coffre-fallback.acme.dev`,
-      `TXT    _cf-custom-hostname.${ADDRESS}  "${hostname.ownership_verification.value}"`,
-      ...hostname.ssl.validation_records!.map(({ txt_value }) => `TXT    _acme-challenge.${ADDRESS}      "${txt_value}"`),
-    ],
-  ]);
+  assert.deepEqual(shown, [all, all]);
   assert.match(text, /You can stop it with Ctrl-C, and run setup again once the records are in: it picks up here/);
   assert.equal(cloudflare.state.fallback.get('zone-2')!.origin, 'coffre-fallback.acme.dev');
   assert.equal(cloudflare.state.hostnames.get('zone-1')?.length ?? 0, 0, 'nothing on the other domain');
@@ -178,7 +214,9 @@ test('DNS elsewhere, two domains on the account: setup asks which, serves the ad
   assert.match(readFileSync(join(dir, 'wrangler', 'dry-coffre'), 'utf8'), /--dry-run: exiting now/);
 });
 
-test('the run after the DNS change: nothing asked about the domain, the custom hostname kept, done once Cloudflare has seen the records', { skip }, async () => {
+test("the run after the DNS change: no token asked, as wrangler's login is enough now; nothing asked about the domain, the custom hostname kept, done once Cloudflare has seen the records", { skip }, async () => {
+  // The fallback origin is there: nothing left needs DNS, which wrangler's login still may not.
+  cloudflare.state.denied.delete('ssl');
   for (const name of [ADDRESS, `_cf-custom-hostname.${ADDRESS}`, `_acme-challenge.${ADDRESS}`]) cloudflare.state.published.add(name);
   const { output, code } = await setup('first', async (terminal) => {
     await start(terminal, ADDRESS, null);
@@ -189,6 +227,8 @@ test('the run after the DNS change: nothing asked about the domain, the custom h
   const text = mainText(output);
   assert.equal(code, 0, text);
   assert.ok(!text.includes('Which of your domains'), text);
+  assert.ok(!text.includes('Paste a Cloudflare API token'), 'no token asked');
+  assert.deepEqual(deploys().map(({ apiToken }) => apiToken), [null, null], "wrangler's login, as it is");
   assert.ok(!text.includes('Add these records'), 'none left to add');
   assert.match(text, /✓ secrets\.example\.org is a custom hostname of acme\.dev\n\s+fallback origin {2}coffre-fallback\.acme\.dev, kept\n\s+custom hostname {2}secrets\.example\.org, kept/);
   assert.match(text, /✓ Cloudflare has seen secrets\.example\.org's records, and its certificate is out/);
@@ -196,31 +236,32 @@ test('the run after the DNS change: nothing asked about the domain, the custom h
   assert.equal(cloudflare.state.hostnames.get('zone-2')!.length, 1);
 });
 
-test('no domain on the account: setup explains both ways; adding the domain shows its nameservers, and stops until they move', { skip }, async () => {
+test("no domain on the account: setup explains both ways; adding the domain, refused to wrangler's login, under a token; its nameservers shown, and setup stops until they move", { skip }, async () => {
   deployment('home');
   cloudflare.state.subdomains['acc-home'] = 'home';
-  const choose = (terminal: Session) => async () => {
+  cloudflare.state.denied.add('zone');
+  let run = await setup('home', async (terminal) => {
     await start(terminal, ADDRESS, 1);
     await terminal.waitFor('How should coffre be reached?');
     terminal.send('\r');
     await terminal.waitFor('The domain to add');
     terminal.send('\r');
-  };
-  // A login that may not add one, as wrangler's: where to, instead.
-  cloudflare.state.denied.add('zone');
-  let run = await setup('home', (terminal) => choose(terminal)());
-  assert.equal(run.code, 1, mainText(run.output));
-  assert.match(mainText(run.output), /This Cloudflare login may not add a domain\. Add example\.org on Cloudflare's dashboard/);
-  cloudflare.state.denied.clear();
-
-  run = await setup('home', (terminal) => choose(terminal)());
+    await terminal.waitFor('Cloudflare API token');
+    terminal.send(`cf-wrong-${'w'.repeat(40)}\r`);
+    await terminal.waitFor('Cloudflare refused that token as well');
+    await terminal.waitFor('Cloudflare API token');
+    terminal.send(`${API_TOKEN}\r`);
+  });
   let text = mainText(run.output);
   assert.equal(run.code, 0, text);
   assert.match(text, /secrets\.example\.org's DNS isn't on this Cloudflare account\./);
   assert.match(text, /Either\s+add\s+example\.org\s+to\s+Cloudflare,\s+which\s+then\s+serves\s+its\s+DNS[\s\S]*or\s+use\s+the\s+Worker's\s+workers\.dev\s+address\s+for\s+now/);
   assert.match(text, /Add example\.org to this Cloudflare account\n\s+At its workers\.dev address for now, coffre\.home\.workers\.dev/);
+  assert.match(text, /Cloudflare refused this login adding example\.org:\s+wrangler's\s+login\s+may\s+not\.[\s\S]*Zone:\s+Zone\s+Edit,\s+for\s+all\s+zones\s+of\s+the\s+account/);
   assert.match(text, /→ example\.org is on this Cloudflare account now\. At your registrar, set its nameservers to:\n\s+ada\.ns\.cloudflare\.com\n\s+bob\.ns\.cloudflare\.com/);
+  assert.ok(!run.output.includes(API_TOKEN), 'the token, never shown');
   assert.deepEqual(cloudflare.state.zones['acc-home']!.map(({ name, status }) => [name, status]), [['example.org', 'pending']]);
+  cloudflare.state.denied.delete('zone');
 
   // Run again before the nameservers moved: the same, and nothing asked.
   run = await setup('home', (terminal) => start(terminal, ADDRESS, 1));
@@ -234,7 +275,7 @@ test('no domain on the account: setup explains both ways; adding the domain show
 test("no domain on the account: the Worker's workers.dev address, for now; deployed there", { skip }, async () => {
   deployment('dev');
   await asSuperuser('postgres', (client) => client.query('CREATE DATABASE setup_domain_two'));
-  const more = { COFFRE_SETUP_DATABASE_URL: `${CLUSTER}/setup_domain_two` };
+  const second = `${CLUSTER}/setup_domain_two`;
   const choose = async (terminal: Session) => {
     await start(terminal, 'secrets.other.org', 1);
     await terminal.waitFor('How should coffre be reached?');
@@ -242,7 +283,7 @@ test("no domain on the account: the Worker's workers.dev address, for now; deplo
   };
   // No workers.dev subdomain on the account yet: where to choose one.
   delete cloudflare.state.subdomains['acc-home'];
-  let run = await setup('dev', choose, more);
+  let run = await setup('dev', choose, second);
   assert.equal(run.code, 1, mainText(run.output));
   assert.match(mainText(run.output), /This account has no workers\.dev subdomain yet: choose one on Cloudflare's dashboard/);
 
@@ -257,7 +298,7 @@ test("no domain on the account: the Worker's workers.dev address, for now; deplo
       await githubAndKeys(terminal, pages);
       await terminal.waitFor('coffre is at', 60_000);
     },
-    more,
+    second,
   );
   const text = mainText(run.output);
   assert.equal(run.code, 0, text);

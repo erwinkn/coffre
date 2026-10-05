@@ -7,6 +7,7 @@
 // Cloudflare is the record: a second run finds the custom hostname, and
 // waits for what is left.
 import { type CloudflareApi, CloudflareError, type CustomHostname, denied, type Zone } from './cloudflare.ts';
+import { listed } from './tty.ts';
 
 /** The fallback origin setup makes on a zone that has none: `coffre-fallback.<zone>`, a record that points nowhere, for the Worker to stand behind. */
 export const FALLBACK = 'coffre-fallback';
@@ -21,13 +22,25 @@ export function zoneOf(address: string, zones: readonly Zone[]): Zone | undefine
     .sort((a, b) => b.name.length - a.name.length)[0];
 }
 
-/** What a token needs for an address whose DNS is elsewhere: wrangler's login has no scope for DNS records, nor, by its scopes' descriptions, for custom hostnames. */
-export function tokenNeeded(zone: string): string {
+/**
+ * Cloudflare refused this login what an address whose DNS is elsewhere
+ * needs, on `zones`: setup asks for a token that may, and does it again.
+ */
+export class Refused extends Error {
+  readonly zones: string[];
+  constructor(zones: string[]) {
+    super(`Cloudflare refused this login the custom hostnames of ${listed(zones, 'and')}`);
+    this.zones = zones;
+  }
+}
+
+/** What a token needs, for setup to go on under it: wrangler's login has no scope for DNS records, and may have none for custom hostnames. */
+export function tokenNeeded(zones: readonly string[]): string {
   return (
-    `This Cloudflare login may not manage ${zone}'s custom hostnames: wrangler's login does not grant that, nor DNS records. ` +
+    `Cloudflare refused this login the custom hostnames of ${listed(zones, 'and')}: wrangler's login may not manage them, and has no scope for DNS records. ` +
     'Make a token at https://dash.cloudflare.com/profile/api-tokens with Account: Workers Scripts Edit, Hyperdrive Edit and Account Settings Read; ' +
-    `and Zone, for ${zone}: Zone Read, Workers Routes Edit, SSL and Certificates Edit and DNS Edit. ` +
-    'Set CLOUDFLARE_API_TOKEN to it, then run setup again. Nothing was changed on Cloudflare.'
+    `and Zone, for ${zones.length === 1 ? zones[0] : 'the domain coffre goes through'}: Zone Read, Workers Routes Edit, SSL and Certificates Edit and DNS Edit. ` +
+    'Setup goes on under it, and so does each wrangler it runs.'
   );
 }
 
@@ -39,11 +52,14 @@ export function saasNeeded(account: string, zone: string): string {
   );
 }
 
+/** Cloudflare's answer for a zone without Cloudflare for SaaS: "No quota has been allocated for this zone". */
+const NO_SAAS = 1404;
+
 /**
  * The zone that serves `address`: the one whose custom hostname it is
  * already, when a run before made it; else the account's only domain, or
- * the one chosen. Checked before anything is made: the token may manage
- * its custom hostnames, and Cloudflare for SaaS is on.
+ * the one chosen, which must have Cloudflare for SaaS on. Throws Refused
+ * when the login may read no zone's custom hostnames.
  */
 export async function saasZone(
   api: CloudflareApi,
@@ -52,45 +68,44 @@ export async function saasZone(
   address: string,
   choose: (question: string, options: readonly string[]) => Promise<number>,
 ): Promise<Zone> {
+  const off = new Set<string>();
   let refused = 0;
   for (const zone of zones) {
     try {
       if ((await api.customHostname(zone.id, address)) !== null) return zone;
     } catch (error) {
-      // A zone without Cloudflare for SaaS has no custom hostname; one the token may not read, none it can tell.
-      if (error instanceof CloudflareError && error.codes.includes(1404)) continue;
-      if (!denied(error)) throw error;
-      refused += 1;
+      if (error instanceof CloudflareError && error.codes.includes(NO_SAAS)) off.add(zone.id);
+      else if (denied(error)) refused += 1;
+      else throw error;
     }
   }
-  if (refused === zones.length) throw new Error(tokenNeeded(zones.length === 1 ? zones[0]!.name : 'the domain'));
+  if (refused === zones.length) throw new Refused(zones.map(({ name }) => name));
   const zone = zones.length === 1 ? zones[0]! : zones[await choose(`Which of your domains serves ${address}?`, zones.map(({ name }) => name))]!;
-  try {
-    const quota = await api.customHostnameQuota(zone.id);
-    if ((quota.hard_cap ?? 0) === 0) throw new Error(saasNeeded(account, zone.name));
-  } catch (error) {
-    if (error instanceof CloudflareError && error.codes.includes(1404)) throw new Error(saasNeeded(account, zone.name));
-    if (denied(error)) throw new Error(tokenNeeded(zone.name));
-    throw error;
-  }
+  if (off.has(zone.id)) throw new Error(saasNeeded(account, zone.name));
   return zone;
 }
 
 /** Where `address` stands on `zone`: its custom hostname, and the CNAME's target, the zone's fallback origin. */
 export type Served = { zone: Zone; target: string; hostname: CustomHostname };
 
+/** Whether Cloudflare gave up on a custom hostname's records, which a request to validate again starts over. */
+const gaveUp = ({ status, ssl }: CustomHostname) => status === 'moved' || ssl?.status?.endsWith('_timed_out') === true;
+
 /**
  * Serve `address` through `zone`: its fallback origin, kept when it has
  * one, which other custom hostnames may use; and the custom hostname, made,
- * kept, or asked to check its records again when Cloudflare stopped
- * waiting for them.
+ * kept, or asked to validate again when Cloudflare gave up waiting for its
+ * records. A new one is read again after `settle` milliseconds: its
+ * certificate's record is seldom in the answer to its creation. Throws
+ * Refused when the login may not.
  */
-export async function serveThrough(api: CloudflareApi, zone: Zone, address: string): Promise<Served & { details: string[] }> {
+export async function serveThrough(api: CloudflareApi, zone: Zone, address: string, settle = 1_000): Promise<Served & { details: string[] }> {
   try {
     const details: string[] = [];
     let target = (await api.fallbackOrigin(zone.id))?.origin;
     if (target === undefined) {
       target = `${FALLBACK}.${zone.name}`;
+      // A run stopped between the two finds the record, and only sets the origin.
       if (!(await api.hasDnsRecord(zone.id, target))) await api.createOriginlessRecord(zone.id, target, "coffre's fallback origin: its Worker answers there");
       await api.setFallbackOrigin(zone.id, target);
       details.push(`fallback origin  ${target}, made`);
@@ -99,17 +114,19 @@ export async function serveThrough(api: CloudflareApi, zone: Zone, address: stri
     }
     let hostname = await api.customHostname(zone.id, address);
     if (hostname === null) {
-      hostname = await api.createCustomHostname(zone.id, address);
+      const made = await api.createCustomHostname(zone.id, address);
+      await new Promise((resolve) => setTimeout(resolve, settle));
+      hostname = await api.customHostnameById(zone.id, made.id);
       details.push(`custom hostname  ${address}, made`);
-    } else if (hostname.ssl?.status?.endsWith('_timed_out')) {
+    } else if (gaveUp(hostname)) {
       hostname = await api.revalidate(zone.id, hostname.id);
-      details.push(`custom hostname  ${address}, kept, its certificate's records checked again`);
+      details.push(`custom hostname  ${address}, kept, asked to validate again`);
     } else {
       details.push(`custom hostname  ${address}, kept`);
     }
     return { zone, target, hostname, details };
   } catch (error) {
-    if (denied(error)) throw new Error(tokenNeeded(zone.name));
+    if (denied(error)) throw new Refused([zone.name]);
     throw error;
   }
 }
@@ -141,10 +158,10 @@ export function recordLines(records: readonly DnsRecord[]): string[] {
 /** Where a custom hostname stands: done once both halves are active; stopped where Cloudflare gave up; and why it waits, when it says. */
 export function standing({ hostname, status, ssl, verification_errors }: CustomHostname): { done: boolean; stopped: string | null; text: string; why: string[] } {
   const certificate = ssl?.status ?? 'initializing';
-  const stopped = ['blocked', 'moved', 'deleted', 'pending_deletion'].includes(status)
+  const stopped = ['blocked', 'deleted', 'pending_deletion'].includes(status)
     ? `Cloudflare marked ${hostname} ${status.replace(/_/g, ' ')}: see SSL/TLS, Custom Hostnames, on its dashboard`
-    : certificate.endsWith('_timed_out')
-      ? `Cloudflare stopped waiting for ${hostname}'s certificate records. Once they are in, run setup again: it asks Cloudflare to check them again`
+    : status === 'moved' || certificate.endsWith('_timed_out')
+      ? `Cloudflare stopped waiting for ${hostname}'s records. Once they are in, run setup again: it asks Cloudflare to validate again`
       : null;
   return {
     done: status === 'active' && certificate === 'active',

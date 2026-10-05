@@ -283,13 +283,18 @@ export type Binding = { type: string; name: string; id?: string; text?: string }
 
 /** Cloudflare's API, under a token it never logs nor shows. */
 export class CloudflareApi {
-  readonly #token: string;
+  #token: string;
   readonly #base: string;
 
-  /** `base`, Cloudflare's, or what CLOUDFLARE_API_BASE_URL names, as wrangler reads it too. */
+  /** `base`, Cloudflare's, or what CLOUDFLARE_API_BASE_URL names, as wrangler reads it too: only the tests set it, to their stand-in for Cloudflare. */
   constructor(token: string, base = process.env.CLOUDFLARE_API_BASE_URL ?? 'https://api.cloudflare.com/client/v4') {
     this.#token = token;
     this.#base = base.replace(/\/$/, '');
+  }
+
+  /** Go on under another token: one given for what wrangler's login was refused. */
+  use(token: string): void {
+    this.#token = token;
   }
 
   async #send<T>(method: string, path: string, body?: unknown): Promise<{ result: T; pages: number }> {
@@ -404,11 +409,6 @@ export class CloudflareApi {
     return this.#call('POST', '/zones', { account: { id: account }, name, type: 'full' });
   }
 
-  /** How many custom hostnames a zone may have: none until Cloudflare for SaaS is enabled on it. */
-  customHostnameQuota(zone: string): Promise<{ allocated?: number; hard_cap?: number; used?: number }> {
-    return this.#call('GET', `/zones/${zone}/custom_hostnames/quota`);
-  }
-
   /** The zone's custom hostname for `hostname`, when there is one. */
   async customHostname(zone: string, hostname: string): Promise<CustomHostname | null> {
     const listed = await this.#call<CustomHostname[]>('GET', `/zones/${zone}/custom_hostnames?hostname=${encodeURIComponent(hostname)}`);
@@ -433,9 +433,20 @@ export class CloudflareApi {
     return this.#call('PATCH', `/zones/${zone}/custom_hostnames/${id}`, { ssl: { method: 'txt', type: 'dv' } });
   }
 
-  /** Where a zone sends its custom hostnames' requests, when it has been set. */
+  /**
+   * Where a zone sends its custom hostnames' requests, when it has been set.
+   * Cloudflare's documentation does not say how it answers for a zone with
+   * none: a 404, an empty answer, and its fallback origin error, 1551, all
+   * say there is none.
+   */
   async fallbackOrigin(zone: string): Promise<FallbackOrigin | null> {
-    const found = await this.#found<Partial<FallbackOrigin> | null>(`/zones/${zone}/custom_hostnames/fallback_origin`);
+    let found: Partial<FallbackOrigin> | null;
+    try {
+      found = await this.#found<Partial<FallbackOrigin> | null>(`/zones/${zone}/custom_hostnames/fallback_origin`);
+    } catch (error) {
+      if (error instanceof CloudflareError && error.codes.includes(1551)) return null;
+      throw error;
+    }
     return typeof found?.origin === 'string' && found.origin !== '' ? { origin: found.origin, status: found.status } : null;
   }
 
@@ -467,15 +478,17 @@ export function originOf(url: string): Origin {
 }
 
 /**
- * Deploy a Worker with wrangler, under the account chosen. `secrets`, when
- * given, go on wrangler's stdin, as its secrets file: never in a file, nor
- * in its arguments. A new Worker needs them at its first deploy.
+ * Deploy a Worker with wrangler, under the account chosen, and the token
+ * setup was given, if any. `secrets`, when given, go on wrangler's stdin,
+ * as its secrets file: never in a file, nor in its arguments. A new Worker
+ * needs them at its first deploy.
  */
-export async function deployWorker(wrangler: Wrangler, config: string, account: string, secrets: Record<string, string>): Promise<void> {
+export async function deployWorker(wrangler: Wrangler, config: string, account: string, secrets: Record<string, string>, token: string | null = null): Promise<void> {
   const some = Object.keys(secrets).length > 0;
   const run = await wrangler(['deploy', '-c', config, ...(some ? ['--secrets-file', '/dev/stdin'] : [])], {
     input: some ? JSON.stringify(secrets) : undefined,
-    env: { CLOUDFLARE_ACCOUNT_ID: account },
+    // A token setup was given goes in the child's environment alone; until then, wrangler signs in as it would.
+    env: { CLOUDFLARE_ACCOUNT_ID: account, ...(token === null ? {} : { CLOUDFLARE_API_TOKEN: token }) },
   });
   if (run.code !== 0) throw new Error(`wrangler could not deploy ${config}: ${said(run)}`);
 }
