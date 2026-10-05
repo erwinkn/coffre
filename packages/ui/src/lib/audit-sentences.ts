@@ -157,7 +157,14 @@ const TEMPLATES: Record<string, Template> = {
   },
   'secret.archive': { did: 'archived', tried: 'archive', what: (facts) => place(facts.entry) },
   'secret.unarchive': { did: 'brought back', tried: 'bring back', what: (facts) => place(facts.entry) },
+  'secret.move': { did: 'moved', tried: 'move', what: (facts) => place(facts.entry), then: ({ entry }) => intoFolder(entry) },
   ...placeTemplates('project'),
+  'project.move': {
+    did: 'moved',
+    tried: 'move',
+    what: ({ entry }) => ['project ', ...place({ ...entry, environment: null, key: null })],
+    then: ({ entry }) => intoFolder(entry),
+  },
   ...placeTemplates('environment'),
   'access.grant': {
     did: 'gave',
@@ -297,6 +304,12 @@ const TEMPLATES: Record<string, Template> = {
   'secret.update': { did: 'changed', tried: 'change', what: (facts) => place(facts.entry) },
   'sync.list': { did: 'listed the syncs of', tried: 'list the syncs of', what: ({ entry }) => environmentOf(entry) },
 };
+
+/** " to the folder stripe", or " out of its folder". */
+function intoFolder(entry: AuditEntry): Part[] {
+  const folder = text(entry.metadata.to);
+  return [folder === null ? ' out of its folder' : ` to the folder ${folder}`];
+}
 
 function placeOnly(entry: AuditEntry): Part[] {
   // A grant on every project names no project: its place is a path in its payload, `*` or `*/dev`.

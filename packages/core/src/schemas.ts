@@ -20,6 +20,10 @@ export function tombstoneOf(slug: string, day: Date, n = 1): string {
   return n === 1 ? base : `${base}-${n}`;
 }
 export const displayName = z.string().trim().min(1).max(120);
+/** A folder: 1 to 64 characters, no `/`, no control character, no space at either end (the tables check it too). */
+export const folderName = z.string().min(1).max(64)
+  .refine((name) => name === name.trim(), 'a folder name cannot start or end with a space')
+  .refine((name) => !/[/\p{Cc}]/u.test(name), 'a folder name cannot hold "/" or a control character');
 export const secretKey = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/);
 export const principalType = z.enum(['user', 'service']);
 export const principalId = z.string().trim().min(1).max(320);

@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import pg from 'pg';
+import { KNOWN_MIGRATIONS } from '@coffre/db/schema-version';
 
 import { asJson, hyperdriveCommand, loginFor, loginUrl, scramVerifier, setupScreen, setupValues, type SetupResult } from '../src/setup.ts';
 import { templateDir } from '../src/init.ts';
@@ -266,7 +267,7 @@ for (const as of ['superuser', 'owner'] as const) {
     const shown = json(first);
     assertNoAdministrator(first, url);
     assert.match(first.stderr, /✓ Created coffre_runtime and coffre_vault_runtime\n/);
-    assert.match(first.stderr, /✓ Migrated the database to coffre \S+'s schema: 7 migrations applied\n/);
+    assert.match(first.stderr, new RegExp(`✓ Migrated the database to coffre \\S+'s schema: ${KNOWN_MIGRATIONS.postgres.length} migrations applied\n`));
     assert.match(first.stderr, /coffre_runtime\s+cannot write members, delete log entries or create tables\n\s+coffre_vault_runtime\s+can write members; cannot delete log entries or create tables\n/);
     assert.deepEqual(shown.logins, {
       coffre_runtime: { login: 'coffre_runtime', password: 'created' },

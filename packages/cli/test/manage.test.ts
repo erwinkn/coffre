@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { createClient, CoffreError } from '@coffre/client';
+import { byFolder, createClient, CoffreError } from '@coffre/client';
 
 import * as manage from '../src/manage.ts';
 
@@ -239,6 +239,29 @@ test("a secret's key: renamed with its versions, archived and back", async () =>
   ]);
   assert.match(written.out, /^market\/prod\/API_TOKEN is now market\/prod\/API_KEY, its versions with it\narchived market\/prod\/API_KEY: `coffre unarchive market\/prod\/API_KEY` brings it back\n$/);
   await assert.rejects(manage.renameSecret(connect, ['market/prod', 'X'], io), /expected <project>\/<environment>\/<KEY>/);
+});
+
+test('move files a project or a secret in a folder, or takes it out with --none', async () => {
+  const { connect, calls, written, io } = fixture(({ path }) =>
+    path.startsWith('/projects') ? { project: { slug: 'acme', name: 'Acme', archivedAt: null, folder: 'Clients' } } : { key: 'STRIPE_KEY', archived: false, folder: null });
+  await manage.move(connect, ['acme', 'Clients'], io);
+  await manage.move(connect, ['market/prod/STRIPE_KEY', '--none'], io);
+  assert.deepEqual(calls, [
+    { method: 'PATCH', path: '/projects/acme', body: { folder: 'Clients' } },
+    { method: 'PATCH', path: '/secrets/market/prod/STRIPE_KEY', body: { folder: null } },
+  ]);
+  assert.equal(written.out, 'acme is in Clients/ now\nmarket/prod/STRIPE_KEY is in no folder now\n');
+  await assert.rejects(manage.move(connect, ['acme'], io), /name a folder, or --none/);
+  await assert.rejects(manage.move(connect, ['acme', 'Clients', '--none'], io), /not both/);
+  await assert.rejects(manage.move(connect, ['market/prod', 'x'], io), /expected <project>\/<environment>\/<KEY>/);
+});
+
+test('lists group by folder: the unfiled first, then each folder by name, each in its own order', () => {
+  const rows = [{ key: 'B', folder: 'stripe' }, { key: 'A', folder: null }, { key: 'C', folder: 'database' }, { key: 'D', folder: 'stripe' }];
+  assert.deepEqual(byFolder(rows).map(([folder, keys]) => [folder, keys.map((row) => row.key)]), [
+    [null, ['A']], ['database', ['C']], ['stripe', ['B', 'D']],
+  ]);
+  assert.deepEqual(byFolder([{ key: 'A', folder: 'x' }]).map(([folder]) => folder), ['x']);
 });
 
 test("sessions revoke warns when it is this CLI's own, and identities unlink says what ends with it", async () => {

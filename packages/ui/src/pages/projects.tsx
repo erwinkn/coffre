@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { byFolder } from '@coffre/client';
 import { useSuspenseQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { createProject, projectsList } from '../lib/changes';
@@ -12,6 +13,7 @@ import { isActiveAccessibleEnvironment } from '../lib/project-environments';
 import { slugProblem } from '../lib/validation';
 import { RowFailure, RowPending, rowClass } from '../components/row-state';
 import { EmptyState, Modal } from '../components/ui';
+import { FolderRow } from '../components/folders';
 import { ClosedDoor, PageHeader } from '../components/page';
 import { Tile } from '../components/tile';
 import { AlertTriangle, Folder, Hash, Layers, Plus } from '../components/icons';
@@ -94,6 +96,8 @@ export function ProjectsPage() {
 
 function ProjectTable({ projects, refused = false }: { projects: ProjectSummary[]; refused?: boolean }) {
   const { status, failedAdds, dismiss } = useChangeStatus(projectsList.queryKey);
+  // Numbered as listed: those in no folder first, then each folder by name.
+  const numbers = new Map(byFolder(projects).flatMap(([, inFolder]) => inFolder).map((project, index) => [project.slug, index]));
   return (
     <div className="dt-wrap">
       <table className="dt projects stacks">
@@ -121,15 +125,18 @@ function ProjectTable({ projects, refused = false }: { projects: ProjectSummary[
           </tr>
         </thead>
         <tbody>
-          {projects.map((project, index) => (
-            <ProjectRow
-              key={project.slug}
-              number={index + 1}
-              project={project}
-              status={status(project.slug)}
-              onDismiss={dismiss}
-            />
-          ))}
+          {byFolder(projects).flatMap(([folder, inFolder]) => [
+            ...(folder === null ? [] : [<FolderRow key={`folder:${folder}`} folder={folder} count={inFolder.length} columns={4} />]),
+            ...inFolder.map((project) => (
+              <ProjectRow
+                key={project.slug}
+                number={(numbers.get(project.slug) ?? 0) + 1}
+                project={project}
+                status={status(project.slug)}
+                onDismiss={dismiss}
+              />
+            )),
+          ])}
           {refused &&
             failedAdds<{ slug: string }>(projects.map((project) => project.slug)).map(
               ({ mutationId, vars, status: failed }) => (

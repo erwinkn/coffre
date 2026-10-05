@@ -37,6 +37,7 @@ export type Api = {
         slug: string;
         name: string;
         archivedAt: string | null;
+        folder: string | null;
         permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.write")[];
         environments: {
           slug: string;
@@ -83,12 +84,14 @@ export type Api = {
       name?: string;
       slug?: string;
       archived?: boolean;
+      folder?: string | null;
     };
     output: {
       project: {
         slug: string;
         name: string;
         archivedAt: string | null;
+        folder: string | null;
       };
     };
   };
@@ -177,6 +180,7 @@ export type Api = {
       permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.write")[];
       keys: {
         key: string;
+        folder: string | null;
         archived: boolean;
         version: number | null;
         updatedAt: string | null;
@@ -208,10 +212,12 @@ export type Api = {
     input: {
       key?: string;
       archived?: boolean;
+      folder?: string | null;
     };
     output: {
       key: string;
       archived: boolean;
+      folder: string | null;
     };
   };
   "GET /secrets/:project/:environment/:key/versions": {
@@ -865,6 +871,7 @@ export type ProjectSummary = {
   slug: string;
   name: string;
   archivedAt: string | null;
+  folder: string | null;
   permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.write")[];
   environments: {
     slug: string;
@@ -886,6 +893,7 @@ export type RemovedMember = {
 
 export type SecretKey = {
   key: string;
+  folder: string | null;
   archived: boolean;
   version: number | null;
   updatedAt: string | null;

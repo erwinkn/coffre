@@ -133,6 +133,10 @@ test('the upgrade refuses populated syncs atomically, then preserves the old log
   assert.equal((await root.audit.verify()).ok, true);
   await root.secrets.set('market/prod', { OLD_TOKEN: 'preserved credential' });
   assert.deepEqual((await root.secrets.reveal('market/prod/OLD_TOKEN')).values, { OLD_TOKEN: 'preserved credential' });
+  // Before 0005, nothing is filed and nothing can be: lists work, and moving waits for the migration.
+  assert.deepEqual((await root.secrets.list('market/prod')).keys.map((key) => key.folder), [null]);
+  assert.ok((await root.projects.list()).projects.every((project) => project.folder === null));
+  await assert.rejects(root.secrets.update('market/prod/OLD_TOKEN', { folder: 'tokens' }), { status: 503 });
   assert.equal(await writeAuditHeartbeat(appDb, chainKey, vault, { warn: () => {} }), true);
   assert.equal((await auditReadiness(appDb, vault)).ok, true, '0000 is ready: deploy before migrating');
   assert.equal((await vault.access(SYNC)).status, 'unknown');
@@ -160,6 +164,8 @@ test('the upgrade refuses populated syncs atomically, then preserves the old log
   assert.equal((await root.audit.verify()).ok, true);
   assert.equal((await auditReadiness(appDb, vault)).ok, true, '0001 remains ready after migrating');
   assert.deepEqual((await root.secrets.reveal('market/prod/OLD_TOKEN')).values, { OLD_TOKEN: 'preserved credential' });
+  await root.secrets.update('market/prod/OLD_TOKEN', { folder: 'tokens' });
+  assert.deepEqual((await root.secrets.list('market/prod')).keys.map((key) => key.folder), ['tokens']);
   assert.deepEqual((await vault.access(SYNC)).grants, []);
   assert.equal((await vault.access(SYNC)).status, 'unknown');
   assert.equal((await vault.setAccess({ actor: `user:${ROOT}`, principal: SYNC, changes: [{ projectId: '00000000-0000-4000-8000-000000000001', environmentId: null, role: 'viewer', expiresAt: null }] })).ok, false);

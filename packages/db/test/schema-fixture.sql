@@ -9,6 +9,8 @@ UPDATE audit_chain_head
        head_hash = decode(repeat('00', 32), 'hex');
 DELETE FROM vault_grants;
 DELETE FROM vault_members;
+DELETE FROM secret_folders;
+DELETE FROM project_folders;
 UPDATE secrets SET current_version_id = NULL;
 DELETE FROM secret_versions;
 DELETE FROM secrets;

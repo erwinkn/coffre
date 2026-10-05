@@ -249,6 +249,26 @@ export async function places(db: Queryable, { tombstones = false }: { tombstones
   return found;
 }
 
+// --- folders --------------------------------------------------------------------
+
+/** The folder each project is listed in, for those in one. */
+export async function projectFolderOf(db: Queryable): Promise<Map<string, string>> {
+  const { projectFolders } = tablesOf(db);
+  const rows = await db.select({ projectId: projectFolders.projectId, folder: projectFolders.folder }).from(projectFolders);
+  return new Map(rows.flatMap((row) => (row.folder === null ? [] : [[row.projectId, row.folder]])));
+}
+
+/** The folder each of an environment's secrets is listed in, for those in one. */
+export async function secretFolderOf(db: Queryable, environmentId: string): Promise<Map<string, string>> {
+  const { secretFolders, secrets } = tablesOf(db);
+  const rows = await db
+    .select({ secretId: secretFolders.secretId, folder: secretFolders.folder })
+    .from(secretFolders)
+    .innerJoin(secrets, eq(secrets.id, secretFolders.secretId))
+    .where(eq(secrets.environmentId, environmentId));
+  return new Map(rows.flatMap((row) => (row.folder === null ? [] : [[row.secretId, row.folder]])));
+}
+
 /**
  * How many distinct live secret names each project holds across the given
  * environments: the same key in dev and prod is one secret.

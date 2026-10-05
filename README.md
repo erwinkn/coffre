@@ -133,6 +133,7 @@ coffre rollback market/dev/DATABASE_URL 2   # restores version 2 as a new versio
 coffre import   market/dev --file .env      # previews; --apply writes
 coffre rename   market/dev/DB_URL DATABASE_URL   # the key, with its versions
 coffre archive  market/dev/OLD_KEY          # unarchive brings it back
+coffre move     market/dev/STRIPE_KEY stripe # a folder, to arrange the list; --none takes it out
 
 coffre projects
 coffre projects create market               # projects rename and archive, and the same for

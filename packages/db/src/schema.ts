@@ -145,6 +145,56 @@ export const secretVersions = pgTable(
   ],
 );
 
+/**
+ * A folder lists rows together and does nothing else: it grants, hides and
+ * renames nothing. A name, not a row of its own: 1 to 64 characters, no
+ * `/`, no control character, no space at either end. Null is no folder.
+ *
+ * A table beside the one it arranges, not a column on it: Drizzle names
+ * every column of a table in its inserts, so a new column on `secrets`
+ * would break a release on the schema before its migration.
+ */
+const folderCheck = (name: string, column: AnyPgColumn) =>
+  check(name, sql`${column} IS NULL OR (char_length(${column}) BETWEEN 1 AND 64 AND ${column} !~ '[/[:cntrl:]]' AND ${column} = btrim(${column}))`);
+
+/** The folder a project is listed in. */
+export const projectFolders = pgTable(
+  'project_folders',
+  {
+    projectId: uuid('project_id').primaryKey(),
+    folder: text(),
+    movedAt: timestamp('moved_at', { withTimezone: true }).notNull().defaultNow(),
+    movedBy: text('moved_by').notNull(),
+  },
+  (table) => [
+    folderCheck('project_folders_folder_check', table.folder),
+    foreignKey({
+      name: 'project_folders_project_id_fkey',
+      columns: [table.projectId],
+      foreignColumns: [projects.id],
+    }).onDelete('restrict'),
+  ],
+);
+
+/** The folder a secret is listed in, within its environment: the same key elsewhere has its own. */
+export const secretFolders = pgTable(
+  'secret_folders',
+  {
+    secretId: uuid('secret_id').primaryKey(),
+    folder: text(),
+    movedAt: timestamp('moved_at', { withTimezone: true }).notNull().defaultNow(),
+    movedBy: text('moved_by').notNull(),
+  },
+  (table) => [
+    folderCheck('secret_folders_folder_check', table.folder),
+    foreignKey({
+      name: 'secret_folders_secret_id_fkey',
+      columns: [table.secretId],
+      foreignColumns: [secrets.id],
+    }).onDelete('restrict'),
+  ],
+);
+
 /** The role catalogue, as SQL: every role, and those an environment may be granted. */
 const ROLES = sql.raw(ROLE_NAMES.map((role) => `'${role}'`).join(', '));
 const ENVIRONMENT_ROLES = sql.raw(ROLE_NAMES.filter(assignableToEnvironment).map((role) => `'${role}'`).join(', '));

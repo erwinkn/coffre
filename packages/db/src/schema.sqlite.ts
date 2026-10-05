@@ -163,6 +163,46 @@ export const secretVersions = sqliteTable(
   ],
 );
 
+/** A folder's name; the app also refuses control characters, which GLOB has no class for. */
+const folderCheck = (name: string, column: AnySQLiteColumn) =>
+  check(name, sql`${column} IS NULL OR (length(${column}) BETWEEN 1 AND 64 AND ${column} NOT GLOB '*/*' AND ${column} = trim(${column}))`);
+
+export const projectFolders = sqliteTable(
+  'project_folders',
+  {
+    projectId: text('project_id').primaryKey(),
+    folder: text(),
+    movedAt: time('moved_at').notNull().default(now),
+    movedBy: text('moved_by').notNull(),
+  },
+  (table) => [
+    folderCheck('project_folders_folder_check', table.folder),
+    foreignKey({
+      name: 'project_folders_project_id_fkey',
+      columns: [table.projectId],
+      foreignColumns: [projects.id],
+    }).onDelete('restrict'),
+  ],
+);
+
+export const secretFolders = sqliteTable(
+  'secret_folders',
+  {
+    secretId: text('secret_id').primaryKey(),
+    folder: text(),
+    movedAt: time('moved_at').notNull().default(now),
+    movedBy: text('moved_by').notNull(),
+  },
+  (table) => [
+    folderCheck('secret_folders_folder_check', table.folder),
+    foreignKey({
+      name: 'secret_folders_secret_id_fkey',
+      columns: [table.secretId],
+      foreignColumns: [secrets.id],
+    }).onDelete('restrict'),
+  ],
+);
+
 const ROLES = sql.raw(ROLE_NAMES.map((role) => `'${role}'`).join(', '));
 const ENVIRONMENT_ROLES = sql.raw(ROLE_NAMES.filter(assignableToEnvironment).map((role) => `'${role}'`).join(', '));
 

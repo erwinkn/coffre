@@ -25,3 +25,10 @@ export function secretKeyProblem(value: string): string | null {
   if (/^[0-9]/.test(value)) return 'Cannot start with a digit.';
   return 'Letters, digits and underscores only.';
 }
+
+export function folderProblem(value: string): string | null {
+  if (value.length > 64) return 'At most 64 characters.';
+  if (value !== value.trim()) return 'No space at either end.';
+  if (/[/\p{Cc}]/u.test(value)) return 'No slash.';
+  return null;
+}

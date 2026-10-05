@@ -22,7 +22,7 @@ import {
   hasEnvironmentDetails,
   type ProjectEnvironment,
 } from '../lib/project-environments';
-import { slugProblem } from '../lib/validation';
+import { folderProblem, slugProblem } from '../lib/validation';
 import {
   ConfirmDialog,
   EmptyState,
@@ -869,17 +869,21 @@ function GeneralSettings({ project }: { project: ProjectSummary }) {
   const router = useRouter();
   const [slug, setSlug] = useState(project.slug);
   const [name, setName] = useState(project.name);
+  const [folder, setFolder] = useState(project.folder ?? '');
   const coffre = useCoffre();
   const { pending, error, run } = useAction();
   const slugError = slug === '' ? null : slugProblem(slug);
-  const dirty = slug !== project.slug || name.trim() !== project.name;
+  const folderError = folderProblem(folder);
+  const nextFolder = folder === '' ? null : folder;
+  const dirty = slug !== project.slug || name.trim() !== project.name || nextFolder !== project.folder;
 
   // Follow a rename made elsewhere (another tab, another person) rather than
   // keep offering the old values back.
   useEffect(() => {
     setSlug(project.slug);
     setName(project.name);
-  }, [project.slug, project.name]);
+    setFolder(project.folder ?? '');
+  }, [project.slug, project.name, project.folder]);
 
   // Two fields and their Save need no card: the tab already says what they are.
   return (
@@ -888,11 +892,16 @@ function GeneralSettings({ project }: { project: ProjectSummary }) {
         onSubmit={(event) => {
           event.preventDefault();
           run(
-            () => coffre.projects.update(project.slug, { slug, name }),
+            () => coffre.projects.update(project.slug, {
+              slug,
+              name,
+              // Only when it moves: before the migration that makes folders, moving answers 503.
+              ...(nextFolder === project.folder ? {} : { folder: nextFolder }),
+            }),
             {
               affects: affects.places(),
               onSuccess: async () => {
-                toast.success('Project renamed');
+                toast.success(slug === project.slug && name.trim() === project.name ? 'Project moved' : 'Project saved');
                 // The slug is part of the URL, so a rename has to navigate.
                 if (slug !== project.slug) {
                   await router.navigate({
@@ -928,12 +937,26 @@ function GeneralSettings({ project }: { project: ProjectSummary }) {
               onChange={(event) => setName(event.target.value)}
             />
           </label>
+          <label className="field">
+            <span className="label">Folder</span>
+            <input
+              className="input"
+              spellCheck={false}
+              placeholder="No folder"
+              value={folder}
+              aria-invalid={folderError !== null}
+              onChange={(event) => setFolder(event.target.value)}
+            />
+            <span className={`hint${folderError !== null ? ' edit-note-error' : ''}`}>
+              {folderError ?? 'Where Projects lists it. Changes nothing else.'}
+            </span>
+          </label>
         </div>
         <div className="form-actions">
           <button
             className="btn btn-primary"
             type="submit"
-            disabled={!dirty || pending || slug === '' || slugError !== null || name.trim() === ''}
+            disabled={!dirty || pending || slug === '' || slugError !== null || name.trim() === '' || folderError !== null}
           >
             {pending && <Spinner />}
             Save

@@ -210,6 +210,8 @@ BEGIN
         'SELECT * FROM device_authorizations',
         'SELECT * FROM service_bindings',
         'SELECT * FROM consumed_tokens',
+        'SELECT * FROM project_folders',
+        'UPDATE secret_folders SET folder = folder',
             'DELETE FROM identities',
         'DELETE FROM device_authorizations',
         'TRUNCATE vault_members',
