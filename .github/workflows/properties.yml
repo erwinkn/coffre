@@ -1,0 +1,54 @@
+name: Nightly properties
+
+# The property tests' long run, every night on a seed of its own: what the
+# pull requests' short, fixed-seed runs cannot reach. A failure names its
+# seed, which replays it exactly (docs/property-tests.md).
+on:
+  schedule:
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: A seed to replay, or empty for a fresh one
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  properties:
+    name: Long properties (${{ matrix.engine }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [postgres, sqlite]
+    steps:
+      - name: Check out main
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/prepare
+        with:
+          build: 'false'
+      - name: Draw the seed
+        id: seed
+        env:
+          REPLAY: ${{ inputs.seed }}
+        run: |
+          seed="${REPLAY:-$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')}"
+          if ! [[ "$seed" =~ ^[0-9]+$ ]]; then echo "::error::the seed must be an unsigned integer, not $seed"; exit 2; fi
+          echo "seed=$seed" >> "$GITHUB_OUTPUT"
+          echo "::notice title=Seed ${seed}::replay with: COFFRE_TEST_ENGINE=${{ matrix.engine }} pnpm test:properties:server --long --seed=${seed}"
+      - name: Core properties
+        if: matrix.engine == 'postgres'
+        run: pnpm test:properties --long --seed=${{ steps.seed.outputs.seed }}
+      - name: Server operation sequences
+        env:
+          COFFRE_TEST_ENGINE: ${{ matrix.engine }}
+        run: pnpm test:properties:server --long --seed=${{ steps.seed.outputs.seed }}
+      - name: Name the seed that failed
+        if: failure() && steps.seed.outputs.seed != ''
+        run: |
+          echo "::error title=Properties failed on seed ${{ steps.seed.outputs.seed }}::replay with: pnpm test:properties --long --seed=${{ steps.seed.outputs.seed }}, and COFFRE_TEST_ENGINE=${{ matrix.engine }} pnpm test:properties:server --long --seed=${{ steps.seed.outputs.seed }}; Hegel's shrunk operations are in the log above"
+          exit 1
