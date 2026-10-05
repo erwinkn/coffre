@@ -1,4 +1,4 @@
-import { byFolder, CoffreError, foldersOf, planImport, type CoffreClient } from '@coffre/client';
+import { byFolder, CoffreError, foldersOf, planImport, type CoffreClient, type ListedReference } from '@coffre/client';
 import { parseDotenv } from '@coffre/core/dotenv';
 import {
   useEffect,
@@ -7,7 +7,7 @@ import {
   type InputHTMLAttributes,
   type TextareaHTMLAttributes,
 } from 'react';
-import { useSuspenseQuery } from '@tanstack/react-query';
+import { useQuery, useSuspenseQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useShell } from '../lib/use-shell';
 import { Menu } from '@base-ui/react/menu';
@@ -38,6 +38,7 @@ import { secretKeyProblem } from '../lib/validation';
 import {
   breakAfterUnderscores,
   ConfirmButton,
+  ConfirmDialog,
   CopyButton,
   EmptyState,
   ErrorLine,
@@ -51,12 +52,15 @@ import {
 import { Card, ClosedDoor, PageHeader } from '../components/page';
 import { SecretReadOnly } from '../components/affordances';
 import { FolderRow, MoveToFolder } from '../components/folders';
+import { LentReferences, MakeReference, ReferenceValue } from '../components/references';
+import { isActiveAccessibleEnvironment } from '../lib/project-environments';
 import {
   AlertCircle,
   Archive,
   Check,
   Clock,
   Eye,
+  ArrowRight,
   EyeOff,
   Folder,
   Hash,
@@ -68,6 +72,7 @@ import {
   Plus,
   RotateBack,
   Search,
+  SlashCircle,
   Terminal,
   Upload,
   X,
@@ -144,6 +149,17 @@ function EnvironmentLedger({
   const restore = useChange(restoreSecret(coffre, { project, environment }));
   const archive = useChange(archiveSecret(coffre, { project, environment }));
   const move = useChange(moveSecret(coffre, { project, environment }));
+  // The references that read this environment's secrets from elsewhere, and the environments you read.
+  const { data: references } = useQuery(queries.references(coffre, `${project}/${environment}`));
+  const lentBy = new Map<string, ListedReference[]>();
+  for (const reference of references?.ok === true ? references.references : []) {
+    const [sourceProject, sourceEnvironment, key] = reference.source.split('/') as [string, string, string];
+    if (sourceProject !== project || sourceEnvironment !== environment) continue;
+    lentBy.set(key, [...(lentBy.get(key) ?? []), reference]);
+  }
+  const readable = useShell().projects.flatMap((each) => each.environments
+    .filter(isActiveAccessibleEnvironment)
+    .map((one) => `${each.slug}/${one.slug}`));
   const { status, dismiss } = useChangeStatus(queryKeys.secrets({ project, environment }));
   const [drafts, setDrafts] = useState<SecretDraft[]>([]);
   const [changes, setChanges] = useState<Record<string, SecretChange>>({});
@@ -465,6 +481,8 @@ function EnvironmentLedger({
                       canReveal={canReveal}
                       folders={folders}
                       onMove={(folder) => move({ key: entry.key, folder })}
+                      lent={lentBy.get(entry.key) ?? []}
+                      environments={readable}
                       status={state}
                       // Not while its save is on its way.
                       disabled={state.state === 'pending'}
@@ -791,6 +809,8 @@ function SecretRow({
   canReveal,
   folders,
   onMove,
+  lent,
+  environments,
   status,
   disabled,
   columns,
@@ -813,6 +833,10 @@ function SecretRow({
   /** The folders in use in this environment, offered when moving it. */
   folders: readonly string[];
   onMove: (folder: string | null) => void;
+  /** The references that read this secret from elsewhere. */
+  lent: ListedReference[];
+  /** The environments you read, offered when making this a reference. */
+  environments: readonly string[];
   /** A save of this row on its way, or refused. */
   status: ItemStatus;
   disabled: boolean;
@@ -830,6 +854,15 @@ function SecretRow({
   const [revealing, setRevealing] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [moving, setMoving] = useState(false);
+  const [referring, setReferring] = useState(false);
+  const [breaking, setBreaking] = useState<string | null>(null);
+  const [lentOpen, setLentOpen] = useState(false);
+  // Making or breaking a reference: its refusal shows under the row, as a reveal's does.
+  const { run: act, error: actError } = useAction();
+  const { reference } = entry;
+  // What a reveal shows: its own version, or, as a reference, its source's.
+  const readVersion = reference === null ? entry.version : reference.version;
+  const holderPath = `${project}/${environment}/${entry.key}`;
   const [error, setError] = useState<string | null>(null);
   // The current value, loaded on request as the starting point for an edit.
   // It is not a change until it is edited: saving it untouched would append a
@@ -840,10 +873,10 @@ function SecretRow({
   // different version -- saved here, rolled back, or written by someone else
   // and picked up on refresh -- the old plaintext is not the value any more,
   // and must not stay on screen pretending to be.
-  const shown = revealIsCurrent(reveal, entry.version) ? reveal : null;
+  const shown = revealIsCurrent(reveal, readVersion) ? reveal : null;
   useEffect(() => {
-    if (reveal !== null && !revealIsCurrent(reveal, entry.version)) setReveal(null);
-  }, [reveal, entry.version]);
+    if (reveal !== null && !revealIsCurrent(reveal, readVersion)) setReveal(null);
+  }, [reveal, readVersion]);
 
   useEffect(() => {
     if (reveal === null) return;
@@ -853,7 +886,7 @@ function SecretRow({
 
   const secondsLeft = useSecondsLeft(shown);
 
-  const editBase = editing && revealIsCurrent(base, entry.version) ? base : null;
+  const editBase = editing && revealIsCurrent(base, readVersion) ? base : null;
   useEffect(() => {
     if (!editing) setBase(null);
   }, [editing]);
@@ -865,7 +898,7 @@ function SecretRow({
       const { values } = await coffre.secrets.reveal(`${project}/${environment}/${entry.key}`);
       const value = values[entry.key];
       setError(null);
-      if (show) setReveal({ value, version: entry.version, at: Date.now() });
+      if (show) setReveal({ value, version: readVersion, at: Date.now() });
       return value;
     } catch (failure) {
       setError(
@@ -896,7 +929,7 @@ function SecretRow({
       const value = await readValue({ show: false });
       setOpening(false);
       if (value === null) return;
-      setBase({ value, version: entry.version, at: Date.now() });
+      setBase({ value, version: readVersion, at: Date.now() });
     }
     setReveal(null);
     onEdit();
@@ -950,6 +983,16 @@ function SecretRow({
             <div className="key-cell">
               <span>{breakAfterUnderscores(entry.key)}</span>
               {leaving && <span className="tag tag-red">Will be archived</span>}
+              {lent.length > 0 && (
+                <button
+                  type="button"
+                  className="tag tag-button tag-violet"
+                  aria-expanded={lentOpen}
+                  onClick={() => setLentOpen((open) => !open)}
+                >
+                  {lent.length} {lent.length === 1 ? 'reference' : 'references'}
+                </button>
+              )}
             </div>
           )}
         </td>
@@ -973,6 +1016,11 @@ function SecretRow({
                     }
                     onEscape={onUndo}
                   />
+                  {reference !== null && reference.state === 'live' && (
+                    <span className="edit-note">
+                      Saving a value stops following <span className="mono">{reference.source}</span>
+                    </span>
+                  )}
                 </div>
               ) : shown !== null && !leaving ? (
                 <div
@@ -985,6 +1033,8 @@ function SecretRow({
                   </span>
                   <span className="revealed-meter" aria-hidden />
                 </div>
+              ) : reference !== null ? (
+                <ReferenceValue reference={reference} />
               ) : (
                 <span className="mask" aria-label="Hidden">
                   ••••••••••••
@@ -1065,12 +1115,14 @@ function SecretRow({
               v{version} → <b>v{version + 1}</b>
             </span>
           ) : (
-            <span className="version-shift">{entry.version === null ? '—' : `v${entry.version}`}</span>
+            <span className="version-shift" title={reference === null ? undefined : "The source's version"}>
+              {readVersion === null ? '—' : `v${readVersion}`}
+            </span>
           )}
         </td>
 
         <td className="col-written col-hide-narrow" data-label="Last written">
-          <Written entry={entry} />
+          <Written entry={reference === null ? entry : { ...entry, updatedBy: reference.createdBy.replace(/^user:/, ''), updatedAt: reference.createdAt }} />
         </td>
 
         <td className="col-actions">
@@ -1105,6 +1157,18 @@ function SecretRow({
                       Move to folder…
                     </Menu.Item>
                   )}
+                  {canWrite && !editing && !leaving && (
+                    <Menu.Item className="menu-item" onClick={() => setReferring(true)}>
+                      <ArrowRight size={14} />
+                      {reference === null ? 'Make a reference…' : 'Point elsewhere…'}
+                    </Menu.Item>
+                  )}
+                  {canWrite && !editing && !leaving && reference !== null && reference.state === 'live' && (
+                    <Menu.Item className="menu-item" onClick={() => setBreaking(holderPath)}>
+                      <SlashCircle size={14} />
+                      Break reference…
+                    </Menu.Item>
+                  )}
                   {canArchive && !leaving && (
                     <>
                       {(canReveal || canWrite) && <Menu.Separator className="menu-sep" />}
@@ -1127,6 +1191,48 @@ function SecretRow({
           )}
         </td>
       </tr>
+
+      {canWrite && (
+        <MakeReference
+          open={referring}
+          onOpenChange={setReferring}
+          holder={holderPath}
+          environments={environments}
+          onMake={(source) =>
+            act(() => coffre.secrets.set(`${project}/${environment}`, { [entry.key]: { ref: source } }), {
+              affects: affects.secrets({ project, environment }),
+              onSuccess: () => toast.success(`${entry.key} reads ${source}`),
+            })
+          }
+        />
+      )}
+
+      <ConfirmDialog
+        open={breaking !== null}
+        onOpenChange={(open) => !open && setBreaking(null)}
+        title="Break this reference?"
+        body={
+          breaking === holderPath
+            ? `Whoever reads ${project}/${environment} stops reading ${reference?.source ?? 'its source'} through ${entry.key}, and a run of ${project}/${environment} refuses until ${entry.key} gets a value.`
+            : `Whoever reads ${breaking ?? ''}'s environment stops reading ${project}/${environment}/${entry.key} through it, and a run there refuses until it gets a value.`
+        }
+        confirmLabel="Break"
+        onConfirm={() => {
+          const path = breaking!;
+          act(() => coffre.references.break(path), {
+            affects: affects.secrets({ project, environment }),
+            onSuccess: () => toast.success(`Broke ${path}`),
+          });
+        }}
+      />
+
+      {lentOpen && lent.length > 0 && (
+        <tr className="detail-row">
+          <td colSpan={columns}>
+            <LentReferences references={lent} onBreak={(each) => setBreaking(each.holder)} />
+          </td>
+        </tr>
+      )}
 
       {canWrite && (
         <MoveToFolder
@@ -1155,10 +1261,10 @@ function SecretRow({
         </tr>
       )}
 
-      {error !== null && (
+      {(error ?? actError) !== null && (
         <tr className="row-error">
           <td colSpan={columns}>
-            <ErrorLine error={error} />
+            <ErrorLine error={(error ?? actError)!} />
           </td>
         </tr>
       )}

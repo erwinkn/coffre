@@ -73,8 +73,15 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
   'POST /secrets/:project/:environment/:key/restore': {
     ui: [{ does: 'a secret › Version history › Restore a version', in: 'pages/environment.tsx', call: 'secrets.restore' }],
   },
-  'DELETE /secrets/:project/:environment/:key/reference': { inFlight: '#143, references in the UI' },
-  'GET /references': { inFlight: '#143, references in the UI' },
+  'DELETE /secrets/:project/:environment/:key/reference': {
+    ui: [
+      { does: "a reference's row › ⋯ › Break reference…, or the Read elsewhere list's Break", in: 'pages/environment.tsx', call: 'references.break' },
+      { does: "a project's references › Break", in: 'components/references.tsx', call: 'references.break' },
+    ],
+  },
+  'GET /references': {
+    ui: [{ does: "an environment: what reads its secrets from elsewhere; a project's references", in: 'lib/queries.ts', call: 'references.list' }],
+  },
   'POST /reveals': { ui: [{ does: 'a secret › Reveal, and Edit, which starts from the value', in: 'pages/environment.tsx', call: 'secrets.reveal' }] },
   'GET /members': {
     ui: [

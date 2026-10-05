@@ -976,6 +976,20 @@ export type OffboardingReport = {
   }[];
 };
 
+export type ListedReference = {
+  id: string;
+  holder: string;
+  source: string;
+  state: "broken" | "live" | "replaced" | "source_archived" | "source_deleted" | "source_empty" | "source_is_reference";
+  version: number | null;
+  createdBy: string;
+  createdAt: string;
+  endedBy: string | null;
+  endedAt: string | null;
+  readers: null | string[];
+  canBreak: boolean;
+};
+
 export type ProjectSummary = {
   slug: string;
   name: string;
@@ -992,6 +1006,18 @@ export type ProjectSummary = {
     };
   }[];
   secretCount: number | null;
+};
+
+export type ReferenceView = {
+  id: string;
+  holder: string;
+  source: string;
+  state: "broken" | "live" | "replaced" | "source_archived" | "source_deleted" | "source_empty" | "source_is_reference";
+  version: number | null;
+  createdBy: string;
+  createdAt: string;
+  endedBy: string | null;
+  endedAt: string | null;
 };
 
 export type RemovedMember = {
