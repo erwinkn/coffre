@@ -36,11 +36,23 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
       { does: 'a project › Settings › Archive …, Restore …', in: 'pages/project.tsx', call: 'projects.update' },
     ],
   },
+  'DELETE /projects/:project': {
+    ui: [
+      { does: 'an archived project › Settings › Delete …, its slug typed out', in: 'components/delete-place.tsx', call: 'projects.delete' },
+      { does: 'the same dialog: what deleting would erase and revoke', in: 'lib/queries.ts', call: 'projects.previewDelete' },
+    ],
+  },
   'PUT /projects/:project/:environment': {
     ui: [{ does: 'a project › Environments › Add environment', in: 'pages/project.tsx', call: 'environments.create' }],
   },
   'PATCH /projects/:project/:environment': {
     ui: [{ does: "an environment's card › ⋯ › Rename, Archive…, Restore", in: 'pages/project.tsx', call: 'environments.update' }],
+  },
+  'DELETE /projects/:project/:environment': {
+    ui: [
+      { does: "an archived environment's card › ⋯ › Delete…, its path typed out", in: 'components/delete-place.tsx', call: 'environments.delete' },
+      { does: 'the same dialog: what deleting would erase and revoke', in: 'lib/queries.ts', call: 'environments.previewDelete' },
+    ],
   },
   'GET /secrets/:project/:environment': { ui: [{ does: 'an environment: its secrets', in: 'pages/environment.tsx', call: 'secrets.list' }] },
   'PATCH /secrets/:project/:environment': {
