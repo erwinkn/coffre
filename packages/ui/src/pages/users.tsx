@@ -1,6 +1,6 @@
 import { useSuspenseQuery } from '@tanstack/react-query';
 
-import { AddPrincipal, DirectoryTable } from '../components/directory';
+import { DirectoryTable } from '../components/directory';
 import { useCoffre } from '../lib/coffre';
 import { queries } from '../lib/queries';
 import { useShell } from '../lib/use-shell';
@@ -24,7 +24,7 @@ export function UsersPage() {
 
   return (
     <>
-      <PageHeader title="Users" actions={<AddPrincipal principalType="user" />} />
+      <PageHeader title="Users" />
       <DirectoryTable
         principalType="user"
         principals={users}

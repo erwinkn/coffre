@@ -57,6 +57,7 @@ export function Card({
   children,
   labelledBy,
   tone,
+  wide = false,
 }: {
   title: ReactNode;
   description?: ReactNode;
@@ -64,10 +65,12 @@ export function Card({
   children: ReactNode;
   labelledBy: string;
   tone?: 'danger';
+  /** Takes the content column whole, for a table of many or long columns. */
+  wide?: boolean;
 }) {
   return (
     <section
-      className={`card${tone === 'danger' ? ' card-danger' : ''}`}
+      className={`card${tone === 'danger' ? ' card-danger' : ''}${wide ? ' card-wide' : ''}`}
       aria-labelledby={labelledBy}
     >
       <div className="card-head">

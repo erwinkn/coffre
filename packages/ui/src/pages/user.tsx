@@ -6,5 +6,6 @@ const Route = pageRoute<typeof user>();
 
 export function UserPage() {
   const { user } = Route.useParams();
-  return <PrincipalPage principalType="user" principalId={user} />;
+  const { tab } = Route.useSearch();
+  return <PrincipalPage principalType="user" principalId={user} tab={tab} />;
 }

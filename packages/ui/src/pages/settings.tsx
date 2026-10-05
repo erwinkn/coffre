@@ -4,10 +4,10 @@ import { useCoffre } from '../lib/coffre';
 import { queries } from '../lib/queries';
 import { useShell } from '../lib/use-shell';
 import { Card, Fact, PageHeader } from '../components/page';
+import { Toggletip } from '../components/ui';
+import { Info } from '../components/icons';
 
 /** The instance's settings. Your own are under Account, at the sidebar's foot. */
-
-const listFormat = new Intl.ListFormat('en', { type: 'disjunction' });
 
 export function SettingsPage() {
   const { auth, capabilities } = useShell();
@@ -30,9 +30,20 @@ export function SettingsPage() {
       >
         <dl className="facts">
           <Fact label="Sign-in">
-            {auth?.signin
-              ? `coffre’s own sign-in, with ${listFormat.format(providers)}. Only invited members get in.`
-              : 'Cloudflare Access. coffre has no sign-in of its own; every request carries an Access assertion that is verified at the origin.'}
+            <span>
+              {auth?.signin ? providers.join(', ') : 'Cloudflare Access'}
+              <Toggletip
+                label={
+                  auth?.signin
+                    ? 'coffre’s own sign-in. Only invited members get in.'
+                    : 'coffre has no sign-in of its own: every request carries an Access assertion, verified at the origin.'
+                }
+              >
+                <button type="button" className="fact-tip" aria-label="About sign-in">
+                  <Info size={14} />
+                </button>
+              </Toggletip>
+            </span>
           </Fact>
           {principals !== null && (
             <>

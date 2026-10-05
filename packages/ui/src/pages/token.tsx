@@ -13,6 +13,7 @@ const Route = pageRoute<typeof token>();
 
 export function TokenPage() {
   const { token } = Route.useParams();
+  const { tab } = Route.useSearch();
   const client = useCoffre();
   const { auth, capabilities } = useShell();
   const member = memberRef('service', token);
@@ -22,14 +23,13 @@ export function TokenPage() {
   const { data: bindings } = useSuspenseQuery(queries.bindings(client, member, owner && auth.signin !== null));
   // A removed service can be issued nothing; its page shows what it left behind.
   const active = report?.ok === true && report.report?.status === 'active';
-  return (
-    <>
-      <PrincipalPage principalType="service" principalId={token} />
-      {/* The two ways a service account signs in: OIDC first, the one with nothing to store. */}
-      {active && bindings?.ok === true && <TrustedWorkloads serviceId={token} bindings={bindings.bindings} />}
-      {active && credentials?.ok === true && (
-        <ServiceTokens serviceId={token} tokens={credentials.tokens} />
-      )}
-    </>
-  );
+  // The two ways a service account signs in: OIDC first, the one with nothing to store.
+  const signIn =
+    active && (bindings?.ok === true || credentials?.ok === true) ? (
+      <>
+        {bindings?.ok === true && <TrustedWorkloads serviceId={token} bindings={bindings.bindings} />}
+        {credentials?.ok === true && <ServiceTokens serviceId={token} tokens={credentials.tokens} />}
+      </>
+    ) : undefined;
+  return <PrincipalPage principalType="service" principalId={token} tab={tab} signIn={signIn} />;
 }

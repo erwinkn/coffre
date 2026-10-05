@@ -77,12 +77,13 @@ function listDirectory(client: CoffreClient) {
   return uiResult(async () => {
     const { members, removed } = await client.members.list();
     const principals: DirectoryPrincipal[] = members.map(
-      ({ principalType, principalId, instanceRole, isRootAdmin, tampered }) => ({
+      ({ principalType, principalId, instanceRole, isRootAdmin, tampered, grants }) => ({
         principalType,
         principalId,
         instanceRole,
         isRootAdmin,
         tampered,
+        grants: grants.map(({ project, environment }) => ({ project, environment })),
       }),
     );
     return { principals, removed };
@@ -323,6 +324,31 @@ export async function loadProject(queryClient: QueryClient, client: CoffreClient
 export async function loadDirectory(queryClient: QueryClient, client: CoffreClient) {
   const shell = await loadShell(queryClient, client);
   return queryClient.fetchQuery(queries.directory(client, shell.capabilities.canManageGrants));
+}
+
+/**
+ * The service accounts page: the directory, and each account's bindings and
+ * tokens, read here as its own page reads them, so the list shows how each
+ * signs in from the first paint and the browser asks for nothing that may be
+ * refused (a deployment that trusts no workloads answers bindings with one).
+ */
+export async function loadServiceDirectory(queryClient: QueryClient, client: CoffreClient) {
+  const shell = await loadShell(queryClient, client);
+  const directory = await loadDirectory(queryClient, client);
+  const allowed = shell.capabilities.canManageGrants && shell.auth.signin !== null;
+  if (!directory.ok || !allowed) return directory;
+  await Promise.all(
+    directory.principals
+      .filter((principal) => principal.principalType === 'service')
+      .flatMap((principal) => {
+        const member = memberRef('service', principal.principalId);
+        return [
+          queryClient.fetchQuery(queries.credentials(client, member, allowed)),
+          queryClient.fetchQuery(queries.bindings(client, member, allowed)),
+        ];
+      }),
+  );
+  return directory;
 }
 
 /**

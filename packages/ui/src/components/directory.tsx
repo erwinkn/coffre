@@ -1,13 +1,16 @@
 import { Fragment, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { Menu } from '@base-ui/react/menu';
 import { changeRole, directoryList, invite, removeMember, type InviteVars } from '../lib/changes';
 import { memberRef, useCoffre } from '../lib/coffre';
+import { queries } from '../lib/queries';
+import { useShell } from '../lib/use-shell';
 import { useChange, useChangeStatus } from '../lib/use-change';
 import type { DirectoryPrincipal } from '../shared/models';
 import { RowFailure, RowPending, rowClass } from './row-state';
-import { ConfirmDialog, EmptyState, MenuPopup, Modal, Spinner, Toggletip } from './ui';
+import { ConfirmDialog, EmptyState, MenuPopup, Modal, Spinner, Timestamp, Toggletip } from './ui';
 import { PrincipalLink } from './principal';
-import { Key, Lock, MoreHorizontal, Pencil, Plus, ShieldCheck, User, X } from './icons';
+import { Clock, Folder, GitHub, Key, Link, Lock, MoreHorizontal, Pencil, Plus, ShieldCheck, User, X } from './icons';
 
 /**
  * The instance directory, shared by the Users and Service accounts pages.
@@ -46,104 +49,219 @@ export function DirectoryTable({
   hasRemoved?: boolean;
 }) {
   const users = principalType === 'user';
-  const columns = users ? 4 : 3;
+  const columns = users ? 4 : 6;
   const { status, failedAdds, dismiss } = useChangeStatus(directoryList.queryKey);
   const refused = failedAdds<InviteVars>(principals.map(memberOf)).filter(
     ({ vars }) => vars.principalType === principalType,
   );
   return (
-    <section className="card" aria-label={users ? 'Users' : 'Service accounts'}>
-      {principals.length === 0 && refused.length === 0 ? (
-        <EmptyState
-          title={
-            hasRemoved
-              ? `No active ${KIND[principalType]}s`
-              : users
-                ? 'Nobody is registered'
-                : 'No service accounts yet'
-          }
-        >
-          {hasRemoved ? `Add a ${KIND[principalType]}` : `Add the first ${KIND[principalType]}`} to let
-          it through the door. Project access is a separate step, granted from each project's page.
-        </EmptyState>
-      ) : (
-        <div className="dt-wrap">
-          <table className={`dt directory directory-${principalType} stacks`}>
-            <thead>
-              <tr>
-                <th className="n">#</th>
-                <th className="col-principal">
-                  <span className="th">
-                    {users ? <User size={14} /> : <Key size={14} />}
-                    {users ? 'Email' : 'Name'}
-                  </span>
-                </th>
-                {users && (
-                  <th className="col-role">
+    <>
+      <section className="card" aria-label={users ? 'Users' : 'Service accounts'}>
+        {principals.length === 0 && refused.length === 0 ? (
+          <EmptyState
+            title={
+              hasRemoved
+                ? `No active ${KIND[principalType]}s`
+                : users
+                  ? 'Nobody is registered'
+                  : 'No service accounts yet'
+            }
+          >
+            {hasRemoved ? `Add a ${KIND[principalType]}` : `Add the first ${KIND[principalType]}`} to let
+            it through the door. Project access is a separate step, granted from each project's page.
+          </EmptyState>
+        ) : (
+          <div className="dt-wrap">
+            <table className={`dt directory directory-${principalType} stacks${users ? '' : ' stacks-inline'}`}>
+              <thead>
+                <tr>
+                  <th className="n">#</th>
+                  <th className="col-principal">
                     <span className="th">
-                      <ShieldCheck size={14} />
-                      Instance role
+                      {users ? <User size={14} /> : <Key size={14} />}
+                      {users ? 'Email' : 'Name'}
                     </span>
                   </th>
-                )}
-                <th className="col-actions">
-                  <span className="visually-hidden">Actions</span>
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {principals.map((principal, index) => {
-                const state = status(memberOf(principal));
-                return (
-                  <Fragment key={principal.principalId}>
-                    <tr className={`row-link ${rowClass(state)}`}>
-                      <td className="n">{index + 1}</td>
-                      <td
-                        className="col-lead"
-                        data-label={principal.principalType === 'user' ? 'Email' : 'Name'}
-                      >
-                        <PrincipalLink
-                          type={principal.principalType}
-                          id={principal.principalId}
-                          stretch
-                        />
-                      </td>
-                      {users && (
-                        <td className="col-role" data-label="Instance role">
-                          <InstanceRole principal={principal} />
+                  {users ? (
+                    <th className="col-role">
+                      <span className="th">
+                        <ShieldCheck size={14} />
+                        Instance role
+                      </span>
+                    </th>
+                  ) : (
+                    <>
+                      <th className="col-signin">
+                        <span className="th">
+                          <Link size={14} />
+                          Signs in with
+                        </span>
+                      </th>
+                      <th className="col-access">
+                        <span className="th">
+                          <Folder size={14} />
+                          Access
+                        </span>
+                      </th>
+                      <th className="col-used">
+                        <span className="th">
+                          <Clock size={14} />
+                          Last used
+                        </span>
+                      </th>
+                    </>
+                  )}
+                  <th className="col-actions">
+                    <span className="visually-hidden">Actions</span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {principals.map((principal, index) => {
+                  const state = status(memberOf(principal));
+                  return (
+                    <Fragment key={principal.principalId}>
+                      <tr className={`row-link ${rowClass(state)}`}>
+                        <td className="n">{index + 1}</td>
+                        <td
+                          className="col-lead"
+                          data-label={principal.principalType === 'user' ? 'Email' : 'Name'}
+                        >
+                          <PrincipalLink
+                            type={principal.principalType}
+                            id={principal.principalId}
+                            stretch
+                          />
                         </td>
-                      )}
-                      <td className="col-actions">
-                        {state.state === 'pending' ? (
-                          <RowPending status={state} />
+                        {users ? (
+                          <td className="col-role" data-label="Instance role">
+                            <InstanceRole principal={principal} />
+                          </td>
                         ) : (
-                          <PrincipalActions principal={principal} />
+                          <ServiceCells principal={principal} />
                         )}
-                      </td>
-                    </tr>
-                    <RowFailure
-                      status={state}
-                      columns={columns}
-                      onDismiss={() => state.state === 'failed' && dismiss(state.mutationId)}
-                    />
-                  </Fragment>
-                );
-              })}
-              {refused.map(({ mutationId, vars, status: failed }) => (
-                <RowFailure
-                  key={mutationId}
-                  status={failed}
-                  columns={columns}
-                  onDismiss={() => dismiss(mutationId)}
-                >
-                  {vars.principalId} was not added.
-                </RowFailure>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </section>
+                        <td className="col-actions">
+                          {state.state === 'pending' ? (
+                            <RowPending status={state} />
+                          ) : (
+                            <PrincipalActions principal={principal} />
+                          )}
+                        </td>
+                      </tr>
+                      <RowFailure
+                        status={state}
+                        columns={columns}
+                        onDismiss={() => state.state === 'failed' && dismiss(state.mutationId)}
+                      />
+                    </Fragment>
+                  );
+                })}
+                {refused.map(({ mutationId, vars, status: failed }) => (
+                  <RowFailure
+                    key={mutationId}
+                    status={failed}
+                    columns={columns}
+                    onDismiss={() => dismiss(mutationId)}
+                  >
+                    {vars.principalId} was not added.
+                  </RowFailure>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+      <div className="table-actions">
+        <AddPrincipal principalType={principalType} />
+      </div>
+    </>
+  );
+}
+
+const PLATFORM: Record<string, string> = {
+  github: 'GitHub',
+  'github-reusable': 'GitHub',
+  'github-reusable-organization': 'GitHub',
+  gitlab: 'GitLab',
+  custom: 'OIDC',
+};
+
+/**
+ * What someone scanning service accounts wants of each: how it signs in, where
+ * it reaches, and whether it is still in use. Access comes with the list; the
+ * bindings and tokens are read per row, as its own page reads them.
+ */
+function ServiceCells({ principal }: { principal: DirectoryPrincipal }) {
+  const client = useCoffre();
+  const { auth, capabilities } = useShell();
+  const member = memberOf(principal);
+  // As `loadServiceDirectory` read them, so these come from its cache.
+  const allowed = capabilities.canManageGrants && auth.signin !== null;
+  // Not suspended: an account added here is shown at once, its facts when they come.
+  const { data: bindings } = useQuery(queries.bindings(client, member, allowed));
+  const { data: credentials } = useQuery(queries.credentials(client, member, allowed));
+
+  const platforms = new Map<string, number>();
+  const bindingList = bindings?.ok === true ? bindings.bindings : [];
+  for (const binding of bindingList) {
+    const platform = PLATFORM[binding.profile] ?? 'OIDC';
+    platforms.set(platform, (platforms.get(platform) ?? 0) + 1);
+  }
+  const now = Date.now();
+  const tokenList = credentials?.ok === true ? credentials.tokens : [];
+  const activeTokens = tokenList.filter((token) => new Date(token.expiresAt).getTime() > now).length;
+  const lastUsed = [...bindingList, ...tokenList]
+    .map((credential) => credential.lastUsedAt)
+    .filter((at): at is string => at !== null)
+    .sort()
+    .at(-1);
+
+  const places = [
+    ...new Set(
+      (principal.grants ?? []).map(({ project, environment }) =>
+        environment === null ? project : `${project}/${environment}`,
+      ),
+    ),
+  ];
+  const projects = new Set((principal.grants ?? []).map((grant) => grant.project));
+  const loaded = bindings !== undefined && credentials !== undefined;
+
+  return (
+    <>
+      <td className="col-signin" data-label="Signs in with">
+        {!loaded ? null : platforms.size === 0 && activeTokens === 0 ? (
+          <span className="cell-muted">Nothing yet</span>
+        ) : (
+          <span className="signin-list">
+            {[...platforms].map(([platform, count]) => (
+              <span key={platform} className="signin-item">
+                {platform === 'GitHub' && <GitHub size={12} />}
+                {platform}
+                {count > 1 && ` ×${count}`}
+              </span>
+            ))}
+            {activeTokens > 0 && (
+              <span className="signin-item">
+                <Key size={12} />
+                {activeTokens} token{activeTokens === 1 ? '' : 's'}
+              </span>
+            )}
+          </span>
+        )}
+      </td>
+      <td className="col-access" data-label="Access" title={places.join(', ')}>
+        {places.length === 0 ? (
+          <span className="cell-muted">None</span>
+        ) : places.length <= 2 ? (
+          <span className="mono">{places.join(', ')}</span>
+        ) : (
+          `${projects.size} project${projects.size === 1 ? '' : 's'}`
+        )}
+      </td>
+      <td className="col-used cell-muted" data-label="Last used">
+        {!loaded ? null : lastUsed === undefined ? 'Never' : <Timestamp iso={lastUsed} display="relative" />}
+      </td>
+    </>
   );
 }
 

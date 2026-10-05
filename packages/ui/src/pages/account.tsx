@@ -126,129 +126,128 @@ function SigninAccounts({
   const { status, dismiss } = useChangeStatus(change.list.queryKey);
 
   return (
-    <Card
-      labelledBy="signin-accounts"
-      title="Sign-in accounts"
-      description="coffre recognises you by these accounts, never by an email address alone. A new account is linked here, while you are signed in."
-    >
-      {(linked !== undefined || message !== null) && (
-        <div className="card-body">
-          {linked !== undefined && (
-            <Notice tone="good">{providerLabel(providers, linked)} account linked.</Notice>
-          )}
-          <ErrorLine error={message} />
-        </div>
-      )}
-
-      {identities.length === 0 ? (
-        <EmptyState title="No account linked">
-          Your next sign-in with a verified <span className="mono">{email}</span> links that
-          account.
-        </EmptyState>
-      ) : (
-        <div className="dt-wrap">
-          <table className="dt">
-            <thead>
-              <tr>
-                <th>Account</th>
-                <th className="col-shrink">Linked (UTC)</th>
-                <th className="col-shrink">Last sign-in</th>
-                <th className="col-actions">
-                  <span className="visually-hidden">Actions</span>
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {identities.map((identity) => {
-                const label = providerLabel(providers, identity.provider);
-                const brand = providers.find((p) => p.id === identity.provider)?.brand ?? 'oidc';
-                const state = status(identity.id);
-                return (
-                  <Fragment key={identity.id}>
-                    <tr className={rowClass(state)}>
-                      <td>
-                        <span className="cell-account">
-                          <ProviderMark brand={brand} />
-                          <span className="cell-stack">
-                            <span>{label}</span>
-                            {identity.email !== null && <small className="mono">{identity.email}</small>}
-                          </span>
-                        </span>
-                      </td>
-                      <td className="nowrap">
-                        <Timestamp iso={identity.createdAt} />
-                      </td>
-                      <td className="nowrap cell-muted">
-                        {identity.lastSignInAt === null ? (
-                          'Never'
-                        ) : (
-                          <Timestamp iso={identity.lastSignInAt} display="relative" />
-                        )}
-                      </td>
-                      <td className="col-actions">
-                        {state.state === 'pending' ? (
-                          <RowPending status={state} />
-                        ) : (
-                          <ConfirmButton
-                            trigger={
-                              <button className="act">
-                                <X size={13} />
-                                Unlink
-                              </button>
-                            }
-                            title={`Unlink this ${label} account?`}
-                            body={
-                              identities.length === 1 ? (
-                                <>
-                                  It stops signing you in, and every session it opened ends now,
-                                  this one included if you signed in with it. Your next sign-in
-                                  with any account whose verified email is{' '}
-                                  <span className="mono">{email}</span> links that account instead.
-                                </>
-                              ) : (
-                                <>
-                                  It stops signing you in, and every session it opened ends now,
-                                  this one included if you signed in with it.
-                                </>
-                              )
-                            }
-                            confirmLabel="Unlink"
-                            onConfirm={() => unlink({ ...identity, label })}
-                          />
-                        )}
-                      </td>
-                    </tr>
-                    <RowFailure
-                      status={state}
-                      columns={4}
-                      onDismiss={() => state.state === 'failed' && dismiss(state.mutationId)}
-                    />
-                  </Fragment>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {providers.length > 0 && (
-        <div className="card-foot">
-          <span className="hint">Link another account</span>
-          <div className="link-providers">
-            {providers.map((provider) => (
-              <a
-                key={provider.id}
-                className="btn btn-sm"
-                href={`/auth/signin/${encodeURIComponent(provider.id)}?link=1`}
-              >
-                <ProviderMark brand={provider.brand} size={14} />
-                {provider.label}
-              </a>
-            ))}
+    <>
+      <Card
+        labelledBy="signin-accounts"
+        title="Sign-in accounts"
+        description="coffre recognises you by these accounts, never by an email address alone. A new account is linked here, while you are signed in."
+      >
+        {(linked !== undefined || message !== null) && (
+          <div className="card-body">
+            {linked !== undefined && (
+              <Notice tone="good">{providerLabel(providers, linked)} account linked.</Notice>
+            )}
+            <ErrorLine error={message} />
           </div>
+        )}
+
+        {identities.length === 0 ? (
+          <EmptyState title="No account linked">
+            Your next sign-in with a verified <span className="mono">{email}</span> links that
+            account.
+          </EmptyState>
+        ) : (
+          <div className="dt-wrap">
+            <table className="dt stacks stacks-inline">
+              <thead>
+                <tr>
+                  <th>Account</th>
+                  <th className="col-shrink">Linked (UTC)</th>
+                  <th className="col-shrink">Last sign-in</th>
+                  <th className="col-actions">
+                    <span className="visually-hidden">Actions</span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {identities.map((identity) => {
+                  const label = providerLabel(providers, identity.provider);
+                  const brand = providers.find((p) => p.id === identity.provider)?.brand ?? 'oidc';
+                  const state = status(identity.id);
+                  return (
+                    <Fragment key={identity.id}>
+                      <tr className={rowClass(state)}>
+                        <td>
+                          <span className="cell-account">
+                            <ProviderMark brand={brand} />
+                            <span className="cell-stack">
+                              <span>{label}</span>
+                              {identity.email !== null && <small className="mono">{identity.email}</small>}
+                            </span>
+                          </span>
+                        </td>
+                        <td className="nowrap" data-label="Linked (UTC)">
+                          <Timestamp iso={identity.createdAt} />
+                        </td>
+                        <td className="nowrap cell-muted" data-label="Last sign-in">
+                          {identity.lastSignInAt === null ? (
+                            'Never'
+                          ) : (
+                            <Timestamp iso={identity.lastSignInAt} display="relative" />
+                          )}
+                        </td>
+                        <td className="col-actions">
+                          {state.state === 'pending' ? (
+                            <RowPending status={state} />
+                          ) : (
+                            <ConfirmButton
+                              trigger={
+                                <button className="act">
+                                  <X size={13} />
+                                  Unlink
+                                </button>
+                              }
+                              title={`Unlink this ${label} account?`}
+                              body={
+                                identities.length === 1 ? (
+                                  <>
+                                    It stops signing you in, and every session it opened ends now,
+                                    this one included if you signed in with it. Your next sign-in
+                                    with any account whose verified email is{' '}
+                                    <span className="mono">{email}</span> links that account instead.
+                                  </>
+                                ) : (
+                                  <>
+                                    It stops signing you in, and every session it opened ends now,
+                                    this one included if you signed in with it.
+                                  </>
+                                )
+                              }
+                              confirmLabel="Unlink"
+                              onConfirm={() => unlink({ ...identity, label })}
+                            />
+                          )}
+                        </td>
+                      </tr>
+                      <RowFailure
+                        status={state}
+                        columns={4}
+                        onDismiss={() => state.state === 'failed' && dismiss(state.mutationId)}
+                      />
+                    </Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+      {providers.length > 0 && (
+        <div className="table-actions">
+          <span className="hint">Link another account</span>
+          {providers.map((provider) => (
+            <a
+              key={provider.id}
+              className="btn"
+              href={`/auth/signin/${encodeURIComponent(provider.id)}?link=1`}
+            >
+              <ProviderMark brand={provider.brand} size={14} />
+              {provider.label}
+            </a>
+          ))}
         </div>
       )}
-    </Card>
+    </>
   );
 }
 
@@ -273,7 +272,7 @@ function Sessions({
         <EmptyState title="No sessions">Nothing is signed in as you right now.</EmptyState>
       ) : (
         <div className="dt-wrap">
-          <table className="dt">
+          <table className="dt stacks stacks-inline">
             <thead>
               <tr>
                 <th>Where</th>
@@ -296,7 +295,7 @@ function Sessions({
                           <span className="cell-stack">
                             <span>
                               {session.label ?? (session.kind === 'cli' ? 'Command line' : 'Browser')}{' '}
-                              {session.current && <span className="tag tag-blue">this browser</span>}
+                              {session.current && <span className="tag tag-blue">This browser</span>}
                             </span>
                             <small>
                               {session.kind === 'cli'
@@ -312,10 +311,10 @@ function Sessions({
                           </span>
                         </span>
                       </td>
-                      <td className="nowrap cell-muted">
+                      <td className="nowrap cell-muted" data-label="Last active">
                         <Timestamp iso={session.lastUsedAt ?? session.createdAt} display="relative" />
                       </td>
-                      <td className="nowrap cell-muted">
+                      <td className="nowrap cell-muted" data-label="Expires">
                         <Timestamp iso={session.expiresAt} display="relative" />
                       </td>
                       <td className="col-actions">

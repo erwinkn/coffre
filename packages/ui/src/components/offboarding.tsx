@@ -7,16 +7,15 @@ import { ChevronRight, Key, User } from './icons';
 import { serviceName } from '@coffre/client';
 
 /**
- * The part of a user's or token's page that answers "if they left, what would
- * we have to change?". Owners only, and most useful once someone is removed:
- * everything that let them in is gone by then, but what they saw is not.
+ * The part of a user's or token's page that answers "what do we change now
+ * they have left?". Owners only. Once someone is removed everything that let
+ * them in is gone, but what they saw is not, nor tokens they issued.
  */
 export function PrincipalReportCards({ report }: { report: PrincipalReport }) {
-  const removed = report.status === 'removed';
   const person = report.principalType === 'user';
   return (
     <>
-      <SeenValues report={report} removed={removed} person={person} />
+      {report.status === 'removed' && <ConsiderRotating report={report} person={person} />}
       {report.issuedTokens.length > 0 && <IssuedTokens report={report} />}
     </>
   );
@@ -77,7 +76,7 @@ export function RemovedList({
                     {users ? 'Email' : 'Name'}
                   </span>
                 </th>
-                <th className="col-role">Still to rotate</th>
+                <th className="col-role">Consider rotating</th>
                 <th className="col-actions">
                   <span className="visually-hidden">Report</span>
                 </th>
@@ -90,7 +89,7 @@ export function RemovedList({
                   <td className="col-lead" data-label={users ? 'Email' : 'Name'}>
                     <PrincipalLink type={principal.principalType} id={principal.principalId} stretch />
                   </td>
-                  <td className="col-role" data-label="Still to rotate">
+                  <td className="col-role" data-label="Consider rotating">
                     {principal.toRotate === 0 ? (
                       <span className="cell-muted">Nothing</span>
                     ) : (
@@ -107,33 +106,18 @@ export function RemovedList({
           </table>
         </div>
       </section>
-      <p className="hint section-foot">
-        {users ? 'They' : 'These'} can no longer sign in. Each page lists the values{' '}
-        {users ? 'they' : 'it'} saw that nobody has changed since.
-      </p>
     </>
   );
 }
 
-function SeenValues({
-  report,
-  removed,
-  person,
-}: {
-  report: PrincipalReport;
-  removed: boolean;
-  person: boolean;
-}) {
+/** Values a removed member saw that nobody has changed since. */
+function ConsiderRotating({ report, person }: { report: PrincipalReport; person: boolean }) {
   const they = person ? 'they' : 'it';
-  const description = removed
-    ? `Values ${they} read or wrote that nobody has changed since, so ${they} may still hold them. Rotate each where it comes from, such as a new API key or database password, then save the new value here and it leaves this list.`
-    : `Current values ${they} ${person ? 'have' : 'has'} read or written: the ones to rotate if ${they} ${person ? 'leave' : 'is retired'}. Saving a new version takes a value off.`;
-
   return (
     <Card
       labelledBy="seen-values"
-      title={removed ? 'Still to rotate' : 'Values seen'}
-      description={description}
+      title="Consider rotating"
+      description={`Values ${they} read or wrote that nobody has changed since, so ${they} may still hold them. Rotate each where it comes from, such as a new API key or database password, then save the new value here and it leaves this list.`}
       actions={
         report.rotated > 0 && (
           <span className="card-aside">{report.rotated} already rotated</span>
@@ -141,7 +125,7 @@ function SeenValues({
       }
     >
       {report.exposed.length === 0 ? (
-        <EmptyState title={removed ? 'Nothing left to rotate' : 'No current values seen'}>
+        <EmptyState title="Nothing left to rotate">
           {report.rotated > 0
             ? `Every value ${they} saw has had a new version since.`
             : `${person ? 'They have' : 'It has'} not read or written a value that is still current.`}

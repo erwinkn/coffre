@@ -24,86 +24,90 @@ export function TrustedWorkloads({ serviceId, bindings }: { serviceId: string; b
   const { status, dismiss } = useChangeStatus(change.list.queryKey);
 
   return (
-    <Card
-      labelledBy="trusted-workloads"
-      title="Sign in with OIDC"
-      description="The way with nothing to store: CI runs sign in as this service account with the ID token their platform signs, when every claim of a trust binding matches. Recommended wherever the CI signs one."
-      actions={<TrustWorkload serviceId={serviceId} />}
-    >
-      {bindings.length === 0 ? (
-        <EmptyState title="No trust bindings">
-          Trust a CI workflow to let its runs sign in as this service account with no stored secret. Until then, CI needs a bearer token.
-        </EmptyState>
-      ) : (
-        <div className="dt-wrap">
-          <table className="dt">
-            <thead>
-              <tr>
-                <th>Workload</th>
-                <th className="col-shrink">Added (UTC)</th>
-                <th className="col-shrink">Last used</th>
-                <th className="col-actions">
-                  <span className="visually-hidden">Actions</span>
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {bindings.map((binding) => {
-                const state = status(binding.id);
-                const { title, detail } = summary(binding);
-                return (
-                  <Fragment key={binding.id}>
-                    <tr className={rowClass(state)}>
-                      <td>
-                        <span className="cell-account">
-                          {binding.profile.startsWith('github') ? <GitHub size={15} /> : <Link size={15} />}
-                          <span className="cell-stack">
-                            <span>{binding.label ?? title}</span>
-                            <small>{binding.label === null ? detail : `${title} · ${detail}`}</small>
-                            <details className="claims">
-                              <summary>Claims</summary>
-                              <Claims binding={binding} />
-                            </details>
+    <>
+      <Card
+        labelledBy="trusted-workloads"
+        title="Sign in with OIDC"
+        description="The way with nothing to store: CI runs sign in as this service account with the ID token their platform signs, when every claim of a trust binding matches. Recommended wherever the CI signs one."
+      >
+        {bindings.length === 0 ? (
+          <EmptyState title="No trust bindings">
+            Trust a CI workflow to let its runs sign in as this service account with no stored secret. Until then, CI needs a bearer token.
+          </EmptyState>
+        ) : (
+          <div className="dt-wrap">
+            <table className="dt">
+              <thead>
+                <tr>
+                  <th>Workload</th>
+                  <th className="col-shrink">Added (UTC)</th>
+                  <th className="col-shrink">Last used</th>
+                  <th className="col-actions">
+                    <span className="visually-hidden">Actions</span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {bindings.map((binding) => {
+                  const state = status(binding.id);
+                  const { title, detail } = summary(binding);
+                  return (
+                    <Fragment key={binding.id}>
+                      <tr className={rowClass(state)}>
+                        <td>
+                          <span className="cell-account">
+                            {binding.profile.startsWith('github') ? <GitHub size={15} /> : <Link size={15} />}
+                            <span className="cell-stack">
+                              <span>{binding.label ?? title}</span>
+                              <small>{binding.label === null ? detail : `${title} · ${detail}`}</small>
+                              <details className="claims">
+                                <summary>Claims</summary>
+                                <Claims binding={binding} />
+                              </details>
+                            </span>
                           </span>
-                        </span>
-                      </td>
-                      <td className="nowrap">
-                        <span className="cell-stack">
-                          <Timestamp iso={binding.createdAt} />
-                          <small>by {binding.createdBy}</small>
-                        </span>
-                      </td>
-                      <td className="nowrap cell-muted">
-                        {binding.lastUsedAt === null ? 'Never' : <Timestamp iso={binding.lastUsedAt} display="relative" />}
-                      </td>
-                      <td className="col-actions">
-                        {state.state === 'pending' ? (
-                          <RowPending status={state} />
-                        ) : (
-                          <ConfirmButton
-                            trigger={
-                              <button className="act">
-                                <X size={13} />
-                                Remove
-                              </button>
-                            }
-                            title={<>Stop trusting {binding.label ?? title}?</>}
-                            body="Its runs are refused from their next sign-in, and credentials they hold stop working. A binding removed is never trusted again; to trust the runs again, add a new one."
-                            confirmLabel="Remove binding"
-                            onConfirm={() => remove(binding)}
-                          />
-                        )}
-                      </td>
-                    </tr>
-                    <RowFailure status={state} columns={4} onDismiss={() => state.state === 'failed' && dismiss(state.mutationId)} />
-                  </Fragment>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </Card>
+                        </td>
+                        <td className="nowrap">
+                          <span className="cell-stack">
+                            <Timestamp iso={binding.createdAt} />
+                            <small>by {binding.createdBy}</small>
+                          </span>
+                        </td>
+                        <td className="nowrap cell-muted">
+                          {binding.lastUsedAt === null ? 'Never' : <Timestamp iso={binding.lastUsedAt} display="relative" />}
+                        </td>
+                        <td className="col-actions">
+                          {state.state === 'pending' ? (
+                            <RowPending status={state} />
+                          ) : (
+                            <ConfirmButton
+                              trigger={
+                                <button className="act">
+                                  <X size={13} />
+                                  Remove
+                                </button>
+                              }
+                              title={<>Stop trusting {binding.label ?? title}?</>}
+                              body="Its runs are refused from their next sign-in, and credentials they hold stop working. A binding removed is never trusted again; to trust the runs again, add a new one."
+                              confirmLabel="Remove binding"
+                              onConfirm={() => remove(binding)}
+                            />
+                          )}
+                        </td>
+                      </tr>
+                      <RowFailure status={state} columns={4} onDismiss={() => state.state === 'failed' && dismiss(state.mutationId)} />
+                    </Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+      <div className="table-actions">
+        <TrustWorkload serviceId={serviceId} />
+      </div>
+    </>
   );
 }
 
@@ -191,7 +195,7 @@ function TrustWorkload({ serviceId }: { serviceId: string }) {
 
   return (
     <>
-      <button className="btn btn-sm" onClick={() => setOpen(true)}>
+      <button className="btn" onClick={() => setOpen(true)}>
         <Plus size={14} />
         Trust a workload
       </button>
