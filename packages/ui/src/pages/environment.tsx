@@ -53,6 +53,7 @@ import { SecretReadOnly } from '../components/affordances';
 import {
   AlertCircle,
   Archive,
+  Check,
   Clock,
   Eye,
   EyeOff,
@@ -190,6 +191,48 @@ function EnvironmentLedger({
       if (dirty) return { ...current, [entry.key]: next };
       const { [entry.key]: _, ...rest } = current;
       return rest;
+    });
+  }
+
+  /**
+   * One row's own Save: its change alone goes, and any other row's stays
+   * pending. A row opened and left as it was just closes.
+   */
+  function saveRow(key: string) {
+    const change = secretChangeFor(changes, key);
+    dropChange(key);
+    if (change === undefined) return;
+    sendAlone({ active, drafts: [], changes: { [key]: change } });
+  }
+
+  function saveDraft(draft: SecretDraft) {
+    setDrafts((rows) => rows.filter((row) => row.id !== draft.id));
+    sendAlone({ active, drafts: [draft], changes: {} });
+  }
+
+  /** Whether one row's change could go alone: named, well named, and clashing with nothing. */
+  function readyAlone(drafts: SecretDraft[], changes: Record<string, SecretChange>): boolean {
+    const names = [
+      ...drafts.map((row) => row.key.trim()),
+      ...Object.values(changes).flatMap((change) => (change.archived ? [] : [change.key.trim()])),
+    ];
+    return (
+      (drafts.length > 0 || Object.keys(changes).length > 0) &&
+      names.every((name) => name !== '' && secretKeyProblem(name) === null) &&
+      !hasSecretEditConflict(active, drafts, changes)
+    );
+  }
+
+  function sendAlone(batch: { active: SecretKey[]; drafts: SecretDraft[]; changes: Record<string, SecretChange> }) {
+    setSaveError(null);
+    save(batch, {
+      // What did not go comes back as it was, beside the other pending rows.
+      onError: (error) => {
+        const left = error instanceof UnsavedEdits ? error.outcome : batch;
+        setDrafts((rows) => [...rows, ...left.drafts]);
+        setChanges((current) => ({ ...current, ...left.changes }));
+        setSaveError(failureMessage(error));
+      },
     });
   }
 
@@ -420,6 +463,10 @@ function EnvironmentLedger({
                       onEdit={() => setEditing((current) => new Set(current).add(entry.key))}
                       onPatch={(patch) => patchChange(entry, patch)}
                       onUndo={() => dropChange(entry.key)}
+                      onSave={() => saveRow(entry.key)}
+                      saveReady={
+                        change === undefined || readyAlone([], { [entry.key]: change })
+                      }
                       onMarkArchive={() => {
                         setEditing((current) => {
                           const next = new Set(current);
@@ -457,6 +504,8 @@ function EnvironmentLedger({
                       )
                     }
                     onRemove={() => setDrafts((rows) => rows.filter((row) => row.id !== draft.id))}
+                    onSave={() => saveDraft(draft)}
+                    saveReady={readyAlone([draft], {})}
                   />
                 ))}
               </tbody>
@@ -736,6 +785,8 @@ function SecretRow({
   onEdit,
   onPatch,
   onUndo,
+  onSave,
+  saveReady,
   onMarkArchive,
 }: {
   number: number;
@@ -754,6 +805,9 @@ function SecretRow({
   onEdit: () => void;
   onPatch: (patch: Partial<SecretChange>) => void;
   onUndo: () => void;
+  /** This row's change alone, saved now. */
+  onSave: () => void;
+  saveReady: boolean;
   onMarkArchive: () => void;
 }) {
   const [reveal, setReveal] = useState<Reveal | null>(null);
@@ -817,7 +871,10 @@ function SecretRow({
   // An edit starts from the current value, read the way Reveal reads it, so
   // the audit log shows who opened it. One that cannot be read starts empty.
   const [opening, setOpening] = useState(false);
-  async function startEdit() {
+  // Rename opens the same editor, its name field focused rather than its value.
+  const [focusName, setFocusName] = useState(false);
+  async function startEdit({ name = false } = {}) {
+    setFocusName(name);
     if (canReveal) {
       setOpening(true);
       const value = await readValue({ show: false });
@@ -851,6 +908,7 @@ function SecretRow({
             <div className="edit-stack">
               <input
                 className="input input-mono"
+                autoFocus={focusName}
                 aria-label={`Name for ${entry.key}`}
                 aria-invalid={keyProblem !== null}
                 spellCheck={false}
@@ -881,41 +939,108 @@ function SecretRow({
         </td>
 
         <td data-label="Value">
-          {editing && canWrite ? (
-            <div className="edit-stack">
-              <ValueField
-                label={`New value for ${entry.key}`}
-                value={change.value ?? editBase?.value ?? ''}
-                start={editBase?.value}
-                placeholder={canReveal ? 'Value' : 'New value; the current one is hidden from you'}
-                disabled={disabled}
-                autoFocus
-                onChange={(value) =>
-                  onPatch({ value: value === (editBase?.value ?? '') ? null : value })
-                }
-                onEscape={onUndo}
-              />
+          {/* What acts on the value sits beside it: reading, Copy, Reveal and Edit;
+              editing or marked for archiving, Save and Cancel, in the same place. */}
+          <div className="value-cell">
+            <div className="value-content">
+              {editing && canWrite ? (
+                <div className="edit-stack">
+                  <ValueField
+                    label={`New value for ${entry.key}`}
+                    value={change.value ?? editBase?.value ?? ''}
+                    start={editBase?.value}
+                    placeholder={canReveal ? 'Value' : 'New value; the current one is hidden from you'}
+                    disabled={disabled}
+                    autoFocus={!focusName}
+                    onChange={(value) =>
+                      onPatch({ value: value === (editBase?.value ?? '') ? null : value })
+                    }
+                    onEscape={onUndo}
+                  />
+                </div>
+              ) : shown !== null && !leaving ? (
+                <div
+                  className="revealed"
+                  style={{ ['--reveal-ttl' as string]: `${REVEAL_TTL_SECONDS}s` }}
+                >
+                  <span className="revealed-value">{shown.value === '' ? '(empty)' : shown.value}</span>
+                  <span className="revealed-note">
+                    Hides in {secondsLeft}s
+                  </span>
+                  <span className="revealed-meter" aria-hidden />
+                </div>
+              ) : (
+                <span className="mask" aria-label="Hidden">
+                  ••••••••••••
+                </span>
+              )}
             </div>
-          ) : shown !== null && !leaving ? (
-            <div
-              className="revealed"
-              style={{ ['--reveal-ttl' as string]: `${REVEAL_TTL_SECONDS}s` }}
-            >
-              {/* Copy acts on the value, so it sits beside it, not among the row's actions. */}
-              <div className="revealed-line">
-                <span className="revealed-value">{shown.value === '' ? '(empty)' : shown.value}</span>
-                <CopyButton variant="act" value={shown.value} label={`Copy ${entry.key}`} />
+            {status.state !== 'pending' && (
+              <div className="acts value-acts">
+                {editing || leaving ? (
+                  <>
+                    <Tip label={leaving ? 'Archive now' : 'Save'}>
+                      <button
+                        className="act act-icon act-accent"
+                        onClick={onSave}
+                        disabled={disabled || !saveReady}
+                        aria-label={`${leaving ? 'Archive' : 'Save'} ${entry.key} now`}
+                      >
+                        <Check size={15} />
+                      </button>
+                    </Tip>
+                    <Tip label={leaving ? 'Keep' : 'Cancel'}>
+                      <button
+                        className="act act-icon act-quiet"
+                        onClick={onUndo}
+                        disabled={disabled}
+                        aria-label={leaving ? `Keep ${entry.key}` : `Cancel editing ${entry.key}`}
+                      >
+                        <X size={15} />
+                      </button>
+                    </Tip>
+                  </>
+                ) : (
+                  <>
+                    {/* Copy comes in to the left, so Hide stays where Reveal was clicked. */}
+                    {shown !== null && (
+                      <CopyButton variant="act" value={shown.value} label={`Copy ${entry.key}`} />
+                    )}
+                    <SecretReadOnly canReveal={canReveal}>
+                      <Tip label={shown === null ? 'Reveal' : 'Hide'}>
+                        <button
+                          className="act act-icon act-accent"
+                          onClick={toggleReveal}
+                          disabled={revealing}
+                          aria-label={`${shown === null ? 'Reveal' : 'Hide'} ${entry.key}`}
+                        >
+                          {revealing && !opening ? (
+                            <Spinner size={13} />
+                          ) : shown === null ? (
+                            <Eye size={15} />
+                          ) : (
+                            <EyeOff size={15} />
+                          )}
+                        </button>
+                      </Tip>
+                    </SecretReadOnly>
+                    {canWrite && (
+                      <Tip label="Edit">
+                        <button
+                          className="act act-icon"
+                          onClick={() => void startEdit()}
+                          disabled={disabled || revealing}
+                          aria-label={`Edit ${entry.key}`}
+                        >
+                          {opening ? <Spinner size={13} /> : <Pencil size={14} />}
+                        </button>
+                      </Tip>
+                    )}
+                  </>
+                )}
               </div>
-              <span className="revealed-note">
-                Hides in {secondsLeft}s
-              </span>
-              <span className="revealed-meter" aria-hidden />
-            </div>
-          ) : (
-            <span className="mask" aria-label="Hidden">
-              ••••••••••••
-            </span>
-          )}
+            )}
+          </div>
         </td>
 
         <td className="col-version" data-label="Version">
@@ -936,102 +1061,47 @@ function SecretRow({
           {status.state === 'pending' ? (
             <RowPending status={status} />
           ) : (
-            <div className="acts">
-              {leaving ? (
-                <Tip label="Keep">
-                  <button
-                    className="act act-icon act-quiet"
-                    onClick={onUndo}
-                    disabled={disabled}
-                    aria-label={`Keep ${entry.key}`}
-                  >
-                    <RotateBack size={14} />
-                  </button>
-                </Tip>
-              ) : editing ? (
-                <Tip label={renamed || valueChanged ? 'Undo changes' : 'Cancel'}>
-                  <button
-                    className="act act-icon act-quiet"
-                    onClick={onUndo}
-                    disabled={disabled}
-                    aria-label={`${renamed || valueChanged ? 'Undo changes to' : 'Stop editing'} ${entry.key}`}
-                  >
-                    {renamed || valueChanged ? <RotateBack size={14} /> : <X size={15} />}
-                  </button>
-                </Tip>
-              ) : (
-                <>
+            (canReveal || (canWrite && !editing && !leaving) || (canArchive && !leaving)) && (
+              <Menu.Root>
+                <Menu.Trigger
+                  className="act act-icon act-quiet"
+                  aria-label={`More for ${entry.key}`}
+                  disabled={disabled}
+                >
+                  <MoreHorizontal size={16} />
+                </Menu.Trigger>
+                <MenuPopup align="end">
                   <SecretReadOnly canReveal={canReveal}>
-                    <Tip label={shown === null ? 'Reveal' : 'Hide'}>
-                      <button
-                        className="act act-icon act-accent"
-                        onClick={toggleReveal}
-                        disabled={revealing}
-                        aria-label={`${shown === null ? 'Reveal' : 'Hide'} ${entry.key}`}
-                      >
-                        {revealing && !opening ? (
-                          <Spinner size={13} />
-                        ) : shown === null ? (
-                          <Eye size={15} />
-                        ) : (
-                          <EyeOff size={15} />
-                        )}
-                      </button>
-                    </Tip>
+                    <Menu.Item className="menu-item" onClick={() => setHistoryOpen((open) => !open)}>
+                      <History size={14} />
+                      {historyOpen ? 'Hide history' : 'Version history'}
+                    </Menu.Item>
                   </SecretReadOnly>
-                  {canWrite && (
-                    <Tip label="Edit">
-                      <button
-                        className="act act-icon"
-                        onClick={() => void startEdit()}
-                        disabled={disabled || revealing}
-                        aria-label={`Edit ${entry.key}`}
-                      >
-                        {opening ? <Spinner size={13} /> : <Pencil size={14} />}
-                      </button>
-                    </Tip>
+                  {canWrite && !editing && !leaving && (
+                    <Menu.Item className="menu-item" onClick={() => void startEdit({ name: true })}>
+                      <Pencil size={14} />
+                      Rename
+                    </Menu.Item>
                   )}
-                  {(canReveal || canArchive) && (
-                    <Menu.Root>
-                      <Menu.Trigger
-                        className="act act-icon act-quiet"
-                        aria-label={`More for ${entry.key}`}
-                        disabled={disabled}
+                  {canArchive && !leaving && (
+                    <>
+                      {(canReveal || canWrite) && <Menu.Separator className="menu-sep" />}
+                      <Menu.Item
+                        className="menu-item menu-item-danger"
+                        onClick={() => {
+                          setReveal(null);
+                          onMarkArchive();
+                        }}
                       >
-                        <MoreHorizontal size={16} />
-                      </Menu.Trigger>
-                      <MenuPopup align="end">
-                        <SecretReadOnly canReveal={canReveal}>
-                          <Menu.Item
-                            className="menu-item"
-                            onClick={() => setHistoryOpen((open) => !open)}
-                          >
-                            <History size={14} />
-                            {historyOpen ? 'Hide history' : 'Version history'}
-                          </Menu.Item>
-                        </SecretReadOnly>
-                        {canArchive && (
-                          <>
-                            {canReveal && <Menu.Separator className="menu-sep" />}
-                            <Menu.Item
-                              className="menu-item menu-item-danger"
-                              onClick={() => {
-                                setReveal(null);
-                                onMarkArchive();
-                              }}
-                            >
-                              <Archive size={14} />
-                              Archive
-                              <span className="menu-hint">on save</span>
-                            </Menu.Item>
-                          </>
-                        )}
-                      </MenuPopup>
-                    </Menu.Root>
+                        <Archive size={14} />
+                        Archive
+                        <span className="menu-hint">on save</span>
+                      </Menu.Item>
+                    </>
                   )}
-                </>
-              )}
-            </div>
+                </MenuPopup>
+              </Menu.Root>
+            )
           )}
         </td>
       </tr>
@@ -1105,12 +1175,17 @@ function DraftRow({
   disabled,
   onChange,
   onRemove,
+  onSave,
+  saveReady,
 }: {
   draft: SecretDraft;
   existingVersion: number | null;
   disabled: boolean;
   onChange: (patch: Partial<SecretDraft>) => void;
   onRemove: () => void;
+  /** This new secret alone, saved now. */
+  onSave: () => void;
+  saveReady: boolean;
 }) {
   const [touched, setTouched] = useState(false);
   const trimmed = draft.key.trim();
@@ -1151,15 +1226,41 @@ function DraftRow({
         </div>
       </td>
       <td data-label="Value">
-        <div className="edit-stack">
-          <ValueField
-            label={`Value for ${trimmed === '' ? 'the new secret' : trimmed}`}
-            value={draft.value}
-            placeholder="Value"
-            disabled={disabled}
-            onChange={(value) => onChange({ value })}
-            onEscape={onRemove}
-          />
+        <div className="value-cell">
+          <div className="value-content">
+            <div className="edit-stack">
+              <ValueField
+                label={`Value for ${trimmed === '' ? 'the new secret' : trimmed}`}
+                value={draft.value}
+                placeholder="Value"
+                disabled={disabled}
+                onChange={(value) => onChange({ value })}
+                onEscape={onRemove}
+              />
+            </div>
+          </div>
+          <div className="acts value-acts">
+            <Tip label="Save">
+              <button
+                className="act act-icon act-accent"
+                onClick={onSave}
+                disabled={disabled || !saveReady}
+                aria-label={trimmed === '' ? 'Save this new secret now' : `Save ${trimmed} now`}
+              >
+                <Check size={15} />
+              </button>
+            </Tip>
+            <Tip label="Cancel">
+              <button
+                className="act act-icon act-quiet"
+                onClick={onRemove}
+                disabled={disabled}
+                aria-label={trimmed === '' ? 'Remove this new secret' : `Remove new secret ${trimmed}`}
+              >
+                <X size={15} />
+              </button>
+            </Tip>
+          </div>
         </div>
       </td>
       <td className="col-version" data-label="Version">
@@ -1176,20 +1277,7 @@ function DraftRow({
       <td className="col-written col-hide-narrow">
         <span className="cell-muted">—</span>
       </td>
-      <td className="col-actions">
-        <div className="acts">
-          <Tip label="Remove">
-            <button
-              className="act act-icon act-quiet"
-              onClick={onRemove}
-              disabled={disabled}
-              aria-label={trimmed === '' ? 'Remove this new secret' : `Remove new secret ${trimmed}`}
-            >
-              <X size={15} />
-            </button>
-          </Tip>
-        </div>
-      </td>
+      <td className="col-actions" />
     </tr>
   );
 }
