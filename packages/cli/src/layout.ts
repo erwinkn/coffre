@@ -58,10 +58,8 @@ export const ROUTE_FILES: Record<string, string> = Object.fromEntries(
     '_solo/unregistered.tsx',
     '_solo/auth.device.tsx',
     '_solo/oauth.authorize.tsx',
-  ]
-    .map((file) => [`app/src/routes/${file}`, CLEAN_BREAK])
-    // The release after 0.4.0, whichever it is: a deployment moving to any of them gains the page.
-    .concat([['app/src/routes/_solo/approvals.$approval.tsx', '0.4.1']]),
+    '_solo/approvals.$approval.tsx',
+  ].map((file) => [`app/src/routes/${file}`, CLEAN_BREAK]),
 );
 
 /**
