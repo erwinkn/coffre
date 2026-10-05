@@ -949,14 +949,6 @@ async function trust(args: string[]): Promise<void> {
   process.stdout.write(describePlan(member, plan, saved.binding));
 }
 
-async function untrust(args: string[]): Promise<void> {
-  const { positionals } = parseArgs({ args, options: {}, allowPositionals: true });
-  const [service, id] = positionals;
-  if (!service || !id || positionals.length > 2) fail('usage: coffre untrust <service> <binding-id>');
-  await client().bindings.remove(serviceMember(service), id);
-  process.stdout.write(`removed binding ${id}: ${serviceMember(service)} no longer trusts the CI runs it named\n`);
-}
-
 async function offboard(args: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args,
@@ -1207,7 +1199,7 @@ const COMMANDS: Record<Command, (args: string[]) => unknown> = {
   'tokens issue': (args) => manage.tokensIssue(connect, args),
   'tokens revoke': (args) => manage.tokensRevoke(connect, args),
   trust,
-  untrust,
+  untrust: (args) => manage.untrust(connect, args),
   audit,
   verify,
   'verify instance': (args) => verify(['instance', ...args]),

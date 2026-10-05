@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import { checkBinding } from '@coffre/core/workloads';
 
-import { bindingFrom, describeBindings, describePlan, serviceMember, type Lookup, type TrustFlags } from '../src/trust.ts';
+import { bindingFrom, describeBindings, describePlan, type Lookup, runsOf, serviceMember, type TrustFlags } from '../src/trust.ts';
 
 const SHA = 'b'.repeat(40);
 
@@ -122,4 +122,32 @@ test('a plan and a list show every claim in full', () => {
     { ...plan, id: 'b1', label: 'prod', createdAt: '2026-10-03T22:00:00.000Z', createdBy: 'lead@acme.example', lastUsedAt: null },
   ]);
   assert.match(listed, /^b1  prod  \(added by lead@acme.example 2026-10-03, never used\)\n  profile  github\n/);
+});
+
+test('a binding says, in a sentence, which CI runs it lets sign in: platform, repository or project, workflow, ref', () => {
+  const SHA = 'a'.repeat(40);
+  assert.equal(
+    runsOf({ profile: 'github', issuer: 'https://token.actions.githubusercontent.com', claims: { repository_owner_id: '9919', repository_id: '41532', workflow_ref: 'acme/api/.github/workflows/deploy.yml@refs/heads/main', ref: 'refs/heads/main', event_name: 'push' } }),
+    "GitHub Actions runs of acme/api's workflow deploy.yml, on branch main, by push",
+  );
+  assert.equal(
+    runsOf({ profile: 'github-reusable', issuer: 'https://token.actions.githubusercontent.com', claims: { repository_owner_id: '9919', repository_id: '41532', ref: 'refs/tags/v2', event_name: 'release', job_workflow_ref: 'acme/deploy/.github/workflows/release.yml@refs/heads/main', job_workflow_sha: SHA } }),
+    'GitHub Actions runs of repository 41532 that call the reusable workflow acme/deploy/.github/workflows/release.yml@refs/heads/main at commit aaaaaaaaaaaa, on tag v2, by release',
+  );
+  assert.match(
+    runsOf({ profile: 'github-reusable-organization', issuer: 'https://token.actions.githubusercontent.com', claims: { repository_owner_id: '9919', ref: 'refs/heads/main', job_workflow_ref: 'acme/deploy/.github/workflows/release.yml@refs/heads/main', job_workflow_sha: SHA } }),
+    /^GitHub Actions runs of any repository of owner 9919 that call the reusable workflow/,
+  );
+  assert.equal(
+    runsOf({ profile: 'gitlab', issuer: 'https://gitlab.com', claims: { namespace_id: '12', project_id: '345', ref_type: 'tag', ref: 'v1', pipeline_source: 'web' } }),
+    'GitLab pipelines of project 345 (namespace 12), on tag v1, by web',
+  );
+  assert.equal(
+    runsOf({ profile: 'gitlab', issuer: 'https://gitlab.acme.example', claims: { namespace_id: '6', project_id: '5', ref_type: 'branch', ref: 'main', pipeline_source: 'push' } }),
+    'GitLab pipelines of project 5 (namespace 6) on https://gitlab.acme.example, on branch main, by push',
+  );
+  assert.equal(
+    runsOf({ profile: 'custom', issuer: 'https://accounts.google.com', claims: { sub: '1040' } }),
+    'runs whose ID token, from https://accounts.google.com, says sub=1040',
+  );
 });

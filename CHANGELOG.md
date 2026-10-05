@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+**`coffre untrust` shows what it would end, and ends it with `--apply`**, as
+every other command that ends something for good does. The preview names
+the binding, its claims, and the CI runs that would lose sign-in, in a
+sentence: "GitHub Actions runs of acme/api's workflow deploy.yml, on
+branch main, by push would no longer sign in as token:api-deploy, and the
+credentials they hold would end at once." A script that ran `coffre
+untrust <service> <id>` adds `--apply`.
+
 **Everything the API does, the CLI does.** The commands that were the
 browser's alone:
 

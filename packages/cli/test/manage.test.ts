@@ -183,3 +183,35 @@ test('a command reads its arguments before it asks for a session', async () => {
   await assert.rejects(manage.projectsCreate(connect, ['a', 'b'], fixture(() => null).io), /too many arguments: b/);
   await assert.rejects(manage.tokensIssue(connect, ['deploy', '--bogus'], fixture(() => null).io), { code: 'ERR_PARSE_ARGS_UNKNOWN_OPTION' });
 });
+
+const BINDING = {
+  id: 'bnd-1',
+  profile: 'github',
+  issuer: 'https://token.actions.githubusercontent.com',
+  jwksUri: 'https://token.actions.githubusercontent.com/.well-known/jwks',
+  claims: { repository_owner_id: '9919', repository_id: '41532', workflow_ref: 'acme/api/.github/workflows/deploy.yml@refs/heads/main', ref: 'refs/heads/main', event_name: 'push' },
+  label: 'deploys',
+  createdAt: '2026-10-01T00:00:00Z',
+  createdBy: 'root@acme.example',
+  lastUsedAt: '2026-10-04T12:30:00Z',
+};
+
+test('untrust shows the binding and the runs it would cut off, and removes it only with --apply', async () => {
+  const preview = fixture(() => ({ bindings: [BINDING] }));
+  await manage.untrust(preview.connect, ['api-deploy', 'bnd-1'], preview.io);
+  assert.deepEqual(preview.calls.map(({ method, path }) => `${method} ${path}`), ['GET /members/token:api-deploy/bindings']);
+  assert.match(preview.written.out, /^Would remove token:api-deploy's trust binding bnd-1  deploys  \(added by root@acme\.example 2026-10-01, last used 2026-10-04 12:30\)\n  profile  github\n/);
+  assert.match(
+    preview.written.out,
+    /\nGitHub Actions runs of acme\/api's workflow deploy\.yml, on branch main, by push would no longer sign in as token:api-deploy, and the credentials they hold would end at once\.\nNothing changed\. Re-run with --apply to remove it\.\n$/,
+  );
+
+  const applied = fixture(({ method }) => (method === 'GET' ? { bindings: [BINDING] } : { removed: true }));
+  await manage.untrust(applied.connect, ['token:api-deploy', 'bnd-1', '--apply'], applied.io);
+  assert.deepEqual(applied.calls.map(({ method, path }) => `${method} ${path}`), ['GET /members/token:api-deploy/bindings', 'DELETE /members/token:api-deploy/bindings/bnd-1']);
+  assert.match(applied.written.out, /^Removed token:api-deploy's trust binding bnd-1/);
+  assert.match(applied.written.out, /can no longer sign in as token:api-deploy, and the credentials they hold have ended\.\n$/);
+
+  await assert.rejects(manage.untrust(preview.connect, ['api-deploy', 'bnd-9'], preview.io), /token:api-deploy has no trust binding bnd-9: `coffre trust api-deploy` lists them/);
+  await assert.rejects(manage.untrust(() => assert.fail('no session is asked for'), ['api-deploy'], preview.io), /name <binding-id>/);
+});
