@@ -528,11 +528,12 @@ const DELETIONS_MIGRATION = '0006_deletions';
  *
  * The vault revokes the grants first, one call per member, and the app then
  * erases and renames in one transaction with its entry, under the log's
- * head: there it finds the place still archived and holding no grant, or
- * refuses with a 409, a place restored meanwhile kept, a grant set
- * meanwhile left for the next attempt to revoke. Each step finds only what
- * is left, so a deletion cut off or refused between them finishes when
- * asked again. Once it commits, the vault grants nothing there.
+ * head: there it finds the place still archived and holding no grant and
+ * no live reference, or refuses with a 409, a place restored meanwhile
+ * kept, a grant set or a reference made meanwhile left for the next
+ * attempt to revoke or end. Each step finds only what is left, so a
+ * deletion cut off or refused between them finishes when asked again.
+ * Once it commits, the vault grants nothing there.
  */
 export async function deletePlace(ctx: ApiContext, place: ResolvedPath, { dryRun }: { dryRun: boolean }): Promise<DeletionResult> {
   const { project, environment } = place;
@@ -593,7 +594,7 @@ export async function deletePlace(ctx: ApiContext, place: ResolvedPath, { dryRun
       });
       if (!result.ok) throw vaultRefused(result.refusal);
     }
-    // No reference follows a tombstone, nor holds one: no new one can come meanwhile, an archived place being neither source nor holder.
+    // No reference follows a tombstone, nor holds one: one made meanwhile, the place restored and archived again, is found under the head.
     await endReferences(ctx, references, operationId);
 
     return audited(ctx, async (tx, log) => {
@@ -613,6 +614,13 @@ export async function deletePlace(ctx: ApiContext, place: ResolvedPath, { dryRun
         throw new Refusal(
           conflict(`${path} was granted while it was being deleted: ask again, and that grant is revoked too`),
           denied(ctx, action, 'granted_meanwhile', fields),
+        );
+      }
+      // Nor may a reference made there since the vault ended them: held in a tombstone, no path could break it, and its source could never be archived.
+      if ((await referencesAt(tx, doomed)).length > 0) {
+        throw new Refusal(
+          conflict(`${path} was given a reference while it was being deleted: ask again, and that reference is ended too`),
+          denied(ctx, action, 'referenced_meanwhile', fields),
         );
       }
       const tombstone = await tombstoneSlug(tx, slug, new Date(), within);

@@ -337,6 +337,32 @@ test('a grant set while a deletion runs is refused with a 409, and revoked when 
   assert.equal((await root.audit.verify()).ok, true);
 });
 
+test('a reference made while a deletion runs is refused with a 409, and ended when it is asked again', async () => {
+  await seedMarket();
+  await root.environments.create('web/prod', { name: 'Production' });
+  await root.secrets.set('web/prod', { OTHER: 'web-other' });
+  await root.projects.update('market', { archived: true });
+  const id = await projectId('market');
+  // After the vault ended the references it found, none: market is restored, reads web's key, and is archived again.
+  const raced = racedBy(async () => {
+    await root.projects.update('market', { archived: false });
+    await root.secrets.set('market/dev', { OTHER: { ref: 'web/prod/OTHER' } });
+    await root.projects.update('market', { archived: true });
+  });
+  await assert.rejects(raced.projects.delete('market'), { status: 409, message: /given a reference while it was being deleted: ask again/ });
+  assert.equal((await projectRow(id)).slug, 'market');
+  assert.ok((await versionsOf(id)).every((version) => version.sealed));
+  assert.deepEqual((await entries('project.delete')).map((entry) => [entry.decision, entry.metadata.reason]), [['deny', 'referenced_meanwhile']]);
+
+  const { deletion } = await root.projects.delete('market');
+  assert.deepEqual(deletion.references, [{ holder: 'market/dev/OTHER', source: 'web/prod/OTHER' }]);
+  assert.equal((await projectRow(id)).slug, `market~deleted-${today()}`);
+  // Nothing held in the tombstone reads web's key: web can be archived.
+  assert.deepEqual((await root.references.list('web')).references, []);
+  await root.projects.update('web', { archived: true });
+  assert.equal((await root.audit.verify()).ok, true);
+});
+
 test('a project restored while it is being deleted stays, unerased, and the deletion is refused', async () => {
   await seedMarket();
   await root.projects.update('market', { archived: true });
