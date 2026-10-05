@@ -119,6 +119,8 @@ pnpm exec coffre migrate --yes              # in a deployment, before its deploy
 coffre login https://secrets.acme.example   # a device login: approve it in the browser
 coffre whoami
 coffre use                                  # the instances you are signed in to
+coffre sessions                             # where you are signed in; sessions revoke <id> signs one out
+coffre identities                           # the accounts you sign in with
 
 coffre list     market/dev
 coffre get      market/dev/DATABASE_URL
@@ -128,12 +130,22 @@ coffre export   market/dev --format dotenv  # or json, shell, github
 coffre history  market/dev/DATABASE_URL
 coffre rollback market/dev/DATABASE_URL 2   # restores version 2 as a new version
 coffre import   market/dev --file .env      # previews; --apply writes
+coffre rename   market/dev/DB_URL DATABASE_URL   # the key, with its versions
+coffre archive  market/dev/OLD_KEY          # unarchive brings it back
 
 coffre projects
+coffre projects create market               # projects rename and archive, and the same for
+coffre environments create market/dev       # environments
 coffre roles
 coffre access                               # who holds what, where you manage access
+coffre admit alice@acme.example             # a member first, then their grants
 coffre grant market alice@acme.example --role developer --env dev
+coffre revoke market alice@acme.example --env dev
 coffre offboard alice@acme.example          # previews; --apply removes (docs/offboarding.md)
+
+coffre admit api-deploy --service           # a service, for CI
+coffre grant market api-deploy --role viewer --env prod --service
+coffre tokens issue api-deploy --output-file token   # a new 0600 file; or trust it, and no token at all:
 coffre trust api-deploy --github acme/api --workflow deploy.yml --branch main
                                             # the CI runs trusted to sign in as token:api-deploy;
                                             # previews the claims, --apply saves (docs/design/oidc.md)
@@ -145,6 +157,12 @@ coffre verify log                           # checks the whole log
 coffre verify keys                          # checks the keys you keep, on your machine (docs/keys.md)
 coffre verify instance                      # checks the instance from outside (docs/conformance.md)
 ```
+
+`coffre help` lists every command, and `coffre <command> --help` each one.
+Everything the API does, the CLI does, but approving a `coffre login`, which
+a browser signed in to coffre does: `packages/cli/src/commands.ts` maps each
+route to its command, and a test fails when a route has neither a command
+nor a reason.
 
 `coffre export market/prod --format github` appends values to `GITHUB_ENV`
 for subsequent GitHub Actions steps and emits mask commands for the values

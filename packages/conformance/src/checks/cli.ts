@@ -6,7 +6,8 @@
 // session left signed in each time; and `verify keys` with this
 // deployment's keys, a wrong one and a malformed one.
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -239,4 +240,70 @@ export async function verifyKeys(cli: Cli): Promise<string> {
     for (const key of [KEYS.VAULT_KEY, KEYS.APP_KEY, wrong, 'not-a-key']) expect(!run.output.includes(key), 'a key was printed', run.output);
   }
   return "this deployment's keys pass, vault ID included; a wrong vault key and a malformed app key are each named; no key shown";
+}
+
+/**
+ * Everything the API does, the CLI does: with the admin's `coffre login`
+ * session, a project and its environment, a secret set and renamed, a
+ * service admitted and granted, a token issued into a 0600 file, then
+ * piped to `coffre login --token` in a CLI of the service's own, read
+ * with, revoked after its preview, and refused from then on; the grant
+ * revoked, the secret and the project archived. No token shows in what
+ * either prints.
+ */
+export async function manageByCli(cli: Cli): Promise<string> {
+  const steps: string[] = [];
+  const ci = new Cli(cli.origin);
+  const as = (who: Cli, label: string) => async (args: string[], input?: string, code = 0): Promise<string> => {
+    const run = await who.run(args, {}, input);
+    expect(run.code === code, `coffre ${args.join(' ')}${label} exited ${run.code}, not ${code}`, run.output);
+    steps.push(`${args.slice(0, 2).join(' ')}${label}`);
+    return run.output;
+  };
+  const [coffre, service] = [as(cli, ''), as(ci, ', as the service')];
+  try {
+    const value = `cli-value-${randomBytes(8).toString('hex')}`;
+    await coffre(['projects', 'create', 'conformance-cli', '--name', 'CLI']);
+    await coffre(['environments', 'create', 'conformance-cli/ci']);
+    await coffre(['set', 'conformance-cli/ci/API_KEY'], value);
+    await coffre(['rename', 'conformance-cli/ci/API_KEY', 'API_TOKEN']);
+    const refused = await coffre(['grant', 'conformance-cli', 'conformance-deploy', '--role', 'viewer', '--env', 'ci', '--service'], undefined, 1);
+    expect(refused.includes('admit them first, `coffre admit conformance-deploy --service`'), 'grant to a service not yet admitted did not say to admit it', refused);
+    const admitted = await coffre(['admit', 'conformance-deploy', '--service']);
+    expect(admitted.includes('next: coffre grant <project> conformance-deploy'), 'admit --service did not say what comes next', admitted);
+    await coffre(['grant', 'conformance-cli', 'conformance-deploy', '--role', 'viewer', '--env', 'ci', '--service']);
+
+    const file = join(cli.home, 'ci-token');
+    const wrote = await coffre(['tokens', 'issue', 'conformance-deploy', '--label', 'conformance', '--expires-in', '1', '--output-file', file]);
+    const token = readFileSync(file, 'utf8').trim();
+    expect(/^coffre_svc_/.test(token) && (statSync(file).mode & 0o777) === 0o600, 'the token file is not a 0600 file holding a service token', statSync(file).mode);
+    expect(!wrote.includes(token), 'tokens issue --output-file printed the token');
+    // The token as CI uses it: piped to `coffre login --token`.
+    const signedIn = await service(['login', cli.origin, '--token'], `${token}\n`);
+    expect(!signedIn.includes(token), 'coffre login --token printed the token');
+    const read = await service(['get', 'conformance-cli/ci/API_TOKEN']);
+    expect(read.trim() === value, 'the issued token did not read the renamed secret', read);
+
+    const [listed] = JSON.parse(await coffre(['tokens', 'conformance-deploy', '--json'])) as { id: string; label: string }[];
+    expect(listed?.label === 'conformance', 'tokens --json does not list the issued token', listed);
+    const preview = await coffre(['tokens', 'revoke', 'conformance-deploy', listed!.id]);
+    expect(/Nothing changed\. Re-run with --apply/.test(preview), 'tokens revoke without --apply did not preview', preview);
+    await service(['get', 'conformance-cli/ci/API_TOKEN']);
+    await coffre(['tokens', 'revoke', 'conformance-deploy', listed!.id, '--apply']);
+    const gone = await service(['get', 'conformance-cli/ci/API_TOKEN'], undefined, 1);
+    expect(/does not know this service token/.test(gone), 'a revoked token was not refused plainly', gone);
+
+    await coffre(['revoke', 'conformance-cli', 'conformance-deploy', '--env', 'ci', '--service']);
+    await coffre(['archive', 'conformance-cli/ci/API_TOKEN']);
+    const keys = JSON.parse(await coffre(['list', 'conformance-cli/ci', '--json'])) as { key: string; archived: boolean }[];
+    expect(keys.length === 1 && keys[0]!.key === 'API_TOKEN' && keys[0]!.archived, 'the renamed secret is not listed, archived', keys);
+    await coffre(['projects', 'archive', 'conformance-cli']);
+    const projects = JSON.parse(await coffre(['projects', '--json'])) as { slug: string; archivedAt: string | null }[];
+    expect(projects.find(({ slug }) => slug === 'conformance-cli')?.archivedAt !== null, 'the project is not archived', projects);
+    const sessions = JSON.parse(await coffre(['sessions', '--json'])) as { kind: string; current: boolean }[];
+    expect(sessions.some(({ kind, current }) => kind === 'cli' && current), "sessions --json does not mark this CLI's session", sessions);
+    return `${steps.length} commands: ${[...new Set(steps)].join(', ')}; the token only in its 0600 file and piped to login, refused once revoked`;
+  } finally {
+    ci.remove();
+  }
 }

@@ -31,6 +31,7 @@ test('a session flag after the command is refused, saying where it goes; a comma
   assert.throws(() => commandLine(['export', 'app/prod', '--service=deploy']), /coffre --service <name> export/);
   assert.deepEqual(commandLine(['grant', 'app', 'deploy', '--role', 'viewer', '--service']).rest, ['app', 'deploy', '--role', 'viewer', '--service']);
   assert.deepEqual(commandLine(['login', 'https://coffre.example.com', '--service', 'deploy']).rest, ['https://coffre.example.com', '--service', 'deploy']);
+  for (const command of ['admit', 'revoke', 'offboard']) assert.deepEqual(commandLine([command, 'deploy', '--service']).rest, ['deploy', '--service']);
   // Setup and migrate refuse it themselves, saying more when it looks like a connection string.
   assert.deepEqual(commandLine(['setup', '--url=postgresql://o:p@h/d']).rest, ['--url=postgresql://o:p@h/d']);
   // After `--`, the arguments are the child's.

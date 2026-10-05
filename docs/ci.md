@@ -1,8 +1,16 @@
 # Secrets in CI and deploys
 
 Give each pipeline a service member and a token, with a `viewer` grant on
-only the environments it reads. Create the member and token in coffre's
-Access page, and store the token in your CI provider's secret store. The
+only the environments it reads, in coffre's Access page or with the CLI:
+
+```sh
+coffre admit api-deploy --service
+coffre grant market api-deploy --role viewer --env prod --service
+coffre tokens issue api-deploy --output-file api-deploy.token   # a new 0600 file, never shown again
+```
+
+A member is admitted before it holds anything: `coffre grant` does not make
+one, and says so. Store the token in your CI provider's secret store. The
 CLI reads no environment variable, and a secret is never a flag or an
 argument, which `ps`, the shell's history and CI logs would show: the job
 pipes the token to `coffre login --token`, which saves the session the

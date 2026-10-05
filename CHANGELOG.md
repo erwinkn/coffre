@@ -2,6 +2,47 @@
 
 ## Unreleased
 
+**Everything the API does, the CLI does.** The commands that were the
+browser's alone:
+
+```sh
+coffre projects create market [--name …]       # rename, archive, unarchive
+coffre environments create market/prod         # the same
+coffre rename market/prod/DB_URL DATABASE_URL   # a secret's key, its versions with it
+coffre archive market/prod/OLD_KEY              # unarchive brings it back
+coffre admit ada@acme.example [--owner]         # a member; --no-owner ends ownership
+coffre admit deploy-slides --service            # a service, for CI
+coffre revoke market ada@acme.example --env prod
+coffre tokens deploy-slides                     # a service's tokens
+coffre tokens issue deploy-slides [--expires-in <days>] [--label …] [--output-file <path>]
+coffre tokens revoke deploy-slides <id> [--apply]
+coffre sessions                                 # sessions revoke <id> [--apply]
+coffre identities                               # identities unlink <id> [--apply]
+```
+
+From nothing to a CI service: `coffre admit deploy-slides --service`, `coffre
+grant deploy deploy-slides --role viewer --env prod --service`, then `coffre
+trust deploy-slides --github … --apply`, or `coffre tokens issue
+deploy-slides`. `grant` does not make a member: to one not yet admitted it
+says `admit them first, coffre admit … --service`. `tokens issue` prints the
+token once, on stdout, and on a terminal says that it will not be shown
+again; `--output-file` writes it to a new file, 0600, never one already
+there, and prints no token. What ends something for good, a token, a
+session or a linked account, is shown first and done with `--apply`, as
+`offboard` and `import` are. The lists take `--json`: `projects`, `list`,
+`history`, `access` (which takes a place now, `access market/prod`),
+`tokens`, `sessions`, `identities`, `audit` and `whoami`.
+
+Approving a `coffre login` stays the browser's, which is what vouches for
+the CLI. `packages/cli/src/commands.ts` maps every route of the API to its
+commands, or to the browser with why; a route added with neither fails the
+typecheck and the parity test, and the test runs every command's `--help`.
+
+Also: `coffre --version` prints the version; `coffre <command> --help` and
+`coffre help <command>` print its usage, for every command; a flag a command
+does not take, or an argument too many, is refused in a line and its usage,
+exit 2, never a stack trace.
+
 **The CLI reads no environment variable, and takes no secret as a flag or an
 argument.** `COFFRE_TOKEN`, `COFFRE_API_URL` and the rest used to override the
 saved session where no one could see it, and a secret in a variable reaches

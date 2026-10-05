@@ -45,7 +45,7 @@ const TAKES: Record<string, readonly SessionName[]> = {
  * --service` names a service's grant, `coffre login <url> --service <name>`
  * the service a CI run signs in as.
  */
-const OWN: Record<string, readonly string[]> = { grant: ['service'], offboard: ['service'], login: ['service'] };
+const OWN: Record<string, readonly string[]> = { admit: ['service'], grant: ['service'], revoke: ['service'], offboard: ['service'], login: ['service'] };
 
 /**
  * The commands that refuse any flag but theirs themselves, and say more: that
