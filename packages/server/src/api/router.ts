@@ -1,5 +1,5 @@
 import { scopeString } from '@coffre/core/mcp';
-import { secretKey, slug } from '@coffre/core/schemas';
+import { folderName, secretKey, slug } from '@coffre/core/schemas';
 import { z } from 'zod';
 
 import { resolvePath, type ResolvedPath } from '../db/queries.ts';
@@ -42,6 +42,7 @@ const PARAMS: Record<string, z.ZodType<string>> = {
   member: z.string().min(3).max(330),
   id: z.string().uuid(),
   code: z.string().min(1).max(16),
+  folder: folderName,
 };
 
 /**

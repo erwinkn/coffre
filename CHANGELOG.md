@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+**Folder commands.** `coffre folders` lists the folders of projects and
+what is in each, and `coffre folders market/prod` an environment's key
+folders, both with `--json`. `coffre folders rename Clients Customers`
+re-files every project in a folder (`… market/prod stripe payments`, every
+key), and onto a folder in use merges the two; `coffre folders remove`
+takes everything out of one, each item staying where it is, in no folder,
+and previews when more than one would move. A folder is still a label,
+there while something is filed in it: no schema change. The API's
+`PATCH` and `DELETE /api/folders/<folder>` and
+`/api/folders/<project>/<environment>/<folder>` do the same, in one
+transaction under the log's head, one `project.move` or `secret.move` per
+item; renaming a folder of projects takes `project.manage` on every
+project in it. Folder headings in the projects list and in an
+environment's keys have Rename and Remove folder in their menu. The
+README's CLI section shows archive, unarchive and rename for keys,
+environments and projects on lines of their own, and what `coffre roles`
+prints.
+
 **MCP clients connect.** coffre is now an OAuth authorization server for
 MCP clients such as Claude, which connect at `<PUBLIC_URL>/mcp` as the
 people who approve them (docs/mcp.md). A client is known by its metadata

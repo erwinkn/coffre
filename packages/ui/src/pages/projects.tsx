@@ -12,8 +12,11 @@ import type { ProjectSummary } from '../shared/models';
 import { isActiveAccessibleEnvironment } from '../lib/project-environments';
 import { slugProblem } from '../lib/validation';
 import { RowFailure, RowPending, rowClass } from '../components/row-state';
-import { EmptyState, Modal } from '../components/ui';
-import { FolderRow } from '../components/folders';
+import { EmptyState, ErrorLine, Modal } from '../components/ui';
+import { FolderMenu, FolderRow } from '../components/folders';
+import { toast } from 'sonner';
+import { affects } from '../lib/queries';
+import { useAction } from '../lib/use-action';
 import { ClosedDoor, PageHeader } from '../components/page';
 import { Tile } from '../components/tile';
 import { AlertTriangle, Folder, Hash, Layers, Plus } from '../components/icons';
@@ -98,8 +101,32 @@ function ProjectTable({ projects, refused = false }: { projects: ProjectSummary[
   const { status, failedAdds, dismiss } = useChangeStatus(projectsList.queryKey);
   // Numbered as listed: those in no folder first, then each folder by name.
   const numbers = new Map(byFolder(projects).flatMap(([, inFolder]) => inFolder).map((project, index) => [project.slug, index]));
+  const coffre = useCoffre();
+  // Renaming or removing a folder of projects: all of it, by who manages each project in it.
+  const refile = useAction();
+  const folders = byFolder(projects).flatMap(([folder]) => (folder === null ? [] : [folder]));
+  const folderMenu = (folder: string, inFolder: ProjectSummary[]) =>
+    inFolder.every((project) => project.permissions.includes('project.manage')) && (
+      <FolderMenu
+        folder={folder}
+        count={inFolder.length}
+        what="project"
+        folders={folders}
+        onRename={(name) =>
+          void refile.run(() => coffre.folders.rename(folder, name), {
+            affects: affects.places(),
+            onSuccess: () => toast.success(`${folder} is ${name} now`),
+          })}
+        onRemove={() =>
+          void refile.run(() => coffre.folders.remove(folder), {
+            affects: affects.places(),
+            onSuccess: () => toast.success(`${folder} removed: its projects are in no folder`),
+          })}
+      />
+    );
   return (
     <div className="dt-wrap">
+      {refile.error !== null && <ErrorLine error={refile.error} />}
       <table className="dt projects stacks">
         <thead>
           <tr>
@@ -126,7 +153,7 @@ function ProjectTable({ projects, refused = false }: { projects: ProjectSummary[
         </thead>
         <tbody>
           {byFolder(projects).flatMap(([folder, inFolder]) => [
-            ...(folder === null ? [] : [<FolderRow key={`folder:${folder}`} folder={folder} count={inFolder.length} columns={4} />]),
+            ...(folder === null ? [] : [<FolderRow key={`folder:${folder}`} folder={folder} count={inFolder.length} columns={4} actions={folderMenu(folder, inFolder)} />]),
             ...inFolder.map((project) => (
               <ProjectRow
                 key={project.slug}

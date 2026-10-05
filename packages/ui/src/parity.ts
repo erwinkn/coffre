@@ -79,6 +79,10 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
   'POST /secrets/:project/:environment/:key/restore': {
     ui: [{ does: 'a secret › Version history › Restore a version', in: 'pages/environment.tsx', call: 'secrets.restore' }],
   },
+  'PATCH /folders/:folder': { ui: [{ does: 'Projects › a folder › ⋯ › Rename folder…', in: 'pages/projects.tsx', call: 'folders.rename' }] },
+  'DELETE /folders/:folder': { ui: [{ does: 'Projects › a folder › ⋯ › Remove folder…', in: 'pages/projects.tsx', call: 'folders.remove' }] },
+  'PATCH /folders/:project/:environment/:folder': { ui: [{ does: "an environment's keys › a folder › ⋯ › Rename folder…", in: 'pages/environment.tsx', call: 'folders.renameKeys' }] },
+  'DELETE /folders/:project/:environment/:folder': { ui: [{ does: "an environment's keys › a folder › ⋯ › Remove folder…", in: 'pages/environment.tsx', call: 'folders.removeKeys' }] },
   'DELETE /secrets/:project/:environment/:key/reference': {
     ui: [
       { does: "a reference's row › ⋯ › Break reference…, or the Read elsewhere list's Break", in: 'pages/environment.tsx', call: 'references.break' },

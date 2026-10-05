@@ -288,6 +288,30 @@ export function createClient(options: ClientOptions) {
     },
 
     /**
+     * Folders, which arrange lists and do nothing else: a folder exists while
+     * something is filed in it. Renaming one re-files all of it, onto a folder
+     * that exists merges the two; removing one takes all of it out, each item
+     * staying where it is, in no folder. Moving one item is `projects.update`
+     * or `secrets.update` with a `folder`.
+     */
+    folders: {
+      /** A folder of projects, renamed. Takes managing every project in it. */
+      rename: (folder: string, name: string) => call('PATCH /folders/:folder', { folder }, { name }),
+      /** Every project out of a folder. */
+      remove: (folder: string) => call('DELETE /folders/:folder', { folder }),
+      /** One of an environment's key folders, `market/prod`, renamed. Takes writing there. */
+      renameKeys: (environment: string, folder: string, name: string) => {
+        const { project, environment: slug } = place(environment);
+        return call('PATCH /folders/:project/:environment/:folder', { project, environment: slug, folder }, { name });
+      },
+      /** Every key out of one of an environment's folders. */
+      removeKeys: (environment: string, folder: string) => {
+        const { project, environment: slug } = place(environment);
+        return call('DELETE /folders/:project/:environment/:folder', { project, environment: slug, folder });
+      },
+    },
+
+    /**
      * An MCP client asking to connect, by its authorization request, and the
      * person's answer: where to send the browser next.
      */

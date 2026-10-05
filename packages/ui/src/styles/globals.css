@@ -1734,6 +1734,13 @@ a.crumb-link:hover {
   font-weight: 600;
 }
 
+.dt .folder-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
 .dt .folder-row .count {
   color: var(--ink-3);
   font-weight: 500;
