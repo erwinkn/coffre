@@ -117,6 +117,7 @@ export type Api = {
   "PUT /projects/:project/:environment": {
     input: {
       name: string;
+      from?: string;
     };
     output: {
       environment: {
@@ -132,6 +133,10 @@ export type Api = {
         roleName: string;
         expiresAt: string | null;
       }[];
+      forked: null | {
+        from: string;
+        keys: number;
+      };
     };
   };
   "PATCH /projects/:project/:environment": {

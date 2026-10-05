@@ -108,6 +108,7 @@ In order, since each builds on the ones before:
 | members only | The stranger's sign-in is refused and leaves no session; no one gets 401 reading, revealing or writing, and a made-up token is refused |
 | grant scoping | The reader reads dev and nothing else, and changes nothing: no write, no grant, no member, no token. So does the service, with its token. The bulk reader cannot read dev |
 | folders | A project and a secret filed in folders are listed in them, and the secret is read and run by its own name, with its own value, by the same reader; the reader files neither, and a folder name with a slash is refused |
+| forks | The admin forks dev: the fork holds dev's values, each with one version; the reader, a viewer on dev, can neither fork dev nor read the fork. It is archived after |
 | reveals audited, runs audited | A single-secret reveal or an environment read writes one `secret.read` of the vault's per value, under the reveal's operation and request, at the versions revealed |
 | cross-site | A write, a reveal and a sign-out with the admin's cookie, from another site or from no page at all: 403, no value in the answer, nothing changed |
 | live setup | The admin sets up what a token from CI needs: `conformance/live/CANARY`, and `token:conformance-live`, a viewer there and auditor on the project |

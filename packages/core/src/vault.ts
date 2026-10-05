@@ -167,8 +167,8 @@ export type WrappedKey = { kekProvider: string; kekId: string; kekVersion: strin
  */
 export type KeyChecks = { current: { kekProvider: string; kekId: string }; checks: (WrappedKey & { seq: number })[] };
 
-/** Why someone reads: shown in the log, and the same rules apply to each. */
-export type Purpose = 'reveal' | 'run' | 'compare';
+/** Why someone reads: shown in the log, and the same rules apply to each. A fork reads to `copy`. */
+export type Purpose = 'reveal' | 'run' | 'compare' | 'copy';
 
 /** Ties the vault's entries to the app's request and audit rows. */
 type Correlation = {

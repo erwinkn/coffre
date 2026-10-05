@@ -356,12 +356,17 @@ export async function patchProject(
   });
 }
 
-/** Create an environment unless it exists. Needs `environment.manage` on the project. */
+/**
+ * Create an environment unless it exists. Needs `environment.manage` on the
+ * project. A fork (forks.ts) creates it this way, and its entry says which
+ * environment it forks.
+ */
 export async function putEnvironment(
   ctx: ApiContext,
   place: ResolvedPath,
   slug: string,
   input: { name: string },
+  { from }: { from?: string } = {},
 ): Promise<{ environment: PlaceView; created: boolean; inherited: InheritedGrant[] }> {
   const { project, environment } = place;
   if (environment !== null) {
@@ -389,7 +394,7 @@ export async function putEnvironment(
     log.push(allowed(ctx, 'environment.create', {
       projectId: project.id,
       environmentId: id,
-      metadata: { slug, name: input.name },
+      metadata: { slug, name: input.name, ...(from === undefined ? {} : { from }) },
     }));
     return { environment: { slug, name: input.name, archivedAt: null }, created: true };
   });

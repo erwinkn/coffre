@@ -1227,6 +1227,7 @@ const COMMANDS: Record<Command, (args: string[]) => unknown> = {
   'projects unarchive': (args) => manage.projectsArchive(connect, args, false),
   'projects delete': (args) => manage.placeDelete(connect, args, false),
   'environments create': (args) => manage.environmentsCreate(connect, args),
+  fork: (args) => manage.fork(connect, args),
   'environments rename': (args) => manage.environmentsRename(connect, args),
   'environments archive': (args) => manage.environmentsArchive(connect, args, true),
   'environments unarchive': (args) => manage.environmentsArchive(connect, args, false),

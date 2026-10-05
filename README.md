@@ -139,6 +139,7 @@ coffre projects
 coffre projects create market               # projects rename and archive, and the same for
 coffre environments create market/dev       # environments
 coffre projects delete market               # an archived one, for good: previews; --apply deletes
+coffre fork     market/prod staging         # a new environment, each key a copy of prod's value, no history
 coffre roles
 coffre access                               # who holds what, where you manage access
 coffre admit alice@acme.example             # a member first, then their grants
