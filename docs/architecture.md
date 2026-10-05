@@ -773,7 +773,12 @@ for the next attempt, each refused with a 409. Each step does only what is
 left, so a deletion cut off or refused between them finishes when asked
 again. Once it commits, the vault grants nothing there: `setAccess` reads
 the place under the same head and refuses a grant on a tombstone as
-`deleted`, though not a revocation. The rule itself, a `~` in the slug, is
+`deleted`, though not a revocation. A key decision checks the place again
+under the head, just before it appends its entries, so a read checked
+before the deletion and logged after it releases nothing. A rename, an
+archive or a restore resolves its path again under the head too: the
+router's resolution came before the transaction, and an update by id
+would give a tombstone a live slug back. The rule itself, a `~` in the slug, is
 one predicate, `isTombstone` in `@coffre/core/schemas`, and `tombstone()` in
 `@coffre/db/dialect` for SQL. Backups taken
 before still hold the encrypted values, and restoring one brings them back

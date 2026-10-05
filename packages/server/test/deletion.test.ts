@@ -3,11 +3,13 @@ import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import type { CoffreClient } from '@coffre/client';
+import { LocalKekProvider } from '@coffre/core/kek';
 import type { Database } from '@coffre/db';
 import { and, asc, eq } from 'drizzle-orm';
 
 import { auditLog, environments, projects, secrets, secretVersions } from './db/tables.ts';
-import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, openTestDatabase, resetDatabase, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
+import { postgresOnly } from './db/engine.ts';
 
 const ROOT = 'admin@acme.example';
 const LEAD = 'user:lead@acme.example';
@@ -318,6 +320,89 @@ test('a project restored while it is being deleted stays, unerased, and the dele
   assert.ok((await versionsOf(id)).every((version) => version.sealed));
   assert.equal((await root.secrets.reveal('market/dev/DATABASE_URL')).values.DATABASE_URL, 'postgres://dev');
   assert.deepEqual((await entries('project.delete')).map((entry) => entry.metadata.reason), ['restored']);
+});
+
+/**
+ * The root admin's client, whose first transaction begins only once
+ * `meanwhile` has run: a request whose path the router resolved before
+ * another owner's change committed.
+ */
+function lateBy(meanwhile: () => Promise<unknown>): CoffreClient {
+  let pending: (() => Promise<unknown>) | null = meanwhile;
+  const late = new Proxy(db.runtime, {
+    get(target, key) {
+      const value = Reflect.get(target, key, target);
+      if (key === 'transaction' && pending !== null) {
+        const run = pending;
+        pending = null;
+        return async (...args: unknown[]) => {
+          await run();
+          return Reflect.apply(value as (...args: unknown[]) => unknown, target, args);
+        };
+      }
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  }) as Database;
+  return clientFor({ ...deps, db: late }, ROOT);
+}
+
+test('a restore or a rename that resolved its place before the place was deleted is refused, and the tombstone stays', async () => {
+  await seedMarket();
+  await root.environments.update('market/dev', { archived: true });
+  const restore = lateBy(() => root.environments.delete('market/dev'));
+  await assert.rejects(restore.environments.update('market/dev', { archived: false }), { status: 404 });
+  const [dev] = await db.owner.select().from(environments).where(eq(environments.slug, `dev~deleted-${today()}`));
+  assert.notEqual(dev.archivedAt, null);
+
+  await root.projects.update('market', { archived: true });
+  const id = await projectId('market');
+  // Renamed by its id, the tombstone would take a live slug again: listed, grantable, and no longer refused.
+  const rename = lateBy(() => root.projects.delete('market'));
+  await assert.rejects(rename.projects.update('market', { slug: 'bazaar' }), { status: 404, message: /no project "market"/ });
+  assert.equal((await projectRow(id)).slug, `market~deleted-${today()}`);
+  assert.equal((await root.audit.verify()).ok, true);
+});
+
+test('a key decided on before its place is deleted, and released after, is refused as deleted', postgresOnly('on SQLite a decision holds the whole file, so no deletion commits inside one'), async () => {
+  await seedMarket();
+  await root.environments.update('market/dev', { archived: true });
+  const { id } = await currentVersion('dev', 'DATABASE_URL');
+  // The lead's grant on the project still covers market/dev, which is deleted
+  // alone, while the vault opens its key: after the check, before the release.
+  let meanwhile: (() => Promise<unknown>) | null = null;
+  class DeletedMeanwhile extends LocalKekProvider {
+    override async unwrap(...args: Parameters<LocalKekProvider['unwrap']>): Promise<Buffer> {
+      const run = meanwhile;
+      meanwhile = null;
+      await run?.();
+      return super.unwrap(...args);
+    }
+  }
+  const vault = testVault(
+    [ROOT],
+    { kek: new DeletedMeanwhile(deps.vault.kek, 'test-kek-1'), signingKey: deps.vault.signingKey.toString('base64') },
+    { kek: deps.vault.kek },
+  );
+  const read = () => vault.unwrap({ principal: LEAD, purpose: 'reveal', requestId: 'r', operationId: crypto.randomUUID(), items: [{ secretVersionId: id }] });
+  // A first read, which also proves the vault's key on stored keys before it decides anything.
+  assert.equal((await read()).ok, true);
+  // Chained out here, the deletion runs as its own request would, not inside the vault's transaction.
+  let release!: () => void;
+  const deleted = new Promise<void>((resolve) => (release = resolve)).then(() => root.environments.delete('market/dev'));
+  meanwhile = async () => {
+    release();
+    await deleted;
+  };
+  const outcome = await read();
+  assert.equal(meanwhile, null);
+  assert.deepEqual(outcome.ok ? outcome.keys : outcome.refusal.code, 'deleted');
+  const reads = await db.owner
+    .select({ decision: auditLog.decision, code: auditLog.code })
+    .from(auditLog)
+    .where(and(eq(auditLog.action, 'secret.read'), eq(auditLog.secretVersionId, id)))
+    .orderBy(asc(auditLog.seq));
+  assert.deepEqual(reads, [{ decision: 'allow', code: null }, { decision: 'deny', code: 'deleted' }]);
+  assert.equal((await root.audit.verify()).ok, true);
 });
 
 test('an environment is deleted only once it is archived itself, whatever its project is', async () => {

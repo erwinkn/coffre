@@ -882,6 +882,14 @@ class VaultService implements Vault {
         if (done.length < outcomes.length) {
           throw new Refused(refusal('bad_claim', MESSAGES.bad_claim), entries());
         }
+        // Again under the log's head, the append's, taken a statement early: a
+        // deletion renames its place under it, so one that committed since the
+        // check above is seen here, and nothing is released after it.
+        await lockLogHead(d.tx);
+        const now = await store.environmentsById(d.tx, secrets.map((secret) => secret.environmentId));
+        if (secrets.some((secret) => now.get(secret.environmentId)?.deleted ?? false)) {
+          throw new Refused(refusal('deleted', MESSAGES.deleted), secrets.map((secret, i) => outcomeEntry(secret, i, 'deny', 'deleted')));
+        }
         const released = secrets.map((secret, i) => outcomeEntry(secret, i, 'allow', null));
         d.log.push(...released);
         const answer = result(done);
