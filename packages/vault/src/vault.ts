@@ -3,10 +3,13 @@ import { randomUUID, timingSafeEqual } from 'node:crypto';
 import {
   allows,
   assignableToEnvironment,
+  everyProjectPath,
   isRole,
   mayManageAccess,
+  type GrantPlace,
   type Holdings,
   type Permission,
+  type Place,
   type Role,
 } from '@coffre/core/access';
 import { GENESIS_HASH, verifyEntries, type LogKey, type StoredEntry } from '@coffre/core/audit';
@@ -785,7 +788,10 @@ class VaultService implements Vault {
     if (this.#isRootAdmin(principal)) await this.#rootRow(principal);
     const check = async (d: Decision) => {
       const reader = await this.#standing(d.tx, principal, d.members.get(principal), d.at, d.reports);
-      const codes = secrets.map((secret) => refuses(reader, call.permission, secret));
+      // A grant on one slug in every project matches the environment's slug as the store has it, not the path the app sent.
+      const bySlug = reader.all.grants.some((grant) => grant.environmentSlug !== null);
+      const environments = bySlug ? await store.environmentsById(d.tx, secrets.map((secret) => secret.environmentId)) : new Map();
+      const codes = secrets.map((secret) => refuses(reader, call.permission, placeOfSecret(secret, environments)));
       let first = codes.find((code) => code !== null) ?? null;
       if (first === null && action === 'secret.read' && (await this.#overBulkLimit(d, principal, secrets.length))) first = 'bulk_limit';
       if (first !== null) {
@@ -1038,45 +1044,52 @@ class VaultService implements Vault {
 
   setAccess(input: SetAccessInput): Promise<Outcome<{ changes: AccessChange[] }>> {
     const { actor, principal } = input;
-    const action = input.changes.every((change) => change.role === null) ? 'access.revoke' : 'access.grant';
+    const changes = input.changes.map((change) => ({ ...change, environmentSlug: change.environmentSlug ?? null }));
+    const action = changes.every((change) => change.role === null) ? 'access.revoke' : 'access.grant';
     // One place refused is shown where it is, to whoever reads that place's log; an invalid one may be no place at all.
-    const [only] = input.changes.length === 1 ? input.changes : [];
-    const refused = (code: RefusalCode, message = MESSAGES[code]) =>
-      new Refused(refusal(code, message), [{
-        ...accessEntry(actor, action, principal, 'deny', input, { changes: input.changes }, code),
-        ...(only === undefined || code === 'invalid' ? {} : { projectId: only.projectId, environmentId: only.environmentId }),
-      }]);
+    const [only] = changes.length === 1 ? changes : [];
+    const refused = (code: RefusalCode, message = MESSAGES[code]) => {
+      const entry = accessEntry(actor, action, principal, 'deny', input, { changes: input.changes }, code);
+      return new Refused(refusal(code, message), [only === undefined || code === 'invalid' ? entry : placed(entry, only)]);
+    };
+    const onProjects = changes.flatMap(({ projectId, environmentId }) => (projectId === null ? [] : [{ projectId, environmentId }]));
     return this.#decide([actor, principal], async (d) => {
       validateCorrelation(input);
       if (!LIVE_PRINCIPAL.test(principal)) throw refused('invalid', `not a principal: ${principal}`);
       if (this.#isRootAdmin(principal)) throw refused('root_admin');
       const places = new Set<string>();
-      for (const change of input.changes) {
-        const key = `${change.projectId}/${change.environmentId ?? ''}`;
+      for (const change of changes) {
+        const shape = placeShape(change);
+        if (shape !== null) throw refused('invalid', shape);
+        const key = placeKey(change);
         if (places.has(key)) throw refused('invalid', 'each place may be changed once per call');
         places.add(key);
         if (change.role !== null && !isRole(change.role)) throw refused('invalid', `no such role: ${change.role}`);
-        if (change.role !== null && change.environmentId !== null && !assignableToEnvironment(change.role)) {
-          throw refused('invalid', `${change.role} can only be granted on a project`);
+        if (change.role !== null && (change.environmentId !== null || change.environmentSlug !== null) && !assignableToEnvironment(change.role)) {
+          throw refused('invalid', `${change.role} can only be granted on a project, or on every project`);
         }
         const expiresAt = change.expiresAt === null ? null : Date.parse(change.expiresAt);
         if (Number.isNaN(expiresAt) || (expiresAt !== null && expiresAt <= d.at)) {
           throw refused('invalid', 'an end date must be in the future');
         }
       }
+      if (changes.some((change) => change.projectId === null) && !(await store.canGrantEveryProject(d.tx))) {
+        throw refused('invalid', "grants on every project need this release's database migration: an owner runs `coffre migrate`");
+      }
+      // Every project is always there; a project or an environment must be.
       const known = await store.places(
         d.tx,
-        input.changes.map((change) => change.projectId),
-        input.changes.flatMap((change) => (change.environmentId === null ? [] : [change.environmentId])),
+        onProjects.map((change) => change.projectId),
+        onProjects.flatMap((change) => (change.environmentId === null ? [] : [change.environmentId])),
       );
-      for (const { projectId, environmentId } of input.changes) {
+      for (const { projectId, environmentId } of onProjects) {
         if (!known.projects.has(projectId) || (environmentId !== null && known.environments.get(environmentId) !== projectId)) {
           throw refused('invalid', `no such place: ${environmentId === null ? projectId : `${projectId}/${environmentId}`}`);
         }
       }
       const acting = await this.#standing(d.tx, actor, d.members.get(actor), d.at, d.reports);
       if (acting.status === 'tampered') throw refused('tampered');
-      if (!input.changes.every((change) => mayManageAccess(acting.live, change))) throw refused('not_allowed');
+      if (!changes.every((change) => mayManageAccess(acting.live, change))) throw refused('not_allowed');
 
       const row = d.members.get(principal);
       const subject = await this.#standing(d.tx, principal, row, d.at, d.reports);
@@ -1086,9 +1099,9 @@ class VaultService implements Vault {
       // The grants the check verified, not a second read: what the decision changes, and seals.
       const held = subject.stored;
       d.grants.set(principal, [...held]);
-      const changes = input.changes.map((change) => this.#apply(d, actor, principal, held, change, input));
+      const outcomes = changes.map((change) => this.#apply(d, actor, principal, held, change, input));
       if (d.writes.length > 0) d.touched.add(principal);
-      return { changes };
+      return { changes: outcomes };
     });
   }
 
@@ -1098,22 +1111,19 @@ class VaultService implements Vault {
     actor: string,
     principal: string,
     held: readonly GrantRow[],
-    change: GrantChange,
+    change: GrantChange & GrantPlace,
     correlation: Correlation,
   ): AccessChange {
-    const existing = held.find((grant) => grant.projectId === change.projectId && grant.environmentId === change.environmentId);
+    const existing = held.find((grant) => placeKey(grant) === placeKey(change));
     const current = existing !== undefined && live(existing, d.at) ? existing : undefined;
     const expiresAt = change.expiresAt === null ? null : Date.parse(change.expiresAt);
-    const place = { projectId: change.projectId, environmentId: change.environmentId };
+    const place = { projectId: change.projectId, environmentId: change.environmentId, environmentSlug: change.environmentSlug };
     const entry = (action: string, role: string | null) =>
-      d.log.push({
-        ...accessEntry(actor, action, principal, 'allow', correlation, {
-          role,
-          expiresAt: expiresAt === null ? null : iso(expiresAt),
-          previousRole: current?.role ?? null,
-        }),
-        ...place,
-      });
+      d.log.push(placed(accessEntry(actor, action, principal, 'allow', correlation, {
+        role,
+        expiresAt: expiresAt === null ? null : iso(expiresAt),
+        previousRole: current?.role ?? null,
+      }), place));
     // A lapsed grant is cleared with no entry: it changes nothing anyone holds.
     const clear = () => {
       if (existing === undefined) return;
@@ -1221,15 +1231,11 @@ class VaultService implements Vault {
 
       const revoked = held.filter((grant) => live(grant, d.at));
       for (const grant of revoked) {
-        d.log.push({
-          ...accessEntry(actor, 'access.revoke', principal, 'allow', input, {
-            role: null,
-            expiresAt: null,
-            previousRole: grant.role,
-          }),
-          projectId: grant.projectId,
-          environmentId: grant.environmentId,
-        });
+        d.log.push(placed(accessEntry(actor, 'access.revoke', principal, 'allow', input, {
+          role: null,
+          expiresAt: null,
+          previousRole: grant.role,
+        }), grant));
       }
       const generation = row.generation + 1;
       d.log.push(accessEntry(actor, 'member.remove', principal, 'allow', input, { revoked: revoked.length, generation }));
@@ -1750,12 +1756,22 @@ function validateItems(items: readonly { secret: SecretRef; key?: string; wrappe
   }
 }
 
-/** Why `reader` may not do `permission` on `secret`, or null if they may. */
-function refuses(reader: Standing, permission: Permission, secret: SecretRef): RefusalCode | null {
+/**
+ * Where a secret is, for a decision: its environment's slug as the store
+ * has it, when it was read and the environment is in the project claimed;
+ * otherwise one no grant on a slug matches.
+ */
+function placeOfSecret(secret: SecretRef, environments: ReadonlyMap<string, { projectId: string; slug: string }>): Place {
+  const environment = environments.get(secret.environmentId);
+  const slug = environment?.projectId === secret.projectId ? environment.slug : '';
+  return { projectId: secret.projectId, environmentId: secret.environmentId, environmentSlug: slug };
+}
+
+/** Why `reader` may not do `permission` at `where`, or null if they may. */
+function refuses(reader: Standing, permission: Permission, where: Place): RefusalCode | null {
   if (reader.status === 'tampered') return 'tampered';
   if (reader.status === 'removed') return 'removed';
   if (reader.status === 'unknown') return 'not_a_member';
-  const where = { projectId: secret.projectId, environmentId: secret.environmentId };
   if (allows(reader.live, permission, where)) return null;
   // Would a grant that has lapsed have covered it?
   return allows(reader.all, permission, where) ? 'expired' : 'no_grant';
@@ -1831,10 +1847,39 @@ function live(grant: GrantRow, at: number): boolean {
   return grant.expiresAt === null || grant.expiresAt > at;
 }
 
+/**
+ * An entry about a grant, at its place: its project and environment, or, on
+ * every project, neither, and the place as a path in its payload.
+ */
+function placed(entry: NewEntry, place: GrantPlace): NewEntry {
+  if (place.projectId !== null) return { ...entry, projectId: place.projectId, environmentId: place.environmentId };
+  const detail = JSON.parse(entry.metadata ?? '{}') as Record<string, unknown>;
+  return { ...entry, projectId: null, environmentId: null, metadata: JSON.stringify({ ...detail, place: everyProjectPath(place.environmentSlug) }) };
+}
+
+/** One key per place a member can hold a grant at: the same place, the same key. */
+function placeKey(place: GrantPlace): string {
+  return place.projectId === null ? everyProjectPath(place.environmentSlug) : `${place.projectId}/${place.environmentId ?? ''}`;
+}
+
+/** Why a change's place is not one a grant can be at, or null when it is. */
+function placeShape(place: GrantPlace): string | null {
+  if (place.projectId === null) {
+    if (place.environmentId !== null) return 'an environment is named in its project';
+    if (place.environmentSlug !== null && !SLUG.test(place.environmentSlug)) return `not an environment slug: ${place.environmentSlug}`;
+    return null;
+  }
+  return place.environmentSlug === null ? null : 'a slug names environments on every project, not in one';
+}
+
+/** An environment's slug, as the schema has it. */
+const SLUG = /^[a-z0-9][a-z0-9-]{0,62}$/;
+
 function view(grant: GrantRow): Grant {
   return {
     projectId: grant.projectId,
     environmentId: grant.environmentId,
+    environmentSlug: grant.environmentSlug,
     role: grant.role as Role,
     expiresAt: grant.expiresAt === null ? null : iso(grant.expiresAt),
     grantedAt: iso(grant.grantedAt),

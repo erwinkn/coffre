@@ -34,6 +34,38 @@ with a different account at the same provider. Only the providers are
 named, never another email or account name, and only to a visitor whose
 provider has just verified that the address is theirs.
 
+**Grants on every project.** A member or a service can hold a role on every
+project, the ones created later too, or on one environment in every project:
+
+```sh
+coffre grant '*' ada@acme.example --role auditor            # every project
+coffre grant '*' ci-deploy --role viewer --env dev --service  # dev in every project, never prod
+coffre revoke '*' ci-deploy --env dev --service
+coffre access '*'                                           # who holds them
+```
+
+- Only instance owners and root admins give or take them. They are grants
+  like any other: roles (only those an environment can hold go on one
+  environment's name), end dates, `access.grant` and `access.revoke` entries
+  naming the place as `*` or `*/dev`, and offboarding, which revokes them
+  with the rest and counts them in its preview.
+- `*/dev` matches the environment's slug when it is used: a project that has
+  no `dev` gains one when someone creates it, and renaming `staging` to `dev`
+  brings it in. Making a project or an environment, or giving one a new slug,
+  answers with who reaches it through them (`inherited`), and the CLI and
+  the dialogs say so before you confirm.
+- The member page shows "All projects · Developer" or "dev in every
+  project · Developer", and a project's access list shows who reaches it
+  through them.
+- One migration, `0005_instance_grants`: a column on `vault_grants`, and its
+  checks loosened to allow these. 0.3.0 runs on the new schema, and this
+  release on the old one, where it answers 503 to a grant on every project
+  until `coffre migrate` has run.
+- **Revoke grants on every project before rolling back past this release.**
+  An older vault does not know them, and refuses everyone who holds one, as
+  a member whose record was changed around it, until an owner removes them
+  ([deploy.md](docs/deploy.md#rolling-back-past-grants-on-every-project)).
+
 **`coffre trust` from first use.**
 - A binding matches one event, and trusting a workflow that also runs by
   hand or on a schedule took one `coffre trust` for each. Now `--event` (and

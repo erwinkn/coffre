@@ -36,6 +36,13 @@
       "when": 1791084354462,
       "tag": "0004_live_indexes",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1791191060464,
+      "tag": "0005_instance_grants",
+      "breakpoints": true
     }
   ]
 }

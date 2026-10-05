@@ -42,8 +42,9 @@ const removing = (id: string): Target => ({ id, kind: 'removing' });
 type Grants = ({ ok: true; grants: GrantRow[] } | Failure);
 
 /** A grant's identity, before the server has given it an id: who, and where. */
-export function grantId(grant: Pick<GrantRow, 'principalType' | 'principalId' | 'environmentSlug'>): string {
-  return `${memberRef(grant.principalType, grant.principalId)}@${grant.environmentSlug ?? ''}`;
+export function grantId(grant: Pick<GrantRow, 'principalType' | 'principalId' | 'environmentSlug'> & { scope?: GrantRow['scope'] }): string {
+  const everywhere = grant.scope === 'every-project' ? '*/' : '';
+  return `${memberRef(grant.principalType, grant.principalId)}@${everywhere}${grant.environmentSlug ?? ''}`;
 }
 
 export function grantsList(project: string) {

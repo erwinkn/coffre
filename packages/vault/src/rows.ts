@@ -21,12 +21,17 @@ export function rowKey(signingKey: Uint8Array): Buffer {
   return Buffer.from(hkdfSync('sha256', signingKey, new Uint8Array(0), 'coffre.vault.rows.v1', 32));
 }
 
-/** A member's grants as the MAC covers them: each one's place, role, end and grant, as a sorted set. */
+/**
+ * A member's grants as the MAC covers them: each one's place, role, end and
+ * grant, as a sorted set. A grant on every project is a kind of its own,
+ * with the slug it covers, or null; a member who holds none has the set,
+ * and so the MAC, they had before there were any.
+ */
 export function grantSet(grants: readonly GrantRow[]): string[] {
   return grants
     .map((grant) => [
-      grant.environmentId === null ? 'project' : 'environment',
-      grant.environmentId ?? grant.projectId,
+      grant.projectId === null ? 'every-project' : grant.environmentId === null ? 'project' : 'environment',
+      grant.projectId === null ? grant.environmentSlug : (grant.environmentId ?? grant.projectId),
       grant.role,
       grant.expiresAt,
       grant.grantedAt,

@@ -18,7 +18,7 @@ import {
   update,
   type ResolvedPath,
 } from '../db/queries.ts';
-import { permissionsAt } from './caller.ts';
+import { permissionsAt, placeOf } from './caller.ts';
 import { allowed, asking, audited, denied, need, recorded, Refusal, vaultRefusal, withRefusals, type ApiContext } from './context.ts';
 import { conflict, notFound, vaultRefused } from './errors.ts';
 import { openValues, rewrapValue, sealValues } from './keys.ts';
@@ -108,7 +108,7 @@ export async function listSecrets(
   const environment = requireLive(place);
   const rows = await environmentSecrets(ctx.db, environment.environmentId);
   return {
-    permissions: permissionsAt(ctx.caller, environment),
+    permissions: permissionsAt(ctx.caller, placeOf(place.project, place.environment)),
     keys: rows.map((row) => ({
       key: row.key,
       archived: row.archivedAt !== null,
@@ -265,7 +265,7 @@ export async function dryRunSecrets(
   const environment = requireLive(place);
   const operationId = randomUUID();
   return withRefusals(ctx, async () => {
-    need(ctx, 'secret.read', environment, 'secret.read', { operationId, metadata: { dryRun: true } });
+    need(ctx, 'secret.read', placeOf(place.project, place.environment), 'secret.read', { operationId, metadata: { dryRun: true } });
     const rows = new Map((await environmentSecrets(ctx.db, environment.environmentId)).map((row) => [row.key, row]));
     // Refuse what the write would refuse before opening anything.
     for (const [key, value] of Object.entries(patch)) {
@@ -446,7 +446,7 @@ export async function reveal(
         }),
       );
     }
-    need(ctx, 'secret.read', environment, 'secret.read', {
+    need(ctx, 'secret.read', placeOf(place.project, place.environment), 'secret.read', {
       operationId,
       metadata: path.key === undefined ? {} : { key: path.key },
     });

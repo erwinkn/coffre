@@ -7,7 +7,7 @@
 import { openSync, closeSync, writeSync, rmSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 
-import { apiMember, serviceName, shownMember, type CoffreClient } from '@coffre/client';
+import { apiMember, serviceName, shownMember, type CoffreClient, type InheritedGrant } from '@coffre/client';
 
 import { describeRemoval, serviceMember } from './trust.ts';
 
@@ -61,6 +61,27 @@ function secret(text: string): string {
 
 const day = (iso: string | null) => (iso === null ? 'never' : iso.slice(0, 10));
 
+/** A place a grant is at, as a person reads it: `market/prod`, or `every project`, or `dev in every project`. */
+export function placeName(path: string): string {
+  if (path === '*') return 'every project';
+  return path.startsWith('*/') ? `${path.slice(2)} in every project` : path;
+}
+
+/** Positionals past the expected ones, perhaps a `*` the shell expanded into file names. */
+export function unquoted(extra: readonly string[]): UsageError {
+  return new UsageError(`too many arguments: ${extra.join(' ')}; to name every project, quote it: '*'`);
+}
+
+/** Who reaches a place through grants on every project, a line each under a heading; nothing when nobody does. */
+function reachedBy(heading: string, inherited: readonly InheritedGrant[]): string {
+  if (inherited.length === 0) return '';
+  const lines = inherited.map((grant) => {
+    const until = grant.expiresAt === null ? '' : ` until ${day(grant.expiresAt)}`;
+    return `  ${shownMember(grant.member)} as ${grant.role}, through ${placeName(grant.place)}${until}\n`;
+  });
+  return `${heading}\n${lines.join('')}`;
+}
+
 // --- projects and environments ------------------------------------------------
 
 export async function projects(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
@@ -89,6 +110,7 @@ export async function projectsCreate(connect: () => CoffreClient, args: string[]
   const api = connect();
   const made = await api.projects.create(project, { name: values.name ?? project });
   io.out.write(made.created ? `created ${made.project.slug}, "${made.project.name}"\n` : `${made.project.slug} exists already, "${made.project.name}": nothing changed\n`);
+  io.out.write(reachedBy('who reaches it already:', made.inherited));
 }
 
 export async function environmentsCreate(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
@@ -98,6 +120,7 @@ export async function environmentsCreate(connect: () => CoffreClient, args: stri
   const made = await api.environments.create(`${project}/${environment}`, { name: values.name ?? environment! });
   const path = `${project}/${made.environment.slug}`;
   io.out.write(made.created ? `created ${path}, "${made.environment.name}"\n` : `${path} exists already, "${made.environment.name}": nothing changed\n`);
+  io.out.write(reachedBy('who reaches it already:', made.inherited));
 }
 
 /** The patch `--name` and `--slug` make: one of them at least. */
@@ -120,8 +143,10 @@ export async function environmentsRename(connect: () => CoffreClient, args: stri
   const { project, environment } = place(positionals[0]!, true);
   const patch = renamed(values);
   const api = connect();
-  const { environment: now } = await api.environments.update(`${project}/${environment}`, patch);
+  const { environment: now, inherited } = await api.environments.update(`${project}/${environment}`, patch);
   io.out.write(`${project}/${environment} is now ${project}/${now.slug}, "${now.name}"\n`);
+  // A new slug brings in whoever holds it in every project.
+  if (now.slug !== environment) io.out.write(reachedBy('who reaches it now by its new slug:', inherited.filter((grant) => grant.place !== '*')));
 }
 
 export async function projectsArchive(connect: () => CoffreClient, args: string[], archived: boolean, io: Io = STDIO): Promise<void> {
@@ -201,13 +226,20 @@ export async function admit(connect: () => CoffreClient, args: string[], io: Io 
 }
 
 export async function revoke(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
-  const { values, positionals } = parse(args, { env: { type: 'string' }, service: { type: 'boolean', default: false } }, ['<project>', '<principal>']);
-  const [project, name] = positionals as [string, string];
+  const { values, positionals } = parseArgs({
+    args,
+    options: { env: { type: 'string' }, service: { type: 'boolean', default: false } },
+    allowPositionals: true,
+    strict: true,
+  });
+  if (positionals.length > 2) throw unquoted(positionals.slice(2));
+  const [project, name] = positionals;
+  if (project === undefined || name === undefined) throw new UsageError(project === undefined ? 'name <project> and <principal>' : 'name <principal>');
   const scope = values.env === undefined ? project : `${project}/${values.env}`;
   const who = memberOf(name, values.service);
   const api = connect();
   const { changes } = await api.access.set(who, { [scope]: null });
-  io.out.write(changes[scope] === 'revoked' ? `revoked ${shownMember(who)}'s grant on ${scope}\n` : `${shownMember(who)} held no grant on ${scope}: nothing changed\n`);
+  io.out.write(changes[scope] === 'revoked' ? `revoked ${shownMember(who)}'s grant on ${placeName(scope)}\n` : `${shownMember(who)} held no grant on ${placeName(scope)}: nothing changed\n`);
 }
 
 // --- bearer tokens ----------------------------------------------------------

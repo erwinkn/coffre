@@ -67,7 +67,7 @@ function grantRows(members: Member[]): GrantRow[] {
       role: grant.role,
       roleName: grant.roleName,
       permissions: grant.permissions,
-      scope: grant.environment === null ? ('project' as const) : ('environment' as const),
+      scope: grant.project === '*' ? ('every-project' as const) : grant.environment === null ? ('project' as const) : ('environment' as const),
       environmentSlug: grant.environment,
       expiresAt: grant.expiresAt,
     })),

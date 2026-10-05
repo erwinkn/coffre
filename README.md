@@ -141,6 +141,7 @@ coffre access                               # who holds what, where you manage a
 coffre admit alice@acme.example             # a member first, then their grants
 coffre grant market alice@acme.example --role developer --env dev
 coffre revoke market alice@acme.example --env dev
+coffre grant '*' bob@acme.example --role viewer --env dev   # dev in every project, the ones made later too; owners only
 coffre offboard alice@acme.example          # previews; --apply removes (docs/offboarding.md)
 
 coffre admit api-deploy --service           # a service, for CI
@@ -225,8 +226,20 @@ the rules behind them are in
 ## Roles
 
 Permissions are a fixed list, and roles are named sets of them. A grant gives
-one member one role at one place, a project or one of its environments, and
-may carry an end date. A project grant covers every environment in it.
+one member one role at one place, and may carry an end date. The places:
+
+| Place | Covers |
+|---|---|
+| `market` | the project, and every environment in it |
+| `market/dev` | that environment |
+| `*` | every project and every environment, the ones created later too |
+| `*/dev` | the environment named `dev` in every project, never another, nor the project |
+
+Grants add up, and none takes anything away: `viewer` on `*` and
+`developer` on `market` write in `market` and read everywhere else. A grant
+on `*/dev` matches the environment's slug when it is used: `billing/staging`
+renamed `billing/dev` comes in, and a project without a `dev` holds nothing
+for it until it has one.
 
 | Role | Permissions | Reads secrets? |
 |---|---|---|
@@ -241,16 +254,20 @@ may carry an end date. A project grant covers every environment in it.
 read, write, admin ladder, reading the audit log took admin, which also read
 every secret, so the person answering "who read which secret" could read them
 all. A role with a project-wide permission (`environment.manage`,
-`grant.manage`, `project.manage`) cannot be granted on one environment: the
-API answers 409 rather than grant less than asked.
+`grant.manage`, `project.manage`) cannot be granted on one environment, nor
+on `*/dev`: the API answers 409 rather than grant less than asked.
 
 Two roles sit above projects. **Root admins** are named in the vault's
 configuration, and no row anywhere makes someone one. They hold every
 permission everywhere, reading secrets included, so keep the list short.
 **Instance owners** are members a root admin or another owner marks as
 owners. They add and remove members, create projects, manage access and read
-the whole log, but read a secret only with a grant. Creating a project grants
-no one anything.
+the whole log, but read a secret only with a grant. Only they and root admins
+grant on `*` and `*/dev`: an `access-manager` manages one project's grants,
+and `owner` on `*` every project's, but neither grants on `*`. Creating a
+project grants no one anything, though grants on `*` reach it at once, and
+creating it says who they reach: so does creating an environment, or giving
+one a new slug ([docs/design/instance-grants.md](docs/design/instance-grants.md)).
 
 ## Design decisions worth knowing
 

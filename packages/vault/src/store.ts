@@ -1,6 +1,10 @@
+import type { GrantPlace } from '@coffre/core/access';
 import type { Author, StoredEntry } from '@coffre/core/audit';
 import { ACCESS_ACTIONS, type SecretRef, type WrappedKey } from '@coffre/core/vault';
 import { tablesOf, type Queryable, type Transaction } from '@coffre/db';
+import { readGrants, type GrantRow } from '@coffre/db/grants';
+
+export { canGrantEveryProject, insertGrant } from '@coffre/db/grants';
 import { clockMillis, engineOf, forUpdate } from '@coffre/db/dialect';
 import { and, asc, count, desc, eq, gt, gte, inArray, isNull, lt, lte, sql } from 'drizzle-orm';
 
@@ -33,16 +37,15 @@ export type Member = {
 /** Every entry that changes who is a member or what they hold. */
 export { ACCESS_ACTIONS };
 
-/** Where a grant applies: a project (`environmentId` null), or one of its environments. */
-export type Place = { projectId: string; environmentId: string | null };
+/**
+ * Where a grant applies: a project, one of its environments (with its
+ * project, which its row finds through `environments`), every project, or
+ * one environment slug in every project.
+ */
+export type Place = GrantPlace;
 
-export type GrantRow = Place & {
-  principal: string;
-  role: string;
-  expiresAt: number | null;
-  grantedAt: number;
-  grantedBy: string;
-};
+/** A grant as stored; `@coffre/db/grants` reads and writes them on any schema since the baseline. */
+export type { GrantRow };
 
 /**
  * On Postgres, fail a lock wait in this transaction after `ms`, rather than
@@ -129,37 +132,38 @@ export async function updateMember(
 // --- grants ---------------------------------------------------------------------
 
 /** Grants, lapsed ones too, each with its project, which an environment's grant finds through `environments`. */
-export async function grants(db: Queryable, principal?: string): Promise<GrantRow[]> {
-  const { vaultGrants, environments } = tablesOf(db);
-  return db
-    .select({
-      principal: vaultGrants.principal,
-      projectId: sql<string>`coalesce(${vaultGrants.projectId}, ${environments.projectId})`,
-      environmentId: vaultGrants.environmentId,
-      role: vaultGrants.role,
-      expiresAt: vaultGrants.expiresAt,
-      grantedAt: vaultGrants.grantedAt,
-      grantedBy: vaultGrants.grantedBy,
-    })
-    .from(vaultGrants)
-    .leftJoin(environments, eq(environments.id, vaultGrants.environmentId))
-    .where(principal === undefined ? undefined : eq(vaultGrants.principal, principal));
+export function grants(db: Queryable, principal?: string): Promise<GrantRow[]> {
+  return readGrants(db, principal === undefined ? {} : { principal });
 }
 
-/** A grant names its environment, or its project when it has none: exactly one. */
+/**
+ * A grant's row names its environment, or its project when it has none, or
+ * neither on every project, with the slug it covers there, if any.
+ */
 function at(db: Queryable, place: Place) {
   const { vaultGrants } = tablesOf(db);
-  return place.environmentId === null
-    ? and(eq(vaultGrants.projectId, place.projectId), isNull(vaultGrants.environmentId))
-    : eq(vaultGrants.environmentId, place.environmentId);
+  if (place.environmentId !== null) return eq(vaultGrants.environmentId, place.environmentId);
+  if (place.projectId !== null) return and(eq(vaultGrants.projectId, place.projectId), isNull(vaultGrants.environmentId));
+  return and(
+    isNull(vaultGrants.projectId),
+    isNull(vaultGrants.environmentId),
+    place.environmentSlug === null ? isNull(vaultGrants.environmentSlug) : eq(vaultGrants.environmentSlug, place.environmentSlug),
+  );
 }
 
-export async function insertGrant(tx: Transaction, grant: GrantRow): Promise<void> {
-  const { vaultGrants } = tablesOf(tx);
-  await tx.insert(vaultGrants).values({
-    ...grant,
-    projectId: grant.environmentId === null ? grant.projectId : null,
-  });
+
+/** Each of these environments that exists, by id, with its project and its slug: what grants on one slug in every project match. */
+export async function environmentsById(
+  db: Queryable,
+  ids: readonly string[],
+): Promise<Map<string, { projectId: string; slug: string }>> {
+  if (ids.length === 0) return new Map();
+  const { environments } = tablesOf(db);
+  const rows = await db
+    .select({ id: environments.id, projectId: environments.projectId, slug: environments.slug })
+    .from(environments)
+    .where(inArray(environments.id, [...new Set(ids)]));
+  return new Map(rows.map(({ id, ...environment }) => [id, environment]));
 }
 
 export async function deleteGrant(tx: Transaction, principal: string, place: Place): Promise<void> {

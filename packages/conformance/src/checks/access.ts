@@ -3,7 +3,7 @@
 import { bearer } from '../browser.ts';
 import type { Deployment } from '../harness.ts';
 import { expect, refused } from '../report.ts';
-import { BULK, DEV, PROD, signIn, valuesIn, type Canaries, type People } from './people.ts';
+import { BULK, canary, DEV, PROD, PROJECT, signIn, valuesIn, type Canaries, type People } from './people.ts';
 import { pollDevice, startDevice } from './signin.ts';
 
 export async function membersOnly(deployment: Deployment, { stranger }: People): Promise<string> {
@@ -115,6 +115,58 @@ export async function offboarding(deployment: Deployment, { admin, leaver, servi
   await admin.api.members.remove(leaver.member);
   await admin.api.members.remove(service.member);
   return `the report names ${exposed.length} values; re-admission revives no old session, token or approval; a fresh provider callback works`;
+}
+
+/**
+ * Grants on every project: one on `*` reaches a project made after it; one
+ * on `*` and a slug reaches that environment in every project and never
+ * another; nobody but an owner gives one; and removing a member takes
+ * them. Its services are removed, and its project archived, as it ends.
+ */
+export async function everyProject(deployment: Deployment, { admin, reader }: People, canaries: Canaries): Promise<string> {
+  const services = { everything: 'token:conformance-everywhere', dev: 'token:conformance-every-dev', manager: 'token:conformance-manager' };
+  const client = async (member: string) => bearer(deployment.origin, (await admin.api.tokens.issue(member, { expiresInDays: 1 })).token);
+  for (const member of Object.values(services)) await admin.api.members.add(member);
+
+  // A project's access manager, and a viewer, are not owners.
+  await admin.api.access.set(services.manager, { [PROJECT]: 'access-manager' });
+  const manager = await client(services.manager);
+  await refused("a project's access manager granted on every project", manager.access.set(services.everything, { '*': 'viewer' }));
+  await refused('a viewer granted themselves every project', reader.api.access.set(reader.member, { '*/prod': 'viewer' }));
+  await admin.api.access.set(services.everything, { '*': 'viewer' });
+  await admin.api.access.set(services.dev, { '*/dev': 'viewer' });
+  const [everything, dev] = [await client(services.everything), await client(services.dev)];
+
+  // Made after the grants: a project with a dev and a prod.
+  const later = `${PROJECT}-later`;
+  const made = await admin.api.projects.create(later, { name: 'Made later' });
+  expect(made.inherited.some((grant) => grant.member === services.everything && grant.place === '*'), 'making a project did not say who reaches it', made.inherited);
+  for (const environment of ['dev', 'prod']) {
+    const path = `${later}/${environment}`;
+    const { inherited } = await admin.api.environments.create(path, { name: environment });
+    const reaches = inherited.filter((grant) => grant.member === services.dev).length;
+    expect(reaches === (environment === 'dev' ? 1 : 0), `making ${path} misnamed who reaches it through dev in every project`, inherited);
+    canaries[`${path}/API_KEY`] = canary();
+    await admin.api.secrets.set(path, valuesIn(canaries, path));
+  }
+  for (const path of [`${later}/prod`, `${later}/dev`, PROD]) {
+    const read = await everything.secrets.reveal(path);
+    expect(read.values.API_KEY === canaries[`${path}/API_KEY`], `viewer on every project could not read ${path}`, read.values);
+  }
+  await refused('viewer on every project wrote a value', everything.secrets.set(`${later}/prod`, { API_KEY: 'from everywhere' }));
+  const devRead = await dev.secrets.reveal(`${later}/dev`);
+  expect(devRead.values.API_KEY === canaries[`${later}/dev/API_KEY`], 'viewer on dev in every project could not read a dev made later', devRead.values);
+  await refused('viewer on dev in every project read a prod made later', dev.secrets.reveal(`${later}/prod`));
+  await refused('viewer on dev in every project read prod', dev.secrets.reveal(PROD));
+
+  // Removed, they hold nothing, and the list of grants on every project is as it was.
+  for (const member of Object.values(services)) await admin.api.members.remove(member);
+  await refused('a removed member read through a grant on every project', everything.secrets.reveal(`${later}/prod`));
+  await refused('a removed member read through a grant on dev in every project', dev.secrets.reveal(`${later}/dev`));
+  const left = (await admin.api.members.list('*')).members.filter((member) => Object.values(services).includes(member.member));
+  expect(left.length === 0, 'grants on every project outlived their members', left);
+  await admin.api.projects.update(later, { archived: true });
+  return 'a grant on every project reaches a project made after it; one on dev, every dev and nothing else; refused to non-owners; gone with its member';
 }
 
 /** Reading more values at once than the vault allows in its window is refused. */

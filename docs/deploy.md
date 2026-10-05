@@ -392,6 +392,17 @@ Then `pnpm typecheck`, and deploy: on Workers, set the app's build and
 deploy commands as [Workers Builds](#workers-builds) says, or `pnpm run
 deploy`; on Node, `pnpm build` and restart both processes.
 
+### Rolling back past grants on every project
+
+Revoke every grant on every project before rolling a deployment back to
+0.3.0 or earlier: `coffre access '*'` lists them, and `coffre revoke '*'
+<member> [--env <env>]` takes each. An older vault does not know them: it
+reads one as a grant on no project, which fails the MAC it seals each
+member's grants under, so it refuses everyone who holds one, as a member
+whose record was changed around it, until an owner removes them and adds
+them back. Their schema change, `0005_instance_grants`, needs no undoing:
+0.3.0 runs on it.
+
 ### Upgrading to 0.1.12
 
 Deploy the new code first, then migrate: `0001_remove_syncs`, from before

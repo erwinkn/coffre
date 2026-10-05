@@ -859,7 +859,8 @@ async function whoHasAccess(args: string[]): Promise<void> {
     for (const g of member.grants) {
       const place = g.environment === null ? g.project : `${g.project}/${g.environment}`;
       const until = g.expiresAt === null ? '' : ` until ${g.expiresAt.slice(0, 10)}`;
-      process.stdout.write(`  ${place.padEnd(24)} ${g.role}${until}\n`);
+      const everywhere = g.project === '*' ? `  (${manage.placeName(place)})` : '';
+      process.stdout.write(`  ${place.padEnd(24)} ${g.role}${until}${everywhere}\n`);
     }
   }
 }
@@ -877,7 +878,8 @@ async function grantAccess(args: string[]): Promise<void> {
   });
 
   const [project, principalId] = positionals;
-  if (!project || !principalId || positionals.length > 2) throw new UsageError('name the project and the principal');
+  if (positionals.length > 2) throw manage.unquoted(positionals.slice(2));
+  if (!project || !principalId) throw new UsageError('name the project and the principal');
   if (!values.role) throw new UsageError('name the role: --role <role>');
 
   const role = values.role;
@@ -892,7 +894,7 @@ async function grantAccess(args: string[]): Promise<void> {
     [scope]: values.expires ? { role, until: values.expires } : role,
   });
 
-  process.stdout.write(`granted ${values.role} on ${scope} to ${shownMember(who).replace(/^user:/, '')}\n`);
+  process.stdout.write(`granted ${values.role} on ${manage.placeName(scope)} to ${shownMember(who).replace(/^user:/, '')}\n`);
 }
 
 function plural(count: number, word: string): string {

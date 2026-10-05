@@ -167,8 +167,18 @@ export async function listAudit(
   const { caller } = ctx;
   if (!caller.isOwner) {
     const readable = caller.grants.filter((grant) => roleGrants(grant.role, 'audit.read'));
-    const projectIds = readable.filter((grant) => grant.environmentId === null).map((grant) => grant.projectId);
+    const projectIds = readable.flatMap((grant) => (grant.projectId !== null && grant.environmentId === null ? [grant.projectId] : []));
     const environmentIds = readable.flatMap((grant) => grant.environmentId ?? []);
+    // A grant on every project reads each project's log, or each environment's of its slug, as they are now.
+    const everywhere = readable.filter((grant) => grant.projectId === null);
+    if (everywhere.length > 0) {
+      for (const project of await places(ctx.db)) {
+        if (everywhere.some((grant) => grant.environmentSlug === null)) projectIds.push(project.id);
+        for (const environment of project.environments) {
+          if (everywhere.some((grant) => grant.environmentSlug === environment.slug)) environmentIds.push(environment.id);
+        }
+      }
+    }
     if (projectIds.length === 0 && environmentIds.length === 0) {
       throw forbidden('you do not hold audit.read on any project');
     }

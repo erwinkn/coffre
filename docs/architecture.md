@@ -811,7 +811,10 @@ migration works with both, and the order does not matter:
 - **A migration expands.** It adds tables, columns that are nullable or have
   a default, indexes and grants. The code that uses them works without them
   too, until the migration runs: the trust bindings answer 503 until
-  `0002_service_bindings`, the exchange until `0003_exchanges`.
+  `0002_service_bindings`, the exchange until `0003_exchanges`, and grants
+  on every project until `0005_instance_grants`. Where Drizzle would name a
+  new column in every select and insert, the code reads `*` and names the
+  column only when it has a value for it (`@coffre/db/grants`).
 - **What contracts waits a release.** Dropping or renaming a table or a
   column, NOT NULL on an existing column, a narrower check or type, or a
   unique or foreign key the old code may break, ships one release after the

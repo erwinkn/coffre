@@ -2,7 +2,7 @@
 
 Written on 2026-10-05, from Erwin's decision that day: a member can hold a
 role on every project, including the ones created later, or on one
-environment name in every project.
+environment name in every project. Revised as built, the same day.
 
 Today a grant gives one member one role at one place: a project
 (`market`), or one of its environments (`market/prod`). Two new places
@@ -30,31 +30,32 @@ role with a project-wide permission (`maintainer`, `access-manager`,
 
 ## Where they live
 
-In a table of their own, `vault_instance_grants`, beside `vault_grants`:
+In `vault_grants`, beside every other grant, with one new nullable column,
+`environment_slug`. A row names its place by which columns it fills:
 
-```
-principal     text  not null   → vault_members
-environment   text  null       null: every project; otherwise a slug, '^[a-z0-9][a-z0-9-]{0,62}$'
-role          text  not null   any role; with an environment, only viewer, developer, auditor
-expires_at    bigint null
-granted_at    bigint not null
-granted_by    text  not null
-unique (principal, coalesce(environment, ''))
-```
+| Place | `project_id` | `environment_id` | `environment_slug` |
+|---|---|---|---|
+| `market` | market's id | null | null |
+| `market/dev` | null | dev's id | null |
+| `*` | null | null | null |
+| `*/dev` | null | null | `dev` |
 
-Only the vault writes it (`coffre_vault`: select, insert, delete); the app
-reads it for lists (`coffre_app`: select), as with `vault_grants`.
+Its checks are loosened to allow the last two rows, and no more: the slug
+is a slug, a role on a slug is one assignable to an environment, and two
+new unique indexes keep one grant per member on `*` and one per slug.
 
-A table of its own rather than new columns on `vault_grants`, because
-`vault_grants` has a check that a grant names exactly one of a project or
-an environment. Loosening it means dropping and adding a constraint, and
-on SQLite rebuilding the table. A new table is the plainest expand
-migration there is, and the previous release never reads it.
+The first draft put them in a table of their own. The previous release's
+conformance rules that out: it holds the vault's database login to writing
+`vault_members`, `vault_grants` and the log, and nothing else, so a new
+table the vault writes fails it (`test:compat`). Changing a check is the
+other expand migration: every row the previous release writes passes the
+new checks, and it never reads the new column. On SQLite, which changes a
+check only by building the table again, the migration does that.
 
 **The member's MAC covers them.** The vault seals each member's row
 together with their grants as one sorted set (`rows.ts`). Instance grants
-join that set as tuples of a new kind, `['instance', environment, role,
-expires_at, granted_at, granted_by]`. A member with none has the same set,
+join that set as tuples of a new kind, `['every-project', environment_slug,
+role, expires_at, granted_at, granted_by]`. A member with none has the same set,
 and so the same MAC, as before. A row inserted, edited or deleted around
 the vault fails the MAC, and the vault refuses that member, as it does
 today for `vault_grants`. Replaying the log (`coffre verify log`) rebuilds
@@ -102,15 +103,29 @@ decision.** That gives:
 
 ## The migration
 
-One migration, `0005_instance_grants`, on both engines: create the table,
-its index and its foreign key, and grant the runtime logins their
-privileges. It adds and removes nothing else, so the previous release runs
-on the new schema unchanged (`pnpm test:compat` holds it to that).
+One migration, `0005_instance_grants`, on both engines: add the column,
+replace two checks with looser ones, and add a check on the slug and two
+unique indexes. The logins' privileges are the table's already. Every row
+the previous release writes passes the new checks, so it runs on the new
+schema unchanged (`pnpm test:compat` holds it to that).
+
+The other half of expand, then contract: this release runs on the schema
+before its migration, until the migration runs. Drizzle names every column
+it knows in a select and in an insert, so a grant read or written through it
+would fail on a table without `environment_slug`. Grants go through
+`@coffre/db/grants` instead, for the vault and the app's lists alike: it
+reads `SELECT g.*`, whatever columns the table has, and names
+`environment_slug` in an insert only for a grant that has one. Until the
+migration has run, by the migrator's ledger, the API answers a grant on
+every project with 503, "an owner runs `coffre migrate`", and the vault
+refuses one on its own too (`sync-removal.test.ts` runs this release on the
+baseline schema).
 
 Rolling back to the previous release once instance grants exist: its vault
-does not know them, so a member who holds one fails its MAC check and is
-refused, until they are removed and admitted again. It fails closed. Revoke
-instance grants before rolling back.
+reads them as grants on no project, which reach nothing, and seals a
+member's grants in the older form, so a member who holds one fails its MAC
+check and is refused until an owner removes them. It fails closed. Revoke
+instance grants before rolling back past this release.
 
 ## The log
 
@@ -138,17 +153,24 @@ previews includes them. Adding them back starts from nothing, as now.
 - **The API.** `PATCH /api/access/<member>` takes `"*"` and `"*/dev"` as
   places, beside `"market"` and `"market/dev"`. Member lists return them as
   grants whose `project` is `"*"`, with the `environment` slug or null.
-  A project's list (`GET /api/members?path=market`) includes the instance
-  grants that reach it, for whoever manages that project's access to see,
-  and not to change.
-- **Creating a project or an environment, or renaming an environment,**
-  answers with who already has access there through instance grants:
-  `inherited: [{ member, role, place: "*/dev", expiresAt }]`.
+  A project's list (`GET /api/members?path=market`) includes the ones that
+  reach it, for whoever manages that project's access to see, and not to
+  change; `?path=*` lists only them.
+- **Making a project or an environment, or renaming an environment,**
+  answers with who reaches it through them:
+  `inherited: [{ member, place: "*/dev", role, roleName, expiresAt }]`.
+  `GET /api/projects` lists them all as `everyProject`, for owners and for
+  whoever manages environments or access somewhere, so that a dialog can say
+  so before anything is made.
 - **The CLI.** `coffre grant '*' <member> --role <role> [--env <name>]`,
-  `coffre revoke '*' <member> [--env <name>]`, `coffre access` lists them
-  first, and `projects create` and `environments create` print who already
-  has access.
+  `coffre revoke '*' <member> [--env <name>]`, `coffre access '*'`, and
+  `coffre access <project>` marks them "(dev in every project)". `projects
+  create`, `environments create`, and `environments rename` to a new slug
+  print who reaches the place. A `*` the shell expanded into file names is
+  answered with "quote it: '*'".
 - **The UI.** The member page shows "All projects · Developer" or "dev in
-  every project · Developer". A project's access list shows them, marked as
-  granted on the instance, without a revoke button for those who cannot.
-  Creating a project or an environment says who already has access.
+  every project · Developer" above its project access. A project's access
+  list shows them where they reach, marked "every project", with no revoke:
+  owners change them with the CLI or the API. The dialogs that make a
+  project or an environment, or rename an environment, say who it is
+  reachable by before you confirm.

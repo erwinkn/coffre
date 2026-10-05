@@ -26,6 +26,7 @@ import type { DirectoryPrincipal, GrantRow, ProjectSummary } from '../shared/mod
 import { ClosedDoor, PageHeader } from './page';
 import { EmptyState, ErrorLine, Modal, Notice, Spinner } from './ui';
 import { GrantRowView, GrantsTable } from './grants';
+import { EveryProjectGrants } from './every-project';
 import { InstanceRole, KIND, PrincipalActions } from './directory';
 import { PrincipalReportCards, RemovedNotice } from './offboarding';
 import { PrincipalAvatar } from './principal';
@@ -57,9 +58,13 @@ function usePrincipalPage(principalType: PrincipalType, principalId: string) {
     const result = grants[index]!.data;
     return {
       project,
+      // Grants on every project show once, above: not again in each project they reach.
       grants: result.ok
         ? result.grants.filter(
-            (grant) => grant.principalType === principalType && grant.principalId === principalId,
+            (grant) =>
+              grant.principalType === principalType &&
+              grant.principalId === principalId &&
+              grant.scope !== 'every-project',
           )
         : [],
       grantsError: result.ok ? null : result.error,
@@ -214,6 +219,7 @@ export function PrincipalPage({
       {/* Removal ends every grant, so there is no access left to show. */}
       {tab === 'access' && !removed && (
         <>
+          <EveryProjectGrants member={memberRef(principalType, principalId)} />
 
           {errors.map(({ project, grantsError }) => (
             <div key={project.slug} style={{ marginBottom: '0.75rem' }}>

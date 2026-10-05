@@ -297,6 +297,9 @@ const TEMPLATES: Record<string, Template> = {
 };
 
 function placeOnly(entry: AuditEntry): Part[] {
+  // A grant on every project names no project: its place is a path in its payload, `*` or `*/dev`.
+  const everywhere = entry.project === null ? text(entry.metadata.place) : null;
+  if (everywhere !== null) return [everywhere === '*' ? 'every project' : `${everywhere.slice('*/'.length)} in every project`];
   return place({ ...entry, key: null });
 }
 

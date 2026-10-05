@@ -58,6 +58,21 @@ test('a write says the version it made', () => {
   assert.equal(said(...mixed), 'wrote market/prod: 3 secrets');
 });
 
+test('a grant on every project names its place in words', () => {
+  const grant = entry({
+    action: 'access.grant',
+    author: 'vault',
+    actorId: 'bob@acme.example',
+    subject: 'user:carol@acme.example',
+    metadata: { role: 'developer', place: '*/dev' },
+  });
+  assert.equal(said(grant), 'gave carol@acme.example developer on dev in every project');
+  assert.equal(
+    said(entry({ ...grant, action: 'access.revoke', metadata: { previousRole: 'viewer', place: '*' } })),
+    'took viewer on every project from carol@acme.example',
+  );
+});
+
 test('a grant names whom, which role and where', () => {
   const grant = entry({
     action: 'access.grant',

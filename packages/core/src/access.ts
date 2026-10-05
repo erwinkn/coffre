@@ -85,8 +85,37 @@ export function assignableToEnvironment(role: Role): boolean {
   );
 }
 
-/** A place a permission applies to: a project, or one of its environments. */
-export type Place = { projectId: string; environmentId?: string | null };
+/**
+ * A place a permission applies to: a project, or one of its environments,
+ * named by its slug too, which grants on every project match by.
+ */
+export type Place =
+  | { projectId: string; environmentId?: null }
+  | { projectId: string; environmentId: string; environmentSlug: string };
+
+/**
+ * Where a grant applies, by the fields it fills:
+ *
+ *   market        projectId
+ *   market/dev    projectId and environmentId
+ *   *             neither: every project, the ones created later too
+ *   *, on dev     environmentSlug: the environment of that slug in every project
+ */
+export type GrantPlace = {
+  /** Null for a grant on every project. */
+  projectId: string | null;
+  environmentId: string | null;
+  /** On every project, the one environment slug it covers; null for all of them, and on a project's grant. */
+  environmentSlug: string | null;
+};
+
+/** Every project, as a path names it. */
+export const EVERY_PROJECT = '*';
+
+/** A grant on every project as a path: `*`, or `*` and the environment slug it covers in each. */
+export function everyProjectPath(environmentSlug: string | null): string {
+  return environmentSlug === null ? EVERY_PROJECT : `${EVERY_PROJECT}/${environmentSlug}`;
+}
 
 /**
  * What someone holds: everything a permission check reads. The app builds
@@ -100,33 +129,47 @@ export type Holdings = {
   /** Root admins and active users with the instance `owner` role. */
   isOwner: boolean;
   /** Live grants only. */
-  grants: readonly { projectId: string; environmentId: string | null; role: Role }[];
+  grants: readonly (GrantPlace & { role: Role })[];
 };
 
 /**
- * Whether `holder` may do `permission` at `place`.
+ * Whether a grant at `grant` reaches `place`:
  *
- *   on a project       its project grant; owners also manage every project
- *   on an environment  its environment grant or its project's grant
+ *   market        market and each of its environments
+ *   market/dev    market/dev
+ *   *             every project and every environment
+ *   *, on dev     each environment whose slug is dev, in every project
  *
- * An environment grant never reaches up to the project: `developer` on
- * `market/prod` does not let anyone rename `market`.
+ * An environment's grant never reaches up to its project, whether it names
+ * the environment or its slug.
+ */
+export function covers(grant: GrantPlace, place: Place): boolean {
+  if (grant.projectId === null) {
+    return grant.environmentSlug === null || (place.environmentId != null && place.environmentSlug === grant.environmentSlug);
+  }
+  return grant.projectId === place.projectId && (grant.environmentId === null || grant.environmentId === (place.environmentId ?? null));
+}
+
+/**
+ * Whether `holder` may do `permission` at `place`: a grant that covers it
+ * gives the role's permissions there, and grants add up. Owners also manage
+ * every project. `developer` on `market/prod` does not let anyone rename
+ * `market`.
  */
 export function allows(holder: Holdings, permission: Permission, place: Place): boolean {
   if (holder.isRootAdmin) return true;
-  const environmentId = place.environmentId ?? null;
-  if (environmentId === null && holder.isOwner && PROJECT_ONLY_PERMISSIONS.includes(permission)) {
+  if (place.environmentId == null && holder.isOwner && PROJECT_ONLY_PERMISSIONS.includes(permission)) {
     return true;
   }
-  return holder.grants.some(
-    (grant) =>
-      grant.projectId === place.projectId &&
-      (grant.environmentId === null || grant.environmentId === environmentId) &&
-      roleGrants(grant.role, permission),
-  );
+  return holder.grants.some((grant) => covers(grant, place) && roleGrants(grant.role, permission));
 }
 
-/** Whether the actor may manage grants on this project. */
-export function mayManageAccess(actor: Holdings, place: Place): boolean {
+/**
+ * Whether the actor may manage grants at this place: on a project or its
+ * environments, with `grant.manage` on the project; on every project, as an
+ * instance owner or a root admin only.
+ */
+export function mayManageAccess(actor: Holdings, place: GrantPlace): boolean {
+  if (place.projectId === null) return actor.isOwner || actor.isRootAdmin;
   return allows(actor, 'grant.manage', { projectId: place.projectId });
 }

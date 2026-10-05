@@ -15,6 +15,7 @@ export default defineConfig({
     connect: 'src/connect.ts',
     migrate: 'src/migrate.ts',
     log: 'src/log.ts',
+    grants: 'src/grants.ts',
   },
   platform: 'node',
   dts: true,

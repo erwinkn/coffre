@@ -19,6 +19,7 @@ import {
   ProjectEmptyStateCopy,
   RootAdminOnly,
 } from '../components/affordances';
+import { ReachedBy, reaching, useEveryProject } from '../components/every-project';
 
 export function ProjectsPage() {
   const { data: result, refetch } = useSuspenseQuery(queries.projects(useCoffre()));
@@ -251,6 +252,7 @@ function NewProject() {
   const [open, setOpen] = useState(false);
   const create = useChange(createProject(useCoffre()));
   const slugError = slug === '' ? null : slugProblem(slug);
+  const reachedBy = reaching(useEveryProject(), null);
 
   function close() {
     setOpen(false);
@@ -307,6 +309,8 @@ function NewProject() {
               onChange={(event) => setName(event.target.value)}
             />
           </label>
+
+          <ReachedBy grants={reachedBy} lead="Through grants on every project, it is reachable at once by" />
 
           <div className="dialog-actions">
             <button className="btn" type="button" onClick={close}>
