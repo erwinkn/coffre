@@ -7,6 +7,10 @@
 // it, and carries on where it stopped. It never makes a key for a Worker
 // that has one, nor for a database already in use.
 //
+// An address whose DNS is elsewhere is served through one of the account's
+// domains, with Cloudflare for SaaS (hostname.ts); with no domain on the
+// account, setup offers to add one, or the Worker's workers.dev address.
+//
 // An account may hold other deployments of coffre. A Worker or a Hyperdrive
 // config is this deployment's only when this directory says so, and setup
 // never touches another's: when one already has this deployment's names,
@@ -16,6 +20,7 @@ import {
   type Binding,
   CloudflareApi,
   cloudflareToken,
+  denied,
   deploymentWrangler,
   deployWorker,
   type HyperdriveConfig,
@@ -26,11 +31,12 @@ import {
 } from './cloudflare.ts';
 import { BUILT_APP, buildApp, editWorker, placeholder, readWorker, type Change, type WorkerConfig } from './deployment.ts';
 import { createGitHubApp, GITHUB, type GitHub } from './github-app.ts';
+import { recordLines, recordsToAdd, Refused, saasZone, type Served, serveThrough, standing, tokenNeeded, waitForRecords, zoneOf } from './hostname.ts';
 import { generateKeys, keyValues, type Keys } from './keys.ts';
 import type { Screen } from './secrets.ts';
 import type { Login } from './setup.ts';
 import { type Outcome, type Step, Steps } from './steps.ts';
-import { type Keyboard, listed, type Output, paragraph, row, style, textLine } from './tty.ts';
+import { hiddenLine, type Keyboard, listed, type Output, paragraph, row, select, style, textLine } from './tty.ts';
 
 export type Component = 'app' | 'vault';
 const COMPONENTS = ['app', 'vault'] as const;
@@ -43,12 +49,29 @@ export function addressOf(answer: string): string {
   return answer.trim().replace(/^https?:\/\//i, '').replace(/[/?#].*$/, '').toLowerCase();
 }
 
-/** Why an address will not do: not a host name, or under none of the account's domains. Null when it will. */
-export function addressProblem(address: string, zones: readonly string[]): string | null {
-  if (!/^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(address)) return 'an address such as secrets.example.com';
-  if (!zones.some((zone) => address === zone || address.endsWith(`.${zone}`))) return `not under a domain of this account: ${listed(zones, 'or')}`;
-  return null;
+/** Why an address will not do: not a host name. Null when it will. */
+export function addressProblem(address: string): string | null {
+  return /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(address) ? null : 'an address such as secrets.example.com';
 }
+
+/** A Worker's workers.dev address: `<name>.<subdomain>.workers.dev`. */
+export const workersDev = (name: string, subdomain: string) => `${name}.${subdomain}.workers.dev`;
+
+/** The domain to add for an address: its last two labels, `example.com` for secrets.example.com, to change where that is not it. */
+export const domainOf = (address: string) => address.split('.').slice(-2).join('.');
+
+/**
+ * Setup stopped for what only its user can do, such as setting a domain's
+ * nameservers at its registrar: nothing failed, and a run after carries on.
+ */
+export class Later extends Error {}
+
+/**
+ * How the app Worker is reached: at a custom domain, under one of the
+ * account's zones; as a custom hostname of one, for an address whose DNS is
+ * elsewhere; or at its workers.dev address.
+ */
+export type Serving = { kind: 'domain' } | ({ kind: 'saas' } & Served) | { kind: 'workers.dev' };
 
 /** What this directory's wrangler.jsonc records of the deployment it is: the Hyperdrive configs it binds, and a vault ID setup made. */
 export type Records = { hyperdrive: Record<Component, string | null>; vaultKeyId: string | null };
@@ -156,11 +179,14 @@ export class Cloudflare {
   readonly workers: Record<Component, WorkerConfig>;
   readonly address: string;
   readonly rootAdmins: string;
+  readonly serving: Serving;
   /** The keys this run makes, for the Workers without theirs, once `checkKeys` has run. */
   keys: Keys | null = null;
   #missing: Record<Component, boolean> = { app: false, vault: false };
   /** The GitHub App's client secret, when this run has it to install. */
   #clientSecret: string | null = null;
+  /** The Cloudflare API token setup was given, for what wrangler's login was refused: its wranglers deploy under it. */
+  readonly #token: string | null;
   /** What this run changed in each wrangler.jsonc, in a few words each. */
   readonly #wrote: Record<Component, Set<string>> = { app: new Set(), vault: new Set() };
 
@@ -170,7 +196,7 @@ export class Cloudflare {
     workers: Record<Component, WorkerConfig>,
     found: Found,
     administrator: URL,
-    answers: { address: string; rootAdmins: string },
+    answers: { address: string; rootAdmins: string; serving: Serving; token: string | null },
     secrets: string[],
   ) {
     this.#dir = dir;
@@ -180,7 +206,9 @@ export class Cloudflare {
     this.#administrator = administrator;
     this.address = answers.address;
     this.rootAdmins = answers.rootAdmins;
+    this.serving = answers.serving;
     this.#secrets = secrets;
+    this.#token = answers.token;
     const vars = workers.app.vars;
     this.#github = { web: vars.GITHUB_URL ?? GITHUB.web, api: vars.GITHUB_API_URL ?? GITHUB.api };
   }
@@ -216,7 +244,6 @@ export class Cloudflare {
           accounts.find(({ id }) => id === workers.app.accountId) ??
           (accounts.length === 1 ? accounts[0]! : accounts[await step.choose('Which Cloudflare account?', accounts.map(({ name }) => name))]!);
         const [zones, configs, email] = await Promise.all([api.zones(account.id), api.hyperdriveConfigs(account.id), api.email()]);
-        if (zones.length === 0) throw new Error(`the account ${account.name} has no domain, and coffre needs one for its address: add one to Cloudflare first`);
         const names = { app: workers.app.name, vault: workers.vault.name };
         const others = await othersUnder(api, account.id, configs, names, records, administrator);
         found = { api, account, zones, configs, others, secrets: { app: new Set(), vault: new Set() }, email };
@@ -226,14 +253,41 @@ export class Cloudflare {
       steps.end();
     }
 
-    const zones = found.zones.map(({ name }) => name);
+    const { api, account } = found;
+    // A domain serves coffre once Cloudflare serves its DNS: one still waiting for its nameservers does not, yet.
+    const active = found.zones.filter(({ status }) => status === undefined || status === 'active');
+    const zones = active.map(({ name }) => name);
     const url = workers.app.vars.PUBLIC_URL;
-    const address = addressOf(
-      await textLine(keys, out, s, "coffre's address", zones.length === 1 ? `under ${zones[0]}` : `under ${listed(zones, 'or')}`, {
+    let subdomain: string | null | undefined;
+    const ownSubdomain = async () => (subdomain === undefined ? (subdomain = await api.workersSubdomain(account.id)) : subdomain);
+    let address = addressOf(
+      await textLine(keys, out, s, "coffre's address", zones.length === 0 ? 'such as secrets.example.com' : `under ${listed(zones, 'or')}, or a domain elsewhere`, {
         initial: placeholder(url) ? '' : new URL(url!).host,
-        check: (answer) => addressProblem(addressOf(answer), zones),
+        check: async (answer) => {
+          const address = addressOf(answer);
+          if (!address.endsWith('.workers.dev')) return addressProblem(address);
+          const own = await ownSubdomain();
+          return own !== null && address === workersDev(workers.app.name, own) ? null : `the app Worker's workers.dev address is ${own === null ? 'not set up yet' : workersDev(workers.app.name, own)}`;
+        },
       }),
     );
+    let kind: Serving['kind'] = 'domain';
+    const under = zoneOf(address, found.zones);
+    if (address.endsWith('.workers.dev')) {
+      kind = 'workers.dev';
+    } else if (under?.status !== undefined && under.status !== 'active') {
+      throw new Later(nameservers(out, under, 'is on Cloudflare, waiting for its nameservers'));
+    } else if (under === undefined) {
+      out.write(`${s.dim(paragraph(out, `${address}'s DNS isn't on this Cloudflare account.`, 2))}\n`);
+      if (active.length > 0) {
+        out.write(
+          `${s.dim(paragraph(out, `Setup serves it through ${active.length === 1 ? active[0]!.name : 'one of your domains'}, with Cloudflare for SaaS: you add a CNAME and TXT records where its DNS is, and setup waits for them.`, 2))}\n`,
+        );
+        kind = 'saas';
+      } else {
+        kind = await noDomain(api, account, address, workers.app.name, ownSubdomain, out, keys, secrets);
+      }
+    }
     if (found.others.length > 0) {
       // Another deployment's, under these names: setup leaves it be, and this one takes names of its own.
       const one = found.others.length === 1;
@@ -250,6 +304,8 @@ export class Cloudflare {
       workers.app.name = name;
       workers.vault.name = `${name}-vault`;
     }
+    // The workers.dev address names the app Worker: its name, once settled.
+    if (kind === 'workers.dev') address = workersDev(workers.app.name, (await ownSubdomain())!);
     for (const component of COMPONENTS) {
       found.secrets[component] = new Set((await found.api.secretNames(found.account.id, workers[component].name)) ?? []);
     }
@@ -267,7 +323,8 @@ export class Cloudflare {
       .map((email) => email.trim())
       .join(',');
     out.write('\n');
-    return new Cloudflare(dir, wrangler, workers, found, administrator, { address, rootAdmins }, secrets);
+    const { serving, token } = kind === 'saas' ? await serveElsewhere(found, active, address, out, keys, describe, secrets) : { serving: { kind }, token: null };
+    return new Cloudflare(dir, wrangler, workers, found, administrator, { address, rootAdmins, serving, token }, secrets);
   }
 
   /** A Worker's Hyperdrive config, when there is one of this deployment's (`ourConfig`). */
@@ -435,12 +492,23 @@ export class Cloudflare {
   write(): Outcome {
     const url = `https://${this.address}`;
     const app = this.workers.app;
-    const route = { pattern: this.address, custom_domain: true };
+    const serving = this.serving;
+    // A custom hostname is served by a route on the zone it goes through, the zone named by its id: the address is under none of the account's.
+    const [route, what] =
+      serving.kind === 'saas'
+        ? [{ pattern: `${this.address}/*`, zone_id: serving.zone.id }, `its route through ${serving.zone.name}`]
+        : [{ pattern: this.address, custom_domain: true }, 'its custom domain'];
     this.#edit('app', [
       { path: ['vars', 'PUBLIC_URL'], value: url, what: 'the address' },
-      app.route === null
-        ? { path: ['routes'], value: [route], after: 'workers_dev', what: 'its custom domain' }
-        : { path: ['routes', 0], value: route, what: 'its custom domain' },
+      ...(serving.kind === 'workers.dev'
+        ? [
+            { path: ['workers_dev'], value: true, what: 'its workers.dev address' },
+            { path: ['routes'], value: [], after: 'workers_dev', what: 'its workers.dev address' },
+          ]
+        : [
+            { path: ['workers_dev'], value: false, what },
+            app.route === null ? { path: ['routes'], value: [route], after: 'workers_dev', what } : { path: ['routes', 0], value: route, what },
+          ]),
     ]);
     this.#edit('vault', [
       { path: ['vars', 'ROOT_ADMINS'], value: this.rootAdmins, what: 'the root admins' },
@@ -491,13 +559,15 @@ export class Cloudflare {
   /** Deploy the vault, then the app, which binds to it, each with the secrets it lacks; then wait for coffre to answer. */
   async deploy(out: Output, describe: (error: unknown) => string): Promise<string> {
     const url = `https://${this.address}`;
-    const steps = new Steps(out, ['Deploy the vault', 'Deploy the app', `Wait for ${url} to answer`], () => null, describe);
+    const serving = this.serving;
+    const titles = ['Deploy the vault', 'Deploy the app', ...(serving.kind === 'saas' ? [`Wait for ${this.address}'s DNS records`] : []), `Wait for ${url} to answer`];
+    const steps = new Steps(out, titles, () => null, describe);
     const account = this.#found.account.id;
     let answered = false;
     try {
       await steps.run(0, async () => {
         const secrets: Record<string, string> = this.#missing.vault ? { VAULT_KEY: this.keys!.VAULT_KEY } : {};
-        await deployWorker(this.#wrangler, this.workers.vault.path, account, secrets);
+        await deployWorker(this.#wrangler, this.workers.vault.path, account, secrets, this.#token);
         return `Deployed the vault, ${this.workers.vault.name}${this.#missing.vault ? ', with its key' : ''}`;
       });
       await steps.run(1, async (step) => {
@@ -509,21 +579,176 @@ export class Cloudflare {
           ...(this.#missing.app ? { APP_KEY: this.keys!.APP_KEY } : {}),
           ...(this.#clientSecret === null ? {} : { GITHUB_CLIENT_SECRET: this.#clientSecret }),
         };
-        await deployWorker(this.#wrangler, BUILT_APP, account, secrets);
+        await deployWorker(this.#wrangler, BUILT_APP, account, secrets, this.#token);
         const what = [...(this.#missing.app ? ['its key'] : []), ...(this.#clientSecret === null ? [] : ["GitHub's secret"])];
         return `Deployed the app, ${this.workers.app.name}${what.length === 0 ? '' : `, with ${listed(what, 'and')}`}`;
       });
-      await steps.run(2, async (step) => {
+      if (serving.kind === 'saas') {
+        await steps.run(2, async (step) => {
+          await waitForRecords(this.#found.api, serving, {
+            records: (lines) => {
+              steps.print(records(out, this.address, lines));
+              steps.aside('Setup asks Cloudflare every 10 seconds. You can stop it with Ctrl-C, and run setup again once the records are in: it picks up here.');
+            },
+            note: (text) => step.note(text),
+            under: (lines) => step.under(lines),
+          });
+          return `Cloudflare has seen ${this.address}'s records, and its certificate is out`;
+        });
+      }
+      await steps.run(titles.length - 1, async (step) => {
         answered = await answers(`${url}/livez`, (seconds) => step.note(`Wait for ${url} to answer: its certificate can take a minute (${seconds}s)`));
-        return answered
-          ? `coffre answers at ${url}`
-          : { text: `${url} does not answer yet`, details: ["A new domain's certificate can take a few minutes more. Nothing else is left to do."] };
+        const why =
+          serving.kind === 'saas'
+            ? `Check the CNAME: ${this.address} must point to ${serving.target}, where its DNS is.`
+            : "A new domain's certificate can take a few minutes more. Nothing else is left to do.";
+        return answered ? `coffre answers at ${url}` : { text: `${url} does not answer yet`, details: [why] };
       });
     } finally {
       steps.end();
     }
     return url;
   }
+}
+
+/** The records to add where an address's DNS is, under what they are for, to copy as they are. */
+function records(out: Output, address: string, lines: string[]): string {
+  const s = style(out);
+  return [`  ${s.bold(`Add these records where ${address}'s DNS is:`)}`, ...lines.map((line) => `    ${line}`)].join('\n');
+}
+
+/** A domain waiting for its nameservers: which to set, at its registrar, and what then. */
+function nameservers(out: Output, zone: Zone, state: string): string {
+  const s = style(out);
+  return [
+    '',
+    `  ${s.accent('→')} ${s.bold(`${zone.name} ${state}.`)} At your registrar, set its nameservers to:`,
+    ...(zone.name_servers ?? []).map((server) => `      ${server}`),
+    s.dim(paragraph(out, 'Cloudflare activates the domain once it sees them, often within the hour, at most within a day. Then run coffre setup again.', 4)),
+    '',
+    '',
+  ].join('\n');
+}
+
+/**
+ * No domain on the account to serve an address through: the two ways on,
+ * neither taken unless chosen. Add the address's domain to Cloudflare,
+ * which then serves its DNS, setup stopping until its nameservers move; or
+ * use the app Worker's workers.dev address for now.
+ */
+async function noDomain(
+  api: CloudflareApi,
+  account: Account,
+  address: string,
+  name: string,
+  ownSubdomain: () => Promise<string | null>,
+  out: Output,
+  keys: Keyboard,
+  secrets: string[],
+): Promise<'workers.dev'> {
+  const s = style(out);
+  const domain = domainOf(address);
+  const subdomain = await ownSubdomain();
+  out.write(
+    `${s.dim(
+      paragraph(
+        out,
+        `The account has no domain to serve it through, and a Worker answers only at an address Cloudflare serves. Either add ${domain} to Cloudflare, ` +
+          "which then serves its DNS once you set the nameservers it gives at your registrar; or use the Worker's workers.dev address for now, " +
+          'and run setup again for your own address later.',
+        2,
+      ),
+    )}\n`,
+  );
+  const choice = await select(keys, out, s, 'How should coffre be reached?', [
+    `Add ${domain} to this Cloudflare account`,
+    `At its workers.dev address for now${subdomain === null ? '' : `, ${workersDev(name, subdomain)}`}`,
+  ]);
+  if (choice === 1) {
+    if (subdomain === null) {
+      throw new Error("This account has no workers.dev subdomain yet: choose one on Cloudflare's dashboard, under Workers & Pages, then run setup again.");
+    }
+    return 'workers.dev';
+  }
+  const chosen = addressOf(await textLine(keys, out, s, 'The domain to add', 'the one you registered', { initial: domain, check: (answer) => addressProblem(addressOf(answer)) }));
+  // Refused, as wrangler's login is: a token that may, asked for, and the domain added under it.
+  let zone: Zone | null = null;
+  let refused = false;
+  while (zone === null) {
+    try {
+      zone = await api.createZone(account.id, chosen);
+      break;
+    } catch (error) {
+      if (!denied(error)) throw error;
+    }
+    const why = refused
+      ? 'Cloudflare refused that token as well.'
+      : `Cloudflare refused this login adding ${chosen}: wrangler's login may not. Make a token at https://dash.cloudflare.com/profile/api-tokens ` +
+        "with Zone: Zone Edit, for all zones of the account. Or stop here, add it on Cloudflare's dashboard, under Add a domain, and run setup again.";
+    out.write(`${s.dim(paragraph(out, why, 2))}\n`);
+    refused = true;
+    const token = await hiddenLine(keys, out, s, 'Cloudflare API token', 'Hidden as you paste it. Ctrl-C stops here.');
+    secrets.push(token);
+    api.use(token);
+  }
+  throw new Later(nameservers(out, zone, 'is on this Cloudflare account now'));
+}
+
+/**
+ * Serve an address whose DNS is elsewhere through one of the account's
+ * domains, and show the records to add there. Refused, as wrangler's login
+ * may be, it asks for a token that may, and goes on under it: so does
+ * every wrangler it runs after.
+ */
+async function serveElsewhere(
+  found: Found,
+  zones: readonly Zone[],
+  address: string,
+  out: Output,
+  keys: Keyboard,
+  describe: (error: unknown) => string,
+  secrets: string[],
+): Promise<{ serving: Serving; token: string | null }> {
+  const steps = new Steps(out, [`Serve ${address} through ${zones.length === 1 ? zones[0]!.name : 'one of your domains'}`], () => keys, describe);
+  let served!: Served;
+  let token: string | null = null;
+  try {
+    await steps.run(0, async (step) => {
+      // Chosen once: a run of the rest under a token asks no second time.
+      let zone: Zone | undefined;
+      for (;;) {
+        try {
+          zone ??= await saasZone(found.api, found.account.id, zones, address, (question, options) => step.choose(question, options));
+          const { details, ...rest } = await serveThrough(found.api, zone, address);
+          served = rest;
+          return { text: `${address} is a custom hostname of ${zone.name}`, details };
+        } catch (error) {
+          if (!(error instanceof Refused)) throw error;
+          steps.aside(token === null ? tokenNeeded(error.zones) : 'Cloudflare refused that token as well: it needs the permissions above.');
+        }
+        await step.paste(
+          'Paste a Cloudflare API token, hidden as you paste it:',
+          async (text) => {
+            if (!/^\S{20,}$/.test(text)) return 'that is not a Cloudflare API token: copy it whole';
+            token = text;
+            secrets.push(text);
+            found.api.use(text);
+            return null;
+          },
+          new AbortController().signal,
+        );
+      }
+    });
+    // Once Cloudflare has seen them, a run after has none to show.
+    if (!standing(served.hostname).done) {
+      steps.print(records(out, address, recordLines(recordsToAdd(served.hostname, served.target))));
+      steps.aside('Setup carries on meanwhile, and waits for Cloudflare to see them once coffre is deployed.');
+    }
+  } finally {
+    steps.end();
+  }
+  out.write('\n');
+  return { serving: { kind: 'saas', ...served }, token };
 }
 
 /** Whether `url` answers 200 within ANSWER_WITHIN_MS, asking every few seconds. */

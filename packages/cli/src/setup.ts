@@ -27,7 +27,7 @@ import { type Screen, showSecrets, type Value } from './secrets.ts';
 import { StepFailed, Steps } from './steps.ts';
 import { Cancelled, type Keyboard, listed, openTerminal, type Output, paragraph, release, row, select, style, type Style } from './tty.ts';
 import { cliVersion } from './version.ts';
-import { Cloudflare, deployedSummary } from './workers.ts';
+import { Cloudflare, deployedSummary, Later } from './workers.ts';
 
 /** The two runtime roles, as the migration names them, and the Hyperdrive config each gets on Workers. */
 const ROLES = { app: 'coffre_runtime', vault: 'coffre_vault_runtime' } as const;
@@ -156,6 +156,11 @@ export async function setup(args: string[]): Promise<void> {
     }
   } catch (error) {
     if (error instanceof Cancelled) return fail(out, 'cancelled; nothing after the last step done was changed', 130);
+    // Stopped for what only its user can do, which it says: a run after carries on.
+    if (error instanceof Later) {
+      out.write(error.message);
+      process.exit(0);
+    }
     // A step shows its own failure; an error outside the steps is shown here.
     if (!(error instanceof StepFailed)) return fail(out, clean(error));
     process.exit(1);

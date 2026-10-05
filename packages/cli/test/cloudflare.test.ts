@@ -15,7 +15,7 @@ import { appManifest, appName, convert, createGitHubApp, manifestAddress, manife
 import { templateDir } from '../src/init.ts';
 import { Steps } from '../src/steps.ts';
 import { Cancelled } from '../src/tty.ts';
-import { addressOf, addressProblem, adminsProblem, isOurs, nameFrom, nameProblem, ourConfig, recordsOf } from '../src/workers.ts';
+import { addressOf, addressProblem, adminsProblem, domainOf, isOurs, nameFrom, nameProblem, ourConfig, recordsOf } from '../src/workers.ts';
 import { cancelTerminals, fakeCloudflare, fakeGitHub, fakeOpener, fakeTerminal, fakeWrangler, manifestForm, settle, submitManifest } from './fakes.ts';
 
 // Whatever a failed test leaves waiting, a prompt, a wrangler, a listener, goes: this file's process always ends.
@@ -135,11 +135,13 @@ test('wrangler.jsonc is read for what setup needs, and edited in place, its comm
 
 test('the address and the root admins: what will do, and why not', () => {
   assert.equal(addressOf(' HTTPS://Secrets.Acme.test/login?x=1 '), 'secrets.acme.test');
-  assert.equal(addressProblem('secrets.acme.test', ['acme.test']), null);
-  assert.equal(addressProblem('acme.test', ['acme.test']), null);
-  assert.match(addressProblem('secrets.other.test', ['acme.test', 'acme.dev'])!, /not under a domain of this account: acme\.test or acme\.dev/);
-  assert.match(addressProblem('notacme.test', ['acme.test'])!, /not under a domain/);
-  assert.match(addressProblem('secrets', ['acme.test'])!, /an address such as/);
+  assert.equal(addressProblem('secrets.acme.test'), null);
+  assert.equal(addressProblem('acme.test'), null);
+  // Under none of the account's domains will do too: it is served through one (hostname.ts).
+  assert.equal(addressProblem('secrets.other.test'), null);
+  assert.match(addressProblem('secrets')!, /an address such as/);
+  assert.match(addressProblem('secrets.acme.test:8443')!, /an address such as/);
+  assert.equal(domainOf('secrets.example.org'), 'example.org');
   assert.equal(adminsProblem('a@acme.test, b@acme.test'), null);
   assert.match(adminsProblem('a@acme.test, nobody')!, /not an email: nobody/);
 });

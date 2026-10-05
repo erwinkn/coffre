@@ -23,6 +23,14 @@ function listen(server: Server): Promise<string> {
 
 export type Origin = { scheme?: string; host: string; port: number; database: string; user: string; password: string };
 export type FakeConfig = { id: string; name: string; origin: Origin; caching: { disabled: boolean } };
+export type FakeZone = { id: string; name: string; status?: string; name_servers?: string[] };
+export type FakeHostname = {
+  id: string;
+  hostname: string;
+  status: string;
+  ownership_verification: { type: string; name: string; value: string };
+  ssl: { status: string; method: string; type: string; validation_records?: { txt_name: string; txt_value: string }[] };
+};
 
 /** Cloudflare's API, as setup and wrangler call it, under one token. */
 export async function fakeCloudflare(token: string) {
@@ -31,12 +39,27 @@ export async function fakeCloudflare(token: string) {
       { id: 'acc-acme', name: 'Acme' },
       { id: 'acc-home', name: 'Home' },
     ],
-    zones: { 'acc-acme': [{ id: 'zone-1', name: 'acme.test' }], 'acc-home': [] } as Record<string, { id: string; name: string }[]>,
+    zones: { 'acc-acme': [{ id: 'zone-1', name: 'acme.test', status: 'active' }], 'acc-home': [] } as Record<string, FakeZone[]>,
     configs: new Map<string, FakeConfig[]>(),
     /** Each Worker deployed, `<account>/<name>`: the names of its secrets, and its bindings. */
     scripts: new Map<string, { secrets: Set<string>; bindings: unknown[] }>(),
     requests: [] as { method: string; path: string; body: string }[],
     email: 'ops@acme.test' as string | null,
+    /** Each account's workers.dev subdomain, when it has one. */
+    subdomains: { 'acc-acme': 'acme' } as Record<string, string>,
+    /** The zones Cloudflare for SaaS is enabled on. */
+    saas: new Set<string>(),
+    /** What the token may not do: custom hostnames (`ssl`), DNS records (`dns`), adding a domain (`zone`), as wrangler's login may not. */
+    denied: new Set<'ssl' | 'dns' | 'zone'>(),
+    /** API tokens made on the dashboard, which may do all of it. */
+    apiTokens: new Set<string>(),
+    /** What a zone with Cloudflare for SaaS on and no fallback origin answers: Cloudflare does not document it. */
+    noFallback: '404' as '404' | 'empty' | '1551',
+    fallback: new Map<string, { origin: string; status: string }>(),
+    dns: new Map<string, { type: string; name: string; content: string; proxied: boolean }[]>(),
+    hostnames: new Map<string, FakeHostname[]>(),
+    /** The records the custom hostnames' DNS provider has, by name: Cloudflare sees each a moment after it is there. */
+    published: new Set<string>(),
   };
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? '/', 'http://localhost');
@@ -50,12 +73,85 @@ export async function fakeCloudflare(token: string) {
       const at = Number(url.searchParams.get('page') ?? 1);
       return send(200, all.slice((at - 1) * size, at * size), [], { page: at, per_page: size, total_count: all.length, total_pages: Math.ceil(all.length / size) });
     };
-    if (request.headers.authorization !== `Bearer ${token}`) return send(401, null, [{ code: 10000, message: 'Authentication error' }]);
+    const bearer = request.headers.authorization?.replace(/^Bearer /, '') ?? '';
+    if (bearer !== token && !state.apiTokens.has(bearer)) return send(401, null, [{ code: 10000, message: 'Authentication error' }]);
+    const refused = (what: 'ssl' | 'dns' | 'zone') => bearer === token && state.denied.has(what);
     const path = url.pathname.replace(/^\/client\/v4/, '');
     let match: RegExpExecArray | null;
     if (path === '/accounts') return page(state.accounts);
     if (path === '/user') return state.email === null ? send(403, null, [{ code: 9109, message: 'Unauthorized' }]) : send(200, { email: state.email });
+    if (path === '/zones' && request.method === 'POST') {
+      if (refused('zone')) return send(403, null, [{ code: 10000, message: 'Authentication error' }]);
+      const { account, name } = JSON.parse(text) as { account: { id: string }; name: string };
+      const zone = { id: `zone-${randomBytes(4).toString('hex')}`, name, status: 'pending', name_servers: ['ada.ns.cloudflare.com', 'bob.ns.cloudflare.com'] };
+      (state.zones[account.id] ??= []).push(zone);
+      return send(200, zone);
+    }
     if (path === '/zones') return page(state.zones[url.searchParams.get('account.id') ?? ''] ?? []);
+    if ((match = /^\/accounts\/([^/]+)\/workers\/subdomain$/.exec(path)) !== null) {
+      const subdomain = state.subdomains[match[1]!];
+      return subdomain === undefined ? send(404, null, [{ code: 10007, message: 'This account has no workers.dev subdomain' }]) : send(200, { subdomain });
+    }
+    if ((match = /^\/zones\/([^/]+)\/dns_records$/.exec(path)) !== null) {
+      if (refused('dns')) return send(403, null, [{ code: 10000, message: 'Authentication error' }]);
+      const records = state.dns.get(match[1]!) ?? [];
+      state.dns.set(match[1]!, records);
+      if (request.method === 'POST') {
+        const record = JSON.parse(text) as { type: string; name: string; content: string; proxied: boolean };
+        records.push(record);
+        return send(200, record);
+      }
+      return send(200, records.filter(({ name }) => name === url.searchParams.get('name')));
+    }
+    if ((match = /^\/zones\/([^/]+)\/custom_hostnames(?:\/([^/]+))?$/.exec(path)) !== null) {
+      const [, zone, part] = match;
+      if (refused('ssl')) return send(403, null, [{ code: 10000, message: 'Authentication error' }]);
+      if (!state.saas.has(zone!)) return send(403, null, [{ code: 1404, message: 'No quota has been allocated for this zone.' }]);
+      const hostnames = state.hostnames.get(zone!) ?? [];
+      state.hostnames.set(zone!, hostnames);
+      if (part === 'fallback_origin') {
+        if (request.method === 'PUT') {
+          const { origin } = JSON.parse(text) as { origin: string };
+          // As Cloudflare checks it: a proxied record of the zone's.
+          if (!(state.dns.get(zone!) ?? []).some(({ name, proxied }) => name === origin && proxied)) {
+            return send(400, null, [{ code: 1551, message: 'Origin should be a proxied A/AAAA/CNAME dns record' }]);
+          }
+          state.fallback.set(zone!, { origin, status: 'pending_deployment' });
+        }
+        const fallback = state.fallback.get(zone!);
+        if (fallback !== undefined) return send(200, fallback);
+        if (state.noFallback === 'empty') return send(200, null);
+        return send(state.noFallback === '1551' ? 400 : 404, null, [{ code: 1551, message: 'No fallback origin' }]);
+      }
+      // Cloudflare's view of a hostname: active once it sees its CNAME or its TXT record; its certificate, once it sees both of its TXT records.
+      const seen = (hostname: FakeHostname): FakeHostname => {
+        const has = (name: string) => state.published.has(name);
+        if (hostname.status !== 'active' && (has(hostname.hostname) || has(hostname.ownership_verification.name))) hostname.status = 'active';
+        // Its certificate's records come a moment after the hostname: never in the answer to the POST.
+        hostname.ssl.validation_records ??= ['a', 'b'].map((half) => ({ txt_name: `_acme-challenge.${hostname.hostname}`, txt_value: `${half}-${randomBytes(8).toString('hex')}` }));
+        if (hostname.ssl.status === 'pending_validation' && has(`_acme-challenge.${hostname.hostname}`)) hostname.ssl.status = 'active';
+        return hostname;
+      };
+      if (part === undefined && request.method === 'POST') {
+        const { hostname, ssl } = JSON.parse(text) as { hostname: string; ssl: { method: string; type: string } };
+        if (hostnames.some((each) => each.hostname === hostname)) return send(409, null, [{ code: 1406, message: 'Duplicate custom hostname found.' }]);
+        const made: FakeHostname = {
+          id: `ch-${randomBytes(4).toString('hex')}`,
+          hostname,
+          status: 'pending',
+          ownership_verification: { type: 'txt', name: `_cf-custom-hostname.${hostname}`, value: randomBytes(16).toString('hex') },
+          ssl: { status: 'pending_validation', ...ssl },
+        };
+        hostnames.push(made);
+        return send(201, { ...made, ssl: { ...made.ssl } });
+      }
+      if (part === undefined) return send(200, hostnames.filter(({ hostname }) => hostname === url.searchParams.get('hostname')).map(seen));
+      const hostname = hostnames.find(({ id }) => id === part);
+      if (hostname === undefined) return send(404, null, [{ code: 1436, message: 'The custom hostname was not found.' }]);
+      // Validation starts over: a moved hostname is pending again, its certificate too.
+      if (request.method === 'PATCH') Object.assign(hostname, { status: hostname.status === 'moved' ? 'pending' : hostname.status, ssl: { ...hostname.ssl, status: 'pending_validation' } });
+      return send(200, seen(hostname));
+    }
     if ((match = /^\/accounts\/([^/]+)\/hyperdrive\/configs(?:\/([^/]+))?$/.exec(path)) !== null) {
       const [, account, id] = match;
       const configs = state.configs.get(account!) ?? [];
@@ -191,8 +287,12 @@ const publish = (path, text) => {
 publish(STATE + '/pid-' + args[0], String(process.pid));
 // The secrets file by its path, as wrangler reads it: /dev/stdin must open as a file.
 const stdin = args.includes('--secrets-file') ? readFileSync(args[args.indexOf('--secrets-file') + 1], 'utf8') : '';
-appendFileSync(STATE + '/calls.jsonl', JSON.stringify({ args, stdin, account: process.env.CLOUDFLARE_ACCOUNT_ID ?? null }) + '\\n');
-if (args[0] === 'auth') {
+// The token a deploy runs under: one in its environment, as wrangler reads it, or its login's.
+const apiToken = process.env.CLOUDFLARE_API_TOKEN ?? null;
+appendFileSync(STATE + '/calls.jsonl', JSON.stringify({ args, stdin, account: process.env.CLOUDFLARE_ACCOUNT_ID ?? null, apiToken }) + '\\n');
+if (args[0] === 'auth' && apiToken !== null) {
+  console.log(JSON.stringify({ type: 'api_token', token: apiToken }));
+} else if (args[0] === 'auth') {
   if (!existsSync(STATE + '/token')) { console.error('You are not authenticated. Please run \`wrangler login\`.'); process.exit(1); }
   console.log(JSON.stringify({ type: 'oauth', token: readFileSync(STATE + '/token', 'utf8') }));
 } else if (args[0] === 'login') {
@@ -242,7 +342,7 @@ if (args[0] === 'auth') {
     ...Object.entries(config.vars ?? {}).map(([key, text]) => ({ type: 'plain_text', name: key, text })),
     ...(config.services ?? []).map(({ binding, service }) => ({ type: 'service', name: binding, service })),
   ];
-  const token = readFileSync(STATE + '/token', 'utf8');
+  const token = apiToken ?? readFileSync(STATE + '/token', 'utf8');
   await fetch(process.env.CLOUDFLARE_API_BASE_URL + '/accounts/' + account + '/workers/scripts/' + name, { method: 'PUT', headers: { authorization: 'Bearer ' + token }, body: JSON.stringify({ secrets, bindings }) });
   console.log('Deployed ' + name);
 } else {

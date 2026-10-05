@@ -178,8 +178,8 @@ test('a first run: signed in, Hyperdrive, the GitHub App and the files done; the
     await terminal.waitFor('Which Cloudflare account?');
     terminal.send('\r');
     await terminal.waitFor("coffre's address");
-    terminal.send('secrets.other.test\r');
-    await terminal.waitFor('not under a domain of this account: acme.test');
+    terminal.send('secrets\r');
+    await terminal.waitFor('an address such as secrets.example.com');
     terminal.send(`\x15${ADDRESS}\r`);
     await terminal.waitFor('Root admins');
     terminal.send('\r');
