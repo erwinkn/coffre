@@ -15,6 +15,7 @@ import {
 } from '@coffre/core/access';
 import { GENESIS_HASH, verifyEntries, type LogKey, type StoredEntry } from '@coffre/core/audit';
 import { checkContext, type SecretContext } from '@coffre/core/envelope';
+import { shownMember } from '@coffre/core/schemas';
 import {
   DEK_BYTES,
   KEY_CHECK,
@@ -1435,7 +1436,7 @@ class VaultService implements Vault {
       const acting = await this.#standing(d.tx, actor, d.members.get(actor), d.at, d.reports);
       if (acting.status === 'tampered') throw refused('tampered');
       if (!acting.live.isOwner) throw refused('not_allowed', 'only owners may add or restore members');
-      if (!LIVE_PRINCIPAL.test(principal)) throw refused('invalid', `not a member: ${principal}`);
+      if (!LIVE_PRINCIPAL.test(principal)) throw refused('invalid', `not a member: ${shownMember(principal)}`);
       if (this.#isRootAdmin(principal)) throw refused('root_admin');
       if (input.owner === true && !principal.startsWith('user:')) {
         throw refused('invalid', 'service accounts cannot be owners');
@@ -1487,7 +1488,7 @@ class VaultService implements Vault {
       new Refused(refusal(code, message), [accessEntry(actor, 'member.remove', principal, 'deny', input, {}, code)]);
     return this.#decide([actor, principal], async (d) => {
       validateCorrelation(input);
-      if (!LIVE_PRINCIPAL.test(principal)) throw refused('invalid', `not a member: ${principal}`);
+      if (!LIVE_PRINCIPAL.test(principal)) throw refused('invalid', `not a member: ${shownMember(principal)}`);
       if (this.#isRootAdmin(principal)) throw refused('root_admin');
       const row = d.members.get(principal);
       const acting = await this.#standing(d.tx, actor, d.members.get(actor), d.at, d.reports);

@@ -1,4 +1,4 @@
-import type { AuthInfo, CoffreClient, ConnectedApp, Member } from '@coffre/client';
+import type { AuthInfo, CoffreClient, Member } from '@coffre/client';
 import { QueryClient, queryOptions, type QueryKey } from '@tanstack/react-query';
 
 import { deriveUiCapabilities } from './capabilities.ts';
@@ -201,8 +201,8 @@ export const queries = {
 
   /**
    * A token's trust bindings: the CI runs that may sign in as it. Null for
-   * anyone but an owner; a failure where the deployment trusts no workloads,
-   * which the page reads as nothing to show. Whether it does is not public.
+   * anyone but an owner, and where the deployment trusts no workloads
+   * (`features.workloads`), so there is nothing to ask.
    */
   bindings: (client: CoffreClient, member: string, allowed: boolean) =>
     queryOptions({
@@ -217,20 +217,9 @@ export const queries = {
   /** Where you are signed in, under coffre's own sign-in. */
   sessions: (client: CoffreClient) =>
     queryOptions({ queryKey: keys.sessions, queryFn: () => uiResult(() => client.sessions.list()) }),
-  /** The MCP clients I connected; `off` where the instance serves no MCP, which answers 404. */
+  /** The MCP clients I connected, where the deployment serves MCP (`features.mcp`). */
   apps: (client: CoffreClient) =>
-    queryOptions({
-      queryKey: keys.apps,
-      queryFn: () =>
-        uiResult(async () => {
-          try {
-            return { ...(await client.apps.list()), off: false };
-          } catch (error) {
-            if (statusOf(error) === 404) return { apps: [] as ConnectedApp[], off: true };
-            throw error;
-          }
-        }),
-    }),
+    queryOptions({ queryKey: keys.apps, queryFn: () => uiResult(() => client.apps.list()) }),
 
   /**
    * What the keys an operator keeps are checked against: the vault's ID and
@@ -342,6 +331,8 @@ export function shellOf(
     instance: member?.instance ?? null,
     /** A member the vault refuses: their record failed its integrity check. */
     accessTampered: me?.tampered === true,
+    /** What the deployment's configuration turns on: MCP clients, and CI runs signing in by their ID tokens. */
+    features: member?.features ?? { mcp: false, workloads: false },
   };
 }
 
@@ -402,6 +393,7 @@ export async function loadServiceDirectory(queryClient: QueryClient, client: Cof
   const shell = await loadShell(queryClient, client);
   const directory = await loadDirectory(queryClient, client);
   const allowed = shell.capabilities.canManageGrants && shell.auth.signin !== null;
+  const trusts = shell.capabilities.canManageGrants && shell.features.workloads;
   if (!directory.ok || !allowed) return directory;
   await Promise.all(
     directory.principals
@@ -410,7 +402,7 @@ export async function loadServiceDirectory(queryClient: QueryClient, client: Cof
         const member = memberRef('service', principal.principalId);
         return [
           queryClient.fetchQuery(queries.credentials(client, member, allowed)),
-          queryClient.fetchQuery(queries.bindings(client, member, allowed)),
+          queryClient.fetchQuery(queries.bindings(client, member, trusts)),
         ];
       }),
   );
@@ -440,7 +432,7 @@ export async function loadPrincipal(
       ? queryClient.fetchQuery(queries.credentials(client, member, owner && shell.auth.signin !== null))
       : null,
     principalType === 'service'
-      ? queryClient.fetchQuery(queries.bindings(client, member, owner && shell.auth.signin !== null))
+      ? queryClient.fetchQuery(queries.bindings(client, member, owner && shell.features.workloads))
       : null,
     ...managedProjects(shell.projects).map((project) => queryClient.fetchQuery(queries.grants(client, project.slug))),
   ]);

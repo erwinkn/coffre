@@ -193,12 +193,12 @@ const PLATFORM: Record<string, string> = {
  */
 function ServiceCells({ principal }: { principal: DirectoryPrincipal }) {
   const client = useCoffre();
-  const { auth, capabilities } = useShell();
+  const { auth, capabilities, features } = useShell();
   const member = memberOf(principal);
   // As `loadServiceDirectory` read them, so these come from its cache.
   const allowed = capabilities.canManageGrants && auth.signin !== null;
   // Not suspended: an account added here is shown at once, its facts when they come.
-  const { data: bindings } = useQuery(queries.bindings(client, member, allowed));
+  const { data: bindings } = useQuery(queries.bindings(client, member, capabilities.canManageGrants && features.workloads));
   const { data: credentials } = useQuery(queries.credentials(client, member, allowed));
 
   const platforms = new Map<string, number>();

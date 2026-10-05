@@ -230,7 +230,7 @@ export function endSession(client: CoffreClient): Change<Sessions, SessionRow, S
   };
 }
 
-type Apps = ({ ok: true; apps: ConnectedApp[]; off: boolean } | Failure);
+type Apps = ({ ok: true; apps: ConnectedApp[] } | Failure);
 
 export function disconnectApp(client: CoffreClient): Change<Apps, ConnectedApp, ConnectedApp, unknown> {
   return {

@@ -44,6 +44,12 @@ export type Me = {
   instanceRole: 'user' | 'owner' | 'root-admin';
   isRootAdmin: boolean;
   canReadAudit: boolean;
+  /**
+   * What this deployment's configuration turns on, as `signin({ … })` says:
+   * MCP clients (`mcp`) and CI runs signing in by their ID tokens
+   * (`workloads`). Read here, never inferred from a route answering 404.
+   */
+  features: { mcp: boolean; workloads: boolean };
   /** Every live environment the caller holds something in, and what. */
   environments: { project: string; environment: string; permissions: Permission[] }[];
   /**
@@ -140,6 +146,7 @@ export async function me(ctx: ApiContext): Promise<Me> {
     instanceRole: caller.instanceRole,
     isRootAdmin: caller.isRootAdmin,
     canReadAudit: caller.isOwner || canAnywhere(caller, 'audit.read'),
+    features: { mcp: ctx.mcp !== null, workloads: ctx.workloads !== null },
     environments: reachable,
     instance: caller.isOwner || caller.isRootAdmin ? await instanceState(ctx) : null,
   };

@@ -21,8 +21,3 @@ export function apiMember(member: string): string {
 export function serviceName(member: string): string {
   return member.replace(/^(?:service|token):/, '');
 }
-
-/** Text from the API, a refusal's message say, its service accounts as people read them. */
-export function shownText(text: string): string {
-  return text.replace(/(?<![\w-])token:(?=[A-Za-z0-9])/g, 'service:');
-}

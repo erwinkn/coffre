@@ -5,6 +5,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 import type pg from 'pg';
 
+import { shownMember } from '@coffre/core/schemas';
 import { github, signin, type BindingClaims, type RateLimiter, type WorkloadProfile } from '@coffre/core/identity';
 import { createDatabase, type Database } from '@coffre/db';
 import { asc, eq, sql, type SQL } from 'drizzle-orm';
@@ -213,7 +214,7 @@ test('refusals say why, never what a binding expects, and a stranger never reach
   const reason = async (jwt: string, service = MEMBER) => (await trade(jwt, service)).body;
   // The claims that differ, by name.
   const feature = await reason(token(rsa, { ref: 'refs/heads/feature', workflow_ref: 'acme/api/.github/workflows/deploy.yml@refs/heads/feature' }));
-  assert.deepEqual([feature.reason, feature.message], ['no_match', `no binding of ${MEMBER} trusts these claims: ref, workflow_ref differ`]);
+  assert.deepEqual([feature.reason, feature.message], ['no_match', `no binding of ${shownMember(MEMBER)} trusts these claims: ref, workflow_ref differ`]);
   assert.ok(!feature.message!.includes('refs/heads/main'));
   assert.equal((await reason(token(rsa, { event_name: 'pull_request_target' }))).reason, 'no_match');
   assert.equal((await reason(token(rsa, { repository_id: '1' }))).reason, 'no_match');
@@ -223,7 +224,7 @@ test('refusals say why, never what a binding expects, and a stranger never reach
   const nobody = await reason(token(rsa), 'token:nobody');
   const elsewhere = await reason(token(rsa, { iss: 'https://gitlab.com' }));
   assert.deepEqual([nobody.reason, elsewhere.reason], ['no_match', 'no_match']);
-  assert.equal(nobody.message, `no binding of token:nobody trusts tokens from ${ISSUER}`);
+  assert.equal(nobody.message, `no binding of service:nobody trusts tokens from ${ISSUER}`);
   assert.equal(await reason(token(rsa), `user:${DEV}`).then((body) => body.reason), 'no_match');
   assert.equal((await reason('not.a.token')).reason, 'malformed');
   assert.deepEqual([vaultCalls, issuer.fetches], [0, 0], 'a stranger costs no vault call and no fetch');
@@ -568,7 +569,7 @@ test("a reusable workflow's binding names its caller's ref: a feature branch cal
   const id = await bind({ repository_owner_id: '9919', repository_id: '41532', ref: 'refs/heads/main', event_name: 'push', ...called }, [], 'github-reusable');
   const caller = (ref: string) => ({ ...called, ref, workflow_ref: `acme/api/.github/workflows/release.yml@${ref}` });
   const feature = (await trade(token(rsa, caller('refs/heads/feature')))).body;
-  assert.deepEqual([feature.reason, feature.message], ['no_match', `no binding of ${MEMBER} trusts these claims: ref differ`]);
+  assert.deepEqual([feature.reason, feature.message], ['no_match', `no binding of ${shownMember(MEMBER)} trusts these claims: ref differ`]);
   assert.equal((await trade(token(rsa, caller('refs/heads/main')))).status, 200);
   assert.equal((await appEntries('token.exchange'))[0]!.metadata.bindingId, id);
 });
@@ -581,7 +582,7 @@ test('a GitLab binding names the namespace by ID: the same project moved to anot
   await bind(pipeline, [], 'gitlab');
   const run = (claims: Record<string, unknown>) => token(rsa, { iss: gitlab, sub: 'project_path:acme/api:ref_type:branch:ref:main', ...pipeline, ...claims });
   const moved = (await trade(run({ namespace_id: '78', namespace_path: 'other' }))).body;
-  assert.deepEqual([moved.reason, moved.message], ['no_match', `no binding of ${MEMBER} trusts these claims: namespace_id differ`]);
+  assert.deepEqual([moved.reason, moved.message], ['no_match', `no binding of ${shownMember(MEMBER)} trusts these claims: namespace_id differ`]);
   assert.equal((await trade(run({}))).status, 200);
 });
 

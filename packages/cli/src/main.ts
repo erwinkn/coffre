@@ -50,7 +50,6 @@ import {
   apiMember,
   serviceName,
   shownMember,
-  shownText,
   type CoffreClient,
 } from '@coffre/client';
 import { assignableToEnvironment, isRole, ROLES, type Role } from '@coffre/core/access';
@@ -154,7 +153,8 @@ async function headersFor(to: Target): Promise<Record<string, string>> {
 }
 
 /** What to do next, for a refusal a command expects: its status and message, to a line, or null. */
-type Hint = (status: number, detail: string) => string | null;
+/** What to suggest after a refusal, by its status and the server's reason for it (`principal_not_registered`), never its words. */
+type Hint = (status: number, reason: string | null) => string | null;
 
 /**
  * The API, for one instance. A refusal of a status in `handled` comes back
@@ -238,10 +238,9 @@ async function send(request: Request, to: Target, hint?: Hint, handled: readonly
   if (handled.includes(response.status)) return response;
   const json = isJsonContentType(response.headers.get('content-type'));
   if (!response.ok) {
-    const body = json ? ((await response.json().catch(() => ({}))) as { error?: unknown; message?: unknown }) : {};
-    // Its service accounts as people read them: the API says token:<name>, people service:<name>.
-    const detail = typeof body.message === 'string' && body.message.length > 0 ? shownText(body.message) : null;
-    const next = detail === null ? null : (hint?.(response.status, detail) ?? null);
+    const body = json ? ((await response.json().catch(() => ({}))) as { error?: unknown; message?: unknown; reason?: unknown }) : {};
+    const detail = typeof body.message === 'string' && body.message.length > 0 ? body.message : null;
+    const next = detail === null ? null : (hint?.(response.status, typeof body.reason === 'string' ? body.reason : null) ?? null);
     if (next !== null) fail(`${detail}: ${next}`);
     if (response.status === 403) fail(`forbidden: ${detail ?? 'you do not have a grant for that environment'}`);
     if (response.status === 404) fail(detail === null ? 'not found' : `not found: ${detail}`);
@@ -619,6 +618,10 @@ async function whoami(args: string[]): Promise<void> {
     const days = Math.round((Date.parse(session.expiresAt) - Date.now()) / 86_400_000);
     process.stdout.write(`  session ends ${session.expiresAt.slice(0, 10)} (in ${days} day${days === 1 ? '' : 's'})\n`);
   }
+  if (me.registered) {
+    const on = (flag: boolean) => (flag ? 'on' : 'off');
+    process.stdout.write(`  here, MCP clients are ${on(me.features.mcp)}, and CI runs signing in by their ID tokens ${on(me.features.workloads)}\n`);
+  }
   printMe(me);
 }
 
@@ -918,7 +921,7 @@ async function grantAccess(args: string[]): Promise<void> {
   const who = memberOf(principalId, values.service);
   // A member is admitted before they hold anything: grant does not make one.
   const admit = `coffre admit ${shownMember(who).replace(/^user:/, '')}`;
-  const hint: Hint = (status, detail) => (status === 409 && /add them as a member/.test(detail) ? `admit them first, \`${admit}\`` : null);
+  const hint: Hint = (status, reason) => (status === 409 && reason === 'principal_not_registered' ? `admit them first, \`${admit}\`` : null);
   // Declarative: this place gets this role, replacing any other role there.
   await client(target(), hint).access.set(who, {
     [scope]: values.expires ? { role, until: values.expires } : role,

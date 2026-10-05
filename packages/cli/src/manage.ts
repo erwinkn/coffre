@@ -623,10 +623,18 @@ export async function sessionsRevoke(connect: () => CoffreClient, args: string[]
   io.out.write(`signed out ${what}${current}\n`);
 }
 
+/** What `apps` says where the deployment serves no MCP, as `GET /me` reports its configuration. */
+const MCP_OFF = "MCP is off on this instance: no app connects here. Its deployment's signin({ mcp }) turns it on (docs/mcp.md)";
+
 /** The MCP clients you connected: Account › Connected apps. */
 export async function apps(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
   const { values } = parse(args, json, []);
   const api = connect();
+  if (!(await api.me()).features.mcp) {
+    if (values.json) return asJson(io, []);
+    io.out.write(`${MCP_OFF}\n`);
+    return;
+  }
   const { apps: list } = await api.apps.list();
   if (values.json) return asJson(io, list);
   for (const app of list) {
@@ -641,6 +649,7 @@ export async function appsRevoke(connect: () => CoffreClient, args: string[], io
   const { values, positionals } = parse(args, { apply: { type: 'boolean', default: false } }, ['<id>']);
   const id = positionals[0]!;
   const api = connect();
+  if (!(await api.me()).features.mcp) throw new Error(MCP_OFF);
   const app = (await api.apps.list()).apps.find((entry) => entry.id === id);
   if (app === undefined) throw new Error(`you have no connected app ${id}: \`coffre apps\` lists them`);
   const what = `${app.name}${app.host === null ? '' : ` (${app.host})`}, connected ${day(app.createdAt)}, last used ${day(app.lastUsedAt)}`;

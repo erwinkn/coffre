@@ -113,6 +113,15 @@ async function locate(
 }
 
 /**
+ * A path's segments as the router matches them: after `/api`, empty ones
+ * dropped, each percent-decoded. Throws on percent-encoding that does not
+ * decode, which no route matches.
+ */
+export function routeParts(pathname: string): string[] {
+  return pathname.replace(/^\/api/, '').split('/').filter(Boolean).map(decodeURIComponent);
+}
+
+/**
  * Serve one API request for an authenticated caller:
  *
  *   1. match `METHOD /route`; no route is 404, a route without this method 405
@@ -127,7 +136,7 @@ export async function serveApi(request: Request, ctx: ApiContext): Promise<Respo
     const url = new URL(request.url);
     let parts: string[];
     try {
-      parts = url.pathname.replace(/^\/api/, '').split('/').filter(Boolean).map(decodeURIComponent);
+      parts = routeParts(url.pathname);
     } catch {
       throw badRequest('the path is not valid percent-encoding');
     }

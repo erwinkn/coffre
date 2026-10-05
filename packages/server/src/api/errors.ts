@@ -45,7 +45,7 @@ export type ErrorBody = { error: ErrorCode; message: string; reason?: string };
 
 export class ApiError extends Error {
   readonly code: ErrorCode;
-  /** The vault's own code, for `vault_refused` and `bulk_limit`. */
+  /** Why, as a code: the vault's own for `vault_refused` and `bulk_limit`, and the app's for a logged refusal, which its entry names too. */
   readonly reason: string | undefined;
 
   constructor(code: ErrorCode, message: string, reason?: string) {
