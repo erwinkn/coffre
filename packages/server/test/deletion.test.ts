@@ -7,7 +7,7 @@ import { LocalKekProvider } from '@coffre/core/kek';
 import type { Database } from '@coffre/db';
 import { and, asc, eq } from 'drizzle-orm';
 
-import { auditLog, environments, projects, secrets, secretVersions } from './db/tables.ts';
+import { auditLog, environments, projects, secretReferences, secrets, secretVersions } from './db/tables.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 import { postgresOnly } from './db/engine.ts';
 
@@ -123,6 +123,7 @@ test('a preview says what deleting would take, and changes nothing', async () =>
       { member: DEV, place: 'market/prod', role: 'developer' },
       { member: LEAD, place: 'market', role: 'owner' },
     ],
+    references: [],
     stranded: [CI, LEAD],
   });
   assert.deepEqual(await versionsOf(id), before);
@@ -154,7 +155,7 @@ test('deleting a project erases its values, revokes its grants, hides it and fre
   assert.deepEqual((await deps.vault.access(CI)).grants, []);
   assert.deepEqual((await deps.vault.access(DEV)).grants.map((grant) => grant.role), ['viewer']);
   const [entry] = await entries('project.delete');
-  assert.deepEqual(entry.metadata, { path: 'market', tombstone: `market~deleted-${today()}`, keys: 3, versions: 4, grants: 3 });
+  assert.deepEqual(entry.metadata, { path: 'market', tombstone: `market~deleted-${today()}`, keys: 3, versions: 4, grants: 3, references: 0 });
   assert.equal(entry.projectId, id);
   const revocations = await db.owner.select({ operationId: auditLog.operationId }).from(auditLog)
     .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, 'access.revoke'), eq(auditLog.projectId, id)));
@@ -178,6 +179,32 @@ test('deleting a project erases its values, revokes its grants, hides it and fre
   assert.equal((await root.audit.verify()).ok, true);
 });
 
+test('deleting a project ends the references into it and out of it, and its preview names them', async () => {
+  await seedMarket();
+  await root.environments.create('web/prod', { name: 'Production' });
+  await root.secrets.set('web/prod', { OTHER: 'web-other' });
+  // web reads market's key; market reads web's.
+  await root.secrets.set('web/prod', { API_KEY: { ref: 'market/prod/API_KEY' } });
+  await root.secrets.set('market/dev', { OTHER: { ref: 'web/prod/OTHER' } });
+  await root.projects.update('market', { archived: true });
+
+  const { deletion: planned } = await root.projects.previewDelete('market');
+  assert.deepEqual(planned.references, [
+    { holder: 'web/prod/API_KEY', source: 'market/prod/API_KEY' },
+    { holder: 'market/dev/OTHER', source: 'web/prod/OTHER' },
+  ]);
+  const { deletion } = await root.projects.delete('market');
+  assert.equal(deletion.references.length, 2);
+  assert.deepEqual((await root.references.list('web')).references, []);
+  const ended = await db.owner.select({ action: auditLog.action }).from(auditLog)
+    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, 'reference.end'), eq(auditLog.decision, 'allow')));
+  assert.equal(ended.length, 2);
+  // web's key no longer reads what was market's; its own value is untouched.
+  await assert.rejects(root.secrets.reveal('web/prod/API_KEY'));
+  assert.equal((await root.secrets.reveal('web/prod/OTHER')).values.OTHER, 'web-other');
+  assert.equal((await root.audit.verify()).ok, true);
+});
+
 test('a second deletion of the same slug on the same day takes the next tombstone', async () => {
   for (const name of ['First', 'Second']) {
     await root.projects.create('market', { name });
@@ -198,7 +225,7 @@ test('deleting an environment takes it alone, and frees its slug in the project'
   const { deletion } = await root.environments.delete('market/prod');
   assert.deepEqual(
     { ...deletion, grants: deletion.grants.map((grant) => grant.member) },
-    { path: 'market/prod', tombstone: `prod~deleted-${today()}`, environments: ['prod'], keys: 2, versions: 3, grants: [CI, DEV], stranded: [CI] },
+    { path: 'market/prod', tombstone: `prod~deleted-${today()}`, environments: ['prod'], keys: 2, versions: 3, grants: [CI, DEV], references: [], stranded: [CI] },
   );
   const versions = await versionsOf(id);
   assert.deepEqual(versions.filter((version) => version.environmentId === prod.id && version.sealed), []);
@@ -429,6 +456,50 @@ test('a key decided on before its place is deleted, and released after, is refus
     .where(and(eq(auditLog.action, 'secret.read'), eq(auditLog.secretVersionId, id)))
     .orderBy(asc(auditLog.seq));
   assert.deepEqual(reads, [{ decision: 'allow', code: null }, { decision: 'deny', code: 'deleted' }]);
+  assert.equal((await root.audit.verify()).ok, true);
+});
+
+test('a read through a reference, decided on before its holder is deleted and released after, is refused as deleted', postgresOnly('on SQLite a decision holds the whole file, so no deletion commits inside one'), async () => {
+  await seedMarket();
+  await root.environments.create('web/prod', { name: 'Production' });
+  await root.secrets.set('web/prod', { OTHER: 'web-other' });
+  // market/dev reads web's key; then market/dev goes, while the vault opens web's key for it.
+  await root.secrets.set('market/dev', { OTHER: { ref: 'web/prod/OTHER' } });
+  await root.environments.update('market/dev', { archived: true });
+  const [row] = await db.owner.select({ reference: secretReferences.id, seq: secretReferences.createdSeq }).from(secretReferences);
+  const [source] = await db.owner.select({ id: secretVersions.id }).from(secretVersions)
+    .innerJoin(secrets, eq(secrets.id, secretVersions.secretId))
+    .innerJoin(environments, eq(environments.id, secrets.environmentId))
+    .where(and(eq(secrets.key, 'OTHER'), eq(environments.slug, 'prod'), eq(secrets.projectId, await projectId('web'))));
+  let meanwhile: (() => Promise<unknown>) | null = null;
+  class DeletedMeanwhile extends LocalKekProvider {
+    override async unwrap(...args: Parameters<LocalKekProvider['unwrap']>): Promise<Buffer> {
+      const run = meanwhile;
+      meanwhile = null;
+      await run?.();
+      return super.unwrap(...args);
+    }
+  }
+  const vault = testVault(
+    [ROOT],
+    { kek: new DeletedMeanwhile(deps.vault.kek, 'test-kek-1'), signingKey: deps.vault.signingKey.toString('base64') },
+    { kek: deps.vault.kek },
+  );
+  // The lead's project grant covers market/dev, the holder, which decides a read through it.
+  const read = () => vault.unwrap({
+    principal: LEAD, purpose: 'reveal', requestId: 'r', operationId: crypto.randomUUID(),
+    items: [{ secretVersionId: source!.id, via: { reference: row!.reference, seq: Number(row!.seq) } }],
+  });
+  assert.equal((await read()).ok, true);
+  let release!: () => void;
+  const deleted = new Promise<void>((resolve) => (release = resolve)).then(() => root.environments.delete('market/dev'));
+  meanwhile = async () => {
+    release();
+    await deleted;
+  };
+  const outcome = await read();
+  assert.equal(meanwhile, null);
+  assert.deepEqual(outcome.ok ? outcome.keys : outcome.refusal.code, 'deleted');
   assert.equal((await root.audit.verify()).ok, true);
 });
 

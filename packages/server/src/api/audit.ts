@@ -77,6 +77,8 @@ export const DETAIL_ACTIONS = [
   'account.unlink',
   'key.wrap',
   'key.rewrap',
+  // The vault's seal of a reference: the app's `secret.reference` says it in words.
+  'reference.create',
   'key.intent',
   'key.check',
   'sync.run',

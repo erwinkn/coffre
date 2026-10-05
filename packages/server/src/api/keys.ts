@@ -1,5 +1,5 @@
 import { decrypt, encrypt, freshDek, type Envelope } from '@coffre/core/envelope';
-import type { Purpose, Refusal, SecretRef, Vault, WrappedKey } from '@coffre/core/vault';
+import type { Purpose, Refusal, SecretRef, Vault, Via, WrappedKey } from '@coffre/core/vault';
 
 /**
  * The app's half of envelope encryption. It encrypts and decrypts values
@@ -47,16 +47,16 @@ export async function sealValues(
   }
 }
 
-/** Have the vault unwrap each envelope's key, and decrypt. */
+/** Have the vault unwrap each envelope's key, and decrypt; `via` reads a source through a reference. */
 export async function openValues(
   vault: Vault,
   asking: Asking & { purpose: Purpose },
-  items: { secretVersionId: string; secret: SecretRef; envelope: Envelope }[],
+  items: { secretVersionId: string; secret: SecretRef; envelope: Envelope; via?: Via }[],
 ): Promise<Keyed<string>> {
   if (items.length === 0) return { ok: true, values: [] };
   const result = await vault.unwrap({
     ...asking,
-    items: items.map(({ secretVersionId }) => ({ secretVersionId })),
+    items: items.map(({ secretVersionId, via }) => (via === undefined ? { secretVersionId } : { secretVersionId, via })),
   });
   if (!result.ok) return result;
   return {

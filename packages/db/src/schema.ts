@@ -379,6 +379,72 @@ export const auditLog = pgTable(
     index('audit_log_exchange_idx')
       .on(sql`((${table.metadata})::jsonb ->> 'credentialId')`)
       .where(sql`${table.author} = 'app' AND ${table.action} = 'token.exchange' AND ${table.decision} = 'allow'`),
+    // Whether a reference has ended: the vault's `reference.end` naming its creation.
+    index('audit_log_reference_end_idx')
+      .on(table.relatedSeq)
+      .where(sql`${table.author} = 'vault' AND ${table.action} = 'reference.end' AND ${table.decision} = 'allow'`),
+    // An entry about a reference names the other side, `also` in its
+    // metadata, so that it is in both projects' logs: a read through
+    // billing's reference is market's read, and billing's too.
+    index('audit_log_also_project_idx')
+      .on(sql`(((${table.metadata})::jsonb -> 'also') ->> 'projectId')`, table.seq)
+      .where(sql`((${table.metadata})::jsonb -> 'also') IS NOT NULL`),
+    index('audit_log_also_environment_idx')
+      .on(sql`(((${table.metadata})::jsonb -> 'also') ->> 'environmentId')`, table.seq)
+      .where(sql`((${table.metadata})::jsonb -> 'also') IS NOT NULL`),
+    index('audit_log_also_secret_idx')
+      .on(sql`(((${table.metadata})::jsonb -> 'also') ->> 'secretId')`, table.seq)
+      .where(sql`((${table.metadata})::jsonb -> 'also') IS NOT NULL`),
+  ],
+);
+
+/**
+ * A reference: a secret whose value is another's, read live through it by
+ * whoever reads the holder's environment (docs/design/environments.md).
+ * The row only points: the reference is the vault's `reference.create`
+ * entry at `created_seq`, which the vault checks at every read, and a
+ * `reference.end` naming that entry ends it, whatever this table says. So
+ * rows are only ever added.
+ */
+export const secretReferences = pgTable(
+  'secret_references',
+  {
+    id: uuid().primaryKey(),
+    // The holder: billing/prod/DATABASE_URL.
+    projectId: uuid('project_id').notNull(),
+    environmentId: uuid('environment_id').notNull(),
+    secretId: uuid('secret_id').notNull(),
+    // The source: market/prod/DATABASE_URL.
+    sourceProjectId: uuid('source_project_id').notNull(),
+    sourceEnvironmentId: uuid('source_environment_id').notNull(),
+    sourceSecretId: uuid('source_secret_id').notNull(),
+    createdSeq: bigint('created_seq', { mode: 'bigint' }).notNull(),
+    createdAt: createdAt(),
+    createdBy: text('created_by').notNull(),
+  },
+  (table) => [
+    unique('secret_references_created_seq_key').on(table.createdSeq),
+    foreignKey({
+      name: 'secret_references_secret_id_fkey',
+      columns: [table.secretId],
+      foreignColumns: [secrets.id],
+    }).onDelete('restrict'),
+    foreignKey({
+      name: 'secret_references_source_secret_id_fkey',
+      columns: [table.sourceSecretId],
+      foreignColumns: [secrets.id],
+    }).onDelete('restrict'),
+    foreignKey({
+      name: 'secret_references_created_seq_fkey',
+      columns: [table.createdSeq],
+      foreignColumns: [auditLog.seq],
+    }).onDelete('restrict'),
+    // A holder's newest reference; what reads its source; what a project lends; what someone made.
+    index('secret_references_holder_idx').on(table.secretId, table.createdSeq),
+    index('secret_references_source_idx').on(table.sourceSecretId),
+    index('secret_references_project_idx').on(table.projectId),
+    index('secret_references_source_project_idx').on(table.sourceProjectId),
+    index('secret_references_created_by_idx').on(table.createdBy),
   ],
 );
 

@@ -29,6 +29,7 @@ import { allowed, audited, denied, Refusal, requireOwner, withRefusals, type Api
 import { ApiError, conflict, notFound, vaultRefused } from './errors.ts';
 import { formatMember } from './paths.ts';
 import { fileProject, projectFoldersOf, requireFolders } from './folders.ts';
+import { endReferences, referencesAt } from './references.ts';
 
 export type Me = {
   principal: { type: 'user' | 'service'; id: string };
@@ -466,6 +467,8 @@ export type Deletion = {
   versions: number;
   /** The grants there, lapsed ones too, which the vault revokes. */
   grants: { member: string; place: string; role: string }[];
+  /** The references into it from elsewhere, and out of it, which the vault ends: each holder, and the source it reads. */
+  references: { holder: string; source: string }[];
   /** Members who hold nothing anywhere afterwards: a service among them may be offboarded. */
   stranded: string[];
 };
@@ -516,7 +519,7 @@ export async function deletePlace(ctx: ApiContext, place: ResolvedPath, { dryRun
       throw new ApiError('unavailable', 'deleting needs this release\'s database migration: an owner runs `coffre migrate`');
     }
 
-    const scope = await deletionScope(ctx.db, doomed);
+    const [scope, references] = await Promise.all([deletionScope(ctx.db, doomed), referencesAt(ctx.db, doomed)]);
     const deletion = (tombstone: string, versions = scope.versions): Deletion => ({
       path,
       tombstone,
@@ -530,6 +533,7 @@ export async function deletePlace(ctx: ApiContext, place: ResolvedPath, { dryRun
           : `${project.slug}/${scope.environments.find((candidate) => candidate.id === grant.environmentId)?.slug ?? grant.environmentId}`,
         role: grant.role,
       })),
+      references: references.map(({ view }) => ({ holder: view.holder, source: view.source })),
       stranded: scope.stranded,
     });
     const slug = environment?.slug ?? project.slug;
@@ -552,6 +556,8 @@ export async function deletePlace(ctx: ApiContext, place: ResolvedPath, { dryRun
       });
       if (!result.ok) throw vaultRefused(result.refusal);
     }
+    // No reference follows a tombstone, nor holds one: no new one can come meanwhile, an archived place being neither source nor holder.
+    await endReferences(ctx, references, operationId);
 
     return audited(ctx, async (tx, log) => {
       // Again, under the log's head, which every change to a place takes first.
@@ -580,7 +586,7 @@ export async function deletePlace(ctx: ApiContext, place: ResolvedPath, { dryRun
       log.push(allowed(ctx, action, {
         ...doomed,
         operationId,
-        metadata: { path, tombstone, keys: done.keys, versions, grants: done.grants.length },
+        metadata: { path, tombstone, keys: done.keys, versions, grants: done.grants.length, references: done.references.length },
       }));
       return { dryRun: false, deletion: done };
     });

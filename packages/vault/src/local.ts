@@ -9,6 +9,8 @@ export const METHODS = [
   'unwrap',
   'wrap',
   'rewrap',
+  'reference',
+  'endReferences',
   'access',
   'setAccess',
   'admit',

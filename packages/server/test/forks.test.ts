@@ -56,7 +56,7 @@ async function entries(author: 'app' | 'vault', action: string) {
 
 test('a fork copies each live key, with its value and folder, and none of its history', async () => {
   const made = await maintainer.environments.create('market/staging', { name: 'Staging', from: 'prod' });
-  assert.deepEqual([made.created, made.forked], [true, { from: 'prod', keys: 2 }]);
+  assert.deepEqual([made.created, made.forked], [true, { from: 'prod', keys: 2, references: 0, copied: [] }]);
   // Copying is reading: one entry per key, by the forker, to copy; then a write per key.
   const reads = await entries('vault', 'secret.read');
   assert.deepEqual(reads.map((read) => [read.actor, read.decision, read.metadata.subject, read.metadata.purpose]), [

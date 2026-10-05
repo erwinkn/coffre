@@ -985,6 +985,7 @@ export async function secretHeads(db: Queryable, environmentId: string, by: { ke
     id: secrets.id,
     key: secrets.key,
     currentVersion: secrets.currentVersion,
+    currentVersionId: secrets.currentVersionId,
     archivedAt: secrets.archivedAt,
   }).from(secrets).where(and(
     eq(secrets.environmentId, environmentId),
@@ -1107,6 +1108,162 @@ export async function secretHistory(
 }
 
 
+// --- references -----------------------------------------------------------------
+
+/**
+ * A reference as the app's row points at it, and the vault's end of it if
+ * one names its creation: whether a reference is live comes from the log
+ * (`audit_log_reference_end_idx`), never from the row, which only grows.
+ */
+export type ReferenceRow = {
+  id: string;
+  createdSeq: bigint;
+  createdAt: Date;
+  createdBy: string;
+  /** Each end with its environment's slug, which grants on one environment in every project match. */
+  holder: { projectId: string; environmentId: string; environmentSlug: string; secretId: string };
+  source: { projectId: string; environmentId: string; environmentSlug: string; secretId: string };
+  ended: { by: string; at: number; reason: string } | null;
+};
+
+/** Each of these environments' slug, by id. */
+async function environmentSlugs(db: Queryable, ids: readonly string[]): Promise<Map<string, string>> {
+  if (ids.length === 0) return new Map();
+  const { environments } = tablesOf(db);
+  const rows = await db.select({ id: environments.id, slug: environments.slug }).from(environments).where(inArray(environments.id, [...new Set(ids)]));
+  return new Map(rows.map((row) => [row.id, row.slug]));
+}
+
+/**
+ * References by holder, by source, by project on either side, or by who made
+ * them; oldest first. Each is what the vault sealed: its holder, source and
+ * maker come from its `reference.create` entry, never from the app's row,
+ * which only points at the entry and which the app's login can write. A row
+ * with no such entry, or one about another reference, is no reference.
+ * Looked up by project or source, the seals are found first, through the
+ * log's `also` indexes, so that a row edited to name other places still
+ * shows where its seal says.
+ */
+export async function referenceRows(
+  db: Queryable,
+  where: { holderSecretIds?: string[]; sourceSecretIds?: string[]; projectId?: string; createdBy?: string },
+): Promise<ReferenceRow[]> {
+  const { secretReferences, auditLog } = tablesOf(db);
+  if (where.holderSecretIds?.length === 0 || where.sourceSecretIds?.length === 0) return [];
+  const sealing = and(eq(auditLog.author, 'vault'), eq(auditLog.action, 'reference.create'), eq(auditLog.decision, 'allow'));
+  const byPlace = where.projectId !== undefined || where.sourceSecretIds !== undefined;
+  const sealedSeqs = byPlace
+    ? (await db.select({ seq: auditLog.seq }).from(auditLog).where(and(
+        sealing,
+        where.projectId === undefined ? undefined : or(eq(auditLog.projectId, where.projectId), also(db, 'projectId', [where.projectId])),
+        where.sourceSecretIds === undefined ? undefined : also(db, 'secretId', where.sourceSecretIds),
+      ))).map((row) => row.seq)
+    : null;
+  if (sealedSeqs?.length === 0) return [];
+  const rows = await db
+    .select({
+      reference: secretReferences,
+      endedBy: auditLog.actor,
+      endedAt: auditLog.occurredAt,
+      endMetadata: auditLog.metadata,
+    })
+    .from(secretReferences)
+    .leftJoin(auditLog, and(
+      eq(auditLog.relatedSeq, secretReferences.createdSeq),
+      eq(auditLog.author, 'vault'),
+      eq(auditLog.action, 'reference.end'),
+      eq(auditLog.decision, 'allow'),
+    ))
+    .where(and(
+      sealedSeqs === null ? undefined : inArray(secretReferences.createdSeq, sealedSeqs),
+      where.holderSecretIds === undefined ? undefined : inArray(secretReferences.secretId, where.holderSecretIds),
+    ))
+    .orderBy(asc(secretReferences.createdSeq));
+  if (rows.length === 0) return [];
+  const seals = new Map((await db
+    .select({ seq: auditLog.seq, actor: auditLog.actor, occurredAt: auditLog.occurredAt, projectId: auditLog.projectId, environmentId: auditLog.environmentId, metadata: auditLog.metadata })
+    .from(auditLog)
+    .where(and(sealing, inArray(auditLog.seq, rows.map(({ reference }) => reference.createdSeq)))))
+    .map((seal) => [seal.seq, seal]));
+  type Sealed = { reference?: unknown; secretId?: unknown; also?: { projectId?: unknown; environmentId?: unknown; secretId?: unknown } };
+  const text = (value: unknown): value is string => typeof value === 'string' && value !== '';
+  const sealed = rows.flatMap(({ reference: row, endedBy, endedAt, endMetadata }) => {
+    const seal = seals.get(row.createdSeq);
+    if (seal === undefined || seal.projectId === null || seal.environmentId === null) return [];
+    const detail = JSON.parse(seal.metadata) as Sealed;
+    const source = detail.also ?? {};
+    if (detail.reference !== row.id || !text(detail.secretId) || !text(source.projectId) || !text(source.environmentId) || !text(source.secretId)) return [];
+    const holder = { projectId: seal.projectId, environmentId: seal.environmentId, secretId: detail.secretId };
+    if (where.holderSecretIds !== undefined && !where.holderSecretIds.includes(holder.secretId)) return [];
+    if (where.createdBy !== undefined && seal.actor !== where.createdBy) return [];
+    return [{
+      id: row.id,
+      createdSeq: row.createdSeq,
+      createdAt: new Date(seal.occurredAt),
+      createdBy: seal.actor,
+      holder,
+      source: { projectId: source.projectId, environmentId: source.environmentId, secretId: source.secretId },
+      ended: endedBy === null ? null : { by: endedBy, at: endedAt!, reason: String((JSON.parse(endMetadata!) as { reason?: unknown }).reason ?? 'broken') },
+    }];
+  });
+  const slugs = await environmentSlugs(db, sealed.flatMap((row) => [row.holder.environmentId, row.source.environmentId]));
+  return sealed.map((row) => ({
+    ...row,
+    holder: { ...row.holder, environmentSlug: slugs.get(row.holder.environmentId)! },
+    source: { ...row.source, environmentSlug: slugs.get(row.source.environmentId)! },
+  }));
+}
+
+/** Where each secret is, by path, and whether anything of it is archived; with its current version's id. */
+export type SecretPlaceRow = {
+  id: string;
+  key: string;
+  projectId: string;
+  project: string;
+  environmentId: string;
+  environment: string;
+  archivedAt: Date | null;
+  projectArchivedAt: Date | null;
+  environmentArchivedAt: Date | null;
+  currentVersionId: string | null;
+  currentVersion: number;
+};
+
+export async function secretPlaces(db: Queryable, ids: readonly string[]): Promise<Map<string, SecretPlaceRow>> {
+  if (ids.length === 0) return new Map();
+  const { secrets, environments, projects } = tablesOf(db);
+  const rows = await db
+    .select({
+      id: secrets.id,
+      key: secrets.key,
+      projectId: secrets.projectId,
+      project: projects.slug,
+      environmentId: secrets.environmentId,
+      environment: environments.slug,
+      archivedAt: secrets.archivedAt,
+      projectArchivedAt: projects.archivedAt,
+      environmentArchivedAt: environments.archivedAt,
+      currentVersionId: secrets.currentVersionId,
+      currentVersion: secrets.currentVersion,
+    })
+    .from(secrets)
+    .innerJoin(environments, eq(environments.id, secrets.environmentId))
+    .innerJoin(projects, eq(projects.id, secrets.projectId))
+    .where(inArray(secrets.id, [...new Set(ids)]));
+  return new Map(rows.map((row) => [row.id, row]));
+}
+
+/** These versions' numbers and envelopes, by id: what a read through a reference opens. */
+export async function versionEnvelopes(db: Queryable, ids: readonly string[]): Promise<Map<string, { version: number; envelope: Envelope }>> {
+  if (ids.length === 0) return new Map();
+  const { secretVersions } = tablesOf(db);
+  const rows = await db
+    .select({ id: secretVersions.id, version: secretVersions.version, ...envelopeColumns(secretVersions) })
+    .from(secretVersions)
+    .where(inArray(secretVersions.id, [...new Set(ids)]));
+  return new Map(rows.map((row) => [row.id, { version: row.version, envelope: envelopeOf(row) }]));
+}
+
 // --- the audit log ------------------------------------------------------------
 
 /**
@@ -1178,16 +1335,39 @@ export type AuditFilter = {
   limit: number;
 };
 
-/** The conditions of `filter`, as a WHERE clause on the log. */
-function auditWhere(auditLog: ReturnType<typeof tablesOf>['auditLog'], filter: Omit<AuditFilter, 'limit'>): SQL | undefined {
+/**
+ * The place on the other side of an entry about a reference, `also` in its
+ * metadata: the holder for a read of its source, the source for the
+ * reference's making and end. Repeats the `audit_log_also_*_idx`
+ * expressions and their condition, so that each is read by its index.
+ */
+function also(db: Queryable, field: 'projectId' | 'environmentId' | 'secretId', ids: readonly string[]): SQL {
+  const { auditLog } = tablesOf(db);
+  const postgres = dialect.engineOf(db) === 'postgres';
+  const present = postgres ? sql`((${auditLog.metadata})::jsonb -> 'also') IS NOT NULL` : sql`json_extract(${auditLog.metadata}, '$.also') IS NOT NULL`;
+  const value = postgres
+    ? sql`(((${auditLog.metadata})::jsonb -> 'also') ->> ${sql.raw(`'${field}'`)})`
+    : sql`json_extract(${auditLog.metadata}, ${sql.raw(`'$.also.${field}'`)})`;
+  return and(present, inArray(value, [...ids]))!;
+}
+
+/**
+ * The conditions of `filter`, as a WHERE clause on the log. A place matches
+ * the entries about it, and those about a reference into or out of it.
+ */
+function auditWhere(db: Queryable, filter: Omit<AuditFilter, 'limit'>): SQL | undefined {
+  const { auditLog } = tablesOf(db);
   const { within } = filter;
+  const columns = { projectId: auditLog.projectId, environmentId: auditLog.environmentId, secretId: auditLog.secretId };
+  const at = (field: keyof typeof columns, ids: readonly string[]) =>
+    ids.length === 0 ? sql`false` : or(inArray(columns[field], [...ids]), also(db, field, ids));
   return and(
     within === undefined
       ? undefined
-      : or(inArray(auditLog.projectId, within.projectIds), inArray(auditLog.environmentId, within.environmentIds)),
-    filter.projectId === undefined ? undefined : eq(auditLog.projectId, filter.projectId),
-    filter.environmentId === undefined ? undefined : eq(auditLog.environmentId, filter.environmentId),
-    filter.secretId === undefined ? undefined : eq(auditLog.secretId, filter.secretId),
+      : or(at('projectId', within.projectIds), at('environmentId', within.environmentIds)),
+    filter.projectId === undefined ? undefined : at('projectId', [filter.projectId]),
+    filter.environmentId === undefined ? undefined : at('environmentId', [filter.environmentId]),
+    filter.secretId === undefined ? undefined : at('secretId', [filter.secretId]),
     filter.actors === undefined ? undefined : inArray(auditLog.actor, filter.actors),
     filter.decision === undefined ? undefined : eq(auditLog.decision, filter.decision),
     filter.excludeActions === undefined || filter.excludeActions.length === 0
@@ -1209,7 +1389,7 @@ export async function auditPage(db: Queryable, filter: AuditFilter) {
     .leftJoin(projects, eq(projects.id, auditLog.projectId))
     .leftJoin(environments, eq(environments.id, auditLog.environmentId))
     .leftJoin(secrets, eq(secrets.id, auditLog.secretId))
-    .where(auditWhere(auditLog, filter))
+    .where(auditWhere(db, filter))
     .orderBy(desc(auditLog.seq))
     .limit(filter.limit);
   return rows.map(shown);
@@ -1257,7 +1437,7 @@ export async function auditActionCounts(
         inArray(auditLog.author, ['app', 'vault']),
         inArray(auditLog.action, [...actions]),
         fromSeq === undefined ? undefined : gte(auditLog.seq, fromSeq),
-        auditWhere(auditLog, { ...filter, excludeActions: undefined }),
+        auditWhere(db, { ...filter, excludeActions: undefined }),
       ),
     )
     .groupBy(auditLog.action);

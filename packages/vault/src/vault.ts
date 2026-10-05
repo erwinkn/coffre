@@ -38,12 +38,14 @@ import {
   type AdmitInput,
   type Checkpoint,
   type CheckpointKey,
+  type EndReferencesInput,
   type Grant,
   type GrantChange,
   type KeyChecks,
   type LogHead,
   type LogVerification,
   type Outcome,
+  type ReferenceInput,
   type Refusal,
   type RefusalCode,
   type RemoveInput,
@@ -52,6 +54,7 @@ import {
   type SetAccessInput,
   type UnwrapInput,
   type Vault,
+  type Via,
   type VerifyLogInput,
   type WrapInput,
   type WrappedKey,
@@ -230,6 +233,7 @@ const MESSAGES: Record<RefusalCode, string> = {
   bulk_limit: 'too many secrets read in too short a time',
   bad_claim: 'the key does not belong to this secret',
   deleted: 'this project or environment was deleted',
+  ended: 'the reference read through was ended',
   not_allowed: 'not allowed to change this',
   root_admin: 'root admins are set in the vault configuration',
   invalid: 'not something the rules allow',
@@ -264,6 +268,13 @@ type Decision = {
   reports: NewEntry[];
   /** Run once the entries are appended, with the seq each was given. */
   after: ((seqOf: (entry: NewEntry) => number) => void)[];
+  /**
+   * Checks made again once the log's head is locked, just before this
+   * decision's entries append: what another decision could have changed
+   * since it checked, such as a reference ended while a read through it
+   * was deciding. A `Refused` there refuses the decision.
+   */
+  underLock: ((locked: Queryable) => Promise<void>)[];
 };
 
 /** The actions of the entries the vault writes about keys. */
@@ -353,7 +364,7 @@ class VaultService implements Vault {
         await store.boundLockWaits(tx, LOCK_TIMEOUT_MS);
         const members = principals.length === 0 ? new Map<string, Member>() : await store.lockMembers(tx, principals);
         const d: Decision = {
-          tx, members, at: await this.#now(tx), log: [], writes: [], touched: new Set(), grants: new Map(), reports, after: [],
+          tx, members, at: await this.#now(tx), log: [], writes: [], touched: new Set(), grants: new Map(), reports, after: [], underLock: [],
         };
         const result = await decide(d);
         const entries = [...reports, ...d.log];
@@ -361,7 +372,7 @@ class VaultService implements Vault {
         // Each member's newest access entry, which their row names (rows.ts).
         const accessSeq = new Map<string, bigint>();
         if (entries.length > 0) {
-          const appended = await this.#append(tx, entries);
+          const appended = await this.#append(tx, entries, d.underLock);
           at = appended.occurredAt;
           entries.forEach((entry, i) => {
             if (isAccessEntry(entry)) accessSeq.set(entry.subjectPrincipal!, appended.seqStart + BigInt(i));
@@ -590,13 +601,15 @@ class VaultService implements Vault {
    * that an instance still running with the replaced KEK, as during a
    * deploy, cannot write after the rotation.
    */
-  #append(tx: Transaction, entries: readonly NewEntry[]): Promise<Appended> {
+  #append(tx: Transaction, entries: readonly NewEntry[], underLock: readonly ((locked: Queryable) => Promise<void>)[] = []): Promise<Appended> {
     const prepared = this.#prepared;
     return appendEntries(tx, prepared.logKey, entries, async (locked) => {
       const rotation = await store.latestVaultEntry(locked, [KEY_ROTATE]);
-      if (rotation === undefined || prepared.logKeys.some((key) => key.keyId === rotation.keyId)) return;
-      prepared.superseded = `the log moved on to ${rotation.keyId}, a key this vault does not hold: a vault given a newer vault key replaced it, and a replaced key writes nothing more`;
-      throw new Error(prepared.superseded);
+      if (rotation !== undefined && !prepared.logKeys.some((key) => key.keyId === rotation.keyId)) {
+        prepared.superseded = `the log moved on to ${rotation.keyId}, a key this vault does not hold: a vault given a newer vault key replaced it, and a replaced key writes nothing more`;
+        throw new Error(prepared.superseded);
+      }
+      for (const check of underLock) await check(locked);
     });
   }
 
@@ -607,18 +620,44 @@ class VaultService implements Vault {
   async unwrap(input: UnwrapInput): Promise<Outcome<{ keys: string[] }>> {
     const { principal } = input;
     validateText(input.purpose);
+    const vias = input.items.map((item) => validateVia(item.via));
     const loaded = await this.#versions(input, 'secret.read', { purpose: input.purpose });
     if (!loaded.ok) return loaded;
-    const items = loaded.versions;
+    // RPC can preserve shared objects, and two holders can read one source: each item its own secret.
+    const items = loaded.versions.map((version) => ({ ...version, secret: { ...version.secret } }));
     validateItems(items, 'wrapped');
+    const sealed = await this.#referencesAt(vias);
     const versionIds = new Map(items.map((item) => [item.secret, item.id]));
-    const entry = (secret: SecretRef, decision: 'allow' | 'deny', code: string | null): NewEntry => ({
-      ...keyEntry('secret.read', principal, secret, decision, code, input, { purpose: input.purpose }),
-      secretVersionId: versionIds.get(secret),
-    });
+    const viaOf = new Map(items.map((item, i) => [item.secret, { via: vias[i], sealed: sealed[i] }]));
+    const entry = (secret: SecretRef, decision: 'allow' | 'deny', code: string | null): NewEntry => {
+      const { via, sealed: seal } = viaOf.get(secret)!;
+      return {
+        ...keyEntry('secret.read', principal, secret, decision, code, input, { purpose: input.purpose, ...(via === null ? {} : viaDetail(via, seal)) }),
+        secretVersionId: versionIds.get(secret),
+      };
+    };
+    // A reference reads only the current version of the source its entry names.
+    if (items.some((item, i) => vias[i] !== null && (sealed[i] === null || sealed[i]!.source.secretId !== item.secret.secretId || !item.current))) {
+      return this.#refuseVersions(principal, 'bad_claim', items.map((item) => entry(item.secret, 'deny', 'bad_claim')));
+    }
+    const ends = sealed.flatMap((seal) => (seal === null ? [] : [seal.seq]));
     const remote = items.some(({ wrapped }) => this.#remote(this.#config.keks.providerOf(wrapped)));
     return this.#keys(
-      { action: 'secret.read', principal, permission: 'secret.read', secrets: items.map((item) => item.secret), remote, entry, input },
+      {
+        action: 'secret.read',
+        principal,
+        permission: 'secret.read',
+        secrets: items.map((item) => item.secret),
+        // Through a reference, the reader's grants on the holder's environment decide.
+        places: sealed.map((seal, i) => seal?.holder ?? items[i]!.secret),
+        vet: ends.length === 0 ? undefined : async (db) => {
+          const ended = await store.endedReferences(db, ends);
+          return sealed.map((seal) => (seal !== null && ended.has(seal.seq) ? 'ended' : null));
+        },
+        remote,
+        entry,
+        input,
+      },
       () =>
         items.map(({ secret, wrapped }) => async (operation: KeyOperation) => {
           const key = await this.#open(wrapped, secret, operation);
@@ -776,6 +815,13 @@ class VaultService implements Vault {
       principal: string;
       permission: Permission;
       secrets: readonly SecretRef[];
+      /** Where each secret's permission is checked, when not where it is: a reference's holder. */
+      places?: readonly SecretPlace[];
+      /**
+       * What else refuses each secret, checked in the decision and again
+       * once the log's head is locked, before its entries append.
+       */
+      vet?: (db: Queryable) => Promise<(RefusalCode | null)[]>;
       remote: boolean;
       entry: (secret: SecretRef, decision: 'allow' | 'deny', code: string | null) => NewEntry;
       input: Correlation & { purpose?: string };
@@ -795,11 +841,17 @@ class VaultService implements Vault {
     if (this.#isRootAdmin(principal)) await this.#rootRow(principal);
     const check = async (d: Decision) => {
       const reader = await this.#standing(d.tx, principal, d.members.get(principal), d.at, d.reports);
-      // One read of the secrets' environments, as the store has them, not as the app sent them: a
-      // grant on one slug in every project matches the slug there, and a deleted place opens for none.
-      const environments = await store.environmentsById(d.tx, secrets.map((secret) => secret.environmentId));
-      const codes = secrets.map((secret) =>
-        refuses(reader, call.permission, placeOfSecret(secret, environments), environments.get(secret.environmentId)?.deleted ?? false));
+      // One read of the environments the decision is about, as the store has them, not as the app sent them:
+      // each secret's and, for a read through a reference, its holder's. A grant on one slug in every project
+      // matches the slug there, and a place deleted on either side opens for none.
+      const at = secrets.map((secret, i) => call.places?.[i] ?? secret);
+      const environments = await store.environmentsById(d.tx, [...secrets, ...at].map((place) => place.environmentId));
+      const gone = (place: SecretPlace) => environments.get(place.environmentId)?.deleted ?? false;
+      const codes: (RefusalCode | null)[] = secrets.map((secret, i) =>
+        refuses(reader, call.permission, placeIn(at[i]!, environments), gone(secret) || gone(at[i]!)));
+      if (call.vet !== undefined && !codes.some((code) => code !== null)) {
+        (await call.vet(d.tx)).forEach((code, i) => (codes[i] = code));
+      }
       let first = codes.find((code) => code !== null) ?? null;
       if (first === null && action === 'secret.read' && (await this.#overBulkLimit(d, principal, secrets.length))) first = 'bulk_limit';
       if (first !== null) {
@@ -863,6 +915,16 @@ class VaultService implements Vault {
         }
         throw error;
       }
+      // A reference ended while this decided refuses it, rather than a read logged after its end.
+      const { vet } = call;
+      if (vet !== undefined) {
+        d.underLock.push(async (locked) => {
+          const codes = await vet(locked);
+          const first = codes.find((code) => code !== null);
+          if (first === undefined || first === null) return;
+          throw new Refused(refusal(first, MESSAGES[first]), secrets.map((secret, item) => outcomeEntry(secret, item, 'deny', codes[item] ?? first)));
+        });
+      }
       const { outcomes, expired } = await settle(operations(), this.#prepared.options.keyBudgetMs);
       const done = outcomes.flatMap((outcome) => (outcome.ok ? [outcome.value] : []));
       try {
@@ -885,9 +947,11 @@ class VaultService implements Vault {
         // Again under the log's head, the append's, taken a statement early: a
         // deletion renames its place under it, so one that committed since the
         // check above is seen here, and nothing is released after it.
+        // A read through a reference: its holder's place too, which a deletion may have taken.
         await lockLogHead(d.tx);
-        const now = await store.environmentsById(d.tx, secrets.map((secret) => secret.environmentId));
-        if (secrets.some((secret) => now.get(secret.environmentId)?.deleted ?? false)) {
+        const places = secrets.flatMap((secret, i) => [secret, call.places?.[i] ?? secret]);
+        const now = await store.environmentsById(d.tx, places.map((place) => place.environmentId));
+        if (places.some((place) => now.get(place.environmentId)?.deleted ?? false)) {
           throw new Refused(refusal('deleted', MESSAGES.deleted), secrets.map((secret, i) => outcomeEntry(secret, i, 'deny', 'deleted')));
         }
         const released = secrets.map((secret, i) => outcomeEntry(secret, i, 'allow', null));
@@ -906,6 +970,180 @@ class VaultService implements Vault {
   async #overBulkLimit(d: Decision, principal: string, n: number): Promise<boolean> {
     const { count, windowMs } = this.#config.bulkLimit;
     return (await store.releasesSince(d.tx, principal, d.at - windowMs)) + n > count;
+  }
+
+  // --- references ---------------------------------------------------------------
+
+  /**
+   * Make each holder a reference to its source: the actor writes the holder
+   * and reads the source, by their own grants, and the vault's
+   * `reference.create` entry is the reference. The app's row only points at
+   * it; a read through one is checked against the entry (`#referencesAt`).
+   */
+  async reference(input: ReferenceInput): Promise<Outcome<{ seqs: number[] }>> {
+    const { principal, items } = input;
+    validateText(principal);
+    validateCorrelation(input);
+    for (const item of items) {
+      if (typeof item.id !== 'string' || !UUID.test(item.id)) throw new Error('a reference id must be a lowercase UUID');
+      if (typeof item.source?.secretId !== 'string' || !UUID.test(item.source.secretId)) throw new Error('a source must be named by its secret id');
+      checkContext(item.holder);
+      validateText(item.holder.path);
+    }
+    if (new Set(items.map((item) => item.id)).size !== items.length) throw new Error('each reference needs its own id');
+    if (items.length === 0) return { ok: true, seqs: [] };
+    const [sources, projectOf] = await Promise.all([
+      store.secretsByIds(this.#db, items.map((item) => item.source.secretId)),
+      store.projectsOfEnvironments(this.#db, items.map((item) => item.holder.environmentId)),
+    ]);
+    const entry = (item: ReferenceInput['items'][number], decision: 'allow' | 'deny', code: string | null): NewEntry => {
+      const source = sources.get(item.source.secretId);
+      return {
+        actor: principal,
+        action: 'reference.create',
+        decision,
+        code,
+        projectId: projectOf.has(item.holder.environmentId) ? item.holder.projectId : null,
+        environmentId: projectOf.has(item.holder.environmentId) ? item.holder.environmentId : null,
+        operationId: input.operationId ?? null,
+        requestId: input.requestId ?? null,
+        // A new holder's row is not committed yet: it is named here, as a wrap names its secret.
+        metadata: JSON.stringify({
+          reference: item.id,
+          subject: item.holder.path,
+          secretId: item.holder.secretId,
+          source: source === undefined ? { secretId: item.source.secretId } : { path: source.path },
+          ...(source === undefined ? {} : { also: { projectId: source.projectId, environmentId: source.environmentId, secretId: source.secretId } }),
+          ...traced(input),
+        }),
+      };
+    };
+    if (this.#isRootAdmin(principal)) await this.#rootRow(principal);
+    return this.#decide([principal], async (d) => {
+      const reader = await this.#standing(d.tx, principal, d.members.get(principal), d.at, d.reports);
+      // Both sides as the store has them: a grant on a slug matches there, and neither side may be deleted.
+      const environments = await store.environmentsById(d.tx, items.flatMap((item) => {
+        const source = sources.get(item.source.secretId);
+        return source === undefined ? [item.holder.environmentId] : [item.holder.environmentId, source.environmentId];
+      }));
+      const gone = (place: SecretPlace) => environments.get(place.environmentId)?.deleted ?? false;
+      const codes = items.map((item): RefusalCode | null => {
+        const source = sources.get(item.source.secretId);
+        if (source === undefined || projectOf.get(item.holder.environmentId) !== item.holder.projectId) return 'bad_claim';
+        if (source.secretId === item.holder.secretId) return 'invalid';
+        return refuses(reader, 'secret.write', placeIn(item.holder, environments), gone(item.holder))
+          ?? refuses(reader, 'secret.read', placeIn(source, environments), gone(source));
+      });
+      const first = codes.find((code) => code !== null) ?? null;
+      if (first !== null) throw new Refused(refusal(first, MESSAGES[first]), items.map((item, i) => entry(item, 'deny', codes[i] ?? first)));
+      // Again under the log's head, as a read is: neither side was deleted since the check above.
+      d.underLock.push(async (locked) => {
+        const now = await store.environmentsById(locked, [...environments.keys()]);
+        if (![...now.values()].some((environment) => environment.deleted)) return;
+        throw new Refused(refusal('deleted', MESSAGES.deleted), items.map((item) => entry(item, 'deny', 'deleted')));
+      });
+      const entries = items.map((item) => entry(item, 'allow', null));
+      d.log.push(...entries);
+      const answer = { seqs: [] as number[] };
+      d.after.push((seqOf) => (answer.seqs = entries.map(seqOf)));
+      return answer;
+    });
+  }
+
+  /**
+   * End references, each with a `reference.end` naming its creation by
+   * `related_seq`, where the next read through it looks. `replaced` takes
+   * write on the holder; `broken`, write on the holder or managing the
+   * source's project's access. Ending one already ended is refused.
+   */
+  async endReferences(input: EndReferencesInput): Promise<Outcome<{ seqs: number[] }>> {
+    const { principal, reason } = input;
+    validateText(principal);
+    validateCorrelation(input);
+    if (reason !== 'replaced' && reason !== 'broken') throw new Error('a reference ends replaced or broken');
+    const vias = input.items.map((item) => validateVia(item)!);
+    if (vias.some((via) => via === null) || new Set(vias.map((via) => via.seq)).size !== vias.length) throw new Error('each reference to end, once');
+    if (vias.length === 0) return { ok: true, seqs: [] };
+    const sealed = await this.#referencesAt(vias);
+    // A holder's row is committed after its reference is sealed, if the write went through: an end names it only then.
+    const holders = await store.secretsByIds(this.#db, sealed.flatMap((seal) => (seal === null ? [] : [seal.holder.secretId])));
+    const entry = (via: Via, seal: Sealed | null, decision: 'allow' | 'deny', code: string | null): NewEntry => ({
+      actor: principal,
+      action: 'reference.end',
+      decision,
+      code,
+      projectId: seal?.holder.projectId ?? null,
+      environmentId: seal?.holder.environmentId ?? null,
+      // So that the holder key's own log shows the reference ending.
+      secretId: seal !== null && holders.has(seal.holder.secretId) ? seal.holder.secretId : null,
+      relatedSeq: seal === null ? null : seal.seq,
+      operationId: input.operationId ?? null,
+      requestId: input.requestId ?? null,
+      metadata: JSON.stringify({
+        reference: via.reference,
+        reason,
+        ...(seal === null
+          ? { seq: via.seq }
+          : {
+              subject: seal.holder.path,
+              secretId: seal.holder.secretId,
+              source: { path: seal.source.path },
+              also: { projectId: seal.source.projectId, environmentId: seal.source.environmentId, secretId: seal.source.secretId },
+            }),
+        ...traced(input),
+      }),
+    });
+    if (this.#isRootAdmin(principal)) await this.#rootRow(principal);
+    if (sealed.some((seal) => seal === null)) {
+      return this.#decide([principal], async () => {
+        throw new Refused(refusal('bad_claim', MESSAGES.bad_claim), vias.map((via, i) => entry(via, sealed[i]!, 'deny', 'bad_claim')));
+      });
+    }
+    const seals = sealed as Sealed[];
+    const ended = async (db: Queryable) => {
+      const done = await store.endedReferences(db, seals.map((seal) => seal.seq));
+      return seals.map((seal) => (done.has(seal.seq) ? ('ended' as const) : null));
+    };
+    return this.#decide([principal], async (d) => {
+      const actor = await this.#standing(d.tx, principal, d.members.get(principal), d.at, d.reports);
+      // Ending is allowed in a deleted place: deleting one ends the references into and out of it.
+      const environments = await store.environmentsById(d.tx, seals.map((seal) => seal.holder.environmentId));
+      const codes: (RefusalCode | null)[] = seals.map((seal) => {
+        const holder = refuses(actor, 'secret.write', placeIn(seal.holder, environments), false);
+        if (holder === null || reason === 'replaced') return holder;
+        return refuses(actor, 'grant.manage', { projectId: seal.source.projectId }, false) === null ? null : holder;
+      });
+      if (!codes.some((code) => code !== null)) (await ended(d.tx)).forEach((code, i) => (codes[i] = code));
+      const first = codes.find((code) => code !== null) ?? null;
+      if (first !== null) throw new Refused(refusal(first, MESSAGES[first]), vias.map((via, i) => entry(via, seals[i]!, 'deny', codes[i] ?? first)));
+      // Two ends of one reference at once: the second finds the first under the head's lock.
+      d.underLock.push(async (locked) => {
+        if ((await ended(locked)).every((code) => code === null)) return;
+        throw new Refused(refusal('ended', MESSAGES.ended), vias.map((via, i) => entry(via, seals[i]!, 'deny', 'ended')));
+      });
+      const entries = vias.map((via, i) => entry(via, seals[i]!, 'allow', null));
+      d.log.push(...entries);
+      const answer = { seqs: [] as number[] };
+      d.after.push((seqOf) => (answer.seqs = entries.map(seqOf)));
+      return answer;
+    });
+  }
+
+  /**
+   * The reference each read names, as the vault's own `reference.create`
+   * entry at its seq says it is: an entry of the vault's, allowed, under its
+   * MAC, about that reference. Null for an item that names none, and for
+   * one that names something else: a row the vault never sealed.
+   */
+  async #referencesAt(vias: readonly (Via | null)[]): Promise<(Sealed | null)[]> {
+    const found = await store.entriesAt(this.#db, vias.flatMap((via) => (via === null ? [] : [BigInt(via.seq)])));
+    return vias.map((via) => {
+      if (via === null) return null;
+      const entry = found.get(BigInt(via.seq));
+      if (entry === undefined || entry.author !== 'vault' || entry.action !== 'reference.create' || entry.decision !== 'allow') return null;
+      if (!this.#authentic(entry)) return null;
+      return sealedReference(entry, via.reference);
+    });
   }
 
   // --- who holds what -----------------------------------------------------------
@@ -1792,15 +2030,71 @@ function validateItems(items: readonly { secret: SecretRef; key?: string; wrappe
   }
 }
 
+/** A reference as its `reference.create` entry seals it. */
+type Sealed = {
+  reference: string;
+  seq: bigint;
+  holder: { projectId: string; environmentId: string; secretId: string; path: string };
+  source: { projectId: string; environmentId: string; secretId: string; path: string };
+  createdBy: string;
+  createdAt: number;
+};
+
+/** What a genuine `reference.create` entry seals, if it is about `reference`; null if not, or malformed. */
+function sealedReference(entry: StoredEntry, reference: string): Sealed | null {
+  let detail: { reference?: unknown; subject?: unknown; secretId?: unknown; source?: { path?: unknown }; also?: Record<string, unknown> };
+  try {
+    detail = JSON.parse(entry.metadata) as typeof detail;
+  } catch {
+    return null;
+  }
+  const text = (value: unknown): value is string => typeof value === 'string' && value !== '';
+  const also = detail.also ?? {};
+  if (detail.reference !== reference || entry.projectId === null || entry.environmentId === null) return null;
+  if (!text(detail.subject) || !text(detail.secretId) || !text(detail.source?.path)) return null;
+  if (!text(also.projectId) || !text(also.environmentId) || !text(also.secretId)) return null;
+  return {
+    reference,
+    seq: entry.seq,
+    holder: { projectId: entry.projectId, environmentId: entry.environmentId, secretId: detail.secretId, path: detail.subject },
+    source: { projectId: also.projectId, environmentId: also.environmentId, secretId: also.secretId, path: detail.source!.path as string },
+    createdBy: entry.actor,
+    createdAt: entry.occurredAt,
+  };
+}
+
+/** A read's reference, checked for shape: null for none. */
+function validateVia(via: Via | null | undefined): Via | null {
+  if (via === undefined || via === null) return null;
+  if (typeof via.reference !== 'string' || !UUID.test(via.reference)) throw new Error('a reference id must be a lowercase UUID');
+  if (!Number.isSafeInteger(via.seq) || via.seq < 0) throw new Error("a reference's seq must be a whole number");
+  return { reference: via.reference, seq: via.seq };
+}
+
 /**
- * Where a secret is, for a decision: its environment's slug as the store
- * has it, when it was read and the environment is in the project claimed;
+ * How a read through a reference is logged: the way in, and `also`, the
+ * holder's place, which puts the read in the holder's project's log too.
+ */
+function viaDetail(via: Via, seal: Sealed | null): Record<string, unknown> {
+  if (seal === null) return { via: { reference: via.reference, seq: via.seq } };
+  return {
+    via: { reference: via.reference, seq: via.seq, path: seal.holder.path, createdBy: seal.createdBy, createdAt: iso(seal.createdAt) },
+    also: { projectId: seal.holder.projectId, environmentId: seal.holder.environmentId, secretId: seal.holder.secretId },
+  };
+}
+
+/** An environment a secret is in, or that holds a reference to one. */
+type SecretPlace = { projectId: string; environmentId: string };
+
+/**
+ * Where a decision checks a permission: an environment, with its slug as
+ * the store has it when it was read and is in the project claimed;
  * otherwise none, which no grant on a slug matches.
  */
-function placeOfSecret(secret: SecretRef, environments: ReadonlyMap<string, { projectId: string; slug: string }>): Place {
-  const environment = environments.get(secret.environmentId);
-  const slug = environment?.projectId === secret.projectId ? environment.slug : null;
-  return { projectId: secret.projectId, environmentId: secret.environmentId, environmentSlug: slug };
+function placeIn(place: SecretPlace, environments: ReadonlyMap<string, { projectId: string; slug: string }>): Place {
+  const environment = environments.get(place.environmentId);
+  const slug = environment?.projectId === place.projectId ? environment.slug : null;
+  return { projectId: place.projectId, environmentId: place.environmentId, environmentSlug: slug };
 }
 
 /**

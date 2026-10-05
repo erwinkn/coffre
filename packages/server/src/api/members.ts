@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { EVERY_PROJECT, grantKind, ROLES, type Permission, type Role } from '@coffre/core/access';
+import { allows, EVERY_PROJECT, grantKind, ROLES, type Permission, type Role } from '@coffre/core/access';
 import type { Queryable } from '@coffre/db';
 import { credentials, identities } from '@coffre/db/schema';
 
@@ -20,6 +20,7 @@ import { can, canAnywhere, type Caller } from './caller.ts';
 import { audited, denied, Refusal, requireOwner, withRefusals, type ApiContext } from './context.ts';
 import { conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { formatMember, parseGrantee, type MemberRef, type Path } from './paths.ts';
+import { referencesBy, type ReferenceView } from './references.ts';
 
 export type MemberGrant = {
   /** Its member and place, `user:ada@acme.example/market/prod`: one grant per member per place. */
@@ -95,6 +96,11 @@ export type OffboardingReport = {
   rotated: number;
   /** Service tokens they issued that still work. */
   issuedTokens: IssuedToken[];
+  /**
+   * References they made, live ones first: decisions that outlive them,
+   * listed for review (docs/design/environments.md, "Offboarding").
+   */
+  references: ReferenceView[];
 };
 
 /** Someone no longer a member, and how many of their report's values are left. */
@@ -386,6 +392,8 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
 
   const activity = await memberActivity(ctx.db, [member.id]);
   const { exposed, rotated } = exposure([member], activity).get(formatMember(member))!;
+  const made = (await referencesBy(ctx.db, formatMember(member))).map((reference) => reference.view);
+  made.sort((a, b) => Number(b.state === 'live') - Number(a.state === 'live') || a.createdAt.localeCompare(b.createdAt));
   return {
     principalType: member.type,
     principalId: member.id,
@@ -411,7 +419,25 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
       expiresAt: token.expiresAt.toISOString(),
       lastUsedAt: token.lastUsedAt?.toISOString() ?? null,
     })),
+    references: made,
   };
+}
+
+/**
+ * Who reads each of these environments by a grant, as members: those a
+ * reference held there lets read its source. Root admins read everything,
+ * and are not listed.
+ */
+export async function readersAt(ctx: ApiContext, places: readonly { projectId: string; environmentId: string; environmentSlug: string }[]): Promise<string[][]> {
+  if (places.length === 0) return [];
+  const all = await directory(ctx, new Date());
+  return places.map((place) => all
+    .filter((listed) => listed.status === 'active' && !listed.isRootAdmin && allows(
+      { isRootAdmin: false, isOwner: false, grants: listed.grants.map((grant) => ({ ...grant, role: grant.role as Role })) },
+      'secret.read',
+      place,
+    ))
+    .map((listed) => formatMember(listed.member)));
 }
 
 function rootAdminRefusal(ctx: ApiContext, action: string, member: MemberRef): Refusal {

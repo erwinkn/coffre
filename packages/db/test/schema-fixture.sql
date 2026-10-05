@@ -1,5 +1,6 @@
 \set ON_ERROR_STOP on
 
+DELETE FROM secret_references;
 -- The log refuses deletions from everyone; the fixture lifts that for itself.
 ALTER TABLE audit_log DISABLE TRIGGER USER;
 DELETE FROM audit_log;

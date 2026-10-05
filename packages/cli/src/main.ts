@@ -669,18 +669,35 @@ async function list(args: string[]): Promise<void> {
     if (folder !== null) process.stdout.write(`${folder}/\n`);
     for (const entry of keys) {
       const archived = entry.archived ? '  (archived)' : '';
+      const { reference } = entry;
+      if (reference !== null) {
+        // A reference reads its source's current version; one that cannot read says why.
+        const state = reference.state === 'live' ? `v${reference.version}` : reference.state.replace('_', ' ');
+        process.stdout.write(`${indent}${entry.key}\t→ ${reference.source}\t${state}\t${shownMember(reference.createdBy).replace(/^user:/, '')}${archived}\n`);
+        continue;
+      }
       process.stdout.write(`${indent}${entry.key}\tv${entry.version ?? '-'}\t${entry.updatedBy ?? '-'}${archived}\n`);
     }
   }
 }
 
 async function set(args: string[]): Promise<void> {
-  const [target, given] = parse(args, {}, ['<project>/<environment>/<KEY>', '[value]'], 1).positionals as [string, string | undefined];
+  const { values, positionals } = parse(args, { ref: { type: 'string' } }, ['<project>/<environment>/<KEY>', '[value]'], 1);
+  const [target, given] = positionals as [string, string | undefined];
   // A value on the command line is in the shell's history and `ps`: it is asked for.
   if (given !== undefined) fail('coffre set asks for the value: paste it, or pipe it in, never as an argument');
 
   const { project, environment, key } = parsePath(target);
   if (!key) fail('usage: coffre set <project>/<environment>/<KEY>');
+  // A reference names a secret, which is no secret: it may be a flag. A value is never one, so the two never mix.
+  if (values.ref !== undefined) {
+    const source = parsePath(values.ref);
+    if (!source.key) fail(`--ref names a secret, <project>/<environment>/<KEY>, not "${values.ref}"`);
+    const made = await client().secrets.set(`${project}/${environment}`, { [key]: { ref: values.ref } });
+    const outcome = made.keys[key];
+    process.stdout.write(`${key} is a reference to ${'reference' in outcome ? outcome.reference : values.ref}: whoever reads ${project}/${environment} reads it\n`);
+    return;
+  }
 
   const value = await readValue(key);
   const result = await client().secrets.set(`${project}/${environment}`, { [key]: value });
@@ -868,6 +885,16 @@ async function whoHasAccess(args: string[]): Promise<void> {
       process.stdout.write(`  ${place.padEnd(24)} ${g.role}${until}${everywhere}\n`);
     }
   }
+  // Who reads a place's secrets through references held elsewhere: a grant there is not the only way in.
+  if (positionals[0] === undefined) return;
+  const into = (await client().references.list(positionals[0])).references
+    .filter((reference) => reference.source.startsWith(`${positionals[0]}/`) && reference.readers !== null);
+  if (into.length === 0) return;
+  process.stdout.write(`\nAlso readable through references\n`);
+  for (const reference of into) {
+    process.stdout.write(`  ${reference.source} through ${reference.holder}, made by ${shownMember(reference.createdBy).replace(/^user:/, '')}\n`);
+    for (const reader of reference.readers!) process.stdout.write(`    ${shownMember(reader).replace(/^user:/, '')}\n`);
+  }
 }
 
 async function grantAccess(args: string[]): Promise<void> {
@@ -1040,6 +1067,14 @@ async function offboard(args: string[]): Promise<void> {
       process.stdout.write(
         `  service:${serviceName(token.service)}${label} ${token.hint}, expires ${token.expiresAt.slice(0, 10)}\n`,
       );
+    }
+  }
+
+  if (report.references.length > 0) {
+    process.stdout.write(`\nReferences ${they} made, which outlive ${they === 'they' ? 'them' : 'it'}: review them, \`coffre references break\` ends one\n`);
+    for (const reference of report.references) {
+      const state = reference.state === 'live' ? '' : `  (${reference.state.replace('_', ' ')})`;
+      process.stdout.write(`  ${reference.holder} → ${reference.source}, ${reference.createdAt.slice(0, 10)}${state}\n`);
     }
   }
 
@@ -1227,6 +1262,8 @@ const COMMANDS: Record<Command, (args: string[]) => unknown> = {
   'projects unarchive': (args) => manage.projectsArchive(connect, args, false),
   'projects delete': (args) => manage.placeDelete(connect, args, false),
   'environments create': (args) => manage.environmentsCreate(connect, args),
+  references: (args) => manage.references(connect, args),
+  'references break': (args) => manage.referencesBreak(connect, args),
   fork: (args) => manage.fork(connect, args),
   'environments rename': (args) => manage.environmentsRename(connect, args),
   'environments archive': (args) => manage.environmentsArchive(connect, args, true),

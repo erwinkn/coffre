@@ -110,6 +110,10 @@ export type Api = {
           place: string;
           role: string;
         }[];
+        references: {
+          holder: string;
+          source: string;
+        }[];
         stranded: string[];
       };
     };
@@ -118,6 +122,7 @@ export type Api = {
     input: {
       name: string;
       from?: string;
+      references?: boolean;
     };
     output: {
       environment: {
@@ -136,6 +141,8 @@ export type Api = {
       forked: null | {
         from: string;
         keys: number;
+        references: number;
+        copied: string[];
       };
     };
   };
@@ -175,6 +182,10 @@ export type Api = {
           place: string;
           role: string;
         }[];
+        references: {
+          holder: string;
+          source: string;
+        }[];
         stranded: string[];
       };
     };
@@ -185,6 +196,18 @@ export type Api = {
       permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.write")[];
       keys: {
         key: string;
+        reference: null | {
+          id: string;
+          holder: string;
+          source: string;
+          state: "broken" | "live" | "replaced" | "source_archived" | "source_deleted" | "source_empty" | "source_is_reference";
+          version: number | null;
+          createdBy: string;
+          createdAt: string;
+          endedBy: string | null;
+          endedAt: string | null;
+          canOpenSource: boolean;
+        };
         folder: string | null;
         archived: boolean;
         version: number | null;
@@ -195,7 +218,9 @@ export type Api = {
   };
   "PATCH /secrets/:project/:environment": {
     input: {
-      [key: string]: string | null;
+      [key: string]: string | null | {
+        ref: string;
+      };
     };
     output: {
       operationId: string;
@@ -204,6 +229,8 @@ export type Api = {
           version: number;
         } | {
           archived: true;
+        } | {
+          reference: string;
         };
       };
     } | {
@@ -246,6 +273,42 @@ export type Api = {
     output: {
       key: string;
       version: number;
+    };
+  };
+  "DELETE /secrets/:project/:environment/:key/reference": {
+    input: undefined;
+    output: {
+      reference: {
+        id: string;
+        holder: string;
+        source: string;
+        state: "broken" | "live" | "replaced" | "source_archived" | "source_deleted" | "source_empty" | "source_is_reference";
+        version: number | null;
+        createdBy: string;
+        createdAt: string;
+        endedBy: string | null;
+        endedAt: string | null;
+      };
+    };
+  };
+  "GET /references": {
+    input: {
+      path: string;
+    };
+    output: {
+      references: {
+        id: string;
+        holder: string;
+        source: string;
+        state: "broken" | "live" | "replaced" | "source_archived" | "source_deleted" | "source_empty" | "source_is_reference";
+        version: number | null;
+        createdBy: string;
+        createdAt: string;
+        endedBy: string | null;
+        endedAt: string | null;
+        readers: null | string[];
+        canBreak: boolean;
+      }[];
     };
   };
   "POST /reveals": {
@@ -321,6 +384,17 @@ export type Api = {
         expiresAt: string;
         lastUsedAt: string | null;
       }[];
+      references: {
+        id: string;
+        holder: string;
+        source: string;
+        state: "broken" | "live" | "replaced" | "source_archived" | "source_deleted" | "source_empty" | "source_is_reference";
+        version: number | null;
+        createdBy: string;
+        createdAt: string;
+        endedBy: string | null;
+        endedAt: string | null;
+      }[];
     };
   };
   "PUT /members/:member": {
@@ -372,6 +446,17 @@ export type Api = {
           hint: string;
           expiresAt: string;
           lastUsedAt: string | null;
+        }[];
+        references: {
+          id: string;
+          holder: string;
+          source: string;
+          state: "broken" | "live" | "replaced" | "source_archived" | "source_deleted" | "source_empty" | "source_is_reference";
+          version: number | null;
+          createdBy: string;
+          createdAt: string;
+          endedBy: string | null;
+          endedAt: string | null;
         }[];
       };
     };
@@ -734,6 +819,10 @@ export type Deletion = {
     place: string;
     role: string;
   }[];
+  references: {
+    holder: string;
+    source: string;
+  }[];
   stranded: string[];
 };
 
@@ -749,6 +838,10 @@ export type DeletionResult = {
       member: string;
       place: string;
       role: string;
+    }[];
+    references: {
+      holder: string;
+      source: string;
     }[];
     stranded: string[];
   };
@@ -870,6 +963,17 @@ export type OffboardingReport = {
     expiresAt: string;
     lastUsedAt: string | null;
   }[];
+  references: {
+    id: string;
+    holder: string;
+    source: string;
+    state: "broken" | "live" | "replaced" | "source_archived" | "source_deleted" | "source_empty" | "source_is_reference";
+    version: number | null;
+    createdBy: string;
+    createdAt: string;
+    endedBy: string | null;
+    endedAt: string | null;
+  }[];
 };
 
 export type ProjectSummary = {
@@ -898,6 +1002,18 @@ export type RemovedMember = {
 
 export type SecretKey = {
   key: string;
+  reference: null | {
+    id: string;
+    holder: string;
+    source: string;
+    state: "broken" | "live" | "replaced" | "source_archived" | "source_deleted" | "source_empty" | "source_is_reference";
+    version: number | null;
+    createdBy: string;
+    createdAt: string;
+    endedBy: string | null;
+    endedAt: string | null;
+    canOpenSource: boolean;
+  };
   folder: string | null;
   archived: boolean;
   version: number | null;
@@ -944,6 +1060,8 @@ export type SetResult = {
       version: number;
     } | {
       archived: true;
+    } | {
+      reference: string;
     };
   };
 };

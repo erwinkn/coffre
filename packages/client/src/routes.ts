@@ -32,6 +32,9 @@ export function getCalls({ places, secrets, members, services }: Subjects): GetC
       { params: {} },
       ...(first === undefined ? [] : [{ params: {}, input: { path: `${first.project}/${first.environment}` } }]),
     ],
+    'GET /references': [
+      ...(first === undefined ? [] : [{ params: {}, input: { path: first.project } }, { params: {}, input: { path: `${first.project}/${first.environment}` } }]),
+    ],
     'GET /members/:member': members.map((member) => ({ params: { member } })),
     'GET /members/:member/tokens': services.map((member) => ({ params: { member } })),
     'GET /members/:member/bindings': services.map((member) => ({ params: { member } })),
@@ -69,6 +72,8 @@ const EVERY_ROUTE: { [K in RouteKey]: true } = {
   'PATCH /secrets/:project/:environment/:key': true,
   'GET /secrets/:project/:environment/:key/versions': true,
   'POST /secrets/:project/:environment/:key/restore': true,
+  'DELETE /secrets/:project/:environment/:key/reference': true,
+  'GET /references': true,
   'POST /reveals': true,
   'GET /members': true,
   'GET /members/:member': true,

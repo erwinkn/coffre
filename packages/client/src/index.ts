@@ -207,6 +207,17 @@ export function createClient(options: ClientOptions) {
         call('PATCH /secrets/:project/:environment/:key', place(path), patch),
     },
 
+    /**
+     * References: secrets read through others (docs/design/environments.md).
+     * A key becomes one with `secrets.set(path, { KEY: { ref: 'market/prod/KEY' } })`.
+     */
+    references: {
+      /** The live references into and out of a place, `market`, `market/prod` or `market/prod/KEY`, and who reads through them. */
+      list: (path: string) => call('GET /references', {}, { path }),
+      /** Break the reference a secret is: its readers stop reading the source through it. */
+      break: (path: string) => call('DELETE /secrets/:project/:environment/:key/reference', place(path)),
+    },
+
     members: {
       /** People and tokens, their role and their access; at a place, those who reach it. */
       list: (path?: string) => call('GET /members', {}, { path }),

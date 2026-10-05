@@ -370,6 +370,57 @@ export const auditLog = sqliteTable(
     index('audit_log_exchange_idx')
       .on(sql`json_extract(${table.metadata}, '$.credentialId')`)
       .where(sql`${table.author} = 'app' AND ${table.action} = 'token.exchange' AND ${table.decision} = 'allow'`),
+    index('audit_log_reference_end_idx')
+      .on(table.relatedSeq)
+      .where(sql`${table.author} = 'vault' AND ${table.action} = 'reference.end' AND ${table.decision} = 'allow'`),
+    index('audit_log_also_project_idx')
+      .on(sql`json_extract(${table.metadata}, '$.also.projectId')`, table.seq)
+      .where(sql`json_extract(${table.metadata}, '$.also') IS NOT NULL`),
+    index('audit_log_also_environment_idx')
+      .on(sql`json_extract(${table.metadata}, '$.also.environmentId')`, table.seq)
+      .where(sql`json_extract(${table.metadata}, '$.also') IS NOT NULL`),
+    index('audit_log_also_secret_idx')
+      .on(sql`json_extract(${table.metadata}, '$.also.secretId')`, table.seq)
+      .where(sql`json_extract(${table.metadata}, '$.also') IS NOT NULL`),
+  ],
+);
+
+export const secretReferences = sqliteTable(
+  'secret_references',
+  {
+    id: text().primaryKey(),
+    projectId: text('project_id').notNull(),
+    environmentId: text('environment_id').notNull(),
+    secretId: text('secret_id').notNull(),
+    sourceProjectId: text('source_project_id').notNull(),
+    sourceEnvironmentId: text('source_environment_id').notNull(),
+    sourceSecretId: text('source_secret_id').notNull(),
+    createdSeq: int64('created_seq').notNull(),
+    createdAt: createdAt(),
+    createdBy: text('created_by').notNull(),
+  },
+  (table) => [
+    unique('secret_references_created_seq_key').on(table.createdSeq),
+    foreignKey({
+      name: 'secret_references_secret_id_fkey',
+      columns: [table.secretId],
+      foreignColumns: [secrets.id],
+    }).onDelete('restrict'),
+    foreignKey({
+      name: 'secret_references_source_secret_id_fkey',
+      columns: [table.sourceSecretId],
+      foreignColumns: [secrets.id],
+    }).onDelete('restrict'),
+    foreignKey({
+      name: 'secret_references_created_seq_fkey',
+      columns: [table.createdSeq],
+      foreignColumns: [auditLog.seq],
+    }).onDelete('restrict'),
+    index('secret_references_holder_idx').on(table.secretId, table.createdSeq),
+    index('secret_references_source_idx').on(table.sourceSecretId),
+    index('secret_references_project_idx').on(table.projectId),
+    index('secret_references_source_project_idx').on(table.sourceProjectId),
+    index('secret_references_created_by_idx').on(table.createdBy),
   ],
 );
 

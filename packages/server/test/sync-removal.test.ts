@@ -137,6 +137,10 @@ test('the upgrade refuses populated syncs atomically, then preserves the old log
   assert.deepEqual((await root.secrets.list('market/prod')).keys.map((key) => key.folder), [null]);
   assert.ok((await root.projects.list()).projects.every((project) => project.folder === null));
   await assert.rejects(root.secrets.update('market/prod/OLD_TOKEN', { folder: 'tokens' }), { status: 503 });
+  // Nor a reference: it waits for 0006, and nothing is one until then.
+  await assert.rejects(root.secrets.set('market/prod', { LINKED: { ref: 'market/prod/OLD_TOKEN' } }), { status: 503 });
+  assert.deepEqual((await root.references.list('market')).references, []);
+  assert.ok((await root.secrets.list('market/prod')).keys.every((key) => key.reference === null));
   assert.equal(await writeAuditHeartbeat(appDb, chainKey, vault, { warn: () => {} }), true);
   assert.equal((await auditReadiness(appDb, vault)).ok, true, '0000 is ready: deploy before migrating');
   assert.equal((await vault.access(SYNC)).status, 'unknown');

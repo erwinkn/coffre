@@ -80,6 +80,8 @@ export function testVault(
     unwrap: call('unwrap'),
     wrap: call('wrap'),
     rewrap: call('rewrap'),
+    reference: call('reference'),
+    endReferences: call('endReferences'),
     access: call('access'),
     setAccess: call('setAccess'),
     admit: call('admit'),
@@ -177,6 +179,7 @@ export async function resetDatabase(owner: Database): Promise<void> {
     consumedTokens,
     secretFolders,
     projectFolders,
+    secretReferences,
     vaultGrants,
     vaultMembers,
   } = tablesOf(owner);
@@ -185,6 +188,8 @@ export async function resetDatabase(owner: Database): Promise<void> {
   await owner.delete(consumedTokens);
   await owner.delete(deviceAuthorizations);
   await owner.delete(identities);
+  // A reference names its vault entry: it goes before the log.
+  await owner.delete(secretReferences);
   await emptyLog(owner);
   await owner.delete(vaultGrants);
   await owner.delete(vaultMembers);

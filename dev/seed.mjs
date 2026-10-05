@@ -48,6 +48,7 @@ const member = ({ principalType, principalId }) =>
 // to the vault's members, so they go next; then the members and grants,
 // which go with the log that records them.
 console.log('==> resetting local data');
+await pool.query('DELETE FROM secret_references');
 await pool.query('ALTER TABLE audit_log DISABLE TRIGGER USER');
 await pool.query('DELETE FROM audit_log');
 await pool.query('ALTER TABLE audit_log ENABLE TRIGGER USER');

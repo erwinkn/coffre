@@ -28,4 +28,5 @@ export const {
   consumedTokens,
   projectFolders,
   secretFolders,
+  secretReferences,
 } = schema;

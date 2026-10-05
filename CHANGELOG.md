@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+**References.** A secret can be a reference to another, in another
+environment or project: `coffre set billing/prod/DATABASE_URL --ref
+market/prod/DATABASE_URL`. Whoever reads `billing/prod` reads market's
+current value through it, rotations included, without a grant in market:
+a reference is a decision, taken by someone who reads the source and writes
+where it is held. The vault makes each one, as a `reference.create` entry
+under its MAC, and checks that entry at every read, so a reference row
+written around the vault reads nothing. One hop: a reference never points
+at a reference. Market's owners and access managers see every reference
+into market, and who reads through it (`coffre references market`,
+`coffre access market/prod`), and break one with `coffre references break`,
+as can whoever writes where it is held.
+A read through a reference is market's read, in market's log and its
+offboarding report, and billing's too. A reference that cannot be read,
+broken, or its source archived or deleted, stops the whole `run` or
+`export`, saying why and who can fix it, rather than run without it.
+Someone's offboarding report lists the references they made. `coffre fork
+--reference` makes each key a reference to its parent's. Migration
+`0008_references` adds one app table and indexes on the log; until it runs,
+making a reference answers 503 (docs/design/environments.md). It builds
+four indexes on `audit_log` in the migration's transaction: on a large log,
+appends wait while they build, so migrate a busy instance when it is quiet.
+
 **Forks.** `coffre fork market/prod staging` makes `market/staging`, with
 each of prod's live keys, its current value and its folder, and none of its
 history. Copying is reading: it needs read on prod, and the vault logs one
@@ -39,6 +62,8 @@ coffre environments delete market/old --apply # an environment alone
 - The vault refuses any key operation in a deleted place, as `deleted`,
   before it asks of any grant, so no grant of any kind reaches into one,
   and grants nothing there afterwards.
+- The references into a deleted place, and out of it, are ended, broken,
+  and the preview names them.
 - An environment is deleted only once it is archived itself. A place
   restored, or granted, while its deletion runs makes the deletion stop
   with a 409, nothing erased; asked again, it revokes the new grant too.

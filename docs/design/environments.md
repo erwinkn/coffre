@@ -208,10 +208,12 @@ directly, and its preview lists those keys before anyone confirms.
 Two ways, each a vault `reference.end` entry naming the reference's
 `reference.create` by `related_seq`:
 
-- **Broken by the source's side.** Whoever holds `grant.manage` on the
-  source's project (its owners and access managers, and instance owners)
-  breaks it: `reason: "broken"`. Billing sees "Reference broken by
-  lead@acme.example on 5 Oct", and its reads of that key stop.
+- **Broken, by either side.** Whoever holds `grant.manage` on the
+  source's project (its owners and access managers, and instance owners),
+  or `secret.write` on the holder's environment, breaks it: `reason:
+  "broken"`. Billing sees "Reference broken by lead@acme.example on 5 Oct",
+  and its reads of that key stop until a value is set or the reference is
+  made again.
 - **Replaced by the holder's side.** Setting a value on
   `billing/prod/DATABASE_URL`, or restoring one of its old versions, ends
   the reference first (`reason: "replaced"`), in a vault call before the
@@ -225,6 +227,13 @@ it: archiving is reversible, and unarchiving brings the reference back.
 
 `secret_references` is insert-only: whether a reference is live comes from
 the log, so a list shows what the vault decides, whatever the row says.
+So do its holder and source: lists, Break and a deletion read them from
+the `reference.create` entry the row names, and a row with no such entry
+is no reference.
+
+The vault releases, through a reference, only its source's newest version,
+by the versions' own order and the source's `current_version_id` both: the
+app's login may write the pointer, never a version.
 
 ### When the source is gone
 
@@ -235,7 +244,7 @@ whose source cannot be read shows why, and is never read as an empty value:
 |---|---|---|
 | source archived, or its environment or project archived | "Source archived" | refused, naming the key |
 | source's project permanently deleted (D25) | "Source deleted" | refused |
-| broken by the source's side | "Broken by … on …" | refused |
+| broken, by either side | "Broken by … on …" | refused |
 | source became a reference itself | "Source is a reference" | refused |
 
 A read of a whole environment is all or nothing, as the vault's batches

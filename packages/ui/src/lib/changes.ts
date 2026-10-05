@@ -451,6 +451,8 @@ export function saveSecrets(
         key,
         // A rename keeps its folder; a new secret is in none.
         folder: entry?.folder ?? null,
+        // A value of its own: no longer a reference.
+        reference: null,
         archived: false,
         version: (entry?.version ?? 0) + 1,
         updatedAt: now,

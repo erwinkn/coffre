@@ -19,6 +19,7 @@ export const SERVER_TABLES = [
   'device_authorizations',
   'project_folders',
   'secret_folders',
+  'secret_references',
   'secret_versions',
   'service_bindings',
   'vault_grants',
