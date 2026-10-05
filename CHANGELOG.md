@@ -105,6 +105,18 @@ its build command to `printenv DATABASE_OWNER_URL | pnpm exec coffre migrate
 ID token anything but `COFFRE_ID_TOKEN`, and pipe it to `coffre login
 --service <name> --id-token` ([docs/ci.md](docs/ci.md#without-a-stored-token)).
 
+**`coffre setup` on Workers takes an address whose DNS is elsewhere.** A
+Worker answers only at an address Cloudflare serves, so setup makes it a
+custom hostname of one of the account's domains, with Cloudflare for SaaS,
+on the Free plan: it keeps or makes the domain's fallback origin, makes the
+custom hostname, shows the CNAME and TXT records to add at the address's
+DNS provider, and, after the deploy, waits for Cloudflare to see them. A
+run stopped there picks up where it left off. With no domain on the
+account, setup offers to add one, showing its nameservers, or the Worker's
+workers.dev address for now. This needs Cloudflare for SaaS enabled on the
+domain, and a token that may manage its custom hostnames and DNS records,
+which wrangler's login may not ([deploy.md](docs/deploy.md#a-domain-whose-dns-is-elsewhere)).
+
 **A deployment's app is a TanStack Start app of its own** (0.2.0), a
 conventional one, and coffre is a set of pieces it mounts, as an auth SDK's
 are. Vite builds the app once, and nothing bundles it again: on Workers,

@@ -430,16 +430,18 @@ of this section itself. Say yes, and it:
 
 1. signs in to Cloudflare through wrangler's browser login, and asks which
    account when there are several;
-2. asks coffre's address, under one of the account's domains, and the root
-   admins;
+2. asks coffre's address and the root admins. An address under one of the
+   account's domains becomes the app's custom domain; one whose DNS is
+   elsewhere is served through one of them
+   ([below](#a-domain-whose-dns-is-elsewhere));
 3. after the database steps, makes a Hyperdrive config for each login, with
    caching off, the password going only in the request to Cloudflare's API;
 4. makes the GitHub App people sign in with, from a manifest: GitHub's page
    opens filled in, and the app's name, `coffre-` and the address, is yours
    to change there;
 5. fills in both `wrangler.jsonc`: the account, the Hyperdrive ids, the
-   address as a custom domain, GitHub's client ID, the root admins and the
-   vault ID;
+   address and its route, GitHub's client ID, the root admins and the vault
+   ID;
 6. shows the keys on their screen, then deploys the vault and the app with
    them as secrets, on wrangler's stdin, and waits for the address to
    answer.
@@ -475,6 +477,74 @@ a Worker lacks its key but the database holds data, it stops before
 changing anything. A run that failed partway carries on from where it
 stopped. Keys shown by a run whose deploy failed never reached Cloudflare:
 the next run makes new ones, and its screen says they replace them.
+
+### A domain whose DNS is elsewhere
+
+A Worker answers only at an address Cloudflare serves: a CNAME from your
+DNS provider to `*.workers.dev` does not reach it. So for an address whose
+DNS is not on the Cloudflare account, `secrets.example.org` say, setup uses
+[Cloudflare for SaaS](https://developers.cloudflare.com/cloudflare-for-platforms/cloudflare-for-saas/):
+the address becomes a custom hostname of one of the account's domains, and
+the app Worker serves it through a route on that domain
+([Workers as your fallback origin](https://developers.cloudflare.com/cloudflare-for-platforms/cloudflare-for-saas/start/advanced-settings/worker-as-origin/)).
+Cloudflare for SaaS is on the Free plan, the first 100 custom hostnames
+free ([plans](https://developers.cloudflare.com/cloudflare-for-platforms/cloudflare-for-saas/plans/)).
+
+Two things only you can do, before setup:
+
+- **Enable Cloudflare for SaaS** on the domain it goes through, on its
+  dashboard page *SSL/TLS, Custom Hostnames*. Cloudflare asks for a payment
+  method there, even on the Free plan. Setup says so, with the link, when it
+  is off.
+- **Give setup a token.** wrangler's login may not manage custom hostnames
+  or DNS records. Make one at
+  [dash.cloudflare.com/profile/api-tokens](https://dash.cloudflare.com/profile/api-tokens)
+  with Account: *Workers Scripts Edit*, *Hyperdrive Edit* and *Account
+  Settings Read*; and Zone, for that domain: *Zone Read*, *Workers Routes
+  Edit*, *SSL and Certificates Edit* and *DNS Edit*. Run setup with
+  `CLOUDFLARE_API_TOKEN` set to it.
+
+Then setup, with several domains on the account, asks which one serves the
+address. It keeps the domain's fallback origin when it has one, else makes
+`coffre-fallback.<domain>`, a proxied `AAAA 100::` record that points
+nowhere, for the Worker to stand behind. It makes the custom hostname, with
+its certificate validated by TXT record, and shows what to add at your DNS
+provider:
+
+```
+Add these records where secrets.example.org's DNS is:
+  CNAME  secrets.example.org                      →  coffre-fallback.acme.com
+  TXT    _cf-custom-hostname.secrets.example.org  "5e1f…"
+  TXT    _acme-challenge.secrets.example.org      "Kq0w…"
+```
+
+The rest of setup carries on meanwhile. After the deploy, it shows the
+records still missing and asks Cloudflare every 10 seconds until it has seen
+them and issued the certificate, then waits for coffre to answer. Ctrl-C
+stops the wait, with everything else done: run setup again once the records
+are in, and it finds the custom hostname, asks nothing about the domain,
+and waits for what is left. When Cloudflare gave up waiting for the
+certificate's records, a run after asks it to check them again.
+
+`app/wrangler.jsonc` records the route, on the domain's zone by its id:
+
+```jsonc
+"routes": [{ "pattern": "secrets.example.org/*", "zone_id": "<the zone's id>" }]
+```
+
+**With no domain on the account**, setup explains the two ways on and takes
+neither unless you choose it:
+
+- **Add the domain to Cloudflare.** Setup adds it, then stops with the two
+  nameservers to set at your registrar. Once Cloudflare sees them, often
+  within the hour, run setup again: the address is under one of the
+  account's domains then, as a custom domain. A run before that shows the
+  nameservers again. Adding a domain needs a token with Zone: *Zone Edit*
+  too; with wrangler's login, setup says to add it on the dashboard instead.
+- **Use the workers.dev address for now**, `<name>.<subdomain>.workers.dev`,
+  once the account has a workers.dev subdomain. Run setup again with your
+  own address later: it moves the app there, and says to change the GitHub
+  App's callback.
 
 Native Windows keeps the steps below, since wrangler cannot read secrets
 from `/dev/stdin` there; WSL works. So does saying no, for a deployment

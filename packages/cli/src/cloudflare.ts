@@ -233,7 +233,27 @@ async function replay(url: URL, ended: () => boolean): Promise<string | null> {
 }
 
 export type Account = { id: string; name: string };
-export type Zone = { id: string; name: string };
+/** A domain on the account: `active` once its nameservers are Cloudflare's, `pending` until then. */
+export type Zone = { id: string; name: string; status?: string; name_servers?: string[] };
+/**
+ * A custom hostname of Cloudflare for SaaS: an address whose DNS is
+ * elsewhere, served through one of the account's zones. `status` is the
+ * hostname's, `ssl.status` its certificate's; each is `active` once
+ * Cloudflare has seen the records that prove it.
+ */
+export type CustomHostname = {
+  id: string;
+  hostname: string;
+  status: string;
+  ownership_verification?: { type?: string; name?: string; value?: string };
+  ssl?: {
+    status?: string;
+    validation_records?: { txt_name?: string; txt_value?: string }[];
+    validation_errors?: { message?: string }[];
+  };
+  verification_errors?: string[];
+};
+export type FallbackOrigin = { origin: string; status?: string };
 export type Origin = { host: string; port: number; database: string; user: string; password: string };
 export type HyperdriveConfig = {
   id: string;
@@ -244,10 +264,18 @@ export type HyperdriveConfig = {
 
 export class CloudflareError extends Error {
   readonly status: number;
-  constructor(message: string, status: number) {
+  /** Cloudflare's own codes for what went wrong: 1404, say, for a zone without Cloudflare for SaaS. */
+  readonly codes: number[];
+  constructor(message: string, status: number, codes: number[] = []) {
     super(message);
     this.status = status;
+    this.codes = codes;
   }
+}
+
+/** Whether Cloudflare refused a call for the token's permissions, not for what it asked. */
+export function denied(error: unknown): boolean {
+  return error instanceof CloudflareError && (error.status === 401 || error.status === 403) && !error.codes.some((code) => code === 1404 || code === 1405);
 }
 
 /** One of a Worker's bindings, as Cloudflare lists them: a Hyperdrive config's id, a var's text. */
@@ -278,7 +306,11 @@ export class CloudflareApi {
     };
     if (!response.ok || answer.success === false) {
       const why = (answer.errors ?? []).map((error) => `${error.message ?? 'error'}${error.code === undefined ? '' : ` (${error.code})`}`).join('; ');
-      throw new CloudflareError(`Cloudflare answered ${response.status} to ${method} ${path.replace(/\?.*$/, '')}${why === '' ? '' : `: ${why}`}`, response.status);
+      throw new CloudflareError(
+        `Cloudflare answered ${response.status} to ${method} ${path.replace(/\?.*$/, '')}${why === '' ? '' : `: ${why}`}`,
+        response.status,
+        (answer.errors ?? []).flatMap(({ code }) => (code === undefined ? [] : [code])),
+      );
     }
     return { result: answer.result as T, pages: answer.result_info?.total_pages ?? 1 };
   }
@@ -360,6 +392,65 @@ export class CloudflareApi {
   async bindings(account: string, script: string): Promise<Binding[] | null> {
     const settings = await this.#found<{ bindings?: Binding[] }>(`/accounts/${account}/workers/scripts/${script}/settings`);
     return settings === null ? null : (settings.bindings ?? []);
+  }
+
+  /** The account's workers.dev subdomain, `acme` for `<worker>.acme.workers.dev`; null when it has none yet. */
+  async workersSubdomain(account: string): Promise<string | null> {
+    return (await this.#found<{ subdomain?: string }>(`/accounts/${account}/workers/subdomain`))?.subdomain ?? null;
+  }
+
+  /** Add a domain to the account. Cloudflare serves it once its registrar names the nameservers it gives. */
+  createZone(account: string, name: string): Promise<Zone> {
+    return this.#call('POST', '/zones', { account: { id: account }, name, type: 'full' });
+  }
+
+  /** How many custom hostnames a zone may have: none until Cloudflare for SaaS is enabled on it. */
+  customHostnameQuota(zone: string): Promise<{ allocated?: number; hard_cap?: number; used?: number }> {
+    return this.#call('GET', `/zones/${zone}/custom_hostnames/quota`);
+  }
+
+  /** The zone's custom hostname for `hostname`, when there is one. */
+  async customHostname(zone: string, hostname: string): Promise<CustomHostname | null> {
+    const listed = await this.#call<CustomHostname[]>('GET', `/zones/${zone}/custom_hostnames?hostname=${encodeURIComponent(hostname)}`);
+    return listed.find((each) => each.hostname === hostname) ?? null;
+  }
+
+  customHostnameById(zone: string, id: string): Promise<CustomHostname> {
+    return this.#call('GET', `/zones/${zone}/custom_hostnames/${id}`);
+  }
+
+  /**
+   * A custom hostname whose certificate Cloudflare validates by a TXT
+   * record: it can be added before the CNAME, and the records to add are
+   * all there is to do, with nothing to ask of Cloudflare after.
+   */
+  createCustomHostname(zone: string, hostname: string): Promise<CustomHostname> {
+    return this.#call('POST', `/zones/${zone}/custom_hostnames`, { hostname, ssl: { method: 'txt', type: 'dv' } });
+  }
+
+  /** Ask Cloudflare to check a custom hostname's certificate records again, after it stopped waiting for them. */
+  revalidate(zone: string, id: string): Promise<CustomHostname> {
+    return this.#call('PATCH', `/zones/${zone}/custom_hostnames/${id}`, { ssl: { method: 'txt', type: 'dv' } });
+  }
+
+  /** Where a zone sends its custom hostnames' requests, when it has been set. */
+  async fallbackOrigin(zone: string): Promise<FallbackOrigin | null> {
+    const found = await this.#found<Partial<FallbackOrigin> | null>(`/zones/${zone}/custom_hostnames/fallback_origin`);
+    return typeof found?.origin === 'string' && found.origin !== '' ? { origin: found.origin, status: found.status } : null;
+  }
+
+  async setFallbackOrigin(zone: string, origin: string): Promise<void> {
+    await this.#call('PUT', `/zones/${zone}/custom_hostnames/fallback_origin`, { origin });
+  }
+
+  /** Whether a zone has a DNS record by this name. */
+  async hasDnsRecord(zone: string, name: string): Promise<boolean> {
+    return (await this.#call<unknown[]>('GET', `/zones/${zone}/dns_records?name=${encodeURIComponent(name)}`)).length > 0;
+  }
+
+  /** A proxied record that points nowhere, `AAAA 100::`: what a Worker stands behind, as Cloudflare documents it. */
+  async createOriginlessRecord(zone: string, name: string, comment: string): Promise<void> {
+    await this.#call('POST', `/zones/${zone}/dns_records`, { type: 'AAAA', name, content: '100::', proxied: true, comment });
   }
 }
 
