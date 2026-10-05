@@ -9,7 +9,7 @@ import { useAction } from '../lib/use-action';
 import { secretKeyProblem } from '../lib/validation';
 import { ArrowRight } from './icons';
 import { Card } from './page';
-import { ConfirmDialog, ErrorLine, Modal, Timestamp } from './ui';
+import { ConfirmDialog, ErrorLine, Modal, Notice, Timestamp } from './ui';
 
 /**
  * References: a secret read live through another (docs/design/environments.md).
@@ -288,16 +288,18 @@ export function ArchiveBlocked({ references }: { references: readonly ListedRefe
   const many = references.length > 1;
   return (
     <div className="archive-blocked">
-      <p className="dialog-body">
-        {many ? `${references.length} references read it` : 'A reference reads it'} from elsewhere. Archiving it would stop{' '}
-        {many ? 'those reads' : 'that read'}, so break {many ? 'them' : 'it'} first: a run where{' '}
-        {many ? 'each is' : 'it is'} held then refuses until that key gets a value.
-      </p>
-      <ul className="lent-references" aria-label="References that read it">
+      <Notice tone="bad">
+        {many ? `${references.length} references read it` : 'A reference reads it'} from elsewhere. Break{' '}
+        {many ? 'them' : 'it'} first: archiving would stop {many ? 'those reads' : 'that read'}.
+      </Notice>
+      <ul className="archive-blockers" aria-label="References that read it">
         {references.map((reference) => (
           <li key={reference.id}>
-            <span>
-              <span className="mono">{reference.holder}</span> reads <span className="mono">{reference.source}</span>
+            <span className="cell-stack">
+              <span className="mono">{reference.holder}</span>
+              <small>
+                reads <span className="mono">{reference.source}</span>
+              </small>
             </span>
             {reference.canBreak ? (
               <button
@@ -309,11 +311,12 @@ export function ArchiveBlocked({ references }: { references: readonly ListedRefe
                 Break
               </button>
             ) : (
-              <span className="cell-muted">{`${reference.source.split('/')[0]}'s access managers can break it, or whoever writes ${reference.holder.split('/').slice(0, 2).join('/')}`}</span>
+              <small className="cell-muted">{`${reference.source.split('/')[0]}'s access managers, or whoever writes ${reference.holder.split('/').slice(0, 2).join('/')}, can break it`}</small>
             )}
           </li>
         ))}
       </ul>
+      <p className="hint">Once broken, a run where it is held refuses until that key gets a value of its own.</p>
       {error !== null && <ErrorLine error={error} />}
     </div>
   );
