@@ -47,7 +47,7 @@ counterexamples is printed in CI's log.
 | A read decides under the reader's row, which a revocation or a removal locks too (`#keys`, through `#decide`) | a value released to a member after their removal committed (`NothingReleasedAfterRevocation`) | |
 | A read through a reference checks again, under the head, that it has not ended (`unwrap`'s `vet`, run again in `underLock`) | a value read through a reference after it was broken (`NothingReleasedThroughEndedReference`) | |
 | Making a reference checks its source again under the head (`secrets.ts`, `setSecrets`) | a reference made to a source archived or deleted meanwhile (`ReferencedSourcesStayLive`) | #152 |
-| Archiving is refused while a live reference from elsewhere reads the place (`references.ts`, `refuseIfRead`) | a live reference reading an archived source (`ReferencedSourcesStayLive`) | #152 |
+| Archiving is refused while a live reference held in an unarchived place elsewhere reads the place (`references.ts`, `archiveBlockers`) | a reference in a live holder reading an archived source (`ReferencedSourcesStayLive`) | #152 |
 | A deletion re-reads the references into and out of the place under the head (`projects.ts`, `referenced_meanwhile`) | a reference held in a deleted place, which no path can break, and whose source can never be archived (`EveryReferenceBreakable`) | this model, fixed in #155 |
 
 Here is #134's first race, as `scripts/formal.sh` prints it, with the grant
@@ -122,7 +122,7 @@ Traces are shortened here; the script prints every step.
 | `NothingReleasedAfterRevocation` | No `secret.read` for a member follows the `access.revoke` or `member.remove` that took their last grant covering where it was decided, unless an `access.grant` covering it again comes between |
 | `NothingReleasedThroughEndedReference` | No `secret.read` through a reference follows its `reference.end`, or the deletion of its source's place or its holder's, in the log |
 | `EveryReferenceBreakable` | A reference that has not ended is held in a standing place, where the API can name its holder, and so break it |
-| `ReferencedSourcesStayLive` | And its source is neither archived nor deleted |
+| `ReferencedSourcesStayLive` | And if it is held in a live place, its source is neither archived nor deleted. The exception is a holder that was archived when its source was archived, and has been restored since: its reads refuse, as any broken reference's |
 
 ## The model
 
@@ -216,6 +216,10 @@ reference to that secret in `References`, and none yet elsewhere.
   - Left out because they decide nothing about locks or ends: a source
     that is itself a reference, archiving a single key, and a read refused
     because the source's version moved.
+  - A holder key archived on its own counts as an archived holder, as its
+    environment or project does: archiving its source isn't refused. The
+    model archives places only, so it checks the rule through the holder's
+    environment.
 
 ## What it does not prove
 
