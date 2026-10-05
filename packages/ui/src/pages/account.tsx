@@ -9,6 +9,7 @@ import { InstanceRole } from '../components/directory';
 import { ConfirmButton, EmptyState, ErrorLine, Notice, Timestamp } from '../components/ui';
 import { Monitor, ProviderMark, SignOut, Terminal, X } from '../components/icons';
 import { signinErrorMessage } from '../lib/signin-errors';
+import { useOneTime } from '../lib/one-time';
 import { useCoffre } from '../lib/coffre';
 import { endSession, unlinkIdentity } from '../lib/changes';
 import { queries } from '../lib/queries';
@@ -117,7 +118,8 @@ function SigninAccounts({
   providers: Provider[];
   identities: IdentityRow[];
 }) {
-  const { linked, error } = Route.useSearch();
+  // Shown once: a reload shows the accounts, not the last link's outcome again.
+  const { linked, error } = useOneTime(Route.useSearch(), ['linked', 'error']);
   const message = signinErrorMessage(error);
   const change = unlinkIdentity(useCoffre());
   const unlink = useChange(change);

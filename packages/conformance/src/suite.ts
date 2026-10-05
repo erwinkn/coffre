@@ -13,7 +13,7 @@ import { editedGeneration, forgedCredential, forgedIdentity, forgedApproval } fr
 import { canaryScan } from './checks/canaries.ts';
 import { Cli, cliLogin, manageByCli, verifyAsOwner, verifyAsUser, verifyInterrupted, verifyKeys, verifyLeftovers, verifyWithToken } from './checks/cli.ts';
 import { pageLoad, personas, setUp, setUpLive, signInAdmin } from './checks/people.ts';
-import { pagesInBrowser } from './checks/pages.ts';
+import { pagesInBrowser, signinErrorOnce } from './checks/pages.ts';
 import { browserBundle, headers, health } from './checks/surface.ts';
 import { cliSignsIn, exchangesLimited, runSignsIn, runsRefused, runUnbound, spentOnce, tokensUnlogged, trustRun } from './checks/workloads.ts';
 
@@ -27,6 +27,7 @@ export async function conform(deployment: Deployment, options: { bulkLimit: numb
   await report.check('security headers', { admin }, ({ admin }) => headers(deployment, admin));
   const canaries = await report.check('setup', { admin }, ({ admin }) => setUp(admin));
   await report.check('pages in a browser', { admin, canaries }, ({ admin }) => pagesInBrowser(deployment, admin, options.browser));
+  await report.check('sign-in error, once', { admin }, ({ admin }) => signinErrorOnce(deployment, admin, options.browser));
   const people = await report.check('personas', { admin, canaries }, ({ admin }) => personas(deployment, admin));
   const all = { people, canaries };
 

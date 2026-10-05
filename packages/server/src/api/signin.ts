@@ -82,9 +82,12 @@ export class CredentialUncheckable extends Error {
 
 class SigninRefused extends Error {
   readonly reason: SigninRefusal;
-  constructor(reason: SigninRefusal) {
+  /** With `account_mismatch`: the providers the person already signs in with, by id. */
+  readonly providers: string[] | undefined;
+  constructor(reason: SigninRefusal, providers?: string[]) {
     super(reason);
     this.reason = reason;
+    this.providers = providers;
   }
 }
 
@@ -107,7 +110,13 @@ export type IssuedCredential = { id: string; token: string; expiresAt: string };
 
 export type SigninResult =
   | { ok: true; principal: PrincipalRef; credential: IssuedCredential }
-  | { ok: false; reason: SigninRefusal };
+  /**
+   * With `account_mismatch`, `providers`: the ids of the providers the person
+   * already signs in with. Theirs to know: the provider has just verified
+   * that the email they share is the visitor's. Ids only, which the sign-in
+   * page shows anyone; never an account or another address.
+   */
+  | { ok: false; reason: SigninRefusal; providers?: string[] };
 
 /** A caller authenticated by a coffre-issued credential. */
 /**
@@ -269,7 +278,7 @@ export class SigninService {
     try {
       return await this.#completeSignin(profile, meta);
     } catch (error) {
-      if (error instanceof SigninRefused) return { ok: false, reason: error.reason };
+      if (error instanceof SigninRefused) return refusal(error);
       // Someone else bound this account, or created this root admin, first.
       if (isUniqueViolation(error)) return this.#completeSignin(profile, meta).catch(refusalOrThrow);
       throw error;
@@ -285,8 +294,8 @@ export class SigninService {
       sourceIp: meta.sourceIp,
     };
     const account = { provider: profile.provider, subject: profile.subject, emails: profile.emails };
-    const refuse = (reason: SigninRefusal, actorId = claimed) =>
-      new Refusal(new SigninRefused(reason), {
+    const refuse = (reason: SigninRefusal, actorId = claimed, providers?: string[]) =>
+      new Refusal(new SigninRefused(reason, providers), {
         ...base,
         actorId,
         decision: 'deny',
@@ -331,10 +340,15 @@ export class SigninService {
           await revokePriorMembership(tx, this.#deps.chainKey, principal, generation, 'system:signin');
 
           const [person] = await members(tx, this.#deps.chainKey, { member: { type: 'user', id: principalId } }, now);
-          const other = (person?.identities ?? []).some(
+          const others = (person?.identities ?? []).filter(
             (identity) => identity.provider !== profile.provider || identity.issuerHash !== issuerHash || identity.subject !== profile.subject,
           );
-          if (other) throw refuse('account_mismatch', principalId);
+          if (others.length > 0) {
+            // In the order the providers are configured: the sign-in page's.
+            const order = this.#deps.signin.providers.map(({ id }) => id);
+            const providers = [...new Set(others.map(({ provider }) => provider))].sort((a, b) => order.indexOf(a) - order.indexOf(b));
+            throw refuse('account_mismatch', principalId, providers);
+          }
 
           identityId = await this.#bind(tx, principalId, profile, principalId, generation);
           log.push({
@@ -936,7 +950,11 @@ export class SigninService {
 const isOpen = (now: Date) => (row: { decidedAt: Date | null; expiresAt: Date }) =>
   row.decidedAt === null && row.expiresAt > now;
 
-function refusalOrThrow(error: unknown): { ok: false; reason: SigninRefusal } {
-  if (error instanceof SigninRefused) return { ok: false, reason: error.reason };
+function refusalOrThrow(error: unknown): { ok: false; reason: SigninRefusal; providers?: string[] } {
+  if (error instanceof SigninRefused) return refusal(error);
   throw error;
+}
+
+function refusal(error: SigninRefused): { ok: false; reason: SigninRefusal; providers?: string[] } {
+  return error.providers === undefined ? { ok: false, reason: error.reason } : { ok: false, reason: error.reason, providers: error.providers };
 }

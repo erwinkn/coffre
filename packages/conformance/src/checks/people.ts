@@ -49,7 +49,7 @@ export async function signIn(
   deployment: Deployment,
   browser: Browser,
   email: string,
-): Promise<{ ok: true } | { ok: false; error: string }> {
+): Promise<{ ok: true } | { ok: false; error: string; location: string }> {
   const leave = await browser.fetch('/auth/signin/github');
   const authorize = new URL(leave.headers.get('location') ?? '', deployment.origin);
   expect(
@@ -68,8 +68,9 @@ export async function signIn(
   );
   const back = await browser.fetch(callback);
   expect(back.status === 302 || back.status === 303, `the callback answered ${back.status}`, await back.text());
-  const error = new URL(back.headers.get('location') ?? '/', deployment.origin).searchParams.get('error');
-  return error === null ? { ok: true } : { ok: false, error };
+  const location = new URL(back.headers.get('location') ?? '/', deployment.origin);
+  const error = location.searchParams.get('error');
+  return error === null ? { ok: true } : { ok: false, error, location: `${location.pathname}${location.search}` };
 }
 
 export async function signInAdmin(deployment: Deployment) {

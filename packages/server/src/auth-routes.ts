@@ -231,7 +231,8 @@ export async function finishSignin(
   const clearPending = clearCookieHeader(auth, pendingCookieName(auth));
   const pending = signin.openPending(readCookie(request, pendingCookieName(auth)));
   const back = pending?.link ? '/account' : '/login';
-  const fail = (code: string) => redirectResponse(`${back}?error=${code}`, [clearPending]);
+  const fail = (code: string, query: Record<string, string> = {}) =>
+    redirectResponse(`${back}?${new URLSearchParams({ error: code, ...query })}`, [clearPending]);
 
   if (pending === null || pending.provider !== provider) return fail('state_mismatch');
   const config = signin.config.providers.find((candidate) => candidate.id === provider);
@@ -269,9 +270,9 @@ export async function finishSignin(
     label: describeUserAgent(request.headers.get('user-agent')),
   });
   if (!result.ok) {
-    return fail(
-      result.reason === 'not_registered' && profile.emails.length === 0 ? 'no_verified_email' : result.reason,
-    );
+    // Which providers the email already signs in with, and the one just tried, for the page to name.
+    const which: Record<string, string> = result.providers === undefined ? {} : { with: result.providers.join(','), via: config.id };
+    return fail(result.reason === 'not_registered' && profile.emails.length === 0 ? 'no_verified_email' : result.reason, which);
   }
 
   // Signing in again on the same browser replaces the session rather than

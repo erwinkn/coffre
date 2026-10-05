@@ -27,7 +27,51 @@ const MESSAGES: Record<string, string> = {
   link_session: 'Your session changed while linking. Sign in again, then retry.',
 };
 
-export function signinErrorMessage(code: string | undefined): string | null {
+/**
+ * Where an email already signs in, for `account_mismatch`: the providers by
+ * the label the sign-in page shows them under, and the one just tried. What
+ * the visitor may know: the provider has just verified the email is theirs.
+ */
+export type Already = { providers: readonly string[]; via?: string };
+
+export function signinErrorMessage(code: string | undefined, already?: Already): string | null {
   if (code === undefined) return null;
+  if (code === 'account_mismatch' && already !== undefined && already.providers.length > 0) return mismatch(already);
   return MESSAGES[code] ?? 'The sign-in did not complete. Try again.';
+}
+
+/** "Your email already signs in with GitHub. Sign in with GitHub, then link this account from your account page." */
+function mismatch({ providers, via }: Already): string {
+  const link = 'then link this account from your account page.';
+  // The same provider, another account of it: a second GitHub account, say.
+  if (providers.length === 1 && providers[0] === via) {
+    return `Your email already signs in with another ${via} account. Sign in with that one, ${link}`;
+  }
+  const named = providers.map((provider) => (provider === via ? `another ${provider} account` : provider));
+  const list = named.length < 3 ? named.join(' and ') : `${named.slice(0, -1).join(', ')} and ${named.at(-1)}`;
+  return named.length === 1
+    ? `Your email already signs in with ${list}. Sign in with ${list}, ${link}`
+    : `Your email already signs in with ${list}. Sign in with one of them, ${link}`;
+}
+
+export type LoginSearch = { next?: string; error?: string; with?: string; via?: string };
+
+/** A sign-in provider's id, as the instance configures it. */
+const PROVIDER_ID = /^[a-z0-9_-]{1,40}$/;
+
+/**
+ * `/login`'s search: where to resume after signing in, same-origin paths
+ * only, since an absolute URL accepted here would make the sign-in page an
+ * open redirect; and the sign-in's `error`, with account_mismatch's `with`
+ * and `via`, provider ids, shown once, then taken out of the URL.
+ */
+export function loginSearch(search: Record<string, unknown>): LoginSearch {
+  const out: LoginSearch = {};
+  const { next, error, via } = search;
+  if (typeof next === 'string' && next.startsWith('/') && !next.startsWith('//')) out.next = next;
+  if (typeof error === 'string' && /^[a-z_]{1,40}$/.test(error)) out.error = error;
+  const providers = typeof search.with === 'string' ? search.with.split(',').filter((id) => PROVIDER_ID.test(id)).slice(0, 8) : [];
+  if (providers.length > 0) out.with = providers.join(',');
+  if (typeof via === 'string' && PROVIDER_ID.test(via)) out.via = via;
+  return out;
 }
