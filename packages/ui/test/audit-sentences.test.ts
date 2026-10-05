@@ -201,6 +201,8 @@ test('every other action has a sentence', () => {
     [{ action: 'token.unbind', decision: 'deny', reason: 'requires_instance_owner', metadata: { principalType: 'service', principalId: 'api-deploy' } }, 'tried to stop trusting CI runs to sign in as service:api-deploy: requires instance owner'],
     [{ action: 'device.approve' }, 'approved a CLI sign-in'],
     [{ action: 'mcp.connect', metadata: { clientName: 'Claude' } }, 'connected Claude'],
+    [{ action: 'mcp.read', metadata: { tool: 'list_secrets', names: ['market/prod'], via: { clientName: 'Claude Code' } } }, 'used list_secrets on market/prod via Claude Code'],
+    [{ action: 'mcp.call', decision: 'deny', reason: 'insufficient_scope', metadata: { tool: 'archive_secret', names: ['market/prod/OLD'] } }, 'tried to use archive_secret on market/prod/OLD: insufficient scope'],
     [{ action: 'mcp.connect', decision: 'deny', reason: 'person_denied', metadata: { clientName: 'Claude' } }, 'tried to connect Claude: they said no'],
     [{ action: 'mcp.token', metadata: { clientName: 'Claude', grant: 'refresh_token' } }, 'refreshed the tokens of Claude'],
     [{ action: 'mcp.disconnect', metadata: { clientName: 'Claude', reason: 'refresh_reused' } }, 'disconnected Claude: a refresh token it had replaced was used again'],

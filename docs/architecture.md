@@ -348,7 +348,11 @@ metadata at `/.well-known/oauth-protected-resource[/mcp]` and
 and answered in its errors. The consent page is `/oauth/authorize`, and its
 calls, like Connected apps', are ordinary rows of the table. Their tokens are
 good at `/mcp` and nowhere else: `/api` reads `credentials`, which an MCP
-token is not, and `/mcp` takes nothing but one.
+token is not, and `/mcp` takes nothing but one. A tool's call is API calls
+in process, as its person, through this same table (`fetchApi`, as a page's
+render): the request carries its connection (`via`), which the router holds
+to a table of the scope each route needs (`ROUTE_SCOPES`), and which every
+entry it writes names, the vault's as their `credentialId`.
 
 The server is one table keyed by method and route, each entry giving its input
 schema, the permission it needs and its handler. `@coffre/client` is typed

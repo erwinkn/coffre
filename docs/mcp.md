@@ -46,6 +46,25 @@ You can untick any but Browse. A connection lasts as long as a `coffre
 login` session (30 days unless the deployment says otherwise); then you
 connect again.
 
+## Tools
+
+A connected client can browse, as you:
+
+- `whoami`: who it acts as, and what it may do.
+- `list_projects`, `list_secrets`, `secret_history`: projects,
+  environments, keys, versions, and who changed what. Never a value.
+- `list_access`, `describe_member`: who has access, and what a member
+  holds.
+- `read_audit_log`: the log, 50 entries a call.
+- `run_with_secrets`: how to run a command with an environment's secrets,
+  `coffre run market/staging -- npm test`, which sets them for the command
+  only, so no value enters the conversation. Claude Code runs it itself;
+  in a chat without a shell, you do.
+
+Each tool is coffre's API called as you, so a tool can do no more than you
+could with the CLI. Changing secrets, and reading values, come with later
+releases.
+
 ## Connected apps
 
 Your account page lists every client you connected: its website, what it

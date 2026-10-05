@@ -64,6 +64,7 @@
   "devDependencies": {
     "@coffre/vault": "workspace:*",
     "@hegeldev/hegel": "0.4.7",
+    "@modelcontextprotocol/client": "2.1.0",
     "@tanstack/react-router": "1.170.18",
     "@tanstack/react-start": "1.168.32",
     "@types/node": "26.1.1",

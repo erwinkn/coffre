@@ -1,42 +1,328 @@
-// `POST /mcp`: the MCP endpoint (docs/design/mcp.md, section 2). For now,
-// a connection's token and what the server is: `server/discover`. The
-// tools come next.
+// `POST /mcp`: the MCP endpoint (docs/design/mcp.md, section 2). One JSON
+// answer per request, never a stream, and no session: the 2026-07-28
+// revision, whose requests each carry their version and the client's
+// capabilities in `_meta`, and the 2025 era's `initialize` beside it, which
+// coffre answers without minting a session either. Both serve the same
+// tools, with the same checks. The token is checked first (`mcpCaller`):
+// nothing here runs for a request without a good one.
+import { CoffreError, createClient } from '@coffre/client';
+import { isMcpScope, scopeString, type McpScope } from '@coffre/core/mcp';
+import { z } from 'zod';
+
+import { allowed, audited, denied, type McpVia } from '../api/context.ts';
+import type { AuditEntry } from '../db/audit.ts';
+import type { AuthenticatedIdentity } from '../auth.ts';
+import { fetchApi } from '../fetch-api.ts';
 import { readLimitedJson } from '../http.ts';
+import { logged } from '../logged.ts';
 import type { CoffreRuntime } from '../runtime.ts';
 import { COFFRE_VERSION } from '../version.ts';
-import { mcpCaller } from './http.ts';
+import { mcpCaller, resourceMetadataUrl } from './http.ts';
+import { challengeScopes } from './scopes.ts';
+import type { McpConnection } from './service.ts';
+import { INSTRUCTIONS, listed, TOOL_BY_NAME, TOOLS, type Tool } from './tools.ts';
 
-/** The revision coffre speaks. */
+/** The revision coffre speaks, stateless. */
 export const PROTOCOL_VERSION = '2026-07-28';
+/** The 2025 era's, answered through `initialize`, without a session. */
+export const LEGACY_VERSIONS = ['2025-11-25', '2025-06-18'] as const;
 const BODY_BYTES = 256 * 1024;
+/** How long a client may keep the tool list and the server's description: every token sees the same. */
+const TTL_MS = 3_600_000;
+
+const META = {
+  protocolVersion: 'io.modelcontextprotocol/protocolVersion',
+  clientCapabilities: 'io.modelcontextprotocol/clientCapabilities',
+  serverInfo: 'io.modelcontextprotocol/serverInfo',
+} as const;
+
+/** JSON-RPC's codes, and MCP's own (`-32020` header mismatch, `-32022` unsupported version). */
+const CODE = {
+  parse: -32700,
+  invalidRequest: -32600,
+  methodNotFound: -32601,
+  invalidParams: -32602,
+  internal: -32603,
+  headerMismatch: -32020,
+  unsupportedVersion: -32022,
+} as const;
 
 type JsonRpcId = string | number;
+type Message = { jsonrpc: '2.0'; id?: JsonRpcId; method: string; params?: Record<string, unknown> };
+type RpcError = { code: number; message: string; data?: unknown };
 
-function rpc(id: JsonRpcId | null, body: { result: unknown } | { error: { code: number; message: string; data?: unknown } }, status = 200): Response {
-  return Response.json({ jsonrpc: '2.0', ...(id === null ? {} : { id }), ...body }, { status, headers: { 'cache-control': 'no-store' } });
+const SERVER_INFO = { name: 'coffre', title: 'coffre', version: COFFRE_VERSION };
+
+function rpc(id: JsonRpcId | null, body: { result: unknown } | { error: RpcError }, status = 200, headers: Record<string, string> = {}): Response {
+  return Response.json({ jsonrpc: '2.0', id, ...body }, { status, headers: { 'cache-control': 'no-store', ...headers } });
 }
+
+const failure = (id: JsonRpcId | null, status: number, error: RpcError, headers?: Record<string, string>) => rpc(id, { error }, status, headers);
+
+/** A request's `Mcp-Name`, as sent: plain ASCII, or `=?base64?…?=` around UTF-8. Null when it is neither. */
+export function decodeHeaderValue(value: string): string | null {
+  const wrapped = /^=\?base64\?([A-Za-z0-9+/]*={0,2})\?=$/.exec(value);
+  if (wrapped === null) return /^[\t\x20-\x7e]*$/.test(value) ? value : null;
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(atob(wrapped[1]!), (c) => c.charCodeAt(0)));
+  } catch {
+    return null;
+  }
+}
+
+/** A JSON-RPC message the endpoint can answer, or why not. */
+function parseMessage(body: unknown): Message | RpcError {
+  if (Array.isArray(body)) return { code: CODE.invalidRequest, message: 'Batches are not supported: send one message per request' };
+  if (typeof body !== 'object' || body === null) return { code: CODE.invalidRequest, message: 'Invalid Request: not a JSON-RPC message' };
+  const message = body as Record<string, unknown>;
+  if (message.jsonrpc !== '2.0' || typeof message.method !== 'string') {
+    return { code: CODE.invalidRequest, message: 'Invalid Request: a JSON-RPC 2.0 request or notification, with a method' };
+  }
+  if ('id' in message && typeof message.id !== 'string' && typeof message.id !== 'number') {
+    return { code: CODE.invalidRequest, message: 'Invalid Request: an id is a string or a number' };
+  }
+  if (message.params !== undefined && (typeof message.params !== 'object' || message.params === null || Array.isArray(message.params))) {
+    return { code: CODE.invalidRequest, message: 'Invalid Request: params is an object' };
+  }
+  return message as Message;
+}
+
+const errorOf = (value: Message | RpcError): value is RpcError => !('method' in value);
 
 export async function mcpEndpoint(request: Request, runtime: CoffreRuntime, sourceIp: string | null): Promise<Response> {
   const caller = await mcpCaller(request, runtime, sourceIp);
   if (caller instanceof Response) return caller;
-  let message: { id?: JsonRpcId; method?: unknown };
+  let body: unknown;
   try {
-    message = (await readLimitedJson(request, BODY_BYTES)) as typeof message;
+    body = await readLimitedJson(request, BODY_BYTES);
   } catch {
-    return rpc(null, { error: { code: -32700, message: 'Parse error' } }, 400);
+    return failure(null, 400, { code: CODE.parse, message: 'Parse error: the body is not JSON' });
   }
-  const id = typeof message?.id === 'string' || typeof message?.id === 'number' ? message.id : null;
-  if (message?.method === 'server/discover') {
-    return rpc(id, {
-      result: {
-        resultType: 'complete',
-        supportedVersions: [PROTOCOL_VERSION],
-        capabilities: { tools: {} },
-        _meta: { 'io.modelcontextprotocol/serverInfo': { name: 'coffre', version: COFFRE_VERSION } },
-        ttlMs: 3_600_000,
-        cacheScope: 'public',
-      },
+  const message = parseMessage(body);
+  if (errorOf(message)) return failure(null, 400, message);
+  const id = message.id ?? null;
+  // A notification gets no answer; nothing coffre is told needs one.
+  if (id === null) return new Response(null, { status: 202 });
+
+  const meta = (message.params?._meta ?? undefined) as Record<string, unknown> | undefined;
+  const header = request.headers.get('mcp-protocol-version');
+  const claimed = meta?.[META.protocolVersion];
+  try {
+    if (claimed !== undefined) return await modern(request, runtime, sourceIp, caller, message, id, claimed, header);
+    return await legacy(request, runtime, sourceIp, caller, message, id, header);
+  } catch (error) {
+    console.error('mcp request failed', logged(error));
+    return failure(id, 500, { code: CODE.internal, message: 'Internal error: see the server log' });
+  }
+}
+
+// --- 2026-07-28 ---------------------------------------------------------------
+
+async function modern(
+  request: Request,
+  runtime: CoffreRuntime,
+  sourceIp: string | null,
+  caller: McpConnection,
+  message: Message,
+  id: JsonRpcId,
+  claimed: unknown,
+  header: string | null,
+): Promise<Response> {
+  if (typeof claimed !== 'string' || claimed !== PROTOCOL_VERSION) {
+    return failure(id, 400, {
+      code: CODE.unsupportedVersion,
+      message: `Unsupported protocol version: coffre speaks ${PROTOCOL_VERSION}`,
+      data: { supported: [PROTOCOL_VERSION], requested: claimed },
     });
   }
-  return rpc(id, { error: { code: -32601, message: 'Method not found' } }, 404);
+  // The headers name what the body says, so that what routes a request cannot disagree with what it is.
+  const mismatch = (detail: string) => failure(id, 400, { code: CODE.headerMismatch, message: `Header mismatch: ${detail}` });
+  if (header === null) return mismatch('MCP-Protocol-Version is required');
+  if (header !== claimed) return mismatch(`MCP-Protocol-Version is ${header}, the body ${claimed}`);
+  const method = request.headers.get('mcp-method');
+  if (method === null) return mismatch('Mcp-Method is required');
+  if (method !== message.method) return mismatch(`Mcp-Method is ${method}, the body ${message.method}`);
+  if (message.method === 'tools/call') {
+    const sent = request.headers.get('mcp-name');
+    const name = message.params?.name;
+    if (typeof name === 'string') {
+      if (sent === null) return mismatch('Mcp-Name is required for tools/call');
+      if (decodeHeaderValue(sent) !== name) return mismatch('Mcp-Name does not name the tool the body calls');
+    }
+  }
+  const meta = message.params!._meta as Record<string, unknown>;
+  const capabilities = meta[META.clientCapabilities];
+  if (typeof capabilities !== 'object' || capabilities === null || Array.isArray(capabilities)) {
+    return failure(id, 400, { code: CODE.invalidParams, message: `Invalid params: _meta needs ${META.clientCapabilities}` });
+  }
+
+  const complete = (result: Record<string, unknown>) =>
+    rpc(id, { result: { resultType: 'complete', ...result, _meta: { [META.serverInfo]: SERVER_INFO } } });
+  switch (message.method) {
+    case 'server/discover':
+      return complete({
+        supportedVersions: [PROTOCOL_VERSION],
+        capabilities: { tools: {} },
+        instructions: INSTRUCTIONS,
+        ttlMs: TTL_MS,
+        cacheScope: 'public',
+      });
+    case 'tools/list':
+      return complete({ tools: TOOLS.map(listed), ttlMs: TTL_MS, cacheScope: 'public' });
+    case 'tools/call':
+      return call(request, runtime, sourceIp, caller, message, id, (result) => complete(result));
+    default:
+      return failure(id, 404, { code: CODE.methodNotFound, message: `Method not found: ${message.method}` });
+  }
+}
+
+// --- 2025-11-25 and 2025-06-18 ----------------------------------------------
+
+async function legacy(
+  request: Request,
+  runtime: CoffreRuntime,
+  sourceIp: string | null,
+  caller: McpConnection,
+  message: Message,
+  id: JsonRpcId,
+  header: string | null,
+): Promise<Response> {
+  if (message.method === 'initialize') {
+    const asked = message.params?.protocolVersion;
+    const version = (LEGACY_VERSIONS as readonly unknown[]).includes(asked) ? (asked as string) : LEGACY_VERSIONS[0];
+    // No session ID: every request stands alone, as on 2026-07-28.
+    return rpc(id, { result: { protocolVersion: version, capabilities: { tools: {} }, serverInfo: SERVER_INFO, instructions: INSTRUCTIONS } });
+  }
+  if (header === PROTOCOL_VERSION) {
+    return failure(id, 400, { code: CODE.invalidParams, message: `Invalid params: a ${PROTOCOL_VERSION} request carries its _meta envelope` });
+  }
+  if (header === null || !(LEGACY_VERSIONS as readonly string[]).includes(header)) {
+    return failure(id, 400, {
+      code: CODE.invalidRequest,
+      message: `coffre needs MCP-Protocol-Version ${PROTOCOL_VERSION}, or ${LEGACY_VERSIONS.join(' or ')} after initialize`,
+    });
+  }
+  switch (message.method) {
+    case 'ping':
+      return rpc(id, { result: {} });
+    case 'tools/list':
+      return rpc(id, { result: { tools: TOOLS.map(listed) } });
+    case 'tools/call':
+      return call(request, runtime, sourceIp, caller, message, id, (result) => rpc(id, { result }));
+    default:
+      return rpc(id, { error: { code: CODE.methodNotFound, message: `Method not found: ${message.method}` } });
+  }
+}
+
+// --- tools/call ---------------------------------------------------------------
+
+const CallParams = z.object({ name: z.string().max(64), arguments: z.record(z.string(), z.unknown()).optional() }).passthrough();
+
+/**
+ * One tool's call: admitted against its connection's limit, held to its
+ * scopes, run as API calls in its person's name, and logged with the client.
+ * A refusal the API gives is the tool's result, an error the model reads; a
+ * scope the connection lacks is a 403 that starts the client's step-up.
+ */
+async function call(
+  request: Request,
+  runtime: CoffreRuntime,
+  sourceIp: string | null,
+  connection: McpConnection,
+  message: Message,
+  id: JsonRpcId,
+  answer: (result: Record<string, unknown>) => Response,
+): Promise<Response> {
+  const mcp = runtime.mcp!;
+  if (!(await mcp.admitCall(connection.id))) {
+    return failure(id, 429, { code: CODE.internal, message: 'Too many calls: try again in a minute' }, { 'retry-after': '60' });
+  }
+  const params = CallParams.safeParse(message.params ?? {});
+  if (!params.success) return rpc(id, { error: { code: CODE.invalidParams, message: 'Invalid params: tools/call takes a name and its arguments' } });
+  const tool = TOOL_BY_NAME.get(params.data.name);
+  if (tool === undefined) return rpc(id, { error: { code: CODE.invalidParams, message: `Unknown tool: ${params.data.name}` } });
+  const args = tool.input.safeParse(params.data.arguments ?? {});
+  if (!args.success) {
+    return answer(toolError(`The arguments do not fit ${tool.name}: ${args.error.issues.map((issue) => `${issue.path.join('.') || 'arguments'}: ${issue.message}`).join('; ')}`));
+  }
+
+  const requestId = crypto.randomUUID();
+  const via: McpVia = { connectionId: connection.id, clientId: connection.clientId, clientName: connection.clientName, scopes: connection.scopes };
+  const writer = { caller: connection.caller, requestId, sourceIp, provenance: connection.id, via };
+  const names = tool.names(args.data as never);
+  const log = (entry: AuditEntry) =>
+    audited(runtime, async (_tx, entries) => {
+      entries.push(entry);
+    });
+  const metadata = { tool: tool.name, names };
+  // A read-only tool's call that went through is detail, as a sign-in is; everything else shows.
+  const done = (decision: 'allow' | 'deny', reason?: string) =>
+    log(
+      decision === 'allow'
+        ? allowed(writer, tool.readOnly ? 'mcp.read' : 'mcp.call', { metadata })
+        : denied(writer, 'mcp.call', reason ?? 'refused', { metadata }),
+    );
+
+  if (!connection.scopes.includes(tool.scope)) {
+    await done('deny', 'insufficient_scope');
+    return insufficientScope(runtime, connection, tool, id, tool.scope);
+  }
+
+  const identity: AuthenticatedIdentity = {
+    principal: { type: 'user', id: connection.principal.id, email: connection.principal.id, subject: connection.principal.id },
+    registered: connection.caller.registered,
+    caller: connection.caller,
+    requestId,
+    sourceIp,
+    credentialId: null,
+    provenance: connection.id,
+    via,
+  };
+  // The API in process, as the connection's person: one token check for the whole call, the one already made.
+  const api = createClient({
+    url: runtime.publicUrl,
+    headers: () => ({ authorization: 'Bearer mcp-connection' }),
+    transport: (inner) => fetchApi(inner, runtime, { sourceIp, authenticate: async () => identity }),
+  });
+  try {
+    const result = await tool.run({ api, connection, publicUrl: runtime.publicUrl }, args.data as never);
+    await done('allow');
+    return answer({
+      content: [{ type: 'text', text: result.text ?? JSON.stringify(result.structured, null, 2) }],
+      structuredContent: result.structured,
+    });
+  } catch (error) {
+    const refused = refusalOf(error);
+    if (refused === null) throw error;
+    await done('deny', refused.code);
+    // The API's own table refused: the challenge names the scope its route needs, which its reason says.
+    if (refused.code === 'insufficient_scope') return insufficientScope(runtime, connection, tool, id, refused.reason !== undefined && isMcpScope(refused.reason) ? refused.reason : tool.scope);
+    return answer(toolError(refused.message));
+  }
+}
+
+/** What the API answered a tool's call with, when it refused it, or could not answer; null for a bug. */
+function refusalOf(error: unknown): { code: string; message: string; reason: string | undefined } | null {
+  if (!(error instanceof CoffreError) || (error.status >= 500 && error.status !== 503)) return null;
+  return { code: error.code, message: error.message, reason: error.reason };
+}
+
+function toolError(text: string): Record<string, unknown> {
+  return { content: [{ type: 'text', text }], isError: true };
+}
+
+/**
+ * A tool beyond the connection's scopes: 403, with what to ask for, which
+ * is everything it holds and what it lacks (RFC 6750, section 3.1).
+ */
+function insufficientScope(runtime: CoffreRuntime, connection: McpConnection, tool: Tool, id: JsonRpcId, needed: McpScope): Response {
+  const scope = scopeString(challengeScopes(connection.scopes, needed));
+  return failure(
+    id,
+    403,
+    { code: CODE.invalidRequest, message: `${tool.name} needs the ${needed} scope: connect again, and allow it` },
+    {
+      'www-authenticate': `Bearer error="insufficient_scope", scope="${scope}", resource_metadata="${resourceMetadataUrl(runtime)}", error_description="${tool.name} needs ${needed}"`,
+    },
+  );
 }

@@ -87,6 +87,18 @@ function app(entry: AuditEntry): Part[] {
   return [text(entry.metadata.clientName) ?? 'an app'];
 }
 
+/** A tool's call: its name, and what it named. */
+function tool(entry: AuditEntry): Part[] {
+  const names = Array.isArray(entry.metadata.names) ? entry.metadata.names.filter((name): name is string => typeof name === 'string') : [];
+  return [text(entry.metadata.tool) ?? 'a tool', ...(names.length === 0 ? [] : [` on ${names.join(', ')}`])];
+}
+
+/** The client a request came through, said after what it did: "via Claude". */
+function via(entry: AuditEntry): Part[] {
+  const client = (entry.metadata.via as { clientName?: unknown } | undefined)?.clientName;
+  return typeof client === 'string' ? [` via ${client}`] : [];
+}
+
 /** Why coffre itself ended a connection, said after it. */
 const DISCONNECTED: Record<string, string> = {
   code_reused: ': its sign-in code was used twice',
@@ -336,6 +348,8 @@ const TEMPLATES: Record<string, Template> = {
   'key.rotate': { did: 'rotated its key', tried: 'rotate its key', what: () => [] },
   // An MCP client a person connected, such as Claude: named as the consent page showed it.
   'mcp.connect': { did: 'connected', tried: 'connect', what: ({ entry }) => app(entry) },
+  // A tool an MCP client called, by its name, and the places it named.
+  'mcp.call': { did: 'used', tried: 'use', what: ({ entry }) => tool(entry), then: ({ entry }) => via(entry) },
   'mcp.disconnect': {
     did: 'disconnected',
     tried: 'disconnect',
@@ -354,6 +368,7 @@ const TEMPLATES: Record<string, Template> = {
   'token.revoke': { did: 'revoked a bearer token of', tried: 'revoke a bearer token of', what: (facts) => subject(facts.entry) },
   'device.approve': { did: 'approved a CLI sign-in', tried: 'approve a CLI sign-in', what: () => [] },
   'device.deny': { did: 'turned down a CLI sign-in', tried: 'turn down a CLI sign-in', what: () => [] },
+  'mcp.read': { did: 'used', tried: 'use', what: ({ entry }) => tool(entry), then: ({ entry }) => via(entry) },
   'mcp.token': {
     did: ({ entry }) => (entry.metadata.grant === 'refresh_token' ? 'refreshed the tokens of' : 'gave its first tokens to'),
     tried: 'give tokens to',

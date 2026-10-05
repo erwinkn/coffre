@@ -3,6 +3,7 @@ import type { Access } from '@coffre/core/vault';
 
 import { callerFrom, loadCaller, type Caller } from './api/caller.ts';
 import { ApiError } from './api/errors.ts';
+import type { McpVia } from './api/context.ts';
 import { CredentialUncheckable } from './api/signin.ts';
 import { errorResponse } from './http.ts';
 import type { CoffreRuntime } from './runtime.ts';
@@ -18,6 +19,8 @@ export type AuthenticatedIdentity = {
   credentialId: string | null;
   /** That credential, when a trust binding issued it for a CI run: every entry the request writes names it. */
   provenance: string | null;
+  /** The MCP connection a tool's call came through; null for every other request. */
+  via: McpVia | null;
 };
 
 type AuthenticationRuntime = Pick<
@@ -143,6 +146,7 @@ export async function authenticateRequest(
       sourceIp,
       credentialId,
       provenance: exchanged ? credentialId : null,
+      via: null,
     };
   } catch {
     return errorResponse(new ApiError('unavailable', 'coffre cannot check who you are right now'));

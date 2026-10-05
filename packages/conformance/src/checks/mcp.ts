@@ -8,13 +8,16 @@ import { createHash, randomBytes } from 'node:crypto';
 
 import type { Deployment } from '../harness.ts';
 import { expect } from '../report.ts';
-import type { People, Person } from './people.ts';
+import { DEV, PROD, type Canaries, type People, type Person } from './people.ts';
 
 const NAME = 'Conformance MCP client';
 /** A native client's redirect, on loopback. A custom scheme is left out of a registration (D37). */
 const REDIRECT = 'http://127.0.0.1:33418/callback';
 /** A `state` the router would read as a number: it must come back as sent. */
 const STATE = '1e5';
+
+/** What every 2026-07-28 request carries: its revision and the client's capabilities. */
+const ENVELOPE = { 'io.modelcontextprotocol/protocolVersion': '2026-07-28', 'io.modelcontextprotocol/clientCapabilities': {} };
 
 type Tokens = { access_token: string; refresh_token: string; scope: string; token_type: string; expires_in: number };
 
@@ -30,11 +33,11 @@ async function json(response: Response): Promise<Record<string, unknown>> {
 }
 
 /** A JSON-RPC message to /mcp, with the headers a client sends. */
-function mcp(deployment: Deployment, headers: Record<string, string>, method = 'server/discover'): Promise<Response> {
+function mcp(deployment: Deployment, headers: Record<string, string>, method = 'server/discover', params: Record<string, unknown> = {}): Promise<Response> {
   return fetch(`${deployment.origin}/mcp`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...headers },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params: {} }),
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
   });
 }
 
@@ -96,7 +99,7 @@ async function refused(deployment: Deployment, what: string, fields: Record<stri
 }
 
 async function discovers(deployment: Deployment, access: string): Promise<boolean> {
-  const answer = await mcp(deployment, { authorization: `Bearer ${access}` });
+  const answer = await mcp(deployment, { authorization: `Bearer ${access}`, 'mcp-protocol-version': '2026-07-28', 'mcp-method': 'server/discover' }, 'server/discover', { _meta: ENVELOPE });
   if (answer.status === 401) return false;
   const body = await json(answer);
   expect(answer.status === 200 && Array.isArray((body.result as { supportedVersions?: unknown } | undefined)?.supportedVersions),
@@ -203,4 +206,94 @@ export async function mcpConnect(deployment: Deployment, people: People): Promis
   const reasons = mine.filter((entry) => entry.action === 'mcp.disconnect').map((entry) => entry.metadata.reason).sort();
   expect(JSON.stringify(reasons) === JSON.stringify(['code_reused', 'person', 'refresh_reused']), 'the disconnections do not say why', reasons);
   return '401 and both metadata documents; registered, approved, redeemed and discovered; only at /mcp, and only its token there; a reused refresh token, a reused code and a disconnection each end the connection, and the log says so';
+}
+
+/** A 2026-07-28 request as a client sends it: its headers say what its body does. */
+async function modern(deployment: Deployment, access: string, method: string, params: Record<string, unknown> = {}, name?: string) {
+  const response = await mcp(deployment, {
+    authorization: `Bearer ${access}`,
+    'mcp-protocol-version': '2026-07-28',
+    'mcp-method': method,
+    ...(name === undefined ? {} : { 'mcp-name': name }),
+  }, method, { ...params, _meta: ENVELOPE });
+  return { response, body: await json(response) };
+}
+
+/**
+ * The Browse tools, as a client calls them (design section 14, checks 1, 4
+ * and 5): on 2026-07-28 and through a 2025-11-25 `initialize`, as the
+ * reader, who sees dev and not prod. No value appears in any answer, the
+ * headers must agree with the body, and every call is in the log under the
+ * client, the API's own entries naming the connection.
+ */
+export async function mcpBrowse(deployment: Deployment, people: People, canaries: Canaries): Promise<string> {
+  const registered = await json(await fetch(`${deployment.origin}/api/oauth/register`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ client_name: NAME, redirect_uris: [REDIRECT] }),
+  }));
+  const clientId = registered.client_id as string;
+  const { access_token: access } = await redeem(deployment, clientId, await connect(deployment, people.reader, clientId));
+  const answers: string[] = [];
+
+  // 2026-07-28: discover, list, call.
+  const discovered = await modern(deployment, access, 'server/discover');
+  answers.push(JSON.stringify(discovered.body));
+  expect(discovered.response.status === 200, `server/discover answered ${discovered.response.status}`, discovered.body);
+  const listed = await modern(deployment, access, 'tools/list');
+  const result = listed.body.result as { tools?: { name: string; annotations?: { readOnlyHint?: boolean } }[]; cacheScope?: string; ttlMs?: number } | undefined;
+  const names = result?.tools?.map((tool) => tool.name) ?? [];
+  expect(names.includes('list_secrets') && names.includes('run_with_secrets') && result?.cacheScope === 'public' && typeof result.ttlMs === 'number',
+    'tools/list does not list the Browse tools, cacheable', listed.body);
+  const callTool = async (tool: string, args: Record<string, unknown>) => {
+    const { response, body } = await modern(deployment, access, 'tools/call', { name: tool, arguments: args }, tool);
+    answers.push(JSON.stringify(body));
+    expect(response.status === 200, `tools/call ${tool} answered ${response.status}`, body);
+    return body.result as { structuredContent?: Record<string, unknown>; content?: { text?: string }[]; isError?: boolean };
+  };
+  const dev = await callTool('list_secrets', { environment: DEV });
+  const keys = ((dev.structuredContent?.keys ?? []) as { key: string }[]).map((key) => key.key);
+  expect(['API_KEY', 'DATABASE_URL'].every((key) => keys.includes(key)), `list_secrets on ${DEV} does not list its keys`, keys);
+  const prod = await callTool('list_secrets', { environment: PROD });
+  expect(prod.isError === true, `the reader listed ${PROD}'s keys through MCP, which they cannot`, prod);
+  const run = await callTool('run_with_secrets', { environment: DEV, command: 'npm test' });
+  expect(run.content?.[0]?.text?.includes(`coffre run ${DEV} -- npm test`) === true, 'run_with_secrets does not say how to run the command', run);
+  for (const tool of ['whoami', 'list_projects']) await callTool(tool, {});
+  await callTool('secret_history', { secret: `${DEV}/API_KEY` });
+
+  // The headers say what the body does, or the request is refused.
+  const mismatched = await mcp(deployment, {
+    authorization: `Bearer ${access}`, 'mcp-protocol-version': '2026-07-28', 'mcp-method': 'tools/call', 'mcp-name': 'list_projects',
+  }, 'tools/call', { name: 'whoami', arguments: {}, _meta: ENVELOPE });
+  const mismatch = await json(mismatched);
+  expect(mismatched.status === 400 && (mismatch.error as { code?: number } | undefined)?.code === -32020, `a Mcp-Name naming another tool answered ${mismatched.status}`, mismatch);
+
+  // 2025-11-25: initialize, with no session, then the same tools.
+  const initialized = await mcp(deployment, { authorization: `Bearer ${access}` }, 'initialize', {
+    protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'coffre-conformance', version: '1' },
+  });
+  const init = await json(initialized);
+  expect(initialized.status === 200 && (init.result as { protocolVersion?: string } | undefined)?.protocolVersion === '2025-11-25',
+    `initialize for 2025-11-25 answered ${initialized.status}`, init);
+  expect(initialized.headers.get('mcp-session-id') === null, 'initialize minted a session: coffre keeps none');
+  const legacy = await mcp(deployment, { authorization: `Bearer ${access}`, 'mcp-protocol-version': '2025-11-25' }, 'tools/call', { name: 'list_secrets', arguments: { environment: DEV } });
+  const legacyBody = await json(legacy);
+  answers.push(JSON.stringify(legacyBody));
+  expect(legacy.status === 200 && (legacyBody.result as { isError?: boolean } | undefined)?.isError !== true, `a 2025-11-25 tools/call answered ${legacy.status}`, legacyBody);
+
+  // No value in any answer.
+  const leaked = Object.entries(canaries).filter(([, value]) => answers.some((answer) => answer.includes(value))).map(([path]) => path);
+  expect(leaked.length === 0, 'a Browse tool answered with a secret value', leaked);
+
+  // Every call in the log, under the client; the API's own refusal names the connection.
+  const { entries } = await people.admin.api.audit.list({ actor: people.reader.member, detail: '1', limit: 500 });
+  const mine = entries.filter((entry) => (entry.metadata.via as { clientId?: string } | undefined)?.clientId === clientId);
+  const reads = mine.filter((entry) => entry.action === 'mcp.read').length;
+  const refused = mine.filter((entry) => entry.action === 'mcp.call' && entry.decision === 'deny').length;
+  expect(reads === 6 && refused === 1, 'the log does not hold each call under the client', { reads, refused });
+  const api = mine.filter((entry) => !entry.action.startsWith('mcp.'));
+  expect(api.length > 0, "the API's own entries for the calls do not name the connection", mine.map((entry) => entry.action));
+  const shown = (await people.admin.api.audit.list({ actor: people.reader.member, limit: 500 })).entries;
+  expect(!shown.some((entry) => entry.action === 'mcp.read'), 'read-only calls are not detail');
+  return `on 2026-07-28 and 2025-11-25, the Browse tools as the reader: ${DEV} listed, ${PROD} refused, no value in any answer; headers held to the body; ${reads} reads as detail and the refusal shown, each under the client`;
 }

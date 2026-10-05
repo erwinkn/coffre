@@ -129,6 +129,7 @@ export async function contextFor(
     sourceIp: null,
     credentialId: null,
     provenance: null,
+    via: null,
   };
 }
 
