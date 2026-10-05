@@ -220,6 +220,11 @@ Every client is public: it holds no secret, and PKCE protects its codes.
 - **Dynamic Client Registration (fallback, deprecated by the spec).**
   - `POST /api/oauth/register` takes `client_name` and `redirect_uris` only:
     at most 5 URIs, and `token_endpoint_auth_method: none`.
+  - A redirect URI that breaks the rules below is left out of the
+    registration rather than failing it, as RFC 7591 allows, as long as one
+    usable URI remains. Cursor registers `cursor://…` beside its localhost
+    callback. Refusing the whole registration would lock Cursor out, as it
+    does at providers that refuse it.
   - It answers a random `client_id` and stores a row in `oauth_clients`.
   - The consent page shows such a client as **unverified**, because its name
     is only its own claim.
@@ -863,6 +868,8 @@ parity as they merge.
 
 ## 16. Open questions for Erwin
 
+Question 2 is settled; 1, 3 and 4 wait for Erwin.
+
 1. **Clients that can't elicit, claude.ai today.**
    - **Default (D31):** refuse changes and showing values, so a claude.ai
      connector can browse and, with Read values, read.
@@ -875,14 +882,53 @@ parity as they merge.
    - **What we'd lose:** the client no longer vouches that the link came
      from coffre. A manipulated model could show a lookalike link, though
      it could print one at any time anyway.
-   - **Recommendation:** the alternative. Without it, the org-wide claude.ai
-     connector can't change anything at all.
-2. **Custom-scheme redirects** (`cursor://…`, `vscode://…`). D31 says to
+   - **Threat model.** The model now holds the URL, which brings three
+     threats:
+     1. **An agentic browser that holds the person's cookies**, such as
+        Claude in Chrome or the agent's own browser tool, opens the link and
+        clicks Approve. coffre sees a valid same-origin session and can't
+        tell it from the person, so the confirmation fails. The same agent
+        could already make the change through coffre's UI with that
+        session; the link only hands it the exact target.
+     2. **A lookalike link**, injected into the model's output, phishes the
+        sign-in.
+     3. **A forwarded link** is opened by someone else, who is refused.
+   - **What resists the agentic browser**, from weakest to strongest:
+     - **Cheap bounds**, which ship either way, though none stops an agent:
+       single use, bound to the person, connection and digest, a 5-minute
+       expiry, a POST-only Approve, `frame-ancestors 'none'`, same-origin.
+     - **A recent sign-in.** An IdP session lets an agent sign in again
+       silently, and `prompt=login` is per provider; GitHub has none.
+     - **A passkey with user verification** (WebAuthn,
+       `userVerification: required`) on Approve. This is the one control
+       an agent can't pass. It needs per-person passkeys, a new feature,
+       and it would protect elicitation clients that drive a browser too.
+     - **Approval on another device.** Stronger, and much heavier.
+   - **Recommendation:** the alternative, with the cheap bounds. Say plainly
+     that an agent driving the person's signed-in browser can approve, just
+     as it can use coffre's UI. Passkeys on approvals are the follow-up.
+     Without the alternative, the org-wide claude.ai connector can't change
+     anything at all.
+2. **Custom-scheme redirects** (`cursor://…`, `vscode://…`). *Settled: v1
+   refuses them, and DCR leaves them out of a registration.* D31 says to
    refuse non-HTTPS. coffre allows loopback HTTP because the spec and Claude
-   Code need it. Custom schemes would let some desktop clients connect.
-   Cursor, I believe, redirects to a `cursor://` URL; I haven't verified
-   that. **Recommendation:** refuse them in v1, and revisit if a client
-   people use needs one.
+   Code need it. By their own docs, no mainstream client needs a custom
+   scheme:
+   - **Cursor** documents `http://localhost:8787/callback` and
+     `https://www.cursor.com/agents/mcp/oauth/callback`, through DCR. Its
+     `cursor://anysphere.cursor-mcp/oauth/callback` is an undocumented
+     fallback for when that port is taken. DCR leaves it out (section 4).
+   - **VS Code** has a CIMD at `https://vscode.dev/oauth/client-metadata.json`,
+     redirecting to `https://vscode.dev/redirect` and
+     `http://127.0.0.1:33418/`.
+   - **Windsurf** documents no MCP redirect.
+   - **Claude**: section 10.
+
+   v1 refuses custom schemes. If one is ever needed, the future path, and
+   the narrowest allowance, is a reverse-domain scheme (RFC 8252 §7.1, such as
+   `com.example.app:/cb`), declared in a CIMD document and matched exactly,
+   with a warning on the consent page. Never through DCR, and never a
+   one-word scheme.
 3. **2025-era clients: reads only.** The full `-32042` path would let them
    make changes. It needs a session ID that carries the client's declared
    capabilities under a MAC. Claude Code's 2025 runtime doesn't declare URL
