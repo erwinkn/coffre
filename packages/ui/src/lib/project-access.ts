@@ -66,7 +66,7 @@ export function projectAccessLabel(
   grant: Pick<GrantRow, 'role' | 'roleName' | 'environmentSlug'>,
 ): string {
   const scope =
-    grant.environmentSlug === null ? 'all environments' : grant.environmentSlug;
+    grant.environmentSlug === null ? 'all envs' : grant.environmentSlug;
 
   if (grant.role === 'owner') return 'Owner';
   if (grant.role === 'viewer') {

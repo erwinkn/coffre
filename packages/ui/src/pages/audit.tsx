@@ -1,5 +1,5 @@
-import { serviceName, shownMember, type AuditEntryView } from '@coffre/client';
-import { Fragment, useState, type ReactNode } from 'react';
+import { type AuditEntryView } from '@coffre/client';
+import { useState, type ReactNode } from 'react';
 import { useQuery, useSuspenseQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useCoffre } from '../lib/coffre';
@@ -12,7 +12,8 @@ import {
   who,
   type Part,
 } from '../lib/audit-sentences';
-import { breakAfterUnderscores, EmptyState, Notice, Spinner, Timestamp, Toggletip } from '../components/ui';
+import { EmptyState, Notice, Spinner, Timestamp, Toggletip } from '../components/ui';
+import { memberName, Sentence } from '../components/audit-sentence';
 import { ClosedDoor, PageHeader } from '../components/page';
 import {
   Activity,
@@ -131,7 +132,7 @@ export function AuditPage() {
         </Link>
       </div>
 
-      <section className="card" aria-label="Audit entries">
+      <section className="card card-wide" aria-label="Audit entries">
         {shown.length === 0 ? (
           <EmptyState title={deniedOnly ? 'No denials recorded' : 'Nothing recorded yet'}>
             {deniedOnly
@@ -345,56 +346,6 @@ function Row({
   );
 }
 
-/** A sentence, its people and places links to their pages. */
-function Sentence({ parts }: { parts: Part[] }) {
-  return (
-    <>
-      {parts.map((part, index) => (
-        <Fragment key={index}>
-          {typeof part === 'string' ? (
-            part
-          ) : 'place' in part ? (
-            <PlaceLink path={part.place} />
-          ) : (
-            <MemberLink member={part.member} />
-          )}
-        </Fragment>
-      ))}
-    </>
-  );
-}
-
-function PlaceLink({ path }: { path: string }) {
-  const [project, environment] = path.split('/') as [string, string | undefined];
-  const text = <span className="mono">{breakAfterUnderscores(path)}</span>;
-  return environment === undefined ? (
-    <Link to="/projects/$project" params={{ project }}>
-      {text}
-    </Link>
-  ) : (
-    <Link to="/projects/$project/$environment" params={{ project, environment }}>
-      {text}
-    </Link>
-  );
-}
-
-/** A member from the log, which keeps `token:<name>`, shown as people read it: `service:<name>`, to its page. */
-function MemberLink({ member }: { member: string }) {
-  return member.startsWith('token:') ? (
-    <Link to="/tokens/$token" params={{ token: serviceName(member) }}>
-      {shownMember(member)}
-    </Link>
-  ) : (
-    <Link to="/users/$user" params={{ user: memberName(member) }}>
-      {memberName(member)}
-    </Link>
-  );
-}
-
-function memberName(member: string): string {
-  return member.startsWith('user:') ? member.slice('user:'.length) : shownMember(member);
-}
-
 /** The entry the log breaks at, said in words as well as in red. */
 function BreakMark() {
   return (
@@ -486,7 +437,7 @@ function ChainStatus({ chain, onRetry }: { chain: ChainResult | undefined; onRet
         label={
           `Every entry through ${chain.through ?? 0} holds, under the app's key and the vault's.` +
           (chain.checkpoint === null
-            ? ' The vault has not signed the log yet.'
+            ? ' Not checkpointed yet: the vault signs the log every few minutes.'
             : ` The vault last signed it through entry ${chain.checkpoint.seq}, at ${chain.checkpoint.signedAt}.`)
         }
       >

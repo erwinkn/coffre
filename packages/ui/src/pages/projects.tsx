@@ -54,14 +54,7 @@ export function ProjectsPage() {
 
   return (
     <>
-      <PageHeader
-        title="Projects"
-        actions={
-          <RootAdminOnly capabilities={capabilities}>
-            <NewProject />
-          </RootAdminOnly>
-        }
-      />
+      <PageHeader title="Projects" />
 
       {active.length === 0 && refusedProjects.length === 0 ? (
         <div className="card">
@@ -77,6 +70,12 @@ export function ProjectsPage() {
           <ProjectTable projects={active} refused />
         </section>
       )}
+
+      <RootAdminOnly capabilities={capabilities}>
+        <div className="table-actions">
+          <NewProject />
+        </div>
+      </RootAdminOnly>
 
       {archived.length > 0 && (
         <section aria-labelledby="archived-projects">

@@ -21,7 +21,15 @@ import type { CoffreClient } from '@coffre/client';
 
 import { ShellLayout, SoloLayout } from './layout';
 import { uiResult } from './lib/coffre';
-import { loadDirectory, loadPrincipal, loadProject, loadShell, queries, type AuditSearch } from './lib/queries';
+import {
+  loadDirectory,
+  loadPrincipal,
+  loadProject,
+  loadServiceDirectory,
+  loadShell,
+  queries,
+  type AuditSearch,
+} from './lib/queries';
 import type { ProjectTab } from './pages/project';
 import { loginSearch } from './lib/signin-errors';
 
@@ -133,6 +141,10 @@ export const users = {
 
 /** `/users/$user`. */
 export const user = {
+  // Access is the default tab, with no parameter.
+  validateSearch: (search: Record<string, unknown>): { tab?: 'activity' } => ({
+    tab: search.tab === 'activity' ? search.tab : undefined,
+  }),
   loader: ({ context, params }: Loader<{ user: string }>) => {
     const { coffre, queryClient } = coffreOf(context);
     return loadPrincipal(queryClient, coffre, 'user', params.user);
@@ -143,12 +155,16 @@ export const user = {
 export const tokens = {
   loader: ({ context }: Loader) => {
     const { coffre, queryClient } = coffreOf(context);
-    return loadDirectory(queryClient, coffre);
+    return loadServiceDirectory(queryClient, coffre);
   },
 };
 
 /** `/tokens/$token`. */
 export const token = {
+  // Sign-in is the default tab, with no parameter.
+  validateSearch: (search: Record<string, unknown>): { tab?: 'access' | 'activity' } => ({
+    tab: search.tab === 'access' || search.tab === 'activity' ? search.tab : undefined,
+  }),
   loader: ({ context, params }: Loader<{ token: string }>) => {
     const { coffre, queryClient } = coffreOf(context);
     return loadPrincipal(queryClient, coffre, 'service', params.token);

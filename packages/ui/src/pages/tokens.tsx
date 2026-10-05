@@ -1,6 +1,6 @@
 import { useSuspenseQuery } from '@tanstack/react-query';
 
-import { AddPrincipal, DirectoryTable } from '../components/directory';
+import { DirectoryTable } from '../components/directory';
 import { useCoffre } from '../lib/coffre';
 import { queries } from '../lib/queries';
 import { useShell } from '../lib/use-shell';
@@ -26,8 +26,7 @@ export function TokensPage() {
     <>
       <PageHeader
         title="Service accounts"
-        description="Machine identities, for CI and other machines. Each signs in with OIDC, its CI's ID token matched by a trust binding, or with a bearer token."
-        actions={<AddPrincipal principalType="service" />}
+        description="Identities for CI and other automation."
       />
       <DirectoryTable
         principalType="service"

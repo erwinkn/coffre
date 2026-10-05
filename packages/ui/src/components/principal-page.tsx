@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import { useSuspenseQueries, useSuspenseQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useShell } from '../lib/use-shell';
@@ -30,7 +30,9 @@ import { InstanceRole, KIND, PrincipalActions } from './directory';
 import { PrincipalReportCards, RemovedNotice } from './offboarding';
 import { PrincipalAvatar } from './principal';
 import { Tile } from './tile';
-import { Clock, Folder, Key, Pencil, Users, X } from './icons';
+import { Activity, Archive, Clock, Folder, Key, Link as LinkIcon, Pencil, Users, X } from './icons';
+import { ActionsLog } from './actions-log';
+import { PageTabs, type TabItem } from './tabs';
 
 type PrincipalType = DirectoryPrincipal['principalType'];
 
@@ -66,14 +68,22 @@ function usePrincipalPage(principalType: PrincipalType, principalId: string) {
   return { report, access };
 }
 
+export type PrincipalTab = 'sign-in' | 'access' | 'activity';
+
 export function PrincipalPage({
   principalType,
   principalId,
+  tab: asked,
+  signIn,
 }: {
   principalType: PrincipalType;
   principalId: string;
+  /** The tab the URL names; the first one shown when it names none. */
+  tab: PrincipalTab | undefined;
+  /** A service account's ways in, its first tab while it is active. */
+  signIn?: ReactNode;
 }) {
-  const { instanceRole } = useShell();
+  const { instanceRole, capabilities } = useShell();
   const { report, access } = usePrincipalPage(principalType, principalId);
   // A role change or removal made from this page's menu, refused.
   const { status, dismiss } = useChangeStatus(directoryList.queryKey);
@@ -128,6 +138,20 @@ export function PrincipalPage({
         ({ project, grantsError }) => project.archivedAt === null && grantsError === null,
       );
 
+  const tabs: TabItem<PrincipalTab>[] = [
+    ...(signIn !== undefined && !removed
+      ? [{ key: 'sign-in' as const, label: 'Sign-in', icon: <LinkIcon size={15} /> }]
+      : []),
+    removed
+      ? { key: 'access' as const, label: 'Offboarding', icon: <Archive size={15} /> }
+      : { key: 'access' as const, label: 'Access', icon: <Folder size={15} /> },
+    ...(capabilities.canReadAudit
+      ? [{ key: 'activity' as const, label: 'Activity', icon: <Activity size={15} /> }]
+      : []),
+  ];
+  const tab = tabs.find(({ key }) => key === (asked ?? tabs[0]!.key))?.key ?? tabs[0]!.key;
+  const member = memberRef(principalType, principalId);
+
   return (
     <>
       <PageHeader
@@ -135,7 +159,7 @@ export function PrincipalPage({
         title={principalType === 'service' ? `service:${principalId}` : principalId}
         description={
           principalType === 'service'
-            ? 'A service account: a machine identity, for CI and other machines. It signs in with OIDC, its CI’s ID token matched by a trust binding, or with a bearer token.'
+            ? 'A service account: an identity for CI and other automation.'
             : undefined
         }
         meta={
@@ -145,22 +169,7 @@ export function PrincipalPage({
             entry?.principalType === 'user' && <InstanceRole principal={entry} />
           )
         }
-        actions={
-          (editable.length > 0 || entry !== undefined) && (
-            <>
-              {editable.length > 0 && (
-                <EditAccess
-                  principalType={principalType}
-                  principalId={principalId}
-                  access={editable}
-                />
-              )}
-              {entry !== undefined && (
-                <PrincipalActions principal={entry} trigger="btn btn-icon" />
-              )}
-            </>
-          )
-        }
+        actions={entry !== undefined && <PrincipalActions principal={entry} trigger="btn btn-icon" />}
       />
 
       {change.state === 'failed' && (
@@ -173,12 +182,38 @@ export function PrincipalPage({
           <Notice tone="bad">{report.error}</Notice>
         </div>
       )}
-      {removed && found !== null && <RemovedNotice report={found} />}
+      <PageTabs
+        label={people ? 'User sections' : 'Service account sections'}
+        tabs={tabs}
+        current={tab}
+        link={(key, props) =>
+          people ? (
+            <Link
+              to="/users/$user"
+              params={{ user: principalId }}
+              search={{ tab: key === 'activity' ? key : undefined }}
+              activeOptions={{ exact: true, explicitUndefined: true }}
+              {...props}
+            />
+          ) : (
+            <Link
+              to="/tokens/$token"
+              params={{ token: principalId }}
+              search={{ tab: key === 'access' || key === 'activity' ? key : undefined }}
+              activeOptions={{ exact: true, explicitUndefined: true }}
+              {...props}
+            />
+          )
+        }
+      />
+
+      {tab === 'sign-in' && signIn}
+
+      {tab === 'access' && removed && found !== null && <RemovedNotice report={found} />}
 
       {/* Removal ends every grant, so there is no access left to show. */}
-      {!removed && (
+      {tab === 'access' && !removed && (
         <>
-          <h2 className="section-title">Project access</h2>
 
           {errors.map(({ project, grantsError }) => (
             <div key={project.slug} style={{ marginBottom: '0.75rem' }}>
@@ -222,7 +257,7 @@ export function PrincipalPage({
                         >
                           {project.name}
                         </Link>
-                        {project.archivedAt !== null && <span className="tag tag-red">archived</span>}
+                        {project.archivedAt !== null && <span className="tag tag-red">Archived</span>}
                       </span>
                     }
                   />
@@ -230,6 +265,12 @@ export function PrincipalPage({
               </GrantsTable>
             )}
           </section>
+
+          {editable.length > 0 && (
+            <div className="table-actions">
+              <EditAccess principalType={principalType} principalId={principalId} access={editable} />
+            </div>
+          )}
 
           {/* A root admin manages every project, so nothing is out of view. */}
           {instanceRole !== 'root-admin' && (
@@ -240,7 +281,9 @@ export function PrincipalPage({
         </>
       )}
 
-      {found !== null && <PrincipalReportCards report={found} />}
+      {tab === 'access' && found !== null && <PrincipalReportCards report={found} />}
+
+      {tab === 'activity' && <ActionsLog member={member} />}
     </>
   );
 }

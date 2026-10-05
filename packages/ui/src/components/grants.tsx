@@ -82,15 +82,15 @@ export function GrantRowView({
           data-label="Expires"
         >
           {grant.expiresAt === null ? (
-            'never'
+            'Never'
           ) : (
             <>
-              <span className="narrow-only">expires </span>
+              <span className="narrow-only">Expires </span>
               {grant.expiresAt.slice(0, 10)}
               {expired && (
                 <>
                   {' '}
-                  <span className="tag tag-red">expired</span>
+                  <span className="tag tag-red">Expired</span>
                 </>
               )}
             </>

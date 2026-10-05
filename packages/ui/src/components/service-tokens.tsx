@@ -23,100 +23,104 @@ export function ServiceTokens({ serviceId, tokens }: { serviceId: string; tokens
   const { status, dismiss } = useChangeStatus(change.list.queryKey);
 
   return (
-    <Card
-      labelledBy="service-tokens"
-      title="Bearer tokens"
-      description="For CI without OIDC: tokens this service account presents to the API. Each is shown once, when it is issued; coffre keeps only a hash."
-      actions={<IssueToken serviceId={serviceId} />}
-    >
-      {tokens.length === 0 ? (
-        <EmptyState title="No bearer tokens">
-          None is needed for CI that signs in with OIDC; issue one for CI that cannot.
-        </EmptyState>
-      ) : (
-        <div className="dt-wrap">
-          <table className="dt">
-            <thead>
-              <tr>
-                <th>Token</th>
-                <th className="col-shrink">Issued (UTC)</th>
-                <th className="col-shrink">Last used</th>
-                <th className="col-shrink">Expires</th>
-                <th className="col-actions">
-                  <span className="visually-hidden">Actions</span>
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {tokens.map((token) => {
-                const state = status(token.id);
-                return (
-                  <Fragment key={token.id}>
-                    <tr className={rowClass(state)}>
-                      <td>
-                        <span className="cell-account">
-                          <Key size={15} />
-                          <span className="cell-stack">
-                            <span>{token.label ?? 'Unlabelled'}</span>
-                            <small className="mono">{token.hint}</small>
+    <>
+      <Card
+        labelledBy="service-tokens"
+        title="Bearer tokens"
+        description="For CI without OIDC: tokens this service account presents to the API. Each is shown once, when it is issued; coffre keeps only a hash."
+      >
+        {tokens.length === 0 ? (
+          <EmptyState title="No bearer tokens">
+            None is needed for CI that signs in with OIDC; issue one for CI that cannot.
+          </EmptyState>
+        ) : (
+          <div className="dt-wrap">
+            <table className="dt">
+              <thead>
+                <tr>
+                  <th>Token</th>
+                  <th className="col-shrink">Issued (UTC)</th>
+                  <th className="col-shrink">Last used</th>
+                  <th className="col-shrink">Expires</th>
+                  <th className="col-actions">
+                    <span className="visually-hidden">Actions</span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {tokens.map((token) => {
+                  const state = status(token.id);
+                  return (
+                    <Fragment key={token.id}>
+                      <tr className={rowClass(state)}>
+                        <td>
+                          <span className="cell-account">
+                            <Key size={15} />
+                            <span className="cell-stack">
+                              <span>{token.label ?? 'Unlabelled'}</span>
+                              <small className="mono">{token.hint}</small>
+                            </span>
                           </span>
-                        </span>
-                      </td>
-                      <td className="nowrap">
-                        <span className="cell-stack">
-                          <Timestamp iso={token.createdAt} />
-                          <small>by {token.createdBy}</small>
-                        </span>
-                      </td>
-                      <td className="nowrap cell-muted">
-                        {token.lastUsedAt === null ? (
-                          'Never'
-                        ) : (
+                        </td>
+                        <td className="nowrap">
                           <span className="cell-stack">
-                            <Timestamp iso={token.lastUsedAt} display="relative" />
-                            {token.lastUsedIp !== null && <small className="mono">{token.lastUsedIp}</small>}
+                            <Timestamp iso={token.createdAt} />
+                            <small>by {token.createdBy}</small>
                           </span>
-                        )}
-                      </td>
-                      <td className="nowrap cell-muted">
-                        <Timestamp iso={token.expiresAt} display="relative" />
-                      </td>
-                      <td className="col-actions">
-                        {state.state === 'pending' ? (
-                          <RowPending status={state} />
-                        ) : (
-                          <ConfirmButton
-                            trigger={
-                              <button className="act">
-                                <X size={13} />
-                                Revoke
-                              </button>
-                            }
-                            title={
-                              <>
-                                Revoke <span className="mono">{token.hint}</span>?
-                              </>
-                            }
-                            body="Whatever uses it is refused from its next request. Issue a new token first if the service should keep working."
-                            confirmLabel="Revoke token"
-                            onConfirm={() => revoke(token)}
-                          />
-                        )}
-                      </td>
-                    </tr>
-                    <RowFailure
-                      status={state}
-                      columns={5}
-                      onDismiss={() => state.state === 'failed' && dismiss(state.mutationId)}
-                    />
-                  </Fragment>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </Card>
+                        </td>
+                        <td className="nowrap cell-muted">
+                          {token.lastUsedAt === null ? (
+                            'Never'
+                          ) : (
+                            <span className="cell-stack">
+                              <Timestamp iso={token.lastUsedAt} display="relative" />
+                              {token.lastUsedIp !== null && <small className="mono">{token.lastUsedIp}</small>}
+                            </span>
+                          )}
+                        </td>
+                        <td className="nowrap cell-muted">
+                          <Timestamp iso={token.expiresAt} display="relative" />
+                        </td>
+                        <td className="col-actions">
+                          {state.state === 'pending' ? (
+                            <RowPending status={state} />
+                          ) : (
+                            <ConfirmButton
+                              trigger={
+                                <button className="act">
+                                  <X size={13} />
+                                  Revoke
+                                </button>
+                              }
+                              title={
+                                <>
+                                  Revoke <span className="mono">{token.hint}</span>?
+                                </>
+                              }
+                              body="Whatever uses it is refused from its next request. Issue a new token first if the service should keep working."
+                              confirmLabel="Revoke token"
+                              onConfirm={() => revoke(token)}
+                            />
+                          )}
+                        </td>
+                      </tr>
+                      <RowFailure
+                        status={state}
+                        columns={5}
+                        onDismiss={() => state.state === 'failed' && dismiss(state.mutationId)}
+                      />
+                    </Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+      <div className="table-actions">
+        <IssueToken serviceId={serviceId} />
+      </div>
+    </>
   );
 }
 
@@ -137,7 +141,7 @@ function IssueToken({ serviceId }: { serviceId: string }) {
 
   return (
     <>
-      <button className="btn btn-sm" onClick={() => setOpen(true)}>
+      <button className="btn" onClick={() => setOpen(true)}>
         <Plus size={14} />
         Issue token
       </button>

@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { useSuspenseQuery } from '@tanstack/react-query';
+import { useQuery, useSuspenseQuery } from '@tanstack/react-query';
 import { Link, useRouter } from '@tanstack/react-router';
 import { useShell } from '../lib/use-shell';
 import { Menu } from '@base-ui/react/menu';
@@ -31,10 +31,13 @@ import {
   Modal,
   Notice,
   Spinner,
+  Timestamp,
 } from '../components/ui';
 import { Card, ClosedDoor, PageHeader } from '../components/page';
+import { PageTabs, type TabItem } from '../components/tabs';
 import { GrantRowView, GrantsTable, RefusedGrants, useRefusedGrants } from '../components/grants';
-import { PrincipalLink } from '../components/principal';
+import { KIND } from '../components/directory';
+import { PrincipalAvatar, PrincipalLink } from '../components/principal';
 import { PrincipalPicker } from '../components/principal-picker';
 import {
   parseProjectAccess,
@@ -42,6 +45,7 @@ import {
 } from '../lib/project-access';
 import {
   Archive,
+  ChevronRight,
   Folder,
   Key,
   Layers,
@@ -60,7 +64,7 @@ const Route = pageRoute<typeof project>();
 
 export type ProjectTab = 'environments' | 'users' | 'tokens' | 'settings';
 
-const TABS: { key: ProjectTab; label: string; icon: ReactNode }[] = [
+const TABS: TabItem<ProjectTab>[] = [
   { key: 'environments', label: 'Environments', icon: <Layers size={15} /> },
   { key: 'users', label: 'Users', icon: <Users size={15} /> },
   { key: 'tokens', label: 'Service accounts', icon: <Key size={15} /> },
@@ -141,19 +145,6 @@ function ProjectView({
         tile={project.slug}
         title={project.name}
         aside={<span className="page-title-slug">{project.slug}</span>}
-        actions={
-          tab === 'environments'
-            ? canManageEnvironments && <NewEnvironment project={project.slug} />
-            : (tab === 'users' || tab === 'tokens') &&
-              grantsError === null && (
-                <NewGrant
-                  principalType={principalType}
-                  project={project.slug}
-                  environments={project.environments}
-                  grants={grants}
-                />
-              )
-        }
       />
 
       {project.archivedAt !== null && (
@@ -165,29 +156,25 @@ function ProjectView({
         </div>
       )}
 
-      {/* One tab is no choice at all, so a reader-only project shows none. */}
-      {allowed.length > 1 && (
-        <nav className="tabs" aria-label="Project sections">
-          {allowed.map(({ key, label, icon }) => (
-            <Link
-              key={key}
-              to="/projects/$project"
-              params={{ project: project.slug }}
-              search={{ tab: key === 'environments' ? undefined : key }}
-              // Without these, Environments (no parameter) counts as a
-              // prefix of every other tab and stays highlighted on all of them.
-              activeOptions={{ exact: true, explicitUndefined: true }}
-              aria-current={key === tab ? 'page' : undefined}
-            >
-              {icon}
-              {label}
-            </Link>
-          ))}
-        </nav>
-      )}
+      <PageTabs
+        label="Project sections"
+        tabs={allowed}
+        current={tab}
+        link={(key, props) => (
+          <Link
+            to="/projects/$project"
+            params={{ project: project.slug }}
+            search={{ tab: key === 'environments' ? undefined : key }}
+            // Without these, Environments (no parameter) counts as a
+            // prefix of every other tab and stays highlighted on all of them.
+            activeOptions={{ exact: true, explicitUndefined: true }}
+            {...props}
+          />
+        )}
+      />
 
       {tab === 'environments' && (
-        <EnvironmentsPanel project={project} canManage={canManageEnvironments} />
+        <EnvironmentsPanel project={project} canManage={canManageEnvironments} grants={grants} />
       )}
 
       {(tab === 'users' || tab === 'tokens') &&
@@ -197,7 +184,8 @@ function ProjectView({
           <AccessPanel
             principalType={principalType}
             project={project.slug}
-            grants={grants.filter((grant) => grant.principalType === principalType)}
+            environments={project.environments}
+            grants={grants}
           />
         ))}
 
@@ -214,9 +202,12 @@ function ProjectView({
 function EnvironmentsPanel({
   project,
   canManage,
+  grants,
 }: {
   project: ProjectSummary;
   canManage: boolean;
+  /** The project's grants, when you manage its access: who can open each environment. */
+  grants: GrantRow[];
 }) {
   const detailed = project.environments.filter(hasEnvironmentDetails);
   const archived = detailed.filter((environment) => environment.details.archivedAt !== null);
@@ -248,6 +239,7 @@ function EnvironmentsPanel({
                 project={project.slug}
                 environment={environment}
                 isAdmin={canManage}
+                grants={grants}
               />
             </li>
           ))}
@@ -269,6 +261,12 @@ function EnvironmentsPanel({
         </ul>
       )}
 
+      {canManage && (
+        <div className="table-actions">
+          <NewEnvironment project={project.slug} />
+        </div>
+      )}
+
       {archived.length > 0 && (
         <section aria-labelledby="archived-environments">
           <h2 className="section-title" id="archived-environments">
@@ -281,6 +279,7 @@ function EnvironmentsPanel({
                   project={project.slug}
                   environment={environment}
                   isAdmin={canManage}
+                  grants={grants}
                 />
               </li>
             ))}
@@ -295,14 +294,44 @@ function EnvironmentsPanel({
  * One environment. The whole card opens it when you can; its menu sits above
  * that link.
  */
+/** Who can open an environment: a grant on it, or on the whole project. */
+function holdersOf(grants: GrantRow[], environment: string) {
+  const seen = new Set<string>();
+  return grants.filter((grant) => {
+    const id = `${grant.principalType}:${grant.principalId}`;
+    if ((grant.environmentSlug !== null && grant.environmentSlug !== environment) || seen.has(id)) {
+      return false;
+    }
+    seen.add(id);
+    return true;
+  });
+}
+
+/** The newest change among an environment's secrets, read when its card shows. */
+function useLastChange(project: string, environment: string, enabled: boolean) {
+  const { data } = useQuery({ ...queries.secrets(useCoffre(), { project, environment }), enabled });
+  if (data === undefined || !data.ok) return null;
+  let last: { at: string; by: string | null } | null = null;
+  for (const key of data.keys) {
+    if (!key.archived && key.updatedAt !== null && (last === null || key.updatedAt > last.at)) {
+      last = { at: key.updatedAt, by: key.updatedBy };
+    }
+  }
+  return last;
+}
+
+const SHOWN_HOLDERS = 4;
+
 function EnvironmentCard({
   project,
   environment,
   isAdmin,
+  grants,
 }: {
   project: string;
   environment: ProjectEnvironment;
   isAdmin: boolean;
+  grants: GrantRow[];
 }) {
   const [renaming, setRenaming] = useState(false);
   const [confirming, setConfirming] = useState(false);
@@ -320,36 +349,73 @@ function EnvironmentCard({
   const opens = details !== null && !isArchived && environment.accessible && !pending;
   const manageable = isAdmin && details !== null;
   const slugError = slug === '' ? null : slugProblem(slug);
+  const lastChange = useLastChange(project, environment.slug, opens);
+  const holders = holdersOf(grants, environment.slug);
 
   return (
-    <div className={`env-card${opens ? ' is-link' : ' is-muted'} ${rowClass(state)}`}>
+    <div
+      className={`env-card${opens ? ' is-link' : ' is-muted'} ${rowClass(state)}`}
+    >
       <div className="env-card-text">
-        {opens ? (
-          <Link
-            className="env-card-name stretch"
-            to="/projects/$project/$environment"
-            params={{ project, environment: environment.slug }}
-          >
-            {environment.name}
-          </Link>
-        ) : (
-          <span className="env-card-name">{environment.name}</span>
-        )}
-        <span className="env-card-meta">
-          <span className="mono">{environment.slug}</span>
-          {isArchived ? (
-            <span className="tag tag-red">archived</span>
-          ) : !environment.accessible && !pending ? (
-            <span className="tag tag-outline">no secret access</span>
+        <span className="env-card-head">
+          {opens ? (
+            <Link
+              className="env-card-name stretch"
+              to="/projects/$project/$environment"
+              params={{ project, environment: environment.slug }}
+            >
+              {environment.name}
+            </Link>
           ) : (
-            secretCount !== null && (
-              <span>
-                {secretCount} secret{secretCount === 1 ? '' : 's'}
-              </span>
-            )
+            <span className="env-card-name">{environment.name}</span>
           )}
+          <span className="env-card-slug mono">{environment.slug}</span>
         </span>
+
+        {isArchived ? (
+          <span className="env-card-meta">
+            <span className="tag tag-red">Archived</span>
+          </span>
+        ) : !environment.accessible && !pending ? (
+          <span className="env-card-meta">
+            <span className="tag tag-outline">No secret access</span>
+          </span>
+        ) : (
+          secretCount !== null && (
+            <span className="env-card-facts">
+              <span className="env-card-count">
+                <strong>{secretCount}</strong> secret{secretCount === 1 ? '' : 's'}
+              </span>
+              {lastChange !== null && (
+                <span className="env-card-change">
+                  Changed <Timestamp iso={lastChange.at} display="relative" />
+                  {lastChange.by !== null && <> by {lastChange.by.split('@')[0]}</>}
+                </span>
+              )}
+            </span>
+          )
+        )}
+
+        {holders.length > 0 && !isArchived && (
+          <span
+            className="env-card-holders"
+            title={holders.map((grant) => grant.principalId).join(', ')}
+          >
+            <span className="avatar-stack">
+              {holders.slice(0, SHOWN_HOLDERS).map((grant) => (
+                <PrincipalAvatar
+                  key={`${grant.principalType}:${grant.principalId}`}
+                  type={grant.principalType}
+                  id={grant.principalId}
+                />
+              ))}
+            </span>
+            <span>{holders.length} with access</span>
+          </span>
+        )}
       </div>
+
+      {opens && <ChevronRight size={16} className="env-card-go" aria-hidden />}
 
       {pending && <RowPending status={state} />}
 
@@ -587,47 +653,62 @@ function NewEnvironment({ project }: { project: string }) {
   );
 }
 
+/** One kind's grants on the project, and below them the way to add one. */
 function AccessPanel({
   principalType,
   project,
-  grants,
+  environments,
+  grants: all,
 }: {
   principalType: 'user' | 'service';
   project: string;
+  environments: ProjectSummary['environments'];
+  /** Every grant on the project: the picker shows what each candidate already holds. */
   grants: GrantRow[];
 }) {
   const people = principalType === 'user';
+  const kind = KIND[principalType];
+  const grants = all.filter((grant) => grant.principalType === principalType);
   const refused = useRefusedGrants(project, grants, principalType);
   return (
-    <section className="card" aria-label={people ? 'Users with access' : 'Service accounts with access'}>
-      {grants.length === 0 && refused.length === 0 ? (
-        <EmptyState title={people ? 'No user has access' : 'No token has access'}>
-          Add {people ? 'a user' : 'a token'} with permissions on the whole project or on one
-          environment.
-        </EmptyState>
-      ) : (
-        <GrantsTable
-          lead={
-            <span className="th">
-              {people ? <User size={14} /> : <Key size={14} />}
-              {people ? 'Email' : 'Name'}
-            </span>
-          }
-        >
-          {grants.map((grant, index) => (
-            <GrantRowView
-              key={grantId(grant)}
-              number={index + 1}
-              project={project}
-              grant={grant}
-              leadLabel={people ? 'Email' : 'Name'}
-              lead={<PrincipalLink type={grant.principalType} id={grant.principalId} />}
-            />
-          ))}
-          <RefusedGrants refused={refused} />
-        </GrantsTable>
-      )}
-    </section>
+    <>
+      <section className="card" aria-label={people ? 'Users with access' : 'Service accounts with access'}>
+        {grants.length === 0 && refused.length === 0 ? (
+          <EmptyState title={`No ${kind} has access`}>
+            Add a {kind} with permissions on the whole project or on one environment.
+          </EmptyState>
+        ) : (
+          <GrantsTable
+            lead={
+              <span className="th">
+                {people ? <User size={14} /> : <Key size={14} />}
+                {people ? 'Email' : 'Name'}
+              </span>
+            }
+          >
+            {grants.map((grant, index) => (
+              <GrantRowView
+                key={grantId(grant)}
+                number={index + 1}
+                project={project}
+                grant={grant}
+                leadLabel={people ? 'Email' : 'Name'}
+                lead={<PrincipalLink type={grant.principalType} id={grant.principalId} />}
+              />
+            ))}
+            <RefusedGrants refused={refused} />
+          </GrantsTable>
+        )}
+      </section>
+      <div className="table-actions">
+        <NewGrant
+          principalType={principalType}
+          project={project}
+          environments={environments}
+          grants={all}
+        />
+      </div>
+    </>
   );
 }
 
@@ -649,7 +730,7 @@ function NewGrant({
   const [expiresAt, setExpiresAt] = useState('');
   const grant = useChange(grantAccess(useCoffre(), project));
   const permissionOptions = projectAccessOptions(environments);
-  const kind = principalType === 'user' ? 'user' : 'token';
+  const kind = KIND[principalType];
 
   function close() {
     setOpen(false);
@@ -767,15 +848,9 @@ function GeneralSettings({ project }: { project: ProjectSummary }) {
     setName(project.name);
   }, [project.slug, project.name]);
 
+  // Two fields and their Save need no card: the tab already says what they are.
   return (
-    <section className="card" aria-labelledby="general-settings">
-      <div className="card-head">
-        <div>
-          <h2 className="card-title" id="general-settings">
-            General
-          </h2>
-        </div>
-      </div>
+    <section className="plain-form" aria-label="General">
       <form
         onSubmit={(event) => {
           event.preventDefault();
@@ -798,7 +873,7 @@ function GeneralSettings({ project }: { project: ProjectSummary }) {
           );
         }}
       >
-        <div className="card-body form-row">
+        <div className="form-row">
           <label className="field">
             <span className="label">Slug</span>
             <input
@@ -821,12 +896,7 @@ function GeneralSettings({ project }: { project: ProjectSummary }) {
             />
           </label>
         </div>
-        <div className="card-foot">
-          {error !== null && (
-            <span className="hint">
-              <ErrorLine error={error} />
-            </span>
-          )}
+        <div className="form-actions">
           <button
             className="btn btn-primary"
             type="submit"
@@ -835,6 +905,11 @@ function GeneralSettings({ project }: { project: ProjectSummary }) {
             {pending && <Spinner />}
             Save
           </button>
+          {error !== null && (
+            <span className="hint">
+              <ErrorLine error={error} />
+            </span>
+          )}
         </div>
       </form>
     </section>
@@ -852,11 +927,10 @@ function DangerZone({ project }: { project: ProjectSummary }) {
       <div className="card-row">
         <div>
           <p className="card-row-title">{isArchived ? 'Restore project' : 'Archive project'}</p>
-          <p className="card-row-desc">
-            {isArchived
-              ? 'The project reappears in listings and its environments serve reads again, for everyone who holds a grant on it.'
-              : 'Every environment stops serving reads, including to machine callers already running. Nothing is deleted, and you can restore it here at any time.'}
-          </p>
+          {/* Restoring needs no warning: the button says what it does. */}
+          {!isArchived && (
+            <p className="card-row-desc">Stops every read until restored; nothing is deleted.</p>
+          )}
           {error !== null && (
             <div style={{ marginTop: '0.5rem' }}>
               <ErrorLine error={error} />
@@ -875,7 +949,7 @@ function DangerZone({ project }: { project: ProjectSummary }) {
           ) : (
             <Archive size={14} />
           )}
-          {isArchived ? 'Restore project' : 'Archive project…'}
+          {isArchived ? `Restore ${project.name}` : `Archive ${project.name}…`}
         </button>
       </div>
 
@@ -902,7 +976,7 @@ function DangerZone({ project }: { project: ProjectSummary }) {
             </>
           )
         }
-        confirmLabel={isArchived ? 'Restore project' : 'Archive project'}
+        confirmLabel={isArchived ? `Restore ${project.name}` : `Archive ${project.name}`}
         destructive={!isArchived}
         onConfirm={() =>
           run(

@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
   type InputHTMLAttributes,
+  type TextareaHTMLAttributes,
 } from 'react';
 import { useSuspenseQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
@@ -205,9 +206,8 @@ function EnvironmentLedger({
   }
 
   function addDraft() {
-    // New rows go to the top, where the button that made them is, rather than
-    // below a list that may be longer than the screen.
-    setDrafts((rows) => [{ id: nextDraftId.current++, key: '', value: '' }, ...rows]);
+    // New rows go last, by the button that made them, in the order they were added.
+    setDrafts((rows) => [...rows, { id: nextDraftId.current++, key: '', value: '' }]);
   }
 
   function discardAll() {
@@ -319,17 +319,6 @@ function EnvironmentLedger({
         tile={project}
         title={environment}
         aside={<EnvironmentName project={project} environment={environment} />}
-        actions={
-          <>
-            {canWrite && canReveal && <ImportEnv project={project} environment={environment} />}
-            {canWrite && (
-              <button className="btn btn-primary" onClick={addDraft}>
-                <Plus size={14} />
-                New secret
-              </button>
-            )}
-          </>
-        }
       />
 
       {(active.length > 0 || drafts.length > 0) && (
@@ -362,22 +351,9 @@ function EnvironmentLedger({
         </div>
       )}
 
-      <section className="card" aria-label="Secrets">
+      <section className="card card-wide" aria-label="Secrets">
         {active.length === 0 && drafts.length === 0 ? (
-          <EmptyState
-            title="No secrets yet"
-            actions={
-              canWrite ? (
-                <>
-                  <button className="btn btn-primary" onClick={addDraft}>
-                    <Plus size={14} />
-                    New secret
-                  </button>
-                  {canReveal && <ImportEnv project={project} environment={environment} />}
-                </>
-              ) : undefined
-            }
-          >
+          <EmptyState title="No secrets yet">
             {canWrite
               ? 'Add them one by one, or import an existing .env file. Nothing is written until you save, or until you have seen the import plan.'
               : 'Nothing has been written to this environment, and adding the first secret needs secret.write.'}
@@ -419,23 +395,6 @@ function EnvironmentLedger({
                 </tr>
               </thead>
               <tbody>
-                {drafts.map((draft) => (
-                  <DraftRow
-                    key={draft.id}
-                    draft={draft}
-                    existingVersion={
-                      keys.find((entry) => entry.key === draft.key.trim())?.version ?? null
-                    }
-                    disabled={false}
-                    onChange={(patch) =>
-                      setDrafts((rows) =>
-                        rows.map((row) => (row.id === draft.id ? { ...row, ...patch } : row)),
-                      )
-                    }
-                    onRemove={() => setDrafts((rows) => rows.filter((row) => row.id !== draft.id))}
-                  />
-                ))}
-
                 {listed.map((entry) => {
                   const change = secretChangeFor(changes, entry.key);
                   const state = status(entry.key);
@@ -483,22 +442,45 @@ function EnvironmentLedger({
                     </td>
                   </tr>
                 )}
+
+                {drafts.map((draft) => (
+                  <DraftRow
+                    key={draft.id}
+                    draft={draft}
+                    existingVersion={
+                      keys.find((entry) => entry.key === draft.key.trim())?.version ?? null
+                    }
+                    disabled={false}
+                    onChange={(patch) =>
+                      setDrafts((rows) =>
+                        rows.map((row) => (row.id === draft.id ? { ...row, ...patch } : row)),
+                      )
+                    }
+                    onRemove={() => setDrafts((rows) => rows.filter((row) => row.id !== draft.id))}
+                  />
+                ))}
               </tbody>
             </table>
           </div>
         )}
       </section>
 
+      {canWrite && (
+        <div className="table-actions">
+          <button className="btn btn-primary" onClick={addDraft}>
+            <Plus size={14} />
+            New secret
+          </button>
+          {canReveal && <ImportEnv project={project} environment={environment} />}
+        </div>
+      )}
+
       {archived.length > 0 && (
         <Card
+          wide
           labelledBy="archived-secrets"
           title="Archived"
-          description={
-            <>
-              Retired, so no longer served or injected by <code>coffre run</code>. Their history
-              and audit trail are intact, and restoring is immediate.
-            </>
-          }
+          description="No longer served; restoring one brings it back with its history."
         >
           <div className="dt-wrap">
             <table className="dt secrets secrets-archived stacks">
@@ -617,11 +599,7 @@ function MaskedInput({
   className = '',
   ...props
 }: Omit<InputHTMLAttributes<HTMLInputElement>, 'type'> & { masked: boolean }) {
-  const [cssMask, setCssMask] = useState(false);
-  useEffect(() => {
-    setCssMask(typeof CSS !== 'undefined' && CSS.supports('-webkit-text-security', 'disc'));
-  }, []);
-
+  const cssMask = useCssMask();
   return (
     <input
       {...props}
@@ -636,9 +614,44 @@ function MaskedInput({
   );
 }
 
+function useCssMask(): boolean {
+  const [cssMask, setCssMask] = useState(false);
+  useEffect(() => {
+    setCssMask(typeof CSS !== 'undefined' && CSS.supports('-webkit-text-security', 'disc'));
+  }, []);
+  return cssMask;
+}
+
+/**
+ * MaskedInput for a value with line breaks, which a text input would drop.
+ * Without the CSS mask there is no password textarea, so masked text is
+ * drawn transparent instead.
+ */
+function MaskedTextarea({
+  masked,
+  className = '',
+  ...props
+}: TextareaHTMLAttributes<HTMLTextAreaElement> & { masked: boolean }) {
+  const cssMask = useCssMask();
+  return (
+    <textarea
+      {...props}
+      className={`${className}${masked ? (cssMask ? ' is-masked' : ' is-masked-fallback') : ''}`}
+      autoComplete="off"
+      spellCheck={false}
+      data-1p-ignore
+      data-lpignore="true"
+      data-bwignore
+    />
+  );
+}
+
+const lineCount = (text: string) => text.split('\n').length;
+
 function ValueField({
   label,
   value,
+  start = '',
   onChange,
   placeholder,
   disabled,
@@ -647,6 +660,8 @@ function ValueField({
 }: {
   label: string;
   value: string;
+  /** The value the edit started from. */
+  start?: string;
   onChange: (value: string) => void;
   placeholder: string;
   disabled: boolean;
@@ -654,21 +669,32 @@ function ValueField({
   onEscape?: () => void;
 }) {
   const [shown, setShown] = useState(false);
+  const field = {
+    className: 'input input-mono',
+    masked: !shown,
+    'aria-label': label,
+    placeholder,
+    value,
+    disabled,
+    autoFocus,
+    onChange: (event: { target: { value: string } }) => onChange(event.target.value),
+    onKeyDown: (event: { key: string }) => {
+      if (event.key === 'Escape' && onEscape !== undefined) onEscape();
+    },
+  };
   return (
     <div className="input-group">
-      <MaskedInput
-        className="input input-mono"
-        masked={!shown}
-        aria-label={label}
-        placeholder={placeholder}
-        value={value}
-        disabled={disabled}
-        autoFocus={autoFocus}
-        onChange={(event) => onChange(event.target.value)}
-        onKeyDown={(event) => {
-          if (event.key === 'Escape' && onEscape !== undefined) onEscape();
-        }}
-      />
+      {/* A value with line breaks opens one line tall, as tall as the row it
+          replaces, and grows only by the lines typed into it. */}
+      {start.includes('\n') ? (
+        <MaskedTextarea
+          {...field}
+          className="input input-mono value-lines"
+          rows={Math.min(8, 1 + Math.max(0, lineCount(value) - lineCount(start)))}
+        />
+      ) : (
+        <MaskedInput {...field} />
+      )}
       <button
         type="button"
         className="btn btn-quiet btn-sm btn-icon input-addon"
@@ -762,14 +788,14 @@ function SecretRow({
     if (!editing) setBase(null);
   }, [editing]);
 
-  async function readValue(): Promise<string | null> {
+  async function readValue({ show = true } = {}): Promise<string | null> {
     if (shown !== null) return shown.value;
     setRevealing(true);
     try {
       const { values } = await coffre.secrets.reveal(`${project}/${environment}/${entry.key}`);
       const value = values[entry.key];
       setError(null);
-      setReveal({ value, version: entry.version, at: Date.now() });
+      if (show) setReveal({ value, version: entry.version, at: Date.now() });
       return value;
     } catch (failure) {
       setError(
@@ -786,6 +812,21 @@ function SecretRow({
   function toggleReveal() {
     if (shown !== null) setReveal(null);
     else void readValue();
+  }
+
+  // An edit starts from the current value, read the way Reveal reads it, so
+  // the audit log shows who opened it. One that cannot be read starts empty.
+  const [opening, setOpening] = useState(false);
+  async function startEdit() {
+    if (canReveal) {
+      setOpening(true);
+      const value = await readValue({ show: false });
+      setOpening(false);
+      if (value === null) return;
+      setBase({ value, version: entry.version, at: Date.now() });
+    }
+    setReveal(null);
+    onEdit();
   }
 
   const leaving = change.archived;
@@ -834,7 +875,7 @@ function SecretRow({
           ) : (
             <div className="key-cell">
               <span>{breakAfterUnderscores(entry.key)}</span>
-              {leaving && <span className="tag tag-red">will be archived</span>}
+              {leaving && <span className="tag tag-red">Will be archived</span>}
             </div>
           )}
         </td>
@@ -845,7 +886,8 @@ function SecretRow({
               <ValueField
                 label={`New value for ${entry.key}`}
                 value={change.value ?? editBase?.value ?? ''}
-                placeholder="New value"
+                start={editBase?.value}
+                placeholder={canReveal ? 'Value' : 'New value; the current one is hidden from you'}
                 disabled={disabled}
                 autoFocus
                 onChange={(value) =>
@@ -853,38 +895,17 @@ function SecretRow({
                 }
                 onEscape={onUndo}
               />
-              <span className="edit-note">
-                <span>
-                  {valueChanged
-                    ? `Saving appends v${version + 1}; v${version} stays restorable.`
-                    : editBase !== null
-                      ? `This is v${version}. Change it to append v${version + 1}.`
-                      : `Nothing is decrypted to edit. Left empty, v${version} stays current.`}
-                </span>
-                {canReveal && !valueChanged && editBase === null && (
-                  <button
-                    type="button"
-                    className="act"
-                    disabled={revealing}
-                    onClick={async () => {
-                      const value = await readValue();
-                      if (value !== null) {
-                        setBase({ value, version: entry.version, at: Date.now() });
-                      }
-                    }}
-                  >
-                    {revealing && <Spinner size={12} />}
-                    Start from current value
-                  </button>
-                )}
-              </span>
             </div>
           ) : shown !== null && !leaving ? (
             <div
               className="revealed"
               style={{ ['--reveal-ttl' as string]: `${REVEAL_TTL_SECONDS}s` }}
             >
-              <span className="revealed-value">{shown.value === '' ? '(empty)' : shown.value}</span>
+              {/* Copy acts on the value, so it sits beside it, not among the row's actions. */}
+              <div className="revealed-line">
+                <span className="revealed-value">{shown.value === '' ? '(empty)' : shown.value}</span>
+                <CopyButton variant="act" value={shown.value} label={`Copy ${entry.key}`} />
+              </div>
               <span className="revealed-note">
                 Hides in {secondsLeft}s
               </span>
@@ -940,10 +961,6 @@ function SecretRow({
                 </Tip>
               ) : (
                 <>
-                  {/* Copy comes in to the left, so Hide stays where Reveal was clicked. */}
-                  {shown !== null && (
-                    <CopyButton variant="act" value={shown.value} label={`Copy ${entry.key}`} />
-                  )}
                   <SecretReadOnly canReveal={canReveal}>
                     <Tip label={shown === null ? 'Reveal' : 'Hide'}>
                       <button
@@ -952,7 +969,7 @@ function SecretRow({
                         disabled={revealing}
                         aria-label={`${shown === null ? 'Reveal' : 'Hide'} ${entry.key}`}
                       >
-                        {revealing ? (
+                        {revealing && !opening ? (
                           <Spinner size={13} />
                         ) : shown === null ? (
                           <Eye size={15} />
@@ -966,18 +983,11 @@ function SecretRow({
                     <Tip label="Edit">
                       <button
                         className="act act-icon"
-                        onClick={() => {
-                          // A value already revealed is already on the record, so
-                          // it becomes the starting point instead of being thrown
-                          // away and read again.
-                          if (shown !== null) setBase(shown);
-                          setReveal(null);
-                          onEdit();
-                        }}
-                        disabled={disabled}
+                        onClick={() => void startEdit()}
+                        disabled={disabled || revealing}
                         aria-label={`Edit ${entry.key}`}
                       >
-                        <Pencil size={14} />
+                        {opening ? <Spinner size={13} /> : <Pencil size={14} />}
                       </button>
                     </Tip>
                   )}
@@ -1221,30 +1231,42 @@ function ArchivedRow({
           <Written entry={entry} />
         </td>
         <td className="col-actions">
-          <div className="acts">
-            <SecretReadOnly canReveal={canReveal}>
-              <Tip label={historyOpen ? 'Hide history' : 'Version history'}>
-                <button
-                  className="act act-icon act-quiet"
-                  onClick={() => setHistoryOpen((open) => !open)}
-                  aria-label={`${historyOpen ? 'Hide history of' : 'Version history of'} ${entry.key}`}
-                  aria-expanded={historyOpen}
-                >
-                  <History size={15} />
-                </button>
-              </Tip>
-            </SecretReadOnly>
-            {canArchive &&
-              (state.state === 'pending' ? (
-                <RowPending status={state} />
-              ) : (
-                <Tip label="Restore">
-                  <button className="act act-icon" onClick={onRestore} aria-label={`Restore ${entry.key}`}>
-                    <RotateBack size={14} />
-                  </button>
-                </Tip>
-              ))}
-          </div>
+          {state.state === 'pending' ? (
+            <RowPending status={state} />
+          ) : (
+            (canReveal || canArchive) && (
+              <div className="acts">
+                <Menu.Root>
+                  <Menu.Trigger
+                    className="act act-icon act-quiet"
+                    aria-label={`More for ${entry.key}`}
+                  >
+                    <MoreHorizontal size={16} />
+                  </Menu.Trigger>
+                  <MenuPopup align="end">
+                    <SecretReadOnly canReveal={canReveal}>
+                      <Menu.Item
+                        className="menu-item"
+                        onClick={() => setHistoryOpen((open) => !open)}
+                      >
+                        <History size={14} />
+                        {historyOpen ? 'Hide history' : 'Version history'}
+                      </Menu.Item>
+                    </SecretReadOnly>
+                    {canArchive && (
+                      <>
+                        {canReveal && <Menu.Separator className="menu-sep" />}
+                        <Menu.Item className="menu-item" onClick={onRestore}>
+                          <RotateBack size={14} />
+                          Restore
+                        </Menu.Item>
+                      </>
+                    )}
+                  </MenuPopup>
+                </Menu.Root>
+              </div>
+            )
+          )}
         </td>
       </tr>
       {historyOpen && (
@@ -1360,7 +1382,7 @@ function VersionHistory({
                 <tr key={version.version}>
                   <td className="cell-mono nowrap">
                     v{version.version}{' '}
-                    {version.current && <span className="tag tag-blue">current</span>}
+                    {version.current && <span className="tag tag-blue">Current</span>}
                   </td>
                   <td className="nowrap">
                     <Timestamp iso={version.createdAt} />
