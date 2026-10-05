@@ -91,6 +91,7 @@ pnpm test:sqlite       # the same suite on SQLite
 pnpm test:properties   # bounded Hegel properties; --long for 100x cases (docs/property-tests.md)
 pnpm test:properties:server  # modeled server operations; --long for 40 sequences
 pnpm test:schema       # what the restricted logins may and may not do
+pnpm formal            # the locking protocol, model-checked over every interleaving (docs/formal.md)
 pnpm build             # every package
 pnpm typecheck         # every package, the examples and dev/ (after pnpm build)
 pnpm conformance:workers   # examples/workers, held to docs/conformance.md (after pnpm build)
