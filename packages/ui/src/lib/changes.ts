@@ -1,4 +1,4 @@
-import type { CoffreClient, IdentityRow, SecretKey, SessionRow } from '@coffre/client';
+import type { CoffreClient, ConnectedApp, IdentityRow, SecretKey, SessionRow } from '@coffre/client';
 import type { Role } from '@coffre/core/access';
 import type { QueryKey } from '@tanstack/react-query';
 
@@ -227,6 +227,19 @@ export function endSession(client: CoffreClient): Change<Sessions, SessionRow, S
     removing: { pending: 'Ending…', done: 'ended', failed: 'Not ended.' },
     affects: () => affects.sessions(),
     run: (session) => client.sessions.revoke(session.id),
+  };
+}
+
+type Apps = ({ ok: true; apps: ConnectedApp[]; off: boolean } | Failure);
+
+export function disconnectApp(client: CoffreClient): Change<Apps, ConnectedApp, ConnectedApp, unknown> {
+  return {
+    list: listOf<ConnectedApp, Apps>(keys.apps, 'apps', (app) => app.id),
+    label: (app) => app.name,
+    targets: (app) => [removing(app.id)],
+    removing: { pending: 'Disconnecting…', done: 'disconnected', failed: 'Not disconnected.' },
+    affects: () => affects.apps(),
+    run: (app) => client.apps.disconnect(app.id),
   };
 }
 

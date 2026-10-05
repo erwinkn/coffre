@@ -3447,6 +3447,15 @@ a.env-card-name:hover {
   color: var(--red);
 }
 
+.notice-warn {
+  border-color: color-mix(in oklab, var(--amber) 30%, var(--border));
+  background: var(--amber-wash);
+}
+
+.notice-warn svg {
+  color: var(--amber);
+}
+
 .notice-good {
   border-color: color-mix(in oklab, var(--green) 30%, var(--border));
   background: var(--green-wash);
@@ -4092,6 +4101,72 @@ a.env-card-name:hover {
   padding: 1rem 1.5rem;
   border-top: 1px solid var(--border);
   background: var(--canvas);
+}
+
+/* The consent page: who asks, its host first, since a name is anyone's to claim. */
+.consent-client {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0 1.5rem 1.25rem;
+  padding: 0.875rem 1rem;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  background: var(--canvas);
+}
+
+.consent-client > svg {
+  flex: none;
+  color: var(--ink-3);
+}
+
+.consent-client .cell-stack > span {
+  white-space: normal;
+}
+
+.consent-host {
+  font-size: 1.125rem;
+  font-weight: 600;
+}
+
+.consent-scopes {
+  display: grid;
+  gap: 0.75rem;
+  margin: 0;
+  padding: 1rem 1.5rem;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+
+.consent-scopes legend {
+  float: left;
+  width: 100%;
+  margin-bottom: 0.25rem;
+}
+
+.consent-scope {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.625rem;
+  font-size: 0.875rem;
+}
+
+.consent-scope input {
+  margin-top: 0.2rem;
+}
+
+.consent-scope small {
+  line-height: 1.4;
+}
+
+.consent-notices {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0 1.5rem;
+}
+
+.consent-notices:not(:empty) {
+  padding-bottom: 1rem;
 }
 
 /* ========================================================================== */

@@ -60,7 +60,7 @@ test('every route of the API is a command of the CLI, or a browser\'s, with why'
   }
   // What only a browser does, as coffre help does not offer it.
   const browser = Object.entries(PARITY).filter(([, reach]) => 'browser' in reach).map(([route]) => route);
-  assert.deepEqual(browser, ['GET /device-logins/:code', 'POST /device-logins/:code']);
+  assert.deepEqual(browser, ['GET /device-logins/:code', 'POST /device-logins/:code', 'GET /oauth/authorizations', 'POST /oauth/authorizations']);
 });
 
 test("a command's own flag named like a session flag reaches it: grant --service is grant's", () => {

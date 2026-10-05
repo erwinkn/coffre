@@ -313,6 +313,8 @@ and `apiMember`). The URL names the thing and the HTTP method is the verb:
 | change someone's access, in one transaction | `PATCH /api/access/user:ada@acme.example {"market": "developer", "market/prod": null}` |
 | my sessions and linked sign-in accounts, and ending them | `GET` / `DELETE /api/sessions/:id`, `GET` / `DELETE /api/identities/:id` |
 | approve or deny a `coffre login` device code | `GET` / `POST /api/device-logins/:code {"approve": true}` |
+| what an MCP client asking to connect is and wants, and the person's answer | `GET /api/oauth/authorizations?client_id=…`, `POST /api/oauth/authorizations {"request": {…}, "approve": true, "scopes": ["browse"]}` |
+| the MCP clients I connected, and disconnecting one | `GET /api/apps`, `DELETE /api/apps/:id` |
 | the audit log, and verifying it | `GET /api/audit?path=market/prod`, `GET /api/audit/verification` |
 
 Three conventions carry it:
@@ -337,6 +339,16 @@ Sign-in itself (OAuth redirects and callbacks, the device-code exchange for
 `coffre login`, signing out) stays on its own routes; it is a protocol, not
 something done to the data. What a signed-in person does with their own
 sessions, and a device-code approval, are ordinary routes in the table.
+
+MCP clients ([mcp.md](mcp.md), [design/mcp.md](design/mcp.md)) have coffre as
+their OAuth authorization server, on routes of its own beside the table: the
+metadata at `/.well-known/oauth-protected-resource[/mcp]` and
+`/.well-known/oauth-authorization-server`, and `POST /api/oauth/token`,
+`/api/oauth/register` and `/api/oauth/revoke`, form-encoded as OAuth wants
+and answered in its errors. The consent page is `/oauth/authorize`, and its
+calls, like Connected apps', are ordinary rows of the table. Their tokens are
+good at `/mcp` and nowhere else: `/api` reads `credentials`, which an MCP
+token is not, and `/mcp` takes nothing but one.
 
 The server is one table keyed by method and route, each entry giving its input
 schema, the permission it needs and its handler. `@coffre/client` is typed
@@ -617,6 +629,8 @@ purpose `coffre/signin-rows/v1`. The message is a JSON tuple beginning with
 | `credentials` | id, token hash, kind, principal type and id, generation, identity id, expires at, revoked at |
 | `device_authorizations` | id, device code hash, user code, decision, decided at, principal type and id, generation, expires at, consumed at |
 | `service_bindings` | id, principal, generation, profile, issuer, JWKS URL, claims, revoked at |
+| `oauth_clients` | id, redirect URIs, revoked at |
+| `mcp_connections` | id, principal, generation, client id, scopes, redirect URI, code hash, code challenge, code expires at, refresh hash, previous refresh hash, expires at, revoked at |
 
 Dates are integer milliseconds, bytes are hex, and null is distinct from
 any value. Row IDs and the device's short user code bind the MAC to the

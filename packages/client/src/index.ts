@@ -16,8 +16,10 @@ export type {
   Api,
   AuditEntryView,
   AuthInfo,
+  AuthorizationView,
   BindingPlan,
   BindingView,
+  ConnectedApp,
   Deletion,
   DeletionResult,
   DismissedKey,
@@ -283,6 +285,21 @@ export function createClient(options: ClientOptions) {
     deviceLogins: {
       get: (code: string) => call('GET /device-logins/:code', { code }),
       decide: (code: string, approve: boolean) => call('POST /device-logins/:code', { code }, { approve }),
+    },
+
+    /**
+     * An MCP client asking to connect, by its authorization request, and the
+     * person's answer: where to send the browser next.
+     */
+    oauth: {
+      describe: (request: RouteInput<'GET /oauth/authorizations'>) => call('GET /oauth/authorizations', {}, request),
+      decide: (input: RouteInput<'POST /oauth/authorizations'>) => call('POST /oauth/authorizations', {}, input),
+    },
+
+    /** The MCP clients I connected. */
+    apps: {
+      list: () => call('GET /apps', {}),
+      disconnect: (id: string) => call('DELETE /apps/:id', { id }),
     },
 
     audit: {

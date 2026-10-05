@@ -134,6 +134,10 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
   'DELETE /identities/:id': { ui: [{ does: 'Account › a sign-in account › Unlink', in: 'pages/account.tsx', call: 'identities.unlink' }] },
   'GET /device-logins/:code': { ui: [{ does: "the page `coffre login` opens: the login's code", in: 'pages/device-login.tsx', call: 'deviceLogins.get' }] },
   'POST /device-logins/:code': { ui: [{ does: 'that page › Approve, Deny', in: 'pages/device-login.tsx', call: 'deviceLogins.decide' }] },
+  'GET /oauth/authorizations': { ui: [{ does: 'the page an MCP client opens to connect: what it asks for', in: 'pages/oauth-authorize.tsx', call: 'oauth.describe' }] },
+  'POST /oauth/authorizations': { ui: [{ does: 'that page › Approve, Deny', in: 'pages/oauth-authorize.tsx', call: 'oauth.decide' }] },
+  'GET /apps': { ui: [{ does: 'Account › Connected apps', in: 'pages/account.tsx', call: 'apps.list' }] },
+  'DELETE /apps/:id': { ui: [{ does: 'Account › a connected app › Disconnect', in: 'pages/account.tsx', call: 'apps.disconnect' }] },
   'GET /audit': {
     ui: [
       { does: 'Audit', in: 'pages/audit.tsx', call: 'audit.list' },

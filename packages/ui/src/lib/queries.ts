@@ -1,4 +1,4 @@
-import type { AuthInfo, CoffreClient, Member } from '@coffre/client';
+import type { AuthInfo, CoffreClient, ConnectedApp, Member } from '@coffre/client';
 import { QueryClient, queryOptions, type QueryKey } from '@tanstack/react-query';
 
 import { deriveUiCapabilities } from './capabilities.ts';
@@ -55,6 +55,7 @@ export const keys = {
   bindings: (member: string) => ['bindings', member],
   identities: ['identities'],
   sessions: ['sessions'],
+  apps: ['apps'],
   audit: ['audit'],
   auditKeys: ['audit', 'keys'],
 } satisfies Record<string, QueryKey | ((...args: never[]) => QueryKey)>;
@@ -216,6 +217,20 @@ export const queries = {
   /** Where you are signed in, under coffre's own sign-in. */
   sessions: (client: CoffreClient) =>
     queryOptions({ queryKey: keys.sessions, queryFn: () => uiResult(() => client.sessions.list()) }),
+  /** The MCP clients I connected; `off` where the instance serves no MCP, which answers 404. */
+  apps: (client: CoffreClient) =>
+    queryOptions({
+      queryKey: keys.apps,
+      queryFn: () =>
+        uiResult(async () => {
+          try {
+            return { ...(await client.apps.list()), off: false };
+          } catch (error) {
+            if (statusOf(error) === 404) return { apps: [] as ConnectedApp[], off: true };
+            throw error;
+          }
+        }),
+    }),
 
   /**
    * What the keys an operator keeps are checked against: the vault's ID and
@@ -474,6 +489,7 @@ export const affects = {
   /** Unlinking an account also ends the sessions it signed in. */
   identities: (): QueryKey[] => [keys.identities, keys.sessions],
   sessions: (): QueryKey[] => [keys.sessions],
+  apps: (): QueryKey[] => [keys.apps],
 };
 
 /**

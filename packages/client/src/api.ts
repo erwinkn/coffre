@@ -674,6 +674,80 @@ export type Api = {
       decided: true;
     };
   };
+  "GET /oauth/authorizations": {
+    input: {
+      client_id?: string;
+      redirect_uri?: string;
+      response_type?: string;
+      code_challenge?: string;
+      code_challenge_method?: string;
+      state?: string;
+      scope?: string;
+      resource?: string;
+    };
+    output: {
+      status: "invalid";
+      message: string;
+    } | {
+      status: "refused";
+      message: string;
+      redirect: string;
+    } | {
+      status: "ready";
+      client: {
+        id: string;
+        name: string;
+        host: string | null;
+        registration: "cimd" | "dcr";
+      };
+      redirectHost: string;
+      loopbackOnly: boolean;
+      scopes: ("browse" | "manage-access" | "read-values" | "write")[];
+      connected: number;
+      days: number;
+    };
+  };
+  "POST /oauth/authorizations": {
+    input: {
+      request: {
+        client_id?: string;
+        redirect_uri?: string;
+        response_type?: string;
+        code_challenge?: string;
+        code_challenge_method?: string;
+        state?: string;
+        scope?: string;
+        resource?: string;
+      };
+      approve: boolean;
+      scopes?: string[];
+    };
+    output: {
+      redirect: string;
+    };
+  };
+  "GET /apps": {
+    input: undefined;
+    output: {
+      apps: {
+        id: string;
+        name: string;
+        host: string | null;
+        registration: "cimd" | "dcr";
+        scopes: ("browse" | "manage-access" | "read-values" | "write")[];
+        createdAt: string;
+        lastUsedAt: string | null;
+        lastUsedIp: string | null;
+        expiresAt: string;
+      }[];
+    };
+  };
+  "DELETE /apps/:id": {
+    input: undefined;
+    output: {
+      disconnected: true;
+    };
+  };
   "GET /audit": {
     input: {
       path?: string;
@@ -803,10 +877,33 @@ export type AuthInfo = {
       label: string;
       brand: "github" | "google" | "microsoft" | "oidc";
     }[];
+    mcp: boolean;
   };
   access: null | {
     assertion: boolean;
   };
+};
+
+export type AuthorizationView = {
+  status: "invalid";
+  message: string;
+} | {
+  status: "refused";
+  message: string;
+  redirect: string;
+} | {
+  status: "ready";
+  client: {
+    id: string;
+    name: string;
+    host: string | null;
+    registration: "cimd" | "dcr";
+  };
+  redirectHost: string;
+  loopbackOnly: boolean;
+  scopes: ("browse" | "manage-access" | "read-values" | "write")[];
+  connected: number;
+  days: number;
 };
 
 export type BindingPlan = {
@@ -834,6 +931,18 @@ export type BindingView = {
   createdAt: string;
   createdBy: string;
   lastUsedAt: string | null;
+};
+
+export type ConnectedApp = {
+  id: string;
+  name: string;
+  host: string | null;
+  registration: "cimd" | "dcr";
+  scopes: ("browse" | "manage-access" | "read-values" | "write")[];
+  createdAt: string;
+  lastUsedAt: string | null;
+  lastUsedIp: string | null;
+  expiresAt: string;
 };
 
 export type Deletion = {

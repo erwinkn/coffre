@@ -47,6 +47,11 @@
       "types": "./dist/kek.d.ts",
       "default": "./dist/kek.js"
     },
+    "./mcp": {
+      "coffre:source": "./src/mcp.ts",
+      "types": "./dist/mcp.d.ts",
+      "default": "./dist/mcp.js"
+    },
     "./schemas": {
       "coffre:source": "./src/schemas.ts",
       "types": "./dist/schemas.d.ts",

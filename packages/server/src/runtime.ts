@@ -8,6 +8,7 @@ import { WorkloadService } from './api/workloads.ts';
 import type { AuthenticatedIdentity } from './auth.ts';
 import type { ResolvedConfig } from './config.ts';
 import { logged } from './logged.ts';
+import { McpService } from './mcp/service.ts';
 import type { WorkloadTransport } from './workloads/transport.ts';
 
 export type CoffreRuntime = {
@@ -19,6 +20,8 @@ export type CoffreRuntime = {
   signin: SigninService | null;
   /** Trust bindings, when sign-in turns them on. */
   workloads: WorkloadService | null;
+  /** MCP clients' OAuth and their connections, when sign-in turns them on. */
+  mcp: McpService | null;
   auth: ResolvedConfig['auth'];
   publicUrl: string;
   verifier: IdentityVerifier;
@@ -43,6 +46,7 @@ export function createRuntime(
 ): CoffreRuntime {
   let signin: SigninService | null = null;
   let workloads: WorkloadService | null = null;
+  let mcp: McpService | null = null;
   let verifier: IdentityVerifier;
   if (config.auth.mode === 'signin') {
     signin = new SigninService({
@@ -56,6 +60,10 @@ export function createRuntime(
     if (trusted !== null) {
       workloads = new WorkloadService({ db, chainKey: config.auditChainKey, vault, config: trusted, transport, signin, publicUrl: config.publicUrl });
     }
+    const connected = config.auth.signin.mcp;
+    if (connected !== null) {
+      mcp = new McpService({ db, chainKey: config.auditChainKey, vault, config: connected, signin: config.auth.signin, publicUrl: config.publicUrl, transport });
+    }
   } else {
     verifier = accessVerifier(config.auth.access);
   }
@@ -65,6 +73,7 @@ export function createRuntime(
     chainKey: config.auditChainKey,
     signin,
     workloads,
+    mcp,
     auth: config.auth,
     publicUrl: config.publicUrl,
     verifier,
@@ -81,6 +90,7 @@ export function apiContext(runtime: CoffreRuntime, identity: AuthenticatedIdenti
     waitUntil: runtime.waitUntil,
     signin: runtime.signin,
     workloads: runtime.workloads,
+    mcp: runtime.mcp,
     caller: identity.caller,
     requestId: identity.requestId,
     sourceIp: identity.sourceIp,

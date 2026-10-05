@@ -837,6 +837,42 @@ workloads: { limits: processLimits({ perSource: 30, total: 300 }) },
 Then an owner trusts a workflow on a service's page, under "Trusted
 workloads", or with `coffre trust`.
 
+## MCP clients
+
+Claude and other MCP clients connect at `<PUBLIC_URL>/mcp` as the people
+who approve them ([mcp.md](mcp.md), [design](design/mcp.md)). A deployment
+`coffre init` writes has it on; leaving `mcp` out turns it off, and `/mcp`
+and its metadata then answer 404. It needs coffre's own sign-in, and three
+limits: OAuth's token and registration requests pass one per source address
+and one in total before any work, as CI runs' exchanges do, and each
+connection's calls pass one of their own. A deployment from before 0.4
+gains MCP's route files from `coffre update`, and adds these itself.
+
+On Workers, three more rate-limiting bindings in `app/wrangler.jsonc`:
+
+```jsonc
+{ "name": "MCP_PER_SOURCE", "namespace_id": "1003", "simple": { "limit": 30, "period": 60 } },
+{ "name": "MCP_PER_CONNECTION", "namespace_id": "1004", "simple": { "limit": 120, "period": 60 } },
+{ "name": "MCP_TOTAL", "namespace_id": "1005", "simple": { "limit": 300, "period": 60 } }
+```
+
+and in `app/src/coffre.ts`, beside `workloads`:
+
+```ts
+mcp: {
+  limits: { perSource: env.MCP_PER_SOURCE, perConnection: env.MCP_PER_CONNECTION, total: env.MCP_TOTAL },
+},
+```
+
+On Node:
+
+```ts
+mcp: { limits: processLimits({ perSource: 30, perConnection: 120, total: 300 }) },
+```
+
+claude.ai and Claude Desktop connect from Anthropic's servers, which must
+reach the instance; Claude Code connects from the person's machine.
+
 ## Backups, restores and monitoring
 
 Back up the one database, and keep the escrowed keys apart from it: the

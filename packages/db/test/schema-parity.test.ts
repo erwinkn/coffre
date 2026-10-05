@@ -66,7 +66,7 @@ function shapes(schema: Record<string, unknown>, config: (table: never) => unkno
 
 test('the SQLite schema has the Postgres tables, columns, nullability and keys', () => {
   const expected = shapes(postgres, postgresConfig);
-  assert.deepEqual(Object.keys(expected), ['audit_chain_head', 'audit_log', 'consumed_tokens', 'credentials', 'device_authorizations', 'dismissed_keys', 'environments', 'identities', 'project_folders', 'projects', 'secret_folders', 'secret_references', 'secret_versions', 'secrets', 'service_bindings', 'vault_grants', 'vault_members']);
+  assert.deepEqual(Object.keys(expected), ['audit_chain_head', 'audit_log', 'consumed_tokens', 'credentials', 'device_authorizations', 'dismissed_keys', 'environments', 'identities', 'mcp_connections', 'oauth_clients', 'project_folders', 'projects', 'secret_folders', 'secret_references', 'secret_versions', 'secrets', 'service_bindings', 'vault_grants', 'vault_members']);
   assert.deepEqual(shapes(sqlite, sqliteConfig), expected);
 });
 

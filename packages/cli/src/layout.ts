@@ -61,6 +61,25 @@ const WORKERS_WORKLOADS: Difference[] = [
   ],
 ];
 
+/** MCP, which the template turns on since 0.4: no release of 0.1 had it. */
+const WORKERS_MCP: Difference[] = [
+  [
+    "  /** What MCP clients' OAuth requests pass first, and each connection's tool calls: the same file's bindings. */\n" +
+      '  MCP_PER_SOURCE: RateLimit;\n' +
+      '  MCP_PER_CONNECTION: RateLimit;\n' +
+      '  MCP_TOTAL: RateLimit;\n',
+    '',
+  ],
+  [
+    '    // MCP clients, Claude among them, may connect at <PUBLIC_URL>/mcp as the\n' +
+      '    // people who approve them (docs/mcp.md). Remove this to turn it off.\n' +
+      '    mcp: {\n' +
+      '      limits: { perSource: env.MCP_PER_SOURCE, perConnection: env.MCP_PER_CONNECTION, total: env.MCP_TOTAL },\n' +
+      '    },\n',
+    '',
+  ],
+];
+
 const WORKERS_AUDIT_CHAIN_KEY: Difference[] = [
   ['  APP_KEY: string;\n', '  AUDIT_CHAIN_KEY: string;\n'],
   ['auditChainKey: env.APP_KEY,', 'auditChainKey: env.AUDIT_CHAIN_KEY,'],
@@ -89,6 +108,15 @@ const NODE_WORKLOADS: Difference[] = [
   ],
 ];
 
+const NODE_MCP: Difference[] = [
+  [
+    '    // MCP clients, Claude among them, may connect at <PUBLIC_URL>/mcp as the\n' +
+      '    // people who approve them (docs/mcp.md). Remove this to turn it off.\n' +
+      '    mcp: { limits: processLimits({ perSource: 30, perConnection: 120, total: 300 }) },\n',
+    '',
+  ],
+];
+
 const NODE_AUDIT_CHAIN_KEY: Difference[] = [["auditChainKey: env('APP_KEY'),", "auditChainKey: env('AUDIT_CHAIN_KEY'),"]];
 
 /** src/server.ts, as each release of 0.1 wrote it. */
@@ -98,6 +126,13 @@ export const NODE_ENTRIES: readonly Known[] = [
   { blob: 'bd78dc61ff7b45bd1215815298d5bd52fd6647da', releases: '0.1.2', differences: [...NODE_WORKLOADS, ...NODE_AUDIT_CHAIN_KEY] },
   { blob: 'b8d45d4df0bc42949265142bac2a38c2922e9609', releases: '0.1.0 and 0.1.1', differences: [...NODE_WORKLOADS, ...NODE_AUDIT_CHAIN_KEY] },
 ];
+
+/**
+ * What the template's configuration has that 0.1.18's had not, undone on
+ * every 0.1 deployment's first: MCP, since 0.4, which needs bindings and
+ * settings a 0.1 deployment has none of.
+ */
+export const SINCE_0_1: Record<Kind, readonly Difference[]> = { workers: WORKERS_MCP, node: NODE_MCP };
 
 /** `text` with each difference undone; null if one is not there exactly once, which a test rules out for the template. */
 export function undo(text: string, differences: readonly Difference[]): string | null {
@@ -194,8 +229,14 @@ export const ROUTE_FILES: Record<string, string> = Object.fromEntries(
     '_solo/login.tsx',
     '_solo/unregistered.tsx',
     '_solo/auth.device.tsx',
-  ].map((file) => [`app/src/routes/${file}`, '0.2.0']),
+  ]
+    .map((file) => [`app/src/routes/${file}`, '0.2.0'])
+    .concat(['mcp.ts', '[.]well-known.$.ts', '_solo/oauth.authorize.tsx'].map((file) => [`app/src/routes/${file}`, '0.4.0'])),
 );
+
+/** What a deployment gaining MCP's route files must do itself: its configuration is its own. */
+const MCP_NOTE =
+  "coffre's MCP endpoint, /mcp, answers 404 until app/src/coffre.ts turns it on with signin({ mcp: { limits } }): on Workers, three more rate-limiting bindings in app/wrangler.jsonc; on Node, processLimits() (docs/mcp.md)";
 
 /**
  * The route files coffre wrote and no longer does, a page removed or
@@ -269,7 +310,8 @@ export function pageMove(
     if (blobs.includes(blob(was))) changes.push({ path, was, becomes: null });
     else problems.push(`${path} is a page coffre ${retired} no longer has, and is not as coffre wrote it: delete it, or keep it as a page of the deployment's own`);
   }
-  return problems.length > 0 ? { problems } : { changes, notes: [] };
+  const mcp = changes.some(({ path, was }) => path === 'app/src/routes/mcp.ts' && was === null);
+  return problems.length > 0 ? { problems } : { changes, notes: mcp ? [MCP_NOTE] : [] };
 }
 
 /** 0.1's `assets`, the prebuilt pages in node_modules: the app's build sets its own now. */
@@ -309,7 +351,7 @@ export function startAppMove(dir: string, kind: Kind, template: string): Move {
 
   // The configuration, in 0.2's shape, as this release had it.
   const configPath = 'app/src/coffre.ts';
-  const config = undo(templateText(configPath), known.differences);
+  const config = undo(templateText(configPath), [...SINCE_0_1[kind], ...known.differences]);
   if (config === null) throw new Error(`${configPath} of the template no longer holds what ${known.releases} differ by`);
 
   // The app's files: written where there are none, left where they are
@@ -366,6 +408,9 @@ export function startAppMove(dir: string, kind: Kind, template: string): Move {
     if (example !== null && SERVER_ENV_EXAMPLES.includes(blob(example))) change('server.env.example', null, example);
     notes.push('The server reads its settings from .env now, which srvx loads: rename server.env to .env where the server runs');
   }
+
+  // No release of 0.1 had MCP: its route files come with the app, and answer 404 until it is turned on.
+  notes.push(MCP_NOTE);
 
   if (problems.length > 0) return { problems };
   // Last, the entry: until it changes, the move is not done, and the next run finishes it.

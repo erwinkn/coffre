@@ -596,6 +596,87 @@ export const consumedTokens = pgTable(
 );
 
 /**
+ * MCP clients that registered themselves (RFC 7591), the fallback to Client
+ * ID Metadata Documents, which need no row. The ID is the client's
+ * `client_id`. Its redirects are under its MAC: a database writer cannot add
+ * one of their own to a client people have approved.
+ */
+export const oauthClients = pgTable(
+  'oauth_clients',
+  {
+    id: uuid().primaryKey(),
+    authMac: bytea('auth_mac').notNull(),
+    // Its own claim, shown as unverified.
+    name: text().notNull(),
+    // JSON: a list of HTTPS or loopback URLs.
+    redirectUris: text('redirect_uris').notNull(),
+    createdAt: createdAt(),
+    createdIp: text('created_ip'),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+  },
+  (table) => [
+    check('oauth_clients_auth_mac_check', sql`octet_length(${table.authMac}) = 32`),
+    check('oauth_clients_redirect_uris_check', sql`${table.redirectUris}::jsonb IS NOT NULL`),
+  ],
+);
+
+/**
+ * One MCP client a person connected: one approved authorization, its
+ * scopes, its code until the client redeems it, and the refresh token it
+ * holds since. Access tokens have no row: each names its connection under a
+ * MAC, and every request checks this row. Revoking it ends them all.
+ */
+export const mcpConnections = pgTable(
+  'mcp_connections',
+  {
+    id: uuid().primaryKey(),
+    authMac: bytea('auth_mac').notNull(),
+    // The person it acts as, `user:<email>`, under the generation they approved it in.
+    principal: text().notNull(),
+    generation: integer().notNull(),
+    // A metadata document's URL, or a registration's ID.
+    clientId: text('client_id').notNull(),
+    // As the consent page showed them: display only.
+    clientName: text('client_name').notNull(),
+    clientHost: text('client_host'),
+    registration: text().notNull(),
+    // Space-separated, in catalogue order: `browse write`.
+    scopes: text().notNull(),
+    redirectUri: text('redirect_uri').notNull(),
+    // Until the client redeems it: its SHA-256, its PKCE challenge, and 60 seconds.
+    codeHash: bytea('code_hash'),
+    codeChallenge: text('code_challenge'),
+    codeExpiresAt: timestamp('code_expires_at', { withTimezone: true }),
+    // From then on: the refresh token's SHA-256, and the one it replaced, whose reuse ends the connection.
+    refreshHash: bytea('refresh_hash'),
+    refreshPreviousHash: bytea('refresh_previous_hash'),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    createdAt: createdAt(),
+    lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
+    lastUsedIp: text('last_used_ip'),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    revokedBy: text('revoked_by'),
+  },
+  (table) => [
+    check('mcp_connections_principal_check', sql`${table.principal} LIKE 'user:%'`),
+    check('mcp_connections_registration_check', sql`${table.registration} IN ('cimd', 'dcr')`),
+    check('mcp_connections_auth_mac_check', sql`octet_length(${table.authMac}) = 32`),
+    check('mcp_connections_code_hash_check', sql`${table.codeHash} IS NULL OR octet_length(${table.codeHash}) = 32`),
+    check('mcp_connections_refresh_hash_check', sql`${table.refreshHash} IS NULL OR octet_length(${table.refreshHash}) = 32`),
+    foreignKey({
+      name: 'mcp_connections_principal_fkey',
+      columns: [table.principal],
+      foreignColumns: [vaultMembers.principal],
+    }).onDelete('restrict'),
+    unique('mcp_connections_code_hash_key').on(table.codeHash),
+    unique('mcp_connections_refresh_hash_key').on(table.refreshHash),
+    index('mcp_connections_refresh_previous_idx').on(table.refreshPreviousHash),
+    // A person's live connections: Connected apps, and the limit on how many.
+    index('mcp_connections_live_idx').on(table.principal, table.expiresAt).where(sql`${table.revokedAt} IS NULL`),
+  ],
+);
+
+/**
  * Bearer credentials coffre issues itself: browser sessions, CLI sessions and
  * service tokens.
  *

@@ -335,6 +335,33 @@ test("sessions revoke warns when it is this CLI's own, and identities unlink say
   assert.equal(unlink.written.out, 'unlinked your github account ada@acme.example (idn-1), and ended the sessions it signed in\n');
 });
 
+test('apps lists the MCP clients you connected, unverified ones said so, and apps revoke disconnects one only with --apply', async () => {
+  const listed = {
+    apps: [
+      { id: 'c0nn-1', name: 'Claude', host: 'claude.ai', registration: 'cimd', scopes: ['browse'], createdAt: '2026-10-01T00:00:00Z', lastUsedAt: '2026-10-04T00:00:00Z', lastUsedIp: null, expiresAt: '2026-10-31T00:00:00Z' },
+      { id: 'c0nn-2', name: 'Cursor', host: null, registration: 'dcr', scopes: ['browse', 'write'], createdAt: '2026-10-02T00:00:00Z', lastUsedAt: null, lastUsedIp: null, expiresAt: '2026-11-01T00:00:00Z' },
+    ],
+  };
+  const list = fixture(() => listed);
+  await manage.apps(list.connect, [], list.io);
+  assert.equal(
+    list.written.out,
+    'c0nn-1  Claude                        claude.ai                 browse            last used 2026-10-04  ends 2026-10-31\n' +
+      'c0nn-2  Cursor (unverified)           -                         browse write      last used never  ends 2026-11-01\n',
+  );
+
+  const preview = fixture(() => listed);
+  await manage.appsRevoke(preview.connect, ['c0nn-1'], preview.io);
+  assert.deepEqual(preview.calls.map(({ method, path }) => `${method} ${path}`), ['GET /apps']);
+  assert.match(preview.written.out, /^would disconnect Claude \(claude\.ai\), connected 2026-10-01, last used 2026-10-04: its tokens would stop at its next request\.\nNothing changed/);
+
+  const revoke = fixture(({ method }) => (method === 'GET' ? listed : { disconnected: true }));
+  await manage.appsRevoke(revoke.connect, ['c0nn-2', '--apply'], revoke.io);
+  assert.deepEqual(revoke.calls.map(({ method, path }) => `${method} ${path}`), ['GET /apps', 'DELETE /apps/c0nn-2']);
+  assert.equal(revoke.written.out, 'disconnected Cursor, connected 2026-10-02, last used never\n');
+  await assert.rejects(manage.appsRevoke(fixture(() => listed).connect, ['c0nn-9'], list.io), /you have no connected app c0nn-9: `coffre apps` lists them/);
+});
+
 test('a command reads its arguments before it asks for a session', async () => {
   const connect = () => assert.fail('no session is asked for');
   await assert.rejects(manage.tokens(connect, [], fixture(() => null).io), /name <service>/);

@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+**MCP clients connect.** coffre is now an OAuth authorization server for
+MCP clients such as Claude, which connect at `<PUBLIC_URL>/mcp` as the
+people who approve them (docs/mcp.md). A client is known by its metadata
+document, as Claude publishes one, or registers itself, and then shows as
+Unverified; a registration's custom-scheme redirects are left out. The
+consent page, `/oauth/authorize`, shows the client's website, where the
+answer goes, and the scopes asked for, Browse always; nothing is granted
+until the person approves, every time. Codes are PKCE-bound and last a
+minute; access tokens last an hour and are good at `/mcp` only; refresh
+tokens rotate, and one presented again, like a code redeemed twice, ends
+the connection. The account page's Connected apps, and `coffre apps` and
+`coffre apps revoke`, list and disconnect them; an owner may disconnect
+anyone's. Each connection, token and disconnection is in the log under the
+client's name, tokens as detail. In this release `/mcp` answers
+`server/discover`; its tools come next. `coffre init` turns it on with
+`signin({ mcp })` and three limits: on Workers, the rate-limiting bindings
+`MCP_PER_SOURCE`, `MCP_PER_CONNECTION` and `MCP_TOTAL`; on Node,
+`processLimits()`, which now takes `perConnection` too. `coffre update`
+adds the three route files to an older deployment, which turns MCP on
+itself (docs/deploy.md, "MCP clients"). Migration `0010_mcp_connections`
+adds the clients' and connections' tables; until it runs, connecting
+answers 503.
+
 **Missing keys.** An environment's page lists the keys its sibling
 environments have and it lacks, compared only with those you can read: key
 names are metadata. Each has Add, a new row with its name, and Dismiss,

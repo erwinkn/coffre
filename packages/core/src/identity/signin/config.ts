@@ -70,6 +70,8 @@ export type SigninConfig = {
   cliSessionDays: number;
   /** CI runs signing in as services with their platform's ID token, when on (`workloads.ts`). */
   workloads: WorkloadsConfig | null;
+  /** MCP clients acting as the people who connect them, when on (docs/design/mcp.md). */
+  mcp: McpConfig | null;
 };
 
 /**
@@ -101,6 +103,32 @@ export type RateLimiter = { limit(options: { key: string }): Promise<{ success: 
 export type WorkloadLimits = { perSource: RateLimiter; total: RateLimiter };
 
 export type WorkloadsConfig = { allowLoopback: boolean; limits: WorkloadLimits };
+
+/**
+ * MCP clients, Claude among them, acting as the people who connect them,
+ * with coffre as their OAuth authorization server (docs/design/mcp.md). Off
+ * unless the deployment turns it on.
+ */
+export type McpOptions = {
+  /**
+   * The limits every unauthenticated OAuth request passes before coffre does
+   * any work for it, one per source address and one for all together, and
+   * the one each connection's tool calls pass. On Workers, three
+   * rate-limiting bindings; on Node, `processLimits()` from
+   * `@coffre/server/node`. Required.
+   */
+  limits: McpLimits;
+  /**
+   * Lets a client's metadata document be plain HTTP on loopback: for local
+   * development and conformance. Refused unless the public URL is loopback
+   * too.
+   */
+  allowLoopbackClientsForDevelopment?: boolean;
+};
+
+export type McpLimits = { perSource: RateLimiter; perConnection: RateLimiter; total: RateLimiter };
+
+export type McpConfig = { allowLoopback: boolean; limits: McpLimits };
 
 const PROVIDER_ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const BRANDS: readonly SigninBrand[] = ['github', 'google', 'microsoft', 'oidc'];
@@ -286,6 +314,7 @@ export function defineSignin(options: {
   browserSessionHours?: number;
   cliSessionDays?: number;
   workloads?: WorkloadsOptions;
+  mcp?: McpOptions;
 }): SigninConfig {
   if (options.providers.length === 0) {
     throw new Error('sign-in needs at least one provider');
@@ -306,7 +335,25 @@ export function defineSignin(options: {
     browserSessionHours: lifetime(options.browserSessionHours, 'browserSessionHours', 12, 24 * 7),
     cliSessionDays: lifetime(options.cliSessionDays, 'cliSessionDays', 30, 365),
     workloads: options.workloads === undefined ? null : workloadsConfig(options.workloads, publicOrigin(options.publicUrl)),
+    mcp: options.mcp === undefined ? null : mcpConfig(options.mcp, publicOrigin(options.publicUrl)),
   };
+}
+
+/** MCP, checked: its three limits given, each one a limiter; loopback clients only on a loopback instance. */
+function mcpConfig(options: McpOptions, publicUrl: string): McpConfig {
+  const limiter = (value: unknown) => typeof (value as RateLimiter | undefined)?.limit === 'function';
+  if (!limiter(options.limits?.perSource) || !limiter(options.limits?.perConnection) || !limiter(options.limits?.total)) {
+    throw new Error(
+      'mcp needs its limits, per source, per connection and in total: on Workers, three rate-limiting bindings; on Node, processLimits()',
+    );
+  }
+  const loopback = options.allowLoopbackClientsForDevelopment === true;
+  if (loopback && !isLoopback(new URL(publicUrl))) {
+    throw new Error(
+      `mcp.allowLoopbackClientsForDevelopment is for an instance on loopback, and ${publicUrl} is not one: turn it off`,
+    );
+  }
+  return { allowLoopback: loopback, limits: options.limits };
 }
 
 /** Workloads, checked: both limits given, each one a limiter; loopback issuers only on a loopback instance. */

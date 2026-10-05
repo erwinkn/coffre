@@ -1,4 +1,4 @@
-import { defineSignin, type SigninConfig, type WorkloadsOptions } from './signin/config.ts';
+import { defineSignin, type McpOptions, type SigninConfig, type WorkloadsOptions } from './signin/config.ts';
 import type { SigninProvider } from './signin/types.ts';
 import type { AccessVerifierConfig } from './types.ts';
 
@@ -101,6 +101,8 @@ export type SigninOptions = {
   cliSessionDays?: number;
   /** Lets CI runs sign in as services with their platform's ID token: `{}` turns it on. */
   workloads?: WorkloadsOptions;
+  /** Lets MCP clients, Claude among them, act as the people who connect them (docs/mcp.md). */
+  mcp?: McpOptions;
 };
 
 /**
@@ -125,5 +127,6 @@ function toSignin(options: SigninOptions) {
     browserSessionHours: options.browserSessionHours,
     cliSessionDays: options.cliSessionDays,
     workloads: options.workloads,
+    mcp: options.mcp,
   };
 }

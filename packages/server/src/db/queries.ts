@@ -98,7 +98,9 @@ export async function update<T extends Table>(
 }
 
 /** State changes authenticate the old row first and cannot overwrite a concurrent change. */
-export async function updateAuth<T extends Tables['identities'] | Tables['credentials'] | Tables['deviceAuthorizations'] | Tables['serviceBindings']>(
+export async function updateAuth<
+  T extends Tables['identities'] | Tables['credentials'] | Tables['deviceAuthorizations'] | Tables['serviceBindings'] | Tables['oauthClients'] | Tables['mcpConnections'],
+>(
   db: Queryable,
   chainKey: Buffer,
   table: T,
@@ -953,6 +955,72 @@ export async function revokeLiveCredentials(
   ));
   if (rows.length === 0) return 0;
   return updateAuth(db, chainKey, credentials, { id: rows.map((row) => row.id), revokedAt: null }, changes);
+}
+
+// --- MCP clients and connections -------------------------------------------
+
+export type OauthClientRow = Tables['oauthClients']['$inferSelect'];
+export type ConnectionRow = Tables['mcpConnections']['$inferSelect'];
+
+export async function insertOauthClient(db: Queryable, chainKey: Buffer, row: Omit<NewRow<Tables['oauthClients']>, 'authMac'> & {
+  id: string; name: string; redirectUris: string;
+}): Promise<void> {
+  const signed = { ...row, revokedAt: null };
+  await insert(db, tablesOf(db).oauthClients, { ...signed, authMac: authMac(chainKey, 'oauth_clients', signed) });
+}
+
+/** A registered client, by its ID: null for none, a revoked one, or one that fails its MAC, which is reported. */
+export async function findOauthClient(db: Queryable, chainKey: Buffer, id: string): Promise<OauthClientRow | null> {
+  const { oauthClients } = tablesOf(db);
+  const [row] = await db.select().from(oauthClients).where(eq(oauthClients.id, id));
+  return row !== undefined && row.revokedAt === null && checkAuthRow(chainKey, 'oauth_clients', row) ? row : null;
+}
+
+export async function insertConnection(db: Queryable, chainKey: Buffer, row: Omit<NewRow<Tables['mcpConnections']>, 'authMac'> & {
+  id: string; principal: string; generation: number; clientId: string; scopes: string; redirectUri: string;
+  codeHash: Buffer; codeChallenge: string; codeExpiresAt: Date; expiresAt: Date;
+}): Promise<void> {
+  const signed = { ...row, refreshHash: null, refreshPreviousHash: null, revokedAt: null };
+  await insert(db, tablesOf(db).mcpConnections, { ...signed, authMac: authMac(chainKey, 'mcp_connections', signed) });
+}
+
+/**
+ * The connection a code, a refresh token or an ID names, its MAC checked:
+ * revoked, expired or not, for the caller to judge. A refresh token found
+ * as the one before the current one says so: `previous`, a reuse. Null for
+ * none; a row that fails its MAC refuses (`AuthRowTampered`).
+ */
+export async function findConnection(
+  db: Queryable,
+  chainKey: Buffer,
+  by: { id: string } | { codeHash: Buffer } | { refreshHash: Buffer },
+): Promise<(ConnectionRow & { previous: boolean; now: Date }) | null> {
+  const { mcpConnections } = tablesOf(db);
+  const where =
+    'id' in by
+      ? eq(mcpConnections.id, by.id)
+      : 'codeHash' in by
+        ? eq(mcpConnections.codeHash, by.codeHash)
+        : or(eq(mcpConnections.refreshHash, by.refreshHash), eq(mcpConnections.refreshPreviousHash, by.refreshHash));
+  const [row] = await db.select({ connection: mcpConnections, now: clockMillis(db) }).from(mcpConnections).where(where).limit(1);
+  if (row === undefined) return null;
+  verifyAuthRow(chainKey, 'mcp_connections', row.connection);
+  const previous = 'refreshHash' in by && row.connection.refreshHash?.equals(by.refreshHash) !== true;
+  return { ...row.connection, previous, now: new Date(row.now) };
+}
+
+/**
+ * A person's connections that have not ended, codes not yet redeemed among
+ * them, newest first: rows that fail their MAC are reported and passed over.
+ */
+export async function liveConnections(db: Queryable, chainKey: Buffer, principal: string, at: Date): Promise<ConnectionRow[]> {
+  const { mcpConnections } = tablesOf(db);
+  const rows = await db
+    .select()
+    .from(mcpConnections)
+    .where(and(eq(mcpConnections.principal, principal), isNull(mcpConnections.revokedAt), gt(mcpConnections.expiresAt, at)))
+    .orderBy(desc(mcpConnections.createdAt));
+  return rows.filter((row) => checkAuthRow(chainKey, 'mcp_connections', row));
 }
 
 /** Device authorizations: one by either of its codes, or every one still waiting for a decision. */

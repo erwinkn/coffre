@@ -264,3 +264,40 @@ export const deviceLogin = {
     return uiResult(() => coffre.deviceLogins.get(code));
   },
 };
+
+/** An OAuth authorization request's parameters, the only ones the consent page carries. */
+const AUTHORIZATION_PARAMS = [
+  'client_id',
+  'redirect_uri',
+  'response_type',
+  'code_challenge',
+  'code_challenge_method',
+  'state',
+  'scope',
+  'resource',
+] as const;
+
+type AuthorizationSearch = Partial<Record<(typeof AUTHORIZATION_PARAMS)[number], string>>;
+
+/**
+ * `/oauth/authorize`: an MCP client asking to connect. Its parameters are
+ * read from the query string as sent: the router's search parses what looks
+ * like JSON, and a `state` of `1e5` must go back as `1e5`.
+ */
+export const oauthAuthorize = {
+  loaderDeps: ({ search }: { search: unknown }) => ({ search }),
+  // Its own read, as the device login's: every authorization is checked afresh.
+  loader: async ({ context, location }: Loader) => {
+    const { coffre, queryClient } = coffreOf(context);
+    const shell = await loadShell(queryClient, coffre);
+    if (shell.registrationRequired) throw redirect({ to: '/unregistered' });
+    if (shell.principal === null) throw redirect({ to: '/login', search: { next: location.href } });
+    const query = new URLSearchParams(location.searchStr);
+    const request: AuthorizationSearch = {};
+    for (const name of AUTHORIZATION_PARAMS) {
+      const value = query.get(name);
+      if (value !== null) request[name] = value;
+    }
+    return { request, email: shell.principal.id, result: await uiResult(() => coffre.oauth.describe(request)) };
+  },
+};

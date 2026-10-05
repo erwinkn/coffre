@@ -71,6 +71,13 @@
       "when": 1791207604367,
       "tag": "0009_dismissals",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1791213875972,
+      "tag": "0010_mcp_connections",
+      "breakpoints": true
     }
   ]
 }

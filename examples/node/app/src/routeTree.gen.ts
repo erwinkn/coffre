@@ -12,7 +12,9 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as CoffreRouteImport } from './routes/_coffre'
 import { Route as SoloRouteImport } from './routes/_solo'
 import { Route as LivezRouteImport } from './routes/livez'
+import { Route as McpRouteImport } from './routes/mcp'
 import { Route as ReadyzRouteImport } from './routes/readyz'
+import { Route as DotwellKnownSplatRouteImport } from './routes/[.]well-known.$'
 import { Route as CoffreIndexRouteImport } from './routes/_coffre/index'
 import { Route as CoffreAccessRouteImport } from './routes/_coffre/access'
 import { Route as CoffreAccountRouteImport } from './routes/_coffre/account'
@@ -28,6 +30,7 @@ import { Route as CoffreTokensTokenRouteImport } from './routes/_coffre/tokens.$
 import { Route as CoffreUsersIndexRouteImport } from './routes/_coffre/users.index'
 import { Route as CoffreUsersUserRouteImport } from './routes/_coffre/users.$user'
 import { Route as SoloAuthDeviceRouteImport } from './routes/_solo/auth.device'
+import { Route as SoloOauthAuthorizeRouteImport } from './routes/_solo/oauth.authorize'
 import { Route as CoffreProjectsProjectIndexRouteImport } from './routes/_coffre/projects.$project.index'
 import { Route as CoffreProjectsProjectEnvironmentRouteImport } from './routes/_coffre/projects.$project.$environment'
 
@@ -44,9 +47,19 @@ const LivezRoute = LivezRouteImport.update({
   path: '/livez',
   getParentRoute: () => rootRouteImport,
 } as any)
+const McpRoute = McpRouteImport.update({
+  id: '/mcp',
+  path: '/mcp',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ReadyzRoute = ReadyzRouteImport.update({
   id: '/readyz',
   path: '/readyz',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DotwellKnownSplatRoute = DotwellKnownSplatRouteImport.update({
+  id: '/.well-known/$',
+  path: '/.well-known/$',
   getParentRoute: () => rootRouteImport,
 } as any)
 const CoffreIndexRoute = CoffreIndexRouteImport.update({
@@ -124,6 +137,11 @@ const SoloAuthDeviceRoute = SoloAuthDeviceRouteImport.update({
   path: '/auth/device',
   getParentRoute: () => SoloRoute,
 } as any)
+const SoloOauthAuthorizeRoute = SoloOauthAuthorizeRouteImport.update({
+  id: '/oauth/authorize',
+  path: '/oauth/authorize',
+  getParentRoute: () => SoloRoute,
+} as any)
 const CoffreProjectsProjectIndexRoute =
   CoffreProjectsProjectIndexRouteImport.update({
     id: '/projects/$project/',
@@ -140,7 +158,9 @@ const CoffreProjectsProjectEnvironmentRoute =
 export interface FileRoutesByFullPath {
   '/': typeof CoffreIndexRoute
   '/livez': typeof LivezRoute
+  '/mcp': typeof McpRoute
   '/readyz': typeof ReadyzRoute
+  '/.well-known/$': typeof DotwellKnownSplatRoute
   '/access': typeof CoffreAccessRoute
   '/account': typeof CoffreAccountRoute
   '/audit': typeof CoffreAuditRoute
@@ -152,6 +172,7 @@ export interface FileRoutesByFullPath {
   '/tokens/$token': typeof CoffreTokensTokenRoute
   '/users/$user': typeof CoffreUsersUserRoute
   '/auth/device': typeof SoloAuthDeviceRoute
+  '/oauth/authorize': typeof SoloOauthAuthorizeRoute
   '/projects/': typeof CoffreProjectsIndexRoute
   '/tokens/': typeof CoffreTokensIndexRoute
   '/users/': typeof CoffreUsersIndexRoute
@@ -161,7 +182,9 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof CoffreIndexRoute
   '/livez': typeof LivezRoute
+  '/mcp': typeof McpRoute
   '/readyz': typeof ReadyzRoute
+  '/.well-known/$': typeof DotwellKnownSplatRoute
   '/access': typeof CoffreAccessRoute
   '/account': typeof CoffreAccountRoute
   '/audit': typeof CoffreAuditRoute
@@ -173,6 +196,7 @@ export interface FileRoutesByTo {
   '/tokens/$token': typeof CoffreTokensTokenRoute
   '/users/$user': typeof CoffreUsersUserRoute
   '/auth/device': typeof SoloAuthDeviceRoute
+  '/oauth/authorize': typeof SoloOauthAuthorizeRoute
   '/projects': typeof CoffreProjectsIndexRoute
   '/tokens': typeof CoffreTokensIndexRoute
   '/users': typeof CoffreUsersIndexRoute
@@ -184,7 +208,9 @@ export interface FileRoutesById {
   '/_coffre': typeof CoffreRouteWithChildren
   '/_solo': typeof SoloRouteWithChildren
   '/livez': typeof LivezRoute
+  '/mcp': typeof McpRoute
   '/readyz': typeof ReadyzRoute
+  '/.well-known/$': typeof DotwellKnownSplatRoute
   '/_coffre/access': typeof CoffreAccessRoute
   '/_coffre/account': typeof CoffreAccountRoute
   '/_coffre/audit': typeof CoffreAuditRoute
@@ -197,6 +223,7 @@ export interface FileRoutesById {
   '/_coffre/tokens/$token': typeof CoffreTokensTokenRoute
   '/_coffre/users/$user': typeof CoffreUsersUserRoute
   '/_solo/auth/device': typeof SoloAuthDeviceRoute
+  '/_solo/oauth/authorize': typeof SoloOauthAuthorizeRoute
   '/_coffre/projects/': typeof CoffreProjectsIndexRoute
   '/_coffre/tokens/': typeof CoffreTokensIndexRoute
   '/_coffre/users/': typeof CoffreUsersIndexRoute
@@ -208,7 +235,9 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/livez'
+    | '/mcp'
     | '/readyz'
+    | '/.well-known/$'
     | '/access'
     | '/account'
     | '/audit'
@@ -220,6 +249,7 @@ export interface FileRouteTypes {
     | '/tokens/$token'
     | '/users/$user'
     | '/auth/device'
+    | '/oauth/authorize'
     | '/projects/'
     | '/tokens/'
     | '/users/'
@@ -229,7 +259,9 @@ export interface FileRouteTypes {
   to:
     | '/'
     | '/livez'
+    | '/mcp'
     | '/readyz'
+    | '/.well-known/$'
     | '/access'
     | '/account'
     | '/audit'
@@ -241,6 +273,7 @@ export interface FileRouteTypes {
     | '/tokens/$token'
     | '/users/$user'
     | '/auth/device'
+    | '/oauth/authorize'
     | '/projects'
     | '/tokens'
     | '/users'
@@ -251,7 +284,9 @@ export interface FileRouteTypes {
     | '/_coffre'
     | '/_solo'
     | '/livez'
+    | '/mcp'
     | '/readyz'
+    | '/.well-known/$'
     | '/_coffre/access'
     | '/_coffre/account'
     | '/_coffre/audit'
@@ -264,6 +299,7 @@ export interface FileRouteTypes {
     | '/_coffre/tokens/$token'
     | '/_coffre/users/$user'
     | '/_solo/auth/device'
+    | '/_solo/oauth/authorize'
     | '/_coffre/projects/'
     | '/_coffre/tokens/'
     | '/_coffre/users/'
@@ -275,7 +311,9 @@ export interface RootRouteChildren {
   CoffreRoute: typeof CoffreRouteWithChildren
   SoloRoute: typeof SoloRouteWithChildren
   LivezRoute: typeof LivezRoute
+  McpRoute: typeof McpRoute
   ReadyzRoute: typeof ReadyzRoute
+  DotwellKnownSplatRoute: typeof DotwellKnownSplatRoute
   ApiSplatRoute: typeof ApiSplatRoute
   AuthSplatRoute: typeof AuthSplatRoute
 }
@@ -303,11 +341,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof LivezRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/mcp': {
+      id: '/mcp'
+      path: '/mcp'
+      fullPath: '/mcp'
+      preLoaderRoute: typeof McpRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/readyz': {
       id: '/readyz'
       path: '/readyz'
       fullPath: '/readyz'
       preLoaderRoute: typeof ReadyzRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/.well-known/$': {
+      id: '/.well-known/$'
+      path: '/.well-known/$'
+      fullPath: '/.well-known/$'
+      preLoaderRoute: typeof DotwellKnownSplatRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/_coffre/': {
@@ -415,6 +467,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SoloAuthDeviceRouteImport
       parentRoute: typeof SoloRoute
     }
+    '/_solo/oauth/authorize': {
+      id: '/_solo/oauth/authorize'
+      path: '/oauth/authorize'
+      fullPath: '/oauth/authorize'
+      preLoaderRoute: typeof SoloOauthAuthorizeRouteImport
+      parentRoute: typeof SoloRoute
+    }
     '/_coffre/projects/$project/': {
       id: '/_coffre/projects/$project/'
       path: '/projects/$project'
@@ -469,12 +528,14 @@ interface SoloRouteChildren {
   SoloLoginRoute: typeof SoloLoginRoute
   SoloUnregisteredRoute: typeof SoloUnregisteredRoute
   SoloAuthDeviceRoute: typeof SoloAuthDeviceRoute
+  SoloOauthAuthorizeRoute: typeof SoloOauthAuthorizeRoute
 }
 
 const SoloRouteChildren: SoloRouteChildren = {
   SoloLoginRoute: SoloLoginRoute,
   SoloUnregisteredRoute: SoloUnregisteredRoute,
   SoloAuthDeviceRoute: SoloAuthDeviceRoute,
+  SoloOauthAuthorizeRoute: SoloOauthAuthorizeRoute,
 }
 
 const SoloRouteWithChildren = SoloRoute._addFileChildren(SoloRouteChildren)
@@ -483,7 +544,9 @@ const rootRouteChildren: RootRouteChildren = {
   CoffreRoute: CoffreRouteWithChildren,
   SoloRoute: SoloRouteWithChildren,
   LivezRoute: LivezRoute,
+  McpRoute: McpRoute,
   ReadyzRoute: ReadyzRoute,
+  DotwellKnownSplatRoute: DotwellKnownSplatRoute,
   ApiSplatRoute: ApiSplatRoute,
   AuthSplatRoute: AuthSplatRoute,
 }
