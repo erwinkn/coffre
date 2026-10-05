@@ -13,8 +13,12 @@ import type { SigninService } from './signin.ts';
 import type { WorkloadService } from './workloads.ts';
 import type { McpService } from '../mcp/service.ts';
 
-/** A request made through MCP: the connection it came in on, its client, and the scopes its token holds. */
-export type McpVia = { connectionId: string; clientId: string; clientName: string; scopes: readonly McpScope[] };
+/**
+ * A request made through MCP: the connection it came in on, its client, and
+ * the scopes its token holds; for a change its person approved on coffre's
+ * page, the approval.
+ */
+export type McpVia = { connectionId: string; clientId: string; clientName: string; scopes: readonly McpScope[]; approvalId?: string };
 
 /** What every handler works with: the stores, and who is asking. */
 export type ApiContext = {
@@ -74,7 +78,17 @@ type Writer = Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp'> & { provenan
  */
 function traced(ctx: Writer, metadata: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
   if (ctx.provenance == null) return metadata;
-  const via = ctx.via == null ? {} : { via: { connectionId: ctx.via.connectionId, clientId: ctx.via.clientId, clientName: ctx.via.clientName } };
+  const via =
+    ctx.via == null
+      ? {}
+      : {
+          via: {
+            connectionId: ctx.via.connectionId,
+            clientId: ctx.via.clientId,
+            clientName: ctx.via.clientName,
+            ...(ctx.via.approvalId === undefined ? {} : { approvalId: ctx.via.approvalId }),
+          },
+        };
   return { ...metadata, ...via, credentialId: ctx.provenance };
 }
 

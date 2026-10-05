@@ -593,6 +593,38 @@ export const mcpConnections = sqliteTable(
   ],
 );
 
+/**
+ * A change an MCP client asked for, waiting for its person on coffre's own
+ * page: see schema.ts.
+ */
+export const mcpApprovals = sqliteTable(
+  'mcp_approvals',
+  {
+    id: text().primaryKey(),
+    connectionId: text('connection_id').notNull(),
+    tool: text().notNull(),
+    arguments: text().notNull(),
+    digest: bytes('digest').notNull(),
+    status: text().notNull().default('pending'),
+    outcome: text(),
+    createdAt: createdAt(),
+    expiresAt: time('expires_at').notNull(),
+    decidedAt: time('decided_at'),
+    reportedAt: time('reported_at'),
+  },
+  (table) => [
+    check('mcp_approvals_status_check', sql`${table.status} IN ('pending', 'approved', 'denied', 'cancelled', 'failed')`),
+    check('mcp_approvals_digest_check', sql`octet_length(${table.digest}) = 32`),
+    check('mcp_approvals_arguments_check', sql`json_valid(${table.arguments})`),
+    foreignKey({
+      name: 'mcp_approvals_connection_fkey',
+      columns: [table.connectionId],
+      foreignColumns: [mcpConnections.id],
+    }).onDelete('restrict'),
+    index('mcp_approvals_open_idx').on(table.connectionId, table.digest).where(sql`${table.reportedAt} IS NULL`),
+  ],
+);
+
 export const credentials = sqliteTable(
   'credentials',
   {

@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 import { github, signin, type RateLimiter } from '@coffre/core/identity';
-import { eq } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 
 import { SigninService } from '../src/api/signin.ts';
 import { coffreRoute } from '../src/app.ts';
@@ -210,7 +210,7 @@ test('Claude Code connects: its document fetched, any loopback port, consent, th
     redirectHost: 'localhost',
     loopbackOnly: true,
     scopes: ['browse'],
-    connected: 0,
+    connections: [],
     days: 30,
   });
   assert.deepEqual(fetched, [CLAUDE_CODE]);
@@ -537,4 +537,46 @@ test('GET /me says what the deployment turns on, read from its configuration, no
   const me = (on: CoffreRuntime) => route('/api/me', { headers: { authorization: `Bearer ${token}` } }, on).then((response) => response.json() as Promise<{ features: unknown }>);
   assert.deepEqual((await me(runtime)).features, { mcp: true, workloads: false });
   assert.deepEqual((await me(off)).features, { mcp: false, workloads: false });
+});
+
+test("a step-up supersedes the client's narrower connection once its code is redeemed; one with the same scopes stays", async () => {
+  const laptop = await connect(DEV, CLAUDE_CODE, 'http://localhost:51234/callback', 'browse');
+  const other = await connect(DEV, CLAUDE_CODE, 'http://localhost:51235/callback', 'browse');
+  assert.equal((await discover(laptop.access_token)).status, 200, 'a second laptop signs the first out of nothing');
+  const claude = await connect(DEV, CLAUDE, 'https://claude.ai/api/mcp/auth_callback', 'browse');
+
+  // The consent page says what a step-up replaces: the two Browse connections of Claude Code.
+  const { challenge } = pkce();
+  const shown = await describe(await session(DEV), request(CLAUDE_CODE, 'http://localhost:51236/callback', challenge, { scope: 'browse write' }));
+  assert.deepEqual(shown.connections, [['browse'], ['browse']]);
+
+  const stepped = await connect(DEV, CLAUDE_CODE, 'http://localhost:51236/callback', 'browse write');
+  assert.equal((await discover(laptop.access_token)).status, 401, 'superseded');
+  assert.equal((await discover(other.access_token)).status, 401, 'superseded');
+  assert.equal((await discover(stepped.access_token)).status, 200);
+  assert.equal((await discover(claude.access_token)).status, 200, "another client's connection is its own");
+  const ended = (await entries('mcp.disconnect')).map((entry) => [entry.metadata.reason, entry.metadata.supersededBy !== undefined]);
+  assert.deepEqual(ended, [['superseded', true], ['superseded', true]]);
+});
+
+test('a registration no connection names is revoked after a week, by a later registration; a used one stays', async () => {
+  const register = async (name: string) => {
+    const response = await route('/api/oauth/register', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ client_name: name, redirect_uris: ['http://localhost:8787/callback'] }),
+    });
+    return ((await response.json()) as { client_id: string }).client_id;
+  };
+  const unused = await register('Never connected');
+  const used = await register('Connected once');
+  await connect(DEV, used, 'http://localhost:8787/callback');
+  const recent = await register('Registered today');
+  await db.owner.update(oauthClients).set({ createdAt: new Date(Date.now() - 8 * 86_400_000) }).where(inArray(oauthClients.id, [unused, used]));
+
+  await register('A newcomer');
+  const revoked = new Map((await db.owner.select().from(oauthClients)).map((row) => [row.id, row.revokedAt !== null]));
+  assert.deepEqual([revoked.get(unused), revoked.get(used), revoked.get(recent)], [true, false, false], 'the unused week-old one revoked; a used one, and a recent one, stay');
+  const { challenge } = pkce();
+  assert.equal((await describe(await session(DEV), request(unused, 'http://localhost:8787/callback', challenge))).status, 'invalid', 'a revoked registration connects no more');
 });

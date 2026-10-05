@@ -266,6 +266,20 @@ export const deviceLogin = {
   },
 };
 
+/**
+ * `/approvals/$approval`: a change an MCP client asked for, which its person
+ * decides here. Its own read: the page shows what the change would do now.
+ */
+export const approval = {
+  loader: async ({ context, params, location }: Loader<{ approval: string }>) => {
+    const { coffre, queryClient } = coffreOf(context);
+    const shell = await loadShell(queryClient, coffre);
+    if (shell.registrationRequired) throw redirect({ to: '/unregistered' });
+    if (shell.principal === null) throw redirect({ to: '/login', search: { next: location.href } });
+    return uiResult(() => coffre.approvals.get(params.approval));
+  },
+};
+
 type AuthorizationSearch = RouteInput<'GET /oauth/authorizations'>;
 
 /**

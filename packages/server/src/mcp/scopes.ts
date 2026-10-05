@@ -44,7 +44,7 @@ export const ROUTE_SCOPES: { [K in RouteKey]: McpScope | null } = {
   'GET /workloads/lookup': 'browse',
   'DELETE /members/:member/bindings/:id': 'manage-access',
   'PATCH /access/:member': 'manage-access',
-  // The person's own sign-in, and connecting apps: never an app's to touch.
+  // The person's own sign-in, connecting apps and deciding their changes: never an app's to touch.
   'GET /sessions': null,
   'DELETE /sessions/:id': null,
   'GET /identities': null,
@@ -53,6 +53,8 @@ export const ROUTE_SCOPES: { [K in RouteKey]: McpScope | null } = {
   'POST /device-logins/:code': null,
   'GET /oauth/authorizations': null,
   'POST /oauth/authorizations': null,
+  'GET /approvals/:id': null,
+  'POST /approvals/:id': null,
   'GET /apps': null,
   'DELETE /apps/:id': null,
   'GET /audit': 'browse',

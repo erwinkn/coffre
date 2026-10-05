@@ -181,11 +181,13 @@ export async function resetDatabase(owner: Database): Promise<void> {
     consumedTokens,
     secretReferences,
     dismissedKeys,
+    mcpApprovals,
     mcpConnections,
     oauthClients,
     vaultGrants,
     vaultMembers,
   } = tablesOf(owner);
+  await owner.delete(mcpApprovals);
   await owner.delete(mcpConnections);
   await owner.delete(oauthClients);
   await owner.delete(credentials);

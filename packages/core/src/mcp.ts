@@ -59,6 +59,16 @@ export function grantedScopes(asked: readonly McpScope[], chosen: readonly strin
   return MCP_SCOPES.filter((scope) => scope === 'browse' || (asked.includes(scope) && picked.has(scope)));
 }
 
+/**
+ * Whether a connection granted `granted` supersedes an earlier one of the
+ * same client that holds `held`: it grants all of that and more, as a
+ * step-up does. The earlier one then ends, once the new one's code is
+ * redeemed; one with the same scopes, a second laptop say, stays.
+ */
+export function supersedes(granted: readonly McpScope[], held: readonly McpScope[]): boolean {
+  return held.every((scope) => granted.includes(scope)) && granted.some((scope) => !held.includes(scope));
+}
+
 // --- redirect URIs ----------------------------------------------------------
 
 /** A client's redirect, refused: the message says why, for the consent page and the registration answer. */

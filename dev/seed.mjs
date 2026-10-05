@@ -52,6 +52,7 @@ await pool.query('DELETE FROM secret_references');
 await pool.query('ALTER TABLE audit_log DISABLE TRIGGER USER');
 await pool.query('DELETE FROM audit_log');
 await pool.query('ALTER TABLE audit_log ENABLE TRIGGER USER');
+await pool.query('DELETE FROM mcp_approvals');
 await pool.query('DELETE FROM mcp_connections');
 await pool.query('DELETE FROM oauth_clients');
 await pool.query('DELETE FROM credentials');

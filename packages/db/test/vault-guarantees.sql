@@ -216,6 +216,7 @@ BEGIN
         'UPDATE secrets SET folder = folder',
         'SELECT * FROM oauth_clients',
         'SELECT * FROM mcp_connections',
+        'SELECT * FROM mcp_approvals',
             'DELETE FROM identities',
         'DELETE FROM device_authorizations',
         'TRUNCATE vault_members',

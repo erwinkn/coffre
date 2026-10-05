@@ -380,6 +380,21 @@ export const routes = {
     run: (ctx, { input }) => mcp(ctx).decide(ctx, input.request, { approve: input.approve, scopes: input.scopes }),
   }),
 
+  // A change an MCP client asked for, on the page where its person decides it.
+  ...route('GET /approvals/:id', {
+    run: async (ctx, { params }) => ({ approval: await mcp(ctx).approvals.view(ctx, params.id) }),
+  }),
+  ...route('POST /approvals/:id', {
+    input: z.object({
+      approve: z.boolean(),
+      // Of the change the page showed: a change that is not it is refused.
+      digest: z.string().regex(/^[0-9a-f]{64}$/),
+      // What the person typed, for a change that asks for a value.
+      value: secretValue.optional(),
+    }).strict(),
+    run: (ctx, { params, input }) => mcp(ctx).approvals.decide(ctx, params.id, input),
+  }),
+
   // The MCP clients you connected: Connected apps.
   ...route('GET /apps', {
     run: async (ctx) => ({ apps: await mcp(ctx).apps(ctx) }),

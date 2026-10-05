@@ -34,6 +34,28 @@ points `coffre(env => …)` and `serve({ … })`, which threw to say so. The CLI
 no longer refuses the `COFFRE_*` variables earlier CLIs read: it reads no
 variable at all, as before, and says nothing of them.
 
+**MCP changes, each approved on coffre.** A client with the Write scope
+can ask to set a secret to a value the person types (`request_secret_value`),
+rename, archive, unarchive and restore secrets, and create projects and
+environments; with Manage access, change a member's access, admit and
+offboard members, issue and revoke service tokens, and trust and untrust
+CI workloads. None changes anything when called: it opens an approval, and
+the person decides it on coffre's page, `/approvals/<id>`, which shows the
+app, the change and what it replaces; Approve makes the change there, once,
+as the person through the connection, and its entries name the client and
+the approval (`via.approvalId`), beside `mcp.approve` or `mcp.deny`. A
+client on MCP 2026-07-28 that declares URL elicitation, Claude Code among
+them, is asked to open the page and retries with a MACed `requestState`
+bound to its connection and call; any other, claude.ai among them, gets the
+link in the result and calls again with the same arguments, 2025-era
+clients included: no client is read-only for its protocol version. Approvals
+expire in five minutes, a connection holds five at once, and only their
+person decides them, with the digest of the change the page showed. No tool takes a value; a token is shown on the
+page only. A consent that grants all of an earlier connection of the same
+client and more supersedes it once its code is redeemed (`mcp.disconnect`,
+`superseded`), and a registration no connection names is revoked after a
+week. Migration `0001_mcp_approvals` adds the approvals' table.
+
 **Folder commands.** `coffre folders` lists the folders of projects and
 what is in each, and `coffre folders market/prod` an environment's key
 folders, both with `--json`. `coffre folders rename Clients Customers`

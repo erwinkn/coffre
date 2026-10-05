@@ -11,6 +11,7 @@ import {
   clientName,
   grantedScopes,
   scopeString,
+  supersedes,
   type ClientMetadata,
   type McpScope,
 } from '@coffre/core/mcp';
@@ -28,6 +29,7 @@ import {
   insertConnection,
   insertOauthClient,
   liveConnections,
+  sweepOauthClients,
   memberOf,
   memberStanding,
   principalOf,
@@ -37,6 +39,7 @@ import {
 } from '../db/queries.ts';
 import { logged } from '../logged.ts';
 import type { WorkloadTransport } from '../workloads/transport.ts';
+import { McpApprovals } from './approvals.ts';
 import { resolveClient, wouldFetch } from './clients.ts';
 import {
   ACCESS_TOKEN_SECONDS,
@@ -55,6 +58,10 @@ const CODE_SECONDS = 60;
 export const MAX_CONNECTIONS = 20;
 /** Last use is written once per this long at most, as for credentials. */
 const TOUCH_INTERVAL_MS = 5 * 60 * 1000;
+/** A registration no connection names is revoked after this long: a client that registers to connect does so within minutes. */
+const UNUSED_REGISTRATION_MS = 7 * 86_400_000;
+/** How many of those one registration revokes, at most: the work stays bounded, and keeps pace with registrations. */
+const SWEEP_LIMIT = 10;
 
 export type McpServiceDeps = {
   db: Database;
@@ -64,6 +71,8 @@ export type McpServiceDeps = {
   signin: SigninConfig;
   publicUrl: string;
   transport: WorkloadTransport;
+  /** How long a call waits on its approval before answering that it still waits; 25 seconds unless a test says otherwise. */
+  approvalWaitMs?: number;
 };
 
 /** Who is asking, for the consent page's calls. */
@@ -108,8 +117,8 @@ export type AuthorizationView =
       loopbackOnly: boolean;
       /** What the client asks for, `browse` always among them. */
       scopes: McpScope[];
-      /** The person's own live connections of this client already. */
-      connected: number;
+      /** The scopes of each of the person's live connections of this client: one the approval supersedes ends. */
+      connections: McpScope[][];
       /** How long the connection lasts, unless disconnected: a CLI login's days. */
       days: number;
     };
@@ -162,9 +171,16 @@ type Meta = { requestId: string; sourceIp: string | null };
  */
 export class McpService {
   readonly #deps: McpServiceDeps;
+  /** The changes clients asked for, waiting for their person on coffre's page. */
+  readonly approvals: McpApprovals;
 
   constructor(deps: McpServiceDeps) {
     this.#deps = deps;
+    this.approvals = new McpApprovals(deps);
+  }
+
+  get approvalWaitMs(): number | undefined {
+    return this.#deps.approvalWaitMs;
   }
 
   get limits(): McpConfig['limits'] {
@@ -188,14 +204,14 @@ export class McpService {
     const checked = await this.#check(request, asker.sourceIp);
     if (checked.status !== 'ready') return checked;
     const { client, redirectUri, scopes } = checked;
-    const connected = await this.#sameClient(asker, client.clientId);
+    const connections = await this.#sameClient(asker, client.clientId);
     return {
       status: 'ready',
       client: { id: client.clientId, name: client.name, host: client.host, registration: client.registration },
       redirectHost: redirectHost(redirectUri),
       loopbackOnly: client.redirectUris.every((uri) => redirectKind(uri) === 'loopback'),
       scopes,
-      connected,
+      connections,
       days: this.#deps.signin.cliSessionDays,
     };
   }
@@ -259,10 +275,10 @@ export class McpService {
     return back({ code });
   }
 
-  /** The person's own live connections of a client: the consent page says when there are some. */
-  async #sameClient(asker: Asker, clientId: string): Promise<number> {
+  /** The scopes of the person's own live connections of a client: the consent page says what the new one replaces. */
+  async #sameClient(asker: Asker, clientId: string): Promise<McpScope[][]> {
     const live = await liveConnections(this.#deps.db, this.#deps.chainKey, `user:${asker.caller.principal.id}`, new Date());
-    return live.filter((row) => row.clientId === clientId && row.refreshHash !== null).length;
+    return live.filter((row) => row.clientId === clientId && row.refreshHash !== null).map((row) => parseScopes(row.scopes).scopes);
   }
 
   /**
@@ -435,6 +451,13 @@ export class McpService {
       });
       if (redeemed === 0) throw new OAuthError('invalid_grant', 'that code was used already');
       log.push(this.#entry(row, 'mcp.token', 'allow', meta, { grant: 'authorization_code' }));
+      // A step-up: the client's earlier connections that this one grants all of and more end now, as the consent page said.
+      const granted = parseScopes(row.scopes).scopes;
+      for (const earlier of await liveConnections(tx, this.#deps.chainKey, row.principal, row.now)) {
+        if (earlier.id === row.id || earlier.clientId !== row.clientId || earlier.refreshHash === null || !supersedes(granted, parseScopes(earlier.scopes).scopes)) continue;
+        const ended = await updateAuth(tx, this.#deps.chainKey, mcpConnections, { id: earlier.id, revokedAt: null }, { revokedAt: row.now, revokedBy: 'coffre' });
+        if (ended > 0) log.push(this.#entry(earlier, 'mcp.disconnect', 'allow', meta, { reason: 'superseded', supersededBy: row.id }));
+      }
     });
     return this.#answer(row, parseScopes(row.scopes).scopes, refresh, row.now);
   }
@@ -562,6 +585,8 @@ export class McpService {
     }
     const id = randomUUID();
     const name = clientName(fields.client_name, 'Unnamed app');
+    // Each registration revokes a few that were never used, so live ones cannot pile up (W19's review, P3-4).
+    await sweepOauthClients(this.#deps.db, this.#deps.chainKey, new Date(Date.now() - UNUSED_REGISTRATION_MS), SWEEP_LIMIT);
     await insertOauthClient(this.#deps.db, this.#deps.chainKey, { id, name, redirectUris: JSON.stringify(redirects.kept), createdIp: meta.sourceIp });
     return {
       client_id: id,

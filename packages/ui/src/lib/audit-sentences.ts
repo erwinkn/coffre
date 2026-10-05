@@ -104,6 +104,7 @@ const DISCONNECTED: Record<string, string> = {
   code_reused: ': its sign-in code was used twice',
   refresh_reused: ': a refresh token it had replaced was used again',
   revocation_endpoint: ', at its own request',
+  superseded: ': a connection with more scopes replaced it',
 };
 
 function plural(count: number, one: string, many = `${one}s`): string {
@@ -316,6 +317,10 @@ const TEMPLATES: Record<string, Template> = {
   'mcp.connect': { did: 'connected', tried: 'connect', what: ({ entry }) => app(entry) },
   // A tool an MCP client called, by its name, and the places it named.
   'mcp.call': { did: 'used', tried: 'use', what: ({ entry }) => tool(entry), then: ({ entry }) => via(entry) },
+  // A person's decision, on coffre's page, on a change an MCP client asked for; the change's own entries follow, via the client.
+  'mcp.approve': { did: 'approved', tried: 'approve', what: ({ entry }) => tool(entry), then: ({ entry }) => [` for ${text(entry.metadata.clientName) ?? 'an app'}`] },
+  'mcp.deny': { did: 'turned down', tried: 'turn down', what: ({ entry }) => tool(entry), then: ({ entry }) => [` for ${text(entry.metadata.clientName) ?? 'an app'}`] },
+  'mcp.view': { did: 'opened an approval', tried: 'open an approval', what: () => [] },
   'mcp.disconnect': {
     did: 'disconnected',
     tried: 'disconnect',
@@ -418,6 +423,10 @@ const REASONS: Record<string, string> = {
   person_denied: 'they said no',
   too_many_connections: 'too many connected apps',
   unknown_connection: 'no such connected app',
+  not_yours: "it was someone else's",
+  too_many_approvals: 'too many changes waiting for approval',
+  request_state: 'its retry did not match its call',
+  changed: 'the change was not the one shown',
 };
 
 /** What a missing permission meant, from the app's `missing_<permission>`. */

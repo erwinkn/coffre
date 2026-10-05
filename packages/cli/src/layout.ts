@@ -58,6 +58,7 @@ export const ROUTE_FILES: Record<string, string> = Object.fromEntries(
     '_solo/unregistered.tsx',
     '_solo/auth.device.tsx',
     '_solo/oauth.authorize.tsx',
+    '_solo/approvals.$approval.tsx',
   ].map((file) => [`app/src/routes/${file}`, CLEAN_BREAK]),
 );
 
