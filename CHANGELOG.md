@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+**A service account is an identity, not a token.** The CLI and the UI showed
+a service as `token:deploy-slides`, so its OIDC trust bindings looked set
+"on a token", though OIDC is the way to need no token at all. Now a service
+account, a machine identity for CI and other machines, is
+`service:<name>` wherever a person reads one: help, output, previews,
+refusals, `coffre access`, `coffre audit`, the audit log's sentences and the
+UI's pages. It signs in one of two ways, and they are named so: by OIDC (trust
+bindings) or with bearer tokens.
+- The UI's Tokens page is Service accounts, and a service account's page
+  shows "Sign in with OIDC", its trust bindings, then "Bearer tokens".
+- The CLI takes `service:<name>`, still takes `token:<name>`, and `--service`
+  as before; `coffre admit service:deploy` needs no `--service`.
+- The API, the vault and the audit log keep `token:<name>`: the log's signed
+  entries hold it. Nothing is migrated, and nothing signed or verified
+  changes; `@coffre/client` shows and takes the names at the edge
+  (`shownMember`, `apiMember`).
+
 **`coffre trust` from first use.**
 - A binding matches one event, and trusting a workflow that also runs by
   hand or on a schedule took one `coffre trust` for each. Now `--event` (and

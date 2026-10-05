@@ -42,14 +42,14 @@ export function PrincipalLink({
     <span className="cell-principal">
       <PrincipalAvatar type={type} id={id} />
       {!mounted(type === 'user' ? '/users/$user' : '/tokens/$token') ? (
-        <span>{id}</span>
+        <span>{type === 'user' ? id : `service:${id}`}</span>
       ) : type === 'user' ? (
         <Link className={className} to="/users/$user" params={{ user: id }}>
           {id}
         </Link>
       ) : (
         <Link className={className} to="/tokens/$token" params={{ token: id }}>
-          {id}
+          service:{id}
         </Link>
       )}
     </span>

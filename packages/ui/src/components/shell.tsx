@@ -268,7 +268,7 @@ function Sidebar({
           users={
             <>
               <NavLink to="/users" label="Users" icon={<Users size={16} />} collapsed={collapsed} />
-              <NavLink to="/tokens" label="Tokens" icon={<Key size={16} />} collapsed={collapsed} />
+              <NavLink to="/tokens" label="Service accounts" icon={<Key size={16} />} collapsed={collapsed} />
             </>
           }
           audit={
@@ -421,7 +421,7 @@ function Breadcrumbs({
   // under its project. Someone who manages one project's access reaches the
   // page without being able to open the list, so the root is then just a label.
   if ((section === 'users' || section === 'tokens') && projectSlug !== undefined) {
-    const label = <span>{section === 'users' ? 'Users' : 'Tokens'}</span>;
+    const label = <span>{section === 'users' ? 'Users' : 'Service accounts'}</span>;
     return (
       <nav className="crumbs" aria-label="Breadcrumb">
         {canListPrincipals ? (

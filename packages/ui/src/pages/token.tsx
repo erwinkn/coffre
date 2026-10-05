@@ -25,10 +25,11 @@ export function TokenPage() {
   return (
     <>
       <PrincipalPage principalType="service" principalId={token} />
+      {/* The two ways a service account signs in: OIDC first, the one with nothing to store. */}
+      {active && bindings?.ok === true && <TrustedWorkloads serviceId={token} bindings={bindings.bindings} />}
       {active && credentials?.ok === true && (
         <ServiceTokens serviceId={token} tokens={credentials.tokens} />
       )}
-      {active && bindings?.ok === true && <TrustedWorkloads serviceId={token} bindings={bindings.bindings} />}
     </>
   );
 }

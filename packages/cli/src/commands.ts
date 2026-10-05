@@ -60,12 +60,12 @@ export const SECTIONS = [
     title: 'Session',
     entries: [
       { command: 'login', usage: ['login [<url>] [--no-browser]'], about: ['sign in, and make <url> the current instance'] },
-      { command: 'login', usage: ['login <url> --token'], about: ["a CI run's sign-in: a service token, asked for or piped in"] },
+      { command: 'login', usage: ['login <url> --token'], about: ["a CI run's sign-in: a bearer token, asked for or piped in"] },
       { command: 'login', usage: ['login <url> --access-client-id <id>'], about: ['the same, behind Cloudflare Access: its secret asked for'] },
       {
         command: 'login',
         usage: ['login <url> --service <name> [--id-token]'],
-        about: ["the same, as a service, by the run's ID token: GitHub's", 'runner gives it; elsewhere, --id-token asks for it'],
+        about: ["the same, as a service account, by OIDC, the run's ID token:", "GitHub's runner gives it; elsewhere, --id-token asks for it"],
       },
       { command: 'logout', usage: ['logout [<url>]'] },
       { command: 'whoami', usage: ['whoami [--json]'] },
@@ -114,7 +114,7 @@ export const SECTIONS = [
       {
         command: 'admit',
         usage: ['admit <principal> [--service] [--owner | --no-owner]'],
-        about: ['a member: a person by their email, or a service, for CI;', '--owner makes them an owner of the instance'],
+        about: ['a member: a person by their email, or a service account,', 'service:<name> or --service; --owner makes a person an owner'],
       },
       {
         command: 'grant',
@@ -130,21 +130,21 @@ export const SECTIONS = [
     ],
   },
   {
-    title: 'Services, for CI: admit --service, grant --service, then a token or trust',
+    title: 'Service accounts, for CI and other machines: admit, grant, then OIDC or a bearer token',
     entries: [
-      { command: 'tokens', usage: ['tokens <service> [--json]'], about: ["a service's tokens, by their last characters"] },
-      {
-        command: 'tokens issue',
-        usage: ['tokens issue <service> [--expires-in <days>] [--label <label>]', '             [--output-file <path>]'],
-        about: ['a token, on stdout or in a new 0600 file, shown once and', 'kept nowhere; 90 days unless told'],
-      },
-      { command: 'tokens revoke', usage: ['tokens revoke <service> <id> [--apply]'] },
       {
         command: 'trust',
         usage: ['trust <service> [--github … | --gitlab … | --issuer …] [--apply]'],
-        about: ['the CI runs that may sign in as a service, by their', "platform's ID token; `coffre trust` alone says how"],
+        about: ['OIDC, no stored secret: the CI runs that may sign in as', "it, by their platform's ID token; `coffre trust` alone says how"],
       },
       { command: 'untrust', usage: ['untrust <service> <binding-id> [--apply]'], about: ['the CI runs it would cut off; --apply removes it'] },
+      { command: 'tokens', usage: ['tokens <service> [--json]'], about: ['its bearer tokens, for CI without OIDC'] },
+      {
+        command: 'tokens issue',
+        usage: ['tokens issue <service> [--expires-in <days>] [--label <label>]', '             [--output-file <path>]'],
+        about: ['a bearer token, on stdout or in a new 0600 file, shown once', 'and kept nowhere; 90 days unless told'],
+      },
+      { command: 'tokens revoke', usage: ['tokens revoke <service> <id> [--apply]'] },
     ],
   },
   {
@@ -173,8 +173,8 @@ export const ENTRIES: readonly Entry[] = SECTIONS.flatMap(({ entries }): readonl
 
 const SESSION_FLAGS = `  Session flags, before the command: coffre [flags] <command>, for that command alone
     --url <url>                     which instance to talk to; else the current one
-    --service <name>                the service a CI run signs in as, by its ID token, which a
-                                    trust binding accepts (coffre trust); on GitHub Actions, with
+    --service <name>                the service account a CI run signs in as, by OIDC: its ID token,
+                                    which a trust binding accepts (coffre trust); on GitHub Actions, with
                                     \`permissions: id-token: write\`, nothing else
     --auth-mode signin|cloudflare   normally detected at login
     Without them, the session \`coffre login\` saved.

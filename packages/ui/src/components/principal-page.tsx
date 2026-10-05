@@ -102,11 +102,11 @@ export function PrincipalPage({
     return (
       <ClosedDoor
         icon={people ? <Users size={18} /> : <Key size={18} />}
-        label={<span className="mono">{principalId}</span>}
-        title={people ? 'No such user for you' : 'No such token for you'}
+        label={<span className="mono">{people ? principalId : `service:${principalId}`}</span>}
+        title={people ? 'No such user for you' : 'No such service account for you'}
         actions={
           <Link className="btn" to={list}>
-            All {people ? 'users' : 'tokens'}
+            All {people ? 'users' : 'service accounts'}
           </Link>
         }
       >
@@ -132,7 +132,12 @@ export function PrincipalPage({
     <>
       <PageHeader
         lead={<PrincipalAvatar type={principalType} id={principalId} size="lg" />}
-        title={principalId}
+        title={principalType === 'service' ? `service:${principalId}` : principalId}
+        description={
+          principalType === 'service'
+            ? 'A service account: a machine identity, for CI and other machines. It signs in with OIDC, its CI’s ID token matched by a trust binding, or with a bearer token.'
+            : undefined
+        }
         meta={
           removed ? (
             <span className="tag tag-red">Removed</span>

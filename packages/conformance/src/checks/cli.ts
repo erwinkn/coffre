@@ -203,7 +203,8 @@ export async function verifyInterrupted(cli: Cli, admin: Person): Promise<string
  * else changed; the runs' reads are in the audit log.
  */
 export async function verifyLeftovers(cli: Cli, admin: Person, setups: string[], before: string, kept: Canary): Promise<string> {
-  expect(setups[0]!.includes(`the service ${PROBE.service}`), 'the first run did not make its service', setups[0]);
+  // Shown as people read it, service:<name>, though the API keeps token:<name>.
+  expect(setups[0]!.includes(`the service account ${PROBE.service.replace(/^token:/, 'service:')}`), 'the first run did not make its service account', setups[0]);
   expect(setups.slice(1).every((line) => line.startsWith('all found')), 'a later run made something again', setups);
   const { tokens } = await admin.api.tokens.list(PROBE.service);
   expect(tokens.length === 0, `${PROBE.service} still holds ${tokens.length} credential(s)`, tokens);
@@ -268,8 +269,9 @@ export async function manageByCli(cli: Cli): Promise<string> {
     await coffre(['set', 'conformance-cli/ci/API_KEY'], value);
     await coffre(['rename', 'conformance-cli/ci/API_KEY', 'API_TOKEN']);
     const refused = await coffre(['grant', 'conformance-cli', 'conformance-deploy', '--role', 'viewer', '--env', 'ci', '--service'], undefined, 1);
-    expect(refused.includes('admit them first, `coffre admit conformance-deploy --service`'), 'grant to a service not yet admitted did not say to admit it', refused);
+    expect(refused.includes('admit them first, `coffre admit service:conformance-deploy`'), 'grant to a service not yet admitted did not say to admit it', refused);
     const admitted = await coffre(['admit', 'conformance-deploy', '--service']);
+    expect(admitted.includes('admitted service:conformance-deploy') && !admitted.includes('token:'), 'admit --service did not name the service account as service:<name>', admitted);
     expect(admitted.includes('next: coffre grant <project> conformance-deploy'), 'admit --service did not say what comes next', admitted);
     await coffre(['grant', 'conformance-cli', 'conformance-deploy', '--role', 'viewer', '--env', 'ci', '--service']);
 
@@ -291,7 +293,7 @@ export async function manageByCli(cli: Cli): Promise<string> {
     await service(['get', 'conformance-cli/ci/API_TOKEN']);
     await coffre(['tokens', 'revoke', 'conformance-deploy', listed!.id, '--apply']);
     const gone = await service(['get', 'conformance-cli/ci/API_TOKEN'], undefined, 1);
-    expect(/does not know this service token/.test(gone), 'a revoked token was not refused plainly', gone);
+    expect(/does not know this bearer token/.test(gone), 'a revoked token was not refused plainly', gone);
 
     await coffre(['revoke', 'conformance-cli', 'conformance-deploy', '--env', 'ci', '--service']);
     await coffre(['archive', 'conformance-cli/ci/API_TOKEN']);

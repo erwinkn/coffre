@@ -63,7 +63,7 @@ export type ProjectTab = 'environments' | 'users' | 'tokens' | 'settings';
 const TABS: { key: ProjectTab; label: string; icon: ReactNode }[] = [
   { key: 'environments', label: 'Environments', icon: <Layers size={15} /> },
   { key: 'users', label: 'Users', icon: <Users size={15} /> },
-  { key: 'tokens', label: 'Tokens', icon: <Key size={15} /> },
+  { key: 'tokens', label: 'Service accounts', icon: <Key size={15} /> },
   { key: 'settings', label: 'Settings', icon: <Settings size={15} /> },
 ];
 
@@ -599,7 +599,7 @@ function AccessPanel({
   const people = principalType === 'user';
   const refused = useRefusedGrants(project, grants, principalType);
   return (
-    <section className="card" aria-label={people ? 'Users with access' : 'Tokens with access'}>
+    <section className="card" aria-label={people ? 'Users with access' : 'Service accounts with access'}>
       {grants.length === 0 && refused.length === 0 ? (
         <EmptyState title={people ? 'No user has access' : 'No token has access'}>
           Add {people ? 'a user' : 'a token'} with permissions on the whole project or on one

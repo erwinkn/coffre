@@ -100,6 +100,16 @@ test('a flag a command does not take is refused in a line and the usage, never a
   assert.match(init.stderr, /^coffre: unknown option '--bogus'\nusage:\n {4}coffre init --workers/);
 });
 
+test('coffre help names service accounts as people do, service:<name>, and offers OIDC before bearer tokens', async () => {
+  const { stdout } = await coffre(['help']);
+  assert.doesNotMatch(stdout, /(?<![\w-])token:[A-Za-z0-9]/);
+  const section = stdout.slice(stdout.indexOf('  Service accounts, for CI and other machines'));
+  assert.ok(section.indexOf('coffre trust') < section.indexOf('coffre tokens issue'), 'OIDC first, then bearer tokens');
+  assert.match(stdout, /coffre admit <principal> \[--service\].*\n.*a service account,\n.*service:<name> or --service/);
+  const trust = await coffre(['trust']);
+  assert.match(trust.stdout, /A service account, service:<name>, signs in by OIDC this way/);
+});
+
 test('--version prints the version; help and --help the commands', async () => {
   const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
   for (const flag of ['--version', '-v']) assert.deepEqual(await coffre([flag]), { code: 0, stdout: `${version}\n`, stderr: '' });

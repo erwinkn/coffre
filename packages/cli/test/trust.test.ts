@@ -95,6 +95,8 @@ test('the flags name one platform, and one of a branch or a tag', async () => {
   await assert.rejects(bindingFrom({ github: 'acme/api', branch: 'main' }, lookup), /--workflow deploy.yml/);
   assert.equal(serviceMember('api-deploy'), 'token:api-deploy');
   assert.equal(serviceMember('token:api-deploy'), 'token:api-deploy');
+  // As people write it now: the API keeps token:<name>.
+  assert.equal(serviceMember('service:api-deploy'), 'token:api-deploy');
 });
 
 test('a plan and a list show every claim in full', () => {
@@ -108,7 +110,7 @@ test('a plan and a list show every claim in full', () => {
   assert.equal(
     describePlan('token:api-deploy', plan, null),
     [
-      'Would trust CI runs to sign in as token:api-deploy:',
+      'Would trust CI runs to sign in as service:api-deploy, by OIDC:',
       '  profile  github',
       '  issuer   https://token.actions.githubusercontent.com',
       '  keys     https://token.actions.githubusercontent.com/.well-known/jwks',
@@ -118,7 +120,7 @@ test('a plan and a list show every claim in full', () => {
       '',
     ].join('\n'),
   );
-  assert.equal(describeBindings('token:api-deploy', []), 'token:api-deploy trusts no CI runs\n');
+  assert.equal(describeBindings('token:api-deploy', []), 'service:api-deploy trusts no CI runs: none signs in as it by OIDC\n');
   const listed = describeBindings('token:api-deploy', [
     { ...plan, id: 'b1', label: 'prod', createdAt: '2026-10-03T22:00:00.000Z', createdBy: 'lead@acme.example', lastUsedAt: null },
   ]);

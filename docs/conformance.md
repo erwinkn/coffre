@@ -206,7 +206,7 @@ deployment it booted.
 | sign-in info | `GET /api/auth` names the sign-in providers, or Cloudflare Access, and nothing more |
 | anonymous answers | No page shows no one anything: every page but `/login` redirects to `/login` with an empty body, and `/login` carries no credential coffre issues. Without a value to look for, this is a best effort, and says so |
 
-**With a token**, a service token that reads one canary:
+**With a token**, a service account's bearer token that reads one canary:
 
 | Check | What must hold |
 |---|---|
@@ -294,7 +294,7 @@ For example, on an instance with another project, `market`, which the token
 holds nothing on:
 
 ```
-Checking https://secrets.example.com, as no one and with the service token `coffre login --token` saved
+Checking https://secrets.example.com, as no one and with the bearer token `coffre login --token` saved
   The token's reads add a few entries to the instance's audit log, for good.
 
   ✓ health              /livez and /readyz
@@ -303,7 +303,7 @@ Checking https://secrets.example.com, as no one and with the service token `coff
   ✓ forged cross-site   21 changes, sign-out included, from another site with a session cookie: 403
   ✓ sign-in info        coffre's sign-in through github, and nothing more
   ✓ anonymous answers   best effort, without a canary: 12 closed pages send no one to /login with nothing else; /login carries no credential
-  ✓ token               token:conformance-probe, reading conformance/live
+  ✓ token               service:conformance-probe, reading conformance/live
   ✓ token reveal        one secret.read of CANARY, entry 57, under request 1d3a7bc8-3fcf-419f-9771-c83026072506
   ✓ token scan          72 answers from 15 GET routes and 13 pages, as the token and as no one: no value
   ✓ token scope         only conformance/live; 6 reads elsewhere refused: no other environment of conformance, a made-up place, the members

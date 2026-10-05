@@ -10,7 +10,7 @@ import { PrincipalLink } from './principal';
 import { Key, Lock, MoreHorizontal, Pencil, Plus, ShieldCheck, User, X } from './icons';
 
 /**
- * The instance directory, shared by the Users and Tokens pages.
+ * The instance directory, shared by the Users and Service accounts pages.
  *
  * Both are rows in the same table on the server (principals, typed user or
  * service); the pages split them because people and machines are looked after
@@ -19,7 +19,7 @@ import { Key, Lock, MoreHorizontal, Pencil, Plus, ShieldCheck, User, X } from '.
 
 type PrincipalType = DirectoryPrincipal['principalType'];
 
-/** How the directory, and its changes, name someone: `user:…`, `token:…`. */
+/** How the directory, and its changes, name someone to the API: `user:…`, `token:…` (shown `service:…`). */
 export const memberOf = (principal: Pick<DirectoryPrincipal, 'principalType' | 'principalId'>) =>
   memberRef(principal.principalType, principal.principalId);
 
@@ -32,7 +32,7 @@ export const ROLE_LABEL: Record<DirectoryPrincipal['instanceRole'], string> = {
 /** What each kind of principal is called in the interface. */
 export const KIND: Record<PrincipalType, string> = {
   user: 'user',
-  service: 'token',
+  service: 'service account',
 };
 
 export function DirectoryTable({
@@ -52,7 +52,7 @@ export function DirectoryTable({
     ({ vars }) => vars.principalType === principalType,
   );
   return (
-    <section className="card" aria-label={users ? 'Users' : 'Tokens'}>
+    <section className="card" aria-label={users ? 'Users' : 'Service accounts'}>
       {principals.length === 0 && refused.length === 0 ? (
         <EmptyState
           title={
@@ -60,7 +60,7 @@ export function DirectoryTable({
               ? `No active ${KIND[principalType]}s`
               : users
                 ? 'Nobody is registered'
-                : 'No tokens yet'
+                : 'No service accounts yet'
           }
         >
           {hasRemoved ? `Add a ${KIND[principalType]}` : `Add the first ${KIND[principalType]}`} to let
@@ -148,7 +148,7 @@ export function DirectoryTable({
 }
 
 /**
- * A user's instance role. Tokens have none worth showing: every one is a
+ * A user's instance role. Service accounts have none worth showing: every one is a
  * plain member. A root admin's role comes from the deployment, so its tag says
  * so on hover or tap instead of offering a menu that could not work.
  */
@@ -305,8 +305,8 @@ export function PrincipalActions({
             </>
           ) : (
             <>
-              Every token issued to it stops working and its project permissions are revoked at
-              once, including for anything running with it right now. Its past actions stay in
+              Its bearer tokens and trust bindings stop working and its project permissions are
+              revoked at once, including for anything running as it right now. Its past actions stay in
               the audit log, and its page then lists the values it read, to rotate.
             </>
           )
@@ -355,7 +355,7 @@ export function AddPrincipal({ principalType }: { principalType: PrincipalType }
         >
           <label className="field">
             <span className="label">
-              {principalType === 'user' ? 'Cloudflare Access email' : 'Service token common name'}
+              {principalType === 'user' ? 'Cloudflare Access email' : 'Service account name'}
             </span>
             <input
               className="input input-mono"
@@ -407,7 +407,7 @@ function RoleField({
         <option value="owner">Owner</option>
       </select>
       <span className="hint">
-        Owners manage users and tokens, can create projects, and read the whole audit log.
+        Owners manage users and service accounts, can create projects, and read the whole audit log.
         Neither role reads a secret without a project grant.
       </span>
     </label>

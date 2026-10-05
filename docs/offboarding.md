@@ -28,7 +28,7 @@ removed alice@acme.example: revoked 3 grants, 2 sessions, 1 linked account
 
 The vault removes them in one transaction of its own: it revokes every
 grant on every project, marks them removed, and moves their *generation* on.
-Every session, CLI login, service token, linked account and device approval
+Every session, CLI login, service account's bearer token, linked account and device approval
 carries the generation it was issued under, so all of them stop working at
 that moment, whatever happens next. The vault logs one `member.remove`, and
 one `access.revoke` per grant, so each project's log shows who lost access to
@@ -64,7 +64,7 @@ drop out of sight once they can no longer sign in.
   password), save the new value in coffre, and it leaves the list. Rolling
   back to a version they saw puts it back; archiving the secret, its
   environment or its project takes it off, since coffre no longer serves it.
-- **Service tokens they issued.** Each was shown once, to them, when it was
+- **Bearer tokens they issued** to service accounts. Each was shown once, to them, when it was
   made. Revoke any they may have kept a copy of.
 
 ### How "saw" is decided

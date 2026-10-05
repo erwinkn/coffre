@@ -13,7 +13,8 @@ import { Key, Plus, X } from './icons';
 const LIFETIMES = [30, 90, 180, 365] as const;
 
 /**
- * The bearer tokens a service presents to the API. A value exists in exactly
+ * The bearer tokens a service account presents to the API, for CI without
+ * OIDC. A value exists in exactly
  * one place, this dialog, for as long as it stays open: coffre keeps a hash.
  */
 export function ServiceTokens({ serviceId, tokens }: { serviceId: string; tokens: ServiceTokenRow[] }) {
@@ -24,13 +25,13 @@ export function ServiceTokens({ serviceId, tokens }: { serviceId: string; tokens
   return (
     <Card
       labelledBy="service-tokens"
-      title="Credentials"
-      description="Bearer tokens this service presents to the API. Each is shown once, when it is issued; coffre keeps only a hash."
+      title="Bearer tokens"
+      description="For CI without OIDC: tokens this service account presents to the API. Each is shown once, when it is issued; coffre keeps only a hash."
       actions={<IssueToken serviceId={serviceId} />}
     >
       {tokens.length === 0 ? (
-        <EmptyState title="No live credentials">
-          Nothing can act as this service until a token is issued.
+        <EmptyState title="No bearer tokens">
+          None is needed for CI that signs in with OIDC; issue one for CI that cannot.
         </EmptyState>
       ) : (
         <div className="dt-wrap">

@@ -118,7 +118,7 @@ test('an instance named twice, as an argument and as --url, is refused', () => {
 test('verify instance refuses --service, in a line', () => {
   const run = coffre(['--service', 'deploy', 'verify', 'instance', 'http://127.0.0.1:9']);
   assert.equal(run.status, 2);
-  assert.match(run.stderr, /^coffre: verify instance checks as no one, then with a service token .* --service is for other commands\n$/);
+  assert.match(run.stderr, /^coffre: verify instance checks as no one, then with a bearer token .* --service is for other commands\n$/);
 });
 
 test('a secret is never an argument: set refuses a value, login refuses two ways in', () => {
@@ -141,5 +141,5 @@ test('a secret is never an argument: set refuses a value, login refuses two ways
   // Nothing on stdin and no terminal: said, before anything is sent.
   const none = coffre(['login', 'http://127.0.0.1:9', '--token']);
   assert.equal(none.status, 1);
-  assert.equal(none.stderr, 'coffre: no service token: none came on stdin, and there is no terminal to ask on\n');
+  assert.equal(none.stderr, 'coffre: no bearer token: none came on stdin, and there is no terminal to ask on\n');
 });

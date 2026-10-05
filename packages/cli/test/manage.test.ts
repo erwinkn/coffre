@@ -36,7 +36,7 @@ test('tokens issue prints the token once, on stdout, and says on a terminal that
   await manage.tokensIssue(connect, ['deploy-slides', '--label', 'CI', '--expires-in', '30'], io);
   assert.deepEqual(calls, [{ method: 'POST', path: '/members/token:deploy-slides/tokens', body: { expiresInDays: 30, label: 'CI' } }]);
   assert.equal(written.out, `${TOKEN}\n`);
-  assert.equal(written.err, "coffre: token:deploy-slides's token tok-1, until 2027-01-01. It is shown this once: coffre keeps only its hash\n");
+  assert.equal(written.err, "coffre: service:deploy-slides's bearer token tok-1, until 2027-01-01. It is shown this once: coffre keeps only its hash\n");
   assert.ok(!written.err.includes(TOKEN));
 });
 
@@ -49,7 +49,7 @@ test('tokens issue --output-file writes a new 0600 file, prints no token, and ne
   assert.equal(readFileSync(path, 'utf8'), `${TOKEN}\n`);
   assert.equal(statSync(path).mode & 0o777, 0o600);
   assert.ok(!written.out.includes(TOKEN) && !written.err.includes(TOKEN));
-  assert.match(written.out, /^wrote token:deploy-slides's token tok-1, until 2027-01-01, to .*token, readable by you alone/);
+  assert.match(written.out, /^wrote service:deploy-slides's bearer token tok-1, until 2027-01-01, to .*token, readable by you alone/);
 
   // A file there already: refused before any token is made.
   const again = fixture(() => assert.fail('no token is issued'));
@@ -80,35 +80,40 @@ test('tokens revoke shows what it would end, and ends it only with --apply', asy
   const preview = fixture(() => LISTED);
   await manage.tokensRevoke(preview.connect, ['deploy', 'tok-1'], preview.io);
   assert.deepEqual(preview.calls.map(({ method }) => method), ['GET']);
-  assert.match(preview.written.out, /^would revoke token:deploy's token tok-1, …abcd "CI", last used never: whatever uses it stops at once\.\nNothing changed\. Re-run with --apply/);
+  assert.match(preview.written.out, /^would revoke service:deploy's bearer token tok-1, …abcd "CI", last used never: whatever uses it stops at once\.\nNothing changed\. Re-run with --apply/);
 
   const applied = fixture(({ method }) => (method === 'GET' ? LISTED : { revoked: true }));
   await manage.tokensRevoke(applied.connect, ['deploy', 'tok-1', '--apply'], applied.io);
   assert.deepEqual(applied.calls.map(({ method, path }) => `${method} ${path}`), ['GET /members/token:deploy/tokens', 'DELETE /members/token:deploy/tokens/tok-1']);
-  await assert.rejects(manage.tokensRevoke(preview.connect, ['deploy', 'tok-9'], preview.io), /holds no token tok-9: `coffre tokens deploy` lists them/);
+  await assert.rejects(manage.tokensRevoke(preview.connect, ['deploy', 'tok-9'], preview.io), /service:deploy holds no bearer token tok-9: `coffre tokens deploy` lists them/);
 });
 
 test('admit makes a member, and for a service names the next steps: grant, then trust or a token', async () => {
   const { connect, calls, written, io } = fixture(() => ({ member: 'token:deploy-slides', instanceRole: 'user', created: true }));
   await manage.admit(connect, ['deploy-slides', '--service'], io);
   assert.deepEqual(calls, [{ method: 'PUT', path: '/members/token:deploy-slides', body: {} }]);
-  assert.match(written.out, /^admitted token:deploy-slides\n  next: coffre grant <project> deploy-slides --role viewer \[--env <env>\] --service,\n        then coffre trust deploy-slides --github … --apply, or coffre tokens issue deploy-slides\n$/);
+  assert.match(written.out, /^admitted service:deploy-slides\n  next: coffre grant <project> deploy-slides --role viewer \[--env <env>\] --service,\n        then let its CI sign in by OIDC, coffre trust deploy-slides --github … --apply,\n        or, for CI without OIDC, give it a bearer token, coffre tokens issue deploy-slides\n$/);
 
   const person = fixture(() => ({ member: 'user:ada@acme.example', instanceRole: 'owner', created: false }));
   await manage.admit(person.connect, ['ada@acme.example', '--owner'], person.io);
   assert.deepEqual(person.calls[0]!.body, { owner: true });
   assert.equal(person.written.out, 'user:ada@acme.example is a member, an owner of the instance now\n');
-  await assert.rejects(manage.admit(person.connect, ['deploy', '--service', '--owner'], person.io), /a service cannot own the instance/);
+  await assert.rejects(manage.admit(person.connect, ['deploy', '--service', '--owner'], person.io), /a service account cannot own the instance/);
   await assert.rejects(manage.admit(person.connect, ['ada@acme.example', '--owner', '--no-owner'], person.io), manage.UsageError);
-  // Not `user:token:deploy`: the name says a service, so --service says it too.
-  await assert.rejects(manage.admit(person.connect, ['token:deploy'], person.io), /token:deploy names a service: coffre admit deploy --service/);
+  // A name that says it is a service account's is one, with --service or not: service:deploy, or token:deploy as before.
+  for (const name of ['service:deploy', 'token:deploy']) {
+    const service = fixture(() => ({ member: 'token:deploy', instanceRole: 'user', created: false }));
+    await manage.admit(service.connect, [name], service.io);
+    assert.deepEqual(service.calls, [{ method: 'PUT', path: '/members/token:deploy', body: {} }]);
+    assert.equal(service.written.out, 'service:deploy is a member already\n');
+  }
 });
 
 test('revoke takes a grant away, and says when there was none', async () => {
   const { connect, calls, written, io } = fixture(() => ({ changes: { 'market/prod': 'revoked' } }));
   await manage.revoke(connect, ['market', 'deploy', '--env', 'prod', '--service'], io);
   assert.deepEqual(calls, [{ method: 'PATCH', path: '/access/token:deploy', body: { 'market/prod': null } }]);
-  assert.equal(written.out, "revoked token:deploy's grant on market/prod\n");
+  assert.equal(written.out, "revoked service:deploy's grant on market/prod\n");
   const none = fixture(() => ({ changes: { market: 'unchanged' } }));
   await manage.revoke(none.connect, ['market', 'ada@acme.example'], none.io);
   assert.equal(none.written.out, 'user:ada@acme.example held no grant on market: nothing changed\n');
@@ -200,18 +205,18 @@ test('untrust shows the binding and the runs it would cut off, and removes it on
   const preview = fixture(() => ({ bindings: [BINDING] }));
   await manage.untrust(preview.connect, ['api-deploy', 'bnd-1'], preview.io);
   assert.deepEqual(preview.calls.map(({ method, path }) => `${method} ${path}`), ['GET /members/token:api-deploy/bindings']);
-  assert.match(preview.written.out, /^Would remove token:api-deploy's trust binding bnd-1  deploys  \(added by root@acme\.example 2026-10-01, last used 2026-10-04 12:30\)\n  profile  github\n/);
+  assert.match(preview.written.out, /^Would remove service:api-deploy's trust binding bnd-1  deploys  \(added by root@acme\.example 2026-10-01, last used 2026-10-04 12:30\)\n  profile  github\n/);
   assert.match(
     preview.written.out,
-    /\nGitHub Actions runs of acme\/api's workflow deploy\.yml, on branch main, by push would no longer sign in as token:api-deploy, and the credentials they hold would end at once\.\nNothing changed\. Re-run with --apply to remove it\.\n$/,
+    /\nGitHub Actions runs of acme\/api's workflow deploy\.yml, on branch main, by push would no longer sign in as service:api-deploy, and the credentials they hold would end at once\.\nNothing changed\. Re-run with --apply to remove it\.\n$/,
   );
 
   const applied = fixture(({ method }) => (method === 'GET' ? { bindings: [BINDING] } : { removed: true }));
   await manage.untrust(applied.connect, ['token:api-deploy', 'bnd-1', '--apply'], applied.io);
   assert.deepEqual(applied.calls.map(({ method, path }) => `${method} ${path}`), ['GET /members/token:api-deploy/bindings', 'DELETE /members/token:api-deploy/bindings/bnd-1']);
-  assert.match(applied.written.out, /^Removed token:api-deploy's trust binding bnd-1/);
-  assert.match(applied.written.out, /can no longer sign in as token:api-deploy, and the credentials they hold have ended\.\n$/);
+  assert.match(applied.written.out, /^Removed service:api-deploy's trust binding bnd-1/);
+  assert.match(applied.written.out, /can no longer sign in as service:api-deploy, and the credentials they hold have ended\.\n$/);
 
-  await assert.rejects(manage.untrust(preview.connect, ['api-deploy', 'bnd-9'], preview.io), /token:api-deploy has no trust binding bnd-9: `coffre trust api-deploy` lists them/);
+  await assert.rejects(manage.untrust(preview.connect, ['api-deploy', 'bnd-9'], preview.io), /service:api-deploy has no trust binding bnd-9: `coffre trust api-deploy` lists them/);
   await assert.rejects(manage.untrust(() => assert.fail('no session is asked for'), ['api-deploy'], preview.io), /name <binding-id>/);
 });

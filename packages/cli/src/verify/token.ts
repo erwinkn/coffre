@@ -1,8 +1,8 @@
-// An instance checked with a service token that reads one canary and
+// An instance checked with a bearer token that reads one canary and
 // audits its project: its value nowhere but its reveal, the reveal audited,
 // nothing else in reach. The token is the operator's, from CI, or the one
 // `coffre verify instance` issues for the run when an owner is signed in.
-import { CoffreError, type AuthInfo, type CoffreClient } from '@coffre/client';
+import { CoffreError, shownMember, type AuthInfo, type CoffreClient } from '@coffre/client';
 import { getCalls, getUrls } from '@coffre/client/routes';
 
 import { CLOSED_PAGES, NOBODY, NOWHERE, OPEN_PAGES } from './anonymous.ts';
@@ -26,7 +26,7 @@ export function parseCanary(text: string, value?: string): Canary {
 }
 
 /**
- * The checks with a service token that reads the canary, and audits its
+ * The checks with a bearer token that reads the canary, and audits its
  * project. `prefix` names them apart, run twice; `verification` false leaves
  * out the last, which a token can only skip, for a caller that verifies the
  * chain otherwise.
@@ -53,16 +53,16 @@ type Token = { member: string };
 /** The token is a service's, and reads the canary's environment. */
 async function whoIsToken(origin: string, api: CoffreClient, canary: Canary): Promise<{ detail: string; value: Token }> {
   const auth = (await (await fetch(`${origin}/api/auth`)).json()) as AuthInfo;
-  if (auth.signin === null) throw new Skip("behind Cloudflare Access, coffre issues no service tokens: the token's checks need coffre's own sign-in");
+  if (auth.signin === null) throw new Skip("behind Cloudflare Access, coffre issues no bearer tokens: the token's checks need coffre's own sign-in");
   const me = await api.me();
   expect(me.principal.type === 'service', `the token is ${me.principal.type}:${me.principal.id}'s, not a service's`);
   const member = `token:${me.principal.id}`;
   const place = `${canary.project}/${canary.environment}`;
   const reads = me.environments.find((env) => `${env.project}/${env.environment}` === place);
-  expect(reads?.permissions.includes('secret.read'), `${member} cannot read ${place}`, me.environments);
+  expect(reads?.permissions.includes('secret.read'), `${shownMember(member)} cannot read ${place}`, me.environments);
   const { keys } = await api.secrets.list(place);
   expect(keys.some((key) => key.key === canary.key), `${place} holds no ${canary.key}`, keys.map((key) => key.key));
-  return { detail: `${member}, reading ${place}`, value: { member } };
+  return { detail: `${shownMember(member)}, reading ${place}`, value: { member } };
 }
 
 /** Reveal the canary once, and find its `secret.read` in the audit log, by the reveal's request. */
@@ -158,7 +158,7 @@ async function tokenScope(api: CoffreClient, canary: Canary): Promise<string> {
   // Its project's log is the token's to read, as `audit.read` there; another's is not.
   await refused(`the token read ${nowhere}'s audit`, api.audit.list({ path: nowhere, limit: 1 }));
   await refused('the token listed the members', api.members.list());
-  await refused(`the token read ${NOBODY}`, api.members.get(NOBODY));
+  await refused(`the token read ${shownMember(NOBODY)}`, api.members.get(NOBODY));
   refusals += 3;
   try {
     const { entries } = await api.audit.list({ limit: 500 });

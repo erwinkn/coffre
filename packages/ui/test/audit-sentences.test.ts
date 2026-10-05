@@ -130,6 +130,7 @@ test('a refused batch keeps its size, and says why', () => {
     metadata: { purpose: 'run' },
   });
   assert.equal(said(...run), 'tried to run market/prod, 50 secrets: bulk limit');
+  // The member as the log keeps it; shownMember says it as people read it, service:ci-deploy, where it is shown.
   assert.deepEqual(who(run), { member: 'token:ci-deploy' });
 });
 
@@ -168,10 +169,10 @@ test('every other action has a sentence', () => {
     [{ action: 'key.rotate', metadata: { from: 'vault:1a2b3c4d' } }, 'rotated its key'],
     [{ action: 'sign_in', metadata: { kind: 'cli' } }, 'signed in to the CLI'],
     [{ action: 'sign_out' }, 'signed out'],
-    [{ action: 'token.create', metadata: { principalType: 'service', principalId: 'ci-deploy' } }, 'issued a token to token:ci-deploy'],
-    [{ action: 'token.bind', metadata: { principalType: 'service', principalId: 'api-deploy' } }, 'trusted CI runs to sign in as token:api-deploy'],
-    [{ action: 'token.unbind', metadata: { principalType: 'service', principalId: 'api-deploy' } }, 'stopped trusting CI runs to sign in as token:api-deploy'],
-    [{ action: 'token.unbind', decision: 'deny', reason: 'requires_instance_owner', metadata: { principalType: 'service', principalId: 'api-deploy' } }, 'tried to stop trusting CI runs to sign in as token:api-deploy: requires instance owner'],
+    [{ action: 'token.create', metadata: { principalType: 'service', principalId: 'ci-deploy' } }, 'issued a bearer token to service:ci-deploy'],
+    [{ action: 'token.bind', metadata: { principalType: 'service', principalId: 'api-deploy' } }, 'trusted CI runs to sign in as service:api-deploy'],
+    [{ action: 'token.unbind', metadata: { principalType: 'service', principalId: 'api-deploy' } }, 'stopped trusting CI runs to sign in as service:api-deploy'],
+    [{ action: 'token.unbind', decision: 'deny', reason: 'requires_instance_owner', metadata: { principalType: 'service', principalId: 'api-deploy' } }, 'tried to stop trusting CI runs to sign in as service:api-deploy: requires instance owner'],
     [{ action: 'device.approve' }, 'approved a CLI sign-in'],
     [{ action: 'account.link', metadata: { provider: 'github' } }, 'linked a github account'],
     [{ action: 'key.wrap', ...prod, key: 'DATABASE_URL', version: 5 }, 'sealed the key of market/prod/DATABASE_URL, version 5'],

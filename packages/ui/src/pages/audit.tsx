@@ -1,4 +1,4 @@
-import type { AuditEntryView } from '@coffre/client';
+import { serviceName, shownMember, type AuditEntryView } from '@coffre/client';
 import { Fragment, useState, type ReactNode } from 'react';
 import { useQuery, useSuspenseQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
@@ -378,10 +378,11 @@ function PlaceLink({ path }: { path: string }) {
   );
 }
 
+/** A member from the log, which keeps `token:<name>`, shown as people read it: `service:<name>`, to its page. */
 function MemberLink({ member }: { member: string }) {
   return member.startsWith('token:') ? (
-    <Link to="/tokens/$token" params={{ token: member.slice('token:'.length) }}>
-      {member}
+    <Link to="/tokens/$token" params={{ token: serviceName(member) }}>
+      {shownMember(member)}
     </Link>
   ) : (
     <Link to="/users/$user" params={{ user: memberName(member) }}>
@@ -391,7 +392,7 @@ function MemberLink({ member }: { member: string }) {
 }
 
 function memberName(member: string): string {
-  return member.startsWith('user:') ? member.slice('user:'.length) : member;
+  return member.startsWith('user:') ? member.slice('user:'.length) : shownMember(member);
 }
 
 /** The entry the log breaks at, said in words as well as in red. */

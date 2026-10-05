@@ -147,7 +147,7 @@ coffre admit api-deploy --service           # a service, for CI
 coffre grant market api-deploy --role viewer --env prod --service
 coffre tokens issue api-deploy --output-file token   # a new 0600 file; or trust it, and no token at all:
 coffre trust api-deploy --github acme/api --workflow deploy.yml --branch main
-                                            # the CI runs trusted to sign in as token:api-deploy;
+                                            # the CI runs trusted to sign in as service:api-deploy, by OIDC;
                                             # previews the claims, --apply saves (docs/design/oidc.md)
 coffre untrust api-deploy <binding-id>      # the CI runs it would cut off; --apply removes it
 
@@ -178,10 +178,11 @@ newlines, or use `coffre run` to pass them directly to a child process.
 A session lasts 30 days, is kept per instance in `~/.coffre/credentials.json`
 (mode 0600), and can be revoked from the account page. The CLI reads no
 environment variable, and a secret is never a flag or an argument: a command
-asks for it at a hidden prompt, or reads it from stdin. CI signs in the same
-way, with a service token from the Tokens page, piped to `coffre login
---token`; or as a service by its ID token, `--service`
-([docs/ci.md](docs/ci.md)); or with an Access service token
+asks for it at a hidden prompt, or reads it from stdin. CI signs in as a
+service account, a machine identity: by OIDC, its ID token matched by a trust
+binding, `--service`, with nothing to store ([docs/ci.md](docs/ci.md)); or
+with a bearer token from the service account's page, piped to `coffre login
+--token`; or, behind Access, with an Access service token
 ([docs/deployment-auth.md](docs/deployment-auth.md)):
 
 ```sh
@@ -193,8 +194,9 @@ coffre run market/prod -- ./deploy
 
 The API is addressed by path: `market` is a project, `market/prod` an
 environment, `market/prod/DATABASE_URL` a secret, and `user:ada@acme.example`
-or `token:ci-deploy` a member. The URL names the thing; the method is the
-verb.
+or `token:ci-deploy` a member: the API, the vault and the audit log name a
+service account `token:<name>`, which the CLI and the UI show as
+`service:<name>`. The URL names the thing; the method is the verb.
 
 ```sh
 curl -X PATCH $COFFRE/api/secrets/market/prod \

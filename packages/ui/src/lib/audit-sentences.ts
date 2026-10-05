@@ -7,7 +7,7 @@
  * A sentence is parts rather than a string, so the page can make the people
  * and places in it links. `plain` flattens it, for tests and titles.
  */
-import type { AuditEntryView } from '@coffre/client';
+import { shownMember, type AuditEntryView } from '@coffre/client';
 
 /** What a sentence is made from: an entry of the log, as `GET /api/audit` gives it. */
 export type AuditEntry = Pick<
@@ -29,7 +29,11 @@ export type AuditEntry = Pick<
   | 'metadata'
 >;
 
-/** Text, a place (`market`, `market/prod`, `market/prod/KEY`), or a member (`user:…`, `token:…`). */
+/**
+ * Text, a place (`market`, `market/prod`, `market/prod/KEY`), or a member,
+ * as the log stores it (`user:…`, `token:…`): `shownMember` says it as people
+ * read it, `service:…`, where it is shown.
+ */
 export type Part = string | { place: string } | { member: string };
 
 export type Sentence = { parts: Part[]; refused: boolean };
@@ -251,8 +255,8 @@ const TEMPLATES: Record<string, Template> = {
     what: ({ entry }) => (text(entry.metadata.provider) === null ? [] : [`with ${text(entry.metadata.provider)}`]),
   },
   sign_out: { did: 'signed out', tried: 'sign out', what: () => [] },
-  'token.create': { did: 'issued a token to', tried: 'issue a token to', what: (facts) => subject(facts.entry) },
-  'token.revoke': { did: 'revoked a token of', tried: 'revoke a token of', what: (facts) => subject(facts.entry) },
+  'token.create': { did: 'issued a bearer token to', tried: 'issue a bearer token to', what: (facts) => subject(facts.entry) },
+  'token.revoke': { did: 'revoked a bearer token of', tried: 'revoke a bearer token of', what: (facts) => subject(facts.entry) },
   'device.approve': { did: 'approved a CLI sign-in', tried: 'approve a CLI sign-in', what: () => [] },
   'device.deny': { did: 'turned down a CLI sign-in', tried: 'turn down a CLI sign-in', what: () => [] },
   'account.link': {
@@ -443,7 +447,7 @@ export function lines<T extends AuditEntry>(entries: T[]): T[][] {
 export function plain(parts: Part[]): string {
   return parts
     .map((part) =>
-      typeof part === 'string' ? part : 'place' in part ? part.place : part.member.startsWith('user:') ? part.member.slice(5) : part.member,
+      typeof part === 'string' ? part : 'place' in part ? part.place : part.member.startsWith('user:') ? part.member.slice(5) : shownMember(part.member),
     )
     .join('');
 }

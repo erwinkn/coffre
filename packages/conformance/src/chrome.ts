@@ -8,7 +8,14 @@ import { homedir, tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 
 /** What a page did, loaded: the heading it shows, and every error its scripts and console reported. */
-export type Loaded = { heading: string | null; errors: string[] };
+export type Loaded = {
+  heading: string | null;
+  /** The titles of the page's cards, in order. */
+  cards: string[];
+  /** What a person reads on it. */
+  text: string;
+  errors: string[];
+};
 
 const NAMES = ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser', 'chrome'];
 const MAC = ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/Applications/Chromium.app/Contents/MacOS/Chromium'];
@@ -147,12 +154,16 @@ export class Chrome {
       await Promise.race([load, new Promise((resolve) => setTimeout(resolve, 30_000))]);
       // What streams in after the load, and hydration, have their time: the page may render, then fail.
       await new Promise((resolve) => setTimeout(resolve, settle));
-      const { result } = (await this.#send(
-        'Runtime.evaluate',
-        { expression: "document.querySelector('h1')?.textContent?.trim() || null", returnByValue: true },
-        sessionId,
-      )) as { result: { value: string | null } };
-      return { heading: result.value, errors };
+      // The heading, the cards' titles in order, and all the text a person reads.
+      const expression = `({
+        heading: document.querySelector('h1')?.textContent?.trim() || null,
+        cards: [...document.querySelectorAll('h2.card-title')].map((title) => title.textContent.trim()),
+        text: document.body.innerText,
+      })`;
+      const { result } = (await this.#send('Runtime.evaluate', { expression, returnByValue: true }, sessionId)) as {
+        result: { value: { heading: string | null; cards: string[]; text: string } };
+      };
+      return { ...result.value, errors };
     } finally {
       this.#listeners.delete(listener);
       await this.#send('Target.closeTarget', { targetId }).catch(() => {});

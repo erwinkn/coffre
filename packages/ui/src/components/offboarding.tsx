@@ -4,6 +4,7 @@ import { Card } from './page';
 import { EmptyState, Notice, Timestamp } from './ui';
 import { PrincipalLink } from './principal';
 import { ChevronRight, Key, User } from './icons';
+import { serviceName } from '@coffre/client';
 
 /**
  * The part of a user's or token's page that answers "if they left, what would
@@ -47,7 +48,7 @@ export function RemovedNotice({ report }: { report: PrincipalReport }) {
 }
 
 /**
- * The people or tokens removed from the directory, under the live ones.
+ * The people or service accounts removed from the directory, under the live ones.
  * Removal ends their access but not the work it leaves, so they stay one click
  * away until every value they saw has been rotated.
  */
@@ -64,7 +65,7 @@ export function RemovedList({
   return (
     <>
       <h2 className="section-title">Removed</h2>
-      <section className="card" aria-label={users ? 'Removed users' : 'Removed tokens'}>
+      <section className="card" aria-label={users ? 'Removed users' : 'Removed service accounts'}>
         <div className="dt-wrap">
           <table className="dt directory stacks">
             <thead>
@@ -190,8 +191,8 @@ function IssuedTokens({ report }: { report: PrincipalReport }) {
   return (
     <Card
       labelledBy="issued-tokens"
-      title="Tokens they issued"
-      description="Service tokens they created that still work. Each was shown to them once, when it was made; revoke any they may have kept a copy of."
+      title="Bearer tokens they issued"
+      description="Bearer tokens they issued to service accounts that still work. Each was shown to them once, when it was made; revoke any they may have kept a copy of."
     >
       <div className="dt-wrap">
         <table className="dt report-tokens">
@@ -207,8 +208,8 @@ function IssuedTokens({ report }: { report: PrincipalReport }) {
               <tr key={token.id}>
                 <td>
                   <span className="cell-stack">
-                    <Link className="cell-link mono" to="/tokens/$token" params={{ token: token.service }}>
-                      {token.service}
+                    <Link className="cell-link mono" to="/tokens/$token" params={{ token: serviceName(token.service) }}>
+                      service:{serviceName(token.service)}
                     </Link>
                     <small>
                       {token.label ?? 'No label'} · <span className="mono">{token.hint}</span>

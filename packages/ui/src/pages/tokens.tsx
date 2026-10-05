@@ -14,7 +14,7 @@ export function TokensPage() {
 
   if (!result.ok) {
     return (
-      <ClosedDoor icon={<Key size={18} />} label="Tokens" title="Tokens are closed to you">
+      <ClosedDoor icon={<Key size={18} />} label="Service accounts" title="Service accounts are closed to you">
         {result.error}
       </ClosedDoor>
     );
@@ -24,7 +24,11 @@ export function TokensPage() {
 
   return (
     <>
-      <PageHeader title="Tokens" actions={<AddPrincipal principalType="service" />} />
+      <PageHeader
+        title="Service accounts"
+        description="Machine identities, for CI and other machines. Each signs in with OIDC, its CI's ID token matched by a trust binding, or with a bearer token."
+        actions={<AddPrincipal principalType="service" />}
+      />
       <DirectoryTable
         principalType="service"
         principals={tokens}

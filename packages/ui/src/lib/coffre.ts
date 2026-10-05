@@ -1,4 +1,4 @@
-import { CoffreError, type CoffreClient } from '@coffre/client';
+import { CoffreError, shownText, type CoffreClient } from '@coffre/client';
 import { useRouter } from '@tanstack/react-router';
 
 import type { CoffreContext } from '../options';
@@ -36,8 +36,9 @@ export function failureMessage(error: unknown): string {
   }
   if (error.status === 404) return 'Not found. It may have been renamed or archived.';
   // A 400 or 409 carries a sentence written for the person, such as which
-  // field of a request is wrong. Anything unexpected stays generic.
-  if (error.status === 400 || error.status === 409) return error.message;
+  // field of a request is wrong, its service accounts as people read them,
+  // service:<name>. Anything unexpected stays generic.
+  if (error.status === 400 || error.status === 409) return shownText(error.message);
   return 'coffre is unavailable. Nothing was read or written.';
 }
 
@@ -56,7 +57,7 @@ export async function uiResult<T extends object>(
   }
 }
 
-/** How the API names a member: `user:ada@acme.example`, `token:ci-deploy`. */
+/** How the API names a member: `user:ada@acme.example`, `token:ci-deploy` (which people read as `service:ci-deploy`). */
 export function memberRef(principalType: 'user' | 'service', principalId: string): string {
   return `${principalType === 'user' ? 'user' : 'token'}:${principalId}`;
 }
