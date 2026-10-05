@@ -4,6 +4,7 @@ import {
   allows,
   assignableToEnvironment,
   everyProjectPath,
+  grantKind,
   isRole,
   mayManageAccess,
   type GrantPlace,
@@ -1076,7 +1077,7 @@ class VaultService implements Vault {
           throw refused('invalid', 'an end date must be in the future');
         }
       }
-      if (changes.some((change) => change.projectId === null) && !(await store.canGrantEveryProject(d.tx))) {
+      if (changes.some((change) => grantKind(change) === 'every-project') && !(await store.canGrantEveryProject(d.tx))) {
         throw refused('invalid', "grants on every project need this release's database migration: an owner runs `coffre migrate`");
       }
       // Every project is always there; a project or an environment must be.
@@ -1772,11 +1773,11 @@ function validateItems(items: readonly { secret: SecretRef; key?: string; wrappe
 /**
  * Where a secret is, for a decision: its environment's slug as the store
  * has it, when it was read and the environment is in the project claimed;
- * otherwise one no grant on a slug matches.
+ * otherwise none, which no grant on a slug matches.
  */
 function placeOfSecret(secret: SecretRef, environments: ReadonlyMap<string, { projectId: string; slug: string }>): Place {
   const environment = environments.get(secret.environmentId);
-  const slug = environment?.projectId === secret.projectId ? environment.slug : '';
+  const slug = environment?.projectId === secret.projectId ? environment.slug : null;
   return { projectId: secret.projectId, environmentId: secret.environmentId, environmentSlug: slug };
 }
 
@@ -1862,27 +1863,29 @@ function live(grant: GrantRow, at: number): boolean {
 
 /**
  * Where an entry about a grant says it is: its project and environment; or,
- * on every project, neither, and the place as a path in its payload.
+ * on every project, neither, and the place as a path in its payload. Only a
+ * grant that names no place at all is on every project (`grantKind`).
  */
 function located(place: GrantPlace): { ids: Pick<NewEntry, 'projectId' | 'environmentId'>; detail: { place?: string } } {
-  return place.projectId === null
+  return grantKind(place) === 'every-project'
     ? { ids: {}, detail: { place: everyProjectPath(place.environmentSlug) } }
     : { ids: { projectId: place.projectId, environmentId: place.environmentId }, detail: {} };
 }
 
-/** One key per place a member can hold a grant at: the same place, the same key. */
+/** One key per place a member can hold a grant at, by what the grant names first: its environment, its project, or neither. */
 function placeKey(place: GrantPlace): string {
-  return place.projectId === null ? everyProjectPath(place.environmentSlug) : `${place.projectId}/${place.environmentId ?? ''}`;
+  if (place.environmentId !== null) return `environment:${place.environmentId}`;
+  return place.projectId !== null ? `project:${place.projectId}` : everyProjectPath(place.environmentSlug);
 }
 
 /** Why a change's place is not one a grant can be at, or null when it is. */
 function placeShape(place: GrantPlace): string | null {
-  if (place.projectId === null) {
-    if (place.environmentId !== null) return 'an environment is named in its project';
-    if (place.environmentSlug !== null && !SLUG.test(place.environmentSlug)) return `not an environment slug: ${place.environmentSlug}`;
-    return null;
+  const kind = grantKind(place);
+  if (kind === null) return place.projectId === null ? 'an environment is named in its project' : 'a slug names environments on every project, not in one';
+  if (kind === 'every-project' && place.environmentSlug !== null && !SLUG.test(place.environmentSlug)) {
+    return `not an environment slug: ${place.environmentSlug}`;
   }
-  return place.environmentSlug === null ? null : 'a slug names environments on every project, not in one';
+  return null;
 }
 
 /** An environment's slug, as the schema has it. */

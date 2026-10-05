@@ -3,7 +3,7 @@ import test from 'node:test';
 import * as hegel from '@hegeldev/hegel';
 import * as gs from '@hegeldev/hegel/generators';
 
-import { allows, assignableToEnvironment, mayManageAccess, roleGrants, type Holdings, type Permission, type Place, type Role } from '../src/access.ts';
+import { allows, assignableToEnvironment, covers, grantKind, mayManageAccess, roleGrants, type Holdings, type Permission, type Place, type Role } from '../src/access.ts';
 import { propertySettings } from './properties.ts';
 
 // Independent specification from README's Roles table. Do not derive this
@@ -90,3 +90,22 @@ test(`roles and grant management match the model, seed ${settings.seed}`, () => 
     assert.equal(mayManageAccess(actor, place), canManage, JSON.stringify({ actor, place }));
   }
 }, settings));
+
+test('a grant whose fields name no coherent place covers nothing, and is no grant on every project', () => {
+  // An environment grant whose environment row is gone reads back with no project: never `*`.
+  const orphan = { projectId: null, environmentId: 'market/dev', environmentSlug: null, role: 'owner' as const };
+  const slugInProject = { projectId: 'market', environmentId: null, environmentSlug: 'dev', role: 'owner' as const };
+  for (const grant of [orphan, slugInProject]) {
+    assert.equal(grantKind(grant), null);
+    const holder = { isRootAdmin: false, isOwner: false, grants: [grant] };
+    for (const place of [{ projectId: 'market' }, { projectId: 'other' }, { projectId: 'market', environmentId: 'market/dev', environmentSlug: 'dev' }] as Place[]) {
+      assert.equal(covers(grant, place), false, JSON.stringify({ grant, place }));
+      for (const permission of permissions) assert.equal(allows(holder, permission, place), false);
+    }
+    assert.equal(mayManageAccess({ isRootAdmin: true, isOwner: true, grants: [] }, grant), false, 'not even a root admin changes a grant at no place');
+  }
+  assert.equal(grantKind({ projectId: null, environmentId: null, environmentSlug: null }), 'every-project');
+  // A slug not read matches no grant on a slug.
+  const dev = { projectId: null, environmentId: null, environmentSlug: 'dev' };
+  assert.equal(covers(dev, { projectId: 'market', environmentId: 'market/dev', environmentSlug: null }), false);
+});

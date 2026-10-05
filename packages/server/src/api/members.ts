@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { EVERY_PROJECT, ROLES, type Permission, type Role } from '@coffre/core/access';
+import { EVERY_PROJECT, grantKind, ROLES, type Permission, type Role } from '@coffre/core/access';
 import type { Queryable } from '@coffre/db';
 import { credentials, identities } from '@coffre/db/schema';
 
@@ -16,7 +16,7 @@ import {
   type PlaceRow,
   type StoredGrant,
 } from '../db/queries.ts';
-import { can, canAnywhere } from './caller.ts';
+import { can, canAnywhere, type Caller } from './caller.ts';
 import { audited, denied, Refusal, requireOwner, withRefusals, type ApiContext } from './context.ts';
 import { conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { formatMember, parseGrantee, type MemberRef, type Path } from './paths.ts';
@@ -121,9 +121,12 @@ function slugs(known: PlaceRow[]): Map<string, string> {
 function placed(grants: StoredGrant[], names: Map<string, string>): PlacedGrant[] {
   return grants.flatMap((grant): PlacedGrant[] => {
     const expiresAt = grant.expiresAt === null ? null : new Date(grant.expiresAt).toISOString();
-    if (grant.projectId === null) {
+    const kind = grantKind(grant);
+    if (kind === 'every-project') {
       return [{ project: EVERY_PROJECT, environment: grant.environmentSlug, projectId: null, role: grant.role as Role, expiresAt }];
     }
+    // A grant whose fields name no coherent place reaches nothing, and is not listed.
+    if (kind === null || grant.projectId === null) return [];
     const project = names.get(grant.projectId);
     const environment = grant.environmentId === null ? null : names.get(grant.environmentId);
     // A grant on a place that is gone names nothing anyone can reach.
@@ -144,7 +147,21 @@ function placed(grants: StoredGrant[], names: Map<string, string>): PlacedGrant[
  */
 function reached(grant: PlacedGrant, known: PlaceRow[]): PlaceRow[] {
   if (grant.projectId !== null) return known.filter((project) => project.id === grant.projectId);
-  return known.filter((project) => grant.environment === null || project.environments.some((environment) => environment.slug === grant.environment));
+  return known.filter((project) => everyProjectReaches(grant.environment, project));
+}
+
+/** Whether a grant on every project, on this slug or on all (null), reaches the project as it is now. */
+export function everyProjectReaches(environmentSlug: string | null, project: PlaceRow): boolean {
+  return environmentSlug === null || project.environments.some((environment) => environment.slug === environmentSlug);
+}
+
+/**
+ * Whether the caller sees who holds what in a project: owners, and members
+ * with `grant.manage` on it. A grant on every project is shown to whoever
+ * sees the grants of a project it reaches, by this one check.
+ */
+export function seesGrantsIn(caller: Caller, projectId: string): boolean {
+  return caller.isOwner || can(caller, 'grant.manage', { projectId });
 }
 
 /** Someone in the directory, as the rows and the vault's findings say. */
@@ -206,7 +223,7 @@ export async function listMembers(
   query: { path?: Path },
 ): Promise<{ members: Member[]; removed: RemovedMember[] }> {
   const { caller } = ctx;
-  const manages = (projectId: string) => can(caller, 'grant.manage', { projectId });
+  const manages = (projectId: string) => seesGrantsIn(caller, projectId);
   if (!caller.isOwner && !canAnywhere(caller, 'grant.manage')) {
     throw forbidden('only owners, and members with grant.manage on a project, can list members');
   }

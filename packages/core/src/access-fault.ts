@@ -1,4 +1,4 @@
-import { everyProjectPath, type GrantPlace } from './access.ts';
+import { everyProjectPath, grantKind, type GrantPlace } from './access.ts';
 
 /**
  * Why the vault's members and grants do not follow from its log, as facts
@@ -41,8 +41,11 @@ export function describeAccessFault(fault: AccessFault, names: FaultNames = {}):
     names.place ??
     ((projectId: string, environmentId: string | null) =>
       environmentId === null ? projectId : `${projectId}/${environmentId}`);
-  const grant = ({ principal, projectId, environmentId, environmentSlug, role }: FaultGrant) =>
-    `${who(principal)} as ${role} on ${projectId === null ? everyProjectPath(environmentSlug) : where(projectId, environmentId)}`;
+  const grant = (held: FaultGrant) => {
+    const { principal, projectId, environmentId, environmentSlug, role } = held;
+    const place = grantKind(held) === 'every-project' ? everyProjectPath(environmentSlug) : where(projectId ?? 'no project', environmentId);
+    return `${who(principal)} as ${role} on ${place}`;
+  };
   switch (fault.kind) {
     case 'unadmitted-change':
       return `entry ${fault.seq} changes ${who(fault.principal)}, whom the log never admitted`;

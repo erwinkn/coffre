@@ -23,15 +23,16 @@ export function rowKey(signingKey: Uint8Array): Buffer {
 
 /**
  * A member's grants as the MAC covers them: each one's place, role, end and
- * grant, as a sorted set. A grant on every project is a kind of its own,
- * with the slug it covers, or null; a member who holds none has the set,
- * and so the MAC, they had before there were any.
+ * grant, as a sorted set. A grant is kept by what its row names first: its
+ * environment, its project, or neither, which is a grant on every project,
+ * with the slug it covers, or null. A member who holds none of those has the
+ * set, and so the MAC, they had before there were any.
  */
 export function grantSet(grants: readonly GrantRow[]): string[] {
   return grants
     .map((grant) => [
-      grant.projectId === null ? 'every-project' : grant.environmentId === null ? 'project' : 'environment',
-      grant.projectId === null ? grant.environmentSlug : (grant.environmentId ?? grant.projectId),
+      grant.environmentId !== null ? 'environment' : grant.projectId !== null ? 'project' : 'every-project',
+      grant.environmentId ?? grant.projectId ?? grant.environmentSlug,
       grant.role,
       grant.expiresAt,
       grant.grantedAt,

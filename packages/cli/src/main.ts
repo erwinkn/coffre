@@ -866,20 +866,18 @@ async function whoHasAccess(args: string[]): Promise<void> {
 }
 
 async function grantAccess(args: string[]): Promise<void> {
-  const { values, positionals } = parseArgs({
+  const { values, positionals } = parse(
     args,
-    options: {
+    {
       role: { type: 'string' },
       env: { type: 'string' },
       service: { type: 'boolean', default: false },
       expires: { type: 'string' },
     },
-    allowPositionals: true,
-  });
+    ['<project>', '<principal>'],
+  );
 
-  const [project, principalId] = positionals;
-  if (positionals.length > 2) throw manage.unquoted(positionals.slice(2));
-  if (!project || !principalId) throw new UsageError('name the project and the principal');
+  const [project, principalId] = positionals as [string, string];
   if (!values.role) throw new UsageError('name the role: --role <role>');
 
   const role = values.role;

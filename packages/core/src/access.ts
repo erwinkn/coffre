@@ -87,27 +87,41 @@ export function assignableToEnvironment(role: Role): boolean {
 
 /**
  * A place a permission applies to: a project, or one of its environments,
- * named by its slug too, which grants on every project match by.
+ * named by its slug too, which grants on every project match by. A slug
+ * not read (null) matches no grant on a slug.
  */
 export type Place =
   | { projectId: string; environmentId?: null }
-  | { projectId: string; environmentId: string; environmentSlug: string };
+  | { projectId: string; environmentId: string; environmentSlug: string | null };
 
 /**
- * Where a grant applies, by the fields it fills:
+ * Where a grant applies, by the fields it fills (`grantKind`):
  *
  *   market        projectId
  *   market/dev    projectId and environmentId
  *   *             neither: every project, the ones created later too
- *   *, on dev     environmentSlug: the environment of that slug in every project
+ *   *, on dev     environmentSlug only: the environment of that slug in every project
  */
 export type GrantPlace = {
-  /** Null for a grant on every project. */
+  /** The project, also of an environment's grant; null only on every project. */
   projectId: string | null;
   environmentId: string | null;
   /** On every project, the one environment slug it covers; null for all of them, and on a project's grant. */
   environmentSlug: string | null;
 };
+
+/**
+ * What a grant's fields say it is on, or null when they say nothing
+ * coherent: an environment without its project, as a grant whose
+ * environment row is gone reads, or a slug beside an id. A grant is on
+ * every project only when it names no place at all; anything else that
+ * lacks a field covers nothing.
+ */
+export function grantKind(grant: GrantPlace): 'project' | 'environment' | 'every-project' | null {
+  if (grant.environmentId !== null) return grant.projectId !== null && grant.environmentSlug === null ? 'environment' : null;
+  if (grant.projectId !== null) return grant.environmentSlug === null ? 'project' : null;
+  return 'every-project';
+}
 
 /** Every project, as a path names it. */
 export const EVERY_PROJECT = '*';
@@ -144,10 +158,16 @@ export type Holdings = {
  * the environment or its slug.
  */
 export function covers(grant: GrantPlace, place: Place): boolean {
-  if (grant.projectId === null) {
-    return grant.environmentSlug === null || (place.environmentId != null && place.environmentSlug === grant.environmentSlug);
+  switch (grantKind(grant)) {
+    case 'environment':
+      return grant.projectId === place.projectId && grant.environmentId === (place.environmentId ?? null);
+    case 'project':
+      return grant.projectId === place.projectId;
+    case 'every-project':
+      return grant.environmentSlug === null || (place.environmentId != null && place.environmentSlug !== null && place.environmentSlug === grant.environmentSlug);
+    case null:
+      return false;
   }
-  return grant.projectId === place.projectId && (grant.environmentId === null || grant.environmentId === (place.environmentId ?? null));
 }
 
 /**
@@ -170,6 +190,7 @@ export function allows(holder: Holdings, permission: Permission, place: Place): 
  * instance owner or a root admin only.
  */
 export function mayManageAccess(actor: Holdings, place: GrantPlace): boolean {
-  if (place.projectId === null) return actor.isOwner || actor.isRootAdmin;
-  return allows(actor, 'grant.manage', { projectId: place.projectId });
+  const kind = grantKind(place);
+  if (kind === 'every-project') return actor.isOwner || actor.isRootAdmin;
+  return kind !== null && place.projectId !== null && allows(actor, 'grant.manage', { projectId: place.projectId });
 }

@@ -120,7 +120,9 @@ const MEMBER_FIELDS = [
  * neither, every project, which it names as a path (`*`, or `*` and a slug).
  */
 function placeOf(row: StoredEntry, detail: Record<string, unknown>): Place {
-  if (row.projectId !== null) return { projectId: row.projectId, environmentId: row.environmentId, environmentSlug: null };
+  if (row.projectId !== null || row.environmentId !== null) {
+    return { projectId: row.projectId, environmentId: row.environmentId, environmentSlug: null };
+  }
   const slug = typeof detail.place === 'string' ? detail.place.split('/')[1] : undefined;
   return { projectId: null, environmentId: null, environmentSlug: slug ?? null };
 }

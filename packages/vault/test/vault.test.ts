@@ -919,6 +919,20 @@ test('a removal revokes grants on every project with the rest, and the log repla
   assert.equal(!found.ok && found.reason, `the store holds a grant the log never gave: ${BOB} as viewer on */prod`);
 });
 
+test('an environment grant whose environment is gone seals as that environment, never as one on every project', () => {
+  const key = rowKey(SIGNING_KEY);
+  const row = {
+    principal: ADA, status: 'active' as const, owner: false, generation: 0, accessSeq: 7n,
+    createdAt: 1, createdBy: ROOT, statusChangedAt: 1, statusChangedBy: ROOT,
+  };
+  const grant = { principal: ADA, environmentSlug: null, role: 'viewer', expiresAt: null, grantedAt: 2, grantedBy: ROOT };
+  // What readGrants returns for an environment grant whose environment row is missing: no project.
+  const orphan = { ...grant, projectId: null, environmentId: 'e' };
+  const everywhere = { ...grant, projectId: null, environmentId: null };
+  assert.notDeepEqual(memberMac(key, row, [orphan]), memberMac(key, row, [everywhere]));
+  assert.deepEqual(memberMac(key, row, [orphan]), memberMac(key, row, [{ ...orphan, projectId: 'p' }]), 'sealed by its environment alone');
+});
+
 test('a member who holds no grant on every project keeps the MAC the previous release sealed', () => {
   const key = rowKey(SIGNING_KEY);
   const row = {

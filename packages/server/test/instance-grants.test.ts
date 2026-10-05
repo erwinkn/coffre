@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import type { CoffreClient } from '@coffre/client';
 import { and, asc, eq } from 'drizzle-orm';
 
-import { auditLog } from './db/tables.ts';
+import { auditLog, vaultGrants } from './db/tables.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 // Grants on every project (`*`), and on one environment slug in every
@@ -148,6 +148,32 @@ test('making a project or an environment answers who reaches it already', async 
   // Who makes places is shown them all beforehand; who cannot, nothing.
   assert.deepEqual((await lead.projects.list()).everyProject, [developer, viewer]);
   assert.deepEqual((await ada.projects.list()).everyProject, []);
+});
+
+test("grants on every project are shown to exactly those who see a project's grants, and none of a tampered member", async () => {
+  const MAINT = 'user:maint@acme.example';
+  await root.members.add(MAINT);
+  await root.access.set(MAINT, { market: 'maintainer' });
+  const maint = clientFor(deps, 'maint@acme.example');
+  await root.access.set(ADA, { '*': 'viewer', '*/qa': 'developer' });
+  const viewer = { member: ADA, place: '*', role: 'viewer', roleName: 'Viewer', expiresAt: null };
+  const qa = { member: ADA, place: '*/qa', role: 'developer', roleName: 'Developer', expiresAt: null };
+
+  // A maintainer makes environments, and does not see who holds what in the project: nor these.
+  assert.equal((await maint.members.list('market').catch((error: { status: number }) => error.status)), 403);
+  assert.deepEqual((await maint.environments.create('market/qa', { name: 'QA' })).inherited, []);
+  assert.deepEqual((await maint.projects.list()).everyProject, []);
+  // Market's access manager sees them where they reach market: qa does, now.
+  assert.deepEqual((await lead.environments.update('market/qa', { name: 'Q.A.' })).inherited, [viewer, qa]);
+  assert.deepEqual((await lead.projects.list()).everyProject, [viewer, qa]);
+  await root.environments.update('market/qa', { slug: 'staging' });
+  assert.deepEqual((await lead.projects.list()).everyProject, [viewer], 'one on qa reaches no project of theirs');
+  assert.deepEqual((await root.projects.list()).everyProject, [viewer, qa], 'owners see them all');
+
+  // A grant written around the vault: the vault refuses its member, and the previews leave it out.
+  await db.owner.insert(vaultGrants).values({ principal: CI, role: 'viewer', grantedAt: Date.now(), grantedBy: `user:${ROOT}` });
+  assert.equal((await deps.vault.access(CI)).status, 'tampered');
+  assert.deepEqual((await root.projects.list()).everyProject, [viewer, qa]);
 });
 
 test('offboarding removes grants on every project, each with its entry', async () => {

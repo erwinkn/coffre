@@ -41,8 +41,9 @@ In `vault_grants`, beside every other grant, with one new nullable column,
 | `*/dev` | null | null | `dev` |
 
 Its checks are loosened to allow the last two rows, and no more: the slug
-is a slug, a role on a slug is one assignable to an environment, and two
-new unique indexes keep one grant per member on `*` and one per slug.
+is a slug, a role on a slug is one assignable to an environment, a partial
+unique index keeps one grant per member on `*`, and a unique constraint one
+per member and slug.
 
 The first draft put them in a table of their own. The previous release's
 conformance rules that out: it holds the vault's database login to writing
@@ -104,8 +105,8 @@ decision.** That gives:
 ## The migration
 
 One migration, `0005_instance_grants`, on both engines: add the column,
-replace two checks with looser ones, and add a check on the slug and two
-unique indexes. The logins' privileges are the table's already. Every row
+replace two checks with looser ones, and add a check on the slug, a unique
+constraint on member and slug, and a partial unique index on `*` grants. The logins' privileges are the table's already. Every row
 the previous release writes passes the new checks, so it runs on the new
 schema unchanged (`pnpm test:compat` holds it to that).
 

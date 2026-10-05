@@ -291,21 +291,25 @@ export type StoredGrant = GrantPlace & { role: string; expiresAt: number | null 
 export type EveryProjectGrant = { principal: string; environmentSlug: string | null; role: string; expiresAt: number | null };
 
 /**
- * The live grants on every project that active members hold, as stored: who
- * reaches a project or an environment the moment it is made. A display,
- * as lists are; the vault decides.
+ * The live grants on every project that active members hold, as stored,
+ * but those of members the vault has found changed around it, as lists
+ * leave them out: who reaches a project or an environment the moment it is
+ * made. A display, as lists are; the vault decides.
  */
 export async function everyProjectGrants(db: Queryable, now: Date): Promise<EveryProjectGrant[]> {
   const { vaultMembers } = tablesOf(db);
   const grants = await readGrants(db, { everyProject: true, liveAt: now.getTime() });
   if (grants.length === 0) return [];
-  const active = new Set((await db
-    .select({ principal: vaultMembers.principal })
-    .from(vaultMembers)
-    .where(and(inArray(vaultMembers.principal, [...new Set(grants.map((grant) => grant.principal))]), eq(vaultMembers.status, 'active'))))
-    .map((row) => row.principal));
+  const [rows, tampered] = await Promise.all([
+    db
+      .select({ principal: vaultMembers.principal })
+      .from(vaultMembers)
+      .where(and(inArray(vaultMembers.principal, [...new Set(grants.map((grant) => grant.principal))]), eq(vaultMembers.status, 'active'))),
+    tamperedMembers(db),
+  ]);
+  const active = new Set(rows.map((row) => row.principal));
   return grants
-    .filter((grant) => active.has(grant.principal))
+    .filter((grant) => active.has(grant.principal) && !tampered.has(grant.principal))
     .map(({ principal, environmentSlug, role, expiresAt }) => ({ principal, environmentSlug, role, expiresAt }))
     .sort((a, b) => compareText(a.principal, b.principal) || compareText(a.environmentSlug ?? '', b.environmentSlug ?? ''));
 }

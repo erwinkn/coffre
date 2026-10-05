@@ -1,4 +1,4 @@
-import { roleGrants } from '@coffre/core/access';
+import { grantKind, roleGrants } from '@coffre/core/access';
 import { GENESIS_HASH, verifyEntries } from '@coffre/core/audit';
 import { describeAccessFault, type LogVerification } from '@coffre/core/vault';
 import { SNAPSHOT } from '@coffre/db/dialect';
@@ -167,10 +167,10 @@ export async function listAudit(
   const { caller } = ctx;
   if (!caller.isOwner) {
     const readable = caller.grants.filter((grant) => roleGrants(grant.role, 'audit.read'));
-    const projectIds = readable.flatMap((grant) => (grant.projectId !== null && grant.environmentId === null ? [grant.projectId] : []));
-    const environmentIds = readable.flatMap((grant) => grant.environmentId ?? []);
+    const projectIds = readable.flatMap((grant) => (grantKind(grant) === 'project' ? [grant.projectId!] : []));
+    const environmentIds = readable.flatMap((grant) => (grantKind(grant) === 'environment' ? [grant.environmentId!] : []));
     // A grant on every project reads each project's log, or each environment's of its slug, as they are now.
-    const everywhere = readable.filter((grant) => grant.projectId === null);
+    const everywhere = readable.filter((grant) => grantKind(grant) === 'every-project');
     if (everywhere.length > 0) {
       for (const project of await places(ctx.db)) {
         if (everywhere.some((grant) => grant.environmentSlug === null)) projectIds.push(project.id);

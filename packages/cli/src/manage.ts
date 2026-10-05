@@ -27,9 +27,12 @@ type Options = NonNullable<Parameters<typeof parseArgs>[0]>['options'];
 /** Strict options and positionals, each positional named: too few or too many is a usage error. */
 export function parse<O extends Options>(args: string[], options: O, names: readonly string[], optional = 0) {
   const { values, positionals } = parseArgs({ args, options, allowPositionals: true, strict: true });
-  if (positionals.length < names.length - optional || positionals.length > names.length) {
-    throw new UsageError(positionals.length > names.length ? `too many arguments: ${positionals.slice(names.length).join(' ')}` : `name ${listOf(names.slice(positionals.length))}`);
+  if (positionals.length > names.length) {
+    // A command that takes a project takes `*` too, which a shell expands into file names unless quoted.
+    const quote = names[0] === '<project>' ? "; to name every project, quote it: '*'" : '';
+    throw new UsageError(`too many arguments: ${positionals.slice(names.length).join(' ')}${quote}`);
   }
+  if (positionals.length < names.length - optional) throw new UsageError(`name ${listOf(names.slice(positionals.length))}`);
   return { values, positionals };
 }
 
@@ -67,10 +70,6 @@ export function placeName(path: string): string {
   return path.startsWith('*/') ? `${path.slice(2)} in every project` : path;
 }
 
-/** Positionals past the expected ones, perhaps a `*` the shell expanded into file names. */
-export function unquoted(extra: readonly string[]): UsageError {
-  return new UsageError(`too many arguments: ${extra.join(' ')}; to name every project, quote it: '*'`);
-}
 
 /** Who reaches a place through grants on every project, a line each under a heading; nothing when nobody does. */
 function reachedBy(heading: string, inherited: readonly InheritedGrant[]): string {
@@ -226,15 +225,8 @@ export async function admit(connect: () => CoffreClient, args: string[], io: Io 
 }
 
 export async function revoke(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
-  const { values, positionals } = parseArgs({
-    args,
-    options: { env: { type: 'string' }, service: { type: 'boolean', default: false } },
-    allowPositionals: true,
-    strict: true,
-  });
-  if (positionals.length > 2) throw unquoted(positionals.slice(2));
-  const [project, name] = positionals;
-  if (project === undefined || name === undefined) throw new UsageError(project === undefined ? 'name <project> and <principal>' : 'name <principal>');
+  const { values, positionals } = parse(args, { env: { type: 'string' }, service: { type: 'boolean', default: false } }, ['<project>', '<principal>']);
+  const [project, name] = positionals as [string, string];
   const scope = values.env === undefined ? project : `${project}/${values.env}`;
   const who = memberOf(name, values.service);
   const api = connect();
