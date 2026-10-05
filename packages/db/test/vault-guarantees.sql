@@ -103,6 +103,52 @@ EXCEPTION
 END
 $$;
 
+-- 5b. On every project, a grant names neither id, and an environment slug at most.
+DO $$
+BEGIN
+    INSERT INTO vault_grants (principal, project_id, environment_slug, role, granted_at, granted_by)
+    VALUES ('user:ada@acme.example', '11111111-1111-1111-1111-111111111111', 'dev', 'viewer', 0, 'user:admin@acme.example');
+    RAISE EXCEPTION 'FAIL: a slug was named with a project';
+EXCEPTION
+    WHEN check_violation THEN
+        RAISE NOTICE 'PASS: a slug names environments on every project only';
+END
+$$;
+
+DO $$
+BEGIN
+    INSERT INTO vault_grants (principal, environment_slug, role, granted_at, granted_by)
+    VALUES ('user:ada@acme.example', 'dev', 'maintainer', 0, 'user:admin@acme.example');
+    RAISE EXCEPTION 'FAIL: a project role was granted on an environment slug';
+EXCEPTION
+    WHEN check_violation THEN
+        RAISE NOTICE 'PASS: a project role cannot be granted on an environment slug';
+END
+$$;
+
+DO $$
+BEGIN
+    INSERT INTO vault_grants (principal, environment_slug, role, granted_at, granted_by)
+    VALUES ('user:ada@acme.example', 'Dev', 'viewer', 0, 'user:admin@acme.example');
+    RAISE EXCEPTION 'FAIL: a grant named no slug';
+EXCEPTION
+    WHEN check_violation THEN
+        RAISE NOTICE 'PASS: an environment slug is a slug';
+END
+$$;
+
+DO $$
+BEGIN
+    INSERT INTO vault_grants (principal, role, granted_at, granted_by)
+    VALUES ('user:ada@acme.example', 'viewer', 0, 'user:admin@acme.example'),
+           ('user:ada@acme.example', 'owner', 0, 'user:admin@acme.example');
+    RAISE EXCEPTION 'FAIL: a member held two grants on every project';
+EXCEPTION
+    WHEN unique_violation THEN
+        RAISE NOTICE 'PASS: one grant per member on every project';
+END
+$$;
+
 -- 6. The vault reads what it decides on, and writes none of it.
 SELECT count(*) FROM projects;
 SELECT count(*) FROM secret_versions;

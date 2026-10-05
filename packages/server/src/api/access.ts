@@ -2,8 +2,8 @@ import { randomUUID } from 'node:crypto';
 
 import { assignableToEnvironment, EVERY_PROJECT, type Role } from '@coffre/core/access';
 import { slug } from '@coffre/core/schemas';
-import { canGrantEveryProject } from '@coffre/db/grants';
 import type { AccessChange } from '@coffre/core/vault';
+import { canGrantEveryProject } from '@coffre/db/grants';
 
 import { memberStanding, places } from '../db/queries.ts';
 import { denied, need, Refusal, requireOwner, withRefusals, type ApiContext } from './context.ts';

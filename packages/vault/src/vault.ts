@@ -1049,8 +1049,11 @@ class VaultService implements Vault {
     // One place refused is shown where it is, to whoever reads that place's log; an invalid one may be no place at all.
     const [only] = changes.length === 1 ? changes : [];
     const refused = (code: RefusalCode, message = MESSAGES[code]) => {
-      const entry = accessEntry(actor, action, principal, 'deny', input, { changes: input.changes }, code);
-      return new Refused(refusal(code, message), [only === undefined || code === 'invalid' ? entry : placed(entry, only)]);
+      const where = only === undefined || code === 'invalid' ? { ids: {}, detail: {} } : located(only);
+      return new Refused(refusal(code, message), [{
+        ...accessEntry(actor, action, principal, 'deny', input, { changes: input.changes, ...where.detail }, code),
+        ...where.ids,
+      }]);
     };
     const onProjects = changes.flatMap(({ projectId, environmentId }) => (projectId === null ? [] : [{ projectId, environmentId }]));
     return this.#decide([actor, principal], async (d) => {
@@ -1118,12 +1121,17 @@ class VaultService implements Vault {
     const current = existing !== undefined && live(existing, d.at) ? existing : undefined;
     const expiresAt = change.expiresAt === null ? null : Date.parse(change.expiresAt);
     const place = { projectId: change.projectId, environmentId: change.environmentId, environmentSlug: change.environmentSlug };
+    const where = located(place);
     const entry = (action: string, role: string | null) =>
-      d.log.push(placed(accessEntry(actor, action, principal, 'allow', correlation, {
-        role,
-        expiresAt: expiresAt === null ? null : iso(expiresAt),
-        previousRole: current?.role ?? null,
-      }), place));
+      d.log.push({
+        ...accessEntry(actor, action, principal, 'allow', correlation, {
+          role,
+          expiresAt: expiresAt === null ? null : iso(expiresAt),
+          previousRole: current?.role ?? null,
+          ...where.detail,
+        }),
+        ...where.ids,
+      });
     // A lapsed grant is cleared with no entry: it changes nothing anyone holds.
     const clear = () => {
       if (existing === undefined) return;
@@ -1231,11 +1239,16 @@ class VaultService implements Vault {
 
       const revoked = held.filter((grant) => live(grant, d.at));
       for (const grant of revoked) {
-        d.log.push(placed(accessEntry(actor, 'access.revoke', principal, 'allow', input, {
-          role: null,
-          expiresAt: null,
-          previousRole: grant.role,
-        }), grant));
+        const where = located(grant);
+        d.log.push({
+          ...accessEntry(actor, 'access.revoke', principal, 'allow', input, {
+            role: null,
+            expiresAt: null,
+            previousRole: grant.role,
+            ...where.detail,
+          }),
+          ...where.ids,
+        });
       }
       const generation = row.generation + 1;
       d.log.push(accessEntry(actor, 'member.remove', principal, 'allow', input, { revoked: revoked.length, generation }));
@@ -1848,13 +1861,13 @@ function live(grant: GrantRow, at: number): boolean {
 }
 
 /**
- * An entry about a grant, at its place: its project and environment, or, on
- * every project, neither, and the place as a path in its payload.
+ * Where an entry about a grant says it is: its project and environment; or,
+ * on every project, neither, and the place as a path in its payload.
  */
-function placed(entry: NewEntry, place: GrantPlace): NewEntry {
-  if (place.projectId !== null) return { ...entry, projectId: place.projectId, environmentId: place.environmentId };
-  const detail = JSON.parse(entry.metadata ?? '{}') as Record<string, unknown>;
-  return { ...entry, projectId: null, environmentId: null, metadata: JSON.stringify({ ...detail, place: everyProjectPath(place.environmentSlug) }) };
+function located(place: GrantPlace): { ids: Pick<NewEntry, 'projectId' | 'environmentId'>; detail: { place?: string } } {
+  return place.projectId === null
+    ? { ids: {}, detail: { place: everyProjectPath(place.environmentSlug) } }
+    : { ids: { projectId: place.projectId, environmentId: place.environmentId }, detail: {} };
 }
 
 /** One key per place a member can hold a grant at: the same place, the same key. */

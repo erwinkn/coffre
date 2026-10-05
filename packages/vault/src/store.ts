@@ -2,10 +2,8 @@ import type { GrantPlace } from '@coffre/core/access';
 import type { Author, StoredEntry } from '@coffre/core/audit';
 import { ACCESS_ACTIONS, type SecretRef, type WrappedKey } from '@coffre/core/vault';
 import { tablesOf, type Queryable, type Transaction } from '@coffre/db';
-import { readGrants, type GrantRow } from '@coffre/db/grants';
-
-export { canGrantEveryProject, insertGrant } from '@coffre/db/grants';
 import { clockMillis, engineOf, forUpdate } from '@coffre/db/dialect';
+import { readGrants, type GrantRow } from '@coffre/db/grants';
 import { and, asc, count, desc, eq, gt, gte, inArray, isNull, lt, lte, sql } from 'drizzle-orm';
 
 /**
@@ -46,6 +44,7 @@ export type Place = GrantPlace;
 
 /** A grant as stored; `@coffre/db/grants` reads and writes them on any schema since the baseline. */
 export type { GrantRow };
+export { canGrantEveryProject, insertGrant } from '@coffre/db/grants';
 
 /**
  * On Postgres, fail a lock wait in this transaction after `ms`, rather than
@@ -150,7 +149,6 @@ function at(db: Queryable, place: Place) {
     place.environmentSlug === null ? isNull(vaultGrants.environmentSlug) : eq(vaultGrants.environmentSlug, place.environmentSlug),
   );
 }
-
 
 /** Each of these environments that exists, by id, with its project and its slug: what grants on one slug in every project match. */
 export async function environmentsById(
