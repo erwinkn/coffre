@@ -1071,7 +1071,7 @@ async function offboard(args: string[]): Promise<void> {
   }
 
   if (report.references.length > 0) {
-    process.stdout.write(`\nReferences ${they} made, which outlive ${they === 'they' ? 'them' : 'it'}: review them, \`coffre references break\` ends one\n`);
+    process.stdout.write(`\nReferences ${they} made: each belongs to the environment that holds it, so removing ${they === 'they' ? 'them' : 'it'} ends none. Review them; \`coffre references break\` ends one\n`);
     for (const reference of report.references) {
       const state = reference.state === 'live' ? '' : `  (${reference.state.replace('_', ' ')})`;
       process.stdout.write(`  ${reference.holder} → ${reference.source}, ${reference.createdAt.slice(0, 10)}${state}\n`);

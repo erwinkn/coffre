@@ -268,6 +268,9 @@ export async function setSecrets(
         ...asking(ctx, operationId),
         reason: 'replaced',
         items: replaced.map((row) => ({ reference: row.id, seq: Number(row.createdSeq) })),
+      }).catch(async (error: unknown) => {
+        await abandon(ctx, operationId, references, made.seqs);
+        throw error;
       });
       if (!ended.ok) {
         await abandon(ctx, operationId, references, made.seqs);

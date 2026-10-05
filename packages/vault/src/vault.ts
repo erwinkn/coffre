@@ -1110,6 +1110,9 @@ class VaultService implements Vault {
       const environments = await store.environmentsById(d.tx, seals.map((seal) => seal.holder.environmentId));
       const codes: (RefusalCode | null)[] = seals.map((seal) => {
         const holder = refuses(actor, 'secret.write', placeIn(seal.holder, environments), false);
+        // Abandoning is its maker's alone, for a write of theirs that stored nothing: the vault
+        // never reads the app's rows, so whose seal it is decides, and no one else's end says it.
+        if (reason === 'abandoned' && seal.createdBy !== principal) return 'not_allowed';
         // Replacing or abandoning is the holder's side: write where it is held.
         if (holder === null || reason !== 'broken') return holder;
         return refuses(actor, 'grant.manage', { projectId: seal.source.projectId }, false) === null ? null : holder;

@@ -237,7 +237,9 @@ Three ways, each a vault `reference.end` entry naming the reference's
   writes its row. If that write stores nothing (refused, failed, or
   prepared again under fresh ids), the app ends the seal at once, as its
   maker, who writes the holder's environment as replacing needs: `reason:
-  "abandoned"`. Otherwise a row the app's login wrote later, naming the
+  "abandoned"`. The vault takes it from the seal's maker alone, so no one
+  else's end says a stored reference was never stored; it never reads the
+  app's rows to tell. Otherwise a row the app's login wrote later, naming the
   seal, would make it a reference no write stored. Best effort: a crash
   between the two leaves a seal with no row, which is no reference until
   such a row names it; reviving it takes the app's login, and yields only

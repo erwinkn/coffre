@@ -4,7 +4,7 @@ import type { Role } from '@coffre/core/access';
 import type { GrantRow } from '../shared/models';
 
 /** Read or write on one environment, and when it ends: an ISO instant, or null for never. */
-export type EnvironmentAccess = { role: 'viewer' | 'developer'; expiresAt: string | null };
+export type EnvironmentAccess = { role: Extract<Role, 'viewer' | 'developer'>; expiresAt: string | null };
 
 /**
  * What one project is set to in a principal's access editor: nothing, owner,
@@ -16,7 +16,7 @@ export type EnvironmentAccess = { role: 'viewer' | 'developer'; expiresAt: strin
  * leaves them alone unless another setting is picked.
  */
 export type AccessPlan = {
-  level: 'none' | 'owner' | 'viewer' | 'developer' | 'env' | 'custom';
+  level: 'none' | Extract<Role, 'owner' | 'viewer' | 'developer'> | 'env' | 'custom';
   /** When the project-wide level ends. */
   expiresAt: string | null;
   /** Environments without an entry get no access. */

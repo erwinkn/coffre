@@ -142,6 +142,24 @@ test('a value of its own ends the reference: the vault first, then the write', a
   assert.deepEqual((await bo.secrets.reveal('billing/prod/DATABASE_URL')).values, { DATABASE_URL: 'postgres://v1' });
 });
 
+test('a new reference whose old one could not be ended, the vault call thrown, is abandoned', async () => {
+  await ada.secrets.set('billing/prod', { DATABASE_URL: ref('market/prod/DATABASE_URL') });
+  const original = deps.vault.endReferences.bind(deps.vault);
+  deps.vault.endReferences = async (input) => {
+    if (input.reason === 'replaced') throw new Error('the vault is unreachable');
+    return original(input);
+  };
+  try {
+    assert.match(await refusal(ada.secrets.set('billing/prod', { DATABASE_URL: ref('market/prod/STRIPE_KEY') })), /^5\d\d: /);
+  } finally {
+    deps.vault.endReferences = original;
+  }
+  const [, sealed] = await entries('vault', 'reference.create');
+  assert.deepEqual((await entries('vault', 'reference.end')).map((entry) => [entry.relatedSeq, entry.metadata.reason]), [[sealed!.seq, 'abandoned']]);
+  // The first reference was never ended, and still reads.
+  assert.deepEqual((await bo.secrets.reveal('billing/prod/DATABASE_URL')).values, { DATABASE_URL: 'postgres://v1' });
+});
+
 test("the source's access manager breaks it, and a run of the holder stops, saying why and who can fix it", async () => {
   await ada.secrets.set('billing/prod', { DATABASE_URL: ref('market/prod/DATABASE_URL') });
   // Only who writes the holder, or manages the source's access: to anyone else there is no such reference.

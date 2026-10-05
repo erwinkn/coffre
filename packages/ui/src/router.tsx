@@ -5,6 +5,7 @@ import { NotFound, RouteError } from './components/route-states';
 import { createQueryClient } from './lib/queries';
 import { DEFAULT_PREFERENCES, requestPage } from './lib/page-context';
 import { browserPreferences, type Preferences } from './lib/preferences';
+import { parseSearch, stringifySearch } from './lib/search';
 import type { CoffreContext } from './options';
 
 /**
@@ -37,6 +38,9 @@ export function createRouter<TRouteTree extends AnyRoute>(routeTree: TRouteTree)
     scrollRestoration: true,
     defaultNotFoundComponent: NotFound,
     defaultErrorComponent: RouteError,
+    // Every search value a string, as sent: `state=1e5` goes back as `1e5` (`lib/search.ts`).
+    parseSearch,
+    stringifySearch,
     // The nonce coffre's middleware minted for this response's policy, which
     // the router puts on every script it renders. The browser has none to
     // give: hydration reads it back from the page.
