@@ -22,6 +22,12 @@ coffre environments delete market/old --apply # an environment alone
 - An environment is deleted only once it is archived itself. A place
   restored, or granted, while its deletion runs makes the deletion stop
   with a 409, nothing erased; asked again, it revokes the new grant too.
+- Two races with a deletion's commit, which a model of the locking
+  protocol found, are closed. A rename, archive or restore whose request
+  found the place just before it was deleted is refused with a 404,
+  where it used to give the tombstone a live slug back. And a read the
+  vault had checked just before the place was deleted is refused as
+  `deleted`, where it used to release the key after the deletion.
 - What stays is a tombstone of names: the place, its keys and its versions'
   numbers, authors and times, which the audit log names. It is renamed
   `market~deleted-2026-10-05`, so `market` is free for a new project that

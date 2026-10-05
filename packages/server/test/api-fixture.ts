@@ -55,7 +55,7 @@ export function waitUntil(promise: Promise<unknown>): void {
  */
 export function testVault(
   rootAdmins: readonly string[],
-  config: Pick<VaultConfig, 'bulkLimit'> = {},
+  config: Partial<Pick<VaultConfig, 'bulkLimit' | 'kek' | 'signingKey'>> = {},
   keys: { kek: Buffer } = { kek: randomBytes(32) },
 ): TestVault {
   const { kek } = keys;

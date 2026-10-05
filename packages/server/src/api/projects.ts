@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { covers, everyProjectPath, ROLES, type Permission, type Role } from '@coffre/core/access';
+import type { Transaction } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
 import { environments, projects } from '@coffre/db/schema';
 
@@ -278,6 +279,21 @@ function placeChanges(
   return { renames, archivedAt };
 }
 
+/**
+ * The place a request names, resolved again under the log's head, which
+ * every change to a place takes first. The router resolved it before the
+ * transaction: one deleted since, or re-slugged, is no longer at that path,
+ * and a change by its id would undo the deletion's tombstone.
+ */
+async function stillThere(tx: Transaction, place: ResolvedPath): Promise<void> {
+  const { project, environment } = place;
+  const now = await resolvePath(tx, { project: project.slug, environment: environment?.slug });
+  if (now === null || now.project.id !== project.id) throw notFound(`no project "${project.slug}"`);
+  if (environment !== null && now.environment?.id !== environment.id) {
+    throw notFound(`no environment "${project.slug}/${environment.slug}"`);
+  }
+}
+
 /** Rename, re-slug, archive or restore a project. */
 export async function patchProject(
   ctx: ApiContext,
@@ -288,6 +304,7 @@ export async function patchProject(
   const { renames, archivedAt } = placeChanges(project, patch);
   const renamed = Object.keys(renames).length > 0;
   return audited(ctx, async (tx, log) => {
+    await stillThere(tx, place);
     if (renamed || archivedAt !== undefined) {
       try {
         await update(tx, projects, { id: project.id }, { ...renames, archivedAt });
@@ -376,6 +393,7 @@ export async function patchEnvironment(
   const renamed = Object.keys(renames).length > 0;
   const scope = { projectId: project.id, environmentId: environment.id };
   const patched = await audited(ctx, async (tx, log) => {
+    await stillThere(tx, place);
     if (renamed || archivedAt !== undefined) {
       try {
         await update(tx, environments, { id: environment.id }, { ...renames, archivedAt });
