@@ -110,8 +110,10 @@ const show = (value) => {
     if ('set' in value) return `{${value.set.map(show).join(', ')}}`;
     if ('who' in value && 'at' in value && Object.keys(value).length === 2) return `${value.who}@${value.at}`;
     if ('kind' in value && 'at' in value && 'id' in value) {
+      if (value.kind.startsWith('access.')) return `${value.kind} ${value.who}@${value.at} (${value.id[0]})`;
+      if (value.kind === 'member.remove') return `member.remove ${value.who} (${value.id[0]})`;
       const via = value.via === undefined || value.via[0] === 'none' ? '' : ` via ${reference(value.via)}`;
-      const reader = value.kind === 'secret.read' ? ` as ${value.who}${value.granted ? '' : ', ungranted'}` : '';
+      const reader = value.kind === 'secret.read' ? ` as ${value.who}` : '';
       return `${value.kind} ${value.at} (${value.id[0]})${via}${reader}`;
     }
     return `[${Object.entries(value).map(([k, v]) => `${k} ${show(v)}`).join(', ')}]`;

@@ -32,7 +32,7 @@ REMOVALS=(
   "Locks SortedMemberLocks NoWaitCycle"
   "Members ReaderRowLocked NothingReleasedAfterRevocation"
   "References EndRecheckUnderHead NothingReleasedThroughEndedReference"
-  "Referencing SourceRecheckInReference EveryReferenceBreakable"
+  "Referencing SourceRecheckInReference ReferencedSourcesStayLive"
   "Referencing ArchiveRefusedWhileRead ReferencedSourcesStayLive"
   "Referencing ReferenceRereadInDeletion EveryReferenceBreakable"
 )

@@ -271,9 +271,8 @@ Refuse(p) ==
     /\ UNCHANGED <<rows, log, creds, op, l, left, history>>
 
 \* A log entry: what it is, where, the operation that wrote it, whom it
-\* is about. A read's names the reference it went through, and whether its
-\* reader held a grant there as it committed.
-Entry(kind, at, p) == [kind |-> kind, at |-> at, id |-> l[p].id, who |-> op[p].who, via |-> NoRef, granted |-> TRUE]
+\* is about. A read's names the reference it went through, if any.
+Entry(kind, at, p) == [kind |-> kind, at |-> at, id |-> l[p].id, who |-> op[p].who, via |-> NoRef]
 
 -----------------------------------------------------------------------------
 (* Starting an operation *)
@@ -366,8 +365,7 @@ ReadCommit(p) ==
     /\ IF \/ KeyPlaceRecheckUnderHead /\ (Gone("env") \/ Gone(op[p].at))
           \/ EndRecheckUnderHead /\ l[p].ref # NoRef /\ Ended(l[p].ref)
          THEN Refuse(p)
-         ELSE /\ log' = Append(log, [Entry("secret.read", "env", p) EXCEPT !.via = l[p].ref,
-                                                                    !.granted = MayUse(op[p].who, op[p].at)])
+         ELSE /\ log' = Append(log, [Entry("secret.read", "env", p) EXCEPT !.via = l[p].ref])
               /\ Release(p)
               /\ Goto(p, "read.answer")
               /\ UNCHANGED <<rows, creds, op, l, left, history>>
@@ -476,17 +474,18 @@ CallCheck(p) ==
 
 CallHead(p) == pc[p] = "call.head" /\ TakeHead(p, "call.commit")
 
-\* Append the entries under the head, change the grants, seal, commit.
+\* Append the entries under the head, change the grants, seal, commit: an
+\* `access.grant` or an `access.revoke` for each place that changed.
 CallCommit(p) ==
     LET c == l[p].call
-        changed == {x \in c.at : ([who |-> c.who, at |-> x] \in grants) # c.grant}
+        changed == SelectSeq(<<"*", "proj", "env", "hold">>,
+                             LAMBDA x : x \in c.at /\ ([who |-> c.who, at |-> x] \in grants) # c.grant)
+        entry(x) == [Entry(IF c.grant THEN "access.grant" ELSE "access.revoke", x, p) EXCEPT !.who = c.who]
     IN
     /\ pc[p] = "call.commit"
     /\ grants' = IF c.grant THEN grants \cup {[who |-> c.who, at |-> x] : x \in c.at}
                  ELSE grants \ {[who |-> c.who, at |-> x] : x \in c.at}
-    /\ log' = IF c.grant /\ changed # {}
-                THEN Append(log, Entry("access.grant", CHOOSE x \in changed : TRUE, p))
-                ELSE log
+    /\ log' = log \o [i \in 1..Len(changed) |-> entry(changed[i])]
     /\ Return(p, TRUE)
     /\ UNCHANGED <<refRow, slug, archived, held, version, status, gen, creds, op, left, history>>
 
@@ -789,9 +788,10 @@ RemoveCommit(p) ==
     /\ grants' = {g \in grants : g.who # m}
     /\ status' = [status EXCEPT ![m] = "removed"]
     /\ gen' = [gen EXCEPT ![m] = @ + 1]
+    /\ log' = Append(log, Entry("member.remove", "*", p))
     /\ Release(p)
     /\ Goto(p, "idle")
-    /\ UNCHANGED <<refRow, slug, archived, held, version, log, creds, op, l, left, history>>
+    /\ UNCHANGED <<refRow, slug, archived, held, version, creds, op, l, left, history>>
 
 -----------------------------------------------------------------------------
 (***************************************************************************)
@@ -929,12 +929,28 @@ AuditBeforeRelease == \A id \in revealed : \E i \in 1..Len(log) : log[i].kind = 
 \* the credential committed, to an active member.
 CredentialsAtCurrentGeneration == \A c \in creds : c.current
 
-\* A `secret.read` commits only while its reader still holds a grant that
-\* covers where it was decided. Grants change only under the head, which
-\* the read holds as it commits: so once a revocation or a removal has
-\* committed, nothing more is released to them there, until a grant that
-\* covers it again has committed.
-NothingReleasedAfterRevocation == \A i \in 1..Len(log) : log[i].kind = "secret.read" => log[i].granted
+\* The grants as the first n entries of the log leave them: the ones at the
+\* start, then each `access.grant`, `access.revoke` and `member.remove`.
+RECURSIVE GrantsAfter(_)
+GrantsAfter(n) ==
+    IF n = 0 THEN InitGrants
+    ELSE LET e == log[n]
+             before == GrantsAfter(n - 1)
+         IN CASE e.kind = "access.grant"  -> before \cup {[who |-> e.who, at |-> e.at]}
+              [] e.kind = "access.revoke" -> before \ {[who |-> e.who, at |-> e.at]}
+              [] e.kind = "member.remove" -> {g \in before : g.who # e.who}
+              [] OTHER                    -> before
+
+\* Where a read was decided: through a reference, at its holder.
+DecidedAt(e) == IF e.via # NoRef THEN "hold" ELSE e.at
+
+\* No `secret.read` for a member follows, in the log, the revocation or the
+\* removal that took their last grant covering where it was decided, unless
+\* a grant covering it again comes between. Root admins hold no grants.
+NothingReleasedAfterRevocation ==
+    \A j \in 1..Len(log) :
+        log[j].kind = "secret.read" /\ log[j].who \notin Roots =>
+            \E g \in GrantsAfter(j - 1) : g.who = log[j].who /\ Covers(g.at, DecidedAt(log[j]))
 
 \* No `secret.read` through a reference follows its `reference.end`, or the
 \* deletion of its source's place or its holder's, in the log.
@@ -944,10 +960,10 @@ NothingReleasedThroughEndedReference ==
             ~(\/ log[i].kind = "reference.end" /\ log[i].via = log[j].via
               \/ log[i].kind = "delete" /\ (Covers(log[i].at, "env") \/ Covers(log[i].at, "hold")))
 
-\* A reference that has not ended is between standing places, where the API
+\* A reference that has not ended is held in a standing place, where the API
 \* can name its holder, and so break it. One held in a deleted place would
 \* keep its source from being archived, with no path left to break it.
-EveryReferenceBreakable == (refRow # NoRef /\ ~Ended(refRow)) => ~Gone("env") /\ ~Gone("hold")
+EveryReferenceBreakable == (refRow # NoRef /\ ~Ended(refRow)) => ~Gone("hold")
 
 \* And its source is live: a reference is made only to a live source, and
 \* archiving one is refused while a reference from elsewhere reads it.
