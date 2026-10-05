@@ -22,7 +22,7 @@ import { bindingFrom, describeBindings, describePlan, serviceMember, TRUST_USAGE
 import { exchange, idToken } from './workload.ts';
 import { commandLine, readSession, removedVariables } from './flags.ts';
 import { readSecret } from './secret.ts';
-import { help, named, usage } from './commands.ts';
+import { help, lookup, usage, type Command } from './commands.ts';
 import * as manage from './manage.ts';
 import { parse, UsageError } from './manage.ts';
 import { cliVersion } from './version.ts';
@@ -1104,17 +1104,6 @@ async function verifyLog(): Promise<void> {
   process.exit(2);
 }
 
-/** Prose under a usage line, indented and wrapped to a terminal's 80 columns. */
-function indented(text: string): string {
-  const lines: string[] = [];
-  for (const word of text.split(/\s+/)) {
-    const last = lines.length - 1;
-    if (last >= 0 && lines[last]!.length + 1 + word.length <= 76) lines[last] += ` ${word}`;
-    else lines.push(word);
-  }
-  return lines.map((line) => `    ${line}`).join('\n');
-}
-
 /** `coffre init --workers|--node [<dir>]`: a new deployment of coffre. */
 function initProject(args: string[]): void {
   const { values, positionals } = parseArgs({
@@ -1172,8 +1161,8 @@ const sessionFlags = attempt(() => readSession(line.session));
 /** The API of the instance the session names, asked for once a command has read its arguments. */
 const connect = () => client();
 
-/** Each command, by the words that name it (`commands.ts`). */
-const COMMANDS: Record<string, (args: string[]) => unknown> = {
+/** Each command, by the words that name it: those `coffre help` lists, each one (`commands.ts`). */
+const COMMANDS: Record<Command, (args: string[]) => unknown> = {
   init: initProject,
   keys,
   // Their own chunks: the database driver and the migrations load only for them.
@@ -1221,19 +1210,23 @@ const COMMANDS: Record<string, (args: string[]) => unknown> = {
   untrust,
   audit,
   verify,
+  'verify instance': (args) => verify(['instance', ...args]),
+  'verify keys': (args) => verify(['keys', ...args]),
+  'verify log': (args) => verify(['log', ...args]),
 };
 
 /** The commands whose --help says more than their line in `coffre help`. */
-const HELP: Record<string, string> = {
+const HELP: Partial<Record<Command, string>> = {
   trust: TRUST_USAGE,
   verify: VERIFY_USAGE,
   'verify instance': INSTANCE_USAGE,
   'verify keys': KEYS_USAGE,
 };
 
-/** A command's help, on `out`. */
+/** A command's help, or a group's. */
 function helpText(words: string): string {
-  return HELP[words] === undefined ? help(words) : `${HELP[words]}\n`;
+  const own = HELP[words as Command];
+  return own === undefined ? help(words) : `${own}\n`;
 }
 
 /** A parse error's first sentence, without Node's advice: `unknown option '--bogus'`. */
@@ -1250,38 +1243,37 @@ if (command === '--version' || command === '-v') {
   process.exit(0);
 }
 if (command === undefined || command === '--help' || command === '-h' || command === 'help') {
-  const about = command === 'help' && rest.length > 0 ? named(rest) : null;
+  const about = command === 'help' && rest.length > 0 ? lookup(rest) : null;
   if (command === 'help' && rest.length > 0 && about === null) {
     process.stderr.write(`coffre: no command ${rest.join(' ')}\n${usage()}`);
     process.exit(2);
   }
-  process.stdout.write(about === null ? usage() : helpText(about));
+  process.stdout.write(about === null ? usage() : helpText('group' in about ? about.group : about.command));
   process.exit(0);
 }
 
-const words = named([command, ...rest]);
-const two = rest[0] === undefined ? null : `${command} ${rest[0]}`;
-const [key, args] = two !== null && two in COMMANDS ? [two, rest.slice(1)] : [command, rest];
-const end = args.indexOf('--');
-if ((end === -1 ? args : args.slice(0, end)).some((arg) => arg === '--help' || arg === '-h')) {
-  // verify's own commands say the most about themselves.
-  process.stdout.write(helpText(key === 'verify' && words !== null ? words : (words ?? key)));
-  process.exit(0);
-}
-if (!(key in COMMANDS)) {
-  // `coffre tokens` alone has commands under it; `coffre nope` is none.
-  if (words !== null) {
-    process.stderr.write(`coffre: ${command} needs a command after it\n${helpText(words)}`);
-    process.exit(2);
-  }
+const found = lookup([command, ...rest]);
+if (found === null) {
   process.stderr.write(`coffre: no command ${command}\n\n${usage()}`);
   process.exit(1);
 }
+const words = 'group' in found ? found.group : found.command;
+const args = 'group' in found ? rest : found.args;
+const end = args.indexOf('--');
+if ((end === -1 ? args : args.slice(0, end)).some((arg) => arg === '--help' || arg === '-h')) {
+  process.stdout.write(helpText(words));
+  process.exit(0);
+}
+// `coffre tokens` alone has commands under it, and is none itself.
+if ('group' in found) {
+  process.stderr.write(`coffre: ${command} needs a command after it\n${helpText(words)}`);
+  process.exit(2);
+}
 try {
-  await COMMANDS[key]!(args);
+  await COMMANDS[found.command](found.args);
 } catch (error) {
   const misuse = parseError(error);
   if (misuse === null) fail(error instanceof Error ? error.message : String(error));
-  process.stderr.write(`coffre: ${misuse}\n${helpText(words ?? key)}`);
+  process.stderr.write(`coffre: ${misuse}\n${helpText(words)}`);
   process.exit(2);
 }

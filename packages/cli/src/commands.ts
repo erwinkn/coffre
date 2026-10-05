@@ -11,17 +11,17 @@ import type { RouteKey } from '@coffre/client';
 /** A command: how it is written, and what it does, a line or more beside it. */
 export type Entry = {
   /** The words that name it, as typed: `projects create`. */
-  command: string;
+  readonly command: string;
   /** Its synopsis, without `coffre`: a line, or more for a long one. */
-  usage: string[];
-  about?: string[];
+  readonly usage: readonly string[];
+  readonly about?: readonly string[];
 };
 
-export type Section = { title: string; entries: Entry[] };
+export type Section = { readonly title: string; readonly entries: readonly Entry[] };
 
 const P = '<project>/<environment>';
 
-export const SECTIONS: Section[] = [
+export const SECTIONS = [
   {
     title: 'New deployment',
     entries: [
@@ -152,8 +152,9 @@ export const SECTIONS: Section[] = [
     entries: [{ command: 'audit', usage: ['audit [--limit N] [--actor <id>] [--denied] [--detail] [--json]'] }],
   },
   {
-    title: 'Verify (coffre verify alone asks which, on a terminal)',
+    title: 'Verify',
     entries: [
+      { command: 'verify', usage: ['verify'], about: ['asks which of these, on a terminal'] },
       { command: 'verify instance', usage: ['verify instance [<url>]'], about: ['the instance from outside: as no one, then as you, an owner'] },
       {
         command: 'verify keys',
@@ -163,7 +164,12 @@ export const SECTIONS: Section[] = [
       { command: 'verify log', usage: ['verify log'], about: ['the whole audit log, as an owner'] },
     ],
   },
-];
+] as const satisfies readonly Section[];
+
+/** Each command's words, as `coffre help` lists them: what main.ts runs, one to one. */
+export type Command = (typeof SECTIONS)[number]['entries'][number]['command'];
+
+export const ENTRIES: readonly Entry[] = SECTIONS.flatMap(({ entries }): readonly Entry[] => entries);
 
 const SESSION_FLAGS = `  Session flags, before the command: coffre [flags] <command>, for that command alone
     --url <url>                     which instance to talk to; else the current one
@@ -200,25 +206,28 @@ export function usage(): string {
   return `coffre - secrets, with an audit log\n\n${sections.join('\n\n')}\n\n${SESSION_FLAGS}`;
 }
 
-/** The words of `args` that name a command, longest first: `projects create` before `projects`. */
-export function named(args: readonly string[]): string | null {
-  for (let count = Math.min(args.length, 2); count > 0; count--) {
-    const words = args.slice(0, count).join(' ');
-    if (SECTIONS.some(({ entries }) => entries.some((entry) => entry.command === words || entry.command.startsWith(`${words} `)))) return words;
+/**
+ * What `argv` names: a command, its words the longest that match
+ * (`projects create` before `projects`), and the arguments after them; or a
+ * group of commands, `tokens` or `environments`, alone; or nothing.
+ */
+export function lookup(argv: readonly string[]): { command: Command; args: string[] } | { group: string } | null {
+  for (let count = Math.min(argv.length, 2); count > 0; count--) {
+    const words = argv.slice(0, count).join(' ');
+    if (ENTRIES.some((entry) => entry.command === words)) return { command: words as Command, args: argv.slice(count) };
   }
-  return null;
+  const [first] = argv;
+  return first !== undefined && ENTRIES.some((entry) => entry.command.startsWith(`${first} `)) ? { group: first } : null;
 }
 
 /** `coffre <command> --help`: the command's entries, and those under it. */
 export function help(command: string): string {
-  const entries = SECTIONS.flatMap(({ entries }) => entries).filter(
-    (entry) => entry.command === command || entry.command.startsWith(`${command} `),
-  );
+  const entries = ENTRIES.filter((entry) => entry.command === command || entry.command.startsWith(`${command} `));
   return `usage:\n${entries.flatMap(lines).join('\n')}\n`;
 }
 
 /** What a route of the API is for the CLI: the commands that call it, or why only a browser does. */
-export type Reach = { commands: readonly string[] } | { browser: string };
+export type Reach = { commands: readonly Command[] } | { browser: string };
 
 /**
  * Every route, and the commands that call it. Typed over the route table:

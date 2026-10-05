@@ -10,11 +10,11 @@ import { fileURLToPath } from 'node:url';
 
 import { everyRoute } from '@coffre/client/routes';
 
-import { PARITY, SECTIONS } from '../src/commands.ts';
+import { ENTRIES, PARITY } from '../src/commands.ts';
 import { commandLine, SESSION_OPTIONS } from '../src/flags.ts';
 
 const main = fileURLToPath(new URL('../src/main.ts', import.meta.url));
-const COMMANDS = [...new Set(SECTIONS.flatMap(({ entries }) => entries.map(({ command }) => command)))];
+const COMMANDS = [...new Set(ENTRIES.map(({ command }) => command))];
 
 type Run = { code: number | null; stdout: string; stderr: string };
 
@@ -56,7 +56,7 @@ test('every route of the API is a command of the CLI, or a browser\'s, with why'
       continue;
     }
     assert.ok(reach.commands.length > 0, `${route} names a command`);
-    for (const command of reach.commands) assert.ok(COMMANDS.includes(command), `${route}: \`coffre ${command}\` is no command of coffre help`);
+    for (const command of reach.commands) assert.ok((COMMANDS as string[]).includes(command), `${route}: \`coffre ${command}\` is no command of coffre help`);
   }
   // What only a browser does, as coffre help does not offer it.
   const browser = Object.entries(PARITY).filter(([, reach]) => 'browser' in reach).map(([route]) => route);
@@ -64,7 +64,7 @@ test('every route of the API is a command of the CLI, or a browser\'s, with why'
 });
 
 test("a command's own flag named like a session flag reaches it: grant --service is grant's", () => {
-  for (const { command, usage } of SECTIONS.flatMap(({ entries }) => entries)) {
+  for (const { command, usage } of ENTRIES) {
     for (const name of Object.keys(SESSION_OPTIONS)) {
       if (!usage.join(' ').includes(`[--${name}]`)) continue;
       const words = command.split(' ');

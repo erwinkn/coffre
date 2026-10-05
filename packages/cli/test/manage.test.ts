@@ -100,6 +100,8 @@ test('admit makes a member, and for a service names the next steps: grant, then 
   assert.equal(person.written.out, 'user:ada@acme.example is a member, an owner of the instance now\n');
   await assert.rejects(manage.admit(person.connect, ['deploy', '--service', '--owner'], person.io), /a service cannot own the instance/);
   await assert.rejects(manage.admit(person.connect, ['ada@acme.example', '--owner', '--no-owner'], person.io), manage.UsageError);
+  // Not `user:token:deploy`: the name says a service, so --service says it too.
+  await assert.rejects(manage.admit(person.connect, ['token:deploy'], person.io), /token:deploy names a service: coffre admit deploy --service/);
 });
 
 test('revoke takes a grant away, and says when there was none', async () => {

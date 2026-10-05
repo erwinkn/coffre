@@ -175,6 +175,7 @@ export async function admit(connect: () => CoffreClient, args: string[], io: Io 
   if (values.owner && values['no-owner']) throw new UsageError('--owner or --no-owner, not both');
   if (values.service && values.owner) throw new UsageError('a service cannot own the instance: drop --owner');
   const name = positionals[0]!;
+  if (name.startsWith('token:') && !values.service) throw new UsageError(`${name} names a service: coffre admit ${name.slice('token:'.length)} --service`);
   const who = member(name, values.service);
   const owner = values.owner ? true : values['no-owner'] ? false : undefined;
   const api = connect();
