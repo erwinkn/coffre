@@ -6,9 +6,10 @@
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { globSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { CloudflareApi, type Zone } from '../src/cloudflare.ts';
 import { deployOnPush, gitRemote, githubTokenForm, type Pushes, repositoryOf, tokenForm, tokenName, WORKFLOW } from '../src/deploy-on-push.ts';
@@ -268,4 +269,10 @@ test('no GitHub token to give, and not now: nothing set, nothing made', async ()
   assert.equal(github.state.calls.length, calls);
   assert.equal(cloudflare.state.tokens.length, tokens);
   assert.equal(github.state.secrets.has(REPOSITORY), false);
+});
+
+test('the secrets are sealed by libsodium, here and nowhere else: no other module of coffre imports it', () => {
+  const root = fileURLToPath(new URL('../../..', import.meta.url));
+  const importers = globSync('packages/*/src/**/*.{ts,tsx}', { cwd: root }).filter((file) => /\b(from|import\(|require\()\s*['"]libsodium/.test(readFileSync(join(root, file), 'utf8')));
+  assert.deepEqual(importers, ['packages/cli/src/deploy-on-push.ts']);
 });

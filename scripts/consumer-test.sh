@@ -97,6 +97,9 @@ for args in "" "--json"; do
         exit 1
     fi
 done
+# What setup sets on GitHub, sealed by the libsodium the CLI bundles.
+node --conditions=coffre:source "$root/packages/cli/test/sealed.ts" "$work/cli/package/dist/deploy-on-push.js"
+echo "    sealed a secret GitHub opens"
 
 for kind in "${kinds[@]}"; do
     project="$work/coffre-$kind"
