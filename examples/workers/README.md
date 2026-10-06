@@ -83,15 +83,6 @@ pnpm exec wrangler secret put APP_KEY -c app/wrangler.jsonc
 pnpm exec wrangler secret put GITHUB_CLIENT_SECRET -c app/wrangler.jsonc
 ```
 
-To upgrade: `coffre update` here, then migrate and deploy: commit and push
-for Workers Builds, where both Workers' builds start with `printenv
-DATABASE_OWNER_URL | pnpm exec coffre migrate --yes`, with the
-administrator's URL as their secret build variable `DATABASE_OWNER_URL`; or
-here, `pnpm exec coffre migrate`, then `pnpm run deploy`. Until the
-migration has run, the new version answers 503, `migrating`
-([upgrading](https://github.com/erwinkn/coffre/blob/main/docs/deploy.md#upgrading),
-[Workers Builds](https://github.com/erwinkn/coffre/blob/main/docs/deploy.md#workers-builds)).
-
 Keep older vault keys after a rotation, for good: what they wrapped still
 needs them, and so does what the vault signed under them before it. With AWS KMS
 instead of a key of your own, the vault also needs a `SIGNING_KEY`
@@ -119,6 +110,17 @@ stops taking writes or the vault stops checkpointing it.
 Everything coffre keeps is in the database: secrets, members, grants and
 the audit log. Back it up as one, keep the escrowed keys apart from it, and
 follow the [restore runbook](https://github.com/erwinkn/coffre/blob/main/docs/restore.md) to bring it back.
+
+## Upgrading
+
+Run `coffre update` here, then migrate and deploy. With Workers Builds,
+commit and push: both Workers' builds start with `printenv
+DATABASE_OWNER_URL | pnpm exec coffre migrate --yes`, the administrator's
+URL being their secret build variable `DATABASE_OWNER_URL`. By hand, run
+`pnpm exec coffre migrate`, then `pnpm run deploy`. Until the migration has
+run, the new version answers 503, `migrating`
+([upgrading](https://github.com/erwinkn/coffre/blob/main/docs/deploy.md#upgrading),
+[Workers Builds](https://github.com/erwinkn/coffre/blob/main/docs/deploy.md#workers-builds)).
 
 ## Locally
 
