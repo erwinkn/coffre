@@ -126,7 +126,9 @@ every migration lets it ([expand, then contract](architecture.md#expand-then-con
    the release's pages are built with, React, TanStack Start and Vite among
    them, showing each: they must be those exactly, and the app's build stops
    when one is not. It adds the page files a release adds, and removes those
-   it retires, where they are as coffre wrote them.
+   it retires, where they are as coffre wrote them, and then writes the
+   route tree, `app/src/routeTree.gen.ts`, as the build does, so the diff
+   to commit is whole.
 
    It also pins the deployment's pnpm, `packageManager` in its package.json,
    to the one coffre installs with, as `coffre init` writes it: then your

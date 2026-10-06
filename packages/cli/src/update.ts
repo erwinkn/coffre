@@ -17,6 +17,7 @@ import {
   coffrePins,
   deploymentKind,
   excludeUntil,
+  generateRouteTree,
   HeldBack,
   install,
   installAsLocked,
@@ -25,6 +26,7 @@ import {
   pinPackageManager,
   removeCleared,
   resolveAgain,
+  ROUTE_TREE,
   movePins,
   startPinMoves,
   type Held,
@@ -327,14 +329,15 @@ export async function update(args: string[]): Promise<void> {
               ? `Pin this deployment to ${on}, as coffre installs with, and install it?`
               : `Move its Start app's packages to the versions coffre ${latest} is built with, and install it?`
           : `Move this deployment from ${was} to ${latest}${move.length > 0 ? ", with coffre's pages as above," : ''}${repin ? ` on ${on},` : ''} and install it?`;
-        step.under([...move.flatMap((change) => shownChange(change)), ...shared.map(({ name, from, to }) => `~ ${name} ${from} → ${to}`)]);
+        step.under([...move.flatMap((change) => shownChange(change)), ...(move.length > 0 ? [`~ ${ROUTE_TREE}, regenerated`] : []), ...shared.map(({ name, from, to }) => `~ ${name} ${from} → ${to}`)]);
         const accepted = await ask(question, step);
         step.under([]);
         if (!accepted) return { text: `This deployment stays as it is, at ${was}`, details };
 
         // Put back byte for byte however this ends short of installed: the
         // deployment's pins, pnpm and lockfile stay as they were.
-        const files = [...new Set(['package.json', 'pnpm-workspace.yaml', 'pnpm-lock.yaml', ...move.map(({ path }) => path)])].map((name) => {
+        const names = [...new Set(['package.json', 'pnpm-workspace.yaml', 'pnpm-lock.yaml', ...move.map(({ path }) => path), ...(move.length > 0 ? [ROUTE_TREE] : [])])];
+        const files = names.map((name) => {
           const path = join(deployment, name);
           return { path, text: existsSync(path) ? readFileSync(path, 'utf8') : null };
         });
@@ -344,10 +347,7 @@ export async function update(args: string[]): Promise<void> {
             else writeFileSync(path, text);
           }
         };
-        const kept =
-          move.length > 0
-            ? `${listed([...new Set(['package.json', 'pnpm-workspace.yaml', 'pnpm-lock.yaml', ...move.map(({ path }) => path)])], 'and')} are as they were`
-            : 'package.json, pnpm-workspace.yaml and pnpm-lock.yaml are as they were';
+        const kept = `${listed(names, 'and')} are as they were`;
         /**
          * No version old enough fits: wait, everything as it was, or let
          * these through by name, each until it is old enough. Never asked
@@ -437,6 +437,15 @@ export async function update(args: string[]): Promise<void> {
           throw new Error(`${reason}. ${kept}${error instanceof HeldBack ? '' : '; node_modules may be incomplete, which pnpm install puts right'}`);
         }
         after = deploymentMigrations(deployment) ?? after;
+        // The tree its build would write, from the files now there, by the version now installed: a diff that is whole.
+        if (move.length > 0) {
+          step.note('Regenerating its route tree');
+          try {
+            if (await generateRouteTree(deployment)) details.push(`Regenerated ${ROUTE_TREE}, as the build writes it, for those page files`);
+          } catch (error) {
+            details.push(`Could not regenerate ${ROUTE_TREE} (${error instanceof Error ? error.message : String(error)}): the next build writes it`);
+          }
+        }
         return {
           text: current ? `Pinned ${pnpm}, and installed it` : `Moved this deployment from ${was} to ${latest}, and installed it`,
           details,

@@ -79,6 +79,40 @@ export async function installAsLocked(dir: string): Promise<boolean> {
 /** Where `buildApp` leaves a Workers app, as wrangler deploys it: Vite's own wrangler.json for the build. */
 export const BUILT_APP = 'app/dist/server/wrangler.json';
 
+/** The route tree TanStack Start writes from the app's route files, committed with them. */
+export const ROUTE_TREE = 'app/src/routeTree.gen.ts';
+
+/**
+ * Write the deployment's route tree, as its build does first of all: its own
+ * Vite resolves the app's config, and TanStack's generator, a plugin of
+ * that config, writes `ROUTE_TREE` from the route files there, by the
+ * installed version's own rules, with no build after it. True when the file
+ * changed; false when it did not, or the deployment has no Start app to ask.
+ */
+export function generateRouteTree(dir: string): Promise<boolean> {
+  const tree = join(dir, ROUTE_TREE);
+  if (!existsSync(join(dir, 'app', 'vite.config.ts'))) return Promise.resolve(false);
+  const before = existsSync(tree) ? readFileSync(tree, 'utf8') : null;
+  // Vite resolves from the deployment, whatever this CLI is bundled with.
+  const script = `
+    import { createRequire } from 'node:module';
+    import { pathToFileURL } from 'node:url';
+    const vite = await import(pathToFileURL(createRequire(process.cwd() + '/package.json').resolve('vite')).href);
+    await vite.resolveConfig({ root: 'app' }, 'build');
+  `;
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script], { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, NO_COLOR: '1' } });
+    let output = '';
+    child.stdout.setEncoding('utf8').on('data', (chunk: string) => (output += chunk));
+    child.stderr.setEncoding('utf8').on('data', (chunk: string) => (output += chunk));
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code !== 0) return reject(new Error(`resolving the app's Vite config failed: ${output.trim().split('\n').slice(-4).join(' ')}`));
+      resolve((existsSync(tree) ? readFileSync(tree, 'utf8') : null) !== before);
+    });
+  });
+}
+
 /**
  * Build the deployment's app, its own TanStack Start app, with its own
  * Vite, as its `pnpm run deploy` does: what wrangler then uploads as it is.

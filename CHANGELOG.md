@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+**`coffre update` writes the route tree with the route files it adds.** A
+release that adds or removes a page file left the committed
+`app/src/routeTree.gen.ts` stale until the next build rewrote it, so an
+update's diff was incomplete: 0.4.2's account tabs were four new route
+files and a tree that did not name them. Update now regenerates the tree
+once it has installed the release, through the deployment's own Vite and
+TanStack Router, as its build does, shows it among the changes, and lists
+it with the files it changed.
+
 **The MCP tool `read_secret_values` is `reveal_secret_values`**, to match its
 scope, Reveal values. No alias is kept: a client that called the old name
 gets an unknown-tool error, and finds the new one in `tools/list`.

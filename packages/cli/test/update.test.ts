@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,6 +11,7 @@ import {
   bumpPins,
   coffrePins,
   excludeUntil,
+  generateRouteTree,
   heldBack,
   installFailure,
   minimumReleaseAge,
@@ -23,8 +24,8 @@ import {
   START_PACKAGES,
   startPinMoves,
 } from '../src/deployment.ts';
-import { templateFiles } from '../src/init.ts';
-import { CLEAN_BREAK } from '../src/layout.ts';
+import { templateDir, templateFiles } from '../src/init.ts';
+import { applyChanges, CLEAN_BREAK, pageMove } from '../src/layout.ts';
 import { registry } from './registry.ts';
 import { inTerminal, ptySkip } from './pty.ts';
 import { deploymentMigrations, globalCli, installOf, migrationsAdded, movedLines, notUpdated } from '../src/update.ts';
@@ -503,6 +504,56 @@ test("pnpm 11's own global install, as it lays it out: found by asking pnpm, tho
     // With its bin directory off PATH, pnpm may not answer; its PNPM_HOME still says it is pnpm's.
     const off = globalCli('pnpm', base, home);
     assert.deepEqual(installOf(self, { npm: null, pnpm: off ?? null, pnpmHome: off === undefined ? pnpmHome : null }), { kind: 'pnpm' });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a deployment that gains route files gets the route tree its build writes, and none is left stale", { skip: !existsSync(join(examples, 'node', 'node_modules', 'vite')) }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'coffre-update-tree-'));
+  // Vite's config reads @coffre/ui's sources, as the workspace's own tests do; published, the condition is inert.
+  const options = process.env.NODE_OPTIONS;
+  process.env.NODE_OPTIONS = `${options ?? ''} --conditions=coffre:source`.trim();
+  try {
+    const template = templateDir('node');
+    for (const file of templateFiles(template)) {
+      mkdirSync(join(dir, file, '..'), { recursive: true });
+      cpSync(join(template, file), join(dir, file));
+    }
+    symlinkSync(join(examples, 'node', 'node_modules'), join(dir, 'node_modules'));
+    const tree = join(dir, 'app', 'src', 'routeTree.gen.ts');
+    const built = readFileSync(tree, 'utf8');
+
+    // A deployment from before the account page's tabs, its tree as its build wrote it then.
+    const tabs = ['index', 'sessions', 'apps', 'appearance'].map((tab) => `app/src/routes/_coffre/account.${tab}.tsx`);
+    for (const path of tabs) rmSync(join(dir, path));
+    assert.equal(await generateRouteTree(dir), true);
+    assert.ok(!readFileSync(tree, 'utf8').includes('account.sessions'), 'the tree before the tabs has none');
+    assert.equal(await generateRouteTree(dir), false, 'a tree up to date is left alone');
+
+    // update adds the files and regenerates, and the tree is what the template's build wrote.
+    const move = pageMove(dir, template, '0.4.1');
+    assert.ok('changes' in move && move.changes.length === tabs.length);
+    applyChanges(dir, move.changes);
+    assert.equal(readFileSync(tree, 'utf8').includes('account.sessions'), false, 'stale until regenerated');
+    assert.equal(await generateRouteTree(dir), true);
+    assert.equal(readFileSync(tree, 'utf8'), built);
+
+    // And one removed: the tree loses it again.
+    rmSync(join(dir, tabs[1]!));
+    assert.equal(await generateRouteTree(dir), true);
+    assert.ok(!readFileSync(tree, 'utf8').includes('account.sessions'));
+  } finally {
+    if (options === undefined) delete process.env.NODE_OPTIONS;
+    else process.env.NODE_OPTIONS = options;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a directory with no Start app has no route tree to regenerate', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'coffre-update-notree-'));
+  try {
+    assert.equal(await generateRouteTree(dir), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
