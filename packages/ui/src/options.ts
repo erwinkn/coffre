@@ -282,10 +282,20 @@ export const settings = {
   },
 };
 
+/**
+ * `/account`, the layout of your own account's tabs: its header, Sign out,
+ * and the tabs you may open. Each tab is a page under it that reads its own.
+ */
+export const account = {};
+
 type AccountSearch = { linked?: string; error?: string };
 
-/** `/account`. */
-export const account = {
+/**
+ * `/account/`, who coffre takes you for and, when coffre runs its own
+ * sign-in, the accounts you sign in with. Linking one comes back here, with
+ * its outcome in `?linked=` or `?error=`.
+ */
+export const accountProfile = {
   validateSearch: (search: Record<string, unknown>): AccountSearch => {
     const out: AccountSearch = {};
     for (const name of ['linked', 'error'] as const) {
@@ -294,15 +304,40 @@ export const account = {
     }
     return out;
   },
-  // The sign-in half: which accounts you sign in with and where you are
-  // signed in. Absent behind Cloudflare Access, which owns sessions there.
+  loader: async ({ context }: Loader) => {
+    const { coffre, queryClient } = coffreOf(context);
+    if (await ownSignIn(context)) await queryClient.fetchQuery(queries.identities(coffre));
+  },
+};
+
+/** `/account/sessions`, where you are signed in: absent behind Cloudflare Access, which owns sessions there. */
+export const accountSessions = {
+  loader: async ({ context }: Loader) => {
+    const { coffre, queryClient } = coffreOf(context);
+    if (!(await ownSignIn(context))) throw redirect({ to: '/account' });
+    await queryClient.fetchQuery(queries.sessions(coffre));
+  },
+};
+
+/** `/account/apps`, how to connect an MCP client and the ones you connected, where the deployment serves MCP. */
+export const accountApps = {
   loader: async ({ context }: Loader) => {
     const { coffre, queryClient } = coffreOf(context);
     const shell = await loadShell(queryClient, coffre);
-    if (shell.auth.signin === null || shell.principal?.type !== 'user') return;
-    await Promise.all([queryClient.fetchQuery(queries.identities(coffre)), queryClient.fetchQuery(queries.sessions(coffre))]);
+    if (!shell.features.mcp || shell.principal?.type !== 'user') throw redirect({ to: '/account' });
+    await queryClient.fetchQuery(queries.apps(coffre));
   },
 };
+
+/** `/account/appearance`, how coffre looks here, kept in this browser. */
+export const accountAppearance = {};
+
+/** Whether you are a person signed in by coffre's own sign-in, whose accounts and sessions are coffre's to show. */
+async function ownSignIn(context: unknown): Promise<boolean> {
+  const { coffre, queryClient } = coffreOf(context);
+  const shell = await loadShell(queryClient, coffre);
+  return shell.auth.signin !== null && shell.principal?.type === 'user';
+}
 
 // --- in the solo frame ----------------------------------------------------------------
 

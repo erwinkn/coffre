@@ -31,8 +31,8 @@ export const CLEAN_BREAK = '0.4.0';
  * a file the deployment adds. One from a release it had already reached is
  * one it left out, and stays out. A test holds this to the template.
  */
-export const ROUTE_FILES: Record<string, string> = Object.fromEntries(
-  [
+export const ROUTE_FILES: Record<string, string> = {
+  ...since(CLEAN_BREAK, [
     '__root.tsx',
     'api.$.ts',
     'auth.$.ts',
@@ -67,8 +67,15 @@ export const ROUTE_FILES: Record<string, string> = Object.fromEntries(
     '_solo/auth.device.tsx',
     '_solo/oauth.authorize.tsx',
     '_solo/approvals.$approval.tsx',
-  ].map((file) => [`app/src/routes/${file}`, CLEAN_BREAK]),
-);
+  ]),
+  // The account page's tabs: `_coffre/account.tsx`, the page itself before, is now their layout.
+  ...since('0.4.2', ['_coffre/account.index.tsx', '_coffre/account.sessions.tsx', '_coffre/account.apps.tsx', '_coffre/account.appearance.tsx']),
+};
+
+/** Route files, under `app/src/routes/`, that `release` first wrote. */
+function since(release: string, files: string[]): Record<string, string> {
+  return Object.fromEntries(files.map((file) => [`app/src/routes/${file}`, release]));
+}
 
 /**
  * The route files coffre wrote and no longer does, a page removed or

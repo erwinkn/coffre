@@ -89,6 +89,18 @@ test('a 0.4.0 deployment loses /access, which only sent old links to /users, but
   }
 });
 
+test("a 0.4 deployment gains the account page's tabs, under its account.tsx as it was", () => {
+  const dir = deployment('workers');
+  try {
+    const tabs = ['index', 'sessions', 'apps', 'appearance'].map((tab) => `app/src/routes/_coffre/account.${tab}.tsx`);
+    for (const path of tabs) rmSync(join(dir, path));
+    const move = changesOf(pageMove(dir, templateDir('workers'), '0.4.1'));
+    assert.deepEqual(move.map(({ path, was }) => [path, was]), tabs.map((path) => [path, null]));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a deployment without coffre's layouts as file routes is refused, not given pages", () => {
   const dir = deployment('workers');
   try {

@@ -9,6 +9,10 @@ export { useCoffre } from './lib/coffre.ts';
 export { createRouter } from './router.tsx';
 export {
   account,
+  accountAppearance,
+  accountApps,
+  accountProfile,
+  accountSessions,
   approval,
   audit,
   deviceLogin,
