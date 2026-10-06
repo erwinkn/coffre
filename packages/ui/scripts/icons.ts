@@ -2,8 +2,10 @@
  * Writes the mark's files from `src/components/mark.ts`:
  *
  *   src/assets/          what the app links: the PNG favicon, the iOS icon
- *   docs/brand/          the rest: the README's mark, the SVG favicon on its
- *                        own, 16 and 48px PNGs, and the 512px app logo
+ *   docs/brand/          the README's mark, the SVG favicon on its own, and
+ *                        16 and 48px PNGs
+ *   ../cli/assets/       the 512px logo for the GitHub App setup makes,
+ *                        which the CLI ships and names
  *
  *   node scripts/icons.ts
  *
@@ -17,6 +19,7 @@ import { INK, markPath, markSvg, TILE, TILE_RADIUS } from '../src/components/mar
 
 const assets = new URL('../src/assets/', import.meta.url);
 const brand = new URL('../../../docs/brand/', import.meta.url);
+const cli = new URL('../../cli/assets/', import.meta.url);
 
 /** Square: GitHub and iOS round the corners themselves. */
 const FILES: { dir: URL; name: string; size: number; square?: boolean }[] = [
@@ -24,10 +27,10 @@ const FILES: { dir: URL; name: string; size: number; square?: boolean }[] = [
   { dir: assets, name: 'apple-touch-icon.png', size: 180, square: true },
   { dir: brand, name: 'favicon-16.png', size: 16 },
   { dir: brand, name: 'favicon-48.png', size: 48 },
-  { dir: brand, name: 'github-logo-512.png', size: 512, square: true },
+  { dir: cli, name: 'github-app-logo.png', size: 512, square: true },
 ];
 
-for (const dir of [assets, brand]) mkdirSync(dir, { recursive: true });
+for (const dir of [assets, brand, cli]) mkdirSync(dir, { recursive: true });
 writeFileSync(new URL('mark.svg', brand), markSvg(64));
 writeFileSync(new URL('favicon.svg', brand), markSvg(16, { adaptive: true }));
 for (const { dir, name, size, square = false } of FILES) {

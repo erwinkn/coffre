@@ -30,7 +30,7 @@ import {
   type Zone,
 } from './cloudflare.ts';
 import { BUILT_APP, buildApp, editWorker, placeholder, readWorker, type Change, type WorkerConfig } from './deployment.ts';
-import { createGitHubApp, GITHUB, type GitHub } from './github-app.ts';
+import { createGitHubApp, GITHUB, type GitHub, logoPath } from './github-app.ts';
 import { recordLines, recordsToAdd, Refused, saasZone, type Served, serveThrough, standing, tokenNeeded, waitForRecords, zoneOf } from './hostname.ts';
 import { generateKeys, keyValues, type Keys } from './keys.ts';
 import type { Screen } from './secrets.ts';
@@ -499,6 +499,8 @@ export class Cloudflare {
     this.#secrets.push(app.clientSecret);
     this.#edit('app', [{ path: ['vars', 'GITHUB_CLIENT_ID'], value: app.clientId, what: "GitHub's client ID" }]);
     this.workers.app.vars.GITHUB_CLIENT_ID = app.clientId;
+    // Its logo is the one thing neither the manifest nor GitHub's API can set: uploaded on its page, by hand.
+    say.link(`For its logo, upload ${logoPath(this.#dir)}, under Display information, at`, app.settings);
     return { text: `Made coffre's GitHub App, ${app.slug}`, details: app.url === '' ? [] : [app.url] };
   }
 

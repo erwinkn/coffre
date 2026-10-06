@@ -1,17 +1,18 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { type ChildProcess, spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { inflateSync } from 'node:zlib';
 
 import { parse } from 'jsonc-parser';
 
 import { localCallback } from '../src/browser.ts';
 import { callbackOf, CloudflareApi, cloudflareToken, deploymentWrangler, deployWorker, originOf, stopWranglers } from '../src/cloudflare.ts';
 import { deploymentKind, editWorker, placeholder, readWorker } from '../src/deployment.ts';
-import { appManifest, appName, convert, createGitHubApp, manifestAddress, manifestPage } from '../src/github-app.ts';
+import { appManifest, appName, appSettings, convert, createGitHubApp, logoPath, manifestAddress, manifestPage } from '../src/github-app.ts';
 import { templateDir } from '../src/init.ts';
 import { Steps } from '../src/steps.ts';
 import { Cancelled } from '../src/tty.ts';
@@ -490,11 +491,50 @@ test("a manifest's code converts once, into the client ID and secret; the privat
     const page = manifestPage(fake.github, appManifest('https://secrets.acme.test', 'http://127.0.0.1:1/created'), 's');
     const code = new URL(await submitManifest(page)).searchParams.get('code')!;
     const app = await convert(fake.github, code);
-    assert.deepEqual(Object.keys(app).sort(), ['clientId', 'clientSecret', 'slug', 'url']);
+    assert.deepEqual(Object.keys(app).sort(), ['clientId', 'clientSecret', 'settings', 'slug', 'url']);
     assert.equal(app.slug, 'coffre-secrets-acme-test');
+    assert.equal(app.settings, `${fake.github.web}/settings/apps/coffre-secrets-acme-test`, "a person's app: under their settings");
     await assert.rejects(convert(fake.github, code), /GitHub answered 404: Not Found/);
   } finally {
     fake.close();
+  }
+});
+
+test("an app's settings page, where its logo goes: under a person's settings, or an organization's", () => {
+  const github = { web: 'https://github.com', api: 'https://api.github.com' };
+  assert.equal(appSettings(github, 'coffre-x', { login: 'ada', type: 'User' }), 'https://github.com/settings/apps/coffre-x');
+  assert.equal(appSettings(github, 'coffre-x', { login: 'acme', type: 'Organization' }), 'https://github.com/organizations/acme/settings/apps/coffre-x');
+  assert.equal(appSettings({ web: 'https://git.acme.example', api: 'https://git.acme.example/api/v3' }, 'coffre-x'), 'https://git.acme.example/settings/apps/coffre-x');
+});
+
+test("the app's logo: a PNG the CLI ships, square, 512px, every pixel opaque, under GitHub's 1 MB; named from a deployment's own CLI when it has one", () => {
+  const dir = scratch();
+  try {
+    const shipped = logoPath(dir);
+    assert.ok(isAbsolute(shipped) && shipped.endsWith(join('packages', 'cli', 'assets', 'github-app-logo.png')), shipped);
+    const png = readFileSync(shipped);
+    assert.ok(png.length < 1024 * 1024);
+    assert.deepEqual([...png.subarray(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const chunks: { type: string; data: Buffer }[] = [];
+    for (let at = 8; at < png.length; at += 12 + png.readUInt32BE(at)) {
+      chunks.push({ type: png.toString('latin1', at + 4, at + 8), data: png.subarray(at + 8, at + 8 + png.readUInt32BE(at)) });
+    }
+    const header = chunks[0]!.data;
+    const [width, height] = [header.readUInt32BE(0), header.readUInt32BE(4)];
+    assert.deepEqual([width, height, header[8], header[9]], [512, 512, 8, 6], 'square, 512px, 8-bit RGBA');
+    // A solid background, which reads on GitHub's light and dark themes alike: no pixel lets the page through.
+    const rows = inflateSync(Buffer.concat(chunks.filter(({ type }) => type === 'IDAT').map(({ data }) => data)));
+    for (let y = 0; y < height; y++) {
+      assert.equal(rows[y * (1 + width * 4)], 0, 'unfiltered rows, as the mark script writes them');
+      for (let x = 0; x < width; x++) assert.equal(rows[y * (1 + width * 4) + 1 + x * 4 + 3], 255, `a see-through pixel at ${x},${y}`);
+    }
+    // In a deployment, its own CLI's copy, by a path it can open from there.
+    const pinned = join(dir, 'node_modules', '@coffre', 'cli', 'assets');
+    mkdirSync(pinned, { recursive: true });
+    writeFileSync(join(pinned, 'github-app-logo.png'), png);
+    assert.equal(logoPath(dir), join('node_modules', '@coffre', 'cli', 'assets', 'github-app-logo.png'));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

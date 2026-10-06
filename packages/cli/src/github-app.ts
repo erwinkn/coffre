@@ -9,7 +9,10 @@
 // into the browser instead, and GitHub's way back, the address the browser
 // then fails to load, is pasted here. Both land in the same handler.
 import { randomBytes } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { localCallback, openBrowser } from './browser.ts';
 import type { Link } from './cloudflare.ts';
@@ -20,7 +23,28 @@ export type GitHub = { web: string; api: string };
 
 export const GITHUB: GitHub = { web: 'https://github.com', api: 'https://api.github.com' };
 
-export type GitHubApp = { clientId: string; clientSecret: string; slug: string; url: string };
+/** An app as made: `url` its public page, `settings` its settings page, where its logo goes. */
+export type GitHubApp = { clientId: string; clientSecret: string; slug: string; url: string; settings: string };
+
+/**
+ * coffre's mark as an app's logo, as GitHub takes one: a square PNG, 512px,
+ * on its black tile, which reads in GitHub's light and dark themes alike.
+ * Neither the manifest nor GitHub's API sets a logo: it is uploaded on the
+ * app's settings page, by hand.
+ */
+const LOGO = fileURLToPath(new URL('../assets/github-app-logo.png', import.meta.url));
+
+/** Where the logo is, for someone in a deployment's directory: its own CLI's copy when it has one, else this CLI's. */
+export function logoPath(dir: string): string {
+  const pinned = join('node_modules', '@coffre', 'cli', 'assets', 'github-app-logo.png');
+  return existsSync(join(dir, pinned)) ? pinned : LOGO;
+}
+
+/** An app's settings page: under its owner's, a person's or an organization's. */
+export function appSettings(github: GitHub, slug: string, owner?: { login?: string; type?: string }): string {
+  const under = owner?.type === 'Organization' && owner.login !== undefined ? `organizations/${owner.login}/` : '';
+  return `${github.web}/${under}settings/apps/${slug}`;
+}
 
 /** GitHub's limit on an app's name. */
 const NAME_LIMIT = 34;
@@ -86,11 +110,19 @@ export async function convert(github: GitHub, code: string): Promise<GitHubApp> 
     method: 'POST',
     headers: { accept: 'application/vnd.github+json', 'user-agent': 'coffre-setup', 'x-github-api-version': '2022-11-28' },
   });
-  const made = (await response.json().catch(() => ({}))) as { client_id?: string; client_secret?: string; slug?: string; html_url?: string; message?: string };
+  const made = (await response.json().catch(() => ({}))) as {
+    client_id?: string;
+    client_secret?: string;
+    slug?: string;
+    html_url?: string;
+    owner?: { login?: string; type?: string };
+    message?: string;
+  };
   if (!response.ok || made.client_id === undefined || made.client_secret === undefined) {
     throw new Error(`GitHub answered ${response.status}${made.message === undefined ? '' : `: ${made.message}`}`);
   }
-  return { clientId: made.client_id, clientSecret: made.client_secret, slug: made.slug ?? '', url: made.html_url ?? '' };
+  const slug = made.slug ?? '';
+  return { clientId: made.client_id, clientSecret: made.client_secret, slug, url: made.html_url ?? '', settings: appSettings(github, slug, made.owner) };
 }
 
 function listen(server: Server): Promise<number> {

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+**coffre's logo for the GitHub App setup makes.** Neither an app's
+manifest nor GitHub's API sets a logo, so setup can't. Once it has made the
+app, it prints where to upload one, the app's settings page, under Display
+information, and the file: coffre's mark as a 512px PNG on its black tile,
+which `@coffre/cli` now ships, at
+`node_modules/@coffre/cli/assets/github-app-logo.png` in a deployment.
+
 **The CLI says why it could not reach an instance.** It said only
 `could not reach https://…: fetch failed`. It now gives Node's own reason,
 with its code and address, such as `getaddrinfo ENOTFOUND
