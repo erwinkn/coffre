@@ -3,11 +3,17 @@
 ## Unreleased
 
 **A base64 secret pasted on its own line is not imported under its own
-text.** In a `.env`, `c2stbGl2ZS0xMjM0NTY3OA==` read as the key
-`c2stbGl2ZS0xMjM0NTY3OA` with the value `=`. `coffre import` and the web
-app's import now refuse a line whose value is only `=`, as one more line
-they can't parse, named by its number alone. A key is one exactly when the
-API's `secretKey` says so.
+text.** Base64 that starts with a letter is a valid key name, and its
+padding supplied the `=`: `c2stbGl2ZS0xMjM0NTY3ODkwYWJjZGVmZ2hpamtsbW4=`,
+a 32-byte key, read as that key with an empty value, and
+`c2stbGl2ZS0xMjM0NTY3OA==` as that key with the value `=`. `coffre import`
+and the web app's import now refuse both, as lines they can't parse, named
+by their number alone. **An empty value must be quoted:** `KEY=""` or
+`KEY=''` imports as empty, and a bare `KEY=` is refused with `no value:
+write KEY="" for an empty one`, since it can't be told from that padding.
+An unquoted value of only `=` is refused too. `coffre export` quotes both,
+so its files import back as they were. A key is one exactly when the API's
+`secretKey` says so.
 
 **coffre's logo for the GitHub App setup makes.** Neither an app's
 manifest nor GitHub's API sets a logo, so setup can't. Once it has made the

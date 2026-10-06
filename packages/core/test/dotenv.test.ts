@@ -40,7 +40,7 @@ test('parses the shapes a real .env file contains', () => {
         "SINGLE='literal $NOT_INTERPOLATED'",
         'WITH_ESCAPE="line\\nbreak"',
         'TRAILING=value # trailing comment',
-        'EMPTY=',
+        'EMPTY=""',
         '  SPACED  =  padded  ',
       ].join('\n'),
     ),
@@ -116,7 +116,7 @@ test('base64 and PEM-style values survive', () => {
 });
 
 test('a value that is only whitespace becomes empty, not whitespace', () => {
-  assert.deepEqual(values('A=   \nB=""\nC="  "'), { A: '', B: '', C: '  ' });
+  assert.deepEqual(values('B=""\nC="  "\nD=\'\''), { B: '', C: '  ', D: '' });
 });
 
 test('unicode and emoji survive', () => {
@@ -236,6 +236,17 @@ test('a bare base64 secret pasted on its own line is refused, and never named', 
   assert.deepEqual(values('A="=="\nB=\'=\''), { A: '==', B: '=' });
 });
 
+test('one "=" of padding, a 32-byte key in base64, leaves an empty value: only a quoted one is meant', () => {
+  const key = 'c2stbGl2ZS0xMjM0NTY3ODkwYWJjZGVmZ2hpamtsbW4=';
+  const { entries, problems } = parseDotenv([key, 'PLACEHOLDER=', 'BLANK=   ', 'export ALSO=', 'MEANT=""', "TOO=''"].join('\n'));
+  assert.deepEqual(entries.map(({ key, value }) => [key, value]), [
+    ['MEANT', ''],
+    ['TOO', ''],
+  ]);
+  assert.deepEqual(problems, [1, 2, 3, 4].map((line) => ({ line, reason: 'no value: write KEY="" for an empty one' })));
+  assert.ok(!JSON.stringify(problems).includes('c2stbGl2'));
+});
+
 test('invalid keys are rejected', () => {
   rejected('1LEADING_DIGIT=x', /key must match/);
   rejected('has-hyphen=x', /key must match/);
@@ -340,6 +351,8 @@ test('every accepted value round-trips exactly through a quoted encoding', () =>
 const AWKWARD = [
   'plain',
   '',
+  '=',
+  '==',
   'db-demo://u:p@h:5432/db?ssl=require',
   'with space',
   '   padded   ',

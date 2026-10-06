@@ -115,10 +115,15 @@ export function parseDotenv(input: string): ParseResult {
       const comment = rest.indexOf(' #');
       if (comment !== -1) rest = rest.slice(0, comment);
       value = rest.trim();
-      // Nothing but "=" after the "=": base64's padding, `c2stbGl2ZS0xMjM0NTY3OA==`, a secret pasted on its
-      // own line, its text before the padding taken for a key. Never named: that key is the secret.
+      // A secret pasted on its own line, its base64 padding taken for the "=": `c2stbGl2ZS0xMjM0NTY3OA==`
+      // leaves "=" after it, `c2stbGl2ZS0xMjM0NTY3ODk=` nothing. Its text would be the key: never named.
+      // An empty value is meant only quoted, `KEY=""`; unquoted, it can't be told from that padding.
       if (/^=+$/.test(value)) {
         problems.push({ line: lineNumber, reason: 'a value pasted on its own, not KEY=value: only "=" follows what would be its key' });
+        continue;
+      }
+      if (value === '') {
+        problems.push({ line: lineNumber, reason: 'no value: write KEY="" for an empty one' });
         continue;
       }
     }
@@ -224,7 +229,8 @@ export function assertEnvironmentEntry(key: string, value: string): void {
 }
 
 function quoteDotenv(value: string): string {
-  if (PLAIN_VALUE.test(value)) return value;
+  // Empty, or only "=", a value is quoted: unquoted, the parser refuses it as a pasted secret's padding.
+  if (PLAIN_VALUE.test(value) && !/^=*$/.test(value)) return value;
   if (!/['\n\r]/.test(value)) return `'${value}'`;
   const escaped = value.replace(/[\\"\n\r]/g, (character) => {
     switch (character) {
