@@ -124,6 +124,38 @@ test('Action changes beyond the literal pin, including a missing bump, require a
     }
 });
 
+const notes = '# Release notes\n\n## Unreleased\n\n**A change.** Its note.\n\n## 0.1.13 (2026-10-03)\n\n**An older change.**\n';
+const withNotes = ({ write }) => write('CHANGELOG.md', notes);
+
+test('the release notes may stay as they are, or have Unreleased headed with the new version', (t) => {
+    assert.equal(fixture(t, true, withNotes).check().versionOnly, true);
+    const f = fixture(t, true, withNotes);
+    f.edit('CHANGELOG.md', (text) => text.replace('## Unreleased\n', '## Unreleased\n\n## 0.1.14 (2026-10-07)\n'));
+    assert.deepEqual(f.check(), { versionOnly: true, version: '0.1.14', reason: 'Only synchronized release versions changed' });
+});
+
+test('any other edit of the release notes requires all checks', (t) => {
+    for (const change of [
+        (text) => text.replace('## Unreleased\n', '## Unreleased\n\n## 0.1.15 (2026-10-07)\n'),
+        (text) => text.replace('## Unreleased\n', '## Unreleased\n\n## 0.1.14 (2026-02-30)\n'),
+        (text) => text.replace('## Unreleased\n', '## Unreleased\n\n## 0.1.14 (7 October 2026)\n'),
+        (text) => text.replace('## Unreleased\n', '## Unreleased\n## 0.1.14 (2026-10-07)\n'),
+        (text) => text.replace('## Unreleased\n', '## 0.1.14 (2026-10-07)\n'),
+        (text) => text.replace('## Unreleased\n', '## Unreleased\n\n## 0.1.14 (2026-10-07)\n').replace('Its note.', 'Its note, reworded.'),
+        (text) => text.replace('## Unreleased\n', '## Unreleased\n\n**A late change.**\n\n## 0.1.14 (2026-10-07)\n'),
+        (text) => `${text.replace('## Unreleased\n', '## Unreleased\n\n## 0.1.14 (2026-10-07)\n')}\n**Another.**\n`,
+        (text) => text.replace('Its note.', 'Its note, reworded.'),
+    ]) {
+        const f = fixture(t, true, withNotes);
+        f.edit('CHANGELOG.md', change);
+        assert.equal(f.check().versionOnly, false, change.toString());
+    }
+    // Without an Unreleased heading, the notes have nothing a bump changes.
+    const f = fixture(t, true, ({ write }) => write('CHANGELOG.md', notes.replace('## Unreleased\n\n', '')));
+    f.edit('CHANGELOG.md', (text) => text.replace('# Release notes\n', '# Release notes\n\n## Unreleased\n\n## 0.1.14 (2026-10-07)\n'));
+    assert.equal(f.check().versionOnly, false);
+});
+
 test('deletions, renames, new files and permission changes are not version bumps', (t) => {
     for (const change of [
         (f) => rmSync(join(f.dir, 'packages/core/src/untouched.ts')),

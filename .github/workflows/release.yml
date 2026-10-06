@@ -1,7 +1,8 @@
 name: Release
 
 # Push a tag naming the packages' version (`pnpm bump 0.2.0`, merged, then
-# `git tag v0.2.0 && git push origin v0.2.0`) to publish it to npm.
+# `git tag v0.2.0 && git push origin v0.2.0`) to publish it to npm. The bump
+# also heads the release notes' Unreleased section with the version.
 on:
   push:
     tags: ['v*']

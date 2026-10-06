@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.1 (2026-10-06)
+
 **`/access` is gone.** It only sent links from before 0.4.0 on to
 `/users`. `coffre update` deletes its route file,
 `app/src/routes/_coffre/access.tsx`, from a 0.4.0 deployment, unless the
@@ -23,6 +25,8 @@ vault's HTTP server ended one idle for six seconds, Node's default. A call
 the server sent on it at that moment failed with ECONNRESET, and its
 request answered 503 "coffre cannot check who you are right now". The
 vault now leaves idle connections open, for the server's next calls.
+
+## 0.4.0 (2026-10-06)
 
 **0.4.0 is a clean break.** There is no upgrade from 0.3 or earlier: deploy
 0.4.0 afresh, on a new database, and bring over what you keep with
@@ -375,6 +379,8 @@ gone mid-upload, ended the whole dev server with an empty `✘ [ERROR]`
 `pnpm conformance`, would stop partway. `coffre update` now moves wrangler
 and the Workers types with the plugin.
 
+## 0.3.0 (2026-10-05)
+
 **Everything the API does, the CLI does.** The commands that were the
 browser's alone:
 
@@ -491,6 +497,8 @@ domain. When Cloudflare refuses wrangler's login a call this needs, setup
 asks for an API token, hidden, saying which permissions it needs, and its
 wranglers deploy under it ([deploy.md](docs/deploy.md#a-domain-whose-dns-is-elsewhere)).
 
+## 0.2.0 (2026-10-04)
+
 **A deployment's app is a TanStack Start app of its own** (0.2.0), a
 conventional one, and coffre is a set of pieces it mounts, as an auth SDK's
 are. Vite builds the app once, and nothing bundles it again: on Workers,
@@ -559,6 +567,8 @@ build app` and its deploy command `npx wrangler deploy -c
 app/dist/server/wrangler.json`; `pnpm run deploy` does both. On Node,
 `pnpm build`, then restart both processes.
 
+## 0.1.18 (2026-10-04)
+
 **Workers deployments: signed-in pages no longer go blank.** wrangler bundles
 with esbuild's `keep_names` on, which wraps functions in an `__name` helper
 that only the Worker has; seroval, which streams a page's data, writes its own
@@ -588,6 +598,8 @@ answer; when neither claims the CLI, it says so and prints what each manager
 would run. Run in a deployment, `pnpm coffre update` now knows its CLI as
 one of the deployment's packages.
 
+## 0.1.16 (2026-10-04)
+
 `coffre update` moves a deployment from pnpm 10 to 11 without a terminal:
 pnpm's question about removing `node_modules` no longer stops it. When a
 lockfile another pnpm wrote holds a package too young for this one, it first
@@ -596,11 +608,15 @@ only when no older version fits does it offer to wait or to let the package
 through. An install that fails leaves `package.json`, `pnpm-workspace.yaml`
 and `pnpm-lock.yaml` as they were, byte for byte, and says so.
 
+## 0.1.15 (2026-10-03)
+
 Deployments pin pnpm: `coffre init` writes `"packageManager": "pnpm@11.8.0"`,
 and `coffre update` adds it to a deployment that lacks it, so every
 install, Workers Builds' included, holds `minimumReleaseAge` alike. When
 pnpm holds a package back, `coffre update` says when it is old enough, and
 offers to wait or to let it through by name until then, never silently.
+
+## 0.1.14 (2026-10-03)
 
 `coffre update` and `coffre migrate` upgrade a deployment: update the CLI
 and the deployment's coffre packages, deploy, then migrate the database
@@ -610,6 +626,8 @@ apply. `/me` now tells owners and root admins the version an instance runs
 and how many of its migrations the database has applied; owners see a
 banner while some are pending, and the CLI says so once a day. `pnpm
 migrate` stays, for automation. [Upgrading](docs/deploy.md#upgrading).
+
+## 0.1.12 (2026-10-03)
 
 Syncs are removed; use a service token with `coffre run` or `coffre export`,
 or the GitHub Action.

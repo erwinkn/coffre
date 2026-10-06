@@ -420,10 +420,13 @@ Two traps, both noted in `pnpm-workspace.yaml`:
   writes caret ranges. Add dependencies with `pnpm run add:dep`, and
   `pnpm check:pins` catches any that slip through.
 
-**Releasing.** `pnpm bump 0.4.1`, merged, then a pushed tag, `v0.4.1`: the
-release workflow publishes all eight packages with npm's trusted publishing
-(the workflow's OIDC token, no stored token) and provenance, so each version
-on npm names the commit and run that built it.
+**Releasing.** Each change adds its note under `## Unreleased` in the
+[release notes](CHANGELOG.md). `pnpm bump 0.4.2` moves every package's
+version and heads those notes `## 0.4.2 (<today>)`, under a new, empty
+`## Unreleased`. Merged, then a pushed tag, `v0.4.2`: the release workflow
+publishes all eight packages with npm's trusted publishing (the workflow's
+OIDC token, no stored token) and provenance, so each version on npm names
+the commit and run that built it.
 
 ## Not in scope
 

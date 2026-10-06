@@ -10,8 +10,8 @@ const root = resolve(import.meta.dirname, '..');
 function checkout(t) {
     const dir = mkdtempSync(join(tmpdir(), 'coffre-action-pin-'));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
-    const files = ['package.json', 'dev/package.json', 'action/action.yml', 'scripts/bump.mjs', 'scripts/check-pins.mjs', 'scripts/action-pin.mjs',
-        'packages/cli/src/deployment.ts', 'packages/cli/src/init.ts'];
+    const files = ['package.json', 'dev/package.json', 'action/action.yml', 'CHANGELOG.md', 'scripts/bump.mjs', 'scripts/check-pins.mjs', 'scripts/action-pin.mjs',
+        'scripts/changelog.mjs', 'packages/cli/src/deployment.ts', 'packages/cli/src/init.ts'];
     for (const base of ['packages', 'examples']) {
         for (const name of readdirSync(join(root, base))) files.push(`${base}/${name}/package.json`);
     }
@@ -32,6 +32,11 @@ test('bump moves the Action with the packages and examples; check:pins rejects d
     const bumped = run(dir, 'bump.mjs', '9.8.7-test.1');
     assert.equal(bumped.status, 0, bumped.stderr);
     assert.match(readFileSync(join(dir, 'action/action.yml'), 'utf8'), /npx -y @coffre\/cli@9\.8\.7-test\.1 "\$@"/);
+    const today = new Date().toISOString().slice(0, 10);
+    assert.equal(
+        readFileSync(join(dir, 'CHANGELOG.md'), 'utf8'),
+        readFileSync(join(root, 'CHANGELOG.md'), 'utf8').replace('\n## Unreleased\n', `\n## Unreleased\n\n## 9.8.7-test.1 (${today})\n`),
+    );
     assert.equal(run(dir, 'check-pins.mjs').status, 0);
     for (const pin of ['9.8.6', '^9.8.7-test.1']) {
         const path = join(dir, 'action/action.yml');
@@ -40,6 +45,17 @@ test('bump moves the Action with the packages and examples; check:pins rejects d
         assert.equal(checked.status, 1);
         assert.match(checked.stderr, /action\/action.yml/);
     }
+});
+
+test('bump leaves release notes without an Unreleased heading, or none, as they are', (t) => {
+    const dir = checkout(t);
+    const path = join(dir, 'CHANGELOG.md');
+    writeFileSync(path, '# Release notes\n\n## 9.8.6 (2026-10-06)\n');
+    assert.equal(run(dir, 'bump.mjs', '9.8.7').status, 0);
+    assert.equal(readFileSync(path, 'utf8'), '# Release notes\n\n## 9.8.6 (2026-10-06)\n');
+    rmSync(path);
+    assert.equal(run(dir, 'bump.mjs', '9.8.8').status, 0);
+    assert.equal(existsSync(path), false);
 });
 
 test('a malformed or missing Action fails before bump edits any manifests', (t) => {

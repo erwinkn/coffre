@@ -4,14 +4,17 @@
 //
 //   pnpm bump 0.2.0
 //
-// It edits package.json files, the examples' pnpm with them, and the Action's CLI pin: building, tagging and publishing are
-// separate steps, and none of them happens here.
+// It edits package.json files, the examples' pnpm with them, the Action's CLI
+// pin, and the release notes, whose `## Unreleased` it heads with the version
+// and today's date (UTC), under a new, empty one: building, tagging and
+// publishing are separate steps, and none of them happens here.
 
 import { readdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { bumpPins, pinPackageManager } from '../packages/cli/src/deployment.ts';
 import { bumpAction } from './action-pin.mjs';
+import { headChangelog } from './changelog.mjs';
 
 const root = new URL('..', import.meta.url).pathname;
 const version = process.argv[2];
@@ -52,7 +55,12 @@ for (const example of readdirSync(join(root, 'examples'))) {
     pinPackageManager(dir, pnpm);
 }
 writeFileSync(actionPath, action);
-console.log(`coffre ${version}: every package, both examples and the Action. Run pnpm install to relink the examples.`);
+const changelogPath = join(root, 'CHANGELOG.md');
+const notes = existsSync(changelogPath) ? readFileSync(changelogPath, 'utf8') : '';
+const headed = headChangelog(notes, version, new Date().toISOString().slice(0, 10));
+if (headed !== notes) writeFileSync(changelogPath, headed);
+const moved = headed !== notes ? 'every package, both examples, the Action and the release notes' : 'every package, both examples and the Action';
+console.log(`coffre ${version}: ${moved}. Run pnpm install to relink the examples.`);
 
 // For the release notes: whatever a published package pins that is younger
 // than the minimumReleaseAge every deployment holds. Ranges below those pins

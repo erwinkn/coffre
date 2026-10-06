@@ -6,6 +6,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { actionPin, bumpAction } from './action-pin.mjs';
+import { headChangelog, releaseDate } from './changelog.mjs';
 
 const versionPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 function validVersion(value) {
@@ -92,6 +93,17 @@ export function versionOnly(base, head = 'HEAD', cwd = process.cwd()) {
             const action = read(base, 'action/action.yml');
             if (actionPin(action) !== before) return full('Action pin disagrees');
             expected.set('action/action.yml', bumpAction(action, after));
+        }
+        // The release notes may keep their Unreleased heading, or have it
+        // headed with the new version, on whichever day the bump ran.
+        if (paths.includes('CHANGELOG.md')) {
+            const notes = read(base, 'CHANGELOG.md');
+            const headed = read(head, 'CHANGELOG.md');
+            if (headed !== notes) {
+                const date = releaseDate(headed, after);
+                if (!date) return full('Release notes change beyond the release heading');
+                expected.set('CHANGELOG.md', headChangelog(notes, after, date));
+            }
         }
 
         // Raw metadata includes permissions, symlinks, additions and deletions.
