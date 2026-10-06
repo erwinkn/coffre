@@ -179,7 +179,7 @@ export const SHOW_VALUE: Tool = changeTool({
   name: 'show_secret_value',
   title: "Show a secret's value to the person",
   description:
-    "Show the person a secret's value on coffre's own page, after they press Reveal there. The value is never sent to you or this conversation: use this when the person wants to see a value; read_secret_values is the one that sends values to you.",
+    "Show the person a secret's value on coffre's own page, after they press Reveal there. The value is never sent to you or this conversation: use this when the person wants to see a value; reveal_secret_values is the one that sends values to you.",
   scope: 'read',
   readOnly: true,
   idempotent: true,

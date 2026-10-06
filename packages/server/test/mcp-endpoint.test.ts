@@ -36,7 +36,7 @@ for (const mode of ['modern', 'legacy'] as const) {
       assert.deepEqual(tools.slice(0, readTools.length).map((tool) => tool.name), readTools);
       assert.ok(tools.slice(0, readTools.length).every((tool) => tool.annotations?.readOnlyHint === true));
       // Every tool is listed to every token, as the spec allows: a client steps up when it needs one. Only reads say they are.
-      const reads = new Set([...readTools, 'show_secret_value', 'read_secret_values']);
+      const reads = new Set([...readTools, 'show_secret_value', 'reveal_secret_values']);
       assert.ok(tools.length > reads.size && tools.every((tool) => tool.annotations?.readOnlyHint === reads.has(tool.name)), JSON.stringify(tools.map((tool) => [tool.name, tool.annotations?.readOnlyHint])));
       assert.ok(tools.every((tool) => tool.annotations?.openWorldHint === false));
       // No tool takes a value: an agent cannot supply one.

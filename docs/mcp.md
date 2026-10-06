@@ -71,7 +71,7 @@ With **Read**, a connected client can, as you:
 - `show_secret_value`: shows you a secret's value on coffre's page, when
   you press Reveal there. The value is never sent to the client.
 
-With **Reveal values**, `read_secret_values` sends the values of a secret or
+With **Reveal values**, `reveal_secret_values` sends the values of a secret or
 an environment to the client, and they become part of the conversation:
 its answer says so first. The consent page warns before you grant it.
 
