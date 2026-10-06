@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { formatDotenv, formatShellExports, parseDotenv } from '../src/dotenv.ts';
+import { secretKey } from '../src/schemas.ts';
 
 /**
  * The parser is the one place where attacker-influenceable text becomes
@@ -214,6 +215,25 @@ test('a problem names its key when the line has a valid one, and never carries t
     ],
   );
   assert.ok(!JSON.stringify(problems).includes('51Habc123'), 'a value, or part of one, in a problem');
+});
+
+test("a key is one exactly when the API's secretKey says so", () => {
+  for (const key of ['DATABASE_URL', '_PRIVATE', 'a', 'mixedCase9', 'A'.repeat(128), 'A'.repeat(129), '9LEADING', 'with-dash', 'with.dot', 'é', 'c2stbGl2ZS0xMjM0NTY3OA']) {
+    const { entries } = parseDotenv(`${key}=x`);
+    assert.equal(entries.length === 1, secretKey.safeParse(key).success, key);
+  }
+});
+
+test('a bare base64 secret pasted on its own line is refused, and never named', () => {
+  // Each a secret alone: padded or not, starting with a letter or not, with base64's + and /.
+  const pasted = ['c2stbGl2ZS0xMjM0NTY3OA==', 'export c2stbGl2ZS0xMjM0NTY3OA==', 'c2stbGl2ZS0xMjM0NTY3ODkw', '9Kx2c3RlbS1rZXk+bGl2ZQ==', 'S2V5/c3Rl+bS1rZXk=', 'c2stbGl2ZS0xMjM0NTY3OA===='];
+  const { entries, problems } = parseDotenv(pasted.join('\n'));
+  assert.deepEqual(entries, []);
+  assert.deepEqual(problems.map(({ line, key }) => [line, key]), pasted.map((_, i) => [i + 1, undefined]));
+  for (const each of pasted) assert.ok(!JSON.stringify(problems).includes(each.replace(/^export |=+$/g, '').slice(0, 10)), each);
+  assert.match(problems[0]!.reason, /a value pasted on its own/);
+  // Quoted, "=" is a value its author meant.
+  assert.deepEqual(values('A="=="\nB=\'=\''), { A: '==', B: '=' });
 });
 
 test('invalid keys are rejected', () => {

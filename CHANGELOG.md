@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+**A base64 secret pasted on its own line is not imported under its own
+text.** In a `.env`, `c2stbGl2ZS0xMjM0NTY3OA==` read as the key
+`c2stbGl2ZS0xMjM0NTY3OA` with the value `=`. `coffre import` and the web
+app's import now refuse a line whose value is only `=`, as one more line
+they can't parse, named by its number alone. A key is one exactly when the
+API's `secretKey` says so.
+
 **coffre's logo for the GitHub App setup makes.** Neither an app's
 manifest nor GitHub's API sets a logo, so setup can't. Once it has made the
 app, it prints where to upload one, the app's settings page, under Display

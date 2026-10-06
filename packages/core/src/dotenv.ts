@@ -25,6 +25,11 @@ export type ParseResult = {
   problems: ParseProblem[];
 };
 
+/**
+ * A secret's key, as the API's `secretKey` (`schemas.ts`) has it: a plain
+ * pattern, so that the browser's import does not carry zod. The tests hold
+ * the two in agreement.
+ */
 const KEY_RE = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 
 export function parseDotenv(input: string): ParseResult {
@@ -110,6 +115,12 @@ export function parseDotenv(input: string): ParseResult {
       const comment = rest.indexOf(' #');
       if (comment !== -1) rest = rest.slice(0, comment);
       value = rest.trim();
+      // Nothing but "=" after the "=": base64's padding, `c2stbGl2ZS0xMjM0NTY3OA==`, a secret pasted on its
+      // own line, its text before the padding taken for a key. Never named: that key is the secret.
+      if (/^=+$/.test(value)) {
+        problems.push({ line: lineNumber, reason: 'a value pasted on its own, not KEY=value: only "=" follows what would be its key' });
+        continue;
+      }
     }
 
     // A NUL byte cannot survive being put in a process environment: execve
