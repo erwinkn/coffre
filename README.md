@@ -421,9 +421,12 @@ Two traps, both noted in `pnpm-workspace.yaml`:
   `pnpm check:pins` catches any that slip through.
 
 **Releasing.** Each change adds its note under `## Unreleased` in the
-[release notes](CHANGELOG.md). `pnpm bump 0.4.2` moves every package's
-version and heads those notes `## 0.4.2 (<today>)`, under a new, empty
-`## Unreleased`. Merged, then a pushed tag, `v0.4.2`: the release workflow
+[release notes](CHANGELOG.md). A release is `pnpm bump 0.4.2`, a commit and
+a PR, with no `pnpm install` and no hand edit: the bump moves every
+package's version, the examples' pins and their entries in
+`pnpm-lock.yaml`, and heads those notes `## 0.4.2 (<today>)`, under a new,
+empty `## Unreleased`. Validate proves that diff version-only and skips the
+full suite. Merged, then a pushed tag, `v0.4.2`: the release workflow
 publishes all eight packages with npm's trusted publishing (the workflow's
 OIDC token, no stored token) and provenance, so each version on npm names
 the commit and run that built it.

@@ -1,20 +1,24 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
+
+import { versionOnly } from './version-only.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 
 function checkout(t) {
     const dir = mkdtempSync(join(tmpdir(), 'coffre-action-pin-'));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
-    const files = ['package.json', 'dev/package.json', 'action/action.yml', 'CHANGELOG.md', 'scripts/bump.mjs', 'scripts/check-pins.mjs', 'scripts/action-pin.mjs',
-        'scripts/changelog.mjs', 'packages/cli/src/deployment.ts', 'packages/cli/src/init.ts'];
+    const files = ['package.json', 'pnpm-workspace.yaml', 'pnpm-lock.yaml', '.npmrc', 'dev/package.json', 'action/action.yml', 'CHANGELOG.md',
+        'scripts/bump.mjs', 'scripts/check-pins.mjs', 'scripts/action-pin.mjs', 'scripts/changelog.mjs', 'scripts/lockfile.mjs',
+        'packages/cli/src/deployment.ts', 'packages/cli/src/init.ts'];
     for (const base of ['packages', 'examples']) {
         for (const name of readdirSync(join(root, base))) files.push(`${base}/${name}/package.json`);
     }
+    for (const name of readdirSync(join(root, 'examples'))) files.push(`examples/${name}/pnpm-workspace.yaml`);
     for (const file of files) {
         mkdirSync(dirname(join(dir, file)), { recursive: true });
         cpSync(join(root, file), join(dir, file));
@@ -45,6 +49,31 @@ test('bump moves the Action with the packages and examples; check:pins rejects d
         assert.equal(checked.status, 1);
         assert.match(checked.stderr, /action\/action.yml/);
     }
+});
+
+test('a release is bump and a commit: pnpm takes its lockfile as it is, and the version-only gate its diff', (t) => {
+    const dir = checkout(t);
+    const git = (...args) => execFileSync('git', ['-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Bump test', '-c', 'user.email=bump@example.test', ...args], { cwd: dir, encoding: 'utf8' }).trim();
+    writeFileSync(join(dir, '.gitignore'), 'node_modules\n');
+    git('init', '-q');
+    git('add', '-A');
+    git('commit', '-qm', 'base');
+    const bumped = run(dir, 'bump.mjs', '9.8.7');
+    assert.equal(bumped.status, 0, bumped.stderr);
+    git('commit', '-qam', 'bump');
+    assert.deepEqual(versionOnly('HEAD~1', 'HEAD', dir), { versionOnly: true, version: '9.8.7', reason: 'Only synchronized release versions changed' });
+    // A frozen install fails on any manifest the lockfile disagrees with.
+    const install = spawnSync('pnpm', ['install', '--frozen-lockfile', '--lockfile-only'], { cwd: dir, encoding: 'utf8', timeout: 60_000 });
+    assert.equal(install.status, 0, install.stdout + install.stderr);
+});
+
+test('a lockfile without the examples\' pins fails before bump edits any manifests', (t) => {
+    const dir = checkout(t);
+    const before = readFileSync(join(dir, 'packages/cli/package.json'), 'utf8');
+    const path = join(dir, 'pnpm-lock.yaml');
+    writeFileSync(path, readFileSync(path, 'utf8').replace(/(\n {6}'@coffre\/cli':\n {8}specifier: )\S+/, '$1workspace:*'));
+    assert.notEqual(run(dir, 'bump.mjs', '9.8.7').status, 0);
+    assert.equal(readFileSync(join(dir, 'packages/cli/package.json'), 'utf8'), before);
 });
 
 test('bump leaves release notes without an Unreleased heading, or none, as they are', (t) => {
