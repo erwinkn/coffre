@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.5 (2026-10-06)
+
 **`run_with_secrets` is gone from the MCP tools.** It only wrote out a
 command, which the model can write itself. The server's instructions now
 tell the model to run `coffre run <project>/<env> -- <command>` in the
