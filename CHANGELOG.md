@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.3 (2026-10-06)
+
 **`coffre update` writes the route tree with the route files it adds.** A
 release that adds or removes a page file left the committed
 `app/src/routeTree.gen.ts` stale until the next build rewrote it, so an
