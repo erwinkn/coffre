@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+**Node: a vault in its own process no longer fails a call now and then.**
+The server keeps its connections to the vault's socket open, and the
+vault's HTTP server ended one idle for six seconds, Node's default. A call
+the server sent on it at that moment failed with ECONNRESET, and its
+request answered 503 "coffre cannot check who you are right now". The
+vault now leaves idle connections open, for the server's next calls.
+
 **0.4.0 is a clean break.** There is no upgrade from 0.3 or earlier: deploy
 0.4.0 afresh, on a new database, and bring over what you keep with
 `coffre export` ([deploy.md](docs/deploy.md#from-a-release-before-040)).

@@ -79,6 +79,12 @@ export async function serveVault(config: NodeVaultConfig & { socket: string }): 
     }
   });
 
+  // The server's agent keeps its connections open for its next calls, so
+  // the vault never ends an idle one. Node's default did, after five seconds
+  // and one more, racing the server's next call on it, which then failed
+  // with ECONNRESET: "coffre cannot check who you are right now".
+  server.keepAliveTimeout = 0;
+
   // A socket file left by a vault that did not stop cleanly would make
   // listen fail; anything else at that path is not ours to remove.
   if (existsSync(config.socket)) {
