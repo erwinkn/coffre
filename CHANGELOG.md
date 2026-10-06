@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.2 (2026-10-06)
+
 **The account page is in tabs, and shows how to connect Claude.** Profile
 (who you are, and the accounts you sign in with), Sessions, Connected apps
 and Appearance are routes under `/account`, as a project's tabs are, each

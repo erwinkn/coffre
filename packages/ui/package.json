@@ -1,6 +1,6 @@
 {
   "name": "@coffre/ui",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "coffre's pages, for a deployment's own TanStack Start app: its router, and a Vite plugin for its build.",
   "license": "MIT",
   "repository": {
