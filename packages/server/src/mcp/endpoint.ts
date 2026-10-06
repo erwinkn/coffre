@@ -23,15 +23,17 @@ import type { ApprovalRow } from '../db/queries.ts';
 import { callDigest, MAX_PENDING, OUTCOME_SECONDS, statusOf, type Outcome } from './approvals.ts';
 import type { McpConnection } from './service.ts';
 import { openState, sealState } from './tokens.ts';
-import { INSTRUCTIONS, listed, TOOL_BY_NAME, TOOLS, type Tool } from './tools.ts';
+import { INSTRUCTIONS, listed, TOOL_BY_NAME, TOOLS, type Tool, usable } from './tools.ts';
 
 /** The revision coffre speaks, stateless. */
 export const PROTOCOL_VERSION = '2026-07-28';
 /** The 2025 era's, answered through `initialize`, without a session. */
 export const LEGACY_VERSIONS = ['2025-11-25', '2025-06-18'] as const;
 const BODY_BYTES = 256 * 1024;
-/** How long a client may keep the tool list and the server's description: every token sees the same. */
+/** How long a client may keep the server's description, which every token sees the same. */
 const TTL_MS = 3_600_000;
+/** How long a client may keep its person's tool list, theirs alone: a role granted or taken shows within it. */
+const LIST_TTL_MS = 300_000;
 
 const META = {
   protocolVersion: 'io.modelcontextprotocol/protocolVersion',
@@ -171,7 +173,7 @@ async function modern(
         cacheScope: 'public',
       });
     case 'tools/list':
-      return complete({ tools: TOOLS.map(listed), ttlMs: TTL_MS, cacheScope: 'public' });
+      return complete({ tools: toolsFor(caller), ttlMs: LIST_TTL_MS, cacheScope: 'private' });
     case 'tools/call':
       return call(request, runtime, sourceIp, caller, message, id, (result) => complete(result), { era: 'modern', elicitsUrl: elicitsUrl(capabilities as Record<string, unknown>) });
     default:
@@ -209,12 +211,22 @@ async function legacy(
     case 'ping':
       return rpc(id, { result: {} });
     case 'tools/list':
-      return rpc(id, { result: { tools: TOOLS.map(listed) } });
+      return rpc(id, { result: { tools: toolsFor(caller) } });
     case 'tools/call':
       return call(request, runtime, sourceIp, caller, message, id, (result) => rpc(id, { result }), { era: 'legacy', elicitsUrl: false });
     default:
       return rpc(id, { error: { code: CODE.methodNotFound, message: `Method not found: ${message.method}` } });
   }
+}
+
+/**
+ * The tools a person's roles let them use somewhere, as they are on this
+ * request: the vault's answer the token check already read, so listing
+ * costs no read of its own. A tool only the connection's scopes withhold
+ * stays listed: calling it asks for the scope.
+ */
+function toolsFor(connection: McpConnection): Record<string, unknown>[] {
+  return TOOLS.filter((tool) => usable(connection.caller, tool)).map(listed);
 }
 
 // --- tools/call ---------------------------------------------------------------

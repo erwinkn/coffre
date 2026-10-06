@@ -88,8 +88,11 @@ and never streams, because nothing coffre does takes long enough to need
 progress. It implements:
 
 - **Modern methods:** `server/discover`, `tools/list` and `tools/call`.
-  `tools/list` carries `ttlMs` and `cacheScope: "public"`, because every
-  token sees the same list. Any other method answers `404` with `-32601`.
+  `tools/list` is the person's own (section 5), so it carries
+  `cacheScope: "private"` and a `ttlMs` of five minutes: a role granted or
+  taken shows within them. `server/discover`, the same for every token,
+  stays `public`, for an hour. Any other method answers `404` with
+  `-32601`.
 - **Header checks.** `MCP-Protocol-Version`, `Mcp-Method` and `Mcp-Name` must
   match the body, or the answer is `400` `HeaderMismatch` (`-32020`).
   `Mcp-Name` is decoded from its Base64 form first.
@@ -390,8 +393,18 @@ again.
    connection's scopes don't allow, by a table of `route → scope`. So a
    tool with a bug can't reach `POST /reveals` without `reveal`.
 
-The tool list is the same for every token, as the spec allows. Clients see
-what they could do and step up when they need to.
+**The tool list is the person's** (D76). `tools/list`, in either era,
+leaves out a tool no role the person holds now reaches anywhere, and keeps
+a tool their roles reach but their connection's scopes withhold: clients
+see what they could do, and step up when they need to. Each tool declares
+what it needs: any member (`whoami`, `list_projects`); an instance owner
+(`describe_member`, `create_project`, `admit_member`, `offboard_member`,
+the service-token and trust tools); or a permission held somewhere, as a
+grant's role gives it, instance owners holding the project-only ones and
+`audit.read` everywhere, as the API lets them. The list is computed on
+each request from the `vault.access` answer the token check already read,
+so it costs no read of its own. It only hides: `tools/call` is unchanged,
+and a hidden tool called by name is refused by the same checks as before.
 
 **Picking scopes at connection.** Clients ask for what the `401` and the
 resource metadata name, `read`. Claude Desktop never asked for more:

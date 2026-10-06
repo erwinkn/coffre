@@ -5,9 +5,11 @@
 // it to its connection's. Read, here: what is there, never a value. The
 // tools that change something are in changes.ts, each through an approval.
 import { apiMember, type CoffreClient } from '@coffre/client';
+import { PROJECT_ONLY_PERMISSIONS, type Permission } from '@coffre/core/access';
 import type { McpScope } from '@coffre/core/mcp';
 import { z } from 'zod';
 
+import { canAnywhere, type Caller } from '../api/caller.ts';
 import { CHANGE_TOOLS, SHOW_VALUE, type Change } from './changes.ts';
 import type { McpConnection } from './service.ts';
 
@@ -22,6 +24,8 @@ export type Tool<I extends z.ZodObject = z.ZodObject> = {
   title: string;
   description: string;
   scope: McpScope;
+  /** Who could ever use it, by their roles (`usable`): `tools/list` leaves it out for anyone else. */
+  needs: Need;
   /** The hints, for the client: coffre does not rely on them. */
   readOnly: boolean;
   idempotent: boolean;
@@ -52,6 +56,7 @@ function tool<I extends z.ZodObject>(definition: Tool<I>): Tool {
 const READ_TOOLS: readonly Tool[] = [
   tool({
     name: 'whoami',
+    needs: 'anyone',
     title: 'Who am I',
     description: 'The person this connection acts as, their role, every project and environment they can reach, and what this connection may do.',
     scope: 'read',
@@ -67,6 +72,7 @@ const READ_TOOLS: readonly Tool[] = [
   }),
   tool({
     name: 'list_projects',
+    needs: 'anyone',
     title: 'List projects',
     description: 'The projects and environments the person can see, with their folders and whether they are archived.',
     scope: 'read',
@@ -80,6 +86,7 @@ const READ_TOOLS: readonly Tool[] = [
   }),
   tool({
     name: 'list_secrets',
+    needs: 'secret.read',
     title: 'List secrets',
     description: "An environment's keys: each one's version, folder, who last changed it and when, and whether it is a reference to another secret. Never a value.",
     scope: 'read',
@@ -93,6 +100,7 @@ const READ_TOOLS: readonly Tool[] = [
   }),
   tool({
     name: 'secret_history',
+    needs: 'secret.read',
     title: 'Secret history',
     description: "A secret's versions, newest first: who made each and when. Never a value.",
     scope: 'read',
@@ -106,6 +114,7 @@ const READ_TOOLS: readonly Tool[] = [
   }),
   tool({
     name: 'list_access',
+    needs: 'grant.manage',
     title: 'List access',
     description: "Who is a member, and their access. Given a place, a project or project/environment, only those who reach it, and through which grant.",
     scope: 'read',
@@ -119,6 +128,7 @@ const READ_TOOLS: readonly Tool[] = [
   }),
   tool({
     name: 'describe_member',
+    needs: 'owner',
     title: 'Describe a member',
     description: "What a member holds: their grants, and what they have read. For a service account, also its tokens and the CI workloads it trusts.",
     scope: 'read',
@@ -138,6 +148,7 @@ const READ_TOOLS: readonly Tool[] = [
   }),
   tool({
     name: 'read_audit_log',
+    needs: 'audit.read',
     title: 'Read the audit log',
     description: 'The audit log, newest first: what was done, by whom, where, allowed or refused. 50 entries a call unless asked; page back with `before`, the oldest seq seen.',
     scope: 'read',
@@ -161,6 +172,7 @@ const READ_TOOLS: readonly Tool[] = [
   }),
   tool({
     name: 'run_with_secrets',
+    needs: 'secret.read',
     title: 'Run a command with secrets',
     description:
       "How to run a command with an environment's secrets as environment variables, through coffre's CLI, so that no value enters this conversation. Checks the person may read the environment, and names the variables it would set.",
@@ -195,6 +207,7 @@ const READ_TOOLS: readonly Tool[] = [
 /** Values to the model: only with Reveal values, which the person ticked under its warning. */
 const REVEAL_VALUES = tool({
   name: 'reveal_secret_values',
+  needs: 'secret.read',
   title: 'Reveal secret values',
   description:
     "Read the values of one secret or of a whole environment, into this conversation: they become part of it, and of wherever it is kept. Use it only when the person wants you to see the values. To show the person a value without you seeing it, use show_secret_value; to give a command its values, run_with_secrets.",
@@ -217,6 +230,29 @@ const REVEAL_VALUES = tool({
 export const TOOLS: readonly Tool[] = [...READ_TOOLS, SHOW_VALUE, REVEAL_VALUES, ...CHANGE_TOOLS];
 
 export const TOOL_BY_NAME = new Map(TOOLS.map((entry) => [entry.name, entry]));
+
+/**
+ * Who could ever use a tool, by their roles: every member (`anyone`),
+ * instance owners alone (`owner`), or whoever holds a permission somewhere.
+ * Instance owners hold the project-only ones on every project, and read the
+ * whole audit log, as the API lets them.
+ */
+export type Need = 'anyone' | 'owner' | Permission;
+
+const OWNERS_HOLD: readonly Permission[] = [...PROJECT_ONLY_PERMISSIONS, 'audit.read'];
+
+/**
+ * Whether the person's roles, as they are now, let them use `tool`
+ * anywhere: what `tools/list` shows them. Their connection's scopes do not
+ * count: a tool they lack the scope for stays listed, and its call asks for
+ * the scope. Nor is this a check: each call is held to the API's, as ever.
+ */
+export function usable(caller: Caller, tool: Tool): boolean {
+  const { needs } = tool;
+  if (needs === 'anyone') return true;
+  if (needs === 'owner') return caller.isOwner;
+  return canAnywhere(caller, needs) || (caller.isOwner && OWNERS_HOLD.includes(needs));
+}
 
 /** A tool as `tools/list` describes it, in either era. */
 export function listed(entry: Tool): Record<string, unknown> {

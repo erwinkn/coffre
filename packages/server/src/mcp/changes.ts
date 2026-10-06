@@ -143,6 +143,7 @@ function secretTool<I extends z.ZodObject>(definition: Omit<ChangeTool<I>, 'scop
 function archiving(archived: boolean): Tool {
   return secretTool({
     name: archived ? 'archive_secret' : 'unarchive_secret',
+    needs: 'secret.archive',
     title: archived ? 'Archive a secret' : 'Unarchive a secret',
     description: archived
       ? `Archive a secret: coffre run and exports stop setting it, and every version stays restorable. ${approved}`
@@ -177,6 +178,7 @@ const shownAccess = (to: AccessChange) => (to === null ? 'nothing' : typeof to =
  */
 export const SHOW_VALUE: Tool = changeTool({
   name: 'show_secret_value',
+  needs: 'secret.read',
   title: "Show a secret's value to the person",
   description:
     "Show the person a secret's value on coffre's own page, after they press Reveal there. The value is never sent to you or this conversation: use this when the person wants to see a value; reveal_secret_values is the one that sends values to you.",
@@ -204,6 +206,7 @@ export const SHOW_VALUE: Tool = changeTool({
 export const CHANGE_TOOLS: readonly Tool[] = [
   secretTool({
     name: 'request_secret_value',
+    needs: 'secret.write',
     title: 'Ask the person to set a value',
     description: `Set a secret to a value the person types on coffre's page: neither you nor this conversation ever see it. Use it whenever a value is needed; never ask for one in the conversation. ${approved}`,
     idempotent: false,
@@ -229,6 +232,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
   }),
   secretTool({
     name: 'generate_secret_value',
+    needs: 'secret.write',
     title: 'Set a secret to a new random value',
     description: `Set a secret to a random value coffre makes on its own server: neither you nor the person sees it, and whatever reads the secret gets it. 32 random bytes in base64url unless asked otherwise. ${approved}`,
     idempotent: false,
@@ -258,6 +262,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
   }),
   secretTool({
     name: 'rename_secret',
+    needs: 'secret.write',
     title: 'Rename a secret',
     description: `Rename a secret's key, keeping its versions. Whatever reads the old name stops finding it. ${approved}`,
     idempotent: true,
@@ -282,6 +287,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
   archiving(false),
   secretTool({
     name: 'restore_secret_version',
+    needs: 'secret.write',
     title: 'Restore a version',
     description: `Make an earlier version of a secret current again, as a new version: secret_history lists them. ${approved}`,
     idempotent: false,
@@ -311,6 +317,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
   }),
   changeTool({
     name: 'create_project',
+    needs: 'owner',
     title: 'Create a project',
     description: `Create a project, with no environments yet. Instance owners only. ${approved}`,
     scope: 'write',
@@ -335,6 +342,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
   }),
   changeTool({
     name: 'create_environment',
+    needs: 'environment.manage',
     title: 'Create an environment',
     description: `Create an environment in a project, with no secrets yet. ${approved}`,
     scope: 'write',
@@ -361,6 +369,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
 
   changeTool({
     name: 'set_access',
+    needs: 'grant.manage',
     title: 'Change a member’s access',
     description: `Grant, change or revoke a member's roles at projects and environments; list_access shows what they hold. ${approved}`,
     scope: 'manage-access',
@@ -401,6 +410,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
   }),
   changeTool({
     name: 'admit_member',
+    needs: 'owner',
     title: 'Admit a member',
     description: `Admit a person, or a service account, as a member, with no access until granted some. ${approved}`,
     scope: 'manage-access',
@@ -425,6 +435,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
   }),
   changeTool({
     name: 'offboard_member',
+    needs: 'owner',
     title: 'Offboard a member',
     description: `Remove a member: their grants, sessions, tokens and linked accounts end, and the answer lists the secrets they read or wrote, to rotate. ${approved}`,
     scope: 'manage-access',
@@ -454,6 +465,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
   }),
   changeTool({
     name: 'issue_service_token',
+    needs: 'owner',
     title: 'Issue a service token',
     description: `Issue a bearer token for a service account. coffre shows the token to the person on its page, once; it never reaches you. ${approved}`,
     scope: 'manage-access',
@@ -481,6 +493,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
   }),
   changeTool({
     name: 'revoke_service_token',
+    needs: 'owner',
     title: 'Revoke a service token',
     description: `Revoke one of a service account's tokens, by the ID describe_member lists. ${approved}`,
     scope: 'manage-access',
@@ -506,6 +519,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
   }),
   changeTool({
     name: 'trust_workload',
+    needs: 'owner',
     title: 'Trust a CI workload',
     description: `Let CI runs whose ID token has these claims sign in as a service account, with no stored token. ${approved}`,
     scope: 'manage-access',
@@ -540,6 +554,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
   }),
   changeTool({
     name: 'untrust_workload',
+    needs: 'owner',
     title: 'Stop trusting a CI workload',
     description: `Remove one of a service account's trust bindings, by the ID describe_member lists. ${approved}`,
     scope: 'manage-access',
