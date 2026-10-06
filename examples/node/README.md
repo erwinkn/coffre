@@ -30,8 +30,9 @@ cp vault.env.example vault.env
 chmod 600 .env vault.env
 ```
 
-Fill in `PUBLIC_URL`, a GitHub OAuth app whose callback is
-`<PUBLIC_URL>/auth/callback/github`, and `ROOT_ADMINS`. Keep each env file
+Fill in `PUBLIC_URL`, a GitHub App whose callback is
+`<PUBLIC_URL>/auth/callback/github`, with read-only access to email
+addresses, or an OAuth app with that callback, and `ROOT_ADMINS`. Keep each env file
 readable only by its process's user.
 
 ## 2. The database and keys
@@ -52,7 +53,7 @@ each login holds only its rights.
 
 Then it shows five values on a screen of their own, which leaves nothing
 behind in your scrollback. Copy each with `c` into your password manager,
-beside the OAuth client secret, then into its file; `w` shows where each
+beside the GitHub client secret, then into its file; `w` shows where each
 goes. Nothing keeps a copy. There is one key for each process, so that the
 server, which faces the network, never holds what decrypts a value.
 

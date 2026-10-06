@@ -13,7 +13,8 @@
     // Where people reach coffre: an origin, no path. Add it as a route or
     // custom domain too.
     "PUBLIC_URL": "https://secrets.example.com",
-    // A GitHub OAuth app whose callback is <PUBLIC_URL>/auth/callback/github.
+    // A GitHub App whose callback is <PUBLIC_URL>/auth/callback/github, with
+    // read-only access to email addresses, or an OAuth app with that callback.
     "GITHUB_CLIENT_ID": "replace-with-your-client-id"
   },
   "secrets": {
