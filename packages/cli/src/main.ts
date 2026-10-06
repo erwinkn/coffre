@@ -803,7 +803,8 @@ async function importEnv(args: string[]): Promise<void> {
   const parsed = parseDotenv(content);
 
   for (const problem of parsed.problems) {
-    process.stderr.write(`  line ${problem.line}: ${problem.reason} (${problem.text})\n`);
+    // The key, when the line has one, and never the line: it may be a value.
+    process.stderr.write(`  line ${problem.line}: ${problem.reason}${problem.key === undefined ? '' : ` (${problem.key})`}\n`);
   }
   if (parsed.entries.length === 0) return;
 

@@ -52,4 +52,4 @@ export type ImportPlanEntry = { key: string; action: ImportAction; version: numb
 export type PrincipalReport = OffboardingReport;
 export type RemovedPrincipal = RemovedMember;
 
-export type ImportProblem = { line: number; text: string; reason: string };
+export type ImportProblem = { line: number; key?: string; reason: string };

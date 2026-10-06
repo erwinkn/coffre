@@ -13,7 +13,12 @@
  */
 
 export type ParsedEntry = { key: string; value: string; line: number };
-export type ParseProblem = { line: number; text: string; reason: string };
+/**
+ * A line that could not be parsed: its number, why, and its key when it has
+ * a valid one. Never the line's text: a line without its "=", or with a key
+ * that is not one, may be a secret pasted on its own, `c2stbGl2ZS0xMjM0NQ==`.
+ */
+export type ParseProblem = { line: number; key?: string; reason: string };
 
 export type ParseResult = {
   entries: ParsedEntry[];
@@ -45,17 +50,13 @@ export function parseDotenv(input: string): ParseResult {
 
     const equals = withoutExport.indexOf('=');
     if (equals === -1) {
-      problems.push({ line: lineNumber, text: trimmed, reason: 'no "=" on this line' });
+      problems.push({ line: lineNumber, reason: 'no "=" on this line' });
       continue;
     }
 
     const key = withoutExport.slice(0, equals).trim();
     if (!KEY_RE.test(key)) {
-      problems.push({
-        line: lineNumber,
-        text: key,
-        reason: 'key must match ^[A-Za-z_][A-Za-z0-9_]*$',
-      });
+      problems.push({ line: lineNumber, reason: 'key must match ^[A-Za-z_][A-Za-z0-9_]*$' });
       continue;
     }
 
@@ -67,7 +68,7 @@ export function parseDotenv(input: string): ParseResult {
       if (closing === -1) {
         problems.push({
           line: lineNumber,
-          text: key,
+          key,
           reason: 'unterminated double quote (multi-line values are not supported)',
         });
         continue;
@@ -79,7 +80,7 @@ export function parseDotenv(input: string): ParseResult {
       if (trailingIsSignificant(rest.slice(closing + 1))) {
         problems.push({
           line: lineNumber,
-          text: key,
+          key,
           reason: 'unexpected text after the closing quote',
         });
         continue;
@@ -89,7 +90,7 @@ export function parseDotenv(input: string): ParseResult {
       if (closing === -1) {
         problems.push({
           line: lineNumber,
-          text: key,
+          key,
           reason: 'unterminated single quote (multi-line values are not supported)',
         });
         continue;
@@ -99,7 +100,7 @@ export function parseDotenv(input: string): ParseResult {
       if (trailingIsSignificant(rest.slice(closing + 1))) {
         problems.push({
           line: lineNumber,
-          text: key,
+          key,
           reason: 'unexpected text after the closing quote',
         });
         continue;
@@ -118,14 +119,14 @@ export function parseDotenv(input: string): ParseResult {
     if (value.includes('\u0000')) {
       problems.push({
         line: lineNumber,
-        text: key,
+        key,
         reason: 'value contains a NUL byte, which cannot be passed in an environment',
       });
       continue;
     }
 
     if (seen.has(key)) {
-      problems.push({ line: lineNumber, text: key, reason: 'duplicate key in this file' });
+      problems.push({ line: lineNumber, key, reason: 'duplicate key in this file' });
       continue;
     }
     seen.add(key);

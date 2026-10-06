@@ -1892,8 +1892,8 @@ function ImportEnv({ project, environment }: { project: string; environment: str
               <ul style={{ margin: '0.375rem 0 0', paddingLeft: '1.1rem' }}>
                 {problems.map((problem) => (
                   <li key={problem.line}>
-                    Line {problem.line}: {problem.reason}{' '}
-                    <span className="mono">({problem.text})</span>
+                    Line {problem.line}: {problem.reason}
+                    {problem.key !== undefined && <span className="mono"> ({problem.key})</span>}
                   </li>
                 ))}
               </ul>
