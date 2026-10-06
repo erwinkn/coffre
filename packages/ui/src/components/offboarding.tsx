@@ -235,7 +235,7 @@ function IssuedTokens({ report }: { report: PrincipalReport }) {
               <tr key={token.id}>
                 <td>
                   <span className="cell-stack">
-                    <Link className="cell-link mono" to="/tokens/$token" params={{ token: serviceName(token.service) }}>
+                    <Link className="cell-link mono" to="/service-accounts/$account" params={{ account: serviceName(token.service) }}>
                       service:{serviceName(token.service)}
                     </Link>
                     <small>

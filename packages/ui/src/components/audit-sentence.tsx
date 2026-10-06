@@ -40,7 +40,7 @@ function PlaceLink({ path }: { path: string }) {
 /** A member from the log, which keeps `token:<name>`, shown as people read it: `service:<name>`, to its page. */
 function MemberLink({ member }: { member: string }) {
   return member.startsWith('token:') ? (
-    <Link to="/tokens/$token" params={{ token: serviceName(member) }}>
+    <Link to="/service-accounts/$account" params={{ account: serviceName(member) }}>
       {shownMember(member)}
     </Link>
   ) : (

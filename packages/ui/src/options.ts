@@ -20,19 +20,22 @@ import type { QueryClient } from '@tanstack/react-query';
 import type { CoffreClient, RouteInput } from '@coffre/client';
 
 import { ShellLayout, SoloLayout } from './layout';
-import { uiResult } from './lib/coffre';
+import { memberRef, uiResult } from './lib/coffre';
 import { stringsOf } from './lib/search';
 import {
+  loadAccess,
   loadDirectory,
-  loadPrincipal,
+  loadMember,
   loadProject,
   loadServiceDirectory,
   loadSettings,
   loadShell,
+  projectOf,
   queries,
+  signInWays,
   type AuditSearch,
 } from './lib/queries';
-import type { ProjectTab } from './pages/project';
+import type { Permission } from './shared/models';
 import { loginSearch } from './lib/signin-errors';
 
 /**
@@ -84,23 +87,65 @@ export const projects = {
   },
 };
 
-/** `/projects/$project`. */
+/**
+ * `/projects/$project`, the layout of a project's tabs: its header, and the
+ * tabs its visitor may open. Each tab is a page under it that reads its own.
+ */
 export const project = {
-  // The tab lives in the URL so a link can land on a project's access list.
-  // Environments is the default and so has no parameter.
-  validateSearch: (search: Record<string, unknown>): { tab?: Exclude<ProjectTab, 'environments'> } => ({
-    tab: search.tab === 'users' || search.tab === 'tokens' || search.tab === 'settings' ? search.tab : undefined,
-  }),
-  loader: async ({ context, params }: Loader<{ project: string }>) => {
+  loader: ({ context }: Loader<{ project: string }>) => {
     const { coffre, queryClient } = coffreOf(context);
-    // What others read of it through references, which its access tab shows beside the grants.
-    const [project] = await Promise.all([
-      loadProject(queryClient, coffre, params.project),
-      queryClient.fetchQuery(queries.references(coffre, params.project)),
-    ]);
-    return project;
+    return queryClient.fetchQuery(queries.projects(coffre));
   },
 };
+
+/** `/projects/$project/`, its environments, and who can open each when you manage its access. */
+export const projectEnvironments = {
+  loader: ({ context, params }: Loader<{ project: string }>) => {
+    const { coffre, queryClient } = coffreOf(context);
+    return loadProject(queryClient, coffre, params.project);
+  },
+};
+
+/** `/projects/$project/users`: who holds access, and what others read of it through references. */
+export const projectUsers = {
+  loader: async ({ context, params }: Loader<{ project: string }>) => {
+    const { coffre, queryClient } = coffreOf(context);
+    if (!(await projectTab(context, params.project, 'grant.manage'))) return;
+    await Promise.all([
+      queryClient.fetchQuery(queries.grants(coffre, params.project)),
+      queryClient.fetchQuery(queries.references(coffre, params.project)),
+    ]);
+  },
+};
+
+/** `/projects/$project/service-accounts`. */
+export const projectServiceAccounts = {
+  loader: async ({ context, params }: Loader<{ project: string }>) => {
+    const { coffre, queryClient } = coffreOf(context);
+    if (await projectTab(context, params.project, 'grant.manage')) await queryClient.fetchQuery(queries.grants(coffre, params.project));
+  },
+};
+
+/** `/projects/$project/settings`: the project itself, which its layout read. */
+export const projectSettings = {
+  loader: async ({ context, params }: Loader<{ project: string }>) => {
+    await projectTab(context, params.project, 'project.manage');
+  },
+};
+
+/**
+ * Whether a project's tab reads anything: not for a project its visitor
+ * cannot see, whose layout shows a closed door instead; and a tab they may
+ * not open sends them to the first, so a link someone shared still lands
+ * somewhere useful.
+ */
+async function projectTab(context: unknown, slug: string, permission: Permission): Promise<boolean> {
+  const { coffre, queryClient } = coffreOf(context);
+  const found = projectOf(await queryClient.fetchQuery(queries.projects(coffre)), slug);
+  if (!found.ok) return false;
+  if (!found.project.permissions.includes(permission)) throw redirect({ to: '/projects/$project', params: { project: slug } });
+  return true;
+}
 
 /** `/projects/$project/$environment`. */
 export const environment = {
@@ -156,35 +201,80 @@ export const users = {
   },
 };
 
-/** `/users/$user`. */
+/** `/users/$user`, the layout of a user's tabs: who they are to the instance, for owners. */
 export const user = {
-  // Access is the default tab, with no parameter.
-  validateSearch: (search: Record<string, unknown>): { tab?: 'activity' } => ({
-    tab: search.tab === 'activity' ? search.tab : undefined,
-  }),
   loader: ({ context, params }: Loader<{ user: string }>) => {
     const { coffre, queryClient } = coffreOf(context);
-    return loadPrincipal(queryClient, coffre, 'user', params.user);
+    return loadMember(queryClient, coffre, memberRef('user', params.user));
   },
 };
 
-/** `/tokens`. */
-export const tokens = {
+/** `/users/$user/`, their access on every project where you manage it. */
+export const userAccess = {
+  loader: ({ context }: Loader) => {
+    const { coffre, queryClient } = coffreOf(context);
+    return loadAccess(queryClient, coffre);
+  },
+};
+
+/** `/users/$user/activity`, for whoever reads the audit log; the others are sent to the first tab. */
+export const userActivity = {
+  loader: async ({ context, params }: Loader<{ user: string }>) => {
+    const { coffre, queryClient } = coffreOf(context);
+    const shell = await loadShell(queryClient, coffre);
+    if (!shell.capabilities.canReadAudit) throw redirect({ to: '/users/$user', params });
+  },
+};
+
+/** `/service-accounts`. */
+export const serviceAccounts = {
   loader: ({ context }: Loader) => {
     const { coffre, queryClient } = coffreOf(context);
     return loadServiceDirectory(queryClient, coffre);
   },
 };
 
-/** `/tokens/$token`. */
-export const token = {
-  // Sign-in is the default tab, with no parameter.
-  validateSearch: (search: Record<string, unknown>): { tab?: 'access' | 'activity' } => ({
-    tab: search.tab === 'access' || search.tab === 'activity' ? search.tab : undefined,
-  }),
-  loader: ({ context, params }: Loader<{ token: string }>) => {
+/** `/service-accounts/$account`, the layout of a service account's tabs: who it is to the instance, for owners. */
+export const serviceAccount = {
+  loader: ({ context, params }: Loader<{ account: string }>) => {
     const { coffre, queryClient } = coffreOf(context);
-    return loadPrincipal(queryClient, coffre, 'service', params.token);
+    return loadMember(queryClient, coffre, memberRef('service', params.account));
+  },
+};
+
+/**
+ * `/service-accounts/$account/`, how it signs in: its trusted workloads and
+ * bearer tokens. Only an owner manages them, and only while it is active;
+ * anyone else is sent to its access.
+ */
+export const serviceAccountSignIn = {
+  loader: async ({ context, params }: Loader<{ account: string }>) => {
+    const { coffre, queryClient } = coffreOf(context);
+    const member = memberRef('service', params.account);
+    const [shell, report] = await Promise.all([loadShell(queryClient, coffre), loadMember(queryClient, coffre, member)]);
+    const ways = signInWays(shell, report);
+    if (ways === null) throw redirect({ to: '/service-accounts/$account/access', params });
+    await Promise.all([
+      queryClient.fetchQuery(queries.credentials(coffre, member, ways.tokens)),
+      queryClient.fetchQuery(queries.bindings(coffre, member, ways.workloads)),
+    ]);
+  },
+};
+
+/** `/service-accounts/$account/access`. */
+export const serviceAccountAccess = {
+  loader: ({ context }: Loader) => {
+    const { coffre, queryClient } = coffreOf(context);
+    return loadAccess(queryClient, coffre);
+  },
+};
+
+/** `/service-accounts/$account/activity`, as a user's. */
+export const serviceAccountActivity = {
+  loader: async ({ context, params }: Loader<{ account: string }>) => {
+    const { coffre, queryClient } = coffreOf(context);
+    const shell = await loadShell(queryClient, coffre);
+    if (!shell.capabilities.canReadAudit) throw redirect({ to: '/service-accounts/$account', params });
   },
 };
 

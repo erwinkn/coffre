@@ -1,13 +1,14 @@
-import { useState, type ReactNode } from 'react';
+import { useState } from 'react';
 import { useSuspenseQueries, useSuspenseQuery } from '@tanstack/react-query';
-import { Link } from '@tanstack/react-router';
+import { Link, Outlet } from '@tanstack/react-router';
 import { ROLES } from '@coffre/core/access';
 import { useShell } from '../lib/use-shell';
 import { toast } from 'sonner';
 import { memberRef, useCoffre } from '../lib/coffre';
 import { directoryList } from '../lib/changes';
-import { affects, managedProjects, queries } from '../lib/queries';
+import { affects, managedProjects, queries, signInWays } from '../lib/queries';
 import { useChangeStatus } from '../lib/use-change';
+import { useMounted } from '../lib/mounted';
 import { ItemFailure } from './row-state';
 import { useAction } from '../lib/use-action';
 import { projectAccessLabel } from '../lib/project-access';
@@ -34,33 +35,33 @@ import { PrincipalReportCards, RemovedNotice } from './offboarding';
 import { PrincipalAvatar } from './principal';
 import { Tile } from './tile';
 import { Activity, Archive, Clock, Folder, Key, Link as LinkIcon, Pencil, Users, X } from './icons';
-import { ActionsLog } from './actions-log';
-import { PageTabs, type TabItem } from './tabs';
+import { PageTabs } from './tabs';
 
 type PrincipalType = DirectoryPrincipal['principalType'];
 
 type ProjectAccess = { project: ProjectSummary; grants: GrantRow[]; grantsError: string | null };
 
+/** Who a user or service account is to the instance, as an owner reads it; null for anyone else. */
+function useReport(principalType: PrincipalType, principalId: string) {
+  const { capabilities } = useShell();
+  return useSuspenseQuery(queries.report(useCoffre(), memberRef(principalType, principalId), capabilities.canManageGrants)).data;
+}
+
 /**
- * Everything one user's or token's page shows, from what `loadPrincipal`
- * read: who it is to the instance and what it has seen (owners only), and its
- * grants on every project where you manage access.
+ * Its grants on every project where you manage access, which `loadAccess`
+ * read: there is no call for one member's, so each project's are filtered.
  */
-function usePrincipalPage(principalType: PrincipalType, principalId: string) {
+function useProjectAccess(principalType: PrincipalType, principalId: string): ProjectAccess[] {
   const client = useCoffre();
-  const { projects, capabilities } = useShell();
-  const managed = managedProjects(projects);
-  const { data: report } = useSuspenseQuery(
-    queries.report(client, memberRef(principalType, principalId), capabilities.canManageGrants),
-  );
+  const managed = managedProjects(useShell().projects);
   const grants = useSuspenseQueries({
     queries: managed.map((project) => queries.grants(client, project.slug)),
   });
-  const access: ProjectAccess[] = managed.map((project, index) => {
+  return managed.map((project, index) => {
     const result = grants[index]!.data;
     return {
       project,
-      // Grants on every project show once, above: not again in each project they reach.
+      // Grants on every project show once, below: not again in each project they reach.
       grants: result.ok
         ? result.grants.filter(
             (grant) =>
@@ -72,32 +73,24 @@ function usePrincipalPage(principalType: PrincipalType, principalId: string) {
       grantsError: result.ok ? null : result.error,
     };
   });
-  return { report, access };
 }
 
-export type PrincipalTab = 'sign-in' | 'access' | 'activity';
-
-export function PrincipalPage({
-  principalType,
-  principalId,
-  tab: asked,
-  signIn,
-}: {
-  principalType: PrincipalType;
-  principalId: string;
-  /** The tab the URL names; the first one shown when it names none. */
-  tab: PrincipalTab | undefined;
-  /** A service account's ways in, its first tab while it is active. */
-  signIn?: ReactNode;
-}) {
-  const { instanceRole, capabilities } = useShell();
-  const { report, access } = usePrincipalPage(principalType, principalId);
+/**
+ * A user's or service account's page: who it is, its menu, and its tabs,
+ * each a page of its own under this one. Access is a user's first tab; a
+ * service account's is how it signs in, while it shows one. A tab the
+ * deployment left out is not offered.
+ */
+export function PrincipalLayout({ principalType, principalId }: { principalType: PrincipalType; principalId: string }) {
+  const shell = useShell();
+  const mounted = useMounted();
+  const { capabilities } = shell;
+  const report = useReport(principalType, principalId);
   // A role change or removal made from this page's menu, refused.
   const { status, dismiss } = useChangeStatus(directoryList.queryKey);
   const change = status(memberRef(principalType, principalId));
   const kind = KIND[principalType];
   const people = principalType === 'user';
-  const list = people ? '/users' : '/tokens';
   const found = report?.ok === true ? report.report : null;
   const removed = found?.status === 'removed';
   const entry =
@@ -115,14 +108,14 @@ export function PrincipalPage({
   // miss there means there is no such user. Everyone else only reaches this
   // page through projects they manage.
   const unknown = report?.ok === true && found === null;
-  if (unknown || (report === null && access.length === 0)) {
+  if (unknown || (report === null && managedProjects(shell.projects).length === 0)) {
     return (
       <ClosedDoor
         icon={people ? <Users size={18} /> : <Key size={18} />}
         label={<span className="mono">{people ? principalId : `service:${principalId}`}</span>}
         title={people ? 'No such user for you' : 'No such service account for you'}
         actions={
-          <Link className="btn" to={list}>
+          <Link className="btn" to={people ? '/users' : '/service-accounts'}>
             All {people ? 'users' : 'service accounts'}
           </Link>
         }
@@ -134,30 +127,47 @@ export function PrincipalPage({
     );
   }
 
-  const rows = access.flatMap(({ project, grants }) =>
-    grants.map((grant) => ({ project, grant })),
+  const access = (
+    <>
+      {removed ? <Archive size={15} /> : <Folder size={15} />}
+      {removed ? 'Offboarding' : 'Access'}
+    </>
   );
-  const errors = access.filter((entry) => entry.grantsError !== null);
-  // Grants to someone removed are refused until they are added back.
-  const editable = removed
-    ? []
-    : access.filter(
-        ({ project, grantsError }) => project.archivedAt === null && grantsError === null,
-      );
-
-  const tabs: TabItem<PrincipalTab>[] = [
-    ...(signIn !== undefined && !removed
-      ? [{ key: 'sign-in' as const, label: 'Sign-in', icon: <LinkIcon size={15} /> }]
-      : []),
-    removed
-      ? { key: 'access' as const, label: 'Offboarding', icon: <Archive size={15} /> }
-      : { key: 'access' as const, label: 'Access', icon: <Folder size={15} /> },
-    ...(capabilities.canReadAudit
-      ? [{ key: 'activity' as const, label: 'Activity', icon: <Activity size={15} /> }]
-      : []),
-  ];
-  const tab = tabs.find(({ key }) => key === (asked ?? tabs[0]!.key))?.key ?? tabs[0]!.key;
-  const member = memberRef(principalType, principalId);
+  const activity = (
+    <>
+      <Activity size={15} />
+      Activity
+    </>
+  );
+  const tabs = people
+    ? [
+        <Link key="access" to="/users/$user" params={{ user: principalId }} activeOptions={{ exact: true, includeSearch: false }}>
+          {access}
+        </Link>,
+        capabilities.canReadAudit && mounted('/users/$user/activity') && (
+          <Link key="activity" to="/users/$user/activity" params={{ user: principalId }}>
+            {activity}
+          </Link>
+        ),
+      ]
+    : [
+        signInWays(shell, report) !== null && (
+          <Link key="sign-in" to="/service-accounts/$account" params={{ account: principalId }} activeOptions={{ exact: true, includeSearch: false }}>
+            <LinkIcon size={15} />
+            Sign-in
+          </Link>
+        ),
+        mounted('/service-accounts/$account/access') && (
+          <Link key="access" to="/service-accounts/$account/access" params={{ account: principalId }}>
+            {access}
+          </Link>
+        ),
+        capabilities.canReadAudit && mounted('/service-accounts/$account/activity') && (
+          <Link key="activity" to="/service-accounts/$account/activity" params={{ account: principalId }}>
+            {activity}
+          </Link>
+        ),
+      ];
 
   return (
     <>
@@ -189,37 +199,44 @@ export function PrincipalPage({
           <Notice tone="bad">{report.error}</Notice>
         </div>
       )}
-      <PageTabs
-        label={people ? 'User sections' : 'Service account sections'}
-        tabs={tabs}
-        current={tab}
-        link={(key, props) =>
-          people ? (
-            <Link
-              to="/users/$user"
-              params={{ user: principalId }}
-              search={{ tab: key === 'activity' ? key : undefined }}
-              activeOptions={{ exact: true, explicitUndefined: true }}
-              {...props}
-            />
-          ) : (
-            <Link
-              to="/tokens/$token"
-              params={{ token: principalId }}
-              search={{ tab: key === 'access' || key === 'activity' ? key : undefined }}
-              activeOptions={{ exact: true, explicitUndefined: true }}
-              {...props}
-            />
-          )
-        }
-      />
+      <PageTabs label={people ? 'User sections' : 'Service account sections'}>{tabs}</PageTabs>
 
-      {tab === 'sign-in' && signIn}
+      <Outlet />
+    </>
+  );
+}
 
-      {tab === 'access' && removed && found !== null && <RemovedNotice report={found} />}
+/**
+ * A user's or service account's Access tab: its grants on every project
+ * where you manage access, and on every project; once it is removed, what
+ * its offboarding did instead.
+ */
+export function PrincipalAccess({ principalType, principalId }: { principalType: PrincipalType; principalId: string }) {
+  const { instanceRole } = useShell();
+  const report = useReport(principalType, principalId);
+  const access = useProjectAccess(principalType, principalId);
+  const kind = KIND[principalType];
+  const people = principalType === 'user';
+  const found = report?.ok === true ? report.report : null;
+  const removed = found?.status === 'removed';
+
+  const rows = access.flatMap(({ project, grants }) =>
+    grants.map((grant) => ({ project, grant })),
+  );
+  const errors = access.filter((entry) => entry.grantsError !== null);
+  // Grants to someone removed are refused until they are added back.
+  const editable = removed
+    ? []
+    : access.filter(
+        ({ project, grantsError }) => project.archivedAt === null && grantsError === null,
+      );
+
+  return (
+    <>
+      {removed && found !== null && <RemovedNotice report={found} />}
 
       {/* Removal ends every grant, so there is no access left to show. */}
-      {tab === 'access' && !removed && (
+      {!removed && (
         <>
           {errors.map(({ project, grantsError }) => (
             <div key={project.slug} style={{ marginBottom: '0.75rem' }}>
@@ -257,9 +274,8 @@ export function PrincipalPage({
                         <Tile name={project.slug} />
                         <Link
                           className="cell-link"
-                          to="/projects/$project"
+                          to={people ? '/projects/$project/users' : '/projects/$project/service-accounts'}
                           params={{ project: project.slug }}
-                          search={{ tab: people ? 'users' : 'tokens' }}
                         >
                           {project.name}
                         </Link>
@@ -289,9 +305,7 @@ export function PrincipalPage({
         </>
       )}
 
-      {tab === 'access' && found !== null && <PrincipalReportCards report={found} />}
-
-      {tab === 'activity' && <ActionsLog member={member} />}
+      {found !== null && <PrincipalReportCards report={found} />}
     </>
   );
 }

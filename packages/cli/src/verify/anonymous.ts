@@ -19,7 +19,7 @@ export const CLOSED_PAGES = [
   '/settings',
   '/projects',
   '/users',
-  '/tokens',
+  '/service-accounts',
   '/unregistered',
 ];
 

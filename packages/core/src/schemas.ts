@@ -1,6 +1,12 @@
 import { z } from 'zod';
 
+import { PROJECT_PAGES } from './pages.ts';
+
 export const slug = z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/);
+/** An environment's slug: any slug but the name of one of its project's pages. */
+export const environmentSlug = slug.refine((value) => !(PROJECT_PAGES as readonly string[]).includes(value), {
+  error: (issue) => `"${String(issue.input)}" is taken by a project's page, /projects/<project>/${String(issue.input)}: an environment cannot have it`,
+});
 
 /**
  * A deleted project or environment keeps its row as a tombstone, under a

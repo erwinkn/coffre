@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import type { CoffreClient } from '@coffre/client';
 import { and, asc, count, eq } from 'drizzle-orm';
 
+import { PROJECT_PAGES } from '@coffre/core/pages';
+
 import { auditLog, projects, vaultMembers } from './db/tables.ts';
 import {
   clientFor,
@@ -147,6 +149,19 @@ test('renaming projects and environments to existing slugs is a conflict and is 
       ['environment.update', 'slug_taken'],
     ],
   );
+});
+
+test("no environment takes the name of a project's page: not made, forked or renamed into one", async () => {
+  await seedProject();
+  for (const page of PROJECT_PAGES) {
+    const refused = { status: 400, message: new RegExp(`"${page}" is taken by a project's page`) };
+    await assert.rejects(root.environments.create(`market/${page}`, { name: 'Page' }), refused);
+    await assert.rejects(root.environments.create(`market/${page}`, { name: 'Page', from: 'prod' }), refused);
+    await assert.rejects(root.environments.update('market/prod', { slug: page }), refused);
+  }
+  // A page's name in a longer slug is any slug.
+  await root.environments.create('market/settings-eu', { name: 'Settings, EU' });
+  assert.deepEqual((await root.projects.list()).projects.find((project) => project.slug === 'market')?.environments.map((environment) => environment.slug).sort(), ['prod', 'settings-eu']);
 });
 
 test('project owners create environments; environment-scoped grants do not', async () => {

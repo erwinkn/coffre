@@ -1,6 +1,6 @@
 import { ROLE_NAMES, type Permission } from '@coffre/core/access';
 import { MAX_BINDINGS, MAX_CLAIMS, WORKLOAD_PROFILES } from '@coffre/core/identity';
-import { displayName, folderName, secretKey, slug } from '@coffre/core/schemas';
+import { displayName, environmentSlug, folderName, secretKey, slug } from '@coffre/core/schemas';
 import { z } from 'zod';
 
 import { setAccess } from './access.ts';
@@ -73,6 +73,7 @@ const placePatch = z
   .object({ name: displayName, slug, archived: z.boolean() })
   .partial()
   .strict();
+const environmentPatch = placePatch.extend({ slug: environmentSlug.optional() }).strict();
 
 /** `?dryRun=1`: what the call would do, without doing it. Any other query is refused, not ignored. */
 const dryRunFlag = z.object({ dryRun: z.enum(['1', 'true']).optional() }).strict();
@@ -154,13 +155,16 @@ export const routes = {
     needs: { permission: 'environment.manage', on: 'project' },
     action: 'environment.create',
     creates: true,
-    run: async (ctx, { params, place, input }): Promise<{ environment: PlaceView; created: boolean; inherited: InheritedGrant[]; forked: Forked | null }> =>
-      input.from === undefined
+    run: async (ctx, { params, place, input }): Promise<{ environment: PlaceView; created: boolean; inherited: InheritedGrant[]; forked: Forked | null }> => {
+      // Not a slug a project's page has (`@coffre/core/pages`).
+      environmentSlug.parse(params.environment);
+      return input.from === undefined
         ? { ...(await putEnvironment(ctx, place, params.environment, input)), forked: null }
-        : forkEnvironment(ctx, place, params.environment, { name: input.name, from: input.from, references: input.references === true }),
+        : forkEnvironment(ctx, place, params.environment, { name: input.name, from: input.from, references: input.references === true });
+    },
   }),
   ...route('PATCH /projects/:project/:environment', {
-    input: placePatch,
+    input: environmentPatch,
     needs: { permission: 'environment.manage', on: 'project' },
     action: 'environment.update',
     run: (ctx, { place, input }) => patchEnvironment(ctx, place, input),

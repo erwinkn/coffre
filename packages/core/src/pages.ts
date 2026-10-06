@@ -1,6 +1,7 @@
 // What coffre's server and its pages agree on outside the API: the
 // visitor's preferences, which the server reads from a request's cookies
-// and the browser from its own, to draw the same page; and what either says
+// and the browser from its own, to draw the same page; the names a
+// project's pages take, which no environment may; and what either says
 // when coffre's request middleware is missing.
 
 /**
@@ -11,6 +12,14 @@ export type Preferences = { theme: 'system' | 'light' | 'dark'; sidebar: 'expand
 
 /** The cookies that hold them. */
 export const PREFERENCE_COOKIES = { theme: 'coffre-theme', sidebar: 'coffre-sidebar' } as const;
+
+/**
+ * A project's pages beside its environments': `/projects/market/settings`
+ * sits where `/projects/market/prod` does, so no environment takes one of
+ * these names (`environmentSlug` in `./schemas.ts`). A tab a project gains
+ * adds its word here.
+ */
+export const PROJECT_PAGES = ['users', 'service-accounts', 'settings'] as const;
 
 /** The preferences in a `Cookie` header, or in `document.cookie`, which reads the same. */
 export function preferencesIn(cookies: string | null): Preferences {

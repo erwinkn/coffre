@@ -65,7 +65,7 @@ export function SettingsPage() {
                     {users} user{users === 1 ? '' : 's'}
                   </Link>
                   {' · '}
-                  <Link to="/tokens">
+                  <Link to="/service-accounts">
                     {tokens} service account{tokens === 1 ? '' : 's'}
                   </Link>
                 </span>

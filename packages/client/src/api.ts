@@ -146,8 +146,8 @@ export type Api = {
   "PATCH /projects/:project/:environment": {
     input: {
       name?: string;
-      slug?: string;
       archived?: boolean;
+      slug?: string;
     };
     output: {
       environment: {

@@ -33,8 +33,16 @@ How coffre's pages place and word things. The styles they name are in
 ## Sections
 
 - A page with several sections shows them as tabs, `PageTabs` in
-  `src/components/tabs.tsx`. The first is the default and has no URL
-  parameter; a tab nobody may open is not shown, and one tab shows none.
+  `src/components/tabs.tsx`. Each tab is a route nested under the page's
+  layout route, which holds the header and the tab bar: `/projects/market`
+  is a project's Environments, its first tab, the layout's index;
+  `/projects/market/settings` its Settings. A tab has no query parameter,
+  and its route's loader reads only what the tab shows.
+- A tab nobody may open is not shown, and its URL sends to the first tab;
+  one tab shows none. A tab the deployment left out is not shown either.
+- A project's tabs sit where its environments do, so no environment takes
+  a tab's name: a tab a project gains adds its word to `PROJECT_PAGES` in
+  `@coffre/core/pages`, which the server refuses as an environment's slug.
 
 ## Sizes
 

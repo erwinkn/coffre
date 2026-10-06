@@ -1,43 +1,18 @@
-import { Fragment, type ReactNode } from 'react';
-
-export type TabItem<K extends string> = { key: K; label: string; icon: ReactNode };
-
-/** What a tab's link is handed: its label and whether it is the page shown. */
-export type TabLinkProps = { children: ReactNode; 'aria-current': 'page' | undefined };
+import { Children, type ReactNode } from 'react';
 
 /**
- * A page's sections as tabs under its header. Each is a link, so a section
- * has a URL; `link` says which, so where tabs live (a search parameter today,
- * nested routes later) changes in the page and not here.
+ * A page's sections as tabs under its header. Each is a `<Link>` to a route
+ * nested under the page's layout, the first to its index with
+ * `activeOptions={{ exact: true, includeSearch: false }}`, and the router
+ * marks the one shown `aria-current="page"`. The caller leaves out a tab
+ * nobody may open.
  */
-export function PageTabs<K extends string>({
-  label,
-  tabs,
-  current,
-  link,
-}: {
-  label: string;
-  tabs: TabItem<K>[];
-  current: K;
-  link: (key: K, props: TabLinkProps) => ReactNode;
-}) {
+export function PageTabs({ label, children }: { label: string; children: ReactNode }) {
   // One tab is no choice at all.
-  if (tabs.length < 2) return null;
+  if (Children.toArray(children).length < 2) return null;
   return (
     <nav className="tabs" aria-label={label}>
-      {tabs.map(({ key, label, icon }) => (
-        <Fragment key={key}>
-          {link(key, {
-            children: (
-              <>
-                {icon}
-                {label}
-              </>
-            ),
-            'aria-current': key === current ? 'page' : undefined,
-          })}
-        </Fragment>
-      ))}
+      {children}
     </nav>
   );
 }

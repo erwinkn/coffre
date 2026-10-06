@@ -9,12 +9,33 @@ import type { Deployment } from '../harness.ts';
 import { expect, Skip } from '../report.ts';
 import { type Person, PROJECT, signIn } from './people.ts';
 
-/** Each page, and the heading it shows. */
-const PAGES = [
-  ['/projects', 'Projects'],
-  [`/projects/${PROJECT}`, 'Conformance'],
-  ['/audit', 'Audit'],
-] as const;
+/** Each page, the heading it shows, and the tab it is, for a page with tabs. */
+const PAGES: [path: string, heading: string, tab: string | null][] = [
+  ['/projects', 'Projects', null],
+  [`/projects/${PROJECT}`, 'Conformance', 'Environments'],
+  [`/projects/${PROJECT}/users`, 'Conformance', 'Users'],
+  [`/projects/${PROJECT}/service-accounts`, 'Conformance', 'Service accounts'],
+  [`/projects/${PROJECT}/settings`, 'Conformance', 'Settings'],
+  ['/audit', 'Audit', null],
+];
+
+/**
+ * A project's tabs walked as a person would: Users, then Settings, by their
+ * links, then back twice and forward once, which ends on Users.
+ */
+const WALK_TABS = `(async () => {
+  const wait = () => new Promise((resolve) => setTimeout(resolve, 1000));
+  const open = (label) => [...document.querySelectorAll('.tabs a')].find((link) => link.textContent.trim() === label)?.click();
+  open('Users');
+  await wait();
+  open('Settings');
+  await wait();
+  history.back();
+  await wait();
+  history.back();
+  await wait();
+  history.forward();
+})()`;
 
 /**
  * A menu item's dialog opened as a person would: the menu by its button,
@@ -70,30 +91,47 @@ export async function pagesInBrowser(deployment: Deployment, admin: Person, brow
   await admin.api.members.add(SERVICE);
   const name = SERVICE.slice('token:'.length);
   // A service account is service:<name> to people; the API and the log keep token:<name>.
-  const pages = [...PAGES, ['/settings', 'Settings'], ['/tokens', 'Service accounts'], [`/tokens/${name}`, `service:${name}`]] as const;
+  const account = `/service-accounts/${name}`;
+  const person = `/users/${encodeURIComponent(admin.email)}`;
+  const pages = [
+    ...PAGES,
+    ['/settings', 'Settings', null],
+    [person, admin.email, 'Access'],
+    [`${person}/activity`, admin.email, 'Activity'],
+    ['/service-accounts', 'Service accounts', null],
+    [account, `service:${name}`, 'Sign-in'],
+    [`${account}/activity`, `service:${name}`, 'Activity'],
+  ] as const;
   const chrome = await Chrome.open(executable);
   try {
-    for (const [path, heading] of pages) {
+    for (const [path, heading, tab] of pages) {
       // On the service account's page, its removal is opened, and not confirmed: the dialog says first what it would revoke.
-      const then = path === `/tokens/${name}` ? openFromMenu('button[aria-label^="Actions for"]', 'Remove') : undefined;
+      const then = path === account ? openFromMenu('button[aria-label^="Actions for"]', 'Remove') : undefined;
       const loaded = await chrome.load(new URL(path, deployment.origin).href, admin.browser.cookies(), undefined, then);
       expect(loaded.errors.length === 0, `${path}, signed in, reported errors in the browser`, loaded.errors.join('\n'));
       // The heading, then what may follow it in the h1, such as a project's slug.
       expect(loaded.heading?.startsWith(heading), `${path}, signed in, shows ${JSON.stringify(loaded.heading)}, not the heading ${JSON.stringify(heading)}`);
-      if (path.startsWith('/tokens')) expect(!/(?<![\w-])token:[A-Za-z0-9]/.test(loaded.text), `${path} shows a service account as token:<name>`, loaded.text);
-      if (path === `/tokens/${name}`) {
+      expect(loaded.tab === tab, `${path}, signed in, shows the tab ${JSON.stringify(loaded.tab)}, not ${JSON.stringify(tab)}`);
+      if (path.startsWith('/service-accounts')) expect(!/(?<![\w-])token:[A-Za-z0-9]/.test(loaded.text), `${path} shows a service account as token:<name>`, loaded.text);
+      if (path === account) {
         const ways = loaded.cards.filter((title) => title === 'Sign in with OIDC' || title === 'Bearer tokens');
         expect(ways.join(' then ') === 'Sign in with OIDC then Bearer tokens', `${path} does not show OIDC, then bearer tokens`, loaded.cards);
         expect(loaded.dialog?.includes('Removing revokes 0 grants, 0 bearer tokens') === true, `${path}: Remove… does not preview what it would revoke`, loaded.dialog);
       }
       if (path === '/settings') expect(loaded.cards.includes('Keys'), '/settings does not show what the keys are checked against', loaded.cards);
     }
+    // A project's tabs are routes: their links, back and forward move between them in the page.
+    const project = new URL(`/projects/${PROJECT}`, deployment.origin).href;
+    const walked = await chrome.load(project, admin.browser.cookies(), undefined, WALK_TABS);
+    expect(walked.errors.length === 0, `${project}'s tabs reported errors in the browser`, walked.errors.join('\n'));
+    expect(walked.href === `${project}/users` && walked.tab === 'Users', `Users, Settings, back, back and forward from ${project} ended on ${walked.href}, the tab ${JSON.stringify(walked.tab)}`);
     // Its access on every project, which an owner grants and revokes on its Access tab.
-    const access = `/tokens/${name}?tab=access`;
+    const access = `${account}/access`;
     await admin.api.access.set(SERVICE, { '*/dev': 'viewer' });
     try {
       const loaded = await chrome.load(new URL(access, deployment.origin).href, admin.browser.cookies());
       expect(loaded.errors.length === 0, `${access} reported errors in the browser`, loaded.errors.join('\n'));
+      expect(loaded.tab === 'Access', `${access} shows the tab ${JSON.stringify(loaded.tab)}, not "Access"`);
       for (const shown of ['dev in every project', 'Grant on every project']) {
         expect(loaded.text.includes(shown), `${access}, to an owner, does not show "${shown}"`, loaded.text);
       }
@@ -111,7 +149,7 @@ export async function pagesInBrowser(deployment: Deployment, admin: Person, brow
   } finally {
     await chrome.close();
   }
-  return `${pages.map(([path]) => path).join(', ')}, signed in, in Chrome: each rendered, no error from their scripts; a service account shown as service:${name}, OIDC then bearer tokens, its removal previewed; the keys' checks in Settings; its grant on dev in every project with an owner's grant button; the MCP consent page, a registered client shown as unverified`;
+  return `${pages.map(([path]) => path).join(', ')}, signed in, in Chrome: each rendered, on its tab, no error from their scripts; a project's tabs by their links, back and forward; a service account shown as service:${name}, OIDC then bearer tokens, its removal previewed; the keys' checks in Settings; its grant on dev in every project with an owner's grant button; the MCP consent page, a registered client shown as unverified`;
 }
 
 /**

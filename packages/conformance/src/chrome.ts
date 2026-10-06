@@ -10,6 +10,8 @@ import { delimiter, join } from 'node:path';
 /** What a page did, loaded: the heading it shows, and every error its scripts and console reported. */
 export type Loaded = {
   heading: string | null;
+  /** The tab the page shows, for a page with tabs. */
+  tab: string | null;
   /** The titles of the page's cards, in order. */
   cards: string[];
   /** What a person reads on it. */
@@ -176,16 +178,17 @@ export class Chrome {
         // What it asked of the server has its time to come back.
         await new Promise((resolve) => setTimeout(resolve, settle));
       }
-      // The heading, the cards' titles in order, all the text a person reads, and where the page ended.
+      // The heading, the tab shown, the cards' titles in order, all the text a person reads, and where the page ended.
       const expression = `({
         heading: document.querySelector('h1')?.textContent?.trim() || null,
+        tab: document.querySelector('.tabs [aria-current=page]')?.textContent?.trim() || null,
         cards: [...document.querySelectorAll('h2.card-title')].map((title) => title.textContent.trim()),
         text: document.body.innerText,
         href: location.href,
         dialog: document.querySelector('[role=alertdialog], [role=dialog]')?.innerText ?? null,
       })`;
       const { result } = (await this.#send('Runtime.evaluate', { expression, returnByValue: true }, sessionId)) as {
-        result: { value: { heading: string | null; cards: string[]; text: string; href: string; dialog: string | null } };
+        result: { value: { heading: string | null; tab: string | null; cards: string[]; text: string; href: string; dialog: string | null } };
       };
       return { ...result.value, errors };
     } finally {
