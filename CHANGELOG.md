@@ -23,9 +23,10 @@ the workflow deploys with, scoped to the account's Workers Scripts, Account
 Settings, Workers KV and Hyperdrive and the zone's Workers Routes, and sets
 the repository's Actions secrets `CLOUDFLARE_API_TOKEN`,
 `CLOUDFLARE_ACCOUNT_ID` and `DATABASE_OWNER_URL` through GitHub's API, each
-sealed to the repository's public key. wrangler's login may not make API
-tokens, so setup usually prints the dashboard's token form, filled in, and
-checks the token you paste before taking it. It signs in to GitHub with
+sealed to the repository's public key by libsodium's `crypto_box_seal`
+(libsodium-wrappers 0.8.4, bundled in the CLI). wrangler's login may not
+make API tokens, so setup usually prints the dashboard's token form, filled
+in, and checks the token you paste before taking it. It signs in to GitHub with
 gh's login, or a fine-grained token that lasts a day, and shows no value.
 Run again, it keeps the token; `--rotate-deploy-token` makes a new one.
 Without a GitHub remote, it says how to wire it later. Workers Builds stays

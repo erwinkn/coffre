@@ -3,7 +3,8 @@
 // writes, under three of the repository's Actions secrets. Setup makes the
 // Cloudflare API token the workflow deploys with, scoped to what the deploy
 // needs, and sets the three through GitHub's API, each sealed to the
-// repository's public key. It shows none of them, and writes none.
+// repository's public key with libsodium's sealed box, as GitHub's API
+// takes them. It shows none of them, and writes none.
 //
 // wrangler's login may not make API tokens: setup tries, and when Cloudflare
 // refuses, has the person make the token on a form it fills in, and checks
@@ -13,10 +14,11 @@ import { spawn, spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
+import sodium from 'libsodium-wrappers';
+
 import { type Account, CloudflareApi, denied, type TokenPolicy, type Zone } from './cloudflare.ts';
 import type { GitHub } from './github-app.ts';
 import { templateDir } from './init.ts';
-import { seal } from './sealed-box.ts';
 import type { Step } from './steps.ts';
 import { listed } from './tty.ts';
 
@@ -198,7 +200,8 @@ export class GitHubRepository {
 
   /** Set a secret, sealed to the repository's key: GitHub opens it, and nobody else. */
   async set(name: string, value: string, publicKey: { id: string; key: Uint8Array }): Promise<void> {
-    const sealed = Buffer.from(seal(Buffer.from(value, 'utf8'), publicKey.key)).toString('base64');
+    await sodium.ready;
+    const sealed = Buffer.from(sodium.crypto_box_seal(Buffer.from(value, 'utf8'), publicKey.key)).toString('base64');
     await this.#send('PUT', `/${name}`, { encrypted_value: sealed, key_id: publicKey.id });
   }
 }
