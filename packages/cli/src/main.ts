@@ -576,8 +576,8 @@ async function whoami(args: string[]): Promise<void> {
     process.stdout.write(`  session ends ${session.expiresAt.slice(0, 10)} (in ${days} day${days === 1 ? '' : 's'})\n`);
   }
   if (me.registered) {
-    const on = (flag: boolean) => (flag ? 'on' : 'off');
-    process.stdout.write(`  here, MCP clients are ${on(me.features.mcp)}, and CI runs signing in by their ID tokens ${on(me.features.workloads)}\n`);
+    const mcp = me.features.mcp === null ? 'off' : `on, at ${me.features.mcp}`;
+    process.stdout.write(`  here, MCP clients are ${mcp}, and CI runs signing in by their ID tokens ${me.features.workloads ? 'on' : 'off'}\n`);
   }
   printMe(me);
 }

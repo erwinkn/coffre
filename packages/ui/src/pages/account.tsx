@@ -2,7 +2,7 @@ import type { IdentityRow, SessionRow } from '@coffre/client';
 import { Link, Outlet } from '@tanstack/react-router';
 import { useSuspenseQuery } from '@tanstack/react-query';
 
-import { Fragment, useSyncExternalStore } from 'react';
+import { Fragment } from 'react';
 import { useShell } from '../lib/use-shell';
 import { Card, Fact, PageHeader } from '../components/page';
 import { PageTabs } from '../components/tabs';
@@ -117,9 +117,10 @@ export function AccountSessionsPage() {
 
 /** How to connect Claude, then the apps you connected. */
 export function AccountAppsPage() {
+  const { features } = useShell();
   return (
     <>
-      <ConnectAnApp />
+      {features.mcp !== null && <ConnectAnApp url={features.mcp} />}
       <ConnectedApps />
     </>
   );
@@ -420,16 +421,8 @@ function Sessions({
   );
 }
 
-/**
- * How to connect an MCP client: this instance's address, and the steps for
- * Claude Code and claude.ai. The address is the page's own origin, the
- * instance's public URL, where its sign-in sets the session cookie this page
- * came with. The server's render has no origin of its own to give, so the
- * address appears as the page hydrates.
- */
-function ConnectAnApp() {
-  const origin = useSyncExternalStore(noChange, () => window.location.origin, () => null);
-  const url = origin === null ? null : `${origin}/mcp`;
+/** How to connect an MCP client: this instance's endpoint, as `/me` reports it, and the steps for Claude Code and claude.ai. */
+function ConnectAnApp({ url }: { url: string }) {
   return (
     <Card
       labelledBy="connect"
@@ -441,7 +434,7 @@ function ConnectAnApp() {
           <CopyLine value={url} label="Copy the URL" />
         </Fact>
         <Fact label="Claude Code">
-          <CopyLine value={url === null ? null : `claude mcp add --transport http coffre ${url}`} label="Copy the command" />
+          <CopyLine value={`claude mcp add --transport http coffre ${url}`} label="Copy the command" />
           <span className="hint">
             Then run <span className="mono">/mcp</span> in Claude Code to sign in.
           </span>
@@ -454,14 +447,12 @@ function ConnectAnApp() {
   );
 }
 
-const noChange = () => () => {};
-
-/** A value to copy whole, in a box of its own: blank until it is known. */
-function CopyLine({ value, label }: { value: string | null; label: string }) {
+/** A value to copy whole, in a box of its own. */
+function CopyLine({ value, label }: { value: string; label: string }) {
   return (
     <div className="copy-line">
-      <code className="mono">{value ?? '\u00a0'}</code>
-      {value !== null && <CopyButton value={value} label={label} />}
+      <code className="mono">{value}</code>
+      <CopyButton value={value} label={label} />
     </div>
   );
 }

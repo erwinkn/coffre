@@ -578,11 +578,11 @@ test("a client's name, host and kind are under their rows' MACs: edited in the d
   assert.equal((await describe(token, ask)).status, 'invalid', 'a registration renamed in the database is no client');
 });
 
-test('GET /me says what the deployment turns on, read from its configuration, not from a route answering 404', async () => {
+test('GET /me says what the deployment turns on, read from its configuration, not from a route answering 404: MCP as its endpoint', async () => {
   const token = await session(DEV);
   const me = (on: CoffreRuntime) => route('/api/me', { headers: { authorization: `Bearer ${token}` } }, on).then((response) => response.json() as Promise<{ features: unknown }>);
-  assert.deepEqual((await me(runtime)).features, { mcp: true, workloads: false });
-  assert.deepEqual((await me(off)).features, { mcp: false, workloads: false });
+  assert.deepEqual((await me(runtime)).features, { mcp: `${ORIGIN}/mcp`, workloads: false });
+  assert.deepEqual((await me(off)).features, { mcp: null, workloads: false });
 });
 
 test("a step-up supersedes the client's narrower connection once its code is redeemed; one with the same scopes stays", async () => {

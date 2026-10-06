@@ -45,10 +45,12 @@ export type Me = {
   canReadAudit: boolean;
   /**
    * What this deployment's configuration turns on, as `signin({ … })` says:
-   * MCP clients (`mcp`) and CI runs signing in by their ID tokens
-   * (`workloads`). Read here, never inferred from a route answering 404.
+   * MCP clients (`mcp`), as the endpoint they connect to,
+   * `https://secrets.acme.example/mcp`, or null when it serves none; and CI
+   * runs signing in by their ID tokens (`workloads`). Read here, never
+   * inferred from a route answering 404 or from where a page was served.
    */
-  features: { mcp: boolean; workloads: boolean };
+  features: { mcp: string | null; workloads: boolean };
   /** Every live environment the caller holds something in, and what. */
   environments: { project: string; environment: string; permissions: Permission[] }[];
 };
@@ -136,7 +138,7 @@ export async function me(ctx: ApiContext): Promise<Me> {
     instanceRole: caller.instanceRole,
     isRootAdmin: caller.isRootAdmin,
     canReadAudit: caller.isOwner || canAnywhere(caller, 'audit.read'),
-    features: { mcp: ctx.mcp !== null, workloads: ctx.workloads !== null },
+    features: { mcp: ctx.mcp?.resource ?? null, workloads: ctx.workloads !== null },
     environments: reachable,
   };
 }

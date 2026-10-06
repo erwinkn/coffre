@@ -13,6 +13,14 @@ claude.ai's steps. It shows only where the deployment turns MCP on.
 `_coffre/account.{index,sessions,apps,appearance}.tsx`, and `coffre update`
 adds them; `_coffre/account.tsx`, unchanged, is now their layout.
 
+**`GET /me` says where MCP clients connect.** `features.mcp` is the MCP
+endpoint's URL, built from the deployment's public URL as MCP's metadata
+builds it (`https://secrets.acme.example/mcp`), where it was `true`, and
+`null` where it was `false`. Connect an app shows it as the page is
+rendered, not once it loads, and `coffre whoami` says it: `MCP clients are
+on, at https://secrets.acme.example/mcp`. A page's tab bar now ends where
+its cards do.
+
 **`coffre run` and `coffre export` read several environments.** `coffre
 run deploy/prod auth/prod -- ./deploy` gives the command both
 environments' keys, where it took nesting one `coffre run` in another,
