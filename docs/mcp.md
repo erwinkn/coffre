@@ -29,7 +29,8 @@ claim, so look at where coffre's answer goes before you approve.
 **The consent page.** Every connection shows it, even for a client you
 connected before. It names the client's website, where the answer goes
 (with a warning when that is only a program on your computer), you, and
-what the client asks to do. Nothing is granted until you press Approve.
+every scope, with what the client asked for ticked. Nothing is granted
+until you press Approve.
 
 ## Scopes
 
@@ -43,9 +44,12 @@ You grant these on the consent page:
   the conversation, wherever the client keeps it.
 - **Manage access**: grants, members, service tokens, trusted workloads.
 
-You can untick any but Browse. A connection lasts as long as a `coffre
-login` session (30 days unless the deployment says otherwise); then you
-connect again.
+Clients ask for Browse alone, and not all ask for more later (Claude Code
+does, Claude Desktop did not), so tick what you want the client to do when
+you connect it: Write to make changes, which you still approve one by one.
+You can tick or untick any but Browse, whatever the client asked for. A
+connection lasts as long as a `coffre login` session (30 days unless the
+deployment says otherwise); then you connect again.
 
 ## Tools
 
@@ -103,10 +107,14 @@ type it on the approval page, and it goes to coffre only;
 `issue_service_token` makes is shown to you on the page, once, and never to
 the app. A connection may have five changes waiting at once.
 
-When a client needs a scope it doesn't hold, coffre's consent page opens
-again, asking for it. The new connection replaces the client's earlier one
-that it grants all of and more; one with the same scopes, on a second
-laptop say, stays.
+When a client calls a tool its connection lacks the scope for, coffre
+refuses it and says, in the tool's answer, which scope it needs and how you
+grant it: connect the client again, ticking that scope. Claude Code asks
+you whether to re-authenticate and opens the consent page itself, with the
+scope ticked; in claude.ai or Desktop, disconnect coffre under Customize,
+Connectors, and connect it again. The new connection replaces the client's
+earlier one that it grants all of and more; one with the same scopes, on a
+second laptop say, stays.
 
 ## Connected apps
 

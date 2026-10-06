@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { AuthorizationView, RouteInput } from '@coffre/client';
-import { MCP_SCOPE_INFO, supersedes, type McpScope } from '@coffre/core/mcp';
+import { MCP_SCOPE_INFO, MCP_SCOPES, supersedes, type McpScope } from '@coffre/core/mcp';
 
 import { failureMessage, statusOf, useCoffre } from '../lib/coffre';
 import { ClosedDoor } from '../components/page';
@@ -15,7 +15,8 @@ type Ready = Extract<AuthorizationView, { status: 'ready' }>;
 
 /**
  * Where an MCP client, such as Claude, sends you to connect: who it is,
- * where coffre's answer goes, and what it may do as you. Nothing is granted
+ * where coffre's answer goes, and what it may do as you, of every scope,
+ * whatever it asked for: what it asked for starts ticked. Nothing is granted
  * until you press Approve, and every connection asks again: there is no
  * silent re-consent. Either answer goes back to the app by `location`,
  * never a form post, which the page's `form-action 'self'` would stop.
@@ -98,7 +99,7 @@ function Approve({
   const { client } = view;
   const unverified = client.registration === 'dcr';
   // A step-up: the connections this one grants all of and more end once the app has its new one.
-  const granted = view.scopes.filter((scope) => chosen.has(scope));
+  const granted = MCP_SCOPES.filter((scope) => chosen.has(scope));
   const replaced = view.connections.filter((held) => supersedes(granted, held)).length;
   const kept = view.connections.length - replaced;
 
@@ -166,8 +167,10 @@ function Approve({
       </dl>
 
       <fieldset className="consent-scopes">
-        <legend className="label">It may</legend>
-        {view.scopes.map((scope) => {
+        <legend className="label">
+          It may <span className="hint">· to add a scope later, you connect it again</span>
+        </legend>
+        {MCP_SCOPES.map((scope) => {
           const { label, description } = MCP_SCOPE_INFO[scope];
           const locked = scope === 'browse';
           return (

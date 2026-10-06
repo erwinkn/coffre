@@ -32,7 +32,7 @@ export async function protectedResource(_request: Request, runtime: CoffreRuntim
   return jsonResponse({
     resource: mcp.resource,
     authorization_servers: [mcp.issuer],
-    // The minimum: the rest come one step-up at a time.
+    // The minimum, which clients ask for: the person ticks the rest on the consent page.
     scopes_supported: ['browse'],
     bearer_methods_supported: ['header'],
     resource_name: `coffre at ${new URL(runtime.publicUrl).host}`,

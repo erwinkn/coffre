@@ -52,8 +52,12 @@ function token(deployment: Deployment, fields: Record<string, string>): Promise<
   });
 }
 
-/** The person approves on the consent page, as its Approve does; the code comes back on the redirect. */
-async function connect(deployment: Deployment, person: Person, clientId: string, scope = 'browse'): Promise<{ code: string; verifier: string }> {
+/**
+ * The person approves on the consent page, as its Approve does, with what
+ * they ticked: by default what the client asked for. The code comes back on
+ * the redirect.
+ */
+async function connect(deployment: Deployment, person: Person, clientId: string, scope = 'browse', ticked = scope.split(' ')): Promise<{ code: string; verifier: string }> {
   const verifier = base64url(randomBytes(32));
   const request = {
     client_id: clientId,
@@ -69,7 +73,7 @@ async function connect(deployment: Deployment, person: Person, clientId: string,
   expect(view.status === 'ready', 'the consent page refused a good request', view);
   expect(view.client.registration === 'dcr' && view.client.name === NAME && view.scopes.join(' ') === scope && view.loopbackOnly,
     'the consent page does not show the registered client as it is', view);
-  const { redirect } = await person.api.oauth.decide({ request, approve: true, scopes: scope.split(' ') });
+  const { redirect } = await person.api.oauth.decide({ request, approve: true, scopes: ticked });
   const back = new URL(redirect);
   expect(`${back.origin}${back.pathname}` === REDIRECT, `the answer went to ${back.origin}${back.pathname}, not the redirect`, redirect);
   expect(back.searchParams.get('state') === STATE && back.searchParams.get('iss') === deployment.origin,
@@ -349,15 +353,21 @@ export async function mcpChanges(deployment: Deployment, people: People, canarie
   };
   const archived = async (key: string) => (await admin.api.secrets.history(`${place}/${key}`)).archived;
 
-  // Browse cannot ask for a change: 403, and the step-up's scopes; nothing reached the API.
+  // Browse cannot ask for a change: 403, the step-up's scopes, and for a client that does not step up, how to grant Write; nothing reached the API.
   const browse = (await redeem(deployment, clientId, await connect(deployment, changer, clientId))).access_token;
   const stepUp = await call(browse, 'archive_secret', { secret: `${place}/OLD` });
   expect(stepUp.status === 403 && stepUp.challenge.includes('error="insufficient_scope"') && stepUp.challenge.includes('scope="browse write"'),
     `archive_secret with Browse answered ${stepUp.status}, not a step-up to Write`, stepUp.challenge);
+  expect(stepUp.result?.isError === true && stepUp.result.content?.[0]?.text?.includes("ticking Write on coffre's consent page") === true,
+    'archive_secret with Browse does not say, as its result, how to grant Write', stepUp.result);
   expect(!(await archived('OLD')), 'archive_secret with Browse archived the secret');
 
+  // Write ticked on the consent page, though the client asked for Browse only, as Claude does; the token says so.
+  const granted = await redeem(deployment, clientId, await connect(deployment, changer, clientId, 'browse', ['write']));
+  expect(granted.scope === 'browse write', `a connection ticked Write answered scope "${granted.scope}", not "browse write"`, granted.scope);
+  const write = granted.access_token;
+
   // With Write, and no URL elicitation: the link, and nothing changed.
-  const write = (await redeem(deployment, clientId, await connect(deployment, changer, clientId, 'browse write'))).access_token;
   const linked = await call(write, 'archive_secret', { secret: `${place}/OLD` });
   const approval = linked.result?.structuredContent?.approval;
   expect(linked.status === 200 && linked.result?.structuredContent?.status === 'pending' && approval?.url === `${deployment.origin}/approvals/${approval?.id}`,
@@ -435,7 +445,7 @@ export async function mcpChanges(deployment: Deployment, people: People, canarie
   expect(once.archive === 1 && once.rename === 1 && once.write === 2, 'the changes are not each made once, via the client and its approval', once);
   const decisions = entries.filter((entry) => entry.action === 'mcp.approve').map((entry) => `${entry.decision} ${entry.reason ?? ''}`.trim()).sort();
   expect(JSON.stringify(decisions) === JSON.stringify(['allow', 'allow', 'allow', 'allow', 'deny approved', 'deny changed']), 'the decisions, and the two refused, are not in the log', decisions);
-  return `Browse stepped up to Write; with Write, the link without URL elicitation and an elicitation with it; nothing changed until ${changer.email} approved on coffre's page, another person and another site refused, a replayed requestState refused; each change made once, via the client and its approval; a value typed on the page only, and one coffre made reaching no one`;
+  return `Browse stepped up to Write, saying how as its result; Write ticked beyond what was asked; with Write, the link without URL elicitation and an elicitation with it; nothing changed until ${changer.email} approved on coffre's page, another person and another site refused, a replayed requestState refused; each change made once, via the client and its approval; a value typed on the page only, and one coffre made reaching no one`;
 }
 
 /**

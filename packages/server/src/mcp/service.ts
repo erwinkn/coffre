@@ -115,7 +115,7 @@ export type AuthorizationView =
       redirectHost: string;
       /** Every redirect the client has is loopback: any program on the machine could be it. */
       loopbackOnly: boolean;
-      /** What the client asks for, `browse` always among them. */
+      /** What the client asks for, `browse` always among them: what the page starts with ticked, of all four. */
       scopes: McpScope[];
       /** The scopes of each of the person's live connections of this client: one the approval supersedes ends. */
       connections: McpScope[][];
@@ -234,12 +234,12 @@ export class McpService {
 
     if (!answer.approve) {
       await audited(this.#deps, async (_tx, log) => {
-        log.push(denied(asker, 'mcp.connect', 'person_denied', { metadata: { ...shown, scopes: scopeString(asked) } }));
+        log.push(denied(asker, 'mcp.connect', 'person_denied', { metadata: { ...shown, asked: scopeString(asked) } }));
       });
       return back({ error: 'access_denied', error_description: 'the person did not approve the connection' });
     }
 
-    const scopes = grantedScopes(asked, answer.scopes);
+    const scopes = grantedScopes(answer.scopes);
     const member = `user:${principal.id}`;
     const code = secret();
     const id = randomUUID();
@@ -270,7 +270,7 @@ export class McpService {
         codeExpiresAt: new Date(now.getTime() + CODE_SECONDS * 1000),
         expiresAt: new Date(now.getTime() + this.#deps.signin.cliSessionDays * 86_400_000),
       });
-      log.push(allowed(asker, 'mcp.connect', { metadata: { connectionId: id, ...shown, scopes: scopeString(scopes) } }));
+      log.push(allowed(asker, 'mcp.connect', { metadata: { connectionId: id, ...shown, asked: scopeString(asked), scopes: scopeString(scopes) } }));
     });
     return back({ code });
   }

@@ -21,8 +21,8 @@ test('scopes: Browse always, in catalogue order, offline_access dropped, the unk
   assert.deepEqual(parseScopes('manage-access  write offline_access'), { scopes: ['browse', 'write', 'manage-access'], unknown: [] });
   assert.deepEqual(parseScopes('browse admin'), { scopes: ['browse'], unknown: ['admin'] });
   assert.equal(scopeString(['read-values', 'browse']), 'browse read-values');
-  assert.deepEqual(grantedScopes(['browse', 'write', 'read-values'], ['read-values', 'manage-access']), ['browse', 'read-values']);
-  assert.deepEqual(grantedScopes(['browse', 'write'], []), ['browse'], 'Browse cannot be unticked');
+  assert.deepEqual(grantedScopes(['manage-access', 'read-values', 'admin']), ['browse', 'read-values', 'manage-access'], 'what was ticked, asked for or not');
+  assert.deepEqual(grantedScopes([]), ['browse'], 'Browse cannot be unticked');
 });
 
 test('redirects: HTTPS, or HTTP on loopback; never a custom scheme', () => {

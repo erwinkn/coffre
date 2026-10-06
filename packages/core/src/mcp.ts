@@ -53,10 +53,15 @@ export function scopeString(scopes: Iterable<McpScope>): string {
   return MCP_SCOPES.filter((scope) => held.has(scope)).join(' ');
 }
 
-/** A person's choice at consent: what was asked, minus what they unticked, and never without `browse`. */
-export function grantedScopes(asked: readonly McpScope[], chosen: readonly string[]): McpScope[] {
+/**
+ * A person's choice at consent: what they ticked, whatever the client asked
+ * for, and never without `browse`. What a client asks for only decides what
+ * starts ticked: clients ask for what the resource metadata names, `browse`,
+ * and not every one asks for more later (docs/design/mcp.md, section 5).
+ */
+export function grantedScopes(chosen: readonly string[]): McpScope[] {
   const picked = new Set(chosen);
-  return MCP_SCOPES.filter((scope) => scope === 'browse' || (asked.includes(scope) && picked.has(scope)));
+  return MCP_SCOPES.filter((scope) => scope === 'browse' || picked.has(scope));
 }
 
 /**
