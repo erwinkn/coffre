@@ -889,8 +889,9 @@ Workers use Postgres.
 ### Expand, then contract
 
 A deployment migrates in its pipeline, before it deploys
-([deploy.md](deploy.md#upgrading)); with Workers Builds, each Worker's build
-does. Until the deploy is done, and for good if it fails, the previous
+([deploy.md](deploy.md#upgrading)): on Workers, its deploy workflow migrates
+before `pnpm run deploy`, and with Workers Builds instead, each Worker's
+build does. Until the deploy is done, and for good if it fails, the previous
 release runs on the new schema. The new release never runs on the old one:
 the app checks, once per isolate or process until it holds, that the
 database has every migration the release ships (`@coffre/db/schema-version`,

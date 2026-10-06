@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+**An MCP client lists only the tools its person's roles reach.**
+`tools/list`, in both protocol eras, leaves out the tools no role the
+person holds reaches anywhere: a viewer's client no longer offers
+`set_access`, `admit_member` or the audit log, and an access manager's no
+longer offers values. A tool their roles allow but the connection's scopes
+don't stays listed, so a client can still step up to it. The list is
+computed per request from what the token check already read, and its
+cache hints are now `cacheScope: "private"` and five minutes, not public
+and an hour, so a role granted or taken shows within minutes. Calls are
+checked as before: a hidden tool called by name is refused as it was.
+
 **A Workers deployment deploys on every push.** `coffre init --workers`
 writes `.github/workflows/deploy.yml`: on each push to `main`, it installs
 the deployment as its lockfile says, migrates the database with
