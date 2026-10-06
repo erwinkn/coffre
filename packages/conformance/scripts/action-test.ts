@@ -40,10 +40,14 @@ async function serve(readyFile: string, environmentFile: string): Promise<void> 
     const { value: admin } = await signInAdmin(deployment);
     await admin.api.projects.create('action-test', { name: 'Action test' });
     await admin.api.environments.create('action-test/ci', { name: 'CI' });
-    await admin.api.secrets.set('action-test/ci', ACTION_VALUES);
+    await admin.api.environments.create('action-test/deploy', { name: 'Deploy' });
+    // Two environments, read together by the Action: GITHUB_TOKEN from the second.
+    const { GITHUB_TOKEN, ...values } = ACTION_VALUES;
+    await admin.api.secrets.set('action-test/ci', values);
+    await admin.api.secrets.set('action-test/deploy', { GITHUB_TOKEN: GITHUB_TOKEN! });
     const member = 'token:action-test';
     await admin.api.members.add(member);
-    await admin.api.access.set(member, { 'action-test/ci': 'viewer' });
+    await admin.api.access.set(member, { 'action-test/ci': 'viewer', 'action-test/deploy': 'viewer' });
     const { token } = await admin.api.tokens.issue(member, { label: 'Action test', expiresInDays: 1 });
     // The foreground setup step forwards this command from the fixture log.
     // Only the credential is masked here; the Action must mask all values.
