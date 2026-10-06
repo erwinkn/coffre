@@ -210,7 +210,7 @@ const REVEAL_VALUES = tool({
   needs: 'secret.read',
   title: 'Reveal secret values',
   description:
-    "Read the values of one secret or of a whole environment, into this conversation: they become part of it, and of wherever it is kept. Use it only when the person wants you to see the values. To show the person a value without you seeing it, use show_secret_value; to give a command its values, run_with_secrets.",
+    "Read the values of one secret or of a whole environment into this conversation. Use it only when the person wants you to see the values. To show the person a value without you seeing it, use show_secret_value; to give a command its values, run_with_secrets.",
   scope: 'reveal',
   readOnly: true,
   idempotent: true,

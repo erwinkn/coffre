@@ -100,7 +100,7 @@ test('update ends with what the release asks of the database', () => {
   );
   assert.equal(
     migrationsAdded('0.4.0', '0.4.1', ['0000_baseline'], ['0000_baseline']),
-    "coffre 0.4.1 adds no migration to 0.4.0's: deploying it is all.",
+    "coffre 0.4.1 adds no migration to 0.4.0's: just deploy it.",
   );
 });
 
@@ -240,7 +240,7 @@ printf '{"dependencies":{"@coffre/cli":{"path":"%s"}}}' "$at"
     assert.match(stderr, /This deployment stays as it is, at 0\.3\.0: coffre 0\.4\.0 was a clean break, and moves no deployment from before it\. Nothing was changed/);
     assert.match(stderr, /Deploy coffre 9\.9\.9 afresh, with coffre init/);
     assert.match(stderr, /Updated this CLI from \S+ to 9\.9\.9, with npm/);
-    assert.doesNotMatch(stderr, /adds \d+ migration|coffre migrate|Deploy it as you do/, 'no migration step for a deployment deployed afresh');
+    assert.doesNotMatch(stderr, /adds \d+ migration|coffre migrate|to deploy it|Deploy it with/, 'no migration step for a deployment deployed afresh');
     assert.equal(readFileSync(join(dir, 'package.json'), 'utf8'), before);
   } finally {
     close();

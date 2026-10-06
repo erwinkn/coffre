@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+**Shorter copy across the pages, the CLI and the MCP tools.** Sentences that
+explained mechanics, hedged or repeated what the page already shows are cut;
+warnings and the facts a person acts on stay. The consent page no longer
+opens with a lede, says "30 days" for how long a connection lasts, and says
+only that a new connection replaces the earlier one. `coffre update` ends
+with how this deployment deploys: a push to main when it has
+`.github/workflows/deploy.yml`, else `pnpm run deploy`, or a restart on
+Node. `coffre whoami` puts MCP and CI sign-in on lines of their own.
+
 ## 0.4.4 (2026-10-06)
 
 **An MCP client lists only the tools its person's roles reach.**

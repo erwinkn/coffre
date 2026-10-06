@@ -108,7 +108,7 @@ export function ConnectedAppsCard<TData>({
                                 )}
                                 , last used{' '}
                                 {app.lastUsedAt === null ? 'never' : <Timestamp iso={app.lastUsedAt} display="relative" />},
-                                stops at its next request. To use it again, connect it again.
+                                will stop working. To use it again, connect it again.
                               </>
                             }
                             confirmLabel="Disconnect"

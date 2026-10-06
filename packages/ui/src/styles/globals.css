@@ -2335,12 +2335,7 @@ a.crumb-link:hover {
   border-bottom: 0;
 }
 
-.history-note {
-  padding: 0.5rem 0.875rem;
-  border-top: 1px solid var(--border);
-  color: var(--ink-3);
-  font-size: 0.75rem;
-}
+
 
 .history-body {
   padding: 0.75rem 0.875rem;

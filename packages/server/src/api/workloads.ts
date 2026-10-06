@@ -306,7 +306,7 @@ export class WorkloadService {
         const answer = await this.#deps.transport.json(url);
         return typeof answer === 'object' && answer !== null ? (answer as Record<string, unknown>) : {};
       } catch (error) {
-        if (error instanceof FetchRefused) throw notFound(`${url.hostname} did not find it: a private one's IDs are typed in`);
+        if (error instanceof FetchRefused) throw notFound(`${url.hostname} did not find it: for a private one, type its IDs`);
         throw error;
       }
     };

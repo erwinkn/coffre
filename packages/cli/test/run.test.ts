@@ -146,7 +146,7 @@ test('a key that came to clash between listing and reading still stops run, its 
   const run = await coffre.coffre(['run', 'deploy/prod', 'auth/prod', '--', ...printing('TOKEN')]);
   assert.equal(run.code, 1);
   assert.equal(run.stdout, '', 'the command ran');
-  assert.equal(run.stderr, 'coffre: deploy/prod and auth/prod both define TOKEN, as they were read just now: none of their values is used, and each read is in the audit log\n');
+  assert.equal(run.stderr, 'coffre: deploy/prod and auth/prod both define TOKEN, as read just now. No value was used, and the reads are in the audit log\n');
 });
 
 test('run and export refuse an environment named twice, or a secret in place of one, before any request', async (t) => {

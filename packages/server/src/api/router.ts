@@ -152,7 +152,7 @@ export async function serveApi(request: Request, ctx: ApiContext): Promise<Respo
     if (ctx.via !== null) {
       // Through MCP, a route is the connection's only within its scopes, whatever the person may do.
       const needed = ROUTE_SCOPES[`${route.method} ${route.shape}` as keyof typeof ROUTE_SCOPES];
-      if (needed === null || needed === undefined) throw new ApiError('forbidden', 'apps connected through MCP cannot do this: it is for people, in coffre itself');
+      if (needed === null || needed === undefined) throw new ApiError('forbidden', 'apps connected through MCP cannot do this: only people can, in coffre itself');
       if (!ctx.via.scopes.includes(needed)) {
         throw new ApiError('insufficient_scope', `this needs the ${MCP_SCOPE_INFO[needed].label} scope: connect the app again with it (${scopeString(challengeScopes(ctx.via.scopes, needed))})`, needed);
       }

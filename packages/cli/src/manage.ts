@@ -216,12 +216,12 @@ export function describeDeletion(deletion: Deletion, done: boolean): string {
   const revoked = grants.map((grant) => `${shownMember(grant.member)} (${grant.role} on ${grant.place})`);
   const lines = [
     done ? `deleted ${path}, for good:` : `would delete ${path}, for good:`,
-    `  erased: ${count(versions, 'version')}, each one's ciphertext and wrapped data key${where}`,
+    `  erased: ${count(versions, 'version')}${where}`,
     `  revoked: ${count(grants.length, 'grant')}${revoked.length === 0 ? '' : `, ${revoked.join(', ')}`}`,
     ...(deletion.references.length === 0
       ? []
       : [`  ended: ${count(deletion.references.length, 'reference')}, ${deletion.references.map((reference) => `${reference.holder} → ${reference.source}`).join(', ')}`]),
-    `  kept, names only: ${tombstone} and its ${count(keys, 'key')}, which the audit log names`,
+    `  kept, names only: ${tombstone} and its ${count(keys, 'key')}, for the audit log`,
     `  ${path.split('/').at(-1)} ${done ? 'is' : 'would be'} free to use again`,
   ];
   for (const member of stranded) {
@@ -309,7 +309,7 @@ export async function missing(connect: () => CoffreClient, args: string[], io: I
     return;
   }
   if (result.missing.length === 0) {
-    io.out.write(`${path} has every key its environments you read have${result.dismissed.length === 0 ? '' : `, but ${result.dismissed.length} dismissed: --dismissed lists them`}\n`);
+    io.out.write(`${path} has every key of the sibling environments you read${result.dismissed.length === 0 ? '' : `, but ${result.dismissed.length} dismissed: --dismissed lists them`}\n`);
     return;
   }
   for (const key of result.missing) io.out.write(`${key.key.padEnd(28)} in ${key.in.join(', ')}\n`);
@@ -550,11 +550,11 @@ export async function tokensIssue(connect: () => CoffreClient, args: string[], i
   if (fd !== null) {
     writeSync(fd, `${issued.token}\n`);
     closeSync(fd);
-    io.out.write(`wrote ${about}, to ${path}, readable by you alone; coffre keeps only its hash\n`);
+    io.out.write(`wrote ${about}, to ${path}, readable by you alone\n`);
     return;
   }
   io.out.write(`${issued.token}\n`);
-  if (io.err.isTTY) io.err.write(`coffre: ${about}. It is shown this once: coffre keeps only its hash\n`);
+  if (io.err.isTTY) io.err.write(`coffre: ${about}. It is shown this once\n`);
 }
 
 export async function tokensRevoke(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
@@ -654,7 +654,7 @@ export async function appsRevoke(connect: () => CoffreClient, args: string[], io
   if (app === undefined) throw new Error(`you have no connected app ${id}: \`coffre apps\` lists them`);
   const what = `${app.name}${app.host === null ? '' : ` (${app.host})`}, connected ${day(app.createdAt)}, last used ${day(app.lastUsedAt)}`;
   if (!values.apply) {
-    io.out.write(`would disconnect ${what}: its tokens would stop at its next request.\nNothing changed. Re-run with --apply to disconnect it.\n`);
+    io.out.write(`would disconnect ${what}: it would stop working at once.\nNothing changed. Re-run with --apply to disconnect it.\n`);
     return;
   }
   await api.apps.disconnect(id);
@@ -679,9 +679,9 @@ export async function identitiesUnlink(connect: () => CoffreClient, args: string
   if (identity === undefined) throw new Error(`you have no linked account ${id}: \`coffre identities\` lists them`);
   const what = `your ${identity.provider} account${identity.email === null ? '' : ` ${identity.email}`} (${id})`;
   if (!values.apply) {
-    io.out.write(`would unlink ${what}: it would sign you in no more, and the sessions it signed in would end.\nNothing changed. Re-run with --apply to unlink it.\n`);
+    io.out.write(`would unlink ${what}: it would no longer sign you in, and its sessions would end.\nNothing changed. Re-run with --apply to unlink it.\n`);
     return;
   }
   await api.identities.unlink(id);
-  io.out.write(`unlinked ${what}, and ended the sessions it signed in\n`);
+  io.out.write(`unlinked ${what}, and ended its sessions\n`);
 }

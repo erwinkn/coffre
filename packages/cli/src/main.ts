@@ -577,7 +577,7 @@ async function whoami(args: string[]): Promise<void> {
   }
   if (me.registered) {
     const mcp = me.features.mcp === null ? 'off' : `on, at ${me.features.mcp}`;
-    process.stdout.write(`  here, MCP clients are ${mcp}, and CI runs signing in by their ID tokens ${me.features.workloads ? 'on' : 'off'}\n`);
+    process.stdout.write(`  MCP clients: ${mcp}\n  CI sign-in by ID token: ${me.features.workloads ? 'on' : 'off'}\n`);
   }
   printMe(me);
 }
@@ -709,7 +709,7 @@ async function readEnvironments(paths: readonly string[]): Promise<[string, stri
   const read: [string, Record<string, string>][] = [];
   for (const path of paths) read.push([path, (await client().secrets.reveal(path)).values]);
   const shared = clash(read.map(([path, values]) => [path, Object.keys(values)]));
-  if (shared !== null) fail(`${shared}, as they were read just now: none of their values is used, and each read is in the audit log`);
+  if (shared !== null) fail(`${shared}, as read just now. No value was used, and the reads are in the audit log`);
   return read.flatMap(([, values]) => Object.entries(values));
 }
 

@@ -192,7 +192,7 @@ function DangerZone({ project }: { project: ProjectSummary }) {
           <div>
             <p className="card-row-title">Delete project</p>
             <p className="card-row-desc">
-              Erases its values for good and frees its name; only names stay, for the audit log.
+              Erases its values for good and frees its name. The audit log keeps the names.
             </p>
           </div>
           <button className="btn btn-danger-outline" onClick={() => setDeleting(true)}>
@@ -207,7 +207,7 @@ function DangerZone({ project }: { project: ProjectSummary }) {
           open={deleting}
           onOpenChange={setDeleting}
           onDeleted={async () => {
-            toast.success(`${project.slug} deleted, and its name is free`);
+            toast.success(`${project.slug} deleted`);
             await router.navigate({ to: '/projects' });
           }}
         />
@@ -224,15 +224,13 @@ function DangerZone({ project }: { project: ProjectSummary }) {
         body={
           isArchived ? (
             <>
-              The project reappears in listings and its environments start serving reads
-              again, for everyone who holds a grant on it.
+              Its environments serve reads again, to everyone with a grant on it.
             </>
           ) : (
             <>
               Every environment in <span className="mono">{project.slug}</span> stops serving
-              reads, including to machine callers already running. Nothing is deleted: values,
-              versions and the audit trail over them stay intact, and you can restore it here
-              at any time.
+              reads, to machines already running too. Nothing is deleted, and you can restore it
+              here at any time.
             </>
           )
         }

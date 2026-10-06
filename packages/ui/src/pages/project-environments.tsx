@@ -397,13 +397,13 @@ function EnvironmentCard({
             body={
               secretCount === null ? (
                 <>
-                  This changes whether the environment serves secrets to principals who have
-                  access. Values and history remain stored.
+                  This changes whether the environment serves its secrets. Values and history
+                  stay stored.
                 </>
               ) : isArchived ? (
                 <>
-                  The environment starts serving its {secretCount} secret
-                  {secretCount === 1 ? '' : 's'} again, to everyone who holds a grant on it.
+                  It serves its {secretCount} secret{secretCount === 1 ? '' : 's'} again, to
+                  everyone with a grant on it.
                 </>
               ) : (
                 <>
@@ -431,7 +431,7 @@ function EnvironmentCard({
           path={`${project}/${environment.slug}`}
           open={deleting}
           onOpenChange={setDeleting}
-          onDeleted={() => toast.success(`${project}/${environment.slug} deleted, and its name is free`)}
+          onDeleted={() => toast.success(`${project}/${environment.slug} deleted`)}
         />
       )}
 
@@ -550,7 +550,7 @@ function NewEnvironment({ project, sources }: { project: string; sources: string
                 {how === ''
                   ? 'No secrets yet.'
                   : how === 'copy'
-                    ? `Each of ${from}'s keys, with its current value and folder, without history. Copying reads them, in your name.`
+                    ? `Each of ${from}'s keys, with its current value and folder, without history.`
                     : `Each key follows ${from}'s until it gets a value of its own. Whoever can read ${slug === '' ? 'the new environment' : slug} will read ${from}'s values through them, even without access to ${from}.`}
               </span>
               {copied.length > 0 && (

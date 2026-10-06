@@ -108,7 +108,7 @@ export function ServiceTokens({ serviceId, tokens }: { serviceId: string; tokens
                                     </>
                                   )}
                                   .{' '}
-                                  Whatever uses it is refused from its next request. Issue a new token first if the
+                                  Whatever uses it is refused at once. Issue a new token first if the
                                   service account should keep working.
                                 </>
                               }

@@ -68,7 +68,7 @@ function Decided({ decision, reveal }: { decision: Decision; reveal: boolean }) 
       {!(reveal && done) && <p>{decision.outcome.text}</p>}
       {decision.shown.length > 0 && (
         <>
-          <Notice tone="warn">{reveal ? 'Shown here only, and logged as your reveal: the app does not get it.' : 'Shown once, here only: copy it now. The app does not get it.'}</Notice>
+          <Notice tone="warn">{reveal ? 'Shown only to you, here. The app does not get it.' : 'Shown once, here only: copy it now. The app does not get it.'}</Notice>
           <dl className="facts device-facts">
             {decision.shown.map((line) => (
               <div className="fact" key={line.label}>
@@ -82,7 +82,7 @@ function Decided({ decision, reveal }: { decision: Decision; reveal: boolean }) 
           </dl>
         </>
       )}
-      <p>You can close this tab: the app hears the outcome when it asks.</p>
+      <p>You can close this tab and go back to the app.</p>
     </ClosedDoor>
   );
 }
@@ -121,8 +121,8 @@ function Approve({ view, onDecided }: { view: ApprovalView; onDecided: (decision
         <p className="signin-lede">
           {client.name} asks to <strong>{view.summary}</strong>.{' '}
           {reveal
-            ? 'Reveal shows it here, to you, logged as your reveal; it is never sent to the app.'
-            : 'Read what it does: nothing changes until you approve, and then coffre makes it, as you.'}
+            ? 'Reveal shows it only to you, here. The app never gets it.'
+            : 'Nothing changes until you approve.'}
         </p>
       </div>
 

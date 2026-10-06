@@ -28,7 +28,7 @@ export function TrustedWorkloads({ serviceId, bindings }: { serviceId: string; b
       <Card
         labelledBy="trusted-workloads"
         title="Sign in with OIDC"
-        description="The way with nothing to store: CI runs sign in as this service account with the ID token their platform signs, when every claim of a trust binding matches. Recommended wherever the CI signs one."
+        description="CI runs sign in as this service account with their platform's ID token, when it matches a trust binding. There is nothing to store, so prefer it wherever the CI supports it."
       >
         {bindings.length === 0 ? (
           <EmptyState title="No trust bindings">
@@ -100,7 +100,7 @@ export function TrustedWorkloads({ serviceId, bindings }: { serviceId: string; b
                                       It was last used <Timestamp iso={binding.lastUsedAt} display="relative" />.
                                     </>
                                   )}{' '}
-                                  A binding removed is never trusted again; to trust the runs again, add a new one.
+                                  To trust these runs again, add a new binding.
                                 </>
                               }
                               confirmLabel="Remove binding"
@@ -264,7 +264,7 @@ function TrustWorkload({ serviceId }: { serviceId: string }) {
                   {field('Owner ID', 'ownerId', { mono: true })}
                 </div>
                 <p className="hint">
-                  Bindings name IDs, which unlike names nobody else can take over. For a private repository:{' '}
+                  Bindings use IDs, since a name can pass to someone else. For a private repository:{' '}
                   <span className="mono">gh api repos/{form.repository.trim() || 'acme/api'} --jq '.id, .owner.id'</span>
                 </p>
                 <ErrorLine error={lookup.error} />

@@ -28,13 +28,8 @@ function CloudflareAccessRequired() {
   return (
     <ClosedDoor icon={<Lock size={18} />} label="Cloudflare Access" title="Open coffre through Access">
       <p>
-        This instance has no sign-in of its own. Cloudflare Access authenticates you before
-        a request ever reaches coffre, and this request arrived without an Access
-        assertion.
-      </p>
-      <p>
-        Use the Access-protected hostname. A request straight to the origin is refused by
-        design.
+        Cloudflare Access signs you in to coffre, and this request did not come through it.
+        Open coffre at its Access-protected hostname.
       </p>
     </ClosedDoor>
   );
@@ -48,12 +43,12 @@ function CloudflareAuthenticationFailed() {
       title="Your identity could not be confirmed"
     >
       <p>
-        Cloudflare Access forwarded an identity assertion, but coffre could not verify it.
-        The Access session may have expired, or the identity verifier may be unavailable.
+        coffre could not verify the identity Cloudflare Access sent. Your Access session may
+        have expired.
       </p>
       <p>
         Reopen coffre through its Access-protected hostname. If this keeps happening, tell
-        whoever operates coffre.
+        whoever runs coffre.
       </p>
     </ClosedDoor>
   );

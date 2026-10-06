@@ -450,8 +450,8 @@ function EnvironmentLedger({
         {active.length === 0 && drafts.length === 0 ? (
           <EmptyState title="No secrets yet">
             {canWrite
-              ? 'Add them one by one, or import an existing .env file. Nothing is written until you save, or until you have seen the import plan.'
-              : 'Nothing has been written to this environment, and adding the first secret needs secret.write.'}
+              ? 'Add them one by one, or import a .env file.'
+              : 'Adding secrets here needs secret.write.'}
           </EmptyState>
         ) : (
           <div className="dt-wrap">
@@ -1409,7 +1409,7 @@ function DraftRow({
           {(keyProblem !== null || isNewVersion) && (
             <span className={`edit-note${keyProblem !== null ? ' edit-note-error' : ''}`}>
               {keyProblem ??
-                'This name already exists here. Saving appends a new version to it rather than creating a second secret.'}
+                'This name exists here already. Saving adds a new version to it.'}
             </span>
           )}
         </div>
@@ -1683,13 +1683,11 @@ function VersionHistory({
                         }
                         body={
                           <>
-                            The current pointer moves to v{version.version}. Nothing is copied
-                            or deleted, every version stays readable, and the next write
-                            continues the numbering forward. Anything reading{' '}
+                            v{version.version} becomes current, and anything reading{' '}
                             <span className="mono">
                               {project}/{environment}
                             </span>{' '}
-                            picks up the change immediately.
+                            gets it at once. Every version stays.
                           </>
                         }
                         confirmLabel={`Roll back to v${version.version}`}
@@ -1725,9 +1723,6 @@ function VersionHistory({
           <ErrorLine error={error} />
         </div>
       )}
-      <p className="history-note">
-        Metadata only. Listing versions decrypts nothing.
-      </p>
     </div>
   );
 }
@@ -1829,10 +1824,8 @@ function ImportEnv({ project, environment }: { project: string; environment: str
         wide
         description={
           <>
-            Paste a .env file. It is read by the CLI’s own parser, so this page and the CLI
-            cannot disagree about what it means, and malformed lines are reported rather
-            than guessed at. coffre compares it with the current values without sending any
-            to this page.
+            Paste a .env file. coffre parses it as the CLI does and compares it with the current
+            values, without sending them to this page.
           </>
         }
       >
@@ -1881,7 +1874,7 @@ function ImportEnv({ project, environment }: { project: string; environment: str
           )}
 
           {plan !== null && plan.entries.length > 0 && changes.length === 0 && (
-            <Notice tone="good">Every key already has this value. There is nothing to write.</Notice>
+            <Notice tone="good">Every key already has this value.</Notice>
           )}
 
           {problems.length > 0 && (

@@ -15,8 +15,8 @@ export function NotFound() {
         </Link>
       }
     >
-      There is no page at this address. If you followed a link to a project or
-      environment, it may have been renamed or archived since.
+      If you followed a link to a project or environment, it may have been renamed or
+      archived.
     </ClosedDoor>
   );
 }
@@ -52,9 +52,8 @@ export function RouteError({ reset }: ErrorComponentProps) {
         </>
       }
     >
-      coffre could not load what this page needs, and nothing was read or written. If you
-      typed this address, check it; if it keeps happening, the service or its database may
-      be unavailable.
+      coffre could not load this page, and nothing was read or written. If it keeps
+      happening, the service or its database may be down.
     </ClosedDoor>
   );
 }
