@@ -1,5 +1,5 @@
 // `/mcp` itself (docs/design/mcp.md, sections 2, 5 and 6): the official
-// client connects in both eras and calls the Browse tools, which act as
+// client connects in both eras and calls the Read tools, which act as
 // their person and no further; the wire's checks, the scope gates in the
 // endpoint and in the API, and every call's entry in the log.
 import test from 'node:test';
@@ -27,16 +27,16 @@ useMcp(async () => {
 });
 
 for (const mode of ['modern', 'legacy'] as const) {
-  test(`the official client connects on ${mode === 'modern' ? '2026-07-28' : '2025-11-25'}, lists the Browse tools and calls them as its person`, async () => {
+  test(`the official client connects on ${mode === 'modern' ? '2026-07-28' : '2025-11-25'}, lists the Read tools and calls them as its person`, async () => {
     sent.length = 0;
     const mcp = await client(await connect(), mode);
     try {
       const { tools } = await mcp.listTools();
-      const browse = ['whoami', 'list_projects', 'list_secrets', 'secret_history', 'list_access', 'describe_member', 'read_audit_log', 'run_with_secrets'];
-      assert.deepEqual(tools.slice(0, browse.length).map((tool) => tool.name), browse);
-      assert.ok(tools.slice(0, browse.length).every((tool) => tool.annotations?.readOnlyHint === true));
+      const readTools = ['whoami', 'list_projects', 'list_secrets', 'secret_history', 'list_access', 'describe_member', 'read_audit_log', 'run_with_secrets'];
+      assert.deepEqual(tools.slice(0, readTools.length).map((tool) => tool.name), readTools);
+      assert.ok(tools.slice(0, readTools.length).every((tool) => tool.annotations?.readOnlyHint === true));
       // Every tool is listed to every token, as the spec allows: a client steps up when it needs one. Only reads say they are.
-      const reads = new Set([...browse, 'show_secret_value', 'read_secret_values']);
+      const reads = new Set([...readTools, 'show_secret_value', 'read_secret_values']);
       assert.ok(tools.length > reads.size && tools.every((tool) => tool.annotations?.readOnlyHint === reads.has(tool.name)), JSON.stringify(tools.map((tool) => [tool.name, tool.annotations?.readOnlyHint])));
       assert.ok(tools.every((tool) => tool.annotations?.openWorldHint === false));
       // No tool takes a value: an agent cannot supply one.
@@ -57,7 +57,7 @@ for (const mode of ['modern', 'legacy'] as const) {
       assert.match(run.content[0]!.text!, /coffre run market\/prod -- npm test/);
       assert.match(run.content[0]!.text!, /API_KEY/);
       const whoami = (await mcp.callTool({ name: 'whoami', arguments: {} })) as Result;
-      assert.deepEqual(whoami.structuredContent!.connection, { client: 'Claude Code', scopes: ['browse'] });
+      assert.deepEqual(whoami.structuredContent!.connection, { client: 'Claude Code', scopes: ['read'] });
     } finally {
       await mcp.close();
     }
@@ -83,8 +83,8 @@ for (const mode of ['modern', 'legacy'] as const) {
 }
 
 test('a tool beyond the API scope table is refused by the API itself, whatever the person may do', async () => {
-  // The root admin may reveal; a connection with only Browse may not, even if a tool asked.
-  const ctx = { ...(await contextFor(deps, ROOT)), via: { connectionId: randomUUID(), clientId: CLAUDE_CODE, clientName: 'Claude Code', scopes: ['browse'] as const } };
+  // The root admin may reveal; a connection with only Read may not, even if a tool asked.
+  const ctx = { ...(await contextFor(deps, ROOT)), via: { connectionId: randomUUID(), clientId: CLAUDE_CODE, clientName: 'Claude Code', scopes: ['read'] as const } };
   const reveal = await serveApi(new Request(`${ORIGIN}/api/reveals`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: 'market/prod' }) }), ctx);
   assert.equal(reveal.status, 403);
   assert.equal(((await reveal.json()) as { error: string }).error, 'insufficient_scope');
@@ -152,30 +152,30 @@ test("bad arguments are the tool's error, not a crash; an unknown tool is invali
 
 test("a tool beyond the connection's scopes answers 403 insufficient_scope, naming what it holds and lacks, and says in plain words how to grant it; so does one whose API call is", async () => {
   const token = await connect();
-  // Tools of the tests' own: one that declares a scope Browse lacks, one that claims Browse and reaches past it.
+  // Tools of the tests' own: one that declares a scope Read lacks, one that claims Read and reaches past it.
   const reveal = (name: string, scope: Tool['scope']): Tool => ({
     name, title: name, description: name, scope, readOnly: true, idempotent: true, destructive: false,
     input: z.object({}).strict(), output: { type: 'object' }, names: () => ['market/prod'],
     run: async ({ api }) => ({ structured: await api.secrets.reveal('market/prod') }),
   });
-  TOOL_BY_NAME.set('test_reveal', reveal('test_reveal', 'read-values'));
-  TOOL_BY_NAME.set('test_sneaky', reveal('test_sneaky', 'browse'));
+  TOOL_BY_NAME.set('test_reveal', reveal('test_reveal', 'reveal'));
+  TOOL_BY_NAME.set('test_sneaky', reveal('test_sneaky', 'read'));
   try {
     for (const name of ['test_reveal', 'test_sneaky']) {
       const response = await raw(token, { method: 'tools/call', params: { name, arguments: {}, _meta: envelope() } }, { 'mcp-name': name });
       assert.equal(response.status, 403, name);
       const challenge = response.headers.get('www-authenticate') ?? '';
-      assert.match(challenge, /^Bearer error="insufficient_scope", scope="browse read-values", resource_metadata="https:\/\/secrets\.acme\.example\/\.well-known\/oauth-protected-resource\/mcp"/, name);
+      assert.match(challenge, /^Bearer error="insufficient_scope", scope="read reveal", resource_metadata="https:\/\/secrets\.acme\.example\/\.well-known\/oauth-protected-resource\/mcp"/, name);
       // For a client that does not step up, as Claude Desktop did not: the tool's result, which the model reads.
       const { result } = (await response.json()) as { result: Result };
       assert.equal(result.isError, true, name);
-      assert.match(result.content[0]!.text!, new RegExp(`^${name} needs coffre's Read values scope, which this connection was not given\\. Nothing was done\\.`), name);
-      assert.match(result.content[0]!.text!, /disconnect coffre in this app and connect it again, ticking Read values on coffre's consent page/, name);
+      assert.match(result.content[0]!.text!, new RegExp(`^${name} needs coffre's Reveal values scope, which this connection was not given\\. Nothing was done\\.`), name);
+      assert.match(result.content[0]!.text!, /disconnect coffre in this app and connect it again, ticking Reveal values on coffre's consent page/, name);
     }
     // The official client reads the challenge, not the body: with an auth provider, it would step up to these scopes.
     const official = await client(token, 'modern');
     try {
-      await assert.rejects(official.callTool({ name: 'test_reveal', arguments: {} }), { name: 'InsufficientScopeError', message: /"browse read-values"/ });
+      await assert.rejects(official.callTool({ name: 'test_reveal', arguments: {} }), { name: 'InsufficientScopeError', message: /"read reveal"/ });
     } finally {
       await official.close();
     }

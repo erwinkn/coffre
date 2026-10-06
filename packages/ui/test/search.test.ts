@@ -10,9 +10,9 @@ import { parseSearch, stringifySearch, stringsOf } from '../src/lib/search.ts';
 // is `stringsOf` (options.ts, which loads pages, so not from Node).
 
 test('every value is read as the URL has it, and written back the same', () => {
-  const sent = '?state=1e5&code=0123&detail=1&flag=true&empty=&scope=browse+write';
+  const sent = '?state=1e5&code=0123&detail=1&flag=true&empty=&scope=read+write';
   const search = parseSearch(sent);
-  assert.deepEqual(search, { state: '1e5', code: '0123', detail: '1', flag: 'true', empty: '', scope: 'browse write' });
+  assert.deepEqual(search, { state: '1e5', code: '0123', detail: '1', flag: 'true', empty: '', scope: 'read write' });
   assert.equal(stringifySearch(search), sent);
   assert.equal(stringifySearch({ tab: undefined }), '');
 });
@@ -33,7 +33,7 @@ test("the consent page takes the client's parameters as strings, whatever they l
 test('a router with them keeps state=1e5 as 1e5, through its search and the URL it builds', async () => {
   const root = createRootRoute();
   const authorize = createRoute({ getParentRoute: () => root, path: '/oauth/authorize', validateSearch: stringsOf });
-  const href = '/oauth/authorize?client_id=c&state=1e5&scope=browse+write';
+  const href = '/oauth/authorize?client_id=c&state=1e5&scope=read+write';
   const router = createRouter({
     routeTree: root.addChildren([authorize]),
     history: createMemoryHistory({ initialEntries: [href] }),
@@ -41,6 +41,6 @@ test('a router with them keeps state=1e5 as 1e5, through its search and the URL 
     stringifySearch,
   });
   await router.load();
-  assert.deepEqual(router.state.location.search, { client_id: 'c', state: '1e5', scope: 'browse write' });
+  assert.deepEqual(router.state.location.search, { client_id: 'c', state: '1e5', scope: 'read write' });
   assert.equal(router.buildLocation({ to: '/oauth/authorize', search: true }).href, href);
 });

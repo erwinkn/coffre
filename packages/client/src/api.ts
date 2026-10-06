@@ -448,7 +448,7 @@ export type Api = {
         name: string;
         host: string | null;
         registration: "cimd" | "dcr";
-        scopes: ("browse" | "manage-access" | "read-values" | "write")[];
+        scopes: ("manage-access" | "read" | "reveal" | "write")[];
         createdAt: string;
         lastUsedAt: string | null;
         lastUsedIp: string | null;
@@ -524,7 +524,7 @@ export type Api = {
           name: string;
           host: string | null;
           registration: "cimd" | "dcr";
-          scopes: ("browse" | "manage-access" | "read-values" | "write")[];
+          scopes: ("manage-access" | "read" | "reveal" | "write")[];
           createdAt: string;
           lastUsedAt: string | null;
           lastUsedIp: string | null;
@@ -757,8 +757,8 @@ export type Api = {
       };
       redirectHost: string;
       loopbackOnly: boolean;
-      scopes: ("browse" | "manage-access" | "read-values" | "write")[];
-      connections: ("browse" | "manage-access" | "read-values" | "write")[][];
+      scopes: ("manage-access" | "read" | "reveal" | "write")[];
+      connections: ("manage-access" | "read" | "reveal" | "write")[][];
       days: number;
     };
   };
@@ -789,7 +789,7 @@ export type Api = {
         name: string;
         host: string | null;
         registration: "cimd" | "dcr";
-        scopes: ("browse" | "manage-access" | "read-values" | "write")[];
+        scopes: ("manage-access" | "read" | "reveal" | "write")[];
         createdAt: string;
         lastUsedAt: string | null;
         lastUsedIp: string | null;
@@ -1049,8 +1049,8 @@ export type AuthorizationView = {
   };
   redirectHost: string;
   loopbackOnly: boolean;
-  scopes: ("browse" | "manage-access" | "read-values" | "write")[];
-  connections: ("browse" | "manage-access" | "read-values" | "write")[][];
+  scopes: ("manage-access" | "read" | "reveal" | "write")[];
+  connections: ("manage-access" | "read" | "reveal" | "write")[][];
   days: number;
 };
 
@@ -1086,7 +1086,7 @@ export type ConnectedApp = {
   name: string;
   host: string | null;
   registration: "cimd" | "dcr";
-  scopes: ("browse" | "manage-access" | "read-values" | "write")[];
+  scopes: ("manage-access" | "read" | "reveal" | "write")[];
   createdAt: string;
   lastUsedAt: string | null;
   lastUsedIp: string | null;
@@ -1273,7 +1273,7 @@ export type OffboardingReport = {
     name: string;
     host: string | null;
     registration: "cimd" | "dcr";
-    scopes: ("browse" | "manage-access" | "read-values" | "write")[];
+    scopes: ("manage-access" | "read" | "reveal" | "write")[];
     createdAt: string;
     lastUsedAt: string | null;
     lastUsedIp: string | null;

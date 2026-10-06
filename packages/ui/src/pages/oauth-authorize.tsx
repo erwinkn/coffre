@@ -172,7 +172,7 @@ function Approve({
         </legend>
         {MCP_SCOPES.map((scope) => {
           const { label, description } = MCP_SCOPE_INFO[scope];
-          const locked = scope === 'browse';
+          const locked = scope === 'read';
           return (
             <label key={scope} className="consent-scope">
               <input
@@ -194,7 +194,7 @@ function Approve({
       </fieldset>
 
       <div className="consent-notices">
-        {chosen.has('read-values') && (
+        {chosen.has('reveal') && (
           <Notice tone="bad">
             Values will be sent to {client.name}. They become part of the conversation: whoever can read
             that conversation, and wherever {client.name} stores it, has them.

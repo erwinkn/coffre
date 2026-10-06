@@ -57,7 +57,7 @@ function token(deployment: Deployment, fields: Record<string, string>): Promise<
  * they ticked: by default what the client asked for. The code comes back on
  * the redirect.
  */
-async function connect(deployment: Deployment, person: Person, clientId: string, scope = 'browse', ticked = scope.split(' ')): Promise<{ code: string; verifier: string }> {
+async function connect(deployment: Deployment, person: Person, clientId: string, scope = 'read', ticked = scope.split(' ')): Promise<{ code: string; verifier: string }> {
   const verifier = base64url(randomBytes(32));
   const request = {
     client_id: clientId,
@@ -122,8 +122,8 @@ export async function mcpConnect(deployment: Deployment, people: People): Promis
   const anonymous = await mcp(deployment, {});
   const challenge = anonymous.headers.get('www-authenticate') ?? '';
   expect(anonymous.status === 401, `/mcp answered ${anonymous.status} without a token, not 401`);
-  expect(challenge.includes(`resource_metadata="${origin}/.well-known/oauth-protected-resource/mcp"`) && challenge.includes('scope="browse"'),
-    "the 401's challenge does not name the resource metadata and Browse", challenge);
+  expect(challenge.includes(`resource_metadata="${origin}/.well-known/oauth-protected-resource/mcp"`) && challenge.includes('scope="read"'),
+    "the 401's challenge does not name the resource metadata and Read", challenge);
   const resource = await json(await fetch(`${origin}/.well-known/oauth-protected-resource/mcp`));
   expect(resource.resource === `${origin}/mcp` && (resource.authorization_servers as unknown[] | undefined)?.[0] === origin,
     'the protected resource metadata does not name /mcp and coffre as its issuer', resource);
@@ -161,7 +161,7 @@ export async function mcpConnect(deployment: Deployment, people: People): Promis
 
   // The first connection: its code redeemed, then its refresh token rotated.
   const first = await redeem(deployment, clientId, await connect(deployment, people.reader, clientId));
-  expect(first.access_token.startsWith('coffre_mcp_') && first.refresh_token.startsWith('coffre_mcr_') && first.scope === 'browse',
+  expect(first.access_token.startsWith('coffre_mcp_') && first.refresh_token.startsWith('coffre_mcr_') && first.scope === 'read',
     'the tokens are not the shapes and scope coffre issues', { scope: first.scope });
   expect(await discovers(deployment, first.access_token), 'a fresh access token was refused at /mcp');
 
@@ -237,20 +237,20 @@ async function register(deployment: Deployment): Promise<string> {
   return registered.client_id as string;
 }
 
-/** A client registered and connected as the person, with Browse, for a check of another's: its access token. */
+/** A client registered and connected as the person, with Read, for a check of another's: its access token. */
 export async function connectedApp(deployment: Deployment, person: Person): Promise<string> {
   const clientId = await register(deployment);
   return (await redeem(deployment, clientId, await connect(deployment, person, clientId))).access_token;
 }
 
 /**
- * The Browse tools, as a client calls them (design section 14, checks 1, 4
+ * The Read tools, as a client calls them (design section 14, checks 1, 4
  * and 5): on 2026-07-28 and through a 2025-11-25 `initialize`, as the
  * reader, who sees dev and not prod. No value appears in any answer, the
  * headers must agree with the body, and every call is in the log under the
  * client, the API's own entries naming the connection.
  */
-export async function mcpBrowse(deployment: Deployment, people: People, canaries: Canaries): Promise<string> {
+export async function mcpRead(deployment: Deployment, people: People, canaries: Canaries): Promise<string> {
   const clientId = await register(deployment);
   const { access_token: access } = await redeem(deployment, clientId, await connect(deployment, people.reader, clientId));
   const answers: string[] = [];
@@ -263,7 +263,7 @@ export async function mcpBrowse(deployment: Deployment, people: People, canaries
   const result = listed.body.result as { tools?: { name: string; annotations?: { readOnlyHint?: boolean } }[]; cacheScope?: string; ttlMs?: number } | undefined;
   const names = result?.tools?.map((tool) => tool.name) ?? [];
   expect(names.includes('list_secrets') && names.includes('run_with_secrets') && result?.cacheScope === 'public' && typeof result.ttlMs === 'number',
-    'tools/list does not list the Browse tools, cacheable', listed.body);
+    'tools/list does not list the Read tools, cacheable', listed.body);
   const callTool = async (tool: string, args: Record<string, unknown>) => {
     const { response, body } = await modern(deployment, access, 'tools/call', { name: tool, arguments: args }, tool);
     answers.push(JSON.stringify(body));
@@ -302,7 +302,7 @@ export async function mcpBrowse(deployment: Deployment, people: People, canaries
 
   // No value in any answer.
   const leaked = Object.entries(canaries).filter(([, value]) => answers.some((answer) => answer.includes(value))).map(([path]) => path);
-  expect(leaked.length === 0, 'a Browse tool answered with a secret value', leaked);
+  expect(leaked.length === 0, 'a Read tool answered with a secret value', leaked);
 
   // Every call in the log, under the client; the API's own refusal names the connection.
   const { entries } = await people.admin.api.audit.list({ actor: people.reader.member, detail: '1', limit: 500 });
@@ -314,7 +314,7 @@ export async function mcpBrowse(deployment: Deployment, people: People, canaries
   expect(api.length > 0, "the API's own entries for the calls do not name the connection", mine.map((entry) => entry.action));
   const shown = (await people.admin.api.audit.list({ actor: people.reader.member, limit: 500 })).entries;
   expect(!shown.some((entry) => entry.action === 'mcp.read'), 'read-only calls are not detail');
-  return `on 2026-07-28 and 2025-11-25, the Browse tools as the reader: ${DEV} listed, ${PROD} refused, no value in any answer; headers held to the body; ${reads} reads as detail and the refusal shown, each under the client`;
+  return `on 2026-07-28 and 2025-11-25, the Read tools as the reader: ${DEV} listed, ${PROD} refused, no value in any answer; headers held to the body; ${reads} reads as detail and the refusal shown, each under the client`;
 }
 
 type ToolAnswer = {
@@ -328,7 +328,7 @@ type ToolAnswer = {
 
 /**
  * Changes, as a client asks for them (design section 14, checks 2 and 3):
- * Browse cannot ask at all, and with Write nothing changes until the person
+ * Read cannot ask at all, and with Write nothing changes until the person
  * approves on coffre's page. A client without URL elicitation gets the link
  * and calls again; one with it is asked to open the page, and retries with
  * its requestState, which no other call may use. Only the person decides,
@@ -353,18 +353,18 @@ export async function mcpChanges(deployment: Deployment, people: People, canarie
   };
   const archived = async (key: string) => (await admin.api.secrets.history(`${place}/${key}`)).archived;
 
-  // Browse cannot ask for a change: 403, the step-up's scopes, and for a client that does not step up, how to grant Write; nothing reached the API.
-  const browse = (await redeem(deployment, clientId, await connect(deployment, changer, clientId))).access_token;
-  const stepUp = await call(browse, 'archive_secret', { secret: `${place}/OLD` });
-  expect(stepUp.status === 403 && stepUp.challenge.includes('error="insufficient_scope"') && stepUp.challenge.includes('scope="browse write"'),
-    `archive_secret with Browse answered ${stepUp.status}, not a step-up to Write`, stepUp.challenge);
+  // Read cannot ask for a change: 403, the step-up's scopes, and for a client that does not step up, how to grant Write; nothing reached the API.
+  const reading = (await redeem(deployment, clientId, await connect(deployment, changer, clientId))).access_token;
+  const stepUp = await call(reading, 'archive_secret', { secret: `${place}/OLD` });
+  expect(stepUp.status === 403 && stepUp.challenge.includes('error="insufficient_scope"') && stepUp.challenge.includes('scope="read write"'),
+    `archive_secret with Read answered ${stepUp.status}, not a step-up to Write`, stepUp.challenge);
   expect(stepUp.result?.isError === true && stepUp.result.content?.[0]?.text?.includes("ticking Write on coffre's consent page") === true,
-    'archive_secret with Browse does not say, as its result, how to grant Write', stepUp.result);
-  expect(!(await archived('OLD')), 'archive_secret with Browse archived the secret');
+    'archive_secret with Read does not say, as its result, how to grant Write', stepUp.result);
+  expect(!(await archived('OLD')), 'archive_secret with Read archived the secret');
 
-  // Write ticked on the consent page, though the client asked for Browse only, as Claude does; the token says so.
-  const granted = await redeem(deployment, clientId, await connect(deployment, changer, clientId, 'browse', ['write']));
-  expect(granted.scope === 'browse write', `a connection ticked Write answered scope "${granted.scope}", not "browse write"`, granted.scope);
+  // Write ticked on the consent page, though the client asked for Read only, as Claude does; the token says so.
+  const granted = await redeem(deployment, clientId, await connect(deployment, changer, clientId, 'read', ['write']));
+  expect(granted.scope === 'read write', `a connection ticked Write answered scope "${granted.scope}", not "read write"`, granted.scope);
   const write = granted.access_token;
 
   // With Write, and no URL elicitation: the link, and nothing changed.
@@ -445,12 +445,12 @@ export async function mcpChanges(deployment: Deployment, people: People, canarie
   expect(once.archive === 1 && once.rename === 1 && once.write === 2, 'the changes are not each made once, via the client and its approval', once);
   const decisions = entries.filter((entry) => entry.action === 'mcp.approve').map((entry) => `${entry.decision} ${entry.reason ?? ''}`.trim()).sort();
   expect(JSON.stringify(decisions) === JSON.stringify(['allow', 'allow', 'allow', 'allow', 'deny approved', 'deny changed']), 'the decisions, and the two refused, are not in the log', decisions);
-  return `Browse stepped up to Write, saying how as its result; Write ticked beyond what was asked; with Write, the link without URL elicitation and an elicitation with it; nothing changed until ${changer.email} approved on coffre's page, another person and another site refused, a replayed requestState refused; each change made once, via the client and its approval; a value typed on the page only, and one coffre made reaching no one`;
+  return `Read stepped up to Write, saying how as its result; Write ticked beyond what was asked; with Write, the link without URL elicitation and an elicitation with it; nothing changed until ${changer.email} approved on coffre's page, another person and another site refused, a replayed requestState refused; each change made once, via the client and its approval; a value typed on the page only, and one coffre made reaching no one`;
 }
 
 /**
- * Values (design section 14, checks 2 and 4): Browse cannot read one, Read
- * values reads what the person may, a value shown on coffre's page goes to
+ * Values (design section 14, checks 2 and 4): Read cannot get one, Reveal
+ * values gets what the person may, a value shown on coffre's page goes to
  * the person and not the client, and one a client asks coffre to make
  * reaches no one.
  */
@@ -465,28 +465,28 @@ export async function mcpValues(deployment: Deployment, people: People, canaries
   };
   const dev = valuesIn(canaries, DEV);
 
-  // Browse: no value to the model, but one shown to the person on coffre's page.
-  const browse = (await redeem(deployment, clientId, await connect(deployment, reader, clientId))).access_token;
-  const stepUp = await call(browse, 'read_secret_values', { path: DEV });
-  expect(stepUp.status === 403 && stepUp.challenge.includes('scope="browse read-values"'), `read_secret_values with Browse answered ${stepUp.status}, not a step-up`, stepUp.challenge);
-  const show = await call(browse, 'show_secret_value', { secret: `${DEV}/API_KEY` });
+  // Read: no value to the model, but one shown to the person on coffre's page.
+  const reading = (await redeem(deployment, clientId, await connect(deployment, reader, clientId))).access_token;
+  const stepUp = await call(reading, 'read_secret_values', { path: DEV });
+  expect(stepUp.status === 403 && stepUp.challenge.includes('scope="read reveal"'), `read_secret_values with Read answered ${stepUp.status}, not a step-up`, stepUp.challenge);
+  const show = await call(reading, 'show_secret_value', { secret: `${DEV}/API_KEY` });
   const id = show.result?.structuredContent?.approval?.id;
   expect(show.result?.structuredContent?.status === 'pending' && id !== undefined, 'show_secret_value did not open an approval', show.result);
   const page = (await reader.api.approvals.get(id!)).approval;
   expect(page.kind === 'reveal', 'the approval page does not say it shows a value', page);
   const shown = await reader.api.approvals.decide(id!, { approve: true, digest: page.digest });
   expect(shown.shown.some((line) => line.value === dev.API_KEY), 'Reveal did not show the person the value');
-  const told = await call(browse, 'show_secret_value', { secret: `${DEV}/API_KEY` });
+  const told = await call(reading, 'show_secret_value', { secret: `${DEV}/API_KEY` });
   expect(told.result?.structuredContent?.status === 'approved', 'show_secret_value does not report the value as shown', told.result);
-  const browseLeaks = Object.entries(canaries).filter(([, value]) => answers.some((answer) => answer.includes(value))).map(([path]) => path);
-  expect(browseLeaks.length === 0, 'a Browse answer held a value', browseLeaks);
+  const readLeaks = Object.entries(canaries).filter(([, value]) => answers.some((answer) => answer.includes(value))).map(([path]) => path);
+  expect(readLeaks.length === 0, 'a Read answer held a value', readLeaks);
 
-  // Read values: the values the person may read, and no others.
-  const reading = (await redeem(deployment, clientId, await connect(deployment, reader, clientId, 'browse read-values'))).access_token;
-  const read = await call(reading, 'read_secret_values', { path: DEV });
+  // Reveal values: the values the person may read, and no others.
+  const revealing = (await redeem(deployment, clientId, await connect(deployment, reader, clientId, 'read reveal'))).access_token;
+  const read = await call(revealing, 'read_secret_values', { path: DEV });
   expect(JSON.stringify(read.result?.structuredContent?.values) === JSON.stringify(dev), `read_secret_values on ${DEV} did not answer its values`);
   expect(read.result?.content?.[0]?.text?.startsWith('These values are now part of this conversation') === true, 'read_secret_values does not warn first', read.result?.content);
-  const prod = await call(reading, 'read_secret_values', { path: PROD });
+  const prod = await call(revealing, 'read_secret_values', { path: PROD });
   expect(prod.result?.isError === true && !JSON.stringify(prod.result).includes(canaries[`${PROD}/API_KEY`]!), `the reader read ${PROD} through MCP`, prod.result);
-  return `Browse stepped up for values and showed ${DEV}/API_KEY to ${reader.email} on coffre's page only; Read values answered ${DEV}'s values, warning first, and refused ${PROD}`;
+  return `Read stepped up for values and showed ${DEV}/API_KEY to ${reader.email} on coffre's page only; Reveal values answered ${DEV}'s values, warning first, and refused ${PROD}`;
 }

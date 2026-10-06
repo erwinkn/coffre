@@ -16,13 +16,13 @@ import {
   scopeString,
 } from '@coffre/core/mcp';
 
-test('scopes: Browse always, in catalogue order, offline_access dropped, the unknown named', () => {
-  assert.deepEqual(parseScopes(undefined), { scopes: ['browse'], unknown: [] });
-  assert.deepEqual(parseScopes('manage-access  write offline_access'), { scopes: ['browse', 'write', 'manage-access'], unknown: [] });
-  assert.deepEqual(parseScopes('browse admin'), { scopes: ['browse'], unknown: ['admin'] });
-  assert.equal(scopeString(['read-values', 'browse']), 'browse read-values');
-  assert.deepEqual(grantedScopes(['manage-access', 'read-values', 'admin']), ['browse', 'read-values', 'manage-access'], 'what was ticked, asked for or not');
-  assert.deepEqual(grantedScopes([]), ['browse'], 'Browse cannot be unticked');
+test('scopes: Read always, in catalogue order, offline_access dropped, the unknown named', () => {
+  assert.deepEqual(parseScopes(undefined), { scopes: ['read'], unknown: [] });
+  assert.deepEqual(parseScopes('manage-access  write offline_access'), { scopes: ['read', 'write', 'manage-access'], unknown: [] });
+  assert.deepEqual(parseScopes('read admin'), { scopes: ['read'], unknown: ['admin'] });
+  assert.equal(scopeString(['reveal', 'read']), 'read reveal');
+  assert.deepEqual(grantedScopes(['manage-access', 'reveal', 'admin']), ['read', 'reveal', 'manage-access'], 'what was ticked, asked for or not');
+  assert.deepEqual(grantedScopes([]), ['read'], 'Read cannot be unticked');
 });
 
 test('redirects: HTTPS, or HTTP on loopback; never a custom scheme', () => {

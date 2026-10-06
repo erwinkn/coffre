@@ -5,22 +5,22 @@
  * page alike.
  */
 
-/** In the order the consent page lists them; `browse` is always granted. */
-export const MCP_SCOPES = ['browse', 'write', 'read-values', 'manage-access'] as const;
+/** In the order the consent page lists them; `read` is always granted. */
+export const MCP_SCOPES = ['read', 'write', 'reveal', 'manage-access'] as const;
 
 export type McpScope = (typeof MCP_SCOPES)[number];
 
 export const MCP_SCOPE_INFO: Record<McpScope, { label: string; description: string }> = {
-  browse: {
-    label: 'Browse',
+  read: {
+    label: 'Read',
     description: 'Projects, environments, key names, history, access and the audit log. Never a value.',
   },
   write: {
     label: 'Write',
     description: 'Set, generate, rename, archive and restore secrets; create projects and environments. Each change waits for your approval on coffre.',
   },
-  'read-values': {
-    label: 'Read values',
+  reveal: {
+    label: 'Reveal values',
     description: 'Secret values, sent to the app. They become part of its conversation, wherever it keeps it.',
   },
   'manage-access': {
@@ -38,13 +38,13 @@ export function isMcpScope(value: string): value is McpScope {
 
 /**
  * The scopes a space-separated `scope` asks for, in catalogue order, with
- * `browse` always among them; and the ones coffre does not know, which the
+ * `read` always among them; and the ones coffre does not know, which the
  * caller refuses as `invalid_scope`.
  */
 export function parseScopes(value: string | null | undefined): { scopes: McpScope[]; unknown: string[] } {
   const asked = new Set((value ?? '').split(' ').filter((scope) => scope !== '' && !IGNORED_SCOPES.has(scope)));
   const unknown = [...asked].filter((scope) => !isMcpScope(scope));
-  return { scopes: MCP_SCOPES.filter((scope) => scope === 'browse' || asked.has(scope)), unknown };
+  return { scopes: MCP_SCOPES.filter((scope) => scope === 'read' || asked.has(scope)), unknown };
 }
 
 /** Scopes as one string, in catalogue order: how a connection stores them and a token answer says them. */
@@ -55,13 +55,13 @@ export function scopeString(scopes: Iterable<McpScope>): string {
 
 /**
  * A person's choice at consent: what they ticked, whatever the client asked
- * for, and never without `browse`. What a client asks for only decides what
- * starts ticked: clients ask for what the resource metadata names, `browse`,
+ * for, and never without `read`. What a client asks for only decides what
+ * starts ticked: clients ask for what the resource metadata names, `read`,
  * and not every one asks for more later (docs/design/mcp.md, section 5).
  */
 export function grantedScopes(chosen: readonly string[]): McpScope[] {
   const picked = new Set(chosen);
-  return MCP_SCOPES.filter((scope) => scope === 'browse' || picked.has(scope));
+  return MCP_SCOPES.filter((scope) => scope === 'read' || picked.has(scope));
 }
 
 /**

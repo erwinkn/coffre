@@ -115,7 +115,7 @@ export type AuthorizationView =
       redirectHost: string;
       /** Every redirect the client has is loopback: any program on the machine could be it. */
       loopbackOnly: boolean;
-      /** What the client asks for, `browse` always among them: what the page starts with ticked, of all four. */
+      /** What the client asks for, `read` always among them: what the page starts with ticked, of all four. */
       scopes: McpScope[];
       /** The scopes of each of the person's live connections of this client: one the approval supersedes ends. */
       connections: McpScope[][];

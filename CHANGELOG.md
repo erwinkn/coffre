@@ -34,11 +34,18 @@ separated by spaces or lines ([docs/ci.md](docs/ci.md#several-environments)).
 Both commands now refuse a secret's path, `market/prod/KEY`, where they
 name an environment: `run` read the whole environment for it.
 
+**MCP's scopes are Read, Write, Reveal values and Manage access.** Browse
+is now Read, and Read values is Reveal values, on the consent page, the
+account's Connected apps, the tools' answers and the docs. Their OAuth
+scopes follow: `read`, `write`, `reveal` and `manage-access`, where
+`browse` and `read-values` were. A connection made before holds Read
+alone: disconnect it, and connect again to grant the others.
+
 **You pick a connected app's scopes when you connect it.** Clients ask for
-Browse alone, and Claude Desktop did not ask for more, so a connection could
-browse and nothing else: every write tool, approval link and
+Read alone, and Claude Desktop did not ask for more, so a connection could
+read and nothing else: every write tool, approval link and
 `request_secret_value` was refused. coffre's consent page now lists all
-four scopes, Browse, Write, Read values and Manage access, with what the
+four scopes, Read, Write, Reveal values and Manage access, with what the
 client asked for ticked, and grants what you tick. The token answer's
 `scope` says what was granted, and `mcp.connect` in the log records what
 was asked for and what was granted. A tool call short of its scope still

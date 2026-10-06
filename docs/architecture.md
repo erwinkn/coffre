@@ -314,7 +314,7 @@ and `apiMember`). The URL names the thing and the HTTP method is the verb:
 | change someone's access, in one transaction | `PATCH /api/access/user:ada@acme.example {"market": "developer", "market/prod": null}` |
 | my sessions and linked sign-in accounts, and ending them | `GET` / `DELETE /api/sessions/:id`, `GET` / `DELETE /api/identities/:id` |
 | approve or deny a `coffre login` device code | `GET` / `POST /api/device-logins/:code {"approve": true}` |
-| what an MCP client asking to connect is and wants, and the person's answer | `GET /api/oauth/authorizations?client_id=…`, `POST /api/oauth/authorizations {"request": {…}, "approve": true, "scopes": ["browse"]}` |
+| what an MCP client asking to connect is and wants, and the person's answer | `GET /api/oauth/authorizations?client_id=…`, `POST /api/oauth/authorizations {"request": {…}, "approve": true, "scopes": ["read"]}` |
 | the MCP clients I connected, and disconnecting one | `GET /api/apps`, `DELETE /api/apps/:id` |
 | the audit log, and verifying it | `GET /api/audit?path=market/prod`, `GET /api/audit/verification` |
 

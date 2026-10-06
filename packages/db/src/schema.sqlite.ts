@@ -557,7 +557,7 @@ export const mcpConnections = sqliteTable(
     clientName: text('client_name').notNull(),
     clientHost: text('client_host'),
     registration: text().notNull(),
-    // Space-separated, in catalogue order: `browse write`.
+    // Space-separated, in catalogue order: `read write`.
     scopes: text().notNull(),
     redirectUri: text('redirect_uri').notNull(),
     // Until the client redeems it: its SHA-256, its PKCE challenge, and 60 seconds.

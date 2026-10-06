@@ -338,8 +338,8 @@ test("sessions revoke warns when it is this CLI's own, and identities unlink say
 test('apps lists the MCP clients you connected, unverified ones said so, and apps revoke disconnects one only with --apply', async () => {
   const listed = {
     apps: [
-      { id: 'c0nn-1', name: 'Claude', host: 'claude.ai', registration: 'cimd', scopes: ['browse'], createdAt: '2026-10-01T00:00:00Z', lastUsedAt: '2026-10-04T00:00:00Z', lastUsedIp: null, expiresAt: '2026-10-31T00:00:00Z' },
-      { id: 'c0nn-2', name: 'Cursor', host: null, registration: 'dcr', scopes: ['browse', 'write'], createdAt: '2026-10-02T00:00:00Z', lastUsedAt: null, lastUsedIp: null, expiresAt: '2026-11-01T00:00:00Z' },
+      { id: 'c0nn-1', name: 'Claude', host: 'claude.ai', registration: 'cimd', scopes: ['read'], createdAt: '2026-10-01T00:00:00Z', lastUsedAt: '2026-10-04T00:00:00Z', lastUsedIp: null, expiresAt: '2026-10-31T00:00:00Z' },
+      { id: 'c0nn-2', name: 'Cursor', host: null, registration: 'dcr', scopes: ['read', 'write'], createdAt: '2026-10-02T00:00:00Z', lastUsedAt: null, lastUsedIp: null, expiresAt: '2026-11-01T00:00:00Z' },
     ],
   };
   const on = { features: { mcp: 'https://secrets.acme.example/mcp', workloads: false } };
@@ -348,8 +348,8 @@ test('apps lists the MCP clients you connected, unverified ones said so, and app
   await manage.apps(list.connect, [], list.io);
   assert.equal(
     list.written.out,
-    'c0nn-1  Claude                        claude.ai                 browse            last used 2026-10-04  ends 2026-10-31\n' +
-      'c0nn-2  Cursor (unverified)           -                         browse write      last used never  ends 2026-11-01\n',
+    'c0nn-1  Claude                        claude.ai                 read              last used 2026-10-04  ends 2026-10-31\n' +
+      'c0nn-2  Cursor (unverified)           -                         read write        last used never  ends 2026-11-01\n',
   );
 
   const preview = fixture(answer);

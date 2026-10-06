@@ -35,7 +35,7 @@ export type Change<I extends z.ZodObject = z.ZodObject> = {
   asks?: Ask;
   /**
    * A reveal: the page shows the person a value on Approve, which never goes
-   * to the client. Its API call needs `read-values`, which the connection
+   * to the client. Its API call needs `reveal`, which the connection
    * need not hold, since the value reaches the person only.
    */
   reveal?: true;
@@ -173,14 +173,14 @@ const shownAccess = (to: AccessChange) => (to === null ? 'nothing' : typeof to =
 
 /**
  * Showing a value to the person, on coffre's page, through an approval like
- * a change's: Browse, since the value never reaches the client.
+ * a change's: Read, since the value never reaches the client.
  */
 export const SHOW_VALUE: Tool = changeTool({
   name: 'show_secret_value',
   title: "Show a secret's value to the person",
   description:
     "Show the person a secret's value on coffre's own page, after they press Reveal there. The value is never sent to you or this conversation: use this when the person wants to see a value; read_secret_values is the one that sends values to you.",
-  scope: 'browse',
+  scope: 'read',
   readOnly: true,
   idempotent: true,
   destructive: false,

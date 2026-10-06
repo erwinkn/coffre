@@ -74,7 +74,7 @@ async function consentUrl(deployment: Deployment): Promise<string> {
     code_challenge: 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM',
     code_challenge_method: 'S256',
     state: 'pages',
-    scope: 'browse write',
+    scope: 'read write',
   });
   return `${deployment.origin}/oauth/authorize?${request}`;
 }
@@ -155,7 +155,7 @@ export async function pagesInBrowser(deployment: Deployment, admin: Person, brow
     const loaded = await chrome.load(consent, admin.browser.cookies());
     expect(loaded.errors.length === 0, '/oauth/authorize reported errors in the browser', loaded.errors.join('\n'));
     expect(loaded.heading === `Connect ${CONSENT_CLIENT} to coffre?`, `/oauth/authorize shows ${JSON.stringify(loaded.heading)}`);
-    for (const shown of ['Unverified', 'localhost', admin.email, 'Browse', 'Approve', 'Deny']) {
+    for (const shown of ['Unverified', 'localhost', admin.email, 'Read', 'Reveal values', 'Manage access', 'Approve', 'Deny']) {
       expect(loaded.text.includes(shown), `/oauth/authorize does not show "${shown}"`, loaded.text);
     }
   } finally {

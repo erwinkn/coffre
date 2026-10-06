@@ -9,7 +9,7 @@ People connect an MCP client, Claude among them, to their coffre instance.
 The client then acts as that person, within the scopes they chose when they
 connected and never beyond their own grants. coffre confirms every change on
 its own page before making it, and keeps secret values away from the model
-unless the person opted into **Read values**.
+unless the person opted into **Reveal values**.
 
 ## 1. One session, end to end
 
@@ -32,10 +32,10 @@ claude mcp add --transport http coffre https://secrets.acme.example/mcp
    > It receives the answer on this computer (`localhost`). Continue only if
    > you just started this from an app on this computer.
    >
-   > ☑ Browse: projects, environments, key names, history, access, the audit log
-   > ☐ Write · ☐ Read values · ☐ Manage access
+   > ☑ Read: projects, environments, key names, history, access, the audit log
+   > ☐ Write · ☐ Reveal values · ☐ Manage access
 
-   Claude Code asked for Browse, so only Browse is ticked; she could tick
+   Claude Code asked for Read, so only Read is ticked; she could tick
    the others here, and leaves them. She approves. Claude Code gets a
    one-hour access token and a refresh token.
 3. **Browsing.** "What does market/staging have?" Claude calls `list_secrets`
@@ -44,7 +44,7 @@ claude mcp add --transport http coffre https://secrets.acme.example/mcp
 4. **Asking for more.** "Generate a new SESSION_SECRET for staging."
    `generate_secret_value` needs the **Write** scope. coffre answers `403
    insufficient_scope`. Claude Code asks Ada whether to re-authenticate
-   "for the scope browse write", and opens the consent page again, with
+   "for the scope read write", and opens the consent page again, with
    **Write** ticked this time. Ada approves.
 5. **Confirming.** Claude calls `generate_secret_value` again. coffre makes
    no change. It records a pending approval and answers with a URL-mode
@@ -176,13 +176,13 @@ URL, and the protected resource is `<publicUrl>/mcp`.
 
 ```http
 HTTP/1.1 401 Unauthorized
-WWW-Authenticate: Bearer resource_metadata="https://secrets.acme.example/.well-known/oauth-protected-resource/mcp", scope="browse"
+WWW-Authenticate: Bearer resource_metadata="https://secrets.acme.example/.well-known/oauth-protected-resource/mcp", scope="read"
 ```
 
 ```json
 { "resource": "https://secrets.acme.example/mcp",
   "authorization_servers": ["https://secrets.acme.example"],
-  "scopes_supported": ["browse"],
+  "scopes_supported": ["read"],
   "bearer_methods_supported": ["header"],
   "resource_name": "coffre at secrets.acme.example" }
 ```
@@ -193,7 +193,7 @@ WWW-Authenticate: Bearer resource_metadata="https://secrets.acme.example/.well-k
   "token_endpoint": "https://secrets.acme.example/api/oauth/token",
   "registration_endpoint": "https://secrets.acme.example/api/oauth/register",
   "revocation_endpoint": "https://secrets.acme.example/api/oauth/revoke",
-  "scopes_supported": ["browse", "write", "read-values", "manage-access", "offline_access"],
+  "scopes_supported": ["read", "write", "reveal", "manage-access", "offline_access"],
   "response_types_supported": ["code"],
   "grant_types_supported": ["authorization_code", "refresh_token"],
   "code_challenge_methods_supported": ["S256"],
@@ -203,7 +203,7 @@ WWW-Authenticate: Bearer resource_metadata="https://secrets.acme.example/.well-k
   "authorization_response_iss_parameter_supported": true }
 ```
 
-The resource metadata lists only `browse`, the minimum, and the `401`
+The resource metadata lists only `read`, the minimum, and the `401`
 names it too: it is what clients ask for, and what the consent page starts
 with ticked. The person ticks the others there, at connection, whatever was
 asked; a client that steps up asks for one later (section 5). Claude picks
@@ -273,8 +273,8 @@ device login page:
    - where the answer goes, with a warning when that is only `localhost`;
    - the person's own email;
    - every scope, those the client asked for ticked and the others not.
-     Browse can't be unticked; the person's ticks decide, whatever was
-     asked. **Read values** carries its warning (section 7).
+     Read can't be unticked; the person's ticks decide, whatever was
+     asked. **Reveal values** carries its warning (section 7).
 4. **Approve** and **Deny** call `POST /api/oauth/authorizations` with a
    cookie. The API's same-origin rule applies, so another site can't post
    it.
@@ -356,10 +356,16 @@ answers well inside Claude's 10 seconds.
 
 | Scope | Lets the client | Default |
 |---|---|---|
-| `browse` | see projects, environments, key names, versions, access, the audit log; run `coffre run` instructions; show a value **to the person** on coffre's page | always |
+| `read` | see projects, environments, key names, versions, access, the audit log; run `coffre run` instructions; show a value **to the person** on coffre's page | always |
 | `write` | set, generate, rename, archive, unarchive and restore secrets; create projects and environments | opt-in |
-| `read-values` | receive secret values in tool results | opt-in, with a warning |
+| `reveal` | receive secret values in tool results | opt-in, with a warning |
 | `manage-access` | grants, admitting and offboarding members, service tokens, trust bindings | opt-in |
+
+Their labels are Read, Write, Reveal values and Manage access. Before
+0.4.2 the first was `browse` (Browse) and the third `read-values` (Read
+values); a connection made then holds an unknown scope for each, which
+counts as nothing, so it keeps Read alone until its person connects it
+again.
 
 **Never beyond the person's own grants.** Three layers hold that:
 
@@ -372,7 +378,7 @@ answers well inside Claude's 10 seconds.
    without `write`.
 2. **Scopes gate tools.** A tool outside the token's scopes answers HTTP
    `403` with `WWW-Authenticate: Bearer error="insufficient_scope",
-   scope="browse write"`. The `scope` names everything the connection
+   scope="read write"`. The `scope` names everything the connection
    already holds plus what's missing, because Claude's docs ask for the
    union. A client that steps up (MCP's incremental consent) asks for it,
    and the consent page opens with it ticked. Not every client does: the
@@ -382,19 +388,19 @@ answers well inside Claude's 10 seconds.
 3. **The API checks the scope too.** A request that comes in through MCP
    carries its connection. `serveApi` refuses any route that the
    connection's scopes don't allow, by a table of `route → scope`. So a
-   tool with a bug can't reach `POST /reveals` without `read-values`.
+   tool with a bug can't reach `POST /reveals` without `reveal`.
 
 The tool list is the same for every token, as the spec allows. Clients see
 what they could do and step up when they need to.
 
 **Picking scopes at connection.** Clients ask for what the `401` and the
-resource metadata name, `browse`. Claude Desktop never asked for more:
-connected to Erwin's instance, it got Browse, and every write tool,
+resource metadata name, `read`. Claude Desktop never asked for more:
+connected to Erwin's instance, it got Read, and every write tool,
 approval link and `request_secret_value` was refused, with no step-up. So
 the consent page offers all four scopes on every connection, ticking only
 what was asked, and grants what the person ticks. The metadata still names
-only `browse`: naming all four would have clients ask for, and the page
-tick, Read values and Manage access by default.
+only `read`: naming all four would have clients ask for, and the page
+tick, Reveal values and Manage access by default.
 
 ## 6. The tools
 
@@ -405,15 +411,15 @@ coffre's page (section 7).
 
 | Tool | Scope | Hints (read-only, destructive, idempotent) | Approval | API calls |
 |---|---|---|---|---|
-| `whoami` | browse | ✓ · ✓ | | `GET /me`; the connection's scopes and client |
-| `list_projects` | browse | ✓ · ✓ | | `GET /projects` |
-| `list_secrets {environment}` | browse | ✓ · ✓ | | `GET /secrets/:p/:e` |
-| `secret_history {secret}` | browse | ✓ · ✓ | | `GET /secrets/:p/:e/:key/versions` |
-| `list_access {place?}` | browse | ✓ · ✓ | | `GET /members?path=` |
-| `describe_member {member}` | browse | ✓ · ✓ | | `GET /members/:m`; for a service, its tokens and bindings |
-| `read_audit_log {path?, actor?, decision?, before?, limit?}` | browse | ✓ · ✓ | | `GET /audit` |
-| `run_with_secrets {environment, command?}` | browse | ✓ · ✓ | | `GET /secrets/:p/:e`, to check access and list keys |
-| `show_secret_value {secret}` | browse | ✓ · ✓ | the page shows it | `POST /reveals`, from the page |
+| `whoami` | read | ✓ · ✓ | | `GET /me`; the connection's scopes and client |
+| `list_projects` | read | ✓ · ✓ | | `GET /projects` |
+| `list_secrets {environment}` | read | ✓ · ✓ | | `GET /secrets/:p/:e` |
+| `secret_history {secret}` | read | ✓ · ✓ | | `GET /secrets/:p/:e/:key/versions` |
+| `list_access {place?}` | read | ✓ · ✓ | | `GET /members?path=` |
+| `describe_member {member}` | read | ✓ · ✓ | | `GET /members/:m`; for a service, its tokens and bindings |
+| `read_audit_log {path?, actor?, decision?, before?, limit?}` | read | ✓ · ✓ | | `GET /audit` |
+| `run_with_secrets {environment, command?}` | read | ✓ · ✓ | | `GET /secrets/:p/:e`, to check access and list keys |
+| `show_secret_value {secret}` | read | ✓ · ✓ | the page shows it | `POST /reveals`, from the page |
 | `request_secret_value {secret, note?}` | write | ✗ ✓ ✗ | the person types it | `PATCH /secrets/:p/:e` |
 | `generate_secret_value {secret, length?, alphabet?}` | write | ✗ ✓ ✗ | ✓ | `PATCH /secrets/:p/:e`, value made on the server |
 | `rename_secret {secret, newKey}` | write | ✗ ✓ ✓ | ✓ | `PATCH /secrets/:p/:e/:key {key}` |
@@ -422,7 +428,7 @@ coffre's page (section 7).
 | `restore_secret_version {secret, version}` | write | ✗ ✓ ✗ | ✓ | `POST …/:key/restore` |
 | `create_project {project, name}` | write | ✗ ✗ ✓ | ✓ | `PUT /projects/:p` |
 | `create_environment {environment, name}` | write | ✗ ✗ ✓ | ✓ | `PUT /projects/:p/:e` |
-| `read_secret_values {path}` | read-values | ✓ · ✓ | | `POST /reveals`; an environment or one secret |
+| `read_secret_values {path}` | reveal | ✓ · ✓ | | `POST /reveals`; an environment or one secret |
 | `set_access {member, changes}` | manage-access | ✗ ✓ ✓ | ✓ | `PATCH /access/:m`, the API's merge patch |
 | `admit_member {member, owner?}` | manage-access | ✗ ✗ ✓ | ✓ | `PUT /members/:m` |
 | `offboard_member {member}` | manage-access | ✗ ✓ ✓ | ✓ | `DELETE /members/:m`; the page shows its report |
@@ -576,21 +582,21 @@ The agent never supplies a value. There are two tools:
 
 ### Reading a value
 
-- **To the person (Browse):** `show_secret_value` opens the approval page.
+- **To the person (Read):** `show_secret_value` opens the approval page.
   The value shows only when the person clicks **Reveal**, a `POST` logged
   as a reveal, requested by the client. The model gets "shown to
   ada@acme.example at 14:03" and no value. It is an approval like a
   change's: its Reveal reads the value as the person, with the connection
   attached, and is the one call through MCP that may reach `POST /reveals`
-  without Read values, since the value goes to the page alone.
-- **To the model (Read values):** `read_secret_values` returns values in its
+  without Reveal values, since the value goes to the page alone.
+- **To the model (Reveal values):** `read_secret_values` returns values in its
   result, with no page. It is a read, so it needs no approval. The vault
   logs it as a `reveal` under the access token's credential ID, and the
   app's `mcp.call` names the client. The vault's bulk limit applies as
   always. The result begins with a plain warning: "These values are now
   part of this conversation and its history."
 
-The consent page warns when Read values is asked for:
+The consent page warns when Reveal values is asked for:
 
 > Values will be sent to Claude. They become part of the conversation:
 > whoever can read that conversation, and wherever Claude stores it, has
@@ -697,7 +703,7 @@ Anthropic's docs, read on 2026-10-05:
 | Hosted apps redirect to `https://claude.ai/api/mcp/auth_callback` | HTTPS on the document's own host, allowed |
 | Claude Code: CIMD `https://claude.ai/oauth/claude-code-client-metadata`, redirects to `http://localhost/callback` and `http://127.0.0.1/callback` on any port | loopback matched with the port ignored, `localhost` included |
 | S256 PKCE; `code_challenge_methods_supported` | yes |
-| Scopes come from the `401`'s `scope`, else `scopes_supported`; `offline_access` is added when listed | `scope="browse"`; `offline_access` listed |
+| Scopes come from the `401`'s `scope`, else `scopes_supported`; `offline_access` is added when listed | `scope="read"`; `offline_access` listed |
 | Step-up on `403 insufficient_scope`, whose `scope` should name everything still needed | the union of held and needed scopes; the body is a tool result saying how to grant it, for a client that doesn't step up (Claude Desktop didn't) |
 | Token endpoint takes form-urlencoded and answers in 10 s (refresh in 30 s); rotate refresh tokens; `invalid_grant` for a dead one | yes |
 | Tool results ~150,000 characters (hosted), 25,000 tokens (Claude Code); tool calls 240 s (hosted) | paged lists; approvals wait 25 s per round |
@@ -733,23 +739,23 @@ needs an instance it can reach.
 What Claude Code sends was checked on 2026-10-06, with Claude Code 2.1.291
 against a local stack:
 
-- **Authorize:** `scope=browse offline_access` and `prompt=consent`, its
+- **Authorize:** `scope=read offline_access` and `prompt=consent`, its
   CIMD and a loopback redirect. Its **Re-authenticate** in `/mcp` asks again
   for the scopes it last held.
 - **Requests:** 2026-07-28, with `elicitation: {form: {}, url: {}}` in
   every request's capabilities.
 - **A `403 insufficient_scope`:** it asks the person whether to
-  re-authenticate "for the scope browse write", opens the consent page,
+  re-authenticate "for the scope read write", opens the consent page,
   with Write ticked, and retries the call once. If the person says not now,
   the model reads Claude Code's own message, "needs additional permissions
-  (scope: "browse write") — run /mcp to re-authenticate", not the body.
+  (scope: "read write") — run /mcp to re-authenticate", not the body.
 - **A change:** a URL elicitation, "Approve on coffre: …", with Open in
   browser, I'm done and Decline. The call it retries right after a step-up
   doesn't show it: that call gets the approval link instead, and works the
   same. Both made their change once the person approved on coffre's page.
 
 Claude Desktop, connected to Erwin's instance on 2026-10-06, was granted
-Browse and never stepped up, so it could make no change until the consent
+Read and never stepped up, so it could make no change until the consent
 page offered Write at connection (section 5). That is his report: a local
 stack can't be reached from claude.ai, so it was not checked here.
 
@@ -881,13 +887,13 @@ did before theirs.
       metadata) is returned as JSON data, never as instructions.
     - No change happens without the person reading coffre's page. That
       page, not the model's summary, is what they approve.
-    - Values never reach the model without Read values.
+    - Values never reach the model without Reveal values.
   - **What we don't defend:**
     - A model steered into proposing a harmful but well-formed change. The
       page shows it, but the person must read it.
-    - With Read values, a value that itself carries instructions.
-    - With Read values, a model that reads a value and then passes it to
-      another tool or connector of the client's. This is why Read values is
+    - With Reveal values, a value that itself carries instructions.
+    - With Reveal values, a model that reads a value and then passes it to
+      another tool or connector of the client's. This is why Reveal values is
       opt-in, with its warning.
     - A person who approves without reading.
 - **Approval fatigue.** At most five pending approvals per connection. An
@@ -909,17 +915,17 @@ did before theirs.
 
 1. **Connect.** The `401` and both metadata documents are as above. Then:
    - a client registers;
-   - a seeded person signs in through the dev IdP and consents to Browse;
+   - a seeded person signs in through the dev IdP and consents to Read;
    - the code is exchanged;
    - `server/discover` and `tools/list` succeed, on 2026-07-28 and through
      a 2025-11-25 `initialize`;
    - a CIMD client, served by the harness on loopback under a development
      flag like trust bindings' loopback issuers, does the same.
-2. **Browse can't write.** `archive_secret` and `read_secret_values` answer
+2. **Read can't write.** `archive_secret` and `read_secret_values` answer
    `403 insufficient_scope`, with the right `scope`, and a tool result
    saying how to grant it. The secret is still live, and the API refused
-   nothing on the token's behalf. A connection that asked for Browse, with
-   Write ticked, gets a token whose `scope` is `browse write`.
+   nothing on the token's behalf. A connection that asked for Read, with
+   Write ticked, gets a token whose `scope` is `read write`.
 3. **No change without approval.** With Write:
    - without URL elicitation: `-32021`, and nothing changed;
    - with it: `input_required`, and nothing changed;
@@ -927,8 +933,8 @@ did before theirs.
    - a `requestState` replayed with other arguments is refused;
    - the person approves, the change is made once, and the retry reports
      it.
-4. **No value without Read values.** Every Browse and Write tool's result is
-   searched for the seeded values, which must not appear. With Read values,
+4. **No value without Reveal values.** Every Read and Write tool's result is
+   searched for the seeded values, which must not appear. With Reveal values,
    `read_secret_values` returns them.
 5. **Every call audited with the client.** Each call above has its entry
    naming the client ID, and the change's own entries carry `via`.
@@ -955,7 +961,7 @@ parity as they merge.
    - The consent page, codes, tokens, refresh, revocation, limits.
    - `signin({ mcp })`, `init`, `update`, both examples.
    - `/mcp` answers only `401`, or `server/discover` once authenticated.
-2. **The MCP endpoint with Browse.** Both eras, the tools, `run_with_secrets`,
+2. **The MCP endpoint with Read.** Both eras, the tools, `run_with_secrets`,
    the scope gate in `serveApi`, the audit's `via`, and the conformance
    checks 1, 2, 5 and 6.
 3. **Changes with approvals.** `mcp_approvals`, the approval page, MRTR, the
@@ -987,7 +993,7 @@ works in any revision, Erwin then extended it to 2025-era clients (D62).
 
 1. **Clients that can't elicit, claude.ai today.**
    - **Default (D31):** refuse changes and showing values, so a claude.ai
-     connector can browse and, with Read values, read.
+     connector can read and, with Reveal values, receive values.
    - **Alternative:** for such clients, the tool result carries the
      approval link as text for the model to show the person ("Open
      https://secrets.acme.example/approvals/7QF2… to approve"). The client
@@ -1065,15 +1071,15 @@ This becomes `docs/mcp.md` with the fifth pull request.
 > can do less: you choose what they may do when you connect them.
 >
 > **Scopes.** You grant these on coffre's consent page:
-> - **Browse**, always: projects, environments, key names, history, access,
+> - **Read**, always: projects, environments, key names, history, access,
 >   the audit log.
 > - **Write**: set, generate, rename, archive and restore secrets; create
 >   projects and environments.
-> - **Read values**: secret values sent to the client. They become part of
+> - **Reveal values**: secret values sent to the client. They become part of
 >   the conversation.
 > - **Manage access**: grants, members, service tokens, trusted workloads.
 >
-> Tick what a client may do when you connect it: clients ask for Browse
+> Tick what a client may do when you connect it: clients ask for Read
 > alone. One that needs more later may ask, and you see the consent page
 > again.
 >
