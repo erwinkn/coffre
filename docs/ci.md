@@ -131,6 +131,33 @@ With the CLI:
   for your instance's URL piped to `coffre login --service <name>
   --id-token`.
 
+## Several environments
+
+A deploy that needs two environments' secrets names both:
+
+```sh
+coffre run deploy/prod auth/prod -- ./deploy
+coffre export deploy/prod auth/prod --format json
+```
+
+The command gets their keys together. Every environment is read, one
+audited read each, or none is: the CLI first lists each one's keys, which
+opens no value, and stops before reading anything if it may not read one
+of them, if one holds a reference that cannot be read, or if two of them
+define the same key. coffre does not pick a winner for a key in two
+places; it names the key and both environments, never a value:
+
+```text
+coffre: deploy/prod and auth/prod both define API_URL: a key comes from one environment only. Nothing was read
+```
+
+Keep each key in one of them, and archive the other's copy. The listing
+narrows the window but does not close it: an environment changed between
+the listing and the reads, a grant revoked or a clashing key added, still
+stops the command, and no value is used, but the reads made before it are
+in the audit log. The service account needs a `viewer` grant on each
+environment.
+
 ## GitHub Actions
 
 Use a released tag containing the [Action](../action/action.yml), replacing
@@ -177,8 +204,19 @@ that key is refused. GitHub's default metadata variables cannot be
 overridden. Other names such as `GITHUB_TOKEN` work.
 [GitHub documents these runner rules](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-commands#setting-an-environment-variable).
 
-The inputs are `url`, `environment`, and one of `token` or `service`. With
-`service`, the run's ID token and the credential it buys are masked too.
+The inputs are `url`, `environment`, and one of `token` or `service`.
+`environment` takes several environments, separated by spaces or lines,
+read together as [above](#several-environments):
+
+```yaml
+  - uses: erwinkn/coffre/action@v<version>
+    with:
+      url: https://secrets.acme.example
+      service: token:api-deploy
+      environment: deploy/prod auth/prod
+```
+
+With `service`, the run's ID token and the credential it buys are masked too.
 
 To use an installed CLI directly inside a step:
 

@@ -129,7 +129,8 @@ coffre set      market/dev/DATABASE_URL     # asks for the value, or reads it pi
 coffre set      billing/prod/DATABASE_URL --ref market/prod/DATABASE_URL   # a reference: billing reads market's, live
 coffre references market/prod               # what reads it through references; references break ends one
 coffre run      market/dev -- printenv
-coffre export   market/dev --format dotenv  # or json, shell, github
+coffre run      market/prod auth/prod -- ./deploy   # several: their keys together; a key in two of them stops it
+coffre export   market/dev --format dotenv  # or json, shell, github; several environments, as run
 coffre history  market/dev/DATABASE_URL
 coffre rollback market/dev/DATABASE_URL 2   # restores version 2 as a new version
 coffre import   market/dev --file .env      # previews; --apply writes
