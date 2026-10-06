@@ -104,7 +104,7 @@ deployed afresh ([From a release before 0.4.0](#from-a-release-before-040)).
 From 0.4.0 on:
 
 The database migrates before the deploy, in the deployment's own pipeline:
-Workers Builds, CI, or a script before a restart. The new version never
+its deploy workflow, Workers Builds, other CI, or a script before a restart. The new version never
 serves on a schema it does not have: below its migrations, everything but
 `/livez` and `/readyz` answers 503 `migrating`, and `/readyz` stays red.
 The previous version keeps serving on the new schema until the deploy, as
@@ -150,9 +150,10 @@ every migration lets it ([expand, then contract](architecture.md#expand-then-con
    them. With `--yes` it waits: it never lets a package through unasked.
    Whenever the install fails, it puts `package.json`, `pnpm-workspace.yaml`
    and `pnpm-lock.yaml` back as they were, and says so.
-2. **Migrate, then deploy.** Commit and push: [Workers Builds](#workers-builds)
-   does both. By hand, or in any other pipeline, in the deployment's
-   directory:
+2. **Migrate, then deploy.** Commit and push: the
+   [deploy workflow](#deploys-on-every-push), or
+   [Workers Builds](#workers-builds), does both. By hand, or in any other
+   pipeline, in the deployment's directory:
 
    ```sh
    printenv DATABASE_OWNER_URL | pnpm exec coffre migrate --yes   # the owner's URL, piped in
@@ -238,10 +239,72 @@ which become the Worker's assets. The vault is a plain Worker, which wrangler
 builds itself. `pnpm dev` runs both under `vite dev`, the vault beside the
 app.
 
+### Deploys on every push
+
+`coffre init --workers` writes a GitHub Actions workflow,
+[.github/workflows/deploy.yml](../examples/workers/.github/workflows/deploy.yml). In a GitHub
+repository, it runs on every push to `main`, and on demand from the
+repository's Actions tab. It installs the deployment exactly as
+`pnpm-lock.yaml` says, so commit that file; migrates the database; then
+runs `pnpm run deploy`, the vault first, then the app. A migration that
+fails stops the run before anything deploys, and the Workers keep running
+the previous version, which runs on the new schema too. Two runs never
+overlap: a push during a deploy waits for it to end. Its actions are pinned
+by commit, as coffre's own workflows pin them.
+
+It reads three of the repository's Actions secrets:
+
+| Secret | What it is |
+|---|---|
+| `CLOUDFLARE_API_TOKEN` | a Cloudflare API token that may deploy the two Workers, and little else |
+| `CLOUDFLARE_ACCOUNT_ID` | the Cloudflare account's id |
+| `DATABASE_OWNER_URL` | the database owner's direct URL, the one `coffre setup` asked for. Only the migrate step has it, and `printenv` hands it to the CLI on stdin |
+
+The token needs, on the account, *Workers Scripts Edit*, *Account Settings
+Read*, *Workers KV Storage Edit* and *Hyperdrive Read*; and on the zone
+coffre's address is served through, *Workers Routes Edit*. An address
+under `workers.dev` needs no zone.
+
+**`coffre setup` sets all three** when the deployment's directory is a
+clone of a GitHub repository, its `origin` on the GitHub its sign-in uses.
+It does so after deploying ([Setup does Cloudflare too](#setup-does-cloudflare-too)):
+
+- **The token.** Setup asks Cloudflare's API for one with exactly these
+  permissions, named `coffre deploys: <owner>/<repository>`. wrangler's
+  login has no scope for API tokens, so Cloudflare refuses it, unless
+  `CLOUDFLARE_API_TOKEN` is set to a token with *API Tokens Edit*. Refused,
+  setup says so, prints the dashboard's form for a new token with the
+  permissions filled in, and asks for the token you make there, hidden as
+  you paste it. The form cannot name the account and the zone itself:
+  choose them there. Setup checks the token can read what each permission
+  covers before it takes it, and says which one it lacks.
+- **GitHub.** Setup signs in with gh's login (`gh auth token`) when gh is
+  signed in to that GitHub and may set the repository's secrets. Otherwise
+  it asks whether to set them now; yes prints GitHub's form for a
+  fine-grained token that may set the repository's secrets and lasts a day,
+  since setup needs it for that run alone. On the form, choose *Only select
+  repositories*, then the repository.
+- **The secrets.** Each is sealed to the repository's public key, as
+  GitHub's API requires (libsodium's sealed box), and set through that API.
+  None is shown, logged or written anywhere. A deployment from before
+  `coffre init` wrote the workflow gets it, to commit.
+
+Run again, setup keeps the repository's token, and sets the other two
+again. `coffre setup --rotate-deploy-token` makes a new token and sets it;
+the one it replaces is deleted when the login may delete tokens, and
+otherwise left for you to delete on the dashboard.
+
+**Without a GitHub remote**, setup skips this, and its summary says how to
+wire it later: push the deployment to a GitHub repository, workflow
+included, and run setup again; or set the three secrets yourself, on the
+repository's *Settings > Secrets and variables > Actions*; or use Workers
+Builds instead.
+
 ### Workers Builds
 
-Workers Builds builds and deploys both Workers on every push, each build
-migrating the database first: whichever Worker deploys first, it finds its
+Instead of the workflow, Cloudflare's Workers Builds can build and deploy
+both Workers on every push. Delete the deploy workflow then, or
+each push deploys twice. Each build migrates the database first: whichever Worker deploys first, it finds its
 schema. In each Worker's **Settings > Build**, with the repository connected
 and the deployment's directory as the root:
 
@@ -282,11 +345,15 @@ of this section itself. Say yes, and it:
    address and its route, GitHub's client ID, the root admins and the vault
    ID;
 6. shows the keys on their screen, then deploys the vault and the app with
-   them as secrets, on wrangler's stdin, and waits for the address to
-   answer.
+   them as secrets, on wrangler's stdin;
+7. when the deployment is a GitHub repository, makes the Cloudflare token
+   its deploys run under, and sets the repository's three Actions secrets
+   ([Deploys on every push](#deploys-on-every-push));
+8. waits for the address to answer.
 
 The database URLs are never shown: Hyperdrive has them, and nothing else
-does. Nothing is written but the two `wrangler.jsonc`.
+does. Nothing is written but the two `wrangler.jsonc`, and the deploy
+workflow, for a deployment that has none.
 
 **On a machine your browser is not on**, such as a server over SSH, each
 browser step ends at a localhost address the browser cannot reach. Paste

@@ -8,6 +8,8 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { PassThrough, Writable } from 'node:stream';
 
+import sodium from 'libsodium-wrappers';
+
 import { stopWranglers } from '../src/cloudflare.ts';
 import { templateDir } from '../src/init.ts';
 
@@ -62,6 +64,12 @@ export async function fakeCloudflare(token: string) {
     hostnames: new Map<string, FakeHostname[]>(),
     /** The records the custom hostnames' DNS provider has, by name: Cloudflare sees each a moment after it is there. */
     published: new Set<string>(),
+    /** Tokens that may make API tokens, as one with API Tokens Edit may; wrangler's login may not. */
+    tokenMakers: new Set<string>(),
+    /** Tokens that may do only what they were given: `workers_scripts`, say, or `workers_routes:<zone>`. */
+    scoped: new Map<string, Set<string>>(),
+    /** The API tokens made through the API, their values included, as only their maker sees them. */
+    tokens: [] as { id: string; name: string; policies: { resources: Record<string, string>; permission_groups: { id: string }[] }[]; value: string }[],
   };
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? '/', 'http://localhost');
@@ -76,10 +84,57 @@ export async function fakeCloudflare(token: string) {
       return send(200, all.slice((at - 1) * size, at * size), [], { page: at, per_page: size, total_count: all.length, total_pages: Math.ceil(all.length / size) });
     };
     const bearer = request.headers.authorization?.replace(/^Bearer /, '') ?? '';
-    if (bearer !== token && !state.apiTokens.has(bearer)) return send(401, null, [{ code: 10000, message: 'Authentication error' }]);
+    const scoped = state.scoped.get(bearer);
+    if (bearer !== token && !state.apiTokens.has(bearer) && scoped === undefined) return send(401, null, [{ code: 10000, message: 'Authentication error' }]);
     const refused = (what: 'ssl' | 'dns' | 'zone') => bearer === token && state.denied.has(what);
     const path = url.pathname.replace(/^\/client\/v4/, '');
     let match: RegExpExecArray | null;
+    const forbidden = () => send(403, null, [{ code: 9109, message: 'Unauthorized to access requested resource' }]);
+    if (path === '/user/tokens/verify') return send(200, { id: state.tokens.find(({ value }) => value === bearer)?.id ?? 'tok-given', status: 'active' });
+    if (path.startsWith('/user/tokens')) {
+      if (!state.tokenMakers.has(bearer)) return forbidden();
+      if (path === '/user/tokens/permission_groups') return send(200, PERMISSION_GROUPS);
+      if (path === '/user/tokens' && request.method === 'POST') {
+        const { name, policies } = JSON.parse(text) as (typeof state.tokens)[number];
+        const made = { id: `tok-${randomBytes(4).toString('hex')}`, name, policies, value: `cf-made-${randomBytes(20).toString('hex')}` };
+        state.tokens.push(made);
+        // What it may do: its groups, on the account, and on the zone they name.
+        const may = new Set<string>();
+        for (const policy of policies) {
+          const zone = Object.keys(policy.resources).map((resource) => /^com\.cloudflare\.api\.account\.zone\.(.+)$/.exec(resource)?.[1]).find((id) => id !== undefined);
+          for (const { id } of policy.permission_groups) {
+            const permission = PERMISSION_GROUPS.find((group) => group.id === id)!.permission;
+            may.add(zone === undefined ? permission : `${permission}:${zone}`);
+          }
+        }
+        state.scoped.set(made.value, may);
+        return send(200, made);
+      }
+      if (path === '/user/tokens') return page(state.tokens.map(({ id, name }) => ({ id, name, status: 'active' })));
+      if ((match = /^\/user\/tokens\/([^/]+)$/.exec(path)) !== null && request.method === 'DELETE') {
+        const id = match[1]!;
+        const gone = state.tokens.find((each) => each.id === id);
+        state.tokens = state.tokens.filter((each) => each.id !== id);
+        if (gone !== undefined) state.scoped.delete(gone.value);
+        return send(200, { id });
+      }
+    }
+    // What a token for the deploys reads, to show it has each permission it needs; a scoped token reads nothing else.
+    const reads: [RegExp, string][] = [
+      [/^\/accounts\/[^/]+$/, 'account_settings'],
+      [/^\/accounts\/[^/]+\/workers\/scripts$/, 'workers_scripts'],
+      [/^\/accounts\/[^/]+\/storage\/kv\/namespaces$/, 'workers_kv_storage'],
+      [/^\/accounts\/[^/]+\/hyperdrive\/configs$/, 'hyperdrive'],
+      [/^\/zones\/([^/]+)\/workers\/routes$/, 'workers_routes'],
+    ];
+    const read = reads.find(([pattern]) => pattern.test(path));
+    if (scoped !== undefined) {
+      const zone = read === undefined ? undefined : read[0].exec(path)![1];
+      if (request.method !== 'GET' || read === undefined || !scoped.has(zone === undefined ? read[1] : `${read[1]}:${zone}`)) return forbidden();
+      if (read[1] !== 'hyperdrive') return send(200, read[1] === 'account_settings' ? { id: path.split('/')[2] } : []);
+    } else if (read !== undefined && read[1] !== 'hyperdrive') {
+      return send(200, read[1] === 'account_settings' ? { id: path.split('/')[2] } : []);
+    }
     if (path === '/accounts') return page(state.accounts);
     if (path === '/user') return state.email === null ? send(403, null, [{ code: 9109, message: 'Unauthorized' }]) : send(200, { email: state.email });
     if (path === '/zones' && request.method === 'POST') {
@@ -200,14 +255,61 @@ export async function fakeCloudflare(token: string) {
   return { url, state, close: () => (server.closeAllConnections(), server.close()) };
 }
 
-/** GitHub, as its App manifest flow goes: the form posted, Create clicked at once, the code converted, once. */
+/** Cloudflare's permission groups, as it lists them to a token that may make tokens: those the deploy needs, and some it does not. */
+const PERMISSION_GROUPS = [
+  { id: 'pg-scripts-read', name: 'Workers Scripts Read', permission: 'workers_scripts_read' },
+  { id: 'pg-scripts', name: 'Workers Scripts Write', permission: 'workers_scripts' },
+  { id: 'pg-settings', name: 'Account Settings Read', permission: 'account_settings' },
+  { id: 'pg-kv', name: 'Workers KV Storage Write', permission: 'workers_kv_storage' },
+  { id: 'pg-hyperdrive-write', name: 'Hyperdrive Write', permission: 'hyperdrive_write' },
+  { id: 'pg-hyperdrive', name: 'Hyperdrive Read', permission: 'hyperdrive' },
+  { id: 'pg-routes', name: 'Workers Routes Write', permission: 'workers_routes' },
+  { id: 'pg-dns', name: 'DNS Write', permission: 'dns' },
+];
+
+/**
+ * GitHub, as its App manifest flow goes: the form posted, Create clicked at
+ * once, the code converted, once. And a repository's Actions secrets, as
+ * its API takes them: each sealed to the repository's public key, which the
+ * stand-in opens with libsodium, as GitHub does.
+ */
 export async function fakeGitHub() {
+  await sodium.ready;
+  const keys = sodium.crypto_box_keypair();
   const state = {
     manifests: [] as Record<string, unknown>[],
     codes: new Map<string, { client_id: string; client_secret: string; slug: string }>(),
+    /** The tokens that may set each repository's secrets, by token. */
+    tokens: new Map<string, Set<string>>(),
+    /** Each repository's secrets, opened: what GitHub Actions would see. */
+    secrets: new Map<string, Map<string, string>>(),
+    /** Every call to the secrets API: its method, path and token. */
+    calls: [] as { method: string; path: string; token: string }[],
   };
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? '/', 'http://localhost');
+    const secrets = /^\/api\/v3\/repos\/([^/]+\/[^/]+)\/actions\/secrets\/([^/]+)$/.exec(url.pathname);
+    if (secrets !== null) {
+      const [, repository, name] = secrets;
+      const json = (status: number, body?: unknown) =>
+        response.writeHead(status, { 'content-type': 'application/json' }).end(body === undefined ? undefined : JSON.stringify(body));
+      const token = request.headers.authorization?.replace(/^Bearer /, '') ?? '';
+      state.calls.push({ method: request.method ?? '', path: url.pathname, token });
+      const repos = state.tokens.get(token);
+      if (repos === undefined) return json(401, { message: 'Bad credentials' });
+      if (!repos.has(repository!)) return json(403, { message: 'Resource not accessible by personal access token' });
+      const stored = state.secrets.get(repository!) ?? new Map<string, string>();
+      state.secrets.set(repository!, stored);
+      if (name === 'public-key') return json(200, { key_id: 'key-1', key: Buffer.from(keys.publicKey).toString('base64') });
+      if (request.method === 'GET') return stored.has(name!) ? json(200, { name, created_at: '2026-10-06T00:00:00Z' }) : json(404, { message: 'Not Found' });
+      if (request.method === 'PUT') {
+        const { encrypted_value: sealed, key_id: id } = JSON.parse(await body(request)) as { encrypted_value: string; key_id: string };
+        if (id !== 'key-1') return json(422, { message: 'Bad key_id' });
+        const existed = stored.has(name!);
+        stored.set(name!, Buffer.from(sodium.crypto_box_seal_open(Buffer.from(sealed, 'base64'), keys.publicKey, keys.privateKey)).toString('utf8'));
+        return json(existed ? 204 : 201);
+      }
+    }
     if (request.method === 'POST' && url.pathname === '/settings/apps/new') {
       const manifest = JSON.parse(new URLSearchParams(await body(request)).get('manifest')!) as Record<string, unknown>;
       // A manifest's permissions go by the form's names, as GitHub checks them: `emails`, not the API's `email_addresses`.
@@ -385,6 +487,13 @@ writeFileSync('app/dist/server/wrangler.json', JSON.stringify({ ...config, main:
 `,
   );
   chmodSync(join(dir, 'node_modules', '.bin', 'vite'), 0o755);
+}
+
+/** gh, signed in to one GitHub host with `token`: `gh auth token --hostname <host>` prints it; any other host has none. */
+export function fakeGh(dir: string, host: string, token: string): void {
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'gh'), `#!/bin/sh\n[ "$1 $2 $3 $4" = "auth token --hostname ${host}" ] && echo '${token}' && exit 0\necho 'not logged in' >&2\nexit 1\n`);
+  chmodSync(join(dir, 'gh'), 0o755);
 }
 
 /**

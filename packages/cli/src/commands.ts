@@ -29,11 +29,12 @@ export const SECTIONS = [
       { command: 'init', usage: ['init --node [<dir>]'], about: ['a Node server, and its vault beside it'] },
       {
         command: 'setup',
-        usage: ['setup [--reset-passwords] [--json]'],
+        usage: ['setup [--reset-passwords] [--rotate-deploy-token] [--json]'],
         about: [
           'its database logins, migrations and keys in one go,',
           'shown once on a screen of their own; on Workers,',
-          'Cloudflare too, and in an empty directory, the deployment',
+          'Cloudflare too, and deploys on every push to GitHub;',
+          'in an empty directory, the deployment first',
         ],
       },
       { command: 'keys', usage: ['keys [--json]'], about: ['the app key, vault key and vault ID alone, shown the same way'] },
