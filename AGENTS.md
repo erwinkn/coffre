@@ -33,10 +33,11 @@ A package imports another only by name (`@coffre/core/vault`, never
 `src`, `test` and `scripts` to it, so each package builds, ships and can be
 internalized into a deployment on its own. The `@coffre/*` dependencies are
 `workspace:*` and every package carries one version: `pnpm bump <version>` moves
-them all and the examples' pins, and says whether any dependency the release
-pins is younger than the week deployments wait, for the release notes;
-`pnpm check:pins` fails on any drift, including the examples' `packageManager`,
-which must be the workspace's pnpm.
+them all and the examples' pins, heads `CHANGELOG.md`'s `## Unreleased` notes
+`## <version> (<date>)` under a new, empty `## Unreleased`, and says whether
+any dependency the release pins is younger than the week deployments wait,
+for the release notes; `pnpm check:pins` fails on any drift, including the
+examples' `packageManager`, which must be the workspace's pnpm.
 
 Every package's `exports` lists a `coffre:source` condition first, pointing at
 `src/*.ts`. Inside the workspace, dev, tests and typecheck turn it on and read the
@@ -148,9 +149,10 @@ credential once for all its API calls (`pageClient`).
 **Tests / checks.**
 `Validate` runs the full CI suite except for a proven, synchronized version
 bump. `scripts/version-only.mjs` compares Git objects and rejects any edit
-beyond package versions, example pins, their lockfile specifiers and the
-Action's literal CLI pin. The detector and gate tests run even on that
-fast path. Parse errors or an unsupported diff select full validation.
+beyond package versions, example pins, their lockfile specifiers, the
+Action's literal CLI pin and the release notes' heading for the new version.
+The detector and gate tests run even on that fast path. Parse errors or an
+unsupported diff select full validation.
 
 - `pnpm test` = lint + migrate a scratch template + `node --test --test-concurrency=4`.
   Each file gets a private Postgres clone or SQLite copy; cases within a file remain
