@@ -1155,8 +1155,9 @@ function initProject(args: string[]): void {
   const at = dir === process.cwd() ? null : (positionals[0] ?? null);
   process.stdout.write(
     `\nA ${kind === 'workers' ? 'Cloudflare Workers' : 'Node'} deployment of coffre ${version}` +
-      `${at === null ? ' here' : ` in ${at}`}. README.md takes it from there:\n\n` +
-      `${at === null ? '' : `  cd ${/\s/.test(at) ? `'${at}'` : at}\n`}  pnpm install\n`,
+      `${at === null ? ' here' : ` in ${at}`}. Next:\n\n` +
+      `${at === null ? '' : `  cd ${/\s/.test(at) ? `'${at}'` : at}\n`}  pnpm install\n\n` +
+      'Then README.md takes it from there.\n',
   );
 }
 
