@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+**A Workers deployment deploys on every push.** `coffre init --workers`
+writes `.github/workflows/deploy.yml`: on each push to `main`, it installs
+the deployment as its lockfile says, migrates the database with
+`printenv DATABASE_OWNER_URL | pnpm exec coffre migrate --yes`, then runs
+`pnpm run deploy`, one run at a time. In a clone of a GitHub repository,
+`coffre setup` wires it after deploying: it makes the Cloudflare API token
+the workflow deploys with, scoped to the account's Workers Scripts, Account
+Settings, Workers KV and Hyperdrive and the zone's Workers Routes, and sets
+the repository's Actions secrets `CLOUDFLARE_API_TOKEN`,
+`CLOUDFLARE_ACCOUNT_ID` and `DATABASE_OWNER_URL` through GitHub's API, each
+sealed to the repository's public key. wrangler's login may not make API
+tokens, so setup usually prints the dashboard's token form, filled in, and
+checks the token you paste before taking it. It signs in to GitHub with
+gh's login, or a fine-grained token that lasts a day, and shows no value.
+Run again, it keeps the token; `--rotate-deploy-token` makes a new one.
+Without a GitHub remote, it says how to wire it later. Workers Builds stays
+documented as the alternative (docs/deploy.md, "Deploys on every push").
+A deployment made by an earlier `coffre init` gets the workflow from
+setup, to commit.
+
 ## 0.4.3 (2026-10-06)
 
 **`coffre update` writes the route tree with the route files it adds.** A

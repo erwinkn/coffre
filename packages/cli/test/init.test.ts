@@ -95,3 +95,22 @@ test('coffre init refuses a directory that is not empty, and needs one kind', (t
   assert.ok(existsSync(join(clone, 'app', 'wrangler.jsonc')));
   assert.throws(() => coffre(['init', 'x'], scratch, scratch), /usage: coffre init/);
 });
+
+test("the Workers deployment's deploy workflow pins its actions by commit, as coffre's own workflows do, and keeps the owner's URL to its migrate step", () => {
+  const workflow = readFileSync(join(root, 'examples/workers/.github/workflows/deploy.yml'), 'utf8');
+  const ours = readFileSync(join(root, '.github/workflows/validate.yml'), 'utf8');
+  const uses = [...workflow.matchAll(/uses: (\S+@\S+)(?: # (\S+))?/g)];
+  assert.deepEqual(uses.map(([, action]) => action!.split('@')[0]), ['actions/checkout', 'actions/setup-node']);
+  for (const [line, action] of uses) {
+    assert.match(action!, /@[0-9a-f]{40}$/, `${action} is pinned by commit`);
+    assert.ok(ours.includes(line), `${line}: as .github/workflows/validate.yml pins it`);
+  }
+  assert.match(workflow, /node-version: 24\n/);
+  assert.match(workflow, /run: corepack enable && pnpm install --frozen-lockfile\n/);
+  // The URL on the migrate step alone, handed to the CLI on stdin.
+  assert.equal(workflow.match(/DATABASE_OWNER_URL: \$\{\{ secrets\.DATABASE_OWNER_URL \}\}/g)?.length, 1);
+  assert.match(workflow, /run: printenv DATABASE_OWNER_URL \| pnpm exec coffre migrate --yes\n {8}env:\n {10}DATABASE_OWNER_URL: /);
+  assert.match(workflow, /run: pnpm run deploy\n/);
+  assert.match(workflow, /concurrency:\n {2}group: deploy\n {2}cancel-in-progress: false\n/);
+  assert.match(workflow, /permissions:\n {2}contents: read\n/);
+});

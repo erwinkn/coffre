@@ -3,11 +3,13 @@
 // and a browser. A first run whose app deploy fails, the run that resumes
 // it, one that finds everything done, two whose Hyperdrive configs are
 // deleted while they run, a second deployment beside the first on one account, a third on the first's database server, and one that
-// stops before changing a database in use.
+// stops before changing a database in use. A deployment that is a GitHub
+// repository deploys on every push: its run sets the repository's secrets.
 // Every deploy is also the real wrangler's, in a dry run, on the same files
 // and the same stdin.
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -19,11 +21,13 @@ import pg from 'pg';
 import { editWorker, readWorker } from '../src/deployment.ts';
 import { templateDir } from '../src/init.ts';
 import { asSuperuser, CLUSTER, connects, database, emptyCluster, needsCluster, OTHER_CLUSTER } from './cluster.ts';
-import { fakeCloudflare, fakeGitHub, fakeOpener, fakeVite, fakeWrangler, realWrangler, submitManifest } from './fakes.ts';
+import { fakeCloudflare, fakeGh, fakeGitHub, fakeOpener, fakeVite, fakeWrangler, realWrangler, submitManifest } from './fakes.ts';
 import { ENTER_ALT, inTerminal, ptySkip, screens, type Session, typingUrl, visible } from './pty.ts';
 
 const skip = needsCluster.skip || ptySkip;
 const TOKEN = `cf-oauth-${'t'.repeat(40)}`;
+/** gh's token, for the stand-in GitHub, which alone this run's gh knows. */
+const GH = `gho_${'g'.repeat(36)}`;
 const ADDRESS = 'secrets.acme.test';
 
 let dir: string;
@@ -67,6 +71,8 @@ globalThis.fetch = (input, init) => {
   mkdirSync(join(deployment, 'node_modules', '@coffre', 'cli', 'assets'), { recursive: true });
   cpSync(fileURLToPath(new URL('../assets/github-app-logo.png', import.meta.url)), join(deployment, 'node_modules', '@coffre', 'cli', 'assets', 'github-app-logo.png'));
   fakeOpener(join(dir, 'bin'));
+  // Never the real gh, nor its login.
+  fakeGh(join(dir, 'bin'), '127.0.0.1', GH);
   url = await database('setup_workers', 'owner');
   env = {
     PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
@@ -320,7 +326,37 @@ test('a run with everything done: nothing made, nothing shown, both deployed aga
     ['deploy', '-c', 'app/dist/server/wrangler.json'],
   ]);
   assert.deepEqual(cloudflare.state.configs.get('acc-acme')!.map(({ origin }) => origin.password), before);
+  // A directory that is no GitHub repository: how to deploy on push is said, and nothing done for it.
+  assert.ok(!text.includes('deploy on every push\n'), 'no step for it');
+  assert.match(text, /Deploys\s+This directory has no GitHub remote\. To deploy on every push, push it to a GitHub repository, with\s+\.github\/workflows\/deploy\.yml/);
+  assert.match(text, /CLOUDFLARE_API_TOKEN,\s+CLOUDFLARE_ACCOUNT_ID\s+and\s+DATABASE_OWNER_URL/);
   assertKept(output, wrangler);
+});
+
+test('a deployment that is a GitHub repository: a token made on the form, checked, and the three secrets set through gh\'s login', { skip }, async () => {
+  execFileSync('git', ['init', '-q', deployment()]);
+  execFileSync('git', ['-C', deployment(), 'remote', 'add', 'origin', `${github.github.web}/acme/secrets.git`]);
+  github.state.tokens.set(GH, new Set(['acme/secrets']));
+  // What the person makes on the dashboard's form: the deploy's permissions, on the account and its zone.
+  const made = `cf-deploys-${'d'.repeat(32)}`;
+  cloudflare.state.scoped.set(made, new Set(['workers_scripts', 'account_settings', 'workers_kv_storage', 'hyperdrive', 'workers_routes:zone-1']));
+  secrets.add(made).add(GH);
+  const { output, code } = await setup(async (terminal) => {
+    await answer(terminal);
+    await terminal.waitFor('Paste the Cloudflare token');
+    terminal.send(`${made}\r`);
+    await terminal.waitFor('coffre is at');
+  });
+  const text = mainText(output);
+  assert.equal(code, 0, text);
+  assert.match(text, /Cloudflare refused this login making an API token: wrangler's login may not\./);
+  assert.match(text, /https:\/\/dash\.cloudflare\.com\/profile\/api-tokens\?permissionGroupKeys=/);
+  assert.match(text, /✓ acme\/secrets deploys on every push to main, signed in to GitHub with gh's login\n\s+CLOUDFLARE_API_TOKEN\s+the token you made, for the account's Workers, and acme\.test's routes\n/);
+  assert.match(text, /Deploys\s+Every push to main migrates the database, then deploys both Workers, with\s+\.github\/workflows\/deploy\.yml\./);
+  // The repository's secrets, as GitHub Actions opens them.
+  assert.deepEqual(Object.fromEntries(github.state.secrets.get('acme/secrets')!), { CLOUDFLARE_API_TOKEN: made, CLOUDFLARE_ACCOUNT_ID: 'acc-acme', DATABASE_OWNER_URL: new URL(url).href });
+  assert.ok(github.state.calls.every(({ token }) => token === GH));
+  assertKept(output, calls());
 });
 
 test("a Hyperdrive config deleted during a run, its login's password kept: setup stops, and says to run it again", { skip }, async () => {

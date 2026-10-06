@@ -475,7 +475,49 @@ export class CloudflareApi {
   async createOriginlessRecord(zone: string, name: string, comment: string): Promise<void> {
     await this.#call('POST', `/zones/${zone}/dns_records`, { type: 'AAAA', name, content: '100::', proxied: true, comment });
   }
+
+  /** The permissions a token may be given, by name and id: `Workers Scripts Write`, say. */
+  permissionGroups(): Promise<{ id: string; name: string }[]> {
+    return this.#call('GET', '/user/tokens/permission_groups');
+  }
+
+  /** A new API token, under the signed-in person: its id, and its value, which Cloudflare gives only now. */
+  createToken(name: string, policies: TokenPolicy[]): Promise<{ id: string; value: string }> {
+    return this.#call('POST', '/user/tokens', { name, policies });
+  }
+
+  /** The signed-in person's API tokens, by name, never their values. */
+  tokens(): Promise<{ id: string; name: string }[]> {
+    return this.#all('/user/tokens');
+  }
+
+  /** This token's own id, as Cloudflare verifies it; null when it does not say. */
+  async tokenId(): Promise<string | null> {
+    try {
+      return (await this.#call<{ id?: string }>('GET', '/user/tokens/verify')).id ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  async deleteToken(id: string): Promise<void> {
+    await this.#call('DELETE', `/user/tokens/${id}`);
+  }
+
+  /** Whether this token may read what `path` names: false when Cloudflare refuses it for its permissions. */
+  async may(path: string): Promise<boolean> {
+    try {
+      await this.#call('GET', path);
+      return true;
+    } catch (error) {
+      if (denied(error)) return false;
+      throw error;
+    }
+  }
 }
+
+/** What an API token may do, and on what: an account, or a zone. */
+export type TokenPolicy = { effect: 'allow'; resources: Record<string, '*'>; permission_groups: { id: string }[] };
 
 /** A login's URL as a Hyperdrive origin: Hyperdrive makes its own TLS connection, so the URL's parameters stay behind. */
 export function originOf(url: string): Origin {

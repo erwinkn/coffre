@@ -11,6 +11,10 @@
 // domains, with Cloudflare for SaaS (hostname.ts); with no domain on the
 // account, setup offers to add one, or the Worker's workers.dev address.
 //
+// When the deployment is a GitHub repository, setup then has it deploy on
+// every push to main (deploy-on-push.ts): a Cloudflare token for the deploys,
+// and the repository's secrets, which .github/workflows/deploy.yml reads.
+//
 // An account may hold other deployments of coffre. A Worker or a Hyperdrive
 // config is this deployment's only when this directory says so, and setup
 // never touches another's: when one already has this deployment's names,
@@ -29,6 +33,7 @@ import {
   type Wrangler,
   type Zone,
 } from './cloudflare.ts';
+import { deployOnPush, gitRemote, repositoryOf, SECRETS, WORKFLOW } from './deploy-on-push.ts';
 import { BUILT_APP, buildApp, editWorker, placeholder, readWorker, type Change, type WorkerConfig } from './deployment.ts';
 import { createGitHubApp, GITHUB, type GitHub, logoPath } from './github-app.ts';
 import { recordLines, recordsToAdd, Refused, saasZone, type Served, serveThrough, standing, tokenNeeded, waitForRecords, zoneOf } from './hostname.ts';
@@ -189,6 +194,10 @@ export class Cloudflare {
   readonly #token: string | null;
   /** What this run changed in each wrangler.jsonc, in a few words each. */
   readonly #wrote: Record<Component, Set<string>> = { app: new Set(), vault: new Set() };
+  /** The deployment's GitHub repository, `owner/name`, from its remote: what deploys on every push. */
+  readonly repository: string | null;
+  /** Whether the repository deploys on every push now; null until the deploy has asked. */
+  pushes: boolean | null = null;
 
   private constructor(
     dir: string,
@@ -211,6 +220,8 @@ export class Cloudflare {
     this.#token = answers.token;
     const vars = workers.app.vars;
     this.#github = { web: vars.GITHUB_URL ?? GITHUB.web, api: vars.GITHUB_API_URL ?? GITHUB.api };
+    const remote = gitRemote(dir);
+    this.repository = remote === null ? null : repositoryOf(remote, this.#github);
   }
 
   /**
@@ -572,12 +583,23 @@ export class Cloudflare {
     };
   }
 
-  /** Deploy the vault, then the app, which binds to it, each with the secrets it lacks; then wait for coffre to answer. */
-  async deploy(out: Output, describe: (error: unknown) => string): Promise<string> {
+  /**
+   * Deploy the vault, then the app, which binds to it, each with the secrets
+   * it lacks; have the repository deploy on every push, when there is one;
+   * then wait for coffre to answer.
+   */
+  async deploy(out: Output, describe: (error: unknown) => string, keys: Keyboard, options: { rotateDeployToken: boolean }): Promise<string> {
     const url = `https://${this.address}`;
     const serving = this.serving;
-    const titles = ['Deploy the vault', 'Deploy the app', ...(serving.kind === 'saas' ? [`Wait for ${this.address}'s DNS records`] : []), `Wait for ${url} to answer`];
-    const steps = new Steps(out, titles, () => null, describe);
+    const repository = this.repository;
+    const titles = [
+      'Deploy the vault',
+      'Deploy the app',
+      ...(repository === null ? [] : [`Have ${repository} deploy on every push`]),
+      ...(serving.kind === 'saas' ? [`Wait for ${this.address}'s DNS records`] : []),
+      `Wait for ${url} to answer`,
+    ];
+    const steps = new Steps(out, titles, () => keys, describe);
     const account = this.#found.account.id;
     let answered = false;
     try {
@@ -599,8 +621,30 @@ export class Cloudflare {
         const what = [...(this.#missing.app ? ['its key'] : []), ...(this.#clientSecret === null ? [] : ["GitHub's secret"])];
         return `Deployed the app, ${this.workers.app.name}${what.length === 0 ? '' : `, with ${listed(what, 'and')}`}`;
       });
-      if (serving.kind === 'saas') {
+      if (repository !== null) {
         await steps.run(2, async (step) => {
+          const zone = serving.kind === 'saas' ? serving.zone : serving.kind === 'domain' ? (zoneOf(this.address, this.#found.zones) ?? null) : null;
+          const done = await deployOnPush(
+            {
+              dir: this.#dir,
+              repository,
+              github: this.#github,
+              api: this.#found.api,
+              account: this.#found.account,
+              zone,
+              owner: this.#administrator,
+              rotate: options.rotateDeployToken,
+              secrets: this.#secrets,
+            },
+            step,
+            { aside: (text) => steps.aside(text), link: (label, address) => steps.link(label, address) },
+          );
+          this.pushes = done !== null;
+          return done ?? { text: `${repository} does not deploy on push yet`, details: [`Its Actions secrets, ${listed([...SECRETS], 'and')}, aren't set: setup sets them when run again`] };
+        });
+      }
+      if (serving.kind === 'saas') {
+        await steps.run(titles.length - 2, async (step) => {
           await waitForRecords(this.#found.api, serving, {
             records: (lines) => {
               steps.print(records(out, this.address, lines));
@@ -784,6 +828,19 @@ async function answers(url: string, waiting: (seconds: number) => void): Promise
   }
 }
 
+/** How the deployment deploys from now on: on every push, or what to do for it. */
+function deploys(cloudflare: Cloudflare): string {
+  const secrets = `its Actions secrets ${listed([...SECRETS], 'and')}`;
+  if (cloudflare.pushes === true) return `Every push to main migrates the database, then deploys both Workers, with ${WORKFLOW}.`;
+  if (cloudflare.repository !== null) {
+    return `To deploy on every push, run coffre setup again here: it sets ${cloudflare.repository}'s secrets, which ${WORKFLOW} needs. Or connect Workers Builds (docs/deploy.md).`;
+  }
+  return (
+    `This directory has no GitHub remote. To deploy on every push, push it to a GitHub repository, with ${WORKFLOW}, and run coffre setup again: ` +
+    `it sets ${secrets}. Or set them yourself, or connect Workers Builds (docs/deploy.md).`
+  );
+}
+
 /** After the deploy: where coffre is, and what is left, with no secret in it. */
 export function deployedSummary(cloudflare: Cloudflare, out: Output): string {
   const s = style(out);
@@ -798,16 +855,14 @@ export function deployedSummary(cloudflare: Cloudflare, out: Output): string {
     row(out, s, 'Sign in', `${url}, with GitHub, as ${first}.`),
     row(out, s, 'CLI', `coffre login ${url}`),
     row(out, s, 'Monitor', `${url}/readyz turns green at the first scheduled run, within 5 minutes.`),
-    row(
-      out,
-      s,
-      'Builds',
-      'With Workers Builds, each Worker migrates first: the vault builds with printenv DATABASE_OWNER_URL | pnpm exec coffre migrate --yes, ' +
-        'the app with printenv DATABASE_OWNER_URL | pnpm exec coffre migrate --yes && pnpm exec vite build app, ' +
-        'each with the secret build variable DATABASE_OWNER_URL, the database URL you gave setup; the app ' +
-        'deploys with npx wrangler deploy -c app/dist/server/wrangler.json.',
+    row(out, s, 'Deploys', deploys(cloudflare)),
+    s.dim(
+      paragraph(
+        out,
+        'After every upgrade of coffre, commit and push: the workflow migrates the database, then deploys. By hand, pnpm exec coffre migrate --yes first, then pnpm run deploy. docs/deploy.md has each step.',
+        4,
+      ),
     ),
-    s.dim(paragraph(out, 'After every upgrade of coffre, pnpm exec coffre migrate --yes first, then pnpm run deploy; or a push to Workers Builds, which migrates in both builds. docs/deploy.md has each step.', 4)),
     '',
     '',
   ].join('\n');

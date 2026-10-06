@@ -66,6 +66,9 @@ the Hyperdrive configs and the GitHub App, fills in both `wrangler.jsonc`,
 and deploys, with the keys as secrets. That is sections 1, 3 and 4 below,
 and the database URLs then go straight to Hyperdrive, unshown
 ([deploy.md](https://github.com/erwinkn/coffre/blob/main/docs/deploy.md#setup-does-cloudflare-too)).
+When this directory is a clone of a GitHub repository, it also makes every
+push deploy: a Cloudflare token for the deploys, and the repository's
+Actions secrets, which its deploy workflow reads.
 
 ## 3. Hyperdrive and secrets
 
@@ -107,6 +110,15 @@ sign in there as a root admin, and from a terminal:
 coffre login https://secrets.example.com
 ```
 
+**On every push.** [.github/workflows/deploy.yml](.github/workflows/deploy.yml) does the same on each
+push to `main`, in GitHub Actions: it installs this project as
+`pnpm-lock.yaml` says, so commit that file; migrates the database; then
+runs `pnpm run deploy`. It reads three Actions secrets, which `coffre setup`
+sets: `CLOUDFLARE_API_TOKEN`, a token that may deploy the Workers;
+`CLOUDFLARE_ACCOUNT_ID`; and `DATABASE_OWNER_URL`, the database
+administrator's URL, which only its migrate step sees
+([deploy.md](https://github.com/erwinkn/coffre/blob/main/docs/deploy.md#deploys-on-every-push)).
+
 Point a monitor at `<PUBLIC_URL>/readyz`: it turns red when the audit log
 stops taking writes or the vault stops checkpointing it.
 
@@ -116,12 +128,12 @@ follow the [restore runbook](https://github.com/erwinkn/coffre/blob/main/docs/re
 
 ## Upgrading
 
-Run `coffre update` here, then migrate and deploy. With Workers Builds,
-commit and push: both Workers' builds start with `printenv
-DATABASE_OWNER_URL | pnpm exec coffre migrate --yes`, the administrator's
-URL being their secret build variable `DATABASE_OWNER_URL`. By hand, run
-`pnpm exec coffre migrate`, then `pnpm run deploy`. Until the migration has
-run, the new version answers 503, `migrating`
+Run `coffre update` here, then migrate and deploy: commit and push, and the
+workflow does both. With Workers Builds instead, both Workers' builds start
+with `printenv DATABASE_OWNER_URL | pnpm exec coffre migrate --yes`, the
+administrator's URL being their secret build variable `DATABASE_OWNER_URL`.
+By hand, run `pnpm exec coffre migrate`, then `pnpm run deploy`. Until the
+migration has run, the new version answers 503, `migrating`
 ([upgrading](https://github.com/erwinkn/coffre/blob/main/docs/deploy.md#upgrading),
 [Workers Builds](https://github.com/erwinkn/coffre/blob/main/docs/deploy.md#workers-builds)).
 

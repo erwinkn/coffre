@@ -9,7 +9,8 @@
 // In an empty directory, it first makes a deployment there. In a Workers
 // deployment, on a terminal, it offers to do Cloudflare too (workers.ts):
 // then the database URLs go straight to Hyperdrive, and the keys, once
-// shown, to the Workers it deploys.
+// shown, to the Workers it deploys; a GitHub repository then deploys on
+// every push (deploy-on-push.ts).
 import { createHash, createHmac, pbkdf2Sync, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -101,7 +102,7 @@ function newPassword(): string {
 export async function setup(args: string[]): Promise<void> {
   const secrets: string[] = [];
   const clean = (error: unknown) => redact(error instanceof Error ? error.message : String(error), secrets);
-  let options: { resetPasswords: boolean; json: boolean };
+  let options: Options;
   try {
     options = parseOptions(args);
   } catch (error) {
@@ -143,7 +144,7 @@ export async function setup(args: string[]): Promise<void> {
     const result = await run(administrator, out, questions, { resetPasswords: options.resetPasswords, cloudflare }, secrets, clean);
     if (cloudflare !== null) {
       if (cloudflare.keys !== null) await showSecrets(terminal!, cloudflare.screen());
-      await cloudflare.deploy(out, clean);
+      await cloudflare.deploy(out, clean, terminal!.keys, { rotateDeployToken: options.rotateDeployToken });
       out.write(deployedSummary(cloudflare, out));
     } else if (options.json) {
       jsonWarning(process.stderr, listed(shownNames(result), 'and'));
@@ -175,20 +176,26 @@ function fail(out: Output, message: string, code = 1): never {
   process.exit(code);
 }
 
-function parseOptions(args: string[]): { resetPasswords: boolean; json: boolean } {
+type Options = { resetPasswords: boolean; rotateDeployToken: boolean; json: boolean };
+
+function parseOptions(args: string[]): Options {
   try {
     const { values } = parseArgs({
       args,
-      options: { 'reset-passwords': { type: 'boolean', default: false }, json: { type: 'boolean', default: false } },
+      options: {
+        'reset-passwords': { type: 'boolean', default: false },
+        'rotate-deploy-token': { type: 'boolean', default: false },
+        json: { type: 'boolean', default: false },
+      },
       allowPositionals: false,
       strict: true,
     });
-    return { resetPasswords: values['reset-passwords'], json: values.json };
+    return { resetPasswords: values['reset-passwords'], rotateDeployToken: values['rotate-deploy-token'], json: values.json };
   } catch {
     // The error would quote the argument, which may be the connection string itself.
     const leaked = args.some((arg) => /postgres(ql)?:|@/i.test(arg));
     throw new SetupError(
-      `coffre setup takes only --reset-passwords and --json. It asks for the administrator's connection string, at a hidden prompt or on stdin, ` +
+      `coffre setup takes only --reset-passwords, --rotate-deploy-token and --json. It asks for the administrator's connection string, at a hidden prompt or on stdin, ` +
         `never from the command line, where the shell's history and other users can read it.` +
         (leaked ? ' One of the arguments looks like one: change that password, which is in your shell history now.' : ''),
     );
