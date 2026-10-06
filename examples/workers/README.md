@@ -31,10 +31,11 @@ Worker secrets. Everything below runs from this directory.
 Make a Postgres database, then, from this directory:
 
 ```sh
-npx @coffre/cli setup
+pnpm exec coffre setup
 ```
 
-Run it with the CLI you ran `coffre init` with. It asks for the database
+That is the CLI this project pins, once `pnpm install` has run: it migrates
+with the migrations of the `@coffre/server` beside it. It asks for the database
 administrator's connection string at a hidden prompt. A script pipes it in;
 never pass it as an argument. It
 makes the two logins coffre runs as, `coffre_runtime` for the app and

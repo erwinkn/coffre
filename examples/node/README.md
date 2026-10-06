@@ -39,10 +39,11 @@ readable only by its process's user.
 Make a Postgres database, then:
 
 ```sh
-npx @coffre/cli setup
+pnpm exec coffre setup
 ```
 
-Run it with the CLI you ran `coffre init` with. It asks for the database
+That is the CLI this project pins: it migrates with the migrations of the
+`@coffre/server` beside it. It asks for the database
 administrator's connection string at a hidden prompt. A script pipes it in;
 never pass it as an argument. It
 makes the two logins coffre runs as, `coffre_runtime` for the server and
