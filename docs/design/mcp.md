@@ -64,10 +64,9 @@ claude mcp add --transport http coffre https://secrets.acme.example/mcp
    coffre sees that the approval was used and answers "SESSION_SECRET is at
    version 4".
 7. **Using it.** "Run the tests with staging's secrets." Claude calls
-   `run_with_secrets` and gets back
-   `coffre run market/staging -- npm test`, plus the keys that command sets.
-   It runs the command in its shell. The values go to the test process and
-   never into the conversation.
+   runs `coffre run market/staging -- npm test` in the terminal, as the
+   server's instructions say. The values go to the test process and never
+   into the conversation.
 
 Ada can see Claude Code, its scopes and when it was last used on her
 account page under **Connected apps**, or with `coffre apps`. She can
@@ -359,7 +358,7 @@ answers well inside Claude's 10 seconds.
 
 | Scope | Lets the client | Default |
 |---|---|---|
-| `read` | see projects, environments, key names, versions, access, the audit log; run `coffre run` instructions; show a value **to the person** on coffre's page | always |
+| `read` | see projects, environments, key names, versions, access, the audit log; show a value **to the person** on coffre's page | always |
 | `write` | set, generate, rename, archive, unarchive and restore secrets; create projects and environments | opt-in |
 | `reveal` | receive secret values in tool results | opt-in, with a warning |
 | `manage-access` | grants, admitting and offboarding members, service tokens, trust bindings | opt-in |
@@ -431,7 +430,6 @@ coffre's page (section 7).
 | `list_access {place?}` | read | ✓ · ✓ | | `GET /members?path=` |
 | `describe_member {member}` | read | ✓ · ✓ | | `GET /members/:m`; for a service, its tokens and bindings |
 | `read_audit_log {path?, actor?, decision?, before?, limit?}` | read | ✓ · ✓ | | `GET /audit` |
-| `run_with_secrets {environment, command?}` | read | ✓ · ✓ | | `GET /secrets/:p/:e`, to check access and list keys |
 | `show_secret_value {secret}` | read | ✓ · ✓ | the page shows it | `POST /reveals`, from the page |
 | `request_secret_value {secret, note?}` | write | ✗ ✓ ✗ | the person types it | `PATCH /secrets/:p/:e` |
 | `generate_secret_value {secret, length?, alphabet?}` | write | ✗ ✓ ✗ | ✓ | `PATCH /secrets/:p/:e`, value made on the server |
@@ -618,21 +616,12 @@ The consent page warns when Reveal values is asked for:
 ### Using secrets: `coffre run`
 
 When the agent has a shell, the values should go to the process that needs
-them, not to the transcript. `run_with_secrets {environment: "market/staging",
-command: "npm test"}` checks that the person may read that environment
-(`GET /secrets`), and answers with no value:
-
-```text
-Run it with coffre's CLI. It sets these 12 environment variables for the
-command only, and none of them enter this conversation:
-  DATABASE_URL, REDIS_URL, SESSION_SECRET, STRIPE_KEY, …
-
-  coffre login https://secrets.acme.example   # once per machine; approve in the browser
-  coffre run market/staging -- npm test
-
-Install the CLI with `npm install -g @coffre/cli`, or prefix each command with
-`npx @coffre/cli`.
-```
+them, not to the transcript. No tool does this: a tool could only print the
+command, which the model can write itself. The server's `instructions` tell
+the model to run `coffre run <project>/<env> [<project>/<env> …] --
+<command>` in the person's terminal. (`coffre login <url>` once per
+machine; `coffre run` itself is refused for anyone who cannot read the
+environment.)
 
 The CLI signs in with its own device login, as the person, and the MCP
 connection grants it nothing.
@@ -642,13 +631,13 @@ in one paragraph:
 
 - never ask the person to paste a secret into the chat;
 - to set one, use `request_secret_value` or `generate_secret_value`;
-- with a shell, use `coffre run`;
+- to use secrets in a command, run it with `coffre run`, and avoid commands
+  that print them;
 - `reveal_secret_values` puts values into the conversation, so use it only
   when the person wants the model to see them.
 
-**Without a shell** (a claude.ai chat), `run_with_secrets` still answers.
-Its first line says this conversation has no shell to run the command in,
-so the person runs it themselves. The tool descriptions of
+**Without a shell** (a claude.ai chat), the model has nowhere to run it; the
+person can. The tool descriptions of
 `reveal_secret_values` and `show_secret_value` say plainly which one puts the
 value in front of the model.
 
@@ -974,7 +963,7 @@ parity as they merge.
    - The consent page, codes, tokens, refresh, revocation, limits.
    - `signin({ mcp })`, `init`, `update`, both examples.
    - `/mcp` answers only `401`, or `server/discover` once authenticated.
-2. **The MCP endpoint with Read.** Both eras, the tools, `run_with_secrets`,
+2. **The MCP endpoint with Read.** Both eras, the tools,
    the scope gate in `serveApi`, the audit's `via`, and the conformance
    checks 1, 2, 5 and 6.
 3. **Changes with approvals.** `mcp_approvals`, the approval page, MRTR, the

@@ -263,7 +263,7 @@ export async function mcpRead(deployment: Deployment, people: People, canaries: 
   const result = listed.body.result as { tools?: { name: string; annotations?: { readOnlyHint?: boolean } }[]; cacheScope?: string; ttlMs?: number } | undefined;
   const names = result?.tools?.map((tool) => tool.name) ?? [];
   // The reader's list: their role's tools, and none of an instance owner's; theirs alone to cache, and not for long, so a role's change shows.
-  expect(names.includes('list_secrets') && names.includes('run_with_secrets') && !names.includes('admit_member') && result?.cacheScope === 'private' && typeof result.ttlMs === 'number' && result.ttlMs <= 600_000,
+  expect(names.includes('list_secrets') && !names.includes('run_with_secrets') && !names.includes('admit_member') && result?.cacheScope === 'private' && typeof result.ttlMs === 'number' && result.ttlMs <= 600_000,
     "tools/list does not list the reader's tools alone, cached for them only and briefly", listed.body);
   const callTool = async (tool: string, args: Record<string, unknown>) => {
     const { response, body } = await modern(deployment, access, 'tools/call', { name: tool, arguments: args }, tool);
@@ -276,8 +276,6 @@ export async function mcpRead(deployment: Deployment, people: People, canaries: 
   expect(['API_KEY', 'DATABASE_URL'].every((key) => keys.includes(key)), `list_secrets on ${DEV} does not list its keys`, keys);
   const prod = await callTool('list_secrets', { environment: PROD });
   expect(prod.isError === true, `the reader listed ${PROD}'s keys through MCP, which they cannot`, prod);
-  const run = await callTool('run_with_secrets', { environment: DEV, command: 'npm test' });
-  expect(run.content?.[0]?.text?.includes(`coffre run ${DEV} -- npm test`) === true, 'run_with_secrets does not say how to run the command', run);
   for (const tool of ['whoami', 'list_projects']) await callTool(tool, {});
   await callTool('secret_history', { secret: `${DEV}/API_KEY` });
 
@@ -310,7 +308,7 @@ export async function mcpRead(deployment: Deployment, people: People, canaries: 
   const mine = entries.filter((entry) => (entry.metadata.via as { clientId?: string } | undefined)?.clientId === clientId);
   const reads = mine.filter((entry) => entry.action === 'mcp.read').length;
   const refused = mine.filter((entry) => entry.action === 'mcp.call' && entry.decision === 'deny').length;
-  expect(reads === 6 && refused === 1, 'the log does not hold each call under the client', { reads, refused });
+  expect(reads === 5 && refused === 1, 'the log does not hold each call under the client', { reads, refused });
   const api = mine.filter((entry) => !entry.action.startsWith('mcp.'));
   expect(api.length > 0, "the API's own entries for the calls do not name the connection", mine.map((entry) => entry.action));
   const shown = (await people.admin.api.audit.list({ actor: people.reader.member, limit: 500 })).entries;

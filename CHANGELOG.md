@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+**`run_with_secrets` is gone from the MCP tools.** It only wrote out a
+command, which the model can write itself. The server's instructions now
+tell the model to run `coffre run <project>/<env> -- <command>` in the
+person's terminal, with the CLI signed in, so values reach the process and
+never the conversation.
+
 **Shorter copy across the pages, the CLI and the MCP tools.** Sentences that
 explained mechanics, hedged or repeated what the page already shows are cut;
 warnings and the facts a person acts on stay. The consent page no longer
