@@ -36,12 +36,12 @@ const idOf = (result: { body: { result?: { structuredContent?: Record<string, un
 
 test('values reach the model only with Reveal values, with a warning first, and the reveal is logged under the connection', async () => {
   const reading = await connect(DEV);
-  const refused = await callRaw(reading, 'read_secret_values', { path: 'market/prod' });
+  const refused = await callRaw(reading, 'reveal_secret_values', { path: 'market/prod' });
   assert.equal(refused.status, 403);
   assert.equal(JSON.stringify(refused.body).includes(VALUE), false);
 
   const revealing = await connect(DEV, 'read reveal');
-  const revealed = await callRaw(revealing, 'read_secret_values', { path: 'market/prod' });
+  const revealed = await callRaw(revealing, 'reveal_secret_values', { path: 'market/prod' });
   assert.deepEqual(revealed.body.result!.structuredContent!.values, { API_KEY: VALUE });
   assert.match(revealed.body.result!.content[0]!.text!, /^These values are now part of this conversation and its history\./);
   // The vault's entry is the record of the read, under the connection, as the call's own entry names it.
@@ -69,7 +69,7 @@ test('show_secret_value shows the value to the person on the page, with Read, an
   const [row] = await db.owner.select().from(mcpApprovals);
   assert.equal(reveal.actor, `user:${DEV}`);
   assert.equal(reveal.metadata.credentialId, row!.connectionId);
-  assert.equal((await callRaw(token, 'read_secret_values', { path: 'market/prod' })).status, 403);
+  assert.equal((await callRaw(token, 'reveal_secret_values', { path: 'market/prod' })).status, 403);
 });
 
 test('generate_secret_value makes the value on the server when the person approves, and nobody sees it', async () => {

@@ -467,8 +467,8 @@ export async function mcpValues(deployment: Deployment, people: People, canaries
 
   // Read: no value to the model, but one shown to the person on coffre's page.
   const reading = (await redeem(deployment, clientId, await connect(deployment, reader, clientId))).access_token;
-  const stepUp = await call(reading, 'read_secret_values', { path: DEV });
-  expect(stepUp.status === 403 && stepUp.challenge.includes('scope="read reveal"'), `read_secret_values with Read answered ${stepUp.status}, not a step-up`, stepUp.challenge);
+  const stepUp = await call(reading, 'reveal_secret_values', { path: DEV });
+  expect(stepUp.status === 403 && stepUp.challenge.includes('scope="read reveal"'), `reveal_secret_values with Read answered ${stepUp.status}, not a step-up`, stepUp.challenge);
   const show = await call(reading, 'show_secret_value', { secret: `${DEV}/API_KEY` });
   const id = show.result?.structuredContent?.approval?.id;
   expect(show.result?.structuredContent?.status === 'pending' && id !== undefined, 'show_secret_value did not open an approval', show.result);
@@ -483,10 +483,10 @@ export async function mcpValues(deployment: Deployment, people: People, canaries
 
   // Reveal values: the values the person may read, and no others.
   const revealing = (await redeem(deployment, clientId, await connect(deployment, reader, clientId, 'read reveal'))).access_token;
-  const read = await call(revealing, 'read_secret_values', { path: DEV });
-  expect(JSON.stringify(read.result?.structuredContent?.values) === JSON.stringify(dev), `read_secret_values on ${DEV} did not answer its values`);
-  expect(read.result?.content?.[0]?.text?.startsWith('These values are now part of this conversation') === true, 'read_secret_values does not warn first', read.result?.content);
-  const prod = await call(revealing, 'read_secret_values', { path: PROD });
+  const read = await call(revealing, 'reveal_secret_values', { path: DEV });
+  expect(JSON.stringify(read.result?.structuredContent?.values) === JSON.stringify(dev), `reveal_secret_values on ${DEV} did not answer its values`);
+  expect(read.result?.content?.[0]?.text?.startsWith('These values are now part of this conversation') === true, 'reveal_secret_values does not warn first', read.result?.content);
+  const prod = await call(revealing, 'reveal_secret_values', { path: PROD });
   expect(prod.result?.isError === true && !JSON.stringify(prod.result).includes(canaries[`${PROD}/API_KEY`]!), `the reader read ${PROD} through MCP`, prod.result);
   return `Read stepped up for values and showed ${DEV}/API_KEY to ${reader.email} on coffre's page only; Reveal values answered ${DEV}'s values, warning first, and refused ${PROD}`;
 }

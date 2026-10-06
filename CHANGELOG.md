@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+**The MCP tool `read_secret_values` is `reveal_secret_values`**, to match its
+scope, Reveal values. No alias is kept: a client that called the old name
+gets an unknown-tool error, and finds the new one in `tools/list`.
+
 ## 0.4.2 (2026-10-06)
 
 **The account page is in tabs, and shows how to connect Claude.** Profile

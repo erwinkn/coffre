@@ -194,8 +194,8 @@ const READ_TOOLS: readonly Tool[] = [
 
 /** Values to the model: only with Reveal values, which the person ticked under its warning. */
 const REVEAL_VALUES = tool({
-  name: 'read_secret_values',
-  title: 'Read secret values',
+  name: 'reveal_secret_values',
+  title: 'Reveal secret values',
   description:
     "Read the values of one secret or of a whole environment, into this conversation: they become part of it, and of wherever it is kept. Use it only when the person wants you to see the values. To show the person a value without you seeing it, use show_secret_value; to give a command its values, run_with_secrets.",
   scope: 'reveal',
@@ -242,5 +242,5 @@ export const INSTRUCTIONS = [
   'Never ask the person to paste a secret into the conversation: to set one, use request_secret_value, and they type it on coffre.',
   "Every change waits for the person to approve it on coffre's own page: when a tool answers with an approval link, show it to them, and once they approve, call the tool again with the same arguments for the outcome.",
   'With a shell, give a command its secrets with `coffre run <project>/<environment> -- <command>`: run_with_secrets says how, and no value enters the conversation.',
-  'read_secret_values puts values into the conversation: use it only when the person wants you to see them; show_secret_value shows a value to the person alone.',
+  'reveal_secret_values puts values into the conversation: use it only when the person wants you to see them; show_secret_value shows a value to the person alone.',
 ].join(' ');

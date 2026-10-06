@@ -428,7 +428,7 @@ coffre's page (section 7).
 | `restore_secret_version {secret, version}` | write | ✗ ✓ ✗ | ✓ | `POST …/:key/restore` |
 | `create_project {project, name}` | write | ✗ ✗ ✓ | ✓ | `PUT /projects/:p` |
 | `create_environment {environment, name}` | write | ✗ ✗ ✓ | ✓ | `PUT /projects/:p/:e` |
-| `read_secret_values {path}` | reveal | ✓ · ✓ | | `POST /reveals`; an environment or one secret |
+| `reveal_secret_values {path}` | reveal | ✓ · ✓ | | `POST /reveals`; an environment or one secret |
 | `set_access {member, changes}` | manage-access | ✗ ✓ ✓ | ✓ | `PATCH /access/:m`, the API's merge patch |
 | `admit_member {member, owner?}` | manage-access | ✗ ✗ ✓ | ✓ | `PUT /members/:m` |
 | `offboard_member {member}` | manage-access | ✗ ✓ ✓ | ✓ | `DELETE /members/:m`; the page shows its report |
@@ -589,7 +589,7 @@ The agent never supplies a value. There are two tools:
   change's: its Reveal reads the value as the person, with the connection
   attached, and is the one call through MCP that may reach `POST /reveals`
   without Reveal values, since the value goes to the page alone.
-- **To the model (Reveal values):** `read_secret_values` returns values in its
+- **To the model (Reveal values):** `reveal_secret_values` returns values in its
   result, with no page. It is a read, so it needs no approval. The vault
   logs it as a `reveal` under the access token's credential ID, and the
   app's `mcp.call` names the client. The vault's bulk limit applies as
@@ -630,13 +630,13 @@ in one paragraph:
 - never ask the person to paste a secret into the chat;
 - to set one, use `request_secret_value` or `generate_secret_value`;
 - with a shell, use `coffre run`;
-- `read_secret_values` puts values into the conversation, so use it only
+- `reveal_secret_values` puts values into the conversation, so use it only
   when the person wants the model to see them.
 
 **Without a shell** (a claude.ai chat), `run_with_secrets` still answers.
 Its first line says this conversation has no shell to run the command in,
 so the person runs it themselves. The tool descriptions of
-`read_secret_values` and `show_secret_value` say plainly which one puts the
+`reveal_secret_values` and `show_secret_value` say plainly which one puts the
 value in front of the model.
 
 ## 8. The audit log
@@ -921,7 +921,7 @@ did before theirs.
      a 2025-11-25 `initialize`;
    - a CIMD client, served by the harness on loopback under a development
      flag like trust bindings' loopback issuers, does the same.
-2. **Read can't write.** `archive_secret` and `read_secret_values` answer
+2. **Read can't write.** `archive_secret` and `reveal_secret_values` answer
    `403 insufficient_scope`, with the right `scope`, and a tool result
    saying how to grant it. The secret is still live, and the API refused
    nothing on the token's behalf. A connection that asked for Read, with
@@ -935,7 +935,7 @@ did before theirs.
      it.
 4. **No value without Reveal values.** Every Read and Write tool's result is
    searched for the seeded values, which must not appear. With Reveal values,
-   `read_secret_values` returns them.
+   `reveal_secret_values` returns them.
 5. **Every call audited with the client.** Each call above has its entry
    naming the client ID, and the change's own entries carry `via`.
 6. **Audience and lifecycle.**
@@ -967,7 +967,7 @@ parity as they merge.
 3. **Changes with approvals.** `mcp_approvals`, the approval page, MRTR, the
    Write and Manage access tools, and check 3.
 4. **Values.** `request_secret_value`, `generate_secret_value`,
-   `show_secret_value`, `read_secret_values`, the consent warning, and
+   `show_secret_value`, `reveal_secret_values`, the consent warning, and
    check 4.
 5. **Connected apps.** The account tab, the person's page, the offboarding
    report, `coffre apps`, and docs/mcp.md.
