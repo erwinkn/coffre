@@ -69,7 +69,7 @@ export const ROUTE_FILES: Record<string, string> = {
     '_solo/approvals.$approval.tsx',
   ]),
   // The account page's tabs: `_coffre/account.tsx`, the page itself before, is now their layout.
-  ...since('0.5.0', ['_coffre/account.index.tsx', '_coffre/account.sessions.tsx', '_coffre/account.apps.tsx', '_coffre/account.appearance.tsx']),
+  ...since('0.4.2', ['_coffre/account.index.tsx', '_coffre/account.sessions.tsx', '_coffre/account.apps.tsx', '_coffre/account.appearance.tsx']),
 };
 
 /** Route files, under `app/src/routes/`, that `release` first wrote. */
