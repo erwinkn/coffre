@@ -13,7 +13,6 @@ export const OPEN_PAGES = ['/login'];
 export const CLOSED_PAGES = [
   '/',
   '/account',
-  '/access',
   '/audit',
   '/auth/device',
   '/settings',

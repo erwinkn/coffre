@@ -7,7 +7,6 @@ import { createRootRouteWithContext, createRoute } from '@tanstack/react-router'
 
 import type { createRouter } from './router';
 import {
-  access,
   account,
   audit,
   deviceLogin,
@@ -80,7 +79,6 @@ const routeTree = root.addChildren([
     ]),
     createRoute({ ...under('/projects/$project/$environment'), ...environment, component: EnvironmentPage }),
     createRoute({ ...under('/audit'), ...audit, component: AuditPage }),
-    createRoute({ ...under('/access'), ...access }),
     createRoute({ ...under('/users'), ...users, component: UsersPage }),
     userPage.addChildren([
       createRoute({ ...tab(userPage, '/'), ...userAccess, component: UserAccessPage }),

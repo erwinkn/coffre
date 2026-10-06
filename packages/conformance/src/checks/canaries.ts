@@ -30,7 +30,6 @@ function pages(people: People): string[] {
     '/login',
     '/unregistered',
     '/account',
-    '/access',
     '/audit',
     '/settings',
     '/auth/device',

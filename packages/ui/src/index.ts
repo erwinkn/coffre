@@ -8,7 +8,6 @@ export { CoffreProvider } from './layout.tsx';
 export { useCoffre } from './lib/coffre.ts';
 export { createRouter } from './router.tsx';
 export {
-  access,
   account,
   approval,
   audit,
