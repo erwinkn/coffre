@@ -8,7 +8,7 @@ import { ClosedDoor, PageHeader } from '../components/page';
 import { RemovedList } from '../components/offboarding';
 import { Key } from '../components/icons';
 
-export function TokensPage() {
+export function ServiceAccountsPage() {
   const { capabilities } = useShell();
   const { data: result } = useSuspenseQuery(queries.directory(useCoffre(), capabilities.canManageGrants));
 
@@ -20,7 +20,7 @@ export function TokensPage() {
     );
   }
 
-  const tokens = result.principals.filter((principal) => principal.principalType === 'service');
+  const accounts = result.principals.filter((principal) => principal.principalType === 'service');
 
   return (
     <>
@@ -30,7 +30,7 @@ export function TokensPage() {
       />
       <DirectoryTable
         principalType="service"
-        principals={tokens}
+        principals={accounts}
         hasRemoved={result.removed.some((principal) => principal.principalType === 'service')}
       />
       <RemovedList principalType="service" removed={result.removed} />

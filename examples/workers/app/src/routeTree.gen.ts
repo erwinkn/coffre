@@ -25,15 +25,23 @@ import { Route as SoloUnregisteredRouteImport } from './routes/_solo/unregistere
 import { Route as ApiSplatRouteImport } from './routes/api.$'
 import { Route as AuthSplatRouteImport } from './routes/auth.$'
 import { Route as CoffreProjectsIndexRouteImport } from './routes/_coffre/projects.index'
-import { Route as CoffreTokensIndexRouteImport } from './routes/_coffre/tokens.index'
-import { Route as CoffreTokensTokenRouteImport } from './routes/_coffre/tokens.$token'
+import { Route as CoffreProjectsProjectRouteImport } from './routes/_coffre/projects.$project'
+import { Route as CoffreServiceAccountsIndexRouteImport } from './routes/_coffre/service-accounts.index'
+import { Route as CoffreServiceAccountsAccountRouteImport } from './routes/_coffre/service-accounts.$account'
 import { Route as CoffreUsersIndexRouteImport } from './routes/_coffre/users.index'
 import { Route as CoffreUsersUserRouteImport } from './routes/_coffre/users.$user'
-import { Route as SoloApprovalsApprovalRouteImport } from './routes/_solo/approvals.$approval'
 import { Route as SoloAuthDeviceRouteImport } from './routes/_solo/auth.device'
 import { Route as SoloOauthAuthorizeRouteImport } from './routes/_solo/oauth.authorize'
 import { Route as CoffreProjectsProjectIndexRouteImport } from './routes/_coffre/projects.$project.index'
-import { Route as CoffreProjectsProjectEnvironmentRouteImport } from './routes/_coffre/projects.$project.$environment'
+import { Route as CoffreProjectsProjectServiceAccountsRouteImport } from './routes/_coffre/projects.$project.service-accounts'
+import { Route as CoffreProjectsProjectSettingsRouteImport } from './routes/_coffre/projects.$project.settings'
+import { Route as CoffreProjectsProjectUsersRouteImport } from './routes/_coffre/projects.$project.users'
+import { Route as CoffreProjectsProjectEnvironmentRouteImport } from './routes/_coffre/projects.$project_.$environment'
+import { Route as CoffreServiceAccountsAccountIndexRouteImport } from './routes/_coffre/service-accounts.$account.index'
+import { Route as CoffreServiceAccountsAccountAccessRouteImport } from './routes/_coffre/service-accounts.$account.access'
+import { Route as CoffreServiceAccountsAccountActivityRouteImport } from './routes/_coffre/service-accounts.$account.activity'
+import { Route as CoffreUsersUserIndexRouteImport } from './routes/_coffre/users.$user.index'
+import { Route as CoffreUsersUserActivityRouteImport } from './routes/_coffre/users.$user.activity'
 
 const CoffreRoute = CoffreRouteImport.update({
   id: '/_coffre',
@@ -113,16 +121,23 @@ const CoffreProjectsIndexRoute = CoffreProjectsIndexRouteImport.update({
   path: '/projects/',
   getParentRoute: () => CoffreRoute,
 } as any)
-const CoffreTokensIndexRoute = CoffreTokensIndexRouteImport.update({
-  id: '/tokens/',
-  path: '/tokens/',
+const CoffreProjectsProjectRoute = CoffreProjectsProjectRouteImport.update({
+  id: '/projects/$project',
+  path: '/projects/$project',
   getParentRoute: () => CoffreRoute,
 } as any)
-const CoffreTokensTokenRoute = CoffreTokensTokenRouteImport.update({
-  id: '/tokens/$token',
-  path: '/tokens/$token',
-  getParentRoute: () => CoffreRoute,
-} as any)
+const CoffreServiceAccountsIndexRoute =
+  CoffreServiceAccountsIndexRouteImport.update({
+    id: '/service-accounts/',
+    path: '/service-accounts/',
+    getParentRoute: () => CoffreRoute,
+  } as any)
+const CoffreServiceAccountsAccountRoute =
+  CoffreServiceAccountsAccountRouteImport.update({
+    id: '/service-accounts/$account',
+    path: '/service-accounts/$account',
+    getParentRoute: () => CoffreRoute,
+  } as any)
 const CoffreUsersIndexRoute = CoffreUsersIndexRouteImport.update({
   id: '/users/',
   path: '/users/',
@@ -132,11 +147,6 @@ const CoffreUsersUserRoute = CoffreUsersUserRouteImport.update({
   id: '/users/$user',
   path: '/users/$user',
   getParentRoute: () => CoffreRoute,
-} as any)
-const SoloApprovalsApprovalRoute = SoloApprovalsApprovalRouteImport.update({
-  id: '/approvals/$approval',
-  path: '/approvals/$approval',
-  getParentRoute: () => SoloRoute,
 } as any)
 const SoloAuthDeviceRoute = SoloAuthDeviceRouteImport.update({
   id: '/auth/device',
@@ -150,16 +160,62 @@ const SoloOauthAuthorizeRoute = SoloOauthAuthorizeRouteImport.update({
 } as any)
 const CoffreProjectsProjectIndexRoute =
   CoffreProjectsProjectIndexRouteImport.update({
-    id: '/projects/$project/',
-    path: '/projects/$project/',
-    getParentRoute: () => CoffreRoute,
+    id: '/',
+    path: '/',
+    getParentRoute: () => CoffreProjectsProjectRoute,
+  } as any)
+const CoffreProjectsProjectServiceAccountsRoute =
+  CoffreProjectsProjectServiceAccountsRouteImport.update({
+    id: '/service-accounts',
+    path: '/service-accounts',
+    getParentRoute: () => CoffreProjectsProjectRoute,
+  } as any)
+const CoffreProjectsProjectSettingsRoute =
+  CoffreProjectsProjectSettingsRouteImport.update({
+    id: '/settings',
+    path: '/settings',
+    getParentRoute: () => CoffreProjectsProjectRoute,
+  } as any)
+const CoffreProjectsProjectUsersRoute =
+  CoffreProjectsProjectUsersRouteImport.update({
+    id: '/users',
+    path: '/users',
+    getParentRoute: () => CoffreProjectsProjectRoute,
   } as any)
 const CoffreProjectsProjectEnvironmentRoute =
   CoffreProjectsProjectEnvironmentRouteImport.update({
-    id: '/projects/$project/$environment',
+    id: '/projects/$project_/$environment',
     path: '/projects/$project/$environment',
     getParentRoute: () => CoffreRoute,
   } as any)
+const CoffreServiceAccountsAccountIndexRoute =
+  CoffreServiceAccountsAccountIndexRouteImport.update({
+    id: '/',
+    path: '/',
+    getParentRoute: () => CoffreServiceAccountsAccountRoute,
+  } as any)
+const CoffreServiceAccountsAccountAccessRoute =
+  CoffreServiceAccountsAccountAccessRouteImport.update({
+    id: '/access',
+    path: '/access',
+    getParentRoute: () => CoffreServiceAccountsAccountRoute,
+  } as any)
+const CoffreServiceAccountsAccountActivityRoute =
+  CoffreServiceAccountsAccountActivityRouteImport.update({
+    id: '/activity',
+    path: '/activity',
+    getParentRoute: () => CoffreServiceAccountsAccountRoute,
+  } as any)
+const CoffreUsersUserIndexRoute = CoffreUsersUserIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => CoffreUsersUserRoute,
+} as any)
+const CoffreUsersUserActivityRoute = CoffreUsersUserActivityRouteImport.update({
+  id: '/activity',
+  path: '/activity',
+  getParentRoute: () => CoffreUsersUserRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof CoffreIndexRoute
@@ -175,16 +231,24 @@ export interface FileRoutesByFullPath {
   '/unregistered': typeof SoloUnregisteredRoute
   '/api/$': typeof ApiSplatRoute
   '/auth/$': typeof AuthSplatRoute
-  '/tokens/$token': typeof CoffreTokensTokenRoute
-  '/users/$user': typeof CoffreUsersUserRoute
-  '/approvals/$approval': typeof SoloApprovalsApprovalRoute
+  '/projects/$project': typeof CoffreProjectsProjectRouteWithChildren
+  '/service-accounts/$account': typeof CoffreServiceAccountsAccountRouteWithChildren
+  '/users/$user': typeof CoffreUsersUserRouteWithChildren
   '/auth/device': typeof SoloAuthDeviceRoute
   '/oauth/authorize': typeof SoloOauthAuthorizeRoute
   '/projects/': typeof CoffreProjectsIndexRoute
-  '/tokens/': typeof CoffreTokensIndexRoute
+  '/service-accounts/': typeof CoffreServiceAccountsIndexRoute
   '/users/': typeof CoffreUsersIndexRoute
+  '/projects/$project/service-accounts': typeof CoffreProjectsProjectServiceAccountsRoute
+  '/projects/$project/settings': typeof CoffreProjectsProjectSettingsRoute
+  '/projects/$project/users': typeof CoffreProjectsProjectUsersRoute
   '/projects/$project/$environment': typeof CoffreProjectsProjectEnvironmentRoute
+  '/service-accounts/$account/access': typeof CoffreServiceAccountsAccountAccessRoute
+  '/service-accounts/$account/activity': typeof CoffreServiceAccountsAccountActivityRoute
+  '/users/$user/activity': typeof CoffreUsersUserActivityRoute
   '/projects/$project/': typeof CoffreProjectsProjectIndexRoute
+  '/service-accounts/$account/': typeof CoffreServiceAccountsAccountIndexRoute
+  '/users/$user/': typeof CoffreUsersUserIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof CoffreIndexRoute
@@ -200,16 +264,21 @@ export interface FileRoutesByTo {
   '/unregistered': typeof SoloUnregisteredRoute
   '/api/$': typeof ApiSplatRoute
   '/auth/$': typeof AuthSplatRoute
-  '/tokens/$token': typeof CoffreTokensTokenRoute
-  '/users/$user': typeof CoffreUsersUserRoute
-  '/approvals/$approval': typeof SoloApprovalsApprovalRoute
   '/auth/device': typeof SoloAuthDeviceRoute
   '/oauth/authorize': typeof SoloOauthAuthorizeRoute
   '/projects': typeof CoffreProjectsIndexRoute
-  '/tokens': typeof CoffreTokensIndexRoute
+  '/service-accounts': typeof CoffreServiceAccountsIndexRoute
   '/users': typeof CoffreUsersIndexRoute
+  '/projects/$project/service-accounts': typeof CoffreProjectsProjectServiceAccountsRoute
+  '/projects/$project/settings': typeof CoffreProjectsProjectSettingsRoute
+  '/projects/$project/users': typeof CoffreProjectsProjectUsersRoute
   '/projects/$project/$environment': typeof CoffreProjectsProjectEnvironmentRoute
+  '/service-accounts/$account/access': typeof CoffreServiceAccountsAccountAccessRoute
+  '/service-accounts/$account/activity': typeof CoffreServiceAccountsAccountActivityRoute
+  '/users/$user/activity': typeof CoffreUsersUserActivityRoute
   '/projects/$project': typeof CoffreProjectsProjectIndexRoute
+  '/service-accounts/$account': typeof CoffreServiceAccountsAccountIndexRoute
+  '/users/$user': typeof CoffreUsersUserIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -228,16 +297,24 @@ export interface FileRoutesById {
   '/api/$': typeof ApiSplatRoute
   '/auth/$': typeof AuthSplatRoute
   '/_coffre/': typeof CoffreIndexRoute
-  '/_coffre/tokens/$token': typeof CoffreTokensTokenRoute
-  '/_coffre/users/$user': typeof CoffreUsersUserRoute
-  '/_solo/approvals/$approval': typeof SoloApprovalsApprovalRoute
+  '/_coffre/projects/$project': typeof CoffreProjectsProjectRouteWithChildren
+  '/_coffre/service-accounts/$account': typeof CoffreServiceAccountsAccountRouteWithChildren
+  '/_coffre/users/$user': typeof CoffreUsersUserRouteWithChildren
   '/_solo/auth/device': typeof SoloAuthDeviceRoute
   '/_solo/oauth/authorize': typeof SoloOauthAuthorizeRoute
   '/_coffre/projects/': typeof CoffreProjectsIndexRoute
-  '/_coffre/tokens/': typeof CoffreTokensIndexRoute
+  '/_coffre/service-accounts/': typeof CoffreServiceAccountsIndexRoute
   '/_coffre/users/': typeof CoffreUsersIndexRoute
-  '/_coffre/projects/$project/$environment': typeof CoffreProjectsProjectEnvironmentRoute
+  '/_coffre/projects/$project/service-accounts': typeof CoffreProjectsProjectServiceAccountsRoute
+  '/_coffre/projects/$project/settings': typeof CoffreProjectsProjectSettingsRoute
+  '/_coffre/projects/$project/users': typeof CoffreProjectsProjectUsersRoute
+  '/_coffre/projects/$project_/$environment': typeof CoffreProjectsProjectEnvironmentRoute
+  '/_coffre/service-accounts/$account/access': typeof CoffreServiceAccountsAccountAccessRoute
+  '/_coffre/service-accounts/$account/activity': typeof CoffreServiceAccountsAccountActivityRoute
+  '/_coffre/users/$user/activity': typeof CoffreUsersUserActivityRoute
   '/_coffre/projects/$project/': typeof CoffreProjectsProjectIndexRoute
+  '/_coffre/service-accounts/$account/': typeof CoffreServiceAccountsAccountIndexRoute
+  '/_coffre/users/$user/': typeof CoffreUsersUserIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -255,16 +332,24 @@ export interface FileRouteTypes {
     | '/unregistered'
     | '/api/$'
     | '/auth/$'
-    | '/tokens/$token'
+    | '/projects/$project'
+    | '/service-accounts/$account'
     | '/users/$user'
-    | '/approvals/$approval'
     | '/auth/device'
     | '/oauth/authorize'
     | '/projects/'
-    | '/tokens/'
+    | '/service-accounts/'
     | '/users/'
+    | '/projects/$project/service-accounts'
+    | '/projects/$project/settings'
+    | '/projects/$project/users'
     | '/projects/$project/$environment'
+    | '/service-accounts/$account/access'
+    | '/service-accounts/$account/activity'
+    | '/users/$user/activity'
     | '/projects/$project/'
+    | '/service-accounts/$account/'
+    | '/users/$user/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -280,16 +365,21 @@ export interface FileRouteTypes {
     | '/unregistered'
     | '/api/$'
     | '/auth/$'
-    | '/tokens/$token'
-    | '/users/$user'
-    | '/approvals/$approval'
     | '/auth/device'
     | '/oauth/authorize'
     | '/projects'
-    | '/tokens'
+    | '/service-accounts'
     | '/users'
+    | '/projects/$project/service-accounts'
+    | '/projects/$project/settings'
+    | '/projects/$project/users'
     | '/projects/$project/$environment'
+    | '/service-accounts/$account/access'
+    | '/service-accounts/$account/activity'
+    | '/users/$user/activity'
     | '/projects/$project'
+    | '/service-accounts/$account'
+    | '/users/$user'
   id:
     | '__root__'
     | '/_coffre'
@@ -307,16 +397,24 @@ export interface FileRouteTypes {
     | '/api/$'
     | '/auth/$'
     | '/_coffre/'
-    | '/_coffre/tokens/$token'
+    | '/_coffre/projects/$project'
+    | '/_coffre/service-accounts/$account'
     | '/_coffre/users/$user'
-    | '/_solo/approvals/$approval'
     | '/_solo/auth/device'
     | '/_solo/oauth/authorize'
     | '/_coffre/projects/'
-    | '/_coffre/tokens/'
+    | '/_coffre/service-accounts/'
     | '/_coffre/users/'
-    | '/_coffre/projects/$project/$environment'
+    | '/_coffre/projects/$project/service-accounts'
+    | '/_coffre/projects/$project/settings'
+    | '/_coffre/projects/$project/users'
+    | '/_coffre/projects/$project_/$environment'
+    | '/_coffre/service-accounts/$account/access'
+    | '/_coffre/service-accounts/$account/activity'
+    | '/_coffre/users/$user/activity'
     | '/_coffre/projects/$project/'
+    | '/_coffre/service-accounts/$account/'
+    | '/_coffre/users/$user/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -444,18 +542,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof CoffreProjectsIndexRouteImport
       parentRoute: typeof CoffreRoute
     }
-    '/_coffre/tokens/': {
-      id: '/_coffre/tokens/'
-      path: '/tokens'
-      fullPath: '/tokens/'
-      preLoaderRoute: typeof CoffreTokensIndexRouteImport
+    '/_coffre/projects/$project': {
+      id: '/_coffre/projects/$project'
+      path: '/projects/$project'
+      fullPath: '/projects/$project'
+      preLoaderRoute: typeof CoffreProjectsProjectRouteImport
       parentRoute: typeof CoffreRoute
     }
-    '/_coffre/tokens/$token': {
-      id: '/_coffre/tokens/$token'
-      path: '/tokens/$token'
-      fullPath: '/tokens/$token'
-      preLoaderRoute: typeof CoffreTokensTokenRouteImport
+    '/_coffre/service-accounts/': {
+      id: '/_coffre/service-accounts/'
+      path: '/service-accounts'
+      fullPath: '/service-accounts/'
+      preLoaderRoute: typeof CoffreServiceAccountsIndexRouteImport
+      parentRoute: typeof CoffreRoute
+    }
+    '/_coffre/service-accounts/$account': {
+      id: '/_coffre/service-accounts/$account'
+      path: '/service-accounts/$account'
+      fullPath: '/service-accounts/$account'
+      preLoaderRoute: typeof CoffreServiceAccountsAccountRouteImport
       parentRoute: typeof CoffreRoute
     }
     '/_coffre/users/': {
@@ -471,13 +576,6 @@ declare module '@tanstack/react-router' {
       fullPath: '/users/$user'
       preLoaderRoute: typeof CoffreUsersUserRouteImport
       parentRoute: typeof CoffreRoute
-    }
-    '/_solo/approvals/$approval': {
-      id: '/_solo/approvals/$approval'
-      path: '/approvals/$approval'
-      fullPath: '/approvals/$approval'
-      preLoaderRoute: typeof SoloApprovalsApprovalRouteImport
-      parentRoute: typeof SoloRoute
     }
     '/_solo/auth/device': {
       id: '/_solo/auth/device'
@@ -495,20 +593,131 @@ declare module '@tanstack/react-router' {
     }
     '/_coffre/projects/$project/': {
       id: '/_coffre/projects/$project/'
-      path: '/projects/$project'
+      path: '/'
       fullPath: '/projects/$project/'
       preLoaderRoute: typeof CoffreProjectsProjectIndexRouteImport
-      parentRoute: typeof CoffreRoute
+      parentRoute: typeof CoffreProjectsProjectRoute
     }
-    '/_coffre/projects/$project/$environment': {
-      id: '/_coffre/projects/$project/$environment'
+    '/_coffre/projects/$project/service-accounts': {
+      id: '/_coffre/projects/$project/service-accounts'
+      path: '/service-accounts'
+      fullPath: '/projects/$project/service-accounts'
+      preLoaderRoute: typeof CoffreProjectsProjectServiceAccountsRouteImport
+      parentRoute: typeof CoffreProjectsProjectRoute
+    }
+    '/_coffre/projects/$project/settings': {
+      id: '/_coffre/projects/$project/settings'
+      path: '/settings'
+      fullPath: '/projects/$project/settings'
+      preLoaderRoute: typeof CoffreProjectsProjectSettingsRouteImport
+      parentRoute: typeof CoffreProjectsProjectRoute
+    }
+    '/_coffre/projects/$project/users': {
+      id: '/_coffre/projects/$project/users'
+      path: '/users'
+      fullPath: '/projects/$project/users'
+      preLoaderRoute: typeof CoffreProjectsProjectUsersRouteImport
+      parentRoute: typeof CoffreProjectsProjectRoute
+    }
+    '/_coffre/projects/$project_/$environment': {
+      id: '/_coffre/projects/$project_/$environment'
       path: '/projects/$project/$environment'
       fullPath: '/projects/$project/$environment'
       preLoaderRoute: typeof CoffreProjectsProjectEnvironmentRouteImport
       parentRoute: typeof CoffreRoute
     }
+    '/_coffre/service-accounts/$account/': {
+      id: '/_coffre/service-accounts/$account/'
+      path: '/'
+      fullPath: '/service-accounts/$account/'
+      preLoaderRoute: typeof CoffreServiceAccountsAccountIndexRouteImport
+      parentRoute: typeof CoffreServiceAccountsAccountRoute
+    }
+    '/_coffre/service-accounts/$account/access': {
+      id: '/_coffre/service-accounts/$account/access'
+      path: '/access'
+      fullPath: '/service-accounts/$account/access'
+      preLoaderRoute: typeof CoffreServiceAccountsAccountAccessRouteImport
+      parentRoute: typeof CoffreServiceAccountsAccountRoute
+    }
+    '/_coffre/service-accounts/$account/activity': {
+      id: '/_coffre/service-accounts/$account/activity'
+      path: '/activity'
+      fullPath: '/service-accounts/$account/activity'
+      preLoaderRoute: typeof CoffreServiceAccountsAccountActivityRouteImport
+      parentRoute: typeof CoffreServiceAccountsAccountRoute
+    }
+    '/_coffre/users/$user/': {
+      id: '/_coffre/users/$user/'
+      path: '/'
+      fullPath: '/users/$user/'
+      preLoaderRoute: typeof CoffreUsersUserIndexRouteImport
+      parentRoute: typeof CoffreUsersUserRoute
+    }
+    '/_coffre/users/$user/activity': {
+      id: '/_coffre/users/$user/activity'
+      path: '/activity'
+      fullPath: '/users/$user/activity'
+      preLoaderRoute: typeof CoffreUsersUserActivityRouteImport
+      parentRoute: typeof CoffreUsersUserRoute
+    }
   }
 }
+
+interface CoffreProjectsProjectRouteChildren {
+  CoffreProjectsProjectServiceAccountsRoute: typeof CoffreProjectsProjectServiceAccountsRoute
+  CoffreProjectsProjectSettingsRoute: typeof CoffreProjectsProjectSettingsRoute
+  CoffreProjectsProjectUsersRoute: typeof CoffreProjectsProjectUsersRoute
+  CoffreProjectsProjectIndexRoute: typeof CoffreProjectsProjectIndexRoute
+}
+
+const CoffreProjectsProjectRouteChildren: CoffreProjectsProjectRouteChildren = {
+  CoffreProjectsProjectServiceAccountsRoute:
+    CoffreProjectsProjectServiceAccountsRoute,
+  CoffreProjectsProjectSettingsRoute: CoffreProjectsProjectSettingsRoute,
+  CoffreProjectsProjectUsersRoute: CoffreProjectsProjectUsersRoute,
+  CoffreProjectsProjectIndexRoute: CoffreProjectsProjectIndexRoute,
+}
+
+const CoffreProjectsProjectRouteWithChildren =
+  CoffreProjectsProjectRoute._addFileChildren(
+    CoffreProjectsProjectRouteChildren,
+  )
+
+interface CoffreServiceAccountsAccountRouteChildren {
+  CoffreServiceAccountsAccountAccessRoute: typeof CoffreServiceAccountsAccountAccessRoute
+  CoffreServiceAccountsAccountActivityRoute: typeof CoffreServiceAccountsAccountActivityRoute
+  CoffreServiceAccountsAccountIndexRoute: typeof CoffreServiceAccountsAccountIndexRoute
+}
+
+const CoffreServiceAccountsAccountRouteChildren: CoffreServiceAccountsAccountRouteChildren =
+  {
+    CoffreServiceAccountsAccountAccessRoute:
+      CoffreServiceAccountsAccountAccessRoute,
+    CoffreServiceAccountsAccountActivityRoute:
+      CoffreServiceAccountsAccountActivityRoute,
+    CoffreServiceAccountsAccountIndexRoute:
+      CoffreServiceAccountsAccountIndexRoute,
+  }
+
+const CoffreServiceAccountsAccountRouteWithChildren =
+  CoffreServiceAccountsAccountRoute._addFileChildren(
+    CoffreServiceAccountsAccountRouteChildren,
+  )
+
+interface CoffreUsersUserRouteChildren {
+  CoffreUsersUserActivityRoute: typeof CoffreUsersUserActivityRoute
+  CoffreUsersUserIndexRoute: typeof CoffreUsersUserIndexRoute
+}
+
+const CoffreUsersUserRouteChildren: CoffreUsersUserRouteChildren = {
+  CoffreUsersUserActivityRoute: CoffreUsersUserActivityRoute,
+  CoffreUsersUserIndexRoute: CoffreUsersUserIndexRoute,
+}
+
+const CoffreUsersUserRouteWithChildren = CoffreUsersUserRoute._addFileChildren(
+  CoffreUsersUserRouteChildren,
+)
 
 interface CoffreRouteChildren {
   CoffreAccessRoute: typeof CoffreAccessRoute
@@ -516,13 +725,13 @@ interface CoffreRouteChildren {
   CoffreAuditRoute: typeof CoffreAuditRoute
   CoffreSettingsRoute: typeof CoffreSettingsRoute
   CoffreIndexRoute: typeof CoffreIndexRoute
-  CoffreTokensTokenRoute: typeof CoffreTokensTokenRoute
-  CoffreUsersUserRoute: typeof CoffreUsersUserRoute
+  CoffreProjectsProjectRoute: typeof CoffreProjectsProjectRouteWithChildren
+  CoffreServiceAccountsAccountRoute: typeof CoffreServiceAccountsAccountRouteWithChildren
+  CoffreUsersUserRoute: typeof CoffreUsersUserRouteWithChildren
   CoffreProjectsIndexRoute: typeof CoffreProjectsIndexRoute
-  CoffreTokensIndexRoute: typeof CoffreTokensIndexRoute
+  CoffreServiceAccountsIndexRoute: typeof CoffreServiceAccountsIndexRoute
   CoffreUsersIndexRoute: typeof CoffreUsersIndexRoute
   CoffreProjectsProjectEnvironmentRoute: typeof CoffreProjectsProjectEnvironmentRoute
-  CoffreProjectsProjectIndexRoute: typeof CoffreProjectsProjectIndexRoute
 }
 
 const CoffreRouteChildren: CoffreRouteChildren = {
@@ -531,13 +740,14 @@ const CoffreRouteChildren: CoffreRouteChildren = {
   CoffreAuditRoute: CoffreAuditRoute,
   CoffreSettingsRoute: CoffreSettingsRoute,
   CoffreIndexRoute: CoffreIndexRoute,
-  CoffreTokensTokenRoute: CoffreTokensTokenRoute,
-  CoffreUsersUserRoute: CoffreUsersUserRoute,
+  CoffreProjectsProjectRoute: CoffreProjectsProjectRouteWithChildren,
+  CoffreServiceAccountsAccountRoute:
+    CoffreServiceAccountsAccountRouteWithChildren,
+  CoffreUsersUserRoute: CoffreUsersUserRouteWithChildren,
   CoffreProjectsIndexRoute: CoffreProjectsIndexRoute,
-  CoffreTokensIndexRoute: CoffreTokensIndexRoute,
+  CoffreServiceAccountsIndexRoute: CoffreServiceAccountsIndexRoute,
   CoffreUsersIndexRoute: CoffreUsersIndexRoute,
   CoffreProjectsProjectEnvironmentRoute: CoffreProjectsProjectEnvironmentRoute,
-  CoffreProjectsProjectIndexRoute: CoffreProjectsProjectIndexRoute,
 }
 
 const CoffreRouteWithChildren =
@@ -546,7 +756,6 @@ const CoffreRouteWithChildren =
 interface SoloRouteChildren {
   SoloLoginRoute: typeof SoloLoginRoute
   SoloUnregisteredRoute: typeof SoloUnregisteredRoute
-  SoloApprovalsApprovalRoute: typeof SoloApprovalsApprovalRoute
   SoloAuthDeviceRoute: typeof SoloAuthDeviceRoute
   SoloOauthAuthorizeRoute: typeof SoloOauthAuthorizeRoute
 }
@@ -554,7 +763,6 @@ interface SoloRouteChildren {
 const SoloRouteChildren: SoloRouteChildren = {
   SoloLoginRoute: SoloLoginRoute,
   SoloUnregisteredRoute: SoloUnregisteredRoute,
-  SoloApprovalsApprovalRoute: SoloApprovalsApprovalRoute,
   SoloAuthDeviceRoute: SoloAuthDeviceRoute,
   SoloOauthAuthorizeRoute: SoloOauthAuthorizeRoute,
 }

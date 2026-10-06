@@ -407,33 +407,38 @@ export async function loadServiceDirectory(queryClient: QueryClient, client: Cof
   return directory;
 }
 
-/**
- * Everything one user's or token's page reads: the report (owners only), the
- * grants of every project where you manage access, and a token's
- * credentials. There is no "grants of this member" call, so each project you
- * manage is asked for its grants and the page keeps this member's. Projects
- * where you do not hold grant.manage are skipped rather than asked: the
- * refusal would land in the audit log as a denial in your name.
- */
-export async function loadPrincipal(
-  queryClient: QueryClient,
-  client: CoffreClient,
-  principalType: 'user' | 'service',
-  principalId: string,
-) {
+/** Who a user or service account is to the instance, its pages' header: null to anyone but an owner. */
+export async function loadMember(queryClient: QueryClient, client: CoffreClient, member: string) {
   const shell = await loadShell(queryClient, client);
-  const member = memberRef(principalType, principalId);
+  return queryClient.fetchQuery(queries.report(client, member, shell.capabilities.canManageGrants));
+}
+
+export type MemberReport = Awaited<ReturnType<typeof loadMember>>;
+
+/**
+ * What a user's or service account's Access tab reads: the grants of every
+ * project where you manage access. There is no "grants of this member"
+ * call, so each project you manage is asked for its grants and the tab
+ * keeps this member's. Projects where you do not hold grant.manage are
+ * skipped rather than asked: the refusal would land in the audit log as a
+ * denial in your name.
+ */
+export async function loadAccess(queryClient: QueryClient, client: CoffreClient) {
+  const shell = await loadShell(queryClient, client);
+  await Promise.all(managedProjects(shell.projects).map((project) => queryClient.fetchQuery(queries.grants(client, project.slug))));
+}
+
+/**
+ * How a service account's page lets it sign in: bearer tokens under
+ * coffre's own sign-in, trusted workloads where the deployment trusts them.
+ * Null where it shows neither: to anyone but an owner, and for an account
+ * that is not active, which can be issued nothing.
+ */
+export function signInWays(shell: Shell, report: MemberReport): { tokens: boolean; workloads: boolean } | null {
   const owner = shell.capabilities.canManageGrants;
-  await Promise.all([
-    queryClient.fetchQuery(queries.report(client, member, owner)),
-    principalType === 'service'
-      ? queryClient.fetchQuery(queries.credentials(client, member, owner && shell.auth.signin !== null))
-      : null,
-    principalType === 'service'
-      ? queryClient.fetchQuery(queries.bindings(client, member, owner && shell.features.workloads))
-      : null,
-    ...managedProjects(shell.projects).map((project) => queryClient.fetchQuery(queries.grants(client, project.slug))),
-  ]);
+  const ways = { tokens: owner && shell.auth.signin !== null, workloads: owner && shell.features.workloads };
+  const active = report?.ok === true && report.report?.status === 'active';
+  return active && (ways.tokens || ways.workloads) ? ways : null;
 }
 
 export function managedProjects(projects: ProjectSummary[]): ProjectSummary[] {

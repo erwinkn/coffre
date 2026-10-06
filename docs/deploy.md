@@ -595,9 +595,15 @@ ProjectsPage })`; coffre has no helper of its own for it.
   links expect; there is no base path. Links, coffre's and the app's, are
   checked against the app's tree when it typechecks. The types do not
   catch a page put at another path: its links would not reach it.
-- **What is left out is not offered.** coffre's nav and its command palette
-  show only the pages mounted, and a user or token named on a page links to
-  theirs only if it is. Another link to a page left out, such as a
+- **A page with tabs is a layout.** A project's, a user's and a service
+  account's page is a layout route, `_coffre/projects.$project.tsx`, and
+  each tab a file under it, its first the index,
+  `_coffre/projects.$project.index.tsx`. An environment's page,
+  `_coffre/projects.$project_.$environment.tsx`, is under the project's
+  path but not its layout.
+- **What is left out is not offered.** coffre's nav, its command palette
+  and a page's tabs show only the pages mounted, and a user or token named
+  on a page links to theirs only if it is. Another link to a page left out, such as a
   project's, leads to the not-found page.
 - **The shell signs people in.** `shell` is coffre's nav, and lets in only
   signed-in, registered visitors, sending the rest to sign in; coffre's

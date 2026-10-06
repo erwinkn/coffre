@@ -100,10 +100,10 @@ export function AuditPage() {
           {/* `exact` compares the whole search, not a subset of it: otherwise
               "All events" for one actor also counts as active while that
               actor's denials are showing, and both halves light up. */}
-          <Link to="/audit" search={{ ...filters, decision: undefined, detail: search.detail }} activeOptions={{ exact: true }}>
+          <Link to="/audit" search={{ ...filters, decision: undefined, detail: search.detail }} activeOptions={{ exact: true, includeSearch: false }}>
             All events
           </Link>
-          <Link to="/audit" search={{ ...filters, decision: 'deny', detail: search.detail }} activeOptions={{ exact: true }}>
+          <Link to="/audit" search={{ ...filters, decision: 'deny', detail: search.detail }} activeOptions={{ exact: true, includeSearch: false }}>
             <SlashCircle size={13} />
             Denials only
           </Link>

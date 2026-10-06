@@ -1,5 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router';
-import { project } from '@coffre/ui';
-import { ProjectPage } from '@coffre/ui/pages/project';
+import { projectEnvironments } from '@coffre/ui';
+import { ProjectEnvironmentsPage } from '@coffre/ui/pages/project-environments';
 
-export const Route = createFileRoute('/_coffre/projects/$project/')({ ...project, component: ProjectPage });
+export const Route = createFileRoute('/_coffre/projects/$project/')({ ...projectEnvironments, component: ProjectEnvironmentsPage });

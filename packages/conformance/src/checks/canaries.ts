@@ -36,12 +36,12 @@ function pages(people: People): string[] {
     '/auth/device',
     '/oauth/authorize',
     '/projects',
-    `/projects/${PROJECT}`,
+    ...['', '/users', '/service-accounts', '/settings'].map((tab) => `/projects/${PROJECT}${tab}`),
     ...[DEV, PROD, BULK].map((path) => `/projects/${path}`),
     '/users',
-    ...users.map((person) => `/users/${encodeURIComponent(person.email)}`),
-    '/tokens',
-    `/tokens/${SERVICE.slice('token:'.length)}`,
+    ...users.flatMap((person) => ['', '/activity'].map((tab) => `/users/${encodeURIComponent(person.email)}${tab}`)),
+    '/service-accounts',
+    ...['', '/access', '/activity'].map((tab) => `/service-accounts/${SERVICE.slice('token:'.length)}${tab}`),
   ];
 }
 

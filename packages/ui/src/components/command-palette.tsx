@@ -148,8 +148,8 @@ export function CommandPalette({
               value: 'service accounts tokens machines ci oidc directory',
               icon: <Key size={15} />,
               label: 'Service accounts',
-              path: '/tokens',
-              run: closing(() => navigate({ to: '/tokens' })),
+              path: '/service-accounts',
+              run: closing(() => navigate({ to: '/service-accounts' })),
             },
           ],
           audit: [

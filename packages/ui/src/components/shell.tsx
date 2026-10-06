@@ -8,6 +8,7 @@ import {
 import { Link, useNavigate, useRouterState } from '@tanstack/react-router';
 import { Dialog } from '@base-ui/react/dialog';
 import { Menu } from '@base-ui/react/menu';
+import { PROJECT_PAGES } from '@coffre/core/pages';
 import type { ProjectSummary } from '../shared/models';
 import type { UiCapabilities } from '../lib/capabilities';
 import { isActiveAccessibleEnvironment } from '../lib/project-environments';
@@ -244,7 +245,7 @@ function Sidebar({
           users={
             <>
               <NavLink to="/users" label="Users" icon={<Users size={16} />} collapsed={collapsed} />
-              <NavLink to="/tokens" label="Service accounts" icon={<Key size={16} />} collapsed={collapsed} />
+              <NavLink to="/service-accounts" label="Service accounts" icon={<Key size={16} />} collapsed={collapsed} />
             </>
           }
           audit={
@@ -306,7 +307,7 @@ function NavLink({
   icon,
   collapsed,
 }: {
-  to: '/projects' | '/users' | '/tokens' | '/audit' | '/settings';
+  to: '/projects' | '/users' | '/service-accounts' | '/audit' | '/settings';
   label: string;
   icon: ReactNode;
   collapsed: boolean;
@@ -388,20 +389,22 @@ function Breadcrumbs({
   projects: ProjectSummary[];
   canListPrincipals: boolean;
 }) {
-  const [section, projectSlug, environmentSlug] = pathname
+  const [section, projectSlug, place] = pathname
     .split('/')
     .filter((segment) => segment !== '')
     .map(decodeURIComponent);
+  // A project's tab sits where an environment would, and no environment takes its name.
+  const environmentSlug = place !== undefined && (PROJECT_PAGES as readonly string[]).includes(place) ? undefined : place;
 
   // A user's or token's own page sits under its list, like an environment
   // under its project. Someone who manages one project's access reaches the
   // page without being able to open the list, so the root is then just a label.
-  if ((section === 'users' || section === 'tokens') && projectSlug !== undefined) {
+  if ((section === 'users' || section === 'service-accounts') && projectSlug !== undefined) {
     const label = <span>{section === 'users' ? 'Users' : 'Service accounts'}</span>;
     return (
       <nav className="crumbs" aria-label="Breadcrumb">
         {canListPrincipals ? (
-          <Link className="crumb-link crumb-root" to={section === 'users' ? '/users' : '/tokens'}>
+          <Link className="crumb-link crumb-root" to={section === 'users' ? '/users' : '/service-accounts'}>
             {label}
           </Link>
         ) : (

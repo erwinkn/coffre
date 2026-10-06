@@ -109,7 +109,7 @@ export function PrincipalPicker({
         ) : registered.length === 0 ? (
           <p className="picker-empty">
             No {kind}s are registered yet.{' '}
-            <Link to={principalType === 'user' ? '/users' : '/tokens'}>Add one</Link> first.
+            <Link to={principalType === 'user' ? '/users' : '/service-accounts'}>Add one</Link> first.
           </p>
         ) : matches.length === 0 ? (
           <p className="picker-empty">No registered {kind} matches “{query.trim()}”.</p>

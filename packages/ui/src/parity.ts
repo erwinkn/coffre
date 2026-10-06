@@ -32,8 +32,8 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
   'PUT /projects/:project': { ui: [{ does: 'Projects › New project', in: 'pages/projects.tsx', call: 'projects.create' }] },
   'PATCH /projects/:project': {
     ui: [
-      { does: 'a project › Settings › Save (slug, name)', in: 'pages/project.tsx', call: 'projects.update' },
-      { does: 'a project › Settings › Archive …, Restore …', in: 'pages/project.tsx', call: 'projects.update' },
+      { does: 'a project › Settings › Save (slug, name)', in: 'pages/project-settings.tsx', call: 'projects.update' },
+      { does: 'a project › Settings › Archive …, Restore …', in: 'pages/project-settings.tsx', call: 'projects.update' },
     ],
   },
   'DELETE /projects/:project': {
@@ -43,10 +43,10 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
     ],
   },
   'PUT /projects/:project/:environment': {
-    ui: [{ does: 'a project › Environments › Add environment', in: 'pages/project.tsx', call: 'environments.create' }],
+    ui: [{ does: 'a project › Environments › Add environment', in: 'pages/project-environments.tsx', call: 'environments.create' }],
   },
   'PATCH /projects/:project/:environment': {
-    ui: [{ does: "an environment's card › ⋯ › Rename, Archive…, Restore", in: 'pages/project.tsx', call: 'environments.update' }],
+    ui: [{ does: "an environment's card › ⋯ › Rename, Archive…, Restore", in: 'pages/project-environments.tsx', call: 'environments.update' }],
   },
   'DELETE /projects/:project/:environment': {
     ui: [
@@ -93,14 +93,15 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
   'GET /references': {
     ui: [
       { does: "an environment: what reads its secrets from elsewhere; a project's references", in: 'lib/queries.ts', call: 'references.list' },
-      { does: 'Archive a project or an environment: the references that would stop reading it', in: 'pages/project.tsx', call: 'references.list' },
+      { does: 'a project › Settings › Archive …: the references that would stop reading it', in: 'pages/project-settings.tsx', call: 'references.list' },
+      { does: "an environment's card › ⋯ › Archive…: the references that would stop reading it", in: 'pages/project-environments.tsx', call: 'references.list' },
     ],
   },
   'POST /reveals': { ui: [{ does: 'a secret › Reveal, and Edit, which starts from the value', in: 'pages/environment.tsx', call: 'secrets.reveal' }] },
   'GET /members': {
     ui: [
       { does: 'Users, Service accounts', in: 'components/directory.tsx', call: 'members.list' },
-      { does: "a project › Users, Service accounts: who holds access there", in: 'pages/project.tsx', call: 'members.list' },
+      { does: "a project › Users, Service accounts: who holds access there", in: 'pages/project-access.tsx', call: 'members.list' },
     ],
   },
   'GET /members/:member': {
@@ -130,7 +131,7 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
   'GET /workloads/lookup': { ui: [{ does: 'Trust a workload: a repository named, its IDs looked up', in: 'components/trusted-workloads.tsx', call: 'bindings.lookup' }] },
   'PATCH /access/:member': {
     ui: [
-      { does: 'a project › Users, Service accounts › Add user, Add service account', in: 'pages/project.tsx', call: 'access.set' },
+      { does: 'a project › Users, Service accounts › Add user, Add service account', in: 'pages/project-access.tsx', call: 'access.set' },
       { does: 'a grant › Revoke', in: 'components/grants.tsx', call: 'access.set' },
       { does: "a user's or service account's page › Edit access", in: 'components/principal-page.tsx', call: 'access.set' },
       { does: "an owner, on a user's or service account's Access tab › Grant on every project, and its Revoke", in: 'components/every-project.tsx', call: 'access.set' },
