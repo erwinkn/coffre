@@ -25,6 +25,11 @@ export type ParseResult = {
   problems: ParseProblem[];
 };
 
+/**
+ * A secret's key, as the API's `secretKey` (`schemas.ts`) has it: a plain
+ * pattern, so that the browser's import does not carry zod. The tests hold
+ * the two in agreement.
+ */
 const KEY_RE = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 
 export function parseDotenv(input: string): ParseResult {
@@ -106,10 +111,22 @@ export function parseDotenv(input: string): ParseResult {
         continue;
       }
     } else {
-      // Unquoted: strip a trailing comment, then trailing whitespace.
-      const comment = rest.indexOf(' #');
-      if (comment !== -1) rest = rest.slice(0, comment);
-      value = rest.trim();
+      // Unquoted: a "#" after whitespace starts a comment, found before trimming, as dotenv does:
+      // `KEY= # later` has no value, `KEY=a #b` is `a`; `KEY=#fff` and `KEY=a#b` keep theirs.
+      const text = withoutExport.slice(equals + 1);
+      const comment = text.search(/\s#/);
+      value = (comment === -1 ? text : text.slice(0, comment)).trim();
+      // A secret pasted on its own line, its base64 padding taken for the "=": `c2stbGl2ZS0xMjM0NTY3OA==`
+      // leaves "=" after it, `c2stbGl2ZS0xMjM0NTY3ODk=` nothing. Its text would be the key: never named.
+      // An empty value is meant only quoted, `KEY=""`; unquoted, it can't be told from that padding.
+      if (/^=+$/.test(value)) {
+        problems.push({ line: lineNumber, reason: 'a value pasted on its own, not KEY=value: only "=" follows what would be its key' });
+        continue;
+      }
+      if (value === '') {
+        problems.push({ line: lineNumber, reason: 'no value: write KEY="" for an empty one' });
+        continue;
+      }
     }
 
     // A NUL byte cannot survive being put in a process environment: execve
@@ -213,7 +230,8 @@ export function assertEnvironmentEntry(key: string, value: string): void {
 }
 
 function quoteDotenv(value: string): string {
-  if (PLAIN_VALUE.test(value)) return value;
+  // Empty, or only "=", a value is quoted: unquoted, the parser refuses it as a pasted secret's padding.
+  if (PLAIN_VALUE.test(value) && !/^=*$/.test(value)) return value;
   if (!/['\n\r]/.test(value)) return `'${value}'`;
   const escaped = value.replace(/[\\"\n\r]/g, (character) => {
     switch (character) {

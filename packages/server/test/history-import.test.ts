@@ -85,7 +85,7 @@ test('parses the shapes a real .env file contains', () => {
       "SINGLE='literal $NOT_INTERPOLATED'",
       'WITH_ESCAPE="line\\nbreak"',
       'TRAILING=value # trailing comment',
-      'EMPTY=',
+      'EMPTY=""',
       '  SPACED  =  padded  ',
     ].join('\n'),
   );

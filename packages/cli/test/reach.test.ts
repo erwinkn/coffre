@@ -76,7 +76,8 @@ test("import names a line it cannot parse by its number, its reason and its key,
   const dir = mkdtempSync(join(tmpdir(), 'coffre-import-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const file = join(dir, '.env');
-  writeFileSync(file, [`${secret}==`, secret, `TOKEN="${secret}`, `DATABASE_URL="postgres://u:${secret}@db" extra`].join('\n'));
+  // The last, base64 that starts with a letter: what would be its key is the secret itself.
+  writeFileSync(file, [`${secret}==`, secret, `TOKEN="${secret}`, `DATABASE_URL="postgres://u:${secret}@db" extra`, 'c2stNTFIYWJjMTIzeHl6MA=='].join('\n'));
   const { status, stdout, stderr } = await cli(t, ['import', 'market/prod', '--file', file]);
   assert.equal(status, 0, stderr);
   assert.equal(
@@ -86,8 +87,9 @@ test("import names a line it cannot parse by its number, its reason and its key,
       '  line 2: no "=" on this line',
       '  line 3: unterminated double quote (multi-line values are not supported) (TOKEN)',
       '  line 4: unexpected text after the closing quote (DATABASE_URL)',
+      '  line 5: a value pasted on its own, not KEY=value: only "=" follows what would be its key',
       '',
     ].join('\n'),
   );
-  assert.ok(!(stdout + stderr).includes('51Habc123'));
+  assert.ok(!(stdout + stderr).includes('51Habc123') && !(stdout + stderr).includes('c2stNTFI'));
 });

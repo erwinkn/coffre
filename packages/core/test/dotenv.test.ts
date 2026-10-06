@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { formatDotenv, formatShellExports, parseDotenv } from '../src/dotenv.ts';
+import { secretKey } from '../src/schemas.ts';
 
 /**
  * The parser is the one place where attacker-influenceable text becomes
@@ -39,7 +40,7 @@ test('parses the shapes a real .env file contains', () => {
         "SINGLE='literal $NOT_INTERPOLATED'",
         'WITH_ESCAPE="line\\nbreak"',
         'TRAILING=value # trailing comment',
-        'EMPTY=',
+        'EMPTY=""',
         '  SPACED  =  padded  ',
       ].join('\n'),
     ),
@@ -99,6 +100,14 @@ test('# inside a value is preserved, and only a spaced # starts a comment', () =
   assert.deepEqual(values('PASSWORD=pw # note'), { PASSWORD: 'pw' }, 'spaced # is a comment');
 });
 
+test('in an unquoted value, a # after whitespace starts a comment, found before trimming', () => {
+  assert.deepEqual(values('COLOR=#fff\nA=a #b\nB=a#b\nC=a\t#b'), { COLOR: '#fff', A: 'a', B: 'a#b', C: 'a' });
+  // A comment alone is no value, refused as a bare KEY= is; `  #fff` too, its # after whitespace.
+  const { entries, problems } = parseDotenv('LATER= # later\nTABBED=\t#later\nSPACED=  #fff');
+  assert.deepEqual(entries, []);
+  assert.deepEqual(problems, [1, 2, 3].map((line) => ({ line, reason: 'no value: write KEY="" for an empty one' })));
+});
+
 test('characters common in real credentials survive verbatim', () => {
   const nasty = String.raw`aA1!@$%^&*()_+-[]{}|;:,.<>?/~\``;
   assert.deepEqual(values(`KEY="${nasty}"`), { KEY: nasty });
@@ -115,7 +124,7 @@ test('base64 and PEM-style values survive', () => {
 });
 
 test('a value that is only whitespace becomes empty, not whitespace', () => {
-  assert.deepEqual(values('A=   \nB=""\nC="  "'), { A: '', B: '', C: '  ' });
+  assert.deepEqual(values('B=""\nC="  "\nD=\'\''), { B: '', C: '  ', D: '' });
 });
 
 test('unicode and emoji survive', () => {
@@ -214,6 +223,36 @@ test('a problem names its key when the line has a valid one, and never carries t
     ],
   );
   assert.ok(!JSON.stringify(problems).includes('51Habc123'), 'a value, or part of one, in a problem');
+});
+
+test("a key is one exactly when the API's secretKey says so", () => {
+  for (const key of ['DATABASE_URL', '_PRIVATE', 'a', 'mixedCase9', 'A'.repeat(128), 'A'.repeat(129), '9LEADING', 'with-dash', 'with.dot', 'é', 'c2stbGl2ZS0xMjM0NTY3OA']) {
+    const { entries } = parseDotenv(`${key}=x`);
+    assert.equal(entries.length === 1, secretKey.safeParse(key).success, key);
+  }
+});
+
+test('a bare base64 secret pasted on its own line is refused, and never named', () => {
+  // Each a secret alone: padded or not, starting with a letter or not, with base64's + and /.
+  const pasted = ['c2stbGl2ZS0xMjM0NTY3OA==', 'export c2stbGl2ZS0xMjM0NTY3OA==', 'c2stbGl2ZS0xMjM0NTY3ODkw', '9Kx2c3RlbS1rZXk+bGl2ZQ==', 'S2V5/c3Rl+bS1rZXk=', 'c2stbGl2ZS0xMjM0NTY3OA===='];
+  const { entries, problems } = parseDotenv(pasted.join('\n'));
+  assert.deepEqual(entries, []);
+  assert.deepEqual(problems.map(({ line, key }) => [line, key]), pasted.map((_, i) => [i + 1, undefined]));
+  for (const each of pasted) assert.ok(!JSON.stringify(problems).includes(each.replace(/^export |=+$/g, '').slice(0, 10)), each);
+  assert.match(problems[0]!.reason, /a value pasted on its own/);
+  // Quoted, "=" is a value its author meant.
+  assert.deepEqual(values('A="=="\nB=\'=\''), { A: '==', B: '=' });
+});
+
+test('one "=" of padding, a 32-byte key in base64, leaves an empty value: only a quoted one is meant', () => {
+  const key = 'c2stbGl2ZS0xMjM0NTY3ODkwYWJjZGVmZ2hpamtsbW4=';
+  const { entries, problems } = parseDotenv([key, 'PLACEHOLDER=', 'BLANK=   ', 'export ALSO=', 'MEANT=""', "TOO=''"].join('\n'));
+  assert.deepEqual(entries.map(({ key, value }) => [key, value]), [
+    ['MEANT', ''],
+    ['TOO', ''],
+  ]);
+  assert.deepEqual(problems, [1, 2, 3, 4].map((line) => ({ line, reason: 'no value: write KEY="" for an empty one' })));
+  assert.ok(!JSON.stringify(problems).includes('c2stbGl2'));
 });
 
 test('invalid keys are rejected', () => {
@@ -320,11 +359,18 @@ test('every accepted value round-trips exactly through a quoted encoding', () =>
 const AWKWARD = [
   'plain',
   '',
+  '=',
+  '==',
   'db-demo://u:p@h:5432/db?ssl=require',
   'with space',
   '   padded   ',
   'with#hash',
   'with #comment-lookalike',
+  '#fff',
+  'a #b',
+  'a#b',
+  ' # later',
+  'a\t#b',
   'with$dollar and ${BRACES}',
   "with'single",
   'with"double',
@@ -338,6 +384,13 @@ const AWKWARD = [
   'tab\there',
   'unicode: café ☕',
 ];
+
+test('formatDotenv quotes a value that unquoted would read differently: empty, only "=", or with a # or whitespace', () => {
+  assert.equal(
+    formatDotenv([['E', ''], ['P', '=='], ['C', 'a #b'], ['H', '#fff'], ['U', 'a#b'], ['K', 'plain=value']]),
+    "E=''\nP='=='\nC='a #b'\nH='#fff'\nU='a#b'\nK=plain=value\n",
+  );
+});
 
 test('formatDotenv output parses back to exactly the values written', () => {
   const entries = AWKWARD.map((value, index) => [`K${index}`, value] as const);

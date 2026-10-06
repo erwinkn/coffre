@@ -1,7 +1,7 @@
 /**
  * Writes the mark's files from `src/components/mark.ts`:
  *
- *   src/assets/          what the app links: the PNG favicon, the iOS icon
+ *   src/assets/          what the app links: the iOS icon
  *   docs/brand/          the README's mark, the SVG favicon on its own, and
  *                        16 and 48px PNGs
  *   ../cli/assets/       the 512px logo for the GitHub App setup makes,
@@ -23,7 +23,6 @@ const cli = new URL('../../cli/assets/', import.meta.url);
 
 /** Square: GitHub and iOS round the corners themselves. */
 const FILES: { dir: URL; name: string; size: number; square?: boolean }[] = [
-  { dir: assets, name: 'favicon-32.png', size: 32 },
   { dir: assets, name: 'apple-touch-icon.png', size: 180, square: true },
   { dir: brand, name: 'favicon-16.png', size: 16 },
   { dir: brand, name: 'favicon-48.png', size: 48 },
