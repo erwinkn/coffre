@@ -16,7 +16,6 @@ import { Route as McpRouteImport } from './routes/mcp'
 import { Route as ReadyzRouteImport } from './routes/readyz'
 import { Route as DotwellKnownSplatRouteImport } from './routes/[.]well-known.$'
 import { Route as CoffreIndexRouteImport } from './routes/_coffre/index'
-import { Route as CoffreAccessRouteImport } from './routes/_coffre/access'
 import { Route as CoffreAccountRouteImport } from './routes/_coffre/account'
 import { Route as CoffreAuditRouteImport } from './routes/_coffre/audit'
 import { Route as CoffreSettingsRouteImport } from './routes/_coffre/settings'
@@ -75,11 +74,6 @@ const DotwellKnownSplatRoute = DotwellKnownSplatRouteImport.update({
 const CoffreIndexRoute = CoffreIndexRouteImport.update({
   id: '/',
   path: '/',
-  getParentRoute: () => CoffreRoute,
-} as any)
-const CoffreAccessRoute = CoffreAccessRouteImport.update({
-  id: '/access',
-  path: '/access',
   getParentRoute: () => CoffreRoute,
 } as any)
 const CoffreAccountRoute = CoffreAccountRouteImport.update({
@@ -229,7 +223,6 @@ export interface FileRoutesByFullPath {
   '/mcp': typeof McpRoute
   '/readyz': typeof ReadyzRoute
   '/.well-known/$': typeof DotwellKnownSplatRoute
-  '/access': typeof CoffreAccessRoute
   '/account': typeof CoffreAccountRoute
   '/audit': typeof CoffreAuditRoute
   '/settings': typeof CoffreSettingsRoute
@@ -263,7 +256,6 @@ export interface FileRoutesByTo {
   '/mcp': typeof McpRoute
   '/readyz': typeof ReadyzRoute
   '/.well-known/$': typeof DotwellKnownSplatRoute
-  '/access': typeof CoffreAccessRoute
   '/account': typeof CoffreAccountRoute
   '/audit': typeof CoffreAuditRoute
   '/settings': typeof CoffreSettingsRoute
@@ -296,7 +288,6 @@ export interface FileRoutesById {
   '/mcp': typeof McpRoute
   '/readyz': typeof ReadyzRoute
   '/.well-known/$': typeof DotwellKnownSplatRoute
-  '/_coffre/access': typeof CoffreAccessRoute
   '/_coffre/account': typeof CoffreAccountRoute
   '/_coffre/audit': typeof CoffreAuditRoute
   '/_coffre/settings': typeof CoffreSettingsRoute
@@ -333,7 +324,6 @@ export interface FileRouteTypes {
     | '/mcp'
     | '/readyz'
     | '/.well-known/$'
-    | '/access'
     | '/account'
     | '/audit'
     | '/settings'
@@ -367,7 +357,6 @@ export interface FileRouteTypes {
     | '/mcp'
     | '/readyz'
     | '/.well-known/$'
-    | '/access'
     | '/account'
     | '/audit'
     | '/settings'
@@ -399,7 +388,6 @@ export interface FileRouteTypes {
     | '/mcp'
     | '/readyz'
     | '/.well-known/$'
-    | '/_coffre/access'
     | '/_coffre/account'
     | '/_coffre/audit'
     | '/_coffre/settings'
@@ -489,13 +477,6 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof CoffreIndexRouteImport
-      parentRoute: typeof CoffreRoute
-    }
-    '/_coffre/access': {
-      id: '/_coffre/access'
-      path: '/access'
-      fullPath: '/access'
-      preLoaderRoute: typeof CoffreAccessRouteImport
       parentRoute: typeof CoffreRoute
     }
     '/_coffre/account': {
@@ -739,7 +720,6 @@ const CoffreUsersUserRouteWithChildren = CoffreUsersUserRoute._addFileChildren(
 )
 
 interface CoffreRouteChildren {
-  CoffreAccessRoute: typeof CoffreAccessRoute
   CoffreAccountRoute: typeof CoffreAccountRoute
   CoffreAuditRoute: typeof CoffreAuditRoute
   CoffreSettingsRoute: typeof CoffreSettingsRoute
@@ -754,7 +734,6 @@ interface CoffreRouteChildren {
 }
 
 const CoffreRouteChildren: CoffreRouteChildren = {
-  CoffreAccessRoute: CoffreAccessRoute,
   CoffreAccountRoute: CoffreAccountRoute,
   CoffreAuditRoute: CoffreAuditRoute,
   CoffreSettingsRoute: CoffreSettingsRoute,

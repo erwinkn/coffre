@@ -186,13 +186,6 @@ export const audit = {
   },
 };
 
-/** `/access`: the access page became the users page, and old links land there. */
-export const access = {
-  beforeLoad: () => {
-    throw redirect({ to: '/users' });
-  },
-};
-
 /** `/users`. */
 export const users = {
   loader: ({ context }: Loader) => {

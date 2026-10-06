@@ -73,6 +73,22 @@ test("a page a later release adds is a file the deployment gains; one it had lef
   }
 });
 
+test('a 0.4.0 deployment loses /access, which only sent old links to /users, but not one it changed', () => {
+  const dir = deployment('workers');
+  try {
+    const access = 'app/src/routes/_coffre/access.tsx';
+    // The file as 0.4.0 wrote it.
+    const written = "import { createFileRoute } from '@tanstack/react-router';\nimport { access } from '@coffre/ui';\n\nexport const Route = createFileRoute('/_coffre/access')({ ...access });\n";
+    writeFileSync(join(dir, access), written);
+    const move = changesOf(pageMove(dir, templateDir('workers'), CLEAN_BREAK));
+    assert.deepEqual(move, [{ path: access, was: written, becomes: null }]);
+    writeFileSync(join(dir, access), '// ours\n');
+    assert.match(problemsOf(pageMove(dir, templateDir('workers'), CLEAN_BREAK)), /access\.tsx is a page coffre 0\.4\.1 no longer has/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a deployment without coffre's layouts as file routes is refused, not given pages", () => {
   const dir = deployment('workers');
   try {

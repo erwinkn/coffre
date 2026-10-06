@@ -50,7 +50,6 @@ export const ROUTE_FILES: Record<string, string> = Object.fromEntries(
     '_coffre/projects.$project.settings.tsx',
     '_coffre/projects.$project_.$environment.tsx',
     '_coffre/audit.tsx',
-    '_coffre/access.tsx',
     '_coffre/users.index.tsx',
     '_coffre/users.$user.tsx',
     '_coffre/users.$user.index.tsx',
@@ -74,9 +73,12 @@ export const ROUTE_FILES: Record<string, string> = Object.fromEntries(
 /**
  * The route files coffre wrote and no longer does, a page removed or
  * renamed: by the release that retired each, and the blobs of what releases
- * before it wrote there. None yet.
+ * before it wrote there.
  */
-export const RETIRED_ROUTE_FILES: Record<string, { since: string; blobs: readonly string[] }> = {};
+export const RETIRED_ROUTE_FILES: Record<string, { since: string; blobs: readonly string[] }> = {
+  // `/access`, which only sent old links on to `/users`.
+  'app/src/routes/_coffre/access.tsx': { since: '0.4.1', blobs: ['d75015bd1e9553986e46bff01b729bd2b29a3a8d'] },
+};
 
 /**
  * Whether release `a` comes after release `b`, as semver orders them: by

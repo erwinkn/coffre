@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+**`/access` is gone.** It only sent links from before 0.4.0 on to
+`/users`. `coffre update` deletes its route file,
+`app/src/routes/_coffre/access.tsx`, from a 0.4.0 deployment, unless the
+deployment changed it, and `@coffre/ui` no longer exports its `access`
+route options.
+
 **An owner sees a person's connected apps.** A person's page lists, to
 owners, the MCP apps they connected, under **Connected apps**, and each can
 be disconnected there. The member report (`GET /api/members/<member>`) has
