@@ -128,7 +128,11 @@ export async function authenticateRequest(
     ({ credentialId = null, credentialGeneration, access: checked, exchanged = false, ...principal } = verified);
   } catch (error) {
     // Only a credential checked and refused is a sign-out; one that could not be checked is an outage.
-    if (error instanceof CredentialUncheckable) return errorResponse(new ApiError('unavailable', 'coffre cannot check who you are right now'));
+    if (error instanceof CredentialUncheckable) {
+      // Logged with what failed, the database or the vault, as below.
+      console.error('checking a credential failed', { requestId, error: logged(error.cause) });
+      return errorResponse(new ApiError('unavailable', 'coffre cannot check who you are right now'));
+    }
     return errorResponse(new ApiError('unauthenticated', 'that credential is unknown, expired or revoked'));
   }
 

@@ -6,6 +6,7 @@ import { github, signin, type AuthConfig, type Principal } from '@coffre/core/id
 import type { Access } from '@coffre/core/vault';
 
 import { answer } from './start-fixture.ts';
+import { CredentialUncheckable } from '../src/api/signin.ts';
 import { accessTokenForRequest, authenticateRequest, cloudflareSourceIp } from '../src/auth.ts';
 
 const cloudflare: AuthConfig = {
@@ -349,6 +350,30 @@ test('a principal lookup that fails answers unavailable, not unauthenticated, an
   assert.equal(((await (result as Response).json()) as { error: string }).error, 'unavailable');
   const [message, fields] = report.mock.calls[0]!.arguments as [string, { requestId: string; error: { message: string } }];
   assert.deepEqual([report.mock.callCount(), message, fields.requestId, fields.error.message], [1, 'checking who called failed', 'request-1', 'connection refused']);
+});
+
+test('a credential that cannot be checked answers unavailable, not unauthenticated, and logs what failed with the request id', async (t) => {
+  const report = t.mock.method(console, 'error', () => {});
+  const result = await authenticateRequest(
+    new Request('https://coffre.test/api/me'),
+    {
+      auth: own,
+      verifier: {
+        verify: async () => {
+          throw new CredentialUncheckable(new Error('the vault at /run/coffre/vault.sock is unreachable: read ECONNRESET'));
+        },
+      },
+      vault: vaultKnowing({}),
+    } as never,
+    'request-2',
+    'coffre_session_whatever',
+  );
+
+  assert.equal((result as Response).status, 503);
+  assert.equal(((await (result as Response).json()) as { error: string }).error, 'unavailable');
+  const [message, fields] = report.mock.calls[0]!.arguments as [string, { requestId: string; error: { message: string } }];
+  assert.deepEqual([report.mock.callCount(), message, fields.requestId, fields.error.message],
+    [1, 'checking a credential failed', 'request-2', 'the vault at /run/coffre/vault.sock is unreachable: read ECONNRESET']);
 });
 
 test('removal between credential verification and caller loading cannot use the new membership', async () => {
