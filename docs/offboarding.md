@@ -20,7 +20,7 @@ Values they saw that nobody has changed since, to rotate once they leave (4)
   market/dev/REDIS_URL           v3    read 2026-09-25
 
 Connected apps, which removing them disconnects (1)
-  Claude  claude.ai, may browse, write, last used 2026-09-30
+  Claude  claude.ai, may read, write, last used 2026-09-30
 
 Nothing changed. Re-run with --apply to remove alice@acme.example.
 

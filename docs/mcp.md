@@ -36,24 +36,26 @@ until you press Approve.
 
 You grant these on the consent page:
 
-- **Browse**, always: projects, environments, key names, history, access,
-  the audit log. Never a value.
-- **Write**: set, generate, rename, archive and restore secrets; create
-  projects and environments.
-- **Read values**: secret values sent to the client. They become part of
-  the conversation, wherever the client keeps it.
-- **Manage access**: grants, members, service tokens, trusted workloads.
+- **Read** (`read`), always: projects, environments, key names, history,
+  access, the audit log. Never a value.
+- **Write** (`write`): set, generate, rename, archive and restore secrets;
+  create projects and environments.
+- **Reveal values** (`reveal`): secret values sent to the client. They
+  become part of the conversation, wherever the client keeps it.
+- **Manage access** (`manage-access`): grants, members, service tokens,
+  trusted workloads.
 
-Clients ask for Browse alone, and not all ask for more later (Claude Code
+The words in brackets are the OAuth scopes a client asks for. Clients ask
+for Read alone, and not all ask for more later (Claude Code
 does, Claude Desktop did not), so tick what you want the client to do when
 you connect it: Write to make changes, which you still approve one by one.
-You can tick or untick any but Browse, whatever the client asked for. A
+You can tick or untick any but Read, whatever the client asked for. A
 connection lasts as long as a `coffre login` session (30 days unless the
 deployment says otherwise); then you connect again.
 
 ## Tools
 
-A connected client can browse, as you:
+With **Read**, a connected client can, as you:
 
 - `whoami`: who it acts as, and what it may do.
 - `list_projects`, `list_secrets`, `secret_history`: projects,
@@ -69,7 +71,7 @@ A connected client can browse, as you:
 - `show_secret_value`: shows you a secret's value on coffre's page, when
   you press Reveal there. The value is never sent to the client.
 
-With **Read values**, `read_secret_values` sends the values of a secret or
+With **Reveal values**, `read_secret_values` sends the values of a secret or
 an environment to the client, and they become part of the conversation:
 its answer says so first. The consent page warns before you grant it.
 

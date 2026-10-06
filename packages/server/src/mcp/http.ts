@@ -33,7 +33,7 @@ export async function protectedResource(_request: Request, runtime: CoffreRuntim
     resource: mcp.resource,
     authorization_servers: [mcp.issuer],
     // The minimum, which clients ask for: the person ticks the rest on the consent page.
-    scopes_supported: ['browse'],
+    scopes_supported: ['read'],
     bearer_methods_supported: ['header'],
     resource_name: `coffre at ${new URL(runtime.publicUrl).host}`,
   });
@@ -145,7 +145,7 @@ export function unauthorized(runtime: CoffreRuntime, presented: boolean): Respon
   const challenge = [
     ...(presented ? ['error="invalid_token"', 'error_description="the token is unknown, expired or revoked"'] : []),
     `resource_metadata="${resourceMetadataUrl(runtime)}"`,
-    'scope="browse"',
+    'scope="read"',
   ];
   return jsonResponse(
     { error: presented ? 'invalid_token' : 'unauthorized', error_description: presented ? 'the token is unknown, expired or revoked' : 'connect with OAuth first' },

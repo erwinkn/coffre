@@ -87,7 +87,7 @@ export async function sessionFor(email: string): Promise<string> {
 }
 
 /** Consent and the code exchanged, as Claude Code does it: the access token. */
-export async function connect(email = DEV, scope = 'browse'): Promise<string> {
+export async function connect(email = DEV, scope = 'read'): Promise<string> {
   const session = await sessionFor(email);
   const verifier = randomBytes(32).toString('base64url');
   const request = {

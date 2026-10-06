@@ -225,8 +225,8 @@ export class McpApprovals {
     }
 
     // The change, after the decision committed and outside any transaction: the API makes it as it would for the person.
-    // A reveal reads the value for the page alone, so its call may reach Read values' route whatever the connection holds.
-    const scopes = [...parseScopes(connection.scopes).scopes, ...(tool.change!.reveal === true ? (['read-values'] as const) : [])];
+    // A reveal reads the value for the page alone, so its call may reach Reveal values' route whatever the connection holds.
+    const scopes = [...parseScopes(connection.scopes).scopes, ...(tool.change!.reveal === true ? (['reveal'] as const) : [])];
     const via: McpVia = { connectionId: connection.id, clientId: connection.clientId, clientName: connection.clientName, scopes, approvalId: row.id };
     try {
       const applied = await tool.change!.apply(this.#client({ ...ctx, via, provenance: connection.id }), args as never, { value: input.value });

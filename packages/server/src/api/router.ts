@@ -1,4 +1,4 @@
-import { scopeString } from '@coffre/core/mcp';
+import { MCP_SCOPE_INFO, scopeString } from '@coffre/core/mcp';
 import { folderName, secretKey, slug } from '@coffre/core/schemas';
 import { z } from 'zod';
 
@@ -154,7 +154,7 @@ export async function serveApi(request: Request, ctx: ApiContext): Promise<Respo
       const needed = ROUTE_SCOPES[`${route.method} ${route.shape}` as keyof typeof ROUTE_SCOPES];
       if (needed === null || needed === undefined) throw new ApiError('forbidden', 'apps connected through MCP cannot do this: it is for people, in coffre itself');
       if (!ctx.via.scopes.includes(needed)) {
-        throw new ApiError('insufficient_scope', `this needs the ${needed} scope: connect the app again with it (${scopeString(challengeScopes(ctx.via.scopes, needed))})`, needed);
+        throw new ApiError('insufficient_scope', `this needs the ${MCP_SCOPE_INFO[needed].label} scope: connect the app again with it (${scopeString(challengeScopes(ctx.via.scopes, needed))})`, needed);
       }
     }
 

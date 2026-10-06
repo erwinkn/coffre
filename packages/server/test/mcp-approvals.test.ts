@@ -58,7 +58,7 @@ async function approvalRows() {
 }
 
 test('with URL elicitation, the official client is asked to open the page, and its retry reports the change the page made, once', async () => {
-  const mcp = await client(await connect(DEV, 'browse write'), 'modern', { elicitsUrl: true });
+  const mcp = await client(await connect(DEV, 'read write'), 'modern', { elicitsUrl: true });
   const prompts: { url: string; message: string }[] = [];
   mcp.setRequestHandler('elicitation/create', async (request) => {
     const params = request.params as { mode: string; url: string; message: string };
@@ -99,7 +99,7 @@ test('with URL elicitation, the official client is asked to open the page, and i
 });
 
 test('without URL elicitation, the result carries the link; nothing changes until the person approves, and calling again reports it', async () => {
-  const token = await connect(DEV, 'browse write');
+  const token = await connect(DEV, 'read write');
   const first = await callRaw(token, 'archive_secret', { secret: 'market/prod/OLD_KEY' });
   assert.equal(first.status, 200);
   const result = first.body.result!;
@@ -127,7 +127,7 @@ test('without URL elicitation, the result carries the link; nothing changes unti
 });
 
 test('a requestState replayed with other arguments, or by another connection, is refused; decline cancels', async () => {
-  const token = await connect(DEV, 'browse write');
+  const token = await connect(DEV, 'read write');
   const capabilities = { elicitation: { url: {} } };
   const first = await callRaw(token, 'archive_secret', { secret: 'market/prod/OLD_KEY' }, {}, capabilities);
   assert.equal(first.body.result!.resultType, 'input_required');
@@ -135,7 +135,7 @@ test('a requestState replayed with other arguments, or by another connection, is
 
   const other = await callRaw(token, 'archive_secret', { secret: 'market/prod/API_KEY' }, { requestState: state, inputResponses: { approve: { action: 'accept' } } }, capabilities);
   assert.equal(other.body.error?.code, -32602);
-  const elsewhere = await callRaw(await connect(DEV, 'browse write'), 'archive_secret', { secret: 'market/prod/OLD_KEY' }, { requestState: state }, capabilities);
+  const elsewhere = await callRaw(await connect(DEV, 'read write'), 'archive_secret', { secret: 'market/prod/OLD_KEY' }, { requestState: state }, capabilities);
   assert.equal(elsewhere.body.error?.code, -32602);
   const forged = await callRaw(token, 'archive_secret', { secret: 'market/prod/OLD_KEY' }, { requestState: `${state.split('.')[0]}.AAAA` }, capabilities);
   assert.equal(forged.body.error?.code, -32602);
@@ -158,7 +158,7 @@ test('a requestState replayed with other arguments, or by another connection, is
 });
 
 test('only its person decides an approval, with the digest they were shown; a denial changes nothing', async () => {
-  const token = await connect(DEV, 'browse write');
+  const token = await connect(DEV, 'read write');
   const id = ((await callRaw(token, 'archive_secret', { secret: 'market/prod/OLD_KEY' })).body.result!.structuredContent!.approval as { id: string }).id;
 
   const theirs = await view(id, OTHER);
@@ -177,7 +177,7 @@ test('only its person decides an approval, with the digest they were shown; a de
 });
 
 test('a value comes from the page only: the person types it, coffre writes it, and no result or row holds it', async () => {
-  const token = await connect(DEV, 'browse write');
+  const token = await connect(DEV, 'read write');
   const first = await callRaw(token, 'request_secret_value', { secret: 'market/prod/NEW_KEY', note: 'the Stripe key' });
   const id = (first.body.result!.structuredContent!.approval as { id: string }).id;
   const shown = await view(id);
@@ -200,7 +200,7 @@ test('a value comes from the page only: the person types it, coffre writes it, a
 test('a token issued through an approval is shown on the page, once, and never to the client', async () => {
   await clientFor(deps, ROOT).members.add('token:ci-deploy');
   await clientFor(deps, ROOT).members.add(`user:${DEV}`, { owner: true });
-  const token = await connect(DEV, 'browse manage-access');
+  const token = await connect(DEV, 'read manage-access');
   const id = ((await callRaw(token, 'issue_service_token', { service: 'ci-deploy', label: 'deploys', expiresInDays: 30 })).body.result!.structuredContent!.approval as { id: string }).id;
   const decided = await decide(id, true);
   assert.equal(decided.body.status, 'approved', JSON.stringify(decided.body));
@@ -213,20 +213,20 @@ test('a token issued through an approval is shown on the page, once, and never t
 });
 
 test('a change the person could not make is refused before anyone is asked; without Write, the step-up starts', async () => {
-  const viewer = await connect(OTHER, 'browse write');
+  const viewer = await connect(OTHER, 'read write');
   const refused = await callRaw(viewer, 'archive_secret', { secret: 'market/prod/OLD_KEY' });
   assert.equal(refused.body.result!.isError, true);
   assert.match(refused.body.result!.content[0]!.text!, /secret\.archive/);
   assert.equal((await approvalRows()).length, 0);
 
-  const browse = await connect(DEV);
-  const stepUp = await callRaw(browse, 'archive_secret', { secret: 'market/prod/OLD_KEY' });
+  const reading = await connect(DEV);
+  const stepUp = await callRaw(reading, 'archive_secret', { secret: 'market/prod/OLD_KEY' });
   assert.equal(stepUp.status, 403);
   assert.equal((await approvalRows()).length, 0);
 });
 
 test('a 2025-era client makes changes through the link, as any client without URL elicitation (D62); a connection holds at most five waiting', async () => {
-  const token = await connect(DEV, 'browse write');
+  const token = await connect(DEV, 'read write');
   const legacy = await client(token, 'legacy');
   try {
     const asked = (await legacy.callTool({ name: 'archive_secret', arguments: { secret: 'market/prod/OLD_KEY' } })) as Result;
@@ -249,7 +249,7 @@ test('a 2025-era client makes changes through the link, as any client without UR
 });
 
 test('a disconnected app’s approvals can no longer be decided', async () => {
-  const token = await connect(DEV, 'browse write');
+  const token = await connect(DEV, 'read write');
   const id = ((await callRaw(token, 'archive_secret', { secret: 'market/prod/OLD_KEY' })).body.result!.structuredContent!.approval as { id: string }).id;
   const [approval] = await db.owner.select().from(mcpApprovals).where(eq(mcpApprovals.id, id));
   const session = await sessionFor(DEV);

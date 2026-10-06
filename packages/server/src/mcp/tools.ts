@@ -2,7 +2,7 @@
 // API calls, as its person, through the same route table, checks and vault
 // as a page's render. A tool can do no more than its person could with the
 // CLI; the scope it declares, and the API's own table (`ROUTE_SCOPES`), hold
-// it to its connection's. Browse, here: what is there, never a value. The
+// it to its connection's. Read, here: what is there, never a value. The
 // tools that change something are in changes.ts, each through an approval.
 import { apiMember, type CoffreClient } from '@coffre/client';
 import type { McpScope } from '@coffre/core/mcp';
@@ -48,13 +48,13 @@ function tool<I extends z.ZodObject>(definition: Tool<I>): Tool {
   return definition as unknown as Tool;
 }
 
-/** The Browse tools: every one read-only, idempotent, and about this instance only. */
-const BROWSE: readonly Tool[] = [
+/** The Read tools: every one read-only, idempotent, and about this instance only. */
+const READ_TOOLS: readonly Tool[] = [
   tool({
     name: 'whoami',
     title: 'Who am I',
     description: 'The person this connection acts as, their role, every project and environment they can reach, and what this connection may do.',
-    scope: 'browse',
+    scope: 'read',
     readOnly: true,
     idempotent: true,
     destructive: false,
@@ -69,7 +69,7 @@ const BROWSE: readonly Tool[] = [
     name: 'list_projects',
     title: 'List projects',
     description: 'The projects and environments the person can see, with their folders and whether they are archived.',
-    scope: 'browse',
+    scope: 'read',
     readOnly: true,
     idempotent: true,
     destructive: false,
@@ -82,7 +82,7 @@ const BROWSE: readonly Tool[] = [
     name: 'list_secrets',
     title: 'List secrets',
     description: "An environment's keys: each one's version, folder, who last changed it and when, and whether it is a reference to another secret. Never a value.",
-    scope: 'browse',
+    scope: 'read',
     readOnly: true,
     idempotent: true,
     destructive: false,
@@ -95,7 +95,7 @@ const BROWSE: readonly Tool[] = [
     name: 'secret_history',
     title: 'Secret history',
     description: "A secret's versions, newest first: who made each and when. Never a value.",
-    scope: 'browse',
+    scope: 'read',
     readOnly: true,
     idempotent: true,
     destructive: false,
@@ -108,7 +108,7 @@ const BROWSE: readonly Tool[] = [
     name: 'list_access',
     title: 'List access',
     description: "Who is a member, and their access. Given a place, a project or project/environment, only those who reach it, and through which grant.",
-    scope: 'browse',
+    scope: 'read',
     readOnly: true,
     idempotent: true,
     destructive: false,
@@ -121,7 +121,7 @@ const BROWSE: readonly Tool[] = [
     name: 'describe_member',
     title: 'Describe a member',
     description: "What a member holds: their grants, and what they have read. For a service account, also its tokens and the CI workloads it trusts.",
-    scope: 'browse',
+    scope: 'read',
     readOnly: true,
     idempotent: true,
     destructive: false,
@@ -140,7 +140,7 @@ const BROWSE: readonly Tool[] = [
     name: 'read_audit_log',
     title: 'Read the audit log',
     description: 'The audit log, newest first: what was done, by whom, where, allowed or refused. 50 entries a call unless asked; page back with `before`, the oldest seq seen.',
-    scope: 'browse',
+    scope: 'read',
     readOnly: true,
     idempotent: true,
     destructive: false,
@@ -164,7 +164,7 @@ const BROWSE: readonly Tool[] = [
     title: 'Run a command with secrets',
     description:
       "How to run a command with an environment's secrets as environment variables, through coffre's CLI, so that no value enters this conversation. Checks the person may read the environment, and names the variables it would set.",
-    scope: 'browse',
+    scope: 'read',
     readOnly: true,
     idempotent: true,
     destructive: false,
@@ -192,13 +192,13 @@ const BROWSE: readonly Tool[] = [
   }),
 ];
 
-/** Values to the model: only with Read values, which the person ticked under its warning. */
-const READ_VALUES = tool({
+/** Values to the model: only with Reveal values, which the person ticked under its warning. */
+const REVEAL_VALUES = tool({
   name: 'read_secret_values',
   title: 'Read secret values',
   description:
     "Read the values of one secret or of a whole environment, into this conversation: they become part of it, and of wherever it is kept. Use it only when the person wants you to see the values. To show the person a value without you seeing it, use show_secret_value; to give a command its values, run_with_secrets.",
-  scope: 'read-values',
+  scope: 'reveal',
   readOnly: true,
   idempotent: true,
   destructive: false,
@@ -214,7 +214,7 @@ const READ_VALUES = tool({
   },
 });
 
-export const TOOLS: readonly Tool[] = [...BROWSE, SHOW_VALUE, READ_VALUES, ...CHANGE_TOOLS];
+export const TOOLS: readonly Tool[] = [...READ_TOOLS, SHOW_VALUE, REVEAL_VALUES, ...CHANGE_TOOLS];
 
 export const TOOL_BY_NAME = new Map(TOOLS.map((entry) => [entry.name, entry]));
 
