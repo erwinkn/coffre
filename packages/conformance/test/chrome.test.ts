@@ -16,9 +16,10 @@ test("a page's heading, its cards' titles, its text and address, and what its sc
       '<script>history.replaceState(null, "", location.pathname)</script>',
     // What a signed-in page did under wrangler's keep_names: a helper only the bundle had.
     '/broken': '<!doctype html><h1>Projects</h1><script>const f = __name(() => {}, "f")</script>',
-    // A button that opens a confirmation, as a person would next.
+    // A button that opens a confirmation, as a person would next, on a page's tab.
     '/remove':
-      '<!doctype html><h1>Projects</h1><button id="remove">Remove</button>' +
+      '<!doctype html><h1>Projects</h1><nav class="tabs"><a href="/remove" aria-current="page"> Access </a><a href="/activity">Activity</a></nav>' +
+      '<button id="remove">Remove</button>' +
       '<script>remove.onclick = () => document.body.insertAdjacentHTML("beforeend", "<div role=alertdialog>Removing revokes 2 grants</div>")</script>',
     // A failed load is an error too: the icon the browser asks for is here.
     '/favicon.ico': '',
@@ -33,6 +34,7 @@ test("a page's heading, its cards' titles, its text and address, and what its sc
   try {
     assert.deepEqual(await browser.load(`${origin}/fine?linked=github`, [['session', 's3cret']], 200), {
       heading: 'Projects',
+      tab: null,
       cards: ['Sign in with OIDC', 'Bearer tokens'],
       text: 'Projects\nSign in with OIDC\nBearer tokens',
       href: `${origin}/fine`,
@@ -41,6 +43,7 @@ test("a page's heading, its cards' titles, its text and address, and what its sc
     });
     const removing = await browser.load(`${origin}/remove`, [], 200, 'document.getElementById("remove").click()');
     assert.equal(removing.dialog, 'Removing revokes 2 grants', 'the dialog a step opened is read');
+    assert.equal(removing.tab, 'Access', 'the tab shown is read');
     const broken = await browser.load(`${origin}/broken`, [], 200);
     assert.equal(broken.heading, 'Projects');
     assert.equal(broken.errors.length, 1);
