@@ -406,8 +406,10 @@ you would rather set up by hand.
 
 ### 1. Settings
 
-Set `PUBLIC_URL` and `GITHUB_CLIENT_ID` in `app/wrangler.jsonc`. The GitHub
-OAuth app's callback is `<PUBLIC_URL>/auth/callback/github`. Set
+Set `PUBLIC_URL` and `GITHUB_CLIENT_ID` in `app/wrangler.jsonc`, from a
+GitHub App whose callback is `<PUBLIC_URL>/auth/callback/github`, with
+read-only access to email addresses, as setup makes it. An OAuth app with
+that callback works too. Set
 `ROOT_ADMINS` in `vault/wrangler.jsonc`: the first people in, whom nobody can
 remove through the API. `VAULT_KEY_ID` comes with the keys, in step 3.
 

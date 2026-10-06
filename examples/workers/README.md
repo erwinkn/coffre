@@ -22,7 +22,9 @@ Worker secrets. Everything below runs from this directory.
 ## 1. Settings
 
 - `app/wrangler.jsonc`: `PUBLIC_URL`, and `GITHUB_CLIENT_ID` from a GitHub
-  OAuth app whose callback is `<PUBLIC_URL>/auth/callback/github`.
+  App whose callback is `<PUBLIC_URL>/auth/callback/github`, with read-only
+  access to email addresses, as `coffre setup` makes it. An OAuth app with
+  that callback works too.
 - `vault/wrangler.jsonc`: `ROOT_ADMINS`, the emails of the first people in,
   and `VAULT_KEY_ID`, which `coffre setup` gives you below.
 
