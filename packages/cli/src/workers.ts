@@ -417,7 +417,12 @@ export class Cloudflare {
     worker.accountId = this.#found.account.id;
   }
 
-  /** A Hyperdrive config for each login, made, given its new password, or kept; with caching off, always. */
+  /**
+   * A Hyperdrive config for each login, made, given its new password, or
+   * kept; with caching off, always. Setup listed the configs as it began: one
+   * deleted since is made again when its login has a new password, and stops
+   * the run when it does not, Hyperdrive needing a password setup can't read.
+   */
   async hyperdrive(logins: Record<Component, Login>): Promise<Outcome> {
     const { api, account } = this.#found;
     const width = Math.max(...COMPONENTS.map((component) => this.workers[component].name.length)) + 2;
@@ -429,22 +434,31 @@ export class Cloudflare {
       let what: string;
       if (login.url !== null) {
         const origin = originOf(login.url);
-        if (config === undefined) {
-          config = { id: await api.createHyperdrive(account.id, name, origin), name, origin };
-          what = `made, for ${login.login}`;
-        } else {
-          await api.updateHyperdrive(account.id, config.id, name, origin);
+        if (config !== undefined && (await api.updateHyperdrive(account.id, config.id, name, origin))) {
           what = `given ${login.login}'s new password`;
+        } else {
+          what = config === undefined ? `made, for ${login.login}` : `made again: the config ${config.name} was deleted during this run`;
+          config = { id: await api.createHyperdrive(account.id, name, origin), name, origin };
         }
-      } else if (config!.caching?.disabled !== true) {
-        await api.disableCaching(account.id, config!.id);
-        what = 'kept, its caching turned off';
       } else {
-        what = 'kept';
+        const now = config === undefined ? null : await api.hyperdriveConfig(account.id, config.id);
+        if (now === null) {
+          throw new Error(
+            `The Hyperdrive config ${config?.name ?? name} was deleted during this run. ${login.login} kept its password, which setup can't read, ` +
+              `so it can't make the config again: run setup again, which gives ${login.login} a new password and makes the config with it.`,
+          );
+        }
+        config = now;
+        if (config.caching?.disabled !== true) {
+          await api.disableCaching(account.id, config.id);
+          what = 'kept, its caching turned off';
+        } else {
+          what = 'kept';
+        }
       }
       details.push(`${name.padEnd(width)}${what}`);
-      this.#edit(component, [{ path: ['hyperdrive', 0, 'id'], value: config!.id, what: 'Hyperdrive' }]);
-      this.workers[component].hyperdrive = config!.id;
+      this.#edit(component, [{ path: ['hyperdrive', 0, 'id'], value: config.id, what: 'Hyperdrive' }]);
+      this.workers[component].hyperdrive = config.id;
     }
     return { text: `Hyperdrive configs ${this.workers.app.name} and ${this.workers.vault.name}, caching off`, details };
   }
