@@ -49,7 +49,7 @@ runs:
         # npx keeps its cache where it was.
         home="$(mktemp -d)"
         trap 'rm -rf "$home"' EXIT
-        coffre() { npm_config_cache="${npm_config_cache:-$HOME/.npm}" HOME="$home" npx -y @coffre/cli@0.4.4 "$@"; }
+        coffre() { npm_config_cache="${npm_config_cache:-$HOME/.npm}" HOME="$home" npx -y @coffre/cli@0.4.5 "$@"; }
         # One environment or several, a word each.
         read -r -d '' -a environments <<< "$INPUT_ENVIRONMENT" || true
         if [ -n "$INPUT_SERVICE" ]; then
