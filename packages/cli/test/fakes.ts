@@ -227,7 +227,7 @@ export async function fakeGitHub() {
       state.codes.delete(conversion[1]!);
       if (app === undefined) return response.writeHead(404, { 'content-type': 'application/json' }).end(JSON.stringify({ message: 'Not Found' }));
       return response.writeHead(201, { 'content-type': 'application/json' }).end(
-        JSON.stringify({ ...app, id: 1, pem: '-----BEGIN RSA PRIVATE KEY-----', webhook_secret: 'whsec', html_url: `https://github.com/apps/${app.slug}` }),
+        JSON.stringify({ ...app, id: 1, owner: { login: 'ops', type: 'User' }, pem: '-----BEGIN RSA PRIVATE KEY-----', webhook_secret: 'whsec', html_url: `https://github.com/apps/${app.slug}` }),
       );
     }
     response.writeHead(404).end();

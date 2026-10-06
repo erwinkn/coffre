@@ -8,10 +8,11 @@
 // and the same stdin.
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import pg from 'pg';
 
@@ -62,6 +63,9 @@ globalThis.fetch = (input, init) => {
   ]);
   fakeWrangler(deployment, join(dir, 'wrangler'), TOKEN, realWrangler());
   fakeVite(deployment);
+  // The deployment's own CLI, as its install gives it: the GitHub App's logo is named from there.
+  mkdirSync(join(deployment, 'node_modules', '@coffre', 'cli', 'assets'), { recursive: true });
+  cpSync(fileURLToPath(new URL('../assets/github-app-logo.png', import.meta.url)), join(deployment, 'node_modules', '@coffre', 'cli', 'assets', 'github-app-logo.png'));
   fakeOpener(join(dir, 'bin'));
   url = await database('setup_workers', 'owner');
   env = {
@@ -203,6 +207,11 @@ test('a first run: signed in, Hyperdrive, the GitHub App and the files done; the
   assert.match(text, /✓ Created coffre_runtime and coffre_vault_runtime/);
   assert.match(text, /✓ Hyperdrive configs coffre and coffre-vault, caching off\n\s+coffre\s+made, for coffre_runtime\n\s+coffre-vault\s+made, for coffre_vault_runtime/);
   assert.match(text, /✓ Made coffre's GitHub App, coffre-secrets-acme-test/);
+  // Its logo, which only its page sets: the file from the deployment's own CLI, and where it goes.
+  assert.match(
+    text,
+    new RegExp(`\\n {2}For its logo, upload node_modules/@coffre/cli/assets/github-app-logo\\.png, under Display information, at\\s${github.github.web}/settings/apps/coffre-secrets-acme-test\\n[\\s\\S]*✓ Made coffre's GitHub App`),
+  );
   assert.match(
     text,
     /✓ Filled in app\/wrangler\.jsonc and vault\/wrangler\.jsonc\n\s+app\s+the account, Hyperdrive, GitHub's client ID, the address and its custom domain\n\s+vault\s+the account, Hyperdrive, the root admins and the vault ID\n/,

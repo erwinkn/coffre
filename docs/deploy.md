@@ -272,7 +272,10 @@ of this section itself. Say yes, and it:
    caching off, the password going only in the request to Cloudflare's API;
 4. makes the GitHub App people sign in with, from a manifest: GitHub's page
    opens filled in, and the app's name, `coffre-` and the address, is yours
-   to change there;
+   to change there. Its logo is not: neither a manifest nor GitHub's API
+   sets one. Setup prints the app's settings page and coffre's mark as a
+   PNG, `node_modules/@coffre/cli/assets/github-app-logo.png`, to upload
+   there under Display information;
 5. fills in both `wrangler.jsonc`: the account, the Hyperdrive ids, the
    address and its route, GitHub's client ID, the root admins and the vault
    ID;
@@ -413,8 +416,9 @@ you would rather set up by hand.
 
 Set `PUBLIC_URL` and `GITHUB_CLIENT_ID` in `app/wrangler.jsonc`, from a
 GitHub App whose callback is `<PUBLIC_URL>/auth/callback/github`, with
-read-only access to email addresses, as setup makes it. An OAuth app with
-that callback works too. Set
+read-only access to email addresses, as setup makes it, and, for its logo,
+[coffre's mark](../packages/cli/assets/github-app-logo.png). An OAuth app
+with that callback works too. Set
 `ROOT_ADMINS` in `vault/wrangler.jsonc`: the first people in, whom nobody can
 remove through the API. `VAULT_KEY_ID` comes with the keys, in step 3.
 

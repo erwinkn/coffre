@@ -13,6 +13,7 @@
     "node": ">=20"
   },
   "files": [
+    "assets",
     "dist"
   ],
   "bin": {
