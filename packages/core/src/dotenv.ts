@@ -111,10 +111,11 @@ export function parseDotenv(input: string): ParseResult {
         continue;
       }
     } else {
-      // Unquoted: strip a trailing comment, then trailing whitespace.
-      const comment = rest.indexOf(' #');
-      if (comment !== -1) rest = rest.slice(0, comment);
-      value = rest.trim();
+      // Unquoted: a "#" after whitespace starts a comment, found before trimming, as dotenv does:
+      // `KEY= # later` has no value, `KEY=a #b` is `a`; `KEY=#fff` and `KEY=a#b` keep theirs.
+      const text = withoutExport.slice(equals + 1);
+      const comment = text.search(/\s#/);
+      value = (comment === -1 ? text : text.slice(0, comment)).trim();
       // A secret pasted on its own line, its base64 padding taken for the "=": `c2stbGl2ZS0xMjM0NTY3OA==`
       // leaves "=" after it, `c2stbGl2ZS0xMjM0NTY3ODk=` nothing. Its text would be the key: never named.
       // An empty value is meant only quoted, `KEY=""`; unquoted, it can't be told from that padding.

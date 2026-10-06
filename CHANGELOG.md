@@ -11,9 +11,13 @@ and the web app's import now refuse both, as lines they can't parse, named
 by their number alone. **An empty value must be quoted:** `KEY=""` or
 `KEY=''` imports as empty, and a bare `KEY=` is refused with `no value:
 write KEY="" for an empty one`, since it can't be told from that padding.
-An unquoted value of only `=` is refused too. `coffre export` quotes both,
-so its files import back as they were. A key is one exactly when the API's
-`secretKey` says so.
+An unquoted value of only `=` is refused too. **In an unquoted value, a `#`
+after whitespace starts a comment**, as dotenv has it, found before the
+value is trimmed: `KEY= # later` has no value, and is refused as a bare
+`KEY=` is; it read as `# later`. `KEY=a #b` is `a`; `KEY=#fff` and
+`KEY=a#b` keep their `#`. `coffre export` quotes any value that would read
+differently unquoted, so its files import back as they were. A key is one
+exactly when the API's `secretKey` says so.
 
 **coffre's logo for the GitHub App setup makes.** Neither an app's
 manifest nor GitHub's API sets a logo, so setup can't. Once it has made the

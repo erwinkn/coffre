@@ -100,6 +100,14 @@ test('# inside a value is preserved, and only a spaced # starts a comment', () =
   assert.deepEqual(values('PASSWORD=pw # note'), { PASSWORD: 'pw' }, 'spaced # is a comment');
 });
 
+test('in an unquoted value, a # after whitespace starts a comment, found before trimming', () => {
+  assert.deepEqual(values('COLOR=#fff\nA=a #b\nB=a#b\nC=a\t#b'), { COLOR: '#fff', A: 'a', B: 'a#b', C: 'a' });
+  // A comment alone is no value, refused as a bare KEY= is; `  #fff` too, its # after whitespace.
+  const { entries, problems } = parseDotenv('LATER= # later\nTABBED=\t#later\nSPACED=  #fff');
+  assert.deepEqual(entries, []);
+  assert.deepEqual(problems, [1, 2, 3].map((line) => ({ line, reason: 'no value: write KEY="" for an empty one' })));
+});
+
 test('characters common in real credentials survive verbatim', () => {
   const nasty = String.raw`aA1!@$%^&*()_+-[]{}|;:,.<>?/~\``;
   assert.deepEqual(values(`KEY="${nasty}"`), { KEY: nasty });
@@ -358,6 +366,11 @@ const AWKWARD = [
   '   padded   ',
   'with#hash',
   'with #comment-lookalike',
+  '#fff',
+  'a #b',
+  'a#b',
+  ' # later',
+  'a\t#b',
   'with$dollar and ${BRACES}',
   "with'single",
   'with"double',
@@ -371,6 +384,13 @@ const AWKWARD = [
   'tab\there',
   'unicode: café ☕',
 ];
+
+test('formatDotenv quotes a value that unquoted would read differently: empty, only "=", or with a # or whitespace', () => {
+  assert.equal(
+    formatDotenv([['E', ''], ['P', '=='], ['C', 'a #b'], ['H', '#fff'], ['U', 'a#b'], ['K', 'plain=value']]),
+    "E=''\nP='=='\nC='a #b'\nH='#fff'\nU='a#b'\nK=plain=value\n",
+  );
+});
 
 test('formatDotenv output parses back to exactly the values written', () => {
   const entries = AWKWARD.map((value, index) => [`K${index}`, value] as const);
