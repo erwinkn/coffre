@@ -463,6 +463,44 @@ test("Connected apps lists a person's redeemed connections, and Disconnect ends 
   ]);
 });
 
+test("an owner reads a person's connected apps in their report; removal disconnects them, says how many, and re-admission brings none back", async () => {
+  const app = await connect();
+  // A consent whose code was never redeemed is no connected app, but removal ends it too.
+  await decide(await session(DEV), request(CLAUDE_CODE, 'http://localhost:5000/callback', pkce().challenge), { approve: true });
+  const root = await session(ROOT);
+  const as = (method: string, path: string, token = root) => route(path, { method, headers: { authorization: `Bearer ${token}` } });
+  type Report = { live: { apps: number }; apps: { name: string; host: string; scopes: string[] }[] };
+  const before = (await (await as('GET', `/api/members/user:${DEV}`)).json()) as Report;
+  assert.equal(before.live.apps, 1);
+  assert.deepEqual(before.apps.map((listed) => [listed.name, listed.host, listed.scopes]), [['Claude Code', 'claude.ai', ['browse']]]);
+  assert.equal((await as('GET', `/api/members/user:${DEV}`, await session(OTHER))).status, 403, "only owners read someone's report");
+
+  const removal = await as('DELETE', `/api/members/user:${DEV}`);
+  assert.equal(removal.status, 200, await removal.clone().text());
+  const { revoked, report } = (await removal.json()) as { revoked: { apps: number }; report: Report };
+  assert.equal(revoked.apps, 1, 'the code never redeemed is no app, and is not counted');
+  assert.deepEqual([report.live.apps, report.apps], [0, []]);
+  assert.equal((await discover(app.access_token)).status, 401);
+  const rows = await db.owner.select().from(mcpConnections).where(eq(mcpConnections.principal, `user:${DEV}`));
+  assert.deepEqual(rows.map((row) => [row.revokedAt !== null, row.revokedBy]), [[true, ROOT], [true, ROOT]], 'revoked, not only dead by the generation');
+
+  // As a removal before this release left them, dead by the generation alone: re-admission revokes them.
+  await updateAuth(db.owner, deps.chainKey, mcpConnections, { principal: `user:${DEV}` }, { revokedAt: null, revokedBy: null });
+  assert.equal((await as('PUT', `/api/members/user:${DEV}`)).status, 200);
+  const readmitted = await db.owner.select().from(mcpConnections).where(eq(mcpConnections.principal, `user:${DEV}`));
+  assert.deepEqual(readmitted.map((row) => row.revokedBy), [ROOT, ROOT]);
+  const back = (await (await as('GET', `/api/members/user:${DEV}`)).json()) as Report;
+  assert.deepEqual([back.live.apps, back.apps], [0, []], 'a fresh start');
+  assert.equal((await route('/api/oauth/token', tokenRequest({ grant_type: 'refresh_token', refresh_token: app.refresh_token, client_id: CLAUDE_CODE }))).status, 400);
+});
+
+test("an instance that serves no MCP lists no one's apps", async () => {
+  await connect();
+  const response = await route(`/api/members/user:${DEV}`, { headers: { authorization: `Bearer ${await session(ROOT)}` } }, off);
+  const report = (await response.json()) as { live: { apps: number }; apps: unknown[] };
+  assert.deepEqual([report.live.apps, report.apps], [0, []]);
+});
+
 test('a consent abandoned before its code was redeemed does not count against the twenty', async () => {
   const dev = await session(DEV);
   const consent = () => decide(dev, request(CLAUDE_CODE, 'http://localhost:5000/callback', pkce().challenge), { approve: true });

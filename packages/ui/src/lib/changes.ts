@@ -1,4 +1,4 @@
-import type { CoffreClient, ConnectedApp, IdentityRow, SecretKey, SessionRow } from '@coffre/client';
+import type { CoffreClient, ConnectedApp, IdentityRow, OffboardingReport, SecretKey, SessionRow } from '@coffre/client';
 import type { Role } from '@coffre/core/access';
 import type { QueryKey } from '@tanstack/react-query';
 
@@ -33,6 +33,7 @@ function listOf<TItem, TData extends { ok: boolean } | null>(
 
 const ARCHIVING: Words = { pending: 'Archiving…', done: 'archived', failed: 'Not archived.' };
 const REVOKING: Words = { pending: 'Revoking…', done: 'revoked', failed: 'Not revoked.' };
+const DISCONNECTING: Words = { pending: 'Disconnecting…', done: 'disconnected', failed: 'Not disconnected.' };
 
 const saving = (id: string): Target => ({ id, kind: 'saving' });
 const removing = (id: string): Target => ({ id, kind: 'removing' });
@@ -237,8 +238,28 @@ export function disconnectApp(client: CoffreClient): Change<Apps, ConnectedApp, 
     list: listOf<ConnectedApp, Apps>(keys.apps, 'apps', (app) => app.id),
     label: (app) => app.name,
     targets: (app) => [removing(app.id)],
-    removing: { pending: 'Disconnecting…', done: 'disconnected', failed: 'Not disconnected.' },
+    removing: DISCONNECTING,
     affects: () => affects.apps(),
+    run: (app) => client.apps.disconnect(app.id),
+  };
+}
+
+type Report = { ok: true; report: OffboardingReport | null } | Failure | null;
+
+/** An owner disconnecting someone's app, on their page: their report lists it, as the owner reads it. */
+export function disconnectMemberApp(client: CoffreClient, member: string): Change<Report, ConnectedApp, ConnectedApp, unknown> {
+  return {
+    list: {
+      queryKey: [...keys.report(member), { owner: true }],
+      items: (data) => (data?.ok === true ? (data.report?.apps ?? []) : []),
+      withItems: (data, apps) => (data?.ok === true && data.report !== null ? { ...data, report: { ...data.report, apps } } : data),
+      id: (app) => app.id,
+    },
+    label: (app) => app.name,
+    targets: (app) => [removing(app.id)],
+    removing: DISCONNECTING,
+    // Their report counts what removing them would end; an owner's own apps may be among them.
+    affects: () => [keys.report(member), ...affects.apps()],
     run: (app) => client.apps.disconnect(app.id),
   };
 }

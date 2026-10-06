@@ -119,6 +119,7 @@ export async function pagesInBrowser(deployment: Deployment, admin: Person, brow
         expect(loaded.dialog?.includes('Removing revokes 0 grants, 0 bearer tokens') === true, `${path}: Remove… does not preview what it would revoke`, loaded.dialog);
       }
       if (path === '/settings') expect(loaded.cards.includes('Keys'), '/settings does not show what the keys are checked against', loaded.cards);
+      if (path === person) expect(loaded.cards.includes('Connected apps'), `${path} does not show an owner the person's connected apps`, loaded.cards);
     }
     // A project's tabs are routes: their links, back and forward move between them in the page.
     const project = new URL(`/projects/${PROJECT}`, deployment.origin).href;

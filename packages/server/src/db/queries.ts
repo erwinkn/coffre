@@ -962,14 +962,15 @@ export async function revokePriorMembership(
   generation: number,
   revokedBy: string,
 ): Promise<void> {
-  const { credentials, identities } = tablesOf(db);
+  const { credentials, identities, mcpConnections } = tablesOf(db);
   const revokedAt = new Date();
-  const older = (table: typeof credentials | typeof identities) =>
+  const older = (table: typeof credentials | typeof identities | typeof mcpConnections) =>
     and(eq(table.principal, principalOf(principal)), lt(table.generation, generation), isNull(table.revokedAt));
   // Expired credentials are dead already, and a CI service leaves one behind each run.
   const tables = [
     [credentials, and(older(credentials), gt(credentials.expiresAt, revokedAt))],
     [identities, older(identities)],
+    [mcpConnections, and(older(mcpConnections), gt(mcpConnections.expiresAt, revokedAt))],
   ] as const;
   for (const [table, where] of tables) {
     for (const row of await db.select().from(table).where(where)) {

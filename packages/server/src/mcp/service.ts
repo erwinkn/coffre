@@ -345,9 +345,17 @@ export class McpService {
 
   // --- connected apps -----------------------------------------------------------
 
-  /** The person's connected apps, newest first: those whose client redeemed its code. */
+  /** Your connected apps: Connected apps on your account page. */
   async apps(asker: Asker): Promise<ConnectedApp[]> {
-    const live = await liveConnections(this.#deps.db, this.#deps.chainKey, principalOf(asker.caller.principal), new Date());
+    return this.appsOf(principalOf(asker.caller.principal));
+  }
+
+  /**
+   * A person's connected apps, `user:<email>`, newest first: those whose
+   * client redeemed its code. Their member report lists them for owners.
+   */
+  async appsOf(principal: string): Promise<ConnectedApp[]> {
+    const live = await liveConnections(this.#deps.db, this.#deps.chainKey, principal, new Date());
     return live
       .filter((row) => row.refreshHash !== null)
       .map((row) => ({

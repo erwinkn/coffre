@@ -113,7 +113,7 @@ test('removing someone revokes every way in, so re-adding them starts from nothi
   const cli = await cliSession(DEV);
 
   const { revoked } = await root.members.remove(`user:${DEV}`);
-  assert.deepEqual(revoked, { grants: 1, sessions: 2, tokens: 0, identities: 1 });
+  assert.deepEqual(revoked, { grants: 1, sessions: 2, tokens: 0, identities: 1, apps: 0 });
   await root.members.add(`user:${DEV}`);
 
   await assert.rejects(signin.verify(browser.token), /unknown, expired or revoked/);
@@ -139,7 +139,7 @@ test('removing someone revokes every way in, so re-adding them starts from nothi
 test('a removed service loses its tokens for good', async () => {
   const token = await lead.tokens.issue(`token:${SERVICE}`, { label: 'ci', expiresInDays: 30 });
   const { revoked } = await root.members.remove(`token:${SERVICE}`);
-  assert.deepEqual(revoked, { grants: 0, sessions: 0, tokens: 1, identities: 0 });
+  assert.deepEqual(revoked, { grants: 0, sessions: 0, tokens: 1, identities: 0, apps: 0 });
   await root.members.add(`token:${SERVICE}`);
   await assert.rejects(signin.verify(token.token), /unknown, expired or revoked/);
 });
@@ -167,7 +167,7 @@ test('R4: a junk credential inserted by the app login does not break listings or
   await db.runtime.insert(credentials).values({ ...row, id, tokenHash: hashToken(token) });
 
   assert.ok((await root.members.list()).members.some((entry) => entry.member === `user:${DEV}`));
-  assert.deepEqual((await root.members.get(`user:${DEV}`)).live, { grants: 1, sessions: 2, tokens: 0, identities: 1 });
+  assert.deepEqual((await root.members.get(`user:${DEV}`)).live, { grants: 1, sessions: 2, tokens: 0, identities: 1, apps: 0 });
   assert.equal((await signin.verify(browser.token)).id, DEV);
   await assert.rejects(signin.verify(token), /authentic|tamper|unknown/i);
   assert.ok(report.mock.calls.some((call) => {
@@ -176,7 +176,7 @@ test('R4: a junk credential inserted by the app login does not break listings or
   }));
 
   const { revoked } = await root.members.remove(`user:${DEV}`);
-  assert.deepEqual(revoked, { grants: 1, sessions: 2, tokens: 0, identities: 1 });
+  assert.deepEqual(revoked, { grants: 1, sessions: 2, tokens: 0, identities: 1, apps: 0 });
   await root.members.add(`user:${DEV}`);
   await assert.rejects(signin.verify(browser.token), /unknown, expired or revoked/);
   await assert.rejects(signin.verify(cli.token), /unknown, expired or revoked/);
@@ -192,7 +192,7 @@ test('R4: a bad identity and the session depending on it are dead while healthy 
   await db.owner.update(identities).set({ subject: 'edited-around-the-app' }).where(eq(identities.id, identity.id));
 
   assert.ok((await root.members.list()).members.some((entry) => entry.member === `user:${DEV}`));
-  assert.deepEqual((await root.members.get(`user:${DEV}`)).live, { grants: 1, sessions: 1, tokens: 0, identities: 0 });
+  assert.deepEqual((await root.members.get(`user:${DEV}`)).live, { grants: 1, sessions: 1, tokens: 0, identities: 0, apps: 0 });
   assert.equal((await signin.verify(cli.token)).id, DEV);
   await assert.rejects(signin.verify(browser.token), /authentic|tamper|unknown/i);
   assert.ok(report.mock.calls.some((call) => {
@@ -201,7 +201,7 @@ test('R4: a bad identity and the session depending on it are dead while healthy 
   }));
 
   const { revoked } = await root.members.remove(`user:${DEV}`);
-  assert.deepEqual(revoked, { grants: 1, sessions: 1, tokens: 0, identities: 0 });
+  assert.deepEqual(revoked, { grants: 1, sessions: 1, tokens: 0, identities: 0, apps: 0 });
   await root.members.add(`user:${DEV}`);
   await assert.rejects(signin.verify(cli.token), /unknown, expired or revoked/);
   await assert.rejects(signin.verify(browser.token), /authentic|tamper|unknown/i);
@@ -273,7 +273,7 @@ test('the report tells who removed someone, and that nothing still lets them in'
   const before = await root.members.get(`user:${DEV}`);
   assert.equal(before.status, 'active');
   assert.equal(before.instanceRole, 'user');
-  assert.deepEqual(before.live, { grants: 1, sessions: 1, tokens: 0, identities: 1 });
+  assert.deepEqual(before.live, { grants: 1, sessions: 1, tokens: 0, identities: 1, apps: 0 });
   assert.equal(before.removedAt, null);
 
   await lead.members.remove(`user:${DEV}`);
@@ -281,7 +281,7 @@ test('the report tells who removed someone, and that nothing still lets them in'
   assert.equal(after.status, 'removed');
   assert.equal(after.removedBy, LEAD);
   assert.ok(after.removedAt !== null);
-  assert.deepEqual(after.live, { grants: 0, sessions: 0, tokens: 0, identities: 0 });
+  assert.deepEqual(after.live, { grants: 0, sessions: 0, tokens: 0, identities: 0, apps: 0 });
 
   await root.members.add(`user:${DEV}`);
   const back = await root.members.get(`user:${DEV}`);

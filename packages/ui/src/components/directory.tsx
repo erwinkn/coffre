@@ -430,7 +430,7 @@ const plural = (count: number, one: string) => `${count} ${one}${count === 1 ? '
  * they leave behind to rotate.
  */
 function RemovalPreview({ principal, open }: { principal: DirectoryPrincipal; open: boolean }) {
-  const { capabilities } = useShell();
+  const { capabilities, features } = useShell();
   const person = principal.principalType === 'user';
   const { data, isPending } = useQuery({
     ...queries.report(useCoffre(), memberOf(principal), capabilities.canManageGrants),
@@ -450,8 +450,15 @@ function RemovalPreview({ principal, open }: { principal: DirectoryPrincipal; op
       : 'Its bearer tokens and trust bindings stop working, and its project access is revoked at once.';
   }
   const { live } = report;
+  // Named, as an app's name is what its person knows it by: "2 connected apps (Claude, Cursor)".
+  const apps = `${plural(live.apps, 'connected app')}${report.apps.length > 0 ? ` (${report.apps.map((app) => app.name).join(', ')})` : ''}`;
   const revokes = person
-    ? [plural(live.grants, 'grant'), plural(live.sessions, 'session'), plural(live.identities, 'linked sign-in account')]
+    ? [
+        plural(live.grants, 'grant'),
+        plural(live.sessions, 'session'),
+        plural(live.identities, 'linked sign-in account'),
+        ...(features.mcp ? [apps] : []),
+      ]
     : [plural(live.grants, 'grant'), plural(live.tokens, 'bearer token')];
   return (
     <>

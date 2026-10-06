@@ -11,7 +11,7 @@ the CLI, `offboard` previews first, like `import`:
 
 ```
 $ coffre offboard alice@acme.example
-alice@acme.example is active; removing would revoke 3 grants, 2 sessions, 1 linked account
+alice@acme.example is active; removing would revoke 3 grants, 2 sessions, 1 linked account, 1 connected app
 
 Values they saw that nobody has changed since, to rotate once they leave (4)
   market/prod/DATABASE_URL       v4    read 2026-09-12
@@ -19,22 +19,27 @@ Values they saw that nobody has changed since, to rotate once they leave (4)
   ops/deploy/GITHUB_TOKEN          v1    read 2026-09-01
   market/dev/REDIS_URL           v3    read 2026-09-25
 
+Connected apps, which removing them disconnects (1)
+  Claude  claude.ai, may browse, write, last used 2026-09-30
+
 Nothing changed. Re-run with --apply to remove alice@acme.example.
 
 $ coffre offboard alice@acme.example --apply
-removed alice@acme.example: revoked 3 grants, 2 sessions, 1 linked account
+removed alice@acme.example: revoked 3 grants, 2 sessions, 1 linked account, 1 connected app
 …
 ```
 
 The vault removes them in one transaction of its own: it revokes every
 grant they hold, on a project, an environment or every project, marks them
 removed, and moves their *generation* on.
-Every session, CLI login, service account's bearer token, linked account and device approval
-carries the generation it was issued under, so all of them stop working at
+Every session, CLI login, service account's bearer token, linked account,
+device approval and connected MCP app carries the generation it was issued under, so all of them stop working at
 that moment, whatever happens next. The vault logs one `member.remove`, and
 one `access.revoke` per grant, so each project's log shows who lost access to
-it. Then the app marks the sessions, tokens and linked accounts revoked, so
-they no longer list as live.
+it. Then the app marks the sessions, tokens, linked accounts and connected
+apps revoked, so they no longer list as live. The removal dialog names the
+apps it disconnects, and so does the person's page, for owners, under
+**Connected apps**, where each can be disconnected on its own.
 
 A sign-in racing a removal either finishes first and is cut off by the new
 generation, or is refused. Every request checks the member, in both sign-in

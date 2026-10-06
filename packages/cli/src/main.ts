@@ -884,13 +884,18 @@ function plural(count: number, word: string): string {
   return `${count} ${word}${count === 1 ? '' : 's'}`;
 }
 
-/** "2 grants, 1 session, 0 linked accounts": what a removal ends. */
+/** "2 grants, 1 session, 0 linked accounts, 1 connected app": what a removal ends. */
 function waysIn(
   principalType: 'user' | 'service',
-  counts: { grants: number; sessions: number; tokens: number; identities: number },
+  counts: { grants: number; sessions: number; tokens: number; identities: number; apps: number },
 ): string {
   return principalType === 'user'
-    ? [plural(counts.grants, 'grant'), plural(counts.sessions, 'session'), plural(counts.identities, 'linked account')].join(', ')
+    ? [
+        plural(counts.grants, 'grant'),
+        plural(counts.sessions, 'session'),
+        plural(counts.identities, 'linked account'),
+        plural(counts.apps, 'connected app'),
+      ].join(', ')
     : [plural(counts.grants, 'grant'), plural(counts.tokens, 'token')].join(', ');
 }
 
@@ -1012,6 +1017,15 @@ async function offboard(args: string[]): Promise<void> {
       `  ${names[index]!.padEnd(width)}  v${String(entry.version).padEnd(4)} ${entry.how} ${entry.at.slice(0, 10)}\n`,
     );
   });
+
+  if (report.apps.length > 0) {
+    process.stdout.write(`\nConnected apps, which removing them disconnects (${report.apps.length})\n`);
+    const width = Math.max(...report.apps.map((app) => app.name.length));
+    for (const app of report.apps) {
+      const used = app.lastUsedAt === null ? 'never used' : `last used ${app.lastUsedAt.slice(0, 10)}`;
+      process.stdout.write(`  ${app.name.padEnd(width)}  ${app.host ?? 'no website'}, may ${app.scopes.join(', ')}, ${used}\n`);
+    }
+  }
 
   if (report.issuedTokens.length > 0) {
     process.stdout.write(`\nBearer tokens ${they} issued to service accounts, which still work\n`);
