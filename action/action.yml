@@ -1,5 +1,5 @@
 name: coffre
-description: Read an environment from coffre, mask its secrets, and make them available to subsequent steps
+description: Read one or more environments from coffre, mask their secrets, and make them available to subsequent steps
 inputs:
   url:
     description: URL of your coffre instance
@@ -8,7 +8,9 @@ inputs:
     description: A coffre service token with read access to the environment; or, instead, `service`
     required: false
   environment:
-    description: The project/environment to read
+    description: >-
+      The project/environment to read; or several, separated by spaces or lines, read together:
+      a key two of them define stops the step before anything is read
     required: true
   service:
     description: >-
@@ -48,11 +50,13 @@ runs:
         home="$(mktemp -d)"
         trap 'rm -rf "$home"' EXIT
         coffre() { npm_config_cache="${npm_config_cache:-$HOME/.npm}" HOME="$home" npx -y @coffre/cli@0.4.1 "$@"; }
+        # One environment or several, a word each.
+        read -r -d '' -a environments <<< "$INPUT_ENVIRONMENT" || true
         if [ -n "$INPUT_SERVICE" ]; then
           # Nothing more than its name, and the runner's ID token.
-          coffre --url "$INPUT_URL" --service "$INPUT_SERVICE" export --format github "$INPUT_ENVIRONMENT"
+          coffre --url "$INPUT_URL" --service "$INPUT_SERVICE" export --format github "${environments[@]}"
         else
           # The token goes on stdin, never in an argument, which ps shows.
           printf '%s' "$INPUT_TOKEN" | coffre login "$INPUT_URL" --token
-          coffre --url "$INPUT_URL" export --format github "$INPUT_ENVIRONMENT"
+          coffre --url "$INPUT_URL" export --format github "${environments[@]}"
         fi

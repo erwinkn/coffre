@@ -108,7 +108,7 @@ jobs:
         with:
           url: ${{ env.ACTION_TEST_URL }}
           token: ${{ env.ACTION_TEST_TOKEN }}
-          environment: action-test/ci
+          environment: action-test/ci action-test/deploy
       - name: Assert values and exercise runner masking
         env:
           TOOLING_NODE: ${{ steps.tooling.outputs.node }}

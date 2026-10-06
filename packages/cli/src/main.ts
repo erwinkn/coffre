@@ -21,6 +21,7 @@ import { exchange, idToken } from './workload.ts';
 import { commandLine, readSession } from './flags.ts';
 import { readSecret } from './secret.ts';
 import { help, lookup, usage, type Command } from './commands.ts';
+import { clash, environmentPaths, listOf } from './environments.ts';
 import * as manage from './manage.ts';
 import { memberOf, parse, UsageError } from './manage.ts';
 import { cliVersion } from './version.ts';
@@ -43,6 +44,7 @@ import {
 } from './instance.ts';
 import {
   byFolder,
+  CoffreError,
   createClient,
   planImport,
   apiMember,
@@ -678,21 +680,55 @@ async function readValue(key: string): Promise<string> {
 }
 
 /**
- * Fetch every secret for an environment and exec a command with them in the
- * environment. One round trip, and one audit row per secret injected.
+ * Every value in the environments named, as one environment: all are read,
+ * or none is. One is read as it always was. Of several, each is listed
+ * first, which opens no value: one the caller may not read, a reference in
+ * it that cannot be read, or a key two of them define stops here, before
+ * anything is read. Then each is read, one audited read apiece, and what
+ * came back is checked again, for an environment changed in between.
+ */
+async function readEnvironments(paths: readonly string[]): Promise<[string, string][]> {
+  if (paths.length > 1) {
+    const listing = client(target(), undefined, [403, 404]);
+    const keys: [string, string[]][] = [];
+    for (const path of paths) {
+      const listed = await listing.secrets.list(path).catch((error: unknown) =>
+        fail(`${path}: ${error instanceof CoffreError ? error.message : String(error)}. Nothing was read`),
+      );
+      const live = listed.keys.filter(({ archived }) => !archived);
+      // A key without a value of its own reads through its reference, which reveal refuses for the whole environment when it cannot.
+      const stuck = live.find(({ version, reference }) => version === null && reference !== null && reference.state !== 'live');
+      if (stuck !== undefined) {
+        fail(`${path}/${stuck.key} is a reference that cannot be read (${stuck.reference!.state.replaceAll('_', ' ')}): \`coffre references ${path}\` says more. Nothing was read`);
+      }
+      keys.push([path, live.filter(({ version, reference }) => version !== null || reference !== null).map(({ key }) => key)]);
+    }
+    const shared = clash(keys);
+    if (shared !== null) fail(`${shared}: a key comes from one environment only. Nothing was read`);
+  }
+  const read: [string, Record<string, string>][] = [];
+  for (const path of paths) read.push([path, (await client().secrets.reveal(path)).values]);
+  const shared = clash(read.map(([path, values]) => [path, Object.keys(values)]));
+  if (shared !== null) fail(`${shared}, as they were read just now: none of their values is used, and each read is in the audit log`);
+  return read.flatMap(([, values]) => Object.entries(values));
+}
+
+/**
+ * Fetch every secret of the environments named and exec a command with them
+ * in its environment: one audited read per environment, and one audit row
+ * per secret injected.
  */
 async function run(args: string[]): Promise<void> {
   const separator = args.indexOf('--');
   if (separator === -1 || separator === args.length - 1) {
-    fail('usage: coffre run <project>/<environment> -- <command> [args...]');
+    fail('usage: coffre run <project>/<environment> [<project>/<environment> ...] -- <command> [args...]');
   }
 
-  const [target] = parse(args.slice(0, separator), {}, ['<project>/<environment>']).positionals as [string];
-
-  const { project, environment } = parsePath(target);
+  const { positionals } = parseArgs({ args: args.slice(0, separator), options: {}, allowPositionals: true, strict: true });
+  const paths = environmentPaths(positionals);
   const command = args.slice(separator + 1);
 
-  const { values } = await client().secrets.reveal(`${project}/${environment}`);
+  const values = Object.fromEntries(await readEnvironments(paths));
 
   const child = spawn(command[0], command.slice(1), {
     // Secrets are passed through the environment of the child only. They are
@@ -710,9 +746,9 @@ async function run(args: string[]): Promise<void> {
 }
 
 /**
- * Print every secret in an environment, for tools that want a file or a
- * shell rather than a child process. Each value read is one audit row in
- * your name, exactly as with `run`.
+ * Print every secret of the environments named, for tools that want a file
+ * or a shell rather than a child process. Each value read is one audit row
+ * in your name, exactly as with `run`.
  */
 async function exportEnv(args: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
@@ -720,17 +756,14 @@ async function exportEnv(args: string[]): Promise<void> {
     options: { format: { type: 'string', default: 'dotenv' } },
     allowPositionals: true,
   });
-  const usage = 'usage: coffre export <project>/<environment> [--format dotenv|json|shell|github]';
-  if (!positionals[0]) fail(usage);
+  const usage = 'usage: coffre export <project>/<environment> [<project>/<environment> ...] [--format dotenv|json|shell|github]';
   const format = values.format;
   if (format !== 'dotenv' && format !== 'json' && format !== 'shell' && format !== 'github') fail(usage);
+  const paths = environmentPaths(positionals);
   const githubEnv = process.env.GITHUB_ENV;
   if (format === 'github' && !githubEnv) fail('--format github requires GITHUB_ENV (run it in a GitHub Actions step)');
 
-  const { project, environment } = parsePath(positionals[0]);
-  const revealed = await client().secrets.reveal(`${project}/${environment}`);
-
-  const entries = Object.entries(revealed.values).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  const entries = (await readEnvironments(paths)).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
   if (format === 'github') {
     // All masks precede validation, file I/O and the summary. Never print the
     // environment records, even if the file cannot be written.
@@ -744,7 +777,7 @@ async function exportEnv(args: string[]): Promise<void> {
   if (process.stderr.isTTY) {
     const count = entries.length;
     process.stderr.write(
-      `coffre: read ${count} secret${count === 1 ? '' : 's'} from ${project}/${environment}; each read is in the audit log under your name\n`,
+      `coffre: read ${count} secret${count === 1 ? '' : 's'} from ${listOf(paths)}; each read is in the audit log under your name\n`,
     );
   }
 }

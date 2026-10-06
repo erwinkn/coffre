@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+**`coffre run` and `coffre export` read several environments.** `coffre
+run deploy/prod auth/prod -- ./deploy` gives the command both
+environments' keys, where it took nesting one `coffre run` in another,
+and the inner one's key won when both had it. Every environment is read,
+one audited read each, or none is: the CLI first lists each one's keys,
+which reads no value, and stops if it may not read one, if one holds a
+reference that cannot be read, or if two define the same key, naming the
+key and both environments, never a value. `coffre export` takes the same
+list, in each format, and the Action's `environment` input takes several,
+separated by spaces or lines ([docs/ci.md](docs/ci.md#several-environments)).
+Both commands now refuse a secret's path, `market/prod/KEY`, where they
+name an environment: `run` read the whole environment for it.
+
 **A base64 secret pasted on its own line is not imported under its own
 text.** Base64 that starts with a letter is a valid key name, and its
 padding supplied the `=`: `c2stbGl2ZS0xMjM0NTY3ODkwYWJjZGVmZ2hpamtsbW4=`,

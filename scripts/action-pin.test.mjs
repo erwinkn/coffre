@@ -147,9 +147,13 @@ test('the Action takes one of a token or a service, and a service only with the 
             `npx ran with: ${cli} --url https://coffre.example.com export --format github app/ci\nstdin: \n`,
     );
     assert.ok(!token.stderr.includes('coffre_svc_x'));
+    // Several environments, by spaces or lines as a YAML block gives them: a word each, read together.
+    const several = run({ INPUT_SERVICE: 'token:api-deploy', ACTIONS_ID_TOKEN_REQUEST_URL: 'https://runner.example/token', INPUT_ENVIRONMENT: 'deploy/prod  auth/prod\nwww/prod\n' });
+    assert.equal(several.status, 0, several.stderr);
+    assert.equal(several.stdout, `npx ran with: ${cli} --url https://coffre.example.com --service token:api-deploy export --format github deploy/prod auth/prod www/prod\nstdin: \n`);
     // Each step's CLI had a home of its own, not the runner user's, and it went with the step.
     const homes = readFileSync(join(dir, 'homes'), 'utf8').trim().split('\n');
-    assert.equal(new Set(homes).size, 2, 'one home per step, shared by its commands');
+    assert.equal(new Set(homes).size, 3, 'one home per step, shared by its commands');
     for (const home of homes) {
         assert.notEqual(home, process.env.HOME);
         assert.equal(existsSync(home), false, `${home} outlived the step`);
