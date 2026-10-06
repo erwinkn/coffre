@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.4 (2026-10-06)
+
 **An MCP client lists only the tools its person's roles reach.**
 `tools/list`, in both protocol eras, leaves out the tools no role the
 person holds reaches anywhere: a viewer's client no longer offers

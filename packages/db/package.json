@@ -1,6 +1,6 @@
 {
   "name": "@coffre/db",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "coffre's database: the schema, its migrations and the connections, on Postgres or SQLite.",
   "license": "MIT",
   "repository": {
