@@ -7,9 +7,11 @@
  *
  * Every call is one `fetch`. Pass a `transport` to send requests somewhere
  * else: the web app hands requests straight to its router, and the CLI adds
- * its own handling of Cloudflare Access redirects.
+ * its own handling of Cloudflare Access redirects. A request that never
+ * reaches the instance throws `Unreachable`, which says why.
  */
 import type { Api, AuthInfo, BindingPlan, BindingView, DeletionResult, DryRunOutcome, DryRunResult, SetResult } from './api.ts';
+import { Unreachable } from './reach.ts';
 
 export type {
   AccessValue,
@@ -47,6 +49,7 @@ export type {
 
 export { byFolder, foldersOf } from './folders.ts';
 export { apiMember, serviceName, shownMember } from './members.ts';
+export { unreachable, Unreachable } from './reach.ts';
 
 export type RouteKey = keyof Api;
 /** What a caller sends: the body, or the query string for a GET. */
@@ -104,7 +107,15 @@ function place(path: string): { project: string; environment: string; key: strin
 
 export function createClient(options: ClientOptions) {
   const origin = options.url.replace(/\/+$/, '');
-  const transport = options.transport ?? ((request: Request) => fetch(request));
+  const transport =
+    options.transport ??
+    (async (request: Request) => {
+      try {
+        return await fetch(request);
+      } catch (error) {
+        throw new Unreachable(origin, error);
+      }
+    });
 
   async function send(method: string, path: string, input: unknown): Promise<unknown> {
     const url = new URL(`${origin}/api${path}`);

@@ -48,6 +48,7 @@ import {
   apiMember,
   serviceName,
   shownMember,
+  unreachable,
   type CoffreClient,
 } from '@coffre/client';
 import { assignableToEnvironment, isRole, ROLES, type Role } from '@coffre/core/access';
@@ -176,7 +177,7 @@ async function send(request: Request, to: Target, hint?: Hint, handled: readonly
     // later explodes in JSON parsing.
     response = await fetch(request, { redirect: 'manual' });
   } catch (error) {
-    fail(`could not reach ${to.origin}: ${error instanceof Error ? error.message : String(error)}`);
+    fail(unreachable(to.origin, error));
   }
 
   const relogin = `run \`coffre login ${to.origin}\``;
@@ -319,7 +320,7 @@ async function login(args: string[]): Promise<void> {
       body: JSON.stringify({ client_label: `coffre CLI on ${hostname()}` }),
     });
   } catch (error) {
-    fail(`could not reach ${origin}: ${error instanceof Error ? error.message : String(error)}`);
+    fail(unreachable(origin, error));
   }
   if (started.status === 429) fail('too many sign-in attempts from this address; wait a minute and retry');
   if (!started.ok || !isJsonContentType(started.headers.get('content-type'))) {
@@ -368,7 +369,7 @@ async function askMode(origin: string): Promise<'signin' | 'cloudflare'> {
   try {
     response = await fetch(`${origin}/api/auth`, { redirect: 'manual', headers: { accept: 'application/json' } });
   } catch (error) {
-    fail(`could not reach ${origin}: ${error instanceof Error ? error.message : String(error)}`);
+    fail(unreachable(origin, error));
   }
   const body = isJsonContentType(response.headers.get('content-type'))
     ? await response.json().catch(() => undefined)
@@ -526,12 +527,16 @@ async function logout(args: string[]): Promise<void> {
   if (session.kind === undefined && session.mode === 'signin' && session.token) {
     // Revoking is the point; if the server is unreachable, say so rather than
     // pretend the token is dead.
-    const response = await fetch(`${origin}/api/auth/logout`, {
-      method: 'POST',
-      redirect: 'manual',
-      headers: { authorization: `Bearer ${session.token}`, 'content-type': 'application/json' },
-    }).catch(() => null);
-    if (response === null) fail(`could not reach ${origin} to end the session; nothing was changed`);
+    let response: Response;
+    try {
+      response = await fetch(`${origin}/api/auth/logout`, {
+        method: 'POST',
+        redirect: 'manual',
+        headers: { authorization: `Bearer ${session.token}`, 'content-type': 'application/json' },
+      });
+    } catch (error) {
+      fail(`${unreachable(`${origin} to end the session`, error)}; nothing was changed`);
+    }
     // 401: the session had already ended, which is what we wanted anyway.
     if (!response.ok && response.status !== 401) {
       fail(`${origin} refused to end the session (status ${response.status}); nothing was changed`);

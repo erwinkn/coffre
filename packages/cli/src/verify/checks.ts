@@ -3,7 +3,7 @@
 // line a check, run on past a failure so that one run shows everything.
 import { inspect } from 'node:util';
 
-import { CoffreError, createClient, type CoffreClient } from '@coffre/client';
+import { CoffreError, createClient, Unreachable, type CoffreClient } from '@coffre/client';
 
 import { style, type Output } from '../tty.ts';
 
@@ -92,7 +92,8 @@ export class Checks {
         this.#print(name, 'skip', error.message);
         return undefined;
       }
-      const detail = error instanceof Failure ? error.detail : error instanceof Error ? error.stack : error;
+      // An instance this machine cannot reach: the message says why, and the stack nothing more.
+      const detail = error instanceof Failure ? error.detail : error instanceof Unreachable ? undefined : error instanceof Error ? error.stack : error;
       this.#print(name, 'fail', error instanceof Error ? error.message : String(error), detail);
       return undefined;
     }
