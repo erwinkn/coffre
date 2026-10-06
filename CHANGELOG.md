@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+**An owner sees a person's connected apps.** A person's page lists, to
+owners, the MCP apps they connected, under **Connected apps**, and each can
+be disconnected there. The member report (`GET /api/members/<member>`) has
+`apps`, and `live.apps` counts them. Removing someone disconnects their
+apps, not only through the generation: the removal dialog and `coffre
+offboard` name them and count them first, and `revoked.apps` says how many
+went. Re-admitting someone revokes the apps of their earlier membership
+too, so none is listed again.
+
 **Node: a vault in its own process no longer fails a call now and then.**
 The server keeps its connections to the vault's socket open, and the
 vault's HTTP server ended one idle for six seconds, Node's default. A call

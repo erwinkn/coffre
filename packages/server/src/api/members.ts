@@ -2,11 +2,12 @@ import { randomUUID } from 'node:crypto';
 
 import { allows, EVERY_PROJECT, grantKind, ROLES, type Permission, type Role } from '@coffre/core/access';
 import type { Queryable } from '@coffre/db';
-import { credentials, identities } from '@coffre/db/schema';
+import { credentials, identities, mcpConnections } from '@coffre/db/schema';
 
 import { actorParts } from '../db/audit.ts';
 import {
   revokePriorMembership,
+  liveConnections,
   memberActivity,
   members as loadMembers,
   missingMembers,
@@ -19,6 +20,7 @@ import {
 import { can, canAnywhere, type Caller } from './caller.ts';
 import { audited, denied, Refusal, requireOwner, withRefusals, type ApiContext } from './context.ts';
 import { conflict, forbidden, notFound, vaultRefused } from './errors.ts';
+import type { ConnectedApp } from '../mcp/service.ts';
 import { formatMember, parseGrantee, type MemberRef, type Path } from './paths.ts';
 import { referencesBy, type ReferenceView } from './references.ts';
 
@@ -89,13 +91,15 @@ export type OffboardingReport = {
   removedAt: string | null;
   removedBy: string | null;
   /** What still lets them in. All zero once removed. */
-  live: { grants: number; sessions: number; tokens: number; identities: number };
+  live: WaysIn;
   /** Current values they read or wrote, by project, environment and key. */
   exposed: ExposedSecret[];
   /** Secrets they saw that have had a new version since. */
   rotated: number;
   /** Service tokens they issued that still work. */
   issuedTokens: IssuedToken[];
+  /** A person's connected MCP apps, which removing them disconnects. */
+  apps: ConnectedApp[];
   /**
    * References they made, live ones first, as the log's `reference.create`
    * entries name their actor: each belongs to the environment that holds
@@ -104,6 +108,9 @@ export type OffboardingReport = {
    */
   references: ReferenceView[];
 };
+
+/** What lets a member in, counted: what removing them revokes. */
+export type WaysIn = { grants: number; sessions: number; tokens: number; identities: number; apps: number };
 
 /** Someone no longer a member, and how many of their report's values are left. */
 export type RemovedMember = {
@@ -383,7 +390,6 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
   const listed = everyone.find((entry) => formatMember(entry.member) === formatMember(member));
   if (listed === undefined) throw notFound('no such member');
   const { row, status } = listed;
-  const active = status === 'active';
 
   const held = row?.credentials ?? [];
   const issued = everyone
@@ -396,6 +402,9 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
   const { exposed, rotated } = exposure([member], activity).get(formatMember(member))!;
   const made = (await referencesBy(ctx.db, formatMember(member))).map((reference) => reference.view);
   made.sort((a, b) => Number(b.state === 'live') - Number(a.state === 'live') || a.createdAt.localeCompare(b.createdAt));
+  // Only people connect apps. Removal disconnects them, but 0.4.0's left
+  // them to the generation alone: a removed member's are never listed.
+  const apps = member.type === 'user' && status !== 'removed' && ctx.mcp !== null ? await ctx.mcp.appsOf(formatMember(member)) : [];
   return {
     principalType: member.type,
     principalId: member.id,
@@ -410,6 +419,7 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
       sessions: held.filter((credential) => credential.kind !== 'service').length,
       tokens: held.filter((credential) => credential.kind === 'service').length,
       identities: row?.identities.length ?? 0,
+      apps: apps.length,
     },
     exposed,
     rotated,
@@ -421,6 +431,7 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
       expiresAt: token.expiresAt.toISOString(),
       lastUsedAt: token.lastUsedAt?.toISOString() ?? null,
     })),
+    apps,
     references: made,
   };
 }
@@ -493,13 +504,14 @@ export async function putMember(
 /**
  * Offboard a member: the vault revokes every grant and refuses them from
  * then on, whatever sessions they still hold; the app signs out every
- * session and revokes their tokens and sign-in accounts. Re-adding them
- * later is a fresh start. Returns their report, which is what to rotate.
+ * session and revokes their tokens, sign-in accounts and connected apps.
+ * Re-adding them later is a fresh start. Returns their report, which is
+ * what to rotate.
  */
 export async function removeMember(
   ctx: ApiContext,
   member: MemberRef,
-): Promise<{ revoked: { grants: number; sessions: number; tokens: number; identities: number }; report: OffboardingReport }> {
+): Promise<{ revoked: WaysIn; report: OffboardingReport }> {
   const principal = formatMember(member);
   const fields = { principalType: member.type, principalId: member.id };
   const revoked = await withRefusals(ctx, async () => {
@@ -528,6 +540,9 @@ export async function removeMember(
       const [held] = await loadMembers(tx, ctx.chainKey, { member }, now);
       const liveCredentials = (held?.credentials ?? []).filter((row) => row.generation < generation);
       const liveIdentities = (held?.identities ?? []).filter((row) => row.generation < generation);
+      // The generation already ends them; revoked, Connected apps and their report say so.
+      const liveApps =
+        member.type === 'user' ? (await liveConnections(tx, ctx.chainKey, principal, now)).filter((row) => row.generation < generation) : [];
       const revokedBy = ctx.caller.principal.id;
       const ids = (rows: { id: string }[]) => rows.map((row) => row.id);
       if (liveCredentials.length > 0) {
@@ -536,12 +551,17 @@ export async function removeMember(
       if (liveIdentities.length > 0) {
         await updateAuth(tx, ctx.chainKey, identities, { id: ids(liveIdentities) }, { revokedAt: now, revokedBy });
       }
+      if (liveApps.length > 0) {
+        await updateAuth(tx, ctx.chainKey, mcpConnections, { id: ids(liveApps) }, { revokedAt: now, revokedBy });
+      }
 
       return {
         grants: result.revoked.length,
         sessions: liveCredentials.filter((row) => row.kind !== 'service').length,
         tokens: liveCredentials.filter((row) => row.kind === 'service').length,
         identities: liveIdentities.length,
+        // As the report counts them: a code never redeemed was no app yet.
+        apps: liveApps.filter((row) => row.refreshHash !== null).length,
       };
     });
   });

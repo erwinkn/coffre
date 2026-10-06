@@ -424,6 +424,7 @@ export type Api = {
         sessions: number;
         tokens: number;
         identities: number;
+        apps: number;
       };
       exposed: {
         project: string;
@@ -441,6 +442,17 @@ export type Api = {
         hint: string;
         expiresAt: string;
         lastUsedAt: string | null;
+      }[];
+      apps: {
+        id: string;
+        name: string;
+        host: string | null;
+        registration: "cimd" | "dcr";
+        scopes: ("browse" | "manage-access" | "read-values" | "write")[];
+        createdAt: string;
+        lastUsedAt: string | null;
+        lastUsedIp: string | null;
+        expiresAt: string;
       }[];
       references: {
         id: string;
@@ -473,6 +485,7 @@ export type Api = {
         sessions: number;
         tokens: number;
         identities: number;
+        apps: number;
       };
       report: {
         principalType: "service" | "user";
@@ -487,6 +500,7 @@ export type Api = {
           sessions: number;
           tokens: number;
           identities: number;
+          apps: number;
         };
         exposed: {
           project: string;
@@ -504,6 +518,17 @@ export type Api = {
           hint: string;
           expiresAt: string;
           lastUsedAt: string | null;
+        }[];
+        apps: {
+          id: string;
+          name: string;
+          host: string | null;
+          registration: "cimd" | "dcr";
+          scopes: ("browse" | "manage-access" | "read-values" | "write")[];
+          createdAt: string;
+          lastUsedAt: string | null;
+          lastUsedIp: string | null;
+          expiresAt: string;
         }[];
         references: {
           id: string;
@@ -1224,6 +1249,7 @@ export type OffboardingReport = {
     sessions: number;
     tokens: number;
     identities: number;
+    apps: number;
   };
   exposed: {
     project: string;
@@ -1241,6 +1267,17 @@ export type OffboardingReport = {
     hint: string;
     expiresAt: string;
     lastUsedAt: string | null;
+  }[];
+  apps: {
+    id: string;
+    name: string;
+    host: string | null;
+    registration: "cimd" | "dcr";
+    scopes: ("browse" | "manage-access" | "read-values" | "write")[];
+    createdAt: string;
+    lastUsedAt: string | null;
+    lastUsedIp: string | null;
+    expiresAt: string;
   }[];
   references: {
     id: string;

@@ -101,7 +101,8 @@ async function refused(deployment: Deployment, what: string, fields: Record<stri
   expect(answer.status === 400 && body.error === 'invalid_grant', `${what} answered ${answer.status}, not invalid_grant`, body);
 }
 
-async function discovers(deployment: Deployment, access: string): Promise<boolean> {
+/** Whether a connection's access token still reaches /mcp. */
+export async function discovers(deployment: Deployment, access: string): Promise<boolean> {
   const answer = await mcp(deployment, { authorization: `Bearer ${access}`, 'mcp-protocol-version': '2026-07-28', 'mcp-method': 'server/discover' }, 'server/discover', { _meta: ENVELOPE });
   if (answer.status === 401) return false;
   const body = await json(answer);
@@ -230,6 +231,12 @@ async function register(deployment: Deployment): Promise<string> {
     body: JSON.stringify({ client_name: NAME, redirect_uris: [REDIRECT] }),
   }));
   return registered.client_id as string;
+}
+
+/** A client registered and connected as the person, with Browse, for a check of another's: its access token. */
+export async function connectedApp(deployment: Deployment, person: Person): Promise<string> {
+  const clientId = await register(deployment);
+  return (await redeem(deployment, clientId, await connect(deployment, person, clientId))).access_token;
 }
 
 /**

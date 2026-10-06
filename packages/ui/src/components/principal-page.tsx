@@ -5,7 +5,7 @@ import { ROLES } from '@coffre/core/access';
 import { useShell } from '../lib/use-shell';
 import { toast } from 'sonner';
 import { memberRef, useCoffre } from '../lib/coffre';
-import { directoryList } from '../lib/changes';
+import { directoryList, disconnectMemberApp } from '../lib/changes';
 import { affects, managedProjects, queries, signInWays } from '../lib/queries';
 import { useChangeStatus } from '../lib/use-change';
 import { useMounted } from '../lib/mounted';
@@ -24,7 +24,7 @@ import {
   type AccessChange,
   type AccessPlan,
 } from '../lib/access-plan';
-import type { DirectoryPrincipal, GrantRow, ProjectSummary } from '../shared/models';
+import type { DirectoryPrincipal, GrantRow, PrincipalReport, ProjectSummary } from '../shared/models';
 import { ClosedDoor, PageHeader } from './page';
 import { EmptyState, ErrorLine, Modal, Notice, Spinner } from './ui';
 import { GrantRowView, GrantsTable } from './grants';
@@ -32,6 +32,7 @@ import { EveryProjectGrants } from './every-project';
 import { ExpiryField } from './expiry-field';
 import { InstanceRole, KIND, PrincipalActions } from './directory';
 import { PrincipalReportCards, RemovedNotice } from './offboarding';
+import { ConnectedAppsCard } from './connected-apps';
 import { PrincipalAvatar } from './principal';
 import { Tile } from './tile';
 import { Activity, Archive, Clock, Folder, Key, Link as LinkIcon, Pencil, Users, X } from './icons';
@@ -212,7 +213,7 @@ export function PrincipalLayout({ principalType, principalId }: { principalType:
  * its offboarding did instead.
  */
 export function PrincipalAccess({ principalType, principalId }: { principalType: PrincipalType; principalId: string }) {
-  const { instanceRole } = useShell();
+  const { instanceRole, features } = useShell();
   const report = useReport(principalType, principalId);
   const access = useProjectAccess(principalType, principalId);
   const kind = KIND[principalType];
@@ -302,11 +303,26 @@ export function PrincipalAccess({ principalType, principalId }: { principalType:
           )}
 
           <EveryProjectGrants principalType={principalType} principalId={principalId} />
+
+          {/* Only an owner reads the report that lists them; removal disconnects them. */}
+          {features.mcp && people && found !== null && <MemberApps principalId={principalId} apps={found.apps} />}
         </>
       )}
 
       {found !== null && <PrincipalReportCards report={found} />}
     </>
+  );
+}
+
+/** A person's connected apps, for an owner, who may disconnect any of them. */
+function MemberApps({ principalId, apps }: { principalId: string; apps: PrincipalReport['apps'] }) {
+  return (
+    <ConnectedAppsCard
+      apps={apps}
+      change={disconnectMemberApp(useCoffre(), memberRef('user', principalId))}
+      description="AI assistants and other MCP clients they connected. Each acts as them, never beyond their access. Disconnecting one stops it at its next request; removing them disconnects every one."
+      empty="They have connected none. An app connects only after they approve it on coffre's page."
+    />
   );
 }
 

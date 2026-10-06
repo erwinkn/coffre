@@ -4,6 +4,7 @@ import { bearer } from '../browser.ts';
 import type { Deployment } from '../harness.ts';
 import { expect, refused } from '../report.ts';
 import { BULK, canary, DEV, PROD, PROJECT, signIn, valuesIn, type Canaries, type People } from './people.ts';
+import { connectedApp, discovers } from './mcp.ts';
 import { pollDevice, startDevice } from './signin.ts';
 
 export async function membersOnly(deployment: Deployment, { stranger }: People): Promise<string> {
@@ -90,7 +91,13 @@ export async function offboarding(deployment: Deployment, { admin, leaver, servi
   await leaver.api.deviceLogins.decide(device.user_code, true);
   // What they saw is what to rotate once they are gone.
   await leaver.cli.secrets.reveal(DEV);
-  const { report } = await admin.api.members.remove(leaver.member);
+  // An app they connected is listed to an owner, and removal disconnects it.
+  const app = await connectedApp(deployment, leaver);
+  const before = await admin.api.members.get(leaver.member);
+  expect(before.live.apps === 1 && before.apps.length === 1, "the owner's report does not list the app the leaver connected", before.apps);
+  const { revoked, report } = await admin.api.members.remove(leaver.member);
+  expect(revoked.apps === 1 && report.live.apps === 0 && report.apps.length === 0, 'removal does not say it disconnected their app', { revoked, apps: report.apps });
+  expect(!(await discovers(deployment, app)), "a removed member's app still reaches /mcp");
   const exposed = report.exposed.map((entry) => `${entry.project}/${entry.environment}/${entry.key}`).sort();
   const expected = Object.keys(valuesIn(canaries, DEV)).map((key) => `${DEV}/${key}`).sort();
   expect(same(exposed, expected), 'the offboarding report does not name what they read', report.exposed);
@@ -114,7 +121,7 @@ export async function offboarding(deployment: Deployment, { admin, leaver, servi
   expect(fresh.ok, 'a fresh provider callback could not sign the re-admitted member in');
   await admin.api.members.remove(leaver.member);
   await admin.api.members.remove(service.member);
-  return `the report names ${exposed.length} values; re-admission revives no old session, token or approval; a fresh provider callback works`;
+  return `the report names ${exposed.length} values and their connected app, which removal disconnects; re-admission revives no old session, token or approval; a fresh provider callback works`;
 }
 
 /**

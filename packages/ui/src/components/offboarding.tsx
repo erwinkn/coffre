@@ -41,7 +41,7 @@ export function RemovedNotice({ report }: { report: PrincipalReport }) {
         )}
         .{' '}
         {person
-          ? 'Their project access, sessions, CLI logins and linked sign-in accounts were revoked at the same time, so adding them again starts from nothing.'
+          ? 'Their project access, sessions, CLI logins, linked sign-in accounts and connected apps were revoked at the same time, so adding them again starts from nothing.'
           : 'Its project access and every token issued to it were revoked at the same time, so adding it again starts from nothing.'}
       </Notice>
     </div>
