@@ -30,6 +30,7 @@ import { Route as CoffreServiceAccountsIndexRouteImport } from './routes/_coffre
 import { Route as CoffreServiceAccountsAccountRouteImport } from './routes/_coffre/service-accounts.$account'
 import { Route as CoffreUsersIndexRouteImport } from './routes/_coffre/users.index'
 import { Route as CoffreUsersUserRouteImport } from './routes/_coffre/users.$user'
+import { Route as SoloApprovalsApprovalRouteImport } from './routes/_solo/approvals.$approval'
 import { Route as SoloAuthDeviceRouteImport } from './routes/_solo/auth.device'
 import { Route as SoloOauthAuthorizeRouteImport } from './routes/_solo/oauth.authorize'
 import { Route as CoffreProjectsProjectIndexRouteImport } from './routes/_coffre/projects.$project.index'
@@ -148,6 +149,11 @@ const CoffreUsersUserRoute = CoffreUsersUserRouteImport.update({
   path: '/users/$user',
   getParentRoute: () => CoffreRoute,
 } as any)
+const SoloApprovalsApprovalRoute = SoloApprovalsApprovalRouteImport.update({
+  id: '/approvals/$approval',
+  path: '/approvals/$approval',
+  getParentRoute: () => SoloRoute,
+} as any)
 const SoloAuthDeviceRoute = SoloAuthDeviceRouteImport.update({
   id: '/auth/device',
   path: '/auth/device',
@@ -234,6 +240,7 @@ export interface FileRoutesByFullPath {
   '/projects/$project': typeof CoffreProjectsProjectRouteWithChildren
   '/service-accounts/$account': typeof CoffreServiceAccountsAccountRouteWithChildren
   '/users/$user': typeof CoffreUsersUserRouteWithChildren
+  '/approvals/$approval': typeof SoloApprovalsApprovalRoute
   '/auth/device': typeof SoloAuthDeviceRoute
   '/oauth/authorize': typeof SoloOauthAuthorizeRoute
   '/projects/': typeof CoffreProjectsIndexRoute
@@ -264,6 +271,7 @@ export interface FileRoutesByTo {
   '/unregistered': typeof SoloUnregisteredRoute
   '/api/$': typeof ApiSplatRoute
   '/auth/$': typeof AuthSplatRoute
+  '/approvals/$approval': typeof SoloApprovalsApprovalRoute
   '/auth/device': typeof SoloAuthDeviceRoute
   '/oauth/authorize': typeof SoloOauthAuthorizeRoute
   '/projects': typeof CoffreProjectsIndexRoute
@@ -300,6 +308,7 @@ export interface FileRoutesById {
   '/_coffre/projects/$project': typeof CoffreProjectsProjectRouteWithChildren
   '/_coffre/service-accounts/$account': typeof CoffreServiceAccountsAccountRouteWithChildren
   '/_coffre/users/$user': typeof CoffreUsersUserRouteWithChildren
+  '/_solo/approvals/$approval': typeof SoloApprovalsApprovalRoute
   '/_solo/auth/device': typeof SoloAuthDeviceRoute
   '/_solo/oauth/authorize': typeof SoloOauthAuthorizeRoute
   '/_coffre/projects/': typeof CoffreProjectsIndexRoute
@@ -335,6 +344,7 @@ export interface FileRouteTypes {
     | '/projects/$project'
     | '/service-accounts/$account'
     | '/users/$user'
+    | '/approvals/$approval'
     | '/auth/device'
     | '/oauth/authorize'
     | '/projects/'
@@ -365,6 +375,7 @@ export interface FileRouteTypes {
     | '/unregistered'
     | '/api/$'
     | '/auth/$'
+    | '/approvals/$approval'
     | '/auth/device'
     | '/oauth/authorize'
     | '/projects'
@@ -400,6 +411,7 @@ export interface FileRouteTypes {
     | '/_coffre/projects/$project'
     | '/_coffre/service-accounts/$account'
     | '/_coffre/users/$user'
+    | '/_solo/approvals/$approval'
     | '/_solo/auth/device'
     | '/_solo/oauth/authorize'
     | '/_coffre/projects/'
@@ -576,6 +588,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/users/$user'
       preLoaderRoute: typeof CoffreUsersUserRouteImport
       parentRoute: typeof CoffreRoute
+    }
+    '/_solo/approvals/$approval': {
+      id: '/_solo/approvals/$approval'
+      path: '/approvals/$approval'
+      fullPath: '/approvals/$approval'
+      preLoaderRoute: typeof SoloApprovalsApprovalRouteImport
+      parentRoute: typeof SoloRoute
     }
     '/_solo/auth/device': {
       id: '/_solo/auth/device'
@@ -756,6 +775,7 @@ const CoffreRouteWithChildren =
 interface SoloRouteChildren {
   SoloLoginRoute: typeof SoloLoginRoute
   SoloUnregisteredRoute: typeof SoloUnregisteredRoute
+  SoloApprovalsApprovalRoute: typeof SoloApprovalsApprovalRoute
   SoloAuthDeviceRoute: typeof SoloAuthDeviceRoute
   SoloOauthAuthorizeRoute: typeof SoloOauthAuthorizeRoute
 }
@@ -763,6 +783,7 @@ interface SoloRouteChildren {
 const SoloRouteChildren: SoloRouteChildren = {
   SoloLoginRoute: SoloLoginRoute,
   SoloUnregisteredRoute: SoloUnregisteredRoute,
+  SoloApprovalsApprovalRoute: SoloApprovalsApprovalRoute,
   SoloAuthDeviceRoute: SoloAuthDeviceRoute,
   SoloOauthAuthorizeRoute: SoloOauthAuthorizeRoute,
 }
