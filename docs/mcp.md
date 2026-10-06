@@ -63,11 +63,6 @@ With **Read**, a connected client can, as you:
 - `list_access`, `describe_member`: who has access, and what a member
   holds.
 - `read_audit_log`: the log, 50 entries a call.
-- `run_with_secrets`: how to run a command with an environment's secrets,
-  `coffre run market/staging -- npm test`, which sets them for the command
-  only, so no value enters the conversation. Claude Code runs it itself;
-  in a chat without a shell, you do.
-
 - `show_secret_value`: shows you a secret's value on coffre's page, when
   you press Reveal there. The value is never sent to the client.
 
@@ -81,6 +76,11 @@ With **Write**, it can ask to change secrets and places:
 `create_environment`. With **Manage access**: `set_access`, `admit_member`,
 `offboard_member`, `issue_service_token`, `revoke_service_token`,
 `trust_workload` and `untrust_workload`.
+
+To use secrets in a command, a client with a shell runs it in your
+terminal as `coffre run market/staging -- npm test`, which sets them for
+that process only: the values never enter the conversation. The CLI must be
+signed in (`coffre login`), and the MCP connection grants it nothing.
 
 Each tool is coffre's API called as you, so a tool can do no more than you
 could with the CLI.

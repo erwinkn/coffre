@@ -170,38 +170,6 @@ const READ_TOOLS: readonly Tool[] = [
       structured: await api.audit.list({ ...rest, ...(actor === undefined ? {} : { actor: apiMember(actor) }), limit: limit ?? 50 }),
     }),
   }),
-  tool({
-    name: 'run_with_secrets',
-    needs: 'secret.read',
-    title: 'Run a command with secrets',
-    description:
-      "How to run a command with an environment's secrets as environment variables, through coffre's CLI, so that no value enters this conversation. Checks the person may read the environment, and names the variables it would set.",
-    scope: 'read',
-    readOnly: true,
-    idempotent: true,
-    destructive: false,
-    input: z.object({ environment, command: z.string().min(1).max(2000).optional().describe('The command to run, such as npm test') }).strict(),
-    output: object({ environment: { type: 'string' }, keys: list, readable: { type: 'boolean' }, commands: list }),
-    names: ({ environment }) => [environment],
-    run: async ({ api, publicUrl }, { environment, command }) => {
-      const { keys, permissions } = await api.secrets.list(environment);
-      const live = keys.filter((key) => !key.archived && key.version !== null).map((key) => key.key);
-      const readable = permissions.includes('secret.read');
-      const commands = [`coffre login ${publicUrl}`, `coffre run ${environment} -- ${command ?? '<command>'}`];
-      const text = readable
-        ? [
-            `Run it with coffre's CLI. It sets these ${live.length} environment variables for the command only, and none of them enter this conversation:`,
-            `  ${live.join(', ') || '(none yet)'}`,
-            '',
-            `  ${commands[0]}   # once per machine; approve in the browser`,
-            `  ${commands[1]}`,
-            '',
-            'Install the CLI with `npm install -g @coffre/cli`, or prefix each command with `npx @coffre/cli`. Without a shell here, the person runs these themselves.',
-          ].join('\n')
-        : `The person cannot read ${environment}'s values, so coffre run would be refused: ask someone who manages its access for a grant.`;
-      return { structured: { environment, keys: live, readable, commands }, text };
-    },
-  }),
 ];
 
 /** Values to the model: only with Reveal values, which the person ticked under its warning. */
@@ -210,7 +178,7 @@ const REVEAL_VALUES = tool({
   needs: 'secret.read',
   title: 'Reveal secret values',
   description:
-    "Read the values of one secret or of a whole environment into this conversation. Use it only when the person wants you to see the values. To show the person a value without you seeing it, use show_secret_value; to give a command its values, run_with_secrets.",
+    "Read the values of one secret or of a whole environment into this conversation. Use it only when the person wants you to see the values. To show the person a value without you seeing it, use show_secret_value.",
   scope: 'reveal',
   readOnly: true,
   idempotent: true,
@@ -277,6 +245,6 @@ export const INSTRUCTIONS = [
   "coffre keeps this team's secrets. These tools act as the person who connected them, and never beyond their access.",
   'Never ask the person to paste a secret into the conversation: to set one, use request_secret_value, and they type it on coffre.',
   "Every change waits for the person to approve it on coffre's own page: when a tool answers with an approval link, show it to them, and once they approve, call the tool again with the same arguments for the outcome.",
-  'With a shell, give a command its secrets with `coffre run <project>/<environment> -- <command>`: run_with_secrets says how, and no value enters the conversation.',
+  'To use secrets in a command, run it in the person\'s terminal as `coffre run <project>/<env> [<project>/<env> …] -- <command>`, with the CLI signed in: the values go to the process, never the conversation, so avoid commands that print them.',
   'reveal_secret_values puts values into the conversation: use it only when the person wants you to see them; show_secret_value shows a value to the person alone.',
 ].join(' ');

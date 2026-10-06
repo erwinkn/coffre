@@ -35,7 +35,7 @@ for (const mode of ['modern', 'legacy'] as const) {
       // A viewer's: the tools their role reaches somewhere, the one that reveals values among them, though
       // this connection holds Read alone, so that a client steps up for it. Not the access or the log's,
       // which no role of theirs reaches.
-      const readTools = ['whoami', 'list_projects', 'list_secrets', 'secret_history', 'run_with_secrets', 'show_secret_value', 'reveal_secret_values'];
+      const readTools = ['whoami', 'list_projects', 'list_secrets', 'secret_history', 'show_secret_value', 'reveal_secret_values'];
       assert.deepEqual(tools.map((tool) => tool.name), readTools);
       assert.ok(tools.every((tool) => tool.annotations?.readOnlyHint === true));
       assert.ok(tools.every((tool) => tool.annotations?.openWorldHint === false));
@@ -53,9 +53,6 @@ for (const mode of ['modern', 'legacy'] as const) {
       assert.equal(refused.isError, true);
       assert.match(refused.content[0]!.text!, /billing/);
 
-      const run = (await mcp.callTool({ name: 'run_with_secrets', arguments: { environment: 'market/prod', command: 'npm test' } })) as Result;
-      assert.match(run.content[0]!.text!, /coffre run market\/prod -- npm test/);
-      assert.match(run.content[0]!.text!, /API_KEY/);
       const whoami = (await mcp.callTool({ name: 'whoami', arguments: {} })) as Result;
       assert.deepEqual(whoami.structuredContent!.connection, { client: 'Claude Code', scopes: ['read'] });
     } finally {
@@ -69,7 +66,7 @@ for (const mode of ['modern', 'legacy'] as const) {
     }
     // Each call in the log, under the client: the reads as detail, the refusal shown, and the API's own entries name the connection.
     const reads = await entries('mcp.read');
-    assert.deepEqual(reads.map((entry) => entry.metadata.tool), ['list_projects', 'list_secrets', 'run_with_secrets', 'whoami']);
+    assert.deepEqual(reads.map((entry) => entry.metadata.tool), ['list_projects', 'list_secrets', 'whoami']);
     assert.ok(reads.every((entry) => entry.actor === `user:${DEV}` && (entry.metadata.via as { clientName: string }).clientName === 'Claude Code'));
     const refusal = await entries('mcp.call');
     assert.deepEqual(refusal.map((entry) => [entry.decision, entry.metadata.tool, entry.metadata.names]), [['deny', 'list_secrets', ['billing/prod']]]);
@@ -196,7 +193,7 @@ async function listFor(token: string): Promise<{ names: string[]; legacy: string
 }
 
 const ANYONE = ['whoami', 'list_projects'];
-const READS = ['list_secrets', 'secret_history', 'run_with_secrets', 'show_secret_value', 'reveal_secret_values'];
+const READS = ['list_secrets', 'secret_history', 'show_secret_value', 'reveal_secret_values'];
 const WRITES = ['request_secret_value', 'generate_secret_value', 'rename_secret', 'restore_secret_version'];
 const ARCHIVES = ['archive_secret', 'unarchive_secret'];
 const OWNERS = ['describe_member', 'create_project', 'admit_member', 'offboard_member', 'issue_service_token', 'revoke_service_token', 'trust_workload', 'untrust_workload'];
