@@ -61,15 +61,22 @@ A connected client can browse, as you:
   only, so no value enters the conversation. Claude Code runs it itself;
   in a chat without a shell, you do.
 
+- `show_secret_value`: shows you a secret's value on coffre's page, when
+  you press Reveal there. The value is never sent to the client.
+
+With **Read values**, `read_secret_values` sends the values of a secret or
+an environment to the client, and they become part of the conversation:
+its answer says so first. The consent page warns before you grant it.
+
 With **Write**, it can ask to change secrets and places:
-`request_secret_value`, `rename_secret`, `archive_secret`,
+`request_secret_value`, `generate_secret_value`, `rename_secret`, `archive_secret`,
 `unarchive_secret`, `restore_secret_version`, `create_project` and
 `create_environment`. With **Manage access**: `set_access`, `admit_member`,
 `offboard_member`, `issue_service_token`, `revoke_service_token`,
 `trust_workload` and `untrust_workload`.
 
 Each tool is coffre's API called as you, so a tool can do no more than you
-could with the CLI. Reading values comes with a later release.
+could with the CLI.
 
 ## Every change is approved on coffre
 
@@ -89,7 +96,9 @@ minutes.
 - **Clients on a 2025 revision** of MCP get the link too.
 
 A client never types a secret value. `request_secret_value` asks you to
-type it on the approval page, and it goes to coffre only. A service token
+type it on the approval page, and it goes to coffre only;
+`generate_secret_value` has coffre make a random one on its own server
+(32 bytes in base64url unless asked), which nobody sees. A service token
 `issue_service_token` makes is shown to you on the page, once, and never to
 the app. A connection may have five changes waiting at once.
 

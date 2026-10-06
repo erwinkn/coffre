@@ -5,6 +5,8 @@
 // four plain functions over the API: a sentence for the prompt, a check as
 // the connection before asking, what the page shows, and the change itself.
 // No tool takes a value: the person types one on the page, or coffre makes it.
+import { randomBytes } from 'node:crypto';
+
 import { apiMember, CoffreError, shownMember, type CoffreClient, type RouteInput } from '@coffre/client';
 import { ROLE_NAMES, type Permission } from '@coffre/core/access';
 import { WORKLOAD_PROFILES } from '@coffre/core/identity';
@@ -31,6 +33,12 @@ export type Change<I extends z.ZodObject = z.ZodObject> = {
   /** What the page shows, read as the person when they open it: what the change replaces. */
   preview: (api: CoffreClient, args: z.infer<I>) => Promise<Detail[]>;
   asks?: Ask;
+  /**
+   * A reveal: the page shows the person a value on Approve, which never goes
+   * to the client. Its API call needs `read-values`, which the connection
+   * need not hold, since the value reaches the person only.
+   */
+  reveal?: true;
   /** The change, as the person with the connection attached, when they approve it. */
   apply: (api: CoffreClient, args: z.infer<I>, given: { value?: string }) => Promise<Applied>;
 };
@@ -99,10 +107,31 @@ const CHANGE_OUTPUT = {
   required: ['status', 'approval'],
 };
 
-type ChangeTool<I extends z.ZodObject> = Omit<Tool<I>, 'readOnly' | 'output' | 'run' | 'change'> & { change: Change<I> };
+type ChangeTool<I extends z.ZodObject> = Omit<Tool<I>, 'readOnly' | 'output' | 'run' | 'change'> & { change: Change<I>; readOnly?: boolean };
 
 function changeTool<I extends z.ZodObject>(definition: ChangeTool<I>): Tool {
-  return { ...definition, readOnly: false, output: CHANGE_OUTPUT } as unknown as Tool;
+  return { readOnly: false, ...definition, output: CHANGE_OUTPUT } as unknown as Tool;
+}
+
+/** The alphabets `generate_secret_value` draws from, and how long a value is in each unless asked: 256 bits or so. */
+export const ALPHABETS = {
+  base64url: { characters: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_', length: 43 },
+  hex: { characters: '0123456789abcdef', length: 64 },
+  alphanumeric: { characters: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789', length: 43 },
+} as const;
+export type Alphabet = keyof typeof ALPHABETS;
+
+/** A random value of `length` characters from an alphabet, each uniform: bytes past the last whole multiple are drawn again. */
+export function randomValue(alphabet: Alphabet, length: number = ALPHABETS[alphabet].length): string {
+  const { characters } = ALPHABETS[alphabet];
+  const limit = 256 - (256 % characters.length);
+  let value = '';
+  while (value.length < length) {
+    for (const byte of randomBytes(length * 2)) {
+      if (byte < limit && value.length < length) value += characters[byte % characters.length];
+    }
+  }
+  return value;
 }
 
 const approved = 'Nothing changes until the person approves it on coffre.';
@@ -142,6 +171,35 @@ const accessChange = z.union([role, z.object({ role, until: z.string().max(40).n
 type AccessChange = z.infer<typeof accessChange>;
 const shownAccess = (to: AccessChange) => (to === null ? 'nothing' : typeof to === 'string' ? to : `${to.role}${to.until === null ? '' : ` until ${to.until}`}`);
 
+/**
+ * Showing a value to the person, on coffre's page, through an approval like
+ * a change's: Browse, since the value never reaches the client.
+ */
+export const SHOW_VALUE: Tool = changeTool({
+  name: 'show_secret_value',
+  title: "Show a secret's value to the person",
+  description:
+    "Show the person a secret's value on coffre's own page, after they press Reveal there. The value is never sent to you or this conversation: use this when the person wants to see a value; read_secret_values is the one that sends values to you.",
+  scope: 'browse',
+  readOnly: true,
+  idempotent: true,
+  destructive: false,
+  input: z.object({ secret }).strict(),
+  names: ({ secret }) => [secret],
+  change: {
+    summary: ({ secret }) => `show you the value of ${secret}`,
+    check: async ({ api }, { secret }) => needs(api, splitSecret(secret).environment, 'secret.read'),
+    preview: async (api, { secret }) => [{ label: 'Secret', value: secret, kind: 'mono' }, ...(await current(api, secret))],
+    reveal: true,
+    apply: async (api, { secret }) => {
+      const { key } = splitSecret(secret);
+      const { values } = await api.secrets.reveal(secret);
+      const at = new Date().toISOString().replace(/\.\d+Z$/, 'Z');
+      return { result: { secret, shownAt: at }, text: `The value of ${secret} was shown to the person on coffre at ${at}. It was not sent here.`, shown: [{ label: key, value: values[key] ?? '', kind: 'mono' }] };
+    },
+  },
+});
+
 /** The tools that change coffre, each through an approval: Write, then Manage access. */
 export const CHANGE_TOOLS: readonly Tool[] = [
   secretTool({
@@ -166,6 +224,35 @@ export const CHANGE_TOOLS: readonly Tool[] = [
         const written = (await api.secrets.set(environment, { [key]: value })).keys[key];
         const version = written !== undefined && 'version' in written ? written.version : null;
         return { result: { secret, version }, text: `${secret} is set${version === null ? '' : `, version ${version}`}. Its value went to coffre only.` };
+      },
+    },
+  }),
+  secretTool({
+    name: 'generate_secret_value',
+    title: 'Set a secret to a new random value',
+    description: `Set a secret to a random value coffre makes on its own server: neither you nor the person sees it, and whatever reads the secret gets it. 32 random bytes in base64url unless asked otherwise. ${approved}`,
+    idempotent: false,
+    destructive: true,
+    input: z
+      .object({
+        secret,
+        length: z.number().int().min(16).max(128).optional().describe('How many characters: 43 for base64url and alphanumeric, 64 for hex, unless asked'),
+        alphabet: z.enum(['base64url', 'hex', 'alphanumeric']).optional().describe('base64url unless asked'),
+      })
+      .strict(),
+    change: {
+      summary: ({ secret }) => `set ${secret} to a new random value`,
+      check: async ({ api }, { secret }) => needs(api, splitSecret(secret).environment, 'secret.write'),
+      preview: async (api, { secret, length, alphabet = 'base64url' }) => [
+        { label: 'Secret', value: secret, kind: 'mono' },
+        ...(await current(api, secret)),
+        { label: 'New value', value: `${length ?? ALPHABETS[alphabet].length} random ${alphabet} characters, made by coffre: nobody sees it, and earlier versions stay restorable` },
+      ],
+      apply: async (api, { secret, length, alphabet = 'base64url' }) => {
+        const { environment, key } = splitSecret(secret);
+        const written = (await api.secrets.set(environment, { [key]: randomValue(alphabet, length) })).keys[key];
+        const version = written !== undefined && 'version' in written ? written.version : null;
+        return { result: { secret, version }, text: `${secret} is set to a new random value${version === null ? '' : `, version ${version}`}. Nobody saw it.` };
       },
     },
   }),

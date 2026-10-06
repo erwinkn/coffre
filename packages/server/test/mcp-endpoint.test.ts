@@ -35,8 +35,9 @@ for (const mode of ['modern', 'legacy'] as const) {
       const browse = ['whoami', 'list_projects', 'list_secrets', 'secret_history', 'list_access', 'describe_member', 'read_audit_log', 'run_with_secrets'];
       assert.deepEqual(tools.slice(0, browse.length).map((tool) => tool.name), browse);
       assert.ok(tools.slice(0, browse.length).every((tool) => tool.annotations?.readOnlyHint === true));
-      // The changes are listed to every token, as the spec allows: a client steps up when it needs one.
-      assert.ok(tools.slice(browse.length).length > 0 && tools.slice(browse.length).every((tool) => tool.annotations?.readOnlyHint === false));
+      // Every tool is listed to every token, as the spec allows: a client steps up when it needs one. Only reads say they are.
+      const reads = new Set([...browse, 'show_secret_value', 'read_secret_values']);
+      assert.ok(tools.length > reads.size && tools.every((tool) => tool.annotations?.readOnlyHint === reads.has(tool.name)), JSON.stringify(tools.map((tool) => [tool.name, tool.annotations?.readOnlyHint])));
       assert.ok(tools.every((tool) => tool.annotations?.openWorldHint === false));
       // No tool takes a value: an agent cannot supply one.
       assert.ok(tools.every((tool) => !JSON.stringify(tool.inputSchema).includes('"value"')), 'no input named value');

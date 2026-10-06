@@ -8,7 +8,7 @@ import { apiMember, type CoffreClient } from '@coffre/client';
 import type { McpScope } from '@coffre/core/mcp';
 import { z } from 'zod';
 
-import { CHANGE_TOOLS, type Change } from './changes.ts';
+import { CHANGE_TOOLS, SHOW_VALUE, type Change } from './changes.ts';
 import type { McpConnection } from './service.ts';
 
 /** What a tool answers: its structured result, and the text a model reads. */
@@ -192,7 +192,29 @@ const BROWSE: readonly Tool[] = [
   }),
 ];
 
-export const TOOLS: readonly Tool[] = [...BROWSE, ...CHANGE_TOOLS];
+/** Values to the model: only with Read values, which the person ticked under its warning. */
+const READ_VALUES = tool({
+  name: 'read_secret_values',
+  title: 'Read secret values',
+  description:
+    "Read the values of one secret or of a whole environment, into this conversation: they become part of it, and of wherever it is kept. Use it only when the person wants you to see the values. To show the person a value without you seeing it, use show_secret_value; to give a command its values, run_with_secrets.",
+  scope: 'read-values',
+  readOnly: true,
+  idempotent: true,
+  destructive: false,
+  input: z.object({ path: z.string().min(1).max(300).describe('An environment, market/prod, or one secret, market/prod/STRIPE_KEY') }).strict(),
+  output: object({ path: { type: 'string' }, values: { type: 'object' } }),
+  names: ({ path }) => [path],
+  run: async ({ api }, { path }) => {
+    const { values } = await api.secrets.reveal(path);
+    return {
+      structured: { path, values },
+      text: `These values are now part of this conversation and its history.\n\n${JSON.stringify(values, null, 2)}`,
+    };
+  },
+});
+
+export const TOOLS: readonly Tool[] = [...BROWSE, SHOW_VALUE, READ_VALUES, ...CHANGE_TOOLS];
 
 export const TOOL_BY_NAME = new Map(TOOLS.map((entry) => [entry.name, entry]));
 
@@ -220,4 +242,5 @@ export const INSTRUCTIONS = [
   'Never ask the person to paste a secret into the conversation: to set one, use request_secret_value, and they type it on coffre.',
   "Every change waits for the person to approve it on coffre's own page: when a tool answers with an approval link, show it to them, and once they approve, call the tool again with the same arguments for the outcome.",
   'With a shell, give a command its secrets with `coffre run <project>/<environment> -- <command>`: run_with_secrets says how, and no value enters the conversation.',
+  'read_secret_values puts values into the conversation: use it only when the person wants you to see them; show_secret_value shows a value to the person alone.',
 ].join(' ');
