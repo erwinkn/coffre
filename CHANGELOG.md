@@ -26,6 +26,19 @@ separated by spaces or lines ([docs/ci.md](docs/ci.md#several-environments)).
 Both commands now refuse a secret's path, `market/prod/KEY`, where they
 name an environment: `run` read the whole environment for it.
 
+**You pick a connected app's scopes when you connect it.** Clients ask for
+Browse alone, and Claude Desktop did not ask for more, so a connection could
+browse and nothing else: every write tool, approval link and
+`request_secret_value` was refused. coffre's consent page now lists all
+four scopes, Browse, Write, Read values and Manage access, with what the
+client asked for ticked, and grants what you tick. The token answer's
+`scope` says what was granted, and `mcp.connect` in the log records what
+was asked for and what was granted. A tool call short of its scope still
+answers `403 insufficient_scope` for clients that step up, as Claude Code
+does, and its body is now the tool's result: which scope it needs, and how
+to grant it, by connecting the app again and ticking it
+([docs/mcp.md](docs/mcp.md#scopes)).
+
 **A base64 secret pasted on its own line is not imported under its own
 text.** Base64 that starts with a letter is a valid key name, and its
 padding supplied the `=`: `c2stbGl2ZS0xMjM0NTY3ODkwYWJjZGVmZ2hpamtsbW4=`,

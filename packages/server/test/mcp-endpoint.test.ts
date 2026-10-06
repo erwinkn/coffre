@@ -150,7 +150,7 @@ test("bad arguments are the tool's error, not a crash; an unknown tool is invali
   assert.equal(((await unknown.json()) as { error: { code: number } }).error.code, -32602);
 });
 
-test("a tool beyond the connection's scopes answers 403 insufficient_scope, naming what it holds and lacks; so does one whose API call is", async () => {
+test("a tool beyond the connection's scopes answers 403 insufficient_scope, naming what it holds and lacks, and says in plain words how to grant it; so does one whose API call is", async () => {
   const token = await connect();
   // Tools of the tests' own: one that declares a scope Browse lacks, one that claims Browse and reaches past it.
   const reveal = (name: string, scope: Tool['scope']): Tool => ({
@@ -166,12 +166,24 @@ test("a tool beyond the connection's scopes answers 403 insufficient_scope, nami
       assert.equal(response.status, 403, name);
       const challenge = response.headers.get('www-authenticate') ?? '';
       assert.match(challenge, /^Bearer error="insufficient_scope", scope="browse read-values", resource_metadata="https:\/\/secrets\.acme\.example\/\.well-known\/oauth-protected-resource\/mcp"/, name);
+      // For a client that does not step up, as Claude Desktop did not: the tool's result, which the model reads.
+      const { result } = (await response.json()) as { result: Result };
+      assert.equal(result.isError, true, name);
+      assert.match(result.content[0]!.text!, new RegExp(`^${name} needs coffre's Read values scope, which this connection was not given\\. Nothing was done\\.`), name);
+      assert.match(result.content[0]!.text!, /disconnect coffre in this app and connect it again, ticking Read values on coffre's consent page/, name);
+    }
+    // The official client reads the challenge, not the body: with an auth provider, it would step up to these scopes.
+    const official = await client(token, 'modern');
+    try {
+      await assert.rejects(official.callTool({ name: 'test_reveal', arguments: {} }), { name: 'InsufficientScopeError', message: /"browse read-values"/ });
+    } finally {
+      await official.close();
     }
   } finally {
     TOOL_BY_NAME.delete('test_reveal');
     TOOL_BY_NAME.delete('test_sneaky');
   }
   const refused = await entries('mcp.call');
-  assert.deepEqual(refused.map((entry) => [entry.metadata.tool, entry.code ?? entry.metadata.reason]), [['test_reveal', 'insufficient_scope'], ['test_sneaky', 'insufficient_scope']]);
+  assert.deepEqual(refused.map((entry) => [entry.metadata.tool, entry.code ?? entry.metadata.reason]), [['test_reveal', 'insufficient_scope'], ['test_sneaky', 'insufficient_scope'], ['test_reveal', 'insufficient_scope']]);
   assert.deepEqual(await entries('secret.read'), [], 'no value was read');
 });

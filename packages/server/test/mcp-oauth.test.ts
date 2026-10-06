@@ -130,10 +130,10 @@ function tokenRequest(fields: Record<string, string>): RequestInit {
 }
 
 /** Consent, then the code exchanged: what a client holds once its person approved. */
-async function connect(email = DEV, client = CLAUDE_CODE, redirect = 'http://localhost:51234/callback', scope = 'browse') {
+async function connect(email = DEV, client = CLAUDE_CODE, redirect = 'http://localhost:51234/callback', scope = 'browse', ticked = scope.split(' ')) {
   const { verifier, challenge } = pkce();
   const ask = request(client, redirect, challenge, { scope });
-  const back = await decide(await session(email), ask, { approve: true, scopes: scope.split(' ') });
+  const back = await decide(await session(email), ask, { approve: true, scopes: ticked });
   const code = back.searchParams.get('code')!;
   const response = await route('/api/oauth/token', tokenRequest({ grant_type: 'authorization_code', code, code_verifier: verifier, redirect_uri: redirect, client_id: client, resource: RESOURCE }));
   assert.equal(response.status, 200, await response.clone().text());
@@ -303,14 +303,22 @@ test('a person who denies sends the client access_denied, and the refusal is log
   assert.equal((await db.owner.select().from(mcpConnections)).length, 0);
 });
 
-test('scopes: Browse always; the rest only as asked and as the person ticked', async () => {
+test('scopes: Browse always; the rest as the person ticked, asked for or not; the token says which', async () => {
   const token = await session(DEV);
   const { challenge } = pkce();
   const ask = request(CLAUDE_CODE, 'http://localhost:5000/callback', challenge, { scope: 'write read-values offline_access' });
-  assert.deepEqual((await describe(token, ask)).scopes, ['browse', 'write', 'read-values'], 'offline_access is every connection');
+  assert.deepEqual((await describe(token, ask)).scopes, ['browse', 'write', 'read-values'], 'what starts ticked; offline_access is every connection');
   await decide(token, ask, { approve: true, scopes: ['write', 'manage-access'] });
   const [row] = await db.owner.select().from(mcpConnections);
-  assert.equal(row?.scopes, 'browse write', 'unticked Read values stays out, and what was not asked is not given');
+  assert.equal(row?.scopes, 'browse write manage-access', 'unticked Read values stays out; Manage access, never asked for, is in');
+  const [connected] = await entries('mcp.connect');
+  assert.deepEqual([connected?.metadata.asked, connected?.metadata.scopes], ['browse write read-values', 'browse write manage-access']);
+
+  // Claude asks for what the resource metadata names, Browse; its person ticks Write.
+  const claude = await connect(DEV, CLAUDE, 'https://claude.ai/api/mcp/auth_callback', 'browse', ['write']);
+  assert.equal(claude.scope, 'browse write', 'RFC 6749, section 3.3: the scope granted, which is not the one asked for');
+  const refreshed = (await (await route('/api/oauth/token', tokenRequest({ grant_type: 'refresh_token', refresh_token: claude.refresh_token, client_id: CLAUDE }))).json()) as { scope: string };
+  assert.equal(refreshed.scope, 'browse write');
 });
 
 test('refresh tokens rotate, may narrow the scopes, and a replaced one presented again ends the connection', async () => {

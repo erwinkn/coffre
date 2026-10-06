@@ -33,16 +33,19 @@ claude mcp add --transport http coffre https://secrets.acme.example/mcp
    > you just started this from an app on this computer.
    >
    > ☑ Browse: projects, environments, key names, history, access, the audit log
+   > ☐ Write · ☐ Read values · ☐ Manage access
 
-   She approves. Claude Code gets a one-hour access token and a refresh token.
+   Claude Code asked for Browse, so only Browse is ticked; she could tick
+   the others here, and leaves them. She approves. Claude Code gets a
+   one-hour access token and a refresh token.
 3. **Browsing.** "What does market/staging have?" Claude calls `list_secrets`
    with `market/staging` and gets key names, versions and who changed them,
    never values. The audit log records `mcp.call` from Ada, via Claude Code.
 4. **Asking for more.** "Generate a new SESSION_SECRET for staging."
    `generate_secret_value` needs the **Write** scope. coffre answers `403
-   insufficient_scope`, and Claude Code opens the consent page again. This
-   time it says "adds **Write**: set, rename and archive secrets". Ada
-   approves.
+   insufficient_scope`. Claude Code asks Ada whether to re-authenticate
+   "for the scope browse write", and opens the consent page again, with
+   **Write** ticked this time. Ada approves.
 5. **Confirming.** Claude calls `generate_secret_value` again. coffre makes
    no change. It records a pending approval and answers with a URL-mode
    elicitation for `https://secrets.acme.example/approvals/7QF2…`. Claude
@@ -200,8 +203,11 @@ WWW-Authenticate: Bearer resource_metadata="https://secrets.acme.example/.well-k
   "authorization_response_iss_parameter_supported": true }
 ```
 
-The resource metadata lists only `browse`, the minimum. The other scopes
-come later, one step-up at a time. Claude picks CIMD only when both
+The resource metadata lists only `browse`, the minimum, and the `401`
+names it too: it is what clients ask for, and what the consent page starts
+with ticked. The person ticks the others there, at connection, whatever was
+asked; a client that steps up asks for one later (section 5). Claude picks
+CIMD only when both
 `client_id_metadata_document_supported` and `"none"` are present, and adds
 `offline_access` when it is listed (section 10).
 
@@ -266,15 +272,18 @@ device login page:
    - its host, which matters more than the name;
    - where the answer goes, with a warning when that is only `localhost`;
    - the person's own email;
-   - the requested scopes, each ticked. Browse can't be unticked; the
-     others can. **Read values** carries its warning (section 7).
+   - every scope, those the client asked for ticked and the others not.
+     Browse can't be unticked; the person's ticks decide, whatever was
+     asked. **Read values** carries its warning (section 7).
 4. **Approve** and **Deny** call `POST /api/oauth/authorizations` with a
    cookie. The API's same-origin rule applies, so another site can't post
    it.
    - The server checks every parameter again. It keeps nothing between the
      two requests.
    - On Approve, it creates the connection and its code, and logs
-     `mcp.connect`.
+     `mcp.connect` with the scopes asked for and those granted. The token
+     answer's `scope` says what was granted (RFC 6749, section 3.3), which
+     may be more than was asked.
    - It answers the URL to go to:
      `redirect_uri?code=…&state=…&iss=https://secrets.acme.example`, or
      `error=access_denied` on Deny.
@@ -365,7 +374,11 @@ answers well inside Claude's 10 seconds.
    `403` with `WWW-Authenticate: Bearer error="insufficient_scope",
    scope="browse write"`. The `scope` names everything the connection
    already holds plus what's missing, because Claude's docs ask for the
-   union. The client then runs the step-up flow: MCP's incremental consent.
+   union. A client that steps up (MCP's incremental consent) asks for it,
+   and the consent page opens with it ticked. Not every client does: the
+   `403`'s body is the tool's result, an error that names the scope and
+   tells the person how to grant it, by connecting the client again and
+   ticking it, with the steps in Claude's apps and Claude Code.
 3. **The API checks the scope too.** A request that comes in through MCP
    carries its connection. `serveApi` refuses any route that the
    connection's scopes don't allow, by a table of `route → scope`. So a
@@ -373,6 +386,15 @@ answers well inside Claude's 10 seconds.
 
 The tool list is the same for every token, as the spec allows. Clients see
 what they could do and step up when they need to.
+
+**Picking scopes at connection.** Clients ask for what the `401` and the
+resource metadata name, `browse`. Claude Desktop never asked for more:
+connected to Erwin's instance, it got Browse, and every write tool,
+approval link and `request_secret_value` was refused, with no step-up. So
+the consent page offers all four scopes on every connection, ticking only
+what was asked, and grants what the person ticks. The metadata still names
+only `browse`: naming all four would have clients ask for, and the page
+tick, Read values and Manage access by default.
 
 ## 6. The tools
 
@@ -622,7 +644,7 @@ Code".
 
 | Action | When |
 |---|---|
-| `mcp.connect` | consent approved (scopes, client, redirect host) or denied |
+| `mcp.connect` | consent approved (scopes asked and granted, client, redirect host) or denied |
 | `mcp.disconnect` | a connection revoked: by the person, an owner, the revocation endpoint, a reused code or refresh token |
 | `mcp.call` | each `tools/call`, with the tool and its arguments' paths; never a value. Refusals too: scope, capability, the API's own. A retry that only waits on its approval is not logged again |
 | `mcp.approve`, `mcp.deny` | the person's decision on coffre's page |
@@ -676,7 +698,7 @@ Anthropic's docs, read on 2026-10-05:
 | Claude Code: CIMD `https://claude.ai/oauth/claude-code-client-metadata`, redirects to `http://localhost/callback` and `http://127.0.0.1/callback` on any port | loopback matched with the port ignored, `localhost` included |
 | S256 PKCE; `code_challenge_methods_supported` | yes |
 | Scopes come from the `401`'s `scope`, else `scopes_supported`; `offline_access` is added when listed | `scope="browse"`; `offline_access` listed |
-| Step-up on `403 insufficient_scope`, whose `scope` should name everything still needed | the union of held and needed scopes |
+| Step-up on `403 insufficient_scope`, whose `scope` should name everything still needed | the union of held and needed scopes; the body is a tool result saying how to grant it, for a client that doesn't step up (Claude Desktop didn't) |
 | Token endpoint takes form-urlencoded and answers in 10 s (refresh in 30 s); rotate refresh tokens; `invalid_grant` for a dead one | yes |
 | Tool results ~150,000 characters (hosted), 25,000 tokens (Claude Code); tool calls 240 s (hosted) | paged lists; approvals wait 25 s per round |
 
@@ -707,6 +729,29 @@ on 2026-09-26 and 2026-10-04: its user-facing client sends `server/discover`,
 elicitation capability, and only its connector-setup probe opens with a
 2025-11-25 `initialize`, which coffre answers. A live check from claude.ai
 needs an instance it can reach.
+
+What Claude Code sends was checked on 2026-10-06, with Claude Code 2.1.291
+against a local stack:
+
+- **Authorize:** `scope=browse offline_access` and `prompt=consent`, its
+  CIMD and a loopback redirect. Its **Re-authenticate** in `/mcp` asks again
+  for the scopes it last held.
+- **Requests:** 2026-07-28, with `elicitation: {form: {}, url: {}}` in
+  every request's capabilities.
+- **A `403 insufficient_scope`:** it asks the person whether to
+  re-authenticate "for the scope browse write", opens the consent page,
+  with Write ticked, and retries the call once. If the person says not now,
+  the model reads Claude Code's own message, "needs additional permissions
+  (scope: "browse write") — run /mcp to re-authenticate", not the body.
+- **A change:** a URL elicitation, "Approve on coffre: …", with Open in
+  browser, I'm done and Decline. The call it retries right after a step-up
+  doesn't show it: that call gets the approval link instead, and works the
+  same. Both made their change once the person approved on coffre's page.
+
+Claude Desktop, connected to Erwin's instance on 2026-10-06, was granted
+Browse and never stepped up, so it could make no change until the consent
+page offered Write at connection (section 5). That is his report: a local
+stack can't be reached from claude.ai, so it was not checked here.
 
 **Reachability.** The hosted apps call coffre from Anthropic's servers,
 `160.79.104.0/21`. They reach `/mcp`, `/.well-known/…`, `/api/oauth/token`
@@ -849,7 +894,8 @@ did before theirs.
   identical call rejoins its approval. Each approval is shown alone, never
   in bulk.
 - **Step-up.** A consent that grants all an earlier connection of the same
-  client holds and more supersedes it: the earlier one ends when the new
+  client holds and more supersedes it, whether the client asked for the
+  more or the person ticked it: the earlier one ends when the new
   one's code is redeemed, logged as `mcp.disconnect`, `superseded`, and the
   consent page says so. One with the same scopes, a second laptop, stays.
 - **Workers.** No isolate keeps a pending promise: a CIMD document or a
@@ -870,8 +916,10 @@ did before theirs.
    - a CIMD client, served by the harness on loopback under a development
      flag like trust bindings' loopback issuers, does the same.
 2. **Browse can't write.** `archive_secret` and `read_secret_values` answer
-   `403 insufficient_scope`, with the right `scope`. The secret is still
-   live, and the API refused nothing on the token's behalf.
+   `403 insufficient_scope`, with the right `scope`, and a tool result
+   saying how to grant it. The secret is still live, and the API refused
+   nothing on the token's behalf. A connection that asked for Browse, with
+   Write ticked, gets a token whose `scope` is `browse write`.
 3. **No change without approval.** With Write:
    - without URL elicitation: `-32021`, and nothing changed;
    - with it: `input_required`, and nothing changed;
@@ -1025,8 +1073,9 @@ This becomes `docs/mcp.md` with the fifth pull request.
 >   the conversation.
 > - **Manage access**: grants, members, service tokens, trusted workloads.
 >
-> A client asks for Write, Read values or Manage access the first time it
-> needs one, and you see the consent page again.
+> Tick what a client may do when you connect it: clients ask for Browse
+> alone. One that needs more later may ask, and you see the consent page
+> again.
 >
 > **Every change is confirmed on coffre.** When a client wants to change
 > something, coffre opens its own page with the exact change, and nothing

@@ -6,7 +6,7 @@
 // tools, with the same checks. The token is checked first (`mcpCaller`):
 // nothing here runs for a request without a good one.
 import { CoffreError, createClient, type CoffreClient } from '@coffre/client';
-import { isMcpScope, scopeString, type McpScope } from '@coffre/core/mcp';
+import { isMcpScope, MCP_SCOPE_INFO, scopeString, type McpScope } from '@coffre/core/mcp';
 import { z } from 'zod';
 
 import { allowed, audited, denied, type McpVia } from '../api/context.ts';
@@ -239,7 +239,8 @@ const WAIT_MS = 25_000;
  * One tool's call: admitted against its connection's limit, held to its
  * scopes, run as API calls in its person's name, and logged with the client.
  * A refusal the API gives is the tool's result, an error the model reads; a
- * scope the connection lacks is a 403 that starts the client's step-up. A
+ * scope the connection lacks is a 403 that starts the client's step-up,
+ * whose body is such a result too, for a client that does not. A
  * change goes through its approval instead (`change`).
  */
 async function call(
@@ -433,16 +434,25 @@ function toolError(text: string): Record<string, unknown> {
 
 /**
  * A tool beyond the connection's scopes: 403, with what to ask for, which
- * is everything it holds and what it lacks (RFC 6750, section 3.1).
+ * is everything it holds and what it lacks (RFC 6750, section 3.1), for a
+ * client that steps up, as Claude Code does. Not every one does, Claude
+ * Desktop among them: the body is the tool's result, an error that tells
+ * the model, in plain words, what its person does to grant the scope
+ * (docs/design/mcp.md, section 5).
  */
 function insufficientScope(runtime: CoffreRuntime, connection: McpConnection, tool: Tool, id: JsonRpcId, needed: McpScope): Response {
   const scope = scopeString(challengeScopes(connection.scopes, needed));
-  return failure(
-    id,
-    403,
-    { code: CODE.invalidRequest, message: `${tool.name} needs the ${needed} scope: connect again, and allow it` },
-    {
-      'www-authenticate': `Bearer error="insufficient_scope", scope="${scope}", resource_metadata="${resourceMetadataUrl(runtime)}", error_description="${tool.name} needs ${needed}"`,
-    },
-  );
+  return rpc(id, { result: toolError(missingScope(tool, needed)) }, 403, {
+    'www-authenticate': `Bearer error="insufficient_scope", scope="${scope}", resource_metadata="${resourceMetadataUrl(runtime)}", error_description="${tool.name} needs ${needed}"`,
+  });
+}
+
+/** What the model is told of a scope its connection lacks: only its person can grant it, by connecting again. */
+function missingScope(tool: Tool, needed: McpScope): string {
+  const { label } = MCP_SCOPE_INFO[needed];
+  return [
+    `${tool.name} needs coffre's ${label} scope, which this connection was not given. Nothing was done.`,
+    `Only the person can grant it: they disconnect coffre in this app and connect it again, ticking ${label} on coffre's consent page. The new connection replaces this one.`,
+    'In Claude (claude.ai, Desktop): disconnect coffre under Customize > Connectors, then connect it again. In Claude Code: /mcp, coffre, then Re-authenticate.',
+  ].join('\n');
 }
