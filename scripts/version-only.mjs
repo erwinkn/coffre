@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 import { actionPin, bumpAction } from './action-pin.mjs';
 import { headChangelog, releaseDate } from './changelog.mjs';
+import { bumpLockfile } from './lockfile.mjs';
 
 const versionPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 function validVersion(value) {
@@ -19,36 +20,6 @@ function validVersion(value) {
 }
 const sections = ['dependencies', 'devDependencies'];
 const canonical = (value) => `${JSON.stringify(value, null, 2)}\n`;
-
-function bumpLockfile(text, pins, before, after) {
-    let top, importer, section, dependency;
-    const seen = new Set();
-    const links = new Set();
-    const key = (value) => value.replace(/^['"]|['"]$/g, '');
-    const result = text.split('\n').map((line) => {
-        const match = /^( *)([^ ].*):$/.exec(line);
-        if (match) {
-            switch (match[1].length) {
-                case 0: top = match[2]; importer = section = dependency = undefined; break;
-                case 2: importer = key(match[2]); section = dependency = undefined; break;
-                case 4: section = key(match[2]); dependency = undefined; break;
-                case 6: dependency = key(match[2]); break;
-            }
-        }
-        const id = `${importer}/${section}/${dependency}`;
-        if (top !== 'importers' || !pins.has(id)) return line;
-        if (line === `        specifier: ${before}`) {
-            seen.add(id);
-            return `        specifier: ${after}`;
-        }
-        // A registry resolution would also need new package/snapshot entries.
-        // Accept the workspace links bump currently writes, left unchanged.
-        if (/^        version: link:\.\.\/\.\.\/packages\/[^/]+$/.test(line)) links.add(id);
-        return line;
-    }).join('\n');
-    if (seen.size !== pins.size || links.size !== pins.size) throw new Error('Expected coffre lockfile specifiers are missing');
-    return result;
-}
 
 export function versionOnly(base, head = 'HEAD', cwd = process.cwd()) {
     const full = (reason) => ({ versionOnly: false, reason });

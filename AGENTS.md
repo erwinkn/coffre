@@ -33,11 +33,14 @@ A package imports another only by name (`@coffre/core/vault`, never
 `src`, `test` and `scripts` to it, so each package builds, ships and can be
 internalized into a deployment on its own. The `@coffre/*` dependencies are
 `workspace:*` and every package carries one version: `pnpm bump <version>` moves
-them all and the examples' pins, heads `CHANGELOG.md`'s `## Unreleased` notes
-`## <version> (<date>)` under a new, empty `## Unreleased`, and says whether
-any dependency the release pins is younger than the week deployments wait,
-for the release notes; `pnpm check:pins` fails on any drift, including the
-examples' `packageManager`, which must be the workspace's pnpm.
+them all, the examples' pins and their `pnpm-lock.yaml` specifiers, heads
+`CHANGELOG.md`'s `## Unreleased` notes `## <version> (<date>)` under a new,
+empty `## Unreleased`, and says whether any dependency the release pins is
+younger than the week deployments wait, for the release notes. A release is
+that bump, a commit and a PR, with no `pnpm install` or hand edit: its diff is
+exactly what Validate's version-only fast path accepts. `pnpm check:pins`
+fails on any drift, including the examples' `packageManager`, which must be
+the workspace's pnpm.
 
 Every package's `exports` lists a `coffre:source` condition first, pointing at
 `src/*.ts`. Inside the workspace, dev, tests and typecheck turn it on and read the

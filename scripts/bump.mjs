@@ -4,17 +4,20 @@
 //
 //   pnpm bump 0.2.0
 //
-// It edits package.json files, the examples' pnpm with them, the Action's CLI
-// pin, and the release notes, whose `## Unreleased` it heads with the version
-// and today's date (UTC), under a new, empty one: building, tagging and
-// publishing are separate steps, and none of them happens here.
+// It edits package.json files, the examples' pnpm with them, their specifiers
+// in pnpm-lock.yaml, the Action's CLI pin, and the release notes, whose
+// `## Unreleased` it heads with the version and today's date (UTC), under a
+// new, empty one: exactly what the version-only gate accepts, so a release is
+// this, a commit and a PR. Building, tagging and publishing are separate
+// steps, and none of them happens here.
 
 import { readdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import { bumpPins, pinPackageManager } from '../packages/cli/src/deployment.ts';
 import { bumpAction } from './action-pin.mjs';
 import { headChangelog } from './changelog.mjs';
+import { bumpLockfile } from './lockfile.mjs';
 
 const root = new URL('..', import.meta.url).pathname;
 const version = process.argv[2];
@@ -23,15 +26,27 @@ if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version ?? '')) {
     process.exit(2);
 }
 
-// Validate before editing any manifest, so a malformed Action cannot leave
-// half of a release bumped.
-const actionPath = join(root, 'action/action.yml');
-const action = bumpAction(readFileSync(actionPath, 'utf8'), version);
-
 const manifests = (dir) =>
     readdirSync(join(root, dir))
         .map((entry) => join(dir, entry, 'package.json'))
         .filter((manifest) => existsSync(join(root, manifest)));
+
+// Validate before editing any manifest, so a malformed Action or lockfile
+// cannot leave half of a release bumped.
+const actionPath = join(root, 'action/action.yml');
+const action = bumpAction(readFileSync(actionPath, 'utf8'), version);
+const before = JSON.parse(readFileSync(join(root, 'packages/cli/package.json'), 'utf8')).version;
+const pins = new Set();
+for (const manifest of manifests('examples')) {
+    const pkg = JSON.parse(readFileSync(join(root, manifest), 'utf8'));
+    for (const section of ['dependencies', 'devDependencies']) {
+        for (const name of Object.keys(pkg[section] ?? {})) {
+            if (name.startsWith('@coffre/')) pins.add(`${dirname(manifest)}/${section}/${name}`);
+        }
+    }
+}
+const lockfilePath = join(root, 'pnpm-lock.yaml');
+const lockfile = bumpLockfile(readFileSync(lockfilePath, 'utf8'), pins, before, version);
 
 function edit(manifest, change) {
     const path = join(root, manifest);
@@ -54,13 +69,14 @@ for (const example of readdirSync(join(root, 'examples'))) {
     bumpPins(dir, version);
     pinPackageManager(dir, pnpm);
 }
+writeFileSync(lockfilePath, lockfile);
 writeFileSync(actionPath, action);
 const changelogPath = join(root, 'CHANGELOG.md');
 const notes = existsSync(changelogPath) ? readFileSync(changelogPath, 'utf8') : '';
 const headed = headChangelog(notes, version, new Date().toISOString().slice(0, 10));
 if (headed !== notes) writeFileSync(changelogPath, headed);
-const moved = headed !== notes ? 'every package, both examples, the Action and the release notes' : 'every package, both examples and the Action';
-console.log(`coffre ${version}: ${moved}. Run pnpm install to relink the examples.`);
+const moved = headed !== notes ? 'the lockfile, the Action and the release notes' : 'the lockfile and the Action';
+console.log(`coffre ${version}: every package, both examples, ${moved}.`);
 
 // For the release notes: whatever a published package pins that is younger
 // than the minimumReleaseAge every deployment holds. Ranges below those pins
