@@ -196,6 +196,26 @@ test('a line with no separator is reported with its line number', () => {
   assert.match(problems[0].reason, /no "="/);
 });
 
+test('a problem names its key when the line has a valid one, and never carries the line or its value', () => {
+  const secret = 'sk-live-51Habc123xyz';
+  const { problems } = parseDotenv(
+    [`${secret}==`, secret, `TOKEN="${secret}`, `TOKEN='${secret}`, `API_KEY="${secret}" trailing`, `9${secret}=x`, `A=${secret}`, `A=${secret}`].join('\n'),
+  );
+  assert.deepEqual(
+    problems.map(({ line, key }) => [line, key]),
+    [
+      [1, undefined],
+      [2, undefined],
+      [3, 'TOKEN'],
+      [4, 'TOKEN'],
+      [5, 'API_KEY'],
+      [6, undefined],
+      [8, 'A'],
+    ],
+  );
+  assert.ok(!JSON.stringify(problems).includes('51Habc123'), 'a value, or part of one, in a problem');
+});
+
 test('invalid keys are rejected', () => {
   rejected('1LEADING_DIGIT=x', /key must match/);
   rejected('has-hyphen=x', /key must match/);

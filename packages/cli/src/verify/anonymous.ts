@@ -2,7 +2,7 @@
 // it is up, its headers, every route refusing a caller with no credential
 // and saying nothing more, a change from another site's page refused, and
 // no page showing anything. `coffre verify instance` runs these first.
-import type { AuthInfo } from '@coffre/client';
+import { Unreachable, type AuthInfo } from '@coffre/client';
 import { everyRoute } from '@coffre/client/routes';
 
 import { expect, type Checks } from './checks.ts';
@@ -28,19 +28,28 @@ export const NOBODY = 'token:conformance-nobody';
 
 /** The checks anyone can run: no sign-in, nothing written. */
 export async function anonymousChecks(report: Checks, origin: string): Promise<void> {
-  await report.check('health', {}, () => reachable(origin));
-  await report.check('headers', {}, () => headers(origin));
-  await report.check('anonymous api', {}, () => anonymousApi(origin));
-  await report.check('forged cross-site', {}, () => forgedCrossSite(origin));
-  await report.check('sign-in info', {}, () => signinInfo(origin));
-  await report.check('anonymous answers', {}, () => anonymousAnswers(origin));
+  // One this machine cannot reach: health says why, and the rest would only say it again.
+  let instance: string | undefined = origin;
+  await report.check('health', {}, () =>
+    reachable(origin).catch((error: unknown) => {
+      if (error instanceof Unreachable) instance = undefined;
+      throw error;
+    }),
+  );
+  await report.check('headers', { instance }, () => headers(origin));
+  await report.check('anonymous api', { instance }, () => anonymousApi(origin));
+  await report.check('forged cross-site', { instance }, () => forgedCrossSite(origin));
+  await report.check('sign-in info', { instance }, () => signinInfo(origin));
+  await report.check('anonymous answers', { instance }, () => anonymousAnswers(origin));
 }
 
 // --- as no one ----------------------------------------------------------------
 
 /** An instance someone else runs: up, and its scheduled job beating. */
 export async function reachable(origin: string): Promise<string> {
-  const live = await fetch(`${origin}/livez`);
+  const live = await fetch(`${origin}/livez`).catch((error: unknown) => {
+    throw new Unreachable(origin, error);
+  });
   expect(live.ok, `/livez answered ${live.status}`);
   const ready = await fetch(`${origin}/readyz`);
   expect(ready.ok, `/readyz answered ${ready.status}: is the scheduled job running?`, await ready.text());

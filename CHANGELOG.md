@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+**The CLI says why it could not reach an instance.** It said only
+`could not reach https://…: fetch failed`. It now gives Node's own reason,
+with its code and address, such as `getaddrinfo ENOTFOUND
+secrets.acme.example`, and what to try for the common ones: a name that
+does not resolve here, IPv6 this network does not carry, and a
+certificate that something in between presents. `@coffre/client` throws
+`Unreachable`, saying the same, in place of `fetch`'s bare `TypeError`,
+and `coffre verify instance` says it once, at its health check.
+
+**`coffre import` no longer prints a line it can't parse.** It printed the
+line's text, which can hold a value: a line with no `=`, or a key that is
+not one, may be a secret pasted on its own. It now says the line's number,
+why, and its key when it has a valid one; so does the web app's import.
+`ParseProblem` in `@coffre/core/dotenv` has `key` in place of `text`.
+
 **`coffre setup` survives a Hyperdrive config deleted while it runs.**
 Setup lists the account's configs as it starts. A config deleted after
 that, whose login was getting a new password, made the update answer 404
