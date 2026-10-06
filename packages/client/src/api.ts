@@ -17,7 +17,7 @@ export type Api = {
       isRootAdmin: boolean;
       canReadAudit: boolean;
       features: {
-        mcp: boolean;
+        mcp: string | null;
         workloads: boolean;
       };
       environments: {
@@ -1202,7 +1202,7 @@ export type Me = {
   isRootAdmin: boolean;
   canReadAudit: boolean;
   features: {
-    mcp: boolean;
+    mcp: string | null;
     workloads: boolean;
   };
   environments: {

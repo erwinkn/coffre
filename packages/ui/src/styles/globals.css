@@ -722,8 +722,9 @@ a.crumb-link:hover {
   margin-bottom: 1.5rem;
 }
 
-/* Its actions end where the page's cards do. */
-.content:has(.card-wide) > .page-head {
+/* Its actions, and the tab bar under it, end where the page's cards do. */
+.content:has(.card-wide) > .page-head,
+.content:has(.card-wide) > .tabs {
   max-width: none;
 }
 
@@ -2718,6 +2719,7 @@ span.env-link {
 .tabs {
   display: flex;
   gap: 0.25rem;
+  max-width: var(--card-max);
   margin: -0.25rem 0 1.5rem;
   /* A shadow rather than a border: the scroll box clips at its padding
      edge, and the current tab's underline has to cover this line. */

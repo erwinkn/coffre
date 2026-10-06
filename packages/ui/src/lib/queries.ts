@@ -329,8 +329,8 @@ export function shellOf(
     registrationRequired: me !== null && !me.registered,
     /** A member the vault refuses: their record failed its integrity check. */
     accessTampered: me?.tampered === true,
-    /** What the deployment's configuration turns on: MCP clients, and CI runs signing in by their ID tokens. */
-    features: member?.features ?? { mcp: false, workloads: false },
+    /** What the deployment's configuration turns on: MCP clients, as their endpoint's URL, and CI runs signing in by their ID tokens. */
+    features: member?.features ?? { mcp: null, workloads: false },
   };
 }
 

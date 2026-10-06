@@ -342,7 +342,7 @@ test('apps lists the MCP clients you connected, unverified ones said so, and app
       { id: 'c0nn-2', name: 'Cursor', host: null, registration: 'dcr', scopes: ['browse', 'write'], createdAt: '2026-10-02T00:00:00Z', lastUsedAt: null, lastUsedIp: null, expiresAt: '2026-11-01T00:00:00Z' },
     ],
   };
-  const on = { features: { mcp: true, workloads: false } };
+  const on = { features: { mcp: 'https://secrets.acme.example/mcp', workloads: false } };
   const answer = ({ path }: Call) => (path === '/me' ? on : listed);
   const list = fixture(answer);
   await manage.apps(list.connect, [], list.io);
@@ -364,7 +364,7 @@ test('apps lists the MCP clients you connected, unverified ones said so, and app
   await assert.rejects(manage.appsRevoke(fixture(answer).connect, ['c0nn-9'], list.io), /you have no connected app c0nn-9: `coffre apps` lists them/);
 
   // Where the deployment serves no MCP, as /me reports it, apps says so, and asks nothing more.
-  const off = fixture(() => ({ features: { mcp: false, workloads: false } }));
+  const off = fixture(() => ({ features: { mcp: null, workloads: false } }));
   await manage.apps(off.connect, [], off.io);
   assert.match(off.written.out, /^MCP is off on this instance: no app connects here/);
   assert.deepEqual(off.calls.map(({ path }) => path), ['/me']);
