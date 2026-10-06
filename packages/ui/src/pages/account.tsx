@@ -1,95 +1,133 @@
-import type { ConnectedApp, IdentityRow, SessionRow } from '@coffre/client';
-import { MCP_SCOPE_INFO } from '@coffre/core/mcp';
-import { useSuspenseQueries, useSuspenseQuery } from '@tanstack/react-query';
+import type { IdentityRow, SessionRow } from '@coffre/client';
+import { Link, Outlet } from '@tanstack/react-router';
+import { useSuspenseQuery } from '@tanstack/react-query';
 
-import { Fragment } from 'react';
+import { Fragment, useSyncExternalStore } from 'react';
 import { useShell } from '../lib/use-shell';
 import { Card, Fact, PageHeader } from '../components/page';
+import { PageTabs } from '../components/tabs';
 import { ThemeCards } from '../components/theme';
 import { InstanceRole } from '../components/directory';
-import { ConfirmButton, EmptyState, ErrorLine, Notice, Timestamp } from '../components/ui';
-import { Link as LinkIcon, Monitor, ProviderMark, SignOut, Terminal, X } from '../components/icons';
+import { ConfirmButton, CopyButton, EmptyState, ErrorLine, Notice, Timestamp } from '../components/ui';
+import { Link as LinkIcon, Monitor, ProviderMark, SignOut, Sun, Terminal, User, X } from '../components/icons';
 import { signinErrorMessage } from '../lib/signin-errors';
 import { useOneTime } from '../lib/one-time';
 import { useCoffre } from '../lib/coffre';
+import { useMounted } from '../lib/mounted';
 import { disconnectApp, endSession, unlinkIdentity } from '../lib/changes';
 import { queries } from '../lib/queries';
 import { useChange, useChangeStatus } from '../lib/use-change';
 import { RowFailure, RowPending, rowClass } from '../components/row-state';
 import { ConnectedAppsCard } from '../components/connected-apps';
 import { pageRoute } from '../lib/page-route';
-import type { account } from '../options';
+import type { accountProfile } from '../options';
 
-const Route = pageRoute<typeof account>();
-
-type Search = { linked?: string; error?: string };
+const Route = pageRoute<typeof accountProfile>();
 
 /**
- * Your own settings: how coffre looks here, who it takes you for and, when
+ * Your own account, around its tabs: who coffre takes you for and, when
  * coffre runs its own sign-in, which accounts you sign in with, where you
- * are signed in, and the MCP clients you connected. The sidebar's Settings is the instance's; this page is
- * reached from your account at the sidebar's foot.
+ * are signed in, the MCP clients you connected, and how coffre looks here.
+ * The sidebar's Settings is the instance's; this page is reached from your
+ * account at the sidebar's foot. It keeps the name it had as one page, which
+ * a deployment's `_coffre/account.tsx` mounts.
  */
-
 export function AccountPage() {
-  const { principal, instanceRole, auth, features } = useShell();
+  const { principal, auth, features } = useShell();
+  const mounted = useMounted();
+  const person = principal?.type === 'user';
 
   return (
     <>
       <PageHeader title="Account" actions={principal !== null && <SignOutButton />} />
 
-      <Card labelledBy="appearance" title="Appearance">
-        <div className="card-body">
-          <ThemeCards />
-        </div>
-      </Card>
+      <PageTabs label="Account sections">
+        {[
+          <Link key="profile" to="/account" activeOptions={{ exact: true, includeSearch: false }}>
+            <User size={15} />
+            Profile
+          </Link>,
+          person && auth.signin !== null && mounted('/account/sessions') && (
+            <Link key="sessions" to="/account/sessions">
+              <Monitor size={15} />
+              Sessions
+            </Link>
+          ),
+          person && features.mcp && mounted('/account/apps') && (
+            <Link key="apps" to="/account/apps">
+              <LinkIcon size={15} />
+              Connected apps
+            </Link>
+          ),
+          mounted('/account/appearance') && (
+            <Link key="appearance" to="/account/appearance">
+              <Sun size={15} />
+              Appearance
+            </Link>
+          ),
+        ]}
+      </PageTabs>
 
-      {principal !== null && (
-        <Card labelledBy="identity" title="Identity">
-          <dl className="facts">
-            <Fact label={principal.type === 'user' ? 'Email' : 'Name'}>
-              <span className="mono">{principal.id}</span>
-            </Fact>
-            <Fact label="Kind">{principal.type === 'user' ? 'User' : 'Token'}</Fact>
-            {principal.type === 'user' && (
-              <Fact label="Instance role">
-                <InstanceRole
-                  principal={{
-                    principalType: 'user',
-                    principalId: principal.id,
-                    instanceRole: instanceRole ?? 'user',
-                    isRootAdmin: instanceRole === 'root-admin',
-                  }}
-                />
-              </Fact>
-            )}
-          </dl>
-        </Card>
-      )}
-
-      {auth.signin !== null && principal?.type === 'user' && (
-        <SignIn email={principal.id} providers={auth.signin.providers} />
-      )}
-
-      {features.mcp && principal?.type === 'user' && <ConnectedApps />}
+      <Outlet />
     </>
   );
 }
 
-/** Which accounts you sign in with, and where you are signed in. */
-function SignIn({ email, providers }: { email: string; providers: Provider[] }) {
-  const client = useCoffre();
-  const [{ data: identities }, { data: sessions }] = useSuspenseQueries({
-    queries: [queries.identities(client), queries.sessions(client)],
-  });
-  if (!identities.ok) return <ErrorLine error={identities.error} />;
-  if (!sessions.ok) return <ErrorLine error={sessions.error} />;
+/** Its first tab: who you are to coffre, and the accounts you sign in with. */
+export function AccountProfilePage() {
+  const { principal, instanceRole, auth } = useShell();
+  if (principal === null) return null;
   return (
     <>
-      <SigninAccounts email={email} providers={providers} identities={identities.identities} />
-      <Sessions sessions={sessions.sessions} providers={providers} />
+      <Card labelledBy="identity" title="Identity">
+        <dl className="facts">
+          <Fact label={principal.type === 'user' ? 'Email' : 'Name'}>
+            <span className="mono">{principal.id}</span>
+          </Fact>
+          <Fact label="Kind">{principal.type === 'user' ? 'User' : 'Token'}</Fact>
+          {principal.type === 'user' && (
+            <Fact label="Instance role">
+              <InstanceRole
+                principal={{
+                  principalType: 'user',
+                  principalId: principal.id,
+                  instanceRole: instanceRole ?? 'user',
+                  isRootAdmin: instanceRole === 'root-admin',
+                }}
+              />
+            </Fact>
+          )}
+        </dl>
+      </Card>
+
+      {auth.signin !== null && principal.type === 'user' && (
+        <SigninAccounts email={principal.id} providers={auth.signin.providers} />
+      )}
     </>
   );
+}
+
+/** Where you are signed in, browsers and command lines. */
+export function AccountSessionsPage() {
+  const { auth } = useShell();
+  const { data: sessions } = useSuspenseQuery(queries.sessions(useCoffre()));
+  if (!sessions.ok) return <ErrorLine error={sessions.error} />;
+  return <Sessions sessions={sessions.sessions} providers={auth.signin?.providers ?? []} />;
+}
+
+/** How to connect Claude, then the apps you connected. */
+export function AccountAppsPage() {
+  return (
+    <>
+      <ConnectAnApp />
+      <ConnectedApps />
+    </>
+  );
+}
+
+/** How coffre looks in this browser. */
+export function AccountAppearancePage() {
+  return <ThemeCards />;
 }
 
 /**
@@ -113,7 +151,14 @@ function providerLabel(providers: Provider[], id: string | null) {
   return providers.find((provider) => provider.id === id)?.label ?? id ?? 'unknown';
 }
 
-function SigninAccounts({
+/** Which accounts you sign in with. */
+function SigninAccounts({ email, providers }: { email: string; providers: Provider[] }) {
+  const { data } = useSuspenseQuery(queries.identities(useCoffre()));
+  if (!data.ok) return <ErrorLine error={data.error} />;
+  return <SigninAccountsCard email={email} providers={providers} identities={data.identities} />;
+}
+
+function SigninAccountsCard({
   email,
   providers,
   identities,
@@ -375,6 +420,52 @@ function Sessions({
   );
 }
 
+/**
+ * How to connect an MCP client: this instance's address, and the steps for
+ * Claude Code and claude.ai. The address is the page's own origin, the
+ * instance's public URL, where its sign-in sets the session cookie this page
+ * came with. The server's render has no origin of its own to give, so the
+ * address appears as the page hydrates.
+ */
+function ConnectAnApp() {
+  const origin = useSyncExternalStore(noChange, () => window.location.origin, () => null);
+  const url = origin === null ? null : `${origin}/mcp`;
+  return (
+    <Card
+      labelledBy="connect"
+      title="Connect an app"
+      description="Claude, or another MCP client, connects at this address. It asks you to approve it here, then acts as you."
+    >
+      <dl className="facts">
+        <Fact label="MCP URL">
+          <CopyLine value={url} label="Copy the URL" />
+        </Fact>
+        <Fact label="Claude Code">
+          <CopyLine value={url === null ? null : `claude mcp add --transport http coffre ${url}`} label="Copy the command" />
+          <span className="hint">
+            Then run <span className="mono">/mcp</span> in Claude Code to sign in.
+          </span>
+        </Fact>
+        <Fact label="claude.ai">
+          <span>In Customize › Connectors, choose Add custom connector, then paste the URL.</span>
+        </Fact>
+      </dl>
+    </Card>
+  );
+}
+
+const noChange = () => () => {};
+
+/** A value to copy whole, in a box of its own: blank until it is known. */
+function CopyLine({ value, label }: { value: string | null; label: string }) {
+  return (
+    <div className="copy-line">
+      <code className="mono">{value ?? '\u00a0'}</code>
+      {value !== null && <CopyButton value={value} label={label} />}
+    </div>
+  );
+}
+
 /** The MCP clients you connected, such as Claude: each acts as you until it is disconnected or expires. */
 function ConnectedApps() {
   const client = useCoffre();
@@ -383,12 +474,8 @@ function ConnectedApps() {
     <ConnectedAppsCard
       apps={apps.ok ? apps.apps : { error: apps.error }}
       change={disconnectApp(client)}
-      description="AI assistants and other MCP clients you connected. Each acts as you, never beyond your access, and every call it makes is in the audit log. Disconnecting one stops it at its next request."
-      empty={
-        <>
-          An app such as Claude connects through coffre's MCP endpoint, at <span className="mono">/mcp</span>, after you approve it here.
-        </>
-      }
+      description="Each acts as you, never beyond your access, and every call it makes is in the audit log. Disconnecting one stops it at its next request."
+      empty="An app you connect shows here once you approve it."
     />
   );
 }

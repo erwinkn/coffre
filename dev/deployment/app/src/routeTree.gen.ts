@@ -23,6 +23,10 @@ import { Route as SoloLoginRouteImport } from './routes/_solo/login'
 import { Route as SoloUnregisteredRouteImport } from './routes/_solo/unregistered'
 import { Route as ApiSplatRouteImport } from './routes/api.$'
 import { Route as AuthSplatRouteImport } from './routes/auth.$'
+import { Route as CoffreAccountIndexRouteImport } from './routes/_coffre/account.index'
+import { Route as CoffreAccountAppearanceRouteImport } from './routes/_coffre/account.appearance'
+import { Route as CoffreAccountAppsRouteImport } from './routes/_coffre/account.apps'
+import { Route as CoffreAccountSessionsRouteImport } from './routes/_coffre/account.sessions'
 import { Route as CoffreProjectsIndexRouteImport } from './routes/_coffre/projects.index'
 import { Route as CoffreProjectsProjectRouteImport } from './routes/_coffre/projects.$project'
 import { Route as CoffreServiceAccountsIndexRouteImport } from './routes/_coffre/service-accounts.index'
@@ -110,6 +114,26 @@ const AuthSplatRoute = AuthSplatRouteImport.update({
   id: '/auth/$',
   path: '/auth/$',
   getParentRoute: () => rootRouteImport,
+} as any)
+const CoffreAccountIndexRoute = CoffreAccountIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => CoffreAccountRoute,
+} as any)
+const CoffreAccountAppearanceRoute = CoffreAccountAppearanceRouteImport.update({
+  id: '/appearance',
+  path: '/appearance',
+  getParentRoute: () => CoffreAccountRoute,
+} as any)
+const CoffreAccountAppsRoute = CoffreAccountAppsRouteImport.update({
+  id: '/apps',
+  path: '/apps',
+  getParentRoute: () => CoffreAccountRoute,
+} as any)
+const CoffreAccountSessionsRoute = CoffreAccountSessionsRouteImport.update({
+  id: '/sessions',
+  path: '/sessions',
+  getParentRoute: () => CoffreAccountRoute,
 } as any)
 const CoffreProjectsIndexRoute = CoffreProjectsIndexRouteImport.update({
   id: '/projects/',
@@ -223,19 +247,23 @@ export interface FileRoutesByFullPath {
   '/mcp': typeof McpRoute
   '/readyz': typeof ReadyzRoute
   '/.well-known/$': typeof DotwellKnownSplatRoute
-  '/account': typeof CoffreAccountRoute
+  '/account': typeof CoffreAccountRouteWithChildren
   '/audit': typeof CoffreAuditRoute
   '/settings': typeof CoffreSettingsRoute
   '/login': typeof SoloLoginRoute
   '/unregistered': typeof SoloUnregisteredRoute
   '/api/$': typeof ApiSplatRoute
   '/auth/$': typeof AuthSplatRoute
+  '/account/appearance': typeof CoffreAccountAppearanceRoute
+  '/account/apps': typeof CoffreAccountAppsRoute
+  '/account/sessions': typeof CoffreAccountSessionsRoute
   '/projects/$project': typeof CoffreProjectsProjectRouteWithChildren
   '/service-accounts/$account': typeof CoffreServiceAccountsAccountRouteWithChildren
   '/users/$user': typeof CoffreUsersUserRouteWithChildren
   '/approvals/$approval': typeof SoloApprovalsApprovalRoute
   '/auth/device': typeof SoloAuthDeviceRoute
   '/oauth/authorize': typeof SoloOauthAuthorizeRoute
+  '/account/': typeof CoffreAccountIndexRoute
   '/projects/': typeof CoffreProjectsIndexRoute
   '/service-accounts/': typeof CoffreServiceAccountsIndexRoute
   '/users/': typeof CoffreUsersIndexRoute
@@ -256,16 +284,19 @@ export interface FileRoutesByTo {
   '/mcp': typeof McpRoute
   '/readyz': typeof ReadyzRoute
   '/.well-known/$': typeof DotwellKnownSplatRoute
-  '/account': typeof CoffreAccountRoute
   '/audit': typeof CoffreAuditRoute
   '/settings': typeof CoffreSettingsRoute
   '/login': typeof SoloLoginRoute
   '/unregistered': typeof SoloUnregisteredRoute
   '/api/$': typeof ApiSplatRoute
   '/auth/$': typeof AuthSplatRoute
+  '/account/appearance': typeof CoffreAccountAppearanceRoute
+  '/account/apps': typeof CoffreAccountAppsRoute
+  '/account/sessions': typeof CoffreAccountSessionsRoute
   '/approvals/$approval': typeof SoloApprovalsApprovalRoute
   '/auth/device': typeof SoloAuthDeviceRoute
   '/oauth/authorize': typeof SoloOauthAuthorizeRoute
+  '/account': typeof CoffreAccountIndexRoute
   '/projects': typeof CoffreProjectsIndexRoute
   '/service-accounts': typeof CoffreServiceAccountsIndexRoute
   '/users': typeof CoffreUsersIndexRoute
@@ -288,7 +319,7 @@ export interface FileRoutesById {
   '/mcp': typeof McpRoute
   '/readyz': typeof ReadyzRoute
   '/.well-known/$': typeof DotwellKnownSplatRoute
-  '/_coffre/account': typeof CoffreAccountRoute
+  '/_coffre/account': typeof CoffreAccountRouteWithChildren
   '/_coffre/audit': typeof CoffreAuditRoute
   '/_coffre/settings': typeof CoffreSettingsRoute
   '/_solo/login': typeof SoloLoginRoute
@@ -296,12 +327,16 @@ export interface FileRoutesById {
   '/api/$': typeof ApiSplatRoute
   '/auth/$': typeof AuthSplatRoute
   '/_coffre/': typeof CoffreIndexRoute
+  '/_coffre/account/appearance': typeof CoffreAccountAppearanceRoute
+  '/_coffre/account/apps': typeof CoffreAccountAppsRoute
+  '/_coffre/account/sessions': typeof CoffreAccountSessionsRoute
   '/_coffre/projects/$project': typeof CoffreProjectsProjectRouteWithChildren
   '/_coffre/service-accounts/$account': typeof CoffreServiceAccountsAccountRouteWithChildren
   '/_coffre/users/$user': typeof CoffreUsersUserRouteWithChildren
   '/_solo/approvals/$approval': typeof SoloApprovalsApprovalRoute
   '/_solo/auth/device': typeof SoloAuthDeviceRoute
   '/_solo/oauth/authorize': typeof SoloOauthAuthorizeRoute
+  '/_coffre/account/': typeof CoffreAccountIndexRoute
   '/_coffre/projects/': typeof CoffreProjectsIndexRoute
   '/_coffre/service-accounts/': typeof CoffreServiceAccountsIndexRoute
   '/_coffre/users/': typeof CoffreUsersIndexRoute
@@ -331,12 +366,16 @@ export interface FileRouteTypes {
     | '/unregistered'
     | '/api/$'
     | '/auth/$'
+    | '/account/appearance'
+    | '/account/apps'
+    | '/account/sessions'
     | '/projects/$project'
     | '/service-accounts/$account'
     | '/users/$user'
     | '/approvals/$approval'
     | '/auth/device'
     | '/oauth/authorize'
+    | '/account/'
     | '/projects/'
     | '/service-accounts/'
     | '/users/'
@@ -357,16 +396,19 @@ export interface FileRouteTypes {
     | '/mcp'
     | '/readyz'
     | '/.well-known/$'
-    | '/account'
     | '/audit'
     | '/settings'
     | '/login'
     | '/unregistered'
     | '/api/$'
     | '/auth/$'
+    | '/account/appearance'
+    | '/account/apps'
+    | '/account/sessions'
     | '/approvals/$approval'
     | '/auth/device'
     | '/oauth/authorize'
+    | '/account'
     | '/projects'
     | '/service-accounts'
     | '/users'
@@ -396,12 +438,16 @@ export interface FileRouteTypes {
     | '/api/$'
     | '/auth/$'
     | '/_coffre/'
+    | '/_coffre/account/appearance'
+    | '/_coffre/account/apps'
+    | '/_coffre/account/sessions'
     | '/_coffre/projects/$project'
     | '/_coffre/service-accounts/$account'
     | '/_coffre/users/$user'
     | '/_solo/approvals/$approval'
     | '/_solo/auth/device'
     | '/_solo/oauth/authorize'
+    | '/_coffre/account/'
     | '/_coffre/projects/'
     | '/_coffre/service-accounts/'
     | '/_coffre/users/'
@@ -527,6 +573,34 @@ declare module '@tanstack/react-router' {
       fullPath: '/auth/$'
       preLoaderRoute: typeof AuthSplatRouteImport
       parentRoute: typeof rootRouteImport
+    }
+    '/_coffre/account/': {
+      id: '/_coffre/account/'
+      path: '/'
+      fullPath: '/account/'
+      preLoaderRoute: typeof CoffreAccountIndexRouteImport
+      parentRoute: typeof CoffreAccountRoute
+    }
+    '/_coffre/account/appearance': {
+      id: '/_coffre/account/appearance'
+      path: '/appearance'
+      fullPath: '/account/appearance'
+      preLoaderRoute: typeof CoffreAccountAppearanceRouteImport
+      parentRoute: typeof CoffreAccountRoute
+    }
+    '/_coffre/account/apps': {
+      id: '/_coffre/account/apps'
+      path: '/apps'
+      fullPath: '/account/apps'
+      preLoaderRoute: typeof CoffreAccountAppsRouteImport
+      parentRoute: typeof CoffreAccountRoute
+    }
+    '/_coffre/account/sessions': {
+      id: '/_coffre/account/sessions'
+      path: '/sessions'
+      fullPath: '/account/sessions'
+      preLoaderRoute: typeof CoffreAccountSessionsRouteImport
+      parentRoute: typeof CoffreAccountRoute
     }
     '/_coffre/projects/': {
       id: '/_coffre/projects/'
@@ -664,6 +738,24 @@ declare module '@tanstack/react-router' {
   }
 }
 
+interface CoffreAccountRouteChildren {
+  CoffreAccountAppearanceRoute: typeof CoffreAccountAppearanceRoute
+  CoffreAccountAppsRoute: typeof CoffreAccountAppsRoute
+  CoffreAccountSessionsRoute: typeof CoffreAccountSessionsRoute
+  CoffreAccountIndexRoute: typeof CoffreAccountIndexRoute
+}
+
+const CoffreAccountRouteChildren: CoffreAccountRouteChildren = {
+  CoffreAccountAppearanceRoute: CoffreAccountAppearanceRoute,
+  CoffreAccountAppsRoute: CoffreAccountAppsRoute,
+  CoffreAccountSessionsRoute: CoffreAccountSessionsRoute,
+  CoffreAccountIndexRoute: CoffreAccountIndexRoute,
+}
+
+const CoffreAccountRouteWithChildren = CoffreAccountRoute._addFileChildren(
+  CoffreAccountRouteChildren,
+)
+
 interface CoffreProjectsProjectRouteChildren {
   CoffreProjectsProjectServiceAccountsRoute: typeof CoffreProjectsProjectServiceAccountsRoute
   CoffreProjectsProjectSettingsRoute: typeof CoffreProjectsProjectSettingsRoute
@@ -720,7 +812,7 @@ const CoffreUsersUserRouteWithChildren = CoffreUsersUserRoute._addFileChildren(
 )
 
 interface CoffreRouteChildren {
-  CoffreAccountRoute: typeof CoffreAccountRoute
+  CoffreAccountRoute: typeof CoffreAccountRouteWithChildren
   CoffreAuditRoute: typeof CoffreAuditRoute
   CoffreSettingsRoute: typeof CoffreSettingsRoute
   CoffreIndexRoute: typeof CoffreIndexRoute
@@ -734,7 +826,7 @@ interface CoffreRouteChildren {
 }
 
 const CoffreRouteChildren: CoffreRouteChildren = {
-  CoffreAccountRoute: CoffreAccountRoute,
+  CoffreAccountRoute: CoffreAccountRouteWithChildren,
   CoffreAuditRoute: CoffreAuditRoute,
   CoffreSettingsRoute: CoffreSettingsRoute,
   CoffreIndexRoute: CoffreIndexRoute,

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+**The account page is in tabs, and shows how to connect Claude.** Profile
+(who you are, and the accounts you sign in with), Sessions, Connected apps
+and Appearance are routes under `/account`, as a project's tabs are, each
+reading only what it shows. Connected apps opens with **Connect an app**:
+this instance's MCP URL, `https://<your instance>/mcp`, to copy; Claude
+Code's `claude mcp add --transport http coffre <url>`, then `/mcp`; and
+claude.ai's steps. It shows only where the deployment turns MCP on.
+`coffre init` writes the tabs' four route files,
+`_coffre/account.{index,sessions,apps,appearance}.tsx`, and `coffre update`
+adds them; `_coffre/account.tsx`, unchanged, is now their layout.
+
 **`coffre run` and `coffre export` read several environments.** `coffre
 run deploy/prod auth/prod -- ./deploy` gives the command both
 environments' keys, where it took nesting one `coffre run` in another,

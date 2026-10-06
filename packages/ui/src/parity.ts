@@ -138,9 +138,9 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
     ],
   },
   'GET /sessions': { ui: [{ does: 'Account › Sessions', in: 'pages/account.tsx', call: 'sessions.list' }] },
-  'DELETE /sessions/:id': { ui: [{ does: 'Account › a session › End', in: 'pages/account.tsx', call: 'sessions.revoke' }] },
-  'GET /identities': { ui: [{ does: 'Account › Sign-in accounts', in: 'pages/account.tsx', call: 'identities.list' }] },
-  'DELETE /identities/:id': { ui: [{ does: 'Account › a sign-in account › Unlink', in: 'pages/account.tsx', call: 'identities.unlink' }] },
+  'DELETE /sessions/:id': { ui: [{ does: 'Account › Sessions › a session › End', in: 'pages/account.tsx', call: 'sessions.revoke' }] },
+  'GET /identities': { ui: [{ does: 'Account › Profile › Sign-in accounts', in: 'pages/account.tsx', call: 'identities.list' }] },
+  'DELETE /identities/:id': { ui: [{ does: 'Account › Profile › a sign-in account › Unlink', in: 'pages/account.tsx', call: 'identities.unlink' }] },
   'GET /device-logins/:code': { ui: [{ does: "the page `coffre login` opens: the login's code", in: 'pages/device-login.tsx', call: 'deviceLogins.get' }] },
   'POST /device-logins/:code': { ui: [{ does: 'that page › Approve, Deny', in: 'pages/device-login.tsx', call: 'deviceLogins.decide' }] },
   'GET /oauth/authorizations': { ui: [{ does: 'the page an MCP client opens to connect: what it asks for', in: 'pages/oauth-authorize.tsx', call: 'oauth.describe' }] },
@@ -148,7 +148,7 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
   'GET /approvals/:id': { ui: [{ does: 'the page an MCP client sends you to, to decide a change it asked for', in: 'pages/approval.tsx', call: 'approvals.get' }] },
   'POST /approvals/:id': { ui: [{ does: 'that page › Approve, Deny', in: 'pages/approval.tsx', call: 'approvals.decide' }] },
   'GET /apps': { ui: [{ does: 'Account › Connected apps', in: 'pages/account.tsx', call: 'apps.list' }] },
-  'DELETE /apps/:id': { ui: [{ does: 'Account › a connected app › Disconnect', in: 'pages/account.tsx', call: 'apps.disconnect' }] },
+  'DELETE /apps/:id': { ui: [{ does: 'Account › Connected apps › a connected app › Disconnect', in: 'pages/account.tsx', call: 'apps.disconnect' }] },
   'GET /audit': {
     ui: [
       { does: 'Audit', in: 'pages/audit.tsx', call: 'audit.list' },

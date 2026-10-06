@@ -101,7 +101,12 @@ export async function pagesInBrowser(deployment: Deployment, admin: Person, brow
     ['/service-accounts', 'Service accounts', null],
     [account, `service:${name}`, 'Sign-in'],
     [`${account}/activity`, `service:${name}`, 'Activity'],
+    ['/account', 'Account', 'Profile'],
+    ['/account/sessions', 'Account', 'Sessions'],
+    ['/account/apps', 'Account', 'Connected apps'],
+    ['/account/appearance', 'Account', 'Appearance'],
   ] as const;
+  const mcp = `${deployment.origin}/mcp`;
   const chrome = await Chrome.open(executable);
   try {
     for (const [path, heading, tab] of pages) {
@@ -120,6 +125,12 @@ export async function pagesInBrowser(deployment: Deployment, admin: Person, brow
       }
       if (path === '/settings') expect(loaded.cards.includes('Keys'), '/settings does not show what the keys are checked against', loaded.cards);
       if (path === person) expect(loaded.cards.includes('Connected apps'), `${path} does not show an owner the person's connected apps`, loaded.cards);
+      if (path === '/account/apps') {
+        expect(loaded.cards.join(' then ') === 'Connect an app then Connected apps', `${path} does not show Connect an app, then the connected apps`, loaded.cards);
+        for (const shown of [mcp, `claude mcp add --transport http coffre ${mcp}`, 'Add custom connector']) {
+          expect(loaded.text.includes(shown), `${path} does not show "${shown}"`, loaded.text);
+        }
+      }
     }
     // A project's tabs are routes: their links, back and forward move between them in the page.
     const project = new URL(`/projects/${PROJECT}`, deployment.origin).href;
@@ -150,7 +161,7 @@ export async function pagesInBrowser(deployment: Deployment, admin: Person, brow
   } finally {
     await chrome.close();
   }
-  return `${pages.map(([path]) => path).join(', ')}, signed in, in Chrome: each rendered, on its tab, no error from their scripts; a project's tabs by their links, back and forward; a service account shown as service:${name}, OIDC then bearer tokens, its removal previewed; the keys' checks in Settings; its grant on dev in every project with an owner's grant button; the MCP consent page, a registered client shown as unverified`;
+  return `${pages.map(([path]) => path).join(', ')}, signed in, in Chrome: each rendered, on its tab, no error from their scripts; a project's tabs by their links, back and forward; a service account shown as service:${name}, OIDC then bearer tokens, its removal previewed; the keys' checks in Settings; its grant on dev in every project with an owner's grant button; the account's Connected apps tab, with this instance's MCP URL and Claude Code's command; the MCP consent page, a registered client shown as unverified`;
 }
 
 /**

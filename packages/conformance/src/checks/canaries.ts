@@ -29,7 +29,7 @@ function pages(people: People): string[] {
     '/',
     '/login',
     '/unregistered',
-    '/account',
+    ...['', '/sessions', '/apps', '/appearance'].map((tab) => `/account${tab}`),
     '/audit',
     '/settings',
     '/auth/device',

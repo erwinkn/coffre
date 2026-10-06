@@ -8,6 +8,10 @@ import { createRootRouteWithContext, createRoute } from '@tanstack/react-router'
 import type { createRouter } from './router';
 import {
   account,
+  accountAppearance,
+  accountApps,
+  accountProfile,
+  accountSessions,
   audit,
   deviceLogin,
   environment,
@@ -34,7 +38,7 @@ import {
   users,
   type CoffreContext,
 } from './options';
-import { AccountPage } from './pages/account';
+import { AccountAppearancePage, AccountAppsPage, AccountPage, AccountProfilePage, AccountSessionsPage } from './pages/account';
 import { AuditPage } from './pages/audit';
 import { DevicePage } from './pages/device-login';
 import { EnvironmentPage } from './pages/environment';
@@ -60,7 +64,8 @@ const under = <T extends string>(path: T) => ({ getParentRoute: () => nav, path 
 const projectPage = createRoute({ ...under('/projects/$project'), ...project, component: ProjectLayout });
 const userPage = createRoute({ ...under('/users/$user'), ...user, component: UserLayout });
 const serviceAccountPage = createRoute({ ...under('/service-accounts/$account'), ...serviceAccount, component: ServiceAccountLayout });
-const tab = <P extends typeof projectPage | typeof userPage | typeof serviceAccountPage, T extends string>(parent: P, path: T) => ({ getParentRoute: () => parent, path });
+const accountPage = createRoute({ ...under('/account'), ...account, component: AccountPage });
+const tab = <P extends typeof projectPage | typeof userPage | typeof serviceAccountPage | typeof accountPage, T extends string>(parent: P, path: T) => ({ getParentRoute: () => parent, path });
 
 const routeTree = root.addChildren([
   frame.addChildren([
@@ -91,7 +96,12 @@ const routeTree = root.addChildren([
       createRoute({ ...tab(serviceAccountPage, '/activity'), ...serviceAccountActivity, component: ServiceAccountActivityPage }),
     ]),
     createRoute({ ...under('/settings'), ...settings, component: SettingsPage }),
-    createRoute({ ...under('/account'), ...account, component: AccountPage }),
+    accountPage.addChildren([
+      createRoute({ ...tab(accountPage, '/'), ...accountProfile, component: AccountProfilePage }),
+      createRoute({ ...tab(accountPage, '/sessions'), ...accountSessions, component: AccountSessionsPage }),
+      createRoute({ ...tab(accountPage, '/apps'), ...accountApps, component: AccountAppsPage }),
+      createRoute({ ...tab(accountPage, '/appearance'), ...accountAppearance, component: AccountAppearancePage }),
+    ]),
   ]),
 ]);
 

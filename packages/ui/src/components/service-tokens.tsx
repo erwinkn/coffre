@@ -222,7 +222,7 @@ function IssueToken({ serviceId }: { serviceId: string }) {
               secrets; a CI run signs the CLI in with it, piped to{' '}
               <span className="mono">coffre login &lt;url&gt; --token</span>.
             </Notice>
-            <div className="token-once">
+            <div className="copy-line">
               <code className="mono">{issued.token}</code>
               <CopyButton value={issued.token} label="Copy token" />
             </div>

@@ -1,8 +1,9 @@
 # Connect Claude, or another MCP client, to coffre
 
-coffre serves MCP at `https://<your instance>/mcp`. A client signs in as
-you, with your coffre sign-in, and can never do more than you can. It can
-do less: you choose what it may do when you connect it. The design, and why
+coffre serves MCP at `https://<your instance>/mcp`, which your account's
+Connected apps tab, `/account/apps`, shows with the steps below. A client
+signs in as you, with your coffre sign-in, and can never do more than you
+can. It can do less: you choose what it may do when you connect it. The design, and why
 each piece is as it is, is [design/mcp.md](design/mcp.md).
 
 ## Connecting
@@ -109,10 +110,10 @@ laptop say, stays.
 
 ## Connected apps
 
-Your account page lists every client you connected: its website, what it
-may do, when it was last used and when it expires. **Disconnect** ends it
-at its next request. So do `coffre apps` and `coffre apps revoke <id>
---apply`. An owner sees anyone's on that person's page, and may disconnect
+Your account's Connected apps tab lists every client you connected: its
+website, what it may do, when it was last used and when it expires.
+**Disconnect** ends it at its next request. So do `coffre apps` and
+`coffre apps revoke <id> --apply`. An owner sees anyone's on that person's page, and may disconnect
 them there, as with sessions. Removing someone from coffre disconnects
 theirs: the removal dialog and `coffre offboard` name them first
 ([offboarding.md](offboarding.md)). Each connection, its tokens and its end
@@ -139,4 +140,4 @@ calls. `coffre init` writes it on:
   120, total: 300 }) }`, counted in the process.
 
 Without `mcp`, `/mcp` and its metadata answer 404, and the account page has
-no Connected apps.
+no Connected apps tab.
