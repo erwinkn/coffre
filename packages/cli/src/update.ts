@@ -264,7 +264,8 @@ export async function update(args: string[]): Promise<void> {
   try {
     await steps.run(0, async () => {
       latest = await latestVersion();
-      return `coffre ${latest} is the latest release; this CLI is ${current}`;
+      // The next step says when this CLI is up to date; when it is not, this one says what it is.
+      return `coffre ${latest} is the latest release${current === latest ? '' : `; this CLI is ${current}`}`;
     });
     await steps.run(1, async (step) => {
       if (current === latest) return `This CLI is up to date, at ${current}`;
