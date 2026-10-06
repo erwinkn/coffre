@@ -309,8 +309,13 @@ database; the GitHub App, by its client ID and the app Worker's secret;
 each Worker's key. It never makes a key for a Worker that has one, and when
 a Worker lacks its key but the database holds data, it stops before
 changing anything. A run that failed partway carries on from where it
-stopped. Keys shown by a run whose deploy failed never reached Cloudflare:
-the next run makes new ones, and its screen says they replace them.
+stopped. A Hyperdrive config deleted since is made again, its login
+given a new password for it: Hyperdrive needs the password, and the
+database keeps only its verifier. Setup lists the configs as it starts, so
+one deleted while it runs is made again in that run when its login is
+getting a new password anyway; otherwise that run stops, and says to run
+setup again. Keys shown by a run whose deploy failed never reached
+Cloudflare: the next run makes new ones, and its screen says they replace them.
 
 ### A domain whose DNS is elsewhere
 

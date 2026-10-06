@@ -1,8 +1,8 @@
 // `coffre setup` doing Cloudflare too, end to end, in a terminal: against a
 // disposable cluster, and stand-ins for Cloudflare's API, GitHub, wrangler
 // and a browser. A first run whose app deploy fails, the run that resumes
-// it, one that finds everything done, a second deployment beside the first
-// on one account, a third on the first's database server, and one that
+// it, one that finds everything done, two whose Hyperdrive configs are
+// deleted while they run, a second deployment beside the first on one account, a third on the first's database server, and one that
 // stops before changing a database in use.
 // Every deploy is also the real wrangler's, in a dry run, on the same files
 // and the same stdin.
@@ -103,8 +103,8 @@ function another(name: string): string {
 
 const deployment = () => join(dir, 'deployment');
 
-function setup(play: (terminal: Session) => Promise<void>, where = deployment(), databaseUrl = url) {
-  return inTerminal(['setup'], env, typingUrl(databaseUrl, play), { columns: 160, rows: 48 }, where);
+function setup(play: (terminal: Session) => Promise<void>, where = deployment(), databaseUrl = url, args = ['setup']) {
+  return inTerminal(args, env, typingUrl(databaseUrl, play), { columns: 160, rows: 48 }, where);
 }
 
 /** What the real wrangler said, in its dry run of a Worker's last deploy. */
@@ -312,6 +312,44 @@ test('a run with everything done: nothing made, nothing shown, both deployed aga
   ]);
   assert.deepEqual(cloudflare.state.configs.get('acc-acme')!.map(({ origin }) => origin.password), before);
   assertKept(output, wrangler);
+});
+
+test("a Hyperdrive config deleted during a run, its login's password kept: setup stops, and says to run it again", { skip }, async () => {
+  const files = ['app', 'vault'].map((component) => readFileSync(join(deployment(), component, 'wrangler.jsonc'), 'utf8'));
+  cloudflare.state.vanishing.add('coffre');
+  const { output, code } = await setup((terminal) => answer(terminal));
+  const text = mainText(output);
+  assert.equal(code, 1, text);
+  assert.match(text, /✗ Point Hyperdrive at the database\n\s+The Hyperdrive config coffre was deleted during this run\. coffre_runtime kept its password/);
+  assert.match(text, /run\s+setup\s+again,\s+which\s+gives\s+coffre_runtime\s+a\s+new\s+password\s+and\s+makes\s+the\s+config\s+with\s+it\./);
+  assert.deepEqual(cloudflare.state.configs.get('acc-acme')!.map(({ name }) => name), ['coffre-vault']);
+  assert.deepEqual(calls().filter(({ args }) => args[0] === 'deploy'), []);
+  assert.deepEqual(['app', 'vault'].map((component) => readFileSync(join(deployment(), component, 'wrangler.jsonc'), 'utf8')), files);
+});
+
+test("the run after, the vault's config deleted under its update: both configs made again, each with its login's new password", { skip }, async () => {
+  const before = readWorker(deployment(), 'vault/wrangler.jsonc').hyperdrive;
+  cloudflare.state.vanishing.add('coffre-vault');
+  // The app's config, gone, gets its login a new password on its own; the vault's is listed, so only the flag gives its login one.
+  const { output, code } = await setup((terminal) => answer(terminal), deployment(), url, ['setup', '--reset-passwords']);
+  const text = mainText(output);
+  assert.equal(code, 0, text);
+  assert.match(text, /✓ Set new passwords for coffre_runtime and coffre_vault_runtime/);
+  assert.match(text, /coffre\s+made, for coffre_runtime\n\s+coffre-vault\s+made again: the config coffre-vault was deleted during this run\n/);
+  assert.match(text, /✓ coffre answers at/);
+  const configs = cloudflare.state.configs.get('acc-acme')!;
+  assert.deepEqual(configs.map(({ name, caching }) => [name, caching.disabled]), [
+    ['coffre', true],
+    ['coffre-vault', true],
+  ]);
+  for (const { origin } of configs) secrets.add(origin.password);
+  assert.deepEqual(await firstConnects(), [true, true]);
+  const app = readWorker(deployment(), 'app/wrangler.jsonc');
+  const vault = readWorker(deployment(), 'vault/wrangler.jsonc');
+  assert.deepEqual([app.hyperdrive, vault.hyperdrive], configs.map(({ id }) => id));
+  assert.notEqual(vault.hyperdrive, before);
+  assert.match(dryRun('coffre-vault'), new RegExp(`env\\.VAULT_HYPERDRIVE \\(${configs[1]!.id}\\)`));
+  assertKept(output, calls());
 });
 
 test("a second deployment on the same account: it takes names of its own, and the first's Workers and Hyperdrive configs stay as they were, byte for byte", { skip: skip || (OTHER_CLUSTER === undefined && 'needs a second cluster') }, async () => {

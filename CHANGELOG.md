@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+**`coffre setup` survives a Hyperdrive config deleted while it runs.**
+Setup lists the account's configs as it starts. A config deleted after
+that, whose login was getting a new password, made the update answer 404
+and stopped setup. It now makes the config again and says so. When the
+login kept its password, which setup can't read, the run stops and says to
+run setup again, which gives the login a new password and makes the config.
+
 ## 0.4.1 (2026-10-06)
 
 **`/access` is gone.** It only sent links from before 0.4.0 on to

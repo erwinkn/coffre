@@ -234,6 +234,24 @@ test("Cloudflare's API: the token as a bearer, a database password only in a bod
   }
 });
 
+test('a Hyperdrive config deleted once listed: its update and its read say it is gone; a refusal still throws', LIMIT, async () => {
+  const cloudflare = await fakeCloudflare(TOKEN);
+  try {
+    const api = new CloudflareApi(TOKEN, cloudflare.url);
+    const origin = originOf('postgresql://coffre_runtime:p4ss@db.acme.test/coffre');
+    const id = await api.createHyperdrive('acc-acme', 'coffre', origin);
+    assert.equal((await api.hyperdriveConfig('acc-acme', id))?.name, 'coffre');
+    assert.equal(await api.updateHyperdrive('acc-acme', id, 'coffre', origin), true);
+    cloudflare.state.vanishing.add('coffre');
+    assert.deepEqual((await api.hyperdriveConfigs('acc-acme')).map(({ id }) => id), [id], 'listed, then deleted');
+    assert.equal(await api.hyperdriveConfig('acc-acme', id), null);
+    assert.equal(await api.updateHyperdrive('acc-acme', id, 'coffre', origin), false);
+    await assert.rejects(new CloudflareApi('not-the-token', cloudflare.url).updateHyperdrive('acc-acme', id, 'coffre', origin), /Cloudflare answered 401/);
+  } finally {
+    cloudflare.close();
+  }
+});
+
 // --- wrangler ---------------------------------------------------------------------------------
 
 test("wrangler deploys with the secrets on its stdin, as its secrets file: never in its arguments, and none when there are none", LIMIT, async () => {

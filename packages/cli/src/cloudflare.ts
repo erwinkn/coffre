@@ -365,12 +365,24 @@ export class CloudflareApi {
     return made.id;
   }
 
-  async updateHyperdrive(account: string, id: string, name: string, origin: Origin): Promise<void> {
-    await this.#call('PUT', `/accounts/${account}/hyperdrive/configs/${id}`, {
-      name,
-      origin: { scheme: 'postgres', ...origin },
-      caching: { disabled: true },
-    });
+  /** A Hyperdrive config as it is now; null when it is gone, deleted since it was listed. */
+  hyperdriveConfig(account: string, id: string): Promise<HyperdriveConfig | null> {
+    return this.#found(`/accounts/${account}/hyperdrive/configs/${id}`);
+  }
+
+  /** Whether there was a config to update: false when it is gone, deleted since it was listed. */
+  async updateHyperdrive(account: string, id: string, name: string, origin: Origin): Promise<boolean> {
+    try {
+      await this.#call('PUT', `/accounts/${account}/hyperdrive/configs/${id}`, {
+        name,
+        origin: { scheme: 'postgres', ...origin },
+        caching: { disabled: true },
+      });
+      return true;
+    } catch (error) {
+      if (error instanceof CloudflareError && error.status === 404) return false;
+      throw error;
+    }
   }
 
   async disableCaching(account: string, id: string): Promise<void> {

@@ -41,6 +41,8 @@ export async function fakeCloudflare(token: string) {
     ],
     zones: { 'acc-acme': [{ id: 'zone-1', name: 'acme.test', status: 'active' }], 'acc-home': [] } as Record<string, FakeZone[]>,
     configs: new Map<string, FakeConfig[]>(),
+    /** The names of configs deleted on the dashboard once listed, while setup runs. */
+    vanishing: new Set<string>(),
     /** Each Worker deployed, `<account>/<name>`: the names of its secrets, and its bindings. */
     scripts: new Map<string, { secrets: Set<string>; bindings: unknown[] }>(),
     requests: [] as { method: string; path: string; body: string }[],
@@ -157,7 +159,12 @@ export async function fakeCloudflare(token: string) {
       const configs = state.configs.get(account!) ?? [];
       state.configs.set(account!, configs);
       const visible = ({ origin: { password: _password, ...origin }, ...config }: FakeConfig) => ({ ...config, origin });
-      if (id === undefined && request.method === 'GET') return send(200, configs.map(visible));
+      if (id === undefined && request.method === 'GET') {
+        const listed = configs.map(visible);
+        state.configs.set(account!, configs.filter(({ name }) => !state.vanishing.has(name)));
+        state.vanishing.clear();
+        return send(200, listed);
+      }
       if (id === undefined && request.method === 'POST') {
         const made = { id: `hd-${randomBytes(4).toString('hex')}`, caching: { disabled: false }, ...JSON.parse(text) } as FakeConfig;
         configs.push(made);
