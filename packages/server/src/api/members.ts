@@ -390,7 +390,6 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
   const listed = everyone.find((entry) => formatMember(entry.member) === formatMember(member));
   if (listed === undefined) throw notFound('no such member');
   const { row, status } = listed;
-  const active = status === 'active';
 
   const held = row?.credentials ?? [];
   const issued = everyone
@@ -403,8 +402,9 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
   const { exposed, rotated } = exposure([member], activity).get(formatMember(member))!;
   const made = (await referencesBy(ctx.db, formatMember(member))).map((reference) => reference.view);
   made.sort((a, b) => Number(b.state === 'live') - Number(a.state === 'live') || a.createdAt.localeCompare(b.createdAt));
-  // Only people connect apps; removal disconnects them.
-  const apps = member.type === 'user' && active && ctx.mcp !== null ? await ctx.mcp.appsOf(formatMember(member)) : [];
+  // Only people connect apps. Removal disconnects them, but 0.4.0's left
+  // them to the generation alone: a removed member's are never listed.
+  const apps = member.type === 'user' && status !== 'removed' && ctx.mcp !== null ? await ctx.mcp.appsOf(formatMember(member)) : [];
   return {
     principalType: member.type,
     principalId: member.id,
