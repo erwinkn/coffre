@@ -32,9 +32,8 @@ export function DevicePage() {
     return (
       <ClosedDoor icon={<SlashCircle size={18} />} label="coffre CLI" title="Sign-in refused">
         <p>
-          The terminal that asked gets nothing. If you did not run <span className="mono">coffre
-          login</span> yourself, someone may be trying to get you to approve theirs; the refusal is
-          in the audit log.
+          The terminal gets nothing. If you did not run <span className="mono">coffre login</span>{' '}
+          yourself, someone may be trying to get you to approve theirs.
         </p>
       </ClosedDoor>
     );
@@ -134,8 +133,7 @@ function Approve({
         </h1>
         <p className="signin-lede">
           Only if you just ran <span className="mono">coffre login</span> yourself and it shows
-          this code. It gets your access, in your name, for {sessionDays} days or until you end it
-          from your account page.
+          this code. It gets your access for {sessionDays} days.
         </p>
       </div>
 

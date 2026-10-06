@@ -141,7 +141,7 @@ export function MakeReference({
       open={open}
       onOpenChange={onOpenChange}
       title={`Make ${holder.split('/')[2]} a reference`}
-      description={`Whoever can read ${holderEnvironment} will read the secret you name, as it changes, even without access to its project. It takes your own read on that secret.`}
+      description={`Whoever can read ${holderEnvironment} will read the secret you name, as it changes, even without access to its project. You need read access to that secret.`}
     >
       <form
         className="form"
@@ -204,7 +204,7 @@ export function ReferencesInto({ project }: { project: string }) {
     <Card
       labelledBy="references-into"
       title="Also readable through references"
-      description={`Secrets of ${project} that others read through references held elsewhere. Who reads a reference's environment reads its source, with no grant here.`}
+      description={`Secrets of ${project} that references elsewhere read. Whoever reads a reference's environment reads its source, with no grant here.`}
     >
       <div className="dt-wrap">
         <table className="dt stacks">

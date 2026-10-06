@@ -49,9 +49,8 @@ export const SECTIONS = [
         usage: ['migrate [--yes]'],
         about: [
           "in a deployment's folder, its database to the schema of",
-          'the version it pins, as its pipeline runs it before each',
-          "deploy, with the owner's connection string, asked for",
-          'hidden (piped in, and --yes, without a terminal)',
+          "the version it pins; asks for the owner's connection",
+          'string (piped in, and --yes, without a terminal)',
         ],
       },
     ],
@@ -87,7 +86,7 @@ export const SECTIONS = [
       {
         command: 'set',
         usage: [`set       ${P}/<KEY> --ref <project>/<environment>/<KEY>`],
-        about: ['a reference: whoever reads its environment reads that', "secret's current value through it; takes your own read on it"],
+        about: ['a reference: whoever reads its environment reads that', "secret's current value through it; you need read on it"],
       },
       {
         command: 'references',
@@ -115,10 +114,10 @@ export const SECTIONS = [
       {
         command: 'folders',
         usage: [`folders   ${P} [--json]`],
-        about: ['its key folders, and the keys in each: a folder is a label,', 'there while something is in it, made by move'],
+        about: ['its key folders, and the keys in each; move makes them'],
       },
-      { command: 'folders rename', usage: [`folders rename ${P} <folder> <new-folder>`], about: ['every key in it re-filed; onto a folder that exists, one folder'] },
-      { command: 'folders remove', usage: [`folders remove ${P} <folder> [--apply]`], about: ['every key out of it, each staying, in no folder; more than', 'one shown first'] },
+      { command: 'folders rename', usage: [`folders rename ${P} <folder> <new-folder>`], about: ['every key in it moves; onto an existing folder, the two merge'] },
+      { command: 'folders remove', usage: [`folders remove ${P} <folder> [--apply]`], about: ['every key out of it, into no folder; more than one is', 'shown first'] },
       {
         command: 'missing',
         usage: [`missing   ${P} [--dismissed] [--json]`],
@@ -146,7 +145,7 @@ export const SECTIONS = [
       {
         command: 'folders rename',
         usage: ['folders rename <folder> <new-folder>'],
-        about: ['every project in it re-filed; takes managing each of them'],
+        about: ['every project in it moves; you must manage each of them'],
       },
       { command: 'folders remove', usage: ['folders remove <folder> [--apply]'], about: ['every project out of it, each staying where it is'] },
       { command: 'environments create', usage: [`environments create ${P} [--name <name>]`] },
@@ -155,8 +154,8 @@ export const SECTIONS = [
         usage: [`fork ${P} <new-environment> [--name <name>] [--reference]`],
         about: [
           'a new environment beside it, each key a copy of its value,',
-          'without history: the copy is a read, logged; --reference makes',
-          'each key a reference to its parent instead',
+          'without history; --reference makes each key a reference',
+          'to its parent instead',
         ],
       },
       { command: 'environments rename', usage: [`environments rename ${P} [--name <name>] [--slug <new-environment>]`] },

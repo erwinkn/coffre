@@ -32,6 +32,7 @@ import {
   type Held,
   type Moved,
 } from './deployment.ts';
+import { WORKFLOW } from './deploy-on-push.ts';
 import { templateDir, type Kind } from './init.ts';
 import { after as later, applyChanges, CLEAN_BREAK, pageMove, shownChange } from './layout.ts';
 import { StepFailed, Steps } from './steps.ts';
@@ -112,7 +113,7 @@ function journalTags(folder: string): string[] {
  */
 export function migrationsAdded(from: string, to: string, before: readonly string[], after: readonly string[]): string {
   const added = after.filter((tag) => !before.includes(tag));
-  if (added.length === 0) return `coffre ${to} adds no migration to ${from}'s: deploying it is all.`;
+  if (added.length === 0) return `coffre ${to} adds no migration to ${from}'s: just deploy it.`;
   return (
     `coffre ${to} adds ${added.length === 1 ? '1 migration' : `${added.length} migrations`} to ${from}'s ` +
     `(${listed(added, 'and')}): run \`pnpm exec coffre migrate\` here first, then deploy.`
@@ -405,7 +406,7 @@ export async function update(args: string[]): Promise<void> {
           bumpPins(deployment, latest);
           if (repin) {
             const replaced = pinPackageManager(deployment, pnpm!);
-            details.push(`Pinned ${pnpm}${replaced ? `, not ${replaced}` : ''}: every install, here, in CI and on Workers Builds, holds minimumReleaseAge alike`);
+            details.push(`Pinned ${pnpm}${replaced ? `, not ${replaced}` : ''}: every install, here and in CI, holds minimumReleaseAge alike`);
           }
           step.note(`Installing coffre ${latest}'s packages, with pnpm`);
           try {
@@ -465,8 +466,13 @@ export async function update(args: string[]): Promise<void> {
   if (after !== null) {
     out.write(`  ${migrationsAdded(from, latest, before, after)}\n`);
     if (deployment !== null) {
-      const deploy = kind === 'workers' ? '`pnpm run deploy`, or a push for Workers Builds, whose builds migrate first' : 'restarting the server';
-      out.write(`  ${s.dim(`Deploy it as you do: ${deploy}.`)}\n`);
+      const deploy =
+        kind === 'node'
+          ? 'Restart the server to deploy it.'
+          : existsSync(join(deployment, WORKFLOW))
+            ? `Commit and push to main to deploy it, with ${WORKFLOW}.`
+            : 'Deploy it with `pnpm run deploy`.';
+      out.write(`  ${s.dim(deploy)}\n`);
     }
     out.write('\n');
   }

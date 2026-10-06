@@ -54,7 +54,7 @@ export function OauthAuthorizePage() {
           </button>
         }
       >
-        <p>{view.message}. Nothing was granted; the app is told why.</p>
+        <p>{view.message}. Nothing was granted.</p>
       </ClosedDoor>
     );
   }
@@ -129,9 +129,6 @@ function Approve({
         <h1 className="signin-title" id="consent-title">
           Connect {client.name} to coffre?
         </h1>
-        <p className="signin-lede">
-          Only if you just asked it to connect. It acts as you, and can never do more than you can.
-        </p>
       </div>
 
       <div className="consent-client">
@@ -162,7 +159,7 @@ function Approve({
         </div>
         <div className="fact">
           <dt>For</dt>
-          <dd>{view.days} days, or until you disconnect it on your account page</dd>
+          <dd>{view.days} days</dd>
         </div>
       </dl>
 
@@ -196,26 +193,25 @@ function Approve({
       <div className="consent-notices">
         {chosen.has('reveal') && (
           <Notice tone="bad">
-            Values will be sent to {client.name}. They become part of the conversation: whoever can read
-            that conversation, and wherever {client.name} stores it, has them.
+            Values will be sent to {client.name}, into the conversation. Anyone who can read that
+            conversation, wherever {client.name} stores it, has them.
           </Notice>
         )}
         {view.loopbackOnly && (
           <Notice tone="warn">
             The answer goes to a program on this computer, <span className="mono">{view.redirectHost}</span>.
-            Any program running here could be it: approve only if you just started {client.name} yourself.
+            Any program running here could be it. Approve only if you just started {client.name} yourself.
           </Notice>
         )}
         {replaced > 0 && (
           <Notice tone="info">
-            This replaces your earlier connection{replaced === 1 ? '' : 's'} of {client.name}, with fewer scopes: {replaced === 1 ? 'it ends' : 'they end'} once
-            the app has this one.
+            This replaces your earlier connection{replaced === 1 ? '' : 's'} of {client.name}.
           </Notice>
         )}
         {kept > 0 && (
           <Notice tone="info">
             You have connected {client.name} {kept === 1 ? 'once' : `${kept} times`} already.
-            This adds another connection; your account page lists them.
+            This adds another connection.
           </Notice>
         )}
         <ErrorLine error={error} />

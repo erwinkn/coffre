@@ -136,7 +136,7 @@ export function AuditPage() {
         {shown.length === 0 ? (
           <EmptyState title={deniedOnly ? 'No denials recorded' : 'Nothing recorded yet'}>
             {deniedOnly
-              ? 'Every decision reaches this log, refusals included. An empty page means nobody has been turned away.'
+              ? 'Nobody has been turned away.'
               : 'The log fills as people read and write secrets and change who has access.'}
           </EmptyState>
         ) : (
@@ -378,7 +378,7 @@ function ChainStatus({ chain, onRetry }: { chain: ChainResult | undefined; onRet
     return (
       <Toggletip
         align="end"
-        label="Owners and root admins see whether the log is intact. Checking it means recomputing every entry, and you read only your projects' part of it."
+        label="Only owners and root admins can check the log: it takes every entry, and you see only your projects'."
       >
         <button type="button" className="chain-note">
           <Info size={14} />
@@ -393,7 +393,7 @@ function ChainStatus({ chain, onRetry }: { chain: ChainResult | undefined; onRet
       <div className="chain">
         <Toggletip
           align="end"
-          label={`coffre could not check the log: ${chain.problem}. The entries below loaded, but whether they are intact is unknown until it can.`}
+          label={`coffre could not check the log: ${chain.problem}. The entries below are unverified.`}
         >
           <button type="button" className="chain-flag chain-flag-warn">
             <AlertTriangle size={14} />

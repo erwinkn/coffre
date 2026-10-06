@@ -36,7 +36,7 @@ test('tokens issue prints the token once, on stdout, and says on a terminal that
   await manage.tokensIssue(connect, ['deploy-slides', '--label', 'CI', '--expires-in', '30'], io);
   assert.deepEqual(calls, [{ method: 'POST', path: '/members/token:deploy-slides/tokens', body: { expiresInDays: 30, label: 'CI' } }]);
   assert.equal(written.out, `${TOKEN}\n`);
-  assert.equal(written.err, "coffre: service:deploy-slides's bearer token tok-1, until 2027-01-01. It is shown this once: coffre keeps only its hash\n");
+  assert.equal(written.err, "coffre: service:deploy-slides's bearer token tok-1, until 2027-01-01. It is shown this once\n");
   assert.ok(!written.err.includes(TOKEN));
 });
 
@@ -213,10 +213,10 @@ test('projects delete and environments delete show what they would take, and del
   assert.equal(
     written.out,
     'would delete slides, for good:\n' +
-      "  erased: 1 version, each one's ciphertext and wrapped data key, in dev, prod\n" +
+      '  erased: 1 version, in dev, prod\n' +
       '  revoked: 1 grant, service:ci-deploy (viewer on slides/prod)\n' +
       '  ended: 1 reference, deck/prod/API_KEY → slides/prod/API_KEY\n' +
-      '  kept, names only: slides~deleted-2026-10-05 and its 3 keys, which the audit log names\n' +
+      '  kept, names only: slides~deleted-2026-10-05 and its 3 keys, for the audit log\n' +
       '  slides would be free to use again\n' +
       '  service:ci-deploy would hold nothing anywhere: `coffre offboard ci-deploy --service` removes them\n' +
       'Backups taken before the deletion still hold the encrypted values.\n' +
@@ -332,7 +332,7 @@ test("sessions revoke warns when it is this CLI's own, and identities unlink say
   const unlink = fixture(({ method }) => (method === 'GET' ? identities : { unlinked: true }));
   await manage.identitiesUnlink(unlink.connect, ['idn-1', '--apply'], unlink.io);
   assert.deepEqual(unlink.calls.map(({ method, path }) => `${method} ${path}`), ['GET /identities', 'DELETE /identities/idn-1']);
-  assert.equal(unlink.written.out, 'unlinked your github account ada@acme.example (idn-1), and ended the sessions it signed in\n');
+  assert.equal(unlink.written.out, 'unlinked your github account ada@acme.example (idn-1), and ended its sessions\n');
 });
 
 test('apps lists the MCP clients you connected, unverified ones said so, and apps revoke disconnects one only with --apply', async () => {
@@ -355,7 +355,7 @@ test('apps lists the MCP clients you connected, unverified ones said so, and app
   const preview = fixture(answer);
   await manage.appsRevoke(preview.connect, ['c0nn-1'], preview.io);
   assert.deepEqual(preview.calls.map(({ method, path }) => `${method} ${path}`), ['GET /me', 'GET /apps']);
-  assert.match(preview.written.out, /^would disconnect Claude \(claude\.ai\), connected 2026-10-01, last used 2026-10-04: its tokens would stop at its next request\.\nNothing changed/);
+  assert.match(preview.written.out, /^would disconnect Claude \(claude\.ai\), connected 2026-10-01, last used 2026-10-04: it would stop working at once\.\nNothing changed/);
 
   const revoke = fixture((call) => (call.method === 'GET' ? answer(call) : { disconnected: true }));
   await manage.appsRevoke(revoke.connect, ['c0nn-2', '--apply'], revoke.io);

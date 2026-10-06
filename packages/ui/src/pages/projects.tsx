@@ -249,7 +249,7 @@ function ProjectRow({
                   <span
                     key={environment.slug}
                     className="env-link"
-                    title="You can see this environment exists, but not open it"
+                    title="You can't open this environment"
                   >
                     {environment.slug}
                   </span>
@@ -303,7 +303,7 @@ function NewProject() {
         open={open}
         onOpenChange={(next) => (next ? setOpen(true) : close())}
         title="New project"
-        description="A project holds environments, and access is granted on it or on one of its environments. You become its owner."
+        description="A project holds environments. You become its owner."
       >
         <form
           className="form"
@@ -330,7 +330,7 @@ function NewProject() {
               onChange={(event) => setSlug(event.target.value)}
             />
             <span className={`hint${slugError !== null ? ' edit-note-error' : ''}`} id="new-project-slug-hint">
-              {slugError ?? 'Used in paths, as in market/prod. Renaming it later is safe.'}
+              {slugError ?? 'Used in paths, as in market/prod.'}
             </span>
           </label>
 

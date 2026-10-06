@@ -180,7 +180,7 @@ function SigninAccountsCard({
       <Card
         labelledBy="signin-accounts"
         title="Sign-in accounts"
-        description="coffre recognises you by these accounts, never by an email address alone. A new account is linked here, while you are signed in."
+        description="You can sign in with any of these. Link another below."
       >
         {(linked !== undefined || message !== null) && (
           <div className="card-body">
@@ -316,7 +316,7 @@ function Sessions({
     <Card
       labelledBy="sessions"
       title="Sessions"
-      description="Browsers and command lines signed in as you. Ending one signs it out at its next request."
+      description="Browsers and command lines signed in as you."
     >
       {sessions.length === 0 ? (
         <EmptyState title="No sessions">Nothing is signed in as you right now.</EmptyState>
@@ -395,8 +395,8 @@ function Sessions({
                                   </>
                                 )}
                                 , last active{' '}
-                                <Timestamp iso={session.lastUsedAt ?? session.createdAt} display="relative" />, is
-                                signed out at its next request.
+                                <Timestamp iso={session.lastUsedAt ?? session.createdAt} display="relative" />, will be
+                                signed out.
                               </>
                             }
                             confirmLabel="End session"
@@ -427,7 +427,7 @@ function ConnectAnApp({ url }: { url: string }) {
     <Card
       labelledBy="connect"
       title="Connect an app"
-      description="Claude, or another MCP client, connects at this address. It asks you to approve it here, then acts as you."
+      description="Claude, or any other MCP client, connects at this address once you approve it."
     >
       <dl className="facts">
         <Fact label="MCP URL">
@@ -465,8 +465,8 @@ function ConnectedApps() {
     <ConnectedAppsCard
       apps={apps.ok ? apps.apps : { error: apps.error }}
       change={disconnectApp(client)}
-      description="Each acts as you, never beyond your access, and every call it makes is in the audit log. Disconnecting one stops it at its next request."
-      empty="An app you connect shows here once you approve it."
+      description="Every call an app makes is in the audit log."
+      empty="Apps you connect show here."
     />
   );
 }

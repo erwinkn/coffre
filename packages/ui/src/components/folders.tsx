@@ -83,7 +83,7 @@ export function FolderMenu({
         open={renaming}
         onOpenChange={setRenaming}
         title={`Rename ${folder}`}
-        description={`Its ${items} move with it. A folder only arranges the list: nothing else changes.`}
+        description={`Its ${items} move with it. Nothing else changes.`}
       >
         <form
           className="form"
@@ -172,7 +172,7 @@ export function MoveToFolder({
       open={open}
       onOpenChange={onOpenChange}
       title={`Move ${what} to a folder`}
-      description="A folder arranges the list. It changes nothing else: names, values and access stay as they are."
+      description="Folders only arrange the list: names, values and access stay as they are."
     >
       <form
         className="form"

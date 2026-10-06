@@ -57,8 +57,8 @@ export function ProjectLayout() {
       {found.archivedAt !== null && (
         <div style={{ marginBottom: '1.25rem' }}>
           <Notice tone="bad">
-            <strong>This project is archived.</strong> Its environments serve no reads, to
-            people or to machines, until it is restored.
+            <strong>This project is archived.</strong> Its environments serve no reads until it
+            is restored.
           </Notice>
         </div>
       )}

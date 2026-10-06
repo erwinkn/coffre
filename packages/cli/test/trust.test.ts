@@ -212,7 +212,7 @@ test('the CLI hands a refused lookup back to trust, which says how to give the I
   const { signedInWithToken } = await import('./fakes.ts');
   const server = createServer((request, response) =>
     response.writeHead(request.url!.startsWith('/api/workloads/lookup') ? 404 : 500, { 'content-type': 'application/json' })
-      .end(JSON.stringify({ error: 'not_found', message: "api.github.com did not find it: a private one's IDs are typed in" })),
+      .end(JSON.stringify({ error: 'not_found', message: "api.github.com did not find it: for a private one, type its IDs" })),
   );
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');

@@ -21,7 +21,7 @@ export const MCP_SCOPE_INFO: Record<McpScope, { label: string; description: stri
   },
   reveal: {
     label: 'Reveal values',
-    description: 'Secret values, sent to the app. They become part of its conversation, wherever it keeps it.',
+    description: 'Secret values, sent to the app.',
   },
   'manage-access': {
     label: 'Manage access',

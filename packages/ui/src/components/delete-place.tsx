@@ -60,8 +60,7 @@ export function DeletePlaceDialog({
       </div>
       <div className="dialog-body">
         <Notice tone="bad">
-          Nothing brings it back. Backups of the database taken before now still hold its
-          encrypted values; only they, with the vault key, could restore them.
+          Nothing brings it back, except a database backup from before now, with the vault key.
         </Notice>
       </div>
       <form
@@ -126,7 +125,7 @@ function DeletionSummary({ deletion, what }: { deletion: Deletion; what: 'projec
     <ul className="deletion-summary">
       <li>
         <strong>Erased:</strong> the values of {count(deletion.versions, 'secret version')}
-        {environments}, ciphertext and wrapped key both.
+        {environments}.
       </li>
       <li>
         <strong>Revoked:</strong> {count(deletion.grants.length, 'grant')}
@@ -160,8 +159,8 @@ function DeletionSummary({ deletion, what }: { deletion: Deletion; what: 'projec
       )}
       <li>
         <strong>Kept, names only:</strong> the {what} and its {count(deletion.keys, 'key')}, as{' '}
-        <span className="mono">{deletion.tombstone}</span>, so the audit log still reads. Its
-        name is free to use again.
+        <span className="mono">{deletion.tombstone}</span>, for the audit log. Its name is free
+        to use again.
       </li>
       {deletion.stranded.length > 0 && (
         <li>

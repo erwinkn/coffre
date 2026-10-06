@@ -320,8 +320,8 @@ function MemberApps({ principalId, apps }: { principalId: string; apps: Principa
     <ConnectedAppsCard
       apps={apps}
       change={disconnectMemberApp(useCoffre(), memberRef('user', principalId))}
-      description="AI assistants and other MCP clients they connected. Each acts as them, never beyond their access. Disconnecting one stops it at its next request; removing them disconnects every one."
-      empty="They have connected none. An app connects only after they approve it on coffre's page."
+      description="AI assistants and other MCP clients they connected. Removing them disconnects every one."
+      empty="They have connected none."
     />
   );
 }
@@ -382,7 +382,7 @@ function EditAccess({
             Edit access for <span className="mono">{principalId}</span>
           </>
         }
-        description={`Set what this ${kind} can reach on each project you manage, and until when. Saving applies only what you changed.`}
+        description={`Set what this ${kind} can reach on each project you manage, and until when.`}
         wide
       >
         <form

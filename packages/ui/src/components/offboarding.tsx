@@ -41,8 +41,8 @@ export function RemovedNotice({ report }: { report: PrincipalReport }) {
         )}
         .{' '}
         {person
-          ? 'Their project access, sessions, CLI logins, linked sign-in accounts and connected apps were revoked at the same time, so adding them again starts from nothing.'
-          : 'Its project access and every token issued to it were revoked at the same time, so adding it again starts from nothing.'}
+          ? 'Their project access, sessions, CLI logins, linked sign-in accounts and connected apps were revoked, so adding them again starts from nothing.'
+          : 'Its project access and every token issued to it were revoked, so adding it again starts from nothing.'}
       </Notice>
     </div>
   );
@@ -119,7 +119,7 @@ function ConsiderRotating({ report, person }: { report: PrincipalReport; person:
     <Card
       labelledBy="seen-values"
       title="Consider rotating"
-      description={`Values ${they} read or wrote that nobody has changed since, so ${they} may still hold them. Rotate each where it comes from, such as a new API key or database password, then save the new value here and it leaves this list.`}
+      description={`Values ${they} read or wrote that nobody has changed since. Rotate each at its source, such as a new API key or database password, then save the new value here.`}
       actions={
         report.rotated > 0 && (
           <span className="card-aside">{report.rotated} already rotated</span>
@@ -183,7 +183,7 @@ function MadeReferences({ report }: { report: PrincipalReport }) {
     <Card
       labelledBy="made-references"
       title="References they made"
-      description="Each belongs to the environment that holds it, like a value, and stays when they leave: whoever reads that environment reads another secret through it. Review them; the source's access managers, or whoever writes where one is held, can break it."
+      description="These stay after they leave, and whoever reads a reference's environment reads its source through it. Review them: the source's access managers, or whoever writes where one is held, can break it."
     >
       <div className="dt-wrap">
         <table className="dt stacks">
@@ -219,7 +219,7 @@ function IssuedTokens({ report }: { report: PrincipalReport }) {
     <Card
       labelledBy="issued-tokens"
       title="Bearer tokens they issued"
-      description="Bearer tokens they issued to service accounts that still work. Each was shown to them once, when it was made; revoke any they may have kept a copy of."
+      description="These still work, and they saw each one when it was issued. Revoke any they may have kept."
     >
       <div className="dt-wrap">
         <table className="dt report-tokens">

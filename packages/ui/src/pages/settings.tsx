@@ -29,7 +29,7 @@ export function SettingsPage() {
       <Card
         labelledBy="instance"
         title="Instance"
-        description="Set in the deployment's configuration, so shown here rather than edited."
+        description="Set in the deployment's configuration, not here."
       >
         <dl className="facts">
           <Fact label="Sign-in">
@@ -39,7 +39,7 @@ export function SettingsPage() {
                 label={
                   auth?.signin
                     ? 'coffre’s own sign-in. Only invited members get in.'
-                    : 'coffre has no sign-in of its own: every request carries an Access assertion, verified at the origin.'
+                    : 'Cloudflare Access signs people in, and coffre verifies each request.'
                 }
               >
                 <button type="button" className="fact-tip" aria-label="About sign-in">
@@ -94,8 +94,8 @@ function Keys({ keys }: { keys: RouteOutput<'GET /audit/keys'> }) {
       title="Keys"
       description={
         <>
-          What the vault key and app key you keep are checked against. Check the keys themselves
-          with <code>coffre verify keys</code>, which reads them on your machine and sends neither.
+          To check your vault key and app key against these, run <code>coffre verify keys</code>.
+          It reads them on your machine and sends neither.
         </>
       }
     >

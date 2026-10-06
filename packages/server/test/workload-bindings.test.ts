@@ -269,7 +269,7 @@ test("an owner looks up a public repository's or project's IDs; a private one is
     await lead.bindings.lookup({ gitlab: 'infra/deploy', gitlabUrl: 'https://gitlab.acme.example' }),
     { gitlab: 'infra/deploy', projectId: '7', namespaceId: '3' },
   );
-  await assert.rejects(lead.bindings.lookup({ github: 'acme/private' }), /api.github.com did not find it: a private one's IDs are typed in/);
+  await assert.rejects(lead.bindings.lookup({ github: 'acme/private' }), /api.github.com did not find it: for a private one, type its IDs/);
   await assert.rejects(lead.bindings.lookup({ github: '../../users' }), /a GitHub repository is <owner>\/<name>/);
   await assert.rejects(lead.bindings.lookup({ gitlab: 'acme/api', gitlabUrl: 'http://10.0.0.1' }), /must use https/);
   await assert.rejects(lead.bindings.lookup({}), /look up a GitHub repository or a GitLab project/);

@@ -22,10 +22,9 @@ export function UnregisteredPage() {
               (<span className="mono">{principal.id}</span>)
             </>
           )}{' '}
-          was changed outside coffre, so its vault refuses it until someone looks. Nothing you
-          held is available meanwhile.
+          was changed outside coffre, so the vault refuses it and you have no access.
         </p>
-        <p>Ask a coffre owner to remove you under Users and add you again, which starts your access over.</p>
+        <p>To start over, ask a coffre owner to remove you under Users and add you again.</p>
       </ClosedDoor>
     );
   }
@@ -44,8 +43,7 @@ export function UnregisteredPage() {
             (<span className="mono">{principal.id}</span>)
           </>
         )}
-        , but this coffre instance has not registered that identity. Until it does, no
-        projects, secrets, audit entries or API operations are available to you.
+        , but coffre has not added you.
       </p>
       <p>
         Ask a coffre owner or root admin to add your Access email under Users.

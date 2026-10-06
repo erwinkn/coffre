@@ -67,8 +67,8 @@ export function DirectoryTable({
                   : 'No service accounts yet'
             }
           >
-            {hasRemoved ? `Add a ${KIND[principalType]}` : `Add the first ${KIND[principalType]}`} to let
-            it through the door. Project access is a separate step, granted from each project's page.
+            {hasRemoved ? `Add a ${KIND[principalType]}` : `Add the first ${KIND[principalType]}`}, then
+            grant it project access from each project's page.
           </EmptyState>
         ) : (
           <div className="dt-wrap">
@@ -277,7 +277,7 @@ export function InstanceRole({ principal }: { principal: DirectoryPrincipal }) {
         label={
           <>
             Their record was changed outside coffre, so the vault refuses them
-            everything. Remove them to start them over, then add them again.
+            everything. To start over, remove them and add them again.
           </>
         }
       >
@@ -293,8 +293,7 @@ export function InstanceRole({ principal }: { principal: DirectoryPrincipal }) {
       <Toggletip
         label={
           <>
-            Set by <code>rootAdmins</code> in the vault's configuration, so it
-            cannot be changed or removed here.
+            Set by <code>rootAdmins</code> in the vault's configuration, not here.
           </>
         }
       >
@@ -498,7 +497,7 @@ export function AddPrincipal({ principalType }: { principalType: PrincipalType }
         open={open}
         onOpenChange={(next) => (next ? setOpen(true) : close())}
         title={`Add a ${kind}`}
-        description={`This lets the ${kind} through the door and nothing more. Grant project access from its page or from each project's.`}
+        description={`This gives the ${kind} no project access. Grant it afterwards, from its page or a project's.`}
       >
         <form
           className="form"
