@@ -29,12 +29,12 @@ logins' connection strings are made from it. Then, from the deployment's
 directory:
 
 ```sh
-npx @coffre/cli setup
+pnpm exec coffre setup
 ```
 
-Run it with the CLI you ran `coffre init` with: it migrates with the
-migrations it was built with, which are those of the `@coffre/server` of the
-same version. It asks for the connection string at a hidden prompt; a script
+`pnpm exec` runs the CLI the deployment pins, the version `coffre init`
+wrote: it migrates with the migrations it was built with, which are those of
+the deployment's `@coffre/server`. It asks for the connection string at a hidden prompt; a script
 pipes it in, or redirects a file to it. It never takes it as an argument or a
 flag, where the shell's history and other users could read it. Then:
 

@@ -62,10 +62,11 @@ role logs in to the new branch as `<role>.<new branch id>`.
    **Restore to new branch**, or use **Point-in-time recovery** with the
    source branch and the moment. Name the branch, e.g. `restore-2026-10-01`.
 3. Set the logins up again on the new branch, with the owner's connection
-   string for it, as when the deployment was made:
+   string for it, as when the deployment was made, from the deployment's
+   directory:
 
    ```sh
-   npx @coffre/cli setup --reset-passwords
+   pnpm exec coffre setup --reset-passwords
    ```
 
    It sets both runtime logins' passwords again, which the restore reset,
