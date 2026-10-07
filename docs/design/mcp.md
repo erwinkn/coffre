@@ -553,10 +553,13 @@ The page shows:
 - what the client wrote, labelled as the app's ("The app says", "The app
   calls it"), never as coffre's;
 - for `trust_workload`, what each numeric ID names, read back from
-  GitHub's or GitLab's API through the transport bindings use (a
+  github.com's or gitlab.com's API through the transport bindings use (a
   repository, a project, an owner by its path), or "private or unknown:
   check this ID yourself". The model picks the IDs; the person reads the
-  names;
+  names. Only those two hosts are asked: the app may name its own issuer,
+  whose API could name its IDs anything. For any other issuer the IDs read
+  "coffre can't check this host", and the issuer is flagged: whoever runs
+  it can sign in as the account;
 - when the connection holds Reveal values, that the app can read values
   the person can read, the one they are setting included, instead of
   "the app never sees it";
@@ -564,8 +567,10 @@ The page shows:
 
 **Approve** calls `POST /api/approvals/:id` with the cookie, so the
 same-origin rule applies. It sends back the digest the page showed, and the
-basis: what the change replaces, as shown (a secret's current version for
-the tools that write one, the member's roles for `set_access`). The server:
+basis: what the change replaces, read once for the page, so the basis is
+what it showed (a secret's current version for the tools that write one,
+the member's roles at each place and when they end for `set_access`). The
+server:
 
 1. checks the person, the connection (live, at its generation), the scope
    and the expiry;
@@ -575,16 +580,19 @@ the tools that write one, the member's roles for `set_access`). The server:
    and the change still lands first;
 3. moves the approval from `pending` to `approved` with a conditional
    update, under the log's head, after reading the approval and its
-   connection again there: a double click acts once, and an expiry or a
-   disconnect since the first checks refuses it;
+   connection again there: a double click acts once, a disconnect since
+   the first checks refuses it, and so does an expiry, which the update
+   itself checks against the database's clock;
 4. **makes the change there and then.** It calls the stored API request in
    process, as the person, with the connection attached. Every check runs
    again, and the change's own entries name the client.
 5. stores the outcome (or `failed`, with the API's error) for the client's
    retry.
 
-If the request dies between 3 and 5, the approval stays `approved` with no
-outcome. A minute on, it reads as `failed`, its outcome unknown: the client
+If the request dies between 3 and 5, or the outcome can't be stored, the
+approval stays `approved` with no outcome; the page still hears the change
+was made, and sees what only it may. While coffre makes the change, the
+page and the client say so. A minute on, it reads as `failed`, its outcome unknown: the client
 is told coffre doesn't know whether the change was made, never that nothing
 changed, on every call that rejoins it. Its client is never told it ended,
 so when the same call opens a new approval later, that page warns the

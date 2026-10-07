@@ -17,10 +17,10 @@ import { ApiError, conflict, forbidden, notFound } from '../api/errors.ts';
 import { serveApi } from '../api/router.ts';
 import { AuthRowTampered } from '../auth-rows.ts';
 import type { AuditEntry } from '../db/audit.ts';
-import { findApproval, findConnection, insertApproval, openApprovals, unansweredApprovals, update, type ApprovalRow, type ConnectionRow } from '../db/queries.ts';
+import { decideApproval, findApproval, findConnection, insertApproval, openApprovals, unansweredApprovals, update, type ApprovalRow, type ConnectionRow } from '../db/queries.ts';
 import { logged } from '../logged.ts';
 import type { WorkloadTransport } from '../workloads/transport.ts';
-import type { Detail, Viewing } from './changes.ts';
+import type { Applied, Detail, Viewing } from './changes.ts';
 import type { McpConnection } from './service.ts';
 import { TOOL_BY_NAME, type Tool } from './tools.ts';
 
@@ -204,12 +204,14 @@ export class McpApprovals {
     if (status === 'pending') {
       const api = this.#client(ctx);
       try {
-        details = await tool.change!.preview(api, args, viewing);
+        // Read once: the page shows what the change replaces, and Approve compares its basis with this one.
+        const replaced = (await tool.change!.replaces?.(api, args)) ?? null;
+        details = await tool.change!.preview(api, args, viewing, replaced?.details ?? []);
+        basis = replaced?.basis ?? null;
       } catch (error) {
         if (!(error instanceof CoffreError)) throw error;
         details = [{ label: 'Note', value: `coffre could not read what this replaces: ${error.message}` }];
       }
-      basis = await this.#basis(api, tool, args);
       // The same call approved before, whose making never answered: approving it again may make it twice.
       const earlier = (await unansweredApprovals(this.#deps.db, row.connectionId, row.digest)).filter((other) => other.id !== row.id);
       if (earlier.length > 0) {
@@ -277,13 +279,13 @@ export class McpApprovals {
       if (!live(await findConnection(tx, ctx.chainKey, { id: connection.id }).catch(untampered), ctx)) {
         throw refuse(conflict(`${connection.clientName} is disconnected: this approval can no longer be decided`), 'disconnected');
       }
-      const moved = await update(tx, mcpApprovals, { id, status: 'pending' }, { status: input.approve ? 'approved' : 'denied', decidedAt: new Date() });
-      if (moved === 0) throw refuse(conflict('this approval was decided already'), 'decided');
+      // Pending, and unexpired by the database's clock as the write runs.
+      if ((await decideApproval(tx, id, input.approve ? 'approved' : 'denied')) === 0) throw refuse(conflict('this approval was decided already, or expired'), 'decided');
       log.push(allowed(ctx, action, { metadata }));
     });
     if (!input.approve) {
       const outcome = { text: `The person denied this on coffre: nothing changed.` };
-      await update(this.#deps.db, mcpApprovals, { id }, { outcome: JSON.stringify(outcome) });
+      await this.#store(id, { outcome: JSON.stringify(outcome) });
       return { status: 'denied', outcome, shown: [] };
     }
 
@@ -291,17 +293,32 @@ export class McpApprovals {
     // A reveal reads the value for the page alone, so its call may reach Reveal values' route whatever the connection holds.
     const scopes = [...parseScopes(connection.scopes).scopes, ...(tool.change!.reveal === true ? (['reveal'] as const) : [])];
     const via: McpVia = { connectionId: connection.id, clientId: connection.clientId, clientName: connection.clientName, scopes, approvalId: row.id };
+    let applied: Applied;
     try {
-      const applied = await tool.change!.apply(this.#client({ ...ctx, via, provenance: connection.id }), args as never, { value: input.value });
-      const outcome: Outcome = { text: applied.text, result: applied.result };
-      await update(this.#deps.db, mcpApprovals, { id }, { outcome: JSON.stringify(outcome) });
-      return { status: 'approved', outcome, shown: applied.shown ?? [] };
+      applied = await tool.change!.apply(this.#client({ ...ctx, via, provenance: connection.id }), args as never, { value: input.value });
     } catch (error) {
       const known = error instanceof CoffreError;
       if (!known) console.error('an approved MCP change failed', logged(error));
       const outcome: Outcome = { text: `coffre could not make the change: ${known ? error.message : 'see the server log'}`, error: known ? error.code : 'internal' };
-      await update(this.#deps.db, mcpApprovals, { id }, { status: 'failed', outcome: JSON.stringify(outcome) });
+      await this.#store(id, { status: 'failed', outcome: JSON.stringify(outcome) });
       return { status: 'failed', outcome, shown: [] };
+    }
+    // Made: the page hears so, and sees what only it may, whether or not the outcome is stored.
+    const outcome: Outcome = { text: applied.text, result: applied.result };
+    await this.#store(id, { outcome: JSON.stringify(outcome) });
+    return { status: 'approved', outcome, shown: applied.shown ?? [] };
+  }
+
+  /**
+   * What became of a decided approval, stored for its client. Not stored,
+   * the approval stays without an outcome, which its client reads as
+   * unknown a minute on (`statusOf`), never as a failure or as nothing.
+   */
+  async #store(id: string, outcome: { status?: 'failed'; outcome: string }): Promise<void> {
+    try {
+      await update(this.#deps.db, mcpApprovals, { id }, outcome);
+    } catch (error) {
+      console.error("an MCP approval's outcome was not stored", logged(error));
     }
   }
 
@@ -326,7 +343,7 @@ export class McpApprovals {
   /** What a change replaces, as the person reads it now; null for a tool with none, or one they cannot read, on the page as on Approve. */
   async #basis(api: CoffreClient, tool: Tool, args: unknown): Promise<string | null> {
     try {
-      return (await tool.change!.basis?.(api, args as never)) ?? null;
+      return (await tool.change!.replaces?.(api, args as never))?.basis ?? null;
     } catch (error) {
       if (!(error instanceof CoffreError)) throw error;
       return null;

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { ApprovalView, Decision } from '@coffre/client';
 
+import { settled } from '../lib/approval';
 import { failureMessage, statusOf, useCoffre } from '../lib/coffre';
 import { ClosedDoor } from '../components/page';
 import { CopyButton, ErrorLine, Notice, Spinner, Timestamp } from '../components/ui';
@@ -33,25 +34,16 @@ export function ApprovalPage() {
   return <Approve view={view} onDecided={setDecided} />;
 }
 
-const SETTLED: Record<Exclude<ApprovalView['status'], 'pending'>, string> = {
-  approved: 'You approved this',
-  denied: 'You denied this',
-  cancelled: 'The app cancelled this',
-  failed: 'This change failed',
-  expired: 'This approval expired',
-};
-
 function Settled({ view }: { view: ApprovalView }) {
-  const status = view.status as keyof typeof SETTLED;
+  const { title, text } = settled(view);
   return (
     <ClosedDoor
-      icon={status === 'approved' ? <CheckCircle size={18} /> : <SlashCircle size={18} />}
+      icon={view.status === 'approved' ? <CheckCircle size={18} /> : <SlashCircle size={18} />}
       label="Approve a change"
-      title={view.outcome?.error === 'unknown_outcome' ? 'This change may not have been made' : SETTLED[status]}
+      title={title}
     >
       <p>
-        {view.client.name} asked to {view.summary}.{' '}
-        {view.outcome?.text ?? (status === 'expired' ? 'Nothing changed. The app can ask again.' : 'Nothing changed.')}
+        {view.client.name} asked to {view.summary}. {text}
       </p>
     </ClosedDoor>
   );
@@ -148,7 +140,7 @@ function Approve({ view, onDecided }: { view: ApprovalView; onDecided: (decision
               <span className={line.kind === 'mono' ? 'mono' : undefined}>
                 {line.kind === 'time' ? <Timestamp iso={line.value} /> : line.value}
               </span>
-              {line.note !== undefined && <small className="approval-note">{line.note}</small>}
+              {line.note !== undefined && <small className={line.warn === true ? 'approval-note approval-warn' : 'approval-note'}>{line.note}</small>}
             </dd>
           </div>
         ))}

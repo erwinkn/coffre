@@ -9,11 +9,12 @@ import { randomBytes, randomUUID } from 'node:crypto';
 
 import { and, desc, eq } from 'drizzle-orm';
 
+import { decideApproval } from '../src/db/queries.ts';
 import { callDigest } from '../src/mcp/approvals.ts';
 import { TOOL_BY_NAME } from '../src/mcp/tools.ts';
 import { clientFor } from './api-fixture.ts';
 import { auditLog, mcpApprovals, mcpConnections } from './db/tables.ts';
-import { browserFor, callRaw, client, connect, db, deps, DEV, documents, entries, fromPage, type Result, ROOT, route, sessionFor, useMcp } from './mcp-fixture.ts';
+import { browserFor, callRaw, client, connect, db, deps, DEV, documents, entries, fetched, fromPage, type Result, ROOT, route, sessionFor, useMcp } from './mcp-fixture.ts';
 
 const OTHER = 'other@acme.example';
 const SECRET = `value-${randomBytes(8).toString('hex')}`;
@@ -427,18 +428,18 @@ test("only the browser's session decides an approval: the CLI's is refused, sent
 test('the decision reads the approval and its connection again as it commits: expired or disconnected meanwhile, it is refused (I3)', async () => {
   const token = await connect(DEV, 'read write');
   const change = TOOL_BY_NAME.get('request_secret_value')!.change!;
-  const basis = change.basis!;
+  const replaces = change.replaces!;
   const during = async (id: string, meanwhile: () => Promise<unknown>) => {
     const shown = (await view(id)).body.approval;
     // Between the first checks and the decision's transaction: while Approve reads what the change replaces.
-    change.basis = async (api, args) => {
+    change.replaces = async (api, args) => {
       await meanwhile();
-      return basis(api, args);
+      return replaces(api, args);
     };
     try {
       return await decide(id, true, { value: 'typed', shown });
     } finally {
-      change.basis = basis;
+      change.replaces = replaces;
     }
   };
 
@@ -477,4 +478,124 @@ test('a change the person could not make is refused before anyone is asked, for 
   const environment = (await callRaw(viewer, 'create_environment', { environment: 'market/stage', name: 'Stage' })).body.result!;
   assert.match(environment.content[0]!.text!, /you need environment\.manage on market/);
   assert.equal((await approvalRows()).length, 0);
+});
+
+// --- W49's findings on the fixes -----------------------------------------------
+
+test("trust_workload names IDs only from github.com and gitlab.com: an issuer the app names is flagged, and never asked (M1)", async () => {
+  await clientFor(deps, ROOT).members.add(`user:${DEV}`, { owner: true });
+  await connect(DEV, 'read manage-access');
+  // The attacker's own GitLab would name its project anything.
+  documents.set('https://attacker.example/api/v4/projects/55123', { id: 55123, path_with_namespace: 'acme/web', namespace: { id: 81234, full_path: 'acme' } });
+  const id = await opened(DEV, 'trust_workload', {
+    service: 'ci-deploy', profile: 'gitlab', issuer: 'https://attacker.example',
+    claims: { namespace_id: '81234', project_id: '55123', ref_type: 'branch', ref: 'main', pipeline_source: 'push' },
+  });
+  const { details } = (await view(id)).body.approval;
+  const line = (label: string) => details.find((entry) => entry.label === label)!;
+  assert.equal(line('project_id').note, "coffre can't check this host: check this ID yourself");
+  assert.equal(line('namespace_id').note, "coffre can't check this host: check this ID yourself");
+  assert.equal(line('Runs from').value, 'https://attacker.example');
+  assert.match(line('Runs from').note!, /Not GitHub's or GitLab's own/);
+  assert.equal((line('Runs from') as { warn?: boolean }).warn, true);
+  assert.doesNotMatch(JSON.stringify(details), /acme\/web/);
+  assert.deepEqual(fetched, [], 'the host the app named was never asked');
+});
+
+test('the basis Approve compares is the state the page showed, read once: a version set while the page was made refuses Approve (L4)', async () => {
+  const token = await connect(DEV, 'read write');
+  const id = idOf(await callRaw(token, 'request_secret_value', { secret: 'market/prod/API_KEY' }));
+  const change = TOOL_BY_NAME.get('request_secret_value')!.change!;
+  const preview = change.preview;
+  // Version 2 lands after what it replaces was read, while the rest of the page is made.
+  change.preview = async (...args) => {
+    const details = await preview(...args);
+    await clientFor(deps, ROOT).secrets.set('market/prod', { API_KEY: `meanwhile-${SECRET}` });
+    return details;
+  };
+  let shown: View;
+  try {
+    shown = (await view(id)).body.approval;
+  } finally {
+    change.preview = preview;
+  }
+  assert.ok(shown.details.some((line) => line.label === 'Now' && /^version 1,/.test(line.value)));
+  assert.equal(shown.basis, 'version 1', 'the basis of what the page showed');
+  assert.equal((await decide(id, true, { value: 'typed', shown })).status, 409);
+  assert.equal((await clientFor(deps, ROOT).secrets.reveal('market/prod/API_KEY')).values.API_KEY, `meanwhile-${SECRET}`);
+});
+
+test('a change made whose outcome is not stored reads as being made, then unknown, never failed, and is never reported (L2)', async () => {
+  await clientFor(deps, ROOT).members.add('token:ci-deploy');
+  await clientFor(deps, ROOT).members.add(`user:${DEV}`, { owner: true });
+  const token = await connect(DEV, 'read manage-access');
+  const call = () => callRaw(token, 'issue_service_token', { service: 'ci-deploy', expiresInDays: 30 });
+  const id = idOf(await call());
+  const change = TOOL_BY_NAME.get('issue_service_token')!.change!;
+  const apply = change.apply;
+  const update = deps.db.update;
+  // The token is issued; then the database blips, once, as the outcome is written.
+  change.apply = async (...args) => {
+    const applied = await apply(...args);
+    deps.db.update = (() => {
+      deps.db.update = update;
+      throw new Error('database blip');
+    }) as typeof update;
+    return applied;
+  };
+  let decided: Awaited<ReturnType<typeof decide>>;
+  try {
+    decided = await decide(id, true);
+  } finally {
+    change.apply = apply;
+    deps.db.update = update;
+  }
+  assert.equal(decided.body.status, 'approved', 'the page hears it was made');
+  assert.match(decided.body.shown.find((line) => line.label === 'Token')!.value, /^coffre_svc_/, 'and sees the token, once');
+  const [row] = await db.owner.select().from(mcpApprovals).where(eq(mcpApprovals.id, id));
+  assert.deepEqual([row!.status, row!.outcome], ['approved', null]);
+
+  assert.match((await call()).body.result!.content[0]!.text!, /^The person approved this, and coffre is making the change/);
+  await db.owner.update(mcpApprovals).set({ decidedAt: new Date(Date.now() - 2 * 60_000) }).where(eq(mcpApprovals.id, id));
+  const unknown = (await call()).body.result!;
+  assert.equal(unknown.structuredContent!.status, 'failed');
+  assert.match(unknown.content[0]!.text!, /does not know whether the change was made/);
+  assert.doesNotMatch(unknown.content[0]!.text!, /could not make the change/);
+  const [after] = await db.owner.select().from(mcpApprovals).where(eq(mcpApprovals.id, id));
+  assert.equal(after!.reportedAt, null, 'never heard as an end');
+});
+
+test("set_access takes every project, and an environment in each, from an owner, and places as the API reads them; from anyone else, they're refused up front (I3)", async () => {
+  const root = await connect(ROOT, 'read manage-access');
+  const asked = await callRaw(root, 'set_access', { member: `user:${OTHER}`, changes: { '*': 'viewer', '*/prod': 'developer', ' /market/prod/ ': 'auditor' } });
+  assert.equal(asked.body.result!.structuredContent!.status, 'pending', JSON.stringify(asked.body.result));
+  const { details } = (await view(idOf(asked), ROOT)).body.approval;
+  assert.ok(details.some((line) => line.label === ' /market/prod/ ' && line.value === 'viewer → auditor'), 'the grant held there, found');
+  assert.ok(details.some((line) => line.label === '*' && line.value === 'nothing → viewer'));
+
+  const viewer = await connect(OTHER, 'read write manage-access');
+  for (const place of ['*', '*/prod']) {
+    const refused = (await callRaw(viewer, 'set_access', { member: `user:${DEV}`, changes: { [place]: 'viewer' } })).body.result!;
+    assert.match(refused.content[0]!.text!, /only instance owners/, place);
+  }
+});
+
+test("the decision moves an approval only while it is unexpired by the database's clock as the write runs (I3)", async () => {
+  const token = await connect(DEV, 'read write');
+  const id = idOf(await callRaw(token, 'archive_secret', { secret: 'market/prod/OLD_KEY' }));
+  await db.owner.update(mcpApprovals).set({ expiresAt: new Date(Date.now() - 1000) }).where(eq(mcpApprovals.id, id));
+  assert.equal(await decideApproval(deps.db, id, 'approved'), 0, 'expired: no write');
+  await db.owner.update(mcpApprovals).set({ expiresAt: new Date(Date.now() + 60_000) }).where(eq(mcpApprovals.id, id));
+  assert.equal(await decideApproval(deps.db, id, 'approved'), 1);
+  assert.equal(await decideApproval(deps.db, id, 'approved'), 0, 'decided once');
+});
+
+test("set_access's page and basis carry each grant's end: shortened since it was shown, Approve is refused (L4)", async () => {
+  const root = await connect(ROOT, 'read manage-access');
+  const id = idOf(await callRaw(root, 'set_access', { member: `user:${OTHER}`, changes: { 'market/prod': 'auditor' } }));
+  const shown = (await view(id, ROOT)).body.approval;
+  await clientFor(deps, ROOT).access.set(`user:${OTHER}`, { 'market/prod': { role: 'viewer', until: '2099-01-01' } });
+  assert.equal((await decide(id, true, { shown }, ROOT)).status, 409);
+  const again = (await view(id, ROOT)).body.approval;
+  assert.ok(again.details.some((line) => line.label === 'market/prod' && /^viewer until 2099-01-01.* → auditor$/.test(line.value)), JSON.stringify(again.details));
 });

@@ -6,7 +6,7 @@ import { isTombstone, tombstoneOf } from '@coffre/core/schemas';
 import { own, tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import { readGrants } from '@coffre/db/grants';
 import * as dialect from '@coffre/db/dialect';
-import { canonicalTimestamp, changedRows, clock, clockMillis, forUpdate, migrationLedger, tombstone, truth, type Table } from '@coffre/db/dialect';
+import { ahead, canonicalTimestamp, changedRows, clock, clockMillis, forUpdate, migrationLedger, tombstone, truth, type Table } from '@coffre/db/dialect';
 import type * as schema from '@coffre/db/schema';
 import { and, asc, count, countDistinct, desc, eq, getTableColumns, getTableName, gt, gte, inArray, isNotNull, isNull, like, lt, not, notInArray, or, sql, type AnyColumn, type SQL } from 'drizzle-orm';
 
@@ -1101,6 +1101,17 @@ export async function findApproval(db: Queryable, id: string): Promise<(Approval
   const { mcpApprovals } = tablesOf(db);
   const [row] = await db.select({ approval: mcpApprovals, now: clockMillis(db) }).from(mcpApprovals).where(eq(mcpApprovals.id, id)).limit(1);
   return row === undefined ? null : { ...row.approval, now: new Date(row.now) };
+}
+
+/** Decide a pending approval that has not expired, by the database's clock as the write runs: 1 if it moved, 0 if not. */
+export async function decideApproval(db: Queryable, id: string, status: 'approved' | 'denied'): Promise<number> {
+  const { mcpApprovals } = tablesOf(db);
+  return changedRows(
+    await db
+      .update(mcpApprovals)
+      .set({ status, decidedAt: new Date() })
+      .where(and(eq(mcpApprovals.id, id), eq(mcpApprovals.status, 'pending'), ahead(db, mcpApprovals.expiresAt))),
+  );
 }
 
 /**

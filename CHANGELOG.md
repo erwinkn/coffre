@@ -3,12 +3,13 @@
 ## Unreleased
 
 **MCP approvals are harder to misread or misuse**, after a security review.
-`trust_workload`'s page names each GitHub or GitLab ID it binds, as its API
-reads it back, or says to check an ID it can't name; what the app wrote is
-shown as the app's ("The app calls it"). With Reveal values, the page no
+`trust_workload`'s page names each ID it binds, as github.com's or
+gitlab.com's API reads it back, or says to check an ID it can't name; any
+other issuer is flagged, and its IDs are left for the person to check.
+What the app wrote is shown as the app's ("The app calls it"). With Reveal values, the page no
 longer promises the app never sees a value: it says the app can read it.
-Approve refuses a page gone stale, when a version was set or a role changed
-since it was shown. Identical calls at once open one approval, and a burst
+Approve refuses a page gone stale, when a version was set or a role, or
+its end, changed since it was shown. Identical calls at once open one approval, and a burst
 stays within five waiting. An approved change whose outcome was lost is
 reported as unknown, never as "nothing changed", and the person is warned
 before approving it again. The approval page's API takes only a browser

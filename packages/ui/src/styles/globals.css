@@ -4207,6 +4207,11 @@ a.env-card-name:hover {
   font-size: 0.8125rem;
 }
 
+.approval-warn {
+  color: var(--amber);
+  font-weight: 550;
+}
+
 .approval-field {
   margin: 0 1.5rem 1rem;
 }

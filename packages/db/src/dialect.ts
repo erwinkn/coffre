@@ -157,6 +157,20 @@ export function clockMillis(db: Queryable): SQL<number> {
 }
 
 /**
+ * Whether a timestamp column is still ahead of the database clock as the
+ * statement runs: a condition, for a write that must not land once the
+ * time it names has passed.
+ */
+export function ahead(db: Queryable, column: SQLWrapper): SQL {
+  switch (engineOf(db)) {
+    case 'postgres':
+      return sql`${column} > clock_timestamp()`;
+    case 'sqlite':
+      return sql`${column} > CAST(unixepoch('subsec') * 1000 AS INTEGER)`;
+  }
+}
+
+/**
  * The migrator's own ledger, read by readiness to tell a database that is
  * up but not yet migrated from one that is ready. Drizzle keeps it in a
  * `drizzle` schema on Postgres, and in a plain table elsewhere.

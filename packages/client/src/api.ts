@@ -905,6 +905,7 @@ export type Api = {
           value: string;
           kind?: "mono" | "time";
           note?: string;
+          warn?: true;
         }[];
         asks: null | {
           value: {
@@ -949,6 +950,7 @@ export type Api = {
         value: string;
         kind?: "mono" | "time";
         note?: string;
+        warn?: true;
       }[];
     };
   };
@@ -974,6 +976,7 @@ export type ApprovalView = {
     value: string;
     kind?: "mono" | "time";
     note?: string;
+    warn?: true;
   }[];
   asks: null | {
     value: {
@@ -1133,6 +1136,7 @@ export type Decision = {
     value: string;
     kind?: "mono" | "time";
     note?: string;
+    warn?: true;
   }[];
 };
 
