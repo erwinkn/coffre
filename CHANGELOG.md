@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.6 (2026-10-07)
+
 **MCP approvals are harder to misread or misuse**, after a security review.
 `trust_workload`'s page names each ID it binds, as github.com's or
 gitlab.com's API reads it back, or says to check an ID it can't name; any
