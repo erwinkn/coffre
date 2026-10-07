@@ -41,6 +41,7 @@ type View = {
   details: { label: string; value: string; note?: string }[];
   asks: unknown;
   reveals: boolean;
+  ready: boolean;
   outcome: { text: string; error?: string } | null;
 };
 
@@ -614,4 +615,42 @@ test("set_access's basis is a digest, as long for fifty expiring grants as for o
   const decided = await decide(id, true, { shown }, ROOT);
   assert.equal(decided.status, 200, JSON.stringify(decided.body));
   assert.equal(decided.body.status, 'approved');
+});
+
+test('what a change replaces, unread on the page or on Approve, approves nothing: the page says so, and Approve is refused (L4)', async () => {
+  const root = await connect(ROOT, 'read manage-access');
+  const id = idOf(await callRaw(root, 'set_access', { member: `user:${OTHER}`, changes: { 'market/prod': 'auditor' } }));
+  const about = deps.vault.about;
+  const failing = async <T>(work: () => Promise<T>): Promise<T> => {
+    deps.vault.about = async () => {
+      throw new Error('vault unreachable');
+    };
+    try {
+      return await work();
+    } finally {
+      deps.vault.about = about;
+    }
+  };
+  const held = async () => (await clientFor(deps, ROOT).members.list()).members.find((entry) => entry.member === `user:${OTHER}`)!.grants.map((grant) => grant.role);
+
+  // The vault fails while the page reads the member's roles: it can't be approved, and a null basis is refused.
+  const blind = await failing(() => view(id, ROOT));
+  assert.equal(blind.body.approval.ready, false);
+  assert.equal(blind.body.approval.basis, null);
+  const unread = await decide(id, true, { shown: blind.body.approval }, ROOT);
+  assert.equal(unread.status, 409);
+  assert.match(unread.body.message!, /could not read what this replaces/);
+
+  // Read on the page, then the vault fails as Approve reads them again: refused, to retry.
+  const shown = (await view(id, ROOT)).body.approval;
+  assert.equal(shown.ready, true);
+  const retry = await failing(() => decide(id, true, { shown }, ROOT));
+  assert.equal(retry.status, 503);
+  assert.match(retry.body.message!, /try again/);
+  assert.deepEqual(await held(), ['viewer'], 'nothing applied');
+  assert.deepEqual((await entries('mcp.approve')).map((entry) => [entry.decision, entry.metadata.reason]), [['deny', 'unconfirmed'], ['deny', 'unconfirmed']]);
+
+  // Read on both sides: approved.
+  assert.equal((await decide(id, true, { shown }, ROOT)).body.status, 'approved');
+  assert.deepEqual(await held(), ['auditor']);
 });

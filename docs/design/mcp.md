@@ -575,7 +575,9 @@ server:
 1. checks the person, the connection (live, at its generation), the scope
    and the expiry;
 2. reads the basis again, as the person: a version set or a role changed
-   since refuses Approve with "this changed since you opened it". The API
+   since refuses Approve with "this changed since you opened it". Unread on
+   either side, nothing is approved: a page that couldn't read it says so
+   and offers no Approve, and a read that fails now refuses, to retry. The API
    takes no expected version, so a write in the moment between this read
    and the change still lands first;
 3. moves the approval from `pending` to `approved` with a conditional

@@ -64,6 +64,8 @@ export type ApprovalView = {
   digest: string;
   /** A digest of what the change replaces, as shown: sent back with Approve, which refuses it if it changed since. */
   basis: string | null;
+  /** Whether Approve can go ahead: not when coffre could not read what the change replaces. */
+  ready: boolean;
   createdAt: string;
   expiresAt: string;
   /** Once decided: what became of it. */
@@ -235,6 +237,7 @@ export class McpApprovals {
       reveals: viewing.reveals,
       digest: row.digest.toString('hex'),
       basis,
+      ready: tool.change!.replaces === undefined || basis !== null,
       createdAt: row.createdAt.toISOString(),
       expiresAt: row.expiresAt.toISOString(),
       outcome: outcomeOf(row, row.now),
@@ -271,9 +274,20 @@ export class McpApprovals {
       throw new ApiError('bad_request', 'type the value to set first');
     }
     // What it replaces, read again: another version set, or another role granted, since the page showed it refuses it.
+    // Unread on either side, nothing is approved: a page that could not read it, or a read that fails now.
     // The API takes no expected version, so a write in the moment between this read and the change still lands first.
-    if (input.approve && (await this.#basis(this.#client(ctx), tool, args)) !== (input.basis ?? null)) {
-      throw refuse(conflict('this changed since you opened it: open the approval again'), 'replaced');
+    if (input.approve && tool.change!.replaces !== undefined) {
+      if (input.basis === undefined || input.basis === null) {
+        throw refuse(conflict('coffre could not read what this replaces when the page opened: reload it and try again'), 'unconfirmed');
+      }
+      let basis: string;
+      try {
+        basis = basisOf(await tool.change!.replaces(this.#client(ctx), args as never));
+      } catch (error) {
+        if (!(error instanceof CoffreError)) throw error;
+        throw refuse(new ApiError('unavailable', 'coffre could not read what this replaces just now: try again'), 'unconfirmed');
+      }
+      if (basis !== input.basis) throw refuse(conflict('this changed since you opened it: open the approval again'), 'replaced');
     }
 
     await audited(ctx, async (tx, log) => {
@@ -343,17 +357,6 @@ export class McpApprovals {
     }
     if (!live(connection, ctx)) throw conflict(`${connection.clientName} is disconnected: this approval can no longer be decided`);
     return { row, connection, tool };
-  }
-
-  /** What a change replaces, as the person reads it now; null for a tool with none, or one they cannot read, on the page as on Approve. */
-  async #basis(api: CoffreClient, tool: Tool, args: unknown): Promise<string | null> {
-    try {
-      const replaced = await tool.change!.replaces?.(api, args as never);
-      return replaced === undefined ? null : basisOf(replaced);
-    } catch (error) {
-      if (!(error instanceof CoffreError)) throw error;
-      return null;
-    }
   }
 
   /** The API in process, with this request's caller and connection, and nothing to authenticate again. */

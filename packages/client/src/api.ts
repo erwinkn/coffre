@@ -917,6 +917,7 @@ export type Api = {
         reveals: boolean;
         digest: string;
         basis: string | null;
+        ready: boolean;
         createdAt: string;
         expiresAt: string;
         outcome: null | {
@@ -988,6 +989,7 @@ export type ApprovalView = {
   reveals: boolean;
   digest: string;
   basis: string | null;
+  ready: boolean;
   createdAt: string;
   expiresAt: string;
   outcome: null | {

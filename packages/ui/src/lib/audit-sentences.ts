@@ -430,6 +430,7 @@ const REASONS: Record<string, string> = {
   request_state: 'its retry did not match its call',
   changed: 'the change was not the one shown',
   replaced: 'what it replaces changed since it was shown',
+  unconfirmed: 'what it replaces could not be read',
   disconnected: 'the app was disconnected',
 };
 

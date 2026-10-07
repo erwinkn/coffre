@@ -170,6 +170,9 @@ function Approve({ view, onDecided }: { view: ApprovalView; onDecided: (decision
       )}
 
       <div className="consent-notices">
+        {!view.ready && (
+          <Notice tone="warn">coffre couldn't read what this change replaces, so it can't be approved yet. Reload to try again.</Notice>
+        )}
         {client.registration === 'dcr' && (
           <Notice tone="warn">This app registered itself: its name is its own claim. Approve only what you asked it to do.</Notice>
         )}
@@ -183,7 +186,7 @@ function Approve({ view, onDecided }: { view: ApprovalView; onDecided: (decision
         </button>
         <button
           className="btn btn-primary"
-          disabled={pending !== null || (asksValue !== null && value === '')}
+          disabled={pending !== null || !view.ready || (asksValue !== null && value === '')}
           onClick={() => void decide(true)}
         >
           {pending === 'approve' && <Spinner />}
