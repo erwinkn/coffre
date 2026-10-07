@@ -152,6 +152,7 @@ const PAIRS = [
     ['red', 'panel', 4.5, 'revoke, archive, deny'],
     ['red', 'redWash', 4.5, 'red tag, deny on a denied row'],
     ['amber', 'amberWash', 4.5, 'reveal countdown, amber tag'],
+    ['amber', 'panel', 4.5, 'what the person must check on an approval'],
     ['violet', 'violetWash', 4.5, 'owner tag'],
     ['ink', 'amberWash', 4.5, 'the revealed value itself'],
     ['ink', 'accentWash', 4.5, 'text on an edited row'],

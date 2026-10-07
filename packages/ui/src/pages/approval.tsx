@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { ApprovalView, Decision } from '@coffre/client';
 
+import { settled } from '../lib/approval';
 import { failureMessage, statusOf, useCoffre } from '../lib/coffre';
 import { ClosedDoor } from '../components/page';
 import { CopyButton, ErrorLine, Notice, Spinner, Timestamp } from '../components/ui';
@@ -33,25 +34,16 @@ export function ApprovalPage() {
   return <Approve view={view} onDecided={setDecided} />;
 }
 
-const SETTLED: Record<Exclude<ApprovalView['status'], 'pending'>, string> = {
-  approved: 'You approved this',
-  denied: 'You denied this',
-  cancelled: 'The app cancelled this',
-  failed: 'This change failed',
-  expired: 'This approval expired',
-};
-
 function Settled({ view }: { view: ApprovalView }) {
-  const status = view.status as keyof typeof SETTLED;
+  const { title, text } = settled(view);
   return (
     <ClosedDoor
-      icon={status === 'approved' ? <CheckCircle size={18} /> : <SlashCircle size={18} />}
+      icon={view.status === 'approved' ? <CheckCircle size={18} /> : <SlashCircle size={18} />}
       label="Approve a change"
-      title={SETTLED[status]}
+      title={title}
     >
       <p>
-        {view.client.name} asked to {view.summary}.{' '}
-        {view.outcome?.text ?? (status === 'expired' ? 'Nothing changed. The app can ask again.' : 'Nothing changed.')}
+        {view.client.name} asked to {view.summary}. {text}
       </p>
     </ClosedDoor>
   );
@@ -103,6 +95,7 @@ function Approve({ view, onDecided }: { view: ApprovalView; onDecided: (decision
         await coffre.approvals.decide(view.id, {
           approve,
           digest: view.digest,
+          basis: view.basis,
           ...(approve && asksValue !== null ? { value } : {}),
         }),
       );
@@ -121,7 +114,9 @@ function Approve({ view, onDecided }: { view: ApprovalView; onDecided: (decision
         <p className="signin-lede">
           {client.name} asks to <strong>{view.summary}</strong>.{' '}
           {reveal
-            ? 'Reveal shows it only to you, here. The app never gets it.'
+            ? view.reveals
+              ? 'Reveal shows it to you, here. The app holds Reveal values, so it can read it too.'
+              : 'Reveal shows it only to you, here. The app never gets it.'
             : 'Nothing changes until you approve.'}
         </p>
       </div>
@@ -141,8 +136,11 @@ function Approve({ view, onDecided }: { view: ApprovalView; onDecided: (decision
         {view.details.map((line) => (
           <div className="fact" key={line.label}>
             <dt>{line.label}</dt>
-            <dd className={line.kind === 'mono' ? 'mono' : undefined}>
-              {line.kind === 'time' ? <Timestamp iso={line.value} /> : line.value}
+            <dd>
+              <span className={line.kind === 'mono' ? 'mono' : undefined}>
+                {line.kind === 'time' ? <Timestamp iso={line.value} /> : line.value}
+              </span>
+              {line.note !== undefined && <small className={line.warn === true ? 'approval-note approval-warn' : 'approval-note'}>{line.note}</small>}
             </dd>
           </div>
         ))}
@@ -172,6 +170,9 @@ function Approve({ view, onDecided }: { view: ApprovalView; onDecided: (decision
       )}
 
       <div className="consent-notices">
+        {!view.ready && (
+          <Notice tone="warn">coffre couldn't read what this change replaces, so it can't be approved yet. Reload to try again.</Notice>
+        )}
         {client.registration === 'dcr' && (
           <Notice tone="warn">This app registered itself: its name is its own claim. Approve only what you asked it to do.</Notice>
         )}
@@ -185,7 +186,7 @@ function Approve({ view, onDecided }: { view: ApprovalView; onDecided: (decision
         </button>
         <button
           className="btn btn-primary"
-          disabled={pending !== null || (asksValue !== null && value === '')}
+          disabled={pending !== null || !view.ready || (asksValue !== null && value === '')}
           onClick={() => void decide(true)}
         >
           {pending === 'approve' && <Spinner />}

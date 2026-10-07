@@ -23,8 +23,15 @@ export const DEV = 'dev@acme.example';
 export const CLAUDE_CODE = 'https://claude.ai/oauth/claude-code-client-metadata';
 const REDIRECT = 'http://localhost:51234/callback';
 
+/** What the internet answers besides Claude Code's document, by URL: a test sets GitHub's or GitLab's answers here. */
+export const documents = new Map<string, unknown>();
+/** Every URL coffre asked for, in order. */
+export const fetched: string[] = [];
+
 const transport: WorkloadTransport = {
   json: async (url) => {
+    fetched.push(url.href);
+    if (documents.has(url.href)) return documents.get(url.href);
     if (url.href !== CLAUDE_CODE) throw new FetchRefused(url, 'answered 404');
     return { client_id: CLAUDE_CODE, client_name: 'Claude Code', redirect_uris: ['http://localhost/callback'], token_endpoint_auth_method: 'none' };
   },
@@ -68,6 +75,8 @@ export function useMcp(seed: () => Promise<void>, options: { approvalWaitMs?: nu
   beforeEach(async () => {
     await resetDatabase(db.owner);
     calls.open = true;
+    documents.clear();
+    fetched.length = 0;
     await seed();
   });
 }
@@ -84,6 +93,18 @@ export async function sessionFor(email: string): Promise<string> {
   const polled = await service.pollDevice(started.deviceCode, { requestId: randomUUID(), sourceIp: null });
   if (polled.status !== 'approved') throw new Error('not approved');
   return polled.credential.token;
+}
+
+/** A browser session for a person, as signing in on coffre's page leaves one: what decides approvals. */
+export async function browserFor(email: string): Promise<string> {
+  const signed = await runtime.signin!.completeSignin({ provider: 'github', subject: `gh-${email}`, emails: [email], name: null }, { requestId: randomUUID(), sourceIp: null, label: 'Firefox' });
+  if (!signed.ok) throw new Error(`${email} was not let in`);
+  return signed.credential.token;
+}
+
+/** What one of coffre's pages sends with its calls: the browser's session cookie, from coffre's own origin. */
+export function fromPage(session: string, headers: Record<string, string> = {}): Record<string, string> {
+  return { cookie: `__Host-coffre_session=${session}`, 'sec-fetch-site': 'same-origin', ...headers };
 }
 
 /** Consent and the code exchanged, as Claude Code does it: the access token. */

@@ -321,6 +321,8 @@ const TEMPLATES: Record<string, Template> = {
   'mcp.approve': { did: 'approved', tried: 'approve', what: ({ entry }) => tool(entry), then: ({ entry }) => [` for ${text(entry.metadata.clientName) ?? 'an app'}`] },
   'mcp.deny': { did: 'turned down', tried: 'turn down', what: ({ entry }) => tool(entry), then: ({ entry }) => [` for ${text(entry.metadata.clientName) ?? 'an app'}`] },
   'mcp.view': { did: 'opened an approval', tried: 'open an approval', what: () => [] },
+  // The app's prompt declined, which cancels the approval it would have opened.
+  'mcp.cancel': { did: 'cancelled', tried: 'cancel', what: ({ entry }) => tool(entry), then: ({ entry }) => via(entry) },
   'mcp.disconnect': {
     did: 'disconnected',
     tried: 'disconnect',
@@ -427,6 +429,9 @@ const REASONS: Record<string, string> = {
   too_many_approvals: 'too many changes waiting for approval',
   request_state: 'its retry did not match its call',
   changed: 'the change was not the one shown',
+  replaced: 'what it replaces changed since it was shown',
+  unconfirmed: 'what it replaces could not be read',
+  disconnected: 'the app was disconnected',
 };
 
 /** What a missing permission meant, from the app's `missing_<permission>`. */

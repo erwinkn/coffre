@@ -393,6 +393,8 @@ export const routes = {
       approve: z.boolean(),
       // Of the change the page showed: a change that is not it is refused.
       digest: z.string().regex(/^[0-9a-f]{64}$/),
+      // What it replaces, as the page showed it: Approve refuses it once that changed.
+      basis: z.string().regex(/^[0-9a-f]{64}$/).nullable().optional(),
       // What the person typed, for a change that asks for a value.
       value: secretValue.optional(),
     }).strict(),

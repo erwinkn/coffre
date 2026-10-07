@@ -157,6 +157,9 @@ test('a page render forwards the visitor credential and nothing else', () => {
   });
   assert.deepEqual(pageCredential(page, own), { cookie: `${SESSION}=${encodeURIComponent(DEV)}` });
   assert.deepEqual(pageCredential(page, cloudflare), { 'cf-access-jwt-assertion': 'smuggled' });
+  // Behind Access, its cookie too, which is what says a browser's page asked.
+  const browser = new Request(`${ORIGIN}/projects`, { headers: { cookie: 'theme=dark; CF_Authorization=jwt', 'cf-access-jwt-assertion': 'jwt' } });
+  assert.deepEqual(pageCredential(browser, cloudflare), { 'cf-access-jwt-assertion': 'jwt', cookie: 'CF_Authorization=jwt' });
   assert.deepEqual(pageCredential(new Request(`${ORIGIN}/projects`), own), {});
 });
 

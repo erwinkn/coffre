@@ -4201,7 +4201,17 @@ a.env-card-name:hover {
   padding-bottom: 1rem;
 }
 
-/* The approval page: a value the person types, and a token shown once. */
+/* The approval page: what coffre says an ID is, a value the person types, and a token shown once. */
+.approval-note {
+  color: var(--ink-2);
+  font-size: 0.8125rem;
+}
+
+.approval-warn {
+  color: var(--amber);
+  font-weight: 550;
+}
+
 .approval-field {
   margin: 0 1.5rem 1rem;
 }

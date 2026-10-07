@@ -1,5 +1,5 @@
 import { createClient, type CoffreClient } from '@coffre/client';
-import { ACCESS_JWT_HEADER, type AuthConfig, type SigninBrand } from '@coffre/core/identity';
+import { ACCESS_JWT_HEADER, tokenKind, type AuthConfig, type SigninBrand } from '@coffre/core/identity';
 
 import { ApiError } from './api/errors.ts';
 import { routeParts, serveApi } from './api/router.ts';
@@ -51,21 +51,41 @@ const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
 /**
  * Reads only coffre's own pages make, which do work for the asking: the
- * consent page's describes a client, fetching its metadata document. Asked
+ * consent page's describes a client, fetching its metadata document, and an
+ * approval's reads what its change would replace, as the person. Asked
  * with a cookie, they take the same-origin rule a change does, so another
- * site's `<img>` cannot make coffre fetch a URL in a signed-in person's name.
- * By their route, as the router reads a path: `/api//oauth/authorizations/`
- * is the same read.
+ * site's `<img>` cannot make coffre fetch a URL, or read, in a signed-in
+ * person's name. By their route, as the router reads a path, `:id` any one
+ * segment: `/api//oauth/authorizations/` is the same read.
  */
-const PAGE_READS = new Set(['oauth/authorizations']);
+const PAGE_READS = ['oauth/authorizations', 'approvals/:id'].map((route) => route.split('/'));
 
-function isPageRead(request: Request): boolean {
+/** Whether a request is to one of `routes`, by its path as the router reads it. */
+function routeIn(request: Request, routes: readonly string[][]): boolean {
+  let parts: string[];
   try {
-    return PAGE_READS.has(routeParts(new URL(request.url).pathname).join('/'));
+    parts = routeParts(new URL(request.url).pathname);
   } catch {
     // A path that does not decode is no route: the router answers 400, and reads nothing.
     return false;
   }
+  return routes.some((route) => route.length === parts.length && route.every((part, index) => part.startsWith(':') || part === parts[index]));
+}
+
+const isPageRead = (request: Request) => routeIn(request, PAGE_READS);
+
+/**
+ * Routes only the browser reaches: an approval is decided on coffre's page,
+ * by its person, not by an app holding their CLI session. With
+ * coffre's sign-in, the credential must be a browser session, which the
+ * CLI never holds. Behind Cloudflare Access, it must come with Access's
+ * cookie, which a client that is no browser can set too: there, this keeps
+ * the honest CLI out, not a determined one.
+ */
+const BROWSER_ONLY = [['approvals', ':id']];
+
+function isBrowser(credential: ApiCredential, auth: AuthConfig): boolean {
+  return auth.mode === 'cloudflare' ? credential.ambient : tokenKind(credential.token) === 'browser';
 }
 
 /**
@@ -104,6 +124,9 @@ export async function apiCaller(
     return errorResponse(
       new ApiError('cross_origin', SAFE_METHODS.has(request.method) ? 'this, asked with a browser session, must come from coffre itself' : 'a change sent with a browser session must come from coffre itself'),
     );
+  }
+  if (routeIn(request, BROWSER_ONLY) && !isBrowser(credential, runtime.auth)) {
+    return errorResponse(new ApiError('forbidden', 'open this on coffre, signed in in your browser', 'browser_only'));
   }
   return authenticate(credential.token);
 }
@@ -169,13 +192,15 @@ export async function fetchApi(
 
 /**
  * The page's credential, and nothing else of its request: the session
- * cookie, or Access's assertion behind Cloudflare. Every other cookie and
- * header stays behind.
+ * cookie, or Access's assertion and cookie behind Cloudflare. Every other
+ * cookie and header stays behind.
  */
 export function pageCredential(page: Request, auth: AuthConfig): Record<string, string> {
   if (auth.mode === 'cloudflare') {
     const token = nonEmpty(page.headers.get(ACCESS_JWT_HEADER));
-    return token === null ? {} : { [ACCESS_JWT_HEADER]: token };
+    const cookie = readCookie(page, ACCESS_COOKIE);
+    // Access's cookie too, when the browser sent it: what tells a browser's page from any other caller.
+    return token === null ? {} : { [ACCESS_JWT_HEADER]: token, ...(cookie === null ? {} : { cookie: `${ACCESS_COOKIE}=${encodeURIComponent(cookie)}` }) };
   }
   const name = sessionCookieName(auth);
   const token = readCookie(page, name);

@@ -189,6 +189,8 @@ test('every other action has a sentence', () => {
     [{ action: 'mcp.approve', metadata: { tool: 'archive_secret', names: ['market/prod/OLD'], clientName: 'Claude' } }, 'approved archive_secret on market/prod/OLD for Claude'],
     [{ action: 'mcp.deny', metadata: { tool: 'set_access', names: ['user:bob@acme.example'], clientName: 'Claude' } }, 'turned down set_access on user:bob@acme.example for Claude'],
     [{ action: 'mcp.connect', decision: 'deny', reason: 'person_denied', metadata: { clientName: 'Claude' } }, 'tried to connect Claude: they said no'],
+    [{ action: 'mcp.cancel', metadata: { tool: 'archive_secret', names: ['market/prod/OLD'], via: { clientName: 'Claude Code' } } }, 'cancelled archive_secret on market/prod/OLD via Claude Code'],
+    [{ action: 'mcp.approve', decision: 'deny', reason: 'replaced', metadata: { tool: 'request_secret_value', names: ['market/prod/KEY'], clientName: 'Claude' } }, 'tried to approve request_secret_value on market/prod/KEY: what it replaces changed since it was shown'],
     [{ action: 'mcp.token', metadata: { clientName: 'Claude', grant: 'refresh_token' } }, 'refreshed the tokens of Claude'],
     [{ action: 'mcp.disconnect', metadata: { clientName: 'Claude', reason: 'refresh_reused' } }, 'disconnected Claude: a refresh token it had replaced was used again'],
     [{ action: 'mcp.disconnect', metadata: { clientName: 'Claude', reason: 'superseded' } }, 'disconnected Claude: a connection with more scopes replaced it'],

@@ -6,7 +6,7 @@ import { isTombstone, tombstoneOf } from '@coffre/core/schemas';
 import { own, tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import { readGrants } from '@coffre/db/grants';
 import * as dialect from '@coffre/db/dialect';
-import { canonicalTimestamp, changedRows, clock, clockMillis, forUpdate, migrationLedger, tombstone, truth, type Table } from '@coffre/db/dialect';
+import { ahead, canonicalTimestamp, changedRows, clock, clockMillis, forUpdate, migrationLedger, tombstone, truth, type Table } from '@coffre/db/dialect';
 import type * as schema from '@coffre/db/schema';
 import { and, asc, count, countDistinct, desc, eq, getTableColumns, getTableName, gt, gte, inArray, isNotNull, isNull, like, lt, not, notInArray, or, sql, type AnyColumn, type SQL } from 'drizzle-orm';
 
@@ -1103,15 +1103,43 @@ export async function findApproval(db: Queryable, id: string): Promise<(Approval
   return row === undefined ? null : { ...row.approval, now: new Date(row.now) };
 }
 
-/** A connection's approvals whose end its client has not heard yet, newest first, with the database's clock. */
-export async function openApprovals(db: Queryable, connectionId: string): Promise<{ rows: ApprovalRow[]; now: Date }> {
+/** Decide a pending approval that has not expired, by the database's clock as the write runs: 1 if it moved, 0 if not. */
+export async function decideApproval(db: Queryable, id: string, status: 'approved' | 'denied'): Promise<number> {
+  const { mcpApprovals } = tablesOf(db);
+  return changedRows(
+    await db
+      .update(mcpApprovals)
+      .set({ status, decidedAt: new Date() })
+      .where(and(eq(mcpApprovals.id, id), eq(mcpApprovals.status, 'pending'), ahead(db, mcpApprovals.expiresAt))),
+  );
+}
+
+/**
+ * A connection's approvals whose end its client has not heard yet, asked
+ * since `since`, newest first, with the database's clock: older ones can
+ * no longer be rejoined, and no longer wait.
+ */
+export async function openApprovals(db: Queryable, connectionId: string, since: Date): Promise<{ rows: ApprovalRow[]; now: Date }> {
   const { mcpApprovals } = tablesOf(db);
   const rows = await db
     .select({ approval: mcpApprovals, now: clockMillis(db) })
     .from(mcpApprovals)
-    .where(and(eq(mcpApprovals.connectionId, connectionId), isNull(mcpApprovals.reportedAt)))
+    .where(and(eq(mcpApprovals.connectionId, connectionId), isNull(mcpApprovals.reportedAt), gt(mcpApprovals.createdAt, since)))
     .orderBy(desc(mcpApprovals.createdAt));
   return { rows: rows.map((row) => row.approval), now: new Date(rows[0]?.now ?? Date.now()) };
+}
+
+/**
+ * The same call's earlier approvals, approved and never answered: their
+ * change may or may not have been made. Their client is never told they
+ * ended, so they stay in the open approvals' index.
+ */
+export async function unansweredApprovals(db: Queryable, connectionId: string, digest: Buffer): Promise<ApprovalRow[]> {
+  const { mcpApprovals } = tablesOf(db);
+  return db
+    .select()
+    .from(mcpApprovals)
+    .where(and(eq(mcpApprovals.connectionId, connectionId), eq(mcpApprovals.digest, digest), isNull(mcpApprovals.reportedAt), eq(mcpApprovals.status, 'approved'), isNull(mcpApprovals.outcome)));
 }
 
 /** Device authorizations: one by either of its codes, or every one still waiting for a decision. */

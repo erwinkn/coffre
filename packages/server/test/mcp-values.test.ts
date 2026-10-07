@@ -8,7 +8,7 @@ import { randomBytes } from 'node:crypto';
 import { clientFor } from './api-fixture.ts';
 import { auditLog, mcpApprovals } from './db/tables.ts';
 import { ALPHABETS, randomValue } from '../src/mcp/changes.ts';
-import { callRaw, connect, db, deps, DEV, entries, ROOT, route, sessionFor, useMcp } from './mcp-fixture.ts';
+import { browserFor, callRaw, connect, db, deps, DEV, entries, fromPage, ROOT, route, useMcp } from './mcp-fixture.ts';
 
 const VALUE = `value-${randomBytes(8).toString('hex')}`;
 
@@ -24,11 +24,12 @@ useMcp(
   { approvalWaitMs: 50 },
 );
 
-async function decide(id: string) {
-  const session = await sessionFor(DEV);
-  const headers = { authorization: `Bearer ${session}`, 'content-type': 'application/json' };
-  const { approval } = (await (await route(`/api/approvals/${id}`, { headers })).json()) as { approval: { digest: string; kind: string; details: { label: string; value: string }[] } };
-  const response = await route(`/api/approvals/${id}`, { method: 'POST', headers, body: JSON.stringify({ approve: true, digest: approval.digest }) });
+async function decide(id: string, value?: string) {
+  const headers = fromPage(await browserFor(DEV), { 'content-type': 'application/json' });
+  const { approval } = (await (await route(`/api/approvals/${id}`, { headers })).json()) as {
+    approval: { digest: string; basis: string | null; kind: string; reveals: boolean; details: { label: string; value: string }[]; asks: { value: { note: string } } | null };
+  };
+  const response = await route(`/api/approvals/${id}`, { method: 'POST', headers, body: JSON.stringify({ approve: true, digest: approval.digest, basis: approval.basis, value }) });
   return { approval, decision: (await response.json()) as { status: string; shown: { label: string; value: string }[]; outcome: { text: string } } };
 }
 
@@ -85,6 +86,22 @@ test('generate_secret_value makes the value on the server when the person approv
   assert.equal((reported.body.result!.structuredContent!.result as { version: number }).version, 1);
   const seen = JSON.stringify([asked.body, reported.body, decision, await db.owner.select().from(mcpApprovals), await db.owner.select({ metadata: auditLog.metadata }).from(auditLog)]);
   assert.equal(seen.includes(made), false);
+});
+
+test('with Reveal values, the page never says the app cannot see a value: it says the app can read it, as any the person can (L1)', async () => {
+  const plain = await decide(idOf(await callRaw(await connect(DEV, 'read write'), 'generate_secret_value', { secret: 'market/prod/PLAIN' })));
+  assert.equal(plain.approval.reveals, false);
+  assert.ok(plain.approval.details.some((line) => line.label === 'New value' && /nobody sees it/.test(line.value)));
+
+  const token = await connect(DEV, 'read write reveal');
+  const typed = await decide(idOf(await callRaw(token, 'request_secret_value', { secret: 'market/prod/TYPED' })), 'typed');
+  const generated = await decide(idOf(await callRaw(token, 'generate_secret_value', { secret: 'market/prod/MADE' })));
+  for (const { approval } of [typed, generated]) {
+    assert.equal(approval.reveals, true);
+    assert.ok(approval.details.some((line) => line.label === 'The app' && line.value === 'holds Reveal values: it can read values you can read, this one included'));
+    assert.doesNotMatch(JSON.stringify(approval), /never sees|nobody sees/);
+  }
+  assert.equal(typed.approval.asks!.value.note, 'It goes to coffre, and the app can read it.');
 });
 
 test('a random value is as long as asked, from its alphabet only', () => {

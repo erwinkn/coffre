@@ -8,16 +8,27 @@
 import { randomBytes } from 'node:crypto';
 
 import { apiMember, CoffreError, shownMember, type CoffreClient, type RouteInput } from '@coffre/client';
-import { ROLE_NAMES, type Permission } from '@coffre/core/access';
-import { WORKLOAD_PROFILES } from '@coffre/core/identity';
+import { EVERY_PROJECT, ROLE_NAMES, type Permission } from '@coffre/core/access';
+import { defaultIssuer, GITHUB_ISSUER, GITLAB_ISSUER, WORKLOAD_PROFILES, type WorkloadProfile } from '@coffre/core/identity';
 import type { McpScope } from '@coffre/core/mcp';
 import { secretKey, slug } from '@coffre/core/schemas';
 import { z } from 'zod';
 
+import { FetchRefused, type WorkloadTransport } from '../workloads/transport.ts';
 import type { Tool, ToolContext } from './tools.ts';
 
-/** A line of what the approval page shows: a label, and what it is. */
-export type Detail = { label: string; value: string; kind?: 'mono' | 'time' };
+/** A line of what the approval page shows: a label, what it is, and what that means, when coffre can say; `warn` when the person must check it. */
+export type Detail = { label: string; value: string; kind?: 'mono' | 'time'; note?: string; warn?: true };
+
+/** What a change replaces, read once: the page's lines for it, and the state they show, whose digest Approve reads again and compares. */
+export type Replaced = { details: Detail[]; state: unknown };
+
+/**
+ * What a preview knows besides the API: whether the app holds Reveal
+ * values, and so can read what the person can, and the transport trust
+ * bindings fetch through, to name what an ID is.
+ */
+export type Viewing = { reveals: boolean; transport: WorkloadTransport };
 
 /** What a change answered, once made: what the client reads, and what only the page shows, once. */
 export type Applied = { result: Record<string, unknown>; text: string; shown?: Detail[] };
@@ -30,9 +41,15 @@ export type Change<I extends z.ZodObject = z.ZodObject> = {
   summary: (args: z.infer<I>) => string;
   /** Before asking, as the connection: a call the person could not make fails here, not on the page. */
   check?: (ctx: ToolContext, args: z.infer<I>) => Promise<void>;
-  /** What the page shows, read as the person when they open it: what the change replaces. */
-  preview: (api: CoffreClient, args: z.infer<I>) => Promise<Detail[]>;
-  asks?: Ask;
+  /**
+   * What the change replaces, read as the person: its lines go into the
+   * page's preview, and Approve reads it again and is refused if its state
+   * differs, so what is replaced is what the person read.
+   */
+  replaces?: (api: CoffreClient, args: z.infer<I>) => Promise<Replaced>;
+  /** What the page shows, read as the person when they open it, with `replaces`' lines, `replaced`, where the tool has them. */
+  preview: (api: CoffreClient, args: z.infer<I>, viewing: Viewing, replaced: Detail[]) => Promise<Detail[]>;
+  asks?: (viewing: Viewing) => Ask;
   /**
    * A reveal: the page shows the person a value on Approve, which never goes
    * to the client. Its API call needs `reveal`, which the connection
@@ -79,18 +96,39 @@ async function needs(api: CoffreClient, path: string, permission: Permission): P
   if (!here.permissions.includes(permission)) throw new CoffreError(403, 'forbidden', `you need ${permission} on ${path}`);
 }
 
-/** A secret's current version, for the page: who set it and when, or that there is none yet. */
-async function current(api: CoffreClient, path: string): Promise<Detail[]> {
+/** Refuse now, as the API would on Approve, when the person is not an instance owner. */
+async function ownersOnly({ connection }: ToolContext): Promise<void> {
+  if (!connection.caller.isOwner) throw new CoffreError(403, 'forbidden', 'only instance owners can do this');
+}
+
+/** Refuse now, as the API would on Approve, when the person lacks a permission on each project. */
+async function needsOn(api: CoffreClient, projects: string[], permission: Permission): Promise<void> {
+  const { projects: theirs } = await api.projects.list();
+  for (const project of new Set(projects)) {
+    const here = theirs.find((entry) => entry.slug === project);
+    if (here === undefined) throw new CoffreError(404, 'not_found', `no project "${project}" that you can see`);
+    if (!here.permissions.includes(permission)) throw new CoffreError(403, 'forbidden', `you need ${permission} on ${project}`);
+  }
+}
+
+/** What the page says of an app that holds Reveal values, beside a value it would otherwise never see. */
+const READABLE: Detail = { label: 'The app', value: 'holds Reveal values: it can read values you can read, this one included' };
+
+/** A secret's current version: who set it and when, or that there is none yet; the version is its state. */
+async function current(api: CoffreClient, path: string): Promise<Replaced> {
   try {
     const { versions, archived } = await api.secrets.history(path);
     const now = versions.find((version) => version.current);
-    if (now === undefined) return [{ label: 'Now', value: 'no value yet' }];
-    return [
-      { label: 'Now', value: `version ${now.version}${archived ? ', archived' : ''}, set by ${shownMember(now.createdBy)}` },
-      { label: 'Set', value: now.createdAt, kind: 'time' },
-    ];
+    if (now === undefined) return { state: { version: null }, details: [{ label: 'Now', value: 'no value yet' }] };
+    return {
+      state: { version: now.version },
+      details: [
+        { label: 'Now', value: `version ${now.version}${archived ? ', archived' : ''}, set by ${shownMember(now.createdBy)}` },
+        { label: 'Set', value: now.createdAt, kind: 'time' },
+      ],
+    };
   } catch (error) {
-    if (error instanceof CoffreError && error.status === 404) return [{ label: 'Now', value: 'a new key: there is none yet' }];
+    if (error instanceof CoffreError && error.status === 404) return { state: { version: null }, details: [{ label: 'Now', value: 'a new key: there is none yet' }] };
     throw error;
   }
 }
@@ -134,6 +172,70 @@ export function randomValue(alphabet: Alphabet, length: number = ALPHABETS[alpha
   return value;
 }
 
+/** What the page says of an ID github.com or gitlab.com did not name. */
+const UNNAMED = 'private or unknown: check this ID yourself';
+/** What the page says of an ID on any other issuer, whose answers coffre has no reason to believe. */
+const UNCHECKED = "coffre can't check this host: check this ID yourself";
+
+/** The claims that hold GitHub's or GitLab's numeric IDs. */
+const ID_CLAIMS = new Set(['repository_id', 'repository_owner_id', 'project_id', 'namespace_id']);
+
+/**
+ * What a binding's numeric IDs name, read back from github.com's or
+ * gitlab.com's API, the other way from `GET /workloads/lookup`, through
+ * the same transport: a repository, project or owner by its path. Only
+ * those two answer: the app chose the issuer, and a host it chose could
+ * name its IDs anything. Each ID claim gets a note: what it names, that
+ * coffre could not tell, or that it does not ask that host.
+ */
+async function namesOf(transport: WorkloadTransport, profile: WorkloadProfile, issuer: string | null, claims: Record<string, string>): Promise<Record<string, string>> {
+  const notes: Record<string, string> = {};
+  const own = defaultIssuer(profile);
+  if (own === null || (issuer ?? own) !== own) {
+    for (const claim of Object.keys(claims)) if (ID_CLAIMS.has(claim)) notes[claim] = UNCHECKED;
+    return notes;
+  }
+  const ask = async (url: string): Promise<Record<string, unknown> | null> => {
+    try {
+      const answer = await transport.json(new URL(url));
+      return typeof answer === 'object' && answer !== null ? (answer as Record<string, unknown>) : null;
+    } catch (error) {
+      if (error instanceof FetchRefused) return null;
+      throw error;
+    }
+  };
+  const text = (value: unknown) => (typeof value === 'string' && value.length > 0 ? value.slice(0, 200) : null);
+  const field = (object: Record<string, unknown> | null, key: string) => {
+    const value = object?.[key];
+    return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : null;
+  };
+  const id = (claim: string) => (claims[claim] !== undefined && /^[1-9][0-9]{0,19}$/.test(claims[claim]) ? claims[claim] : null);
+  const name = (claim: string, what: string, path: string | null) => {
+    if (claims[claim] !== undefined) notes[claim] = path === null ? UNNAMED : `the ${what} ${path}`;
+  };
+
+  if (profile.startsWith('github')) {
+    const [repositoryId, ownerId] = [id('repository_id'), id('repository_owner_id')];
+    const repository = repositoryId === null ? null : await ask(`https://api.github.com/repositories/${repositoryId}`);
+    const owner = field(repository, 'owner');
+    const ownerLogin =
+      owner !== null && String(owner.id) === ownerId ? text(owner.login) : ownerId === null ? null : text((await ask(`https://api.github.com/user/${ownerId}`))?.login);
+    name('repository_id', 'GitHub repository', text(repository?.full_name));
+    name('repository_owner_id', 'GitHub account', ownerLogin);
+  } else {
+    const [projectId, namespaceId] = [id('project_id'), id('namespace_id')];
+    const project = projectId === null ? null : await ask(`${GITLAB_ISSUER}/api/v4/projects/${projectId}`);
+    const namespace = field(project, 'namespace');
+    const namespacePath =
+      namespace !== null && String(namespace.id) === namespaceId
+        ? text(namespace.full_path)
+        : namespaceId === null ? null : text((await ask(`${GITLAB_ISSUER}/api/v4/namespaces/${namespaceId}`))?.full_path);
+    name('project_id', 'GitLab project', text(project?.path_with_namespace));
+    name('namespace_id', 'GitLab namespace', namespacePath);
+  }
+  return notes;
+}
+
 const approved = 'Nothing changes until the person approves it on coffre.';
 
 function secretTool<I extends z.ZodObject>(definition: Omit<ChangeTool<I>, 'scope' | 'names'> & { scope?: McpScope }): Tool {
@@ -156,7 +258,7 @@ function archiving(archived: boolean): Tool {
       check: async ({ api }, { secret }) => needs(api, splitSecret(secret).environment, 'secret.archive'),
       preview: async (api, { secret }) => [
         { label: 'Secret', value: secret, kind: 'mono' },
-        ...(await current(api, secret)),
+        ...(await current(api, secret)).details,
         { label: 'Then', value: archived ? 'not set by coffre run or exports; every version stays restorable' : 'set again by coffre run and exports' },
       ],
       apply: async (api, { secret }) => {
@@ -171,6 +273,20 @@ const role = z.enum(ROLE_NAMES);
 const accessChange = z.union([role, z.object({ role, until: z.string().max(40).nullable() }).strict(), z.null()]);
 type AccessChange = z.infer<typeof accessChange>;
 const shownAccess = (to: AccessChange) => (to === null ? 'nothing' : typeof to === 'string' ? to : `${to.role}${to.until === null ? '' : ` until ${to.until}`}`);
+
+// A place as the API reads one, without spaces or slashes around it: market, market/prod, every project (*) or prod in each (*/prod).
+const placeOf = (raw: string) => raw.trim().replace(/^\/+|\/+$/g, '');
+
+/** What `set_access` replaces: the role a member holds at each place, and until when, or nothing. */
+async function heldAt(api: CoffreClient, member: string, changes: Record<string, AccessChange>): Promise<Replaced> {
+  const named = apiMember(member);
+  const held = (await api.members.list()).members.find((entry) => entry.member === named)?.grants ?? [];
+  const now = Object.keys(changes).map((place) => {
+    const grant = held.find((entry) => (entry.environment === null ? entry.project : `${entry.project}/${entry.environment}`) === placeOf(place));
+    return [place, grant === undefined ? 'nothing' : `${grant.role}${grant.expiresAt === null ? '' : ` until ${grant.expiresAt}`}`] as const;
+  });
+  return { state: Object.fromEntries(now), details: now.map(([place, was]) => ({ label: place, value: `${was} → ${shownAccess(changes[place]!)}` })) };
+}
 
 /**
  * Showing a value to the person, on coffre's page, through an approval like
@@ -191,7 +307,7 @@ export const SHOW_VALUE: Tool = changeTool({
   change: {
     summary: ({ secret }) => `show you the value of ${secret}`,
     check: async ({ api }, { secret }) => needs(api, splitSecret(secret).environment, 'secret.read'),
-    preview: async (api, { secret }) => [{ label: 'Secret', value: secret, kind: 'mono' }, ...(await current(api, secret))],
+    preview: async (api, { secret }) => [{ label: 'Secret', value: secret, kind: 'mono' }, ...(await current(api, secret)).details],
     reveal: true,
     apply: async (api, { secret }) => {
       const { key } = splitSecret(secret);
@@ -215,12 +331,14 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     change: {
       summary: ({ secret }) => `set ${secret} to a value you type on coffre`,
       check: async ({ api }, { secret }) => needs(api, splitSecret(secret).environment, 'secret.write'),
-      preview: async (api, { secret, note }) => [
+      replaces: async (api, { secret }) => current(api, secret),
+      preview: async (_api, { secret, note }, { reveals }, replaced) => [
         { label: 'Secret', value: secret, kind: 'mono' },
-        ...(await current(api, secret)),
+        ...replaced,
         ...(note === undefined ? [] : [{ label: 'The app says', value: note }]),
+        ...(reveals ? [READABLE] : []),
       ],
-      asks: { value: { label: 'Value', note: 'It goes to coffre only: the app never sees it.' } },
+      asks: ({ reveals }) => ({ value: { label: 'Value', note: reveals ? 'It goes to coffre, and the app can read it.' : 'It goes to coffre only: the app never sees it.' } }),
       apply: async (api, { secret }, { value }) => {
         if (value === undefined) throw new CoffreError(400, 'bad_request', 'type the value to set');
         const { environment, key } = splitSecret(secret);
@@ -247,10 +365,15 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     change: {
       summary: ({ secret }) => `set ${secret} to a new random value`,
       check: async ({ api }, { secret }) => needs(api, splitSecret(secret).environment, 'secret.write'),
-      preview: async (api, { secret, length, alphabet = 'base64url' }) => [
+      replaces: async (api, { secret }) => current(api, secret),
+      preview: async (_api, { secret, length, alphabet = 'base64url' }, { reveals }, replaced) => [
         { label: 'Secret', value: secret, kind: 'mono' },
-        ...(await current(api, secret)),
-        { label: 'New value', value: `${length ?? ALPHABETS[alphabet].length} random ${alphabet} characters, made by coffre: nobody sees it, and earlier versions stay restorable` },
+        ...replaced,
+        {
+          label: 'New value',
+          value: `${length ?? ALPHABETS[alphabet].length} random ${alphabet} characters, made by coffre${reveals ? ',' : ': nobody sees it,'} and earlier versions stay restorable`,
+        },
+        ...(reveals ? [READABLE] : []),
       ],
       apply: async (api, { secret, length, alphabet = 'base64url' }) => {
         const { environment, key } = splitSecret(secret);
@@ -274,7 +397,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
       preview: async (api, { secret, newKey }) => [
         { label: 'Secret', value: secret, kind: 'mono' },
         { label: 'Becomes', value: `${splitSecret(secret).environment}/${newKey}`, kind: 'mono' },
-        ...(await current(api, secret)),
+        ...(await current(api, secret)).details,
       ],
       apply: async (api, { secret, newKey }) => {
         await api.secrets.rename(secret, newKey);
@@ -296,12 +419,13 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     change: {
       summary: ({ secret, version }) => `restore ${secret} to version ${version}`,
       check: async ({ api }, { secret }) => needs(api, splitSecret(secret).environment, 'secret.write'),
-      preview: async (api, { secret, version }) => {
+      replaces: async (api, { secret }) => current(api, secret),
+      preview: async (api, { secret, version }, _viewing, replaced) => {
         const { versions } = await api.secrets.history(secret);
         const old = versions.find((entry) => entry.version === version);
         return [
           { label: 'Secret', value: secret, kind: 'mono' },
-          ...(await current(api, secret)),
+          ...replaced,
           {
             label: 'Restores',
             value: old === undefined ? `version ${version}, which it does not have` : `version ${version}, set by ${shownMember(old.createdBy)}, as a new version`,
@@ -327,6 +451,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     names: ({ project }) => [project],
     change: {
       summary: ({ project, name }) => `create the project ${project} (${name})`,
+      check: ownersOnly,
       preview: async (_api, { project, name }) => [
         { label: 'Project', value: project, kind: 'mono' },
         { label: 'Name', value: name },
@@ -352,7 +477,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     names: ({ environment }) => [environment],
     change: {
       summary: ({ environment, name }) => `create the environment ${environment} (${name})`,
-      check: async (_ctx, { environment }) => void splitEnvironment(environment),
+      check: async ({ api }, { environment }) => needsOn(api, [splitEnvironment(environment).project], 'environment.manage'),
       preview: async (_api, { environment, name }) => [
         { label: 'Environment', value: environment, kind: 'mono' },
         { label: 'Name', value: name },
@@ -390,17 +515,14 @@ export const CHANGE_TOOLS: readonly Tool[] = [
         const places = Object.keys(changes);
         return `change ${shownMember(apiMember(member))}'s access at ${places.length === 1 ? places[0] : `${places.length} places`}`;
       },
-      preview: async (api, { member, changes }) => {
-        const named = apiMember(member);
-        const held = (await api.members.list()).members.find((entry) => entry.member === named)?.grants ?? [];
-        return [
-          { label: 'Member', value: shownMember(named), kind: 'mono' },
-          ...Object.entries(changes).map(([place, to]) => {
-            const now = held.find((grant) => (grant.environment === null ? grant.project : `${grant.project}/${grant.environment}`) === place);
-            return { label: place, value: `${now?.role ?? 'nothing'} → ${shownAccess(to)}` };
-          }),
-        ];
+      // Each place needs grant.manage on its project, and every project (`*`) an instance owner, as the API checks.
+      check: async (ctx, { changes }) => {
+        const projects = Object.keys(changes).map((place) => placeOf(place).split('/')[0]!);
+        if (projects.includes(EVERY_PROJECT)) await ownersOnly(ctx);
+        await needsOn(ctx.api, projects.filter((project) => project !== EVERY_PROJECT), 'grant.manage');
       },
+      replaces: async (api, { member, changes }) => heldAt(api, member, changes),
+      preview: async (_api, { member }, _viewing, replaced) => [{ label: 'Member', value: shownMember(apiMember(member)), kind: 'mono' }, ...replaced],
       apply: async (api, { member, changes }) => {
         const named = apiMember(member);
         const { changes: done } = await api.access.set(named, changes as RouteInput<'PATCH /access/:member'>);
@@ -420,6 +542,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     names: ({ member }) => [apiMember(member)],
     change: {
       summary: ({ member, owner }) => `admit ${shownMember(apiMember(member))}${owner === true ? ' as an instance owner' : ''}`,
+      check: ownersOnly,
       preview: async (_api, { member, owner }) => [
         { label: 'Member', value: shownMember(apiMember(member)), kind: 'mono' },
         { label: 'As', value: owner === true ? 'an instance owner: every project, every member' : 'a member, with no access until granted some' },
@@ -445,6 +568,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     names: ({ member }) => [apiMember(member)],
     change: {
       summary: ({ member }) => `offboard ${shownMember(apiMember(member))}`,
+      check: ownersOnly,
       preview: async (api, { member }) => {
         const report = await api.members.get(apiMember(member));
         return [
@@ -475,9 +599,10 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     names: ({ service }) => [serviceMember(service)],
     change: {
       summary: ({ service, expiresInDays }) => `issue a token for ${shownService(service)}, good for ${expiresInDays} days`,
+      check: ownersOnly,
       preview: async (_api, { service, label, expiresInDays }) => [
         { label: 'Service account', value: shownService(service), kind: 'mono' },
-        ...(label === undefined ? [] : [{ label: 'Label', value: label }]),
+        ...(label === undefined ? [] : [{ label: 'The app calls it', value: label }]),
         { label: 'Good for', value: `${expiresInDays} days` },
         { label: 'The token', value: 'shown here once, after you approve; never to the app' },
       ],
@@ -503,6 +628,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     names: ({ service }) => [serviceMember(service)],
     change: {
       summary: ({ service }) => `revoke a token of ${shownService(service)}`,
+      check: ownersOnly,
       preview: async (api, { service, id }) => {
         const token = (await api.tokens.list(serviceMember(service))).tokens.find((entry) => entry.id === id);
         return [
@@ -540,12 +666,20 @@ export const CHANGE_TOOLS: readonly Tool[] = [
       // The binding is checked, and its issuer asked where its keys are, before anyone is asked to approve it.
       check: async ({ api }, { service, profile, issuer, claims, label }) =>
         void (await api.bindings.preview(serviceMember(service), { profile, issuer: issuer ?? null, claims, label: label ?? null })),
-      preview: async (_api, { service, profile, issuer, claims, label }) => [
-        { label: 'Service account', value: shownService(service), kind: 'mono' },
-        { label: 'Runs from', value: issuer ?? `${profile}'s own issuer` },
-        ...Object.entries(claims).map(([claim, value]) => ({ label: claim, value, kind: 'mono' as const })),
-        ...(label === undefined ? [] : [{ label: 'Label', value: label }]),
-      ],
+      // The model picks the IDs: each is named back from GitHub or GitLab, where it can be, so the person reads what they trust.
+      preview: async (_api, { service, profile, issuer, claims, label }, { transport }) => {
+        const names = await namesOf(transport, profile, issuer ?? null, claims);
+        // An issuer the app named that is not GitHub's or GitLab's own: whoever runs it signs the tokens.
+        const unfamiliar = issuer !== undefined && issuer !== GITHUB_ISSUER && issuer !== GITLAB_ISSUER;
+        return [
+          { label: 'Service account', value: shownService(service), kind: 'mono' },
+          unfamiliar
+            ? { label: 'Runs from', value: issuer, kind: 'mono', note: "Not GitHub's or GitLab's own: whoever runs this host can sign in as the account. Approve only if it is yours.", warn: true }
+            : { label: 'Runs from', value: issuer ?? `${profile}'s own issuer` },
+          ...Object.entries(claims).map(([claim, value]) => ({ label: claim, value, kind: 'mono' as const, ...(names[claim] === undefined ? {} : { note: names[claim] }) })),
+          ...(label === undefined ? [] : [{ label: 'The app calls it', value: label }]),
+        ];
+      },
       apply: async (api, { service, profile, issuer, claims, label }) => {
         const made = await api.bindings.create(serviceMember(service), { profile, issuer: issuer ?? null, claims, label: label ?? null });
         return { result: { service: shownService(service), binding: made.binding.id }, text: `CI runs that match are trusted as ${shownService(service)}.` };
@@ -564,6 +698,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     names: ({ service }) => [serviceMember(service)],
     change: {
       summary: ({ service }) => `stop trusting a CI workload as ${shownService(service)}`,
+      check: ownersOnly,
       preview: async (api, { service, id }) => {
         const binding = (await api.bindings.list(serviceMember(service))).bindings.find((entry) => entry.id === id);
         return [
