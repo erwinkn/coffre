@@ -20,7 +20,7 @@ import { COFFRE_VERSION } from '../version.ts';
 import { mcpCaller, resourceMetadataUrl } from './http.ts';
 import { challengeScopes } from './scopes.ts';
 import type { ApprovalRow } from '../db/queries.ts';
-import { callDigest, MAX_PENDING, OUTCOME_SECONDS, statusOf, type Outcome } from './approvals.ts';
+import { callDigest, MAX_PENDING, OUTCOME_SECONDS, outcomeOf, statusOf, UNKNOWN_OUTCOME, type Outcome } from './approvals.ts';
 import type { McpConnection } from './service.ts';
 import { openState, sealState } from './tokens.ts';
 import { INSTRUCTIONS, listed, TOOL_BY_NAME, TOOLS, type Tool, usable } from './tools.ts';
@@ -287,11 +287,12 @@ async function call(
       entries.push(entry);
     });
   const metadata = { tool: tool.name, names };
+  const entry = (action: string, more: Record<string, unknown>) => allowed(writer, action, { metadata: { ...metadata, ...more } });
   // A read-only tool's call that went through is detail, as a sign-in is; everything else shows.
   const done = (decision: 'allow' | 'deny', reason?: string, more: Record<string, unknown> = {}) =>
     log(
       decision === 'allow'
-        ? allowed(writer, tool.readOnly ? 'mcp.read' : 'mcp.call', { metadata: { ...metadata, ...more } })
+        ? entry(tool.readOnly ? 'mcp.read' : 'mcp.call', more)
         : denied(writer, 'mcp.call', reason ?? 'refused', { metadata: { ...metadata, ...more } }),
     );
 
@@ -318,7 +319,7 @@ async function call(
   });
   try {
     if (tool.change !== undefined) {
-      return await change(runtime, connection, tool, args.data, params.data, { api, answer, client, done, id });
+      return await change(runtime, connection, tool, args.data, params.data, { api, answer, client, done, entry, id });
     }
     const result = await tool.run({ api, connection, publicUrl: runtime.publicUrl }, args.data as never);
     await done('allow');
@@ -341,6 +342,8 @@ type ChangeCall = {
   answer: (result: Record<string, unknown>) => Response;
   client: ClientSays;
   done: (decision: 'allow' | 'deny', reason?: string, more?: Record<string, unknown>) => Promise<void>;
+  /** The call's entry, allowed, for what `approvals` writes with it. */
+  entry: (action: string, more: Record<string, unknown>) => AuditEntry;
   id: JsonRpcId;
 };
 
@@ -359,7 +362,7 @@ async function change(
   tool: Tool,
   args: unknown,
   params: z.infer<typeof CallParams>,
-  { api, answer, client, done, id }: ChangeCall,
+  { api, answer, client, done, entry, id }: ChangeCall,
 ): Promise<Response> {
   const { approvals } = runtime.mcp!;
   const prompt = (row: ApprovalRow, ask: boolean) =>
@@ -389,30 +392,33 @@ async function change(
     const response = params.inputResponses?.approve as { action?: unknown } | undefined;
     // Declined: the person said no to opening the page, and the approval ends. Cancelled: the prompt was
     // dismissed, or a client that cannot ask anyone (Claude Code with -p) answered it, so the link goes to the model instead.
-    if (response?.action === 'decline') await approvals.cancel(found.id);
-    if (response?.action === 'cancel' && found.status === 'pending') return answer(pending(approvals.url(found.id), found, tool, false));
+    if (response?.action === 'decline') await approvals.cancel(found.id, entry('mcp.cancel', { approvalId: found.id }));
+    if (response?.action === 'cancel' && found.status === 'pending') return answer(pending(approvals.url(found.id), found, tool, 'asked'));
     row = found;
   } else {
     await tool.change!.check?.({ api, connection, publicUrl: runtime.publicUrl }, args as never);
-    const asked = await approvals.ask(connection, tool, args);
+    // A new approval's call is logged with it; a call that rejoins one is not logged again.
+    const asked = await approvals.ask(connection, tool, args, (approvalId) => entry('mcp.call', { approvalId }));
     if ('full' in asked) {
       await done('deny', 'too_many_approvals');
       return answer(toolError(`${MAX_PENDING} changes are waiting for the person already: ask them to decide those on coffre first.`));
     }
     row = asked.row;
-    if (!asked.joined) await done('allow', undefined, { approvalId: row.id });
     if (row.status === 'pending' && (!asked.joined || client.elicitsUrl)) {
-      return client.elicitsUrl ? prompt(row, true) : answer(pending(approvals.url(row.id), row, tool, false));
+      return client.elicitsUrl ? prompt(row, true) : answer(pending(approvals.url(row.id), row, tool, 'asked'));
     }
   }
 
   const settled = await approvals.settle(row.id, Date.now() + (runtime.mcp!.approvalWaitMs ?? WAIT_MS));
   const status = statusOf(settled, settled.now);
   if (status === 'pending' || (status === 'approved' && settled.outcome === null)) {
-    return client.elicitsUrl ? prompt(settled, false) : answer(pending(approvals.url(settled.id), settled, tool, true));
+    return client.elicitsUrl ? prompt(settled, false) : answer(pending(approvals.url(settled.id), settled, tool, status === 'pending' ? 'waiting' : 'making'));
   }
-  await approvals.reported(settled.id);
-  const outcome: Outcome = settled.outcome === null ? { text: `This approval ${status === 'expired' ? 'expired before the person decided it' : `is ${status}`}: nothing changed.` } : (JSON.parse(settled.outcome) as Outcome);
+  const known = outcomeOf(settled, settled.now);
+  // An unknown outcome is no end the client heard: the same call rejoins it, and is told so again, while it may.
+  if (known !== UNKNOWN_OUTCOME) await approvals.reported(settled.id);
+  // Without an outcome, it ended before the person approved it: nothing changed.
+  const outcome: Outcome = known ?? { text: `This approval ${status === 'expired' ? 'expired before the person decided it' : `is ${status}`}: nothing changed.` };
   const structured = {
     status,
     message: outcome.text,
@@ -422,15 +428,24 @@ async function change(
   return answer({ content: [{ type: 'text', text: outcome.text }], structuredContent: structured, ...(status === 'approved' ? {} : { isError: true }) });
 }
 
-/** What a client that cannot open a URL is told while its change waits: the link, for its person. */
-function pending(url: string, row: ApprovalRow, tool: Tool, again: boolean): Record<string, unknown> {
+/**
+ * What a client that cannot open a URL is told while its change waits:
+ * the link, for its person, once `asked`, and while it is `waiting` on
+ * them. Once they approved it, while coffre is `making` it, only to call again.
+ */
+function pending(url: string, row: ApprovalRow, tool: Tool, state: 'asked' | 'waiting' | 'making'): Record<string, unknown> {
+  const approval = { id: row.id, url, expiresAt: row.expiresAt.toISOString() };
+  if (state === 'making') {
+    const text = `The person approved this, and coffre is making the change. Call ${tool.name} again with the same arguments in a moment: it answers what became of it.`;
+    return { content: [{ type: 'text', text }], structuredContent: { status: 'pending', message: text, approval } };
+  }
   const expires = row.expiresAt.toISOString().replace(/\.\d+Z$/, 'Z');
-  const lead = again ? 'The person has not decided yet. Nothing has changed.' : 'Nothing has changed yet: coffre asks the person to approve this on its own page.';
+  const lead = state === 'waiting' ? 'The person has not decided yet. Nothing has changed.' : 'Nothing has changed yet: coffre asks the person to approve this on its own page.';
   const next = `Once they have approved or denied it, call ${tool.name} again with the same arguments: it answers what became of it.`;
   return {
     content: [{ type: 'text', text: [lead, `Show them this link, to open signed in to coffre (it expires at ${expires}):`, '', `  ${url}`, '', next].join('\n') }],
     // Some clients give the model this rather than the text: it says the same.
-    structuredContent: { status: 'pending', message: `${lead} Show the person the approval's url, to open signed in to coffre. ${next}`, approval: { id: row.id, url, expiresAt: row.expiresAt.toISOString() } },
+    structuredContent: { status: 'pending', message: `${lead} Show the person the approval's url, to open signed in to coffre. ${next}`, approval },
   };
 }
 

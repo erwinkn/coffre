@@ -6,6 +6,7 @@ import {
   hashToken,
   isCoffreToken,
   tokenHint,
+  tokenKind,
 } from '../src/identity/tokens.ts';
 
 test('tokens carry their kind as a prefix and 32 random bytes', () => {
@@ -28,6 +29,12 @@ test('isCoffreToken accepts generated tokens and nothing shaped otherwise', () =
   assert.equal(isCoffreToken(` coffre_cli_${body}`), false, 'surrounding space');
   assert.equal(isCoffreToken('eyJhbGciOiJSUzI1NiJ9.e30.sig'), false, 'a JWT');
   assert.equal(isCoffreToken(''), false);
+});
+
+test('tokenKind reads the kind a token says, and nothing from anything else', () => {
+  for (const kind of ['browser', 'cli', 'service'] as const) assert.equal(tokenKind(generateToken(kind)), kind);
+  assert.equal(tokenKind(`coffre_key_${'A'.repeat(43)}`), null);
+  assert.equal(tokenKind('eyJhbGciOiJSUzI1NiJ9.e30.sig'), null);
 });
 
 test('hashToken is SHA-256 of the whole token', () => {

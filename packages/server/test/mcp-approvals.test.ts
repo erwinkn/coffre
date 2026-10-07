@@ -5,13 +5,15 @@
 // and calls again. Values come only from the page.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 
-import { eq } from 'drizzle-orm';
+import { and, desc, eq } from 'drizzle-orm';
 
+import { callDigest } from '../src/mcp/approvals.ts';
+import { TOOL_BY_NAME } from '../src/mcp/tools.ts';
 import { clientFor } from './api-fixture.ts';
-import { auditLog, mcpApprovals } from './db/tables.ts';
-import { callRaw, client, connect, db, deps, DEV, entries, type Result, ROOT, route, sessionFor, useMcp } from './mcp-fixture.ts';
+import { auditLog, mcpApprovals, mcpConnections } from './db/tables.ts';
+import { browserFor, callRaw, client, connect, db, deps, DEV, documents, entries, fromPage, type Result, ROOT, route, sessionFor, useMcp } from './mcp-fixture.ts';
 
 const OTHER = 'other@acme.example';
 const SECRET = `value-${randomBytes(8).toString('hex')}`;
@@ -30,21 +32,30 @@ useMcp(
   { approvalWaitMs: 50 },
 );
 
-/** The person, on coffre's page: what the approval shows them, as their session sees it. */
+type View = {
+  digest: string;
+  basis: string | null;
+  status: string;
+  summary: string;
+  details: { label: string; value: string; note?: string }[];
+  asks: unknown;
+  reveals: boolean;
+  outcome: { text: string; error?: string } | null;
+};
+
+/** The person, on coffre's page: what the approval shows them, as their browser session sees it. */
 async function view(id: string, email = DEV) {
-  const session = await sessionFor(email);
-  const response = await route(`/api/approvals/${id}`, { headers: { authorization: `Bearer ${session}` } });
-  return { status: response.status, body: (await response.json()) as { approval: { digest: string; status: string; summary: string; details: { label: string; value: string }[]; asks: unknown }; message?: string } };
+  const response = await route(`/api/approvals/${id}`, { headers: fromPage(await browserFor(email)) });
+  return { status: response.status, body: (await response.json()) as { approval: View; message?: string } };
 }
 
-/** The person's decision on that page, sent with the digest it showed. */
-async function decide(id: string, approve: boolean, extra: { value?: string; digest?: string } = {}, email = DEV) {
-  const shown = await view(id, email);
-  const session = await sessionFor(email);
+/** The person's decision on that page, sent with the digest and basis it showed, or `shown` if given. */
+async function decide(id: string, approve: boolean, extra: { value?: string; digest?: string; shown?: View } = {}, email = DEV) {
+  const shown = extra.shown ?? (await view(id, email)).body.approval;
   const response = await route(`/api/approvals/${id}`, {
     method: 'POST',
-    headers: { authorization: `Bearer ${session}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ approve, digest: extra.digest ?? shown.body.approval.digest, ...(extra.value === undefined ? {} : { value: extra.value }) }),
+    headers: fromPage(await browserFor(email), { 'content-type': 'application/json' }),
+    body: JSON.stringify({ approve, digest: extra.digest ?? shown.digest, basis: shown.basis, ...(extra.value === undefined ? {} : { value: extra.value }) }),
   });
   return { status: response.status, body: (await response.json()) as { status: string; outcome: { text: string }; shown: { label: string; value: string }[]; message?: string } };
 }
@@ -56,6 +67,8 @@ async function archived(key: string): Promise<boolean> {
 async function approvalRows() {
   return db.owner.select().from(mcpApprovals);
 }
+
+const idOf = (result: { body: { result?: { structuredContent?: Record<string, unknown> } } }) => (result.body.result!.structuredContent!.approval as { id: string }).id;
 
 test('with URL elicitation, the official client is asked to open the page, and its retry reports the change the page made, once', async () => {
   const mcp = await client(await connect(DEV, 'read write'), 'modern', { elicitsUrl: true });
@@ -154,6 +167,10 @@ test('a requestState replayed with other arguments, or by another connection, is
   assert.equal(declined.body.result!.isError, true);
   assert.equal(declined.body.result!.structuredContent!.status, 'cancelled');
   assert.equal(await archived('OLD_KEY'), false);
+  // The decline is logged, as every other way an approval ends (I2).
+  const [cancel] = await entries('mcp.cancel');
+  assert.equal(cancel!.actor, `user:${DEV}`);
+  assert.equal(cancel!.metadata.approvalId, (first.body.result!.inputRequests as { approve: { params: { url: string } } }).approve.params.url.split('/').at(-1));
   assert.equal((await decide((first.body.result!.inputRequests as { approve: { params: { url: string } } }).approve.params.url.split('/').at(-1)!, true)).status, 409);
 });
 
@@ -202,6 +219,7 @@ test('a token issued through an approval is shown on the page, once, and never t
   await clientFor(deps, ROOT).members.add(`user:${DEV}`, { owner: true });
   const token = await connect(DEV, 'read manage-access');
   const id = ((await callRaw(token, 'issue_service_token', { service: 'ci-deploy', label: 'deploys', expiresInDays: 30 })).body.result!.structuredContent!.approval as { id: string }).id;
+  assert.ok((await view(id)).body.approval.details.some((line) => line.label === 'The app calls it' && line.value === 'deploys'), 'the label is the app’s');
   const decided = await decide(id, true);
   assert.equal(decided.body.status, 'approved', JSON.stringify(decided.body));
   const issued = decided.body.shown.find((line) => line.label === 'Token')!.value;
@@ -257,4 +275,206 @@ test('a disconnected app’s approvals can no longer be decided', async () => {
   assert.equal(disconnected.status, 200);
   assert.equal((await view(id)).status, 409);
   assert.equal(await archived('OLD_KEY'), false);
+});
+
+// --- W47's findings ----------------------------------------------------------
+
+/** An approval as a call would have opened it, for a tool this instance cannot check a call of (trust bindings are off here). */
+async function opened(email: string, tool: string, args: Record<string, unknown>): Promise<string> {
+  const [connection] = await db.owner.select().from(mcpConnections).where(eq(mcpConnections.principal, `user:${email}`)).orderBy(desc(mcpConnections.createdAt)).limit(1);
+  const id = randomUUID();
+  await db.owner.insert(mcpApprovals).values({
+    id, connectionId: connection!.id, tool, arguments: JSON.stringify(args), digest: Buffer.from(callDigest(tool, args), 'hex'),
+    status: 'pending', createdAt: new Date(), expiresAt: new Date(Date.now() + 300_000),
+  });
+  return id;
+}
+
+test("trust_workload's page names each ID from GitHub or GitLab, says when it cannot, and shows the label as the app's (M1)", async () => {
+  await clientFor(deps, ROOT).members.add(`user:${DEV}`, { owner: true });
+  await connect(DEV, 'read manage-access');
+  const notes = async (args: Record<string, unknown>) => {
+    const { details } = (await view(await opened(DEV, 'trust_workload', { service: 'ci-deploy', ...args }))).body.approval;
+    return Object.fromEntries(details.map((line) => [line.label, line.note ?? line.value]));
+  };
+
+  // The IDs a model picked, which name the attacker's project, whatever the label says.
+  documents.set('https://gitlab.com/api/v4/projects/55123', { id: 55123, path_with_namespace: 'attacker/web', namespace: { id: 81234, full_path: 'attacker' } });
+  const gitlab = await notes({ profile: 'gitlab', claims: { namespace_id: '81234', project_id: '55123', ref_type: 'branch', ref: 'main', pipeline_source: 'push' }, label: 'acme/web deploy' });
+  assert.equal(gitlab.project_id, 'the GitLab project attacker/web');
+  assert.equal(gitlab.namespace_id, 'the GitLab namespace attacker');
+  assert.equal(gitlab['The app calls it'], 'acme/web deploy');
+  assert.equal(gitlab.Label, undefined);
+
+  // Private, unknown, or not answered: the person is told to check the ID.
+  const unknown = await notes({ profile: 'gitlab', claims: { namespace_id: '77', project_id: '99', ref_type: 'branch', ref: 'main', pipeline_source: 'push' } });
+  assert.equal(unknown.project_id, 'private or unknown: check this ID yourself');
+  assert.equal(unknown.namespace_id, 'private or unknown: check this ID yourself');
+
+  documents.set('https://api.github.com/repositories/41532', { id: 41532, full_name: 'acme/web', owner: { id: 9919, login: 'acme' } });
+  const github = await notes({
+    profile: 'github',
+    claims: { repository_owner_id: '9919', repository_id: '41532', workflow_ref: 'acme/web/.github/workflows/deploy.yml@refs/heads/main', ref: 'refs/heads/main', event_name: 'push' },
+  });
+  assert.equal(github.repository_id, 'the GitHub repository acme/web');
+  assert.equal(github.repository_owner_id, 'the GitHub account acme');
+  documents.set('https://api.github.com/user/5150', { id: 5150, login: 'evil-org' });
+  const organization = await notes({
+    profile: 'github-reusable-organization',
+    claims: { repository_owner_id: '5150', ref: 'refs/heads/main', event_name: 'push', job_workflow_ref: 'acme/ci/.github/workflows/deploy.yml@refs/heads/main', job_workflow_sha: 'a'.repeat(40) },
+  });
+  assert.equal(organization.repository_owner_id, 'the GitHub account evil-org');
+});
+
+test('an approved change that never answered is reported failed, its outcome unknown, never as nothing changed; the person is warned before approving it again (L2)', async () => {
+  const token = await connect(DEV, 'read write');
+  const call = () => callRaw(token, 'archive_secret', { secret: 'market/prod/OLD_KEY' });
+  const id = idOf(await call());
+  const set = (values: Partial<typeof mcpApprovals.$inferInsert>) => db.owner.update(mcpApprovals).set(values).where(eq(mcpApprovals.id, id));
+
+  // Approve committed, and its change has not answered yet.
+  await set({ status: 'approved', decidedAt: new Date() });
+  const making = (await call()).body.result!;
+  assert.equal(making.structuredContent!.status, 'pending');
+  assert.match(making.content[0]!.text!, /^The person approved this, and coffre is making the change/);
+  assert.doesNotMatch(JSON.stringify(making), /[Nn]othing (has )?changed/);
+
+  // A minute on, still no answer: the request died. Failed, outcome unknown, on every call that rejoins it.
+  await set({ decidedAt: new Date(Date.now() - 2 * 60_000) });
+  for (const _ of [1, 2]) {
+    const unknown = (await call()).body.result!;
+    assert.equal(unknown.isError, true);
+    assert.equal(unknown.structuredContent!.status, 'failed');
+    assert.equal(idOf({ body: { result: unknown } }), id);
+    assert.match(unknown.content[0]!.text!, /does not know whether the change was made/);
+    assert.doesNotMatch(JSON.stringify(unknown), /[Nn]othing (has )?changed/);
+  }
+  const page = (await view(id)).body.approval;
+  assert.equal(page.status, 'failed');
+  assert.equal(page.outcome?.error, 'unknown_outcome');
+
+  // Past the time a call may rejoin it, the same call asks anew, and its page says the first may have been made.
+  await set({ createdAt: new Date(Date.now() - 11 * 60_000) });
+  const again = idOf(await call());
+  assert.notEqual(again, id);
+  assert.equal((await view(again)).body.approval.details[0]!.label, 'Asked before');
+});
+
+test('identical calls at once open one approval, logged once, and a burst gets no more than five waiting (L3)', async () => {
+  const token = await connect(DEV, 'read write');
+  const same = await Promise.all(Array.from({ length: 6 }, () => callRaw(token, 'archive_secret', { secret: 'market/prod/OLD_KEY' })));
+  assert.equal(new Set(same.map(idOf)).size, 1);
+  assert.equal((await approvalRows()).length, 1);
+  assert.equal((await entries('mcp.call')).length, 1);
+
+  const burst = await Promise.all(Array.from({ length: 8 }, (_, index) => callRaw(token, 'create_environment', { environment: `market/burst${index}`, name: `Burst ${index}` })));
+  assert.equal(burst.filter((result) => result.body.result!.structuredContent?.status === 'pending').length, 4);
+  assert.equal(burst.filter((result) => /5 changes are waiting/.test(result.body.result!.content[0]!.text!)).length, 4);
+  assert.equal((await approvalRows()).filter((row) => row.status === 'pending').length, 5);
+});
+
+test('Approve refuses a change whose page is stale: a version set, or a role changed, since it was shown (L4)', async () => {
+  const token = await connect(DEV, 'read write');
+  const id = idOf(await callRaw(token, 'request_secret_value', { secret: 'market/prod/API_KEY' }));
+  const shown = (await view(id)).body.approval;
+  assert.equal(shown.basis, 'version 1');
+  await clientFor(deps, ROOT).secrets.set('market/prod', { API_KEY: `meanwhile-${SECRET}` });
+  const stale = await decide(id, true, { value: 'typed', shown });
+  assert.equal(stale.status, 409);
+  assert.match(stale.body.message!, /changed since you opened it/);
+  assert.equal((await clientFor(deps, ROOT).secrets.reveal('market/prod/API_KEY')).values.API_KEY, `meanwhile-${SECRET}`, 'version 2 stands');
+  assert.deepEqual((await entries('mcp.approve')).map((entry) => [entry.decision, entry.metadata.reason]), [['deny', 'replaced']]);
+  // Opened again, the page shows version 2, and Approve goes through.
+  assert.equal((await decide(id, true, { value: 'typed' })).body.status, 'approved');
+
+  const root = await connect(ROOT, 'read manage-access');
+  const access = idOf(await callRaw(root, 'set_access', { member: `user:${OTHER}`, changes: { 'market/prod': 'auditor' } }));
+  const page = (await view(access, ROOT)).body.approval;
+  assert.ok(page.details.some((line) => line.label === 'market/prod' && line.value === 'viewer → auditor'));
+  await clientFor(deps, ROOT).access.set(`user:${OTHER}`, { 'market/prod': 'developer' });
+  assert.equal((await decide(access, true, { shown: page }, ROOT)).status, 409);
+  assert.equal((await approvalRows()).find((row) => row.id === access)!.status, 'pending');
+});
+
+test('approvals asked too long ago to rejoin are not read again, so they never count toward the five (L5)', async () => {
+  const token = await connect(DEV, 'read write');
+  for (let index = 0; index < 5; index += 1) await callRaw(token, 'create_environment', { environment: `market/env${index}`, name: `Env ${index}` });
+  // Rows that still say pending, as if their expiry were far off, but asked eleven minutes ago.
+  await db.owner.update(mcpApprovals).set({ createdAt: new Date(Date.now() - 11 * 60_000), expiresAt: new Date(Date.now() + 60_000) });
+  const sixth = await callRaw(token, 'create_environment', { environment: 'market/env9', name: 'Env 9' });
+  assert.equal(sixth.body.result!.structuredContent!.status, 'pending');
+});
+
+test("only the browser's session decides an approval: the CLI's is refused, sent either way, and another site's page is refused before any read (I1, I3)", async () => {
+  const token = await connect(DEV, 'read write');
+  const id = idOf(await callRaw(token, 'archive_secret', { secret: 'market/prod/OLD_KEY' }));
+  const { approval } = (await view(id)).body;
+  const cli = await sessionFor(DEV);
+  for (const headers of [{ authorization: `Bearer ${cli}` }, fromPage(cli)]) {
+    const read = await route(`/api/approvals/${id}`, { headers });
+    assert.equal(read.status, 403);
+    assert.match(((await read.json()) as { message: string }).message, /signed in in your browser/);
+    const decided = await route(`/api/approvals/${id}`, { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify({ approve: true, digest: approval.digest }) });
+    assert.equal(decided.status, 403);
+  }
+  const crossSite = await route(`/api/approvals/${id}`, { headers: fromPage(await browserFor(DEV), { 'sec-fetch-site': 'cross-site' }) });
+  assert.equal(crossSite.status, 403);
+  assert.match(((await crossSite.json()) as { message: string }).message, /must come from coffre itself/);
+  assert.equal(await archived('OLD_KEY'), false);
+  assert.equal((await approvalRows())[0]!.status, 'pending');
+});
+
+test('the decision reads the approval and its connection again as it commits: expired or disconnected meanwhile, it is refused (I3)', async () => {
+  const token = await connect(DEV, 'read write');
+  const change = TOOL_BY_NAME.get('request_secret_value')!.change!;
+  const basis = change.basis!;
+  const during = async (id: string, meanwhile: () => Promise<unknown>) => {
+    const shown = (await view(id)).body.approval;
+    // Between the first checks and the decision's transaction: while Approve reads what the change replaces.
+    change.basis = async (api, args) => {
+      await meanwhile();
+      return basis(api, args);
+    };
+    try {
+      return await decide(id, true, { value: 'typed', shown });
+    } finally {
+      change.basis = basis;
+    }
+  };
+
+  const expiring = idOf(await callRaw(token, 'request_secret_value', { secret: 'market/prod/NEW_KEY' }));
+  const expired = await during(expiring, () => db.owner.update(mcpApprovals).set({ expiresAt: new Date(Date.now() - 1000) }).where(eq(mcpApprovals.id, expiring)));
+  assert.equal(expired.status, 409);
+  assert.match(expired.body.message!, /expired already/);
+
+  const disconnecting = idOf(await callRaw(token, 'request_secret_value', { secret: 'market/prod/API_KEY' }));
+  const [row] = await db.owner.select().from(mcpApprovals).where(and(eq(mcpApprovals.id, disconnecting)));
+  const session = await sessionFor(DEV);
+  const disconnected = await during(disconnecting, () => route(`/api/apps/${row!.connectionId}`, { method: 'DELETE', headers: { authorization: `Bearer ${session}` } }));
+  assert.equal(disconnected.status, 409);
+  assert.match(disconnected.body.message!, /disconnected/);
+  assert.deepEqual((await entries('secret.write')).filter((entry) => entry.actor === `user:${DEV}`), [], 'nothing written');
+});
+
+test('a change the person could not make is refused before anyone is asked, for every tool: owners only, and access where they manage it (I3)', async () => {
+  const dev = await connect(DEV, 'read write manage-access');
+  const owners: [string, Record<string, unknown>][] = [
+    ['create_project', { project: 'shop', name: 'Shop' }],
+    ['admit_member', { member: 'user:new@acme.example' }],
+    ['offboard_member', { member: `user:${OTHER}` }],
+    ['issue_service_token', { service: 'ci-deploy', expiresInDays: 1 }],
+    ['revoke_service_token', { service: 'ci-deploy', id: randomUUID() }],
+    ['untrust_workload', { service: 'ci-deploy', id: randomUUID() }],
+  ];
+  for (const [tool, args] of owners) {
+    const refused = (await callRaw(dev, tool, args)).body.result!;
+    assert.equal(refused.isError, true, tool);
+    assert.match(refused.content[0]!.text!, /only instance owners/, tool);
+  }
+  const viewer = await connect(OTHER, 'read write manage-access');
+  const access = (await callRaw(viewer, 'set_access', { member: `user:${DEV}`, changes: { market: 'viewer' } })).body.result!;
+  assert.match(access.content[0]!.text!, /you need grant\.manage on market/);
+  const environment = (await callRaw(viewer, 'create_environment', { environment: 'market/stage', name: 'Stage' })).body.result!;
+  assert.match(environment.content[0]!.text!, /you need environment\.manage on market/);
+  assert.equal((await approvalRows()).length, 0);
 });

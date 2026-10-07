@@ -30,6 +30,15 @@ export function isCoffreToken(value: string): boolean {
   return TOKEN.test(value);
 }
 
+/**
+ * The kind a token's prefix says, before any lookup. Its hash covers the
+ * prefix, so a token found under its hash is the kind it says.
+ */
+export function tokenKind(token: string): CredentialKind | null {
+  if (!TOKEN.test(token)) return null;
+  return (Object.keys(PREFIX) as CredentialKind[]).find((kind) => token.startsWith(PREFIX[kind])) ?? null;
+}
+
 export function hashToken(token: string): Buffer {
   return createHash('sha256').update(token, 'utf8').digest();
 }

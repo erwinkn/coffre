@@ -517,7 +517,8 @@ The client asks the person, opens the URL, then retries with
    The official client SDK, which Claude Code's v2 runtime is built on,
    retries ten rounds by default: about four minutes. claude.ai allows 240
    seconds per tool call.
-3. treats `decline` from the client as cancelling the approval. A `cancel`
+3. treats `decline` from the client as cancelling the approval, logged as
+   `mcp.cancel`. A `cancel`
    means the prompt was dismissed, or that a client with no one to ask
    answered it (Claude Code run with `-p` does, as the live check found):
    the approval stays pending, and the result carries its link, as for a
@@ -525,12 +526,23 @@ The client asks the person, opens the URL, then retries with
 
 A call identical to a pending one (same connection, same digest) rejoins
 that approval rather than opening another. A connection may hold at most
-five pending approvals.
+five pending approvals. The call reads its connection's open approvals and
+inserts its own under the audit log's head, with its `mcp.call` entry, so
+identical calls at once open one approval and a burst stays within five.
+It reads only those asked in the last 10 minutes: older ones can no longer
+be rejoined, nor still wait. A call the person could not make is refused
+before any approval opens, as the API would refuse it on Approve.
 
-**The page.** `/approvals/:id` requires the person's coffre session, and
-only the approval's own person, at the same generation, may decide it.
-Anyone else, Bob for instance, sees "this approval is for someone else",
-and nothing more.
+**The page.** `/approvals/:id` requires the person's coffre session in
+their browser, and only the approval's own person, at the same generation,
+may decide it. Anyone else, Bob for instance, sees "this approval is for
+someone else", and nothing more. Its API, `GET` and `POST
+/api/approvals/:id`, takes a browser session only, never a CLI session or
+a service token: deciding on coffre's page is literally what the person
+does. Behind Cloudflare Access, it takes Access's cookie, which a client
+that is no browser can set too. Its `GET`, asked with a cookie, needs
+`Sec-Fetch-Site: same-origin`, as the consent page's does: another site
+cannot make coffre run the preview as the person.
 
 The page shows:
 
@@ -538,20 +550,45 @@ The page shows:
 - the change in coffre's words, with what it replaces. The preview comes
   from the API's own previews: `?dryRun=1` for secrets and bindings, the
   member report for access and offboarding;
+- what the client wrote, labelled as the app's ("The app says", "The app
+  calls it"), never as coffre's;
+- for `trust_workload`, what each numeric ID names, read back from
+  GitHub's or GitLab's API through the transport bindings use (a
+  repository, a project, an owner by its path), or "private or unknown:
+  check this ID yourself". The model picks the IDs; the person reads the
+  names;
+- when the connection holds Reveal values, that the app can read values
+  the person can read, the one they are setting included, instead of
+  "the app never sees it";
 - when it was asked for, and when it expires.
 
 **Approve** calls `POST /api/approvals/:id` with the cookie, so the
-same-origin rule applies, and the server:
+same-origin rule applies. It sends back the digest the page showed, and the
+basis: what the change replaces, as shown (a secret's current version for
+the tools that write one, the member's roles for `set_access`). The server:
 
 1. checks the person, the connection (live, at its generation), the scope
    and the expiry;
-2. moves the approval from `pending` to `approved` with a conditional
-   update, so a double click acts once;
-3. **makes the change there and then.** It calls the stored API request in
+2. reads the basis again, as the person: a version set or a role changed
+   since refuses Approve with "this changed since you opened it". The API
+   takes no expected version, so a write in the moment between this read
+   and the change still lands first;
+3. moves the approval from `pending` to `approved` with a conditional
+   update, under the log's head, after reading the approval and its
+   connection again there: a double click acts once, and an expiry or a
+   disconnect since the first checks refuses it;
+4. **makes the change there and then.** It calls the stored API request in
    process, as the person, with the connection attached. Every check runs
    again, and the change's own entries name the client.
-4. stores the outcome (or `failed`, with the API's error) for the client's
+5. stores the outcome (or `failed`, with the API's error) for the client's
    retry.
+
+If the request dies between 3 and 5, the approval stays `approved` with no
+outcome. A minute on, it reads as `failed`, its outcome unknown: the client
+is told coffre doesn't know whether the change was made, never that nothing
+changed, on every call that rejoins it. Its client is never told it ended,
+so when the same call opens a new approval later, that page warns the
+person they approved it before, with no known outcome.
 
 The change happens when the person approves, on coffre's page. That's what
 they saw and clicked, whether or not the client ever comes back. The
@@ -872,6 +909,14 @@ did before theirs.
   - Both pages are unframeable (`frame-ancestors 'none'`).
   - The consent request is checked again in full when it is posted.
   - Codes need the PKCE verifier, and the `iss` parameter defeats mix-ups.
+- **A signed-in CLI on the agent's machine.** `coffre run` needs the CLI
+  signed in as the person, often on the machine the agent runs on. Whoever
+  can run commands there holds that session: `coffre export`, `coffre set`
+  and the rest act as the person, with none of MCP's scopes or approvals.
+  coffre keeps that session off the approval page's API, so an app can't
+  decide its own approvals with it, but it bounds nothing else: an agent
+  that has a shell beside a signed-in CLI has the person's access. Sign
+  the CLI in elsewhere, or not at all, to keep the agent to its scopes.
 - **Replaying an approval.**
   - An approval is one stored change, for one person, under one
     connection, and it acts once.

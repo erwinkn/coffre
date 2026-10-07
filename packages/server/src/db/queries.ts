@@ -1103,15 +1103,32 @@ export async function findApproval(db: Queryable, id: string): Promise<(Approval
   return row === undefined ? null : { ...row.approval, now: new Date(row.now) };
 }
 
-/** A connection's approvals whose end its client has not heard yet, newest first, with the database's clock. */
-export async function openApprovals(db: Queryable, connectionId: string): Promise<{ rows: ApprovalRow[]; now: Date }> {
+/**
+ * A connection's approvals whose end its client has not heard yet, asked
+ * since `since`, newest first, with the database's clock: older ones can
+ * no longer be rejoined, and no longer wait.
+ */
+export async function openApprovals(db: Queryable, connectionId: string, since: Date): Promise<{ rows: ApprovalRow[]; now: Date }> {
   const { mcpApprovals } = tablesOf(db);
   const rows = await db
     .select({ approval: mcpApprovals, now: clockMillis(db) })
     .from(mcpApprovals)
-    .where(and(eq(mcpApprovals.connectionId, connectionId), isNull(mcpApprovals.reportedAt)))
+    .where(and(eq(mcpApprovals.connectionId, connectionId), isNull(mcpApprovals.reportedAt), gt(mcpApprovals.createdAt, since)))
     .orderBy(desc(mcpApprovals.createdAt));
   return { rows: rows.map((row) => row.approval), now: new Date(rows[0]?.now ?? Date.now()) };
+}
+
+/**
+ * The same call's earlier approvals, approved and never answered: their
+ * change may or may not have been made. Their client is never told they
+ * ended, so they stay in the open approvals' index.
+ */
+export async function unansweredApprovals(db: Queryable, connectionId: string, digest: Buffer): Promise<ApprovalRow[]> {
+  const { mcpApprovals } = tablesOf(db);
+  return db
+    .select()
+    .from(mcpApprovals)
+    .where(and(eq(mcpApprovals.connectionId, connectionId), eq(mcpApprovals.digest, digest), isNull(mcpApprovals.reportedAt), eq(mcpApprovals.status, 'approved'), isNull(mcpApprovals.outcome)));
 }
 
 /** Device authorizations: one by either of its codes, or every one still waiting for a decision. */

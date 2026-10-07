@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+**MCP approvals are harder to misread or misuse**, after a security review.
+`trust_workload`'s page names each GitHub or GitLab ID it binds, as its API
+reads it back, or says to check an ID it can't name; what the app wrote is
+shown as the app's ("The app calls it"). With Reveal values, the page no
+longer promises the app never sees a value: it says the app can read it.
+Approve refuses a page gone stale, when a version was set or a role changed
+since it was shown. Identical calls at once open one approval, and a burst
+stays within five waiting. An approved change whose outcome was lost is
+reported as unknown, never as "nothing changed", and the person is warned
+before approving it again. The approval page's API takes only a browser
+session: a CLI session, which an agent on the same machine may hold, can't
+open or decide an approval. A change the person can't make is refused
+before an approval opens, and a client's decline is logged.
+
 ## 0.4.5 (2026-10-06)
 
 **`run_with_secrets` is gone from the MCP tools.** It only wrote out a

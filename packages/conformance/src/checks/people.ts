@@ -169,7 +169,7 @@ export async function personas(deployment: Deployment, admin: Person) {
 }
 
 /** `coffre login`: a device code, approved in a signed-in browser, for a CLI session. */
-async function deviceLogin(deployment: Deployment, browser: Browser): Promise<string> {
+export async function deviceLogin(deployment: Deployment, browser: Browser): Promise<string> {
   const json = { 'content-type': 'application/json' };
   const started = await fetch(`${deployment.origin}/api/auth/device`, {
     method: 'POST',

@@ -904,6 +904,7 @@ export type Api = {
           label: string;
           value: string;
           kind?: "mono" | "time";
+          note?: string;
         }[];
         asks: null | {
           value: {
@@ -912,7 +913,9 @@ export type Api = {
           };
         };
         kind: "change" | "reveal";
+        reveals: boolean;
         digest: string;
+        basis: string | null;
         createdAt: string;
         expiresAt: string;
         outcome: null | {
@@ -929,6 +932,7 @@ export type Api = {
     input: {
       approve: boolean;
       digest: string;
+      basis?: string | null;
       value?: string;
     };
     output: {
@@ -944,6 +948,7 @@ export type Api = {
         label: string;
         value: string;
         kind?: "mono" | "time";
+        note?: string;
       }[];
     };
   };
@@ -968,6 +973,7 @@ export type ApprovalView = {
     label: string;
     value: string;
     kind?: "mono" | "time";
+    note?: string;
   }[];
   asks: null | {
     value: {
@@ -976,7 +982,9 @@ export type ApprovalView = {
     };
   };
   kind: "change" | "reveal";
+  reveals: boolean;
   digest: string;
+  basis: string | null;
   createdAt: string;
   expiresAt: string;
   outcome: null | {
@@ -1124,6 +1132,7 @@ export type Decision = {
     label: string;
     value: string;
     kind?: "mono" | "time";
+    note?: string;
   }[];
 };
 

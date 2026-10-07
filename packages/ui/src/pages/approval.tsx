@@ -47,7 +47,7 @@ function Settled({ view }: { view: ApprovalView }) {
     <ClosedDoor
       icon={status === 'approved' ? <CheckCircle size={18} /> : <SlashCircle size={18} />}
       label="Approve a change"
-      title={SETTLED[status]}
+      title={view.outcome?.error === 'unknown_outcome' ? 'This change may not have been made' : SETTLED[status]}
     >
       <p>
         {view.client.name} asked to {view.summary}.{' '}
@@ -103,6 +103,7 @@ function Approve({ view, onDecided }: { view: ApprovalView; onDecided: (decision
         await coffre.approvals.decide(view.id, {
           approve,
           digest: view.digest,
+          basis: view.basis,
           ...(approve && asksValue !== null ? { value } : {}),
         }),
       );
@@ -121,7 +122,9 @@ function Approve({ view, onDecided }: { view: ApprovalView; onDecided: (decision
         <p className="signin-lede">
           {client.name} asks to <strong>{view.summary}</strong>.{' '}
           {reveal
-            ? 'Reveal shows it only to you, here. The app never gets it.'
+            ? view.reveals
+              ? 'Reveal shows it to you, here. The app holds Reveal values, so it can read it too.'
+              : 'Reveal shows it only to you, here. The app never gets it.'
             : 'Nothing changes until you approve.'}
         </p>
       </div>
@@ -141,8 +144,11 @@ function Approve({ view, onDecided }: { view: ApprovalView; onDecided: (decision
         {view.details.map((line) => (
           <div className="fact" key={line.label}>
             <dt>{line.label}</dt>
-            <dd className={line.kind === 'mono' ? 'mono' : undefined}>
-              {line.kind === 'time' ? <Timestamp iso={line.value} /> : line.value}
+            <dd>
+              <span className={line.kind === 'mono' ? 'mono' : undefined}>
+                {line.kind === 'time' ? <Timestamp iso={line.value} /> : line.value}
+              </span>
+              {line.note !== undefined && <small className="approval-note">{line.note}</small>}
             </dd>
           </div>
         ))}
