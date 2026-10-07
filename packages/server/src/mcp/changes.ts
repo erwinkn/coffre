@@ -20,8 +20,8 @@ import type { Tool, ToolContext } from './tools.ts';
 /** A line of what the approval page shows: a label, what it is, and what that means, when coffre can say; `warn` when the person must check it. */
 export type Detail = { label: string; value: string; kind?: 'mono' | 'time'; note?: string; warn?: true };
 
-/** What a change replaces, read once: the page's lines for it, and the basis Approve reads again and compares. */
-export type Replaced = { details: Detail[]; basis: string };
+/** What a change replaces, read once: the page's lines for it, and the state they show, whose digest Approve reads again and compares. */
+export type Replaced = { details: Detail[]; state: unknown };
 
 /**
  * What a preview knows besides the API: whether the app holds Reveal
@@ -43,7 +43,7 @@ export type Change<I extends z.ZodObject = z.ZodObject> = {
   check?: (ctx: ToolContext, args: z.infer<I>) => Promise<void>;
   /**
    * What the change replaces, read as the person: its lines go into the
-   * page's preview, and Approve reads it again and is refused if its basis
+   * page's preview, and Approve reads it again and is refused if its state
    * differs, so what is replaced is what the person read.
    */
   replaces?: (api: CoffreClient, args: z.infer<I>) => Promise<Replaced>;
@@ -114,21 +114,21 @@ async function needsOn(api: CoffreClient, projects: string[], permission: Permis
 /** What the page says of an app that holds Reveal values, beside a value it would otherwise never see. */
 const READABLE: Detail = { label: 'The app', value: 'holds Reveal values: it can read values you can read, this one included' };
 
-/** A secret's current version: who set it and when, or that there is none yet, and the version as the basis. */
+/** A secret's current version: who set it and when, or that there is none yet; the version is its state. */
 async function current(api: CoffreClient, path: string): Promise<Replaced> {
   try {
     const { versions, archived } = await api.secrets.history(path);
     const now = versions.find((version) => version.current);
-    if (now === undefined) return { basis: 'version none', details: [{ label: 'Now', value: 'no value yet' }] };
+    if (now === undefined) return { state: { version: null }, details: [{ label: 'Now', value: 'no value yet' }] };
     return {
-      basis: `version ${now.version}`,
+      state: { version: now.version },
       details: [
         { label: 'Now', value: `version ${now.version}${archived ? ', archived' : ''}, set by ${shownMember(now.createdBy)}` },
         { label: 'Set', value: now.createdAt, kind: 'time' },
       ],
     };
   } catch (error) {
-    if (error instanceof CoffreError && error.status === 404) return { basis: 'version none', details: [{ label: 'Now', value: 'a new key: there is none yet' }] };
+    if (error instanceof CoffreError && error.status === 404) return { state: { version: null }, details: [{ label: 'Now', value: 'a new key: there is none yet' }] };
     throw error;
   }
 }
@@ -285,7 +285,7 @@ async function heldAt(api: CoffreClient, member: string, changes: Record<string,
     const grant = held.find((entry) => (entry.environment === null ? entry.project : `${entry.project}/${entry.environment}`) === placeOf(place));
     return [place, grant === undefined ? 'nothing' : `${grant.role}${grant.expiresAt === null ? '' : ` until ${grant.expiresAt}`}`] as const;
   });
-  return { basis: JSON.stringify(now), details: now.map(([place, was]) => ({ label: place, value: `${was} → ${shownAccess(changes[place]!)}` })) };
+  return { state: Object.fromEntries(now), details: now.map(([place, was]) => ({ label: place, value: `${was} → ${shownAccess(changes[place]!)}` })) };
 }
 
 /**

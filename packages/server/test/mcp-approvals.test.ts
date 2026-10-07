@@ -378,7 +378,7 @@ test('Approve refuses a change whose page is stale: a version set, or a role cha
   const token = await connect(DEV, 'read write');
   const id = idOf(await callRaw(token, 'request_secret_value', { secret: 'market/prod/API_KEY' }));
   const shown = (await view(id)).body.approval;
-  assert.equal(shown.basis, 'version 1');
+  assert.match(shown.basis!, /^[0-9a-f]{64}$/, 'a digest of version 1');
   await clientFor(deps, ROOT).secrets.set('market/prod', { API_KEY: `meanwhile-${SECRET}` });
   const stale = await decide(id, true, { value: 'typed', shown });
   assert.equal(stale.status, 409);
@@ -505,6 +505,7 @@ test("trust_workload names IDs only from github.com and gitlab.com: an issuer th
 test('the basis Approve compares is the state the page showed, read once: a version set while the page was made refuses Approve (L4)', async () => {
   const token = await connect(DEV, 'read write');
   const id = idOf(await callRaw(token, 'request_secret_value', { secret: 'market/prod/API_KEY' }));
+  const before = (await view(id)).body.approval.basis;
   const change = TOOL_BY_NAME.get('request_secret_value')!.change!;
   const preview = change.preview;
   // Version 2 lands after what it replaces was read, while the rest of the page is made.
@@ -520,7 +521,7 @@ test('the basis Approve compares is the state the page showed, read once: a vers
     change.preview = preview;
   }
   assert.ok(shown.details.some((line) => line.label === 'Now' && /^version 1,/.test(line.value)));
-  assert.equal(shown.basis, 'version 1', 'the basis of what the page showed');
+  assert.equal(shown.basis, before, 'the basis of version 1, which the page showed');
   assert.equal((await decide(id, true, { value: 'typed', shown })).status, 409);
   assert.equal((await clientFor(deps, ROOT).secrets.reveal('market/prod/API_KEY')).values.API_KEY, `meanwhile-${SECRET}`);
 });
@@ -598,4 +599,19 @@ test("set_access's page and basis carry each grant's end: shortened since it was
   assert.equal((await decide(id, true, { shown }, ROOT)).status, 409);
   const again = (await view(id, ROOT)).body.approval;
   assert.ok(again.details.some((line) => line.label === 'market/prod' && /^viewer until 2099-01-01.* → auditor$/.test(line.value)), JSON.stringify(again.details));
+});
+
+test("set_access's basis is a digest, as long for fifty expiring grants as for one, and Approve takes it (L4)", async () => {
+  const root = clientFor(deps, ROOT);
+  const places = Array.from({ length: 50 }, (_, index) => `market/place-${index}`);
+  for (const place of places) await root.environments.create(place, { name: place });
+  await root.access.set(`user:${OTHER}`, Object.fromEntries(places.map((place) => [place, { role: 'viewer', until: '2099-01-01' }])));
+  const token = await connect(ROOT, 'read manage-access');
+  const id = idOf(await callRaw(token, 'set_access', { member: `user:${OTHER}`, changes: Object.fromEntries(places.map((place) => [place, 'auditor'])) }));
+  const shown = (await view(id, ROOT)).body.approval;
+  assert.equal(shown.details.filter((line) => / until 2099-01-01.* → auditor$/.test(line.value)).length, 50, 'the page still reads each grant');
+  assert.match(shown.basis!, /^[0-9a-f]{64}$/);
+  const decided = await decide(id, true, { shown }, ROOT);
+  assert.equal(decided.status, 200, JSON.stringify(decided.body));
+  assert.equal(decided.body.status, 'approved');
 });

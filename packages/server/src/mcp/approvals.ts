@@ -20,7 +20,7 @@ import type { AuditEntry } from '../db/audit.ts';
 import { decideApproval, findApproval, findConnection, insertApproval, openApprovals, unansweredApprovals, update, type ApprovalRow, type ConnectionRow } from '../db/queries.ts';
 import { logged } from '../logged.ts';
 import type { WorkloadTransport } from '../workloads/transport.ts';
-import type { Applied, Detail, Viewing } from './changes.ts';
+import type { Applied, Detail, Replaced, Viewing } from './changes.ts';
 import type { McpConnection } from './service.ts';
 import { TOOL_BY_NAME, type Tool } from './tools.ts';
 
@@ -62,7 +62,7 @@ export type ApprovalView = {
   reveals: boolean;
   /** Of the tool and its arguments: sent back with the decision, so what runs is what was shown. */
   digest: string;
-  /** What the change replaces, as shown: sent back with Approve, which refuses it if it changed since. */
+  /** A digest of what the change replaces, as shown: sent back with Approve, which refuses it if it changed since. */
   basis: string | null;
   createdAt: string;
   expiresAt: string;
@@ -76,6 +76,11 @@ export type Decision = { status: ApprovalStatus; outcome: Outcome; shown: Detail
 /** SHA-256 of the canonical JSON of a tool's name and arguments: what a call, and its approval, are. */
 export function callDigest(tool: string, args: unknown): string {
   return createHash('sha256').update(canonical([tool, args])).digest('hex');
+}
+
+/** SHA-256 of the canonical JSON of what a change replaces: the page's basis, as long as any other, however much it shows. */
+function basisOf(replaced: Replaced): string {
+  return createHash('sha256').update(canonical(replaced.state)).digest('hex');
 }
 
 /** JSON with every object's keys sorted, so that equal arguments digest equal. */
@@ -207,7 +212,7 @@ export class McpApprovals {
         // Read once: the page shows what the change replaces, and Approve compares its basis with this one.
         const replaced = (await tool.change!.replaces?.(api, args)) ?? null;
         details = await tool.change!.preview(api, args, viewing, replaced?.details ?? []);
-        basis = replaced?.basis ?? null;
+        basis = replaced === null ? null : basisOf(replaced);
       } catch (error) {
         if (!(error instanceof CoffreError)) throw error;
         details = [{ label: 'Note', value: `coffre could not read what this replaces: ${error.message}` }];
@@ -343,7 +348,8 @@ export class McpApprovals {
   /** What a change replaces, as the person reads it now; null for a tool with none, or one they cannot read, on the page as on Approve. */
   async #basis(api: CoffreClient, tool: Tool, args: unknown): Promise<string | null> {
     try {
-      return (await tool.change!.replaces?.(api, args as never))?.basis ?? null;
+      const replaced = await tool.change!.replaces?.(api, args as never);
+      return replaced === undefined ? null : basisOf(replaced);
     } catch (error) {
       if (!(error instanceof CoffreError)) throw error;
       return null;
