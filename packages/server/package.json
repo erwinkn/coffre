@@ -1,6 +1,6 @@
 {
   "name": "@coffre/server",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "description": "coffre's API, sign-in and scheduled audit job, on Cloudflare Workers or Node.",
   "license": "MIT",
   "repository": {
