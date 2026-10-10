@@ -48,6 +48,20 @@ set lower on purpose. To fix one now,
 without setup: `wrangler hyperdrive update <id>
 --origin-connection-limit=<n>` for each config.
 
+**`coffre setup` refuses before it changes anything on Cloudflare.** For
+an address whose DNS is elsewhere, served through one of the account's
+domains, setup made the fallback origin, its DNS record and the custom
+hostname before three of its refusals: a Worker without its key over a
+database that holds data, an administrator who can't create roles, and a
+login that another deployment's Hyperdrive config uses on the same server,
+whose message then said "Nothing was changed". Setup now checks the
+administrator right after connecting, before it asks about Cloudflare, and
+the other two once it has read the account, before its first change there,
+adding a domain included. A run refused before left these behind, and a
+run after reuses them. Its Hyperdrive step also gives each config's own
+connection limit when one set lower was kept ("connection limits of 5 and
+7"), where it said "20 each".
+
 **A project whose grants could not be read keeps its row** on a user's or
 service account's Access tab, with the error and a Retry button. Before, a
 notice sat above the table and the project's row was missing, as if the

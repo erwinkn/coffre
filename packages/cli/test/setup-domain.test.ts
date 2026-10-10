@@ -236,6 +236,91 @@ test("the run after the DNS change: no token asked, as wrangler's login is enoug
   assert.equal(cloudflare.state.hostnames.get('zone-2')!.length, 1);
 });
 
+/**
+ * Setup on `databaseUrl` for a new deployment at `address`, on the account
+ * `down` the list, every question answered as it comes, until it refuses
+ * with `refusal`: what it showed, its exit, and what it wrote to Cloudflare.
+ */
+async function refused(where: string, databaseUrl: string, address: string, down: number, refusal: string) {
+  // Nothing denied: as setup once did, it would make the custom hostname, or add the domain, then refuse.
+  cloudflare.state.denied.clear();
+  deployment(where);
+  const before = cloudflare.state.requests.length;
+  const answers = {
+    'Set Cloudflare up too?': '\r',
+    'Which Cloudflare account?': `${DOWN.repeat(down)}\r`,
+    "coffre's address": `\x15${address}\r`,
+    "This deployment's name": '\r',
+    'Root admins': '\r',
+    'Which of your domains serves': '\r',
+    'How should coffre be reached?': '\r',
+    'The domain to add': '\r',
+  };
+  const { output, code } = await setup(where, (terminal) => answering(terminal, answers, [refusal, 'set its nameservers to']), databaseUrl);
+  const requests = cloudflare.state.requests.slice(before);
+  return { text: mainText(output), code, requests, writes: requests.filter(({ method }) => method !== 'GET').map(({ method, path }) => `${method} ${path}`) };
+}
+
+/** A database on the cluster that holds data: coffre's log has an entry, as far as setup can tell. */
+async function inUse(name: string): Promise<string> {
+  await asSuperuser('postgres', (client) => client.query(`CREATE DATABASE ${name}`));
+  await asSuperuser(name, (client) => client.query('CREATE TABLE audit_log (seq bigint); INSERT INTO audit_log VALUES (0)'));
+  return `${CLUSTER}/${name}`;
+}
+
+test("DNS elsewhere, Workers without their keys over a database in use: setup refuses before it makes a fallback origin, DNS record or custom hostname", { skip }, async () => {
+  const { text, code, writes } = await refused('used', await inUse('setup_domain_used'), 'used.example.org', 0, 'already holds data');
+  assert.deepEqual(writes, [], 'nothing written to Cloudflare');
+  assert.equal(code, 1, text);
+  assert.match(text, /✗ The app Worker coffre-used has no APP_KEY, but the database already holds data/);
+  assert.ok(!text.includes('Root admins'), 'refused before the questions left');
+  assert.equal(cloudflare.state.hostnames.get('zone-1')?.length ?? 0, 0);
+});
+
+test("DNS elsewhere, an administrator who can't create roles: setup refuses before Cloudflare's questions, and asks Cloudflare nothing", { skip }, async () => {
+  await asSuperuser('postgres', async (client) => {
+    await client.query('CREATE DATABASE setup_domain_weak');
+    await client.query("CREATE ROLE setup_owner LOGIN PASSWORD 'owner-only-p4ss'");
+  });
+  const weak = new URL(`${CLUSTER}/setup_domain_weak`);
+  weak.username = 'setup_owner';
+  weak.password = 'owner-only-p4ss';
+  try {
+    const { text, code, requests } = await refused('weak', weak.href, 'weak.example.org', 0, 'cannot create roles');
+    assert.deepEqual(requests, [], 'nothing asked of Cloudflare, nor written');
+    assert.equal(code, 1, text);
+    assert.match(text, /✗ Check setup_owner can create roles\n\s+setup_owner cannot create roles/);
+    assert.ok(!text.includes('Set Cloudflare up too?'), text);
+  } finally {
+    await asSuperuser('postgres', async (client) => {
+      await client.query('DROP DATABASE setup_domain_weak WITH (FORCE)');
+      await client.query('DROP ROLE setup_owner');
+    });
+  }
+});
+
+test("DNS elsewhere, on the server of another deployment, whose login this one would take: setup refuses before it makes a fallback origin, DNS record or custom hostname, and nothing was changed, as it says", { skip }, async () => {
+  await asSuperuser('postgres', (client) => client.query('CREATE DATABASE setup_domain_shared'));
+  const verifiers = () => asSuperuser('postgres', async (client) => (await client.query("SELECT rolname, rolpassword FROM pg_authid WHERE rolname LIKE 'coffre_%' ORDER BY rolname")).rows);
+  const held = await verifiers();
+  const { text, code, writes } = await refused('shared', `${CLUSTER}/setup_domain_shared`, 'shared.example.org', 0, 'is also the login of');
+  assert.deepEqual(writes, [], 'nothing written to Cloudflare');
+  assert.equal(code, 1, text);
+  assert.match(text, /✗ coffre_runtime is also the login of the Hyperdrive config coffre, another deployment's, on this database server/);
+  assert.match(text, /Nothing\s+was\s+changed\./);
+  assert.deepEqual(await verifiers(), held, "the first deployment's logins keep their passwords");
+});
+
+test("no domain on the account, Workers without their keys over a database in use: setup refuses before the domain is added", { skip }, async () => {
+  const zones = cloudflare.state.zones['acc-home']?.length ?? 0;
+  const { text, code, writes } = await refused('home-used', await inUse('setup_domain_home_used'), 'secrets.used.test', 1, 'already holds data');
+  assert.deepEqual(writes, [], 'nothing written to Cloudflare');
+  assert.equal(code, 1, text);
+  assert.match(text, /✗ The app Worker coffre has no APP_KEY, but the database already holds data/);
+  assert.ok(!text.includes('How should coffre be reached?'), 'refused before the choice');
+  assert.equal(cloudflare.state.zones['acc-home']?.length ?? 0, zones);
+});
+
 test("no domain on the account: setup explains both ways; adding the domain, refused to wrangler's login, under a token; its nameservers shown, and setup stops until they move", { skip }, async () => {
   deployment('home');
   cloudflare.state.subdomains['acc-home'] = 'home';

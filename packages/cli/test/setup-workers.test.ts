@@ -318,9 +318,16 @@ test('the run after: the vault keeps its key; the app gets a new one, and a new 
 
 test('a run with everything done: nothing made, nothing shown, both deployed again as they are', { skip }, async () => {
   const before = cloudflare.state.configs.get('acc-acme')!.map(({ origin }) => origin.password);
+  // Limits someone set lower, each its own: kept, and said as they are.
+  const [appConfig, vaultConfig] = cloudflare.state.configs.get('acc-acme')!;
+  appConfig!.origin_connection_limit = 5;
+  vaultConfig!.origin_connection_limit = 7;
   const { output, code } = await setup((terminal) => answer(terminal));
   const text = mainText(output);
   assert.equal(code, 0, text);
+  assert.match(text, /✓ Hyperdrive configs coffre and coffre-vault, caching off, connection limits of 5 and 7\n\s+coffre\s+kept\n\s+coffre-vault\s+kept\n/);
+  assert.deepEqual([appConfig!.origin_connection_limit, vaultConfig!.origin_connection_limit], [5, 7]);
+  appConfig!.origin_connection_limit = vaultConfig!.origin_connection_limit = 20;
   assert.ok(!output.includes(ENTER_ALT), 'no screen: nothing new to save');
   assert.match(text, /✓ Kept coffre's GitHub App, client ID Iv23li/);
   assert.match(text, /✓ app\/ and vault\/wrangler\.jsonc, as they were/);
@@ -481,24 +488,19 @@ test("a deployment on another's database server: setup stops before giving their
   const third = another('third');
   await asSuperuser('postgres', (client) => client.query('CREATE DATABASE setup_workers_three'));
   const { output, code } = await setup(
-    async (terminal) => {
-      await terminal.waitFor('Set Cloudflare up too?');
-      terminal.send('\r');
-      await terminal.waitFor('Which Cloudflare account?');
-      terminal.send('\r');
-      await terminal.waitFor("coffre's address");
-      terminal.send('coffre-three.acme.test\r');
-      await terminal.waitFor("This deployment's name");
-      terminal.send('\r');
-      await terminal.waitFor('Root admins');
-      terminal.send('\r');
-    },
+    // Until it refuses: before the root admins, now; once, after them.
+    (terminal) =>
+      answering(
+        terminal,
+        { 'Set Cloudflare up too?': '\r', 'Which Cloudflare account?': '\r', "coffre's address": 'coffre-three.acme.test\r', "This deployment's name": '\r', 'Root admins': '\r' },
+        ['is also the login of'],
+      ),
     third,
     `${CLUSTER}/setup_workers_three`,
   );
   const text = mainText(output);
   assert.equal(code, 1, text);
-  assert.match(text, /✗ Make the two logins\n\s+coffre_runtime is also the login of the Hyperdrive config coffre, another deployment's, on this database server/);
+  assert.match(text, /✗ coffre_runtime is also the login of the Hyperdrive config coffre, another deployment's, on this database server/);
   assert.deepEqual(await firstConnects(), [true, true], "the first deployment's logins keep their passwords");
   assert.equal(cloudflare.state.configs.get('acc-acme')!.length, before);
   assert.deepEqual(calls().filter(({ args }) => args[0] === 'deploy'), []);
@@ -534,7 +536,7 @@ test("--reset-passwords on a database too small for both Hyperdrive configs: set
     const text = mainText(output);
     assert.equal(code, 1, text);
     assert.match(text, /✗ Check 127\.0\.0\.1\/setup_workers_small has room for Hyperdrive\n\s+the database's max_connections is 15, 3 of them reserved; Hyperdrive takes at least 5/);
-    assert.doesNotMatch(text, /Set Cloudflare up too\?|Connect to|✓ (Set new passwords|Created|Migrated|The database is up to date)/, 'nothing asked, and no step after it ran');
+    assert.doesNotMatch(text, /Set Cloudflare up too\?|Make the two logins|✓ (Set new passwords|Created|Migrated|The database is up to date)/, 'nothing asked, and no step after it ran');
     assert.equal(cloudflare.state.requests.length, requests, 'nothing asked of Cloudflare');
     assert.deepEqual(await verifiers(), held, 'no new password the Hyperdrive configs lack');
     assert.equal(JSON.stringify(cloudflare.state.configs.get('acc-acme')), configs, 'no Hyperdrive config made or changed');
@@ -555,10 +557,10 @@ test('a Worker without its key over a database in use: setup stops before changi
   }
   cloudflare.state.scripts.get('acc-acme/coffre-vault')!.secrets.delete('VAULT_KEY');
   const files = ['app', 'vault'].map((component) => readFileSync(join(deployment(), component, 'wrangler.jsonc'), 'utf8'));
-  const { output, code } = await setup((terminal) => answer(terminal));
+  const { output, code } = await setup((terminal) => answering(terminal, { 'Set Cloudflare up too?': '\r', "coffre's address": '\r', 'Root admins': '\r' }, ['already holds data']));
   const text = mainText(output);
   assert.equal(code, 1, text);
-  assert.match(text, /✗ Connect to 127\.0\.0\.1\/setup_workers\n\s+The vault Worker coffre-vault has no VAULT_KEY, but the database already holds data/);
+  assert.match(text, /✗ The vault Worker coffre-vault has no VAULT_KEY, but the database already holds data/);
   assert.ok(!output.includes(ENTER_ALT));
   assert.deepEqual(calls().filter(({ args }) => args[0] === 'deploy'), []);
   assert.deepEqual(['app', 'vault'].map((component) => readFileSync(join(deployment(), component, 'wrangler.jsonc'), 'utf8')), files);
