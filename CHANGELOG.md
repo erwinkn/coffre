@@ -62,6 +62,35 @@ Access and Activity. A deployment gains `users.$user.apps.tsx` through
 **Shorter explainers.** "Sign in with OIDC" and "Bearer tokens" say what
 each is, when to use it, and give one example.
 
+**Hyperdrive's connection limits now fit the database.**
+Left at Cloudflare's default, 60 per config on Paid, the app's and the
+vault's configs together could outgrow a small database such as
+PlanetScale's smallest, which then refused the connections a burst of
+requests needed ("remaining connection slots are reserved", 53300). A
+user's or service account's Access tab and the service accounts list each
+send one request per project or account at once, and some of them failed
+as "coffre is unavailable". `coffre setup` now reads the database's
+`max_connections`, less what it reserves, and sets each config's connection
+limit to half of what is left after 3 for the administrator (at most 20),
+so that a burst waits in Hyperdrive instead. Cloudflare treats the limit as
+a soft one, which a network failure can briefly exceed. It says how it chose, as in "max_connections
+25, 3 reserved, 3 kept for the administrator and migrations: 9 each". A
+run on an existing deployment lowers a higher limit, and keeps one set
+lower. On a Workers deployment, setup refuses a database too small for
+Hyperdrive's 5 per config right after asking for its URL: before it asks
+about Cloudflare, so before any domain, custom hostname, login, password or
+config changes. Without Cloudflare, its update commands set the limit too,
+since setup can't see what each config allows now: it says to check each
+with `wrangler hyperdrive get <id>` first, and to leave the flag out for one
+set lower on purpose. To fix one now,
+without setup: `wrangler hyperdrive update <id>
+--origin-connection-limit=<n>` for each config.
+
+**A project whose grants could not be read keeps its row** on a user's or
+service account's Access tab, with the error and a Retry button. Before, a
+notice sat above the table and the project's row was missing, as if the
+member held nothing there.
+
 ## 0.4.6 (2026-10-07)
 
 **MCP approvals are harder to misread or misuse**, after a security review.

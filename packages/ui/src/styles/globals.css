@@ -2500,6 +2500,11 @@ tr.row-failure > td:first-child {
   gap: 0.75rem;
 }
 
+/* Someone's access that could not be read, in place of its rows. */
+.unread-access {
+  padding: 1rem;
+}
+
 /* A row that opens a page, said at its end. */
 .col-open {
   vertical-align: middle;

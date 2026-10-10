@@ -260,6 +260,8 @@ export type HyperdriveConfig = {
   name: string;
   origin: { host: string; port?: number; database: string; user: string };
   caching?: { disabled?: boolean };
+  /** The most connections it opens to the database; Cloudflare's default when unset, 20 on Free and 60 on Paid. */
+  origin_connection_limit?: number;
 };
 
 export class CloudflareError extends Error {
@@ -355,12 +357,17 @@ export class CloudflareApi {
     return this.#call('GET', `/accounts/${account}/hyperdrive/configs`);
   }
 
-  /** A Hyperdrive config with caching off: a revoked session must stop at once. The password goes in the body. */
-  async createHyperdrive(account: string, name: string, origin: Origin): Promise<string> {
+  /**
+   * A Hyperdrive config with caching off, as a revoked session must stop at
+   * once, and opening at most `limit` connections to the database. The
+   * password goes in the body.
+   */
+  async createHyperdrive(account: string, name: string, origin: Origin, limit: number): Promise<string> {
     const made = await this.#call<{ id: string }>('POST', `/accounts/${account}/hyperdrive/configs`, {
       name,
       origin: { scheme: 'postgres', ...origin },
       caching: { disabled: true },
+      origin_connection_limit: limit,
     });
     return made.id;
   }
@@ -371,12 +378,13 @@ export class CloudflareApi {
   }
 
   /** Whether there was a config to update: false when it is gone, deleted since it was listed. */
-  async updateHyperdrive(account: string, id: string, name: string, origin: Origin): Promise<boolean> {
+  async updateHyperdrive(account: string, id: string, name: string, origin: Origin, limit: number): Promise<boolean> {
     try {
       await this.#call('PUT', `/accounts/${account}/hyperdrive/configs/${id}`, {
         name,
         origin: { scheme: 'postgres', ...origin },
         caching: { disabled: true },
+        origin_connection_limit: limit,
       });
       return true;
     } catch (error) {
@@ -385,8 +393,9 @@ export class CloudflareApi {
     }
   }
 
-  async disableCaching(account: string, id: string): Promise<void> {
-    await this.#call('PATCH', `/accounts/${account}/hyperdrive/configs/${id}`, { caching: { disabled: true } });
+  /** Change a config's caching or connection limit, and nothing else. */
+  async patchHyperdrive(account: string, id: string, patch: { caching?: { disabled: true }; origin_connection_limit?: number }): Promise<void> {
+    await this.#call('PATCH', `/accounts/${account}/hyperdrive/configs/${id}`, patch);
   }
 
   /** What a call answers, or null when what it names does not exist. */

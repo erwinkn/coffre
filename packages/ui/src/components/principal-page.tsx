@@ -1,17 +1,17 @@
 import { useState } from 'react';
-import { useSuspenseQuery } from '@tanstack/react-query';
+import { useQueryClient, useSuspenseQuery } from '@tanstack/react-query';
 import { Link, Outlet } from '@tanstack/react-router';
 import { INSTANCE_ROLES, ROLES, scopeInWords, unscoped } from '@coffre/core/access';
 import { useShell } from '../lib/use-shell';
 import { toast } from 'sonner';
 import { memberRef, useCoffre } from '../lib/coffre';
 import { directoryList } from '../lib/changes';
-import { affects, hasAppsTab, listsAccess, managedProjects, queries, signInWays } from '../lib/queries';
+import { affects, hasAppsTab, keys, listsAccess, managedProjects, queries, signInWays } from '../lib/queries';
 import { useChangeStatus } from '../lib/use-change';
 import { useMounted } from '../lib/mounted';
 import { ItemFailure } from './row-state';
 import { useAction } from '../lib/use-action';
-import { projectAccessLabel } from '../lib/project-access';
+import { accessRows, projectAccessLabel, type ProjectAccess } from '../lib/project-access';
 import {
   accessChanges,
   accessPatch,
@@ -25,7 +25,7 @@ import {
   type AccessPlan,
 } from '../lib/access-plan';
 import type { MemberAccess } from '@coffre/client';
-import type { DirectoryPrincipal, GrantRow, ProjectSummary } from '../shared/models';
+import type { DirectoryPrincipal } from '../shared/models';
 import { ClosedDoor, PageHeader } from './page';
 import { EmptyState, ErrorLine, Modal, Notice, Spinner } from './ui';
 import { GrantRowView, GrantsTable } from './grants';
@@ -39,8 +39,6 @@ import { PageTabs } from './tabs';
 
 type PrincipalType = DirectoryPrincipal['principalType'];
 
-type ProjectAccess = { project: ProjectSummary; grants: GrantRow[]; grantsError: string | null };
-
 /** Who a user or service account is to the instance, as an owner reads it; null for anyone else. */
 function useReport(principalType: PrincipalType, principalId: string) {
   const { capabilities } = useShell();
@@ -51,7 +49,7 @@ function useReport(principalType: PrincipalType, principalId: string) {
  * What `loadAccess` read in one request: their role and scope, and, for each
  * project where you manage access, the grants they hold there.
  */
-function useMemberAccess(principalType: PrincipalType, principalId: string): { access: MemberAccess | null; projects: ProjectAccess[] } {
+function useMemberAccess(principalType: PrincipalType, principalId: string): { access: MemberAccess | null; error: string | null; projects: ProjectAccess[] } {
   const shell = useShell();
   const managed = managedProjects(shell.projects);
   const { data } = useSuspenseQuery(queries.memberAccess(useCoffre(), memberRef(principalType, principalId), listsAccess(shell)));
@@ -59,6 +57,7 @@ function useMemberAccess(principalType: PrincipalType, principalId: string): { a
   const access = data?.ok === true ? data : null;
   return {
     access,
+    error,
     projects: managed.map((project) => ({
       project,
       grants: (access?.grants ?? []).filter((grant) => grant.project === project.slug).map((grant) => ({
@@ -224,17 +223,14 @@ export function PrincipalLayout({ principalType, principalId }: { principalType:
 export function PrincipalAccess({ principalType, principalId }: { principalType: PrincipalType; principalId: string }) {
   const { instanceRole } = useShell();
   const report = useReport(principalType, principalId);
-  const { access: held, projects: access } = useMemberAccess(principalType, principalId);
+  const { access: held, error, projects: access } = useMemberAccess(principalType, principalId);
   const kind = KIND[principalType];
   const people = principalType === 'user';
   const found = report?.ok === true ? report.report : null;
   const removed = found?.status === 'removed';
 
-  const rows = access.flatMap(({ project, grants }) =>
-    grants.map((grant) => ({ project, grant })),
-  );
-  // One request, so one error: said once, not under every project.
-  const errors = access.filter((entry) => entry.grantsError !== null).slice(0, 1);
+  // One request, so one error, said once in place of the rows (`UnreadAccess`).
+  const rows = accessRows(access).flatMap((row) => (row.grant === null ? [] : [row]));
   // Grants to someone removed are refused until they are added back.
   const editable = removed
     ? []
@@ -249,16 +245,12 @@ export function PrincipalAccess({ principalType, principalId }: { principalType:
       {/* Removal ends every grant, so there is no access left to show. */}
       {!removed && (
         <>
-          {errors.map(({ project, grantsError }) => (
-            <div key={project.slug} style={{ marginBottom: '0.75rem' }}>
-              <Notice tone="bad">{grantsError}</Notice>
-            </div>
-          ))}
-
           {people && held !== null && <InstanceRoleNote access={held} />}
 
           <section className="card" aria-label="Project access">
-            {rows.length === 0 ? (
+            {error !== null ? (
+              <UnreadAccess member={memberRef(principalType, principalId)} error={error} />
+            ) : rows.length === 0 ? (
               <EmptyState title="No project access yet">
                 {editable.length > 0
                   ? `Edit access gives this ${kind} access to several projects at once.`
@@ -331,6 +323,29 @@ function InstanceRoleNote({ access }: { access: MemberAccess }) {
         {unscoped(access.scope) ? ' in every project' : `: ${scopeInWords(access.scope)}`}, from their instance role. The
         grants below add to it.
       </Notice>
+    </div>
+  );
+}
+
+/** Their access could not be read: why, and another try, never an empty list that reads as no access. */
+function UnreadAccess({ member, error }: { member: string; error: string }) {
+  const queryClient = useQueryClient();
+  const [retrying, setRetrying] = useState(false);
+  return (
+    <div className="row-failure-line unread-access">
+      <ErrorLine error={`Their access could not be read. ${error}`} />
+      <button
+        type="button"
+        className="act"
+        disabled={retrying}
+        onClick={() => {
+          setRetrying(true);
+          void queryClient.refetchQueries({ queryKey: keys.memberAccess(member) }).finally(() => setRetrying(false));
+        }}
+      >
+        {retrying && <Spinner size={13} />}
+        Retry
+      </button>
     </div>
   );
 }

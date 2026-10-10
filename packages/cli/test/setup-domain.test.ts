@@ -17,9 +17,9 @@ import { parse } from 'jsonc-parser';
 
 import { editWorker } from '../src/deployment.ts';
 import { templateDir } from '../src/init.ts';
-import { asSuperuser, CLUSTER, database, emptyCluster, needsCluster } from './cluster.ts';
+import { asSuperuser, CLUSTER, database, emptyCluster, needsCluster, SMALL_CLUSTER } from './cluster.ts';
 import { fakeCloudflare, fakeGitHub, fakeOpener, fakeVite, fakeWrangler, realWrangler, submitManifest } from './fakes.ts';
-import { inTerminal, ptySkip, screens, type Session, typingUrl, visible } from './pty.ts';
+import { answering, inTerminal, ptySkip, screens, type Session, typingUrl, visible } from './pty.ts';
 
 const skip = needsCluster.skip || ptySkip;
 const TOKEN = `cf-oauth-${'t'.repeat(40)}`;
@@ -306,4 +306,59 @@ test("no domain on the account: the Worker's workers.dev address, for now; deplo
   const config = app('dev');
   assert.deepEqual([config.vars.PUBLIC_URL, config.workers_dev, config.routes], ['https://coffre.home.workers.dev', true, []]);
   assert.deepEqual(github.state.manifests.at(-1)!.callback_urls, ['https://coffre.home.workers.dev/auth/callback/github']);
+});
+
+/**
+ * Setup on a database too small for both Hyperdrive configs, `answers` given
+ * to whatever Cloudflare questions it asks first: what it showed, its exit,
+ * and what it asked of Cloudflare.
+ */
+async function tooSmall(where: string, answers: Record<string, string>) {
+  await emptyCluster(SMALL_CLUSTER);
+  await asSuperuser('postgres', (client) => client.query('CREATE DATABASE setup_domain_small'), SMALL_CLUSTER);
+  deployment(where);
+  const before = cloudflare.state.requests.length;
+  try {
+    // Until the refusal; or, as setup once did, a domain added and its nameservers shown, or the run over.
+    const { output, code } = await setup(where, (terminal) => answering(terminal, answers, ['raise max_connections', 'set its nameservers to']), `${SMALL_CLUSTER}/setup_domain_small`);
+    return { text: mainText(output), code, requests: cloudflare.state.requests.slice(before) };
+  } finally {
+    await emptyCluster(SMALL_CLUSTER);
+  }
+}
+
+const smallSkip = skip || (SMALL_CLUSTER === undefined && 'needs the small cluster: scripts/test-setup.sh');
+const REFUSED = /✗ Check 127\.0\.0\.1\/setup_domain_small has room for Hyperdrive\n\s+the database's max_connections is 15, 3 of them reserved/;
+
+test("DNS elsewhere, on a database too small for both Hyperdrive configs: setup stops before Cloudflare's questions, with no fallback origin, DNS record or custom hostname made", { skip: smallSkip }, async () => {
+  cloudflare.state.denied.clear();
+  const { text, code, requests } = await tooSmall('small-saas', {
+    'Set Cloudflare up too?': '\r',
+    'Which Cloudflare account?': '\r',
+    "coffre's address": '\x15small.example.org\r',
+    "This deployment's name": '\r',
+    'Root admins': '\r',
+    'Which of your domains serves': '\r',
+  });
+  assert.deepEqual(requests.filter(({ method }) => method !== 'GET').map(({ method, path }) => `${method} ${path}`), [], 'nothing written to Cloudflare');
+  assert.equal(code, 1, text);
+  assert.match(text, REFUSED);
+  assert.ok(!text.includes('Set Cloudflare up too?'), text);
+  assert.deepEqual(requests, [], 'nor anything read');
+});
+
+test("no domain on the account, on a database too small for both Hyperdrive configs: setup stops before Cloudflare's questions, the domain not added", { skip: smallSkip }, async () => {
+  cloudflare.state.denied.clear();
+  const { text, code, requests } = await tooSmall('small-home', {
+    'Set Cloudflare up too?': '\r',
+    'Which Cloudflare account?': `${DOWN}\r`,
+    "coffre's address": '\x15secrets.small.test\r',
+    'How should coffre be reached?': '\r',
+    'The domain to add': '\r',
+  });
+  assert.deepEqual(requests.filter(({ method }) => method !== 'GET').map(({ method, path }) => `${method} ${path}`), [], 'nothing written to Cloudflare');
+  assert.equal(code, 1, text);
+  assert.match(text, REFUSED);
+  assert.ok(!text.includes('Set Cloudflare up too?'), text);
+  assert.deepEqual(requests, [], 'nor anything read');
 });
