@@ -39,7 +39,10 @@ export async function grantScoping({ reader, service, bulk }: People, canaries: 
   await refused('a viewer wrote a value', reader.api.secrets.set(DEV, { API_KEY: 'from the reader' }));
   await refused('a viewer granted themselves more', reader.api.access.set(reader.member, { [PROD]: 'owner' }));
   await refused('a viewer added a member', reader.api.members.add('user:friend@conformance.example'));
-  await refused('a viewer issued a service token', reader.api.tokens.issue(service.member, { expiresInDays: 1 }));
+  // A service account is set up by whoever holds all it holds: a viewer on bulk, who holds nothing on dev, may not.
+  await refused("a viewer on bulk issued a token for a service on dev", bulk.api.tokens.issue(service.member, { expiresInDays: 1 }));
+  await refused('a viewer on bulk gave a service dev', bulk.api.access.set(service.member, { [DEV]: 'viewer' }));
+  await refused('a viewer on dev gave a service prod', reader.api.access.set(service.member, { [PROD]: 'viewer' }));
   const me = await reader.api.me();
   const places = me.environments.map((place) => `${place.project}/${place.environment}`);
   expect(places.length === 1 && places[0] === DEV, 'a viewer on dev is told of other places', places);
@@ -48,7 +51,7 @@ export async function grantScoping({ reader, service, bulk }: People, canaries: 
   expect(same(served.values, valuesIn(canaries, DEV)), "a service viewer on dev did not get dev's values", served.values);
   await refused('a service viewer on dev revealed prod', service.api.secrets.reveal(PROD));
   await refused('a viewer on bulk revealed dev', bulk.api.secrets.reveal(DEV));
-  return 'a viewer on dev reads dev and nothing else, in a browser or with a token, and changes nothing';
+  return 'a viewer on dev reads dev and nothing else, in a browser or with a token, and changes nothing; nobody gives a service account, or a token for one, beyond what they hold';
 }
 
 /**
