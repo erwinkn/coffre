@@ -57,8 +57,10 @@ login that another deployment's Hyperdrive config uses on the same server,
 whose message then said "Nothing was changed". Setup now checks the
 administrator right after connecting, before it asks about Cloudflare, and
 the other two once it has read the account, before its first change there,
-adding a domain included. A run refused before left these behind, and a
-run after reuses them. Its Hyperdrive step also gives each config's own
+adding a domain included, then again right before the logins change, in
+case the database changed while setup asked its questions. That last
+message now says "Neither login was changed". A run refused before left
+these behind, and a run after reuses them. Its Hyperdrive step also gives each config's own
 connection limit when one set lower was kept ("connection limits of 5 and
 7"), where it said "20 each".
 

@@ -13,11 +13,12 @@ import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { migrateDatabase } from '@coffre/db/migrate';
 import { parse } from 'jsonc-parser';
 
 import { editWorker } from '../src/deployment.ts';
 import { templateDir } from '../src/init.ts';
-import { asSuperuser, CLUSTER, database, emptyCluster, needsCluster, SMALL_CLUSTER } from './cluster.ts';
+import { asSuperuser, CLUSTER, database, emptyCluster, needsCluster, OTHER_CLUSTER, SMALL_CLUSTER } from './cluster.ts';
 import { fakeCloudflare, fakeGitHub, fakeOpener, fakeVite, fakeWrangler, realWrangler, submitManifest } from './fakes.ts';
 import { answering, inTerminal, ptySkip, screens, type Session, typingUrl, visible } from './pty.ts';
 
@@ -240,8 +241,9 @@ test("the run after the DNS change: no token asked, as wrangler's login is enoug
  * Setup on `databaseUrl` for a new deployment at `address`, on the account
  * `down` the list, every question answered as it comes, until it refuses
  * with `refusal`: what it showed, its exit, and what it wrote to Cloudflare.
+ * `meanwhile` changes the database while setup waits on its first question.
  */
-async function refused(where: string, databaseUrl: string, address: string, down: number, refusal: string) {
+async function refused(where: string, databaseUrl: string, address: string, down: number, refusal: string, meanwhile?: () => Promise<unknown>) {
   // Nothing denied: as setup once did, it would make the custom hostname, or add the domain, then refuse.
   cloudflare.state.denied.clear();
   deployment(where);
@@ -256,10 +258,25 @@ async function refused(where: string, databaseUrl: string, address: string, down
     'How should coffre be reached?': '\r',
     'The domain to add': '\r',
   };
-  const { output, code } = await setup(where, (terminal) => answering(terminal, answers, [refusal, 'set its nameservers to']), databaseUrl);
+  const { output, code } = await setup(
+    where,
+    async (terminal) => {
+      if (meanwhile !== undefined) {
+        await terminal.waitFor('Set Cloudflare up too?');
+        await meanwhile();
+        terminal.send('\r');
+      }
+      await answering(terminal, answers, [refusal, 'set its nameservers to']);
+    },
+    databaseUrl,
+  );
   const requests = cloudflare.state.requests.slice(before);
   return { text: mainText(output), code, requests, writes: requests.filter(({ method }) => method !== 'GET').map(({ method, path }) => `${method} ${path}`) };
 }
+
+/** What the cluster keeps for each of coffre's logins' passwords. */
+const verifiers = (cluster = CLUSTER) =>
+  asSuperuser('postgres', async (client) => (await client.query("SELECT rolname, rolpassword FROM pg_authid WHERE rolname LIKE 'coffre_%' ORDER BY rolname")).rows, cluster);
 
 /** A database on the cluster that holds data: coffre's log has an entry, as far as setup can tell. */
 async function inUse(name: string): Promise<string> {
@@ -299,16 +316,77 @@ test("DNS elsewhere, an administrator who can't create roles: setup refuses befo
   }
 });
 
-test("DNS elsewhere, on the server of another deployment, whose login this one would take: setup refuses before it makes a fallback origin, DNS record or custom hostname, and nothing was changed, as it says", { skip }, async () => {
+test("DNS elsewhere, on the server of another deployment, whose login this one would take: setup refuses before it makes a fallback origin, DNS record or custom hostname, and neither login was changed, as it says", { skip }, async () => {
   await asSuperuser('postgres', (client) => client.query('CREATE DATABASE setup_domain_shared'));
-  const verifiers = () => asSuperuser('postgres', async (client) => (await client.query("SELECT rolname, rolpassword FROM pg_authid WHERE rolname LIKE 'coffre_%' ORDER BY rolname")).rows);
   const held = await verifiers();
   const { text, code, writes } = await refused('shared', `${CLUSTER}/setup_domain_shared`, 'shared.example.org', 0, 'is also the login of');
   assert.deepEqual(writes, [], 'nothing written to Cloudflare');
   assert.equal(code, 1, text);
   assert.match(text, /✗ coffre_runtime is also the login of the Hyperdrive config coffre, another deployment's, on this database server/);
-  assert.match(text, /Nothing\s+was\s+changed\./);
+  assert.match(text, /Neither\s+login\s+was\s+changed\./);
   assert.deepEqual(await verifiers(), held, "the first deployment's logins keep their passwords");
+});
+
+// On a server of their own: the first deployment's logins are on the cluster's.
+const otherSkip = skip || (OTHER_CLUSTER === undefined && 'needs the other cluster');
+
+test('a database that comes to hold data while setup asks its questions: setup refuses before it makes a key for it', { skip: otherSkip }, async () => {
+  // Set up before, without Cloudflare: its logins made, migrated, holding no data yet.
+  await asSuperuser('postgres', async (client) => {
+    await client.query('CREATE DATABASE setup_domain_late_used');
+    await client.query("CREATE ROLE coffre_runtime LOGIN PASSWORD 'late-app'");
+    await client.query("CREATE ROLE coffre_vault_runtime LOGIN PASSWORD 'late-vault'");
+  }, OTHER_CLUSTER);
+  await migrateDatabase(`${OTHER_CLUSTER}/setup_domain_late_used`);
+  const held = await verifiers(OTHER_CLUSTER);
+  try {
+    const { text, code, writes } = await refused('late-used', `${OTHER_CLUSTER}/setup_domain_late_used`, 'late-used.acme.test', 0, 'already holds data', () =>
+      // Its first entry, written while setup waits.
+      asSuperuser('setup_domain_late_used', (client) =>
+        client.query(`INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, metadata, prev_hash, mac, hash)
+          VALUES (0, 'vault', 'vault:probe', 0, 'system:vault', 'key.check', 'allow', '{}', decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'))`),
+      OTHER_CLUSTER),
+    );
+    assert.equal(code, 1, text);
+    assert.match(text, /✗ Make the two logins\n\s+The app Worker coffre-late-used has no APP_KEY, but the database already holds data/);
+    assert.deepEqual(writes, [], 'no Hyperdrive config, and no Worker deployed with a new key');
+    assert.deepEqual(deploys(), []);
+    assert.deepEqual(await verifiers(OTHER_CLUSTER), held, 'the logins keep their passwords');
+  } finally {
+    await emptyCluster(OTHER_CLUSTER);
+  }
+});
+
+test("another deployment's logins made on this server while setup asks its questions: setup refuses before it gives them new passwords", { skip: otherSkip }, async () => {
+  const other = new URL(OTHER_CLUSTER!);
+  // That deployment's Hyperdrive config, on this server, its logins not made yet when setup reads them.
+  cloudflare.state.configs.get('acc-acme')!.push({
+    id: 'hd-elsewhere',
+    name: 'elsewhere',
+    origin: { host: other.hostname, port: Number(other.port), database: 'elsewhere', user: 'coffre_runtime', password: 'elsewhere-app' },
+    caching: { disabled: true },
+    origin_connection_limit: 20,
+  });
+  await asSuperuser('postgres', (client) => client.query('CREATE DATABASE setup_domain_late_shared'), OTHER_CLUSTER);
+  let held: unknown[] = [];
+  try {
+    const { text, code, writes } = await refused('late-shared', `${OTHER_CLUSTER}/setup_domain_late_shared`, 'late-shared.acme.test', 0, 'is also the login of', async () => {
+      await asSuperuser('postgres', async (client) => {
+        await client.query("CREATE ROLE coffre_runtime LOGIN PASSWORD 'elsewhere-app'");
+        await client.query("CREATE ROLE coffre_vault_runtime LOGIN PASSWORD 'elsewhere-vault'");
+      }, OTHER_CLUSTER);
+      held = await verifiers(OTHER_CLUSTER);
+    });
+    assert.equal(code, 1, text);
+    assert.match(text, /✗ Make the two logins\n\s+coffre_runtime is also the login of the Hyperdrive config elsewhere, another deployment's, on this database server/);
+    assert.equal(held.length, 2);
+    assert.deepEqual(await verifiers(OTHER_CLUSTER), held, "the other deployment's logins keep their passwords");
+    assert.deepEqual(writes, [], 'no Hyperdrive config made');
+    assert.deepEqual(deploys(), []);
+  } finally {
+    cloudflare.state.configs.set('acc-acme', cloudflare.state.configs.get('acc-acme')!.filter(({ id }) => id !== 'hd-elsewhere'));
+    await emptyCluster(OTHER_CLUSTER);
+  }
 });
 
 test("no domain on the account, Workers without their keys over a database in use: setup refuses before the domain is added", { skip }, async () => {

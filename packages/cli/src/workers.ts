@@ -141,9 +141,9 @@ export function adminsProblem(answer: string): string | null {
 }
 
 /**
- * The database, as setup read it before Cloudflare: its administrator,
- * whether it holds data, and each runtime login, by what it logs in as,
- * and whether it exists.
+ * The database, as setup read it: its administrator, whether it holds
+ * data, and each runtime login, by what it logs in as, and whether it
+ * exists.
  */
 export type Database = { administrator: URL; used: boolean; logins: Record<Component, { login: string; exists: boolean }> };
 
@@ -211,7 +211,7 @@ function newPasswords(configs: readonly HyperdriveConfig[], workers: Record<Comp
     throw new Error(
       `${login} is also the login of the Hyperdrive config ${other.name}, another deployment's, on this database server: ` +
         `a new password for the ${component}'s config would cut that deployment off. Two deployments can't share a server's logins: ` +
-        'give this one a server of its own. Nothing was changed.',
+        'give this one a server of its own. Neither login was changed.',
     );
   }
   return resets;
@@ -237,6 +237,13 @@ function missingKeys(workers: Record<Component, WorkerConfig>, secrets: Record<C
   return missing;
 }
 
+/** What setup does to this deployment's keys and logins, given the database as read; or the refusal, before any of it. */
+function checked(found: Found, workers: Record<Component, WorkerConfig>, database: Database, all: boolean): Checked {
+  return { missing: missingKeys(workers, found.secrets, database.used), newPasswords: newPasswords(found.configs, workers, database, all) };
+}
+
+type Checked = { missing: Record<Component, boolean>; newPasswords: Record<Component, boolean> };
+
 export class Cloudflare {
   readonly #dir: string;
   readonly #wrangler: Wrangler;
@@ -254,6 +261,8 @@ export class Cloudflare {
   readonly #missing: Record<Component, boolean>;
   /** Which logins this run gives a new password (`newPasswords`). */
   readonly newPasswords: Record<Component, boolean>;
+  /** Whether every login gets a new password: --reset-passwords. */
+  readonly #resetPasswords: boolean;
   /** The GitHub App's client secret, when this run has it to install. */
   #clientSecret: string | null = null;
   /** The Cloudflare API token setup was given, for what wrangler's login was refused: its wranglers deploy under it. */
@@ -272,7 +281,8 @@ export class Cloudflare {
     found: Found,
     administrator: URL,
     answers: { address: string; rootAdmins: string; serving: Serving; token: string | null },
-    checked: { missing: Record<Component, boolean>; newPasswords: Record<Component, boolean> },
+    checked: Checked,
+    resetPasswords: boolean,
     secrets: string[],
   ) {
     this.#dir = dir;
@@ -287,6 +297,7 @@ export class Cloudflare {
     this.#token = answers.token;
     this.#missing = checked.missing;
     this.newPasswords = checked.newPasswords;
+    this.#resetPasswords = resetPasswords;
     this.keys = checked.missing.app || checked.missing.vault ? generateKeys() : null;
     if (this.keys !== null) secrets.push(this.keys.APP_KEY, this.keys.VAULT_KEY);
     const vars = workers.app.vars;
@@ -381,10 +392,7 @@ export class Cloudflare {
       found.secrets[component] = new Set((await found.api.secretNames(found.account.id, workers[component].name)) ?? []);
     }
     // Its names settled, what this deployment has on Cloudflare is known: whatever refuses the run does so here, before anything changes.
-    const checked = {
-      missing: missingKeys(workers, found.secrets, database.used),
-      newPasswords: newPasswords(found.configs, workers, database, options.resetPasswords),
-    };
+    const settled = checked(found, workers, database, options.resetPasswords);
     let kind: Serving['kind'] = 'domain';
     if (address.endsWith('.workers.dev')) {
       kind = 'workers.dev';
@@ -416,7 +424,17 @@ export class Cloudflare {
       .join(',');
     out.write('\n');
     const { serving, token } = kind === 'saas' ? await serveElsewhere(found, active, address, out, keys, describe, secrets) : { serving: { kind }, token: null };
-    return new Cloudflare(dir, wrangler, workers, found, administrator, { address, rootAdmins, serving, token }, checked, secrets);
+    return new Cloudflare(dir, wrangler, workers, found, administrator, { address, rootAdmins, serving, token }, settled, options.resetPasswords, secrets);
+  }
+
+  /**
+   * The same refusals again, right before the logins change, against the
+   * database as it is now: while setup asked its questions, it may have
+   * come to hold data, or another deployment may have made the logins.
+   * Cloudflare is as read, so a run they let through does as decided then.
+   */
+  recheck(database: Database): void {
+    checked(this.#found, this.workers, database, this.#resetPasswords);
   }
 
   /** A Worker's Hyperdrive config, when there is one of this deployment's (`ourConfig`). */

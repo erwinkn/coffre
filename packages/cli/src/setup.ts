@@ -29,7 +29,7 @@ import { type Screen, showSecrets, type Value } from './secrets.ts';
 import { StepFailed, Steps } from './steps.ts';
 import { Cancelled, type Keyboard, listed, openTerminal, type Output, paragraph, release, row, select, style, type Style } from './tty.ts';
 import { cliVersion } from './version.ts';
-import { Cloudflare, deployedSummary, Later } from './workers.ts';
+import { Cloudflare, type Database, deployedSummary, Later } from './workers.ts';
 
 /** The two runtime roles, as the migration names them, and the Hyperdrive config each gets on Workers. */
 const ROLES = { app: 'coffre_runtime', vault: 'coffre_vault_runtime' } as const;
@@ -149,12 +149,9 @@ export async function setup(args: string[]): Promise<void> {
       if (choice === 0) {
         // Cloudflare goes through the deployment's own wrangler, which a fresh clone has yet to install.
         await installFirst(dir, out, clean);
-        const user = decodeURIComponent(administrator.username);
-        const logins = {
-          app: { login: loginFor(ROLES.app, user), exists: database.existing.has(ROLES.app) },
-          vault: { login: loginFor(ROLES.vault, user), exists: database.existing.has(ROLES.vault) },
-        };
-        cloudflare = await Cloudflare.connect(dir, out, terminal.keys, clean, secrets, { administrator, used: database.used, logins }, { resetPasswords: options.resetPasswords });
+        cloudflare = await Cloudflare.connect(dir, out, terminal.keys, clean, secrets, asRead(administrator, database.used, database.existing), {
+          resetPasswords: options.resetPasswords,
+        });
       }
     }
     const result = await run(administrator, out, questions, { resetPasswords: options.resetPasswords, cloudflare, connections: database.connections }, secrets, clean);
@@ -354,7 +351,11 @@ async function run(
                   (await progress.ask(existing.size === 1 ? `${[...existing][0]} exists already. Set new passwords?` : 'Both logins exist already. Set new passwords?')));
               return () => all;
             }
-          : async () => (component: Component) => cloudflare.newPasswords[component];
+          : async (existing: ReadonlySet<string>) => {
+              // Cloudflare's refusals again, against the database as it is now: it may have changed while setup asked its questions.
+              cloudflare.recheck(asRead(administrator, await holdsData(client), existing));
+              return (component: Component) => cloudflare.newPasswords[component];
+            };
       logins = await provision(client, administrator, user, reset, secrets);
       return described(logins);
     });
@@ -408,6 +409,13 @@ async function holdsData(client: pg.Client): Promise<boolean> {
   const [migrated] = (await client.query<{ migrated: boolean }>("SELECT to_regclass('public.audit_log') IS NOT NULL AS migrated")).rows;
   if (!migrated!.migrated) return false;
   return (await client.query<{ used: boolean }>('SELECT EXISTS (SELECT 1 FROM audit_log) AS used')).rows[0]!.used;
+}
+
+/** The database as Cloudflare's checks take it (`Database`). */
+function asRead(administrator: URL, used: boolean, existing: ReadonlySet<string>): Database {
+  const user = decodeURIComponent(administrator.username);
+  const login = (component: Component) => ({ login: loginFor(ROLES[component], user), exists: existing.has(ROLES[component]) });
+  return { administrator, used, logins: { app: login('app'), vault: login('vault') } };
 }
 
 /** The runtime logins that exist, by role. */
