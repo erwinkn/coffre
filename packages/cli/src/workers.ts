@@ -33,6 +33,7 @@ import {
   type Wrangler,
   type Zone,
 } from './cloudflare.ts';
+import { cappedLimit } from './connections.ts';
 import { deployOnPush, gitRemote, repositoryOf, SECRETS, WORKFLOW } from './deploy-on-push.ts';
 import { BUILT_APP, buildApp, editWorker, placeholder, readWorker, type Change, type WorkerConfig } from './deployment.ts';
 import { createGitHubApp, GITHUB, type GitHub, logoPath } from './github-app.ts';
@@ -447,7 +448,8 @@ export class Cloudflare {
       let what: string;
       if (login.url !== null) {
         const origin = originOf(login.url);
-        const kept = Math.min(config?.origin_connection_limit ?? limit, limit);
+        // A PUT replaces the whole config: the limit it has goes back in, lowered to `limit` when above it.
+        const kept = cappedLimit(config?.origin_connection_limit, limit) ?? config?.origin_connection_limit ?? limit;
         if (config !== undefined && (await api.updateHyperdrive(account.id, config.id, name, origin, kept))) {
           what = `given ${login.login}'s new password`;
         } else {
@@ -463,8 +465,7 @@ export class Cloudflare {
           );
         }
         config = now;
-        // Unset is Cloudflare's default, 60 on Paid: more than a small database takes.
-        const lower = config.origin_connection_limit === undefined || config.origin_connection_limit > limit;
+        const lower = cappedLimit(config.origin_connection_limit, limit) !== null;
         const cache = config.caching?.disabled !== true;
         if (cache || lower) {
           await api.patchHyperdrive(account.id, config.id, {

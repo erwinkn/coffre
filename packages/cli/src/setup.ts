@@ -20,6 +20,7 @@ import { postgresConnection } from '@coffre/db/connect';
 import { migrateDatabase, type MigrationPlan } from '@coffre/db/migrate';
 import pg from 'pg';
 
+import { cappedLimit, type Connections, connectionsOf, hyperdriveLimit, limitReason, tooFewConnections } from './connections.ts';
 import { readDatabaseUrl } from './database-url.ts';
 import { deploymentKind, install, installAsLocked, installed } from './deployment.ts';
 import { init, KINDS, type Kind } from './init.ts';
@@ -52,8 +53,8 @@ export type SetupResult = {
   app: Login;
   vault: Login;
   version: string;
-  /** The most connections each Hyperdrive config may open (`hyperdriveLimit`); null when the database has too few for both. */
-  hyperdriveLimit: number | null;
+  /** What the database lets in, which each Hyperdrive config's limit is a share of (`hyperdriveLimit`). */
+  connections: Connections;
 };
 
 class SetupError extends Error {}
@@ -74,64 +75,6 @@ export function loginUrl(administrator: URL, login: string, password: string): s
   url.username = encodeURIComponent(login);
   url.password = password;
   return url.href;
-}
-
-/** Connections the two Hyperdrive configs leave free: for the administrator, `coffre migrate` and the host's own tools. */
-const HELD_BACK = 3;
-
-/** The fewest connections Hyperdrive takes per config, and the most Free allows, which is plenty for coffre. */
-const HYPERDRIVE_CONNECTIONS = { fewest: 5, most: 20 } as const;
-
-/** What the database lets in: `max_connections`, and the slots it reserves for superusers and `pg_use_reserved_connections`. */
-export type Connections = { max: number; reserved: number };
-
-/** Each config's even share of what the database lets coffre's logins open, less what is held back. */
-function share({ max, reserved }: Connections): number {
-  return Math.floor((max - reserved - HELD_BACK) / 2);
-}
-
-/**
- * The most connections each of the two Hyperdrive configs may open: an even
- * share of what the database lets its logins open, less what is held back.
- * Hyperdrive opens connections up to its limit before it queues a query,
- * and left at Cloudflare's default, 60 on Paid, the two configs outgrow a
- * small database, such as PlanetScale's smallest: it refuses the
- * connection a burst of requests needs ("remaining connection slots are
- * reserved", 53300), and they fail. Under the limit, a query waits its turn
- * instead, which a query holding a connection only while it runs keeps
- * short. Null when the share is short of what Hyperdrive takes.
- */
-export function hyperdriveLimit(connections: Connections): number | null {
-  const each = share(connections);
-  return each < HYPERDRIVE_CONNECTIONS.fewest ? null : Math.min(each, HYPERDRIVE_CONNECTIONS.most);
-}
-
-/** How the limit was chosen: `max_connections 25, 3 reserved, 3 kept for the administrator and migrations: 9 each`. */
-export function limitReason(connections: Connections, limit: number): string {
-  const each = share(connections);
-  return (
-    `max_connections ${connections.max}, ${connections.reserved} reserved, ${HELD_BACK} kept for the administrator and migrations: ` +
-    `${each} each${each > limit ? `, capped at ${limit}` : ''}`
-  );
-}
-
-/** Why a database letting in `connections` can have no Hyperdrive config for each login. */
-export function tooFewConnections(connections: Connections): string {
-  const needed = 2 * HYPERDRIVE_CONNECTIONS.fewest + HELD_BACK + connections.reserved;
-  return (
-    `the database's max_connections is ${connections.max}, ${connections.reserved} of them reserved; Hyperdrive takes at least ${HYPERDRIVE_CONNECTIONS.fewest} ` +
-    `for each of coffre's two configs, and setup keeps ${HELD_BACK} for the administrator and migrations: raise max_connections to ${needed} or more, or move to a larger plan`
-  );
-}
-
-/** What the database lets in, as the administrator reads it; `reserved_connections` is Postgres 16's, and none before. */
-async function connectionsOf(client: pg.Client): Promise<Connections> {
-  const [row] = (await client.query<Connections>(
-    `SELECT current_setting('max_connections')::int AS max,
-            current_setting('superuser_reserved_connections')::int
-              + coalesce(current_setting('reserved_connections', true), '0')::int AS reserved`,
-  )).rows;
-  return row!;
 }
 
 /**
@@ -207,7 +150,7 @@ export async function setup(args: string[]): Promise<void> {
         cloudflare = await Cloudflare.connect(dir, out, terminal.keys, clean, secrets, administrator);
       }
     }
-    const result = await run(administrator, out, questions, { resetPasswords: options.resetPasswords, cloudflare }, secrets, clean);
+    const result = await run(administrator, out, questions, { resetPasswords: options.resetPasswords, cloudflare, workers: kind === 'workers' }, secrets, clean);
     if (cloudflare !== null) {
       if (cloudflare.keys !== null) await showSecrets(terminal!, cloudflare.screen());
       await cloudflare.deploy(out, clean, terminal!.keys, { rotateDeployToken: options.rotateDeployToken });
@@ -314,7 +257,7 @@ async function run(
   administrator: URL,
   out: Output,
   questions: () => Keyboard | null,
-  options: { resetPasswords: boolean; cloudflare: Cloudflare | null },
+  options: { resetPasswords: boolean; cloudflare: Cloudflare | null; workers: boolean },
   secrets: string[],
   clean: (error: unknown) => string,
 ): Promise<SetupResult> {
@@ -343,6 +286,9 @@ async function run(
     await step(0, async () => {
       await client.connect();
       connections = await connectionsOf(client);
+      // Before anything changes: a Workers deployment whose database can't hold both
+      // Hyperdrive configs stops here, its logins and their passwords as they were.
+      if (options.workers && hyperdriveLimit(connections) === null) throw new SetupError(tooFewConnections(connections));
       // Before anything changes: a Worker without its key, over a database that holds data, stops setup here.
       cloudflare?.checkKeys(await holdsData(client));
       return `Connected to ${where} as ${user}`;
@@ -408,18 +354,18 @@ async function run(
     });
     if (cloudflare !== null) {
       await step(5, async () => {
-        const limit = hyperdriveLimit(connections);
-        if (limit === null) throw new SetupError(tooFewConnections(connections));
+        // Checked as setup connected, before any of this run's changes.
+        const limit = hyperdriveLimit(connections)!;
         const { text, details } = await cloudflare.hyperdrive(logins, limit);
         return { text, details: [...details, limitReason(connections, limit)] };
       });
       await step(6, (progress) => cloudflare.github(progress, { aside: (text) => steps.aside(text), link: (label, address) => steps.link(label, address) }));
       await step(7, async () => cloudflare.write());
-      return { keys: null, ...logins, version, hyperdriveLimit: hyperdriveLimit(connections) };
+      return { keys: null, ...logins, version, connections };
     }
     // Keys come with new passwords, for a database that holds no data yet: one that does has its keys already.
     const fresh = !used && (logins.app.url !== null || logins.vault.url !== null);
-    return { keys: fresh ? generateKeys() : null, ...logins, version, hyperdriveLimit: hyperdriveLimit(connections) };
+    return { keys: fresh ? generateKeys() : null, ...logins, version, connections };
   } finally {
     steps.end();
     await client.end().catch(() => {});
@@ -588,23 +534,31 @@ export function setupScreen(result: SetupResult): Screen {
   const set = (['app', 'vault'] as const).filter((component) => result[component].url !== null);
   const created = set.some((component) => result[component].password === 'created');
   const keys = keyGuide();
+  const limit = hyperdriveLimit(result.connections);
+  const updated = set.filter((component) => result[component].password !== 'created');
   const hyperdrive = set.map((component) => {
     const login = result[component];
     const target = login.password === 'created' ? `create ${HYPERDRIVE[component]} --caching-disabled` : `update <the ${component}'s config id>`;
-    return { command: hyperdriveCommand(target, result.hyperdriveLimit) };
+    // Setup can't see what a config allows now, so an update sets the limit too (`cappedLimit`), and says so.
+    return { command: hyperdriveCommand(target, limit === null ? null : cappedLimit(null, limit)) };
   });
   const workers = [
     ...(set.length === 0
       ? []
-      : [
-          `${created ? 'A Hyperdrive config for each database URL, with caching off' : 'Each Hyperdrive config, pointed at its new database URL'}. Run each command, then paste its URL at the silent prompt: it stays out of your shell's history, and the command drops the URL's parameters, since Hyperdrive connects over TLS itself.`,
-          ...hyperdrive.flatMap((command, i) => [`The ${set[i]} database URL:`, command]),
-          ...(result.hyperdriveLimit === null
-            ? []
-            : [`Each opens at most ${result.hyperdriveLimit} connections to the database, so that both fit under its max_connections, with some left for migrations.`]),
-          'Or make them in the Cloudflare dashboard, under Hyperdrive.',
-          ...(created ? ['Their ids go under hyperdrive, in app/wrangler.jsonc and vault/wrangler.jsonc.'] : []),
-        ]),
+      : limit === null
+        ? [`No Hyperdrive config for each database URL: ${tooFewConnections(result.connections)}.`]
+        : [
+            `${created ? 'A Hyperdrive config for each database URL, with caching off' : 'Each Hyperdrive config, pointed at its new database URL'}. Run each command, then paste its URL at the silent prompt: it stays out of your shell's history, and the command drops the URL's parameters, since Hyperdrive connects over TLS itself.`,
+            ...hyperdrive.flatMap((command, i) => [`The ${set[i]} database URL:`, command]),
+            `Each opens at most ${limit} connections to the database, so that both fit under its max_connections, with some left for migrations (${limitReason(result.connections, limit)}).`,
+            ...(updated.length === 0
+              ? []
+              : [
+                  `Setup can't see the limit each config has now, so the update ${updated.length === 1 ? 'command sets' : 'commands set'} it to ${limit}: one you set lower on purpose keeps its own if you leave --origin-connection-limit out of its command.`,
+                ]),
+            'Or make them in the Cloudflare dashboard, under Hyperdrive.',
+            ...(created ? ['Their ids go under hyperdrive, in app/wrangler.jsonc and vault/wrangler.jsonc.'] : []),
+          ]),
     ...(result.keys === null ? [] : keys.workers),
   ];
   const node = [

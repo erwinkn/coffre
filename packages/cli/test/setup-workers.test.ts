@@ -20,7 +20,7 @@ import pg from 'pg';
 
 import { editWorker, readWorker } from '../src/deployment.ts';
 import { templateDir } from '../src/init.ts';
-import { asSuperuser, CLUSTER, connects, database, emptyCluster, needsCluster, OTHER_CLUSTER } from './cluster.ts';
+import { asSuperuser, CLUSTER, connects, database, emptyCluster, needsCluster, OTHER_CLUSTER, SMALL_CLUSTER } from './cluster.ts';
 import { fakeCloudflare, fakeGh, fakeGitHub, fakeOpener, fakeVite, fakeWrangler, realWrangler, submitManifest } from './fakes.ts';
 import { ENTER_ALT, inTerminal, ptySkip, screens, type Session, typingUrl, visible } from './pty.ts';
 
@@ -502,6 +502,49 @@ test("a deployment on another's database server: setup stops before giving their
   assert.deepEqual(await firstConnects(), [true, true], "the first deployment's logins keep their passwords");
   assert.equal(cloudflare.state.configs.get('acc-acme')!.length, before);
   assert.deepEqual(calls().filter(({ args }) => args[0] === 'deploy'), []);
+});
+
+test("--reset-passwords on a database too small for both Hyperdrive configs: setup stops as it connects, and the running instance's logins keep their passwords", { skip: skip || (SMALL_CLUSTER === undefined && 'needs the small cluster') }, async () => {
+  // The logins a running instance logs in with, its Hyperdrive configs holding these passwords.
+  await emptyCluster(SMALL_CLUSTER);
+  await asSuperuser('postgres', async (client) => {
+    await client.query('CREATE DATABASE setup_workers_small');
+    await client.query("CREATE ROLE coffre_runtime LOGIN PASSWORD 'running-app'");
+    await client.query("CREATE ROLE coffre_vault_runtime LOGIN PASSWORD 'running-vault'");
+  }, SMALL_CLUSTER);
+  const verifiers = () =>
+    asSuperuser('postgres', async (client) => (await client.query("SELECT rolname, rolpassword FROM pg_authid WHERE rolname LIKE 'coffre_%' ORDER BY rolname")).rows, SMALL_CLUSTER);
+  const held = await verifiers();
+  const configs = JSON.stringify(cloudflare.state.configs.get('acc-acme'));
+  const small = another('small');
+  try {
+    const { output, code } = await setup(
+      async (terminal) => {
+        await terminal.waitFor('Set Cloudflare up too?');
+        terminal.send('\r');
+        await terminal.waitFor('Which Cloudflare account?');
+        terminal.send('\r');
+        await terminal.waitFor("coffre's address");
+        terminal.send('coffre-small.acme.test\r');
+        await terminal.waitFor("This deployment's name");
+        terminal.send('\r');
+        await terminal.waitFor('Root admins');
+        terminal.send('\r');
+      },
+      small,
+      `${SMALL_CLUSTER}/setup_workers_small`,
+      ['setup', '--reset-passwords'],
+    );
+    const text = mainText(output);
+    assert.equal(code, 1, text);
+    assert.match(text, /✗ Connect to 127\.0\.0\.1\/setup_workers_small\n\s+the database's max_connections is 15, 3 of them reserved; Hyperdrive takes at least 5/);
+    assert.doesNotMatch(text, /✓ (Set new passwords|Created|Migrated|The database is up to date)/, "no step after the first ran");
+    assert.deepEqual(await verifiers(), held, 'no new password the Hyperdrive configs lack');
+    assert.equal(JSON.stringify(cloudflare.state.configs.get('acc-acme')), configs, 'no Hyperdrive config made or changed');
+    assert.deepEqual(calls().filter(({ args }) => args[0] === 'deploy'), []);
+  } finally {
+    await emptyCluster(SMALL_CLUSTER);
+  }
 });
 
 test('a Worker without its key over a database in use: setup stops before changing anything', { skip }, async () => {
